@@ -1,34 +1,16 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 160" role="img" aria-label="kanade — orchestrate fleets of Windows endpoints">
   <title>kanade — 奏 — orchestrate fleets of Windows endpoints</title>
 
-  <defs>
-    <linearGradient id="g-teal" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#2a9d8f"/>
-      <stop offset="1" stop-color="#1f7d72"/>
-    </linearGradient>
-    <linearGradient id="g-amber" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#e8b836"/>
-      <stop offset="1" stop-color="#a87a0c"/>
-    </linearGradient>
-    <linearGradient id="g-violet" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#7350b8"/>
-      <stop offset="1" stop-color="#3a1d57"/>
-    </linearGradient>
-  </defs>
-
   <!-- icon (matches assets/icon.svg, scaled into the wordmark band) -->
-  <g transform="translate(8, 4) scale(0.6)">
-    <g>
-      <rect x="36"  y="184" width="20" height="48"  rx="6" fill="url(#g-teal)"/>
-      <rect x="68"  y="160" width="20" height="72"  rx="6" fill="url(#g-teal)"/>
-      <rect x="100" y="124" width="20" height="108" rx="6" fill="url(#g-amber)"/>
-      <rect x="132" y="100" width="20" height="132" rx="6" fill="url(#g-amber)"/>
-      <rect x="164" y="124" width="20" height="108" rx="6" fill="url(#g-violet)"/>
-      <rect x="196" y="160" width="20" height="72"  rx="6" fill="url(#g-violet)"/>
+  <g transform="translate(4, 4) scale(0.6)">
+    <g fill="none" stroke-width="11" stroke-linecap="round">
+      <path d="M 44 110 C 56 18, 200 18, 212 110" stroke="#5b3a8c"/>
+      <path d="M 74 110 C 84 50, 172 50, 182 110" stroke="#2a9d8f"/>
+      <path d="M 102 110 C 110 78, 146 78, 154 110" stroke="#d4a017"/>
     </g>
-    <text x="128" y="78"
+    <text x="128" y="210"
           font-family="'Noto Serif JP', 'Yu Mincho', 'Hiragino Mincho ProN', 'IPAexMincho', 'Source Han Serif JP', serif"
-          font-size="72" font-weight="700"
+          font-size="112" font-weight="700"
           fill="#1a1a1a" text-anchor="middle">奏</text>
   </g>
 
