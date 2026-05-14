@@ -1,0 +1,12 @@
+# Sprint 1: minimal config. `system.host` (cross-platform hostname) is the
+# only teravars helper used here — full [vars] self-reference + is_windows()
+# branching (see docs/SPEC.md §2.4.4) is deferred until the loader switches
+# to teravars' extract_vars + resolve + render pipeline.
+
+[agent]
+id = '{{ system.host }}'
+nats_url = 'nats://127.0.0.1:4222'
+
+[log]
+path = 'logs/agent.log'
+level = 'info'

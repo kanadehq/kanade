@@ -1,0 +1,24 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# kata:gitignore:base:end の外側に置く Rust block — kata-managed の編集子テンプレ
+# が pj-rust layer の `.gitignore.rust` (現在 abort 中) で投入される予定の位置。
+# pj-rust seed が直ったら手動分を消して `kata apply` で再投入する。
+
+# kata:gitignore:base:begin
+# Editor / OS noise — kata-managed (yukimemi/pj-base).
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# APM dependencies — install output of apm.yml's deps.
+# Skill files under .agents/, .claude/, .gemini/ etc. are
+# committed (kata seeds them; renri post_create refreshes via
+# `apm install --update`); the apm_modules/ source cache is not.
+apm_modules/
+# kata:gitignore:base:end
