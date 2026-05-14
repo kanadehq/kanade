@@ -97,9 +97,7 @@ async fn setup(js: jetstream::Context) -> Result<()> {
 
     println!("jetstream setup complete:");
     println!("  streams : {STREAM_INVENTORY}, {STREAM_RESULTS}, {STREAM_DEPLOY}");
-    println!(
-        "  KV      : {BUCKET_SCRIPT_CURRENT}, {BUCKET_SCRIPT_STATUS}, {BUCKET_AGENTS_STATE}"
-    );
+    println!("  KV      : {BUCKET_SCRIPT_CURRENT}, {BUCKET_SCRIPT_STATUS}, {BUCKET_AGENTS_STATE}");
     Ok(())
 }
 

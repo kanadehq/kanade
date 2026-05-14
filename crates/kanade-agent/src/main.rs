@@ -1,5 +1,6 @@
 mod commands;
 mod heartbeat;
+mod inventory;
 mod process;
 
 use std::path::PathBuf;
@@ -62,6 +63,11 @@ async fn main() -> Result<()> {
         client.clone(),
         pc_id.clone(),
         AGENT_VERSION.to_string(),
+    ));
+    tokio::spawn(inventory::inventory_loop(
+        client.clone(),
+        pc_id.clone(),
+        cfg.inventory.clone(),
     ));
 
     let _ = tokio::join!(
