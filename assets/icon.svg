@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="kanade icon">
+  <title>kanade — 奏</title>
+
+  <defs>
+    <linearGradient id="g-teal" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2a9d8f"/>
+      <stop offset="1" stop-color="#1f7d72"/>
+    </linearGradient>
+    <linearGradient id="g-amber" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e8b836"/>
+      <stop offset="1" stop-color="#a87a0c"/>
+    </linearGradient>
+    <linearGradient id="g-violet" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#7350b8"/>
+      <stop offset="1" stop-color="#3a1d57"/>
+    </linearGradient>
+  </defs>
+
+  <!--
+    奏 (kanade) — six equalizer bars rising and falling like a
+    conductor's sweep across an orchestra section. The fleet of
+    endpoints answering in unison; teal → amber → violet as the
+    gradient sweeps the rostrum left to right.
+  -->
+  <g>
+    <rect x="36"  y="184" width="20" height="48"  rx="6" fill="url(#g-teal)"/>
+    <rect x="68"  y="160" width="20" height="72"  rx="6" fill="url(#g-teal)"/>
+    <rect x="100" y="124" width="20" height="108" rx="6" fill="url(#g-amber)"/>
+    <rect x="132" y="100" width="20" height="132" rx="6" fill="url(#g-amber)"/>
+    <rect x="164" y="124" width="20" height="108" rx="6" fill="url(#g-violet)"/>
+    <rect x="196" y="160" width="20" height="72"  rx="6" fill="url(#g-violet)"/>
+  </g>
+
+  <!--
+    奏 — the conductor's mark, anchored above the bars. CJK serif
+    font chain works on Windows / macOS / common Linux without an
+    embedded font.
+  -->
+  <text x="128" y="78"
+        font-family="'Noto Serif JP', 'Yu Mincho', 'Hiragino Mincho ProN', 'IPAexMincho', 'Source Han Serif JP', serif"
+        font-size="72" font-weight="700"
+        fill="#1a1a1a" text-anchor="middle">奏</text>
+</svg>
