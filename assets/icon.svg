@@ -11,18 +11,20 @@
 
   <!--
     奏 (kanade) — a single tapered baton (タクト) sweeps diagonally
-    across the upper half: a rounded handle on the upper-left grows
-    seamlessly into the tip on the lower-right. The colour triad
-    rides the gradient from violet handle → amber midline → teal
-    tip. 奏 anchors the lower half as the answering chord.
+    across the upper half: a small rounded handle on the upper-left
+    bulges outward, the shaft tapers seamlessly to a sharp tip on
+    the lower-right. The colour triad rides the gradient violet
+    handle → amber midline → teal tip. 奏 anchors the lower half
+    as the answering chord.
 
-    Geometry: handle is a circle at (60, 50) with r=20; the two
-    tangent points from the tip (212, 162) land at ≈(47, 66) and
-    ≈(73, 35). The path traces the back half of the handle (arc)
-    then both tangent lines (to the tip and back), so the silhouette
-    flows smoothly from full circle into a point.
+    Geometry: handle is a circle at (60, 50) with r=12 (slim, like
+    an actual baton); the two tangent points from the tip (212, 162)
+    land at ≈(54, 60) and ≈(68, 41). The path arcs around the
+    upper-left back of the handle (large-arc, clockwise sweep) so
+    the handle bulges *outward*, then both tangent lines run to the
+    tip and back.
   -->
-  <path d="M 47 66 A 20 20 0 1 0 73 35 L 212 162 Z"
+  <path d="M 54 60 A 12 12 0 1 1 68 41 L 212 162 Z"
         fill="url(#g-baton)"/>
 
   <text x="128" y="226"
