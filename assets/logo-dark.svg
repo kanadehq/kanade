@@ -1,15 +1,21 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 160" role="img" aria-label="kanade — orchestrate fleets of Windows endpoints (dark)">
   <title>kanade — 奏 — orchestrate fleets of Windows endpoints (dark)</title>
 
+  <defs>
+    <linearGradient id="g-baton" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0"   stop-color="#9a73d9"/>
+      <stop offset="0.5" stop-color="#f5cf5a"/>
+      <stop offset="1"   stop-color="#4dc4b5"/>
+    </linearGradient>
+  </defs>
+
   <g transform="translate(4, 4) scale(0.6)">
-    <g fill="none" stroke-width="11" stroke-linecap="round">
-      <path d="M 44 110 C 56 18, 200 18, 212 110" stroke="#9a73d9"/>
-      <path d="M 74 110 C 84 50, 172 50, 182 110" stroke="#4dc4b5"/>
-      <path d="M 102 110 C 110 78, 146 78, 154 110" stroke="#f5cf5a"/>
-    </g>
-    <text x="128" y="210"
+    <line x1="58" y1="40" x2="210" y2="158"
+          stroke="url(#g-baton)" stroke-width="8" stroke-linecap="round"/>
+    <circle cx="52" cy="34" r="14" fill="#9a73d9"/>
+    <text x="128" y="226"
           font-family="'Noto Serif JP', 'Yu Mincho', 'Hiragino Mincho ProN', 'IPAexMincho', 'Source Han Serif JP', serif"
-          font-size="112" font-weight="700"
+          font-size="108" font-weight="700"
           fill="#f5f0e6" text-anchor="middle">奏</text>
   </g>
 
