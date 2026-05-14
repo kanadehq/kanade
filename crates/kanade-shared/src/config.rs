@@ -7,6 +7,8 @@ use serde::Deserialize;
 pub struct AgentConfig {
     pub agent: AgentSection,
     pub log: LogSection,
+    #[serde(default)]
+    pub inventory: InventorySection,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -19,6 +21,36 @@ pub struct AgentSection {
 pub struct LogSection {
     pub path: String,
     pub level: String,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct InventorySection {
+    #[serde(default = "default_hw_interval")]
+    pub hw_interval: String,
+    #[serde(default = "default_jitter")]
+    pub jitter: String,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+impl Default for InventorySection {
+    fn default() -> Self {
+        Self {
+            hw_interval: default_hw_interval(),
+            jitter: default_jitter(),
+            enabled: default_enabled(),
+        }
+    }
+}
+
+fn default_hw_interval() -> String {
+    "24h".into()
+}
+fn default_jitter() -> String {
+    "10m".into()
+}
+fn default_enabled() -> bool {
+    true
 }
 
 pub fn load_agent_config(path: &Path) -> Result<AgentConfig> {
