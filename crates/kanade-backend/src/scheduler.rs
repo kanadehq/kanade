@@ -1,40 +1,56 @@
-//! Cron-driven deploy fan-out. Reads the `schedules` KV bucket once at
-//! startup and registers each enabled `Schedule` with
-//! `tokio_cron_scheduler::JobScheduler`. When a job fires it routes
-//! through the same [`deploy_manifest`] helper the HTTP handler uses,
-//! tagged with `actor = "scheduler"` so audit events can be split.
+//! Cron-driven deploy fan-out. Loads every enabled `Schedule` from the
+//! `schedules` KV at startup *and* tails the bucket via `kv.watch_all()`
+//! so future POST/DELETE through `/api/schedules` register and remove
+//! jobs without bouncing the backend.
 //!
-//! Sprint 3c.scheduler limitation: dynamic re-registration on KV updates
-//! is not wired yet — bouncing the backend picks up new schedules.
+//! Fires route through [`deploy_manifest`] with actor = "scheduler", so
+//! audit events split cleanly from operator-initiated `kanade deploy`s.
+
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use futures::TryStreamExt;
+use async_nats::jetstream::kv::Operation;
+use futures::{StreamExt, TryStreamExt};
 use kanade_shared::kv::BUCKET_SCHEDULES;
 use kanade_shared::manifest::Schedule;
+use tokio::sync::Mutex;
 use tokio_cron_scheduler::{Job, JobScheduler};
 use tracing::{info, warn};
+use uuid::Uuid;
 
 use crate::api::AppState;
 use crate::api::deploy::deploy_manifest;
 
+type Registered = Arc<Mutex<HashMap<String, Uuid>>>;
+
 pub async fn run(state: AppState) -> Result<()> {
-    let kv = match state.jetstream.get_key_value(BUCKET_SCHEDULES).await {
-        Ok(k) => k,
-        Err(_) => {
-            info!(
-                bucket = BUCKET_SCHEDULES,
-                "schedules KV missing — scheduler idle (POST a schedule to create the bucket)"
-            );
-            return std::future::pending::<Result<()>>().await;
-        }
-    };
+    // Always create-or-attach to the schedules KV at boot so the watch
+    // loop is live for the first `kanade schedule create` even on a
+    // fresh broker (otherwise the get-only path would idle until a
+    // setup-time KV provisioning step ran).
+    let kv = state
+        .jetstream
+        .create_key_value(async_nats::jetstream::kv::Config {
+            bucket: BUCKET_SCHEDULES.into(),
+            history: 5,
+            ..Default::default()
+        })
+        .await
+        .context("ensure schedules KV")?;
 
     let sched = JobScheduler::new().await.context("init JobScheduler")?;
     sched.start().await.context("start JobScheduler")?;
+    let registered: Registered = Arc::new(Mutex::new(HashMap::new()));
 
-    let keys_stream = kv.keys().await.context("list schedules KV keys")?;
-    let keys: Vec<String> = keys_stream.try_collect().await.context("collect KV keys")?;
-    let mut count: u32 = 0;
+    // 1. Initial load — register every enabled Schedule already in KV.
+    let keys: Vec<String> = kv
+        .keys()
+        .await
+        .context("list schedules KV keys")?
+        .try_collect()
+        .await
+        .context("collect KV keys")?;
     for k in keys {
         let entry = match kv.get(&k).await {
             Ok(Some(b)) => b,
@@ -45,29 +61,68 @@ pub async fn run(state: AppState) -> Result<()> {
             }
         };
         match serde_json::from_slice::<Schedule>(&entry) {
-            Ok(s) => {
-                if !s.enabled {
-                    info!(schedule_id = %s.id, "skipped (disabled)");
-                    continue;
-                }
-                match register(&sched, state.clone(), s.clone()).await {
-                    Ok(()) => count += 1,
-                    Err(e) => {
-                        warn!(error = %e, schedule_id = %s.id, "register failed")
-                    }
+            Ok(s) if s.enabled => {
+                if let Err(e) = register(&sched, state.clone(), &registered, s.clone()).await {
+                    warn!(error = %e, schedule_id = %s.id, "initial register failed");
                 }
             }
+            Ok(s) => info!(schedule_id = %s.id, "skipped (disabled)"),
             Err(e) => warn!(error = %e, key = %k, "deserialize Schedule"),
         }
     }
-    info!(count, "scheduler registered initial schedules");
+    // Snapshot the count before any subsequent await so the MutexGuard
+    // doesn't live across the watch loop (Send bound for tokio::spawn).
+    let initial_count = registered.lock().await.len();
+    info!(
+        count = initial_count,
+        "scheduler registered initial schedules"
+    );
 
-    // Keep the JobScheduler alive for the rest of the process. Without
-    // this the scheduler instance would drop and stop firing.
+    // 2. Watch — react to KV puts/deletes for the lifetime of the process.
+    let mut watcher = kv.watch_all().await.context("kv watch_all")?;
+    while let Some(entry) = watcher.next().await {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                warn!(error = %e, "watch entry error");
+                continue;
+            }
+        };
+        match entry.operation {
+            Operation::Put => {
+                let sched_data: Schedule = match serde_json::from_slice(&entry.value) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        warn!(error = %e, key = %entry.key, "deserialize Schedule on watch");
+                        continue;
+                    }
+                };
+                // Replace any existing registration so cron/manifest edits stick.
+                unregister(&sched, &registered, &sched_data.id).await;
+                if sched_data.enabled
+                    && let Err(e) =
+                        register(&sched, state.clone(), &registered, sched_data.clone()).await
+                {
+                    warn!(error = %e, schedule_id = %sched_data.id, "watch register failed");
+                }
+            }
+            Operation::Delete | Operation::Purge => {
+                unregister(&sched, &registered, &entry.key).await;
+            }
+        }
+    }
+
+    // watch_all is theoretically infinite; if it ever yields None keep the
+    // scheduler alive anyway so existing jobs keep firing.
     std::future::pending::<Result<()>>().await
 }
 
-async fn register(sched: &JobScheduler, state: AppState, schedule: Schedule) -> Result<()> {
+async fn register(
+    sched: &JobScheduler,
+    state: AppState,
+    registered: &Registered,
+    schedule: Schedule,
+) -> Result<()> {
     let cron = schedule.cron.clone();
     let schedule_id = schedule.id.clone();
     let manifest = schedule.manifest.clone();
@@ -97,7 +152,19 @@ async fn register(sched: &JobScheduler, state: AppState, schedule: Schedule) -> 
         })
     })
     .with_context(|| format!("Job::new_async (cron={cron})"))?;
-    sched.add(job).await.context("scheduler.add")?;
+    let uuid = sched.add(job).await.context("scheduler.add")?;
+    registered.lock().await.insert(schedule.id.clone(), uuid);
     info!(schedule_id = %schedule.id, cron = %schedule.cron, "scheduled");
     Ok(())
+}
+
+async fn unregister(sched: &JobScheduler, registered: &Registered, schedule_id: &str) {
+    let removed = registered.lock().await.remove(schedule_id);
+    if let Some(uuid) = removed {
+        if let Err(e) = sched.remove(&uuid).await {
+            warn!(error = %e, schedule_id, "scheduler.remove failed");
+        } else {
+            info!(schedule_id, "scheduler unregistered");
+        }
+    }
 }

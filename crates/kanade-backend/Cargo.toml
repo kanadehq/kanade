@@ -20,6 +20,9 @@ futures    = { workspace = true }
 humantime  = { workspace = true }
 tokio-cron-scheduler = { workspace = true }
 uuid       = { workspace = true }
+
+# Re-exported above already; explicit so the watch loop's `Mutex` use
+# is obvious.
 serde      = { workspace = true }
 serde_json = { workspace = true }
 sqlx       = { workspace = true }
