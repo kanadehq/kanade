@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+// ─── Agent config ────────────────────────────────────────────────────
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct AgentConfig {
     pub agent: AgentSection,
@@ -53,14 +55,49 @@ fn default_enabled() -> bool {
     true
 }
 
-pub fn load_agent_config(path: &Path) -> Result<AgentConfig> {
+// ─── Backend config ──────────────────────────────────────────────────
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct BackendConfig {
+    pub server: ServerSection,
+    pub nats: NatsSection,
+    pub db: DbSection,
+    pub log: LogSection,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct ServerSection {
+    pub bind: String,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct NatsSection {
+    pub url: String,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct DbSection {
+    pub sqlite_path: String,
+}
+
+// ─── Loader ──────────────────────────────────────────────────────────
+
+fn load_typed<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     let mut engine = teravars::Engine::new();
     let ctx = teravars::system_context();
     let paths: Vec<PathBuf> = vec![path.to_path_buf()];
     let merged = teravars::load_merged(&paths, &mut engine, &ctx)
         .with_context(|| format!("teravars load_merged: {path:?}"))?;
-    let cfg: AgentConfig = toml::Value::Table(merged.config)
+    let cfg: T = toml::Value::Table(merged.config)
         .try_into()
-        .with_context(|| format!("decode AgentConfig from {path:?}"))?;
+        .with_context(|| format!("decode config from {path:?}"))?;
     Ok(cfg)
+}
+
+pub fn load_agent_config(path: &Path) -> Result<AgentConfig> {
+    load_typed(path)
+}
+
+pub fn load_backend_config(path: &Path) -> Result<BackendConfig> {
+    load_typed(path)
 }

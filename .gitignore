@@ -3,6 +3,12 @@
 **/*.rs.bk
 Cargo.lock.bak
 
+# Local SQLite (backend projector dev DB, created on `cargo run -p kanade-backend`).
+# Production deploys store this under /var/lib/kanade or C:\ProgramData\Kanade.
+*.db
+*.db-shm
+*.db-wal
+
 # kata:gitignore:base:end の外側に置く Rust block — kata-managed の編集子テンプレ
 # が pj-rust layer の `.gitignore.rust` (現在 abort 中) で投入される予定の位置。
 # pj-rust seed が直ったら手動分を消して `kata apply` で再投入する。

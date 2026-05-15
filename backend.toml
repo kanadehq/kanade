@@ -1,0 +1,16 @@
+# Sprint 3a: minimal backend config. Same teravars pipeline as agent.toml
+# (system.host / env() / is_windows() are available, but [vars] self-refs
+# need yukimemi/teravars#21 to land — kept inline for now).
+
+[server]
+bind = '0.0.0.0:8080'
+
+[nats]
+url = 'nats://127.0.0.1:4222'
+
+[db]
+sqlite_path = './backend.db'
+
+[log]
+path = 'logs/backend.log'
+level = 'info'
