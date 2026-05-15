@@ -2,6 +2,7 @@ mod api;
 mod audit;
 mod projector;
 mod scheduler;
+mod web;
 
 use std::path::PathBuf;
 use std::str::FromStr;

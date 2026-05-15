@@ -37,6 +37,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/schedules/{id}", delete(schedules::delete))
         .with_state(state)
+        // Everything else (`/`, `/assets/...`, hash-router paths) is served
+        // from the rust-embed bundle. The fallback runs after the API routes
+        // above, so JSON endpoints take precedence.
+        .fallback(crate::web::serve)
 }
 
 async fn health() -> &'static str {

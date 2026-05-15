@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>kanade — 奏</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/icon.svg" />
+  <style>
+    :root {
+      --teal: #2a9d8f;
+      --amber: #d4a017;
+      --violet: #5b3a8c;
+      --bg: #fafaf7;
+      --fg: #1a1a1a;
+      --muted: #5a5a5a;
+      --border: #d8d4c8;
+      --card: #ffffff;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --teal: #4dc4b5;
+        --amber: #f5cf5a;
+        --violet: #9a73d9;
+        --bg: #16181c;
+        --fg: #f5f0e6;
+        --muted: #b8b2a4;
+        --border: #2c2f36;
+        --card: #1d2026;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+      background: var(--bg); color: var(--fg);
+      font-size: 14px; line-height: 1.5;
+    }
+    header {
+      background: var(--card);
+      border-bottom: 1px solid var(--border);
+      padding: 16px 24px; display: flex; align-items: baseline; gap: 24px;
+    }
+    h1 {
+      margin: 0; font-size: 22px; font-weight: 700;
+      background: linear-gradient(135deg, var(--violet) 0%, var(--amber) 50%, var(--teal) 100%);
+      -webkit-background-clip: text; background-clip: text; color: transparent;
+    }
+    nav { display: flex; gap: 4px; }
+    nav a {
+      padding: 6px 12px; text-decoration: none; color: var(--muted);
+      border-radius: 6px; font-weight: 500;
+    }
+    nav a.active { background: var(--card); color: var(--fg); box-shadow: 0 0 0 1px var(--border); }
+    nav a:hover { color: var(--fg); }
+    main { padding: 24px; max-width: 1100px; margin: 0 auto; }
+    h2 { margin: 0 0 12px; font-size: 18px; font-weight: 700; }
+    .toolbar { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; flex-wrap: wrap; }
+    input[type=text], input[type=number], textarea, select {
+      padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border);
+      background: var(--card); color: var(--fg); font: inherit;
+    }
+    textarea { width: 100%; min-height: 180px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
+    button {
+      padding: 6px 14px; border-radius: 6px; border: 1px solid var(--violet);
+      background: var(--violet); color: white; font: inherit; cursor: pointer;
+    }
+    button:hover { filter: brightness(1.1); }
+    button.secondary { background: var(--card); color: var(--fg); border-color: var(--border); }
+    table { width: 100%; border-collapse: collapse; background: var(--card); border-radius: 8px; overflow: hidden; box-shadow: 0 0 0 1px var(--border); }
+    th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); vertical-align: top; }
+    th { background: rgba(0,0,0,0.03); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.3px; color: var(--muted); }
+    @media (prefers-color-scheme: dark) {
+      th { background: rgba(255,255,255,0.04); }
+    }
+    tr:last-child td { border-bottom: none; }
+    code, pre {
+      font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px;
+      background: rgba(0,0,0,0.05); padding: 2px 6px; border-radius: 4px;
+    }
+    @media (prefers-color-scheme: dark) {
+      code, pre { background: rgba(255,255,255,0.06); }
+    }
+    pre { padding: 12px; border-radius: 6px; white-space: pre-wrap; word-break: break-word; }
+    .pill { display: inline-block; padding: 1px 8px; font-size: 11px; border-radius: 999px; }
+    .pill.success { background: rgba(42,157,143,0.18); color: var(--teal); }
+    .pill.fail    { background: rgba(212,55,76,0.18); color: #d4374c; }
+    .pill.scheduler { background: rgba(91,58,140,0.18); color: var(--violet); }
+    .pill.cli       { background: rgba(212,160,23,0.18); color: var(--amber); }
+    .muted { color: var(--muted); }
+    .stack { display: flex; flex-direction: column; gap: 4px; }
+    .row { display: flex; gap: 16px; align-items: center; }
+    details { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; }
+    summary { cursor: pointer; font-weight: 500; }
+    .empty { text-align: center; padding: 32px; color: var(--muted); }
+    .err { background: rgba(212,55,76,0.12); color: #d4374c; padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>奏 kanade</h1>
+    <nav id="nav">
+      <a href="#/agents">Agents</a>
+      <a href="#/results">Results</a>
+      <a href="#/audit">Audit</a>
+      <a href="#/schedules">Schedules</a>
+      <a href="#/deploy">Deploy</a>
+    </nav>
+  </header>
+  <main id="root">loading…</main>
+
+  <script>
+    const root = document.getElementById('root');
+    const nav = document.getElementById('nav');
+
+    async function fetchJson(url, opts = {}) {
+      const r = await fetch(url, opts);
+      const text = await r.text();
+      if (!r.ok) throw new Error(`${r.status} ${r.statusText} — ${text}`);
+      return text ? JSON.parse(text) : null;
+    }
+
+    function fmtTime(iso) {
+      if (!iso) return '';
+      const d = new Date(iso);
+      return isNaN(d) ? iso : d.toISOString().replace('T', ' ').replace(/\.\d+Z$/, 'Z');
+    }
+    function pillExit(code) {
+      const cls = code === 0 ? 'success' : 'fail';
+      return `<span class="pill ${cls}">${code}</span>`;
+    }
+    function pillActor(a) {
+      const cls = a === 'scheduler' ? 'scheduler' : 'cli';
+      return `<span class="pill ${cls}">${a}</span>`;
+    }
+
+    async function renderAgents() {
+      const data = await fetchJson('/api/agents');
+      if (!data.length) return `<div class="empty">no agents seen yet — start an agent</div>`;
+      return `<h2>Agents (${data.length})</h2>
+        <table><thead><tr>
+          <th>pc_id</th><th>hostname</th><th>os</th><th>cpu</th><th>ram</th><th>last_inventory</th>
+        </tr></thead><tbody>
+          ${data.map(a => `<tr>
+            <td><code>${a.pc_id}</code></td>
+            <td>${a.hostname ?? '<span class="muted">—</span>'}</td>
+            <td>${a.os_name ?? ''} ${a.os_version ?? ''}${a.os_build ? ` <span class="muted">${a.os_build}</span>` : ''}</td>
+            <td>${a.cpu_model ?? '<span class="muted">—</span>'} ${a.cpu_cores ? `<span class="muted">×${a.cpu_cores}</span>` : ''}</td>
+            <td>${a.ram_bytes ? (a.ram_bytes / (1024 ** 3)).toFixed(1) + ' GB' : ''}</td>
+            <td class="muted">${fmtTime(a.last_inventory)}</td>
+          </tr>`).join('')}
+        </tbody></table>`;
+    }
+
+    async function renderResults() {
+      const data = await fetchJson('/api/results?limit=50');
+      if (!data.length) return `<div class="empty">no results yet — run a deploy</div>`;
+      return `<h2>Recent results (${data.length})</h2>
+        <table><thead><tr>
+          <th>request_id</th><th>pc_id</th><th>exit</th><th>started</th><th>finished</th><th>stdout</th>
+        </tr></thead><tbody>
+          ${data.map(r => `<tr>
+            <td><code>${r.request_id.slice(0, 8)}</code></td>
+            <td><code>${r.pc_id}</code></td>
+            <td>${pillExit(r.exit_code)}</td>
+            <td class="muted">${fmtTime(r.started_at)}</td>
+            <td class="muted">${fmtTime(r.finished_at)}</td>
+            <td><pre style="margin:0">${(r.stdout || '').slice(0, 160) || '<span class="muted">(empty)</span>'}</pre>
+                ${r.stderr ? `<pre style="margin:4px 0 0; color:#d4374c">${r.stderr.slice(0, 160)}</pre>` : ''}</td>
+          </tr>`).join('')}
+        </tbody></table>`;
+    }
+
+    async function renderAudit() {
+      const data = await fetchJson('/api/audit?limit=50');
+      if (!data.length) return `<div class="empty">no audit events yet</div>`;
+      return `<h2>Audit log (${data.length})</h2>
+        <table><thead><tr>
+          <th>when</th><th>actor</th><th>action</th><th>target</th><th>payload</th>
+        </tr></thead><tbody>
+          ${data.map(e => `<tr>
+            <td class="muted">${fmtTime(e.occurred_at)}</td>
+            <td>${pillActor(e.actor)}</td>
+            <td><code>${e.action}</code></td>
+            <td><code>${e.target ?? ''}</code></td>
+            <td><details><summary class="muted">${e.payload?.deploy_id?.slice(0, 8) ?? 'show'}</summary>
+              <pre style="margin:8px 0 0">${JSON.stringify(e.payload, null, 2)}</pre>
+            </details></td>
+          </tr>`).join('')}
+        </tbody></table>`;
+    }
+
+    async function renderSchedules() {
+      const data = await fetchJson('/api/schedules');
+      if (!data.length) return `<div class="empty">no schedules — POST one with <code>kanade schedule create</code></div>`;
+      return `<h2>Schedules (${data.length})</h2>
+        <table><thead><tr>
+          <th>id</th><th>cron</th><th>job</th><th>version</th><th>enabled</th><th></th>
+        </tr></thead><tbody>
+          ${data.map(s => `<tr>
+            <td><code>${s.id}</code></td>
+            <td><code>${s.cron}</code></td>
+            <td>${s.manifest.id}</td>
+            <td><code>${s.manifest.version}</code></td>
+            <td>${s.enabled ? '<span class="pill success">on</span>' : '<span class="pill fail">off</span>'}</td>
+            <td><button class="secondary" data-del="${s.id}">delete</button></td>
+          </tr>`).join('')}
+        </tbody></table>`;
+    }
+
+    function renderDeploy() {
+      return `<h2>Deploy a manifest</h2>
+        <p class="muted">Paste YAML — body is parsed as the same <code>Manifest</code> schema <code>kanade deploy</code> uses.</p>
+        <textarea id="manifest-yaml" placeholder="id: ...\nversion: ...\ntarget:\n  pcs: [minipc]\nexecute:\n  shell: powershell\n  script: \"echo hello\"\n  timeout: 30s"></textarea>
+        <div class="toolbar" style="margin-top:8px">
+          <button id="deploy-btn">POST /api/deploy</button>
+          <span id="deploy-status" class="muted"></span>
+        </div>
+        <pre id="deploy-out" class="muted">(waiting)</pre>`;
+    }
+
+    const routes = {
+      '#/agents': renderAgents,
+      '#/results': renderResults,
+      '#/audit': renderAudit,
+      '#/schedules': renderSchedules,
+      '#/deploy': renderDeploy,
+    };
+
+    async function render() {
+      const hash = location.hash || '#/agents';
+      for (const a of nav.children) {
+        a.classList.toggle('active', a.getAttribute('href') === hash);
+      }
+      const fn = routes[hash] ?? renderAgents;
+      try {
+        const html = await fn();
+        root.innerHTML = html;
+      } catch (e) {
+        root.innerHTML = `<div class="err">${e.message}</div>`;
+      }
+      wireHandlers();
+    }
+
+    function wireHandlers() {
+      const btn = document.getElementById('deploy-btn');
+      if (btn) {
+        btn.addEventListener('click', async () => {
+          const yaml = document.getElementById('manifest-yaml').value;
+          const status = document.getElementById('deploy-status');
+          const out = document.getElementById('deploy-out');
+          status.textContent = 'parsing…';
+          out.textContent = '';
+          try {
+            // The backend speaks JSON; rely on a tiny YAML→JSON conversion via the API:
+            //   call /api/deploy with Content-Type: application/x-yaml so axum could parse it
+            //   directly — but Sprint 4b backend only takes JSON, so we ask the user to use
+            //   the CLI for full YAML, or convert here. For now, the textarea accepts JSON.
+            const body = yaml.trim().startsWith('{') ? JSON.parse(yaml) : null;
+            if (!body) {
+              throw new Error('paste JSON for now (YAML→JSON in browser pending). Use `kanade deploy <file.yaml>` from the CLI for YAML.');
+            }
+            status.textContent = 'POSTing…';
+            const resp = await fetchJson('/api/deploy', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+            });
+            status.textContent = 'ok';
+            out.textContent = JSON.stringify(resp, null, 2);
+          } catch (e) {
+            status.textContent = '';
+            out.innerHTML = `<span style="color:#d4374c">${e.message}</span>`;
+          }
+        });
+      }
+      root.querySelectorAll('[data-del]').forEach(b => {
+        b.addEventListener('click', async () => {
+          const id = b.getAttribute('data-del');
+          if (!confirm(`Delete schedule ${id}?`)) return;
+          try {
+            await fetch(`/api/schedules/${encodeURIComponent(id)}`, { method: 'DELETE' });
+            await render();
+          } catch (e) { alert(e.message); }
+        });
+      });
+    }
+
+    window.addEventListener('hashchange', render);
+    render();
+  </script>
+</body>
+</html>
