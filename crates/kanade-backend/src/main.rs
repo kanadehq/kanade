@@ -1,5 +1,6 @@
 mod api;
 mod audit;
+mod auth;
 mod projector;
 mod scheduler;
 mod web;
@@ -114,7 +115,9 @@ async fn main() -> Result<()> {
         });
     }
 
-    let app = api::router(app_state).layer(TraceLayer::new_for_http());
+    let app = api::router(app_state)
+        .layer(axum::middleware::from_fn(auth::verify))
+        .layer(TraceLayer::new_for_http());
 
     let listener = TcpListener::bind(&cfg.server.bind)
         .await
