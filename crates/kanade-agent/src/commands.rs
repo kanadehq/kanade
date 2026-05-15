@@ -103,12 +103,15 @@ async fn handle_command(
             stdout,
             stderr,
         } => (exit_code, stdout, stderr, None),
-        ExecOutcome::Killed { stdout, stderr } => (
-            -1,
-            stdout,
-            stderr,
-            Some(format!("killed by remote signal (kill.{:?})", cmd.job_id)),
-        ),
+        ExecOutcome::Killed { stdout, stderr } => {
+            let jid = cmd.job_id.as_deref().unwrap_or("?");
+            (
+                -1,
+                stdout,
+                stderr,
+                Some(format!("killed by remote signal (kill.{jid})")),
+            )
+        }
         ExecOutcome::Timeout { stdout, stderr } => (
             -1,
             stdout,

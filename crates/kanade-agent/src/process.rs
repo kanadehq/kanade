@@ -7,7 +7,7 @@ use kanade_shared::subject;
 use kanade_shared::wire::{Command, Shell};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command as ProcessCommand;
-use tracing::warn;
+use tracing::{info, warn};
 
 /// Outcome of a child-process run after kill / timeout / completion races.
 pub enum ExecOutcome {
@@ -74,22 +74,31 @@ pub async fn run_command_with_kill(
 
     let inner = match &cmd.job_id {
         Some(jid) => {
+            let kill_subject = subject::kill(jid);
             let mut kill_sub = client
-                .subscribe(subject::kill(jid))
+                .subscribe(kill_subject.clone())
                 .await
-                .with_context(|| format!("subscribe kill.{jid}"))?;
+                .with_context(|| format!("subscribe {kill_subject}"))?;
+            // Flush so the server has registered our SUB before any publish
+            // can race past us.
+            client.flush().await.ok();
+            info!(job_id = %jid, subject = %kill_subject, "kill listener armed");
+
             tokio::select! {
                 status = child.wait() => {
+                    info!(job_id = %jid, "child exited (wait arm fired)");
                     let s = status?;
                     OutcomeInner::Completed(s.code().unwrap_or(-1))
                 }
-                _ = kill_sub.next() => {
+                msg = kill_sub.next() => {
+                    info!(job_id = %jid, has_msg = msg.is_some(), "kill arm fired");
                     if let Err(e) = child.kill().await {
                         warn!(error = %e, "child.kill failed (process may already be dead)");
                     }
                     OutcomeInner::Killed
                 }
                 _ = tokio::time::sleep(timeout_dur) => {
+                    info!(job_id = %jid, "timeout arm fired");
                     if let Err(e) = child.kill().await {
                         warn!(error = %e, "child.kill on timeout failed");
                     }
