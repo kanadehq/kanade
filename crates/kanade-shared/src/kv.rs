@@ -10,6 +10,15 @@ pub const BUCKET_AGENTS_STATE: &str = "agents_state";
 pub const BUCKET_AGENT_CONFIG: &str = "agent_config";
 pub const BUCKET_SCHEDULES: &str = "schedules";
 
+/// Object Store bucket holding raw agent binaries (one object per
+/// version, e.g. `0.2.0` → file bytes).
+pub const OBJECT_AGENT_RELEASES: &str = "agent_releases";
+
+/// Key inside [`BUCKET_AGENT_CONFIG`] carrying the broadcast target
+/// version. Agents watch this key and self-update when their running
+/// version drifts.
+pub const KEY_AGENT_TARGET_VERSION: &str = "target_version";
+
 pub const SCRIPT_STATUS_ACTIVE: &str = "ACTIVE";
 pub const SCRIPT_STATUS_REVOKED: &str = "REVOKED";
 

@@ -2,6 +2,7 @@ mod commands;
 mod heartbeat;
 mod inventory;
 mod process;
+mod self_update;
 
 use std::path::PathBuf;
 
@@ -70,6 +71,7 @@ async fn main() -> Result<()> {
         pc_id.clone(),
         cfg.inventory.clone(),
     ));
+    tokio::spawn(self_update::run(client.clone(), AGENT_VERSION.to_string()));
 
     // Spawn one command_loop per declared group (Sprint 4a wave rollout
     // publishes to commands.group.{name}).

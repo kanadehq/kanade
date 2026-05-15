@@ -42,6 +42,8 @@ enum SubCmd {
     Deploy(cmd::deploy::DeployArgs),
     /// CRUD cron schedules (spec §2.5.3).
     Schedule(cmd::schedule::ScheduleArgs),
+    /// Manage agent releases (publish a new binary, query the target version).
+    Agent(cmd::agent::AgentArgs),
 }
 
 #[tokio::main]
@@ -80,6 +82,7 @@ async fn main() -> Result<()> {
         SubCmd::Revoke(args) => cmd::revoke::revoke(client, args).await,
         SubCmd::Unrevoke(args) => cmd::revoke::unrevoke(client, args).await,
         SubCmd::Kill(args) => cmd::kill::execute(client, args).await,
+        SubCmd::Agent(args) => cmd::agent::execute(client, args).await,
         SubCmd::Deploy(_) | SubCmd::Schedule(_) => unreachable!("handled above"),
     }
 }

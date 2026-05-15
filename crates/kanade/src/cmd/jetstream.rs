@@ -8,8 +8,8 @@ use async_nats::jetstream::{
 };
 use clap::{Args, Subcommand};
 use kanade_shared::kv::{
-    BUCKET_AGENTS_STATE, BUCKET_SCRIPT_CURRENT, BUCKET_SCRIPT_STATUS, STREAM_AUDIT, STREAM_DEPLOY,
-    STREAM_INVENTORY, STREAM_RESULTS,
+    BUCKET_AGENT_CONFIG, BUCKET_AGENTS_STATE, BUCKET_SCRIPT_CURRENT, BUCKET_SCRIPT_STATUS,
+    OBJECT_AGENT_RELEASES, STREAM_AUDIT, STREAM_DEPLOY, STREAM_INVENTORY, STREAM_RESULTS,
 };
 use tracing::info;
 
@@ -104,9 +104,33 @@ async fn setup(js: jetstream::Context) -> Result<()> {
     .await?;
     info!(bucket = BUCKET_AGENTS_STATE, "ready");
 
+    // agent_config KV — broadcast knobs (today: target_version for
+    // self-update; future: log_level, inventory cadence, …).
+    js.create_key_value(KvConfig {
+        bucket: BUCKET_AGENT_CONFIG.into(),
+        history: 5,
+        ..Default::default()
+    })
+    .await?;
+    info!(bucket = BUCKET_AGENT_CONFIG, "ready");
+
+    // agent_releases Object Store — one object per version, holding the
+    // raw agent binary.
+    js.create_object_store(async_nats::jetstream::object_store::Config {
+        bucket: OBJECT_AGENT_RELEASES.into(),
+        ..Default::default()
+    })
+    .await?;
+    info!(object_store = OBJECT_AGENT_RELEASES, "ready");
+
     println!("jetstream setup complete:");
-    println!("  streams : {STREAM_INVENTORY}, {STREAM_RESULTS}, {STREAM_DEPLOY}, {STREAM_AUDIT}");
-    println!("  KV      : {BUCKET_SCRIPT_CURRENT}, {BUCKET_SCRIPT_STATUS}, {BUCKET_AGENTS_STATE}");
+    println!(
+        "  streams       : {STREAM_INVENTORY}, {STREAM_RESULTS}, {STREAM_DEPLOY}, {STREAM_AUDIT}"
+    );
+    println!(
+        "  KV            : {BUCKET_SCRIPT_CURRENT}, {BUCKET_SCRIPT_STATUS}, {BUCKET_AGENTS_STATE}, {BUCKET_AGENT_CONFIG}"
+    );
+    println!("  object stores : {OBJECT_AGENT_RELEASES}");
     Ok(())
 }
 
@@ -134,10 +158,18 @@ async fn status(js: jetstream::Context) -> Result<()> {
         BUCKET_SCRIPT_CURRENT,
         BUCKET_SCRIPT_STATUS,
         BUCKET_AGENTS_STATE,
+        BUCKET_AGENT_CONFIG,
     ] {
         match js.get_key_value(bucket).await {
             Ok(_) => println!("  {bucket}: OK"),
             Err(_) => println!("  {bucket}: NOT FOUND"),
+        }
+    }
+    println!("object stores:");
+    for name in [OBJECT_AGENT_RELEASES] {
+        match js.get_object_store(name).await {
+            Ok(_) => println!("  {name}: OK"),
+            Err(_) => println!("  {name}: NOT FOUND"),
         }
     }
     Ok(())

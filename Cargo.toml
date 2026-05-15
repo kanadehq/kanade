@@ -1,3 +1,11 @@
+[profile.dev]
+# Windows MSVC link.exe hits PDB LIMIT (LNK1318) once the dependency
+# tree gets big (axum + sqlx + reqwest + jsonwebtoken + tokio-cron-
+# scheduler + tracing all carry many monomorphisations). Line-tables-
+# only debug info keeps backtraces useful while keeping the PDB inside
+# the linker's per-record limit on Windows.
+debug = "line-tables-only"
+
 [workspace]
 resolver = "2"
 members = [
@@ -43,3 +51,4 @@ tokio-cron-scheduler = "0.15"
 rust-embed         = "8"
 mime_guess         = "2"
 jsonwebtoken       = "10"
+sha2               = "0.10"
