@@ -17,6 +17,12 @@ pub struct AgentConfig {
 pub struct AgentSection {
     pub id: String,
     pub nats_url: String,
+    /// Wave / group memberships. Each entry causes the agent to
+    /// subscribe to `commands.group.{name}` on startup. Sprint 4a
+    /// declares groups statically in the agent.toml; a dynamic
+    /// group-membership KV is on the Sprint 4d backlog.
+    #[serde(default)]
+    pub groups: Vec<String>,
 }
 
 #[derive(Deserialize, Debug, Clone)]

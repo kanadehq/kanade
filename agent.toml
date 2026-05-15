@@ -6,6 +6,10 @@
 [agent]
 id = '{{ system.host }}'
 nats_url = 'nats://127.0.0.1:4222'
+# Sprint 4a — wave rollout: declare which `commands.group.*` subjects
+# this agent listens on. Smoke-test default puts the local agent in
+# both canary and wave1 so jobs/wave-test.yaml fires through.
+groups = ['canary', 'wave1']
 
 [log]
 path = 'logs/agent.log'

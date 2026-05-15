@@ -55,6 +55,7 @@ async fn main() -> Result<()> {
     info!(
         commands_all = subject::COMMANDS_ALL,
         commands_self = %subject::commands_pc(&cfg.agent.id),
+        groups = ?cfg.agent.groups,
         "subscribed",
     );
 
@@ -69,6 +70,17 @@ async fn main() -> Result<()> {
         pc_id.clone(),
         cfg.inventory.clone(),
     ));
+
+    // Spawn one command_loop per declared group (Sprint 4a wave rollout
+    // publishes to commands.group.{name}).
+    for group in &cfg.agent.groups {
+        let sub = client
+            .subscribe(subject::commands_group(group))
+            .await
+            .with_context(|| format!("subscribe commands.group.{group}"))?;
+        tokio::spawn(commands::command_loop(client.clone(), pc_id.clone(), sub));
+        info!(group = %group, "subscribed to group subject");
+    }
 
     let _ = tokio::join!(
         commands::command_loop(client.clone(), pc_id.clone(), cmd_all),

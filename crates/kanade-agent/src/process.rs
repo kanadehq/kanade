@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use futures::StreamExt;
 use kanade_shared::subject;
 use kanade_shared::wire::{Command, Shell};
+use rand::Rng;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command as ProcessCommand;
 use tracing::{info, warn};
@@ -37,6 +38,19 @@ pub async fn run_command_with_kill(
     client: &async_nats::Client,
     cmd: &Command,
 ) -> Result<ExecOutcome> {
+    // Spec §2.5.1 jitter — sleep a random `[0, jitter_secs)` interval
+    // before spawning the child so a wide fan-out doesn't hit the OS at
+    // the same instant on every PC.
+    if let Some(j) = cmd.jitter_secs.filter(|&s| s > 0) {
+        let secs = rand::rng().random_range(0..j);
+        info!(
+            jitter_secs = j,
+            sleep_secs = secs,
+            "applying jitter before exec"
+        );
+        tokio::time::sleep(Duration::from_secs(secs)).await;
+    }
+
     let (program, args): (&str, Vec<&str>) = match cmd.shell {
         Shell::Powershell => (
             "powershell",
