@@ -62,21 +62,37 @@ You'll need:
 # 1. NATS server
 scoop install nats-server         # or: winget install nats-io.nats-server
 
-# 2. Clone + install all three binaries to ~/.cargo/bin/
-git clone https://github.com/yukimemi/kanade.git
-cd kanade
-cargo install --path crates/kanade
-cargo install --path crates/kanade-agent
-cargo install --path crates/kanade-backend
+# 2. The three kanade binaries — straight from crates.io.
+cargo install kanade kanade-agent kanade-backend
 ```
 
-`kanade`, `kanade-agent`, and `kanade-backend` are now on your PATH.
+`kanade`, `kanade-agent`, and `kanade-backend` are now on your PATH
+(under `~/.cargo/bin/`).
+
+You'll also want the sample configs (`agent.toml` / `backend.toml`) and
+the example manifests (`jobs/*.yaml`). The fastest way is a shallow
+clone of this repo:
+
+```powershell
+git clone --depth=1 https://github.com/yukimemi/kanade.git
+cd kanade
+```
+
+(or `curl` the individual files from
+`https://raw.githubusercontent.com/yukimemi/kanade/main/...` into your
+own working dir if you'd rather not clone).
+
+> **Build it yourself from source.** Skip the `cargo install` step,
+> `git clone` the full repo, and run `cargo install --path crates/kanade
+> --path crates/kanade-agent --path crates/kanade-backend` (one
+> `--path` at a time, or repeat the command three times). That path
+> matters if you're hacking on the crates.
 
 ## Quick start (5 terminals, ~2 minutes)
 
 Run each step in its own PowerShell window so the daemons stay up. All
-of them assume `cd` into the cloned repo root, because the bundled
-`agent.toml` / `backend.toml` and the `jobs/*.yaml` samples live there.
+of them assume `cd` into the directory that holds `agent.toml` /
+`backend.toml` / `jobs/`, which is the repo root if you cloned it.
 
 ### 1 — start NATS
 
