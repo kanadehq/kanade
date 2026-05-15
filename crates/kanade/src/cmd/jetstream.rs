@@ -8,7 +8,7 @@ use async_nats::jetstream::{
 };
 use clap::{Args, Subcommand};
 use kanade_shared::kv::{
-    BUCKET_AGENTS_STATE, BUCKET_SCRIPT_CURRENT, BUCKET_SCRIPT_STATUS, STREAM_DEPLOY,
+    BUCKET_AGENTS_STATE, BUCKET_SCRIPT_CURRENT, BUCKET_SCRIPT_STATUS, STREAM_AUDIT, STREAM_DEPLOY,
     STREAM_INVENTORY, STREAM_RESULTS,
 };
 use tracing::info;
@@ -68,6 +68,15 @@ async fn setup(js: jetstream::Context) -> Result<()> {
     .await?;
     info!(stream = STREAM_DEPLOY, "ready");
 
+    // AUDIT — permanent record of operator actions (spec §2.3.1).
+    js.create_stream(StreamConfig {
+        name: STREAM_AUDIT.into(),
+        subjects: vec!["audit.>".into()],
+        ..Default::default()
+    })
+    .await?;
+    info!(stream = STREAM_AUDIT, "ready");
+
     // script_current KV — cmd_id → version (spec §2.6 Layer 2).
     js.create_key_value(KvConfig {
         bucket: BUCKET_SCRIPT_CURRENT.into(),
@@ -96,14 +105,19 @@ async fn setup(js: jetstream::Context) -> Result<()> {
     info!(bucket = BUCKET_AGENTS_STATE, "ready");
 
     println!("jetstream setup complete:");
-    println!("  streams : {STREAM_INVENTORY}, {STREAM_RESULTS}, {STREAM_DEPLOY}");
+    println!("  streams : {STREAM_INVENTORY}, {STREAM_RESULTS}, {STREAM_DEPLOY}, {STREAM_AUDIT}");
     println!("  KV      : {BUCKET_SCRIPT_CURRENT}, {BUCKET_SCRIPT_STATUS}, {BUCKET_AGENTS_STATE}");
     Ok(())
 }
 
 async fn status(js: jetstream::Context) -> Result<()> {
     println!("streams:");
-    for name in [STREAM_INVENTORY, STREAM_RESULTS, STREAM_DEPLOY] {
+    for name in [
+        STREAM_INVENTORY,
+        STREAM_RESULTS,
+        STREAM_DEPLOY,
+        STREAM_AUDIT,
+    ] {
         match js.get_stream(name).await {
             Ok(mut stream) => match stream.info().await {
                 Ok(info) => println!(

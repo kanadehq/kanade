@@ -1,4 +1,5 @@
 mod api;
+mod audit;
 mod projector;
 
 use std::path::PathBuf;
@@ -81,6 +82,15 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             if let Err(e) = projector::results::run(js, pool).await {
                 error!(error = %e, "results projector exited");
+            }
+        });
+    }
+    {
+        let pool = pool.clone();
+        let js = jetstream.clone();
+        tokio::spawn(async move {
+            if let Err(e) = projector::audit::run(js, pool).await {
+                error!(error = %e, "audit projector exited");
             }
         });
     }

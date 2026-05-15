@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod audit;
 pub mod deploy;
 pub mod results;
 
@@ -8,7 +9,7 @@ use axum::routing::{get, post};
 use sqlx::SqlitePool;
 
 /// State shared by every axum handler. Individual handlers extract just
-/// the slices they need via [`FromRef`]; the result handler keeps using
+/// the slices they need via [`FromRef`]; read-only handlers keep using
 /// `State<SqlitePool>` unmodified.
 #[derive(Clone)]
 pub struct AppState {
@@ -30,6 +31,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/agents/{pc_id}", get(agents::detail))
         .route("/api/results", get(results::list))
         .route("/api/results/{request_id}", get(results::detail))
+        .route("/api/audit", get(audit::list))
         .route("/api/deploy", post(deploy::create))
         .with_state(state)
 }

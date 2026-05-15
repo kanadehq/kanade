@@ -10,6 +10,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::api::AppState;
+use crate::audit;
 
 #[derive(Serialize)]
 pub struct DeployResponse {
@@ -122,6 +123,20 @@ pub async fn create(
         subjects = ?subjects,
         "deployment published",
     );
+
+    audit::record(
+        &s.nats,
+        "cli",
+        "deploy",
+        Some(&manifest.id),
+        serde_json::json!({
+            "deploy_id": deploy_id,
+            "version": manifest.version,
+            "target_count": target_count,
+            "subjects": subjects,
+        }),
+    )
+    .await;
 
     Ok(Json(DeployResponse {
         deploy_id,
