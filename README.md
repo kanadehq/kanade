@@ -12,7 +12,7 @@
 projector + JetStream KV watcher + cron scheduler) + admin CLI + an
 embedded SPA dashboard + JWT-gated `/api/*` + agent self-update via the
 JetStream Object Store. Full design lives in
-[docs/SPEC.md](./docs/SPEC.md) (Japanese, ~1150 lines covering Part 1
+[docs/SPEC.md](https://github.com/yukimemi/kanade/blob/main/docs/SPEC.md) (Japanese, ~1150 lines covering Part 1
 overview and Part 2 detailed design).
 
 ## Why
@@ -37,7 +37,7 @@ broker" — which everyone reinvents from scratch.
   replaces stale rollouts in the broker; consumer-side version checks
   guard execution; `kanade kill <job_id>` terminates running children.
   The emergency-stop path is wired from MVP, not bolted on later (see
-  [SPEC.md §2.6](./docs/SPEC.md)).
+  [SPEC.md §2.6](https://github.com/yukimemi/kanade/blob/main/docs/SPEC.md)).
 - **Phased build-out.** One server is enough for a few hundred
   endpoints; the same code scales to a 3-node NATS cluster + replicated
   backend + Postgres for several thousand.
@@ -179,7 +179,7 @@ kanade agent current                             # read agent_config.target_vers
 
 ## Authoring jobs
 
-YAML manifests in `jobs/*.yaml` (see [spec §2.4.1](./docs/SPEC.md)).
+YAML manifests in `jobs/*.yaml` (see [spec §2.4.1](https://github.com/yukimemi/kanade/blob/main/docs/SPEC.md)).
 Sample manifests in the repo cover:
 
 - `jobs/echo-test.yaml` — minimal ad-hoc command
@@ -283,6 +283,6 @@ patterns stabilise.
 
 ## License
 
-MIT — see [LICENSE](./LICENSE).
+MIT — see [LICENSE](https://github.com/yukimemi/kanade/blob/main/LICENSE).
 
 [teravars]: https://github.com/yukimemi/teravars
