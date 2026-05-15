@@ -1,0 +1,48 @@
+name: Release to crates.io
+
+# Publish all four kanade crates to crates.io when a `v*` tag is pushed.
+# Internal `kanade-shared` dep is declared with both `path` and `version`
+# so cargo publish keeps the version on the published manifest while
+# local builds keep using the path.
+#
+# Requires the `CARGO_REGISTRY_TOKEN` repo secret (cargo login output).
+#
+# Run on Windows so the kanade-agent verify step can compile the
+# wmi crate (Windows-only dep). Publishing itself is OS-agnostic.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@v2.9.1
+
+      - name: Publish kanade-shared
+        run: cargo publish -p kanade-shared --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Wait for crates.io index to settle
+        shell: bash
+        run: sleep 60
+
+      - name: Publish kanade-agent
+        run: cargo publish -p kanade-agent --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish kanade-backend
+        run: cargo publish -p kanade-backend --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish kanade (CLI)
+        run: cargo publish -p kanade --token ${{ secrets.CARGO_REGISTRY_TOKEN }}

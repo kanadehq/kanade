@@ -1,14 +1,19 @@
 [package]
 name = "kanade-agent"
+description = "Windows-side resident daemon for the kanade endpoint-management system. Subscribes to commands.* over NATS, runs scripts, publishes WMI inventory + heartbeats, watches for self-updates"
+readme = "../../README.md"
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true
 license.workspace      = true
 repository.workspace   = true
+homepage.workspace     = true
 authors.workspace      = true
+keywords.workspace     = true
+categories.workspace   = true
 
 [dependencies]
-kanade-shared = { path = "../kanade-shared" }
+kanade-shared = { path = "../kanade-shared", version = "0.1.0" }
 
 anyhow     = { workspace = true }
 async-nats = { workspace = true }

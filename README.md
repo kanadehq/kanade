@@ -8,10 +8,12 @@
 > carries inventory polling, fleet-wide rollouts, and ad-hoc emergency
 > commands on a single channel.
 
-**Status: 0.1.0 — Sprint 1 (PoC) shipping.** Agent + admin CLI + local
-single-node NATS, end-to-end echo roundtrip verified. The full design
-lives in [docs/SPEC.md](./docs/SPEC.md) (Japanese, ~1150 lines covering
-Part 1 overview and Part 2 detailed design across Sprints 1-6).
+**Status: 0.1.0 — Sprint 4 shipped.** Agent + backend (axum + SQLite
+projector + JetStream KV watcher + cron scheduler) + admin CLI + an
+embedded SPA dashboard + JWT-gated `/api/*` + agent self-update via the
+JetStream Object Store. Full design lives in
+[docs/SPEC.md](./docs/SPEC.md) (Japanese, ~1150 lines covering Part 1
+overview and Part 2 detailed design).
 
 ## Why
 
@@ -27,12 +29,14 @@ broker" — which everyone reinvents from scratch.
   broker over outbound TLS; the broker fans out commands, fans in
   inventory and results. No AD, no client-pull-from-server, no opening
   inbound ports on user PCs.
-- **Declarative job manifests in Git** (Sprint 2+) — review, history,
-  rollback all come for free.
+- **Declarative job manifests in Git.** Review, history, rollback all
+  come for free; the YAML schema (`jobs/*.yaml`) is the same input
+  whether you `kanade deploy` ad-hoc or wire it onto a cron `kanade
+  schedule`.
 - **Three layers of stop-the-bleed.** Stream max-msgs-per-subject
   replaces stale rollouts in the broker; consumer-side version checks
-  guard execution; `kill.{job_id}` terminates running children. The
-  emergency-stop path is wired from MVP, not bolted on later (see
+  guard execution; `kanade kill <job_id>` terminates running children.
+  The emergency-stop path is wired from MVP, not bolted on later (see
   [SPEC.md §2.6](./docs/SPEC.md)).
 - **Phased build-out.** One server is enough for a few hundred
   endpoints; the same code scales to a 3-node NATS cluster + replicated
@@ -42,76 +46,214 @@ broker" — which everyone reinvents from scratch.
 
 | crate            | kind | role |
 |------------------|------|------|
-| `kanade-shared`  | lib  | wire types (`Command` / `ExecResult` / `Heartbeat`), NATS subject helpers, and a [teravars]-backed config loader |
-| `kanade-agent`   | bin  | Windows-side resident daemon. Connects to NATS, subscribes to `commands.*`, spawns child processes, publishes `ExecResult`, heartbeats every 30 s |
-| `kanade`         | bin  | operator-side admin CLI. Sends commands via NATS request/reply (`kubectl`-style single-name entry point) |
+| `kanade-shared`  | lib  | wire types (`Command` / `ExecResult` / `Heartbeat` / `HwInventory`), NATS subject + KV helpers, YAML manifest schema, [teravars]-backed config loader |
+| `kanade-agent`   | bin  | Windows-side resident daemon: subscribes to `commands.*`, runs child processes, publishes results + heartbeats + WMI inventory, watches `agent_config.target_version` for self-update |
+| `kanade-backend` | bin  | axum HTTP server: `/health`, `/api/{agents,results,audit,deploy,schedules}`, embedded SPA at `/`. Runs 3 durable JetStream projectors (INVENTORY/RESULTS/AUDIT → SQLite) and a `tokio-cron-scheduler` driven by the schedules KV |
+| `kanade`         | bin  | operator-side admin CLI (`kubectl`-style single entry point); subcommands talk to NATS directly for `run`/`ping`/`kill`/`revoke`/`jetstream` and to the backend over HTTP for `deploy`/`schedule`/`agent` |
 
-A future `kanade-backend` crate lands in Sprint 3 (axum API + SQLite
-projector + scheduler, fronting the CLI / Web UI).
+## Install
 
-## Quick start
+You'll need:
 
-Install a single-node NATS server and start JetStream:
+- Rust 1.85+ (the workspace pins `edition = "2024"`)
+- A NATS server (Go binary, ~15 MB)
 
 ```powershell
-scoop install nats-server   # or: winget install nats-io.nats-server
+# 1. NATS server
+scoop install nats-server         # or: winget install nats-io.nats-server
+
+# 2. Clone + install all three binaries to ~/.cargo/bin/
+git clone https://github.com/yukimemi/kanade.git
+cd kanade
+cargo install --path crates/kanade
+cargo install --path crates/kanade-agent
+cargo install --path crates/kanade-backend
+```
+
+`kanade`, `kanade-agent`, and `kanade-backend` are now on your PATH.
+
+## Quick start (5 terminals, ~2 minutes)
+
+Run each step in its own PowerShell window so the daemons stay up. All
+of them assume `cd` into the cloned repo root, because the bundled
+`agent.toml` / `backend.toml` and the `jobs/*.yaml` samples live there.
+
+### 1 — start NATS
+
+```powershell
 nats-server -js -p 4222
 ```
 
-Run the agent in a separate terminal (reads `agent.toml` from the repo
-root, picks up the local hostname as `pc_id`):
+### 2 — provision JetStream (one-time)
 
 ```powershell
-cargo run -p kanade-agent
+kanade jetstream setup
 ```
 
-Round-trip a script through NATS — `$env:COMPUTERNAME` doubles as the
-agent's `pc_id` for the local-loopback case:
+Creates the `INVENTORY` / `RESULTS` / `DEPLOY` / `AUDIT` streams, the
+`script_current` / `script_status` / `agents_state` / `agent_config` KV
+buckets, and the `agent_releases` Object Store.
+
+### 3 — start the backend
 
 ```powershell
-cargo run -p kanade -- run $env:COMPUTERNAME -- 'echo hello from kanade'
+$env:KANADE_AUTH_DISABLE = "1"   # JWT off for development
+kanade-backend
 ```
 
-The CLI prints `exit_code`, `stdout`, and `stderr` of the remote
-execution. Liveness probe via heartbeat:
+Serves the dashboard at <http://127.0.0.1:8080> and the JSON API at
+`/api/*`. SQLite is created at `./backend.db`. Both projectors and the
+cron scheduler start in the background.
+
+### 4 — start the agent
 
 ```powershell
-cargo run -p kanade -- ping $env:COMPUTERNAME
+kanade-agent
 ```
 
-## Config (`agent.toml`)
+Loads `./agent.toml`, picks `$env:COMPUTERNAME` as `pc_id`, subscribes
+to `commands.all` + `commands.pc.{pc_id}` + every group declared in
+`agent.toml` (`canary` + `wave1` in the bundled sample), starts the
+heartbeat / inventory / self-update loops.
 
-Tera-templated TOML loaded via the [teravars] crate. The intent is for
-a single file to drive both Windows and Linux agents through
-`system.host` cross-platform hostname resolution and `is_windows()`
-branches (see [SPEC.md §2.4.4](./docs/SPEC.md)). Sprint 1 ships a
-minimal subset — full self-referencing `[vars]` blocks land once
-[teravars#21](https://github.com/yukimemi/teravars/issues/21) is
-resolved.
+### 5 — drive it
+
+```powershell
+# Round-trip a script via NATS, request/reply.
+kanade run $env:COMPUTERNAME -- 'echo hello from kanade'
+
+# Or via the backend's YAML deploy path (writes a row to deployments,
+# emits an audit event, broadcasts the Command).
+kanade deploy jobs/echo-test.yaml
+
+# Heartbeat probe.
+kanade ping $env:COMPUTERNAME
+
+# Inspect via curl…
+curl http://127.0.0.1:8080/api/agents
+curl http://127.0.0.1:8080/api/results
+curl http://127.0.0.1:8080/api/audit
+
+# …or open the dashboard.
+start http://127.0.0.1:8080
+```
+
+## CLI cheat sheet
+
+```text
+kanade run    <pc_id> -- <script>                # request/reply via NATS
+kanade ping   <pc_id>                            # wait for one heartbeat
+kanade kill   <job_id>                           # publish kill.{job_id}
+kanade revoke <cmd_id>                           # script_status = REVOKED
+kanade unrevoke <cmd_id>                         # → ACTIVE
+
+kanade jetstream setup                           # create streams + KV + Object Store
+kanade jetstream status                          # health snapshot
+
+kanade deploy   <manifest.yaml> [--version <v>]  # POST /api/deploy
+kanade schedule create <schedule.yaml>           # POST /api/schedules (cron + manifest)
+kanade schedule list
+kanade schedule delete <id>
+
+kanade agent publish <binary> --version <v>      # upload to Object Store + flip target_version
+kanade agent current                             # read agent_config.target_version
+```
+
+`kanade <subcommand> --help` for argument details.
+
+## Authoring jobs
+
+YAML manifests in `jobs/*.yaml` (see [spec §2.4.1](./docs/SPEC.md)).
+Sample manifests in the repo cover:
+
+- `jobs/echo-test.yaml` — minimal ad-hoc command
+- `jobs/wave-test.yaml` — `rollout.waves` rollout (canary → wave1 with delay)
+- `jobs/schedule-test.yaml` — cron-driven echo every 10 s
+
+A wave manifest sketch:
+
+```yaml
+id: cleanup-disk-temp
+version: 1.0.1
+target:
+  pcs: [PC1234]
+execute:
+  shell: powershell
+  script: |
+    $temp = [System.IO.Path]::GetTempPath()
+    Remove-Item "$temp\*" -Recurse -Force -ErrorAction SilentlyContinue
+  timeout: 600s
+  jitter: 5m
+rollout:
+  strategy: wave
+  waves:
+    - { group: canary, delay: 0s  }
+    - { group: wave1,  delay: 30m }
+```
+
+## Config files
+
+Both use [teravars] templating — `{{ system.host }}`, `{{ env(name="X", default="Y") }}`, `{% if is_windows() %}…{% endif %}` are all available.
+
+`agent.toml`:
+
+```toml
+[agent]
+id = '{{ system.host }}'
+nats_url = 'nats://127.0.0.1:4222'
+groups = ['canary', 'wave1']
+
+[inventory]
+hw_interval = '24h'
+jitter = '10m'
+enabled = true
+
+[log]
+path = 'logs/agent.log'
+level = 'info'
+```
+
+`backend.toml`:
+
+```toml
+[server]
+bind = '0.0.0.0:8080'
+
+[nats]
+url = 'nats://127.0.0.1:4222'
+
+[db]
+sqlite_path = './backend.db'
+
+[log]
+path = 'logs/backend.log'
+level = 'info'
+```
 
 ## Dev workflow
 
 ```powershell
-cargo make check       # fmt-check + clippy + test + lock-check
+cargo make check       # fmt-check + clippy + test + lock-check (same as CI)
 cargo make fmt         # apply formatting
 cargo make on-add      # renri post_create hook (apm install + vcs fetch)
 ```
 
-## Sprint 1 scope
+The workspace pins `[profile.dev] debug = "line-tables-only"` because
+Windows MSVC `link.exe` hits `LNK1318` (PDB record limit) once axum +
+sqlx + reqwest + tokio-cron-scheduler + jsonwebtoken all sit in one
+workspace; line-tables-only keeps backtraces useful without exploding
+the PDB.
 
-- [x] Cargo workspace + three crates (`shared` / `agent` / CLI)
-- [x] Agent: NATS connection, `commands.all` + `commands.pc.{pc_id}` + `kill.>` subscribers
-- [x] Agent: child-process execution, `ExecResult` published to `results.{request_id}`
-- [x] Agent: heartbeat published to `heartbeat.{pc_id}` every 30 s
-- [x] CLI: `run` (request/reply) + `ping` (heartbeat wait)
-- [x] `cargo make check` passes workspace-wide
-- [x] Local NATS round-trip verified
+## Sprint history
 
-Sprint 2 onwards — Windows Service hosting (`windows-service`),
-inventory collection (WMI), kill-signal child-process termination, YAML
-job manifest parser, wave / jitter delivery, mTLS, self-update, backend
-(axum + SQLite + projector). See [docs/SPEC.md](./docs/SPEC.md)
-Sprints 2-6 for the full roadmap.
+- **Sprint 1** — workspace scaffolding, NATS plumbing, agent + CLI echo round-trip
+- **Sprint 2** — §2.6 kill switch (subscribe + flush race fix), version-pin KV, WMI HW inventory
+- **Sprint 3** — backend skeleton, SQLite projectors, YAML deploy API, audit log, `tokio-cron-scheduler` with dynamic KV watch
+- **Sprint 4** — wave rollout + agent-side jitter, embedded SPA dashboard, HS256 JWT middleware, agent self-update via the JetStream Object Store
+
+Sprint 5 (Prometheus metrics, 3000-agent simulation, backups) and
+Sprint 6 (NATS cluster + replicated backend + Postgres migration) are
+open backlog items.
 
 ## Scaffolded with kata
 

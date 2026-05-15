@@ -1,11 +1,16 @@
 [package]
 name = "kanade-shared"
+description = "Shared wire types, NATS subject helpers, KV constants, YAML manifest schema, and teravars-backed config loader for the kanade endpoint-management system"
+readme = "../../README.md"
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true
 license.workspace      = true
 repository.workspace   = true
+homepage.workspace     = true
 authors.workspace      = true
+keywords.workspace     = true
+categories.workspace   = true
 
 [dependencies]
 anyhow     = { workspace = true }

@@ -21,7 +21,10 @@ edition      = "2024"
 rust-version = "1.85"
 license      = "MIT"
 repository   = "https://github.com/yukimemi/kanade"
+homepage     = "https://github.com/yukimemi/kanade"
 authors      = ["yukimemi <yukimemi@gmail.com>"]
+keywords     = ["nats", "jetstream", "endpoint-management", "orchestration"]
+categories   = ["command-line-utilities", "network-programming"]
 
 [workspace.dependencies]
 tokio              = { version = "1.52", features = ["full"] }
