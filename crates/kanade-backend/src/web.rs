@@ -12,7 +12,7 @@ use axum::response::{IntoResponse, Response};
 use rust_embed::RustEmbed;
 
 #[derive(RustEmbed)]
-#[folder = "../../web/dist/"]
+#[folder = "web/dist/"]
 struct WebAssets;
 
 pub async fn serve(req: Request) -> Response {
