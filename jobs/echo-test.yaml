@@ -1,0 +1,16 @@
+# Sprint 3b smoke-test manifest. `kanade deploy jobs/echo-test.yaml`
+# posts this to the backend, which publishes a Command on
+# commands.pc.minipc. Bump `version` to drive a re-deploy through the
+# script_current KV gate.
+
+id: echo-test
+version: 0.0.1
+description: "Sprint 3b smoke test — echo a marker string on the local agent"
+
+target:
+  pcs: [minipc]
+
+execute:
+  shell: powershell
+  script: "echo 'kanade-sprint-3b'"
+  timeout: 30s

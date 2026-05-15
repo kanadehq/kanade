@@ -1,5 +1,6 @@
 pub mod config;
 pub mod kv;
+pub mod manifest;
 pub mod subject;
 pub mod wire;
 

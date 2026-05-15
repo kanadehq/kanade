@@ -62,7 +62,7 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("connect NATS at {}", cfg.nats.url))?;
     info!("connected to NATS");
-    let jetstream = async_nats::jetstream::new(nats);
+    let jetstream = async_nats::jetstream::new(nats.clone());
 
     // Projectors run in the background; if either exits the backend keeps
     // serving HTTP (read-only API stays useful even if a stream is missing).
@@ -85,7 +85,12 @@ async fn main() -> Result<()> {
         });
     }
 
-    let app = api::router(pool.clone()).layer(TraceLayer::new_for_http());
+    let app_state = api::AppState {
+        pool: pool.clone(),
+        nats,
+        jetstream,
+    };
+    let app = api::router(app_state).layer(TraceLayer::new_for_http());
 
     let listener = TcpListener::bind(&cfg.server.bind)
         .await

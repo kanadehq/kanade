@@ -1,3 +1,4 @@
+pub mod deploy;
 pub mod jetstream;
 pub mod kill;
 pub mod ping;

@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 use tracing::debug;
 
 const DEFAULT_NATS: &str = "nats://127.0.0.1:4222";
+const DEFAULT_BACKEND: &str = "http://127.0.0.1:8080";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -16,13 +17,16 @@ struct Cli {
     #[arg(long, global = true, default_value = DEFAULT_NATS, env = "KANADE_NATS_URL")]
     server: String,
 
+    #[arg(long, global = true, default_value = DEFAULT_BACKEND, env = "KANADE_BACKEND_URL")]
+    backend_url: String,
+
     #[command(subcommand)]
     command: SubCmd,
 }
 
 #[derive(Subcommand, Debug)]
 enum SubCmd {
-    /// Run a script on a target PC and wait for the result.
+    /// Run a script on a target PC directly via NATS and wait for the result.
     Run(cmd::run::RunArgs),
     /// Wait for one heartbeat from the target PC.
     Ping(cmd::ping::PingArgs),
@@ -34,6 +38,8 @@ enum SubCmd {
     Unrevoke(cmd::revoke::UnrevokeArgs),
     /// Publish kill.{job_id} so agents running the job terminate (spec §2.6 Layer 3).
     Kill(cmd::kill::KillArgs),
+    /// Submit a YAML job manifest to the backend's POST /api/deploy.
+    Deploy(cmd::deploy::DeployArgs),
 }
 
 #[tokio::main]
@@ -46,6 +52,12 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+
+    // `deploy` talks to the backend over HTTP; everything else needs NATS.
+    if let SubCmd::Deploy(args) = cli.command {
+        return cmd::deploy::execute(&cli.backend_url, args).await;
+    }
+
     let client = async_nats::connect(&cli.server)
         .await
         .with_context(|| format!("connect to NATS at {}", cli.server))?;
@@ -58,5 +70,6 @@ async fn main() -> Result<()> {
         SubCmd::Revoke(args) => cmd::revoke::revoke(client, args).await,
         SubCmd::Unrevoke(args) => cmd::revoke::unrevoke(client, args).await,
         SubCmd::Kill(args) => cmd::kill::execute(client, args).await,
+        SubCmd::Deploy(_) => unreachable!("handled above"),
     }
 }
