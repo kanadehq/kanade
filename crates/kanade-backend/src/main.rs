@@ -1,6 +1,7 @@
 mod api;
 mod audit;
 mod projector;
+mod scheduler;
 
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -100,6 +101,18 @@ async fn main() -> Result<()> {
         nats,
         jetstream,
     };
+
+    // Scheduler runs alongside the projectors; if it can't init (no
+    // schedules KV, bad cron, etc.) the backend keeps serving HTTP.
+    {
+        let s = app_state.clone();
+        tokio::spawn(async move {
+            if let Err(e) = scheduler::run(s).await {
+                error!(error = %e, "scheduler exited");
+            }
+        });
+    }
+
     let app = api::router(app_state).layer(TraceLayer::new_for_http());
 
     let listener = TcpListener::bind(&cfg.server.bind)

@@ -2,15 +2,13 @@ pub mod agents;
 pub mod audit;
 pub mod deploy;
 pub mod results;
+pub mod schedules;
 
 use axum::Router;
 use axum::extract::FromRef;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use sqlx::SqlitePool;
 
-/// State shared by every axum handler. Individual handlers extract just
-/// the slices they need via [`FromRef`]; read-only handlers keep using
-/// `State<SqlitePool>` unmodified.
 #[derive(Clone)]
 pub struct AppState {
     pub pool: SqlitePool,
@@ -33,6 +31,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/results/{request_id}", get(results::detail))
         .route("/api/audit", get(audit::list))
         .route("/api/deploy", post(deploy::create))
+        .route(
+            "/api/schedules",
+            get(schedules::list).post(schedules::create),
+        )
+        .route("/api/schedules/{id}", delete(schedules::delete))
         .with_state(state)
 }
 

@@ -58,3 +58,22 @@ impl From<ExecuteShell> for Shell {
         }
     }
 }
+
+/// Periodic schedule (spec §2.4.3). The full job [`Manifest`] is embedded
+/// so the scheduler can deploy it without a separate Git lookup; once a
+/// dedicated job-catalog API lands, `manifest` can become a `job_id`
+/// reference instead.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Schedule {
+    pub id: String,
+    /// 6-field cron expression (`sec min hour day month day-of-week`),
+    /// matching `tokio-cron-scheduler` syntax.
+    pub cron: String,
+    pub manifest: Manifest,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}

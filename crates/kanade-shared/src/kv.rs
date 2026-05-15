@@ -8,6 +8,7 @@ pub const BUCKET_SCRIPT_CURRENT: &str = "script_current";
 pub const BUCKET_SCRIPT_STATUS: &str = "script_status";
 pub const BUCKET_AGENTS_STATE: &str = "agents_state";
 pub const BUCKET_AGENT_CONFIG: &str = "agent_config";
+pub const BUCKET_SCHEDULES: &str = "schedules";
 
 pub const SCRIPT_STATUS_ACTIVE: &str = "ACTIVE";
 pub const SCRIPT_STATUS_REVOKED: &str = "REVOKED";

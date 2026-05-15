@@ -40,6 +40,8 @@ enum SubCmd {
     Kill(cmd::kill::KillArgs),
     /// Submit a YAML job manifest to the backend's POST /api/deploy.
     Deploy(cmd::deploy::DeployArgs),
+    /// CRUD cron schedules (spec §2.5.3).
+    Schedule(cmd::schedule::ScheduleArgs),
 }
 
 #[tokio::main]
@@ -52,24 +54,32 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+    let Cli {
+        server,
+        backend_url,
+        command,
+    } = cli;
 
-    // `deploy` talks to the backend over HTTP; everything else needs NATS.
-    if let SubCmd::Deploy(args) = cli.command {
-        return cmd::deploy::execute(&cli.backend_url, args).await;
+    // HTTP-only subcommands (no NATS connect required).
+    if let SubCmd::Deploy(args) = command {
+        return cmd::deploy::execute(&backend_url, args).await;
+    } else if let SubCmd::Schedule(args) = command {
+        return cmd::schedule::execute(&backend_url, args).await;
     }
 
-    let client = async_nats::connect(&cli.server)
+    // The remaining subcommands need NATS.
+    let client = async_nats::connect(&server)
         .await
-        .with_context(|| format!("connect to NATS at {}", cli.server))?;
+        .with_context(|| format!("connect to NATS at {server}"))?;
     debug!("connected to NATS");
 
-    match cli.command {
+    match command {
         SubCmd::Run(args) => cmd::run::execute(client, args).await,
         SubCmd::Ping(args) => cmd::ping::execute(client, args).await,
         SubCmd::Jetstream(args) => cmd::jetstream::execute(client, args).await,
         SubCmd::Revoke(args) => cmd::revoke::revoke(client, args).await,
         SubCmd::Unrevoke(args) => cmd::revoke::unrevoke(client, args).await,
         SubCmd::Kill(args) => cmd::kill::execute(client, args).await,
-        SubCmd::Deploy(_) => unreachable!("handled above"),
+        SubCmd::Deploy(_) | SubCmd::Schedule(_) => unreachable!("handled above"),
     }
 }

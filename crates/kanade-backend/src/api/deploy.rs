@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::api::AppState;
 use crate::audit;
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct DeployResponse {
     pub deploy_id: String,
     pub job_id: String,
@@ -21,10 +21,15 @@ pub struct DeployResponse {
     pub subjects: Vec<String>,
 }
 
-pub async fn create(
-    State(s): State<AppState>,
-    Json(manifest): Json<Manifest>,
-) -> Result<Json<DeployResponse>, (StatusCode, String)> {
+/// Core deploy pipeline used by both the HTTP handler (actor = "cli") and
+/// the scheduler (actor = "scheduler"). Validates the manifest, fans the
+/// Command out across every target subject, pins script_current, records
+/// a deployments row, and emits an audit event.
+pub async fn deploy_manifest(
+    s: &AppState,
+    manifest: Manifest,
+    actor: &str,
+) -> Result<DeployResponse, (StatusCode, String)> {
     if !manifest.target.is_specified() {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -81,7 +86,6 @@ pub async fn create(
     }
     let _ = s.nats.flush().await;
 
-    // Spec §2.6 Layer 2 — pin the current version so stale Commands skip.
     match s.jetstream.get_key_value(BUCKET_SCRIPT_CURRENT).await {
         Ok(kv) => {
             if let Err(e) = kv
@@ -104,7 +108,7 @@ pub async fn create(
     .bind(&deploy_id)
     .bind(&manifest.id)
     .bind(&manifest.version)
-    .bind("cli") // Sprint 3c: actual operator identity from auth
+    .bind(actor)
     .bind(target_count as i64)
     .execute(&s.pool)
     .await
@@ -119,6 +123,7 @@ pub async fn create(
         deploy_id = %deploy_id,
         job_id = %manifest.id,
         version = %manifest.version,
+        actor,
         target_count,
         subjects = ?subjects,
         "deployment published",
@@ -126,7 +131,7 @@ pub async fn create(
 
     audit::record(
         &s.nats,
-        "cli",
+        actor,
         "deploy",
         Some(&manifest.id),
         serde_json::json!({
@@ -138,11 +143,18 @@ pub async fn create(
     )
     .await;
 
-    Ok(Json(DeployResponse {
+    Ok(DeployResponse {
         deploy_id,
         job_id: manifest.id,
         version: manifest.version,
         target_count,
         subjects,
-    }))
+    })
+}
+
+pub async fn create(
+    State(s): State<AppState>,
+    Json(manifest): Json<Manifest>,
+) -> Result<Json<DeployResponse>, (StatusCode, String)> {
+    deploy_manifest(&s, manifest, "cli").await.map(Json)
 }
