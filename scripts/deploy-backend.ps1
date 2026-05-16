@@ -47,6 +47,11 @@
   public. Use this when an external firewall (corporate / WAF /
   cloud security group) is the source of truth.
 
+.PARAMETER Recreate
+  Drop the existing Windows service entirely (sc.exe delete + wait
+  for SCM to acknowledge) before re-creating it. Useful for
+  recovering from a half-installed service registration.
+
 .PARAMETER NoStart
   Install + register the service but don't start it.
 
@@ -61,6 +66,9 @@
 
 .EXAMPLE
   PS> .\deploy-backend.ps1 -ForceConfig               # re-run after binary update, fresh config
+
+.EXAMPLE
+  PS> .\deploy-backend.ps1 -Recreate                  # recover from a stuck / broken service
 #>
 
 [CmdletBinding()]
@@ -70,6 +78,7 @@ param(
     [switch]$ForceConfig,
     [int]   $FirewallPort = 0,
     [switch]$NoFirewall,
+    [switch]$Recreate,
     [switch]$NoStart
 )
 
@@ -100,6 +109,24 @@ if ($svc -and $svc.Status -ne 'Stopped') {
     Write-Host "Stopping $ServiceName..."
     Stop-Service -Name $ServiceName -Force
     $svc.WaitForStatus('Stopped', '00:00:30')
+}
+
+# -Recreate: drop the existing service entirely so the New-Service
+# path below runs even when a previous registration is already
+# there. Same recovery valve as deploy-agent.ps1 — Stop +
+# sc.exe delete + wait for SCM to acknowledge.
+if ($Recreate -and $svc) {
+    Write-Host "Removing existing $ServiceName (-Recreate)"
+    & sc.exe delete $ServiceName | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "sc.exe delete failed (exit $LASTEXITCODE)" }
+    $deadline = (Get-Date).AddSeconds(30)
+    while ((Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 250
+    }
+    if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
+        throw "Timed out waiting for $ServiceName to be removed from SCM"
+    }
+    $svc = $null
 }
 
 foreach ($d in @($binDir, $configDir, $dataDir, $logsDir)) {

@@ -28,6 +28,13 @@
   Overwrite the installed agent.toml with the one in -SourceDir. Off
   by default so config tweaks on the target machine survive upgrades.
 
+.PARAMETER Recreate
+  Drop the existing Windows service entirely (sc.exe delete + wait
+  for SCM to acknowledge) before re-creating it. Useful for
+  recovering from a half-installed service (e.g., one that was
+  created without windows-service crate integration in v0.3.1 and
+  now refuses to start). Implicitly stops the service first.
+
 .PARAMETER NoStart
   Install + register the service but don't start it.
 
@@ -39,6 +46,10 @@
 .EXAMPLE
   # Re-run after a binary update, forcing fresh config:
   PS> .\deploy-agent.ps1 -ForceConfig
+
+.EXAMPLE
+  # Recover from a stuck / broken service:
+  PS> .\deploy-agent.ps1 -Recreate
 #>
 
 [CmdletBinding()]
@@ -46,6 +57,7 @@ param(
     [string]$SourceDir   = $PSScriptRoot,
     [string]$ServiceName = 'KanadeAgent',
     [switch]$ForceConfig,
+    [switch]$Recreate,
     [switch]$NoStart
 )
 
@@ -77,6 +89,25 @@ if ($svc -and $svc.Status -ne 'Stopped') {
     Write-Host "Stopping $ServiceName..."
     Stop-Service -Name $ServiceName -Force
     $svc.WaitForStatus('Stopped', '00:00:30')
+}
+
+# -Recreate: drop the existing service entirely so the New-Service
+# path below runs even when a previous (broken) registration is
+# already there. Useful for recovering from a stuck "service exists
+# but won't start" state — Stop-Service + sc.exe delete + wait for
+# SCM to actually remove the entry before continuing.
+if ($Recreate -and $svc) {
+    Write-Host "Removing existing $ServiceName (-Recreate)"
+    & sc.exe delete $ServiceName | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "sc.exe delete failed (exit $LASTEXITCODE)" }
+    $deadline = (Get-Date).AddSeconds(30)
+    while ((Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 250
+    }
+    if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
+        throw "Timed out waiting for $ServiceName to be removed from SCM"
+    }
+    $svc = $null
 }
 
 foreach ($d in @($binDir, $configDir, $dataDir, $logsDir)) {
