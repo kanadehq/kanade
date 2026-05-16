@@ -21,10 +21,13 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      // Backend runs on 8080 in dev; proxy /api/* + /health so the
-      // SPA can call them from the Vite dev server without CORS.
-      '/api': 'http://localhost:8080',
-      '/health': 'http://localhost:8080',
+      // Dev backend runs on :8081 (see `cargo make backend-dev`,
+      // which uses backend.dev.toml). The production KanadeBackend
+      // Windows service stays on :8080, so dev + service can coexist.
+      // Override BACKEND_PROXY at run time if you'd rather aim Vite
+      // at a different host / port (e.g., a staging machine).
+      '/api': process.env.BACKEND_PROXY ?? 'http://localhost:8081',
+      '/health': process.env.BACKEND_PROXY ?? 'http://localhost:8081',
     },
   },
 });

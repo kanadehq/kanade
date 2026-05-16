@@ -1,0 +1,22 @@
+# Dev-mode backend config — pointed at by `cargo make backend-dev`.
+#
+# Loopback bind on a non-clashing port + workspace-local SQLite +
+# logs under target/ so a co-installed KanadeBackend Windows service
+# (on 0.0.0.0:8080 with %ProgramData% paths) doesn't fight for the
+# port or the DB file. Restart with `cargo make backend-dev` to
+# re-emit this config; nothing here persists beyond target/.
+
+[server]
+bind = '127.0.0.1:8081'
+
+[nats]
+url = 'nats://127.0.0.1:4222'
+
+[db]
+# Workspace-relative path; backend.rs::main creates the parent dir
+# on demand so the first run on a fresh checkout just works.
+sqlite_path = './target/dev-data/backend.db'
+
+[log]
+path  = './target/dev-data/backend.log'
+level = 'info'

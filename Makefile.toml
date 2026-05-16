@@ -73,10 +73,22 @@ command = "bun"
 args = ["run", "build"]
 
 [tasks.web-dev]
-description = "Run the Vite dev server with HMR (proxies /api to localhost:8080)"
+description = "Run the Vite dev server with HMR (proxies /api to the dev backend on :8081)"
 cwd = "crates/kanade-backend/web"
 command = "bun"
 args = ["run", "dev"]
+
+[tasks.backend-dev]
+description = "Run kanade-backend in dev mode (loopback :8081, workspace-local DB + logs, auth disabled). Coexists with an installed KanadeBackend Windows service running on :8080."
+env = { "KANADE_BACKEND_CONFIG" = "./backend.dev.toml", "KANADE_AUTH_DISABLE" = "1", "RUST_LOG" = "info,kanade_backend=debug,tower_http=info" }
+command = "cargo"
+args = ["run", "-p", "kanade-backend"]
+
+[tasks.agent-dev]
+description = "Run kanade-agent in dev mode against the same NATS the installed service uses. Beware: both will race on commands.pc.<hostname>; stop the installed service first (Stop-Service KanadeAgent) if you want clean dev-only behaviour."
+env = { "KANADE_AGENT_CONFIG" = "./agent.toml", "RUST_LOG" = "info,kanade_agent=debug" }
+command = "cargo"
+args = ["run", "-p", "kanade-agent"]
 
 [tasks.hook-install]
 description = "Install git pre-push hook that runs 'cargo make check'"
