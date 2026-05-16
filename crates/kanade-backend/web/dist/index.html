@@ -100,10 +100,13 @@
     <h1>奏 kanade</h1>
     <nav id="nav">
       <a href="#/agents">Agents</a>
+      <a href="#/run">Run</a>
       <a href="#/results">Results</a>
       <a href="#/audit">Audit</a>
       <a href="#/schedules">Schedules</a>
       <a href="#/deploy">Deploy</a>
+      <a href="#/config">Config</a>
+      <a href="#/jetstream">JetStream</a>
     </nav>
   </header>
   <main id="root">loading…</main>
@@ -132,23 +135,35 @@
       const cls = a === 'scheduler' ? 'scheduler' : 'cli';
       return `<span class="pill ${cls}">${a}</span>`;
     }
+    function escapeHtml(s) {
+      if (s === null || s === undefined) return '';
+      return String(s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
 
     async function renderAgents() {
       const data = await fetchJson('/api/agents');
       if (!data.length) return `<div class="empty">no agents seen yet — start an agent</div>`;
       return `<h2>Agents (${data.length})</h2>
         <table><thead><tr>
-          <th>pc_id</th><th>hostname</th><th>os</th><th>cpu</th><th>ram</th><th>last_inventory</th>
+          <th>pc_id</th><th>hostname</th><th>os</th><th>cpu</th><th>ram</th><th>last_inventory</th><th>actions</th>
         </tr></thead><tbody>
           ${data.map(a => `<tr>
-            <td><code>${a.pc_id}</code></td>
+            <td><code>${escapeHtml(a.pc_id)}</code></td>
             <td>${a.hostname ?? '<span class="muted">—</span>'}</td>
             <td>${a.os_name ?? ''} ${a.os_version ?? ''}${a.os_build ? ` <span class="muted">${a.os_build}</span>` : ''}</td>
             <td>${a.cpu_model ?? '<span class="muted">—</span>'} ${a.cpu_cores ? `<span class="muted">×${a.cpu_cores}</span>` : ''}</td>
             <td>${a.ram_bytes ? (a.ram_bytes / (1024 ** 3)).toFixed(1) + ' GB' : ''}</td>
             <td class="muted">${fmtTime(a.last_inventory)}</td>
+            <td><div class="row" style="gap:4px;flex-wrap:wrap">
+              <button class="secondary" data-action="ping" data-pc="${escapeHtml(a.pc_id)}">ping</button>
+              <button class="secondary" data-action="groups" data-pc="${escapeHtml(a.pc_id)}">groups</button>
+              <button class="secondary" data-action="effective" data-pc="${escapeHtml(a.pc_id)}">effective</button>
+            </div></td>
           </tr>`).join('')}
-        </tbody></table>`;
+        </tbody></table>
+        <pre id="agent-action-out" class="muted" style="margin-top:12px">(action output appears here)</pre>`;
     }
 
     async function renderResults() {
@@ -207,6 +222,83 @@
         </tbody></table>`;
     }
 
+    function renderRun() {
+      return `<h2>Run a script on one PC</h2>
+        <p class="muted">Posts to <code>/api/run</code>; backend forwards to NATS and waits for the agent's <code>ExecResult</code>. Equivalent to <code>kanade run &lt;pc_id&gt; -- &lt;script&gt;</code>.</p>
+        <div class="stack" style="gap:8px;max-width:560px">
+          <label>pc_id <input type="text" id="run-pc" placeholder="MINIPC-01" /></label>
+          <label>shell
+            <select id="run-shell">
+              <option value="powershell" selected>powershell</option>
+              <option value="cmd">cmd</option>
+            </select>
+          </label>
+          <label>timeout (s) <input type="number" id="run-timeout" value="60" min="1" /></label>
+          <label>job_id (optional)
+            <input type="text" id="run-job" placeholder="e.g. ad-hoc-2026-05-16" />
+          </label>
+        </div>
+        <textarea id="run-script" placeholder="echo hello from kanade web"></textarea>
+        <div class="toolbar" style="margin-top:8px">
+          <button id="run-btn">POST /api/run</button>
+          <span id="run-status" class="muted"></span>
+        </div>
+        <pre id="run-out" class="muted">(waiting)</pre>`;
+    }
+
+    async function renderConfig() {
+      const data = await fetchJson('/api/config');
+      return `<h2>Global agent_config</h2>
+        <p class="muted">PUTs to <code>/api/config</code> replace the <code>global</code> scope. Per-group / per-pc scopes editable below.</p>
+        <textarea id="config-global" style="min-height:140px">${escapeHtml(JSON.stringify(data, null, 2))}</textarea>
+        <div class="toolbar" style="margin-top:8px">
+          <button id="config-save">save global</button>
+          <span id="config-status" class="muted"></span>
+        </div>
+        <h2 style="margin-top:24px">Per-group / Per-PC override</h2>
+        <div class="row" style="gap:12px;align-items:end">
+          <label class="stack" style="gap:2px"><span class="muted">scope</span>
+            <select id="config-scope-kind">
+              <option value="groups">groups.&lt;name&gt;</option>
+              <option value="pcs">pcs.&lt;pc_id&gt;</option>
+            </select>
+          </label>
+          <label class="stack" style="gap:2px"><span class="muted">name</span>
+            <input type="text" id="config-scope-name" placeholder="canary or MINIPC-01" />
+          </label>
+          <button id="config-scope-load" class="secondary">load</button>
+        </div>
+        <textarea id="config-scope-body" placeholder='paste { "target_version": "0.4.0" } or similar; empty fields fall through to the next layer'></textarea>
+        <div class="toolbar" style="margin-top:8px">
+          <button id="config-scope-save">save</button>
+          <button id="config-scope-delete" class="secondary">delete</button>
+          <span id="config-scope-status" class="muted"></span>
+        </div>
+        <h2 style="margin-top:24px">Effective config for one PC</h2>
+        <div class="row" style="gap:12px;align-items:end">
+          <label class="stack" style="gap:2px"><span class="muted">pc_id</span>
+            <input type="text" id="config-eff-pc" placeholder="MINIPC-01" />
+          </label>
+          <button id="config-eff-load" class="secondary">resolve</button>
+        </div>
+        <pre id="config-eff-out" class="muted">(waiting)</pre>`;
+    }
+
+    async function renderJetstream() {
+      const data = await fetchJson('/api/jetstream/status');
+      const probeTable = (rows) => `<table><thead><tr><th>name</th><th>exists</th></tr></thead><tbody>
+        ${rows.map(r => `<tr>
+          <td><code>${escapeHtml(r.name)}</code></td>
+          <td>${r.exists ? '<span class="pill success">ok</span>' : '<span class="pill fail">missing</span>'}</td>
+        </tr>`).join('')}
+      </tbody></table>`;
+      return `<h2>JetStream health</h2>
+        <p class="muted">Sourced from <code>/api/jetstream/status</code>. Missing rows usually mean the broker was just spun up — backend auto-bootstraps every resource at startup, so a refresh after launch should turn them green.</p>
+        <h3 style="margin-top:16px">Streams</h3>${probeTable(data.streams)}
+        <h3 style="margin-top:16px">KV buckets</h3>${probeTable(data.kv_buckets)}
+        <h3 style="margin-top:16px">Object stores</h3>${probeTable(data.object_stores)}`;
+    }
+
     function renderDeploy() {
       return `<h2>Deploy a manifest</h2>
         <p class="muted">Paste YAML — body is parsed as the same <code>Manifest</code> schema <code>kanade deploy</code> uses.</p>
@@ -220,10 +312,13 @@
 
     const routes = {
       '#/agents': renderAgents,
+      '#/run': renderRun,
       '#/results': renderResults,
       '#/audit': renderAudit,
       '#/schedules': renderSchedules,
       '#/deploy': renderDeploy,
+      '#/config': renderConfig,
+      '#/jetstream': renderJetstream,
     };
 
     async function render() {
@@ -283,6 +378,142 @@
           } catch (e) { alert(e.message); }
         });
       });
+
+      // Per-agent inline actions: ping / groups / effective_config.
+      root.querySelectorAll('[data-action]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const action = btn.getAttribute('data-action');
+          const pc = btn.getAttribute('data-pc');
+          const out = document.getElementById('agent-action-out');
+          out.textContent = `${action} ${pc} …`;
+          try {
+            if (action === 'ping') {
+              const r = await fetchJson(`/api/agents/${encodeURIComponent(pc)}/ping?wait_secs=45`, { method: 'POST' });
+              out.textContent = JSON.stringify(r, null, 2);
+            } else if (action === 'groups') {
+              const current = await fetchJson(`/api/agents/${encodeURIComponent(pc)}/groups`);
+              const next = prompt(
+                `Comma-separated group names for ${pc} (current: ${(current.groups || []).join(', ') || '(none)'})`,
+                (current.groups || []).join(', '),
+              );
+              if (next === null) { out.textContent = '(cancelled)'; return; }
+              const list = next.split(',').map(s => s.trim()).filter(Boolean);
+              const r = await fetchJson(`/api/agents/${encodeURIComponent(pc)}/groups`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ groups: list }),
+              });
+              out.textContent = JSON.stringify(r, null, 2);
+            } else if (action === 'effective') {
+              const r = await fetchJson(`/api/agents/${encodeURIComponent(pc)}/effective_config`);
+              out.textContent = JSON.stringify(r, null, 2);
+            }
+          } catch (e) {
+            out.innerHTML = `<span style="color:#d4374c">${escapeHtml(e.message)}</span>`;
+          }
+        });
+      });
+
+      // /run page handler.
+      const runBtn = document.getElementById('run-btn');
+      if (runBtn) {
+        runBtn.addEventListener('click', async () => {
+          const pc      = document.getElementById('run-pc').value.trim();
+          const shell   = document.getElementById('run-shell').value;
+          const timeout = parseInt(document.getElementById('run-timeout').value, 10) || 60;
+          const jobId   = document.getElementById('run-job').value.trim();
+          const script  = document.getElementById('run-script').value;
+          const status  = document.getElementById('run-status');
+          const out     = document.getElementById('run-out');
+          if (!pc || !script) { alert('pc_id and script are required'); return; }
+          status.textContent = `running on ${pc}…`;
+          out.textContent = '';
+          try {
+            const body = { pc_id: pc, shell, script, timeout_secs: timeout };
+            if (jobId) body.job_id = jobId;
+            const r = await fetchJson('/api/run', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+            });
+            status.textContent = `exit ${r.exit_code}`;
+            out.textContent = `=== stdout ===\n${r.stdout || '(empty)'}\n\n=== stderr ===\n${r.stderr || '(empty)'}\n\nstarted:  ${r.started_at}\nfinished: ${r.finished_at}`;
+          } catch (e) {
+            status.textContent = '';
+            out.innerHTML = `<span style="color:#d4374c">${escapeHtml(e.message)}</span>`;
+          }
+        });
+      }
+
+      // /config page handlers.
+      const cfgSaveGlobal = document.getElementById('config-save');
+      if (cfgSaveGlobal) {
+        cfgSaveGlobal.addEventListener('click', async () => {
+          const status = document.getElementById('config-status');
+          try {
+            const body = JSON.parse(document.getElementById('config-global').value);
+            await fetchJson('/api/config', {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+            });
+            status.textContent = 'saved';
+          } catch (e) { status.innerHTML = `<span style="color:#d4374c">${escapeHtml(e.message)}</span>`; }
+        });
+      }
+      const cfgScopeLoad = document.getElementById('config-scope-load');
+      if (cfgScopeLoad) {
+        const urlFor = () => {
+          const kind = document.getElementById('config-scope-kind').value;
+          const name = document.getElementById('config-scope-name').value.trim();
+          if (!name) throw new Error('scope name is required');
+          return kind === 'groups'
+            ? `/api/groups/${encodeURIComponent(name)}/config`
+            : `/api/pcs/${encodeURIComponent(name)}/config`;
+        };
+        cfgScopeLoad.addEventListener('click', async () => {
+          const status = document.getElementById('config-scope-status');
+          try {
+            const r = await fetchJson(urlFor());
+            document.getElementById('config-scope-body').value = JSON.stringify(r, null, 2);
+            status.textContent = 'loaded';
+          } catch (e) { status.innerHTML = `<span style="color:#d4374c">${escapeHtml(e.message)}</span>`; }
+        });
+        document.getElementById('config-scope-save').addEventListener('click', async () => {
+          const status = document.getElementById('config-scope-status');
+          try {
+            const body = JSON.parse(document.getElementById('config-scope-body').value);
+            await fetchJson(urlFor(), {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+            });
+            status.textContent = 'saved';
+          } catch (e) { status.innerHTML = `<span style="color:#d4374c">${escapeHtml(e.message)}</span>`; }
+        });
+        document.getElementById('config-scope-delete').addEventListener('click', async () => {
+          const status = document.getElementById('config-scope-status');
+          try {
+            const url = urlFor();
+            if (!confirm(`DELETE ${url} ?`)) return;
+            await fetch(url, { method: 'DELETE' });
+            document.getElementById('config-scope-body').value = '';
+            status.textContent = 'deleted';
+          } catch (e) { status.innerHTML = `<span style="color:#d4374c">${escapeHtml(e.message)}</span>`; }
+        });
+      }
+      const cfgEffLoad = document.getElementById('config-eff-load');
+      if (cfgEffLoad) {
+        cfgEffLoad.addEventListener('click', async () => {
+          const pc = document.getElementById('config-eff-pc').value.trim();
+          const out = document.getElementById('config-eff-out');
+          if (!pc) { out.textContent = 'pc_id required'; return; }
+          try {
+            const r = await fetchJson(`/api/agents/${encodeURIComponent(pc)}/effective_config`);
+            out.textContent = JSON.stringify(r, null, 2);
+          } catch (e) { out.innerHTML = `<span style="color:#d4374c">${escapeHtml(e.message)}</span>`; }
+        });
+      }
     }
 
     window.addEventListener('hashchange', render);
