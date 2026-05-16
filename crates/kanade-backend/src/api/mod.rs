@@ -1,3 +1,4 @@
+pub mod agent_config;
 pub mod agent_groups;
 pub mod agents;
 pub mod audit;
@@ -37,6 +38,26 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/agents/{pc_id}/groups/{group}",
             delete(agent_groups::remove_group),
+        )
+        .route(
+            "/api/agents/{pc_id}/effective_config",
+            get(agent_config::effective),
+        )
+        .route(
+            "/api/config",
+            get(agent_config::get_global).put(agent_config::put_global),
+        )
+        .route(
+            "/api/groups/{name}/config",
+            get(agent_config::get_group)
+                .put(agent_config::put_group)
+                .delete(agent_config::delete_group),
+        )
+        .route(
+            "/api/pcs/{pc_id}/config",
+            get(agent_config::get_pc)
+                .put(agent_config::put_pc)
+                .delete(agent_config::delete_pc),
         )
         .route("/api/results", get(results::list))
         .route("/api/results/{request_id}", get(results::detail))

@@ -68,7 +68,7 @@ impl ConfigScope {
 /// just keeps running the version it has); the other fields always
 /// have a value, falling back to [`EffectiveConfig::builtin_defaults`]
 /// when no scope sets them.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct EffectiveConfig {
     pub target_version: Option<String>,
     pub inventory_interval: String,
