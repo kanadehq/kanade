@@ -1,0 +1,65 @@
+// Wire types mirroring the Rust side. Hand-maintained for now;
+// when the surface grows past ~10 types we should switch to
+// generating from a shared OpenAPI / TypeScript export.
+
+export type AgentRow = {
+  pc_id: string;
+  hostname: string | null;
+  os_name: string | null;
+  os_version: string | null;
+  os_build: string | null;
+  cpu_model: string | null;
+  cpu_cores: number | null;
+  ram_bytes: number | null;
+  disks: unknown;
+  last_inventory: string | null;
+  updated_at: string | null;
+};
+
+export type Heartbeat = {
+  pc_id: string;
+  at: string;
+  agent_version: string;
+};
+
+export type ExecResult = {
+  request_id: string;
+  pc_id: string;
+  exit_code: number;
+  stdout: string;
+  stderr: string;
+  started_at: string;
+  finished_at: string;
+};
+
+export type AgentGroups = {
+  groups: string[];
+};
+
+export type ConfigScope = {
+  target_version?: string;
+  inventory_interval?: string;
+  inventory_jitter?: string;
+  inventory_enabled?: boolean;
+  heartbeat_interval?: string;
+};
+
+export type EffectiveConfig = {
+  target_version: string | null;
+  inventory_interval: string;
+  inventory_jitter: string;
+  inventory_enabled: boolean;
+  heartbeat_interval: string;
+};
+
+export type EffectiveConfigResponse = {
+  pc_id: string;
+  effective: EffectiveConfig;
+  warnings: string[];
+};
+
+export type JetstreamSnapshot = {
+  streams: { name: string; exists: boolean }[];
+  kv_buckets: { name: string; exists: boolean }[];
+  object_stores: { name: string; exists: boolean }[];
+};

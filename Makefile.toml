@@ -60,6 +60,24 @@ description = "Dry-run crates.io publish"
 command = "cargo"
 args = ["publish", "--dry-run", "--allow-dirty"]
 
+[tasks.web-install]
+description = "Install kanade-backend SPA deps via bun"
+cwd = "crates/kanade-backend/web"
+command = "bun"
+args = ["install"]
+
+[tasks.web-build]
+description = "Build the React SPA into web/dist (consumed by rust-embed)"
+cwd = "crates/kanade-backend/web"
+command = "bun"
+args = ["run", "build"]
+
+[tasks.web-dev]
+description = "Run the Vite dev server with HMR (proxies /api to localhost:8080)"
+cwd = "crates/kanade-backend/web"
+command = "bun"
+args = ["run", "dev"]
+
 [tasks.hook-install]
 description = "Install git pre-push hook that runs 'cargo make check'"
 script_runner = "@duckscript"

@@ -1,0 +1,13 @@
+# Vite / bun build artifacts
+node_modules
+bun.lockb.bak
+
+# The Vite-built SPA bundle is intentionally NOT ignored — rust-embed
+# bakes dist/ into kanade-backend.exe at compile time, and we need it
+# present on every cargo build / cargo publish. CI / `cargo make
+# web-build` regenerates it before committing.
+
+# Editor / OS noise
+.vscode/
+.idea/
+*.log
