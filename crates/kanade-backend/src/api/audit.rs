@@ -2,7 +2,7 @@ use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
 use tracing::warn;
 
 #[derive(Serialize)]
@@ -21,6 +21,8 @@ pub struct ListParams {
     pub limit: u32,
     pub action: Option<String>,
     pub actor: Option<String>,
+    /// ISO-8601 lower bound on `occurred_at`. Anything strictly older is filtered out.
+    pub since: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 fn default_limit() -> u32 {
@@ -31,46 +33,26 @@ pub async fn list(
     State(pool): State<SqlitePool>,
     Query(params): Query<ListParams>,
 ) -> Result<Json<Vec<AuditRow>>, StatusCode> {
-    let rows = match (&params.action, &params.actor) {
-        (Some(a), Some(actor)) => {
-            sqlx::query(
-                "SELECT * FROM audit_log WHERE action = ? AND actor = ?
-                 ORDER BY occurred_at DESC LIMIT ?",
-            )
-            .bind(a)
-            .bind(actor)
-            .bind(params.limit as i64)
-            .fetch_all(&pool)
-            .await
-        }
-        (Some(a), None) => {
-            sqlx::query(
-                "SELECT * FROM audit_log WHERE action = ?
-                 ORDER BY occurred_at DESC LIMIT ?",
-            )
-            .bind(a)
-            .bind(params.limit as i64)
-            .fetch_all(&pool)
-            .await
-        }
-        (None, Some(actor)) => {
-            sqlx::query(
-                "SELECT * FROM audit_log WHERE actor = ?
-                 ORDER BY occurred_at DESC LIMIT ?",
-            )
-            .bind(actor)
-            .bind(params.limit as i64)
-            .fetch_all(&pool)
-            .await
-        }
-        (None, None) => {
-            sqlx::query("SELECT * FROM audit_log ORDER BY occurred_at DESC LIMIT ?")
-                .bind(params.limit as i64)
-                .fetch_all(&pool)
-                .await
-        }
+    let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new("SELECT * FROM audit_log");
+    let mut sep = " WHERE ";
+
+    if let Some(action) = params.action.as_deref().filter(|s| !s.is_empty()) {
+        qb.push(sep).push("action = ").push_bind(action.to_owned());
+        sep = " AND ";
     }
-    .map_err(|e| {
+    if let Some(actor) = params.actor.as_deref().filter(|s| !s.is_empty()) {
+        qb.push(sep).push("actor = ").push_bind(actor.to_owned());
+        sep = " AND ";
+    }
+    if let Some(since) = params.since {
+        qb.push(sep).push("occurred_at >= ").push_bind(since);
+        let _ = sep;
+    }
+
+    qb.push(" ORDER BY occurred_at DESC LIMIT ")
+        .push_bind(params.limit as i64);
+
+    let rows = qb.build().fetch_all(&pool).await.map_err(|e| {
         warn!(error = %e, "list audit");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;

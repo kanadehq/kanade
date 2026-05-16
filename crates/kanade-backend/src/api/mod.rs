@@ -3,6 +3,7 @@ pub mod agent_groups;
 pub mod agents;
 pub mod audit;
 pub mod deploy;
+pub mod health;
 pub mod jetstream_status;
 pub mod jobs;
 pub mod results;
@@ -78,6 +79,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/scripts/{cmd_id}/unrevoke", post(scripts::unrevoke))
         .route("/api/jobs/{job_id}/kill", post(jobs::kill))
         .route("/api/jetstream/status", get(jetstream_status::status))
+        .route("/api/health/fleet", get(health::fleet))
         .with_state(state)
         // Everything else (`/`, `/assets/...`, hash-router paths) is served
         // from the rust-embed bundle. The fallback runs after the API routes

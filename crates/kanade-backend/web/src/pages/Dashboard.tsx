@@ -1,8 +1,10 @@
 import { useQuery } from '@tanstack/react-query';
 import {
   Activity,
+  AlertTriangle,
   CheckCircle2,
   Clock,
+  HelpCircle,
   Server,
   Users,
   Wifi,
@@ -11,9 +13,17 @@ import {
 
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { apiFetch } from '@/lib/api';
+import { ApiError, apiFetch } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import type { AgentRow, JetstreamSnapshot } from '@/lib/types';
+
+type FleetHealth = {
+  status: 'ok' | 'unknown' | 'degraded';
+  agents: { known: number; active: number; stale: number };
+  jetstream: { all_ok: boolean; healthy: number; total: number; missing: string[] };
+  recent_results: { window_hours: number; total: number; failed: number };
+  observed_at: string;
+};
 
 type ResultRow = {
   request_id: string;
@@ -97,6 +107,22 @@ export function Dashboard() {
     queryFn: () => apiFetch<AuditRow[]>('/api/audit?limit=8'),
     refetchInterval: 30_000,
   });
+  // /api/health/fleet returns 503 when degraded so we have to peel
+  // the body off the ApiError to render the rollup either way.
+  const healthQ = useQuery({
+    queryKey: ['health-fleet'],
+    queryFn: async () => {
+      try {
+        return await apiFetch<FleetHealth>('/api/health/fleet');
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 503 && e.body) {
+          return JSON.parse(e.body) as FleetHealth;
+        }
+        throw e;
+      }
+    },
+    refetchInterval: 30_000,
+  });
 
   const agents = agentsQ.data ?? [];
   const active = agents.filter(
@@ -113,12 +139,83 @@ export function Dashboard() {
   const recentFail = (resultsQ.data ?? []).filter((r) => r.exit_code !== 0).length;
   const recentTotal = (resultsQ.data ?? []).length;
 
+  const health = healthQ.data;
+  const healthMeta = health
+    ? (
+        {
+          ok:       { icon: CheckCircle2,  tone: 'success' as const, label: 'all green',     hint: 'agents fresh, JetStream healthy' },
+          unknown:  { icon: HelpCircle,    tone: 'default' as const, label: 'unknown',       hint: 'no agents reporting yet' },
+          degraded: { icon: AlertTriangle, tone: 'danger'  as const, label: 'degraded',      hint: 'fleet attention needed' },
+        }
+      )[health.status]
+    : null;
+
   return (
     <div className="space-y-6">
       <div className="flex items-baseline justify-between">
         <h2 className="text-2xl">Dashboard</h2>
         <span className="text-xs text-muted">auto-refresh: 30s</span>
       </div>
+
+      {health && healthMeta && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <healthMeta.icon
+                className={cn(
+                  'size-5',
+                  healthMeta.tone === 'success' && 'text-success',
+                  healthMeta.tone === 'danger' && 'text-danger',
+                  healthMeta.tone === 'default' && 'text-muted',
+                )}
+              />
+              Fleet health
+              <Badge
+                variant={
+                  healthMeta.tone === 'success' ? 'success'
+                  : healthMeta.tone === 'danger' ? 'danger'
+                  : 'amber'
+                }
+              >
+                {healthMeta.label}
+              </Badge>
+            </CardTitle>
+            <CardDescription>
+              From <code>/api/health/fleet</code> · {healthMeta.hint}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid grid-cols-2 md:grid-cols-4 gap-6">
+            <StatBlock
+              label="agents"
+              value={`${health.agents.active} / ${health.agents.known}`}
+              hint="active / known"
+              tone={health.agents.stale > 0 ? 'danger' : 'default'}
+            />
+            <StatBlock
+              label="stale agents"
+              value={health.agents.stale}
+              tone={health.agents.stale > 0 ? 'danger' : 'success'}
+              hint="last inventory ≥ 25h"
+            />
+            <StatBlock
+              label="JetStream"
+              value={`${health.jetstream.healthy} / ${health.jetstream.total}`}
+              tone={health.jetstream.all_ok ? 'success' : 'danger'}
+              hint={
+                health.jetstream.missing.length > 0
+                  ? `missing: ${health.jetstream.missing.join(', ')}`
+                  : 'streams + KV + obj store'
+              }
+            />
+            <StatBlock
+              label={`failures / ${health.recent_results.window_hours}h`}
+              value={`${health.recent_results.failed} / ${health.recent_results.total}`}
+              tone={health.recent_results.failed > 0 ? 'danger' : 'default'}
+              hint="exit_code ≠ 0 / runs"
+            />
+          </CardContent>
+        </Card>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <Card>
