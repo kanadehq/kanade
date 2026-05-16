@@ -33,6 +33,9 @@ jobs:
           # blocking renovate auto-merge for downstream consumers).
           # Main keeps saving so every PR rebuild gets a warm cache.
           save-if: ${{ github.ref == 'refs/heads/main' }}
+        # Fall through to a cold build when the GH cache backend
+        # flakes on restore (windows-latest sees this most often).
+        continue-on-error: true
       - run: cargo check --all-targets
 
   test:
@@ -48,6 +51,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+        continue-on-error: true
       # `cargo test --all-targets` covers lib / bins / tests / benches
       # / examples but EXCLUDES doc tests, so run --doc separately.
       # Doc-test step is gated on `src/lib.rs` presence: `cargo test
@@ -88,6 +92,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+        continue-on-error: true
       - run: cargo clippy --all-targets -- -D warnings
 
   lockfile:
@@ -102,6 +107,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+        continue-on-error: true
       - run: cargo check --locked --all-targets
 
   coverage:
@@ -121,6 +127,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+        continue-on-error: true
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
