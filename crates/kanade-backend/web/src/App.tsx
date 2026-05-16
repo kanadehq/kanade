@@ -9,8 +9,10 @@ import { Config } from '@/pages/Config';
 import { Dashboard } from '@/pages/Dashboard';
 import { Deploy } from '@/pages/Deploy';
 import { JetStream } from '@/pages/JetStream';
+import { Logs } from '@/pages/Logs';
 import { Placeholder } from '@/pages/Placeholder';
 import { Results } from '@/pages/Results';
+import { Rollout } from '@/pages/Rollout';
 import { Run } from '@/pages/Run';
 import { Schedules } from '@/pages/Schedules';
 
@@ -43,8 +45,10 @@ export default function App() {
                 <Route path="/run" element={<Run />} />
                 <Route path="/results" element={<Results />} />
                 <Route path="/audit" element={<Audit />} />
+                <Route path="/logs" element={<Logs />} />
                 <Route path="/schedules" element={<Schedules />} />
                 <Route path="/deploy" element={<Deploy />} />
+                <Route path="/rollout" element={<Rollout />} />
                 <Route path="/config" element={<Config />} />
                 <Route path="/jetstream" element={<JetStream />} />
                 <Route path="*" element={<Placeholder name="Not Found" />} />

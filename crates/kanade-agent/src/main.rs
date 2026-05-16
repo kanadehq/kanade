@@ -3,6 +3,7 @@ mod config_supervisor;
 mod groups;
 mod heartbeat;
 mod inventory;
+mod logs;
 mod process;
 mod self_update;
 
@@ -145,6 +146,11 @@ pub(crate) async fn run_agent() -> Result<()> {
         client.clone(),
         AGENT_VERSION.to_string(),
         cfg_rx.clone(),
+    ));
+    tokio::spawn(logs::serve(
+        client.clone(),
+        pc_id.clone(),
+        std::path::PathBuf::from(&cfg.log.path),
     ));
 
     // Group membership: Sprint 5 moves this from agent.toml (per-box

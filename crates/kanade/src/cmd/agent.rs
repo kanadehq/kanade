@@ -6,7 +6,8 @@ use kanade_shared::kv::{
     BUCKET_AGENT_CONFIG, BUCKET_AGENT_GROUPS, KEY_AGENT_CONFIG_GLOBAL, OBJECT_AGENT_RELEASES,
     agent_config_group_key, agent_config_pc_key,
 };
-use kanade_shared::wire::{AgentGroups, ConfigScope};
+use kanade_shared::subject;
+use kanade_shared::wire::{AgentGroups, ConfigScope, LogsRequest};
 use tokio::fs;
 use tracing::info;
 
@@ -47,6 +48,16 @@ pub enum AgentSub {
     Rollout(RolloutArgs),
     /// Print the currently broadcast target_version.
     Current,
+    /// Tail the agent's log file (`logs.fetch.<pc_id>` request /
+    /// reply). The agent reads its local rolling log file and
+    /// returns the last N lines as UTF-8.
+    Logs {
+        /// PC id of the agent to query (must be online).
+        pc_id: String,
+        /// Trailing line count. Defaults to 500.
+        #[arg(long, default_value_t = 500)]
+        tail: u32,
+    },
     /// Manage a PC's group memberships via the agent_groups KV bucket.
     Groups(GroupsArgs),
 }
@@ -107,6 +118,7 @@ pub async fn execute(client: async_nats::Client, args: AgentArgs) -> Result<()> 
         AgentSub::Publish { binary, version } => publish(client, binary, version).await,
         AgentSub::Rollout(args) => rollout(client, args).await,
         AgentSub::Current => current(client).await,
+        AgentSub::Logs { pc_id, tail } => logs(client, pc_id, tail).await,
         AgentSub::Groups(g) => groups(client, g).await,
     }
 }
@@ -261,6 +273,23 @@ fn probe_binary_version(binary: &std::path::Path) -> Result<String> {
         .nth(1)
         .with_context(|| format!("unexpected --version output shape: {line:?}"))?;
     Ok(token.to_owned())
+}
+
+async fn logs(client: async_nats::Client, pc_id: String, tail: u32) -> Result<()> {
+    let req = LogsRequest { tail_lines: tail };
+    let payload = serde_json::to_vec(&req).context("encode LogsRequest")?;
+    let reply = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        client.request(subject::logs_fetch(&pc_id), payload.into()),
+    )
+    .await
+    .with_context(|| format!("timeout waiting for {pc_id} (10s)"))?
+    .with_context(|| format!("request logs.fetch.{pc_id}"))?;
+
+    // Reply is raw UTF-8 log bytes — pass straight through to stdout.
+    use std::io::Write;
+    std::io::stdout().write_all(&reply.payload).ok();
+    Ok(())
 }
 
 async fn current(client: async_nats::Client) -> Result<()> {

@@ -405,8 +405,9 @@ the PDB.
 - **Sprint 10** (v0.7.0) — Audit / Results page filters (actor / action / pc_id / status / since presets) and `/api/health/fleet` rollup endpoint (agents · JetStream · recent failures, 200/503 by `status`); Dashboard surfaces the server-computed banner
 - **v0.7.1** — agent file logging via `tracing-appender` (daily rotation, `[log] keep_days` retention), `kanade agent publish` auto-detects `--version` from the binary via `<exe> --version` probe
 - **v0.8.0** — staged self-update rollout: `kanade agent publish` is now upload-only (no KV touch); new `kanade agent rollout <ver> --global|--group <name>|--pc <pc_id> [--jitter <dur>]` flips `target_version` on one scope and (optionally) `target_version_jitter`. Agent-side `self_update` sleeps `random(0..jitter)` before downloading, defusing the "3000 agents hammer the Object Store at the same instant" failure mode. **Breaking change**: any operator scripts that relied on `publish` doing the rollout in one step need to chain a `rollout` call
+- **v0.9.0** — on-demand agent log fetch and a Web UI for rollout. New `logs.fetch.<pc_id>` NATS request/reply on the agent (`kanade agent logs <pc_id> [--tail N]` from the CLI, or the new **Logs** page in the SPA). New backend endpoints `/api/agents/<pc_id>/logs`, `/api/agents/releases`, `POST /api/agents/rollout`, plus a **Rollout** SPA page with a version picker / scope select / jitter input
 
-Backlog: on-demand agent log fetch (`logs.fetch.<pc_id>` + Web UI), Prometheus metrics, 3000-agent simulation, NATS cluster + replicated backend, Postgres migration.
+Backlog: Web UI agent-binary upload (so the SPA can replace the CLI for the publish step too), Prometheus metrics, 3000-agent simulation, NATS cluster + replicated backend, Postgres migration.
 
 ## Production install layout
 

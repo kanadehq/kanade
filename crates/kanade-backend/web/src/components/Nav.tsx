@@ -8,8 +8,10 @@ const links = [
   { to: '/run', label: 'Run' },
   { to: '/results', label: 'Results' },
   { to: '/audit', label: 'Audit' },
+  { to: '/logs', label: 'Logs' },
   { to: '/schedules', label: 'Schedules' },
   { to: '/deploy', label: 'Deploy' },
+  { to: '/rollout', label: 'Rollout' },
   { to: '/config', label: 'Config' },
   { to: '/jetstream', label: 'JetStream' },
 ];

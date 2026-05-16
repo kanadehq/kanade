@@ -32,6 +32,13 @@ pub const INVENTORY_HW: &str = "hw";
 pub const INVENTORY_SW: &str = "sw";
 pub const INVENTORY_NET: &str = "net";
 
+/// `logs.fetch.<pc_id>` — request/reply: operator (or backend) sends
+/// a `LogsRequest`; the addressed agent replies with the tail of its
+/// local log file. On-demand only, no stream.
+pub fn logs_fetch(pc_id: &str) -> String {
+    format!("logs.fetch.{pc_id}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -75,6 +82,11 @@ mod tests {
     #[test]
     fn kill_formats_job_id() {
         assert_eq!(kill("testjob1"), "kill.testjob1");
+    }
+
+    #[test]
+    fn logs_fetch_formats_pc_id() {
+        assert_eq!(logs_fetch("minipc"), "logs.fetch.minipc");
     }
 
     #[test]
