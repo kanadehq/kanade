@@ -87,7 +87,7 @@ pub async fn deploy_manifest(
             delays.push(d);
         }
 
-        for ((idx, wave), delay) in rollout.waves.iter().enumerate().zip(delays.into_iter()) {
+        for ((idx, wave), delay) in rollout.waves.iter().enumerate().zip(delays) {
             let subj = subject::commands_group(&wave.group);
             subjects.push(subj.clone());
             target_count = target_count.saturating_add(1);

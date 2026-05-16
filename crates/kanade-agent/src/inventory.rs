@@ -1,6 +1,8 @@
+#[cfg(target_os = "windows")]
 use std::time::Duration;
 
 use kanade_shared::config::InventorySection;
+#[cfg(target_os = "windows")]
 use tracing::warn;
 
 /// Top-level inventory loop. Delegates to a Windows-only WMI collector or
@@ -13,6 +15,9 @@ pub async fn inventory_loop(client: async_nats::Client, pc_id: String, cfg: Inve
     inner::run(client, pc_id, cfg).await;
 }
 
+// Helpers used by the Windows inner module only — gated so Linux /
+// macOS clippy doesn't flag them as dead code.
+#[cfg(target_os = "windows")]
 fn parse_or_default(label: &str, value: &str, fallback: Duration) -> Duration {
     match humantime::parse_duration(value) {
         Ok(d) => d,
@@ -23,6 +28,7 @@ fn parse_or_default(label: &str, value: &str, fallback: Duration) -> Duration {
     }
 }
 
+#[cfg(target_os = "windows")]
 fn random_jitter(max: Duration) -> Duration {
     use rand::Rng;
     let secs = max.as_secs().max(1);
