@@ -1,7 +1,7 @@
 mod cmd;
 mod http_client;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing::debug;
 
@@ -72,10 +72,10 @@ async fn main() -> Result<()> {
         return cmd::schedule::execute(&backend_url, args).await;
     }
 
-    // The remaining subcommands need NATS.
-    let client = async_nats::connect(&server)
-        .await
-        .with_context(|| format!("connect to NATS at {server}"))?;
+    // The remaining subcommands need NATS. Shared helper picks up
+    // $KANADE_NATS_TOKEN when set and attaches it as the bearer
+    // token.
+    let client = kanade_shared::nats_client::connect(&server).await?;
     debug!("connected to NATS");
 
     match command {

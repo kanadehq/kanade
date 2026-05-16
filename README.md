@@ -305,6 +305,41 @@ $env:KANADE_AUTH_TOKEN = "kanade-fleet-secret-2026"
 kanade deploy jobs\echo-test.yaml
 ```
 
+### NATS authentication
+
+Separate from the backend HTTP layer above. By default `nats-server -js`
+listens on `:4222` without auth — anyone on the LAN who can reach the broker
+can publish `commands.pc.<host>` and execute scripts on every agent. Lock
+it down for production with token auth:
+
+1. Start nats-server with the bundled config:
+
+   ```powershell
+   nats-server -c nats-server.conf
+   ```
+
+   The shipped `nats-server.conf` enables JetStream + an
+   `authorization.token` block. Pick your own secret.
+
+2. Export the token on every kanade host (agent / backend / CLI):
+
+   ```powershell
+   # On agent + backend hosts (set as system env so the service inherits)
+   [Environment]::SetEnvironmentVariable('KANADE_NATS_TOKEN', '<secret>', 'Machine')
+   Restart-Service KanadeAgent, KanadeBackend
+
+   # On operator workstations (for the kanade CLI)
+   $env:KANADE_NATS_TOKEN = "<secret>"
+   ```
+
+The shared `kanade_shared::nats_client::connect()` helper auto-attaches
+the token at NATS connect time. `nats_url` in `agent.toml` / `backend.toml`
+stays plain — the secret never lands in config files or process listings.
+
+For multi-tenant / per-agent identity (NKeys, NATS JWT, mTLS), see
+[spec §2.7.1](https://github.com/yukimemi/kanade/blob/main/docs/SPEC.md).
+Stick with the shared token while operating ≤ ~1000 hosts.
+
 ## Dev workflow
 
 ```powershell

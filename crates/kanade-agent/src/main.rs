@@ -90,9 +90,7 @@ pub(crate) async fn run_agent() -> Result<()> {
         "starting kanade-agent",
     );
 
-    let client = async_nats::connect(&cfg.agent.nats_url)
-        .await
-        .with_context(|| format!("connect to NATS at {}", cfg.agent.nats_url))?;
+    let client = kanade_shared::nats_client::connect(&cfg.agent.nats_url).await?;
     info!("connected to NATS");
 
     let cmd_all = client.subscribe(subject::COMMANDS_ALL).await?;

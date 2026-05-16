@@ -108,10 +108,11 @@ pub(crate) async fn run_backend() -> Result<()> {
         .context("run migrations")?;
     info!("sqlite migrations applied");
 
-    // NATS connect + JetStream context
-    let nats = async_nats::connect(&cfg.nats.url)
-        .await
-        .with_context(|| format!("connect NATS at {}", cfg.nats.url))?;
+    // NATS connect + JetStream context. The shared helper picks up
+    // $KANADE_NATS_TOKEN when set and attaches it as the bearer
+    // token; same env name + same semantics across agent / backend /
+    // CLI so a single fleet-wide secret covers all three.
+    let nats = kanade_shared::nats_client::connect(&cfg.nats.url).await?;
     info!("connected to NATS");
     let jetstream = async_nats::jetstream::new(nats.clone());
 
