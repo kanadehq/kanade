@@ -1,31 +1,22 @@
 #[cfg(target_os = "windows")]
 use std::time::Duration;
 
-use kanade_shared::config::InventorySection;
-#[cfg(target_os = "windows")]
-use tracing::warn;
+use kanade_shared::wire::EffectiveConfig;
+use tokio::sync::watch;
 
-/// Top-level inventory loop. Delegates to a Windows-only WMI collector or
-/// a non-Windows stub depending on the build target.
-pub async fn inventory_loop(client: async_nats::Client, pc_id: String, cfg: InventorySection) {
-    if !cfg.enabled {
-        tracing::info!("inventory disabled in config");
-        return;
-    }
-    inner::run(client, pc_id, cfg).await;
-}
-
-// Helpers used by the Windows inner module only — gated so Linux /
-// macOS clippy doesn't flag them as dead code.
-#[cfg(target_os = "windows")]
-fn parse_or_default(label: &str, value: &str, fallback: Duration) -> Duration {
-    match humantime::parse_duration(value) {
-        Ok(d) => d,
-        Err(e) => {
-            warn!(error = %e, label, value, "invalid duration, using fallback");
-            fallback
-        }
-    }
+/// Top-level inventory loop. Cadence + jitter + on/off all come from
+/// the supervisor's [`EffectiveConfig`] and update live; nothing here
+/// is read once at startup.
+///
+/// Platform split: WMI collection lives in the `inner` module under
+/// `cfg(target_os = "windows")`; the non-Windows build is a no-op
+/// shim so the rest of the agent compiles for CI clippy on Linux.
+pub async fn inventory_loop(
+    client: async_nats::Client,
+    pc_id: String,
+    cfg_rx: watch::Receiver<EffectiveConfig>,
+) {
+    inner::run(client, pc_id, cfg_rx).await;
 }
 
 #[cfg(target_os = "windows")]
@@ -41,14 +32,14 @@ mod inner {
     use std::time::Duration;
 
     use anyhow::{Context, Result};
-    use kanade_shared::config::InventorySection;
     use kanade_shared::subject;
-    use kanade_shared::wire::{DiskInfo, HwInventory};
+    use kanade_shared::wire::{DiskInfo, EffectiveConfig, HwInventory};
     use serde::Deserialize;
+    use tokio::sync::watch;
     use tracing::{info, warn};
     use wmi::WMIConnection;
 
-    use super::{parse_or_default, random_jitter};
+    use super::random_jitter;
 
     #[derive(Deserialize, Debug)]
     #[serde(rename_all = "PascalCase")]
@@ -82,34 +73,71 @@ mod inner {
         file_system: Option<String>,
     }
 
-    pub async fn run(client: async_nats::Client, pc_id: String, cfg: InventorySection) {
-        let interval = parse_or_default(
-            "hw_interval",
-            &cfg.hw_interval,
-            Duration::from_secs(24 * 3600),
-        );
-        let jitter = parse_or_default("jitter", &cfg.jitter, Duration::from_secs(600));
-
-        // Initial random pause within `jitter` so a freshly-restarted
-        // fleet doesn't all hit WMI at once.
-        let init_pause = random_jitter(jitter);
-        info!(?interval, ?jitter, ?init_pause, "inventory loop scheduled");
+    pub async fn run(
+        client: async_nats::Client,
+        pc_id: String,
+        mut cfg_rx: watch::Receiver<EffectiveConfig>,
+    ) {
+        // Initial random pause within the configured jitter so a
+        // freshly-restarted fleet doesn't all hit WMI in unison.
+        let init_jitter = cfg_rx.borrow().inventory_jitter_duration();
+        let init_pause = random_jitter(init_jitter);
+        info!(?init_pause, "inventory loop initial jitter");
         tokio::time::sleep(init_pause).await;
 
         loop {
+            // Snapshot the current effective config once per cycle —
+            // changes that arrive mid-WMI-query take effect on the
+            // next iteration, which is fine.
+            let snapshot = cfg_rx.borrow().clone();
+
+            if !snapshot.inventory_enabled {
+                info!("inventory collection disabled; waiting for config update");
+                // Block until the supervisor pushes a new value;
+                // exit if the supervisor went away.
+                if cfg_rx.changed().await.is_err() {
+                    return;
+                }
+                continue;
+            }
+
             let pc = pc_id.clone();
             match tokio::task::spawn_blocking(move || collect_hw(&pc)).await {
-                Ok(Ok(snapshot)) => {
-                    if let Err(e) = publish(&client, &snapshot).await {
+                Ok(Ok(snap)) => {
+                    if let Err(e) = publish(&client, &snap).await {
                         warn!(error = %e, "publish hw inventory");
                     }
                 }
                 Ok(Err(e)) => warn!(error = %e, "collect hw inventory"),
                 Err(e) => warn!(error = %e, "inventory worker join"),
             }
-            let wait = interval + random_jitter(jitter);
-            tokio::time::sleep(wait).await;
+
+            let wait = snapshot.inventory_interval_duration()
+                + random_jitter(snapshot.inventory_jitter_duration());
+
+            // Sleep until next cycle, but wake early if config
+            // changes — operator may have just disabled / shortened
+            // the interval.
+            tokio::select! {
+                _ = tokio::time::sleep(wait) => {}
+                res = cfg_rx.changed() => {
+                    if res.is_err() {
+                        // Supervisor died — keep our last snapshot
+                        // and continue at the planned cadence.
+                        tokio::time::sleep(wait_ish(snapshot.inventory_interval_duration())).await;
+                    } else {
+                        info!("inventory config changed; re-evaluating");
+                    }
+                }
+            }
         }
+    }
+
+    /// Tiny wrapper to keep the sleep call inside the select arm
+    /// readable when the supervisor channel hangs up. Behaviour-wise
+    /// identical to sleeping for the configured interval again.
+    fn wait_ish(d: Duration) -> Duration {
+        d
     }
 
     fn collect_hw(pc_id: &str) -> Result<HwInventory> {
@@ -176,9 +204,14 @@ mod inner {
 
 #[cfg(not(target_os = "windows"))]
 mod inner {
-    use kanade_shared::config::InventorySection;
+    use kanade_shared::wire::EffectiveConfig;
+    use tokio::sync::watch;
 
-    pub async fn run(_client: async_nats::Client, _pc_id: String, _cfg: InventorySection) {
+    pub async fn run(
+        _client: async_nats::Client,
+        _pc_id: String,
+        _cfg_rx: watch::Receiver<EffectiveConfig>,
+    ) {
         tracing::info!("inventory collection skipped (non-Windows platform)");
     }
 }

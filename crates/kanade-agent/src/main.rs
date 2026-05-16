@@ -1,4 +1,5 @@
 mod commands;
+mod config_supervisor;
 mod groups;
 mod heartbeat;
 mod inventory;
@@ -68,15 +69,31 @@ async fn main() -> Result<()> {
     );
 
     let pc_id = cfg.agent.id.clone();
+
+    // Sprint 6: every fleet-wide knob (heartbeat cadence, inventory
+    // cadence / jitter / enabled, target_version) is now sourced
+    // from the agent_config KV bucket and watched live. The
+    // supervisor publishes the resolved EffectiveConfig on a watch
+    // channel; heartbeat / inventory / self_update subscribe.
+    let cfg_rx = config_supervisor::spawn(client.clone(), pc_id.clone());
+
+    // Sprint 6 phase 6 will add proper detection of "[inventory] is
+    // present in agent.toml with non-default values" and emit a
+    // deprecation warning. For now cfg.inventory is silently
+    // ignored — values come from the agent_config KV bucket via
+    // cfg_rx, not from the local toml.
+    let _ = &cfg.inventory;
+
     tokio::spawn(heartbeat::heartbeat_loop(
         client.clone(),
         pc_id.clone(),
         AGENT_VERSION.to_string(),
+        cfg_rx.clone(),
     ));
     tokio::spawn(inventory::inventory_loop(
         client.clone(),
         pc_id.clone(),
-        cfg.inventory.clone(),
+        cfg_rx.clone(),
     ));
     tokio::spawn(self_update::run(client.clone(), AGENT_VERSION.to_string()));
 

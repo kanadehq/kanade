@@ -29,6 +29,7 @@
 //! none of my groups say X" debugging session.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -88,6 +89,22 @@ impl EffectiveConfig {
             inventory_enabled: true,
             heartbeat_interval: "30s".to_string(),
         }
+    }
+
+    /// Parsed `heartbeat_interval`, falling back to the built-in
+    /// 30 s default on a malformed string. Logging the parse error
+    /// is the caller's job (so that test code can stay quiet).
+    pub fn heartbeat_duration(&self) -> Duration {
+        humantime::parse_duration(&self.heartbeat_interval).unwrap_or(Duration::from_secs(30))
+    }
+
+    pub fn inventory_interval_duration(&self) -> Duration {
+        humantime::parse_duration(&self.inventory_interval)
+            .unwrap_or(Duration::from_secs(24 * 60 * 60))
+    }
+
+    pub fn inventory_jitter_duration(&self) -> Duration {
+        humantime::parse_duration(&self.inventory_jitter).unwrap_or(Duration::from_secs(600))
     }
 }
 
@@ -155,27 +172,39 @@ pub fn resolve(
             continue;
         };
         if scope.target_version.is_some() {
-            setters.entry("target_version").or_default().push(g.to_string());
+            setters
+                .entry("target_version")
+                .or_default()
+                .push(g.to_string());
         }
         if scope.inventory_interval.is_some() {
-            setters.entry("inventory_interval").or_default().push(g.to_string());
+            setters
+                .entry("inventory_interval")
+                .or_default()
+                .push(g.to_string());
         }
         if scope.inventory_jitter.is_some() {
-            setters.entry("inventory_jitter").or_default().push(g.to_string());
+            setters
+                .entry("inventory_jitter")
+                .or_default()
+                .push(g.to_string());
         }
         if scope.inventory_enabled.is_some() {
-            setters.entry("inventory_enabled").or_default().push(g.to_string());
+            setters
+                .entry("inventory_enabled")
+                .or_default()
+                .push(g.to_string());
         }
         if scope.heartbeat_interval.is_some() {
-            setters.entry("heartbeat_interval").or_default().push(g.to_string());
+            setters
+                .entry("heartbeat_interval")
+                .or_default()
+                .push(g.to_string());
         }
     }
     for (field, groups) in setters {
         if groups.len() > 1 {
-            warnings.push(ResolutionWarning::MultiGroupConflict {
-                field,
-                groups,
-            });
+            warnings.push(ResolutionWarning::MultiGroupConflict { field, groups });
         }
     }
 
@@ -327,12 +356,7 @@ mod tests {
                 ..scope()
             },
         );
-        let (eff, warns) = resolve(
-            None,
-            &groups,
-            None,
-            &["wave1".into(), "dept-eng".into()],
-        );
+        let (eff, warns) = resolve(None, &groups, None, &["wave1".into(), "dept-eng".into()]);
         // "dept-eng" sorts before "wave1", so wave1 wins (last alphabetical).
         assert_eq!(eff.inventory_interval, "12h");
         assert_eq!(warns.len(), 1);
@@ -362,12 +386,7 @@ mod tests {
                 ..scope()
             },
         );
-        let (eff, warns) = resolve(
-            None,
-            &groups,
-            None,
-            &["wave1".into(), "dept-eng".into()],
-        );
+        let (eff, warns) = resolve(None, &groups, None, &["wave1".into(), "dept-eng".into()]);
         assert_eq!(eff.inventory_interval, "12h");
         assert_eq!(eff.heartbeat_interval, "15s");
         assert!(warns.is_empty());
@@ -423,12 +442,7 @@ mod tests {
         );
         // my_groups carries the same name twice — the dedup pass
         // keeps it from looking like a conflict-with-self.
-        let (eff, warns) = resolve(
-            None,
-            &groups,
-            None,
-            &["wave1".into(), "wave1".into()],
-        );
+        let (eff, warns) = resolve(None, &groups, None, &["wave1".into(), "wave1".into()]);
         assert_eq!(eff.inventory_interval, "12h");
         assert!(warns.is_empty());
     }
