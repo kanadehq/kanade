@@ -400,8 +400,9 @@ the PDB.
 - **Sprint 6** (v0.3.0) — layered `agent_config` KV bucket: `ConfigScope` per global / per-group / per-pc, resolver with deterministic precedence + multi-group conflict warnings, dynamic cadence reconciliation for heartbeat / inventory / self_update, admin API + `kanade config` CLI. `[inventory]` section in agent.toml deprecated
 - **v0.3.1** — `kanade-backend` auto-bootstraps every JetStream resource at startup; the operator-side `kanade jetstream setup` is now optional
 - **Sprint 10** (v0.7.0) — Audit / Results page filters (actor / action / pc_id / status / since presets) and `/api/health/fleet` rollup endpoint (agents · JetStream · recent failures, 200/503 by `status`); Dashboard surfaces the server-computed banner
+- **v0.7.1** — agent file logging via `tracing-appender` (daily rotation, `[log] keep_days` retention), `kanade agent publish` auto-detects `--version` from the binary via `<exe> --version` probe
 
-Backlog: Prometheus metrics, 3000-agent simulation, NATS cluster + replicated backend, Postgres migration.
+Backlog: on-demand agent log fetch (`logs.fetch.<pc_id>` + Web UI), Prometheus metrics, 3000-agent simulation, NATS cluster + replicated backend, Postgres migration.
 
 ## Production install layout
 

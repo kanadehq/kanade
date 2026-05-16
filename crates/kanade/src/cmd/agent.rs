@@ -24,9 +24,13 @@ pub enum AgentSub {
         /// Path to the new agent binary (e.g. `target/release/kanade-agent.exe`).
         binary: PathBuf,
         /// Semver-ish version string. Stored as the object name and
-        /// broadcast in agent_config.target_version.
+        /// broadcast in agent_config.target_version. When omitted, the
+        /// CLI runs `<binary> --version` and parses the second
+        /// whitespace-separated token; pass explicitly to publish
+        /// under a version label different from what the binary
+        /// reports (e.g. release candidates, rollback aliases).
         #[arg(long)]
-        version: String,
+        version: Option<String>,
     },
     /// Print the currently broadcast target_version.
     Current,
@@ -65,7 +69,22 @@ pub async fn execute(client: async_nats::Client, args: AgentArgs) -> Result<()> 
     }
 }
 
-async fn publish(client: async_nats::Client, binary: PathBuf, version: String) -> Result<()> {
+async fn publish(
+    client: async_nats::Client,
+    binary: PathBuf,
+    version: Option<String>,
+) -> Result<()> {
+    let version = match version {
+        Some(v) => v,
+        None => probe_binary_version(&binary).with_context(|| {
+            format!(
+                "auto-detect version from {binary:?} via `--version` — \
+                 pass --version explicitly if the binary can't be executed here \
+                 (e.g. cross-arch publish from Linux/macOS)"
+            )
+        })?,
+    };
+
     let bytes = fs::read(&binary)
         .await
         .with_context(|| format!("read {binary:?}"))?;
@@ -114,6 +133,38 @@ async fn publish(client: async_nats::Client, binary: PathBuf, version: String) -
         "  kv           : {BUCKET_AGENT_CONFIG}.{KEY_AGENT_CONFIG_GLOBAL}.target_version = {version}"
     );
     Ok(())
+}
+
+/// Run `<binary> --version` and pull the version token out of its
+/// stdout. kanade-agent's clap setup emits `kanade-agent <version>`
+/// on `--version`, so we take the second whitespace-separated word.
+/// Fails when the binary doesn't run on this host (cross-arch),
+/// exits non-zero, or prints an unexpected shape.
+fn probe_binary_version(binary: &std::path::Path) -> Result<String> {
+    let out = std::process::Command::new(binary)
+        .arg("--version")
+        .output()
+        .with_context(|| format!("run `{} --version`", binary.display()))?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "`{} --version` exited {} (stderr: {})",
+            binary.display(),
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let line = String::from_utf8(out.stdout)
+        .context("`--version` stdout is not UTF-8")?
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    let token = line
+        .split_whitespace()
+        .nth(1)
+        .with_context(|| format!("unexpected --version output shape: {line:?}"))?;
+    Ok(token.to_owned())
 }
 
 async fn current(client: async_nats::Client) -> Result<()> {

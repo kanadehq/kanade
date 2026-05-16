@@ -37,6 +37,16 @@ pub struct AgentSection {
 pub struct LogSection {
     pub path: String,
     pub level: String,
+    /// Number of rotated daily files (incl. today's) to retain.
+    /// Defaults to 14 — covers two weeks of incidents without
+    /// blowing up disk. Set to 0 to disable on-disk logging
+    /// (stdout only).
+    #[serde(default = "default_keep_days")]
+    pub keep_days: usize,
+}
+
+fn default_keep_days() -> usize {
+    14
 }
 
 #[derive(Deserialize, Debug, Clone)]
