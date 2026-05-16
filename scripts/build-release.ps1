@@ -167,8 +167,16 @@ foreach ($role in $Roles) {
     }
 
     if (-not $skipBuild) {
-        if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
-        $null = New-Item -ItemType Directory -Path $stage
+        # Don't blow the stage dir away wholesale — if anything (e.g.,
+        # Windows Defender mid-scan, a running kanade-<role>.exe, an
+        # open Explorer preview) holds even one file inside, the
+        # recursive Remove-Item fails noisily. Just ensure the dir
+        # exists; Copy-Item -Force below overwrites individual files,
+        # and any locked file produces a focused error pointing at
+        # that one path instead of taking down the whole rebuild.
+        if (-not (Test-Path $stage)) {
+            $null = New-Item -ItemType Directory -Path $stage
+        }
 
         $temp = Join-Path ([System.IO.Path]::GetTempPath()) ("kanade-stage-{0}-{1}" -f $role, [System.Guid]::NewGuid().ToString('N'))
         try {
@@ -185,7 +193,19 @@ foreach ($role in $Roles) {
 
             $exeSrc = Join-Path $temp "bin\$exeName"
             if (-not (Test-Path $exeSrc)) { throw "Built binary not found at '$exeSrc'." }
-            Copy-Item $exeSrc $exeDst -Force
+            try {
+                Copy-Item $exeSrc $exeDst -Force
+            } catch [System.IO.IOException] {
+                throw @"
+$exeDst is locked (file in use by another process). Likely culprits:
+  - Windows Defender real-time scan finishing on the previous build
+    (usually clears in seconds; just rerun).
+  - A still-running kanade-$role.exe (Get-Process kanade-$role).
+  - The Windows service (Stop-Service Kanade$($role -replace '^(.)', { $_.Value.ToUpper() })
+    or use deploy-$role.ps1 -Recreate after the next stage).
+Original error: $($_.Exception.Message)
+"@
+            }
         }
         finally {
             if (Test-Path $temp) { Remove-Item -Recurse -Force $temp }
