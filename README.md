@@ -52,9 +52,9 @@ broker" — which everyone reinvents from scratch.
 | crate            | kind | role |
 |------------------|------|------|
 | `kanade-shared`  | lib  | wire types (`Command` / `ExecResult` / `Heartbeat` / `HwInventory`), NATS subject + KV helpers, YAML manifest schema, [teravars]-backed config loader |
-| `kanade-agent`   | bin  | Windows-side resident daemon: subscribes to `commands.*`, runs child processes, publishes results + heartbeats + WMI inventory, watches `agent_config.target_version` for self-update |
-| `kanade-backend` | bin  | axum HTTP server: `/health`, `/api/{agents,results,audit,deploy,schedules}`, embedded SPA at `/`. Runs 3 durable JetStream projectors (INVENTORY/RESULTS/AUDIT → SQLite) and a `tokio-cron-scheduler` driven by the schedules KV |
-| `kanade`         | bin  | operator-side admin CLI (`kubectl`-style single entry point); subcommands talk to NATS directly for `run`/`ping`/`kill`/`revoke`/`jetstream` and to the backend over HTTP for `deploy`/`schedule`/`agent` |
+| `kanade-agent`   | bin  | Windows-side resident daemon: subscribes to `commands.*`, runs child processes, publishes results + heartbeats + WMI inventory; watches the layered `agent_config` + `agent_groups` KV buckets and reacts live to cadence / membership / target_version changes |
+| `kanade-backend` | bin  | axum HTTP server: `/health`, `/api/{agents,results,audit,deploy,schedules,config,…}`, embedded SPA at `/`. Auto-bootstraps every required JetStream resource at startup, runs durable projectors (INVENTORY/RESULTS/AUDIT → SQLite) and a `tokio-cron-scheduler` driven by the schedules KV |
+| `kanade`         | bin  | operator-side admin CLI (`kubectl`-style single entry point); subcommands talk to NATS directly for `run`/`ping`/`kill`/`revoke`/`jetstream`/`agent`/`config` and to the backend over HTTP for `deploy`/`schedule` |
 
 ## Install
 
@@ -105,15 +105,21 @@ of them assume `cd` into the directory that holds `agent.toml` /
 nats-server -js -p 4222
 ```
 
-### 2 — provision JetStream (one-time)
+### 2 — provision JetStream (optional)
 
 ```powershell
 kanade jetstream setup
 ```
 
-Creates the `INVENTORY` / `RESULTS` / `DEPLOY` / `AUDIT` streams, the
-`script_current` / `script_status` / `agents_state` / `agent_config` KV
-buckets, and the `agent_releases` Object Store.
+Creates every stream (`INVENTORY` / `RESULTS` / `DEPLOY` / `EVENTS` /
+`AUDIT`), KV bucket (`script_current` / `script_status` / `agents_state`
+/ `agent_config` / `agent_groups` / `schedules`), and the
+`agent_releases` Object Store. This step is **optional** as of v0.3.1:
+`kanade-backend` auto-bootstraps the same set at startup, so a fresh
+NATS server + `kanade-backend` is enough to get a working fleet. The
+CLI command is still useful for re-running setup against a different
+broker, or for inspecting what would be created (`kanade jetstream
+status`).
 
 ### 3 — start the backend
 
@@ -133,9 +139,11 @@ kanade-agent
 ```
 
 Loads `./agent.toml`, picks `$env:COMPUTERNAME` as `pc_id`, subscribes
-to `commands.all` + `commands.pc.{pc_id}` + every group declared in
-`agent.toml` (`canary` + `wave1` in the bundled sample), starts the
-heartbeat / inventory / self-update loops.
+to `commands.all` + `commands.pc.{pc_id}`, then spawns the
+config_supervisor (watches `agent_config` + `agent_groups` KV) plus
+the heartbeat / inventory / self-update / groups-manager loops. Group
+membership and cadence settings are read from the KV buckets — see
+`kanade agent groups` and `kanade config` to drive them.
 
 ### 5 — drive it
 
@@ -168,7 +176,7 @@ kanade kill   <job_id>                           # publish kill.{job_id}
 kanade revoke <cmd_id>                           # script_status = REVOKED
 kanade unrevoke <cmd_id>                         # → ACTIVE
 
-kanade jetstream setup                           # create streams + KV + Object Store
+kanade jetstream setup                           # create streams + KV + Object Store (optional; backend auto-bootstraps on startup)
 kanade jetstream status                          # health snapshot
 
 kanade deploy   <manifest.yaml> [--version <v>]  # POST /api/deploy
@@ -176,8 +184,19 @@ kanade schedule create <schedule.yaml>           # POST /api/schedules (cron + m
 kanade schedule list
 kanade schedule delete <id>
 
-kanade agent publish <binary> --version <v>      # upload to Object Store + flip target_version
-kanade agent current                             # read agent_config.target_version
+kanade agent publish <binary> --version <v>      # upload to Object Store + flip global.target_version
+kanade agent current                             # read agent_config.global.target_version
+
+kanade agent groups list <pc_id>                 # current group memberships for one PC
+kanade agent groups add  <pc_id> <group>         # add membership (idempotent)
+kanade agent groups rm   <pc_id> <group>         # drop membership
+kanade agent groups set  <pc_id> <group> ...     # replace whole list
+
+kanade config get  [--group <name>|--pc <pc_id>] # ConfigScope at this scope (default: global)
+kanade config set  <field>=<value> [...]         # set one field (target_version / inventory_* / heartbeat_*)
+kanade config unset <field> [...]                # clear one field
+kanade config clear [--group <name>|--pc <pc_id>] # delete the whole scope row
+kanade config effective <pc_id>                  # resolved view for a PC (built-in -> global -> groups -> pc)
 ```
 
 `kanade <subcommand> --help` for argument details.
@@ -216,23 +235,24 @@ rollout:
 
 Both use [teravars] templating — `{{ system.host }}`, `{{ env(name="X", default="Y") }}`, `{% if is_windows() %}…{% endif %}` are all available.
 
-`agent.toml`:
+`agent.toml` (intentionally minimal — fleet policy lives in the
+`agent_config` + `agent_groups` KV buckets, edited via
+`kanade config` / `kanade agent groups`):
 
 ```toml
 [agent]
 id = '{{ system.host }}'
 nats_url = 'nats://127.0.0.1:4222'
-groups = ['canary', 'wave1']
-
-[inventory]
-hw_interval = '24h'
-jitter = '10m'
-enabled = true
 
 [log]
 path = 'logs/agent.log'
 level = 'info'
 ```
+
+Older agent.toml files that still carry `[agent] groups = […]` or an
+`[inventory]` section keep loading — both fields are parsed via
+`#[serde(default)]` — but the values are logged-and-ignored at
+startup. Removal is scheduled for v0.4.0.
 
 `backend.toml`:
 
@@ -270,11 +290,12 @@ the PDB.
 - **Sprint 1** — workspace scaffolding, NATS plumbing, agent + CLI echo round-trip
 - **Sprint 2** — §2.6 kill switch (subscribe + flush race fix), version-pin KV, WMI HW inventory
 - **Sprint 3** — backend skeleton, SQLite projectors, YAML deploy API, audit log, `tokio-cron-scheduler` with dynamic KV watch
-- **Sprint 4** — wave rollout + agent-side jitter, embedded SPA dashboard, HS256 JWT middleware, agent self-update via the JetStream Object Store
+- **Sprint 4** — wave rollout + agent-side jitter, embedded SPA dashboard, HS256 JWT middleware, agent self-update via the JetStream Object Store (atomic exe swap + SCM failure-action restart in v0.1.5)
+- **Sprint 5** (v0.2.0) — server-managed group membership: `agent_groups` KV bucket, dynamic agent-side subscribe/unsubscribe, admin API + `kanade agent groups` CLI. `[agent] groups` field in agent.toml deprecated
+- **Sprint 6** (v0.3.0) — layered `agent_config` KV bucket: `ConfigScope` per global / per-group / per-pc, resolver with deterministic precedence + multi-group conflict warnings, dynamic cadence reconciliation for heartbeat / inventory / self_update, admin API + `kanade config` CLI. `[inventory]` section in agent.toml deprecated
+- **v0.3.1** — `kanade-backend` auto-bootstraps every JetStream resource at startup; the operator-side `kanade jetstream setup` is now optional
 
-Sprint 5 (Prometheus metrics, 3000-agent simulation, backups) and
-Sprint 6 (NATS cluster + replicated backend + Postgres migration) are
-open backlog items.
+Backlog: Prometheus metrics, 3000-agent simulation, NATS cluster + replicated backend, Postgres migration.
 
 ## Production install layout
 
