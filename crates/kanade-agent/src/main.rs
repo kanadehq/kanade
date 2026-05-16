@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
 use kanade_shared::config::load_agent_config;
-use kanade_shared::subject;
+use kanade_shared::{default_paths, subject};
 use tracing::info;
 
 const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -21,8 +21,11 @@ const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
     version
 )]
 struct Cli {
-    #[arg(long, default_value = "agent.toml")]
-    config: PathBuf,
+    /// Path to agent.toml. When unset, the agent looks at
+    /// $KANADE_AGENT_CONFIG, then `<config_dir>/agent.toml` (see
+    /// kanade_shared::default_paths::config_dir).
+    #[arg(long)]
+    config: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -35,8 +38,10 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let cfg = load_agent_config(&cli.config)
-        .with_context(|| format!("load config from {:?}", cli.config))?;
+    let cfg_path =
+        default_paths::find_config(cli.config.as_deref(), "KANADE_AGENT_CONFIG", "agent.toml")?;
+    let cfg =
+        load_agent_config(&cfg_path).with_context(|| format!("load config from {cfg_path:?}"))?;
     info!(
         pc_id = %cfg.agent.id,
         nats_url = %cfg.agent.nats_url,

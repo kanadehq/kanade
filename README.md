@@ -271,6 +271,114 @@ Sprint 5 (Prometheus metrics, 3000-agent simulation, backups) and
 Sprint 6 (NATS cluster + replicated backend + Postgres migration) are
 open backlog items.
 
+## Production install layout
+
+`cargo install` drops the binaries under `~/.cargo/bin/` (user-local).
+For a real deployment, copy them into the spec §2.11 layout and register
+a service so they survive reboots.
+
+### Path layout
+
+```text
+Windows                                    Linux
+C:\Program Files\Kanade\                   /usr/local/bin/
+  ├── kanade-agent.exe                       ├── kanade-agent
+  ├── kanade-backend.exe                     ├── kanade-backend
+  ├── kanade.exe                             ├── kanade
+  └── nats-server.exe                        └── nats-server
+
+C:\ProgramData\Kanade\config\              /etc/kanade/
+  ├── agent.toml                             ├── agent.toml
+  └── backend.toml                           └── backend.toml
+
+C:\ProgramData\Kanade\data\                /var/lib/kanade/
+  ├── state.db        (agent)                ├── state.db
+  ├── outbox\         (agent)                ├── outbox/
+  ├── staging\        (self-update)          ├── staging/
+  ├── backend.db      (backend)              ├── backend.db
+  ├── certs\                                 ├── certs/
+  └── nats\           (JetStream data)       └── nats/
+
+C:\ProgramData\Kanade\logs\                /var/log/kanade/
+  ├── agent.log                              ├── agent.log
+  ├── backend.log                            ├── backend.log
+  └── nats-server.log                        └── nats-server.log
+```
+
+### Config discovery
+
+Every binary looks up its config file in this exact order (no cwd
+fallback — too easy to load the wrong file by accident):
+
+1. `--config <path>` CLI flag (always honored, even if the file
+   doesn't exist — that's the caller's choice).
+2. Environment variable: `KANADE_AGENT_CONFIG` for `kanade-agent`,
+   `KANADE_BACKEND_CONFIG` for `kanade-backend`. Non-empty value
+   wins.
+3. `<config_dir>/<basename>`:
+   - Windows: `%ProgramData%\Kanade\config\agent.toml`
+   - Linux: `/etc/kanade/agent.toml`
+
+If none of the three is reachable, the binary exits with a message
+listing every option an operator can use to fix it.
+
+### Windows Service registration (sc.exe)
+
+```powershell
+# Stage the binaries
+New-Item -ItemType Directory -Force 'C:\Program Files\Kanade'
+Copy-Item "$env:USERPROFILE\.cargo\bin\kanade-agent.exe"   'C:\Program Files\Kanade\'
+Copy-Item "$env:USERPROFILE\.cargo\bin\kanade-backend.exe" 'C:\Program Files\Kanade\'
+
+# Stage the config (review + edit first)
+New-Item -ItemType Directory -Force 'C:\ProgramData\Kanade\config'
+Copy-Item .\agent.toml   'C:\ProgramData\Kanade\config\'
+Copy-Item .\backend.toml 'C:\ProgramData\Kanade\config\'
+
+# Register the agent as a service running under LocalSystem.
+sc.exe create KanadeAgent `
+  binPath= '"C:\Program Files\Kanade\kanade-agent.exe"' `
+  start= auto `
+  obj= LocalSystem `
+  DisplayName= "Kanade Endpoint Agent"
+sc.exe failure KanadeAgent reset= 86400 actions= restart/60000/restart/60000/restart/60000
+
+# Register the backend the same way.
+sc.exe create KanadeBackend `
+  binPath= '"C:\Program Files\Kanade\kanade-backend.exe"' `
+  start= auto `
+  obj= LocalSystem `
+  DisplayName= "Kanade Backend"
+
+sc.exe start KanadeAgent
+sc.exe start KanadeBackend
+```
+
+### Linux systemd units
+
+```ini
+# /etc/systemd/system/kanade-backend.service
+[Unit]
+Description=Kanade Backend
+After=network.target nats.service
+
+[Service]
+ExecStart=/usr/local/bin/kanade-backend
+Restart=always
+User=kanade
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now kanade-backend.service
+```
+
+The agent unit is symmetric (`kanade-agent.service`, `ExecStart=/usr/local/bin/kanade-agent`).
+
 ## Scaffolded with kata
 
 The skeleton (`AGENTS.md` / `Makefile.toml` / `clippy.toml` /

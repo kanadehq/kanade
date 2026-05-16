@@ -1,16 +1,25 @@
-# Sprint 1: minimal config. `system.host` (cross-platform hostname) is the
-# only teravars helper used here — full [vars] self-reference + is_windows()
-# branching (see docs/SPEC.md §2.4.4) is deferred until the loader switches
-# to teravars' extract_vars + resolve + render pipeline.
+# Spec §2.4.4 — same file drives Windows + Linux agents. The `[vars]`
+# section is resolved via teravars (≥ 0.1.5 fixes self-reference
+# through load_merged); is_windows() picks the right ProgramData /
+# /var/lib path for the host.
+
+[vars]
+hostname = '{{ system.host }}'
+base     = '''{% if is_windows() %}{{ env(name="ProgramData") }}\Kanade\data{% else %}/var/lib/kanade{% endif %}'''
+log_dir  = '''{% if is_windows() %}{{ env(name="ProgramData") }}\Kanade\logs{% else %}/var/log/kanade{% endif %}'''
 
 [agent]
-id = '{{ system.host }}'
+id       = '{{ vars.hostname }}'
 nats_url = 'nats://127.0.0.1:4222'
-# Sprint 4a — wave rollout: declare which `commands.group.*` subjects
-# this agent listens on. Smoke-test default puts the local agent in
-# both canary and wave1 so jobs/wave-test.yaml fires through.
-groups = ['canary', 'wave1']
+# Wave / group memberships (spec §1.4). Each entry causes the agent to
+# subscribe to `commands.group.{name}` on startup.
+groups   = ['canary', 'wave1']
+
+[inventory]
+hw_interval = '24h'
+jitter      = '10m'
+enabled     = true
 
 [log]
-path = 'logs/agent.log'
+path  = '{{ vars.log_dir }}/agent.log'
 level = 'info'

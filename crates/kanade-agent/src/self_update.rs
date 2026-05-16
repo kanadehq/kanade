@@ -130,13 +130,19 @@ async fn maybe_download(
 }
 
 fn staging_path(version: &str) -> Result<PathBuf> {
+    use kanade_shared::default_paths;
     let exe = std::env::current_exe().context("current_exe")?;
-    let dir = exe.parent().context("exe parent")?.to_path_buf();
     let stem = exe
         .file_stem()
         .and_then(|s| s.to_str())
-        .unwrap_or("kanade-agent");
-    Ok(dir.join(format!("{stem}.{version}.staged")))
+        .unwrap_or("kanade-agent")
+        .to_string();
+    // Spec §2.11.3 — staged binaries live in the data dir, never next
+    // to the running exe (Program Files is read-only for LocalSystem
+    // services after MSI install).
+    Ok(default_paths::data_dir()
+        .join("staging")
+        .join(format!("{stem}.{version}.staged")))
 }
 
 fn hex(bytes: &[u8]) -> String {

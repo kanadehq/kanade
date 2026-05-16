@@ -11,6 +11,7 @@ use std::str::FromStr;
 use anyhow::{Context, Result};
 use clap::Parser;
 use kanade_shared::config::load_backend_config;
+use kanade_shared::default_paths;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
@@ -23,8 +24,11 @@ use tracing::{error, info};
     version
 )]
 struct Cli {
-    #[arg(long, default_value = "backend.toml")]
-    config: PathBuf,
+    /// Path to backend.toml. When unset, the backend looks at
+    /// $KANADE_BACKEND_CONFIG, then `<config_dir>/backend.toml` (see
+    /// kanade_shared::default_paths::config_dir).
+    #[arg(long)]
+    config: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -37,8 +41,13 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let cfg = load_backend_config(&cli.config)
-        .with_context(|| format!("load config from {:?}", cli.config))?;
+    let cfg_path = default_paths::find_config(
+        cli.config.as_deref(),
+        "KANADE_BACKEND_CONFIG",
+        "backend.toml",
+    )?;
+    let cfg =
+        load_backend_config(&cfg_path).with_context(|| format!("load config from {cfg_path:?}"))?;
     info!(
         bind = %cfg.server.bind,
         nats = %cfg.nats.url,
@@ -46,7 +55,18 @@ async fn main() -> Result<()> {
         "starting kanade-backend",
     );
 
-    // SQLite open + migrate
+    // SQLite open + migrate. Ensure the parent directory exists so
+    // `create_if_missing(true)` actually has a folder to drop the file
+    // into when `db.sqlite_path` points at a fresh install-layout
+    // location like `C:\ProgramData\Kanade\data\backend.db`.
+    let sqlite_path = PathBuf::from(&cfg.db.sqlite_path);
+    if let Some(parent) = sqlite_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("create sqlite parent {parent:?}"))?;
+    }
     let sqlite_opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", cfg.db.sqlite_path))
         .with_context(|| format!("parse sqlite path {}", cfg.db.sqlite_path))?
         .create_if_missing(true);

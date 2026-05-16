@@ -976,7 +976,7 @@ dependencies = [
  "cfg-if",
  "js-sys",
  "libc",
- "wasi",
+ "wasi 0.11.1+wasi-snapshot-preview1",
  "wasm-bindgen",
 ]
 
@@ -1513,7 +1513,7 @@ dependencies = [
 
 [[package]]
 name = "kanade"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -1534,7 +1534,7 @@ dependencies = [
 
 [[package]]
 name = "kanade-agent"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -1557,7 +1557,7 @@ dependencies = [
 
 [[package]]
 name = "kanade-backend"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -1585,7 +1585,7 @@ dependencies = [
 
 [[package]]
 name = "kanade-shared"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1728,7 +1728,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "50b7e5b27aa02a74bac8c3f23f448f8d87ff11f92d3aac1a6ed369ee08cc56c1"
 dependencies = [
  "libc",
- "wasi",
+ "wasi 0.11.1+wasi-snapshot-preview1",
  "windows-sys 0.61.2",
 ]
 
@@ -1836,6 +1836,24 @@ checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
  "libm",
+]
+
+[[package]]
+name = "objc2-core-foundation"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a180dd8642fa45cdb7dd721cd4c11b1cadd4929ce112ebd8b9f5803cc79d536"
+dependencies = [
+ "bitflags",
+]
+
+[[package]]
+name = "objc2-system-configuration"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7216bd11cbda54ccabcab84d523dc93b858ec75ecfb3a7d89513fa22464da396"
+dependencies = [
+ "objc2-core-foundation",
 ]
 
 [[package]]
@@ -2998,7 +3016,7 @@ dependencies = [
  "stringprep",
  "thiserror",
  "tracing",
- "whoami",
+ "whoami 1.6.1",
 ]
 
 [[package]]
@@ -3036,7 +3054,7 @@ dependencies = [
  "stringprep",
  "thiserror",
  "tracing",
- "whoami",
+ "whoami 1.6.1",
 ]
 
 [[package]]
@@ -3190,9 +3208,9 @@ dependencies = [
 
 [[package]]
 name = "teravars"
-version = "0.1.4"
+version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14dad394dd1cb5a447e0262a8e4fb32a5d9c11d220b6522384f347a7d6dd699b"
+checksum = "4fdcd9ead31eece24df20e5c7a082c2b04fff9426ba41e3875ef55ebc9c608fc"
 dependencies = [
  "dirs",
  "serde",
@@ -3200,7 +3218,7 @@ dependencies = [
  "tera",
  "thiserror",
  "toml",
- "whoami",
+ "whoami 2.1.2",
 ]
 
 [[package]]
@@ -3700,6 +3718,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
 
 [[package]]
+name = "wasi"
+version = "0.14.7+wasi-0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "883478de20367e224c0090af9cf5f9fa85bed63a95c1abf3afc5c083ebc06e8c"
+dependencies = [
+ "wasip2",
+]
+
+[[package]]
 name = "wasip2"
 version = "1.0.3+wasi-0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3722,6 +3749,15 @@ name = "wasite"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8dad83b4f25e74f184f64c43b150b91efe7647395b42289f38e50566d82855b"
+
+[[package]]
+name = "wasite"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "66fe902b4a6b8028a753d5424909b764ccf79b7a209eac9bf97e59cda9f71a42"
+dependencies = [
+ "wasi 0.14.7+wasi-0.2.4",
+]
 
 [[package]]
 name = "wasm-bindgen"
@@ -3866,7 +3902,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d4a4db5077702ca3015d3d02d74974948aba2ad9e12ab7df718ee64ccd7e97d"
 dependencies = [
  "libredox",
- "wasite",
+ "wasite 0.1.0",
+]
+
+[[package]]
+name = "whoami"
+version = "2.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "998767ef88740d1f5b0682a9c53c24431453923962269c2db68ee43788c5a40d"
+dependencies = [
+ "libc",
+ "libredox",
+ "objc2-system-configuration",
+ "wasite 1.0.2",
  "web-sys",
 ]
 
