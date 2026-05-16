@@ -19,31 +19,14 @@
 
 use anyhow::{Context, Result};
 
-const ENV_TOKEN: &str = "KANADE_NATS_TOKEN";
+use crate::secrets;
 
-#[cfg(windows)]
-const REG_PATH: &str = r"SOFTWARE\kanade\agent";
-#[cfg(windows)]
+const ENV_TOKEN: &str = "KANADE_NATS_TOKEN";
+const REG_SUBKEY: &str = r"SOFTWARE\kanade\agent";
 const REG_VALUE: &str = "NatsToken";
 
-#[cfg(windows)]
-fn read_registry_token() -> Option<String> {
-    use winreg::RegKey;
-    use winreg::enums::HKEY_LOCAL_MACHINE;
-
-    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-    let key = hklm.open_subkey(REG_PATH).ok()?;
-    let token: String = key.get_value(REG_VALUE).ok()?;
-    if token.is_empty() { None } else { Some(token) }
-}
-
-#[cfg(not(windows))]
-fn read_registry_token() -> Option<String> {
-    None
-}
-
 fn resolve_token() -> Option<String> {
-    if let Some(t) = read_registry_token() {
+    if let Some(t) = secrets::read_hklm_value(REG_SUBKEY, REG_VALUE) {
         return Some(t);
     }
     match std::env::var(ENV_TOKEN) {

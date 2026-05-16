@@ -75,19 +75,24 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# Provision the NATS bearer token under HKLM\SOFTWARE\kanade\agent and
-# strip all non-admin ACEs from the key so a logged-in low-priv user
-# can't `Get-ItemProperty` the secret. This is the production path
-# read by kanade-shared::nats_client::connect(); $env:KANADE_NATS_TOKEN
-# is dev-only fallback.
-function Set-KanadeNatsToken {
-    param([Parameter(Mandatory)][string]$Token)
+# Write a secret value to HKLM\SOFTWARE\kanade\<subkey>\<value> and
+# strip non-admin ACEs from the leaf key. Mirrors the helper in
+# deploy-backend.ps1; here we only ever write NatsToken, but the
+# generic shape keeps both scripts in sync. The path is what
+# kanade-shared::secrets::read_hklm_value() reads at startup,
+# preferred ahead of $env:KANADE_NATS_TOKEN.
+function Set-KanadeRegistrySecret {
+    param(
+        [Parameter(Mandatory)][string]$Subkey,
+        [Parameter(Mandatory)][string]$ValueName,
+        [Parameter(Mandatory)][string]$Value
+    )
 
-    $regKey = 'HKLM:\SOFTWARE\kanade\agent'
+    $regKey = "HKLM:\SOFTWARE\kanade\$Subkey"
     if (-not (Test-Path $regKey)) {
         New-Item -Path $regKey -Force | Out-Null
     }
-    Set-ItemProperty -Path $regKey -Name 'NatsToken' -Value $Token -Type String
+    Set-ItemProperty -Path $regKey -Name $ValueName -Value $Value -Type String
 
     $acl = Get-Acl -Path $regKey
     $acl.SetAccessRuleProtection($true, $false)
@@ -99,7 +104,7 @@ function Set-KanadeNatsToken {
     }
     Set-Acl -Path $regKey -AclObject $acl
 
-    Write-Host "Wrote NatsToken to $regKey (SYSTEM + Administrators only)."
+    Write-Host "Wrote $ValueName to $regKey (SYSTEM + Administrators only)."
 }
 
 $binDir    = Join-Path $env:ProgramFiles 'Kanade'
@@ -167,7 +172,7 @@ if ($ForceConfig -or -not (Test-Path $configDst)) {
 }
 
 if ($NatsToken) {
-    Set-KanadeNatsToken -Token $NatsToken
+    Set-KanadeRegistrySecret -Subkey 'agent' -ValueName 'NatsToken' -Value $NatsToken
 }
 
 # Service binPath = quoted exe + --config flag pointing at the

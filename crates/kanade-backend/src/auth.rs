@@ -1,13 +1,29 @@
 //! Authentication middleware for `/api/*`. Three modes, picked at
-//! request time from env:
+//! request time:
 //!
 //!   1. `KANADE_AUTH_DISABLE=1` — open access. Dev / local-only.
-//!   2. `KANADE_AUTH_STATIC_TOKEN=<secret>` — shared bearer token.
-//!      Caller sends `Authorization: Bearer <secret>`; middleware
-//!      does a constant-time compare. Simplest production-ish mode
-//!      and enough for single-operator fleets.
-//!   3. `KANADE_JWT_SECRET=<secret>` — HS256 JWT mode (Sprint 4c).
-//!      Sign tokens out-of-band with `aud=kanade` + a future `exp`.
+//!   2. Static-token mode — shared bearer. Caller sends
+//!      `Authorization: Bearer <secret>`; middleware does a
+//!      constant-time compare. Simplest production-ish mode and
+//!      enough for single-operator fleets.
+//!   3. JWT mode (HS256, Sprint 4c) — sign tokens out-of-band with
+//!      `aud=kanade` + an `exp`.
+//!
+//! Each secret is resolved registry-first, env-second:
+//!
+//! ```text
+//! StaticToken:  HKLM\SOFTWARE\kanade\backend\StaticToken
+//!               → $KANADE_AUTH_STATIC_TOKEN
+//! JwtSecret:    HKLM\SOFTWARE\kanade\backend\JwtSecret
+//!               → $KANADE_JWT_SECRET
+//! ```
+//!
+//! Registry values are written by `deploy-backend.ps1 -StaticToken …
+//! -JwtSecret …` with an ACL hardened to SYSTEM + Administrators
+//! only — keeping the secret out of low-privilege users' reach, which
+//! Machine-scope env vars cannot do. The env vars stay around for
+//! dev / cargo-make / non-Windows hosts. `KANADE_AUTH_DISABLE` stays
+//! env-only since it's a presence flag, not a secret.
 //!
 //! Precedence: DISABLE > STATIC_TOKEN > JWT_SECRET. The first one
 //! that resolves wins; the others are ignored. With none set the
@@ -38,6 +54,7 @@ use axum::http::{StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
+use kanade_shared::secrets;
 use serde::{Deserialize, Serialize};
 use std::env;
 use tracing::warn;
@@ -57,7 +74,30 @@ pub struct Claims {
 const ENV_DISABLE: &str = "KANADE_AUTH_DISABLE";
 const ENV_STATIC_TOKEN: &str = "KANADE_AUTH_STATIC_TOKEN";
 const ENV_SECRET: &str = "KANADE_JWT_SECRET";
+const REG_SUBKEY: &str = r"SOFTWARE\kanade\backend";
+const REG_STATIC_TOKEN: &str = "StaticToken";
+const REG_JWT_SECRET: &str = "JwtSecret";
 const EXPECTED_AUDIENCE: &str = "kanade";
+
+fn resolve_static_token() -> Option<String> {
+    if let Some(t) = secrets::read_hklm_value(REG_SUBKEY, REG_STATIC_TOKEN) {
+        return Some(t);
+    }
+    match env::var(ENV_STATIC_TOKEN) {
+        Ok(t) if !t.is_empty() => Some(t),
+        _ => None,
+    }
+}
+
+fn resolve_jwt_secret() -> Option<String> {
+    if let Some(s) = secrets::read_hklm_value(REG_SUBKEY, REG_JWT_SECRET) {
+        return Some(s);
+    }
+    match env::var(ENV_SECRET) {
+        Ok(s) if !s.is_empty() => Some(s),
+        _ => None,
+    }
+}
 
 pub async fn verify(req: Request, next: Next) -> Result<Response, Response> {
     // Auth opt-out for local development. Set KANADE_AUTH_DISABLE=1 to
@@ -84,12 +124,9 @@ pub async fn verify(req: Request, next: Next) -> Result<Response, Response> {
         return Err(unauth("missing bearer token"));
     };
 
-    // Static-token mode: simple shared bearer secret. constant_time_eq
-    // would be ideal, but matching the env var is operator-controlled
-    // and not in a JWT-style adversarial path — a plain equality
-    // compare is acceptable here.
-    if let Ok(expected) = env::var(ENV_STATIC_TOKEN) {
-        return if !expected.is_empty() && constant_time_eq(token.as_bytes(), expected.as_bytes()) {
+    // Static-token mode: simple shared bearer secret.
+    if let Some(expected) = resolve_static_token() {
+        return if constant_time_eq(token.as_bytes(), expected.as_bytes()) {
             // Synthesise a Claims so downstream handlers that look in
             // request extensions for a caller identity get a usable
             // value (sub=static-token, no roles, far-future exp).
@@ -107,10 +144,9 @@ pub async fn verify(req: Request, next: Next) -> Result<Response, Response> {
         };
     }
 
-    let secret = env::var(ENV_SECRET).unwrap_or_else(|_| {
+    let secret = resolve_jwt_secret().unwrap_or_else(|| {
         warn!(
-            env = ENV_SECRET,
-            "neither KANADE_AUTH_STATIC_TOKEN nor KANADE_JWT_SECRET is set — using a hard-coded dev fallback (NEVER in production)"
+            "no StaticToken/JwtSecret registry value and no KANADE_AUTH_STATIC_TOKEN/KANADE_JWT_SECRET env var — using a hard-coded dev fallback (NEVER in production)"
         );
         "dev-secret-please-override".to_string()
     });

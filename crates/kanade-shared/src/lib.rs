@@ -4,6 +4,7 @@ pub mod default_paths;
 pub mod kv;
 pub mod manifest;
 pub mod nats_client;
+pub mod secrets;
 pub mod subject;
 pub mod wire;
 

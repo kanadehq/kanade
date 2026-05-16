@@ -278,17 +278,29 @@ level = 'info'
 ## Authentication
 
 `/api/*` is protected by a single middleware (`crates/kanade-backend/src/auth.rs`).
-Three modes, picked by env var on the backend side:
+Three modes:
 
-| Env on `kanade-backend` | Mode | Use for |
+| Mode | Selector | Use for |
 |---|---|---|
-| `KANADE_AUTH_DISABLE=1` | open | local dev, `cargo run` |
-| `KANADE_AUTH_STATIC_TOKEN=<secret>` | shared bearer | single-operator fleets — paste the same secret on the SPA login + `kanade` CLI |
-| `KANADE_JWT_SECRET=<secret>` | HS256 JWT | full multi-user setup; sign tokens out-of-band with `aud=kanade` |
+| open | `KANADE_AUTH_DISABLE=1` | local dev, `cargo run` |
+| static bearer | `StaticToken` registry value or `$KANADE_AUTH_STATIC_TOKEN` | single-operator fleets — paste the same secret on the SPA login + `kanade` CLI |
+| HS256 JWT | `JwtSecret` registry value or `$KANADE_JWT_SECRET` | full multi-user setup; sign tokens out-of-band with `aud=kanade` |
 
-Precedence: `DISABLE` > `STATIC_TOKEN` > `JWT_SECRET`. Backend with none of
-the three set falls back to a hard-coded dev secret and logs a loud warning —
-fine for one-shot debugging, **never** for production.
+Precedence: `DISABLE` > static bearer > JWT. Backend with none of the three
+set falls back to a hard-coded dev secret and logs a loud warning — fine for
+one-shot debugging, **never** for production.
+
+Each secret resolves registry-first, env-second:
+
+```text
+StaticToken:  HKLM\SOFTWARE\kanade\backend\StaticToken  →  $KANADE_AUTH_STATIC_TOKEN
+JwtSecret:    HKLM\SOFTWARE\kanade\backend\JwtSecret    →  $KANADE_JWT_SECRET
+```
+
+Provision the registry values with `deploy-backend.ps1` so the script can
+strip non-admin ACEs from the key (SYSTEM + Administrators read only). The
+env vars stay for `cargo run` / `cargo make dev` / non-Windows hosts.
+`KANADE_AUTH_DISABLE` stays env-only — it's a presence flag, not a secret.
 
 Clients send `Authorization: Bearer <token>` on every `/api/*` request:
 
@@ -300,7 +312,10 @@ Clients send `Authorization: Bearer <token>` on every `/api/*` request:
   regardless of which auth mode the backend is running.
 
 ```powershell
-# Backend side
+# Backend side — production (registry, hardened ACL)
+.\deploy-backend.ps1 -StaticToken 'kanade-fleet-secret-2026'
+
+# Backend side — dev (env, current shell only)
 $env:KANADE_AUTH_STATIC_TOKEN = "kanade-fleet-secret-2026"
 .\deploy-backend.ps1
 

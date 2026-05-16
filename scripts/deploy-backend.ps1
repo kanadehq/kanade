@@ -62,6 +62,19 @@
   backend reads this at startup ahead of $env:KANADE_NATS_TOKEN.
   Required when the broker is started with `authorization { token: ... }`.
 
+.PARAMETER StaticToken
+  If set, write the HTTP static-token bearer to
+  HKLM\SOFTWARE\kanade\backend\StaticToken (REG_SZ, hardened ACL).
+  Backend resolves it ahead of $env:KANADE_AUTH_STATIC_TOKEN.
+  Choose this OR -JwtSecret, not both — backend's middleware
+  prefers StaticToken when present.
+
+.PARAMETER JwtSecret
+  If set, write the HS256 JWT signing secret to
+  HKLM\SOFTWARE\kanade\backend\JwtSecret (REG_SZ, hardened ACL).
+  Backend resolves it ahead of $env:KANADE_JWT_SECRET. Operators
+  sign tokens out-of-band with `aud=kanade` + a future `exp`.
+
 .EXAMPLE
   PS> .\deploy-backend.ps1                            # opens whatever backend.toml binds to
 
@@ -73,6 +86,12 @@
 
 .EXAMPLE
   PS> .\deploy-backend.ps1 -NatsToken 'kanade-fleet-secret-2026'   # provision NATS bearer token
+
+.EXAMPLE
+  PS> .\deploy-backend.ps1 -StaticToken 'kanade-fleet-secret-2026' # provision HTTP static-token bearer
+
+.EXAMPLE
+  PS> .\deploy-backend.ps1 -JwtSecret  '<long-hs256-secret>'       # provision HS256 JWT signing key
 
 .EXAMPLE
   PS> .\deploy-backend.ps1 -ForceConfig               # re-run after binary update, fresh config
@@ -90,23 +109,29 @@ param(
     [switch]$NoFirewall,
     [switch]$Recreate,
     [switch]$NoStart,
-    [string]$NatsToken    = ''
+    [string]$NatsToken    = '',
+    [string]$StaticToken  = '',
+    [string]$JwtSecret    = ''
 )
 
 $ErrorActionPreference = 'Stop'
 
-# Provision the NATS bearer token under HKLM\SOFTWARE\kanade\agent
-# (the path is shared across agent + backend + CLI on this host) and
-# strip non-admin ACEs from the key. See deploy-agent.ps1 for the
-# matching helper.
-function Set-KanadeNatsToken {
-    param([Parameter(Mandatory)][string]$Token)
+# Write a secret value to HKLM\SOFTWARE\kanade\<subkey>\<value> and
+# strip non-admin ACEs from the leaf key. Used to provision NATS
+# tokens, HTTP static tokens, and JWT signing secrets — see the
+# resolution order in kanade-shared::secrets and kanade-backend::auth.
+function Set-KanadeRegistrySecret {
+    param(
+        [Parameter(Mandatory)][string]$Subkey,
+        [Parameter(Mandatory)][string]$ValueName,
+        [Parameter(Mandatory)][string]$Value
+    )
 
-    $regKey = 'HKLM:\SOFTWARE\kanade\agent'
+    $regKey = "HKLM:\SOFTWARE\kanade\$Subkey"
     if (-not (Test-Path $regKey)) {
         New-Item -Path $regKey -Force | Out-Null
     }
-    Set-ItemProperty -Path $regKey -Name 'NatsToken' -Value $Token -Type String
+    Set-ItemProperty -Path $regKey -Name $ValueName -Value $Value -Type String
 
     $acl = Get-Acl -Path $regKey
     $acl.SetAccessRuleProtection($true, $false)
@@ -118,7 +143,7 @@ function Set-KanadeNatsToken {
     }
     Set-Acl -Path $regKey -AclObject $acl
 
-    Write-Host "Wrote NatsToken to $regKey (SYSTEM + Administrators only)."
+    Write-Host "Wrote $ValueName to $regKey (SYSTEM + Administrators only)."
 }
 
 $binDir    = Join-Path $env:ProgramFiles 'Kanade'
@@ -184,7 +209,13 @@ if ($ForceConfig -or -not (Test-Path $configDst)) {
 }
 
 if ($NatsToken) {
-    Set-KanadeNatsToken -Token $NatsToken
+    Set-KanadeRegistrySecret -Subkey 'agent'   -ValueName 'NatsToken'   -Value $NatsToken
+}
+if ($StaticToken) {
+    Set-KanadeRegistrySecret -Subkey 'backend' -ValueName 'StaticToken' -Value $StaticToken
+}
+if ($JwtSecret) {
+    Set-KanadeRegistrySecret -Subkey 'backend' -ValueName 'JwtSecret'   -Value $JwtSecret
 }
 
 # Service binPath = quoted exe + --config flag pointing at the
