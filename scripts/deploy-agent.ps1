@@ -108,6 +108,29 @@ if (-not $svc) {
     if ($LASTEXITCODE -ne 0) { throw "sc.exe config failed (exit $LASTEXITCODE)" }
 }
 
+# Failure recovery — restart on any non-clean-stop exit.
+#
+# This is what makes the agent's self-update path work: when
+# self_update.rs swaps the binary into place it calls
+# std::process::exit(64), and SCM has to interpret that exit as a
+# recoverable failure for the configured restart action to fire.
+#
+#   actions= restart/5000/restart/15000/restart/60000
+#     1st failure: wait 5s then restart
+#     2nd failure: 15s
+#     3rd failure: 60s
+#   reset= 86400
+#     Reset the failure counter after 24h of clean uptime.
+#   failureflag <svc> 1   (= bFailureActionsOnNonCrashFailures)
+#     Trigger the actions on ANY non-stop exit, not just crashes.
+#     Without this, exit(64) is silently treated as a normal exit
+#     and the service stays stopped after self-update.
+Write-Host "Configuring failure recovery on $ServiceName"
+& sc.exe failure $ServiceName reset= 86400 actions= restart/5000/restart/15000/restart/60000 | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "sc.exe failure failed (exit $LASTEXITCODE)" }
+& sc.exe failureflag $ServiceName 1 | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "sc.exe failureflag failed (exit $LASTEXITCODE)" }
+
 if (-not $NoStart) {
     Write-Host "Starting $ServiceName"
     Start-Service -Name $ServiceName

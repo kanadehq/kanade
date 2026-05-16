@@ -37,6 +37,8 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    cleanup_stale_upgrade_artifacts();
+
     let cli = Cli::parse();
     let cfg_path =
         default_paths::find_config(cli.config.as_deref(), "KANADE_AGENT_CONFIG", "agent.toml")?;
@@ -95,4 +97,34 @@ async fn main() -> Result<()> {
     );
 
     Ok(())
+}
+
+/// Remove `<exe>.old` / `<exe>.new` left over from the previous
+/// self-update cycle. `.old` is the previous-version exe, no longer
+/// loaded; `.new` would only exist if a swap was interrupted before
+/// the final rename (the in-place exe is still valid in that case).
+/// Either way, removal here keeps the install dir tidy and stops
+/// stale binaries from accumulating across upgrade cycles.
+fn cleanup_stale_upgrade_artifacts() {
+    let Ok(current) = std::env::current_exe() else {
+        return;
+    };
+    let Some(exe_dir) = current.parent() else {
+        return;
+    };
+    let Some(exe_name) = current.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    for suffix in ["old", "new"] {
+        let path = exe_dir.join(format!("{exe_name}.{suffix}"));
+        if !path.exists() {
+            continue;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(_) => tracing::info!(?path, suffix, "removed stale upgrade artifact"),
+            Err(e) => {
+                tracing::warn!(?path, suffix, error = %e, "couldn't remove stale upgrade artifact")
+            }
+        }
+    }
 }

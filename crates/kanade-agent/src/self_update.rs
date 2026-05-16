@@ -1,15 +1,22 @@
 //! Self-update watcher (spec §2.10.5). Listens to
 //! `agent_config.target_version`. When it drifts from `AGENT_VERSION`
 //! the watcher pulls the new binary from the `agent_releases` Object
-//! Store, hashes it (SHA-256), and stages it next to the running exe.
+//! Store, hashes it (SHA-256), atomically swaps it into the running
+//! exe's location, and exits — the Windows Service Control Manager
+//! then restarts the service via its configured failure-actions, this
+//! time loading the new binary.
 //!
-//! Sprint 4d MVP: download + hash + log "restart pending". The actual
-//! exe swap + Windows-Service restart lands in a follow-up because a
-//! running .exe can't be safely deleted on Windows — a clean
-//! supervisor-driven restart belongs in the windows-service crate
-//! wiring, not inside the long-lived agent task.
+//! The swap is the cross-volume-safe three-step (copy to `<exe>.new`,
+//! rename `<exe>` to `<exe>.old`, rename `.new` to `<exe>`) so the
+//! window in which the running exe path holds a partially-written file
+//! is zero. Cleanup of `.old` / `.new` from any interrupted attempt
+//! happens at startup in `main.rs::cleanup_stale_upgrade_artifacts`.
+//!
+//! `deploy-agent.ps1` is responsible for configuring `sc.exe failure`
+//! and `sc.exe failureflag 1` on the service so SCM treats the
+//! self-update exit (code 64) as a recoverable failure and restarts.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use async_nats::jetstream;
@@ -124,9 +131,69 @@ async fn maybe_download(
         path = ?staging,
         bytes = total,
         sha256 = %hex(&digest),
-        "staged new agent binary — restart pending (windows-service supervisor swap is the next step)",
+        "staged new agent binary — beginning atomic swap",
     );
+
+    swap_and_restart(&staging, target).await?;
+    // Unreachable: swap_and_restart calls std::process::exit on success.
     Ok(())
+}
+
+/// Replace the running exe with the staged one and exit so SCM's
+/// failure-actions can restart the service on the new binary.
+///
+/// Sequence (cross-volume safe: staging is under `%ProgramData%`,
+/// the running exe under `%ProgramFiles%`):
+///   1. Copy `<staged>` to `<exe>.new` in the exe's directory.
+///   2. Rename `<exe>` to `<exe>.old`. Allowed even though the file
+///      is mapped — Windows blocks delete-while-loaded, not rename.
+///   3. Rename `<exe>.new` to `<exe>` — atomic within the same dir.
+///   4. `std::process::exit(64)`. With `sc.exe failureflag <svc> 1`
+///      configured on the service, SCM treats this as a recoverable
+///      failure and applies the configured restart action.
+///
+/// Startup-time cleanup of `<exe>.old` lives in `main.rs` so the
+/// stale binary doesn't accumulate.
+async fn swap_and_restart(staged: &Path, target_version: &str) -> Result<()> {
+    let current = std::env::current_exe().context("current_exe")?;
+    let exe_dir = current
+        .parent()
+        .context("current_exe has no parent directory")?;
+    let exe_name = current
+        .file_name()
+        .and_then(|s| s.to_str())
+        .context("current_exe has no UTF-8 file name")?
+        .to_string();
+    let new_path = exe_dir.join(format!("{exe_name}.new"));
+    let old_path = exe_dir.join(format!("{exe_name}.old"));
+
+    // Tidy any leftover .new / .old from a previous interrupted run
+    // so the renames below always have a clean target.
+    let _ = tokio::fs::remove_file(&new_path).await;
+    let _ = tokio::fs::remove_file(&old_path).await;
+
+    tokio::fs::copy(staged, &new_path)
+        .await
+        .with_context(|| format!("copy {staged:?} -> {new_path:?}"))?;
+
+    tokio::fs::rename(&current, &old_path)
+        .await
+        .with_context(|| format!("rename {current:?} -> {old_path:?}"))?;
+    tokio::fs::rename(&new_path, &current)
+        .await
+        .with_context(|| format!("rename {new_path:?} -> {current:?}"))?;
+
+    info!(
+        target = target_version,
+        replaced = ?current,
+        backup   = ?old_path,
+        "swap complete — exiting (code 64); SCM failure-actions take over",
+    );
+
+    // Let the tracing subscriber flush its buffer before SCM kills us.
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+    std::process::exit(64);
 }
 
 fn staging_path(version: &str) -> Result<PathBuf> {

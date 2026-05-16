@@ -9,6 +9,11 @@ Cargo.lock.bak
 *.db-shm
 *.db-wal
 
+# Release-staging output from scripts\build-release.ps1
+# (kanade-<role>.exe + <role>.toml + deploy-<role>.ps1 per role,
+# optionally a sibling .zip when -Zip is passed).
+/dist/
+
 # NOTE: kata-managed base block (begin/end markers below) sits just
 # after this point. The Rust ignores above live OUTSIDE the kata
 # section so they're owned by the project, not the pj-base template.
