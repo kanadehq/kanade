@@ -33,6 +33,18 @@ jobs:
       - name: Cache cargo registry + build
         uses: Swatinem/rust-cache@v2.9.1
 
+      # Re-build the SPA bundle before any cargo step touches
+      # kanade-backend. The committed web/dist/ is what cargo would
+      # otherwise package, and a stale dist (e.g., operator forgot
+      # to run `cargo make web-build` before bumping) shouldn't slip
+      # through to crates.io. bun's install + Vite build adds ~30s.
+      - uses: oven-sh/setup-bun@v2
+      - name: Build SPA bundle
+        working-directory: crates/kanade-backend/web
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
       - name: Publish kanade-shared
         run: cargo publish -p kanade-shared --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
@@ -77,6 +89,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2.9.1
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # rust-embed bakes web/dist/ into kanade-backend.exe at compile
+      # time. Build the SPA fresh on each runner before cargo builds
+      # so the artefact uploaded to the Release page carries the
+      # bundle produced from this exact commit (rather than whatever
+      # was last `cargo make web-build`-ed locally and committed).
+      - uses: oven-sh/setup-bun@v2
+      - name: Build SPA bundle
+        working-directory: crates/kanade-backend/web
+        shell: bash
+        run: |
+          bun install --frozen-lockfile
+          bun run build
 
       - name: Build release binaries
         run: cargo build --release --workspace --bins
