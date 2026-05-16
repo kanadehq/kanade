@@ -89,6 +89,153 @@ impl From<ExecuteShell> for Shell {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn target_is_specified_requires_at_least_one_field() {
+        let empty = Target::default();
+        assert!(!empty.is_specified());
+
+        let with_all = Target {
+            all: true,
+            ..Target::default()
+        };
+        assert!(with_all.is_specified());
+
+        let with_groups = Target {
+            groups: vec!["canary".into()],
+            ..Target::default()
+        };
+        assert!(with_groups.is_specified());
+
+        let with_pcs = Target {
+            pcs: vec!["minipc".into()],
+            ..Target::default()
+        };
+        assert!(with_pcs.is_specified());
+    }
+
+    #[test]
+    fn manifest_deserialises_minimal_yaml() {
+        // Matches jobs/echo-test.yaml.
+        let yaml = r#"
+id: echo-test
+version: 0.0.1
+target:
+  pcs: [minipc]
+execute:
+  shell: powershell
+  script: "echo 'kanade'"
+  timeout: 30s
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(m.id, "echo-test");
+        assert_eq!(m.version, "0.0.1");
+        assert!(m.target.is_specified());
+        assert_eq!(m.target.pcs, vec!["minipc"]);
+        assert!(matches!(m.execute.shell, ExecuteShell::Powershell));
+        assert_eq!(m.execute.script.trim(), "echo 'kanade'");
+        assert_eq!(m.execute.timeout, "30s");
+        assert!(m.execute.jitter.is_none());
+        assert!(m.rollout.is_none());
+        assert!(!m.require_approval);
+    }
+
+    #[test]
+    fn manifest_deserialises_wave_rollout() {
+        let yaml = r#"
+id: cleanup
+version: 1.0.0
+target:
+  groups: [canary, wave1]
+execute:
+  shell: cmd
+  script: "rmdir /S /Q C:\\temp"
+  timeout: 5m
+  jitter: 30s
+rollout:
+  strategy: wave
+  waves:
+    - { group: canary, delay: 0s }
+    - { group: wave1,  delay: 5s }
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        assert!(matches!(m.execute.shell, ExecuteShell::Cmd));
+        assert_eq!(m.execute.jitter.as_deref(), Some("30s"));
+        let rollout = m.rollout.expect("rollout present");
+        assert_eq!(rollout.waves.len(), 2);
+        assert_eq!(rollout.waves[0].group, "canary");
+        assert_eq!(rollout.waves[0].delay, "0s");
+        assert_eq!(rollout.waves[1].delay, "5s");
+        assert_eq!(rollout.strategy, RolloutStrategy::Wave);
+    }
+
+    #[test]
+    fn schedule_embeds_full_manifest() {
+        let yaml = r#"
+id: every-10s
+cron: "*/10 * * * * *"
+enabled: true
+manifest:
+  id: scheduled-echo
+  version: 1.0.0
+  target:
+    pcs: [minipc]
+  execute:
+    shell: powershell
+    script: "echo hi"
+    timeout: 30s
+"#;
+        let s: Schedule = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(s.id, "every-10s");
+        assert_eq!(s.cron, "*/10 * * * * *");
+        assert!(s.enabled);
+        assert_eq!(s.manifest.id, "scheduled-echo");
+    }
+
+    #[test]
+    fn schedule_enabled_defaults_to_true() {
+        let yaml = r#"
+id: x
+cron: "* * * * * *"
+manifest:
+  id: y
+  version: 1.0.0
+  target:
+    all: true
+  execute:
+    shell: powershell
+    script: "echo"
+    timeout: 1s
+"#;
+        let s: Schedule = serde_yaml::from_str(yaml).expect("parse");
+        assert!(s.enabled);
+    }
+
+    #[test]
+    fn execute_shell_into_wire_shell() {
+        assert_eq!(Shell::from(ExecuteShell::Powershell), Shell::Powershell);
+        assert_eq!(Shell::from(ExecuteShell::Cmd), Shell::Cmd);
+    }
+
+    #[test]
+    fn missing_required_field_errors() {
+        // `id` missing.
+        let yaml = r#"
+version: 1.0.0
+target: { all: true }
+execute:
+  shell: powershell
+  script: "echo"
+  timeout: 1s
+"#;
+        let r: Result<Manifest, _> = serde_yaml::from_str(yaml);
+        assert!(r.is_err(), "expected error, got {:?}", r);
+    }
+}
+
 /// Periodic schedule (spec §2.4.3). The full job [`Manifest`] is embedded
 /// so the scheduler can deploy it without a separate Git lookup; once a
 /// dedicated job-catalog API lands, `manifest` can become a `job_id`

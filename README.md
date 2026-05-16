@@ -3,6 +3,11 @@
   <img src="https://raw.githubusercontent.com/yukimemi/kanade/main/assets/logo.svg" alt="kanade — orchestrate fleets of Windows endpoints" width="540">
 </picture>
 
+[![CI](https://github.com/yukimemi/kanade/actions/workflows/ci.yml/badge.svg)](https://github.com/yukimemi/kanade/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/yukimemi/kanade/graph/badge.svg)](https://codecov.io/gh/yukimemi/kanade)
+[![crates.io](https://img.shields.io/crates/v/kanade.svg)](https://crates.io/crates/kanade)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/yukimemi/kanade/blob/main/LICENSE)
+
 > 奏 — *orchestrate*. A self-hosted Rust pub/sub backbone for managing
 > thousands of Windows endpoints without Active Directory. NATS / JetStream
 > carries inventory polling, fleet-wide rollouts, and ad-hoc emergency

@@ -27,3 +27,64 @@ pub const STREAM_RESULTS: &str = "RESULTS";
 pub const STREAM_DEPLOY: &str = "DEPLOY";
 pub const STREAM_EVENTS: &str = "EVENTS";
 pub const STREAM_AUDIT: &str = "AUDIT";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// NATS KV bucket names must be domain-safe ASCII (a-z, A-Z, 0-9, _, -).
+    /// Lock the constants down so a future edit doesn't introduce a `.` and
+    /// break create_key_value silently on the broker side.
+    #[test]
+    fn bucket_names_are_domain_safe() {
+        for name in [
+            BUCKET_SCRIPT_CURRENT,
+            BUCKET_SCRIPT_STATUS,
+            BUCKET_AGENTS_STATE,
+            BUCKET_AGENT_CONFIG,
+            BUCKET_SCHEDULES,
+            OBJECT_AGENT_RELEASES,
+        ] {
+            assert!(
+                !name.contains('.'),
+                "bucket name {name:?} contains a dot, which NATS KV rejects"
+            );
+            assert!(
+                name.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+                "bucket name {name:?} has non-domain-safe characters"
+            );
+        }
+    }
+
+    #[test]
+    fn stream_names_are_unique() {
+        let names = [
+            STREAM_INVENTORY,
+            STREAM_RESULTS,
+            STREAM_DEPLOY,
+            STREAM_EVENTS,
+            STREAM_AUDIT,
+        ];
+        let mut deduped = names.to_vec();
+        deduped.sort_unstable();
+        deduped.dedup();
+        assert_eq!(
+            deduped.len(),
+            names.len(),
+            "stream constants collide: {names:?}"
+        );
+    }
+
+    #[test]
+    fn script_status_strings() {
+        assert_eq!(SCRIPT_STATUS_ACTIVE, "ACTIVE");
+        assert_eq!(SCRIPT_STATUS_REVOKED, "REVOKED");
+        assert_ne!(SCRIPT_STATUS_ACTIVE, SCRIPT_STATUS_REVOKED);
+    }
+
+    #[test]
+    fn key_agent_target_version_constant() {
+        assert_eq!(KEY_AGENT_TARGET_VERSION, "target_version");
+    }
+}

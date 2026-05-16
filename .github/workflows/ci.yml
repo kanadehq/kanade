@@ -81,3 +81,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --locked --all-targets
+
+  coverage:
+    # Run cargo-llvm-cov on Linux (matches the `test` job already on
+    # ubuntu-latest; wmi is target-gated so it's excluded automatically).
+    # Upload lcov.info to Codecov so the README badge + PR comments work.
+    # The action is tokenless on public repos.
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+      - uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
