@@ -1,18 +1,19 @@
-//! HTTP surface for the staged self-update flow that lives in
-//! `kanade agent publish` / `kanade agent rollout` on the CLI side.
+//! HTTP surface for the staged self-update flow.
 //!
+//! * `POST /api/agents/publish` — multipart upload (`file` =
+//!   binary, `version` = label) → puts the bytes in the
+//!   `agent_releases` Object Store. Mirrors `kanade agent
+//!   publish` on the CLI side; the SPA's Rollout page wires a
+//!   file picker to this endpoint.
 //! * `GET  /api/agents/releases` — list every version present in
-//!   the `agent_releases` Object Store. Used by the Web UI's
-//!   rollout picker.
+//!   the Object Store. Used by the Web UI's rollout picker.
 //! * `POST /api/agents/rollout` — flip `target_version` (and
 //!   optionally `target_version_jitter`) on one scope of the
 //!   layered `agent_config` bucket. Mirrors the CLI's `rollout`
-//!   subcommand. We deliberately don't expose `publish` over HTTP
-//!   — uploading a multi-MB exe through the SPA is the wrong UX,
-//!   `kanade agent publish` stays the canonical path.
+//!   subcommand.
 
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{Multipart, State};
 use axum::http::StatusCode;
 use futures::StreamExt;
 use kanade_shared::kv::{
@@ -24,6 +25,90 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use super::AppState;
+
+// ─── POST /api/agents/publish ────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct PublishResponse {
+    pub version: String,
+    pub size: u64,
+    pub digest: Option<String>,
+}
+
+pub async fn publish(
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> Result<Json<PublishResponse>, (StatusCode, String)> {
+    let mut version: Option<String> = None;
+    let mut bytes: Option<Vec<u8>> = None;
+
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("read multipart field: {e}"),
+        )
+    })? {
+        match field.name().unwrap_or("") {
+            "version" => {
+                let text = field
+                    .text()
+                    .await
+                    .map_err(|e| (StatusCode::BAD_REQUEST, format!("read version field: {e}")))?;
+                version = Some(text.trim().to_owned());
+            }
+            "file" => {
+                let buf = field
+                    .bytes()
+                    .await
+                    .map_err(|e| (StatusCode::BAD_REQUEST, format!("read file field: {e}")))?;
+                bytes = Some(buf.to_vec());
+            }
+            other => {
+                warn!(field = other, "publish: ignoring unknown multipart field");
+            }
+        }
+    }
+
+    let version = version
+        .filter(|v| !v.is_empty())
+        .ok_or((StatusCode::BAD_REQUEST, "missing 'version' field".into()))?;
+    let bytes = bytes.ok_or((StatusCode::BAD_REQUEST, "missing 'file' field".into()))?;
+    if bytes.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "'file' field is empty".into()));
+    }
+
+    let size = bytes.len() as u64;
+    info!(version, size, "publish: uploading new agent binary");
+
+    let store = state
+        .jetstream
+        .get_object_store(OBJECT_AGENT_RELEASES)
+        .await
+        .map_err(|e| {
+            warn!(error = %e, "get_object_store agent_releases");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!(
+                    "Object Store '{OBJECT_AGENT_RELEASES}' missing — run `kanade jetstream setup`"
+                ),
+            )
+        })?;
+    let mut cursor = std::io::Cursor::new(bytes);
+    let meta = store
+        .put(version.as_str(), &mut cursor)
+        .await
+        .map_err(|e| {
+            warn!(error = %e, "object_store.put");
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        })?;
+    info!(version, digest = ?meta.digest, "publish: agent binary uploaded");
+
+    Ok(Json(PublishResponse {
+        version,
+        size,
+        digest: meta.digest,
+    }))
+}
 
 // ─── GET /api/agents/releases ────────────────────────────────────────
 

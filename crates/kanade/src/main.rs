@@ -47,6 +47,9 @@ enum SubCmd {
     Agent(cmd::agent::AgentArgs),
     /// Manage the layered agent_config KV bucket (global / per-group / per-pc).
     Config(cmd::config::ConfigArgs),
+    /// Manage groups: list fleet-wide, add/remove PC memberships,
+    /// list PCs in a given group.
+    Group(cmd::group::GroupArgs),
 }
 
 #[tokio::main]
@@ -87,6 +90,7 @@ async fn main() -> Result<()> {
         SubCmd::Kill(args) => cmd::kill::execute(client, args).await,
         SubCmd::Agent(args) => cmd::agent::execute(client, args).await,
         SubCmd::Config(args) => cmd::config::execute(client, args).await,
+        SubCmd::Group(args) => cmd::group::execute(client, args).await,
         SubCmd::Deploy(_) | SubCmd::Schedule(_) => unreachable!("handled above"),
     }
 }

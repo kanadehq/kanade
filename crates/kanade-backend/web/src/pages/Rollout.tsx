@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { CheckCircle2, Loader2, Rocket } from 'lucide-react';
+import { CheckCircle2, Loader2, Rocket, Upload } from 'lucide-react';
 import { useState } from 'react';
 
 import { ErrorCard } from '@/components/ErrorCard';
@@ -40,6 +40,8 @@ export function Rollout() {
   const [scopeKind, setScopeKind] = useState<ScopeKind>('group');
   const [scopeValue, setScopeValue] = useState('canary');
   const [jitter, setJitter] = useState('5m');
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploadVersion, setUploadVersion] = useState('');
 
   const releasesQ = useQuery({
     queryKey: ['agent-releases'],
@@ -48,6 +50,36 @@ export function Rollout() {
   const agentsQ = useQuery({
     queryKey: ['agents'],
     queryFn: () => apiFetch<AgentRow[]>('/api/agents'),
+  });
+
+  const upload = useMutation({
+    mutationFn: async () => {
+      if (!uploadFile || !uploadVersion) {
+        throw new Error('pick a file and enter a version');
+      }
+      const fd = new FormData();
+      fd.append('version', uploadVersion);
+      fd.append('file', uploadFile);
+      const token = localStorage.getItem('kanade_token') ?? '';
+      const res = await fetch('/api/agents/publish', {
+        method: 'POST',
+        body: fd,
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      });
+      if (!res.ok) {
+        throw new Error(`${res.status} ${res.statusText} — ${await res.text()}`);
+      }
+      return (await res.json()) as { version: string; size: number; digest: string | null };
+    },
+    onSuccess: (data) => {
+      // Surface the freshly uploaded version in the picker.
+      qc.invalidateQueries({ queryKey: ['agent-releases'] });
+      // Pre-select it for the rollout step below.
+      setVersion(data.version);
+      // Reset the upload form so a second upload doesn't re-fire on a stale state.
+      setUploadFile(null);
+      setUploadVersion('');
+    },
   });
 
   const rollout = useMutation({
@@ -87,15 +119,85 @@ export function Rollout() {
       <div className="flex items-baseline justify-between">
         <h2 className="text-xl">Agent rollout</h2>
         <span className="text-xs text-muted">
-          Two-step: <code>kanade agent publish</code> uploads the binary, this panel flips <code>target_version</code> on one scope.
+          Two-step: upload a binary, then flip <code>target_version</code> on one scope.
         </span>
       </div>
 
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
+            <Upload className="size-5 text-violet" />
+            1. Upload a binary
+          </CardTitle>
+          <CardDescription>
+            POSTs to <code>/api/agents/publish</code>. Body limit is 64 MB.
+            The CLI equivalent is <code>kanade agent publish &lt;binary&gt; --version &lt;v&gt;</code>.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div className="space-y-1 sm:col-span-2">
+            <Label htmlFor="up-file">binary (.exe / Linux / macOS)</Label>
+            <Input
+              id="up-file"
+              type="file"
+              accept=".exe,application/octet-stream,application/x-msdownload"
+              onChange={(e) => {
+                const f = e.target.files?.[0] ?? null;
+                setUploadFile(f);
+                // Best-effort version prefill from `kanade-agent-<v>.exe`.
+                if (f && !uploadVersion) {
+                  const m = f.name.match(/^kanade-agent[-_.]([0-9][\w.+-]*?)(?:-(?:linux|macos-arm64))?(?:\.exe)?$/);
+                  if (m) setUploadVersion(m[1]);
+                }
+              }}
+            />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="up-version">version label</Label>
+            <Input
+              id="up-version"
+              placeholder="e.g. 0.10.0"
+              value={uploadVersion}
+              onChange={(e) => setUploadVersion(e.target.value)}
+            />
+          </div>
+        </CardContent>
+        <CardContent className="flex items-center gap-3 pt-0">
+          <Button
+            onClick={() => upload.mutate()}
+            disabled={!uploadFile || !uploadVersion || upload.isPending}
+          >
+            {upload.isPending ? (
+              <Loader2 className="size-4 mr-2 animate-spin" />
+            ) : (
+              <Upload className="size-4 mr-2" />
+            )}
+            Upload
+          </Button>
+          {uploadFile && (
+            <span className="text-xs text-muted">
+              {uploadFile.name} · {fmtSize(uploadFile.size)}
+            </span>
+          )}
+          {upload.isSuccess && upload.data && (
+            <span className="flex items-center gap-2 text-sm text-success">
+              <CheckCircle2 className="size-4" />
+              uploaded {upload.data.version} ({fmtSize(upload.data.size)})
+            </span>
+          )}
+        </CardContent>
+        {upload.error && (
+          <CardContent className="pt-0">
+            <ErrorCard title="Upload failed" error={upload.error} />
+          </CardContent>
+        )}
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
             <Rocket className="size-5 text-violet" />
-            Roll out a version
+            2. Roll out a version
           </CardTitle>
           <CardDescription>
             Pick a version from the Object Store, choose a scope, and (recommended) set a jitter so agents don't all download at the same instant.

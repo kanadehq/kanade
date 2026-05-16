@@ -194,10 +194,12 @@ kanade agent rollout <v> --group <name> [--jitter <d>]       # canary / wave
 kanade agent rollout <v> --pc    <pc_id> [--jitter <d>]      # single-host pin
 kanade agent current                             # read agent_config.global.target_version
 
-kanade agent groups list <pc_id>                 # current group memberships for one PC
-kanade agent groups add  <pc_id> <group>         # add membership (idempotent)
-kanade agent groups rm   <pc_id> <group>         # drop membership
-kanade agent groups set  <pc_id> <group> ...     # replace whole list
+kanade group list                                # fleet-wide: every known group + member count + config flag
+kanade group list --pc <pc_id>                   # one PC's memberships
+kanade group members <name>                      # PCs in this group
+kanade group add  <pc_id> <name>                 # add membership (idempotent)
+kanade group rm   <pc_id> <name>                 # drop membership
+kanade group set  <pc_id> <name> ...             # replace whole list
 
 kanade config get  [--group <name>|--pc <pc_id>] # ConfigScope at this scope (default: global)
 kanade config set  <field>=<value> [...]         # set one field (target_version / inventory_* / heartbeat_*)
@@ -406,8 +408,9 @@ the PDB.
 - **v0.7.1** — agent file logging via `tracing-appender` (daily rotation, `[log] keep_days` retention), `kanade agent publish` auto-detects `--version` from the binary via `<exe> --version` probe
 - **v0.8.0** — staged self-update rollout: `kanade agent publish` is now upload-only (no KV touch); new `kanade agent rollout <ver> --global|--group <name>|--pc <pc_id> [--jitter <dur>]` flips `target_version` on one scope and (optionally) `target_version_jitter`. Agent-side `self_update` sleeps `random(0..jitter)` before downloading, defusing the "3000 agents hammer the Object Store at the same instant" failure mode. **Breaking change**: any operator scripts that relied on `publish` doing the rollout in one step need to chain a `rollout` call
 - **v0.9.0** — on-demand agent log fetch and a Web UI for rollout. New `logs.fetch.<pc_id>` NATS request/reply on the agent (`kanade agent logs <pc_id> [--tail N]` from the CLI, or the new **Logs** page in the SPA). New backend endpoints `/api/agents/<pc_id>/logs`, `/api/agents/releases`, `POST /api/agents/rollout`, plus a **Rollout** SPA page with a version picker / scope select / jitter input
+- **v0.10.0** — fleet-wide group ops + Web UI binary upload + logo viewBox fix. New `kanade group` top-level subcommand (`list` fleet-wide, `list --pc <id>` per-PC, `members <name>` reverse lookup, `add` / `rm` / `set` membership) replaces the old `kanade agent groups …`. SPA Rollout page gains an upload card backed by a new `POST /api/agents/publish` multipart endpoint (64 MB body limit) — the CLI is no longer required to publish a new binary
 
-Backlog: Web UI agent-binary upload (so the SPA can replace the CLI for the publish step too), Prometheus metrics, 3000-agent simulation, NATS cluster + replicated backend, Postgres migration.
+Backlog: Prometheus metrics, 3000-agent simulation, NATS cluster + replicated backend, Postgres migration.
 
 ## Production install layout
 

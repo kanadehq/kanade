@@ -14,9 +14,14 @@ pub mod schedules;
 pub mod scripts;
 
 use axum::Router;
-use axum::extract::FromRef;
+use axum::extract::{DefaultBodyLimit, FromRef};
 use axum::routing::{delete, get, post};
 use sqlx::SqlitePool;
+
+/// 64 MB upper bound for `POST /api/agents/publish` multipart bodies.
+/// kanade-agent.exe is ~13 MB on Windows; 64 MB leaves headroom for
+/// debug builds and future on-disk growth without becoming a DoS vector.
+const PUBLISH_BODY_LIMIT: usize = 64 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -85,6 +90,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/agents/{pc_id}/logs", get(agent_logs::tail))
         .route("/api/agents/releases", get(agent_releases::list_releases))
         .route("/api/agents/rollout", post(agent_releases::rollout))
+        .route(
+            "/api/agents/publish",
+            post(agent_releases::publish).layer(DefaultBodyLimit::max(PUBLISH_BODY_LIMIT)),
+        )
         .with_state(state)
         // Everything else (`/`, `/assets/...`, hash-router paths) is served
         // from the rust-embed bundle. The fallback runs after the API routes

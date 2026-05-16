@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod config;
 pub mod deploy;
+pub mod group;
 pub mod jetstream;
 pub mod kill;
 pub mod ping;
