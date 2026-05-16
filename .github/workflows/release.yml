@@ -17,17 +17,19 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write  # upload Windows binaries to the GitHub Release for build-release.ps1 -FromRelease
+  contents: write  # upload binaries to the GitHub Release
 
 jobs:
-  publish:
+  # crates.io publish is OS-agnostic and only needs to run once per
+  # tag, so keep it on a single Windows runner (cargo publish
+  # --verify of kanade-agent needs to compile the wmi crate, which
+  # only resolves on a Windows target).
+  publish-crates:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6.0.2
-
       - uses: dtolnay/rust-toolchain@stable
-
       - name: Cache cargo registry + build
         uses: Swatinem/rust-cache@v2.9.1
 
@@ -47,24 +49,60 @@ jobs:
       - name: Publish kanade (CLI)
         run: cargo publish -p kanade --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
-      # Build release binaries for the GitHub Release page. Each
-      # `cargo publish --verify` already compiled the crate, but
-      # those artefacts live under each crate's per-publish target
-      # subdir and `cargo build` is cheap when the registry cache
-      # is warm — no point chasing the verify outputs.
+  # Build native release binaries on every supported OS and attach
+  # them to the GitHub Release. kanade-agent's wmi / windows-service
+  # crates are target_os="windows" gated, so the binary compiles
+  # cleanly on Linux / macOS — it just does nothing useful there
+  # (no WMI inventory, no SCM hooks). Backend + CLI work on all 3.
+  build-artifacts:
+    needs: publish-crates
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            asset_suffix: '.exe'
+            target_label: 'windows'
+          - os: ubuntu-latest
+            asset_suffix: ''
+            target_label: 'linux'
+          - os: macos-latest
+            asset_suffix: ''
+            target_label: 'macos-arm64'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2.9.1
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       - name: Build release binaries
         run: cargo build --release --workspace --bins
 
-      # Upload kanade-agent.exe / kanade-backend.exe / kanade.exe
-      # to the auto-created GitHub Release for this tag.
-      # build-release.ps1's -FromRelease mode consumes them via
-      # Invoke-WebRequest, skipping cargo install for operators that
-      # don't have a Rust toolchain on the build host.
-      - name: Attach binaries to GitHub Release
+      # Rename per-OS for the release page. Windows keeps the bare
+      # `kanade-agent.exe` form to stay backwards-compatible with
+      # build-release.ps1 -FromRelease (it currently fetches
+      # `<bin>.exe`); Linux + macOS append a target label so the
+      # three OSes coexist on one release tag.
+      - name: Stage artefacts
+        shell: bash
+        run: |
+          mkdir -p staged
+          if [ "${{ matrix.target_label }}" = "windows" ]; then
+            cp target/release/kanade-agent.exe   staged/
+            cp target/release/kanade-backend.exe staged/
+            cp target/release/kanade.exe         staged/
+          else
+            cp target/release/kanade-agent   staged/kanade-agent-${{ matrix.target_label }}
+            cp target/release/kanade-backend staged/kanade-backend-${{ matrix.target_label }}
+            cp target/release/kanade         staged/kanade-${{ matrix.target_label }}
+          fi
+          ls -la staged/
+
+      - name: Attach to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            target/release/kanade-agent.exe
-            target/release/kanade-backend.exe
-            target/release/kanade.exe
+          files: staged/*
           fail_on_unmatched_files: true
