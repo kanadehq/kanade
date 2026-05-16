@@ -115,6 +115,26 @@ if (-not $svc) {
     if ($LASTEXITCODE -ne 0) { throw "sc.exe config failed (exit $LASTEXITCODE)" }
 }
 
+# Failure recovery — restart on any non-clean-stop exit.
+#
+# Backend doesn't self-update (deploy-backend.ps1 is the manual update
+# path), so we don't strictly need the `failureflag 1` bit for an
+# exit(64) handshake — but it's still cheap insurance: a panic that
+# unwinds out of #[tokio::main] returns a non-zero exit code, and
+# without failureflag SCM treats that as "service stopped" and leaves
+# the projector/API offline until the operator notices. With it, SCM
+# applies the restart actions just like a real crash.
+#
+#   actions= restart/5000/restart/15000/restart/60000
+#     1st failure: wait 5s; 2nd: 15s; 3rd: 60s.
+#   reset= 86400
+#     Reset failure counter after 24h of clean uptime.
+Write-Host "Configuring failure recovery on $ServiceName"
+& sc.exe failure $ServiceName reset= 86400 actions= restart/5000/restart/15000/restart/60000 | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "sc.exe failure failed (exit $LASTEXITCODE)" }
+& sc.exe failureflag $ServiceName 1 | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "sc.exe failureflag failed (exit $LASTEXITCODE)" }
+
 if ($FirewallPort -gt 0) {
     $ruleName = "$ServiceName (TCP $FirewallPort)"
     $existing = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue

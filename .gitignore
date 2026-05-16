@@ -14,6 +14,11 @@ Cargo.lock.bak
 # optionally a sibling .zip when -Zip is passed).
 /dist/
 
+# Persistent Cargo target dir for build-release.ps1 reruns — keeps
+# warm artefacts between stage builds so an unchanged version skips
+# the cargo install entirely. Multi-GB once primed; never commit.
+/.cargo-stage-cache/
+
 # NOTE: kata-managed base block (begin/end markers below) sits just
 # after this point. The Rust ignores above live OUTSIDE the kata
 # section so they're owned by the project, not the pj-base template.

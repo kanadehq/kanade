@@ -25,6 +25,14 @@
   Pass -Zip to also produce <OutDir>\<role>.zip (Compress-Archive)
   for handoff via filesharing tools that prefer single archives.
 
+  Reruns are cheap: a persistent Cargo target dir (`-TargetDir`,
+  default `<repo>\.cargo-stage-cache`) keeps build artifacts between
+  invocations, and if the stage already has a binary whose
+  `--version` matches the requested version the cargo install is
+  skipped entirely. Pass `-Force` to rebuild regardless, and note
+  that `-FromSource` always rebuilds (working-tree code may differ
+  from what `--version` reports).
+
 .PARAMETER Version
   Crate version to install from crates.io. Defaults to the version
   in the workspace Cargo.toml. Ignored under -FromSource.
@@ -44,6 +52,19 @@
   Which roles to stage. Default: agent + backend. Pass a subset
   (e.g. -Roles agent) to skip one.
 
+.PARAMETER TargetDir
+  Cargo `--target-dir` for cached build artifacts shared across
+  runs. Default: `<repo>\.cargo-stage-cache`. Shared between roles
+  on purpose — agent and backend reuse most of the dep graph
+  (tokio / serde / async-nats / tracing / …) so a shared cache
+  shrinks the total artefact footprint.
+
+.PARAMETER Force
+  Rebuild every selected role even when the staged binary already
+  reports the requested version. The default fast-path is intended
+  for "I edited the deploy script and want to re-stage" reruns; pass
+  -Force when you need cargo to actually re-resolve / re-link.
+
 .EXAMPLE
   # Stage release matching the workspace version (the common case):
   PS> .\scripts\build-release.ps1
@@ -55,15 +76,21 @@
 .EXAMPLE
   # Pin a specific crates.io version (e.g. for a hotfix older than HEAD):
   PS> .\scripts\build-release.ps1 -Version 0.1.4
+
+.EXAMPLE
+  # Force a clean rebuild despite the cached stage being up to date:
+  PS> .\scripts\build-release.ps1 -Force
 #>
 
 [CmdletBinding()]
 param(
     [string]  $Version,
-    [string]  $OutDir = 'dist',
+    [string]  $OutDir    = 'dist',
     [switch]  $FromSource,
     [switch]  $Zip,
-    [string[]]$Roles = @('agent', 'backend')
+    [string[]]$Roles     = @('agent', 'backend'),
+    [string]  $TargetDir,
+    [switch]  $Force
 )
 
 $ErrorActionPreference = 'Stop'
@@ -88,9 +115,18 @@ if (-not [System.IO.Path]::IsPathRooted($OutDir)) {
 }
 $null = New-Item -ItemType Directory -Path $OutDir -Force
 
+if (-not $TargetDir) {
+    $TargetDir = Join-Path $repoRoot '.cargo-stage-cache'
+}
+if (-not [System.IO.Path]::IsPathRooted($TargetDir)) {
+    $TargetDir = Join-Path $repoRoot $TargetDir
+}
+$null = New-Item -ItemType Directory -Path $TargetDir -Force
+
 Write-Host ("Staging kanade v{0} into {1}" -f $Version, $OutDir)
 if ($FromSource) { Write-Host "Source: local checkout ($repoRoot)" }
 else             { Write-Host "Source: crates.io" }
+Write-Host ("Cache:  {0}" -f $TargetDir)
 
 foreach ($role in $Roles) {
     $crate    = "kanade-$role"
@@ -107,41 +143,70 @@ foreach ($role in $Roles) {
     if (-not (Test-Path $cfgSrc))    { throw "Missing $cfgName in repo root ($cfgSrc)." }
     if (-not (Test-Path $deploySrc)) { throw "Missing $deployPs under scripts\ ($deploySrc)." }
 
-    if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
-    $null = New-Item -ItemType Directory -Path $stage
+    $exeDst = Join-Path $stage $exeName
 
-    $temp = Join-Path ([System.IO.Path]::GetTempPath()) ("kanade-stage-{0}-{1}" -f $role, [System.Guid]::NewGuid().ToString('N'))
-    try {
-        if ($FromSource) {
-            $cratePath = Join-Path $repoRoot "crates\$crate"
-            if (-not (Test-Path $cratePath)) { throw "Missing crate path '$cratePath'." }
-            Write-Host "cargo install --path $cratePath --root $temp"
-            & cargo install --root $temp --locked --path $cratePath
-        } else {
-            Write-Host "cargo install $crate@$Version --root $temp"
-            & cargo install --root $temp --version $Version $crate
-        }
-        if ($LASTEXITCODE -ne 0) { throw "cargo install failed for $crate (exit $LASTEXITCODE)." }
-
-        $exeSrc = Join-Path $temp "bin\$exeName"
-        if (-not (Test-Path $exeSrc)) { throw "Built binary not found at '$exeSrc'." }
-
-        Copy-Item $exeSrc    (Join-Path $stage $exeName)
-        Copy-Item $cfgSrc    (Join-Path $stage $cfgName)
-        Copy-Item $deploySrc (Join-Path $stage $deployPs)
-
-        Write-Host "Staged $stage"
-        Get-ChildItem -Path $stage | ForEach-Object { Write-Host ("  {0,-30}  {1,10:N0} bytes" -f $_.Name, $_.Length) }
-
-        if ($Zip) {
-            $zipPath = "$stage.zip"
-            if (Test-Path $zipPath) { Remove-Item -Force $zipPath }
-            Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zipPath
-            Write-Host "Archived $zipPath"
+    # Fast-path: if the staged binary already reports the requested
+    # version, skip cargo install entirely. -FromSource always rebuilds
+    # (working-tree code may differ from what --version reports).
+    $skipBuild = $false
+    if (-not $FromSource -and -not $Force -and (Test-Path $exeDst)) {
+        try {
+            $verLine = (& $exeDst --version 2>$null) | Select-Object -First 1
+            if ($verLine) {
+                $installed = ($verLine -split '\s+', 2)[-1].Trim()
+                if ($installed -eq $Version) {
+                    Write-Host "Cached: $exeName already at v$Version (pass -Force to rebuild)."
+                    $skipBuild = $true
+                } else {
+                    Write-Host "Stale: $exeName reports '$installed', want '$Version' — rebuilding."
+                }
+            }
+        } catch {
+            # Couldn't run the staged exe — fall through to a rebuild.
         }
     }
-    finally {
-        if (Test-Path $temp) { Remove-Item -Recurse -Force $temp }
+
+    if (-not $skipBuild) {
+        if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+        $null = New-Item -ItemType Directory -Path $stage
+
+        $temp = Join-Path ([System.IO.Path]::GetTempPath()) ("kanade-stage-{0}-{1}" -f $role, [System.Guid]::NewGuid().ToString('N'))
+        try {
+            if ($FromSource) {
+                $cratePath = Join-Path $repoRoot "crates\$crate"
+                if (-not (Test-Path $cratePath)) { throw "Missing crate path '$cratePath'." }
+                Write-Host "cargo install --path $cratePath --root $temp --target-dir $TargetDir"
+                & cargo install --root $temp --locked --path $cratePath --target-dir $TargetDir
+            } else {
+                Write-Host "cargo install $crate@$Version --root $temp --target-dir $TargetDir"
+                & cargo install --root $temp --version $Version $crate --target-dir $TargetDir
+            }
+            if ($LASTEXITCODE -ne 0) { throw "cargo install failed for $crate (exit $LASTEXITCODE)." }
+
+            $exeSrc = Join-Path $temp "bin\$exeName"
+            if (-not (Test-Path $exeSrc)) { throw "Built binary not found at '$exeSrc'." }
+            Copy-Item $exeSrc $exeDst -Force
+        }
+        finally {
+            if (Test-Path $temp) { Remove-Item -Recurse -Force $temp }
+        }
+    }
+
+    # Always refresh the non-binary artefacts. They're tiny and may
+    # have been edited (config tweaks, deploy-script bumps) since the
+    # last stage even when the exe didn't change.
+    if (-not (Test-Path $stage)) { $null = New-Item -ItemType Directory -Path $stage }
+    Copy-Item $cfgSrc    (Join-Path $stage $cfgName)    -Force
+    Copy-Item $deploySrc (Join-Path $stage $deployPs)   -Force
+
+    Write-Host "Staged $stage"
+    Get-ChildItem -Path $stage | ForEach-Object { Write-Host ("  {0,-30}  {1,10:N0} bytes" -f $_.Name, $_.Length) }
+
+    if ($Zip) {
+        $zipPath = "$stage.zip"
+        if (Test-Path $zipPath) { Remove-Item -Force $zipPath }
+        Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zipPath
+        Write-Host "Archived $zipPath"
     }
 }
 
