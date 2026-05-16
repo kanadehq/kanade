@@ -87,13 +87,22 @@ args = ["run", "dev"]
 
 [tasks.backend-dev]
 description = "Run kanade-backend in dev mode (loopback :8081, workspace-local DB + logs, auth disabled). Coexists with an installed KanadeBackend Windows service running on :8080."
-env = { "KANADE_BACKEND_CONFIG" = "./backend.dev.toml", "KANADE_AUTH_DISABLE" = "1", "RUST_LOG" = "info,kanade_backend=debug,tower_http=info" }
+# cwd pinned to the workspace root: `cargo make dev` runs in
+# parallel with `web-dev` (which uses cwd=crates/.../web), and
+# without an explicit cwd here the parallel runner's per-task
+# directory state isn't guaranteed — that meant `./backend.dev.toml`
+# (and the SQLite path inside it) resolved to whatever the last
+# task touched. Absolute config path via the env var below adds a
+# belt-and-braces fallback.
+cwd = "${CARGO_MAKE_WORKING_DIRECTORY}"
+env = { "KANADE_BACKEND_CONFIG" = "${CARGO_MAKE_WORKING_DIRECTORY}/backend.dev.toml", "KANADE_AUTH_DISABLE" = "1", "RUST_LOG" = "info,kanade_backend=debug,tower_http=info" }
 command = "cargo"
 args = ["run", "-p", "kanade-backend"]
 
 [tasks.agent-dev]
 description = "Run kanade-agent in dev mode against the same NATS the installed service uses. Beware: both will race on commands.pc.<hostname>; stop the installed service first (Stop-Service KanadeAgent) if you want clean dev-only behaviour."
-env = { "KANADE_AGENT_CONFIG" = "./agent.toml", "RUST_LOG" = "info,kanade_agent=debug" }
+cwd = "${CARGO_MAKE_WORKING_DIRECTORY}"
+env = { "KANADE_AGENT_CONFIG" = "${CARGO_MAKE_WORKING_DIRECTORY}/agent.toml", "RUST_LOG" = "info,kanade_agent=debug" }
 command = "cargo"
 args = ["run", "-p", "kanade-agent"]
 

@@ -6,6 +6,7 @@ import { AuthProvider } from '@/lib/auth';
 import { Agents } from '@/pages/Agents';
 import { Audit } from '@/pages/Audit';
 import { Config } from '@/pages/Config';
+import { Dashboard } from '@/pages/Dashboard';
 import { Deploy } from '@/pages/Deploy';
 import { JetStream } from '@/pages/JetStream';
 import { Placeholder } from '@/pages/Placeholder';
@@ -36,7 +37,8 @@ export default function App() {
             <Nav />
             <main className="flex-1 max-w-7xl w-full mx-auto px-6 py-8">
               <Routes>
-                <Route path="/" element={<Navigate to="/agents" replace />} />
+                <Route path="/" element={<Navigate to="/dashboard" replace />} />
+                <Route path="/dashboard" element={<Dashboard />} />
                 <Route path="/agents" element={<Agents />} />
                 <Route path="/run" element={<Run />} />
                 <Route path="/results" element={<Results />} />
