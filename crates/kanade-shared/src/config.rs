@@ -17,10 +17,12 @@ pub struct AgentConfig {
 pub struct AgentSection {
     pub id: String,
     pub nats_url: String,
-    /// Wave / group memberships. Each entry causes the agent to
-    /// subscribe to `commands.group.{name}` on startup. Sprint 4a
-    /// declares groups statically in the agent.toml; a dynamic
-    /// group-membership KV is on the Sprint 4d backlog.
+    /// DEPRECATED in Sprint 5: group membership is now server-managed
+    /// via the `agent_groups` KV bucket. Use
+    /// `kanade agent groups set <pc_id> <group> [<group> ...]` to
+    /// declare membership. The field is still parsed for back-compat
+    /// — old agent.toml files keep loading — but the value is
+    /// logged-and-ignored at startup and will be removed in v0.3.0.
     #[serde(default)]
     pub groups: Vec<String>,
 }

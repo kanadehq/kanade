@@ -2,7 +2,10 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
-use kanade_shared::kv::{BUCKET_AGENT_CONFIG, KEY_AGENT_TARGET_VERSION, OBJECT_AGENT_RELEASES};
+use kanade_shared::kv::{
+    BUCKET_AGENT_CONFIG, BUCKET_AGENT_GROUPS, KEY_AGENT_TARGET_VERSION, OBJECT_AGENT_RELEASES,
+};
+use kanade_shared::wire::AgentGroups;
 use tokio::fs;
 use tracing::info;
 
@@ -27,12 +30,38 @@ pub enum AgentSub {
     },
     /// Print the currently broadcast target_version.
     Current,
+    /// Manage a PC's group memberships via the agent_groups KV bucket.
+    Groups(GroupsArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct GroupsArgs {
+    #[command(subcommand)]
+    pub sub: GroupsSub,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum GroupsSub {
+    /// Print the groups this PC currently belongs to.
+    List { pc_id: String },
+    /// Add one group to this PC's membership (idempotent).
+    Add { pc_id: String, group: String },
+    /// Remove one group from this PC's membership (idempotent).
+    Rm { pc_id: String, group: String },
+    /// Replace this PC's whole membership list (sorted + deduped on
+    /// the server side). Pass zero groups to clear.
+    Set {
+        pc_id: String,
+        #[arg(trailing_var_arg = true)]
+        groups: Vec<String>,
+    },
 }
 
 pub async fn execute(client: async_nats::Client, args: AgentArgs) -> Result<()> {
     match args.sub {
         AgentSub::Publish { binary, version } => publish(client, binary, version).await,
         AgentSub::Current => current(client).await,
+        AgentSub::Groups(g) => groups(client, g).await,
     }
 }
 
@@ -90,5 +119,79 @@ async fn current(client: async_nats::Client) -> Result<()> {
         }
         None => println!("target_version = (unset)"),
     }
+    Ok(())
+}
+
+async fn groups(client: async_nats::Client, args: GroupsArgs) -> Result<()> {
+    let js = async_nats::jetstream::new(client);
+    let kv = js
+        .get_key_value(BUCKET_AGENT_GROUPS)
+        .await
+        .with_context(|| {
+            format!("KV '{BUCKET_AGENT_GROUPS}' missing — run `kanade jetstream setup`")
+        })?;
+    match args.sub {
+        GroupsSub::List { pc_id } => {
+            let g = read_groups(&kv, &pc_id).await?;
+            if g.is_empty() {
+                println!("{pc_id}: (no groups)");
+            } else {
+                println!("{pc_id}: {}", g.groups.join(", "));
+            }
+        }
+        GroupsSub::Add { pc_id, group } => {
+            let mut g = read_groups(&kv, &pc_id).await?;
+            if g.insert(&group) {
+                write_groups(&kv, &pc_id, &g).await?;
+                println!("{pc_id}: added '{group}' -> [{}]", g.groups.join(", "));
+            } else {
+                println!("{pc_id}: already has '{group}' (no change)");
+            }
+        }
+        GroupsSub::Rm { pc_id, group } => {
+            let mut g = read_groups(&kv, &pc_id).await?;
+            if g.remove(&group) {
+                write_groups(&kv, &pc_id, &g).await?;
+                let after = if g.is_empty() {
+                    "(no groups)".to_string()
+                } else {
+                    g.groups.join(", ")
+                };
+                println!("{pc_id}: removed '{group}' -> [{after}]");
+            } else {
+                println!("{pc_id}: not a member of '{group}' (no change)");
+            }
+        }
+        GroupsSub::Set { pc_id, groups } => {
+            let normalised = AgentGroups::new(groups);
+            write_groups(&kv, &pc_id, &normalised).await?;
+            if normalised.is_empty() {
+                println!("{pc_id}: cleared all groups");
+            } else {
+                println!(
+                    "{pc_id}: set membership to [{}]",
+                    normalised.groups.join(", ")
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn read_groups(kv: &async_nats::jetstream::kv::Store, pc_id: &str) -> Result<AgentGroups> {
+    match kv.get(pc_id).await.context("kv get")? {
+        Some(bytes) => serde_json::from_slice(&bytes).context("decode agent_groups"),
+        None => Ok(AgentGroups::default()),
+    }
+}
+
+async fn write_groups(
+    kv: &async_nats::jetstream::kv::Store,
+    pc_id: &str,
+    groups: &AgentGroups,
+) -> Result<()> {
+    let bytes = serde_json::to_vec(groups).context("encode agent_groups")?;
+    kv.put(pc_id, bytes.into()).await.context("kv put")?;
+    info!(pc_id, groups = ?groups.groups, "agent_groups updated");
     Ok(())
 }
