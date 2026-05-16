@@ -325,20 +325,37 @@ it down for production with token auth:
    The shipped `nats-server.conf` enables JetStream + an
    `authorization.token` block. Pick your own secret.
 
-2. Export the token on every kanade host (agent / backend / CLI):
+2. Provision the token on every kanade host. The shared
+   `kanade_shared::nats_client::connect()` helper resolves it in this
+   order:
+
+   **(1) `HKLM\SOFTWARE\kanade\agent\NatsToken` (REG_SZ) — production.**
+   `deploy-agent.ps1` / `deploy-backend.ps1` accept `-NatsToken` and
+   write the value with a hardened ACL (SYSTEM + Administrators only).
+   Low-privilege users on the host cannot read it back, which a
+   Machine-scope environment variable cannot prevent.
 
    ```powershell
-   # On agent + backend hosts (set as system env so the service inherits)
-   [Environment]::SetEnvironmentVariable('KANADE_NATS_TOKEN', '<secret>', 'Machine')
-   Restart-Service KanadeAgent, KanadeBackend
-
-   # On operator workstations (for the kanade CLI)
-   $env:KANADE_NATS_TOKEN = "<secret>"
+   # On agent + backend hosts
+   .\deploy-agent.ps1   -NatsToken 'kanade-fleet-secret-2026'
+   .\deploy-backend.ps1 -NatsToken 'kanade-fleet-secret-2026'
    ```
 
-The shared `kanade_shared::nats_client::connect()` helper auto-attaches
-the token at NATS connect time. `nats_url` in `agent.toml` / `backend.toml`
-stays plain — the secret never lands in config files or process listings.
+   **(2) `$KANADE_NATS_TOKEN` environment variable — dev / fallback.**
+   Used only when the registry value is absent. Service binaries run
+   as LocalSystem and never see user-session env vars, so this branch
+   fires for `cargo run`, the operator CLI, and `cargo make dev`:
+
+   ```powershell
+   $env:KANADE_NATS_TOKEN = 'kanade-fleet-secret-2026'
+   kanade jetstream status
+   ```
+
+   **(3) No token → unauthenticated connect.** Works against a broker
+   started without `authorization { ... }` — fine for local dev.
+
+`nats_url` in `agent.toml` / `backend.toml` stays plain. The secret
+never lands in config files or process listings.
 
 For multi-tenant / per-agent identity (NKeys, NATS JWT, mTLS), see
 [spec §2.7.1](https://github.com/yukimemi/kanade/blob/main/docs/SPEC.md).

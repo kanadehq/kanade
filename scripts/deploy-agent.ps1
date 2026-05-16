@@ -38,6 +38,13 @@
 .PARAMETER NoStart
   Install + register the service but don't start it.
 
+.PARAMETER NatsToken
+  If set, write the NATS bearer token to
+  HKLM\SOFTWARE\kanade\agent\NatsToken (REG_SZ) and harden the ACL
+  on that key so only SYSTEM + Administrators can read it. The
+  agent reads this at startup ahead of $env:KANADE_NATS_TOKEN.
+  Required when the broker is started with `authorization { token: ... }`.
+
 .EXAMPLE
   # Drop deploy-agent.ps1 + kanade-agent.exe + agent.toml in a folder,
   # then on the target:
@@ -46,6 +53,10 @@
 .EXAMPLE
   # Re-run after a binary update, forcing fresh config:
   PS> .\deploy-agent.ps1 -ForceConfig
+
+.EXAMPLE
+  # Provision a fleet-wide NATS token (production):
+  PS> .\deploy-agent.ps1 -NatsToken 'kanade-fleet-secret-2026'
 
 .EXAMPLE
   # Recover from a stuck / broken service:
@@ -58,10 +69,38 @@ param(
     [string]$ServiceName = 'KanadeAgent',
     [switch]$ForceConfig,
     [switch]$Recreate,
-    [switch]$NoStart
+    [switch]$NoStart,
+    [string]$NatsToken   = ''
 )
 
 $ErrorActionPreference = 'Stop'
+
+# Provision the NATS bearer token under HKLM\SOFTWARE\kanade\agent and
+# strip all non-admin ACEs from the key so a logged-in low-priv user
+# can't `Get-ItemProperty` the secret. This is the production path
+# read by kanade-shared::nats_client::connect(); $env:KANADE_NATS_TOKEN
+# is dev-only fallback.
+function Set-KanadeNatsToken {
+    param([Parameter(Mandatory)][string]$Token)
+
+    $regKey = 'HKLM:\SOFTWARE\kanade\agent'
+    if (-not (Test-Path $regKey)) {
+        New-Item -Path $regKey -Force | Out-Null
+    }
+    Set-ItemProperty -Path $regKey -Name 'NatsToken' -Value $Token -Type String
+
+    $acl = Get-Acl -Path $regKey
+    $acl.SetAccessRuleProtection($true, $false)
+    @($acl.Access) | ForEach-Object { [void]$acl.RemoveAccessRule($_) }
+    foreach ($id in 'NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators') {
+        $rule = New-Object System.Security.AccessControl.RegistryAccessRule(
+            $id, 'FullControl', 'ContainerInherit', 'None', 'Allow')
+        $acl.AddAccessRule($rule)
+    }
+    Set-Acl -Path $regKey -AclObject $acl
+
+    Write-Host "Wrote NatsToken to $regKey (SYSTEM + Administrators only)."
+}
 
 $binDir    = Join-Path $env:ProgramFiles 'Kanade'
 $dataRoot  = Join-Path $env:ProgramData  'Kanade'
@@ -125,6 +164,10 @@ if ($ForceConfig -or -not (Test-Path $configDst)) {
     Copy-Item -Path $configSrc -Destination $configDst -Force
 } else {
     Write-Host "Keeping existing $configDst (pass -ForceConfig to overwrite)."
+}
+
+if ($NatsToken) {
+    Set-KanadeNatsToken -Token $NatsToken
 }
 
 # Service binPath = quoted exe + --config flag pointing at the
