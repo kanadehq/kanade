@@ -6,6 +6,9 @@ mod inventory;
 mod process;
 mod self_update;
 
+#[cfg(target_os = "windows")]
+mod service;
+
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -30,14 +33,48 @@ struct Cli {
     config: Option<PathBuf>,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
+/// Top-level entry point.
+///
+/// On Windows, we first try to attach to the Service Control Manager.
+/// If that succeeds we run as a real Windows service (service.rs
+/// owns the tokio runtime for the lifetime of the service); if it
+/// fails with `ERROR_FAILED_SERVICE_CONTROLLER_CONNECT` (Win32 1063),
+/// we fall through to console mode — convenient for `cargo run` and
+/// for manual debugging.
+///
+/// On non-Windows targets we always run in console mode.
+fn main() -> Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        match service::try_run_as_service() {
+            Ok(()) => return Ok(()),
+            Err(e) if service::is_not_under_scm(&e) => {
+                // Not started by SCM — fall through to console mode.
+            }
+            Err(e) => return Err(anyhow::anyhow!("service dispatcher failed: {e}")),
+        }
+    }
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("build tokio runtime")?;
+    runtime.block_on(run_agent())
+}
+
+/// Run the agent's tokio main loop. Called either from console
+/// mode (directly from `main`) or from inside the Windows service
+/// entry point (see [`service::run_service`]).
+pub(crate) async fn run_agent() -> Result<()> {
+    // tracing subscriber is shared between console + service modes
+    // and is idempotent (init() returns Err on second call, but we
+    // only ever call once per process).
+    let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info,kanade_agent=debug".into()),
         )
-        .init();
+        .try_init();
 
     cleanup_stale_upgrade_artifacts();
 

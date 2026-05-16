@@ -13,7 +13,7 @@ keywords.workspace     = true
 categories.workspace   = true
 
 [dependencies]
-kanade-shared = { path = "../kanade-shared", version = "0.3.1" }
+kanade-shared = { path = "../kanade-shared", version = "0.3.2" }
 
 anyhow     = { workspace = true }
 async-nats = { workspace = true }
@@ -33,3 +33,10 @@ uuid       = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 wmi = "0.18"
+# SCM (Service Control Manager) integration. Without this the agent
+# runs under sc.exe but never calls StartServiceCtrlDispatcher, so
+# Windows times out after 30 s and marks the service "did not respond"
+# (Event ID 7009). The crate provides the dispatcher + control-handler
+# scaffolding plus the typed status struct (Running / Stopped + accepted
+# control codes) that SCM expects.
+windows-service = "0.8"
