@@ -11,14 +11,11 @@ log_dir  = '''{% if is_windows() %}{{ env(name="ProgramData") }}\Kanade\logs{% e
 [agent]
 id       = '{{ vars.hostname }}'
 nats_url = 'nats://127.0.0.1:4222'
-# DEPRECATED (Sprint 5): group membership is now server-managed
-# through the agent_groups KV bucket. Use
+# NOTE: group membership is server-managed (Sprint 5+) — set it with
 #   kanade agent groups set <pc_id> <group> [<group> ...]
-# to declare membership. The field below is still parsed for
-# backward compat — old agent.toml files keep loading — but the
-# value is logged-and-ignored at startup and will be removed in
-# v0.3.0.
-groups   = []
+# Old agent.toml files that still carry [agent] groups = [...] keep
+# loading thanks to serde(default), but the value is logged-and-
+# ignored at startup and the field will be removed in v0.3.0.
 
 [inventory]
 hw_interval = '24h'
