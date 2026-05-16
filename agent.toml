@@ -11,17 +11,15 @@ log_dir  = '''{% if is_windows() %}{{ env(name="ProgramData") }}\Kanade\logs{% e
 [agent]
 id       = '{{ vars.hostname }}'
 nats_url = 'nats://127.0.0.1:4222'
-# NOTE: group membership is server-managed (Sprint 5+) — set it with
-#   kanade agent groups set <pc_id> <group> [<group> ...]
-# Old agent.toml files that still carry [agent] groups = [...] keep
-# loading thanks to serde(default), but the value is logged-and-
-# ignored at startup and the field will be removed in v0.3.0.
-
-[inventory]
-hw_interval = '24h'
-jitter      = '10m'
-enabled     = true
 
 [log]
 path  = '{{ vars.log_dir }}/agent.log'
 level = 'info'
+
+# Everything that used to live here ([agent] groups, [inventory]
+# hw_interval / jitter / enabled, the implicit heartbeat cadence)
+# is server-managed now via the agent_config + agent_groups KV
+# buckets. Use `kanade config` and `kanade agent groups` to drive
+# fleet-wide settings; this file is intentionally limited to the
+# pinned infra knobs (NATS URL, pc_id, log paths) so a single toml
+# can ship to every host unchanged.

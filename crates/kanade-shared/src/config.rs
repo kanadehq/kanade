@@ -9,6 +9,12 @@ use serde::Deserialize;
 pub struct AgentConfig {
     pub agent: AgentSection,
     pub log: LogSection,
+    /// DEPRECATED in Sprint 6: inventory cadence / jitter / enabled
+    /// are now sourced from the layered `agent_config` KV bucket.
+    /// Still parsed (back-compat for existing agent.toml files);
+    /// the value is logged-and-ignored at startup. Field removal
+    /// is scheduled for v0.4.0 (one minor cycle after this
+    /// deprecation lands in v0.3.0).
     #[serde(default)]
     pub inventory: InventorySection,
 }
@@ -20,9 +26,9 @@ pub struct AgentSection {
     /// DEPRECATED in Sprint 5: group membership is now server-managed
     /// via the `agent_groups` KV bucket. Use
     /// `kanade agent groups set <pc_id> <group> [<group> ...]` to
-    /// declare membership. The field is still parsed for back-compat
-    /// — old agent.toml files keep loading — but the value is
-    /// logged-and-ignored at startup and will be removed in v0.3.0.
+    /// declare membership. Still parsed for back-compat; the value
+    /// is logged-and-ignored at startup. Field removal is scheduled
+    /// for v0.4.0.
     #[serde(default)]
     pub groups: Vec<String>,
 }

@@ -77,12 +77,21 @@ async fn main() -> Result<()> {
     // channel; heartbeat / inventory / self_update subscribe.
     let cfg_rx = config_supervisor::spawn(client.clone(), pc_id.clone());
 
-    // Sprint 6 phase 6 will add proper detection of "[inventory] is
-    // present in agent.toml with non-default values" and emit a
-    // deprecation warning. For now cfg.inventory is silently
-    // ignored — values come from the agent_config KV bucket via
-    // cfg_rx, not from the local toml.
-    let _ = &cfg.inventory;
+    // Sprint 6: cfg.inventory is parsed for back-compat but the
+    // runtime sources cadence / jitter / enabled from the
+    // agent_config KV bucket via cfg_rx. Warn the operator when
+    // the local toml carries non-default values so they know to
+    // migrate via `kanade config set inventory_interval=... ` etc.
+    let inv_defaults = kanade_shared::config::InventorySection::default();
+    if cfg.inventory.hw_interval != inv_defaults.hw_interval
+        || cfg.inventory.jitter != inv_defaults.jitter
+        || cfg.inventory.enabled != inv_defaults.enabled
+    {
+        tracing::warn!(
+            local_inventory = ?cfg.inventory,
+            "agent.toml::[inventory] is deprecated — values now come from the agent_config KV bucket; this section is logged-and-ignored. Use `kanade config set inventory_interval=...` (and friends) to migrate. The field will be removed in v0.4.0.",
+        );
+    }
 
     tokio::spawn(heartbeat::heartbeat_loop(
         client.clone(),
