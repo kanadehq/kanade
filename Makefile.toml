@@ -4,7 +4,6 @@
 # `--workspace` flags on the underlying commands already cover every
 # member, so the cargo-make workspace mode would just duplicate work.
 default_to_workspace = false
-
 [tasks.default]
 alias = "check"
 

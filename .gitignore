@@ -9,9 +9,12 @@ Cargo.lock.bak
 *.db-shm
 *.db-wal
 
-# kata:gitignore:base:end の外側に置く Rust block — kata-managed の編集子テンプレ
-# が pj-rust layer の `.gitignore.rust` (現在 abort 中) で投入される予定の位置。
-# pj-rust seed が直ったら手動分を消して `kata apply` で再投入する。
+# NOTE: kata-managed base block (begin/end markers below) sits just
+# after this point. The Rust ignores above live OUTSIDE the kata
+# section so they're owned by the project, not the pj-base template.
+# pj-rust ships a similar Rust-block as its own layer once that seed
+# is wired up — at which point the manual entries above can be removed
+# and re-introduced via `kata apply`.
 
 # kata:gitignore:base:begin
 # Editor / OS noise — kata-managed (yukimemi/pj-base).

@@ -1,0 +1,92 @@
+preset = "github.com/yukimemi/pj-presets:rust-cli"
+applied_at = "2026-05-16T01:25:48.264864Z"
+
+[[templates]]
+source = "github.com/yukimemi/pj-base"
+rev = "f04151faf4f0678be9621bb724c8f3120a5e4d8b"
+version = "0.10.0"
+
+[[templates]]
+source = "github.com/yukimemi/pj-rust"
+rev = "2fa0ce8a72a8b157f90a3bd5ce1ccd3c16e87d9a"
+version = "0.5.0"
+
+[[templates]]
+source = "github.com/yukimemi/pj-rust-cli"
+rev = "9263751c3f94f3415147e546db33170157fb1503"
+version = "0.2.0"
+
+[files.".agents/skills/renri/SKILL.md"]
+once_applied = true
+
+[files.".claude/skills/renri/SKILL.md"]
+once_applied = true
+
+[files.".editorconfig"]
+once_applied = true
+
+[files.".gemini/settings.json"]
+content_hash = "486c974de88903113ed99b4e643432b7050e88f1031276f5263e8da7b43fe11e"
+
+[files.".gitattributes"]
+content_hash = "1a4b579b1b643a41dbf97d8834ff1f3f1fe532ff863d0f861431cf3ca47d31e2"
+
+[files.".github/workflows/auto-tag.yml"]
+content_hash = "c82436691b19d6eddc2c0d2612a2aad4ed3f5ecd79960a0f7413d82e9a09a32f"
+
+[files.".github/workflows/ci.yml"]
+content_hash = "bb275c9218792e10bf51e625375bf8076be3a096b37cc67d9357c67ed4025d30"
+
+[files.".github/workflows/kata-apply.yml"]
+content_hash = "20d2b132c11cb0a2f382a24d0f8617411dea5565324a5405900fcc8ce4e842f6"
+
+[files.".github/workflows/release.yml"]
+once_applied = true
+
+[files.".gitignore"]
+content_hash = "4bebd1c3417c33f9d1c51f011694f6d82b098bbb1a5a102ba56e97ab01a866ef"
+
+[files.".kata/vars.toml"]
+once_applied = true
+
+[files."AGENTS.md"]
+content_hash = "e4f146a1c66d11e6b6c707f52507b3e37da2fe52d8d7cf13f75edcf9ad5d3a7f"
+
+[files."CLAUDE.md"]
+content_hash = "a76b3af252969b8120128d7ce44f2b6cfdcf88c7420ee00675732f542d047529"
+
+[files."GEMINI.md"]
+content_hash = "3670f70a2f0be4013926bab6e878b90a42ad64c17899080aef4d193b246fa390"
+
+[files.LICENSE]
+once_applied = true
+
+[files."Makefile.toml"]
+content_hash = "27e3f57b9efd6c177843d9b0d248f40af5843739bcde6ceaf985f2ce518ecfcf"
+
+[files."OPENCODE.md"]
+content_hash = "11993dc7feec5fca8e83934f135de33879b88f100c48aeba0729de2f57a11a48"
+
+[files."apm.lock.yaml"]
+once_applied = true
+
+[files."apm.yml"]
+once_applied = true
+
+[files."clippy.toml"]
+content_hash = "89dbb3b4fd63c479f61f077d2383ab5c0998ea838f271ed57fd09281975deda0"
+
+[files."opencode.json"]
+content_hash = "2ada1cf4347db9e98fadd67ca72cd9e29042c5bf6ab719d666b5d71f97663e81"
+
+[files."renovate.json"]
+once_applied = true
+
+[files."renri.toml"]
+content_hash = "f4751570494ba62997cfb47e3abee2e707d3e01d924d1e8b940905a4e7c974f3"
+
+[files."rust-toolchain.toml"]
+content_hash = "9eac3c057320afbad00022718e0c14731122b4c3f28abd2dc702846244c39f66"
+
+[files."rustfmt.toml"]
+content_hash = "8a0bd07a7aaaf3e9fed5dd297b04a5f96c4a969d895375aa4e00247a95aa616c"
