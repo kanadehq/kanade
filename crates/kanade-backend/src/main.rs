@@ -88,6 +88,15 @@ async fn main() -> Result<()> {
     info!("connected to NATS");
     let jetstream = async_nats::jetstream::new(nats.clone());
 
+    // Self-bootstrap every JetStream resource the fleet expects.
+    // Idempotent — re-running just re-acks existing resources —
+    // so a fresh NATS server, a partial setup, or a server restart
+    // all converge to the same state without operator action.
+    kanade_shared::bootstrap::ensure_jetstream_resources(&jetstream)
+        .await
+        .context("ensure_jetstream_resources")?;
+    info!("jetstream resources ready");
+
     // Projectors run in the background; if either exits the backend keeps
     // serving HTTP (read-only API stays useful even if a stream is missing).
     {

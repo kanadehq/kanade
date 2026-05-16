@@ -1513,7 +1513,7 @@ dependencies = [
 
 [[package]]
 name = "kanade"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -1534,7 +1534,7 @@ dependencies = [
 
 [[package]]
 name = "kanade-agent"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -1557,7 +1557,7 @@ dependencies = [
 
 [[package]]
 name = "kanade-backend"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -1585,9 +1585,10 @@ dependencies = [
 
 [[package]]
 name = "kanade-shared"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
+ "async-nats",
  "chrono",
  "humantime",
  "serde",
@@ -1595,7 +1596,9 @@ dependencies = [
  "serde_yaml",
  "teravars",
  "thiserror",
+ "tokio",
  "toml",
+ "tracing",
  "uuid",
 ]
 

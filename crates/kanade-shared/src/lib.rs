@@ -1,3 +1,4 @@
+pub mod bootstrap;
 pub mod config;
 pub mod default_paths;
 pub mod kv;
