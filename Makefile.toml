@@ -1,8 +1,13 @@
 [config]
-# Run all tasks from the workspace root (single invocation) instead of
-# recursing into each member crate. Cargo's `--all-targets` / `--all` /
-# `--workspace` flags on the underlying commands already cover every
-# member, so the cargo-make workspace mode would just duplicate work.
+# cargo-make's default is to enter every workspace member and run the
+# requested task once per member. The yukimemi/* convention runs cargo
+# directly at the workspace root with --workspace / --all-targets
+# (see pj-rust's Makefile.toml), so per-member recursion just
+# duplicates work and slows `cargo make check` noticeably.
+#
+# Turning the recursion off here keeps the task list semantically
+# identical — cargo still visits every member via its own
+# --workspace / --all-targets flag — and shaves the wall-clock cost.
 default_to_workspace = false
 [tasks.default]
 alias = "check"

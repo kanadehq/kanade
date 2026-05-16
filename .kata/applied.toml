@@ -1,5 +1,5 @@
-preset = "github.com/yukimemi/pj-presets:rust-cli"
-applied_at = "2026-05-16T01:25:48.264864Z"
+preset = "github.com/yukimemi/pj-presets:rust-workspace"
+applied_at = "2026-05-16T02:12:18.060513Z"
 
 [[templates]]
 source = "github.com/yukimemi/pj-base"
@@ -12,9 +12,9 @@ rev = "2fa0ce8a72a8b157f90a3bd5ce1ccd3c16e87d9a"
 version = "0.5.0"
 
 [[templates]]
-source = "github.com/yukimemi/pj-rust-cli"
-rev = "9263751c3f94f3415147e546db33170157fb1503"
-version = "0.2.0"
+source = "github.com/yukimemi/pj-rust-workspace"
+rev = "b6ed77d4c6e3cb8dfb4132494087d53987b9e925"
+version = "0.1.0"
 
 [files.".agents/skills/renri/SKILL.md"]
 once_applied = true
@@ -50,10 +50,13 @@ content_hash = "4bebd1c3417c33f9d1c51f011694f6d82b098bbb1a5a102ba56e97ab01a866ef
 once_applied = true
 
 [files."AGENTS.md"]
-content_hash = "e4f146a1c66d11e6b6c707f52507b3e37da2fe52d8d7cf13f75edcf9ad5d3a7f"
+content_hash = "5a78bc2c55e036be1b13768239ebdae01edadef2c4b378966afcbc724ce33234"
 
 [files."CLAUDE.md"]
 content_hash = "a76b3af252969b8120128d7ce44f2b6cfdcf88c7420ee00675732f542d047529"
+
+[files."Cargo.toml"]
+once_applied = true
 
 [files."GEMINI.md"]
 content_hash = "3670f70a2f0be4013926bab6e878b90a42ad64c17899080aef4d193b246fa390"
@@ -62,7 +65,7 @@ content_hash = "3670f70a2f0be4013926bab6e878b90a42ad64c17899080aef4d193b246fa390
 once_applied = true
 
 [files."Makefile.toml"]
-content_hash = "27e3f57b9efd6c177843d9b0d248f40af5843739bcde6ceaf985f2ce518ecfcf"
+content_hash = "5a67ba4b52669c5fa8fef8662661bded52ad7fc126f6726de74d2a68744fcc76"
 
 [files."OPENCODE.md"]
 content_hash = "11993dc7feec5fca8e83934f135de33879b88f100c48aeba0729de2f57a11a48"
