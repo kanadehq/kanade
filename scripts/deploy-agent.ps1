@@ -96,16 +96,28 @@ if ($ForceConfig -or -not (Test-Path $configDst)) {
     Write-Host "Keeping existing $configDst (pass -ForceConfig to overwrite)."
 }
 
+# Service binPath = quoted exe + --config flag pointing at the
+# installed toml. New-Service handles the embedded-quote +
+# space-in-path mess that `sc.exe create` chokes on (exit 1639
+# = ERROR_INVALID_COMMAND_LINE) when called through PowerShell
+# without the --% stop-parsing token.
 $binPath = "`"$exeDst`" --config `"$configDst`""
 if (-not $svc) {
     Write-Host "Creating service $ServiceName"
-    & sc.exe create $ServiceName binPath= $binPath start= auto DisplayName= 'Kanade Agent' | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "sc.exe create failed (exit $LASTEXITCODE)" }
-    & sc.exe description $ServiceName 'Kanade endpoint management agent (yukimemi/kanade).' | Out-Null
+    $null = New-Service `
+        -Name           $ServiceName `
+        -BinaryPathName $binPath `
+        -StartupType    Automatic `
+        -DisplayName    'Kanade Agent' `
+        -Description    'Kanade endpoint management agent (yukimemi/kanade).'
 } else {
-    Write-Host "Updating service binPath for $ServiceName"
-    & sc.exe config $ServiceName binPath= $binPath start= auto | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "sc.exe config failed (exit $LASTEXITCODE)" }
+    Write-Host "Updating $ServiceName configuration"
+    # Existing service: binPath rarely needs changing (the exe path
+    # is stable across upgrades since we always write to
+    # %ProgramFiles%\Kanade\kanade-agent.exe), so only reconfirm
+    # the start type. Operator with a custom binPath can adjust
+    # manually via `sc.exe config`.
+    Set-Service -Name $ServiceName -StartupType Automatic
 }
 
 # Failure recovery — restart on any non-clean-stop exit.
