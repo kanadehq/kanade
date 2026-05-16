@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use kanade_shared::kv::{
-    BUCKET_AGENT_CONFIG, BUCKET_AGENT_GROUPS, KEY_AGENT_TARGET_VERSION, OBJECT_AGENT_RELEASES,
+    BUCKET_AGENT_CONFIG, BUCKET_AGENT_GROUPS, KEY_AGENT_CONFIG_GLOBAL, OBJECT_AGENT_RELEASES,
 };
-use kanade_shared::wire::AgentGroups;
+use kanade_shared::wire::{AgentGroups, ConfigScope};
 use tokio::fs;
 use tracing::info;
 
@@ -92,17 +92,27 @@ async fn publish(client: async_nats::Client, binary: PathBuf, version: String) -
         .with_context(|| {
             format!("KV '{BUCKET_AGENT_CONFIG}' missing — run `kanade jetstream setup`")
         })?;
-    kv.put(
-        KEY_AGENT_TARGET_VERSION,
-        bytes::Bytes::from(version.clone().into_bytes()),
-    )
-    .await
-    .context("KV put target_version")?;
-    info!(version, "broadcast agent_config.target_version");
+    // Sprint 6: target_version is now a field on the layered
+    // `global` ConfigScope, not a standalone key. Read-modify-write
+    // so other fields (inventory cadence, heartbeat interval, …)
+    // operators have already set survive the publish.
+    let mut global = match kv.get(KEY_AGENT_CONFIG_GLOBAL).await? {
+        Some(b) => serde_json::from_slice::<ConfigScope>(&b)
+            .with_context(|| format!("decode existing {BUCKET_AGENT_CONFIG}.global"))?,
+        None => ConfigScope::default(),
+    };
+    global.target_version = Some(version.clone());
+    let payload = serde_json::to_vec(&global).context("encode global ConfigScope")?;
+    kv.put(KEY_AGENT_CONFIG_GLOBAL, payload.into())
+        .await
+        .context("KV put global ConfigScope")?;
+    info!(version, "broadcast agent_config.global.target_version");
 
     println!("published: {version}");
     println!("  object_store : {OBJECT_AGENT_RELEASES}/{version}");
-    println!("  kv           : {BUCKET_AGENT_CONFIG}.{KEY_AGENT_TARGET_VERSION} = {version}");
+    println!(
+        "  kv           : {BUCKET_AGENT_CONFIG}.{KEY_AGENT_CONFIG_GLOBAL}.target_version = {version}"
+    );
     Ok(())
 }
 
@@ -112,12 +122,16 @@ async fn current(client: async_nats::Client) -> Result<()> {
         .get_key_value(BUCKET_AGENT_CONFIG)
         .await
         .with_context(|| format!("KV '{BUCKET_AGENT_CONFIG}' missing"))?;
-    match kv.get(KEY_AGENT_TARGET_VERSION).await? {
+    match kv.get(KEY_AGENT_CONFIG_GLOBAL).await? {
         Some(b) => {
-            let v = String::from_utf8_lossy(&b);
-            println!("target_version = {v}");
+            let scope: ConfigScope = serde_json::from_slice(&b)
+                .with_context(|| format!("decode {BUCKET_AGENT_CONFIG}.global"))?;
+            match scope.target_version {
+                Some(v) => println!("global.target_version = {v}"),
+                None => println!("global.target_version = (unset)"),
+            }
         }
-        None => println!("target_version = (unset)"),
+        None => println!("global = (unset)"),
     }
     Ok(())
 }

@@ -95,7 +95,11 @@ async fn main() -> Result<()> {
         pc_id.clone(),
         cfg_rx.clone(),
     ));
-    tokio::spawn(self_update::run(client.clone(), AGENT_VERSION.to_string()));
+    tokio::spawn(self_update::run(
+        client.clone(),
+        AGENT_VERSION.to_string(),
+        cfg_rx.clone(),
+    ));
 
     // Group membership: Sprint 5 moves this from agent.toml (per-box
     // local config) to a server-managed KV bucket. The manager reads

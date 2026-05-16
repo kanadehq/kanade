@@ -1,10 +1,12 @@
-//! Self-update watcher (spec §2.10.5). Listens to
-//! `agent_config.target_version`. When it drifts from `AGENT_VERSION`
-//! the watcher pulls the new binary from the `agent_releases` Object
-//! Store, hashes it (SHA-256), atomically swaps it into the running
-//! exe's location, and exits — the Windows Service Control Manager
-//! then restarts the service via its configured failure-actions, this
-//! time loading the new binary.
+//! Self-update watcher (spec §2.10.5). Sprint 6: target_version
+//! arrives via the layered agent_config path now, resolved per-pc /
+//! per-group / global by the config_supervisor and pushed on a
+//! [`tokio::sync::watch`] channel. Whenever that resolved value
+//! drifts from `AGENT_VERSION`, the watcher pulls the new binary
+//! from the `agent_releases` Object Store, hashes it (SHA-256),
+//! atomically swaps it into the running exe's location, and exits
+//! — SCM's failure-actions then restart the service on the new
+//! binary.
 //!
 //! The swap is the cross-volume-safe three-step (copy to `<exe>.new`,
 //! rename `<exe>` to `<exe>.old`, rename `.new` to `<exe>`) so the
@@ -20,25 +22,20 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use async_nats::jetstream;
-use futures::StreamExt;
-use kanade_shared::kv::{BUCKET_AGENT_CONFIG, KEY_AGENT_TARGET_VERSION, OBJECT_AGENT_RELEASES};
+use kanade_shared::kv::OBJECT_AGENT_RELEASES;
+use kanade_shared::wire::EffectiveConfig;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
+use tokio::sync::watch;
 use tracing::{info, warn};
 
-pub async fn run(client: async_nats::Client, running_version: String) {
+pub async fn run(
+    client: async_nats::Client,
+    running_version: String,
+    mut cfg_rx: watch::Receiver<EffectiveConfig>,
+) {
     let js = jetstream::new(client);
 
-    let kv = match js.get_key_value(BUCKET_AGENT_CONFIG).await {
-        Ok(k) => k,
-        Err(_) => {
-            info!(
-                bucket = BUCKET_AGENT_CONFIG,
-                "agent_config KV missing — self-update idle"
-            );
-            return;
-        }
-    };
     let store = match js.get_object_store(OBJECT_AGENT_RELEASES).await {
         Ok(s) => s,
         Err(_) => {
@@ -50,34 +47,35 @@ pub async fn run(client: async_nats::Client, running_version: String) {
         }
     };
 
-    // 1. Initial sync — if the broadcast version is already different
-    //    from the running version, pull straight away.
-    if let Ok(Some(b)) = kv.get(KEY_AGENT_TARGET_VERSION).await {
-        let target = String::from_utf8_lossy(&b).to_string();
-        if let Err(e) = maybe_download(&store, &target, &running_version).await {
+    // Initial check against whatever the supervisor's first push
+    // (its initial_sync) populated.
+    let mut current_target = cfg_rx.borrow().target_version.clone();
+    if let Some(target) = current_target.as_deref()
+        && target != running_version
+    {
+        if let Err(e) = maybe_download(&store, target, &running_version).await {
             warn!(error = %e, target, "initial self-update fetch failed");
         }
     }
 
-    // 2. Watch — react to every flip of target_version.
-    let mut watcher = match kv.watch(KEY_AGENT_TARGET_VERSION).await {
-        Ok(w) => w,
-        Err(e) => {
-            warn!(error = %e, "kv watch target_version");
+    // React to every supervisor push; trigger only when
+    // target_version actually changed (cadence-only updates land
+    // here too and should be ignored).
+    loop {
+        if cfg_rx.changed().await.is_err() {
             return;
         }
-    };
-    while let Some(entry) = watcher.next().await {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(e) => {
-                warn!(error = %e, "self-update watch entry");
-                continue;
+        let new_target = cfg_rx.borrow().target_version.clone();
+        if new_target == current_target {
+            continue;
+        }
+        current_target = new_target.clone();
+        if let Some(target) = new_target.as_deref()
+            && target != running_version
+        {
+            if let Err(e) = maybe_download(&store, target, &running_version).await {
+                warn!(error = %e, target, "self-update fetch failed");
             }
-        };
-        let target = String::from_utf8_lossy(&entry.value).to_string();
-        if let Err(e) = maybe_download(&store, &target, &running_version).await {
-            warn!(error = %e, target, "self-update fetch failed");
         }
     }
 }
