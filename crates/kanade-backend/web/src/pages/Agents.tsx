@@ -1,31 +1,98 @@
-import { useQuery } from '@tanstack/react-query';
-import { Loader2, Server } from 'lucide-react';
+import { useMutation, useQuery } from '@tanstack/react-query';
+import { Activity, Loader2, Server, Settings2, Users } from 'lucide-react';
+import { useState } from 'react';
 
+import { ErrorCard } from '@/components/ErrorCard';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { JsonOutput } from '@/components/ui/json-output';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { apiFetch } from '@/lib/api';
-import type { AgentRow } from '@/lib/types';
+import type { AgentGroups, AgentRow, EffectiveConfigResponse, Heartbeat } from '@/lib/types';
 
 function fmtBytes(n: number | null): string {
   if (!n) return '—';
-  const gb = n / 1024 ** 3;
-  return `${gb.toFixed(1)} GB`;
+  return `${(n / 1024 ** 3).toFixed(1)} GB`;
 }
-
 function fmtTime(iso: string | null): string {
   if (!iso) return '—';
   const d = new Date(iso);
-  if (isNaN(d.getTime())) return iso;
-  return d.toISOString().replace('T', ' ').replace(/\.\d+Z$/, 'Z');
+  return isNaN(d.getTime()) ? iso : d.toISOString().replace('T', ' ').replace(/\.\d+Z$/, 'Z');
 }
+
+type ActionResult = {
+  pc_id: string;
+  action: string;
+  value: unknown;
+};
 
 export function Agents() {
   const { data, error, isLoading } = useQuery({
     queryKey: ['agents'],
     queryFn: () => apiFetch<AgentRow[]>('/api/agents'),
   });
+  const [result, setResult] = useState<ActionResult | null>(null);
+
+  const ping = useMutation({
+    mutationFn: (pcId: string) =>
+      apiFetch<{ heartbeat: Heartbeat }>(`/api/agents/${encodeURIComponent(pcId)}/ping?wait_secs=45`, {
+        method: 'POST',
+      }),
+  });
+  const effective = useMutation({
+    mutationFn: (pcId: string) =>
+      apiFetch<EffectiveConfigResponse>(`/api/agents/${encodeURIComponent(pcId)}/effective_config`),
+  });
+  const groupsGet = useMutation({
+    mutationFn: (pcId: string) =>
+      apiFetch<AgentGroups>(`/api/agents/${encodeURIComponent(pcId)}/groups`),
+  });
+  const groupsPut = useMutation({
+    mutationFn: ({ pcId, groups }: { pcId: string; groups: string[] }) =>
+      apiFetch<AgentGroups>(`/api/agents/${encodeURIComponent(pcId)}/groups`, {
+        method: 'PUT',
+        body: JSON.stringify({ groups }),
+      }),
+  });
+
+  const doPing = async (pcId: string) => {
+    setResult({ pc_id: pcId, action: 'ping', value: '…' });
+    try {
+      const r = await ping.mutateAsync(pcId);
+      setResult({ pc_id: pcId, action: 'ping', value: r });
+    } catch (e) {
+      setResult({ pc_id: pcId, action: 'ping', value: (e as Error).message });
+    }
+  };
+  const doEffective = async (pcId: string) => {
+    setResult({ pc_id: pcId, action: 'effective', value: '…' });
+    try {
+      const r = await effective.mutateAsync(pcId);
+      setResult({ pc_id: pcId, action: 'effective', value: r });
+    } catch (e) {
+      setResult({ pc_id: pcId, action: 'effective', value: (e as Error).message });
+    }
+  };
+  const doGroups = async (pcId: string) => {
+    setResult({ pc_id: pcId, action: 'groups', value: 'loading…' });
+    try {
+      const current = await groupsGet.mutateAsync(pcId);
+      const next = window.prompt(
+        `Comma-separated group names for ${pcId} (current: ${current.groups.join(', ') || '(none)'})`,
+        current.groups.join(', '),
+      );
+      if (next === null) {
+        setResult({ pc_id: pcId, action: 'groups', value: '(cancelled)' });
+        return;
+      }
+      const list = next.split(',').map((s) => s.trim()).filter(Boolean);
+      const updated = await groupsPut.mutateAsync({ pcId, groups: list });
+      setResult({ pc_id: pcId, action: 'groups', value: updated });
+    } catch (e) {
+      setResult({ pc_id: pcId, action: 'groups', value: (e as Error).message });
+    }
+  };
 
   if (isLoading) {
     return (
@@ -35,20 +102,7 @@ export function Agents() {
       </div>
     );
   }
-
-  if (error) {
-    return (
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-danger">Couldn't load agents</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <pre className="text-sm whitespace-pre-wrap text-danger">{error.message}</pre>
-        </CardContent>
-      </Card>
-    );
-  }
-
+  if (error) return <ErrorCard title="Couldn't load agents" error={error} />;
   const agents = data ?? [];
 
   if (agents.length === 0) {
@@ -69,7 +123,7 @@ export function Agents() {
     <div className="space-y-4">
       <div className="flex items-baseline justify-between">
         <h2 className="text-xl">Agents</h2>
-        <Badge variant="violet">{agents.length} online</Badge>
+        <Badge variant="violet">{agents.length} known</Badge>
       </div>
       <Table>
         <TableHeader>
@@ -100,18 +154,35 @@ export function Agents() {
               <TableCell className="text-muted text-xs">{fmtTime(a.last_inventory)}</TableCell>
               <TableCell>
                 <div className="flex gap-1 flex-wrap">
-                  <Button variant="secondary" size="sm" disabled>ping</Button>
-                  <Button variant="secondary" size="sm" disabled>groups</Button>
-                  <Button variant="secondary" size="sm" disabled>effective</Button>
+                  <Button variant="secondary" size="sm" onClick={() => doPing(a.pc_id)} disabled={ping.isPending}>
+                    <Activity className="size-3.5" />ping
+                  </Button>
+                  <Button variant="secondary" size="sm" onClick={() => doGroups(a.pc_id)} disabled={groupsGet.isPending || groupsPut.isPending}>
+                    <Users className="size-3.5" />groups
+                  </Button>
+                  <Button variant="secondary" size="sm" onClick={() => doEffective(a.pc_id)} disabled={effective.isPending}>
+                    <Settings2 className="size-3.5" />effective
+                  </Button>
                 </div>
               </TableCell>
             </TableRow>
           ))}
         </TableBody>
       </Table>
-      <p className="text-xs text-muted">
-        Row actions wired up in the next port (Run / Config / per-agent detail are coming).
-      </p>
+
+      {result && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">
+              <code className="text-xs mr-2">{result.pc_id}</code>
+              <Badge variant="amber">{result.action}</Badge>
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <JsonOutput value={result.value} />
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

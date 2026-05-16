@@ -4,7 +4,14 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { Nav } from '@/components/Nav';
 import { AuthProvider } from '@/lib/auth';
 import { Agents } from '@/pages/Agents';
+import { Audit } from '@/pages/Audit';
+import { Config } from '@/pages/Config';
+import { Deploy } from '@/pages/Deploy';
+import { JetStream } from '@/pages/JetStream';
 import { Placeholder } from '@/pages/Placeholder';
+import { Results } from '@/pages/Results';
+import { Run } from '@/pages/Run';
+import { Schedules } from '@/pages/Schedules';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -31,13 +38,13 @@ export default function App() {
               <Routes>
                 <Route path="/" element={<Navigate to="/agents" replace />} />
                 <Route path="/agents" element={<Agents />} />
-                <Route path="/run" element={<Placeholder name="Run" />} />
-                <Route path="/results" element={<Placeholder name="Results" />} />
-                <Route path="/audit" element={<Placeholder name="Audit" />} />
-                <Route path="/schedules" element={<Placeholder name="Schedules" />} />
-                <Route path="/deploy" element={<Placeholder name="Deploy" />} />
-                <Route path="/config" element={<Placeholder name="Config" />} />
-                <Route path="/jetstream" element={<Placeholder name="JetStream" />} />
+                <Route path="/run" element={<Run />} />
+                <Route path="/results" element={<Results />} />
+                <Route path="/audit" element={<Audit />} />
+                <Route path="/schedules" element={<Schedules />} />
+                <Route path="/deploy" element={<Deploy />} />
+                <Route path="/config" element={<Config />} />
+                <Route path="/jetstream" element={<JetStream />} />
                 <Route path="*" element={<Placeholder name="Not Found" />} />
               </Routes>
             </main>
