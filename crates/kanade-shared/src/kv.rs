@@ -20,6 +20,36 @@ pub const OBJECT_AGENT_RELEASES: &str = "agent_releases";
 /// version drifts.
 pub const KEY_AGENT_TARGET_VERSION: &str = "target_version";
 
+/// Sprint 6 layered-config keys inside [`BUCKET_AGENT_CONFIG`]:
+///   * `global`        — fleet-wide default ConfigScope JSON
+///   * `groups.<name>` — per-group override (partial ConfigScope)
+///   * `pcs.<pc_id>`   — per-pc override (partial ConfigScope)
+///
+/// The `groups.` / `pcs.` prefixes let a `kv.keys()` walk pick out
+/// just the rows in one scope when listing.
+pub const KEY_AGENT_CONFIG_GLOBAL: &str = "global";
+pub const PREFIX_AGENT_CONFIG_GROUPS: &str = "groups.";
+pub const PREFIX_AGENT_CONFIG_PCS: &str = "pcs.";
+
+pub fn agent_config_group_key(group: &str) -> String {
+    format!("{PREFIX_AGENT_CONFIG_GROUPS}{group}")
+}
+
+pub fn agent_config_pc_key(pc_id: &str) -> String {
+    format!("{PREFIX_AGENT_CONFIG_PCS}{pc_id}")
+}
+
+/// Inverse of [`agent_config_group_key`] — returns the bare group
+/// name if `key` carries the groups-scope prefix, else `None`.
+pub fn parse_agent_config_group_key(key: &str) -> Option<&str> {
+    key.strip_prefix(PREFIX_AGENT_CONFIG_GROUPS)
+}
+
+/// Inverse of [`agent_config_pc_key`].
+pub fn parse_agent_config_pc_key(key: &str) -> Option<&str> {
+    key.strip_prefix(PREFIX_AGENT_CONFIG_PCS)
+}
+
 pub const SCRIPT_STATUS_ACTIVE: &str = "ACTIVE";
 pub const SCRIPT_STATUS_REVOKED: &str = "REVOKED";
 
@@ -88,5 +118,34 @@ mod tests {
     #[test]
     fn key_agent_target_version_constant() {
         assert_eq!(KEY_AGENT_TARGET_VERSION, "target_version");
+    }
+
+    #[test]
+    fn agent_config_group_key_round_trips() {
+        let k = agent_config_group_key("canary");
+        assert_eq!(k, "groups.canary");
+        assert_eq!(parse_agent_config_group_key(&k), Some("canary"));
+    }
+
+    #[test]
+    fn agent_config_pc_key_round_trips() {
+        let k = agent_config_pc_key("MINIPC-01");
+        assert_eq!(k, "pcs.MINIPC-01");
+        assert_eq!(parse_agent_config_pc_key(&k), Some("MINIPC-01"));
+    }
+
+    #[test]
+    fn agent_config_scope_keys_do_not_collide() {
+        // Belt + braces: make sure no pc id starting with "groups." would
+        // be misparsed (or vice versa). The prefixes are distinct because
+        // they each end in `.` and the parent buckets disagree on what
+        // comes after — pcs holds host names, groups holds membership
+        // names — but locking the invariant in a test stops a future
+        // rename from breaking it.
+        assert_ne!(PREFIX_AGENT_CONFIG_GROUPS, PREFIX_AGENT_CONFIG_PCS);
+        assert!(parse_agent_config_group_key("pcs.someone").is_none());
+        assert!(parse_agent_config_pc_key("groups.someone").is_none());
+        assert_eq!(parse_agent_config_group_key("global"), None);
+        assert_eq!(parse_agent_config_pc_key("global"), None);
     }
 }
