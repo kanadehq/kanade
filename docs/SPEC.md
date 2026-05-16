@@ -316,13 +316,14 @@ heartbeat.>     # 全死活
 
 | KV Bucket | キー | 値 | 用途 |
 |---|---|---|---|
-| `agents_state` | `{pc_id}` | JSON (latest inventory) | 端末の最新状態 |
-| `deployments` | `{deploy_id}` | JSON (progress) | 配信ジョブ進捗 |
-| `groups` | `{group_name}` | JSON (member pc_ids) | グループ定義 |
-| `schedules` | `{schedule_id}` | JSON (cron, target) | スケジュール定義 |
-| `script.current` | `{cmd_id}` | バージョン文字列 | 現行有効バージョン |
-| `script.status` | `{cmd_id}` | `"ACTIVE"` / `"REVOKED"` | 緊急停止フラグ |
-| `agent_config` | `schedule.{name}` | JSON | Agent への動的設定配信 |
+| `agents_state` | `{pc_id}` | JSON (latest inventory) | 端末の最新状態 (`history=1`) |
+| `agent_groups` | `{pc_id}` | JSON `{"groups":[...]}` (Sprint 5) | この PC が属するグループ集合。Agent が watch して `commands.group.<name>` 購読を動的に追加/解除 |
+| `agent_config` | `global` / `groups.<name>` / `pcs.<pc_id>` (Sprint 6) | JSON (`ConfigScope`、partial) | Fleet 全体 / グループ / PC 単位の重ね合わせ設定。詳細は §2.3.5 |
+| `script_current` | `{cmd_id}` | バージョン文字列 | 現行有効バージョン |
+| `script_status` | `{cmd_id}` | `"ACTIVE"` / `"REVOKED"` | 緊急停止フラグ |
+| `schedules` | `{schedule_id}` | JSON (cron, target) | スケジュール定義 (`kanade schedule create` → backend HTTP → このバケット) |
+
+NATS KV のバケット名は domain-safe ASCII (英数 + `_-`) のみで `.` 不可。仕様初期に書いた `script.current` 等は実装では underscore form (`script_current`) に正規化されている。配送ジョブ進捗 (`deployments`) は SQLite に projection するので KV ではなく Stream + projector 経由 (§2.3.4)。
 
 ### 2.3.3 JetStream Object Store
 
@@ -393,6 +394,35 @@ CREATE TABLE roles (user_id TEXT, role TEXT, PRIMARY KEY(user_id, role));
 
 **重要原則**: SQLite は再構築可能なキャッシュ。破損時は JetStream Stream の replay で復旧する。
 
+### 2.3.5 層化された agent_config (Sprint 6)
+
+`agent_config` バケットは **3 層 + ビルトイン default** の重ね合わせ。Agent 起動時の `config_supervisor` タスクが両バケット (`agent_config` + `agent_groups`) を watch し、変更を受けるたびに resolver でフラット化、`tokio::sync::watch` チャネルで heartbeat / inventory / self_update に配布する。
+
+```
+ビルトイン default (compiled-in)            ← 何も設定しなければ常にこの値
+        ↓
+agent_config:global                          ← Fleet 全体の default
+        ↓
+agent_config:groups.<name>                   ← 当該 PC が属する全グループの override が
+                                              アルファベット順に重ね合わせ (last wins)
+        ↓
+agent_config:pcs.<pc_id>                     ← この PC 専用の override (最強)
+        ↓
+= EffectiveConfig (Agent が実際に走る値)
+```
+
+`ConfigScope` の各フィールドは `Option<T>`。`Some` = この層で値を設定、`None` = 下の層に委譲。同一フィールドを複数のグループが設定している場合、警告 (`ResolutionWarning::MultiGroupConflict`) が emit され、アルファベット順最後のグループの値が採用される。
+
+サポートフィールド (Sprint 6 時点):
+- `target_version` — self-update 発火条件 (層化対応により canary rollout が可能)
+- `inventory_interval` / `inventory_jitter` / `inventory_enabled`
+- `heartbeat_interval`
+
+操作:
+- `kanade config get/set/unset/clear [--group <n>|--pc <pc_id>]` — CLI 直接 KV
+- `GET/PUT/DELETE /api/config`, `/api/groups/{n}/config`, `/api/pcs/{p}/config` — backend HTTP
+- `GET /api/agents/{pc_id}/effective_config` — 解決済み view (debug 用)
+
 ## 2.4 命令定義 (YAML スキーマ)
 
 ### 2.4.1 ジョブ定義 (jobs/*.yaml)
@@ -433,19 +463,37 @@ on_failure:
 require_approval: true          # 本番配信時に承認必須
 ```
 
-### 2.4.2 グループ定義 (groups/*.yaml)
+### 2.4.2 グループメンバシップ (Sprint 5 以降: server-managed)
 
-```yaml
-id: wave1
-description: "第 1 波対象"
-members:
-  static: [PC1234, PC1235, PC1236]   # 静的リスト
-  dynamic:                            # 動的クエリ (SQLite に対する)
-    sql: |
-      SELECT pc_id FROM agents
-      WHERE os_version LIKE 'Windows 11%'
-        AND last_seen > datetime('now', '-7 days')
+Sprint 5 でグループ所属は **サーバ側 KV (`agent_groups` バケット)** に移動した。Agent は起動時に自分の `pc_id` で当該バケットを get + watch し、`commands.group.<name>` の購読を動的に張る/外す。
+
+オペレータ操作:
+
+```bash
+kanade agent groups list <pc_id>                 # 現在の所属一覧
+kanade agent groups add  <pc_id> <group>         # 1 つ追加 (idempotent)
+kanade agent groups rm   <pc_id> <group>         # 1 つ削除 (idempotent)
+kanade agent groups set  <pc_id> <g1> <g2> ...   # 全体置換 (sort + dedup)
 ```
+
+または backend HTTP 経由:
+
+```
+GET    /api/agents/{pc_id}/groups          → AgentGroups JSON
+PUT    /api/agents/{pc_id}/groups          (whole list replace)
+POST   /api/agents/{pc_id}/groups          (one add)
+DELETE /api/agents/{pc_id}/groups/{group}  (one remove)
+```
+
+KV 値の wire format:
+
+```json
+{"groups": ["canary", "wave1"]}
+```
+
+`AgentGroups::new` で sort + dedup されるので、二人のオペレータが同じ論理集合を別順序で投入しても bit-identical JSON になる (= update-only-on-change を成立させる前提)。
+
+**バックログ**: YAML マニフェスト (`groups/*.yaml`) で動的クエリ (SQLite ベース) からメンバシップを生成して KV に流し込む reconciler は将来計画。最初の実装はオペレータが CLI / HTTP で直接 KV を書く形。
 
 ### 2.4.3 スケジュール定義 (schedules/*.yaml)
 
@@ -983,11 +1031,18 @@ sc.exe start MgmtAgent
 
 ### 2.10.5 Agent 自己アップデート
 
-1. Backend が新版バイナリを `agent_releases` Object Store にアップロード
-2. KV `agent_config.target_version` を更新
-3. 各 Agent は KV を watch、自バージョンと差分検知
-4. Object Store からダウンロード → 検証 (署名・ハッシュ)
-5. 自己置換 → サービス再起動
+1. オペレータが `kanade agent publish <binary> --version <v>` を実行 → Object Store `agent_releases` に v 名でアップロード
+2. 同コマンドが `agent_config.global.target_version` フィールドを `<v>` に書き換え (Sprint 6 の層化対応: per-group / per-pc 上書きで canary rollout も可能)
+3. 各 Agent の `config_supervisor` が `agent_config` を watch、resolver で自分の `EffectiveConfig` を再計算 → `target_version` が `AGENT_VERSION` 定数と異なれば self_update タスクが発火
+4. Object Store `agent_releases.<v>` からダウンロード → SHA-256 検証
+5. **Atomic swap** (Plan A、v0.1.5):
+   - staged blob を `<exe>.new` として exe と同一ディレクトリにコピー (= Program Files 内、cross-volume safe)
+   - `<exe>` → `<exe>.old` を rename (atomic、Windows は loaded PE を delete 不可だが rename は可能)
+   - `<exe>.new` → `<exe>` を rename (atomic、同一ディレクトリ内)
+6. プロセスが `std::process::exit(64)` で抜ける → SCM が **failure-actions** (`sc.exe failure ... actions= restart/5000/restart/15000/restart/60000` + `sc.exe failureflag <svc> 1`) に従って新バイナリで再起動
+7. 新プロセス起動時に `<exe>.old` を掃除 (`main.rs::cleanup_stale_upgrade_artifacts`)
+
+deploy-agent.ps1 が初回登録時に `sc.exe failure` + `sc.exe failureflag` を設定するため、operator は self-update のために追加作業は不要。
 
 3000 台展開ではこの仕組みを最初から実装することが事実上必須。
 
@@ -1129,18 +1184,35 @@ C:\ProgramData\Mgmt\logs\
 - [ ] OIDC 認証
 - [ ] Agent 自己アップデート
 
-### Sprint 5 (品質向上)
+### Sprint 5 (v0.2.0): サーバ管理のグループメンバシップ — **完了**
 
-- [ ] 監視・メトリクス
+- [x] `agent_groups` KV bucket + AgentGroups wire 型 (sort + dedup invariants)
+- [x] Agent: KV watch + 動的 subscribe/unsubscribe マネージャ (純関数 diff + integration glue)
+- [x] Backend admin API: `/api/agents/{pc_id}/groups` (GET/PUT/POST/DELETE)
+- [x] CLI: `kanade agent groups [list|add|rm|set]`
+- [x] `agent.toml::[agent] groups` を deprecate (`#[serde(default)]` で互換維持、v0.4.0 で削除予定)
+- [x] backend が startup で `agent_groups` バケットを auto-bootstrap (v0.3.1)
+
+### Sprint 6 (v0.3.0): 層化された agent_config — **完了**
+
+- [x] `ConfigScope` / `EffectiveConfig` / `ResolutionWarning` wire 型 + 純関数 `resolve()` (built-in → global → groups.alphabetical-last-wins → pc)
+- [x] Agent: `config_supervisor` タスクで `agent_config` + `agent_groups` 両 watch、`tokio::sync::watch` で配布
+- [x] Heartbeat / inventory が動的 cadence 反映 (interval 入れ替え)、self_update が per-group / per-pc target_version 対応
+- [x] Backend admin API: `/api/config`, `/api/groups/{n}/config`, `/api/pcs/{p}/config`, `/api/agents/{p}/effective_config`
+- [x] CLI: `kanade config [get|set|unset|clear|effective]`
+- [x] `agent.toml::[inventory]` を deprecate (sample ファイルからは削除済み、parser は互換維持)
+- [x] `kanade-backend::main` が startup で JetStream resources を一括 auto-bootstrap (v0.3.1)
+
+### Sprint 7+: 残バックログ
+
+- [ ] 監視・メトリクス (Prometheus exporter)
 - [ ] 大規模テスト (シミュレーション 3000 台)
 - [ ] バックアップ / 復旧手順
-- [ ] ドキュメント整備
-
-### Sprint 6 (HA 化、必要時)
-
+- [ ] Web UI が CLI と feature parity (run / ping / kill / revoke / agent publish の HTTP + SPA 化)
+- [ ] mTLS for NATS (現状未実装)
 - [ ] NATS 3 ノードクラスタ
 - [ ] Backend 冗長化 + LB
-- [ ] SQLite → Postgres 移行
+- [ ] SQLite → Postgres 移行 (必要時)
 
 ---
 
