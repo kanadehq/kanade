@@ -222,6 +222,7 @@ async fn write_scope(
 fn apply_field(scope: &mut ConfigScope, field: &str, value: Option<&str>) -> Result<()> {
     match field {
         "target_version" => scope.target_version = value.map(String::from),
+        "target_version_jitter" => scope.target_version_jitter = value.map(String::from),
         "inventory_interval" => scope.inventory_interval = value.map(String::from),
         "inventory_jitter" => scope.inventory_jitter = value.map(String::from),
         "inventory_enabled" => {
@@ -232,7 +233,7 @@ fn apply_field(scope: &mut ConfigScope, field: &str, value: Option<&str>) -> Res
         }
         "heartbeat_interval" => scope.heartbeat_interval = value.map(String::from),
         other => bail!(
-            "unknown field '{other}' — supported: target_version, inventory_interval, inventory_jitter, inventory_enabled, heartbeat_interval"
+            "unknown field '{other}' — supported: target_version, target_version_jitter, inventory_interval, inventory_jitter, inventory_enabled, heartbeat_interval"
         ),
     }
     Ok(())

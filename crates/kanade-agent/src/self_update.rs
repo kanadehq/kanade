@@ -19,6 +19,7 @@
 //! self-update exit (code 64) as a recoverable failure and restarts.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_nats::jetstream;
@@ -49,10 +50,17 @@ pub async fn run(
 
     // Initial check against whatever the supervisor's first push
     // (its initial_sync) populated.
-    let mut current_target = cfg_rx.borrow().target_version.clone();
+    let (mut current_target, jitter) = {
+        let cfg = cfg_rx.borrow();
+        (
+            cfg.target_version.clone(),
+            cfg.target_version_jitter_duration(),
+        )
+    };
     if let Some(target) = current_target.as_deref()
         && target != running_version
     {
+        sleep_jitter(jitter).await;
         if let Err(e) = maybe_download(&store, target, &running_version).await {
             warn!(error = %e, target, "initial self-update fetch failed");
         }
@@ -65,7 +73,13 @@ pub async fn run(
         if cfg_rx.changed().await.is_err() {
             return;
         }
-        let new_target = cfg_rx.borrow().target_version.clone();
+        let (new_target, jitter) = {
+            let cfg = cfg_rx.borrow();
+            (
+                cfg.target_version.clone(),
+                cfg.target_version_jitter_duration(),
+            )
+        };
         if new_target == current_target {
             continue;
         }
@@ -73,11 +87,37 @@ pub async fn run(
         if let Some(target) = new_target.as_deref()
             && target != running_version
         {
+            sleep_jitter(jitter).await;
             if let Err(e) = maybe_download(&store, target, &running_version).await {
                 warn!(error = %e, target, "self-update fetch failed");
             }
         }
     }
+}
+
+/// Random pause in `0..=max` before the download fires. The point is
+/// to de-synchronise a fleet-wide rollout — `kanade agent rollout
+/// <v> --global` fans the same KV update out to every agent within
+/// milliseconds, and without jitter every agent would hit the Object
+/// Store at the same instant. `max == 0` means "fire now" (default
+/// for the empty-fleet / dev case and for canary smoke tests).
+async fn sleep_jitter(max: Duration) {
+    if max.is_zero() {
+        return;
+    }
+    let secs = max.as_secs();
+    let pick = if secs == 0 {
+        0
+    } else {
+        use rand::Rng;
+        rand::rng().random_range(0..=secs)
+    };
+    info!(
+        jitter_max_secs = secs,
+        sleep_secs = pick,
+        "self-update jitter — pausing before download"
+    );
+    tokio::time::sleep(Duration::from_secs(pick)).await;
 }
 
 async fn maybe_download(

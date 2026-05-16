@@ -188,7 +188,10 @@ kanade schedule create <schedule.yaml>           # POST /api/schedules (cron + m
 kanade schedule list
 kanade schedule delete <id>
 
-kanade agent publish <binary> --version <v>      # upload to Object Store + flip global.target_version
+kanade agent publish <binary> [--version <v>]    # upload binary to Object Store (no KV touch)
+kanade agent rollout <v> --global  [--jitter <d>]            # fleet-wide
+kanade agent rollout <v> --group <name> [--jitter <d>]       # canary / wave
+kanade agent rollout <v> --pc    <pc_id> [--jitter <d>]      # single-host pin
 kanade agent current                             # read agent_config.global.target_version
 
 kanade agent groups list <pc_id>                 # current group memberships for one PC
@@ -401,6 +404,7 @@ the PDB.
 - **v0.3.1** — `kanade-backend` auto-bootstraps every JetStream resource at startup; the operator-side `kanade jetstream setup` is now optional
 - **Sprint 10** (v0.7.0) — Audit / Results page filters (actor / action / pc_id / status / since presets) and `/api/health/fleet` rollup endpoint (agents · JetStream · recent failures, 200/503 by `status`); Dashboard surfaces the server-computed banner
 - **v0.7.1** — agent file logging via `tracing-appender` (daily rotation, `[log] keep_days` retention), `kanade agent publish` auto-detects `--version` from the binary via `<exe> --version` probe
+- **v0.8.0** — staged self-update rollout: `kanade agent publish` is now upload-only (no KV touch); new `kanade agent rollout <ver> --global|--group <name>|--pc <pc_id> [--jitter <dur>]` flips `target_version` on one scope and (optionally) `target_version_jitter`. Agent-side `self_update` sleeps `random(0..jitter)` before downloading, defusing the "3000 agents hammer the Object Store at the same instant" failure mode. **Breaking change**: any operator scripts that relied on `publish` doing the rollout in one step need to chain a `rollout` call
 
 Backlog: on-demand agent log fetch (`logs.fetch.<pc_id>` + Web UI), Prometheus metrics, 3000-agent simulation, NATS cluster + replicated backend, Postgres migration.
 

@@ -42,6 +42,12 @@ use serde::{Deserialize, Serialize};
 pub struct ConfigScope {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_version: Option<String>,
+    /// Random sleep window applied at each agent before it starts
+    /// downloading a new target_version, so a fleet-wide rollout
+    /// doesn't slam the Object Store / broker all at once
+    /// (humantime, e.g. `"30m"`). `"0s"` (or unset) = no jitter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_version_jitter: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inventory_interval: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -55,6 +61,7 @@ pub struct ConfigScope {
 impl ConfigScope {
     pub fn is_empty(&self) -> bool {
         self.target_version.is_none()
+            && self.target_version_jitter.is_none()
             && self.inventory_interval.is_none()
             && self.inventory_jitter.is_none()
             && self.inventory_enabled.is_none()
@@ -71,6 +78,7 @@ impl ConfigScope {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct EffectiveConfig {
     pub target_version: Option<String>,
+    pub target_version_jitter: String,
     pub inventory_interval: String,
     pub inventory_jitter: String,
     pub inventory_enabled: bool,
@@ -84,6 +92,12 @@ impl EffectiveConfig {
     pub fn builtin_defaults() -> Self {
         Self {
             target_version: None,
+            // 0s = "no jitter" = pre-Sprint-11 behaviour. Operators
+            // running ≥ 100-host fleets are expected to bump this
+            // (via `kanade agent rollout … --jitter 30m` or
+            // `kanade config set target_version_jitter=30m`) so the
+            // Object Store fan-out doesn't synchronise.
+            target_version_jitter: "0s".to_string(),
             inventory_interval: "24h".to_string(),
             inventory_jitter: "10m".to_string(),
             inventory_enabled: true,
@@ -105,6 +119,14 @@ impl EffectiveConfig {
 
     pub fn inventory_jitter_duration(&self) -> Duration {
         humantime::parse_duration(&self.inventory_jitter).unwrap_or(Duration::from_secs(600))
+    }
+
+    /// Parsed `target_version_jitter`, falling back to zero (= no
+    /// jitter) on a malformed string. Zero means "start downloading
+    /// immediately when target_version drifts" — fine for small
+    /// fleets / canary smoke tests, bad for 3000 hosts.
+    pub fn target_version_jitter_duration(&self) -> Duration {
+        humantime::parse_duration(&self.target_version_jitter).unwrap_or(Duration::ZERO)
     }
 }
 
@@ -177,6 +199,12 @@ pub fn resolve(
                 .or_default()
                 .push(g.to_string());
         }
+        if scope.target_version_jitter.is_some() {
+            setters
+                .entry("target_version_jitter")
+                .or_default()
+                .push(g.to_string());
+        }
         if scope.inventory_interval.is_some() {
             setters
                 .entry("inventory_interval")
@@ -225,6 +253,9 @@ pub fn resolve(
 fn apply_scope(out: &mut EffectiveConfig, s: &ConfigScope) {
     if let Some(v) = &s.target_version {
         out.target_version = Some(v.clone());
+    }
+    if let Some(v) = &s.target_version_jitter {
+        out.target_version_jitter = v.clone();
     }
     if let Some(v) = &s.inventory_interval {
         out.inventory_interval = v.clone();
