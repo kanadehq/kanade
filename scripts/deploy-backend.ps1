@@ -16,10 +16,13 @@
   layout (README "Production install layout"): Program Files is the
   read-only install root, ProgramData holds writable runtime state.
 
-  Pass -FirewallPort <int> to also open an inbound TCP rule with
-  New-NetFirewallRule. The backend's HTTP bind port is set in
-  backend.toml, so the value must match whatever you configured
-  there (default 8443).
+  Firewall: the installed backend.toml is parsed for its `[server]
+  bind` line. If the host part isn't loopback (127.0.0.1 / ::1 /
+  localhost), the script opens that port via New-NetFirewallRule.
+  Pass -FirewallPort <int> to override the parsed port (e.g. when
+  there's a reverse proxy listening on a different external port),
+  or -NoFirewall to suppress the rule altogether (managed firewall,
+  separate WAF, etc.).
 
 .PARAMETER SourceDir
   Directory holding kanade-backend.exe and backend.toml. Defaults to
@@ -34,18 +37,30 @@
   upgrades.
 
 .PARAMETER FirewallPort
-  If set, add a New-NetFirewallRule for TCP inbound on this port.
-  Match it to the bind_addr in backend.toml.
+  Open this TCP port via New-NetFirewallRule, overriding the port
+  parsed out of backend.toml's `[server] bind`. Useful when an
+  external reverse proxy listens on a different port than the
+  backend itself.
+
+.PARAMETER NoFirewall
+  Skip the firewall rule even when backend.toml's bind looks
+  public. Use this when an external firewall (corporate / WAF /
+  cloud security group) is the source of truth.
 
 .PARAMETER NoStart
   Install + register the service but don't start it.
 
 .EXAMPLE
-  PS> .\deploy-backend.ps1 -FirewallPort 8443
+  PS> .\deploy-backend.ps1                            # opens whatever backend.toml binds to
 
 .EXAMPLE
-  # Re-run after a binary update, forcing fresh config:
-  PS> .\deploy-backend.ps1 -ForceConfig
+  PS> .\deploy-backend.ps1 -FirewallPort 8443         # override the parsed port
+
+.EXAMPLE
+  PS> .\deploy-backend.ps1 -NoFirewall                # external firewall handles ingress
+
+.EXAMPLE
+  PS> .\deploy-backend.ps1 -ForceConfig               # re-run after binary update, fresh config
 #>
 
 [CmdletBinding()]
@@ -54,6 +69,7 @@ param(
     [string]$ServiceName  = 'KanadeBackend',
     [switch]$ForceConfig,
     [int]   $FirewallPort = 0,
+    [switch]$NoFirewall,
     [switch]$NoStart
 )
 
@@ -135,21 +151,63 @@ if ($LASTEXITCODE -ne 0) { throw "sc.exe failure failed (exit $LASTEXITCODE)" }
 & sc.exe failureflag $ServiceName 1 | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "sc.exe failureflag failed (exit $LASTEXITCODE)" }
 
+# Decide which port to open (if any). Priority:
+#   1. Explicit -FirewallPort wins outright.
+#   2. -NoFirewall short-circuits to "nothing".
+#   3. Parse backend.toml's `[server] bind` and, if the host part
+#      isn't loopback, open the port it carries.
+#
+# Loopback bind (127.0.0.1 / ::1 / localhost) means same-machine
+# only — no firewall rule needed, and adding one would just be
+# noise in the audit log.
+$portToOpen = 0
 if ($FirewallPort -gt 0) {
-    $ruleName = "$ServiceName (TCP $FirewallPort)"
+    $portToOpen = $FirewallPort
+    Write-Host "Firewall: opening inbound TCP $portToOpen (explicit -FirewallPort)."
+} elseif (-not $NoFirewall) {
+    $bindLine = Select-String -Path $configDst -Pattern "^bind\s*=\s*['""]([^'""]+)['""]" |
+                Select-Object -First 1
+    if ($bindLine) {
+        $bindAddr    = $bindLine.Matches[0].Groups[1].Value
+        # IPv6 form is [::]:8080 — strip the brackets so the final
+        # `:port` split is unambiguous.
+        $unbracketed = $bindAddr -replace '^\[([^\]]+)\]', '$1'
+        $lastColon   = $unbracketed.LastIndexOf(':')
+        if ($lastColon -gt 0) {
+            $bindHost  = $unbracketed.Substring(0, $lastColon)
+            $bindPort  = $unbracketed.Substring($lastColon + 1) -as [int]
+            $loopback  = @('127.0.0.1', '::1', 'localhost')
+            if ($bindPort -and ($loopback -notcontains $bindHost)) {
+                $portToOpen = $bindPort
+                Write-Host "Firewall: bind '$bindAddr' is public; opening inbound TCP $portToOpen (pass -NoFirewall to skip)."
+            } else {
+                Write-Host "Firewall: bind '$bindAddr' is loopback; no rule needed."
+            }
+        } else {
+            Write-Host "Firewall: couldn't parse a port out of bind '$bindAddr'; skipping rule. Pass -FirewallPort to open one explicitly."
+        }
+    } else {
+        Write-Host "Firewall: no `[server] bind` line found in $configDst; skipping rule. Pass -FirewallPort to open one explicitly."
+    }
+} else {
+    Write-Host "Firewall: -NoFirewall set; skipping rule."
+}
+
+if ($portToOpen -gt 0) {
+    $ruleName = "$ServiceName (TCP $portToOpen)"
     $existing = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
     if ($existing) {
         Write-Host "Firewall rule '$ruleName' already exists; leaving it alone."
     } else {
-        Write-Host "Opening inbound TCP $FirewallPort"
         New-NetFirewallRule `
             -DisplayName $ruleName `
             -Direction   Inbound `
             -Protocol    TCP `
-            -LocalPort   $FirewallPort `
+            -LocalPort   $portToOpen `
             -Action      Allow `
             -Profile     Any `
             | Out-Null
+        Write-Host "Created firewall rule '$ruleName'."
     }
 }
 
