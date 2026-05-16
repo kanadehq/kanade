@@ -44,13 +44,25 @@ pub async fn run(state: AppState) -> Result<()> {
     let registered: Registered = Arc::new(Mutex::new(HashMap::new()));
 
     // 1. Initial load — register every enabled Schedule already in KV.
-    let keys: Vec<String> = kv
-        .keys()
-        .await
-        .context("list schedules KV keys")?
-        .try_collect()
-        .await
-        .context("collect KV keys")?;
+    //
+    // Best-effort: kv.keys() against an empty bucket fails on
+    // async-nats 0.48 (the internal LastPerSubject ordered-consumer
+    // returns an error when the stream has zero messages). Failing
+    // the whole scheduler over that would take down the watch loop
+    // too — which is exactly the bit that catches the first
+    // schedule POST after a fresh broker boot. Log + continue so
+    // the watch loop stays live; the initial set just stays empty
+    // until the first real schedule lands.
+    let keys: Vec<String> = match kv.keys().await {
+        Ok(stream) => stream.try_collect().await.unwrap_or_else(|e| {
+            warn!(error = %e, "collect schedules KV keys (initial load best-effort)");
+            Vec::new()
+        }),
+        Err(e) => {
+            warn!(error = %e, "list schedules KV keys (likely empty bucket; watch loop still arms)");
+            Vec::new()
+        }
+    };
     for k in keys {
         let entry = match kv.get(&k).await {
             Ok(Some(b)) => b,
