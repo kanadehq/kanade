@@ -8,6 +8,7 @@ pub const BUCKET_SCRIPT_CURRENT: &str = "script_current";
 pub const BUCKET_SCRIPT_STATUS: &str = "script_status";
 pub const BUCKET_AGENTS_STATE: &str = "agents_state";
 pub const BUCKET_AGENT_CONFIG: &str = "agent_config";
+pub const BUCKET_AGENT_GROUPS: &str = "agent_groups";
 pub const BUCKET_SCHEDULES: &str = "schedules";
 
 /// Object Store bucket holding raw agent binaries (one object per
@@ -42,6 +43,7 @@ mod tests {
             BUCKET_SCRIPT_STATUS,
             BUCKET_AGENTS_STATE,
             BUCKET_AGENT_CONFIG,
+            BUCKET_AGENT_GROUPS,
             BUCKET_SCHEDULES,
             OBJECT_AGENT_RELEASES,
         ] {
