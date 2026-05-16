@@ -3,8 +3,12 @@ pub mod agent_groups;
 pub mod agents;
 pub mod audit;
 pub mod deploy;
+pub mod jetstream_status;
+pub mod jobs;
 pub mod results;
+pub mod run;
 pub mod schedules;
+pub mod scripts;
 
 use axum::Router;
 use axum::extract::FromRef;
@@ -68,6 +72,12 @@ pub fn router(state: AppState) -> Router {
             get(schedules::list).post(schedules::create),
         )
         .route("/api/schedules/{id}", delete(schedules::delete))
+        .route("/api/run", post(run::run))
+        .route("/api/agents/{pc_id}/ping", post(run::ping))
+        .route("/api/scripts/{cmd_id}/revoke", post(scripts::revoke))
+        .route("/api/scripts/{cmd_id}/unrevoke", post(scripts::unrevoke))
+        .route("/api/jobs/{job_id}/kill", post(jobs::kill))
+        .route("/api/jetstream/status", get(jetstream_status::status))
         .with_state(state)
         // Everything else (`/`, `/assets/...`, hash-router paths) is served
         // from the rust-embed bundle. The fallback runs after the API routes
