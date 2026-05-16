@@ -1,4 +1,5 @@
 mod commands;
+mod groups;
 mod heartbeat;
 mod inventory;
 mod process;
@@ -63,7 +64,6 @@ async fn main() -> Result<()> {
     info!(
         commands_all = subject::COMMANDS_ALL,
         commands_self = %subject::commands_pc(&cfg.agent.id),
-        groups = ?cfg.agent.groups,
         "subscribed",
     );
 
@@ -80,16 +80,18 @@ async fn main() -> Result<()> {
     ));
     tokio::spawn(self_update::run(client.clone(), AGENT_VERSION.to_string()));
 
-    // Spawn one command_loop per declared group (Sprint 4a wave rollout
-    // publishes to commands.group.{name}).
-    for group in &cfg.agent.groups {
-        let sub = client
-            .subscribe(subject::commands_group(group))
-            .await
-            .with_context(|| format!("subscribe commands.group.{group}"))?;
-        tokio::spawn(commands::command_loop(client.clone(), pc_id.clone(), sub));
-        info!(group = %group, "subscribed to group subject");
+    // Group membership: Sprint 5 moves this from agent.toml (per-box
+    // local config) to a server-managed KV bucket. The manager reads
+    // `agent_groups.{pc_id}` from JetStream KV, spawns one
+    // `commands.group.<name>` subscriber per current group, and reacts
+    // to KV updates by adding / dropping subscriptions live.
+    if !cfg.agent.groups.is_empty() {
+        tracing::warn!(
+            local_groups = ?cfg.agent.groups,
+            "agent.toml::[agent] groups is deprecated; use `kanade agent groups set` instead — local value is ignored",
+        );
     }
+    tokio::spawn(groups::manage(client.clone(), pc_id.clone()));
 
     let _ = tokio::join!(
         commands::command_loop(client.clone(), pc_id.clone(), cmd_all),

@@ -54,7 +54,9 @@ impl AgentGroups {
     }
 
     pub fn contains(&self, group: &str) -> bool {
-        self.groups.binary_search_by(|g| g.as_str().cmp(group)).is_ok()
+        self.groups
+            .binary_search_by(|g| g.as_str().cmp(group))
+            .is_ok()
     }
 
     pub fn is_empty(&self) -> bool {
