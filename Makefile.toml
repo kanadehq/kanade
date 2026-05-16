@@ -73,8 +73,15 @@ command = "bun"
 args = ["run", "build"]
 
 [tasks.web-dev]
-description = "Run the Vite dev server with HMR (proxies /api to the dev backend on :8081)"
+description = "Vite dev server with HMR — proxies /api to the dev backend on :8081 (paired with `cargo make backend-dev`)."
 cwd = "crates/kanade-backend/web"
+command = "bun"
+args = ["run", "dev"]
+
+[tasks.web-dev-prod]
+description = "Vite dev server with HMR — proxies /api to the installed KanadeBackend service on :8080. Use this to iterate on the UI against the real fleet data; SPA login dialog needs the operator's bearer token if KANADE_AUTH_STATIC_TOKEN is configured."
+cwd = "crates/kanade-backend/web"
+env = { "BACKEND_PROXY" = "http://localhost:8080" }
 command = "bun"
 args = ["run", "dev"]
 
@@ -89,6 +96,10 @@ description = "Run kanade-agent in dev mode against the same NATS the installed 
 env = { "KANADE_AGENT_CONFIG" = "./agent.toml", "RUST_LOG" = "info,kanade_agent=debug" }
 command = "cargo"
 args = ["run", "-p", "kanade-agent"]
+
+[tasks.dev]
+description = "One-shot sandbox: spawns `backend-dev` (:8081) and `web-dev` (:5173) in parallel. Ctrl+C once to tear both down. Skip this when you'd rather iterate against the production backend — use `web-dev-prod` for that."
+run_task = { name = ["backend-dev", "web-dev"], parallel = true }
 
 [tasks.hook-install]
 description = "Install git pre-push hook that runs 'cargo make check'"
