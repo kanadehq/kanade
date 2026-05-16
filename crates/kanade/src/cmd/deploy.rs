@@ -35,7 +35,7 @@ pub async fn execute(backend_url: &str, args: DeployArgs) -> Result<()> {
     info!(job_id = %manifest.id, version = %manifest.version, "deploying");
 
     let url = format!("{}/api/deploy", backend_url.trim_end_matches('/'));
-    let client = reqwest::Client::new();
+    let client = crate::http_client::authed_client()?;
     let resp = client
         .post(&url)
         .json(&manifest)

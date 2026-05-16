@@ -40,7 +40,7 @@ async fn create(base: &str, yaml: &PathBuf) -> Result<()> {
     info!(schedule_id = %schedule.id, cron = %schedule.cron, "upserting schedule");
 
     let url = format!("{base}/api/schedules");
-    let resp = reqwest::Client::new()
+    let resp = crate::http_client::authed_client()?
         .post(&url)
         .json(&schedule)
         .send()
@@ -58,7 +58,9 @@ async fn create(base: &str, yaml: &PathBuf) -> Result<()> {
 
 async fn list(base: &str) -> Result<()> {
     let url = format!("{base}/api/schedules");
-    let resp = reqwest::get(&url)
+    let resp = crate::http_client::authed_client()?
+        .get(&url)
+        .send()
         .await
         .with_context(|| format!("GET {url}"))?;
     if !resp.status().is_success() {
@@ -71,7 +73,7 @@ async fn list(base: &str) -> Result<()> {
 
 async fn delete(base: &str, id: &str) -> Result<()> {
     let url = format!("{base}/api/schedules/{id}");
-    let resp = reqwest::Client::new()
+    let resp = crate::http_client::authed_client()?
         .delete(&url)
         .send()
         .await

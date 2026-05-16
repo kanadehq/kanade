@@ -271,6 +271,40 @@ path = 'logs/backend.log'
 level = 'info'
 ```
 
+## Authentication
+
+`/api/*` is protected by a single middleware (`crates/kanade-backend/src/auth.rs`).
+Three modes, picked by env var on the backend side:
+
+| Env on `kanade-backend` | Mode | Use for |
+|---|---|---|
+| `KANADE_AUTH_DISABLE=1` | open | local dev, `cargo run` |
+| `KANADE_AUTH_STATIC_TOKEN=<secret>` | shared bearer | single-operator fleets — paste the same secret on the SPA login + `kanade` CLI |
+| `KANADE_JWT_SECRET=<secret>` | HS256 JWT | full multi-user setup; sign tokens out-of-band with `aud=kanade` |
+
+Precedence: `DISABLE` > `STATIC_TOKEN` > `JWT_SECRET`. Backend with none of
+the three set falls back to a hard-coded dev secret and logs a loud warning —
+fine for one-shot debugging, **never** for production.
+
+Clients send `Authorization: Bearer <token>` on every `/api/*` request:
+
+- **SPA**: stores the token in `localStorage`; click `login` in the top-right
+  nav to paste, `logout` to clear. A 401 from the backend auto-clears the
+  stored token and re-prompts.
+- **CLI**: reads `$env:KANADE_AUTH_TOKEN`. Set it once per shell session
+  (or export it from a shell profile). The CLI sends the same header
+  regardless of which auth mode the backend is running.
+
+```powershell
+# Backend side
+$env:KANADE_AUTH_STATIC_TOKEN = "kanade-fleet-secret-2026"
+.\deploy-backend.ps1
+
+# Operator side (CLI)
+$env:KANADE_AUTH_TOKEN = "kanade-fleet-secret-2026"
+kanade deploy jobs\echo-test.yaml
+```
+
 ## Dev workflow
 
 ```powershell

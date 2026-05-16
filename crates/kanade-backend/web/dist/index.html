@@ -108,18 +108,71 @@
       <a href="#/config">Config</a>
       <a href="#/jetstream">JetStream</a>
     </nav>
+    <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
+      <span id="auth-state" class="muted" style="font-size:12px"></span>
+      <button id="auth-btn" class="secondary" style="font-size:12px;padding:4px 10px">login</button>
+    </div>
   </header>
   <main id="root">loading…</main>
+
+  <dialog id="auth-dialog" style="border:1px solid var(--border);border-radius:8px;padding:16px;background:var(--card);color:var(--fg);max-width:480px">
+    <h2 style="margin:0 0 8px">Authenticate</h2>
+    <p class="muted" style="margin:0 0 12px">Paste the bearer token your backend operator gave you. Stored in <code>localStorage</code>; clear it any time with the logout button.</p>
+    <input type="password" id="auth-input" autocomplete="off" placeholder="paste token here" style="width:100%" />
+    <div class="toolbar" style="margin-top:12px;justify-content:flex-end">
+      <button id="auth-cancel" class="secondary">cancel</button>
+      <button id="auth-save">save + reload</button>
+    </div>
+  </dialog>
 
   <script>
     const root = document.getElementById('root');
     const nav = document.getElementById('nav');
 
+    const TOKEN_KEY = 'kanade_token';
+    function getToken() { return localStorage.getItem(TOKEN_KEY) || ''; }
+    function setToken(t) {
+      if (t) localStorage.setItem(TOKEN_KEY, t);
+      else   localStorage.removeItem(TOKEN_KEY);
+    }
+    function refreshAuthState() {
+      const state = document.getElementById('auth-state');
+      const btn = document.getElementById('auth-btn');
+      if (getToken()) {
+        state.textContent = 'auth: token set';
+        btn.textContent = 'logout';
+      } else {
+        state.textContent = 'auth: no token';
+        btn.textContent = 'login';
+      }
+    }
+
     async function fetchJson(url, opts = {}) {
-      const r = await fetch(url, opts);
+      const token = getToken();
+      const headers = new Headers(opts.headers || {});
+      if (token) headers.set('Authorization', `Bearer ${token}`);
+      const r = await fetch(url, { ...opts, headers });
       const text = await r.text();
+      if (r.status === 401) {
+        // Drop the (presumably stale) token + invite the user to
+        // re-paste. Keep throwing so the caller's catch surfaces a
+        // useful message instead of a quietly empty render.
+        setToken('');
+        refreshAuthState();
+        showAuthDialog();
+        throw new Error(`401 unauthorised — paste a fresh token via the login button`);
+      }
       if (!r.ok) throw new Error(`${r.status} ${r.statusText} — ${text}`);
       return text ? JSON.parse(text) : null;
+    }
+
+    function showAuthDialog() {
+      const dlg = document.getElementById('auth-dialog');
+      const input = document.getElementById('auth-input');
+      input.value = getToken();
+      if (typeof dlg.showModal === 'function') dlg.showModal();
+      else dlg.setAttribute('open', '');
+      input.focus();
     }
 
     function fmtTime(iso) {
@@ -516,6 +569,29 @@
       }
     }
 
+    // Auth UI wiring (separate from per-page wireHandlers so it
+    // survives every render() call).
+    document.getElementById('auth-btn').addEventListener('click', () => {
+      if (getToken()) {
+        setToken('');
+        refreshAuthState();
+        render();
+      } else {
+        showAuthDialog();
+      }
+    });
+    document.getElementById('auth-cancel').addEventListener('click', () => {
+      document.getElementById('auth-dialog').close();
+    });
+    document.getElementById('auth-save').addEventListener('click', () => {
+      const token = document.getElementById('auth-input').value.trim();
+      setToken(token);
+      document.getElementById('auth-dialog').close();
+      refreshAuthState();
+      render();
+    });
+
+    refreshAuthState();
     window.addEventListener('hashchange', render);
     render();
   </script>
