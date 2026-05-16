@@ -5,6 +5,9 @@ mod projector;
 mod scheduler;
 mod web;
 
+#[cfg(target_os = "windows")]
+mod service;
+
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -31,14 +34,38 @@ struct Cli {
     config: Option<PathBuf>,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
+/// Top-level entry point.
+///
+/// Mirrors kanade-agent's main: on Windows we probe the Service
+/// Control Manager first and run as a real service if SCM is
+/// driving us; otherwise we fall through to console mode. Non-
+/// Windows targets always run in console mode.
+fn main() -> Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        match service::try_run_as_service() {
+            Ok(()) => return Ok(()),
+            Err(e) if service::is_not_under_scm(&e) => {
+                // Not started by SCM — fall through to console mode.
+            }
+            Err(e) => return Err(anyhow::anyhow!("service dispatcher failed: {e}")),
+        }
+    }
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("build tokio runtime")?;
+    runtime.block_on(run_backend())
+}
+
+pub(crate) async fn run_backend() -> Result<()> {
+    let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info,kanade_backend=debug,tower_http=info".into()),
         )
-        .init();
+        .try_init();
 
     let cli = Cli::parse();
     let cfg_path = default_paths::find_config(
