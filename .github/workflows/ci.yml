@@ -30,8 +30,8 @@ jobs:
           # Skip cache save on PR runs — the Post step's tar.exe is
           # flaky on windows-latest (file locks under target/ make
           # the save fail and mark the otherwise-green job FAILURE,
-          # blocking renovate auto-merge). Main keeps saving so a
-          # warm cache primes every PR rebuild.
+          # blocking renovate auto-merge for downstream consumers).
+          # Main keeps saving so every PR rebuild gets a warm cache.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo check --all-targets
 
