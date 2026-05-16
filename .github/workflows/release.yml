@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write  # upload Windows binaries to the GitHub Release for build-release.ps1 -FromRelease
 
 jobs:
   publish:
@@ -46,3 +46,25 @@ jobs:
 
       - name: Publish kanade (CLI)
         run: cargo publish -p kanade --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      # Build release binaries for the GitHub Release page. Each
+      # `cargo publish --verify` already compiled the crate, but
+      # those artefacts live under each crate's per-publish target
+      # subdir and `cargo build` is cheap when the registry cache
+      # is warm — no point chasing the verify outputs.
+      - name: Build release binaries
+        run: cargo build --release --workspace --bins
+
+      # Upload kanade-agent.exe / kanade-backend.exe / kanade.exe
+      # to the auto-created GitHub Release for this tag.
+      # build-release.ps1's -FromRelease mode consumes them via
+      # Invoke-WebRequest, skipping cargo install for operators that
+      # don't have a Rust toolchain on the build host.
+      - name: Attach binaries to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/release/kanade-agent.exe
+            target/release/kanade-backend.exe
+            target/release/kanade.exe
+          fail_on_unmatched_files: true

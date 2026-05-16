@@ -59,6 +59,18 @@
   (tokio / serde / async-nats / tracing / …) so a shared cache
   shrinks the total artefact footprint.
 
+.PARAMETER FromRelease
+  Download the pre-built Windows binary from the matching GitHub
+  Release tag instead of running cargo. Implies no Rust toolchain
+  is required on the build host. Mutually exclusive with
+  `-FromSource`; ignored when the staged binary already reports
+  the requested version (use `-Force` to override).
+
+.PARAMETER GitHubRepo
+  GitHub `owner/repo` to pull release assets from when
+  `-FromRelease` is set. Default: `yukimemi/kanade`. Override if
+  you fork.
+
 .PARAMETER Force
   Rebuild every selected role even when the staged binary already
   reports the requested version. The default fast-path is intended
@@ -78,6 +90,11 @@
   PS> .\scripts\build-release.ps1 -Version 0.1.4
 
 .EXAMPLE
+  # No-cargo path: pull pre-built binaries straight from the
+  # GitHub Release page (~5s vs ~5min cold-compile).
+  PS> .\scripts\build-release.ps1 -FromRelease
+
+.EXAMPLE
   # Force a clean rebuild despite the cached stage being up to date:
   PS> .\scripts\build-release.ps1 -Force
 #>
@@ -87,6 +104,8 @@ param(
     [string]  $Version,
     [string]  $OutDir    = 'dist',
     [switch]  $FromSource,
+    [switch]  $FromRelease,
+    [string]  $GitHubRepo = 'yukimemi/kanade',
     [switch]  $Zip,
     [string[]]$Roles     = @('agent', 'backend'),
     [string]  $TargetDir,
@@ -95,8 +114,13 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
-    throw "cargo not found on PATH. Run this on a build host with the Rust toolchain installed."
+if ($FromSource -and $FromRelease) {
+    throw "-FromSource and -FromRelease are mutually exclusive."
+}
+# cargo is only required for the build paths (default crates.io + -FromSource).
+# -FromRelease can run without a Rust toolchain at all.
+if (-not $FromRelease -and -not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+    throw "cargo not found on PATH. Install Rust, or pass -FromRelease to download a pre-built binary from GitHub Releases instead."
 }
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
@@ -124,9 +148,12 @@ if (-not [System.IO.Path]::IsPathRooted($TargetDir)) {
 $null = New-Item -ItemType Directory -Path $TargetDir -Force
 
 Write-Host ("Staging kanade v{0} into {1}" -f $Version, $OutDir)
-if ($FromSource) { Write-Host "Source: local checkout ($repoRoot)" }
-else             { Write-Host "Source: crates.io" }
-Write-Host ("Cache:  {0}" -f $TargetDir)
+if     ($FromSource)  { Write-Host "Source: local checkout ($repoRoot)" }
+elseif ($FromRelease) { Write-Host "Source: GitHub Releases ($GitHubRepo @ v$Version)" }
+else                  { Write-Host "Source: crates.io" }
+if (-not $FromRelease) {
+    Write-Host ("Cache:  {0}" -f $TargetDir)
+}
 
 foreach ($role in $Roles) {
     $crate    = "kanade-$role"
@@ -146,8 +173,11 @@ foreach ($role in $Roles) {
     $exeDst = Join-Path $stage $exeName
 
     # Fast-path: if the staged binary already reports the requested
-    # version, skip cargo install entirely. -FromSource always rebuilds
-    # (working-tree code may differ from what --version reports).
+    # version, skip the fetch / cargo install entirely. -FromSource
+    # always rebuilds (working-tree code may differ from what
+    # --version reports); -FromRelease respects the skip because
+    # the on-disk exe at the right version is by definition
+    # bit-identical to what we'd re-download.
     $skipBuild = $false
     if (-not $FromSource -and -not $Force -and (Test-Path $exeDst)) {
         try {
@@ -177,7 +207,23 @@ foreach ($role in $Roles) {
         if (-not (Test-Path $stage)) {
             $null = New-Item -ItemType Directory -Path $stage
         }
+    }
 
+    if ($FromRelease -and -not $skipBuild) {
+        $url = "https://github.com/$GitHubRepo/releases/download/v$Version/$exeName"
+        Write-Host "Downloading $url"
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $exeDst -UseBasicParsing
+        } catch {
+            throw @"
+Failed to download $url
+  - Asset missing on the release? Check https://github.com/$GitHubRepo/releases/tag/v$Version
+  - First v0.3.x tags published before the GitHub-Release-upload step landed won't have assets;
+    use the default (crates.io) source for those, or -FromSource against a checkout.
+Original error: $($_.Exception.Message)
+"@
+        }
+    } elseif (-not $skipBuild) {
         $temp = Join-Path ([System.IO.Path]::GetTempPath()) ("kanade-stage-{0}-{1}" -f $role, [System.Guid]::NewGuid().ToString('N'))
         try {
             if ($FromSource) {
