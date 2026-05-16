@@ -44,6 +44,8 @@ enum SubCmd {
     Schedule(cmd::schedule::ScheduleArgs),
     /// Manage agent releases (publish a new binary, query the target version).
     Agent(cmd::agent::AgentArgs),
+    /// Manage the layered agent_config KV bucket (global / per-group / per-pc).
+    Config(cmd::config::ConfigArgs),
 }
 
 #[tokio::main]
@@ -83,6 +85,7 @@ async fn main() -> Result<()> {
         SubCmd::Unrevoke(args) => cmd::revoke::unrevoke(client, args).await,
         SubCmd::Kill(args) => cmd::kill::execute(client, args).await,
         SubCmd::Agent(args) => cmd::agent::execute(client, args).await,
+        SubCmd::Config(args) => cmd::config::execute(client, args).await,
         SubCmd::Deploy(_) | SubCmd::Schedule(_) => unreachable!("handled above"),
     }
 }
