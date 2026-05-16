@@ -1,11 +1,29 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
   <defs>
-    <linearGradient id="g" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#5b3a8c"/>
+    <linearGradient id="kanade-grad" x1="32" y1="4" x2="32" y2="60" gradientUnits="userSpaceOnUse">
+      <stop offset="0"   stop-color="#5b3a8c"/>
       <stop offset="0.5" stop-color="#d4a017"/>
-      <stop offset="1" stop-color="#2a9d8f"/>
+      <stop offset="1"   stop-color="#2a9d8f"/>
+    </linearGradient>
+    <linearGradient id="kanade-shine" x1="20" y1="14" x2="44" y2="50" gradientUnits="userSpaceOnUse">
+      <stop offset="0"   stop-color="white" stop-opacity="0.45"/>
+      <stop offset="0.6" stop-color="white" stop-opacity="0"/>
     </linearGradient>
   </defs>
-  <path d="M14 50 Q26 14 50 14" stroke="url(#g)"/>
-  <circle cx="14" cy="50" r="5" fill="url(#g)"/>
+  <!-- Body: vertical teardrop. Top point at (32,4), round bottom centred at (32,42) with radius 20. -->
+  <path
+    fill="url(#kanade-grad)"
+    d="M 32 4
+       C 32 4 12 28 12 42
+       A 20 20 0 0 0 52 42
+       C 52 28 32 4 32 4 Z"
+  />
+  <!-- Inner highlight for a touch of depth (water-droplet feel without going skeuomorphic). -->
+  <path
+    fill="url(#kanade-shine)"
+    d="M 28 12
+       C 28 12 18 28 18 40
+       A 14 14 0 0 0 36 30
+       C 36 22 30 14 28 12 Z"
+  />
 </svg>

@@ -1,4 +1,4 @@
-import { NavLink } from 'react-router-dom';
+import { Link, NavLink } from 'react-router-dom';
 
 import { AuthBar } from '@/components/AuthBar';
 import { cn } from '@/lib/utils';
@@ -18,9 +18,16 @@ export function Nav() {
   return (
     <header className="border-b border-border bg-card/60 backdrop-blur-sm sticky top-0 z-10">
       <div className="max-w-7xl mx-auto px-6 py-3 flex items-center gap-6">
-        <h1 className="text-xl font-extrabold bg-gradient-to-br from-violet via-amber to-teal bg-clip-text text-transparent">
-          奏 kanade
-        </h1>
+        <Link to="/" className="flex items-center gap-2 group">
+          <img
+            src="/icon.svg"
+            alt="kanade"
+            className="size-7 transition-transform group-hover:rotate-3"
+          />
+          <h1 className="text-xl font-extrabold bg-gradient-to-br from-violet via-amber to-teal bg-clip-text text-transparent">
+            奏 kanade
+          </h1>
+        </Link>
         <nav className="flex gap-1">
           {links.map((l) => (
             <NavLink
