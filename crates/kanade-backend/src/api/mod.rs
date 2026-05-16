@@ -1,3 +1,4 @@
+pub mod agent_groups;
 pub mod agents;
 pub mod audit;
 pub mod deploy;
@@ -27,6 +28,16 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/api/agents", get(agents::list))
         .route("/api/agents/{pc_id}", get(agents::detail))
+        .route(
+            "/api/agents/{pc_id}/groups",
+            get(agent_groups::list_groups)
+                .put(agent_groups::set_groups)
+                .post(agent_groups::add_group),
+        )
+        .route(
+            "/api/agents/{pc_id}/groups/{group}",
+            delete(agent_groups::remove_group),
+        )
         .route("/api/results", get(results::list))
         .route("/api/results/{request_id}", get(results::detail))
         .route("/api/audit", get(audit::list))

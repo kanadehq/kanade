@@ -8,8 +8,9 @@ use async_nats::jetstream::{
 };
 use clap::{Args, Subcommand};
 use kanade_shared::kv::{
-    BUCKET_AGENT_CONFIG, BUCKET_AGENTS_STATE, BUCKET_SCRIPT_CURRENT, BUCKET_SCRIPT_STATUS,
-    OBJECT_AGENT_RELEASES, STREAM_AUDIT, STREAM_DEPLOY, STREAM_INVENTORY, STREAM_RESULTS,
+    BUCKET_AGENT_CONFIG, BUCKET_AGENT_GROUPS, BUCKET_AGENTS_STATE, BUCKET_SCRIPT_CURRENT,
+    BUCKET_SCRIPT_STATUS, OBJECT_AGENT_RELEASES, STREAM_AUDIT, STREAM_DEPLOY, STREAM_INVENTORY,
+    STREAM_RESULTS,
 };
 use tracing::info;
 
@@ -113,6 +114,17 @@ async fn setup(js: jetstream::Context) -> Result<()> {
     })
     .await?;
     info!(bucket = BUCKET_AGENT_CONFIG, "ready");
+
+    // agent_groups KV — pc_id → AgentGroups JSON (Sprint 5).
+    // History 5 so an operator can see who flipped what when
+    // debugging "why is this PC suddenly in wave2?".
+    js.create_key_value(KvConfig {
+        bucket: BUCKET_AGENT_GROUPS.into(),
+        history: 5,
+        ..Default::default()
+    })
+    .await?;
+    info!(bucket = BUCKET_AGENT_GROUPS, "ready");
 
     // agent_releases Object Store — one object per version, holding the
     // raw agent binary.
