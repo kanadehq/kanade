@@ -327,7 +327,50 @@ fallback — too easy to load the wrong file by accident):
 If none of the three is reachable, the binary exits with a message
 listing every option an operator can use to fix it.
 
+### Install scripts (Windows, recommended)
+
+For hosts without `cargo` installed (the common case for agents and
+production backends), use the PowerShell deploy scripts under
+[`scripts/`](https://github.com/yukimemi/kanade/blob/main/scripts/).
+The flow is "drop exe + config + script into one folder, run as
+Admin": the script lays out the directory tree, copies the binary
+into `%ProgramFiles%\Kanade\`, seeds the config into
+`%ProgramData%\Kanade\config\` (without clobbering an existing
+edited one), and registers the Windows service.
+
+```powershell
+# 1. On the build host: grab the release binaries + sample configs.
+#    Either from a GitHub Release zip, or from a `cargo build --release`
+#    output, or by `cargo install --root .\stage kanade-agent`.
+
+# 2. Stage one folder per role with the matching files:
+#    .\stage-agent\
+#      ├── deploy-agent.ps1     (from scripts\ in this repo)
+#      ├── kanade-agent.exe
+#      └── agent.toml           (edit before deploy)
+#
+#    .\stage-backend\
+#      ├── deploy-backend.ps1
+#      ├── kanade-backend.exe
+#      └── backend.toml
+
+# 3. Copy each stage folder onto the target host (xcopy, robocopy,
+#    scp, USB stick — whatever fits your environment).
+
+# 4. On the target host, run the matching script as Administrator:
+PS> .\deploy-agent.ps1
+PS> .\deploy-backend.ps1 -FirewallPort 8443    # match bind_addr in backend.toml
+```
+
+Re-running the script upgrades the binary in place and preserves
+the edited config. Pass `-ForceConfig` to overwrite the installed
+config from the source folder, or `-NoStart` to skip the
+post-install service start.
+
 ### Windows Service registration (sc.exe)
+
+If you'd rather not use the deploy scripts (or want to understand
+exactly what they do), here are the equivalent manual commands:
 
 ```powershell
 # Stage the binaries

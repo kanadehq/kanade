@@ -6,12 +6,15 @@
   Install / update kanade-backend as a Windows service.
 
 .DESCRIPTION
-  Copies kanade-backend.exe and backend.toml from the script's
-  directory (or -SourceDir) into %ProgramData%\Kanade\{bin,config},
-  ensures the layout dirs exist, and (re-)registers a Windows service
-  that runs the backend against the installed config. Re-running
-  upgrades the binary in place; existing backend.toml is preserved
-  unless -ForceConfig is passed.
+  Copies kanade-backend.exe into %ProgramFiles%\Kanade\ and
+  backend.toml into %ProgramData%\Kanade\config\, ensures the
+  runtime data / log dirs exist under %ProgramData%\Kanade\, and
+  (re-)registers a Windows service that runs the backend against
+  the installed config. Re-running upgrades the binary in place;
+  existing backend.toml is preserved unless -ForceConfig is passed.
+  The split follows the Windows convention used in the spec §2.11
+  layout (README "Production install layout"): Program Files is the
+  read-only install root, ProgramData holds writable runtime state.
 
   Pass -FirewallPort <int> to also open an inbound TCP rule with
   New-NetFirewallRule. The backend's HTTP bind port is set in
@@ -23,7 +26,7 @@
   the directory this script lives in.
 
 .PARAMETER ServiceName
-  Windows service name. Default: Kanade-Backend.
+  Windows service name. Default: KanadeBackend.
 
 .PARAMETER ForceConfig
   Overwrite the installed backend.toml with the one in -SourceDir.
@@ -48,7 +51,7 @@
 [CmdletBinding()]
 param(
     [string]$SourceDir    = $PSScriptRoot,
-    [string]$ServiceName  = 'Kanade-Backend',
+    [string]$ServiceName  = 'KanadeBackend',
     [switch]$ForceConfig,
     [int]   $FirewallPort = 0,
     [switch]$NoStart
@@ -56,11 +59,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$installRoot = Join-Path $env:ProgramData 'Kanade'
-$binDir      = Join-Path $installRoot 'bin'
-$configDir   = Join-Path $installRoot 'config'
-$dataDir     = Join-Path $installRoot 'data'
-$logsDir     = Join-Path $installRoot 'logs'
+$binDir    = Join-Path $env:ProgramFiles 'Kanade'
+$dataRoot  = Join-Path $env:ProgramData  'Kanade'
+$configDir = Join-Path $dataRoot 'config'
+$dataDir   = Join-Path $dataRoot 'data'
+$logsDir   = Join-Path $dataRoot 'logs'
 
 $exeName    = 'kanade-backend.exe'
 $configName = 'backend.toml'
@@ -137,5 +140,6 @@ if (-not $NoStart) {
 }
 
 Write-Host ''
-Write-Host "Installed under $installRoot"
+Write-Host "Installed bin: $exeDst"
+Write-Host "Runtime root:  $dataRoot"
 & $exeDst --version

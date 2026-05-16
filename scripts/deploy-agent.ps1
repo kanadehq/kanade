@@ -6,12 +6,15 @@
   Install / update kanade-agent as a Windows service.
 
 .DESCRIPTION
-  Copies kanade-agent.exe and agent.toml from the script's directory
-  (or -SourceDir) into %ProgramData%\Kanade\{bin,config}, ensures the
-  layout dirs exist, and (re-)registers a Windows service that runs
-  the agent against the installed config. Re-running upgrades the
-  binary in place; existing agent.toml is preserved unless -ForceConfig
-  is passed.
+  Copies kanade-agent.exe into %ProgramFiles%\Kanade\ and agent.toml
+  into %ProgramData%\Kanade\config\, ensures the runtime data / log
+  dirs exist under %ProgramData%\Kanade\, and (re-)registers a
+  Windows service that runs the agent against the installed config.
+  Re-running upgrades the binary in place; existing agent.toml is
+  preserved unless -ForceConfig is passed. The split follows the
+  Windows convention used in the spec §2.11 layout (README "Production
+  install layout"): Program Files is the read-only install root,
+  ProgramData holds writable runtime state.
 
 .PARAMETER SourceDir
   Directory holding kanade-agent.exe and agent.toml. Defaults to the
@@ -19,7 +22,7 @@
   exe + config + this script into one folder and run it.
 
 .PARAMETER ServiceName
-  Windows service name. Default: Kanade-Agent.
+  Windows service name. Default: KanadeAgent.
 
 .PARAMETER ForceConfig
   Overwrite the installed agent.toml with the one in -SourceDir. Off
@@ -41,18 +44,18 @@
 [CmdletBinding()]
 param(
     [string]$SourceDir   = $PSScriptRoot,
-    [string]$ServiceName = 'Kanade-Agent',
+    [string]$ServiceName = 'KanadeAgent',
     [switch]$ForceConfig,
     [switch]$NoStart
 )
 
 $ErrorActionPreference = 'Stop'
 
-$installRoot = Join-Path $env:ProgramData 'Kanade'
-$binDir      = Join-Path $installRoot 'bin'
-$configDir   = Join-Path $installRoot 'config'
-$dataDir     = Join-Path $installRoot 'data'
-$logsDir     = Join-Path $installRoot 'logs'
+$binDir    = Join-Path $env:ProgramFiles 'Kanade'
+$dataRoot  = Join-Path $env:ProgramData  'Kanade'
+$configDir = Join-Path $dataRoot 'config'
+$dataDir   = Join-Path $dataRoot 'data'
+$logsDir   = Join-Path $dataRoot 'logs'
 
 $exeName    = 'kanade-agent.exe'
 $configName = 'agent.toml'
@@ -112,5 +115,6 @@ if (-not $NoStart) {
 }
 
 Write-Host ''
-Write-Host "Installed under $installRoot"
+Write-Host "Installed bin: $exeDst"
+Write-Host "Runtime root:  $dataRoot"
 & $exeDst --version
