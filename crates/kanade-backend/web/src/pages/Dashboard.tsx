@@ -56,7 +56,11 @@ function fmtRelative(iso: string | null): string {
   return `${Math.floor(hr / 24)}d ago`;
 }
 
-const ACTIVE_THRESHOLD_MS = 25 * 60 * 60 * 1000; // 25h — covers the default 24h inventory cadence with slack
+// 2 min — covers the default 30s heartbeat cadence with several
+// missed ticks of slack. Heartbeat is the cheaper / faster liveness
+// signal than the 24h inventory cycle, so the dashboard reacts to
+// an agent dropping offline within ~2 min instead of ~25h.
+const ACTIVE_THRESHOLD_MS = 2 * 60 * 1000;
 
 function StatBlock({
   label,
@@ -127,8 +131,8 @@ export function Dashboard() {
   const agents = agentsQ.data ?? [];
   const active = agents.filter(
     (a) =>
-      a.last_inventory &&
-      Date.now() - new Date(a.last_inventory).getTime() < ACTIVE_THRESHOLD_MS,
+      a.last_heartbeat &&
+      Date.now() - new Date(a.last_heartbeat).getTime() < ACTIVE_THRESHOLD_MS,
   ).length;
 
   const js = jsQ.data;
@@ -229,10 +233,10 @@ export function Dashboard() {
           <CardContent className="flex gap-8 items-end">
             <StatBlock label="known" value={agents.length} />
             <StatBlock
-              label="active &lt; 25 h"
+              label="active (heartbeat &lt; 2m)"
               value={active}
               tone={active === agents.length && agents.length > 0 ? 'success' : 'default'}
-              hint="based on last inventory snapshot"
+              hint="based on last heartbeat (~30s cadence)"
             />
           </CardContent>
         </Card>

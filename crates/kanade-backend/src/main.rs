@@ -154,6 +154,15 @@ pub(crate) async fn run_backend() -> Result<()> {
             }
         });
     }
+    {
+        let pool = pool.clone();
+        let nats_client = nats.clone();
+        tokio::spawn(async move {
+            if let Err(e) = projector::heartbeat::run(nats_client, pool).await {
+                error!(error = %e, "heartbeat projector exited");
+            }
+        });
+    }
 
     let app_state = api::AppState {
         pool: pool.clone(),

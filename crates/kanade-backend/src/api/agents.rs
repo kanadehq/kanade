@@ -12,11 +12,14 @@ pub struct AgentRow {
     pub os_name: Option<String>,
     pub os_version: Option<String>,
     pub os_build: Option<String>,
+    pub os_family: Option<String>,
+    pub agent_version: Option<String>,
     pub cpu_model: Option<String>,
     pub cpu_cores: Option<i64>,
     pub ram_bytes: Option<i64>,
     pub disks: serde_json::Value,
     pub last_inventory: Option<chrono::DateTime<chrono::Utc>>,
+    pub last_heartbeat: Option<chrono::DateTime<chrono::Utc>>,
     pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -60,11 +63,14 @@ fn row_to_agent(r: sqlx::sqlite::SqliteRow) -> AgentRow {
         os_name: r.try_get("os_name").ok(),
         os_version: r.try_get("os_version").ok(),
         os_build: r.try_get("os_build").ok(),
+        os_family: r.try_get("os_family").ok(),
+        agent_version: r.try_get("agent_version").ok(),
         cpu_model: r.try_get("cpu_model").ok(),
         cpu_cores: r.try_get("cpu_cores").ok(),
         ram_bytes: r.try_get("ram_bytes").ok(),
         disks,
         last_inventory: r.try_get("last_inventory").ok(),
+        last_heartbeat: r.try_get("last_heartbeat").ok(),
         updated_at: r.try_get("updated_at").ok(),
     }
 }

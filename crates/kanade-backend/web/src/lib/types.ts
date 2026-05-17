@@ -8,11 +8,14 @@ export type AgentRow = {
   os_name: string | null;
   os_version: string | null;
   os_build: string | null;
+  os_family: string | null;
+  agent_version: string | null;
   cpu_model: string | null;
   cpu_cores: number | null;
   ram_bytes: number | null;
   disks: unknown;
   last_inventory: string | null;
+  last_heartbeat: string | null;
   updated_at: string | null;
 };
 
@@ -20,6 +23,8 @@ export type Heartbeat = {
   pc_id: string;
   at: string;
   agent_version: string;
+  hostname: string | null;
+  os_family: string | null;
 };
 
 export type ExecResult = {

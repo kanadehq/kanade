@@ -31,10 +31,11 @@ use tracing::warn;
 
 use super::AppState;
 
-/// Stale threshold for `last_inventory`. Covers the default 24h
-/// inventory cadence with one hour of slack — same value the
-/// Dashboard page uses for the "active < 25h" rollup.
-const STALE_THRESHOLD: Duration = Duration::hours(25);
+/// Stale threshold for `last_heartbeat`. Heartbeats cadence at 30 s
+/// by default; 2 min of slack catches a few missed ticks without
+/// flapping during a single packet drop. Matches the Dashboard's
+/// "active" rollup.
+const STALE_THRESHOLD: Duration = Duration::minutes(2);
 
 /// Look-back window for the recent-failure rollup.
 const RECENT_WINDOW: Duration = Duration::hours(24);
@@ -116,7 +117,7 @@ async fn agents_health(pool: &sqlx::SqlitePool, stale_cutoff: DateTime<Utc>) -> 
     let row = sqlx::query(
         "SELECT
              COUNT(*) AS known,
-             COALESCE(SUM(CASE WHEN last_inventory >= ? THEN 1 ELSE 0 END), 0) AS active
+             COALESCE(SUM(CASE WHEN last_heartbeat >= ? THEN 1 ELSE 0 END), 0) AS active
          FROM agents",
     )
     .bind(stale_cutoff)

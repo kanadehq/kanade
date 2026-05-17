@@ -1,16 +1,27 @@
-#[cfg(target_os = "windows")]
-use std::time::Duration;
+//! Hardware inventory loop + on-demand collection.
+//!
+//! v0.12.0 pivot: collection is delegated to `powershell.exe
+//! -NoProfile -Command "..."` instead of the `wmi` crate's direct
+//! WMI calls. The wmi crate hits `WBEM_E_INVALID_CLASS (0x80041010)`
+//! on at least one host's LocalSystem context — same machine where
+//! Get-CimInstance from a user-context shell returns the expected
+//! data fine. Shelling out to PowerShell is also the design
+//! direction for v0.13.0 (operator-defined inventory probes), so
+//! this is a step on that path rather than a workaround we'll throw
+//! away.
+//!
+//! The shape returned by the PS snippet matches `HwInventory` JSON
+//! so the wire-side projector + UI keep working untouched.
 
 use kanade_shared::wire::EffectiveConfig;
 use tokio::sync::watch;
 
 /// Top-level inventory loop. Cadence + jitter + on/off all come from
-/// the supervisor's [`EffectiveConfig`] and update live; nothing here
-/// is read once at startup.
+/// the supervisor's [`EffectiveConfig`] and update live.
 ///
-/// Platform split: WMI collection lives in the `inner` module under
-/// `cfg(target_os = "windows")`; the non-Windows build is a no-op
-/// shim so the rest of the agent compiles for CI clippy on Linux.
+/// Platform split: the PowerShell snippet only makes sense on
+/// Windows. Non-Windows builds keep a no-op shim so CI on Linux /
+/// macOS still compiles the agent crate.
 pub async fn inventory_loop(
     client: async_nats::Client,
     pc_id: String,
@@ -20,7 +31,7 @@ pub async fn inventory_loop(
 }
 
 /// On-demand inventory request handler. Subscribes to
-/// `inventory.request.<pc_id>`; on each message, collects WMI
+/// `request.inventory.<pc_id>`; on each message, collects WMI
 /// inventory once, publishes it to `inventory.<pc_id>.hw` (the same
 /// subject the cadence loop uses), and replies to the caller with
 /// `"ok"` or `"error: <chain>"`.
@@ -29,59 +40,55 @@ pub async fn serve_requests(client: async_nats::Client, pc_id: String) {
 }
 
 #[cfg(target_os = "windows")]
-fn random_jitter(max: Duration) -> Duration {
-    use rand::Rng;
-    let secs = max.as_secs().max(1);
-    let r = rand::rng().random_range(0..secs);
-    Duration::from_secs(r)
-}
-
-#[cfg(target_os = "windows")]
 mod inner {
-    use std::time::Duration;
-
-    use anyhow::{Context, Result};
+    use anyhow::{Context, Result, anyhow};
     use futures::StreamExt;
     use kanade_shared::subject;
-    use kanade_shared::wire::{DiskInfo, EffectiveConfig, HwInventory};
-    use serde::Deserialize;
+    use kanade_shared::wire::{EffectiveConfig, HwInventory};
+    use tokio::process::Command;
     use tokio::sync::watch;
     use tracing::{info, warn};
-    use wmi::WMIConnection;
 
     use super::random_jitter;
 
-    #[derive(Deserialize, Debug)]
-    #[serde(rename_all = "PascalCase")]
-    struct Win32ComputerSystem {
-        name: String,
-        total_physical_memory: u64,
-    }
-
-    #[derive(Deserialize, Debug)]
-    #[serde(rename_all = "PascalCase")]
-    struct Win32OperatingSystem {
-        caption: String,
-        version: String,
-        build_number: String,
-    }
-
-    #[derive(Deserialize, Debug)]
-    #[serde(rename_all = "PascalCase")]
-    struct Win32Processor {
-        name: String,
-        number_of_cores: u32,
-    }
-
-    #[derive(Deserialize, Debug)]
-    #[serde(rename_all = "PascalCase")]
-    struct Win32LogicalDisk {
-        #[serde(rename = "DeviceID")]
-        device_id: String,
-        size: Option<u64>,
-        free_space: Option<u64>,
-        file_system: Option<String>,
-    }
+    /// PowerShell snippet that emits one `HwInventory` JSON object
+    /// on stdout. The shape matches `kanade_shared::wire::HwInventory`
+    /// so the agent can `serde_json::from_slice::<HwInventory>` it
+    /// directly.
+    ///
+    /// `Get-CimInstance` (modern WMI bridge) works in user + service
+    /// contexts where the raw `wmi` crate path stumbled. `ConvertTo-
+    /// Json -Compress -Depth 5` keeps the output small enough to
+    /// fit in a single NATS message without losing nested disk
+    /// data.
+    const PS_INVENTORY: &str = r#"
+$ErrorActionPreference = 'Stop'
+$cs    = Get-CimInstance Win32_ComputerSystem
+$os    = Get-CimInstance Win32_OperatingSystem
+$cpus  = @(Get-CimInstance Win32_Processor)
+$cpu   = $cpus | Select-Object -First 1
+$disks = @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' |
+    ForEach-Object {
+        [pscustomobject]@{
+            device_id   = $_.DeviceID
+            size_bytes  = [int64]($_.Size      | ForEach-Object { if ($_ -eq $null) { 0 } else { $_ } })
+            free_bytes  = [int64]($_.FreeSpace | ForEach-Object { if ($_ -eq $null) { 0 } else { $_ } })
+            file_system = $_.FileSystem
+        }
+    })
+[pscustomobject]@{
+    pc_id        = $env:KANADE_PC_ID
+    hostname     = $cs.Name
+    os_name      = $os.Caption
+    os_version   = $os.Version
+    os_build     = $os.BuildNumber
+    cpu_model    = $cpu.Name
+    cpu_cores    = ($cpus | Measure-Object -Property NumberOfCores -Sum).Sum
+    ram_bytes    = [int64]$cs.TotalPhysicalMemory
+    disks        = $disks
+    collected_at = (Get-Date).ToUniversalTime().ToString('o')
+} | ConvertTo-Json -Compress -Depth 5
+"#;
 
     pub async fn run(
         client: async_nats::Client,
@@ -100,48 +107,31 @@ mod inner {
         // matters.
         loop {
             // Snapshot the current effective config once per cycle —
-            // changes that arrive mid-WMI-query take effect on the
-            // next iteration, which is fine.
+            // changes that arrive mid-PowerShell-spawn take effect on
+            // the next iteration, which is fine.
             let snapshot = cfg_rx.borrow().clone();
 
             if !snapshot.inventory_enabled {
                 info!("inventory collection disabled; waiting for config update");
-                // Block until the supervisor pushes a new value;
-                // exit if the supervisor went away.
                 if cfg_rx.changed().await.is_err() {
                     return;
                 }
                 continue;
             }
 
-            let pc = pc_id.clone();
-            match tokio::task::spawn_blocking(move || collect_hw(&pc)).await {
-                Ok(Ok(snap)) => {
-                    if let Err(e) = publish(&client, &snap).await {
-                        warn!(error = ?e, "publish hw inventory");
-                    }
-                }
-                // `?e` (Debug) prints the full anyhow chain — `%e`
-                // (Display) only shows the topmost .context() tag,
-                // which hid WMI HRESULT codes behind a bare
-                // "Win32_ComputerSystem" label.
-                Ok(Err(e)) => warn!(error = ?e, "collect hw inventory"),
-                Err(e) => warn!(error = ?e, "inventory worker join"),
+            match collect_and_publish_once(&client, &pc_id).await {
+                Ok(()) => {}
+                Err(e) => warn!(error = ?e, "collect+publish hw inventory"),
             }
 
             let wait = snapshot.inventory_interval_duration()
                 + random_jitter(snapshot.inventory_jitter_duration());
 
-            // Sleep until next cycle, but wake early if config
-            // changes — operator may have just disabled / shortened
-            // the interval.
             tokio::select! {
                 _ = tokio::time::sleep(wait) => {}
                 res = cfg_rx.changed() => {
                     if res.is_err() {
-                        // Supervisor died — keep our last snapshot
-                        // and continue at the planned cadence.
-                        tokio::time::sleep(wait_ish(snapshot.inventory_interval_duration())).await;
+                        tokio::time::sleep(snapshot.inventory_interval_duration()).await;
                     } else {
                         info!("inventory config changed; re-evaluating");
                     }
@@ -150,59 +140,73 @@ mod inner {
         }
     }
 
-    /// Tiny wrapper to keep the sleep call inside the select arm
-    /// readable when the supervisor channel hangs up. Behaviour-wise
-    /// identical to sleeping for the configured interval again.
-    fn wait_ish(d: Duration) -> Duration {
-        d
+    pub async fn serve_requests(client: async_nats::Client, pc_id: String) {
+        let subj = subject::inventory_request(&pc_id);
+        let mut sub = match client.subscribe(subj.clone()).await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = ?e, subject = %subj, "subscribe request.inventory failed");
+                return;
+            }
+        };
+        info!(subject = %subj, "request.inventory handler ready");
+
+        while let Some(msg) = sub.next().await {
+            let reply = msg.reply.clone();
+            let client = client.clone();
+            let pc = pc_id.clone();
+            tokio::spawn(async move {
+                let body = match collect_and_publish_once(&client, &pc).await {
+                    Ok(()) => "ok".to_string(),
+                    Err(e) => format!("error: {e:#}"),
+                };
+                if let Some(reply_to) = reply {
+                    if let Err(e) = client.publish(reply_to, body.clone().into()).await {
+                        warn!(error = ?e, "publish request.inventory reply");
+                    }
+                }
+                if body != "ok" {
+                    warn!(reply = %body, "request.inventory collection failed");
+                }
+            });
+        }
     }
 
-    fn collect_hw(pc_id: &str) -> Result<HwInventory> {
-        let wmi = WMIConnection::new().context("WMI connection")?;
+    /// Run the PS snippet, parse the stdout JSON into HwInventory,
+    /// stamp the local `collected_at`, publish to inventory subject.
+    async fn collect_and_publish_once(client: &async_nats::Client, pc_id: &str) -> Result<()> {
+        let snap = collect_hw(pc_id)
+            .await
+            .context("collect hw via PowerShell")?;
+        publish(client, &snap).await
+    }
 
-        let cs: Vec<Win32ComputerSystem> = wmi.query().context("Win32_ComputerSystem")?;
-        let os_rows: Vec<Win32OperatingSystem> = wmi.query().context("Win32_OperatingSystem")?;
-        let cpu_rows: Vec<Win32Processor> = wmi.query().context("Win32_Processor")?;
-        let disk_rows: Vec<Win32LogicalDisk> = wmi
-            .raw_query("SELECT * FROM Win32_LogicalDisk WHERE DriveType = 3")
-            .context("Win32_LogicalDisk")?;
-
-        let cs_first = cs
-            .into_iter()
-            .next()
-            .context("Win32_ComputerSystem empty")?;
-        let os_first = os_rows
-            .into_iter()
-            .next()
-            .context("Win32_OperatingSystem empty")?;
-        let cpu_cores: u32 = cpu_rows.iter().map(|c| c.number_of_cores).sum();
-        let cpu_first = cpu_rows
-            .into_iter()
-            .next()
-            .context("Win32_Processor empty")?;
-
-        let disks: Vec<DiskInfo> = disk_rows
-            .into_iter()
-            .map(|d| DiskInfo {
-                device_id: d.device_id,
-                size_bytes: d.size.unwrap_or(0),
-                free_bytes: d.free_space.unwrap_or(0),
-                file_system: d.file_system,
-            })
-            .collect();
-
-        Ok(HwInventory {
-            pc_id: pc_id.to_string(),
-            hostname: cs_first.name,
-            os_name: os_first.caption,
-            os_version: os_first.version,
-            os_build: Some(os_first.build_number),
-            cpu_model: cpu_first.name,
-            cpu_cores,
-            ram_bytes: cs_first.total_physical_memory,
-            disks,
-            collected_at: chrono::Utc::now(),
-        })
+    /// Spawn `powershell.exe -NoProfile -Command <PS_INVENTORY>` and
+    /// parse its stdout into `HwInventory`.
+    async fn collect_hw(pc_id: &str) -> Result<HwInventory> {
+        let out = Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", PS_INVENTORY])
+            .env("KANADE_PC_ID", pc_id)
+            .output()
+            .await
+            .context("spawn powershell.exe for inventory")?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(anyhow!(
+                "powershell exited {} (stderr: {})",
+                out.status,
+                stderr.trim()
+            ));
+        }
+        let stdout = std::str::from_utf8(&out.stdout)
+            .context("powershell stdout is not UTF-8")?
+            .trim();
+        if stdout.is_empty() {
+            return Err(anyhow!("powershell stdout was empty"));
+        }
+        let snap: HwInventory = serde_json::from_str(stdout)
+            .with_context(|| format!("decode HwInventory from powershell stdout: {stdout}"))?;
+        Ok(snap)
     }
 
     async fn publish(client: &async_nats::Client, snapshot: &HwInventory) -> Result<()> {
@@ -217,50 +221,14 @@ mod inner {
         );
         Ok(())
     }
+}
 
-    /// Collect + publish one inventory snapshot synchronously. Shared
-    /// between the cadence loop and the on-demand request handler so
-    /// behaviour stays identical.
-    async fn collect_and_publish_once(client: &async_nats::Client, pc_id: &str) -> Result<()> {
-        let pc = pc_id.to_string();
-        let snap = tokio::task::spawn_blocking(move || collect_hw(&pc))
-            .await
-            .context("inventory worker join")??;
-        publish(client, &snap).await
-    }
-
-    pub async fn serve_requests(client: async_nats::Client, pc_id: String) {
-        let subj = subject::inventory_request(&pc_id);
-        let mut sub = match client.subscribe(subj.clone()).await {
-            Ok(s) => s,
-            Err(e) => {
-                warn!(error = ?e, subject = %subj, "subscribe inventory.request failed");
-                return;
-            }
-        };
-        info!(subject = %subj, "inventory.request handler ready");
-
-        while let Some(msg) = sub.next().await {
-            let reply = msg.reply.clone();
-            let client = client.clone();
-            let pc = pc_id.clone();
-            // Spawn so a slow WMI run doesn't block subsequent requests.
-            tokio::spawn(async move {
-                let body = match collect_and_publish_once(&client, &pc).await {
-                    Ok(()) => "ok".to_string(),
-                    Err(e) => format!("error: {e:#}"),
-                };
-                if let Some(reply_to) = reply {
-                    if let Err(e) = client.publish(reply_to, body.clone().into()).await {
-                        warn!(error = ?e, "publish inventory.request reply");
-                    }
-                }
-                if body != "ok" {
-                    warn!(reply = %body, "inventory.request collection failed");
-                }
-            });
-        }
-    }
+#[cfg(target_os = "windows")]
+fn random_jitter(max: std::time::Duration) -> std::time::Duration {
+    use rand::Rng;
+    let secs = max.as_secs().max(1);
+    let r = rand::rng().random_range(0..secs);
+    std::time::Duration::from_secs(r)
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -277,6 +245,6 @@ mod inner {
     }
 
     pub async fn serve_requests(_client: async_nats::Client, _pc_id: String) {
-        tracing::info!("inventory.request handler skipped (non-Windows platform)");
+        tracing::info!("request.inventory handler skipped (non-Windows platform)");
     }
 }

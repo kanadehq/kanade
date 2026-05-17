@@ -59,8 +59,16 @@ jobs:
       - name: Publish kanade-agent
         run: cargo publish -p kanade-agent --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
+      # --allow-dirty because the SPA bundle was just (re-)built in the
+      # step above — the freshly-generated `web/dist/` carries
+      # different content-hash filenames than whatever the committer
+      # had locally, so cargo's clean-tree check is guaranteed-stale
+      # for kanade-backend specifically. The published crate IS the
+      # CI-built bundle by design (rust-embed bakes it in at compile
+      # time); committing the local dist is only for `cargo run`
+      # convenience on the maintainer's box.
       - name: Publish kanade-backend
-        run: cargo publish -p kanade-backend --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p kanade-backend --allow-dirty --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Publish kanade (CLI)
         run: cargo publish -p kanade --token ${{ secrets.CARGO_REGISTRY_TOKEN }}

@@ -3,6 +3,16 @@ use kanade_shared::wire::{EffectiveConfig, Heartbeat};
 use tokio::sync::watch;
 use tracing::{info, warn};
 
+/// `COMPUTERNAME` on Windows, `HOSTNAME` on Unix-likes. Best-effort —
+/// the heartbeat baseline is happier with `Some("MINIPC")` than with
+/// a panic when the env var is missing, so we shrug it off as
+/// `None` and the backend backfills via inventory later.
+fn hostname() -> Option<String> {
+    std::env::var("COMPUTERNAME")
+        .ok()
+        .or_else(|| std::env::var("HOSTNAME").ok())
+}
+
 /// Heartbeat publisher loop. Cadence is taken from
 /// [`EffectiveConfig::heartbeat_duration`] and updates live the
 /// moment the config_supervisor pushes a new value on the watch
@@ -15,7 +25,16 @@ pub async fn heartbeat_loop(
 ) {
     let mut current_dur = cfg_rx.borrow().heartbeat_duration();
     let mut ticker = tokio::time::interval(current_dur);
-    info!(?current_dur, "heartbeat loop scheduled");
+    // Read once at startup — neither hostname nor OS family changes
+    // over the lifetime of an agent process.
+    let hostname = hostname();
+    let os_family = Some(std::env::consts::OS.to_string());
+    info!(
+        ?current_dur,
+        ?hostname,
+        ?os_family,
+        "heartbeat loop scheduled",
+    );
 
     loop {
         tokio::select! {
@@ -24,6 +43,8 @@ pub async fn heartbeat_loop(
                     pc_id: pc_id.clone(),
                     at: chrono::Utc::now(),
                     agent_version: agent_version.clone(),
+                    hostname: hostname.clone(),
+                    os_family: os_family.clone(),
                 };
                 let payload = match serde_json::to_vec(&hb) {
                     Ok(b) => b,
