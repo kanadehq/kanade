@@ -13,12 +13,13 @@
 //!   subcommand.
 
 use axum::Json;
-use axum::extract::{Multipart, State};
+use axum::extract::{Multipart, Path, State};
 use axum::http::StatusCode;
 use futures::StreamExt;
+use kanade_shared::exe_version::extract_pe_version;
 use kanade_shared::kv::{
     BUCKET_AGENT_CONFIG, KEY_AGENT_CONFIG_GLOBAL, OBJECT_AGENT_RELEASES, agent_config_group_key,
-    agent_config_pc_key,
+    agent_config_pc_key, parse_agent_config_group_key, parse_agent_config_pc_key,
 };
 use kanade_shared::wire::ConfigScope;
 use serde::{Deserialize, Serialize};
@@ -39,7 +40,11 @@ pub async fn publish(
     State(state): State<AppState>,
     mut multipart: Multipart,
 ) -> Result<Json<PublishResponse>, (StatusCode, String)> {
-    let mut version: Option<String> = None;
+    // v0.13.1: the "version" form field is gone. The Object Store
+    // key is whatever the binary's embedded VERSIONINFO says — that
+    // makes a "label vs binary version" disagreement physically
+    // impossible (the failure mode that caused the v0.13.0
+    // "1.0.0"-loop incident).
     let mut bytes: Option<Vec<u8>> = None;
 
     while let Some(field) = multipart.next_field().await.map_err(|e| {
@@ -49,13 +54,6 @@ pub async fn publish(
         )
     })? {
         match field.name().unwrap_or("") {
-            "version" => {
-                let text = field
-                    .text()
-                    .await
-                    .map_err(|e| (StatusCode::BAD_REQUEST, format!("read version field: {e}")))?;
-                version = Some(text.trim().to_owned());
-            }
             "file" => {
                 let buf = field
                     .bytes()
@@ -63,19 +61,33 @@ pub async fn publish(
                     .map_err(|e| (StatusCode::BAD_REQUEST, format!("read file field: {e}")))?;
                 bytes = Some(buf.to_vec());
             }
+            "version" => {
+                // Older clients (CLI v0.13.0 and earlier, SPA before
+                // the upload-card refactor) still POST a `version`
+                // form field; we ignore it now but drain the body so
+                // multipart parsing doesn't stall.
+                let _ = field.text().await;
+                warn!("publish: 'version' form field ignored (extracted from PE bytes instead)");
+            }
             other => {
                 warn!(field = other, "publish: ignoring unknown multipart field");
             }
         }
     }
 
-    let version = version
-        .filter(|v| !v.is_empty())
-        .ok_or((StatusCode::BAD_REQUEST, "missing 'version' field".into()))?;
     let bytes = bytes.ok_or((StatusCode::BAD_REQUEST, "missing 'file' field".into()))?;
     if bytes.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "'file' field is empty".into()));
     }
+
+    let version = extract_pe_version(&bytes).ok_or((
+        StatusCode::BAD_REQUEST,
+        "couldn't extract VERSIONINFO from the uploaded binary — \
+         is it a Windows PE built with `winres`? Kanade ≥ v0.13.1 \
+         embeds the resource automatically; older binaries need to \
+         be re-published from a current build."
+            .to_owned(),
+    ))?;
 
     let size = bytes.len() as u64;
     info!(version, size, "publish: uploading new agent binary");
@@ -108,6 +120,84 @@ pub async fn publish(
         size,
         digest: meta.digest,
     }))
+}
+
+/// `DELETE /api/agents/releases/<version>` — remove a release from
+/// the Object Store. Rejects with 409 when any `agent_config` scope
+/// still points at this version (global / per-group / per-pc), so an
+/// operator can't accidentally remove a binary the fleet is rolling
+/// out to. Pass the same path-parameter the listing endpoint
+/// returns; the version is the Object Store key.
+pub async fn delete_release(
+    State(state): State<AppState>,
+    Path(version): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let kv = state
+        .jetstream
+        .get_key_value(BUCKET_AGENT_CONFIG)
+        .await
+        .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e.to_string()))?;
+    let mut keys = kv
+        .keys()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    while let Some(k) = keys.next().await {
+        let k = match k {
+            Ok(k) => k,
+            Err(_) => continue,
+        };
+        let entry = match kv.get(&k).await.map_err(|e| {
+            warn!(error = %e, %k, "kv.get scope");
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        })? {
+            Some(b) => b,
+            None => continue,
+        };
+        let scope: ConfigScope = match serde_json::from_slice(&entry) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        if scope.target_version.as_deref() == Some(version.as_str()) {
+            let label = if k == KEY_AGENT_CONFIG_GLOBAL {
+                "global".to_string()
+            } else if let Some(g) = parse_agent_config_group_key(&k) {
+                format!("group:{g}")
+            } else if let Some(p) = parse_agent_config_pc_key(&k) {
+                format!("pc:{p}")
+            } else {
+                k.clone()
+            };
+            return Err((
+                StatusCode::CONFLICT,
+                format!(
+                    "version '{version}' is the current target_version of scope '{label}' — \
+                     clear or change that scope first (kanade config unset target_version --… )"
+                ),
+            ));
+        }
+    }
+
+    let store = state
+        .jetstream
+        .get_object_store(OBJECT_AGENT_RELEASES)
+        .await
+        .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e.to_string()))?;
+    store.delete(&version).await.map_err(|e| {
+        warn!(error = %e, %version, "object_store.delete");
+        // async-nats returns a generic error if the key is missing;
+        // surface that as 404 for a cleaner SPA experience.
+        let msg = e.to_string();
+        if msg.contains("not found") || msg.contains("no objects") {
+            (
+                StatusCode::NOT_FOUND,
+                format!("version '{version}' not in Object Store"),
+            )
+        } else {
+            (StatusCode::INTERNAL_SERVER_ERROR, msg)
+        }
+    })?;
+    info!(%version, "publish: agent binary deleted");
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ─── GET /api/agents/releases ────────────────────────────────────────

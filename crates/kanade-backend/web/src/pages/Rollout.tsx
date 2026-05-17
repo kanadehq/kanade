@@ -1,5 +1,5 @@
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { CheckCircle2, Loader2, Rocket, Upload } from 'lucide-react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { CheckCircle2, Loader2, Rocket, Trash2, Upload } from 'lucide-react';
 import { useState } from 'react';
 
 import { ErrorCard } from '@/components/ErrorCard';
@@ -41,7 +41,6 @@ export function Rollout() {
   const [scopeValue, setScopeValue] = useState('canary');
   const [jitter, setJitter] = useState('5m');
   const [uploadFile, setUploadFile] = useState<File | null>(null);
-  const [uploadVersion, setUploadVersion] = useState('');
 
   const releasesQ = useQuery({
     queryKey: ['agent-releases'],
@@ -54,11 +53,8 @@ export function Rollout() {
 
   const upload = useMutation({
     mutationFn: async () => {
-      if (!uploadFile || !uploadVersion) {
-        throw new Error('pick a file and enter a version');
-      }
+      if (!uploadFile) throw new Error('pick a file first');
       const fd = new FormData();
-      fd.append('version', uploadVersion);
       fd.append('file', uploadFile);
       const token = localStorage.getItem('kanade_token') ?? '';
       const res = await fetch('/api/agents/publish', {
@@ -72,18 +68,17 @@ export function Rollout() {
       return (await res.json()) as { version: string; size: number; digest: string | null };
     },
     onSuccess: (data) => {
-      // Surface the freshly uploaded version in the picker.
       qc.invalidateQueries({ queryKey: ['agent-releases'] });
-      // Pre-select it for the rollout step below.
+      // Pre-select the freshly uploaded version for the rollout
+      // step right below.
       setVersion(data.version);
-      // Reset the upload form so a second upload doesn't re-fire on a stale state.
       setUploadFile(null);
-      setUploadVersion('');
     },
   });
 
   const rollout = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (overrideVersion?: string) => {
+      const ver = overrideVersion ?? version;
       type Scope = { type: 'global' } | { type: 'group'; value: string } | { type: 'pc'; value: string };
       const scope: Scope =
         scopeKind === 'global'
@@ -96,7 +91,7 @@ export function Rollout() {
         {
           method: 'POST',
           body: JSON.stringify({
-            version,
+            version: ver,
             scope,
             jitter: jitter || undefined,
           }),
@@ -104,8 +99,25 @@ export function Rollout() {
       );
     },
     onSuccess: () => {
-      // Resolve effective config will move; nudge dependent queries.
       qc.invalidateQueries({ queryKey: ['effective'] });
+    },
+  });
+
+  const remove = useMutation({
+    mutationFn: async (v: string) => {
+      const token = localStorage.getItem('kanade_token') ?? '';
+      const res = await fetch(`/api/agents/releases/${encodeURIComponent(v)}`, {
+        method: 'DELETE',
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      });
+      if (!res.ok) {
+        throw new Error(`${res.status} ${res.statusText} — ${await res.text()}`);
+      }
+      return v;
+    },
+    onSuccess: (v) => {
+      qc.invalidateQueries({ queryKey: ['agent-releases'] });
+      if (version === v) setVersion('');
     },
   });
 
@@ -130,50 +142,38 @@ export function Rollout() {
             1. Upload a binary
           </CardTitle>
           <CardDescription>
-            POSTs to <code>/api/agents/publish</code>. Body limit is 64 MB.
-            The CLI equivalent is <code>kanade agent publish &lt;binary&gt; --version &lt;v&gt;</code>.
+            POSTs to <code>/api/agents/publish</code> (64 MB body limit). The Object
+            Store key is auto-extracted from the binary's embedded VERSIONINFO
+            resource — no label to type, no chance of a label/binary mismatch.
+            CLI: <code>kanade agent publish &lt;binary&gt;</code>.
           </CardDescription>
         </CardHeader>
-        <CardContent className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-          <div className="space-y-1 sm:col-span-2">
+        <CardContent className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div className="space-y-1">
             <Label htmlFor="up-file">binary (.exe / Linux / macOS)</Label>
             <Input
               id="up-file"
               type="file"
               accept=".exe,application/octet-stream,application/x-msdownload"
-              onChange={(e) => {
-                const f = e.target.files?.[0] ?? null;
-                setUploadFile(f);
-                // Best-effort version prefill from `kanade-agent-<v>.exe`.
-                if (f && !uploadVersion) {
-                  const m = f.name.match(/^kanade-agent[-_.]([0-9][\w.+-]*?)(?:-(?:linux|macos-arm64))?(?:\.exe)?$/);
-                  if (m) setUploadVersion(m[1]);
-                }
-              }}
+              onChange={(e) => setUploadFile(e.target.files?.[0] ?? null)}
             />
           </div>
-          <div className="space-y-1">
-            <Label htmlFor="up-version">version label</Label>
-            <Input
-              id="up-version"
-              placeholder="e.g. 0.10.0"
-              value={uploadVersion}
-              onChange={(e) => setUploadVersion(e.target.value)}
-            />
+          <div className="space-y-1 flex flex-col justify-end">
+            <Button
+              onClick={() => upload.mutate()}
+              disabled={!uploadFile || upload.isPending}
+              className="w-full"
+            >
+              {upload.isPending ? (
+                <Loader2 className="size-4 mr-2 animate-spin" />
+              ) : (
+                <Upload className="size-4 mr-2" />
+              )}
+              Upload
+            </Button>
           </div>
         </CardContent>
         <CardContent className="flex items-center gap-3 pt-0">
-          <Button
-            onClick={() => upload.mutate()}
-            disabled={!uploadFile || !uploadVersion || upload.isPending}
-          >
-            {upload.isPending ? (
-              <Loader2 className="size-4 mr-2 animate-spin" />
-            ) : (
-              <Upload className="size-4 mr-2" />
-            )}
-            Upload
-          </Button>
           {uploadFile && (
             <span className="text-xs text-muted">
               {uploadFile.name} · {fmtSize(uploadFile.size)}
@@ -182,7 +182,8 @@ export function Rollout() {
           {upload.isSuccess && upload.data && (
             <span className="flex items-center gap-2 text-sm text-success">
               <CheckCircle2 className="size-4" />
-              uploaded {upload.data.version} ({fmtSize(upload.data.size)})
+              uploaded as <code className="text-xs">{upload.data.version}</code>
+              {' '}({fmtSize(upload.data.size)})
             </span>
           )}
         </CardContent>
@@ -200,7 +201,7 @@ export function Rollout() {
             2. Roll out a version
           </CardTitle>
           <CardDescription>
-            Pick a version from the Object Store, choose a scope, and (recommended) set a jitter so agents don't all download at the same instant.
+            Or click <strong>Roll out</strong> on a row in the table below to pre-fill the form.
           </CardDescription>
         </CardHeader>
         <CardContent className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -263,10 +264,7 @@ export function Rollout() {
           </div>
         </CardContent>
         <CardContent className="flex items-center gap-3 pt-0">
-          <Button
-            onClick={() => rollout.mutate()}
-            disabled={!canSubmit}
-          >
+          <Button onClick={() => rollout.mutate(undefined)} disabled={!canSubmit}>
             {rollout.isPending ? (
               <Loader2 className="size-4 mr-2 animate-spin" />
             ) : (
@@ -294,7 +292,11 @@ export function Rollout() {
       <Card>
         <CardHeader>
           <CardTitle>Object Store releases</CardTitle>
-          <CardDescription>From <code>/api/agents/releases</code> — what's available to rollout.</CardDescription>
+          <CardDescription>
+            From <code>/api/agents/releases</code>. Click <strong>Roll out</strong> to
+            point the form above at a row; <strong>Delete</strong> removes the binary
+            from the Object Store (refused with 409 if any scope still targets it).
+          </CardDescription>
         </CardHeader>
         <CardContent>
           {releasesQ.isLoading ? (
@@ -305,7 +307,8 @@ export function Rollout() {
             <ErrorCard title="Couldn't load releases" error={releasesQ.error} />
           ) : (releasesQ.data ?? []).length === 0 ? (
             <div className="text-muted text-sm">
-              Object Store empty — run <code>kanade agent publish &lt;binary&gt;</code> first.
+              Object Store empty — upload a binary above (or run{' '}
+              <code>kanade agent publish &lt;binary&gt;</code>).
             </div>
           ) : (
             <Table>
@@ -315,6 +318,7 @@ export function Rollout() {
                   <TableHead>size</TableHead>
                   <TableHead>modified</TableHead>
                   <TableHead>digest</TableHead>
+                  <TableHead className="text-right">actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -326,10 +330,39 @@ export function Rollout() {
                     <TableCell className="text-muted text-xs">
                       <code>{r.digest?.slice(0, 24) ?? '—'}</code>
                     </TableCell>
+                    <TableCell className="text-right">
+                      <div className="flex justify-end gap-2">
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => setVersion(r.version)}
+                        >
+                          <Rocket className="size-3.5" />
+                          Roll out…
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="danger"
+                          onClick={() => {
+                            if (confirm(`Delete release ${r.version}? This cannot be undone.`)) {
+                              remove.mutate(r.version);
+                            }
+                          }}
+                          disabled={remove.isPending}
+                        >
+                          <Trash2 className="size-3.5" />
+                        </Button>
+                      </div>
+                    </TableCell>
                   </TableRow>
                 ))}
               </TableBody>
             </Table>
+          )}
+          {remove.error && (
+            <div className="mt-3">
+              <ErrorCard title="Delete failed" error={remove.error} />
+            </div>
           )}
         </CardContent>
       </Card>

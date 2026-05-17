@@ -25,10 +25,28 @@ use anyhow::{Context, Result};
 use async_nats::jetstream;
 use kanade_shared::kv::OBJECT_AGENT_RELEASES;
 use kanade_shared::wire::EffectiveConfig;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::watch;
 use tracing::{info, warn};
+
+/// Persisted across the exit(64) / SCM restart cycle so we can spot a
+/// self-update loop: if the agent boots, sees the same `target_version`
+/// it just tried to swap to, AND its `running_version` is identical to
+/// what was running before the swap (i.e. the swap didn't actually
+/// change the embedded `CARGO_PKG_VERSION`), the binary uploaded under
+/// that label has a different version baked in than the label claims.
+/// Refuse to keep swapping; surface in the log.
+///
+/// Written under `<data_dir>/last_swap.json`. Discarded once a
+/// successful swap (one where `running_version` afterwards matches
+/// the target) clears the loop.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct LastSwap {
+    target: String,
+    running_before: String,
+}
 
 pub async fn run(
     client: async_nats::Client,
@@ -48,6 +66,14 @@ pub async fn run(
         }
     };
 
+    // Boot-time loop check: if last_swap.json says we already tried
+    // this target with the same running_version, the binary at that
+    // label has a label/version mismatch — refuse to retry.
+    let last_swap = read_last_swap();
+    if let Some(prev) = &last_swap {
+        info!(?prev, "recovered last_swap.json from prior cycle");
+    }
+
     // Initial check against whatever the supervisor's first push
     // (its initial_sync) populated.
     let (mut current_target, jitter) = {
@@ -57,13 +83,29 @@ pub async fn run(
             cfg.target_version_jitter_duration(),
         )
     };
+    let mut loop_blocked_target: Option<String> = None;
     if let Some(target) = current_target.as_deref()
         && target != running_version
     {
-        sleep_jitter(jitter).await;
-        if let Err(e) = maybe_download(&store, target, &running_version).await {
-            warn!(error = %e, target, "initial self-update fetch failed");
+        if is_loop(&last_swap, target, &running_version) {
+            loop_blocked_target = Some(target.to_string());
+            warn!(
+                target,
+                running = %running_version,
+                "self-update LOOP detected — previous swap to this target produced the same running_version. \
+                 Refusing to swap again. The binary under this label has a label/version mismatch; \
+                 republish it or clear target_version (`kanade config unset target_version`)."
+            );
+        } else {
+            sleep_jitter(jitter).await;
+            if let Err(e) = attempt_swap(&store, target, &running_version).await {
+                warn!(error = %e, target, "initial self-update fetch failed");
+            }
         }
+    } else if last_swap.is_some() {
+        // We're past a loop: clear the marker so a future legit
+        // rollout to a same-named target isn't falsely blocked.
+        clear_last_swap();
     }
 
     // React to every supervisor push; trigger only when
@@ -84,15 +126,86 @@ pub async fn run(
             continue;
         }
         current_target = new_target.clone();
+
+        // Any target_version change clears a previous loop block —
+        // a new operator action means a fresh attempt is in order.
+        if loop_blocked_target.is_some() && loop_blocked_target.as_deref() != new_target.as_deref()
+        {
+            info!("target_version changed; clearing loop block");
+            loop_blocked_target = None;
+            clear_last_swap();
+        }
+
         if let Some(target) = new_target.as_deref()
             && target != running_version
         {
+            if loop_blocked_target.as_deref() == Some(target) {
+                warn!(target, "still loop-blocked on this target; ignoring");
+                continue;
+            }
             sleep_jitter(jitter).await;
-            if let Err(e) = maybe_download(&store, target, &running_version).await {
+            if let Err(e) = attempt_swap(&store, target, &running_version).await {
                 warn!(error = %e, target, "self-update fetch failed");
             }
         }
     }
+}
+
+fn is_loop(last: &Option<LastSwap>, target: &str, running: &str) -> bool {
+    last.as_ref()
+        .map(|p| p.target == target && p.running_before == running)
+        .unwrap_or(false)
+}
+
+fn last_swap_path() -> Option<PathBuf> {
+    use kanade_shared::default_paths;
+    Some(default_paths::data_dir().join("last_swap.json"))
+}
+
+fn read_last_swap() -> Option<LastSwap> {
+    let path = last_swap_path()?;
+    let bytes = std::fs::read(&path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn write_last_swap(target: &str, running_before: &str) {
+    let Some(path) = last_swap_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let payload = LastSwap {
+        target: target.to_string(),
+        running_before: running_before.to_string(),
+    };
+    match serde_json::to_vec(&payload) {
+        Ok(b) => {
+            if let Err(e) = std::fs::write(&path, b) {
+                warn!(error = %e, ?path, "write last_swap.json");
+            }
+        }
+        Err(e) => warn!(error = %e, "encode last_swap.json"),
+    }
+}
+
+fn clear_last_swap() {
+    if let Some(path) = last_swap_path() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Wrap `maybe_download` with the loop-detection bookkeeping. Records
+/// the (target, running_before) tuple before the swap-and-exit so the
+/// next boot can check whether the swap actually changed
+/// `AGENT_VERSION`.
+async fn attempt_swap(
+    store: &jetstream::object_store::ObjectStore,
+    target: &str,
+    running: &str,
+) -> Result<()> {
+    write_last_swap(target, running);
+    maybe_download(store, target, running).await
 }
 
 /// Random pause in `0..=max` before the download fires. The point is

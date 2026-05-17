@@ -16,7 +16,7 @@ members = [
 ]
 
 [workspace.package]
-version      = "0.13.0"
+version      = "0.13.1"
 edition      = "2024"
 rust-version = "1.85"
 license      = "MIT"
@@ -57,3 +57,5 @@ mime_guess         = "2"
 jsonwebtoken       = "10"
 sha2               = "0.10"
 winreg             = "0.56"
+pelite             = "0.10"
+winres             = "0.1"

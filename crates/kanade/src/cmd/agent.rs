@@ -24,18 +24,15 @@ pub enum AgentSub {
     /// follow-up `kanade agent rollout` flips `target_version` on
     /// some scope (global / group / pc). Two-step on purpose, so a
     /// typo doesn't fan a half-baked binary out to the whole fleet.
+    ///
+    /// v0.13.1+: the Object Store key is auto-extracted from the
+    /// binary's embedded VERSIONINFO resource — no `--version`
+    /// flag, no chance of a label/binary mismatch. Cross-arch
+    /// publish works too (the extractor is pure-Rust `pelite`,
+    /// no spawn).
     Publish {
         /// Path to the new agent binary (e.g. `target/release/kanade-agent.exe`).
         binary: PathBuf,
-        /// Semver-ish version string. Stored as the object name in
-        /// the Object Store. When omitted, the CLI runs `<binary>
-        /// --version` and parses the second whitespace-separated
-        /// token; pass explicitly to publish under a label
-        /// different from what the binary reports (e.g. release
-        /// candidates, rollback aliases) or when cross-arch
-        /// publishing prevents executing the binary locally.
-        #[arg(long)]
-        version: Option<String>,
     },
     /// Flip `target_version` (and optionally `target_version_jitter`)
     /// on one scope of the layered agent_config bucket. Verifies the
@@ -90,32 +87,29 @@ pub struct RolloutArgs {
 
 pub async fn execute(client: async_nats::Client, args: AgentArgs) -> Result<()> {
     match args.sub {
-        AgentSub::Publish { binary, version } => publish(client, binary, version).await,
+        AgentSub::Publish { binary } => publish(client, binary).await,
         AgentSub::Rollout(args) => rollout(client, args).await,
         AgentSub::Current => current(client).await,
         AgentSub::Logs { pc_id, tail } => logs(client, pc_id, tail).await,
     }
 }
 
-async fn publish(
-    client: async_nats::Client,
-    binary: PathBuf,
-    version: Option<String>,
-) -> Result<()> {
-    let version = match version {
-        Some(v) => v,
-        None => probe_binary_version(&binary).with_context(|| {
-            format!(
-                "auto-detect version from {binary:?} via `--version` — \
-                 pass --version explicitly if the binary can't be executed here \
-                 (e.g. cross-arch publish from Linux/macOS)"
-            )
-        })?,
-    };
-
+async fn publish(client: async_nats::Client, binary: PathBuf) -> Result<()> {
     let bytes = fs::read(&binary)
         .await
         .with_context(|| format!("read {binary:?}"))?;
+
+    // v0.13.1+: extract version from the binary's embedded
+    // VERSIONINFO resource (pelite, no spawn, cross-arch safe). The
+    // operator never types a label — the binary IS its label.
+    let version = kanade_shared::exe_version::extract_pe_version(&bytes).with_context(|| {
+        format!(
+            "couldn't extract VERSIONINFO from {binary:?} — is it a Windows PE built \
+             with `winres` (kanade ≥ v0.13.1)? Older binaries need to be re-published \
+             from a current build."
+        )
+    })?;
+
     info!(version, size = bytes.len(), "uploading new agent binary");
 
     let js = async_nats::jetstream::new(client);
@@ -168,9 +162,10 @@ async fn rollout(client: async_nats::Client, args: RolloutArgs) -> Result<()> {
         })?;
     store.info(&args.version).await.with_context(|| {
         format!(
-            "version '{}' not found in {OBJECT_AGENT_RELEASES} — run \
-                 `kanade agent publish <binary> --version {}` first",
-            args.version, args.version
+            "version '{}' not found in {OBJECT_AGENT_RELEASES} — \
+             run `kanade agent publish <binary>` first (the version is \
+             auto-extracted from the binary's VERSIONINFO)",
+            args.version
         )
     })?;
 
@@ -215,38 +210,6 @@ async fn rollout(client: async_nats::Client, args: RolloutArgs) -> Result<()> {
         );
     }
     Ok(())
-}
-
-/// Run `<binary> --version` and pull the version token out of its
-/// stdout. kanade-agent's clap setup emits `kanade-agent <version>`
-/// on `--version`, so we take the second whitespace-separated word.
-/// Fails when the binary doesn't run on this host (cross-arch),
-/// exits non-zero, or prints an unexpected shape.
-fn probe_binary_version(binary: &std::path::Path) -> Result<String> {
-    let out = std::process::Command::new(binary)
-        .arg("--version")
-        .output()
-        .with_context(|| format!("run `{} --version`", binary.display()))?;
-    if !out.status.success() {
-        anyhow::bail!(
-            "`{} --version` exited {} (stderr: {})",
-            binary.display(),
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    let line = String::from_utf8(out.stdout)
-        .context("`--version` stdout is not UTF-8")?
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_owned();
-    let token = line
-        .split_whitespace()
-        .nth(1)
-        .with_context(|| format!("unexpected --version output shape: {line:?}"))?;
-    Ok(token.to_owned())
 }
 
 async fn logs(client: async_nats::Client, pc_id: String, tail: u32) -> Result<()> {

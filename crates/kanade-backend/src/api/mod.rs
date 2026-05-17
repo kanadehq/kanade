@@ -92,6 +92,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/inventory/{pc_id}", get(inventory::list_for_pc))
         .route("/api/agents/{pc_id}/logs", get(agent_logs::tail))
         .route("/api/agents/releases", get(agent_releases::list_releases))
+        .route(
+            "/api/agents/releases/{version}",
+            delete(agent_releases::delete_release),
+        )
         .route("/api/agents/rollout", post(agent_releases::rollout))
         .route(
             "/api/agents/publish",
