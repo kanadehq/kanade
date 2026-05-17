@@ -1,10 +1,10 @@
-//! Cron-driven deploy fan-out. Loads every enabled `Schedule` from the
+//! Cron-driven exec fan-out. Loads every enabled `Schedule` from the
 //! `schedules` KV at startup *and* tails the bucket via `kv.watch_all()`
 //! so future POST/DELETE through `/api/schedules` register and remove
 //! jobs without bouncing the backend.
 //!
-//! Fires route through [`deploy_manifest`] with actor = "scheduler", so
-//! audit events split cleanly from operator-initiated `kanade deploy`s.
+//! Fires route through [`exec_manifest`] with actor = "scheduler", so
+//! audit events split cleanly from operator-initiated `kanade exec`s.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -20,7 +20,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::api::AppState;
-use crate::api::deploy::deploy_manifest;
+use crate::api::exec::exec_manifest;
 
 type Registered = Arc<Mutex<HashMap<String, Uuid>>>;
 
@@ -171,17 +171,17 @@ async fn register(
                     return;
                 }
             };
-            match deploy_manifest(&state, manifest, "scheduler").await {
+            match exec_manifest(&state, manifest, "scheduler").await {
                 Ok(resp) => info!(
                     schedule_id = %schedule_id,
-                    deploy_id = %resp.deploy_id,
-                    "scheduler deploy ok",
+                    exec_id = %resp.exec_id,
+                    "scheduler exec ok",
                 ),
                 Err((status, msg)) => warn!(
                     schedule_id = %schedule_id,
                     status = %status,
                     error = %msg,
-                    "scheduler deploy failed",
+                    "scheduler exec failed",
                 ),
             }
         })

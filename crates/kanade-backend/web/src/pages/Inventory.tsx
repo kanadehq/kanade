@@ -211,7 +211,7 @@ function FleetProbeTable({
           <ErrorCard title={`Couldn't load facts for ${job.manifest_id}`} error={byJob.error} />
         ) : (byJob.data?.rows ?? []).length === 0 ? (
           <div className="text-muted text-sm">
-            No facts yet. Trigger one with <code>kanade deploy</code>{' '}
+            No facts yet. Trigger one with <code>kanade exec</code>{' '}
             against the manifest, or wait for the next scheduled tick.
           </div>
         ) : (

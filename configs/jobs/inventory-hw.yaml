@@ -1,13 +1,13 @@
 # Sample inventory probe — operator-customisable hardware snapshot
 # delivered through the regular deploy + ExecResult pipeline.
 #
-# This file is a Manifest (the shape that `kanade deploy` and
+# This file is a Manifest (the shape that `kanade exec` and
 # `kanade job create` both expect).
 #
 # Two ways to use it:
 #
 #   * One-shot — fires immediately against every targeted PC:
-#         kanade deploy configs/jobs/inventory-hw.yaml
+#         kanade exec configs/jobs/inventory-hw.yaml
 #     (Not registered in the catalog; inventory facts are NOT projected
 #     because the projector only matches against registered jobs.)
 #
@@ -19,7 +19,7 @@
 #     downstream schedule fires from the next tick.
 #
 # The `inventory:` section is what tags this job as an inventory probe.
-# Without it the job runs and stores its output in deployment_results
+# Without it the job runs and stores its output in execution_results
 # like any other scheduled job; with it the results projector ALSO
 # upserts a row into `inventory_facts` keyed by (pc_id, manifest.id),
 # and the SPA Inventory page renders the columns declared in `display`.

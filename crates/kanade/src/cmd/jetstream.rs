@@ -5,7 +5,7 @@ use kanade_shared::bootstrap::ensure_jetstream_resources;
 use kanade_shared::kv::{
     BUCKET_AGENT_CONFIG, BUCKET_AGENT_GROUPS, BUCKET_AGENTS_STATE, BUCKET_SCHEDULES,
     BUCKET_SCRIPT_CURRENT, BUCKET_SCRIPT_STATUS, OBJECT_AGENT_RELEASES, STREAM_AUDIT,
-    STREAM_DEPLOY, STREAM_EVENTS, STREAM_INVENTORY, STREAM_RESULTS,
+    STREAM_EVENTS, STREAM_EXEC, STREAM_INVENTORY, STREAM_RESULTS,
 };
 
 #[derive(Args, Debug)]
@@ -38,7 +38,7 @@ async fn setup(js: jetstream::Context) -> Result<()> {
 
     println!("jetstream setup complete:");
     println!(
-        "  streams       : {STREAM_INVENTORY}, {STREAM_RESULTS}, {STREAM_DEPLOY}, {STREAM_EVENTS}, {STREAM_AUDIT}"
+        "  streams       : {STREAM_INVENTORY}, {STREAM_RESULTS}, {STREAM_EXEC}, {STREAM_EVENTS}, {STREAM_AUDIT}"
     );
     println!(
         "  KV            : {BUCKET_SCRIPT_CURRENT}, {BUCKET_SCRIPT_STATUS}, {BUCKET_AGENTS_STATE}, {BUCKET_AGENT_CONFIG}, {BUCKET_AGENT_GROUPS}, {BUCKET_SCHEDULES}"
@@ -52,7 +52,8 @@ async fn status(js: jetstream::Context) -> Result<()> {
     for name in [
         STREAM_INVENTORY,
         STREAM_RESULTS,
-        STREAM_DEPLOY,
+        STREAM_EXEC,
+        STREAM_EVENTS,
         STREAM_AUDIT,
     ] {
         match js.get_stream(name).await {

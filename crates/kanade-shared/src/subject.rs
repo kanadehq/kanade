@@ -8,8 +8,8 @@ pub fn commands_pc(pc_id: &str) -> String {
     format!("commands.pc.{pc_id}")
 }
 
-pub fn commands_deploy(job_id: &str) -> String {
-    format!("commands.deploy.{job_id}")
+pub fn commands_exec(job_id: &str) -> String {
+    format!("commands.exec.{job_id}")
 }
 
 pub fn results(request_id: &str) -> String {
@@ -41,7 +41,7 @@ pub fn logs_fetch(pc_id: &str) -> String {
 
 // v0.14: subject::inventory_request was retired alongside the
 // hardcoded inventory loop. On-demand collection now goes through
-// the normal deploy path (`kanade deploy configs/jobs/inventory-
+// the normal exec path (`kanade exec configs/jobs/inventory-
 // hw.yaml`) — Command + ExecResult + the inventory-fact projector
 // give operators the same effect with no extra subject.
 
@@ -67,11 +67,11 @@ mod tests {
     }
 
     #[test]
-    fn commands_deploy_formats_job_id() {
+    fn commands_exec_formats_job_id() {
         let job = "3c3c56b3-c83e-4c27-9fa9-4a75e1f5da6f";
         assert_eq!(
-            commands_deploy(job),
-            "commands.deploy.3c3c56b3-c83e-4c27-9fa9-4a75e1f5da6f"
+            commands_exec(job),
+            "commands.exec.3c3c56b3-c83e-4c27-9fa9-4a75e1f5da6f"
         );
     }
 

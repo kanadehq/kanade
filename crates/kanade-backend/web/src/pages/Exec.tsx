@@ -10,20 +10,20 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { apiFetch } from '@/lib/api';
 
-type DeployResponse = {
-  deploy_id: string;
+type ExecResponse = {
+  exec_id: string;
   job_id: string;
   version: string;
   target_count: number;
   subjects: string[];
 };
 
-export function Deploy() {
+export function Exec() {
   const [json, setJson] = useState('');
 
   const mut = useMutation({
     mutationFn: (body: unknown) =>
-      apiFetch<DeployResponse>('/api/deploy', {
+      apiFetch<ExecResponse>('/api/exec', {
         method: 'POST',
         body: JSON.stringify(body),
       }),
@@ -35,7 +35,7 @@ export function Deploy() {
       parsed = JSON.parse(json);
     } catch (e) {
       mut.reset();
-      window.alert(`Body must be JSON. Use the CLI for YAML: kanade deploy <file.yaml>.\n\n${(e as Error).message}`);
+      window.alert(`Body must be JSON. Use the CLI for YAML: kanade exec <file.yaml>.\n\n${(e as Error).message}`);
       return;
     }
     mut.mutate(parsed);
@@ -45,10 +45,10 @@ export function Deploy() {
     <div className="space-y-4">
       <Card>
         <CardHeader>
-          <CardTitle>Deploy a manifest</CardTitle>
+          <CardTitle>Exec a manifest</CardTitle>
           <CardDescription>
-            Posts to <code>/api/deploy</code> using the JSON-equivalent of the manifest schema. For
-            full YAML support, use <code>kanade deploy &lt;file.yaml&gt;</code> from the CLI — a
+            Posts to <code>/api/exec</code> using the JSON-equivalent of the manifest schema. For
+            full YAML support, use <code>kanade exec &lt;file.yaml&gt;</code> from the CLI — a
             browser-side YAML parser is on the backlog.
           </CardDescription>
         </CardHeader>
@@ -64,16 +64,16 @@ export function Deploy() {
           </div>
           <Button onClick={onSubmit} disabled={!json.trim() || mut.isPending}>
             {mut.isPending ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
-            POST /api/deploy
+            POST /api/exec
           </Button>
         </CardContent>
       </Card>
 
-      {mut.error && <ErrorCard title="Deploy failed" error={mut.error} />}
+      {mut.error && <ErrorCard title="Exec failed" error={mut.error} />}
       {mut.data && (
         <Card>
           <CardHeader>
-            <CardTitle>Deploy accepted</CardTitle>
+            <CardTitle>Exec accepted</CardTitle>
             <CardDescription>
               {mut.data.target_count} target(s) · {mut.data.subjects.length} subject(s)
             </CardDescription>

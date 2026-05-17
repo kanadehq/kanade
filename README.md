@@ -40,7 +40,7 @@ broker" — which everyone reinvents from scratch.
   inbound ports on user PCs.
 - **Declarative job manifests in Git.** Review, history, rollback all
   come for free; the YAML schema (`jobs/*.yaml`) is the same input
-  whether you `kanade deploy` ad-hoc or wire it onto a cron `kanade
+  whether you `kanade exec` ad-hoc or wire it onto a cron `kanade
   schedule`.
 - **Three layers of stop-the-bleed.** Stream max-msgs-per-subject
   replaces stale rollouts in the broker; consumer-side version checks
@@ -157,7 +157,7 @@ kanade run $env:COMPUTERNAME -- 'echo hello from kanade'
 
 # Or via the backend's YAML deploy path (writes a row to deployments,
 # emits an audit event, broadcasts the Command).
-kanade deploy jobs/echo-test.yaml
+kanade exec jobs/echo-test.yaml
 
 # Heartbeat probe.
 kanade ping $env:COMPUTERNAME
@@ -183,7 +183,7 @@ kanade unrevoke <cmd_id>                         # → ACTIVE
 kanade jetstream setup                           # create streams + KV + Object Store (optional; backend auto-bootstraps on startup)
 kanade jetstream status                          # health snapshot
 
-kanade deploy   <manifest.yaml> [--version <v>]  # POST /api/deploy (one-shot, unregistered)
+kanade exec     <manifest.yaml> [--version <v>]  # POST /api/exec (one-shot, unregistered)
 
 kanade job create   <manifest.yaml>              # upsert into the jobs catalog (BUCKET_JOBS)
 kanade job list                                  # every registered job
@@ -331,7 +331,7 @@ $env:KANADE_AUTH_STATIC_TOKEN = "kanade-fleet-secret-2026"
 
 # Operator side (CLI)
 $env:KANADE_AUTH_TOKEN = "kanade-fleet-secret-2026"
-kanade deploy jobs\echo-test.yaml
+kanade exec jobs\echo-test.yaml
 ```
 
 ### NATS authentication
@@ -426,6 +426,7 @@ the PDB.
 - **v0.14.0** — retire the hardcoded WMI inventory loop. The agent no longer has an inventory.rs (cadence + WMI / PowerShell shell-out, `inventory_loop` + `serve_requests`, the `request.inventory.<pc_id>` subject, and the `kanade inventory <pc_id>` CLI are all gone). All inventory now flows through operator-defined probes: `configs/jobs/inventory-*.yaml` with an `inventory:` hint, registered via `kanade schedule create`, fanned out by the existing deploy + ExecResult path, projected into `inventory_facts` by the results projector. Backend's `projector/inventory.rs` is gone too — facts upserts happen inline with result projection. Migration `0005` drops the rich columns (`os_name` / `cpu_model` / `ram_bytes` / `disks_json` / ...) from `agents`, so the table holds only the baseline heartbeat-derived fields. The SPA **Agents** page is now a baseline liveness list with a per-row "facts" link to the **Inventory** page
 - **v0.14.1** — split inventory display config into `display` (per-PC detail) + `summary` (fleet list, 3-5 columns). `InventoryHint` grows an `Option<Vec<DisplayField>>` `summary` field; migration `0006` adds `summary_json` to `inventory_facts`; results projector snapshots both. New `GET /api/inventory/by-job/<manifest_id>` returns one row per PC for a probe, fronting the SPA **Inventory** page's new fleet-list view (row-per-PC, columns = `summary`, click a row → existing per-PC detail). Sample `configs/jobs/inventory-hw.yaml` + `configs/schedules/hourly-inventory.yaml` updated to demonstrate trimming the wide `display` set down to four summary columns
 - **v0.15.0** — kill the redundant inline-manifest body inside Schedule yaml. Jobs are now first-class catalog rows in a new `BUCKET_JOBS` KV; `Schedule` shrinks to `{ id, cron, job_id, enabled }`. New `kanade job {create,list,delete}` subcommand + `GET/POST /api/jobs` + `DELETE /api/jobs/{id}` (refuses with 409 when any schedule references the job). Scheduler resolves `job_id → Manifest` from KV at every fire, so editing a job takes effect on the next tick without re-creating schedules. The results projector + `/api/inventory/jobs` listing now read from `BUCKET_JOBS` directly instead of scanning the schedules bucket — faster, and ad-hoc deploys of registered jobs (not just scheduled ones) get inventory-fact projection. Schedule yaml on disk shrinks from ~50 lines to 4
+- **v0.16.0** — `kanade deploy` → `kanade exec`. The "deploy" name implied long-lived rollout, but the operation is just a one-shot fanout — so the user-facing surface (CLI subcommand, HTTP route `/api/exec`, SPA Exec page + nav) all rename. Wire scope: NATS subject prefix `commands.deploy.>` → `commands.exec.>`, stream `DEPLOY` → `EXEC`. DB scope: `deployment_results` → `execution_results`, `deployments` → `executions`, `deploy_id` column → `exec_id`. Audit event `"deploy"` → `"exec"`. Migrations 0001-0006 are squashed into a fresh `0001_baseline.sql` — operators upgrading must wipe their sqlite db and JetStream `DEPLOY` stream first
 
 Backlog: Prometheus metrics, 3000-agent simulation, NATS cluster + replicated backend, Postgres migration, mobile-responsive tables.
 

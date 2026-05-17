@@ -7,7 +7,7 @@ import { Agents } from '@/pages/Agents';
 import { Audit } from '@/pages/Audit';
 import { Config } from '@/pages/Config';
 import { Dashboard } from '@/pages/Dashboard';
-import { Deploy } from '@/pages/Deploy';
+import { Exec } from '@/pages/Exec';
 import { Inventory } from '@/pages/Inventory';
 import { JetStream } from '@/pages/JetStream';
 import { Login } from '@/pages/Login';
@@ -52,7 +52,7 @@ export default function App() {
               <Route path="/logs" element={<Logs />} />
               <Route path="/inventory" element={<Inventory />} />
               <Route path="/schedules" element={<Schedules />} />
-              <Route path="/deploy" element={<Deploy />} />
+              <Route path="/exec" element={<Exec />} />
               <Route path="/rollout" element={<Rollout />} />
               <Route path="/config" element={<Config />} />
               <Route path="/jetstream" element={<JetStream />} />

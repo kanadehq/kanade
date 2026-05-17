@@ -4,7 +4,7 @@ pub mod agent_logs;
 pub mod agent_releases;
 pub mod agents;
 pub mod audit;
-pub mod deploy;
+pub mod exec;
 pub mod health;
 pub mod inventory;
 pub mod jetstream_status;
@@ -75,7 +75,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/results", get(results::list))
         .route("/api/results/{request_id}", get(results::detail))
         .route("/api/audit", get(audit::list))
-        .route("/api/deploy", post(deploy::create))
+        .route("/api/exec", post(exec::create))
         .route(
             "/api/schedules",
             get(schedules::list).post(schedules::create),

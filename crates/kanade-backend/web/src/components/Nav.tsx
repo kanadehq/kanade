@@ -11,7 +11,7 @@ const links = [
   { to: '/audit', label: 'Audit' },
   { to: '/logs', label: 'Logs' },
   { to: '/schedules', label: 'Schedules' },
-  { to: '/deploy', label: 'Deploy' },
+  { to: '/exec', label: 'Exec' },
   { to: '/rollout', label: 'Rollout' },
   { to: '/config', label: 'Config' },
   { to: '/jetstream', label: 'JetStream' },

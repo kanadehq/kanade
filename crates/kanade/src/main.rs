@@ -39,8 +39,8 @@ enum SubCmd {
     Unrevoke(cmd::revoke::UnrevokeArgs),
     /// Publish kill.{job_id} so agents running the job terminate (spec §2.6 Layer 3).
     Kill(cmd::kill::KillArgs),
-    /// Submit a YAML job manifest to the backend's POST /api/deploy.
-    Deploy(cmd::deploy::DeployArgs),
+    /// Submit a YAML job manifest to the backend's POST /api/exec.
+    Exec(cmd::exec::ExecArgs),
     /// CRUD the job catalog (jobs KV). Schedules reference jobs by id.
     Job(cmd::job::JobArgs),
     /// CRUD cron schedules (spec §2.5.3).
@@ -71,8 +71,8 @@ async fn main() -> Result<()> {
     } = cli;
 
     // HTTP-only subcommands (no NATS connect required).
-    if let SubCmd::Deploy(args) = command {
-        return cmd::deploy::execute(&backend_url, args).await;
+    if let SubCmd::Exec(args) = command {
+        return cmd::exec::execute(&backend_url, args).await;
     } else if let SubCmd::Job(args) = command {
         return cmd::job::execute(&backend_url, args).await;
     } else if let SubCmd::Schedule(args) = command {
@@ -95,7 +95,7 @@ async fn main() -> Result<()> {
         SubCmd::Agent(args) => cmd::agent::execute(client, args).await,
         SubCmd::Config(args) => cmd::config::execute(client, args).await,
         SubCmd::Group(args) => cmd::group::execute(client, args).await,
-        SubCmd::Deploy(_) | SubCmd::Job(_) | SubCmd::Schedule(_) => {
+        SubCmd::Exec(_) | SubCmd::Job(_) | SubCmd::Schedule(_) => {
             unreachable!("handled above")
         }
     }

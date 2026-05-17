@@ -24,7 +24,7 @@ use tracing::info;
 use crate::kv::{
     BUCKET_AGENT_CONFIG, BUCKET_AGENT_GROUPS, BUCKET_AGENTS_STATE, BUCKET_JOBS, BUCKET_SCHEDULES,
     BUCKET_SCRIPT_CURRENT, BUCKET_SCRIPT_STATUS, OBJECT_AGENT_RELEASES, STREAM_AUDIT,
-    STREAM_DEPLOY, STREAM_EVENTS, STREAM_INVENTORY, STREAM_RESULTS,
+    STREAM_EVENTS, STREAM_EXEC, STREAM_INVENTORY, STREAM_RESULTS,
 };
 
 /// Idempotently create every NATS JetStream resource the kanade
@@ -58,21 +58,23 @@ pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
     .with_context(|| format!("create_stream {STREAM_RESULTS}"))?;
     info!(stream = STREAM_RESULTS, "ready");
 
-    // DEPLOY — latest-per-subject only (spec §2.6 Layer 1).
+    // EXEC — latest-per-subject only (spec §2.6 Layer 1). Carries the
+    // `commands.exec.<job_id>` fan-out from `kanade exec` /
+    // scheduler fires.
     js.create_stream(StreamConfig {
-        name: STREAM_DEPLOY.into(),
-        subjects: vec!["commands.deploy.>".into()],
+        name: STREAM_EXEC.into(),
+        subjects: vec!["commands.exec.>".into()],
         max_messages_per_subject: 1,
         discard: DiscardPolicy::Old,
         max_age: Duration::from_secs(7 * 24 * 60 * 60),
         ..Default::default()
     })
     .await
-    .with_context(|| format!("create_stream {STREAM_DEPLOY}"))?;
-    info!(stream = STREAM_DEPLOY, "ready");
+    .with_context(|| format!("create_stream {STREAM_EXEC}"))?;
+    info!(stream = STREAM_EXEC, "ready");
 
     // EVENTS — short-lived broadcast bus for kill / revoke / etc.
-    // 7-day window matches the deploy spec window.
+    // 7-day window matches the EXEC spec window.
     js.create_stream(StreamConfig {
         name: STREAM_EVENTS.into(),
         subjects: vec!["events.>".into()],
@@ -159,7 +161,7 @@ pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
 
     // jobs — v0.15 operator-registered Manifest catalog. Schedules
     // reference rows here by id; editing a job rewrites what future
-    // schedule fires deploy.
+    // schedule fires exec.
     js.create_key_value(KvConfig {
         bucket: BUCKET_JOBS.into(),
         history: 5,

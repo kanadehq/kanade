@@ -10,7 +10,7 @@ use tracing::{info, warn};
 const CONSUMER_NAME: &str = "backend_results_projector";
 
 /// Consume the RESULTS stream and:
-///   1. Insert each `ExecResult` into `deployment_results`. ON CONFLICT
+///   1. Insert each `ExecResult` into `execution_results`. ON CONFLICT
 ///      DO NOTHING so a redelivery doesn't duplicate rows.
 ///   2. v0.15: if the result carries a `manifest_id` AND a job
 ///      with that id exists in the catalog AND the job carries an
@@ -82,7 +82,7 @@ pub async fn run(js: jetstream::Context, pool: SqlitePool) -> Result<()> {
 
 async fn insert_result(pool: &SqlitePool, r: &ExecResult) -> Result<()> {
     sqlx::query(
-        "INSERT INTO deployment_results (
+        "INSERT INTO execution_results (
              request_id, pc_id, exit_code, stdout, stderr, started_at, finished_at
          ) VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(request_id) DO NOTHING",
@@ -113,7 +113,7 @@ async fn maybe_project_inventory(
     };
     let entry = match jobs_kv.get(manifest_id).await? {
         Some(b) => b,
-        None => return Ok(()), // ad-hoc deploy of an unregistered manifest
+        None => return Ok(()), // ad-hoc exec of an unregistered manifest
     };
     let job: Manifest = match serde_json::from_slice(&entry) {
         Ok(j) => j,

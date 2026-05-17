@@ -62,7 +62,7 @@ pub const SCRIPT_STATUS_REVOKED: &str = "REVOKED";
 
 pub const STREAM_INVENTORY: &str = "INVENTORY";
 pub const STREAM_RESULTS: &str = "RESULTS";
-pub const STREAM_DEPLOY: &str = "DEPLOY";
+pub const STREAM_EXEC: &str = "EXEC";
 pub const STREAM_EVENTS: &str = "EVENTS";
 pub const STREAM_AUDIT: &str = "AUDIT";
 
@@ -102,7 +102,7 @@ mod tests {
         let names = [
             STREAM_INVENTORY,
             STREAM_RESULTS,
-            STREAM_DEPLOY,
+            STREAM_EXEC,
             STREAM_EVENTS,
             STREAM_AUDIT,
         ];

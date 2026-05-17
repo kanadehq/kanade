@@ -13,24 +13,24 @@ use crate::api::AppState;
 use crate::audit;
 
 #[derive(Serialize, Clone)]
-pub struct DeployResponse {
-    pub deploy_id: String,
+pub struct ExecResponse {
+    pub exec_id: String,
     pub job_id: String,
     pub version: String,
     pub target_count: u32,
     pub subjects: Vec<String>,
 }
 
-/// Core deploy pipeline used by both the HTTP handler (actor = "cli") and
+/// Core exec pipeline used by both the HTTP handler (actor = "cli") and
 /// the scheduler (actor = "scheduler"). Validates the manifest, fans the
 /// Command out across every target subject (or schedules wave-based
-/// fan-out when `rollout` is set), pins script_current, records a
-/// deployments row, and emits an audit event.
-pub async fn deploy_manifest(
+/// fan-out when `rollout` is set), pins script_current, records an
+/// executions row, and emits an audit event.
+pub async fn exec_manifest(
     s: &AppState,
     manifest: Manifest,
     actor: &str,
-) -> Result<DeployResponse, (StatusCode, String)> {
+) -> Result<ExecResponse, (StatusCode, String)> {
     let has_rollout = manifest
         .rollout
         .as_ref()
@@ -56,13 +56,13 @@ pub async fn deploy_manifest(
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid jitter: {e}")))?
         .map(|d| d.as_secs());
 
-    let deploy_id = Uuid::new_v4().to_string();
+    let exec_id = Uuid::new_v4().to_string();
 
     let make_cmd = || Command {
         id: manifest.id.clone(),
         version: manifest.version.clone(),
         request_id: Uuid::new_v4().to_string(),
-        job_id: Some(deploy_id.clone()),
+        job_id: Some(exec_id.clone()),
         shell: manifest.execute.shell.into(),
         script: manifest.execute.script.clone(),
         timeout_secs,
@@ -74,7 +74,7 @@ pub async fn deploy_manifest(
 
     if let Some(rollout) = manifest.rollout.as_ref() {
         // Wave-based fan-out: pre-validate every delay so a bad humantime
-        // string aborts the whole deploy instead of silently failing on a
+        // string aborts the whole exec instead of silently failing on a
         // late wave inside a tokio::spawn.
         let mut delays = Vec::with_capacity(rollout.waves.len());
         for (idx, wave) in rollout.waves.iter().enumerate() {
@@ -172,10 +172,10 @@ pub async fn deploy_manifest(
     }
 
     sqlx::query(
-        "INSERT INTO deployments (deploy_id, job_id, version, initiated_by, target_count, status)
+        "INSERT INTO executions (exec_id, job_id, version, initiated_by, target_count, status)
          VALUES (?, ?, ?, ?, ?, 'pending')",
     )
-    .bind(&deploy_id)
+    .bind(&exec_id)
     .bind(&manifest.id)
     .bind(&manifest.version)
     .bind(actor)
@@ -185,28 +185,28 @@ pub async fn deploy_manifest(
     .map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("insert deployments: {e}"),
+            format!("insert executions: {e}"),
         )
     })?;
 
     info!(
-        deploy_id = %deploy_id,
+        exec_id = %exec_id,
         job_id = %manifest.id,
         version = %manifest.version,
         actor,
         target_count,
         wave_mode = has_rollout,
         subjects = ?subjects,
-        "deployment published",
+        "execution published",
     );
 
     audit::record(
         &s.nats,
         actor,
-        "deploy",
+        "exec",
         Some(&manifest.id),
         serde_json::json!({
-            "deploy_id": deploy_id,
+            "exec_id": exec_id,
             "version": manifest.version,
             "target_count": target_count,
             "subjects": subjects,
@@ -215,8 +215,8 @@ pub async fn deploy_manifest(
     )
     .await;
 
-    Ok(DeployResponse {
-        deploy_id,
+    Ok(ExecResponse {
+        exec_id,
         job_id: manifest.id,
         version: manifest.version,
         target_count,
@@ -227,6 +227,6 @@ pub async fn deploy_manifest(
 pub async fn create(
     State(s): State<AppState>,
     Json(manifest): Json<Manifest>,
-) -> Result<Json<DeployResponse>, (StatusCode, String)> {
-    deploy_manifest(&s, manifest, "cli").await.map(Json)
+) -> Result<Json<ExecResponse>, (StatusCode, String)> {
+    exec_manifest(&s, manifest, "cli").await.map(Json)
 }

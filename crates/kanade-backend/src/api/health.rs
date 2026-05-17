@@ -3,7 +3,7 @@
 //! k8s liveness probes, alerting cron).
 //!
 //! Returns JSON describing the agent inventory freshness, the
-//! JetStream resource set, and recent deployment failures. HTTP
+//! JetStream resource set, and recent execution failures. HTTP
 //! status mirrors `status`:
 //!
 //!   * `ok`        → 200 — all resources present, no stale agents
@@ -23,7 +23,7 @@ use chrono::{DateTime, Duration, Utc};
 use kanade_shared::kv::{
     BUCKET_AGENT_CONFIG, BUCKET_AGENT_GROUPS, BUCKET_AGENTS_STATE, BUCKET_SCHEDULES,
     BUCKET_SCRIPT_CURRENT, BUCKET_SCRIPT_STATUS, OBJECT_AGENT_RELEASES, STREAM_AUDIT,
-    STREAM_DEPLOY, STREAM_EVENTS, STREAM_INVENTORY, STREAM_RESULTS,
+    STREAM_EVENTS, STREAM_EXEC, STREAM_INVENTORY, STREAM_RESULTS,
 };
 use serde::Serialize;
 use sqlx::Row;
@@ -147,7 +147,7 @@ async fn jetstream_health(js: &async_nats::jetstream::Context) -> JetstreamHealt
     for name in [
         STREAM_INVENTORY,
         STREAM_RESULTS,
-        STREAM_DEPLOY,
+        STREAM_EXEC,
         STREAM_EVENTS,
         STREAM_AUDIT,
     ] {
@@ -189,7 +189,7 @@ async fn recent_results(pool: &sqlx::SqlitePool, since: DateTime<Utc>) -> Recent
         "SELECT
              COUNT(*) AS total,
              COALESCE(SUM(CASE WHEN exit_code <> 0 THEN 1 ELSE 0 END), 0) AS failed
-         FROM deployment_results
+         FROM execution_results
          WHERE recorded_at >= ?",
     )
     .bind(since)
