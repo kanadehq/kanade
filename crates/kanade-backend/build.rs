@@ -2,11 +2,10 @@
 // reads its own VERSIONINFO at /api/health/fleet (potentially) and
 // at upload-validation time.
 
+// See crates/kanade-agent/build.rs for the cfg-gate rationale.
+
+#[cfg(target_os = "windows")]
 fn main() {
-    let target = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    if target != "windows" {
-        return;
-    }
     let mut res = winres::WindowsResource::new();
     res.set("ProductName", "kanade-backend");
     res.set("FileDescription", "Kanade endpoint management backend");
@@ -19,3 +18,6 @@ fn main() {
         println!("cargo:warning=winres compile failed: {e}");
     }
 }
+
+#[cfg(not(target_os = "windows"))]
+fn main() {}

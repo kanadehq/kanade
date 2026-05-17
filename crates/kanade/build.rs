@@ -1,10 +1,9 @@
 // See crates/kanade-agent/build.rs for the rationale.
 
+// See crates/kanade-agent/build.rs for the cfg-gate rationale.
+
+#[cfg(target_os = "windows")]
 fn main() {
-    let target = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    if target != "windows" {
-        return;
-    }
     let mut res = winres::WindowsResource::new();
     res.set("ProductName", "kanade");
     res.set("FileDescription", "Kanade admin CLI");
@@ -17,3 +16,6 @@ fn main() {
         println!("cargo:warning=winres compile failed: {e}");
     }
 }
+
+#[cfg(not(target_os = "windows"))]
+fn main() {}

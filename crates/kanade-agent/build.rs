@@ -5,11 +5,20 @@
 // operator-typed label, no chance of a "label vs binary" drift
 // loop like the v0.11.1 → "1.0.0" incident.
 
+// `#[cfg(target_os = "windows")]` evaluates against the build.rs
+// HOST target — which equals the build TARGET when CI is doing a
+// native compile (the only mode the release pipeline uses).
+// Cross-compiling Linux → Windows would skip the resource compile,
+// but kanade doesn't do that today and rc.exe / windres isn't
+// available there anyway.
+//
+// The cfg gate (instead of a runtime `if target != "windows"`) is
+// what lets non-Windows hosts compile build.rs at all: `winres`
+// is a Windows-only build-dependency, so on Linux / macOS the
+// symbol isn't even in scope.
+
+#[cfg(target_os = "windows")]
 fn main() {
-    let target = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    if target != "windows" {
-        return;
-    }
     let mut res = winres::WindowsResource::new();
     res.set("ProductName", "kanade-agent");
     res.set("FileDescription", "Kanade endpoint management agent");
@@ -19,10 +28,9 @@ fn main() {
         res.set("FileVersion", &v);
     }
     if let Err(e) = res.compile() {
-        // CI's Linux + macOS runners reach here only when cross-
-        // compiling for Windows without an rc.exe in PATH; we keep
-        // the build non-fatal so the agent binary still ships
-        // (just without the embedded version resource).
         println!("cargo:warning=winres compile failed: {e}");
     }
 }
+
+#[cfg(not(target_os = "windows"))]
+fn main() {}
