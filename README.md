@@ -78,7 +78,7 @@ cargo install kanade kanade-agent kanade-backend
 `kanade`, `kanade-agent`, and `kanade-backend` are now on your PATH
 (under `~/.cargo/bin/`).
 
-You'll also want the sample configs (`agent.toml` / `backend.toml`) and
+You'll also want the sample configs (`configs/agent.toml` / `configs/backend.toml`) and
 the example manifests (`jobs/*.yaml`). The fastest way is a shallow
 clone of this repo:
 
@@ -100,8 +100,8 @@ own working dir if you'd rather not clone).
 ## Quick start (5 terminals, ~2 minutes)
 
 Run each step in its own PowerShell window so the daemons stay up. All
-of them assume `cd` into the directory that holds `agent.toml` /
-`backend.toml` / `jobs/`, which is the repo root if you cloned it.
+of them assume `cd` into the repo root (which holds `configs/agent.toml`
+/ `configs/backend.toml` / `jobs/`).
 
 ### 1 — start NATS
 
@@ -142,12 +142,12 @@ cron scheduler start in the background.
 kanade-agent
 ```
 
-Loads `./agent.toml`, picks `$env:COMPUTERNAME` as `pc_id`, subscribes
-to `commands.all` + `commands.pc.{pc_id}`, then spawns the
+Loads `./configs/agent.toml`, picks `$env:COMPUTERNAME` as `pc_id`,
+subscribes to `commands.all` + `commands.pc.{pc_id}`, then spawns the
 config_supervisor (watches `agent_config` + `agent_groups` KV) plus
 the heartbeat / inventory / self-update / groups-manager loops. Group
 membership and cadence settings are read from the KV buckets — see
-`kanade agent groups` and `kanade config` to drive them.
+`kanade group` and `kanade config` to drive them.
 
 ### 5 — drive it
 
@@ -339,11 +339,14 @@ it down for production with token auth:
 1. Start nats-server with the bundled config:
 
    ```powershell
-   nats-server -c nats-server.conf
+   nats-server -c configs/nats-server.conf
    ```
 
-   The shipped `nats-server.conf` enables JetStream + an
-   `authorization.token` block. Pick your own secret.
+   The shipped `configs/nats-server.conf` enables JetStream + an
+   `authorization.token` block. Pick your own secret. For
+   production, run as a Windows service via `deploy-nats.ps1`
+   (the script applies a SYSTEM + Administrators-only ACL on the
+   installed config so the token isn't readable by other users).
 
 2. Provision the token on every kanade host. The shared
    `kanade_shared::nats_client::connect()` helper resolves it in this
@@ -409,6 +412,7 @@ the PDB.
 - **v0.8.0** — staged self-update rollout: `kanade agent publish` is now upload-only (no KV touch); new `kanade agent rollout <ver> --global|--group <name>|--pc <pc_id> [--jitter <dur>]` flips `target_version` on one scope and (optionally) `target_version_jitter`. Agent-side `self_update` sleeps `random(0..jitter)` before downloading, defusing the "3000 agents hammer the Object Store at the same instant" failure mode. **Breaking change**: any operator scripts that relied on `publish` doing the rollout in one step need to chain a `rollout` call
 - **v0.9.0** — on-demand agent log fetch and a Web UI for rollout. New `logs.fetch.<pc_id>` NATS request/reply on the agent (`kanade agent logs <pc_id> [--tail N]` from the CLI, or the new **Logs** page in the SPA). New backend endpoints `/api/agents/<pc_id>/logs`, `/api/agents/releases`, `POST /api/agents/rollout`, plus a **Rollout** SPA page with a version picker / scope select / jitter input
 - **v0.10.0** — fleet-wide group ops + Web UI binary upload + logo viewBox fix. New `kanade group` top-level subcommand (`list` fleet-wide, `list --pc <id>` per-PC, `members <name>` reverse lookup, `add` / `rm` / `set` membership) replaces the old `kanade agent groups …`. SPA Rollout page gains an upload card backed by a new `POST /api/agents/publish` multipart endpoint (64 MB body limit) — the CLI is no longer required to publish a new binary
+- **v0.11.0** — fleet bootstrap from a clean Windows box. `build-release.ps1` defaults to `Invoke-WebRequest` from GitHub Releases (no cargo / bun / git on the build host); new `nats` role downloads from `nats-io/nats-server`; sample configs moved from repo root to `configs/`. New `deploy-nats.ps1` registers nats-server as a Windows service (`KanadeNats`), opens TCP 4222 / 8222, and hardens the ACL on `nats-server.conf` (token plaintext)
 
 Backlog: Prometheus metrics, 3000-agent simulation, NATS cluster + replicated backend, Postgres migration.
 
@@ -430,7 +434,8 @@ C:\Program Files\Kanade\                   /usr/local/bin/
 
 C:\ProgramData\Kanade\config\              /etc/kanade/
   ├── agent.toml                             ├── agent.toml
-  └── backend.toml                           └── backend.toml
+  ├── backend.toml                           ├── backend.toml
+  └── nats-server.conf  (hardened ACL)       └── nats-server.conf
 
 C:\ProgramData\Kanade\data\                /var/lib/kanade/
   ├── state.db        (agent)                ├── state.db
@@ -465,37 +470,34 @@ listing every option an operator can use to fix it.
 
 ### Install scripts (Windows, recommended)
 
-For hosts without `cargo` installed (the common case for agents and
-production backends), use the PowerShell deploy scripts under
-[`scripts/`](https://github.com/yukimemi/kanade/blob/main/scripts/).
-The flow is "drop exe + config + script into one folder, run as
-Admin": the script lays out the directory tree, copies the binary
-into `%ProgramFiles%\Kanade\`, seeds the config into
-`%ProgramData%\Kanade\config\` (without clobbering an existing
-edited one), and registers the Windows service.
+PowerShell scripts under
+[`scripts/`](https://github.com/yukimemi/kanade/blob/main/scripts/)
+handle the whole "drop a folder onto the target, run as Admin" path
+— no Rust toolchain, no bun, no git required on the deploy host:
 
 ```powershell
-# 1. On the build host: grab the release binaries + sample configs.
-#    Either from a GitHub Release zip, or from a `cargo build --release`
-#    output, or by `cargo install --root .\stage kanade-agent`.
-
-# 2. Stage one folder per role with the matching files:
-#    .\stage-agent\
-#      ├── deploy-agent.ps1     (from scripts\ in this repo)
-#      ├── kanade-agent.exe
-#      └── agent.toml           (edit before deploy)
+# 1. On any Windows box (no dev tooling needed): pull pre-built
+#    binaries straight from GitHub Releases via Invoke-WebRequest
+#    and assemble one stage folder per role under .\dist\.
+PS> .\scripts\build-release.ps1
+# → dist\agent\, dist\backend\, dist\nats\
+#   each contains: <role>.exe, <role>.{toml,conf}, deploy-<role>.ps1
 #
-#    .\stage-backend\
-#      ├── deploy-backend.ps1
-#      ├── kanade-backend.exe
-#      └── backend.toml
+# Variants:
+#   -Roles agent,backend           # skip nats
+#   -NatsVersion 2.11.10           # pin a specific NATS broker tag
+#   -FromSource                    # compile from this checkout (cargo + bun required)
+#   -FromCrates                    # install from crates.io (cargo required)
+#   -Zip                           # also produce dist\<role>.zip
 
-# 3. Copy each stage folder onto the target host (xcopy, robocopy,
+# 2. Copy each stage folder onto the target host (xcopy, robocopy,
 #    scp, USB stick — whatever fits your environment).
 
-# 4. On the target host, run the matching script as Administrator:
-PS> .\deploy-agent.ps1
-PS> .\deploy-backend.ps1 -FirewallPort 8443    # match bind_addr in backend.toml
+# 3. On the target host, run the matching script as Administrator:
+PS> .\deploy-nats.ps1     -NatsToken 'kanade-fleet-secret-2026'    # broker host (run once)
+PS> .\deploy-agent.ps1    -NatsToken 'kanade-fleet-secret-2026'    # every endpoint
+PS> .\deploy-backend.ps1  -NatsToken 'kanade-fleet-secret-2026' `
+                          -StaticToken '<api-token>'                # admin box
 ```
 
 Re-running the script upgrades the binary in place and preserves
@@ -516,8 +518,8 @@ Copy-Item "$env:USERPROFILE\.cargo\bin\kanade-backend.exe" 'C:\Program Files\Kan
 
 # Stage the config (review + edit first)
 New-Item -ItemType Directory -Force 'C:\ProgramData\Kanade\config'
-Copy-Item .\agent.toml   'C:\ProgramData\Kanade\config\'
-Copy-Item .\backend.toml 'C:\ProgramData\Kanade\config\'
+Copy-Item .\configs\agent.toml   'C:\ProgramData\Kanade\config\'
+Copy-Item .\configs\backend.toml 'C:\ProgramData\Kanade\config\'
 
 # Register the agent as a service running under LocalSystem.
 sc.exe create KanadeAgent `

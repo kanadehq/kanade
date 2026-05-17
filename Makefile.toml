@@ -95,14 +95,14 @@ description = "Run kanade-backend in dev mode (loopback :8081, workspace-local D
 # task touched. Absolute config path via the env var below adds a
 # belt-and-braces fallback.
 cwd = "${CARGO_MAKE_WORKING_DIRECTORY}"
-env = { "KANADE_BACKEND_CONFIG" = "${CARGO_MAKE_WORKING_DIRECTORY}/backend.dev.toml", "KANADE_AUTH_DISABLE" = "1", "RUST_LOG" = "info,kanade_backend=debug,tower_http=info" }
+env = { "KANADE_BACKEND_CONFIG" = "${CARGO_MAKE_WORKING_DIRECTORY}/configs/backend.dev.toml", "KANADE_AUTH_DISABLE" = "1", "RUST_LOG" = "info,kanade_backend=debug,tower_http=info" }
 command = "cargo"
 args = ["run", "-p", "kanade-backend"]
 
 [tasks.agent-dev]
 description = "Run kanade-agent in dev mode against the same NATS the installed service uses. Beware: both will race on commands.pc.<hostname>; stop the installed service first (Stop-Service KanadeAgent) if you want clean dev-only behaviour."
 cwd = "${CARGO_MAKE_WORKING_DIRECTORY}"
-env = { "KANADE_AGENT_CONFIG" = "${CARGO_MAKE_WORKING_DIRECTORY}/agent.toml", "RUST_LOG" = "info,kanade_agent=debug" }
+env = { "KANADE_AGENT_CONFIG" = "${CARGO_MAKE_WORKING_DIRECTORY}/configs/agent.toml", "RUST_LOG" = "info,kanade_agent=debug" }
 command = "cargo"
 args = ["run", "-p", "kanade-agent"]
 

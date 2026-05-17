@@ -2,25 +2,28 @@
 
 <#
 .SYNOPSIS
-  Build deploy-ready stage folders for kanade-agent and kanade-backend.
+  Build deploy-ready stage folders for kanade-agent, kanade-backend, and nats-server.
 
 .DESCRIPTION
-  Runs on a build host (the one with the Rust toolchain installed) to
-  produce one folder per role under -OutDir, ready to be copied onto a
-  target host and run with the matching deploy-<role>.ps1 as Admin.
+  Runs on a host with no development tooling at all — by default it
+  downloads pre-built binaries straight from GitHub Releases over
+  HTTPS (Invoke-WebRequest), so a clean Windows box can assemble a
+  full kanade deploy bundle without Rust / bun / git installed.
 
-  By default it pulls the binary from crates.io with `cargo install`
-  at the version recorded in this repo's workspace Cargo.toml, so
-  every operator pulls bit-identical builds. Pass -FromSource to
-  build from the local checkout instead (useful for unreleased dev
-  builds).
+  Pass -FromSource to compile from the local checkout (needs cargo +
+  bun for kanade-backend's SPA bundle), or -FromCrates to install via
+  cargo from crates.io (needs cargo).
 
   Output layout, per role:
 
     <OutDir>\<role>\
-      ├── kanade-<role>.exe
-      ├── <role>.toml             (edit before deploy)
-      └── deploy-<role>.ps1       (run on the target as Admin)
+      ├── kanade-<role>.exe   (or nats-server.exe for the nats role)
+      ├── <role>.toml         (or nats-server.conf — edit before deploy)
+      └── deploy-<role>.ps1   (run on the target as Admin)
+
+  Default roles include nats, so a clean checkout produces everything
+  needed to bootstrap a fleet (the agent, the backend, and the
+  broker) in one invocation. Pass -Roles to restrict.
 
   Pass -Zip to also produce <OutDir>\<role>.zip (Compress-Archive)
   for handoff via filesharing tools that prefer single archives.
@@ -28,102 +31,94 @@
   Reruns are cheap: a persistent Cargo target dir (`-TargetDir`,
   default `<repo>\.cargo-stage-cache`) keeps build artifacts between
   invocations, and if the stage already has a binary whose
-  `--version` matches the requested version the cargo install is
-  skipped entirely. Pass `-Force` to rebuild regardless, and note
-  that `-FromSource` always rebuilds (working-tree code may differ
-  from what `--version` reports).
+  `--version` matches the requested version the fetch is skipped
+  entirely. `-Force` bypasses the cache; `-FromSource` always
+  rebuilds (working-tree code may differ from what `--version`
+  reports).
 
 .PARAMETER Version
-  Crate version to install from crates.io. Defaults to the version
-  in the workspace Cargo.toml. Ignored under -FromSource.
+  kanade release tag to download (or crate version under -FromCrates).
+  Defaults to the version in the workspace Cargo.toml.
+
+.PARAMETER NatsVersion
+  nats-server release tag to download from nats-io/nats-server.
+  Defaults to a pinned recent stable. Operators are expected to bump
+  this to match the broker version they want to run.
 
 .PARAMETER OutDir
   Stage root, resolved relative to the repo root. Default: 'dist'.
 
 .PARAMETER FromSource
   Use `cargo install --path crates\kanade-<role>` instead of pulling
-  from crates.io. Builds the current working-tree code.
+  from Releases / crates.io. Builds the current working-tree code.
+  Implies cargo on PATH; for the backend role, also bun (Vite SPA bundle).
+
+.PARAMETER FromCrates
+  Use `cargo install kanade-<role>` from crates.io instead of pulling
+  from Releases. Implies cargo on PATH.
 
 .PARAMETER Zip
   After staging, Compress-Archive each role folder into a sibling
-  .zip. Useful when the operator's transport prefers a single file.
+  .zip.
 
 .PARAMETER Roles
-  Which roles to stage. Default: agent + backend. Pass a subset
-  (e.g. -Roles agent) to skip one.
+  Which roles to stage. Default: agent, backend, nats.
 
 .PARAMETER TargetDir
-  Cargo `--target-dir` for cached build artifacts shared across
-  runs. Default: `<repo>\.cargo-stage-cache`. Shared between roles
-  on purpose — agent and backend reuse most of the dep graph
-  (tokio / serde / async-nats / tracing / …) so a shared cache
-  shrinks the total artefact footprint.
-
-.PARAMETER FromRelease
-  Download the pre-built Windows binary from the matching GitHub
-  Release tag instead of running cargo. Implies no Rust toolchain
-  is required on the build host. Mutually exclusive with
-  `-FromSource`; ignored when the staged binary already reports
-  the requested version (use `-Force` to override).
+  Cargo `--target-dir` for cached build artifacts shared across runs.
+  Default: `<repo>\.cargo-stage-cache`. Only used for -FromSource / -FromCrates.
 
 .PARAMETER GitHubRepo
-  GitHub `owner/repo` to pull release assets from when
-  `-FromRelease` is set. Default: `yukimemi/kanade`. Override if
-  you fork.
+  GitHub `owner/repo` to pull kanade release assets from. Default:
+  `yukimemi/kanade`. Override if you fork.
 
 .PARAMETER Force
   Rebuild every selected role even when the staged binary already
-  reports the requested version. The default fast-path is intended
-  for "I edited the deploy script and want to re-stage" reruns; pass
-  -Force when you need cargo to actually re-resolve / re-link.
+  reports the requested version.
 
 .EXAMPLE
-  # Stage release matching the workspace version (the common case):
+  # No-toolchain bootstrap (the common case on a fresh ops jump box):
   PS> .\scripts\build-release.ps1
 
 .EXAMPLE
-  # Stage from source, agent only, and zip the result:
+  # Stage from local source, agent only, and zip:
   PS> .\scripts\build-release.ps1 -FromSource -Roles agent -Zip
 
 .EXAMPLE
-  # Pin a specific crates.io version (e.g. for a hotfix older than HEAD):
-  PS> .\scripts\build-release.ps1 -Version 0.1.4
+  # Pin a specific kanade version (older hotfix, etc):
+  PS> .\scripts\build-release.ps1 -Version 0.10.0
 
 .EXAMPLE
-  # No-cargo path: pull pre-built binaries straight from the
-  # GitHub Release page (~5s vs ~5min cold-compile).
-  PS> .\scripts\build-release.ps1 -FromRelease
-
-.EXAMPLE
-  # Force a clean rebuild despite the cached stage being up to date:
-  PS> .\scripts\build-release.ps1 -Force
+  # Pull from crates.io instead of GitHub Releases:
+  PS> .\scripts\build-release.ps1 -FromCrates
 #>
 
 [CmdletBinding()]
 param(
     [string]  $Version,
-    [string]  $OutDir    = 'dist',
+    [string]  $NatsVersion = '2.11.10',
+    [string]  $OutDir      = 'dist',
     [switch]  $FromSource,
-    [switch]  $FromRelease,
-    [string]  $GitHubRepo = 'yukimemi/kanade',
+    [switch]  $FromCrates,
+    [string]  $GitHubRepo  = 'yukimemi/kanade',
     [switch]  $Zip,
-    [string[]]$Roles     = @('agent', 'backend'),
+    [string[]]$Roles       = @('agent', 'backend', 'nats'),
     [string]  $TargetDir,
     [switch]  $Force
 )
 
 $ErrorActionPreference = 'Stop'
 
-if ($FromSource -and $FromRelease) {
-    throw "-FromSource and -FromRelease are mutually exclusive."
+if ($FromSource -and $FromCrates) {
+    throw "-FromSource and -FromCrates are mutually exclusive."
 }
-# cargo is only required for the build paths (default crates.io + -FromSource).
-# -FromRelease can run without a Rust toolchain at all.
-if (-not $FromRelease -and -not (Get-Command cargo -ErrorAction SilentlyContinue)) {
-    throw "cargo not found on PATH. Install Rust, or pass -FromRelease to download a pre-built binary from GitHub Releases instead."
+# cargo is only required for the compile paths.
+if (($FromSource -or $FromCrates) -and -not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+    throw "cargo not found on PATH. Install Rust, or drop -FromSource/-FromCrates to download a pre-built binary from GitHub Releases instead."
 }
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
+$configsDir = Join-Path $repoRoot 'configs'
 
 if (-not $Version) {
     $cargoToml = Join-Path $repoRoot 'Cargo.toml'
@@ -145,50 +140,83 @@ if (-not $TargetDir) {
 if (-not [System.IO.Path]::IsPathRooted($TargetDir)) {
     $TargetDir = Join-Path $repoRoot $TargetDir
 }
-$null = New-Item -ItemType Directory -Path $TargetDir -Force
 
-Write-Host ("Staging kanade v{0} into {1}" -f $Version, $OutDir)
+Write-Host ("Staging into {0}" -f $OutDir)
 if     ($FromSource)  { Write-Host "Source: local checkout ($repoRoot)" }
-elseif ($FromRelease) { Write-Host "Source: GitHub Releases ($GitHubRepo @ v$Version)" }
-else                  { Write-Host "Source: crates.io" }
-if (-not $FromRelease) {
+elseif ($FromCrates)  { Write-Host "Source: crates.io" }
+else                  { Write-Host "Source: GitHub Releases (default)" }
+Write-Host ("Kanade version: v{0}    NATS version: v{1}" -f $Version, $NatsVersion)
+if ($FromSource -or $FromCrates) {
+    $null = New-Item -ItemType Directory -Path $TargetDir -Force
     Write-Host ("Cache:  {0}" -f $TargetDir)
 }
 
+# Role metadata table. Keeps the per-role differences in one place
+# so the main loop below stays linear.
+$roleSpec = @{
+    'agent' = @{
+        Crate       = 'kanade-agent'
+        ExeName     = 'kanade-agent.exe'
+        ConfigName  = 'agent.toml'
+        DeployScript = 'deploy-agent.ps1'
+        ServiceName = 'KanadeAgent'
+    }
+    'backend' = @{
+        Crate       = 'kanade-backend'
+        ExeName     = 'kanade-backend.exe'
+        ConfigName  = 'backend.toml'
+        DeployScript = 'deploy-backend.ps1'
+        ServiceName = 'KanadeBackend'
+    }
+    'nats' = @{
+        # nats-server is shipped by NATS, not by kanade. The
+        # -FromSource / -FromCrates paths are not supported for it;
+        # we always Invoke-WebRequest from nats-io/nats-server.
+        ExeName     = 'nats-server.exe'
+        ConfigName  = 'nats-server.conf'
+        DeployScript = 'deploy-nats.ps1'
+        ServiceName = 'KanadeNats'
+        External    = $true
+    }
+}
+
 foreach ($role in $Roles) {
-    $crate    = "kanade-$role"
-    $exeName  = "$crate.exe"
-    $cfgName  = "$role.toml"
-    $deployPs = "deploy-$role.ps1"
+    $spec = $roleSpec[$role]
+    if (-not $spec) { throw "Unknown role '$role'. Supported: $($roleSpec.Keys -join ', ')" }
+    $exeName  = $spec.ExeName
+    $cfgName  = $spec.ConfigName
+    $deployPs = $spec.DeployScript
     $stage    = Join-Path $OutDir $role
 
     Write-Host ''
     Write-Host "=== $role ==="
 
-    $cfgSrc    = Join-Path $repoRoot $cfgName
+    $cfgSrc    = Join-Path $configsDir $cfgName
     $deploySrc = Join-Path $repoRoot "scripts\$deployPs"
-    if (-not (Test-Path $cfgSrc))    { throw "Missing $cfgName in repo root ($cfgSrc)." }
+    if (-not (Test-Path $cfgSrc))    { throw "Missing $cfgName under configs/ ($cfgSrc)." }
     if (-not (Test-Path $deploySrc)) { throw "Missing $deployPs under scripts\ ($deploySrc)." }
 
     $exeDst = Join-Path $stage $exeName
 
-    # Fast-path: if the staged binary already reports the requested
-    # version, skip the fetch / cargo install entirely. -FromSource
-    # always rebuilds (working-tree code may differ from what
-    # --version reports); -FromRelease respects the skip because
-    # the on-disk exe at the right version is by definition
-    # bit-identical to what we'd re-download.
+    # Fast-path: skip the fetch when the staged binary already
+    # reports the desired version. nats-server has no embedded
+    # workspace metadata, so we still rely on its `--version` line
+    # for the cache hit check.
+    $wantVer = if ($spec.External) { $NatsVersion } else { $Version }
     $skipBuild = $false
     if (-not $FromSource -and -not $Force -and (Test-Path $exeDst)) {
         try {
             $verLine = (& $exeDst --version 2>$null) | Select-Object -First 1
             if ($verLine) {
-                $installed = ($verLine -split '\s+', 2)[-1].Trim()
-                if ($installed -eq $Version) {
-                    Write-Host "Cached: $exeName already at v$Version (pass -Force to rebuild)."
+                # `nats-server: v2.11.10` vs `kanade-agent 0.10.0` — split
+                # on whitespace and take the LAST token, then strip a
+                # leading 'v' if present.
+                $installed = ($verLine -split '\s+')[-1].TrimStart('v').Trim()
+                if ($installed -eq $wantVer) {
+                    Write-Host "Cached: $exeName already at v$wantVer (pass -Force to rebuild)."
                     $skipBuild = $true
                 } else {
-                    Write-Host "Stale: $exeName reports '$installed', want '$Version' — rebuilding."
+                    Write-Host "Stale: $exeName reports '$installed', want '$wantVer' — rebuilding."
                 }
             }
         } catch {
@@ -196,72 +224,87 @@ foreach ($role in $Roles) {
         }
     }
 
-    if (-not $skipBuild) {
-        # Don't blow the stage dir away wholesale — if anything (e.g.,
-        # Windows Defender mid-scan, a running kanade-<role>.exe, an
-        # open Explorer preview) holds even one file inside, the
-        # recursive Remove-Item fails noisily. Just ensure the dir
-        # exists; Copy-Item -Force below overwrites individual files,
-        # and any locked file produces a focused error pointing at
-        # that one path instead of taking down the whole rebuild.
-        if (-not (Test-Path $stage)) {
-            $null = New-Item -ItemType Directory -Path $stage
-        }
+    if (-not (Test-Path $stage)) {
+        $null = New-Item -ItemType Directory -Path $stage
     }
 
-    if ($FromRelease -and -not $skipBuild) {
-        $url = "https://github.com/$GitHubRepo/releases/download/v$Version/$exeName"
-        Write-Host "Downloading $url"
-        try {
-            Invoke-WebRequest -Uri $url -OutFile $exeDst -UseBasicParsing
-        } catch {
-            throw @"
+    if (-not $skipBuild) {
+        if ($spec.External) {
+            # NATS server: only ever downloaded — there's no
+            # -FromSource analog for an external project.
+            $natsAsset = "nats-server-v$NatsVersion-windows-amd64"
+            $zipUrl    = "https://github.com/nats-io/nats-server/releases/download/v$NatsVersion/$natsAsset.zip"
+            Write-Host "Downloading $zipUrl"
+            $tempZip = Join-Path ([System.IO.Path]::GetTempPath()) "nats-server-v$NatsVersion-$([System.Guid]::NewGuid().ToString('N')).zip"
+            $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) "nats-server-v$NatsVersion-$([System.Guid]::NewGuid().ToString('N'))"
+            try {
+                Invoke-WebRequest -Uri $zipUrl -OutFile $tempZip -UseBasicParsing
+                Expand-Archive -Path $tempZip -DestinationPath $tempDir -Force
+                $extracted = Join-Path $tempDir "$natsAsset\nats-server.exe"
+                if (-not (Test-Path $extracted)) {
+                    throw "nats-server.exe not found inside $zipUrl (expected under '$natsAsset\')."
+                }
+                Copy-Item $extracted $exeDst -Force
+            } catch {
+                throw @"
+Failed to fetch nats-server v$NatsVersion
+  - Check https://github.com/nats-io/nats-server/releases for the current tag
+    and pass -NatsVersion <ver> if the pinned default has been retracted.
+Original error: $($_.Exception.Message)
+"@
+            } finally {
+                if (Test-Path $tempZip) { Remove-Item -Force $tempZip }
+                if (Test-Path $tempDir) { Remove-Item -Recurse -Force $tempDir }
+            }
+        } elseif ($FromSource) {
+            $cratePath = Join-Path $repoRoot "crates\$($spec.Crate)"
+            if (-not (Test-Path $cratePath)) { throw "Missing crate path '$cratePath'." }
+            $temp = Join-Path ([System.IO.Path]::GetTempPath()) ("kanade-stage-{0}-{1}" -f $role, [System.Guid]::NewGuid().ToString('N'))
+            try {
+                Write-Host "cargo install --path $cratePath --root $temp --target-dir $TargetDir"
+                & cargo install --root $temp --locked --path $cratePath --target-dir $TargetDir
+                if ($LASTEXITCODE -ne 0) { throw "cargo install failed for $($spec.Crate) (exit $LASTEXITCODE)." }
+                $exeSrc = Join-Path $temp "bin\$exeName"
+                if (-not (Test-Path $exeSrc)) { throw "Built binary not found at '$exeSrc'." }
+                Copy-Item $exeSrc $exeDst -Force
+            }
+            finally {
+                if (Test-Path $temp) { Remove-Item -Recurse -Force $temp }
+            }
+        } elseif ($FromCrates) {
+            $temp = Join-Path ([System.IO.Path]::GetTempPath()) ("kanade-stage-{0}-{1}" -f $role, [System.Guid]::NewGuid().ToString('N'))
+            try {
+                Write-Host "cargo install $($spec.Crate)@$Version --root $temp --target-dir $TargetDir"
+                & cargo install --root $temp --version $Version $spec.Crate --target-dir $TargetDir
+                if ($LASTEXITCODE -ne 0) { throw "cargo install failed for $($spec.Crate) (exit $LASTEXITCODE)." }
+                $exeSrc = Join-Path $temp "bin\$exeName"
+                if (-not (Test-Path $exeSrc)) { throw "Built binary not found at '$exeSrc'." }
+                Copy-Item $exeSrc $exeDst -Force
+            }
+            finally {
+                if (Test-Path $temp) { Remove-Item -Recurse -Force $temp }
+            }
+        } else {
+            # Default: download from GitHub Releases.
+            $url = "https://github.com/$GitHubRepo/releases/download/v$Version/$exeName"
+            Write-Host "Downloading $url"
+            try {
+                Invoke-WebRequest -Uri $url -OutFile $exeDst -UseBasicParsing
+            } catch {
+                throw @"
 Failed to download $url
   - Asset missing on the release? Check https://github.com/$GitHubRepo/releases/tag/v$Version
   - First v0.3.x tags published before the GitHub-Release-upload step landed won't have assets;
-    use the default (crates.io) source for those, or -FromSource against a checkout.
-Original error: $($_.Exception.Message)
-"@
-        }
-    } elseif (-not $skipBuild) {
-        $temp = Join-Path ([System.IO.Path]::GetTempPath()) ("kanade-stage-{0}-{1}" -f $role, [System.Guid]::NewGuid().ToString('N'))
-        try {
-            if ($FromSource) {
-                $cratePath = Join-Path $repoRoot "crates\$crate"
-                if (-not (Test-Path $cratePath)) { throw "Missing crate path '$cratePath'." }
-                Write-Host "cargo install --path $cratePath --root $temp --target-dir $TargetDir"
-                & cargo install --root $temp --locked --path $cratePath --target-dir $TargetDir
-            } else {
-                Write-Host "cargo install $crate@$Version --root $temp --target-dir $TargetDir"
-                & cargo install --root $temp --version $Version $crate --target-dir $TargetDir
-            }
-            if ($LASTEXITCODE -ne 0) { throw "cargo install failed for $crate (exit $LASTEXITCODE)." }
-
-            $exeSrc = Join-Path $temp "bin\$exeName"
-            if (-not (Test-Path $exeSrc)) { throw "Built binary not found at '$exeSrc'." }
-            try {
-                Copy-Item $exeSrc $exeDst -Force
-            } catch [System.IO.IOException] {
-                throw @"
-$exeDst is locked (file in use by another process). Likely culprits:
-  - Windows Defender real-time scan finishing on the previous build
-    (usually clears in seconds; just rerun).
-  - A still-running kanade-$role.exe (Get-Process kanade-$role).
-  - The Windows service (Stop-Service Kanade$($role -replace '^(.)', { $_.Value.ToUpper() })
-    or use deploy-$role.ps1 -Recreate after the next stage).
+    use -FromCrates for those, or -FromSource against a checkout.
 Original error: $($_.Exception.Message)
 "@
             }
-        }
-        finally {
-            if (Test-Path $temp) { Remove-Item -Recurse -Force $temp }
         }
     }
 
     # Always refresh the non-binary artefacts. They're tiny and may
     # have been edited (config tweaks, deploy-script bumps) since the
     # last stage even when the exe didn't change.
-    if (-not (Test-Path $stage)) { $null = New-Item -ItemType Directory -Path $stage }
     Copy-Item $cfgSrc    (Join-Path $stage $cfgName)    -Force
     Copy-Item $deploySrc (Join-Path $stage $deployPs)   -Force
 
