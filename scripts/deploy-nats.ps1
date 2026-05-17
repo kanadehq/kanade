@@ -44,8 +44,20 @@
 .PARAMETER NoStart
   Install + register the service but don't start it.
 
+.PARAMETER NatsToken
+  If set, substitute the broker's `authorization.token` value in
+  the installed nats-server.conf with this string. NATS keeps the
+  bearer token plaintext in its config file (the broker has no
+  registry / DPAPI back-end like kanade-agent), so the script
+  rewrites that one line and re-applies the SYSTEM + Administrators-
+  only ACL afterwards. Matches the `-NatsToken` flag on
+  deploy-agent.ps1 / deploy-backend.ps1 so the operator can run
+  the same value on every host.
+
 .EXAMPLE
   PS> .\deploy-nats.ps1
+.EXAMPLE
+  PS> .\deploy-nats.ps1 -NatsToken 'kanade-fleet-secret-2026'
 .EXAMPLE
   PS> .\deploy-nats.ps1 -ForceConfig
 .EXAMPLE
@@ -61,8 +73,38 @@ param(
     [switch]$ForceConfig,
     [switch]$NoFirewall,
     [switch]$Recreate,
-    [switch]$NoStart
+    [switch]$NoStart,
+    [string]$NatsToken   = ''
 )
+
+# Rewrite `authorization.token: "..."` inside the installed
+# nats-server.conf to the supplied value. Uses [System.IO.File] for
+# byte-exact preservation of surrounding whitespace + CRLF; the
+# regex replacement double-escapes any `$` in the token so the
+# replacement string doesn't misinterpret it as a backref.
+function Set-NatsServerToken {
+    param(
+        [Parameter(Mandatory)][string]$ConfigPath,
+        [Parameter(Mandatory)][string]$Token
+    )
+
+    $content = [System.IO.File]::ReadAllText($ConfigPath)
+    $pattern = '(?ms)(authorization\s*\{[^}]*?token:\s*)"[^"]*"'
+    if ($content -notmatch $pattern) {
+        throw @"
+Couldn't find an `authorization.token` line inside `authorization { ... }` in
+  $ConfigPath
+to substitute. Either edit the file to include
+  authorization { token: "<your-token>" }
+or drop -NatsToken (the broker will then run unauthenticated, matching
+the shipped sample's commented-out auth block).
+"@
+    }
+    $escaped = $Token -replace '\$', '$$$$'
+    $new = $content -replace $pattern, ('$1"' + $escaped + '"')
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($ConfigPath, $new, $utf8NoBom)
+}
 
 $ErrorActionPreference = 'Stop'
 
@@ -123,6 +165,15 @@ if ($ForceConfig -or -not (Test-Path $configDst)) {
     Copy-Item -Path $configSrc -Destination $configDst -Force
 } else {
     Write-Host "Keeping existing $configDst (pass -ForceConfig to overwrite)."
+}
+
+# Apply -NatsToken before the ACL gets locked down. The script runs
+# as Admin so we still have write access either way, but doing the
+# substitution first keeps the on-disk content right by the time
+# the file is readable only by SYSTEM + Administrators.
+if ($NatsToken) {
+    Write-Host "Substituting authorization.token in $configDst"
+    Set-NatsServerToken -ConfigPath $configDst -Token $NatsToken
 }
 
 # Harden the ACL on nats-server.conf. The NATS bearer token lives
