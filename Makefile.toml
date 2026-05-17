@@ -237,3 +237,151 @@ end
 [tasks.on-add]
 description = "Wired to renri's [[hooks.post_create]] — runs in a freshly created worktree"
 dependencies = ["apm-install-update", "vcs-fetch"]
+
+# ─── Local deploy (dev / debug) ──────────────────────────────────────
+#
+# Build the workspace from source, stage into dist/<role>/ via
+# build-release.ps1 -FromSource, and run each deploy-<role>.ps1 under
+# gsudo. Strictly for the maintainer's own box — production hosts
+# should always use the GitHub Releases artifacts via
+# `build-release.ps1` (no flags) + `deploy-<role>.ps1` directly.
+#
+# NATS token: $env:KANADE_DEV_NATS_TOKEN, defaulting to
+# 'dev-token-not-for-prod' so a forgotten env var doesn't accidentally
+# match a real production secret. Each task passes -ForceConfig so
+# config edits in configs/ apply on every re-deploy.
+
+[tasks.local-deploy]
+description = "[dev] Build + install agent + backend + nats locally via gsudo. One UAC prompt."
+cwd = "${CARGO_MAKE_WORKING_DIRECTORY}"
+script_runner = "powershell"
+script_extension = "ps1"
+script = '''
+$ErrorActionPreference = 'Stop'
+
+if (-not (Get-Command gsudo -ErrorAction SilentlyContinue)) {
+    throw "gsudo not on PATH. Install via `scoop install gsudo` (https://github.com/gerardog/gsudo)."
+}
+
+$token = if ($env:KANADE_DEV_NATS_TOKEN) { $env:KANADE_DEV_NATS_TOKEN } else { 'dev-token-not-for-prod' }
+$root  = $env:CARGO_MAKE_WORKING_DIRECTORY
+
+Write-Host "[1/2] Staging from source..."
+& "$root\scripts\build-release.ps1" -FromSource
+if ($LASTEXITCODE -ne 0) { throw "build-release.ps1 failed (exit $LASTEXITCODE)" }
+
+Write-Host ""
+Write-Host "[2/2] Elevating via gsudo to install services (NATS token: $token)"
+# Single elevated invocation so the operator sees one UAC prompt.
+# Temp .ps1 keeps the command line short + avoids quoting hell.
+$tmp = [System.IO.Path]::GetTempFileName()
+Remove-Item $tmp -Force
+$tmp = "$tmp.ps1"
+@"
+`$ErrorActionPreference = 'Stop'
+& '$root\dist\nats\deploy-nats.ps1'       -NatsToken '$token' -ForceConfig
+& '$root\dist\backend\deploy-backend.ps1' -NatsToken '$token' -ForceConfig
+& '$root\dist\agent\deploy-agent.ps1'     -NatsToken '$token' -ForceConfig
+"@ | Set-Content -Path $tmp -Encoding utf8
+try {
+    & gsudo powershell -NoProfile -ExecutionPolicy Bypass -File $tmp
+    if ($LASTEXITCODE -ne 0) { throw "Elevated deploy failed (exit $LASTEXITCODE)" }
+} finally {
+    if (Test-Path $tmp) { Remove-Item -Force $tmp }
+}
+'''
+
+[tasks.local-deploy-agent]
+description = "[dev] Build kanade-agent from source + install via gsudo as KanadeAgent service."
+cwd = "${CARGO_MAKE_WORKING_DIRECTORY}"
+script_runner = "powershell"
+script_extension = "ps1"
+script = '''
+$ErrorActionPreference = 'Stop'
+if (-not (Get-Command gsudo -ErrorAction SilentlyContinue)) {
+    throw "gsudo not on PATH. Install via `scoop install gsudo`."
+}
+$token = if ($env:KANADE_DEV_NATS_TOKEN) { $env:KANADE_DEV_NATS_TOKEN } else { 'dev-token-not-for-prod' }
+$root  = $env:CARGO_MAKE_WORKING_DIRECTORY
+
+& "$root\scripts\build-release.ps1" -FromSource -Roles agent
+if ($LASTEXITCODE -ne 0) { throw "build-release.ps1 failed (exit $LASTEXITCODE)" }
+
+& gsudo "$root\dist\agent\deploy-agent.ps1" -NatsToken $token -ForceConfig
+if ($LASTEXITCODE -ne 0) { throw "deploy-agent failed (exit $LASTEXITCODE)" }
+'''
+
+[tasks.local-deploy-backend]
+description = "[dev] Build kanade-backend from source + install via gsudo as KanadeBackend service."
+cwd = "${CARGO_MAKE_WORKING_DIRECTORY}"
+script_runner = "powershell"
+script_extension = "ps1"
+script = '''
+$ErrorActionPreference = 'Stop'
+if (-not (Get-Command gsudo -ErrorAction SilentlyContinue)) {
+    throw "gsudo not on PATH. Install via `scoop install gsudo`."
+}
+$token = if ($env:KANADE_DEV_NATS_TOKEN) { $env:KANADE_DEV_NATS_TOKEN } else { 'dev-token-not-for-prod' }
+$root  = $env:CARGO_MAKE_WORKING_DIRECTORY
+
+& "$root\scripts\build-release.ps1" -FromSource -Roles backend
+if ($LASTEXITCODE -ne 0) { throw "build-release.ps1 failed (exit $LASTEXITCODE)" }
+
+& gsudo "$root\dist\backend\deploy-backend.ps1" -NatsToken $token -ForceConfig
+if ($LASTEXITCODE -ne 0) { throw "deploy-backend failed (exit $LASTEXITCODE)" }
+'''
+
+[tasks.local-deploy-nats]
+description = "[dev] Download nats-server + install via gsudo as KanadeNats service."
+cwd = "${CARGO_MAKE_WORKING_DIRECTORY}"
+script_runner = "powershell"
+script_extension = "ps1"
+script = '''
+$ErrorActionPreference = 'Stop'
+if (-not (Get-Command gsudo -ErrorAction SilentlyContinue)) {
+    throw "gsudo not on PATH. Install via `scoop install gsudo`."
+}
+$token = if ($env:KANADE_DEV_NATS_TOKEN) { $env:KANADE_DEV_NATS_TOKEN } else { 'dev-token-not-for-prod' }
+$root  = $env:CARGO_MAKE_WORKING_DIRECTORY
+
+# `nats` is External in build-release.ps1, so it always downloads
+# regardless of -FromSource. Omit the flag for clarity.
+& "$root\scripts\build-release.ps1" -Roles nats
+if ($LASTEXITCODE -ne 0) { throw "build-release.ps1 failed (exit $LASTEXITCODE)" }
+
+& gsudo "$root\dist\nats\deploy-nats.ps1" -NatsToken $token -ForceConfig
+if ($LASTEXITCODE -ne 0) { throw "deploy-nats failed (exit $LASTEXITCODE)" }
+'''
+
+[tasks.local-undeploy]
+description = "[dev] Stop + remove KanadeAgent / KanadeBackend / KanadeNats services. Leaves binaries + config on disk."
+cwd = "${CARGO_MAKE_WORKING_DIRECTORY}"
+script_runner = "powershell"
+script_extension = "ps1"
+script = '''
+$ErrorActionPreference = 'Stop'
+if (-not (Get-Command gsudo -ErrorAction SilentlyContinue)) {
+    throw "gsudo not on PATH. Install via `scoop install gsudo`."
+}
+
+$tmp = [System.IO.Path]::GetTempFileName()
+Remove-Item $tmp -Force
+$tmp = "$tmp.ps1"
+@'
+$ErrorActionPreference = 'Continue'
+foreach ($svc in 'KanadeAgent', 'KanadeBackend', 'KanadeNats') {
+    if (Get-Service -Name $svc -ErrorAction SilentlyContinue) {
+        Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue
+        & sc.exe delete $svc | Out-Null
+        Write-Host "Removed $svc"
+    } else {
+        Write-Host "$svc not installed (skipping)"
+    }
+}
+'@ | Set-Content -Path $tmp -Encoding utf8
+try {
+    & gsudo powershell -NoProfile -ExecutionPolicy Bypass -File $tmp
+} finally {
+    if (Test-Path $tmp) { Remove-Item -Force $tmp }
+}
+'''
