@@ -183,8 +183,13 @@ kanade unrevoke <cmd_id>                         # → ACTIVE
 kanade jetstream setup                           # create streams + KV + Object Store (optional; backend auto-bootstraps on startup)
 kanade jetstream status                          # health snapshot
 
-kanade deploy   <manifest.yaml> [--version <v>]  # POST /api/deploy
-kanade schedule create <schedule.yaml>           # POST /api/schedules (cron + manifest)
+kanade deploy   <manifest.yaml> [--version <v>]  # POST /api/deploy (one-shot, unregistered)
+
+kanade job create   <manifest.yaml>              # upsert into the jobs catalog (BUCKET_JOBS)
+kanade job list                                  # every registered job
+kanade job delete <id>                           # refuses if any schedule references it
+
+kanade schedule create <schedule.yaml>           # cron yaml: { id, cron, job_id, enabled }
 kanade schedule list
 kanade schedule delete <id>
 
