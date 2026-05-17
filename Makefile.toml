@@ -279,9 +279,9 @@ Remove-Item $tmp -Force
 $tmp = "$tmp.ps1"
 @"
 `$ErrorActionPreference = 'Stop'
-& '$root\dist\nats\deploy-nats.ps1'       -NatsToken '$token' -ForceConfig
-& '$root\dist\backend\deploy-backend.ps1' -NatsToken '$token' -ForceConfig
-& '$root\dist\agent\deploy-agent.ps1'     -NatsToken '$token' -ForceConfig
+& '$root\dist\nats\deploy-nats.ps1'       -NatsToken '$token' -ForceConfig -Recreate
+& '$root\dist\backend\deploy-backend.ps1' -NatsToken '$token' -ForceConfig -Recreate
+& '$root\dist\agent\deploy-agent.ps1'     -NatsToken '$token' -ForceConfig -Recreate
 "@ | Set-Content -Path $tmp -Encoding utf8
 try {
     & gsudo powershell -NoProfile -ExecutionPolicy Bypass -File $tmp
@@ -307,7 +307,7 @@ $root  = $env:CARGO_MAKE_WORKING_DIRECTORY
 & "$root\scripts\build-release.ps1" -FromSource -Roles agent
 if ($LASTEXITCODE -ne 0) { throw "build-release.ps1 failed (exit $LASTEXITCODE)" }
 
-& gsudo "$root\dist\agent\deploy-agent.ps1" -NatsToken $token -ForceConfig
+& gsudo "$root\dist\agent\deploy-agent.ps1" -NatsToken $token -ForceConfig -Recreate
 if ($LASTEXITCODE -ne 0) { throw "deploy-agent failed (exit $LASTEXITCODE)" }
 '''
 
@@ -327,7 +327,7 @@ $root  = $env:CARGO_MAKE_WORKING_DIRECTORY
 & "$root\scripts\build-release.ps1" -FromSource -Roles backend
 if ($LASTEXITCODE -ne 0) { throw "build-release.ps1 failed (exit $LASTEXITCODE)" }
 
-& gsudo "$root\dist\backend\deploy-backend.ps1" -NatsToken $token -ForceConfig
+& gsudo "$root\dist\backend\deploy-backend.ps1" -NatsToken $token -ForceConfig -Recreate
 if ($LASTEXITCODE -ne 0) { throw "deploy-backend failed (exit $LASTEXITCODE)" }
 '''
 
@@ -349,7 +349,7 @@ $root  = $env:CARGO_MAKE_WORKING_DIRECTORY
 & "$root\scripts\build-release.ps1" -Roles nats
 if ($LASTEXITCODE -ne 0) { throw "build-release.ps1 failed (exit $LASTEXITCODE)" }
 
-& gsudo "$root\dist\nats\deploy-nats.ps1" -NatsToken $token -ForceConfig
+& gsudo "$root\dist\nats\deploy-nats.ps1" -NatsToken $token -ForceConfig -Recreate
 if ($LASTEXITCODE -ne 0) { throw "deploy-nats failed (exit $LASTEXITCODE)" }
 '''
 
