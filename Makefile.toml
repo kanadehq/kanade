@@ -258,7 +258,7 @@ dependencies = ["apm-install-update", "vcs-fetch"]
 # any edits to configs/ and starts from a clean service state.
 
 [tasks.local-deploy]
-description = "[dev] Build + install agent + backend + nats locally via gsudo. One UAC prompt."
+description = "[dev] Build + install agent + backend + nats + CLI locally. One gsudo prompt for the services; CLI install runs unelevated."
 cwd = "${CARGO_MAKE_WORKING_DIRECTORY}"
 script_runner = "powershell"
 script_extension = "ps1"
@@ -273,12 +273,17 @@ $token       = if ($env:KANADE_DEV_NATS_TOKEN)   { $env:KANADE_DEV_NATS_TOKEN } 
 $staticToken = if ($env:KANADE_DEV_STATIC_TOKEN) { $env:KANADE_DEV_STATIC_TOKEN } else { 'dev-static-token-not-for-prod' }
 $root        = $env:CARGO_MAKE_WORKING_DIRECTORY
 
-Write-Host "[1/2] Staging from source..."
+Write-Host "[1/3] Staging service binaries from source..."
 & "$root\scripts\build-release.ps1" -FromSource
 if ($LASTEXITCODE -ne 0) { throw "build-release.ps1 failed (exit $LASTEXITCODE)" }
 
 Write-Host ""
-Write-Host "[2/2] Elevating via gsudo to install services"
+Write-Host "[2/3] Installing kanade CLI into ~/.cargo/bin (unelevated, no service)..."
+& cargo install --path "$root\crates\kanade" --locked --force
+if ($LASTEXITCODE -ne 0) { throw "cargo install kanade failed (exit $LASTEXITCODE)" }
+
+Write-Host ""
+Write-Host "[3/3] Elevating via gsudo to install services"
 Write-Host "      NATS token:   $token"
 Write-Host "      Static token: $staticToken"
 Write-Host ""
@@ -302,6 +307,20 @@ try {
 } finally {
     if (Test-Path $tmp) { Remove-Item -Force $tmp }
 }
+'''
+
+[tasks.local-deploy-cli]
+description = "[dev] Build kanade CLI from source + cargo install into ~/.cargo/bin. No service, no admin."
+cwd = "${CARGO_MAKE_WORKING_DIRECTORY}"
+script_runner = "powershell"
+script_extension = "ps1"
+script = '''
+$ErrorActionPreference = 'Stop'
+$root = $env:CARGO_MAKE_WORKING_DIRECTORY
+& cargo install --path "$root\crates\kanade" --locked --force
+if ($LASTEXITCODE -ne 0) { throw "cargo install kanade failed (exit $LASTEXITCODE)" }
+Write-Host ""
+& "$env:USERPROFILE\.cargo\bin\kanade.exe" --version
 '''
 
 [tasks.local-deploy-agent]
