@@ -50,9 +50,6 @@ enum SubCmd {
     /// Manage groups: list fleet-wide, add/remove PC memberships,
     /// list PCs in a given group.
     Group(cmd::group::GroupArgs),
-    /// Trigger one out-of-band inventory collection on a PC (publishes
-    /// to inventory.<pc_id>.hw immediately, bypasses the cadence).
-    Inventory(cmd::inventory::InventoryArgs),
 }
 
 #[tokio::main]
@@ -94,7 +91,6 @@ async fn main() -> Result<()> {
         SubCmd::Agent(args) => cmd::agent::execute(client, args).await,
         SubCmd::Config(args) => cmd::config::execute(client, args).await,
         SubCmd::Group(args) => cmd::group::execute(client, args).await,
-        SubCmd::Inventory(args) => cmd::inventory::execute(client, args).await,
         SubCmd::Deploy(_) | SubCmd::Schedule(_) => unreachable!("handled above"),
     }
 }

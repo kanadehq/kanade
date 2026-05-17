@@ -2,19 +2,13 @@
 // when the surface grows past ~10 types we should switch to
 // generating from a shared OpenAPI / TypeScript export.
 
+// v0.14: baseline only. Richer facts live in inventory_facts —
+// see /api/inventory/<pc_id> + the Inventory SPA page.
 export type AgentRow = {
   pc_id: string;
   hostname: string | null;
-  os_name: string | null;
-  os_version: string | null;
-  os_build: string | null;
   os_family: string | null;
   agent_version: string | null;
-  cpu_model: string | null;
-  cpu_cores: number | null;
-  ram_bytes: number | null;
-  disks: unknown;
-  last_inventory: string | null;
   last_heartbeat: string | null;
   updated_at: string | null;
 };

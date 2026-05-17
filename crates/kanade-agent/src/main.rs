@@ -2,7 +2,6 @@ mod commands;
 mod config_supervisor;
 mod groups;
 mod heartbeat;
-mod inventory;
 mod logs;
 mod process;
 mod self_update;
@@ -115,11 +114,12 @@ pub(crate) async fn run_agent() -> Result<()> {
     // channel; heartbeat / inventory / self_update subscribe.
     let cfg_rx = config_supervisor::spawn(client.clone(), pc_id.clone());
 
-    // Sprint 6: cfg.inventory is parsed for back-compat but the
-    // runtime sources cadence / jitter / enabled from the
-    // agent_config KV bucket via cfg_rx. Warn the operator when
-    // the local toml carries non-default values so they know to
-    // migrate via `kanade config set inventory_interval=... ` etc.
+    // v0.14: the hardcoded inventory loop is gone. agent.toml's
+    // [inventory] section + ConfigScope's `inventory_*` fields are
+    // wire-only now; runtime inventory is whatever the operator
+    // ships as a `configs/jobs/inventory-*.yaml` probe through the
+    // schedule/deploy/ExecResult path. Keep warning so a stale
+    // agent.toml doesn't silently mislead.
     let inv_defaults = kanade_shared::config::InventorySection::default();
     if cfg.inventory.hw_interval != inv_defaults.hw_interval
         || cfg.inventory.jitter != inv_defaults.jitter
@@ -127,7 +127,7 @@ pub(crate) async fn run_agent() -> Result<()> {
     {
         tracing::warn!(
             local_inventory = ?cfg.inventory,
-            "agent.toml::[inventory] is deprecated — values now come from the agent_config KV bucket; this section is logged-and-ignored. Use `kanade config set inventory_interval=...` (and friends) to migrate. The field will be removed in v0.4.0.",
+            "agent.toml::[inventory] is fully retired in v0.14 — the agent no longer runs a hardcoded inventory loop. Define a `configs/jobs/inventory-*.yaml` probe with an `inventory:` hint and register it via `kanade schedule create`.",
         );
     }
 
@@ -137,12 +137,6 @@ pub(crate) async fn run_agent() -> Result<()> {
         AGENT_VERSION.to_string(),
         cfg_rx.clone(),
     ));
-    tokio::spawn(inventory::inventory_loop(
-        client.clone(),
-        pc_id.clone(),
-        cfg_rx.clone(),
-    ));
-    tokio::spawn(inventory::serve_requests(client.clone(), pc_id.clone()));
     tokio::spawn(self_update::run(
         client.clone(),
         AGENT_VERSION.to_string(),

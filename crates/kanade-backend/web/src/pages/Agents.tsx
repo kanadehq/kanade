@@ -1,6 +1,7 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { Activity, Loader2, Server, Settings2, Users } from 'lucide-react';
+import { Activity, Loader2, ScrollText, Server, Settings2, Users } from 'lucide-react';
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 
 import { ErrorCard } from '@/components/ErrorCard';
 import { Badge } from '@/components/ui/badge';
@@ -11,10 +12,6 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { apiFetch } from '@/lib/api';
 import type { AgentGroups, AgentRow, EffectiveConfigResponse, Heartbeat } from '@/lib/types';
 
-function fmtBytes(n: number | null): string {
-  if (!n) return '—';
-  return `${(n / 1024 ** 3).toFixed(1)} GB`;
-}
 function fmtTime(iso: string | null): string {
   if (!iso) return '—';
   const d = new Date(iso);
@@ -125,15 +122,18 @@ export function Agents() {
         <h2 className="text-xl">Agents</h2>
         <Badge variant="violet">{agents.length} known</Badge>
       </div>
+      <p className="text-xs text-muted">
+        Baseline liveness only — open <Link to="/inventory" className="underline">Inventory</Link>{' '}
+        (or click <strong>facts</strong>) for richer per-host details collected by operator-defined probes.
+      </p>
       <Table>
         <TableHeader>
           <TableRow>
             <TableHead>pc_id</TableHead>
             <TableHead>hostname</TableHead>
             <TableHead>os</TableHead>
-            <TableHead>cpu</TableHead>
-            <TableHead>ram</TableHead>
-            <TableHead>last_inventory</TableHead>
+            <TableHead>agent</TableHead>
+            <TableHead>last heartbeat</TableHead>
             <TableHead>actions</TableHead>
           </TableRow>
         </TableHeader>
@@ -142,18 +142,16 @@ export function Agents() {
             <TableRow key={a.pc_id}>
               <TableCell><code className="text-xs">{a.pc_id}</code></TableCell>
               <TableCell>{a.hostname ?? <span className="text-muted">—</span>}</TableCell>
-              <TableCell>
-                {a.os_name ?? ''} {a.os_version ?? ''}
-                {a.os_build && <span className="text-muted text-xs ml-1">{a.os_build}</span>}
-              </TableCell>
-              <TableCell>
-                {a.cpu_model ?? <span className="text-muted">—</span>}
-                {a.cpu_cores ? <span className="text-muted text-xs ml-1">×{a.cpu_cores}</span> : null}
-              </TableCell>
-              <TableCell className="tabular-nums">{fmtBytes(a.ram_bytes)}</TableCell>
-              <TableCell className="text-muted text-xs">{fmtTime(a.last_inventory)}</TableCell>
+              <TableCell className="text-muted text-xs">{a.os_family ?? '—'}</TableCell>
+              <TableCell className="text-muted text-xs">{a.agent_version ?? '—'}</TableCell>
+              <TableCell className="text-muted text-xs">{fmtTime(a.last_heartbeat)}</TableCell>
               <TableCell>
                 <div className="flex gap-1 flex-wrap">
+                  <Button variant="secondary" size="sm" asChild>
+                    <Link to={`/inventory?pc=${encodeURIComponent(a.pc_id)}`}>
+                      <ScrollText className="size-3.5" />facts
+                    </Link>
+                  </Button>
                   <Button variant="secondary" size="sm" onClick={() => doPing(a.pc_id)} disabled={ping.isPending}>
                     <Activity className="size-3.5" />ping
                   </Button>

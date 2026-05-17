@@ -5,20 +5,20 @@ use serde::Serialize;
 use sqlx::{Row, SqlitePool};
 use tracing::warn;
 
+/// v0.14: the agents table is now baseline-only. The fields are
+/// populated by the heartbeat projector — pc_id / hostname /
+/// os_family / agent_version / last_heartbeat. For richer
+/// per-host facts (CPU / RAM / disks / OS detail / installed
+/// software / ...) consult the `inventory_facts` table via
+/// `GET /api/inventory/<pc_id>`; each operator-defined probe
+/// (manifest with an `inventory:` hint) lands its
+/// `ConvertTo-Json` output there.
 #[derive(Serialize)]
 pub struct AgentRow {
     pub pc_id: String,
     pub hostname: Option<String>,
-    pub os_name: Option<String>,
-    pub os_version: Option<String>,
-    pub os_build: Option<String>,
     pub os_family: Option<String>,
     pub agent_version: Option<String>,
-    pub cpu_model: Option<String>,
-    pub cpu_cores: Option<i64>,
-    pub ram_bytes: Option<i64>,
-    pub disks: serde_json::Value,
-    pub last_inventory: Option<chrono::DateTime<chrono::Utc>>,
     pub last_heartbeat: Option<chrono::DateTime<chrono::Utc>>,
     pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -53,23 +53,11 @@ pub async fn detail(
 }
 
 fn row_to_agent(r: sqlx::sqlite::SqliteRow) -> AgentRow {
-    let disks_str: Option<String> = r.try_get("disks_json").ok();
-    let disks = disks_str
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .unwrap_or_else(|| serde_json::Value::Array(vec![]));
     AgentRow {
         pc_id: r.try_get("pc_id").unwrap_or_default(),
         hostname: r.try_get("hostname").ok(),
-        os_name: r.try_get("os_name").ok(),
-        os_version: r.try_get("os_version").ok(),
-        os_build: r.try_get("os_build").ok(),
         os_family: r.try_get("os_family").ok(),
         agent_version: r.try_get("agent_version").ok(),
-        cpu_model: r.try_get("cpu_model").ok(),
-        cpu_cores: r.try_get("cpu_cores").ok(),
-        ram_bytes: r.try_get("ram_bytes").ok(),
-        disks,
-        last_inventory: r.try_get("last_inventory").ok(),
         last_heartbeat: r.try_get("last_heartbeat").ok(),
         updated_at: r.try_get("updated_at").ok(),
     }

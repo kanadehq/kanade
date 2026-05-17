@@ -127,15 +127,10 @@ pub(crate) async fn run_backend() -> Result<()> {
 
     // Projectors run in the background; if either exits the backend keeps
     // serving HTTP (read-only API stays useful even if a stream is missing).
-    {
-        let pool = pool.clone();
-        let js = jetstream.clone();
-        tokio::spawn(async move {
-            if let Err(e) = projector::inventory::run(js, pool).await {
-                error!(error = %e, "inventory projector exited");
-            }
-        });
-    }
+    //
+    // v0.14: the inventory projector is gone — inventory facts now
+    // arrive through the results projector (via Manifest.inventory
+    // hint + ExecResult.manifest_id). HwInventory wire is retired.
     {
         let pool = pool.clone();
         let js = jetstream.clone();
