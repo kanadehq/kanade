@@ -75,7 +75,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/results", get(results::list))
         .route("/api/results/{request_id}", get(results::detail))
         .route("/api/audit", get(audit::list))
-        .route("/api/exec", post(exec::create))
+        .route("/api/exec/{job_id}", post(exec::create))
         .route(
             "/api/schedules",
             get(schedules::list).post(schedules::create),

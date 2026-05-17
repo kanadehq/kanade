@@ -183,11 +183,11 @@ kanade unrevoke <cmd_id>                         # → ACTIVE
 kanade jetstream setup                           # create streams + KV + Object Store (optional; backend auto-bootstraps on startup)
 kanade jetstream status                          # health snapshot
 
-kanade exec     <manifest.yaml> [--version <v>]  # POST /api/exec (one-shot, unregistered)
-
 kanade job create   <manifest.yaml>              # upsert into the jobs catalog (BUCKET_JOBS)
 kanade job list                                  # every registered job
 kanade job delete <id>                           # refuses if any schedule references it
+
+kanade exec     <job-id>                         # fire a registered job ad-hoc (POST /api/exec/<id>)
 
 kanade schedule create <schedule.yaml>           # cron yaml: { id, cron, job_id, enabled }
 kanade schedule list
@@ -429,6 +429,7 @@ the PDB.
 - **v0.16.0** — `kanade deploy` → `kanade exec`. The "deploy" name implied long-lived rollout, but the operation is just a one-shot fanout — so the user-facing surface (CLI subcommand, HTTP route `/api/exec`, SPA Exec page + nav) all rename. Wire scope: NATS subject prefix `commands.deploy.>` → `commands.exec.>`, stream `DEPLOY` → `EXEC`. DB scope: `deployment_results` → `execution_results`, `deployments` → `executions`, `deploy_id` column → `exec_id`. Audit event `"deploy"` → `"exec"`. Migrations 0001-0006 are squashed into a fresh `0001_baseline.sql` — operators upgrading must wipe their sqlite db and JetStream `DEPLOY` stream first
 - **v0.16.1** — fix `nats-server.conf`'s `store_dir: "./jetstream"` writing JetStream data under `C:\Windows\System32\jetstream\` because the Windows service starts with cwd = System32. Switched to absolute `C:/ProgramData/Kanade/nats/jetstream` (which `deploy-nats.ps1` already provisions). Operators upgrading should re-run `deploy-nats.ps1 -ForceConfig` (or edit the conf in place) and migrate any pre-existing data from `C:\Windows\System32\jetstream\` — though if you're upgrading from v0.16.0 the wipe-and-recreate path already covers it
 - **v0.16.2** — SPA: per-row enable/disable toggle on the Schedules table (reuses the existing upsert; scheduler's KV watcher picks up the flip on the next put). New **Jobs** page + nav entry that lists `BUCKET_JOBS` entries with per-row delete (backend already refuses with 409 when a schedule still references the job)
+- **v0.17.0** — `kanade exec` stops accepting inline Manifest yaml. The catalog (`kanade job create`) is now the single authoritative path for Manifests, and `kanade exec <job-id>` just fires a registered one — yaml input would have bypassed the catalog. Route changes to `POST /api/exec/{job_id}` (no body); backend resolves the Manifest from `BUCKET_JOBS` and 404s when the id isn't registered. SPA Exec page replaces its Manifest JSON textbox with a dropdown of registered jobs. Three-tier operator surface now reads cleanly: `kanade run <pc> -- <script>` for inline one-PC sync, `kanade exec <job-id>` for catalog-registered fanout, `kanade schedule create` for cron-wrapped catalog-registered. `--version` override flag dropped — re-run `kanade job create` to bump
 
 Backlog: Prometheus metrics, 3000-agent simulation, NATS cluster + replicated backend, Postgres migration, mobile-responsive tables.
 

@@ -1,4 +1,4 @@
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import { Loader2, Send } from 'lucide-react';
 import { useState } from 'react';
 
@@ -7,8 +7,10 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { JsonOutput } from '@/components/ui/json-output';
 import { Label } from '@/components/ui/label';
-import { Textarea } from '@/components/ui/textarea';
+import { Select } from '@/components/ui/select';
 import { apiFetch } from '@/lib/api';
+
+type JobRow = { id: string; version: string; description: string | null };
 
 type ExecResponse = {
   exec_id: string;
@@ -19,52 +21,71 @@ type ExecResponse = {
 };
 
 export function Exec() {
-  const [json, setJson] = useState('');
+  const [jobId, setJobId] = useState('');
 
-  const mut = useMutation({
-    mutationFn: (body: unknown) =>
-      apiFetch<ExecResponse>('/api/exec', {
-        method: 'POST',
-        body: JSON.stringify(body),
-      }),
+  const jobsQ = useQuery({
+    queryKey: ['jobs'],
+    queryFn: () => apiFetch<JobRow[]>('/api/jobs'),
   });
 
-  const onSubmit = () => {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(json);
-    } catch (e) {
-      mut.reset();
-      window.alert(`Body must be JSON. Use the CLI for YAML: kanade exec <file.yaml>.\n\n${(e as Error).message}`);
-      return;
-    }
-    mut.mutate(parsed);
-  };
+  const mut = useMutation({
+    mutationFn: (id: string) =>
+      apiFetch<ExecResponse>(`/api/exec/${encodeURIComponent(id)}`, { method: 'POST' }),
+  });
+
+  const jobs = jobsQ.data ?? [];
 
   return (
     <div className="space-y-4">
       <Card>
         <CardHeader>
-          <CardTitle>Exec a manifest</CardTitle>
+          <CardTitle>Exec a registered job</CardTitle>
           <CardDescription>
-            Posts to <code>/api/exec</code> using the JSON-equivalent of the manifest schema. For
-            full YAML support, use <code>kanade exec &lt;file.yaml&gt;</code> from the CLI — a
-            browser-side YAML parser is on the backlog.
+            Posts to <code>/api/exec/&lt;job_id&gt;</code>. The backend resolves
+            the job from <code>BUCKET_JOBS</code> and fans the Command out at
+            its declared targets. Register new jobs with{' '}
+            <code>kanade job create &lt;manifest.yaml&gt;</code>; manage them on
+            the <a href="/jobs" className="underline">Jobs</a> page.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
-          <div>
-            <Label>manifest (JSON)</Label>
-            <Textarea
-              value={json}
-              onChange={(e) => setJson(e.target.value)}
-              className="min-h-64"
-              placeholder='{"id":"echo-test","version":"1.0.0","target":{"pcs":["MINIPC-01"]},"execute":{"shell":"powershell","script":"echo hello","timeout":"30s"}}'
-            />
-          </div>
-          <Button onClick={onSubmit} disabled={!json.trim() || mut.isPending}>
-            {mut.isPending ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
-            POST /api/exec
+          {jobsQ.isLoading ? (
+            <div className="flex items-center gap-2 text-muted">
+              <Loader2 className="size-4 animate-spin" />loading jobs…
+            </div>
+          ) : jobsQ.error ? (
+            <ErrorCard title="Couldn't load jobs" error={jobsQ.error} />
+          ) : jobs.length === 0 ? (
+            <div className="text-muted text-sm">
+              No registered jobs. Run <code>kanade job create &lt;manifest.yaml&gt;</code>{' '}
+              first.
+            </div>
+          ) : (
+            <div className="space-y-1">
+              <Label htmlFor="exec-job">job_id</Label>
+              <Select
+                id="exec-job"
+                value={jobId}
+                onChange={(e) => setJobId(e.target.value)}
+              >
+                <option value="">(pick one)</option>
+                {jobs.map((j) => (
+                  <option key={j.id} value={j.id}>
+                    {j.id} — v{j.version}
+                    {j.description ? ` · ${j.description}` : ''}
+                  </option>
+                ))}
+              </Select>
+            </div>
+          )}
+          <Button
+            onClick={() => jobId && mut.mutate(jobId)}
+            disabled={!jobId || mut.isPending}
+          >
+            {mut.isPending
+              ? <Loader2 className="size-4 animate-spin" />
+              : <Send className="size-4" />}
+            POST /api/exec/{jobId || '<job_id>'}
           </Button>
         </CardContent>
       </Card>

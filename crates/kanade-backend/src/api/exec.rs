@@ -1,5 +1,5 @@
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use kanade_shared::kv::BUCKET_SCRIPT_CURRENT;
 use kanade_shared::manifest::Manifest;
@@ -10,6 +10,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::api::AppState;
+use crate::api::jobs;
 use crate::audit;
 
 #[derive(Serialize, Clone)]
@@ -224,9 +225,33 @@ pub async fn exec_manifest(
     })
 }
 
+/// `POST /api/exec/{job_id}` — fire a registered job from the
+/// catalog. The Manifest body is no longer accepted inline; operators
+/// must `kanade job create` the manifest first, then `kanade exec
+/// <job-id>` (or hit this endpoint) to fan it out. 404 when the job
+/// isn't in `BUCKET_JOBS`.
 pub async fn create(
     State(s): State<AppState>,
-    Json(manifest): Json<Manifest>,
+    Path(job_id): Path<String>,
 ) -> Result<Json<ExecResponse>, (StatusCode, String)> {
+    let manifest = match jobs::fetch(&s.jetstream, &job_id).await {
+        Ok(Some(m)) => m,
+        Ok(None) => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                format!(
+                    "job '{job_id}' not found in catalog — register it first with \
+                     `kanade job create <manifest.yaml>`"
+                ),
+            ));
+        }
+        Err(e) => {
+            warn!(error = %e, %job_id, "exec: job catalog lookup failed");
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("job catalog lookup: {e}"),
+            ));
+        }
+    };
     exec_manifest(&s, manifest, "cli").await.map(Json)
 }

@@ -1,18 +1,19 @@
-use std::path::PathBuf;
+//! `kanade exec <job-id>` — fan out a registered job to its declared
+//! targets. The Manifest body lives in the catalog (`kanade job
+//! create`), so this command takes only the job's id; the backend
+//! resolves it server-side and 404s if it's not registered.
 
 use anyhow::{Context, Result};
 use clap::Args;
-use kanade_shared::manifest::Manifest;
 use serde::Deserialize;
 use tracing::info;
 
 #[derive(Args, Debug)]
 pub struct ExecArgs {
-    /// Path to the job YAML manifest (spec §2.4.1).
-    pub yaml: PathBuf,
-    /// Override the manifest's version (handy for hot-patches without editing the YAML).
-    #[arg(long)]
-    pub version: Option<String>,
+    /// Id of a registered job (see `kanade job list`). Manifests
+    /// are no longer accepted inline — register first with
+    /// `kanade job create <manifest.yaml>`.
+    pub job_id: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -25,20 +26,15 @@ struct ExecResponse {
 }
 
 pub async fn execute(backend_url: &str, args: ExecArgs) -> Result<()> {
-    let yaml =
-        std::fs::read_to_string(&args.yaml).with_context(|| format!("read {:?}", args.yaml))?;
-    let mut manifest: Manifest =
-        serde_yaml::from_str(&yaml).with_context(|| format!("parse {:?}", args.yaml))?;
-    if let Some(v) = args.version {
-        manifest.version = v;
-    }
-    info!(job_id = %manifest.id, version = %manifest.version, "executing");
+    info!(job_id = %args.job_id, "executing");
 
-    let url = format!("{}/api/exec", backend_url.trim_end_matches('/'));
-    let client = crate::http_client::authed_client()?;
-    let resp = client
+    let url = format!(
+        "{}/api/exec/{}",
+        backend_url.trim_end_matches('/'),
+        args.job_id,
+    );
+    let resp = crate::http_client::authed_client()?
         .post(&url)
-        .json(&manifest)
         .send()
         .await
         .with_context(|| format!("POST {url}"))?;

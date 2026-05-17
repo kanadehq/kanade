@@ -39,7 +39,7 @@ enum SubCmd {
     Unrevoke(cmd::revoke::UnrevokeArgs),
     /// Publish kill.{job_id} so agents running the job terminate (spec §2.6 Layer 3).
     Kill(cmd::kill::KillArgs),
-    /// Submit a YAML job manifest to the backend's POST /api/exec.
+    /// Fire a registered job (`kanade job create` it first) at its declared targets.
     Exec(cmd::exec::ExecArgs),
     /// CRUD the job catalog (jobs KV). Schedules reference jobs by id.
     Job(cmd::job::JobArgs),
