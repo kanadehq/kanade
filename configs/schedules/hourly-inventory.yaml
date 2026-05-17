@@ -56,3 +56,11 @@ manifest:
       - { field: cpu_model,  label: CPU       }
       - { field: cpu_cores,  label: Cores,    type: number }
       - { field: ram_bytes,  label: RAM,      type: bytes  }
+    # 3-5 columns shown on the fleet list page. Falls back to
+    # `display` if omitted — but `display` here is too wide for a
+    # row-per-PC table, so we trim it.
+    summary:
+      - { field: hostname,  label: Hostname }
+      - { field: os_name,   label: OS       }
+      - { field: cpu_cores, label: Cores,   type: number }
+      - { field: ram_bytes, label: RAM,     type: bytes  }

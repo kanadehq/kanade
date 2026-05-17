@@ -75,6 +75,13 @@ execute:
 #   "bytes"     — humanised (KiB / MiB / GiB)
 #   "number"    — locale-formatted integer
 #   omitted     — plain text
+#
+# Two column sets:
+#   `display` — vertical "field / value" table on the per-PC detail page.
+#               Should cover everything an operator might want to see.
+#   `summary` — horizontal table on the fleet list page (row per PC).
+#               Pick 3-5 columns that fit on a wide-but-not-huge table.
+#               Omitting `summary` falls back to `display`.
 inventory:
   display:
     - { field: hostname,   label: Hostname  }
@@ -83,3 +90,8 @@ inventory:
     - { field: cpu_model,  label: CPU       }
     - { field: cpu_cores,  label: Cores,    type: number }
     - { field: ram_bytes,  label: RAM,      type: bytes  }
+  summary:
+    - { field: hostname,  label: Hostname }
+    - { field: os_name,   label: OS       }
+    - { field: cpu_cores, label: Cores,   type: number }
+    - { field: ram_bytes, label: RAM,     type: bytes  }

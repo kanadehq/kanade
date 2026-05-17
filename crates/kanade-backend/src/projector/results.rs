@@ -157,13 +157,20 @@ async fn upsert_inventory(
     let _facts: serde_json::Value = serde_json::from_str(&r.stdout)
         .with_context(|| format!("manifest '{manifest_id}' stdout was not JSON"))?;
     let display_json = serde_json::to_string(&hint.display)?;
+    let summary_json = hint
+        .summary
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
     sqlx::query(
         "INSERT INTO inventory_facts (
-             pc_id, job_id, facts_json, display_json, collected_at, recorded_at
-         ) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+             pc_id, job_id, facts_json, display_json, summary_json,
+             collected_at, recorded_at
+         ) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
          ON CONFLICT(pc_id, job_id) DO UPDATE SET
              facts_json   = excluded.facts_json,
              display_json = excluded.display_json,
+             summary_json = excluded.summary_json,
              collected_at = excluded.collected_at,
              recorded_at  = CURRENT_TIMESTAMP",
     )
@@ -171,6 +178,7 @@ async fn upsert_inventory(
     .bind(manifest_id)
     .bind(&r.stdout)
     .bind(display_json)
+    .bind(summary_json)
     .bind(r.finished_at)
     .execute(pool)
     .await?;

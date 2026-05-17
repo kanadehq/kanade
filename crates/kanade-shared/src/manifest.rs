@@ -33,10 +33,23 @@ pub struct Manifest {
 /// Manifest sub-section: how the SPA should render the inventory
 /// facts this job produces. Each field name (`field`) is a top-level
 /// key in the stdout JSON, e.g. `hostname`, `ram_gb`.
+///
+/// Two render modes:
+///   * `display` — vertical "field / value" per PC, used by the
+///     `/inventory?pc=<id>` detail view. ALL columns the operator
+///     wants visible on the detail page.
+///   * `summary` — horizontal table across the fleet (row = PC,
+///     column = field) on `/inventory`. Optional; when omitted the
+///     SPA falls back to `display`, but operators usually want a
+///     trimmer "hostname / OS / CPU / RAM" set for the fleet view.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct InventoryHint {
-    /// Column list, in display order.
+    /// Detail-view columns, in order.
     pub display: Vec<DisplayField>,
+    /// Optional fleet-list columns (row = PC). Defaults to `display`
+    /// when omitted, but operators usually pick a 3-5 column subset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<Vec<DisplayField>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
