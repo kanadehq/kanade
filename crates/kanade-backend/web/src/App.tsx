@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 
-import { Nav } from '@/components/Nav';
+import { ProtectedLayout } from '@/components/ProtectedLayout';
 import { AuthProvider } from '@/lib/auth';
 import { Agents } from '@/pages/Agents';
 import { Audit } from '@/pages/Audit';
@@ -9,6 +9,7 @@ import { Config } from '@/pages/Config';
 import { Dashboard } from '@/pages/Dashboard';
 import { Deploy } from '@/pages/Deploy';
 import { JetStream } from '@/pages/JetStream';
+import { Login } from '@/pages/Login';
 import { Logs } from '@/pages/Logs';
 import { Placeholder } from '@/pages/Placeholder';
 import { Results } from '@/pages/Results';
@@ -33,30 +34,31 @@ const queryClient = new QueryClient({
 export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <AuthProvider>
-        <BrowserRouter>
-          <div className="min-h-screen flex flex-col">
-            <Nav />
-            <main className="flex-1 max-w-7xl w-full mx-auto px-6 py-8">
-              <Routes>
-                <Route path="/" element={<Navigate to="/dashboard" replace />} />
-                <Route path="/dashboard" element={<Dashboard />} />
-                <Route path="/agents" element={<Agents />} />
-                <Route path="/run" element={<Run />} />
-                <Route path="/results" element={<Results />} />
-                <Route path="/audit" element={<Audit />} />
-                <Route path="/logs" element={<Logs />} />
-                <Route path="/schedules" element={<Schedules />} />
-                <Route path="/deploy" element={<Deploy />} />
-                <Route path="/rollout" element={<Rollout />} />
-                <Route path="/config" element={<Config />} />
-                <Route path="/jetstream" element={<JetStream />} />
-                <Route path="*" element={<Placeholder name="Not Found" />} />
-              </Routes>
-            </main>
-          </div>
-        </BrowserRouter>
-      </AuthProvider>
+      <BrowserRouter>
+        <AuthProvider>
+          <Routes>
+            {/* Public route — the only thing reachable when not signed in. */}
+            <Route path="/login" element={<Login />} />
+
+            {/* Everything else lives under ProtectedLayout's auth gate. */}
+            <Route element={<ProtectedLayout />}>
+              <Route path="/" element={<Navigate to="/dashboard" replace />} />
+              <Route path="/dashboard" element={<Dashboard />} />
+              <Route path="/agents" element={<Agents />} />
+              <Route path="/run" element={<Run />} />
+              <Route path="/results" element={<Results />} />
+              <Route path="/audit" element={<Audit />} />
+              <Route path="/logs" element={<Logs />} />
+              <Route path="/schedules" element={<Schedules />} />
+              <Route path="/deploy" element={<Deploy />} />
+              <Route path="/rollout" element={<Rollout />} />
+              <Route path="/config" element={<Config />} />
+              <Route path="/jetstream" element={<JetStream />} />
+              <Route path="*" element={<Placeholder name="Not Found" />} />
+            </Route>
+          </Routes>
+        </AuthProvider>
+      </BrowserRouter>
     </QueryClientProvider>
   );
 }

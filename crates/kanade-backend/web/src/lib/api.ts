@@ -4,12 +4,14 @@
  *      every /api/* call.
  *   2. Throws a typed ApiError with status + body so React Query's
  *      isError / error.message renders something useful.
- *   3. On 401, drops the stored token so the next render shows the
- *      login dialog. The component-side useAuth() is the
- *      authoritative source — this just removes the localStorage
- *      copy; the React state catches up on the next focus.
+ *   3. On 401, fires a `kanade:auth-expired` window event so the
+ *      AuthProvider (which lives inside the React Router) can
+ *      clear the in-memory token + navigate to /login. The
+ *      localStorage value is cleared too so a hard refresh starts
+ *      unauthenticated.
  */
 
+export const AUTH_EXPIRED_EVENT = 'kanade:auth-expired';
 const TOKEN_KEY = 'kanade_token';
 
 export class ApiError extends Error {
@@ -39,6 +41,10 @@ export async function apiFetch<T = unknown>(path: string, init: RequestInit = {}
 
   if (res.status === 401) {
     localStorage.removeItem(TOKEN_KEY);
+    // React-side listener (AuthProvider) picks this up and routes
+    // to /login. We still throw the ApiError so the calling query
+    // surfaces an error state instead of returning undefined.
+    window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
   }
   if (!res.ok) {
     throw new ApiError(res.status, res.statusText, text);
