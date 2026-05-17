@@ -181,16 +181,24 @@ if ($NatsToken) {
 # back-end like kanade-agent / kanade-backend), so any logged-in user
 # would otherwise be able to read it. Strip non-admin ACEs the same
 # way deploy-{agent,backend}.ps1 do for their hardened registry keys.
+#
+# icacls.exe (Win32 native) instead of Get-Acl / Set-Acl: those
+# cmdlets auto-load `Microsoft.PowerShell.Security`, which fails on
+# some elevated pwsh sessions with a CouldNotAutoloadMatchingModule
+# error. icacls is a bundled OS exe with no PowerShell-module
+# dependency, so it works in every context the deploy script will
+# ever run in.
+#
+# SIDs (instead of "SYSTEM" / "Administrators" names) are used to
+# stay locale-agnostic — non-EN Windows installs translate the
+# display names, but SID literals always resolve correctly:
+#   *S-1-5-18         = NT AUTHORITY\SYSTEM
+#   *S-1-5-32-544     = BUILTIN\Administrators
 Write-Host "Hardening ACL on $configDst (SYSTEM + Administrators only)"
-$acl = Get-Acl -Path $configDst
-$acl.SetAccessRuleProtection($true, $false)
-@($acl.Access) | ForEach-Object { [void]$acl.RemoveAccessRule($_) }
-foreach ($id in 'NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators') {
-    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-        $id, 'FullControl', 'None', 'None', 'Allow')
-    $acl.AddAccessRule($rule)
+$icaclsOut = & icacls $configDst /inheritance:r /grant:r '*S-1-5-18:F' /grant:r '*S-1-5-32-544:F' 2>&1
+if ($LASTEXITCODE -ne 0) {
+    throw "icacls failed on ${configDst} (exit $LASTEXITCODE):`n$icaclsOut"
 }
-Set-Acl -Path $configDst -AclObject $acl
 
 # nats-server.exe detects when it's running under SCM via its own
 # StartServiceCtrlDispatcher path; we don't need NSSM or sc.exe wrappers.

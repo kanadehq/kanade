@@ -120,6 +120,14 @@ $ErrorActionPreference = 'Stop'
 # strip non-admin ACEs from the leaf key. Used to provision NATS
 # tokens, HTTP static tokens, and JWT signing secrets — see the
 # resolution order in kanade-shared::secrets and kanade-backend::auth.
+#
+# Implementation note: uses the pure .NET Microsoft.Win32.Registry
+# API rather than the New-Item / Set-ItemProperty / Get-Acl / Set-Acl
+# cmdlets. The cmdlet path auto-loads Microsoft.PowerShell.Management
+# + Microsoft.PowerShell.Security on first use, and those module
+# loads fail on some elevated / constrained-language pwsh sessions
+# with a CouldNotAutoloadMatchingModule error. The .NET classes are
+# always reachable from any PowerShell context.
 function Set-KanadeRegistrySecret {
     param(
         [Parameter(Mandatory)][string]$Subkey,
@@ -127,23 +135,30 @@ function Set-KanadeRegistrySecret {
         [Parameter(Mandatory)][string]$Value
     )
 
-    $regKey = "HKLM:\SOFTWARE\kanade\$Subkey"
-    if (-not (Test-Path $regKey)) {
-        New-Item -Path $regKey -Force | Out-Null
+    $subkeyPath = "SOFTWARE\kanade\$Subkey"
+    $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($subkeyPath, $true)
+    if (-not $key) {
+        $key = [Microsoft.Win32.Registry]::LocalMachine.CreateSubKey($subkeyPath)
     }
-    Set-ItemProperty -Path $regKey -Name $ValueName -Value $Value -Type String
+    try {
+        $key.SetValue($ValueName, $Value, [Microsoft.Win32.RegistryValueKind]::String)
 
-    $acl = Get-Acl -Path $regKey
-    $acl.SetAccessRuleProtection($true, $false)
-    @($acl.Access) | ForEach-Object { [void]$acl.RemoveAccessRule($_) }
-    foreach ($id in 'NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators') {
-        $rule = New-Object System.Security.AccessControl.RegistryAccessRule(
-            $id, 'FullControl', 'ContainerInherit', 'None', 'Allow')
-        $acl.AddAccessRule($rule)
+        $sec = $key.GetAccessControl()
+        $sec.SetAccessRuleProtection($true, $false)
+        @($sec.Access) | ForEach-Object { [void]$sec.RemoveAccessRule($_) }
+        # SIDs (locale-agnostic): SYSTEM = S-1-5-18, Administrators = S-1-5-32-544
+        foreach ($sid in 'S-1-5-18', 'S-1-5-32-544') {
+            $sidObj = [System.Security.Principal.SecurityIdentifier]::new($sid)
+            $rule = [System.Security.AccessControl.RegistryAccessRule]::new(
+                $sidObj, 'FullControl', 'ContainerInherit', 'None', 'Allow')
+            $sec.AddAccessRule($rule)
+        }
+        $key.SetAccessControl($sec)
+    } finally {
+        $key.Close()
     }
-    Set-Acl -Path $regKey -AclObject $acl
 
-    Write-Host "Wrote $ValueName to $regKey (SYSTEM + Administrators only)."
+    Write-Host "Wrote $ValueName to HKLM:\$subkeyPath (SYSTEM + Administrators only)."
 }
 
 $binDir    = Join-Path $env:ProgramFiles 'Kanade'
