@@ -13,7 +13,7 @@ keywords.workspace     = true
 categories.workspace   = true
 
 [dependencies]
-kanade-shared = { path = "../kanade-shared", version = "0.17.0" }
+kanade-shared = { path = "../kanade-shared", version = "0.17.1" }
 
 anyhow     = { workspace = true }
 async-nats = { workspace = true }
