@@ -275,4 +275,8 @@ mod inner {
     ) {
         tracing::info!("inventory collection skipped (non-Windows platform)");
     }
+
+    pub async fn serve_requests(_client: async_nats::Client, _pc_id: String) {
+        tracing::info!("inventory.request handler skipped (non-Windows platform)");
+    }
 }
