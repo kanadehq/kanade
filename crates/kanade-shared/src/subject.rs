@@ -39,14 +39,23 @@ pub fn logs_fetch(pc_id: &str) -> String {
     format!("logs.fetch.{pc_id}")
 }
 
-/// `inventory.request.<pc_id>` — request/reply: operator asks the
+/// `request.inventory.<pc_id>` — request/reply: operator asks the
 /// addressed agent to collect WMI inventory NOW (out of band of its
 /// configured cadence) and publish it to `inventory.<pc_id>.hw`.
 /// The reply body is `"ok"` on success or `"error: <reason>"` on
 /// failure — useful for diagnosing WMI repository / permission
 /// issues without waiting for the next scheduled cycle.
+///
+/// Namespaced under `request.*` deliberately: the INVENTORY stream's
+/// subject filter is `inventory.>`, so a request subject under
+/// `inventory.request.*` was getting captured by the stream too —
+/// the JetStream publish-ack hit the operator's reply inbox before
+/// the agent's actual `"ok"` and confused `kanade inventory`. The
+/// `request.*` top-level is intentionally not captured by any
+/// stream and is reserved for future operator → agent on-demand
+/// request/reply patterns.
 pub fn inventory_request(pc_id: &str) -> String {
-    format!("inventory.request.{pc_id}")
+    format!("request.inventory.{pc_id}")
 }
 
 #[cfg(test)]
@@ -97,6 +106,17 @@ mod tests {
     #[test]
     fn logs_fetch_formats_pc_id() {
         assert_eq!(logs_fetch("minipc"), "logs.fetch.minipc");
+    }
+
+    #[test]
+    fn inventory_request_lives_outside_inventory_namespace() {
+        // The INVENTORY JetStream stream filter is `inventory.>` —
+        // this subject MUST stay outside that prefix or the server
+        // ack-replies to the request reply inbox and clobbers the
+        // agent's actual response.
+        let subj = inventory_request("minipc");
+        assert_eq!(subj, "request.inventory.minipc");
+        assert!(!subj.starts_with("inventory."));
     }
 
     #[test]
