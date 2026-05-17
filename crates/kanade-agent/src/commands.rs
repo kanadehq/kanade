@@ -133,6 +133,11 @@ async fn handle_command(
         stderr,
         started_at,
         finished_at,
+        // Forward `Command.id` (the manifest's id, e.g. "inventory-hw"),
+        // NOT `Command.job_id` (a per-deploy UUID). The backend's
+        // results projector uses this to look up the manifest's
+        // `inventory:` hint and upsert `inventory_facts` rows.
+        manifest_id: Some(cmd.id.clone()),
     };
     let payload = serde_json::to_vec(&result)?;
     client

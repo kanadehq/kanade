@@ -8,6 +8,7 @@ import { Audit } from '@/pages/Audit';
 import { Config } from '@/pages/Config';
 import { Dashboard } from '@/pages/Dashboard';
 import { Deploy } from '@/pages/Deploy';
+import { Inventory } from '@/pages/Inventory';
 import { JetStream } from '@/pages/JetStream';
 import { Login } from '@/pages/Login';
 import { Logs } from '@/pages/Logs';
@@ -49,6 +50,7 @@ export default function App() {
               <Route path="/results" element={<Results />} />
               <Route path="/audit" element={<Audit />} />
               <Route path="/logs" element={<Logs />} />
+              <Route path="/inventory" element={<Inventory />} />
               <Route path="/schedules" element={<Schedules />} />
               <Route path="/deploy" element={<Deploy />} />
               <Route path="/rollout" element={<Rollout />} />

@@ -21,6 +21,35 @@ pub struct Manifest {
     pub rollout: Option<Rollout>,
     #[serde(default)]
     pub require_approval: bool,
+    /// v0.13: opt-in marker that this job produces a JSON inventory
+    /// fact payload on stdout. When present, the backend's results
+    /// projector parses the ExecResult.stdout as JSON and upserts an
+    /// `inventory_facts` row keyed by `(pc_id, manifest.id)`. The
+    /// `display` sub-config drives the SPA's Inventory page render.
+    #[serde(default)]
+    pub inventory: Option<InventoryHint>,
+}
+
+/// Manifest sub-section: how the SPA should render the inventory
+/// facts this job produces. Each field name (`field`) is a top-level
+/// key in the stdout JSON, e.g. `hostname`, `ram_gb`.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct InventoryHint {
+    /// Column list, in display order.
+    pub display: Vec<DisplayField>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DisplayField {
+    /// Top-level key in the stdout JSON.
+    pub field: String,
+    /// Human-readable column header.
+    pub label: String,
+    /// Optional render hint — `"number"`, `"bytes"`, `"timestamp"`.
+    /// Defaults to plain text rendering on the SPA side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

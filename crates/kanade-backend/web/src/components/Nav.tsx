@@ -5,6 +5,7 @@ import { cn } from '@/lib/utils';
 
 const links = [
   { to: '/agents', label: 'Agents' },
+  { to: '/inventory', label: 'Inventory' },
   { to: '/run', label: 'Run' },
   { to: '/results', label: 'Results' },
   { to: '/audit', label: 'Audit' },

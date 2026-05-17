@@ -6,6 +6,7 @@ pub mod agents;
 pub mod audit;
 pub mod deploy;
 pub mod health;
+pub mod inventory;
 pub mod jetstream_status;
 pub mod jobs;
 pub mod results;
@@ -87,6 +88,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/jobs/{job_id}/kill", post(jobs::kill))
         .route("/api/jetstream/status", get(jetstream_status::status))
         .route("/api/health/fleet", get(health::fleet))
+        .route("/api/inventory/jobs", get(inventory::list_jobs))
+        .route("/api/inventory/{pc_id}", get(inventory::list_for_pc))
         .route("/api/agents/{pc_id}/logs", get(agent_logs::tail))
         .route("/api/agents/releases", get(agent_releases::list_releases))
         .route("/api/agents/rollout", post(agent_releases::rollout))

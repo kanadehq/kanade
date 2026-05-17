@@ -1,0 +1,75 @@
+# Sample inventory probe — operator-customisable hardware snapshot
+# delivered through the regular schedule + deploy + ExecResult pipeline.
+#
+# The `inventory:` section is what tags this job as an inventory probe.
+# Without it the job runs and stores its output in deployment_results
+# like any other scheduled job; with it the results projector also
+# upserts a row into `inventory_facts` keyed by (pc_id, manifest.id),
+# and the SPA Inventory page renders the columns declared in `display`.
+#
+# Install (v0.13.0 onwards):
+#
+#   kanade schedule create configs/jobs/inventory-hw.yaml
+#
+# Inspect:
+#
+#   kanade schedule list                              # confirms cron + manifest
+#   Invoke-RestMethod /api/inventory/jobs              # SPA-side listing
+#   Invoke-RestMethod /api/inventory/<pc_id>           # facts for one PC
+
+id: hourly-inventory
+cron: "0 0 * * * *"   # top of every hour
+enabled: true
+
+manifest:
+  id: inventory-hw
+  version: 0.1.0
+  description: Hardware inventory snapshot via Get-CimInstance
+  target:
+    all: true
+  execute:
+    shell: powershell
+    timeout: 60s
+    # The script MUST emit a single JSON object on stdout. ConvertTo-Json
+    # -Compress keeps the payload small enough to fit through NATS; -Depth
+    # 5 captures the nested disk list without truncation.
+    script: |
+      $ErrorActionPreference = 'Stop'
+      $cs    = Get-CimInstance Win32_ComputerSystem
+      $os    = Get-CimInstance Win32_OperatingSystem
+      $cpus  = @(Get-CimInstance Win32_Processor)
+      $cpu   = $cpus | Select-Object -First 1
+      $disks = @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' |
+          ForEach-Object {
+              [pscustomobject]@{
+                  device_id   = $_.DeviceID
+                  size_bytes  = [int64]($_.Size      | ForEach-Object { if ($_ -eq $null) { 0 } else { $_ } })
+                  free_bytes  = [int64]($_.FreeSpace | ForEach-Object { if ($_ -eq $null) { 0 } else { $_ } })
+                  file_system = $_.FileSystem
+              }
+          })
+      [pscustomobject]@{
+          hostname    = $cs.Name
+          os_name     = $os.Caption
+          os_version  = $os.Version
+          os_build    = $os.BuildNumber
+          cpu_model   = $cpu.Name
+          cpu_cores   = ($cpus | Measure-Object -Property NumberOfCores -Sum).Sum
+          ram_bytes   = [int64]$cs.TotalPhysicalMemory
+          disks       = $disks
+      } | ConvertTo-Json -Compress -Depth 5
+
+  # Display config — drives the SPA Inventory page table for this
+  # manifest. `field` is the top-level JSON key, `label` is the
+  # column header, `type` (optional) is a render hint:
+  #   "bytes"     — humanised (KiB / MiB / GiB)
+  #   "number"    — locale-formatted integer
+  #   omitted     — plain text
+  inventory:
+    display:
+      - { field: hostname,   label: Hostname  }
+      - { field: os_name,    label: OS        }
+      - { field: os_version, label: Version   }
+      - { field: cpu_model,  label: CPU       }
+      - { field: cpu_cores,  label: Cores,    type: number }
+      - { field: ram_bytes,  label: RAM,      type: bytes  }
