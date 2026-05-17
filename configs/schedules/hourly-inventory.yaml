@@ -1,0 +1,58 @@
+# Schedule wrapper for `configs/jobs/inventory-hw.yaml` — fires the
+# manifest top of every hour. The manifest body is embedded inline
+# (Schedule yaml doesn't reference an external file).
+#
+# Install:
+#
+#   kanade schedule create configs/schedules/hourly-inventory.yaml
+#
+# Inspect:
+#
+#   kanade schedule list
+
+id: hourly-inventory
+cron: "0 0 * * * *"   # top of every hour (sec min hour day month dow)
+enabled: true
+
+manifest:
+  id: inventory-hw
+  version: 0.1.0
+  description: Hourly hardware inventory snapshot via Get-CimInstance
+  target:
+    all: true
+  execute:
+    shell: powershell
+    timeout: 60s
+    script: |
+      $ErrorActionPreference = 'Stop'
+      $cs    = Get-CimInstance Win32_ComputerSystem
+      $os    = Get-CimInstance Win32_OperatingSystem
+      $cpus  = @(Get-CimInstance Win32_Processor)
+      $cpu   = $cpus | Select-Object -First 1
+      $disks = @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' |
+          ForEach-Object {
+              [pscustomobject]@{
+                  device_id   = $_.DeviceID
+                  size_bytes  = [int64]($_.Size      | ForEach-Object { if ($_ -eq $null) { 0 } else { $_ } })
+                  free_bytes  = [int64]($_.FreeSpace | ForEach-Object { if ($_ -eq $null) { 0 } else { $_ } })
+                  file_system = $_.FileSystem
+              }
+          })
+      [pscustomobject]@{
+          hostname    = $cs.Name
+          os_name     = $os.Caption
+          os_version  = $os.Version
+          os_build    = $os.BuildNumber
+          cpu_model   = $cpu.Name
+          cpu_cores   = ($cpus | Measure-Object -Property NumberOfCores -Sum).Sum
+          ram_bytes   = [int64]$cs.TotalPhysicalMemory
+          disks       = $disks
+      } | ConvertTo-Json -Compress -Depth 5
+  inventory:
+    display:
+      - { field: hostname,   label: Hostname  }
+      - { field: os_name,    label: OS        }
+      - { field: os_version, label: Version   }
+      - { field: cpu_model,  label: CPU       }
+      - { field: cpu_cores,  label: Cores,    type: number }
+      - { field: ram_bytes,  label: RAM,      type: bytes  }
