@@ -54,7 +54,7 @@ reqwest            = { version = "0.13", features = ["json"] }
 tokio-cron-scheduler = "0.15"
 rust-embed         = "8"
 mime_guess         = "2"
-jsonwebtoken       = "10"
+jsonwebtoken       = "10.4.0"
 sha2               = "0.10"
 winreg             = "0.56"
 pelite             = "0.10"
