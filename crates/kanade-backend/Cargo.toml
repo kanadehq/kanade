@@ -22,7 +22,7 @@ include = [
 ]
 
 [dependencies]
-kanade-shared = { path = "../kanade-shared", version = "0.14.1" }
+kanade-shared = { path = "../kanade-shared", version = "0.15.0" }
 
 anyhow     = { workspace = true }
 async-nats = { workspace = true }

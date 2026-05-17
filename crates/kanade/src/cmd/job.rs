@@ -1,54 +1,54 @@
+//! `kanade job` — manage the job catalog (BUCKET_JOBS).
+//!
+//! A registered Job is just a [`Manifest`] keyed by its `id`.
+//! Schedules and ad-hoc deploys reference it by id; editing a job
+//! in-place rewrites what subsequent fires deploy.
+
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
-use kanade_shared::manifest::Schedule;
+use kanade_shared::manifest::Manifest;
 use tracing::info;
 
 #[derive(Args, Debug)]
-pub struct ScheduleArgs {
+pub struct JobArgs {
     #[command(subcommand)]
-    pub sub: ScheduleSub,
+    pub sub: JobSub,
 }
 
 #[derive(Subcommand, Debug)]
-pub enum ScheduleSub {
-    /// Upsert a schedule from a YAML file.
+pub enum JobSub {
+    /// Upsert a job into the catalog from a YAML manifest.
     Create {
-        /// Path to the schedule YAML (`id` / `cron` / `job_id` / `enabled`).
-        /// The referenced job must already be registered via `kanade job create`.
+        /// Path to the job YAML (Manifest body — `id` / `version` /
+        /// `target` / `execute` / optional `inventory`).
         yaml: PathBuf,
     },
-    /// List all schedules currently stored in the schedules KV.
+    /// List every job in the catalog.
     List,
-    /// Delete a schedule by its id.
+    /// Delete a job by id. Refuses when any schedule references it.
     Delete { id: String },
 }
 
-pub async fn execute(backend_url: &str, args: ScheduleArgs) -> Result<()> {
+pub async fn execute(backend_url: &str, args: JobArgs) -> Result<()> {
     let base = backend_url.trim_end_matches('/');
     match args.sub {
-        ScheduleSub::Create { yaml } => create(base, &yaml).await,
-        ScheduleSub::List => list(base).await,
-        ScheduleSub::Delete { id } => delete(base, &id).await,
+        JobSub::Create { yaml } => create(base, &yaml).await,
+        JobSub::List => list(base).await,
+        JobSub::Delete { id } => delete(base, &id).await,
     }
 }
 
 async fn create(base: &str, yaml: &PathBuf) -> Result<()> {
     let body = std::fs::read_to_string(yaml).with_context(|| format!("read {yaml:?}"))?;
-    let schedule: Schedule =
-        serde_yaml::from_str(&body).with_context(|| format!("parse {yaml:?}"))?;
-    info!(
-        schedule_id = %schedule.id,
-        cron = %schedule.cron,
-        job_id = %schedule.job_id,
-        "upserting schedule",
-    );
+    let job: Manifest = serde_yaml::from_str(&body).with_context(|| format!("parse {yaml:?}"))?;
+    info!(job_id = %job.id, version = %job.version, "upserting job");
 
-    let url = format!("{base}/api/schedules");
+    let url = format!("{base}/api/jobs");
     let resp = crate::http_client::authed_client()?
         .post(&url)
-        .json(&schedule)
+        .json(&job)
         .send()
         .await
         .with_context(|| format!("POST {url}"))?;
@@ -63,7 +63,7 @@ async fn create(base: &str, yaml: &PathBuf) -> Result<()> {
 }
 
 async fn list(base: &str) -> Result<()> {
-    let url = format!("{base}/api/schedules");
+    let url = format!("{base}/api/jobs");
     let resp = crate::http_client::authed_client()?
         .get(&url)
         .send()
@@ -78,7 +78,7 @@ async fn list(base: &str) -> Result<()> {
 }
 
 async fn delete(base: &str, id: &str) -> Result<()> {
-    let url = format!("{base}/api/schedules/{id}");
+    let url = format!("{base}/api/jobs/{id}");
     let resp = crate::http_client::authed_client()?
         .delete(&url)
         .send()

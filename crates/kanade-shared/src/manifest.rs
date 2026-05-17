@@ -215,26 +215,18 @@ rollout:
     }
 
     #[test]
-    fn schedule_embeds_full_manifest() {
+    fn schedule_references_job_by_id() {
         let yaml = r#"
 id: every-10s
 cron: "*/10 * * * * *"
 enabled: true
-manifest:
-  id: scheduled-echo
-  version: 1.0.0
-  target:
-    pcs: [minipc]
-  execute:
-    shell: powershell
-    script: "echo hi"
-    timeout: 30s
+job_id: scheduled-echo
 "#;
         let s: Schedule = serde_yaml::from_str(yaml).expect("parse");
         assert_eq!(s.id, "every-10s");
         assert_eq!(s.cron, "*/10 * * * * *");
         assert!(s.enabled);
-        assert_eq!(s.manifest.id, "scheduled-echo");
+        assert_eq!(s.job_id, "scheduled-echo");
     }
 
     #[test]
@@ -242,15 +234,7 @@ manifest:
         let yaml = r#"
 id: x
 cron: "* * * * * *"
-manifest:
-  id: y
-  version: 1.0.0
-  target:
-    all: true
-  execute:
-    shell: powershell
-    script: "echo"
-    timeout: 1s
+job_id: y
 "#;
         let s: Schedule = serde_yaml::from_str(yaml).expect("parse");
         assert!(s.enabled);
@@ -278,17 +262,20 @@ execute:
     }
 }
 
-/// Periodic schedule (spec §2.4.3). The full job [`Manifest`] is embedded
-/// so the scheduler can deploy it without a separate Git lookup; once a
-/// dedicated job-catalog API lands, `manifest` can become a `job_id`
-/// reference instead.
+/// Periodic schedule (spec §2.4.3). v0.15.0: a Schedule names a
+/// registered job by id rather than embedding the Manifest body. The
+/// scheduler resolves `job_id` against the `BUCKET_JOBS` KV at every
+/// tick, so editing the job retroactively changes what future fires
+/// deploy.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Schedule {
     pub id: String,
     /// 6-field cron expression (`sec min hour day month day-of-week`),
     /// matching `tokio-cron-scheduler` syntax.
     pub cron: String,
-    pub manifest: Manifest,
+    /// Key into [`crate::kv::BUCKET_JOBS`]. Must equal a registered
+    /// Manifest's `id`.
+    pub job_id: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }

@@ -11,6 +11,13 @@ pub const BUCKET_AGENT_CONFIG: &str = "agent_config";
 pub const BUCKET_AGENT_GROUPS: &str = "agent_groups";
 pub const BUCKET_SCHEDULES: &str = "schedules";
 
+/// Job catalog (v0.15) — operator-registered Manifests, keyed by
+/// `manifest.id`. Schedules and ad-hoc `kanade run --job-id ...` look
+/// jobs up here; the wire never round-trips an inline Manifest body
+/// through a Schedule again. Editing a job in-place retroactively
+/// changes what future schedule fires deploy.
+pub const BUCKET_JOBS: &str = "jobs";
+
 /// Object Store bucket holding raw agent binaries (one object per
 /// version, e.g. `0.2.0` → file bytes).
 pub const OBJECT_AGENT_RELEASES: &str = "agent_releases";
@@ -75,6 +82,7 @@ mod tests {
             BUCKET_AGENT_CONFIG,
             BUCKET_AGENT_GROUPS,
             BUCKET_SCHEDULES,
+            BUCKET_JOBS,
             OBJECT_AGENT_RELEASES,
         ] {
             assert!(

@@ -137,17 +137,40 @@ async fn register(
 ) -> Result<()> {
     let cron = schedule.cron.clone();
     let schedule_id = schedule.id.clone();
-    let manifest = schedule.manifest.clone();
+    let job_id = schedule.job_id.clone();
     let job = Job::new_async(cron.as_str(), move |_uuid, _l| {
         let state = state.clone();
-        let manifest = manifest.clone();
+        let job_id = job_id.clone();
         let schedule_id = schedule_id.clone();
         Box::pin(async move {
             info!(
                 schedule_id = %schedule_id,
-                job_id = %manifest.id,
+                job_id = %job_id,
                 "scheduler firing",
             );
+            // Resolve the registered Manifest at fire time so edits to
+            // the job catalog take effect on the next tick without
+            // re-registering the schedule.
+            let manifest = match crate::api::jobs::fetch(&state.jetstream, &job_id).await {
+                Ok(Some(m)) => m,
+                Ok(None) => {
+                    warn!(
+                        schedule_id = %schedule_id,
+                        job_id = %job_id,
+                        "scheduler fire skipped: job not registered in catalog",
+                    );
+                    return;
+                }
+                Err(e) => {
+                    warn!(
+                        schedule_id = %schedule_id,
+                        job_id = %job_id,
+                        error = %e,
+                        "scheduler fire failed: catalog lookup error",
+                    );
+                    return;
+                }
+            };
             match deploy_manifest(&state, manifest, "scheduler").await {
                 Ok(resp) => info!(
                     schedule_id = %schedule_id,

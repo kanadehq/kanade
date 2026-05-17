@@ -13,8 +13,8 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
-use kanade_shared::kv::BUCKET_SCHEDULES;
-use kanade_shared::manifest::{DisplayField, Schedule};
+use kanade_shared::kv::BUCKET_JOBS;
+use kanade_shared::manifest::{DisplayField, Manifest};
 use serde::Serialize;
 use sqlx::Row;
 use tracing::warn;
@@ -146,12 +146,12 @@ pub async fn list_jobs(
 ) -> Result<Json<Vec<InventoryJob>>, (StatusCode, String)> {
     let kv = state
         .jetstream
-        .get_key_value(BUCKET_SCHEDULES)
+        .get_key_value(BUCKET_JOBS)
         .await
         .map_err(|e| {
             (
                 StatusCode::SERVICE_UNAVAILABLE,
-                format!("get KV {BUCKET_SCHEDULES}: {e}"),
+                format!("get KV {BUCKET_JOBS}: {e}"),
             )
         })?;
     let mut out = Vec::new();
@@ -168,14 +168,14 @@ pub async fn list_jobs(
             Some(b) => b,
             None => continue,
         };
-        let schedule: Schedule = match serde_json::from_slice(&entry) {
-            Ok(s) => s,
+        let job: Manifest = match serde_json::from_slice(&entry) {
+            Ok(j) => j,
             Err(_) => continue,
         };
-        if let Some(hint) = schedule.manifest.inventory {
+        if let Some(hint) = job.inventory {
             out.push(InventoryJob {
-                manifest_id: schedule.manifest.id,
-                description: schedule.manifest.description,
+                manifest_id: job.id,
+                description: job.description,
                 display: hint.display,
                 summary: hint.summary,
             });

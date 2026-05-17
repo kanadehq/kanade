@@ -85,6 +85,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/agents/{pc_id}/ping", post(run::ping))
         .route("/api/scripts/{cmd_id}/revoke", post(scripts::revoke))
         .route("/api/scripts/{cmd_id}/unrevoke", post(scripts::unrevoke))
+        .route("/api/jobs", get(jobs::list).post(jobs::create))
+        .route("/api/jobs/{id}", delete(jobs::delete))
         .route("/api/jobs/{job_id}/kill", post(jobs::kill))
         .route("/api/jetstream/status", get(jetstream_status::status))
         .route("/api/health/fleet", get(health::fleet))

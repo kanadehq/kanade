@@ -17,7 +17,6 @@ pub struct ScheduleSummary {
     pub cron: String,
     pub enabled: bool,
     pub job_id: String,
-    pub job_version: String,
 }
 
 /// GET /api/schedules — full Schedule list, KV-backed.
@@ -69,7 +68,7 @@ pub async fn create(
     info!(
         schedule_id = %schedule.id,
         cron = %schedule.cron,
-        job_id = %schedule.manifest.id,
+        job_id = %schedule.job_id,
         "schedule upserted",
     );
     audit::record(
@@ -79,7 +78,7 @@ pub async fn create(
         Some(&schedule.id),
         serde_json::json!({
             "cron": schedule.cron,
-            "job_id": schedule.manifest.id,
+            "job_id": schedule.job_id,
             "enabled": schedule.enabled,
         }),
     )
@@ -88,8 +87,7 @@ pub async fn create(
         id: schedule.id.clone(),
         cron: schedule.cron.clone(),
         enabled: schedule.enabled,
-        job_id: schedule.manifest.id.clone(),
-        job_version: schedule.manifest.version.clone(),
+        job_id: schedule.job_id.clone(),
     }))
 }
 

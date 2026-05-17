@@ -1,30 +1,22 @@
 # Sample inventory probe — operator-customisable hardware snapshot
-# delivered through the regular schedule + deploy + ExecResult pipeline.
+# delivered through the regular deploy + ExecResult pipeline.
 #
-# This file is a *Manifest* (the shape `kanade deploy` expects):
-# one-shot test it directly, then wrap it in a Schedule yaml when
-# you want cron'd repeats.
+# This file is a Manifest (the shape that `kanade deploy` and
+# `kanade job create` both expect).
 #
-# One-shot test (sends the script to every targeted PC immediately):
+# Two ways to use it:
 #
-#   kanade deploy configs/jobs/inventory-hw.yaml
+#   * One-shot — fires immediately against every targeted PC:
+#         kanade deploy configs/jobs/inventory-hw.yaml
+#     (Not registered in the catalog; inventory facts are NOT projected
+#     because the projector only matches against registered jobs.)
 #
-# Periodic — wrap this manifest in a Schedule yaml. Either inline:
-#
-#   id: hourly-inventory
-#   cron: "0 0 * * * *"            # top of every hour
-#   enabled: true
-#   manifest:                       # (paste the keys below here)
-#     id: inventory-hw
-#     version: 0.1.0
-#     target:
-#       all: true
-#     execute: { ... }
-#     inventory: { ... }
-#
-# Or save the schedule wrapper to `configs/schedules/...yaml` and run:
-#
-#   kanade schedule create configs/schedules/hourly-inventory.yaml
+#   * Register + schedule — periodic, fact projection enabled:
+#         kanade job create configs/jobs/inventory-hw.yaml
+#         kanade schedule create configs/schedules/hourly-inventory.yaml
+#     The schedule yaml just references this job by id; editing this
+#     file and re-running `kanade job create` rewrites what every
+#     downstream schedule fires from the next tick.
 #
 # The `inventory:` section is what tags this job as an inventory probe.
 # Without it the job runs and stores its output in deployment_results

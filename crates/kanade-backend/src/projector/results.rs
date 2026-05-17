@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use async_nats::jetstream::{self, consumer::pull::Config as PullConfig};
 use futures::StreamExt;
 use kanade_shared::ExecResult;
-use kanade_shared::kv::{BUCKET_SCHEDULES, STREAM_RESULTS};
-use kanade_shared::manifest::{InventoryHint, Schedule};
+use kanade_shared::kv::{BUCKET_JOBS, STREAM_RESULTS};
+use kanade_shared::manifest::{InventoryHint, Manifest};
 use sqlx::SqlitePool;
 use tracing::{info, warn};
 
@@ -12,8 +12,8 @@ const CONSUMER_NAME: &str = "backend_results_projector";
 /// Consume the RESULTS stream and:
 ///   1. Insert each `ExecResult` into `deployment_results`. ON CONFLICT
 ///      DO NOTHING so a redelivery doesn't duplicate rows.
-///   2. v0.13: if the result carries a `manifest_id` AND a schedule
-///      with that id exists AND the schedule's manifest carries an
+///   2. v0.15: if the result carries a `manifest_id` AND a job
+///      with that id exists in the catalog AND the job carries an
 ///      `inventory:` hint AND `exit_code == 0`, parse stdout as JSON
 ///      and upsert into `inventory_facts`.
 pub async fn run(js: jetstream::Context, pool: SqlitePool) -> Result<()> {
@@ -38,13 +38,13 @@ pub async fn run(js: jetstream::Context, pool: SqlitePool) -> Result<()> {
         "results projector started"
     );
 
-    // KV handle for manifest lookups. Cached here so the per-result
+    // KV handle for job-catalog lookups. Cached here so the per-result
     // hot path doesn't repeatedly call get_key_value (which round-
     // trips to the broker).
-    let schedules_kv = js
-        .get_key_value(BUCKET_SCHEDULES)
+    let jobs_kv = js
+        .get_key_value(BUCKET_JOBS)
         .await
-        .with_context(|| format!("get KV {BUCKET_SCHEDULES}"))?;
+        .with_context(|| format!("get KV {BUCKET_JOBS}"))?;
 
     let mut messages = consumer
         .messages()
@@ -66,7 +66,7 @@ pub async fn run(js: jetstream::Context, pool: SqlitePool) -> Result<()> {
                     info!(request_id = %r.request_id, pc_id = %r.pc_id, exit_code = r.exit_code, "projected result");
                 }
                 if r.exit_code == 0 {
-                    if let Err(e) = maybe_project_inventory(&pool, &schedules_kv, &r).await {
+                    if let Err(e) = maybe_project_inventory(&pool, &jobs_kv, &r).await {
                         warn!(error = ?e, request_id = %r.request_id, "inventory fact projection failed");
                     }
                 }
@@ -99,49 +99,28 @@ async fn insert_result(pool: &SqlitePool, r: &ExecResult) -> Result<()> {
     Ok(())
 }
 
-/// Look up the schedule for `r.manifest_id`; if its manifest declares an
-/// `inventory:` hint, parse `r.stdout` as JSON and upsert a row into
-/// `inventory_facts`. Returns Ok(()) on the "not an inventory job" path
-/// (no hint = nothing to do, not an error).
+/// Look up the registered job for `r.manifest_id`; if its manifest
+/// declares an `inventory:` hint, parse `r.stdout` as JSON and upsert
+/// a row into `inventory_facts`. Returns Ok(()) on the "not an
+/// inventory job" path (no hint = nothing to do, not an error).
 async fn maybe_project_inventory(
     pool: &SqlitePool,
-    schedules_kv: &async_nats::jetstream::kv::Store,
+    jobs_kv: &async_nats::jetstream::kv::Store,
     r: &ExecResult,
 ) -> Result<()> {
     let Some(manifest_id) = r.manifest_id.as_deref() else {
         return Ok(());
     };
-
-    // Walk the schedules bucket looking for one whose manifest.id
-    // matches. The bucket is small (one row per schedule), and we
-    // expect very few inventory jobs, so a full scan per result
-    // is fine; if this becomes hot we can cache by manifest_id.
-    use futures::StreamExt;
-    let mut keys = match schedules_kv.keys().await {
-        Ok(k) => k,
-        Err(_) => return Ok(()), // empty / unreachable bucket
+    let entry = match jobs_kv.get(manifest_id).await? {
+        Some(b) => b,
+        None => return Ok(()), // ad-hoc deploy of an unregistered manifest
     };
-    while let Some(key) = keys.next().await {
-        let key = match key {
-            Ok(k) => k,
-            Err(_) => continue,
-        };
-        let entry = match schedules_kv.get(&key).await? {
-            Some(b) => b,
-            None => continue,
-        };
-        let schedule: Schedule = match serde_json::from_slice(&entry) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        if schedule.manifest.id != manifest_id {
-            continue;
-        }
-        // Match found — is it an inventory job?
-        if let Some(hint) = schedule.manifest.inventory.as_ref() {
-            return upsert_inventory(pool, r, manifest_id, hint).await;
-        }
-        return Ok(());
+    let job: Manifest = match serde_json::from_slice(&entry) {
+        Ok(j) => j,
+        Err(_) => return Ok(()),
+    };
+    if let Some(hint) = job.inventory.as_ref() {
+        return upsert_inventory(pool, r, manifest_id, hint).await;
     }
     Ok(())
 }

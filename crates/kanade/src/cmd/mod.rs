@@ -3,6 +3,7 @@ pub mod config;
 pub mod deploy;
 pub mod group;
 pub mod jetstream;
+pub mod job;
 pub mod kill;
 pub mod ping;
 pub mod revoke;

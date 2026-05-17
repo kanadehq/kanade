@@ -22,7 +22,7 @@ use async_nats::jetstream::{
 use tracing::info;
 
 use crate::kv::{
-    BUCKET_AGENT_CONFIG, BUCKET_AGENT_GROUPS, BUCKET_AGENTS_STATE, BUCKET_SCHEDULES,
+    BUCKET_AGENT_CONFIG, BUCKET_AGENT_GROUPS, BUCKET_AGENTS_STATE, BUCKET_JOBS, BUCKET_SCHEDULES,
     BUCKET_SCRIPT_CURRENT, BUCKET_SCRIPT_STATUS, OBJECT_AGENT_RELEASES, STREAM_AUDIT,
     STREAM_DEPLOY, STREAM_EVENTS, STREAM_INVENTORY, STREAM_RESULTS,
 };
@@ -156,6 +156,18 @@ pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
     .await
     .with_context(|| format!("create_key_value {BUCKET_SCHEDULES}"))?;
     info!(bucket = BUCKET_SCHEDULES, "ready");
+
+    // jobs — v0.15 operator-registered Manifest catalog. Schedules
+    // reference rows here by id; editing a job rewrites what future
+    // schedule fires deploy.
+    js.create_key_value(KvConfig {
+        bucket: BUCKET_JOBS.into(),
+        history: 5,
+        ..Default::default()
+    })
+    .await
+    .with_context(|| format!("create_key_value {BUCKET_JOBS}"))?;
+    info!(bucket = BUCKET_JOBS, "ready");
 
     // ── Object Store ─────────────────────────────────────────────
     // agent_releases — one object per version, raw exe bytes.

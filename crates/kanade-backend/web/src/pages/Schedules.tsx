@@ -11,7 +11,7 @@ import { apiFetch } from '@/lib/api';
 type ScheduleRow = {
   id: string;
   cron: string;
-  manifest: { id: string; version: string };
+  job_id: string;
   enabled: boolean;
 };
 
@@ -54,8 +54,7 @@ export function Schedules() {
           <TableRow>
             <TableHead>id</TableHead>
             <TableHead>cron</TableHead>
-            <TableHead>job</TableHead>
-            <TableHead>version</TableHead>
+            <TableHead>job_id</TableHead>
             <TableHead>enabled</TableHead>
             <TableHead>actions</TableHead>
           </TableRow>
@@ -65,8 +64,7 @@ export function Schedules() {
             <TableRow key={s.id}>
               <TableCell><code className="text-xs">{s.id}</code></TableCell>
               <TableCell><code className="text-xs">{s.cron}</code></TableCell>
-              <TableCell>{s.manifest.id}</TableCell>
-              <TableCell><code className="text-xs">{s.manifest.version}</code></TableCell>
+              <TableCell><code className="text-xs">{s.job_id}</code></TableCell>
               <TableCell>
                 {s.enabled
                   ? <Badge variant="success">on</Badge>
