@@ -246,10 +246,16 @@ dependencies = ["apm-install-update", "vcs-fetch"]
 # should always use the GitHub Releases artifacts via
 # `build-release.ps1` (no flags) + `deploy-<role>.ps1` directly.
 #
-# NATS token: $env:KANADE_DEV_NATS_TOKEN, defaulting to
-# 'dev-token-not-for-prod' so a forgotten env var doesn't accidentally
-# match a real production secret. Each task passes -ForceConfig so
-# config edits in configs/ apply on every re-deploy.
+# Tokens injected at deploy time (env override → safe-named default):
+#   NATS bearer    : $env:KANADE_DEV_NATS_TOKEN    or 'dev-token-not-for-prod'
+#   HTTP static    : $env:KANADE_DEV_STATIC_TOKEN  or 'dev-static-token-not-for-prod'
+# Both written to the hardened registry path the deploy scripts
+# manage; LocalSystem services pick them up at startup. After the
+# install completes, drive the CLI / SPA with:
+#   $env:KANADE_AUTH_TOKEN = 'dev-static-token-not-for-prod'
+#
+# Each task passes -ForceConfig + -Recreate so re-running picks up
+# any edits to configs/ and starts from a clean service state.
 
 [tasks.local-deploy]
 description = "[dev] Build + install agent + backend + nats locally via gsudo. One UAC prompt."
@@ -263,15 +269,22 @@ if (-not (Get-Command gsudo -ErrorAction SilentlyContinue)) {
     throw "gsudo not on PATH. Install via `scoop install gsudo` (https://github.com/gerardog/gsudo)."
 }
 
-$token = if ($env:KANADE_DEV_NATS_TOKEN) { $env:KANADE_DEV_NATS_TOKEN } else { 'dev-token-not-for-prod' }
-$root  = $env:CARGO_MAKE_WORKING_DIRECTORY
+$token       = if ($env:KANADE_DEV_NATS_TOKEN)   { $env:KANADE_DEV_NATS_TOKEN }   else { 'dev-token-not-for-prod' }
+$staticToken = if ($env:KANADE_DEV_STATIC_TOKEN) { $env:KANADE_DEV_STATIC_TOKEN } else { 'dev-static-token-not-for-prod' }
+$root        = $env:CARGO_MAKE_WORKING_DIRECTORY
 
 Write-Host "[1/2] Staging from source..."
 & "$root\scripts\build-release.ps1" -FromSource
 if ($LASTEXITCODE -ne 0) { throw "build-release.ps1 failed (exit $LASTEXITCODE)" }
 
 Write-Host ""
-Write-Host "[2/2] Elevating via gsudo to install services (NATS token: $token)"
+Write-Host "[2/2] Elevating via gsudo to install services"
+Write-Host "      NATS token:   $token"
+Write-Host "      Static token: $staticToken"
+Write-Host ""
+Write-Host "After install, drive the API with:"
+Write-Host "    `$env:KANADE_AUTH_TOKEN = '$staticToken'"
+Write-Host ""
 # Single elevated invocation so the operator sees one UAC prompt.
 # Temp .ps1 keeps the command line short + avoids quoting hell.
 $tmp = [System.IO.Path]::GetTempFileName()
@@ -280,7 +293,7 @@ $tmp = "$tmp.ps1"
 @"
 `$ErrorActionPreference = 'Stop'
 & '$root\dist\nats\deploy-nats.ps1'       -NatsToken '$token' -ForceConfig -Recreate
-& '$root\dist\backend\deploy-backend.ps1' -NatsToken '$token' -ForceConfig -Recreate
+& '$root\dist\backend\deploy-backend.ps1' -NatsToken '$token' -StaticToken '$staticToken' -ForceConfig -Recreate
 & '$root\dist\agent\deploy-agent.ps1'     -NatsToken '$token' -ForceConfig -Recreate
 "@ | Set-Content -Path $tmp -Encoding utf8
 try {
@@ -321,14 +334,18 @@ $ErrorActionPreference = 'Stop'
 if (-not (Get-Command gsudo -ErrorAction SilentlyContinue)) {
     throw "gsudo not on PATH. Install via `scoop install gsudo`."
 }
-$token = if ($env:KANADE_DEV_NATS_TOKEN) { $env:KANADE_DEV_NATS_TOKEN } else { 'dev-token-not-for-prod' }
-$root  = $env:CARGO_MAKE_WORKING_DIRECTORY
+$token       = if ($env:KANADE_DEV_NATS_TOKEN)   { $env:KANADE_DEV_NATS_TOKEN }   else { 'dev-token-not-for-prod' }
+$staticToken = if ($env:KANADE_DEV_STATIC_TOKEN) { $env:KANADE_DEV_STATIC_TOKEN } else { 'dev-static-token-not-for-prod' }
+$root        = $env:CARGO_MAKE_WORKING_DIRECTORY
 
 & "$root\scripts\build-release.ps1" -FromSource -Roles backend
 if ($LASTEXITCODE -ne 0) { throw "build-release.ps1 failed (exit $LASTEXITCODE)" }
 
-& gsudo "$root\dist\backend\deploy-backend.ps1" -NatsToken $token -ForceConfig -Recreate
+& gsudo "$root\dist\backend\deploy-backend.ps1" -NatsToken $token -StaticToken $staticToken -ForceConfig -Recreate
 if ($LASTEXITCODE -ne 0) { throw "deploy-backend failed (exit $LASTEXITCODE)" }
+
+Write-Host ""
+Write-Host "Drive the API with:  `$env:KANADE_AUTH_TOKEN = '$staticToken'"
 '''
 
 [tasks.local-deploy-nats]
