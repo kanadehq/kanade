@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Loader2, Trash2 } from 'lucide-react';
+import { Loader2, Power, PowerOff, Trash2 } from 'lucide-react';
 
 import { ErrorCard } from '@/components/ErrorCard';
 import { Badge } from '@/components/ui/badge';
@@ -24,6 +24,18 @@ export function Schedules() {
 
   const del = useMutation({
     mutationFn: (id: string) => apiFetch(`/api/schedules/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['schedules'] }),
+  });
+
+  // POST /api/schedules is an upsert, so we just re-POST the full row
+  // with `enabled` flipped. The scheduler's KV watcher picks up the
+  // change and registers/unregisters the cron job on the next put.
+  const toggle = useMutation({
+    mutationFn: (s: ScheduleRow) =>
+      apiFetch('/api/schedules', {
+        method: 'POST',
+        body: JSON.stringify({ ...s, enabled: !s.enabled }),
+      }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['schedules'] }),
   });
 
@@ -70,7 +82,18 @@ export function Schedules() {
                   ? <Badge variant="success">on</Badge>
                   : <Badge variant="danger">off</Badge>}
               </TableCell>
-              <TableCell>
+              <TableCell className="flex gap-2">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={toggle.isPending}
+                  onClick={() => toggle.mutate(s)}
+                  title={s.enabled ? 'Disable this schedule' : 'Enable this schedule'}
+                >
+                  {s.enabled
+                    ? <><PowerOff className="size-3.5" />disable</>
+                    : <><Power className="size-3.5" />enable</>}
+                </Button>
                 <Button
                   variant="danger"
                   size="sm"
@@ -88,6 +111,7 @@ export function Schedules() {
         </TableBody>
       </Table>
       {del.error && <ErrorCard title="Delete failed" error={del.error} />}
+      {toggle.error && <ErrorCard title="Toggle failed" error={toggle.error} />}
     </div>
   );
 }

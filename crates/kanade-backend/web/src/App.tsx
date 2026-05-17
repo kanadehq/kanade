@@ -10,6 +10,7 @@ import { Dashboard } from '@/pages/Dashboard';
 import { Exec } from '@/pages/Exec';
 import { Inventory } from '@/pages/Inventory';
 import { JetStream } from '@/pages/JetStream';
+import { Jobs } from '@/pages/Jobs';
 import { Login } from '@/pages/Login';
 import { Logs } from '@/pages/Logs';
 import { Placeholder } from '@/pages/Placeholder';
@@ -51,6 +52,7 @@ export default function App() {
               <Route path="/audit" element={<Audit />} />
               <Route path="/logs" element={<Logs />} />
               <Route path="/inventory" element={<Inventory />} />
+              <Route path="/jobs" element={<Jobs />} />
               <Route path="/schedules" element={<Schedules />} />
               <Route path="/exec" element={<Exec />} />
               <Route path="/rollout" element={<Rollout />} />

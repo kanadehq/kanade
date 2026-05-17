@@ -10,6 +10,7 @@ const links = [
   { to: '/results', label: 'Results' },
   { to: '/audit', label: 'Audit' },
   { to: '/logs', label: 'Logs' },
+  { to: '/jobs', label: 'Jobs' },
   { to: '/schedules', label: 'Schedules' },
   { to: '/exec', label: 'Exec' },
   { to: '/rollout', label: 'Rollout' },
