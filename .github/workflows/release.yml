@@ -24,7 +24,16 @@ jobs:
   # tag, so keep it on a single Windows runner (cargo publish
   # --verify of kanade-agent needs to compile the wmi crate, which
   # only resolves on a Windows target).
+  #
+  # `needs: build-artifacts` so a per-OS compile failure (e.g.
+  # an import that only resolves on one target — the pelite::pe
+  # path in v0.13.1, the inventory::serve_requests stub in v0.11.2)
+  # short-circuits the workflow BEFORE pushing immutable bytes to
+  # crates.io. Costs ~5 min latency for a release, buys the
+  # invariant "if it's on crates.io, every supported OS could
+  # build it."
   publish-crates:
+    needs: build-artifacts
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -78,8 +87,11 @@ jobs:
   # crates are target_os="windows" gated, so the binary compiles
   # cleanly on Linux / macOS — it just does nothing useful there
   # (no WMI inventory, no SCM hooks). Backend + CLI work on all 3.
+  #
+  # This job is now the gating step for `publish-crates` (see above)
+  # — fail-fast across the OS matrix to abort the release early when
+  # a Linux- or macOS-only compile error sneaks in.
   build-artifacts:
-    needs: publish-crates
     strategy:
       fail-fast: false
       matrix:
