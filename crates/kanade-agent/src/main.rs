@@ -142,6 +142,7 @@ pub(crate) async fn run_agent() -> Result<()> {
         pc_id.clone(),
         cfg_rx.clone(),
     ));
+    tokio::spawn(inventory::serve_requests(client.clone(), pc_id.clone()));
     tokio::spawn(self_update::run(
         client.clone(),
         AGENT_VERSION.to_string(),

@@ -13,7 +13,7 @@ keywords.workspace     = true
 categories.workspace   = true
 
 [dependencies]
-kanade-shared = { path = "../kanade-shared", version = "0.11.1" }
+kanade-shared = { path = "../kanade-shared", version = "0.11.2" }
 
 anyhow     = { workspace = true }
 async-nats = { workspace = true }
@@ -21,6 +21,7 @@ bytes      = { workspace = true }
 chrono     = { workspace = true }
 clap       = { workspace = true }
 futures    = { workspace = true }
+humantime  = { workspace = true }
 reqwest    = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }

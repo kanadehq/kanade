@@ -1523,7 +1523,7 @@ dependencies = [
 
 [[package]]
 name = "kanade"
-version = "0.11.1"
+version = "0.11.2"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -1531,6 +1531,7 @@ dependencies = [
  "chrono",
  "clap",
  "futures",
+ "humantime",
  "kanade-shared",
  "reqwest",
  "serde",
@@ -1544,7 +1545,7 @@ dependencies = [
 
 [[package]]
 name = "kanade-agent"
-version = "0.11.1"
+version = "0.11.2"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -1569,7 +1570,7 @@ dependencies = [
 
 [[package]]
 name = "kanade-backend"
-version = "0.11.1"
+version = "0.11.2"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -1598,7 +1599,7 @@ dependencies = [
 
 [[package]]
 name = "kanade-shared"
-version = "0.11.1"
+version = "0.11.2"
 dependencies = [
  "anyhow",
  "async-nats",

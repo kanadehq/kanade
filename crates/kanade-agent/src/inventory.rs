@@ -19,6 +19,15 @@ pub async fn inventory_loop(
     inner::run(client, pc_id, cfg_rx).await;
 }
 
+/// On-demand inventory request handler. Subscribes to
+/// `inventory.request.<pc_id>`; on each message, collects WMI
+/// inventory once, publishes it to `inventory.<pc_id>.hw` (the same
+/// subject the cadence loop uses), and replies to the caller with
+/// `"ok"` or `"error: <chain>"`.
+pub async fn serve_requests(client: async_nats::Client, pc_id: String) {
+    inner::serve_requests(client, pc_id).await;
+}
+
 #[cfg(target_os = "windows")]
 fn random_jitter(max: Duration) -> Duration {
     use rand::Rng;
@@ -32,6 +41,7 @@ mod inner {
     use std::time::Duration;
 
     use anyhow::{Context, Result};
+    use futures::StreamExt;
     use kanade_shared::subject;
     use kanade_shared::wire::{DiskInfo, EffectiveConfig, HwInventory};
     use serde::Deserialize;
@@ -78,13 +88,16 @@ mod inner {
         pc_id: String,
         mut cfg_rx: watch::Receiver<EffectiveConfig>,
     ) {
-        // Initial random pause within the configured jitter so a
-        // freshly-restarted fleet doesn't all hit WMI in unison.
-        let init_jitter = cfg_rx.borrow().inventory_jitter_duration();
-        let init_pause = random_jitter(init_jitter);
-        info!(?init_pause, "inventory loop initial jitter");
-        tokio::time::sleep(init_pause).await;
-
+        // No initial pause: dev / fresh-deploy UX suffers when the
+        // agent goes invisible to /api/agents for up to
+        // `inventory_jitter` (default 10m) after startup. WMI runs
+        // per-host so there's no cross-fleet contention to spread out,
+        // and the inventory subject is 1-2 KB / agent so a 3000-host
+        // simultaneous burst is < 6 MB on the broker — well within
+        // JetStream's headroom. The jitter still applies to every
+        // subsequent cycle, which is where the "don't all phone home
+        // at exactly the same moment 24h later" benefit actually
+        // matters.
         loop {
             // Snapshot the current effective config once per cycle —
             // changes that arrive mid-WMI-query take effect on the
@@ -105,11 +118,15 @@ mod inner {
             match tokio::task::spawn_blocking(move || collect_hw(&pc)).await {
                 Ok(Ok(snap)) => {
                     if let Err(e) = publish(&client, &snap).await {
-                        warn!(error = %e, "publish hw inventory");
+                        warn!(error = ?e, "publish hw inventory");
                     }
                 }
-                Ok(Err(e)) => warn!(error = %e, "collect hw inventory"),
-                Err(e) => warn!(error = %e, "inventory worker join"),
+                // `?e` (Debug) prints the full anyhow chain — `%e`
+                // (Display) only shows the topmost .context() tag,
+                // which hid WMI HRESULT codes behind a bare
+                // "Win32_ComputerSystem" label.
+                Ok(Err(e)) => warn!(error = ?e, "collect hw inventory"),
+                Err(e) => warn!(error = ?e, "inventory worker join"),
             }
 
             let wait = snapshot.inventory_interval_duration()
@@ -199,6 +216,50 @@ mod inner {
             "published hw inventory",
         );
         Ok(())
+    }
+
+    /// Collect + publish one inventory snapshot synchronously. Shared
+    /// between the cadence loop and the on-demand request handler so
+    /// behaviour stays identical.
+    async fn collect_and_publish_once(client: &async_nats::Client, pc_id: &str) -> Result<()> {
+        let pc = pc_id.to_string();
+        let snap = tokio::task::spawn_blocking(move || collect_hw(&pc))
+            .await
+            .context("inventory worker join")??;
+        publish(client, &snap).await
+    }
+
+    pub async fn serve_requests(client: async_nats::Client, pc_id: String) {
+        let subj = subject::inventory_request(&pc_id);
+        let mut sub = match client.subscribe(subj.clone()).await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = ?e, subject = %subj, "subscribe inventory.request failed");
+                return;
+            }
+        };
+        info!(subject = %subj, "inventory.request handler ready");
+
+        while let Some(msg) = sub.next().await {
+            let reply = msg.reply.clone();
+            let client = client.clone();
+            let pc = pc_id.clone();
+            // Spawn so a slow WMI run doesn't block subsequent requests.
+            tokio::spawn(async move {
+                let body = match collect_and_publish_once(&client, &pc).await {
+                    Ok(()) => "ok".to_string(),
+                    Err(e) => format!("error: {e:#}"),
+                };
+                if let Some(reply_to) = reply {
+                    if let Err(e) = client.publish(reply_to, body.clone().into()).await {
+                        warn!(error = ?e, "publish inventory.request reply");
+                    }
+                }
+                if body != "ok" {
+                    warn!(reply = %body, "inventory.request collection failed");
+                }
+            });
+        }
     }
 }
 

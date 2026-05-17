@@ -39,6 +39,16 @@ pub fn logs_fetch(pc_id: &str) -> String {
     format!("logs.fetch.{pc_id}")
 }
 
+/// `inventory.request.<pc_id>` — request/reply: operator asks the
+/// addressed agent to collect WMI inventory NOW (out of band of its
+/// configured cadence) and publish it to `inventory.<pc_id>.hw`.
+/// The reply body is `"ok"` on success or `"error: <reason>"` on
+/// failure — useful for diagnosing WMI repository / permission
+/// issues without waiting for the next scheduled cycle.
+pub fn inventory_request(pc_id: &str) -> String {
+    format!("inventory.request.{pc_id}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
