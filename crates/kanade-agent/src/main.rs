@@ -8,6 +8,7 @@ mod self_update;
 
 mod command_replay;
 mod local_scheduler;
+mod outbox;
 
 #[cfg(target_os = "windows")]
 mod cwd_expand;
@@ -155,16 +156,28 @@ pub(crate) async fn run_agent() -> Result<()> {
     // request_id; the second arrival is dropped.
     let dedup = commands::shared_dedup_cache();
 
-    tokio::spawn(groups::manage(client.clone(), pc_id.clone(), dedup.clone()));
+    // v0.24: groups::spawn returns a watch::Receiver<Vec<String>>
+    // carrying the current membership list. `local_scheduler`
+    // subscribes to it so `runs_on: agent` schedules targeting a
+    // group reflect membership changes without waiting for the
+    // next schedule edit.
+    let (groups_rx, _groups_handle) = groups::spawn(client.clone(), pc_id.clone(), dedup.clone());
     // Reconnect catch-up: durable consumer on STREAM_EXEC that
     // replays the latest retained Command per subject. See
     // `crates/kanade-agent/src/command_replay.rs` for the flow.
     command_replay::spawn(client.clone(), pc_id.clone(), dedup.clone());
+    // v0.24: file-based outbox for ExecResult publishes. Every
+    // result the agent produces is persisted under `outbox/<rid>.json`
+    // first; a background drain task publishes via JetStream and
+    // deletes on PubAck. Survives agent crashes + broker-down
+    // periods longer than the async-nats client buffer.
+    let outbox_dir = default_paths::data_dir().join("outbox");
+    let _outbox_handle = outbox::spawn_drain(client.clone(), outbox_dir.clone());
     // v0.23: schedules marked `runs_on: agent` tick locally so the
     // agent keeps firing even when the broker is unreachable. See
     // `crates/kanade-agent/src/local_scheduler.rs` for the flow.
     let completions_path = default_paths::data_dir().join("local_completions.json");
-    local_scheduler::spawn(client.clone(), pc_id.clone(), completions_path);
+    local_scheduler::spawn(client.clone(), pc_id.clone(), completions_path, groups_rx);
 
     let _ = tokio::join!(
         commands::command_loop(client.clone(), pc_id.clone(), dedup.clone(), cmd_all),

@@ -4,12 +4,14 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_nats::jetstream::kv::Store;
 use futures::StreamExt;
+use kanade_shared::ExecResult;
+use kanade_shared::default_paths;
 use kanade_shared::kv::{BUCKET_SCRIPT_CURRENT, BUCKET_SCRIPT_STATUS, SCRIPT_STATUS_REVOKED};
 use kanade_shared::wire::Command;
-use kanade_shared::{ExecResult, subject};
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
+use crate::outbox;
 use crate::process::{ExecOutcome, run_command_with_kill};
 
 /// FIFO-bounded set of recently-seen `request_id`s. Shared between
@@ -215,11 +217,18 @@ pub async fn handle_command(
         // `inventory:` hint and upsert `inventory_facts` rows.
         manifest_id: Some(cmd.id.clone()),
     };
-    let payload = serde_json::to_vec(&result)?;
-    client
-        .publish(subject::results(&cmd.request_id), payload.into())
-        .await?;
-    info!(request_id = %cmd.request_id, exit_code, "published result");
+    let outbox_dir = default_paths::data_dir().join("outbox");
+    let path = outbox::enqueue(&outbox_dir, &result)?;
+    info!(
+        request_id = %cmd.request_id,
+        exit_code,
+        outbox = %path.display(),
+        "result enqueued to outbox (drain task delivers via JetStream)",
+    );
+    // `client` is now unused on the happy path; suppress the warning
+    // — we keep it in the signature so future hooks (audit, kill
+    // ack, etc.) have it available.
+    let _ = client;
     Ok(())
 }
 
@@ -241,7 +250,7 @@ fn should_skip_for_deadline(
 /// skipped"; stderr carries the deadline + receipt timestamp so
 /// the operator can see *how* late we were on the Results page.
 async fn publish_skipped(
-    client: &async_nats::Client,
+    _client: &async_nats::Client,
     pc_id: &str,
     cmd: &Command,
     deadline: chrono::DateTime<chrono::Utc>,
@@ -268,14 +277,13 @@ async fn publish_skipped(
         finished_at: now,
         manifest_id: Some(cmd.id.clone()),
     };
-    let payload = serde_json::to_vec(&result)?;
-    client
-        .publish(subject::results(&cmd.request_id), payload.into())
-        .await?;
+    let outbox_dir = default_paths::data_dir().join("outbox");
+    let path = outbox::enqueue(&outbox_dir, &result)?;
     info!(
         request_id = %cmd.request_id,
         exit_code = 125,
-        "published synthetic skipped-result (deadline expired)",
+        outbox = %path.display(),
+        "synthetic skipped-result enqueued to outbox",
     );
     Ok(())
 }

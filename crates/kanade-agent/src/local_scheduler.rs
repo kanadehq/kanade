@@ -36,10 +36,10 @@ use async_nats::jetstream::kv::Operation;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures::{StreamExt, TryStreamExt};
 use kanade_shared::kv::{
-    BUCKET_AGENT_GROUPS, BUCKET_JOBS, BUCKET_SCHEDULES, BUCKET_SCRIPT_CURRENT, BUCKET_SCRIPT_STATUS,
+    BUCKET_JOBS, BUCKET_SCHEDULES, BUCKET_SCRIPT_CURRENT, BUCKET_SCRIPT_STATUS,
 };
 use kanade_shared::manifest::{ExecMode, Manifest, RunsOn, Schedule};
-use kanade_shared::wire::{AgentGroups, Command};
+use kanade_shared::wire::Command;
 use tokio::sync::Mutex;
 use tokio_cron_scheduler::{Job, JobScheduler};
 use tracing::{debug, error, info, warn};
@@ -137,15 +137,21 @@ pub fn spawn(
     client: async_nats::Client,
     pc_id: String,
     completions_path: PathBuf,
+    groups_rx: tokio::sync::watch::Receiver<Vec<String>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        if let Err(e) = run(client, pc_id, completions_path).await {
+        if let Err(e) = run(client, pc_id, completions_path, groups_rx).await {
             error!(error = ?e, "local_scheduler loop exited with error");
         }
     })
 }
 
-async fn run(client: async_nats::Client, pc_id: String, completions_path: PathBuf) -> Result<()> {
+async fn run(
+    client: async_nats::Client,
+    pc_id: String,
+    completions_path: PathBuf,
+    groups_rx: tokio::sync::watch::Receiver<Vec<String>>,
+) -> Result<()> {
     let js = async_nats::jetstream::new(client.clone());
     let schedules_kv = js
         .get_key_value(BUCKET_SCHEDULES)
@@ -182,9 +188,11 @@ async fn run(client: async_nats::Client, pc_id: String, completions_path: PathBu
     //    can find their Manifest.
     prime_jobs_cache(&jobs_kv, &state).await;
 
-    // 2) Read current group membership once at boot; we'll re-read
-    //    it on every schedule edit (cheap, KV is small).
-    let my_groups = read_my_groups(&js, &pc_id).await;
+    // 2) Initial group membership snapshot from the watch channel
+    //    (`groups::spawn` publishes the current value the moment the
+    //    KV read finishes, so this borrow is safe even before any
+    //    edit fires).
+    let my_groups = groups_rx.borrow().clone();
     info!(
         pc_id = %pc_id,
         groups = ?my_groups,
@@ -205,9 +213,12 @@ async fn run(client: async_nats::Client, pc_id: String, completions_path: PathBu
     let count = state.lock().await.registered.len();
     info!(count, "local_scheduler: registered initial schedules");
 
-    // 4) Watch both buckets in parallel. Schedule edits trigger
-    //    reconcile; job edits update the cache so the next tick
-    //    sees the new script body.
+    // 4) Three concurrent watch loops:
+    //   * schedules KV → reconcile / unregister per entry
+    //   * jobs KV       → keep the Manifest cache fresh
+    //   * groups_rx     → membership changes → re-reconcile ALL
+    //                     cached schedules so group-targeted ones
+    //                     get picked up / dropped right away
     let schedules_watch = schedules_kv
         .watch_all()
         .await
@@ -218,7 +229,7 @@ async fn run(client: async_nats::Client, pc_id: String, completions_path: PathBu
     let state_for_sched = state.clone();
     let client_for_sched = client.clone();
     let pc_id_for_sched = pc_id.clone();
-    let js_for_sched = js.clone();
+    let groups_rx_for_sched = groups_rx.clone();
     let sched_task = tokio::spawn(async move {
         let mut watch = schedules_watch;
         while let Some(entry) = watch.next().await {
@@ -229,10 +240,7 @@ async fn run(client: async_nats::Client, pc_id: String, completions_path: PathBu
                     continue;
                 }
             };
-            // Refresh group membership on every schedule edit. The
-            // wider problem of "membership flipped without a
-            // schedule edit" lands with the v0.24 outbox work.
-            let groups = read_my_groups(&js_for_sched, &pc_id_for_sched).await;
+            let groups_snapshot = groups_rx_for_sched.borrow().clone();
             match entry.operation {
                 Operation::Put => {
                     if let Ok(s) = serde_json::from_slice::<Schedule>(&entry.value) {
@@ -241,7 +249,7 @@ async fn run(client: async_nats::Client, pc_id: String, completions_path: PathBu
                             &state_for_sched,
                             &client_for_sched,
                             &pc_id_for_sched,
-                            &groups,
+                            &groups_snapshot,
                             &s,
                         )
                         .await;
@@ -282,7 +290,73 @@ async fn run(client: async_nats::Client, pc_id: String, completions_path: PathBu
         }
     });
 
-    let _ = tokio::join!(sched_task, jobs_task);
+    // v0.24: group-membership change handler. Re-reconciles every
+    // schedule the agent already knows about so target.groups overlap
+    // re-evaluates without waiting for the next schedule edit.
+    let internal_for_groups = internal.clone();
+    let state_for_groups = state.clone();
+    let client_for_groups = client.clone();
+    let pc_id_for_groups = pc_id.clone();
+    let mut groups_rx_for_watch = groups_rx;
+    let groups_task = tokio::spawn(async move {
+        // Skip the initial value — already used above for the boot
+        // pass. Future changes flow through here.
+        loop {
+            if groups_rx_for_watch.changed().await.is_err() {
+                break;
+            }
+            let new_groups = groups_rx_for_watch.borrow().clone();
+            info!(
+                groups = ?new_groups,
+                "local_scheduler: group membership changed; re-reconciling all schedules",
+            );
+            let cached: Vec<Schedule> = {
+                let st = state_for_groups.lock().await;
+                st.schedules.values().cloned().collect()
+            };
+            // Also need to consider schedules that AREN'T currently
+            // registered (= weren't ours before but might be now).
+            // Walk schedules KV again.
+            let js = async_nats::jetstream::new(client_for_groups.clone());
+            let kv = match js.get_key_value(BUCKET_SCHEDULES).await {
+                Ok(k) => k,
+                Err(e) => {
+                    warn!(error = %e, "groups change: schedules KV unavailable");
+                    continue;
+                }
+            };
+            let keys: Vec<String> = match kv.keys().await {
+                Ok(s) => s.try_collect().await.unwrap_or_default(),
+                Err(_) => Vec::new(),
+            };
+            let mut seen = std::collections::HashSet::new();
+            for k in keys {
+                seen.insert(k.clone());
+                if let Ok(Some(bytes)) = kv.get(&k).await
+                    && let Ok(s) = serde_json::from_slice::<Schedule>(&bytes)
+                {
+                    reconcile_schedule(
+                        &internal_for_groups,
+                        &state_for_groups,
+                        &client_for_groups,
+                        &pc_id_for_groups,
+                        &new_groups,
+                        &s,
+                    )
+                    .await;
+                }
+            }
+            // Drop schedules that disappeared from KV between
+            // the schedule-watch pass and now.
+            for cached_s in cached {
+                if !seen.contains(&cached_s.id) {
+                    unregister_locally(&internal_for_groups, &state_for_groups, &cached_s.id).await;
+                }
+            }
+        }
+    });
+
+    let _ = tokio::join!(sched_task, jobs_task, groups_task);
     Ok(())
 }
 
@@ -300,17 +374,9 @@ async fn prime_jobs_cache(jobs_kv: &async_nats::jetstream::kv::Store, state: &Ar
     }
 }
 
-async fn read_my_groups(js: &async_nats::jetstream::Context, pc_id: &str) -> Vec<String> {
-    let Ok(kv) = js.get_key_value(BUCKET_AGENT_GROUPS).await else {
-        return Vec::new();
-    };
-    let Ok(Some(bytes)) = kv.get(pc_id).await else {
-        return Vec::new();
-    };
-    serde_json::from_slice::<AgentGroups>(&bytes)
-        .map(|g| g.groups)
-        .unwrap_or_default()
-}
+// v0.24: `read_my_groups` removed — membership now flows through the
+// `groups::spawn` watch channel that `local_scheduler` subscribes to,
+// so we no longer poll the KV ourselves.
 
 async fn reconcile_schedule(
     internal: &JobScheduler,

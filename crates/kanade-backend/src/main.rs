@@ -8,17 +8,19 @@ mod web;
 #[cfg(target_os = "windows")]
 mod service;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use kanade_shared::config::load_backend_config;
+use kanade_shared::config::{LogSection, load_backend_config};
 use kanade_shared::default_paths;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -60,13 +62,10 @@ fn main() -> Result<()> {
 }
 
 pub(crate) async fn run_backend() -> Result<()> {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,kanade_backend=debug,tower_http=info".into()),
-        )
-        .try_init();
-
+    // Config first so the tracing init can honor [log] path / level
+    // / keep_days. v0.24: prior to this the backend's tracing layer
+    // was stdout-only, which meant the Windows service (no console)
+    // wrote zero log lines anywhere on disk — invisible crashes.
     let cli = Cli::parse();
     let cfg_path = default_paths::find_config(
         cli.config.as_deref(),
@@ -75,10 +74,18 @@ pub(crate) async fn run_backend() -> Result<()> {
     )?;
     let cfg =
         load_backend_config(&cfg_path).with_context(|| format!("load config from {cfg_path:?}"))?;
+
+    // _log_guard must outlive the program — tracing_appender's
+    // non_blocking writer flushes its pending buffer on Drop.
+    let _log_guard = init_tracing(&cfg.log)
+        .with_context(|| format!("init tracing from [log] in {cfg_path:?}"))?;
+
     info!(
         bind = %cfg.server.bind,
         nats = %cfg.nats.url,
         db = %cfg.db.sqlite_path,
+        log_path = %cfg.log.path,
+        log_keep_days = cfg.log.keep_days,
         "starting kanade-backend",
     );
 
@@ -186,4 +193,55 @@ pub(crate) async fn run_backend() -> Result<()> {
     info!(bind = %cfg.server.bind, "axum serving");
     axum::serve(listener, app).await.context("axum serve")?;
     Ok(())
+}
+
+/// Build the tracing subscriber: stdout (useful in foreground /
+/// `cargo run` mode) + a daily-rotated file appender pointed at
+/// `[log] path`. `RUST_LOG`, if set, overrides `[log] level`.
+/// Returns the appender's `WorkerGuard`, which the caller must
+/// keep alive — its Drop flushes the non-blocking writer's
+/// pending buffer. v0.24: previously the backend used a stdout-
+/// only `tracing_subscriber::fmt()` init, which meant the Windows
+/// service (no console) wrote zero log lines anywhere on disk.
+fn init_tracing(log: &LogSection) -> Result<Option<tracing_appender::non_blocking::WorkerGuard>> {
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| log.level.clone().into());
+
+    // keep_days = 0 → opt out of file logging entirely (stdout only).
+    if log.keep_days == 0 {
+        let _ = tracing_subscriber::registry()
+            .with(env_filter)
+            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stdout))
+            .try_init();
+        return Ok(None);
+    }
+
+    let path = Path::new(&log.path);
+    let dir = path
+        .parent()
+        .with_context(|| format!("[log] path '{}' has no parent dir", log.path))?;
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("backend");
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("log");
+
+    std::fs::create_dir_all(dir).with_context(|| format!("create log dir {dir:?}"))?;
+
+    let appender = tracing_appender::rolling::Builder::new()
+        .filename_prefix(stem)
+        .filename_suffix(ext)
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .max_log_files(log.keep_days)
+        .build(dir)
+        .with_context(|| format!("build rolling appender at {dir:?}"))?;
+    let (non_blocking, guard) = tracing_appender::non_blocking(appender);
+
+    let _ = tracing_subscriber::registry()
+        .with(env_filter)
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stdout))
+        .with(tracing_subscriber::fmt::layer().with_writer(non_blocking))
+        .try_init();
+
+    Ok(Some(guard))
 }

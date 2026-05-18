@@ -13,7 +13,7 @@ keywords.workspace     = true
 categories.workspace   = true
 
 [dependencies]
-kanade-shared = { path = "../kanade-shared", version = "0.23.0" }
+kanade-shared = { path = "../kanade-shared", version = "0.24.0" }
 
 anyhow     = { workspace = true }
 async-nats = { workspace = true }
@@ -32,6 +32,9 @@ tracing    = { workspace = true }
 tracing-appender   = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid       = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # wmi crate dropped in v0.12.0 — inventory now shells out to
