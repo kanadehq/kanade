@@ -262,6 +262,98 @@ target: { all: true }
     }
 
     #[test]
+    fn schedule_mode_defaults_to_every_tick() {
+        let yaml = r#"
+id: x
+cron: "* * * * * *"
+job_id: y
+target: { all: true }
+"#;
+        let s: Schedule = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(s.mode, ExecMode::EveryTick);
+        assert!(s.cooldown.is_none());
+        assert!(!s.auto_disable_when_done);
+    }
+
+    #[test]
+    fn schedule_mode_serialises_snake_case() {
+        for (mode, expected) in [
+            (ExecMode::EveryTick, "every_tick"),
+            (ExecMode::OncePerPc, "once_per_pc"),
+            (ExecMode::OncePerTarget, "once_per_target"),
+        ] {
+            let s = serde_json::to_value(mode).expect("serialise");
+            assert_eq!(s, serde_json::Value::String(expected.into()));
+            let back: ExecMode = serde_json::from_value(serde_json::Value::String(expected.into()))
+                .expect("deserialise");
+            assert_eq!(back, mode, "round-trip for {expected}");
+        }
+    }
+
+    #[test]
+    fn schedule_kitting_yaml_parses() {
+        let yaml = r#"
+id: kitting-setup
+cron: "*/30 * * * * *"
+job_id: install-baseline
+target: { all: true }
+mode: once_per_pc
+"#;
+        let s: Schedule = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(s.mode, ExecMode::OncePerPc);
+        assert!(s.cooldown.is_none());
+        assert!(!s.auto_disable_when_done);
+    }
+
+    #[test]
+    fn schedule_batch_campaign_yaml_parses() {
+        let yaml = r#"
+id: q3-patch-batch
+cron: "*/5 * * * * *"
+job_id: install-patch
+target:
+  pcs: [pc-001, pc-002, pc-003]
+mode: once_per_pc
+auto_disable_when_done: true
+"#;
+        let s: Schedule = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(s.mode, ExecMode::OncePerPc);
+        assert!(s.cooldown.is_none());
+        assert!(s.auto_disable_when_done);
+        assert_eq!(s.plan.target.pcs.len(), 3);
+    }
+
+    #[test]
+    fn schedule_throttled_yaml_parses() {
+        let yaml = r#"
+id: daily-compliance
+cron: "*/5 * * * * *"
+job_id: check-av-status
+target: { all: true }
+mode: once_per_pc
+cooldown: 1d
+"#;
+        let s: Schedule = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(s.mode, ExecMode::OncePerPc);
+        assert_eq!(s.cooldown.as_deref(), Some("1d"));
+    }
+
+    #[test]
+    fn schedule_once_per_target_yaml_parses() {
+        let yaml = r#"
+id: license-checkin
+cron: "*/10 * * * * *"
+job_id: hit-license-server
+target: { all: true }
+mode: once_per_target
+cooldown: 24h
+"#;
+        let s: Schedule = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(s.mode, ExecMode::OncePerTarget);
+        assert_eq!(s.cooldown.as_deref(), Some("24h"));
+    }
+
+    #[test]
     fn execute_shell_into_wire_shell() {
         assert_eq!(Shell::from(ExecuteShell::Powershell), Shell::Powershell);
         assert_eq!(Shell::from(ExecuteShell::Cmd), Shell::Cmd);
@@ -302,8 +394,45 @@ pub struct Schedule {
     /// schedule.
     #[serde(flatten)]
     pub plan: FanoutPlan,
+    /// Per-pc/per-target dedup semantics (v0.19). Default
+    /// `EveryTick` keeps the historical "fire every cron tick at the
+    /// whole target" behavior.
+    #[serde(default)]
+    pub mode: ExecMode,
+    /// Humantime cooldown for `OncePerPc` / `OncePerTarget`. Once a
+    /// pc/target has succeeded, the scheduler waits this long before
+    /// considering it eligible again. Omit for "succeed once, then
+    /// permanently skip" — i.e. cooldown = infinity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cooldown: Option<String>,
+    /// When true AND the schedule's lifecycle is permanently
+    /// terminated (`cooldown = None` + dedup says nothing more to
+    /// do), the scheduler flips `enabled = false` and emits an
+    /// audit event. No-op when `cooldown` is set (re-arming
+    /// schedules never finish).
+    #[serde(default)]
+    pub auto_disable_when_done: bool,
     #[serde(default = "default_true")]
     pub enabled: bool,
+}
+
+/// Per-pc/per-target dedup semantics for a [`Schedule`] (v0.19).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecMode {
+    /// Fire on every cron tick at the whole target. Historical
+    /// (pre-v0.19) behavior; no dedup.
+    #[default]
+    EveryTick,
+    /// Fire at each pc until that pc succeeds; then skip it until
+    /// the optional cooldown elapses (or forever if no cooldown).
+    /// Use for kitting / first-boot / per-pc compliance checks.
+    OncePerPc,
+    /// Fire at the whole target until **any** pc succeeds; then
+    /// skip the whole target until the optional cooldown elapses
+    /// (or forever if no cooldown). Use for "one delegate is
+    /// enough" tasks like license check-in.
+    OncePerTarget,
 }
 
 fn default_true() -> bool {

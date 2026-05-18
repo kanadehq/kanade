@@ -83,8 +83,8 @@ pub async fn run(js: jetstream::Context, pool: SqlitePool) -> Result<()> {
 async fn insert_result(pool: &SqlitePool, r: &ExecResult) -> Result<()> {
     sqlx::query(
         "INSERT INTO execution_results (
-             request_id, pc_id, exit_code, stdout, stderr, started_at, finished_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?)
+             request_id, pc_id, exit_code, stdout, stderr, started_at, finished_at, job_id
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(request_id) DO NOTHING",
     )
     .bind(&r.request_id)
@@ -94,6 +94,7 @@ async fn insert_result(pool: &SqlitePool, r: &ExecResult) -> Result<()> {
     .bind(&r.stderr)
     .bind(r.started_at)
     .bind(r.finished_at)
+    .bind(&r.manifest_id)
     .execute(pool)
     .await?;
     Ok(())

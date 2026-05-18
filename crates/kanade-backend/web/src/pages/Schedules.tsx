@@ -15,6 +15,9 @@ type ScheduleRow = {
   target: { all: boolean; groups: string[]; pcs: string[] };
   rollout: { waves: { group: string; delay: string }[] } | null;
   jitter: string | null;
+  mode: 'every_tick' | 'once_per_pc' | 'once_per_target';
+  cooldown: string | null;
+  auto_disable_when_done: boolean;
   enabled: boolean;
 };
 
@@ -79,6 +82,9 @@ export function Schedules() {
             <TableHead>cron</TableHead>
             <TableHead>job_id</TableHead>
             <TableHead>target</TableHead>
+            <TableHead>mode</TableHead>
+            <TableHead>cooldown</TableHead>
+            <TableHead>auto-off</TableHead>
             <TableHead>jitter</TableHead>
             <TableHead>rollout</TableHead>
             <TableHead>enabled</TableHead>
@@ -92,6 +98,11 @@ export function Schedules() {
               <TableCell><code className="text-xs">{s.cron}</code></TableCell>
               <TableCell><code className="text-xs">{s.job_id}</code></TableCell>
               <TableCell className="text-xs">{summariseTarget(s.target)}</TableCell>
+              <TableCell><code className="text-xs">{s.mode}</code></TableCell>
+              <TableCell><code className="text-xs">{s.cooldown ?? '—'}</code></TableCell>
+              <TableCell className="text-xs">
+                {s.auto_disable_when_done ? 'yes' : <span className="text-muted">—</span>}
+              </TableCell>
               <TableCell><code className="text-xs">{s.jitter ?? '—'}</code></TableCell>
               <TableCell className="text-xs">
                 {s.rollout
