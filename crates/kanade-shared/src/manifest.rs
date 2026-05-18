@@ -140,6 +140,17 @@ pub struct Execute {
     /// LocalSystem privileges, no GUI) — matches pre-v0.21 behavior.
     #[serde(default)]
     pub run_as: RunAs,
+    /// Working directory for the spawned child (v0.21.1). When
+    /// unset, the child inherits the agent's cwd — on Windows that
+    /// means `%SystemRoot%\System32` for the prod service, which is
+    /// almost never what operators actually want. Use an absolute
+    /// path; relative paths are passed through to the OS verbatim.
+    /// `%PROGRAMDATA%` works for `run_as: system`; for `run_as: user`
+    /// you'd want `%USERPROFILE%` (but expansion happens in the
+    /// shell, so write `$env:USERPROFILE` for PowerShell, or set
+    /// it via teravars before `kanade job create`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]

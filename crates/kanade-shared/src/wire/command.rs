@@ -15,6 +15,11 @@ pub struct Command {
     /// back-compat with pre-v0.21 backends that don't send this field.
     #[serde(default)]
     pub run_as: RunAs,
+    /// Working directory for the spawned child (v0.21.1). `None` ⇒
+    /// inherit the agent's cwd. Pre-v0.21.1 wire payloads omit this
+    /// field and parse fine via `#[serde(default)]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +77,7 @@ mod tests {
             timeout_secs: 30,
             jitter_secs: Some(5),
             run_as: RunAs::System,
+            cwd: None,
         }
     }
 
@@ -147,5 +153,7 @@ mod tests {
         assert_eq!(cmd.shell, Shell::Cmd);
         // Pre-v0.21 wire payloads omit run_as → falls back to System.
         assert_eq!(cmd.run_as, RunAs::System);
+        // Pre-v0.21.1 omit cwd → None (= inherit agent cwd).
+        assert!(cmd.cwd.is_none());
     }
 }

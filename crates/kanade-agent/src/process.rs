@@ -65,11 +65,16 @@ pub async fn run_command_with_kill(
         ),
         Shell::Cmd => ("cmd", vec!["/C", &cmd.script]),
     };
-    let mut child = ProcessCommand::new(program)
+    let mut builder = ProcessCommand::new(program);
+    builder
         .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+    if let Some(dir) = cmd.cwd.as_deref().filter(|s| !s.is_empty()) {
+        builder.current_dir(dir);
+    }
+    let mut child = builder
         .spawn()
         .with_context(|| format!("spawn {program}"))?;
 

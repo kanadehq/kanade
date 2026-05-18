@@ -72,12 +72,13 @@ pub async fn run_command_in_user_session(
     debug_assert!(matches!(run_as, RunAs::User | RunAs::SystemGui));
 
     let cmd_line = build_command_line(cmd);
+    let cwd = cmd.cwd.clone();
     // 1) Spawn on a blocking thread (Win32 dance is sync).
     let SpawnHandles {
         process,
         stdout_read,
         stderr_read,
-    } = tokio::task::spawn_blocking(move || spawn_native(&cmd_line, run_as))
+    } = tokio::task::spawn_blocking(move || spawn_native(&cmd_line, run_as, cwd.as_deref()))
         .await
         .map_err(|e| anyhow!("spawn-blocking join: {e}"))??;
     let process = Arc::new(process);
@@ -177,7 +178,7 @@ unsafe impl Sync for SafeHandle {}
 
 // ── Synchronous Win32 building blocks ─────────────────────────────
 
-fn spawn_native(cmd_line: &[u16], run_as: RunAs) -> Result<SpawnHandles> {
+fn spawn_native(cmd_line: &[u16], run_as: RunAs, cwd: Option<&str>) -> Result<SpawnHandles> {
     unsafe {
         let session = WTSGetActiveConsoleSessionId();
         if session == u32::MAX {
@@ -214,6 +215,19 @@ fn spawn_native(cmd_line: &[u16], run_as: RunAs) -> Result<SpawnHandles> {
         let mut cmd_buf: Vec<u16> = cmd_line.to_vec();
         let flags = CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW;
 
+        // CreateProcessAsUserW's lpCurrentDirectory wants a
+        // NUL-terminated wide string or NULL (= inherit parent's cwd).
+        // Keep the backing Vec alive until after the call.
+        let cwd_wide: Option<Vec<u16>> = cwd.filter(|s| !s.is_empty()).map(|s| {
+            let mut v: Vec<u16> = s.encode_utf16().collect();
+            v.push(0);
+            v
+        });
+        let cwd_pwstr = match &cwd_wide {
+            Some(v) => PWSTR(v.as_ptr() as *mut _),
+            None => PWSTR::null(),
+        };
+
         let result = CreateProcessAsUserW(
             Some(token.raw()),
             PWSTR::null(),
@@ -223,7 +237,7 @@ fn spawn_native(cmd_line: &[u16], run_as: RunAs) -> Result<SpawnHandles> {
             true,
             flags,
             Some(env_guard.0 as *const _ as _),
-            PWSTR::null(),
+            cwd_pwstr,
             &si,
             &mut pi,
         );

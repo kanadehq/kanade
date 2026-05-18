@@ -40,6 +40,15 @@ execute:
   #   system_gui           — user's session + LocalSystem privs.
   #                          Niche: admin installer with visible UI.
   run_as: system
+  # Optional v0.21.1: working directory for the spawned shell. Without
+  # this the agent service's cwd (= %SystemRoot%\System32 on Windows)
+  # is inherited, which is almost never what scripts expect.
+  # Absolute paths only. Examples:
+  #   cwd: 'C:\ProgramData\Kanade\data'      # writable system dir
+  #   cwd: 'C:\Windows\Temp'                  # ephemeral
+  # For run_as: user, write the user's path explicitly — env-var
+  # expansion (%USERPROFILE%) happens inside the shell, not on cwd.
+  # cwd: 'C:\ProgramData\Kanade\data'
   script: |
     $ErrorActionPreference = 'Stop'
     Write-Output "kitting kanade-setup on $env:COMPUTERNAME at $(Get-Date -Format 'o')"
