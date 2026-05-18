@@ -4,8 +4,14 @@ import { cn } from '@/lib/utils';
 
 export const Table = forwardRef<HTMLTableElement, HTMLAttributes<HTMLTableElement>>(
   ({ className, ...props }, ref) => (
-    <div className="rounded-lg border border-border overflow-hidden bg-card">
-      <table ref={ref} className={cn('w-full text-sm', className)} {...props} />
+    // overflow-x-auto on the wrapper lets narrow viewports scroll
+    // horizontally instead of clipping the right edge. The table
+    // takes parent width by default (w-full) but stretches to its
+    // intrinsic content width when columns would otherwise compress
+    // unreadably (min-w-max) — on mobile this surfaces every column
+    // behind a horizontal scrollbar rather than truncating.
+    <div className="rounded-lg border border-border overflow-x-auto bg-card">
+      <table ref={ref} className={cn('w-full min-w-max text-sm', className)} {...props} />
     </div>
   ),
 );
