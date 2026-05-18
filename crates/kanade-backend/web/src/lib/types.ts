@@ -37,17 +37,13 @@ export type AgentGroups = {
 
 export type ConfigScope = {
   target_version?: string;
-  inventory_interval?: string;
-  inventory_jitter?: string;
-  inventory_enabled?: boolean;
+  target_version_jitter?: string;
   heartbeat_interval?: string;
 };
 
 export type EffectiveConfig = {
   target_version: string | null;
-  inventory_interval: string;
-  inventory_jitter: string;
-  inventory_enabled: boolean;
+  target_version_jitter: string;
   heartbeat_interval: string;
 };
 

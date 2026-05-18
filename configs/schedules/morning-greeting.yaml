@@ -1,0 +1,23 @@
+# Schedule demonstrating `starting_deadline` (v0.22).
+#
+# Fires at 9:00 every weekday and shows a toast / notification to
+# the logged-in user. If the broker / agent was offline at 9:00 and
+# only delivered the Command at 11:00, we'd rather skip than have
+# a "good morning" pop up two hours late.
+#
+# `starting_deadline: 30m` → if the agent doesn't receive the
+# Command within 30 minutes of 9:00, it publishes a synthetic
+# skipped-result (exit_code 125 + explanatory stderr) so the
+# operator sees the miss on the Results page.
+#
+# Compare with `configs/schedules/kitting-once.yaml` (no deadline),
+# where catching up later is exactly what we want.
+
+id: morning-greeting
+cron: "0 0 9 * * mon-fri"   # 9:00 weekdays (sec min hour day month dow)
+enabled: true
+job_id: show-toast            # replace with your real toast/notify job
+target:
+  all: true
+mode: every_tick              # fire every weekday; no per-pc dedup needed
+starting_deadline: 30m

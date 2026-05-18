@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Loader2, Trash2 } from 'lucide-react';
+import { Loader2, Power, PowerOff, Trash2 } from 'lucide-react';
 
 import { ErrorCard } from '@/components/ErrorCard';
 import { Badge } from '@/components/ui/badge';
@@ -11,9 +11,25 @@ import { apiFetch } from '@/lib/api';
 type ScheduleRow = {
   id: string;
   cron: string;
-  manifest: { id: string; version: string };
+  job_id: string;
+  target: { all: boolean; groups: string[]; pcs: string[] };
+  rollout: { waves: { group: string; delay: string }[] } | null;
+  jitter: string | null;
+  mode: 'every_tick' | 'once_per_pc' | 'once_per_target';
+  cooldown: string | null;
+  auto_disable_when_done: boolean;
+  starting_deadline: string | null;
+  runs_on: 'backend' | 'agent';
   enabled: boolean;
 };
+
+function summariseTarget(t: ScheduleRow['target']): string {
+  if (t.all) return 'all';
+  const parts: string[] = [];
+  if (t.groups.length) parts.push(`groups: ${t.groups.join(', ')}`);
+  if (t.pcs.length) parts.push(`pcs: ${t.pcs.join(', ')}`);
+  return parts.join(' · ') || '—';
+}
 
 export function Schedules() {
   const qc = useQueryClient();
@@ -24,6 +40,18 @@ export function Schedules() {
 
   const del = useMutation({
     mutationFn: (id: string) => apiFetch(`/api/schedules/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['schedules'] }),
+  });
+
+  // POST /api/schedules is an upsert, so we just re-POST the full row
+  // with `enabled` flipped. The scheduler's KV watcher picks up the
+  // change and registers/unregisters the cron job on the next put.
+  const toggle = useMutation({
+    mutationFn: (s: ScheduleRow) =>
+      apiFetch('/api/schedules', {
+        method: 'POST',
+        body: JSON.stringify({ ...s, enabled: !s.enabled }),
+      }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['schedules'] }),
   });
 
@@ -54,8 +82,15 @@ export function Schedules() {
           <TableRow>
             <TableHead>id</TableHead>
             <TableHead>cron</TableHead>
-            <TableHead>job</TableHead>
-            <TableHead>version</TableHead>
+            <TableHead>job_id</TableHead>
+            <TableHead>target</TableHead>
+            <TableHead>runs_on</TableHead>
+            <TableHead>mode</TableHead>
+            <TableHead>cooldown</TableHead>
+            <TableHead>deadline</TableHead>
+            <TableHead>auto-off</TableHead>
+            <TableHead>jitter</TableHead>
+            <TableHead>rollout</TableHead>
             <TableHead>enabled</TableHead>
             <TableHead>actions</TableHead>
           </TableRow>
@@ -65,14 +100,38 @@ export function Schedules() {
             <TableRow key={s.id}>
               <TableCell><code className="text-xs">{s.id}</code></TableCell>
               <TableCell><code className="text-xs">{s.cron}</code></TableCell>
-              <TableCell>{s.manifest.id}</TableCell>
-              <TableCell><code className="text-xs">{s.manifest.version}</code></TableCell>
+              <TableCell><code className="text-xs">{s.job_id}</code></TableCell>
+              <TableCell className="text-xs">{summariseTarget(s.target)}</TableCell>
+              <TableCell><code className="text-xs">{s.runs_on}</code></TableCell>
+              <TableCell><code className="text-xs">{s.mode}</code></TableCell>
+              <TableCell><code className="text-xs">{s.cooldown ?? '—'}</code></TableCell>
+              <TableCell><code className="text-xs">{s.starting_deadline ?? '—'}</code></TableCell>
+              <TableCell className="text-xs">
+                {s.auto_disable_when_done ? 'yes' : <span className="text-muted">—</span>}
+              </TableCell>
+              <TableCell><code className="text-xs">{s.jitter ?? '—'}</code></TableCell>
+              <TableCell className="text-xs">
+                {s.rollout
+                  ? `${s.rollout.waves.length} wave(s)`
+                  : <span className="text-muted">—</span>}
+              </TableCell>
               <TableCell>
                 {s.enabled
                   ? <Badge variant="success">on</Badge>
                   : <Badge variant="danger">off</Badge>}
               </TableCell>
-              <TableCell>
+              <TableCell className="flex gap-2">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={toggle.isPending}
+                  onClick={() => toggle.mutate(s)}
+                  title={s.enabled ? 'Disable this schedule' : 'Enable this schedule'}
+                >
+                  {s.enabled
+                    ? <><PowerOff className="size-3.5" />disable</>
+                    : <><Power className="size-3.5" />enable</>}
+                </Button>
                 <Button
                   variant="danger"
                   size="sm"
@@ -90,6 +149,7 @@ export function Schedules() {
         </TableBody>
       </Table>
       {del.error && <ErrorCard title="Delete failed" error={del.error} />}
+      {toggle.error && <ErrorCard title="Toggle failed" error={toggle.error} />}
     </div>
   );
 }

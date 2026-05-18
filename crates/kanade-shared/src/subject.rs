@@ -8,9 +8,12 @@ pub fn commands_pc(pc_id: &str) -> String {
     format!("commands.pc.{pc_id}")
 }
 
-pub fn commands_deploy(job_id: &str) -> String {
-    format!("commands.deploy.{job_id}")
-}
+// `commands_exec` (subject `commands.exec.<job_id>`) was removed in
+// v0.22.1. The STREAM_EXEC stream now catches the existing
+// `commands.{all,group.X,pc.Y}` subjects directly, so the dedicated
+// per-exec subject isn't needed any more. See
+// `kanade-agent::command_replay` for how reconnecting agents catch
+// up on missed messages.
 
 pub fn results(request_id: &str) -> String {
     format!("results.{request_id}")
@@ -41,7 +44,7 @@ pub fn logs_fetch(pc_id: &str) -> String {
 
 // v0.14: subject::inventory_request was retired alongside the
 // hardcoded inventory loop. On-demand collection now goes through
-// the normal deploy path (`kanade deploy configs/jobs/inventory-
+// the normal exec path (`kanade exec configs/jobs/inventory-
 // hw.yaml`) — Command + ExecResult + the inventory-fact projector
 // give operators the same effect with no extra subject.
 
@@ -64,15 +67,6 @@ mod tests {
     fn commands_pc_formats_id() {
         assert_eq!(commands_pc("minipc"), "commands.pc.minipc");
         assert_eq!(commands_pc("PC1234"), "commands.pc.PC1234");
-    }
-
-    #[test]
-    fn commands_deploy_formats_job_id() {
-        let job = "3c3c56b3-c83e-4c27-9fa9-4a75e1f5da6f";
-        assert_eq!(
-            commands_deploy(job),
-            "commands.deploy.3c3c56b3-c83e-4c27-9fa9-4a75e1f5da6f"
-        );
     }
 
     #[test]

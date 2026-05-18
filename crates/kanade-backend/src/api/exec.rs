@@ -1,8 +1,8 @@
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use kanade_shared::kv::BUCKET_SCRIPT_CURRENT;
-use kanade_shared::manifest::Manifest;
+use kanade_shared::manifest::{FanoutPlan, Manifest};
 use kanade_shared::subject;
 use kanade_shared::wire::Command;
 use serde::Serialize;
@@ -10,33 +10,40 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::api::AppState;
+use crate::api::jobs;
 use crate::audit;
 
 #[derive(Serialize, Clone)]
-pub struct DeployResponse {
-    pub deploy_id: String,
+pub struct ExecResponse {
+    pub exec_id: String,
     pub job_id: String,
     pub version: String,
     pub target_count: u32,
     pub subjects: Vec<String>,
 }
 
-/// Core deploy pipeline used by both the HTTP handler (actor = "cli") and
-/// the scheduler (actor = "scheduler"). Validates the manifest, fans the
-/// Command out across every target subject (or schedules wave-based
-/// fan-out when `rollout` is set), pins script_current, records a
-/// deployments row, and emits an audit event.
-pub async fn deploy_manifest(
+/// Core exec pipeline used by both the HTTP handler (actor = "cli") and
+/// the scheduler (actor = "scheduler"). Validates the [`FanoutPlan`],
+/// fans the Command out across every target subject (or schedules
+/// wave-based fan-out when `rollout` is set), pins script_current,
+/// records an `executions` row, and emits an audit event.
+///
+/// v0.18: the Manifest supplies only "what to run" (script + shell +
+/// timeout + inventory hint). `target` / `rollout` / `jitter` come
+/// from the caller's [`FanoutPlan`] — schedules carry one inline,
+/// ad-hoc execs build one from CLI flags / SPA form input.
+pub async fn exec_manifest(
     s: &AppState,
     manifest: Manifest,
+    plan: FanoutPlan,
     actor: &str,
-) -> Result<DeployResponse, (StatusCode, String)> {
-    let has_rollout = manifest
+) -> Result<ExecResponse, (StatusCode, String)> {
+    let has_rollout = plan
         .rollout
         .as_ref()
         .map(|r| !r.waves.is_empty())
         .unwrap_or(false);
-    if !has_rollout && !manifest.target.is_specified() {
+    if !has_rollout && !plan.target.is_specified() {
         return Err((
             StatusCode::BAD_REQUEST,
             "target must specify at least one of `all` / `groups` / `pcs` (or set `rollout.waves`)"
@@ -47,8 +54,7 @@ pub async fn deploy_manifest(
     let timeout_secs = humantime::parse_duration(&manifest.execute.timeout)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid timeout: {e}")))?
         .as_secs();
-    let jitter_secs = manifest
-        .execute
+    let jitter_secs = plan
         .jitter
         .as_deref()
         .map(humantime::parse_duration)
@@ -56,25 +62,29 @@ pub async fn deploy_manifest(
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid jitter: {e}")))?
         .map(|d| d.as_secs());
 
-    let deploy_id = Uuid::new_v4().to_string();
+    let exec_id = Uuid::new_v4().to_string();
 
+    let deadline_at = plan.deadline_at;
     let make_cmd = || Command {
         id: manifest.id.clone(),
         version: manifest.version.clone(),
         request_id: Uuid::new_v4().to_string(),
-        job_id: Some(deploy_id.clone()),
+        job_id: Some(exec_id.clone()),
         shell: manifest.execute.shell.into(),
         script: manifest.execute.script.clone(),
         timeout_secs,
         jitter_secs,
+        run_as: manifest.execute.run_as,
+        cwd: manifest.execute.cwd.clone(),
+        deadline_at,
     };
 
     let mut subjects: Vec<String> = Vec::new();
     let mut target_count: u32 = 0;
 
-    if let Some(rollout) = manifest.rollout.as_ref() {
+    if let Some(rollout) = plan.rollout.as_ref() {
         // Wave-based fan-out: pre-validate every delay so a bad humantime
-        // string aborts the whole deploy instead of silently failing on a
+        // string aborts the whole exec instead of silently failing on a
         // late wave inside a tokio::spawn.
         let mut delays = Vec::with_capacity(rollout.waves.len());
         for (idx, wave) in rollout.waves.iter().enumerate() {
@@ -131,15 +141,15 @@ pub async fn deploy_manifest(
         }
     } else {
         // Plain target-based fan-out (no rollout block).
-        if manifest.target.all {
+        if plan.target.all {
             subjects.push(subject::COMMANDS_ALL.to_string());
             target_count = target_count.saturating_add(1);
         }
-        for g in &manifest.target.groups {
+        for g in &plan.target.groups {
             subjects.push(subject::commands_group(g));
             target_count = target_count.saturating_add(1);
         }
-        for pc in &manifest.target.pcs {
+        for pc in &plan.target.pcs {
             subjects.push(subject::commands_pc(pc));
             target_count = target_count.saturating_add(1);
         }
@@ -172,10 +182,10 @@ pub async fn deploy_manifest(
     }
 
     sqlx::query(
-        "INSERT INTO deployments (deploy_id, job_id, version, initiated_by, target_count, status)
+        "INSERT INTO executions (exec_id, job_id, version, initiated_by, target_count, status)
          VALUES (?, ?, ?, ?, ?, 'pending')",
     )
-    .bind(&deploy_id)
+    .bind(&exec_id)
     .bind(&manifest.id)
     .bind(&manifest.version)
     .bind(actor)
@@ -185,28 +195,28 @@ pub async fn deploy_manifest(
     .map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("insert deployments: {e}"),
+            format!("insert executions: {e}"),
         )
     })?;
 
     info!(
-        deploy_id = %deploy_id,
+        exec_id = %exec_id,
         job_id = %manifest.id,
         version = %manifest.version,
         actor,
         target_count,
         wave_mode = has_rollout,
         subjects = ?subjects,
-        "deployment published",
+        "execution published",
     );
 
     audit::record(
         &s.nats,
         actor,
-        "deploy",
+        "exec",
         Some(&manifest.id),
         serde_json::json!({
-            "deploy_id": deploy_id,
+            "exec_id": exec_id,
             "version": manifest.version,
             "target_count": target_count,
             "subjects": subjects,
@@ -215,8 +225,8 @@ pub async fn deploy_manifest(
     )
     .await;
 
-    Ok(DeployResponse {
-        deploy_id,
+    Ok(ExecResponse {
+        exec_id,
         job_id: manifest.id,
         version: manifest.version,
         target_count,
@@ -224,9 +234,33 @@ pub async fn deploy_manifest(
     })
 }
 
+/// `POST /api/exec/{job_id}` — fire a registered job from the
+/// catalog against a caller-supplied [`FanoutPlan`]. The Manifest body
+/// is never accepted inline; operators must `kanade job create` first.
+/// 404 when the job isn't in `BUCKET_JOBS`.
 pub async fn create(
     State(s): State<AppState>,
-    Json(manifest): Json<Manifest>,
-) -> Result<Json<DeployResponse>, (StatusCode, String)> {
-    deploy_manifest(&s, manifest, "cli").await.map(Json)
+    Path(job_id): Path<String>,
+    Json(plan): Json<FanoutPlan>,
+) -> Result<Json<ExecResponse>, (StatusCode, String)> {
+    let manifest = match jobs::fetch(&s.jetstream, &job_id).await {
+        Ok(Some(m)) => m,
+        Ok(None) => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                format!(
+                    "job '{job_id}' not found in catalog — register it first with \
+                     `kanade job create <manifest.yaml>`"
+                ),
+            ));
+        }
+        Err(e) => {
+            warn!(error = %e, %job_id, "exec: job catalog lookup failed");
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("job catalog lookup: {e}"),
+            ));
+        }
+    };
+    exec_manifest(&s, manifest, plan, "cli").await.map(Json)
 }

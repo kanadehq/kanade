@@ -6,7 +6,7 @@
 #     listens on the group subject; the easier path is to flip the agent
 #     subscription temporarily (Sprint 4a doesn't ship a group-membership
 #     mechanism — that's Sprint 4d alongside the dynamic group KV).
-#   * Sprint 4a's deploy_manifest publishes wave[0] immediately,
+#   * Sprint 4a's exec_manifest publishes wave[0] immediately,
 #     schedules wave[1] for delay=5s via tokio::spawn.
 
 id: wave-echo

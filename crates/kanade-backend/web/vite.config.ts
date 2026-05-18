@@ -20,6 +20,11 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    // Allow Tailscale MagicDNS hosts (`<host>.<tailnet>.ts.net`) so
+    // phones reach the dev server over Tailscale without each operator
+    // adding their personal tailnet here. IPs are always allowed, so
+    // 100.x and LAN access keep working with no extra entry.
+    allowedHosts: ['.ts.net'],
     proxy: {
       // Dev backend runs on :8081 (see `cargo make backend-dev`,
       // which uses backend.dev.toml). The production KanadeBackend

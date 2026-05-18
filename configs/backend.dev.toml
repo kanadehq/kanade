@@ -9,8 +9,11 @@
 [server]
 bind = '127.0.0.1:8081'
 
+# Dev NATS lives on :4223 (see `cargo make nats-dev`), distinct from
+# the prod KanadeNats service on :4222 — keeps dev fan-outs and KV
+# registrations isolated from the real fleet.
 [nats]
-url = 'nats://127.0.0.1:4222'
+url = 'nats://127.0.0.1:4223'
 
 [db]
 # Workspace-relative path; backend.rs::main creates the parent dir

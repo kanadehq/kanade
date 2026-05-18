@@ -15,7 +15,8 @@ pub struct ScheduleArgs {
 pub enum ScheduleSub {
     /// Upsert a schedule from a YAML file.
     Create {
-        /// Path to the schedule YAML (`id` / `cron` / `manifest` / `enabled`).
+        /// Path to the schedule YAML (`id` / `cron` / `job_id` / `enabled`).
+        /// The referenced job must already be registered via `kanade job create`.
         yaml: PathBuf,
     },
     /// List all schedules currently stored in the schedules KV.
@@ -37,7 +38,12 @@ async fn create(base: &str, yaml: &PathBuf) -> Result<()> {
     let body = std::fs::read_to_string(yaml).with_context(|| format!("read {yaml:?}"))?;
     let schedule: Schedule =
         serde_yaml::from_str(&body).with_context(|| format!("parse {yaml:?}"))?;
-    info!(schedule_id = %schedule.id, cron = %schedule.cron, "upserting schedule");
+    info!(
+        schedule_id = %schedule.id,
+        cron = %schedule.cron,
+        job_id = %schedule.job_id,
+        "upserting schedule",
+    );
 
     let url = format!("{base}/api/schedules");
     let resp = crate::http_client::authed_client()?

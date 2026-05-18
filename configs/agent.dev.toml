@@ -1,0 +1,21 @@
+# Dev-mode agent config — pointed at by `cargo make agent-dev`.
+#
+# Talks to the dev NATS broker on :4223 (see `cargo make nats-dev`),
+# so it stays fully isolated from the prod KanadeAgent service on
+# the same machine — that one connects to :4222 and is on its own
+# broker network. Both agents can use the same hostname-derived
+# pc_id without colliding.
+#
+# Logs go under target/dev-data/ to avoid stepping on the prod
+# agent.log under %ProgramData%\Kanade\logs.
+
+[vars]
+hostname = '{{ system.host }}'
+
+[agent]
+id       = '{{ vars.hostname }}'
+nats_url = 'nats://127.0.0.1:4223'
+
+[log]
+path  = './target/dev-data/agent.log'
+level = 'info'

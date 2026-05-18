@@ -44,7 +44,7 @@ pub async fn list(
     State(pool): State<SqlitePool>,
     Query(params): Query<ListParams>,
 ) -> Result<Json<Vec<ResultRow>>, StatusCode> {
-    let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new("SELECT * FROM deployment_results");
+    let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new("SELECT * FROM execution_results");
     let mut sep = " WHERE ";
 
     if let Some(pc) = params.pc_id.as_deref().filter(|s| !s.is_empty()) {
@@ -78,7 +78,7 @@ pub async fn detail(
     State(pool): State<SqlitePool>,
     Path(request_id): Path<String>,
 ) -> Result<Json<ResultRow>, StatusCode> {
-    let row = sqlx::query("SELECT * FROM deployment_results WHERE request_id = ?")
+    let row = sqlx::query("SELECT * FROM execution_results WHERE request_id = ?")
         .bind(&request_id)
         .fetch_optional(&pool)
         .await

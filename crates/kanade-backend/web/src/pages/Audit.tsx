@@ -83,7 +83,7 @@ export function Audit() {
             <Label htmlFor="audit-action">action</Label>
             <Input
               id="audit-action"
-              placeholder="exact match — eg. deploy"
+              placeholder="exact match — eg. exec"
               value={action}
               onChange={(e) => setAction(e.target.value)}
             />

@@ -74,6 +74,16 @@ pub async fn run(
         script: req.script,
         timeout_secs: req.timeout_secs,
         jitter_secs: req.jitter_secs,
+        // `kanade run` is inherently inline / one-PC / synchronous,
+        // so the inherited agent identity (= LocalSystem in prod) is
+        // always the right default. Use a Job + `kanade exec` if you
+        // need run_as: user / system_gui.
+        run_as: kanade_shared::wire::RunAs::System,
+        // Same rationale: cwd customisation belongs on a registered
+        // Job, not on inline ad-hoc runs.
+        cwd: None,
+        // Ad-hoc `kanade run` has no scheduled tick → no deadline.
+        deadline_at: None,
     };
 
     let result_subj = subject::results(&request_id);

@@ -6,6 +6,14 @@ mod logs;
 mod process;
 mod self_update;
 
+mod command_replay;
+mod local_scheduler;
+mod outbox;
+
+#[cfg(target_os = "windows")]
+mod cwd_expand;
+#[cfg(target_os = "windows")]
+mod process_as_user;
 #[cfg(target_os = "windows")]
 mod service;
 
@@ -114,23 +122,6 @@ pub(crate) async fn run_agent() -> Result<()> {
     // channel; heartbeat / inventory / self_update subscribe.
     let cfg_rx = config_supervisor::spawn(client.clone(), pc_id.clone());
 
-    // v0.14: the hardcoded inventory loop is gone. agent.toml's
-    // [inventory] section + ConfigScope's `inventory_*` fields are
-    // wire-only now; runtime inventory is whatever the operator
-    // ships as a `configs/jobs/inventory-*.yaml` probe through the
-    // schedule/deploy/ExecResult path. Keep warning so a stale
-    // agent.toml doesn't silently mislead.
-    let inv_defaults = kanade_shared::config::InventorySection::default();
-    if cfg.inventory.hw_interval != inv_defaults.hw_interval
-        || cfg.inventory.jitter != inv_defaults.jitter
-        || cfg.inventory.enabled != inv_defaults.enabled
-    {
-        tracing::warn!(
-            local_inventory = ?cfg.inventory,
-            "agent.toml::[inventory] is fully retired in v0.14 — the agent no longer runs a hardcoded inventory loop. Define a `configs/jobs/inventory-*.yaml` probe with an `inventory:` hint and register it via `kanade schedule create`.",
-        );
-    }
-
     tokio::spawn(heartbeat::heartbeat_loop(
         client.clone(),
         pc_id.clone(),
@@ -159,11 +150,38 @@ pub(crate) async fn run_agent() -> Result<()> {
             "agent.toml::[agent] groups is deprecated; use `kanade agent groups set` instead — local value is ignored",
         );
     }
-    tokio::spawn(groups::manage(client.clone(), pc_id.clone()));
+    // v0.22.1: dedup cache shared between core sub (live online
+    // path) and the JetStream replay consumer (reconnect catch-up).
+    // Either path can be the first to deliver a given Command's
+    // request_id; the second arrival is dropped.
+    let dedup = commands::shared_dedup_cache();
+
+    // v0.24: groups::spawn returns a watch::Receiver<Vec<String>>
+    // carrying the current membership list. `local_scheduler`
+    // subscribes to it so `runs_on: agent` schedules targeting a
+    // group reflect membership changes without waiting for the
+    // next schedule edit.
+    let (groups_rx, _groups_handle) = groups::spawn(client.clone(), pc_id.clone(), dedup.clone());
+    // Reconnect catch-up: durable consumer on STREAM_EXEC that
+    // replays the latest retained Command per subject. See
+    // `crates/kanade-agent/src/command_replay.rs` for the flow.
+    command_replay::spawn(client.clone(), pc_id.clone(), dedup.clone());
+    // v0.24: file-based outbox for ExecResult publishes. Every
+    // result the agent produces is persisted under `outbox/<rid>.json`
+    // first; a background drain task publishes via JetStream and
+    // deletes on PubAck. Survives agent crashes + broker-down
+    // periods longer than the async-nats client buffer.
+    let outbox_dir = default_paths::data_dir().join("outbox");
+    let _outbox_handle = outbox::spawn_drain(client.clone(), outbox_dir.clone());
+    // v0.23: schedules marked `runs_on: agent` tick locally so the
+    // agent keeps firing even when the broker is unreachable. See
+    // `crates/kanade-agent/src/local_scheduler.rs` for the flow.
+    let completions_path = default_paths::data_dir().join("local_completions.json");
+    local_scheduler::spawn(client.clone(), pc_id.clone(), completions_path, groups_rx);
 
     let _ = tokio::join!(
-        commands::command_loop(client.clone(), pc_id.clone(), cmd_all),
-        commands::command_loop(client.clone(), pc_id.clone(), cmd_self),
+        commands::command_loop(client.clone(), pc_id.clone(), dedup.clone(), cmd_all),
+        commands::command_loop(client.clone(), pc_id.clone(), dedup.clone(), cmd_self),
     );
 
     Ok(())

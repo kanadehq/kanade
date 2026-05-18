@@ -1,33 +1,25 @@
 # Sample inventory probe — operator-customisable hardware snapshot
-# delivered through the regular schedule + deploy + ExecResult pipeline.
+# delivered through the regular deploy + ExecResult pipeline.
 #
-# This file is a *Manifest* (the shape `kanade deploy` expects):
-# one-shot test it directly, then wrap it in a Schedule yaml when
-# you want cron'd repeats.
+# This file is a Manifest (the shape that `kanade exec` and
+# `kanade job create` both expect).
 #
-# One-shot test (sends the script to every targeted PC immediately):
+# Two ways to use it:
 #
-#   kanade deploy configs/jobs/inventory-hw.yaml
+#   * One-shot — fires immediately against every targeted PC:
+#         kanade exec configs/jobs/inventory-hw.yaml
+#     (Not registered in the catalog; inventory facts are NOT projected
+#     because the projector only matches against registered jobs.)
 #
-# Periodic — wrap this manifest in a Schedule yaml. Either inline:
-#
-#   id: hourly-inventory
-#   cron: "0 0 * * * *"            # top of every hour
-#   enabled: true
-#   manifest:                       # (paste the keys below here)
-#     id: inventory-hw
-#     version: 0.1.0
-#     target:
-#       all: true
-#     execute: { ... }
-#     inventory: { ... }
-#
-# Or save the schedule wrapper to `configs/schedules/...yaml` and run:
-#
-#   kanade schedule create configs/schedules/hourly-inventory.yaml
+#   * Register + schedule — periodic, fact projection enabled:
+#         kanade job create configs/jobs/inventory-hw.yaml
+#         kanade schedule create configs/schedules/hourly-inventory.yaml
+#     The schedule yaml just references this job by id; editing this
+#     file and re-running `kanade job create` rewrites what every
+#     downstream schedule fires from the next tick.
 #
 # The `inventory:` section is what tags this job as an inventory probe.
-# Without it the job runs and stores its output in deployment_results
+# Without it the job runs and stores its output in execution_results
 # like any other scheduled job; with it the results projector ALSO
 # upserts a row into `inventory_facts` keyed by (pc_id, manifest.id),
 # and the SPA Inventory page renders the columns declared in `display`.
@@ -35,8 +27,6 @@
 id: inventory-hw
 version: 0.1.0
 description: Hardware inventory snapshot via Get-CimInstance
-target:
-  all: true
 execute:
   shell: powershell
   timeout: 60s
@@ -75,6 +65,13 @@ execute:
 #   "bytes"     — humanised (KiB / MiB / GiB)
 #   "number"    — locale-formatted integer
 #   omitted     — plain text
+#
+# Two column sets:
+#   `display` — vertical "field / value" table on the per-PC detail page.
+#               Should cover everything an operator might want to see.
+#   `summary` — horizontal table on the fleet list page (row per PC).
+#               Pick 3-5 columns that fit on a wide-but-not-huge table.
+#               Omitting `summary` falls back to `display`.
 inventory:
   display:
     - { field: hostname,   label: Hostname  }
@@ -83,3 +80,8 @@ inventory:
     - { field: cpu_model,  label: CPU       }
     - { field: cpu_cores,  label: Cores,    type: number }
     - { field: ram_bytes,  label: RAM,      type: bytes  }
+  summary:
+    - { field: hostname,  label: Hostname }
+    - { field: os_name,   label: OS       }
+    - { field: cpu_cores, label: Cores,   type: number }
+    - { field: ram_bytes, label: RAM,     type: bytes  }

@@ -46,7 +46,33 @@ impl SubscriptionDelta {
 /// terminally. Per-group subscribe tasks are aborted on removal so
 /// agents that lose membership stop processing further commands
 /// for that group within a NATS heartbeat.
-pub async fn manage(client: async_nats::Client, pc_id: String) -> Result<()> {
+/// Spawn the group-membership manager + return a watch channel
+/// carrying the current membership list. Local consumers
+/// (`local_scheduler`) can subscribe to it to re-reconcile their
+/// own state when the agent's groups change.
+pub fn spawn(
+    client: async_nats::Client,
+    pc_id: String,
+    dedup: std::sync::Arc<tokio::sync::Mutex<crate::commands::DedupCache>>,
+) -> (
+    tokio::sync::watch::Receiver<Vec<String>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (tx, rx) = tokio::sync::watch::channel(Vec::<String>::new());
+    let handle = tokio::spawn(async move {
+        if let Err(e) = manage(client, pc_id, dedup, tx).await {
+            tracing::error!(error = ?e, "group-membership manager exited with error");
+        }
+    });
+    (rx, handle)
+}
+
+async fn manage(
+    client: async_nats::Client,
+    pc_id: String,
+    dedup: std::sync::Arc<tokio::sync::Mutex<crate::commands::DedupCache>>,
+    groups_tx: tokio::sync::watch::Sender<Vec<String>>,
+) -> Result<()> {
     let js = jetstream::new(client.clone());
     let kv = match js.get_key_value(BUCKET_AGENT_GROUPS).await {
         Ok(k) => k,
@@ -78,8 +104,13 @@ pub async fn manage(client: async_nats::Client, pc_id: String) -> Result<()> {
         &mut subs,
         &client,
         &pc_id,
+        &dedup,
     )
     .await;
+    // Publish the initial membership snapshot so `local_scheduler`
+    // boots with the right set instead of [] until the first watch
+    // event fires.
+    let _ = groups_tx.send(initial_desired);
 
     let mut watch = kv
         .watch(&pc_id)
@@ -102,8 +133,13 @@ pub async fn manage(client: async_nats::Client, pc_id: String) -> Result<()> {
                 drop = ?delta.to_unsubscribe,
                 "agent_groups update — reconciling subscriptions",
             );
-            apply_delta(&delta, &mut subs, &client, &pc_id).await;
+            apply_delta(&delta, &mut subs, &client, &pc_id, &dedup).await;
         }
+        // Always publish — `local_scheduler` cares about the
+        // membership value, not whether *core sub subscriptions*
+        // changed (they can be a no-op when membership stayed the
+        // same modulo ordering).
+        let _ = groups_tx.send(desired);
     }
     Ok(())
 }
@@ -113,6 +149,7 @@ async fn apply_delta(
     subs: &mut HashMap<String, JoinHandle<()>>,
     client: &async_nats::Client,
     pc_id: &str,
+    dedup: &std::sync::Arc<tokio::sync::Mutex<crate::commands::DedupCache>>,
 ) {
     for g in &delta.to_unsubscribe {
         if let Some(handle) = subs.remove(g) {
@@ -132,6 +169,7 @@ async fn apply_delta(
                 let handle = tokio::spawn(commands::command_loop(
                     client.clone(),
                     pc_id.to_string(),
+                    dedup.clone(),
                     sub,
                 ));
                 subs.insert(g.clone(), handle);
