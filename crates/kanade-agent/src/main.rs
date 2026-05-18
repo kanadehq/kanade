@@ -6,6 +6,8 @@ mod logs;
 mod process;
 mod self_update;
 
+mod command_replay;
+
 #[cfg(target_os = "windows")]
 mod cwd_expand;
 #[cfg(target_os = "windows")]
@@ -146,11 +148,21 @@ pub(crate) async fn run_agent() -> Result<()> {
             "agent.toml::[agent] groups is deprecated; use `kanade agent groups set` instead — local value is ignored",
         );
     }
-    tokio::spawn(groups::manage(client.clone(), pc_id.clone()));
+    // v0.22.1: dedup cache shared between core sub (live online
+    // path) and the JetStream replay consumer (reconnect catch-up).
+    // Either path can be the first to deliver a given Command's
+    // request_id; the second arrival is dropped.
+    let dedup = commands::shared_dedup_cache();
+
+    tokio::spawn(groups::manage(client.clone(), pc_id.clone(), dedup.clone()));
+    // Reconnect catch-up: durable consumer on STREAM_EXEC that
+    // replays the latest retained Command per subject. See
+    // `crates/kanade-agent/src/command_replay.rs` for the flow.
+    command_replay::spawn(client.clone(), pc_id.clone(), dedup.clone());
 
     let _ = tokio::join!(
-        commands::command_loop(client.clone(), pc_id.clone(), cmd_all),
-        commands::command_loop(client.clone(), pc_id.clone(), cmd_self),
+        commands::command_loop(client.clone(), pc_id.clone(), dedup.clone(), cmd_all),
+        commands::command_loop(client.clone(), pc_id.clone(), dedup.clone(), cmd_self),
     );
 
     Ok(())

@@ -8,9 +8,12 @@ pub fn commands_pc(pc_id: &str) -> String {
     format!("commands.pc.{pc_id}")
 }
 
-pub fn commands_exec(job_id: &str) -> String {
-    format!("commands.exec.{job_id}")
-}
+// `commands_exec` (subject `commands.exec.<job_id>`) was removed in
+// v0.22.1. The STREAM_EXEC stream now catches the existing
+// `commands.{all,group.X,pc.Y}` subjects directly, so the dedicated
+// per-exec subject isn't needed any more. See
+// `kanade-agent::command_replay` for how reconnecting agents catch
+// up on missed messages.
 
 pub fn results(request_id: &str) -> String {
     format!("results.{request_id}")
@@ -64,15 +67,6 @@ mod tests {
     fn commands_pc_formats_id() {
         assert_eq!(commands_pc("minipc"), "commands.pc.minipc");
         assert_eq!(commands_pc("PC1234"), "commands.pc.PC1234");
-    }
-
-    #[test]
-    fn commands_exec_formats_job_id() {
-        let job = "3c3c56b3-c83e-4c27-9fa9-4a75e1f5da6f";
-        assert_eq!(
-            commands_exec(job),
-            "commands.exec.3c3c56b3-c83e-4c27-9fa9-4a75e1f5da6f"
-        );
     }
 
     #[test]

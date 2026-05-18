@@ -58,12 +58,17 @@ pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
     .with_context(|| format!("create_stream {STREAM_RESULTS}"))?;
     info!(stream = STREAM_RESULTS, "ready");
 
-    // EXEC — latest-per-subject only (spec §2.6 Layer 1). Carries the
-    // `commands.exec.<job_id>` fan-out from `kanade exec` /
-    // scheduler fires.
+    // EXEC — latest-per-subject only (spec §2.6 Layer 1). v0.22.1:
+    // catch the existing `commands.{all,group.X,pc.Y}` subjects so a
+    // single backend publish lands in BOTH the agent's live core
+    // subscription AND the stream's retention store. Reconnecting
+    // agents catch up via a durable consumer with
+    // `DeliverPolicy::LastPerSubject` — they receive the most
+    // recent Command per subject they care about, no matter how
+    // long they were offline (within `max_age`).
     js.create_stream(StreamConfig {
         name: STREAM_EXEC.into(),
-        subjects: vec!["commands.exec.>".into()],
+        subjects: vec!["commands.>".into()],
         max_messages_per_subject: 1,
         discard: DiscardPolicy::Old,
         max_age: Duration::from_secs(7 * 24 * 60 * 60),

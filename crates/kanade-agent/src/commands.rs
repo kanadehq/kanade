@@ -1,16 +1,63 @@
+use std::collections::{HashSet, VecDeque};
+use std::sync::Arc;
+
 use anyhow::Result;
 use async_nats::jetstream::kv::Store;
 use futures::StreamExt;
 use kanade_shared::kv::{BUCKET_SCRIPT_CURRENT, BUCKET_SCRIPT_STATUS, SCRIPT_STATUS_REVOKED};
 use kanade_shared::wire::Command;
 use kanade_shared::{ExecResult, subject};
-use tracing::{error, info, warn};
+use tokio::sync::Mutex;
+use tracing::{debug, error, info, warn};
 
 use crate::process::{ExecOutcome, run_command_with_kill};
+
+/// FIFO-bounded set of recently-seen `request_id`s. Shared between
+/// the core-sub `command_loop` and the JetStream-replay
+/// `command_replay::run`. Either path may receive a given Command
+/// first (live publish via core sub for online agents; replay on
+/// reconnect for offline agents); the second arrival is dropped via
+/// [`Self::insert`] returning `false`.
+pub struct DedupCache {
+    seen: HashSet<String>,
+    order: VecDeque<String>,
+    cap: usize,
+}
+
+impl DedupCache {
+    pub fn new(cap: usize) -> Self {
+        Self {
+            seen: HashSet::with_capacity(cap),
+            order: VecDeque::with_capacity(cap),
+            cap,
+        }
+    }
+    /// Returns `true` when `id` is newly inserted, `false` when it
+    /// was already present (= duplicate, caller should drop).
+    pub fn insert(&mut self, id: String) -> bool {
+        if self.seen.contains(&id) {
+            return false;
+        }
+        self.seen.insert(id.clone());
+        self.order.push_back(id);
+        while self.order.len() > self.cap {
+            if let Some(old) = self.order.pop_front() {
+                self.seen.remove(&old);
+            }
+        }
+        true
+    }
+}
+
+pub fn shared_dedup_cache() -> Arc<Mutex<DedupCache>> {
+    // 4 KB of RAM gets us ~ 128 request_ids; 1024 is generous.
+    Arc::new(Mutex::new(DedupCache::new(1024)))
+}
 
 pub async fn command_loop(
     client: async_nats::Client,
     pc_id: String,
+    dedup: Arc<Mutex<DedupCache>>,
     mut sub: async_nats::Subscriber,
 ) {
     let jetstream = async_nats::jetstream::new(client.clone());
@@ -37,6 +84,16 @@ pub async fn command_loop(
                 continue;
             }
         };
+        // Shared with command_replay: if the JetStream replay path
+        // already ran this Command on an earlier reconnect (rare but
+        // possible), drop the live duplicate here.
+        if !dedup.lock().await.insert(cmd.request_id.clone()) {
+            debug!(
+                request_id = %cmd.request_id,
+                "core-sub dedup: already seen via replay or earlier delivery",
+            );
+            continue;
+        }
         let client = client.clone();
         let pc_id = pc_id.clone();
         let cur = script_current.clone();
@@ -49,7 +106,7 @@ pub async fn command_loop(
     }
 }
 
-async fn handle_command(
+pub async fn handle_command(
     client: async_nats::Client,
     pc_id: String,
     cmd: Command,

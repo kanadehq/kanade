@@ -46,7 +46,11 @@ impl SubscriptionDelta {
 /// terminally. Per-group subscribe tasks are aborted on removal so
 /// agents that lose membership stop processing further commands
 /// for that group within a NATS heartbeat.
-pub async fn manage(client: async_nats::Client, pc_id: String) -> Result<()> {
+pub async fn manage(
+    client: async_nats::Client,
+    pc_id: String,
+    dedup: std::sync::Arc<tokio::sync::Mutex<crate::commands::DedupCache>>,
+) -> Result<()> {
     let js = jetstream::new(client.clone());
     let kv = match js.get_key_value(BUCKET_AGENT_GROUPS).await {
         Ok(k) => k,
@@ -78,6 +82,7 @@ pub async fn manage(client: async_nats::Client, pc_id: String) -> Result<()> {
         &mut subs,
         &client,
         &pc_id,
+        &dedup,
     )
     .await;
 
@@ -102,7 +107,7 @@ pub async fn manage(client: async_nats::Client, pc_id: String) -> Result<()> {
                 drop = ?delta.to_unsubscribe,
                 "agent_groups update — reconciling subscriptions",
             );
-            apply_delta(&delta, &mut subs, &client, &pc_id).await;
+            apply_delta(&delta, &mut subs, &client, &pc_id, &dedup).await;
         }
     }
     Ok(())
@@ -113,6 +118,7 @@ async fn apply_delta(
     subs: &mut HashMap<String, JoinHandle<()>>,
     client: &async_nats::Client,
     pc_id: &str,
+    dedup: &std::sync::Arc<tokio::sync::Mutex<crate::commands::DedupCache>>,
 ) {
     for g in &delta.to_unsubscribe {
         if let Some(handle) = subs.remove(g) {
@@ -132,6 +138,7 @@ async fn apply_delta(
                 let handle = tokio::spawn(commands::command_loop(
                     client.clone(),
                     pc_id.to_string(),
+                    dedup.clone(),
                     sub,
                 ));
                 subs.insert(g.clone(), handle);
