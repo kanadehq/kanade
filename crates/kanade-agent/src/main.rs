@@ -7,6 +7,7 @@ mod process;
 mod self_update;
 
 mod command_replay;
+mod local_scheduler;
 
 #[cfg(target_os = "windows")]
 mod cwd_expand;
@@ -159,6 +160,11 @@ pub(crate) async fn run_agent() -> Result<()> {
     // replays the latest retained Command per subject. See
     // `crates/kanade-agent/src/command_replay.rs` for the flow.
     command_replay::spawn(client.clone(), pc_id.clone(), dedup.clone());
+    // v0.23: schedules marked `runs_on: agent` tick locally so the
+    // agent keeps firing even when the broker is unreachable. See
+    // `crates/kanade-agent/src/local_scheduler.rs` for the flow.
+    let completions_path = default_paths::data_dir().join("local_completions.json");
+    local_scheduler::spawn(client.clone(), pc_id.clone(), completions_path);
 
     let _ = tokio::join!(
         commands::command_loop(client.clone(), pc_id.clone(), dedup.clone(), cmd_all),

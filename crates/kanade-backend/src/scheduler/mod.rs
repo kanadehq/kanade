@@ -17,7 +17,7 @@ use async_nats::jetstream::kv::Operation;
 use chrono::{Duration as ChronoDuration, Utc};
 use futures::{StreamExt, TryStreamExt};
 use kanade_shared::kv::{BUCKET_AGENT_GROUPS, BUCKET_SCHEDULES};
-use kanade_shared::manifest::{ExecMode, FanoutPlan, Schedule, Target};
+use kanade_shared::manifest::{ExecMode, FanoutPlan, RunsOn, Schedule, Target};
 use sqlx::Row;
 use tokio::sync::Mutex;
 use tokio_cron_scheduler::{Job, JobScheduler};
@@ -148,6 +148,18 @@ async fn register(
     registered: &Registered,
     schedule: Schedule,
 ) -> Result<()> {
+    // v0.23: `runs_on: agent` schedules tick on the targeted
+    // agents themselves; the backend's role is just to hold the
+    // definition in the schedules KV so agents can read it. Skip
+    // registration here.
+    if matches!(schedule.runs_on, RunsOn::Agent) {
+        info!(
+            schedule_id = %schedule.id,
+            "skipped (runs_on: agent — agents tick this schedule themselves)",
+        );
+        return Ok(());
+    }
+
     let cron = schedule.cron.clone();
     let schedule_snapshot = schedule.clone();
     let job = Job::new_async(cron.as_str(), move |_uuid, _l| {

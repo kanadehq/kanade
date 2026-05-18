@@ -19,6 +19,7 @@ type ScheduleRow = {
   cooldown: string | null;
   auto_disable_when_done: boolean;
   starting_deadline: string | null;
+  runs_on: 'backend' | 'agent';
   enabled: boolean;
 };
 
@@ -83,6 +84,7 @@ export function Schedules() {
             <TableHead>cron</TableHead>
             <TableHead>job_id</TableHead>
             <TableHead>target</TableHead>
+            <TableHead>runs_on</TableHead>
             <TableHead>mode</TableHead>
             <TableHead>cooldown</TableHead>
             <TableHead>deadline</TableHead>
@@ -100,6 +102,7 @@ export function Schedules() {
               <TableCell><code className="text-xs">{s.cron}</code></TableCell>
               <TableCell><code className="text-xs">{s.job_id}</code></TableCell>
               <TableCell className="text-xs">{summariseTarget(s.target)}</TableCell>
+              <TableCell><code className="text-xs">{s.runs_on}</code></TableCell>
               <TableCell><code className="text-xs">{s.mode}</code></TableCell>
               <TableCell><code className="text-xs">{s.cooldown ?? '—'}</code></TableCell>
               <TableCell><code className="text-xs">{s.starting_deadline ?? '—'}</code></TableCell>

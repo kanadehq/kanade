@@ -365,6 +365,44 @@ cooldown: 1d
     }
 
     #[test]
+    fn schedule_runs_on_defaults_to_backend() {
+        let yaml = r#"
+id: x
+cron: "* * * * * *"
+job_id: y
+target: { all: true }
+"#;
+        let s: Schedule = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(s.runs_on, RunsOn::Backend);
+    }
+
+    #[test]
+    fn schedule_runs_on_agent_parses() {
+        let yaml = r#"
+id: offline-inv
+cron: "0 0 * * * *"
+job_id: inventory-hw
+target: { all: true }
+runs_on: agent
+mode: once_per_pc
+"#;
+        let s: Schedule = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(s.runs_on, RunsOn::Agent);
+        assert_eq!(s.mode, ExecMode::OncePerPc);
+    }
+
+    #[test]
+    fn runs_on_serialises_snake_case() {
+        for (mode, expected) in [(RunsOn::Backend, "backend"), (RunsOn::Agent, "agent")] {
+            let s = serde_json::to_value(mode).expect("serialise");
+            assert_eq!(s, serde_json::Value::String(expected.into()));
+            let back: RunsOn = serde_json::from_value(serde_json::Value::String(expected.into()))
+                .expect("deserialise");
+            assert_eq!(back, mode);
+        }
+    }
+
+    #[test]
     fn schedule_once_per_target_yaml_parses() {
         let yaml = r#"
 id: license-checkin
@@ -450,8 +488,38 @@ pub struct Schedule {
     /// "fire 3 hours late" would be wrong.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub starting_deadline: Option<String>,
+    /// v0.23: where does the cron tick happen? `Backend` (default,
+    /// historical) = backend's scheduler fires Commands via NATS;
+    /// agents passively receive. `Agent` = each targeted agent runs
+    /// its own internal cron and fires locally, so the schedule
+    /// keeps ticking even when the broker is unreachable (laptop on
+    /// the train, broker maintenance window, full WAN outage). The
+    /// two locations are mutually exclusive — when `Agent`, the
+    /// backend scheduler stays out and just keeps the definition in
+    /// KV for agents to read.
+    #[serde(default)]
+    pub runs_on: RunsOn,
     #[serde(default = "default_true")]
     pub enabled: bool,
+}
+
+/// v0.23 — where the cron tick fires from.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RunsOn {
+    /// Backend's central scheduler ticks and publishes Commands to
+    /// NATS. Historical default, what every pre-v0.23 schedule
+    /// uses. Agent offline ⇒ Command queued in STREAM_EXEC; agent
+    /// reconnects ⇒ catch-up via [`command_replay`](crate)
+    /// (see kanade-agent's command_replay module).
+    #[default]
+    Backend,
+    /// Each targeted agent runs the cron tick locally. Survives
+    /// broker / WAN outages. Best for laptops / mobile devices that
+    /// roam off the corporate network. Agent must be online for the
+    /// initial schedule + job-catalog pull, but once cached the
+    /// agent fires the script standalone.
+    Agent,
 }
 
 /// Per-pc/per-target dedup semantics for a [`Schedule`] (v0.19).
