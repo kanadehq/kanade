@@ -72,7 +72,27 @@ pub async fn run_command_with_kill(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     if let Some(dir) = cmd.cwd.as_deref().filter(|s| !s.is_empty()) {
-        builder.current_dir(dir);
+        // v0.21.2: expand `~` / `%FOO%` against the agent's own
+        // token before handing to current_dir (which itself does
+        // no expansion).
+        #[cfg(target_os = "windows")]
+        {
+            match crate::cwd_expand::open_self_token()
+                .and_then(|tok| crate::cwd_expand::expand(dir, tok.handle()))
+            {
+                Ok(expanded) => {
+                    builder.current_dir(expanded);
+                }
+                Err(e) => {
+                    warn!(error = %e, raw_cwd = %dir, "cwd expansion failed; using raw value");
+                    builder.current_dir(dir);
+                }
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            builder.current_dir(dir);
+        }
     }
     let mut child = builder
         .spawn()

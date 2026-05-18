@@ -217,8 +217,25 @@ fn spawn_native(cmd_line: &[u16], run_as: RunAs, cwd: Option<&str>) -> Result<Sp
 
         // CreateProcessAsUserW's lpCurrentDirectory wants a
         // NUL-terminated wide string or NULL (= inherit parent's cwd).
-        // Keep the backing Vec alive until after the call.
-        let cwd_wide: Option<Vec<u16>> = cwd.filter(|s| !s.is_empty()).map(|s| {
+        // v0.21.2: expand `~` / `%FOO%` against the user's token so
+        // operators can write `~\src\foo` and get `C:\Users\<user>\
+        // src\foo`. Failure to expand falls back to the raw string
+        // with a warning — better than refusing to spawn.
+        let cwd_expanded: Option<String> = cwd.filter(|s| !s.is_empty()).map(|s| {
+            match crate::cwd_expand::expand(s, token.raw()) {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(
+                        target: "kanade_agent::process_as_user",
+                        error = %e,
+                        raw_cwd = %s,
+                        "cwd expansion failed; using raw value",
+                    );
+                    s.to_string()
+                }
+            }
+        });
+        let cwd_wide: Option<Vec<u16>> = cwd_expanded.as_deref().map(|s| {
             let mut v: Vec<u16> = s.encode_utf16().collect();
             v.push(0);
             v
