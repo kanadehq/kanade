@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -20,6 +21,17 @@ pub struct Command {
     /// field and parse fine via `#[serde(default)]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// Absolute time after which the agent should refuse to run
+    /// this Command (v0.22). Set by the scheduler from
+    /// `Schedule.starting_deadline` (humantime) measured against
+    /// the cron tick time. `None` ⇒ no deadline, run whenever
+    /// received (default for ad-hoc `kanade exec` + back-compat
+    /// for pre-v0.22 wire). The agent stamps a synthetic
+    /// `ExecResult { exit_code: 125, stderr: "skipped: deadline
+    /// expired ..." }` when it skips, so the operator sees the
+    /// outcome on the Results / Dashboard pages instead of silence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +90,7 @@ mod tests {
             jitter_secs: Some(5),
             run_as: RunAs::System,
             cwd: None,
+            deadline_at: None,
         }
     }
 
@@ -155,5 +168,20 @@ mod tests {
         assert_eq!(cmd.run_as, RunAs::System);
         // Pre-v0.21.1 omit cwd → None (= inherit agent cwd).
         assert!(cmd.cwd.is_none());
+        // Pre-v0.22 omit deadline_at → None (= no deadline).
+        assert!(cmd.deadline_at.is_none());
+    }
+
+    #[test]
+    fn command_deadline_at_round_trips() {
+        use chrono::TimeZone;
+        let deadline = Utc.with_ymd_and_hms(2026, 5, 18, 9, 30, 0).unwrap();
+        let cmd = Command {
+            deadline_at: Some(deadline),
+            ..sample_command()
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        let back: Command = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.deadline_at, Some(deadline));
     }
 }

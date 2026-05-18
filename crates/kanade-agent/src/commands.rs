@@ -86,6 +86,25 @@ async fn handle_command(
         }
     }
 
+    // v0.22: deadline_at gates "missed deadline" commands. When the
+    // scheduler stamps a deadline and the agent receives the Command
+    // after that absolute time (offline reconnect, broker queueing,
+    // etc.), publish a synthetic skipped-result so the operator sees
+    // the outcome on the Results page rather than silence.
+    let now = chrono::Utc::now();
+    if let Some(deadline) = cmd.deadline_at {
+        if should_skip_for_deadline(deadline, now) {
+            warn!(
+                cmd_id = %cmd.id,
+                request_id = %cmd.request_id,
+                %deadline,
+                %now,
+                "skip: starting deadline expired",
+            );
+            return publish_skipped(&client, &pc_id, &cmd, deadline, now).await;
+        }
+    }
+
     info!(
         cmd_id = %cmd.id,
         request_id = %cmd.request_id,
@@ -145,4 +164,102 @@ async fn handle_command(
         .await?;
     info!(request_id = %cmd.request_id, exit_code, "published result");
     Ok(())
+}
+
+/// Pure deadline check — boundary policy: `now > deadline` skips,
+/// `now == deadline` still runs (deadline is the inclusive last
+/// instant to start). Kept as a free function so the
+/// `should_skip_for_deadline_*` unit tests below can pin the
+/// boundary without spinning up tokio / NATS.
+fn should_skip_for_deadline(
+    deadline: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    now > deadline
+}
+
+/// Synthesise an ExecResult that mirrors a real run but flags
+/// "didn't actually run because we were too late". Exit code 125
+/// follows the cron / GNU coreutils convention for "missed /
+/// skipped"; stderr carries the deadline + receipt timestamp so
+/// the operator can see *how* late we were on the Results page.
+async fn publish_skipped(
+    client: &async_nats::Client,
+    pc_id: &str,
+    cmd: &Command,
+    deadline: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    let lateness = now - deadline;
+    let stderr = format!(
+        "skipped: starting deadline expired {} ago (deadline {}, received {})",
+        humantime::format_duration(
+            lateness
+                .to_std()
+                .unwrap_or(std::time::Duration::from_secs(0))
+        ),
+        deadline,
+        now,
+    );
+    let result = ExecResult {
+        request_id: cmd.request_id.clone(),
+        pc_id: pc_id.to_string(),
+        exit_code: 125,
+        stdout: String::new(),
+        stderr,
+        started_at: now,
+        finished_at: now,
+        manifest_id: Some(cmd.id.clone()),
+    };
+    let payload = serde_json::to_vec(&result)?;
+    client
+        .publish(subject::results(&cmd.request_id), payload.into())
+        .await?;
+    info!(
+        request_id = %cmd.request_id,
+        exit_code = 125,
+        "published synthetic skipped-result (deadline expired)",
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn at(secs: i64) -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc
+            .timestamp_opt(1_700_000_000 + secs, 0)
+            .single()
+            .unwrap()
+    }
+
+    #[test]
+    fn now_strictly_before_deadline_runs() {
+        assert!(!should_skip_for_deadline(at(100), at(99)));
+    }
+
+    #[test]
+    fn now_one_second_before_deadline_runs() {
+        assert!(!should_skip_for_deadline(at(100), at(99)));
+    }
+
+    #[test]
+    fn now_exactly_at_deadline_still_runs() {
+        // Boundary: == is the *last* allowed instant. Lets a cron
+        // tick fire at the exact starting_deadline without spuriously
+        // skipping on clock-rounding.
+        assert!(!should_skip_for_deadline(at(100), at(100)));
+    }
+
+    #[test]
+    fn now_one_second_past_deadline_skips() {
+        assert!(should_skip_for_deadline(at(100), at(101)));
+    }
+
+    #[test]
+    fn now_long_past_deadline_skips() {
+        assert!(should_skip_for_deadline(at(100), at(86400)));
+    }
 }

@@ -48,6 +48,8 @@ pub async fn execute(client: async_nats::Client, args: RunArgs) -> Result<()> {
         // for the run_as: user / system_gui / cwd flows.
         run_as: kanade_shared::wire::RunAs::System,
         cwd: None,
+        // Ad-hoc inline run; no scheduled tick → no deadline.
+        deadline_at: None,
     };
 
     let result_subj = subject::results(&request_id);

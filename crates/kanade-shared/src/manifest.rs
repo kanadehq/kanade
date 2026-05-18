@@ -52,6 +52,16 @@ pub struct FanoutPlan {
     /// stagger windows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jitter: Option<String>,
+    /// Absolute time the scheduler stamps on each emitted Command
+    /// when this exec was driven by a [`Schedule`] with
+    /// `starting_deadline`. Agents receiving a Command after this
+    /// instant publish a synthetic skipped-result instead of
+    /// running the script. `None` (default) = no deadline / catch
+    /// up whenever delivered. Operators don't usually set this
+    /// directly — the scheduler computes it from `tick_at +
+    /// starting_deadline`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Manifest sub-section: how the SPA should render the inventory
@@ -428,6 +438,18 @@ pub struct Schedule {
     /// schedules never finish).
     #[serde(default)]
     pub auto_disable_when_done: bool,
+    /// v0.22: optional humantime window after a cron tick during
+    /// which the Command is still considered "live". The scheduler
+    /// computes `tick_at + starting_deadline` and stamps it onto
+    /// each Command as `deadline_at`; agents skip Commands they
+    /// receive after that absolute time. `None` (default) = no
+    /// deadline, meaning a Command queued in the broker / stream
+    /// during agent downtime runs whenever the agent reconnects —
+    /// good for kitting / inventory / cleanup. Set this for
+    /// time-of-day notifications, lunch reminders, etc., where
+    /// "fire 3 hours late" would be wrong.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starting_deadline: Option<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }

@@ -64,6 +64,7 @@ pub async fn exec_manifest(
 
     let exec_id = Uuid::new_v4().to_string();
 
+    let deadline_at = plan.deadline_at;
     let make_cmd = || Command {
         id: manifest.id.clone(),
         version: manifest.version.clone(),
@@ -75,6 +76,7 @@ pub async fn exec_manifest(
         jitter_secs,
         run_as: manifest.execute.run_as,
         cwd: manifest.execute.cwd.clone(),
+        deadline_at,
     };
 
     let mut subjects: Vec<String> = Vec::new();

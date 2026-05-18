@@ -192,6 +192,28 @@ async fn tick(state: &AppState, schedule: Schedule) {
         }
     };
 
+    // v0.22: stamp deadline_at = now + starting_deadline onto every
+    // Command this tick emits. Agents that receive the Command after
+    // this absolute time publish a synthetic skipped-result instead
+    // of running the script. Use a helper so the parse-error path
+    // logs once per tick, not once per Command.
+    let now = Utc::now();
+    let deadline_at = match parse_starting_deadline(schedule.starting_deadline.as_deref(), now) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(
+                %schedule_id, error = %e,
+                "scheduler fire failed: invalid starting_deadline",
+            );
+            return;
+        }
+    };
+    let plan_for_dispatch = || {
+        let mut p = schedule.plan.clone();
+        p.deadline_at = deadline_at;
+        p
+    };
+
     // 2) For EveryTick we don't need to resolve anything — fire and
     //    forget. Skip the more expensive policy path entirely.
     if matches!(schedule.mode, ExecMode::EveryTick) {
@@ -199,7 +221,7 @@ async fn tick(state: &AppState, schedule: Schedule) {
             state,
             &schedule_id,
             manifest,
-            schedule.plan.clone(),
+            plan_for_dispatch(),
             "EveryTick",
         )
         .await;
@@ -254,13 +276,13 @@ async fn tick(state: &AppState, schedule: Schedule) {
                 state,
                 &schedule_id,
                 manifest,
-                schedule.plan.clone(),
+                plan_for_dispatch(),
                 "OncePerTarget armed",
             )
             .await;
         }
         FireAction::FirePcs(pc_ids) => {
-            let mut plan = schedule.plan.clone();
+            let mut plan = plan_for_dispatch();
             // Per-pc dedup overrides the original target shape:
             // pcs only, drop rollout (rollout's group-wave model
             // doesn't compose with per-pc filtering).
@@ -312,6 +334,25 @@ fn parse_cooldown(s: Option<&str>) -> Result<Option<ChronoDuration>> {
             Ok(Some(
                 ChronoDuration::from_std(std).context("cooldown overflow")?,
             ))
+        }
+    }
+}
+
+/// Compute the absolute deadline this tick's Commands carry. Returns
+/// `Ok(None)` when the schedule has no `starting_deadline` — meaning
+/// the Command runs whenever delivered. Returns an error only when
+/// the humantime string is malformed.
+fn parse_starting_deadline(
+    s: Option<&str>,
+    now: chrono::DateTime<Utc>,
+) -> Result<Option<chrono::DateTime<Utc>>> {
+    match s {
+        None => Ok(None),
+        Some(raw) => {
+            let std: StdDuration = humantime::parse_duration(raw)
+                .with_context(|| format!("parse starting_deadline '{raw}'"))?;
+            let d = ChronoDuration::from_std(std).context("starting_deadline overflow")?;
+            Ok(Some(now + d))
         }
     }
 }

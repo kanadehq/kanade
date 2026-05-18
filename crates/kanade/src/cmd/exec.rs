@@ -57,6 +57,8 @@ pub async fn execute(backend_url: &str, args: ExecArgs) -> Result<()> {
         target,
         rollout: None,
         jitter: args.jitter,
+        // ad-hoc CLI exec has no scheduled tick to gate against.
+        deadline_at: None,
     };
 
     info!(job_id = %args.job_id, "executing");

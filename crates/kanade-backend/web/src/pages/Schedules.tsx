@@ -18,6 +18,7 @@ type ScheduleRow = {
   mode: 'every_tick' | 'once_per_pc' | 'once_per_target';
   cooldown: string | null;
   auto_disable_when_done: boolean;
+  starting_deadline: string | null;
   enabled: boolean;
 };
 
@@ -84,6 +85,7 @@ export function Schedules() {
             <TableHead>target</TableHead>
             <TableHead>mode</TableHead>
             <TableHead>cooldown</TableHead>
+            <TableHead>deadline</TableHead>
             <TableHead>auto-off</TableHead>
             <TableHead>jitter</TableHead>
             <TableHead>rollout</TableHead>
@@ -100,6 +102,7 @@ export function Schedules() {
               <TableCell className="text-xs">{summariseTarget(s.target)}</TableCell>
               <TableCell><code className="text-xs">{s.mode}</code></TableCell>
               <TableCell><code className="text-xs">{s.cooldown ?? '—'}</code></TableCell>
+              <TableCell><code className="text-xs">{s.starting_deadline ?? '—'}</code></TableCell>
               <TableCell className="text-xs">
                 {s.auto_disable_when_done ? 'yes' : <span className="text-muted">—</span>}
               </TableCell>

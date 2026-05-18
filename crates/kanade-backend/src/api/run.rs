@@ -82,6 +82,8 @@ pub async fn run(
         // Same rationale: cwd customisation belongs on a registered
         // Job, not on inline ad-hoc runs.
         cwd: None,
+        // Ad-hoc `kanade run` has no scheduled tick → no deadline.
+        deadline_at: None,
     };
 
     let result_subj = subject::results(&request_id);
