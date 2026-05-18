@@ -106,15 +106,15 @@ command = "cargo"
 args = ["run", "-p", "kanade-backend"]
 
 [tasks.agent-dev]
-description = "Run kanade-agent in dev mode against the same NATS the installed service uses. Beware: both will race on commands.pc.<hostname>; stop the installed service first (Stop-Service KanadeAgent) if you want clean dev-only behaviour."
+description = "Run kanade-agent in dev mode against the dev NATS broker (:4223). Fully isolated from the installed KanadeAgent service: dev agent talks to :4223 + writes log under target/dev-data/, prod agent stays on :4222 + %ProgramData%. Same hostname/pc_id is fine because the brokers don't share state."
 cwd = "${CARGO_MAKE_WORKING_DIRECTORY}"
-env = { "KANADE_AGENT_CONFIG" = "${CARGO_MAKE_WORKING_DIRECTORY}/configs/agent.toml", "RUST_LOG" = "info,kanade_agent=debug" }
+env = { "KANADE_AGENT_CONFIG" = "${CARGO_MAKE_WORKING_DIRECTORY}/configs/agent.dev.toml", "RUST_LOG" = "info,kanade_agent=debug" }
 command = "cargo"
 args = ["run", "-p", "kanade-agent"]
 
 [tasks.dev]
-description = "One-shot sandbox: spawns `nats-dev` (:4223), `backend-dev` (:8081), and `web-dev` (:5173) in parallel. Ctrl+C once to tear all three down. Skip this when you'd rather iterate against the production backend — use `web-dev-prod` for that."
-run_task = { name = ["nats-dev", "backend-dev", "web-dev"], parallel = true }
+description = "One-shot sandbox: spawns `nats-dev` (:4223), `backend-dev` (:8081), `agent-dev` (NATS :4223), and `web-dev` (:5173) in parallel — full dev stack isolated from the installed Windows services. Ctrl+C once to tear all four down. Skip this when you'd rather iterate against the production backend — use `web-dev-prod` for that."
+run_task = { name = ["nats-dev", "backend-dev", "agent-dev", "web-dev"], parallel = true }
 
 [tasks.hook-install]
 description = "Install git pre-push hook that runs 'cargo make check'"
