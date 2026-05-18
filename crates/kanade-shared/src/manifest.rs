@@ -2,32 +2,56 @@ use serde::{Deserialize, Serialize};
 
 use crate::wire::Shell;
 
-/// YAML job manifest (spec §2.4.1, Sprint 4a covers everything except
-/// `execute.script_file` / `execute.script_object` / `on_failure`).
+/// YAML job manifest (= registered "what to run", v0.18.0+).
+///
+/// Owns only script-intrinsic fields. **Who** (`target`), **how to
+/// phase fanout** (`rollout`), and **when to stagger start**
+/// (`jitter`) all moved to the Schedule / exec request side — same
+/// script can now be fired against different targets / rollouts
+/// without copying the script body.
+///
+/// `deny_unknown_fields` makes operators copy-pasting an older yaml
+/// that still has `target:` / `rollout:` see a clear parse error at
+/// `kanade job create` time instead of mysteriously losing it.
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub id: String,
     pub version: String,
     #[serde(default)]
     pub description: Option<String>,
-    pub target: Target,
     pub execute: Execute,
-    /// Optional wave rollout — when present, the backend publishes each
-    /// wave's group subject on its own delay schedule instead of fanning
-    /// out the `target` block at deploy time. `target` is then only used
-    /// as a fallback (e.g. `target.all: true` to mark the manifest as
-    /// fleet-wide for the audit log).
-    #[serde(default)]
-    pub rollout: Option<Rollout>,
     #[serde(default)]
     pub require_approval: bool,
-    /// v0.13: opt-in marker that this job produces a JSON inventory
-    /// fact payload on stdout. When present, the backend's results
-    /// projector parses the ExecResult.stdout as JSON and upserts an
+    /// Opt-in marker that this job produces a JSON inventory fact
+    /// payload on stdout. When present, the backend's results
+    /// projector parses `ExecResult.stdout` as JSON and upserts an
     /// `inventory_facts` row keyed by `(pc_id, manifest.id)`. The
     /// `display` sub-config drives the SPA's Inventory page render.
     #[serde(default)]
     pub inventory: Option<InventoryHint>,
+}
+
+/// "Who + how + when-to-stagger" — the fanout-plan side of an exec.
+/// Used both as the POST `/api/exec/{job_id}` body and as the embedded
+/// `target` / `rollout` / `jitter` slot on [`Schedule`]. Centralising
+/// here keeps the validation + serialisation logic in one place.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct FanoutPlan {
+    #[serde(default)]
+    pub target: Target,
+    /// Optional wave rollout — when present, the backend publishes
+    /// each wave's group subject on its own delay schedule instead
+    /// of fanning out the `target` block in one go. `target` then
+    /// only labels the deploy for the audit log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollout: Option<Rollout>,
+    /// Optional humantime jitter; agent uses it to randomise
+    /// execution start. Lives here (not on the script) so different
+    /// schedules / ad-hoc fires of the same job can pick different
+    /// stagger windows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jitter: Option<String>,
 }
 
 /// Manifest sub-section: how the SPA should render the inventory
@@ -108,11 +132,9 @@ impl Target {
 pub struct Execute {
     pub shell: ExecuteShell,
     pub script: String,
-    /// humantime duration string (e.g. "30s", "10m").
+    /// humantime duration string (e.g. "30s", "10m"). Script-intrinsic
+    /// — represents how long this script reasonably takes to run.
     pub timeout: String,
-    /// Optional humantime jitter; agent uses it to randomise execution start.
-    #[serde(default)]
-    pub jitter: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,12 +183,11 @@ mod tests {
 
     #[test]
     fn manifest_deserialises_minimal_yaml() {
-        // Matches jobs/echo-test.yaml.
+        // Matches jobs/echo-test.yaml. v0.18: no target/rollout/jitter
+        // — those live on the schedule / exec request now.
         let yaml = r#"
 id: echo-test
 version: 0.0.1
-target:
-  pcs: [minipc]
 execute:
   shell: powershell
   script: "echo 'kanade'"
@@ -175,58 +196,57 @@ execute:
         let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
         assert_eq!(m.id, "echo-test");
         assert_eq!(m.version, "0.0.1");
-        assert!(m.target.is_specified());
-        assert_eq!(m.target.pcs, vec!["minipc"]);
         assert!(matches!(m.execute.shell, ExecuteShell::Powershell));
         assert_eq!(m.execute.script.trim(), "echo 'kanade'");
         assert_eq!(m.execute.timeout, "30s");
-        assert!(m.execute.jitter.is_none());
-        assert!(m.rollout.is_none());
         assert!(!m.require_approval);
     }
 
     #[test]
-    fn manifest_deserialises_wave_rollout() {
+    fn schedule_carries_target_and_rollout() {
         let yaml = r#"
-id: cleanup
-version: 1.0.0
+id: hourly-cleanup-canary
+cron: "0 0 * * * *"
+job_id: cleanup
+enabled: true
 target:
   groups: [canary, wave1]
-execute:
-  shell: cmd
-  script: "rmdir /S /Q C:\\temp"
-  timeout: 5m
-  jitter: 30s
+jitter: 30s
 rollout:
   strategy: wave
   waves:
     - { group: canary, delay: 0s }
     - { group: wave1,  delay: 5s }
 "#;
-        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
-        assert!(matches!(m.execute.shell, ExecuteShell::Cmd));
-        assert_eq!(m.execute.jitter.as_deref(), Some("30s"));
-        let rollout = m.rollout.expect("rollout present");
+        let s: Schedule = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(s.id, "hourly-cleanup-canary");
+        assert_eq!(s.job_id, "cleanup");
+        assert_eq!(s.plan.target.groups, vec!["canary", "wave1"]);
+        assert_eq!(s.plan.jitter.as_deref(), Some("30s"));
+        let rollout = s.plan.rollout.expect("rollout present");
         assert_eq!(rollout.waves.len(), 2);
         assert_eq!(rollout.waves[0].group, "canary");
-        assert_eq!(rollout.waves[0].delay, "0s");
         assert_eq!(rollout.waves[1].delay, "5s");
         assert_eq!(rollout.strategy, RolloutStrategy::Wave);
     }
 
     #[test]
-    fn schedule_references_job_by_id() {
+    fn schedule_minimal_target_all() {
         let yaml = r#"
 id: every-10s
 cron: "*/10 * * * * *"
 enabled: true
 job_id: scheduled-echo
+target: { all: true }
 "#;
         let s: Schedule = serde_yaml::from_str(yaml).expect("parse");
         assert_eq!(s.id, "every-10s");
         assert_eq!(s.cron, "*/10 * * * * *");
         assert!(s.enabled);
         assert_eq!(s.job_id, "scheduled-echo");
+        assert!(s.plan.target.all);
+        assert!(s.plan.rollout.is_none());
+        assert!(s.plan.jitter.is_none());
     }
 
     #[test]
@@ -235,6 +255,7 @@ job_id: scheduled-echo
 id: x
 cron: "* * * * * *"
 job_id: y
+target: { all: true }
 "#;
         let s: Schedule = serde_yaml::from_str(yaml).expect("parse");
         assert!(s.enabled);
@@ -262,11 +283,11 @@ execute:
     }
 }
 
-/// Periodic schedule (spec §2.4.3). v0.15.0: a Schedule names a
-/// registered job by id rather than embedding the Manifest body. The
-/// scheduler resolves `job_id` against the `BUCKET_JOBS` KV at every
-/// tick, so editing the job retroactively changes what future fires
-/// deploy.
+/// Periodic schedule (spec §2.4.3). v0.18.0 carries the fanout plan
+/// (target + optional rollout + optional jitter) inline; the
+/// referenced job (`job_id` → [`BUCKET_JOBS`]) supplies only the
+/// script body. Two schedules of the same job can target different
+/// groups on different cadences without copying the manifest.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Schedule {
     pub id: String,
@@ -276,6 +297,11 @@ pub struct Schedule {
     /// Key into [`crate::kv::BUCKET_JOBS`]. Must equal a registered
     /// Manifest's `id`.
     pub job_id: String,
+    /// Who + how-to-phase + when-to-stagger. The Manifest doesn't
+    /// carry these any more — same job + different fanout = different
+    /// schedule.
+    #[serde(flatten)]
+    pub plan: FanoutPlan,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }

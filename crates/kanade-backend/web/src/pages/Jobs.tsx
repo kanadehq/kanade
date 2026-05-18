@@ -12,18 +12,9 @@ type JobRow = {
   id: string;
   version: string;
   description: string | null;
-  target: { all: boolean; groups: string[]; pcs: string[] };
   execute: { shell: 'powershell' | 'cmd'; timeout: string };
   inventory: unknown | null;
 };
-
-function summariseTarget(t: JobRow['target']): string {
-  if (t.all) return 'all';
-  const parts: string[] = [];
-  if (t.groups.length) parts.push(`groups: ${t.groups.join(', ')}`);
-  if (t.pcs.length) parts.push(`pcs: ${t.pcs.join(', ')}`);
-  return parts.join(' · ') || '—';
-}
 
 export function Jobs() {
   const qc = useQueryClient();
@@ -72,7 +63,6 @@ export function Jobs() {
           <TableRow>
             <TableHead>id</TableHead>
             <TableHead>version</TableHead>
-            <TableHead>target</TableHead>
             <TableHead>shell</TableHead>
             <TableHead>timeout</TableHead>
             <TableHead>inventory</TableHead>
@@ -85,7 +75,6 @@ export function Jobs() {
             <TableRow key={j.id}>
               <TableCell><code className="text-xs">{j.id}</code></TableCell>
               <TableCell><code className="text-xs">{j.version}</code></TableCell>
-              <TableCell className="text-xs">{summariseTarget(j.target)}</TableCell>
               <TableCell><code className="text-xs">{j.execute.shell}</code></TableCell>
               <TableCell><code className="text-xs">{j.execute.timeout}</code></TableCell>
               <TableCell>

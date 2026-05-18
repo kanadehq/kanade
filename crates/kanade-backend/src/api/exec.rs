@@ -2,7 +2,7 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use kanade_shared::kv::BUCKET_SCRIPT_CURRENT;
-use kanade_shared::manifest::Manifest;
+use kanade_shared::manifest::{FanoutPlan, Manifest};
 use kanade_shared::subject;
 use kanade_shared::wire::Command;
 use serde::Serialize;
@@ -23,21 +23,27 @@ pub struct ExecResponse {
 }
 
 /// Core exec pipeline used by both the HTTP handler (actor = "cli") and
-/// the scheduler (actor = "scheduler"). Validates the manifest, fans the
-/// Command out across every target subject (or schedules wave-based
-/// fan-out when `rollout` is set), pins script_current, records an
-/// executions row, and emits an audit event.
+/// the scheduler (actor = "scheduler"). Validates the [`FanoutPlan`],
+/// fans the Command out across every target subject (or schedules
+/// wave-based fan-out when `rollout` is set), pins script_current,
+/// records an `executions` row, and emits an audit event.
+///
+/// v0.18: the Manifest supplies only "what to run" (script + shell +
+/// timeout + inventory hint). `target` / `rollout` / `jitter` come
+/// from the caller's [`FanoutPlan`] — schedules carry one inline,
+/// ad-hoc execs build one from CLI flags / SPA form input.
 pub async fn exec_manifest(
     s: &AppState,
     manifest: Manifest,
+    plan: FanoutPlan,
     actor: &str,
 ) -> Result<ExecResponse, (StatusCode, String)> {
-    let has_rollout = manifest
+    let has_rollout = plan
         .rollout
         .as_ref()
         .map(|r| !r.waves.is_empty())
         .unwrap_or(false);
-    if !has_rollout && !manifest.target.is_specified() {
+    if !has_rollout && !plan.target.is_specified() {
         return Err((
             StatusCode::BAD_REQUEST,
             "target must specify at least one of `all` / `groups` / `pcs` (or set `rollout.waves`)"
@@ -48,8 +54,7 @@ pub async fn exec_manifest(
     let timeout_secs = humantime::parse_duration(&manifest.execute.timeout)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid timeout: {e}")))?
         .as_secs();
-    let jitter_secs = manifest
-        .execute
+    let jitter_secs = plan
         .jitter
         .as_deref()
         .map(humantime::parse_duration)
@@ -73,7 +78,7 @@ pub async fn exec_manifest(
     let mut subjects: Vec<String> = Vec::new();
     let mut target_count: u32 = 0;
 
-    if let Some(rollout) = manifest.rollout.as_ref() {
+    if let Some(rollout) = plan.rollout.as_ref() {
         // Wave-based fan-out: pre-validate every delay so a bad humantime
         // string aborts the whole exec instead of silently failing on a
         // late wave inside a tokio::spawn.
@@ -132,15 +137,15 @@ pub async fn exec_manifest(
         }
     } else {
         // Plain target-based fan-out (no rollout block).
-        if manifest.target.all {
+        if plan.target.all {
             subjects.push(subject::COMMANDS_ALL.to_string());
             target_count = target_count.saturating_add(1);
         }
-        for g in &manifest.target.groups {
+        for g in &plan.target.groups {
             subjects.push(subject::commands_group(g));
             target_count = target_count.saturating_add(1);
         }
-        for pc in &manifest.target.pcs {
+        for pc in &plan.target.pcs {
             subjects.push(subject::commands_pc(pc));
             target_count = target_count.saturating_add(1);
         }
@@ -226,13 +231,13 @@ pub async fn exec_manifest(
 }
 
 /// `POST /api/exec/{job_id}` — fire a registered job from the
-/// catalog. The Manifest body is no longer accepted inline; operators
-/// must `kanade job create` the manifest first, then `kanade exec
-/// <job-id>` (or hit this endpoint) to fan it out. 404 when the job
-/// isn't in `BUCKET_JOBS`.
+/// catalog against a caller-supplied [`FanoutPlan`]. The Manifest body
+/// is never accepted inline; operators must `kanade job create` first.
+/// 404 when the job isn't in `BUCKET_JOBS`.
 pub async fn create(
     State(s): State<AppState>,
     Path(job_id): Path<String>,
+    Json(plan): Json<FanoutPlan>,
 ) -> Result<Json<ExecResponse>, (StatusCode, String)> {
     let manifest = match jobs::fetch(&s.jetstream, &job_id).await {
         Ok(Some(m)) => m,
@@ -253,5 +258,5 @@ pub async fn create(
             ));
         }
     };
-    exec_manifest(&s, manifest, "cli").await.map(Json)
+    exec_manifest(&s, manifest, plan, "cli").await.map(Json)
 }

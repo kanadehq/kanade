@@ -15,3 +15,16 @@ id: hourly-inventory
 cron: "0 0 * * * *"   # top of every hour (sec min hour day month dow)
 enabled: true
 job_id: inventory-hw
+# v0.18: target lives on the schedule, not the job. Same job_id can
+# be wrapped in multiple schedules with different target/cadence.
+target:
+  all: true
+# Optional: stagger agent start times so 3000 PCs don't all run
+# Get-CimInstance at the same wall-clock instant.
+# jitter: 30s
+# Optional: replace `target` semantics with wave fanout.
+# rollout:
+#   strategy: wave
+#   waves:
+#     - { group: canary, delay: 0s }
+#     - { group: wave1,  delay: 5m }

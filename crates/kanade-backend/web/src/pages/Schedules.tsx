@@ -12,8 +12,19 @@ type ScheduleRow = {
   id: string;
   cron: string;
   job_id: string;
+  target: { all: boolean; groups: string[]; pcs: string[] };
+  rollout: { waves: { group: string; delay: string }[] } | null;
+  jitter: string | null;
   enabled: boolean;
 };
+
+function summariseTarget(t: ScheduleRow['target']): string {
+  if (t.all) return 'all';
+  const parts: string[] = [];
+  if (t.groups.length) parts.push(`groups: ${t.groups.join(', ')}`);
+  if (t.pcs.length) parts.push(`pcs: ${t.pcs.join(', ')}`);
+  return parts.join(' · ') || '—';
+}
 
 export function Schedules() {
   const qc = useQueryClient();
@@ -67,6 +78,9 @@ export function Schedules() {
             <TableHead>id</TableHead>
             <TableHead>cron</TableHead>
             <TableHead>job_id</TableHead>
+            <TableHead>target</TableHead>
+            <TableHead>jitter</TableHead>
+            <TableHead>rollout</TableHead>
             <TableHead>enabled</TableHead>
             <TableHead>actions</TableHead>
           </TableRow>
@@ -77,6 +91,13 @@ export function Schedules() {
               <TableCell><code className="text-xs">{s.id}</code></TableCell>
               <TableCell><code className="text-xs">{s.cron}</code></TableCell>
               <TableCell><code className="text-xs">{s.job_id}</code></TableCell>
+              <TableCell className="text-xs">{summariseTarget(s.target)}</TableCell>
+              <TableCell><code className="text-xs">{s.jitter ?? '—'}</code></TableCell>
+              <TableCell className="text-xs">
+                {s.rollout
+                  ? `${s.rollout.waves.length} wave(s)`
+                  : <span className="text-muted">—</span>}
+              </TableCell>
               <TableCell>
                 {s.enabled
                   ? <Badge variant="success">on</Badge>

@@ -27,8 +27,6 @@
 id: inventory-hw
 version: 0.1.0
 description: Hardware inventory snapshot via Get-CimInstance
-target:
-  all: true
 execute:
   shell: powershell
   timeout: 60s

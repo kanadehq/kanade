@@ -138,10 +138,12 @@ async fn register(
     let cron = schedule.cron.clone();
     let schedule_id = schedule.id.clone();
     let job_id = schedule.job_id.clone();
+    let plan = schedule.plan.clone();
     let job = Job::new_async(cron.as_str(), move |_uuid, _l| {
         let state = state.clone();
         let job_id = job_id.clone();
         let schedule_id = schedule_id.clone();
+        let plan = plan.clone();
         Box::pin(async move {
             info!(
                 schedule_id = %schedule_id,
@@ -171,7 +173,7 @@ async fn register(
                     return;
                 }
             };
-            match exec_manifest(&state, manifest, "scheduler").await {
+            match exec_manifest(&state, manifest, plan, "scheduler").await {
                 Ok(resp) => info!(
                     schedule_id = %schedule_id,
                     exec_id = %resp.exec_id,
