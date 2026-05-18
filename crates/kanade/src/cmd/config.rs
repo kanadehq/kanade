@@ -44,7 +44,7 @@ pub enum ConfigSub {
         scope: ScopeSel,
     },
     /// Set one field. `<spec>` is `<field>=<value>` (e.g.
-    /// `heartbeat_interval=15s`, `inventory_enabled=false`,
+    /// `heartbeat_interval=15s`, `target_version_jitter=30m`,
     /// `target_version=0.3.0`).
     Set {
         spec: String,
@@ -223,28 +223,12 @@ fn apply_field(scope: &mut ConfigScope, field: &str, value: Option<&str>) -> Res
     match field {
         "target_version" => scope.target_version = value.map(String::from),
         "target_version_jitter" => scope.target_version_jitter = value.map(String::from),
-        "inventory_interval" => scope.inventory_interval = value.map(String::from),
-        "inventory_jitter" => scope.inventory_jitter = value.map(String::from),
-        "inventory_enabled" => {
-            scope.inventory_enabled = match value {
-                Some(s) => Some(parse_bool(s)?),
-                None => None,
-            };
-        }
         "heartbeat_interval" => scope.heartbeat_interval = value.map(String::from),
         other => bail!(
-            "unknown field '{other}' — supported: target_version, target_version_jitter, inventory_interval, inventory_jitter, inventory_enabled, heartbeat_interval"
+            "unknown field '{other}' — supported: target_version, target_version_jitter, heartbeat_interval"
         ),
     }
     Ok(())
-}
-
-fn parse_bool(s: &str) -> Result<bool> {
-    match s.to_ascii_lowercase().as_str() {
-        "true" | "1" | "yes" | "on" => Ok(true),
-        "false" | "0" | "no" | "off" => Ok(false),
-        other => bail!("'{other}' is not a bool (expected true / false)"),
-    }
 }
 
 #[cfg(test)]
@@ -266,22 +250,6 @@ mod tests {
         };
         apply_field(&mut s, "heartbeat_interval", None).unwrap();
         assert!(s.heartbeat_interval.is_none());
-    }
-
-    #[test]
-    fn apply_field_parses_bool() {
-        let mut s = ConfigScope::default();
-        apply_field(&mut s, "inventory_enabled", Some("false")).unwrap();
-        assert_eq!(s.inventory_enabled, Some(false));
-        apply_field(&mut s, "inventory_enabled", Some("yes")).unwrap();
-        assert_eq!(s.inventory_enabled, Some(true));
-    }
-
-    #[test]
-    fn apply_field_rejects_bad_bool() {
-        let mut s = ConfigScope::default();
-        let err = apply_field(&mut s, "inventory_enabled", Some("maybe")).unwrap_err();
-        assert!(err.to_string().contains("not a bool"));
     }
 
     #[test]

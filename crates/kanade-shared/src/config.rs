@@ -9,14 +9,6 @@ use serde::Deserialize;
 pub struct AgentConfig {
     pub agent: AgentSection,
     pub log: LogSection,
-    /// DEPRECATED in Sprint 6: inventory cadence / jitter / enabled
-    /// are now sourced from the layered `agent_config` KV bucket.
-    /// Still parsed (back-compat for existing agent.toml files);
-    /// the value is logged-and-ignored at startup. Field removal
-    /// is scheduled for v0.4.0 (one minor cycle after this
-    /// deprecation lands in v0.3.0).
-    #[serde(default)]
-    pub inventory: InventorySection,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -47,36 +39,6 @@ pub struct LogSection {
 
 fn default_keep_days() -> usize {
     14
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct InventorySection {
-    #[serde(default = "default_hw_interval")]
-    pub hw_interval: String,
-    #[serde(default = "default_jitter")]
-    pub jitter: String,
-    #[serde(default = "default_enabled")]
-    pub enabled: bool,
-}
-
-impl Default for InventorySection {
-    fn default() -> Self {
-        Self {
-            hw_interval: default_hw_interval(),
-            jitter: default_jitter(),
-            enabled: default_enabled(),
-        }
-    }
-}
-
-fn default_hw_interval() -> String {
-    "24h".into()
-}
-fn default_jitter() -> String {
-    "10m".into()
-}
-fn default_enabled() -> bool {
-    true
 }
 
 // ─── Backend config ──────────────────────────────────────────────────

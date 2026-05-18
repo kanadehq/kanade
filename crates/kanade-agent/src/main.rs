@@ -114,23 +114,6 @@ pub(crate) async fn run_agent() -> Result<()> {
     // channel; heartbeat / inventory / self_update subscribe.
     let cfg_rx = config_supervisor::spawn(client.clone(), pc_id.clone());
 
-    // v0.14: the hardcoded inventory loop is gone. agent.toml's
-    // [inventory] section + ConfigScope's `inventory_*` fields are
-    // wire-only now; runtime inventory is whatever the operator
-    // ships as a `configs/jobs/inventory-*.yaml` probe through the
-    // schedule/deploy/ExecResult path. Keep warning so a stale
-    // agent.toml doesn't silently mislead.
-    let inv_defaults = kanade_shared::config::InventorySection::default();
-    if cfg.inventory.hw_interval != inv_defaults.hw_interval
-        || cfg.inventory.jitter != inv_defaults.jitter
-        || cfg.inventory.enabled != inv_defaults.enabled
-    {
-        tracing::warn!(
-            local_inventory = ?cfg.inventory,
-            "agent.toml::[inventory] is fully retired in v0.14 — the agent no longer runs a hardcoded inventory loop. Define a `configs/jobs/inventory-*.yaml` probe with an `inventory:` hint and register it via `kanade schedule create`.",
-        );
-    }
-
     tokio::spawn(heartbeat::heartbeat_loop(
         client.clone(),
         pc_id.clone(),

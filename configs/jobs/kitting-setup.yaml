@@ -1,0 +1,40 @@
+# Sample kitting / first-boot job — fired once per PC by the
+# `kitting-once` schedule (configs/schedules/kitting-once.yaml).
+#
+# Install:
+#
+#   kanade job create     configs/jobs/kitting-setup.yaml
+#   kanade schedule create configs/schedules/kitting-once.yaml
+#
+# Real kitting scripts would do things like:
+#   * Set the timezone / locale
+#   * Install / configure antivirus, monitoring agent
+#   * Set the hostname, join the domain
+#   * Push baseline registry / GPO settings
+#   * Pre-create the operator's account
+#
+# This sample only prints a setup confirmation line so it runs
+# safely without admin and gives the SPA Results page something
+# visible to inspect. Replace the body with your real bootstrap
+# pipeline — exit 0 = "this PC is kitted, never run me on it
+# again" (per the `mode: once_per_pc` dedup in the schedule).
+#
+# Failure handling:
+#   * exit != 0 → scheduler picks the PC up again on the next tick
+#     and re-fires (until it succeeds, or the operator yanks the
+#     schedule). Make the script idempotent.
+
+id: kitting-setup
+version: 0.1.0
+description: First-boot setup pipeline (sample — no real side effects)
+execute:
+  shell: powershell
+  timeout: 5m
+  script: |
+    $ErrorActionPreference = 'Stop'
+    Write-Output "kitting kanade-setup on $env:COMPUTERNAME at $(Get-Date -Format 'o')"
+    # Add your real bootstrap commands above this line. Anything
+    # that writes outside %ProgramData%\Kanade\data\ probably
+    # needs the agent service running as SYSTEM (which the
+    # production KanadeAgent does; the dev agent runs as the
+    # operator's user).

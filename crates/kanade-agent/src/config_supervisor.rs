@@ -371,7 +371,7 @@ mod tests {
     fn apply_global_put_updates_state() {
         let mut s = State::default();
         let scope = ConfigScope {
-            inventory_interval: Some("6h".into()),
+            heartbeat_interval: Some("60s".into()),
             ..Default::default()
         };
         let bytes = serde_json::to_vec(&scope).unwrap();
@@ -380,8 +380,8 @@ mod tests {
             ChangeOutcome::Touched,
         );
         assert_eq!(
-            s.global.as_ref().unwrap().inventory_interval.as_deref(),
-            Some("6h")
+            s.global.as_ref().unwrap().heartbeat_interval.as_deref(),
+            Some("60s")
         );
     }
 
@@ -389,7 +389,7 @@ mod tests {
     fn apply_global_delete_clears_state() {
         let mut s = State {
             global: Some(ConfigScope {
-                inventory_interval: Some("6h".into()),
+                heartbeat_interval: Some("60s".into()),
                 ..Default::default()
             }),
             ..Default::default()
@@ -504,7 +504,7 @@ mod tests {
     fn resolved_reflects_layered_state() {
         let mut s = State {
             global: Some(ConfigScope {
-                inventory_interval: Some("24h".into()),
+                heartbeat_interval: Some("60s".into()),
                 ..Default::default()
             }),
             ..Default::default()
@@ -512,13 +512,13 @@ mod tests {
         s.groups.insert(
             "canary".into(),
             ConfigScope {
-                inventory_interval: Some("1h".into()),
+                heartbeat_interval: Some("5s".into()),
                 ..Default::default()
             },
         );
         s.my_groups = vec!["canary".into()];
         let (eff, warns) = s.resolved();
-        assert_eq!(eff.inventory_interval, "1h");
+        assert_eq!(eff.heartbeat_interval, "5s");
         assert!(warns.is_empty());
     }
 }

@@ -27,6 +27,13 @@
 //! [`ResolutionWarning::MultiGroupConflict`] is emitted so the
 //! caller can log it — pre-empts the "why does this PC have value X?
 //! none of my groups say X" debugging session.
+//!
+//! v0.20.0: `inventory_interval` / `inventory_jitter` /
+//! `inventory_enabled` removed. They were leftovers from the
+//! v0.14-retired hardcoded WMI inventory loop; runtime inventory
+//! now lives in operator-defined probe jobs (`configs/jobs/
+//! inventory-*.yaml`), so the layered config no longer carries
+//! anything about it.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -49,12 +56,6 @@ pub struct ConfigScope {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_version_jitter: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub inventory_interval: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub inventory_jitter: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub inventory_enabled: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub heartbeat_interval: Option<String>,
 }
 
@@ -62,9 +63,6 @@ impl ConfigScope {
     pub fn is_empty(&self) -> bool {
         self.target_version.is_none()
             && self.target_version_jitter.is_none()
-            && self.inventory_interval.is_none()
-            && self.inventory_jitter.is_none()
-            && self.inventory_enabled.is_none()
             && self.heartbeat_interval.is_none()
     }
 }
@@ -79,16 +77,11 @@ impl ConfigScope {
 pub struct EffectiveConfig {
     pub target_version: Option<String>,
     pub target_version_jitter: String,
-    pub inventory_interval: String,
-    pub inventory_jitter: String,
-    pub inventory_enabled: bool,
     pub heartbeat_interval: String,
 }
 
 impl EffectiveConfig {
     /// Floor values used when no KV scope sets a given field.
-    /// Mirrors the historic agent.toml defaults so unbootstrapped
-    /// fleets keep behaving the way they did pre-Sprint 6.
     pub fn builtin_defaults() -> Self {
         Self {
             target_version: None,
@@ -96,11 +89,9 @@ impl EffectiveConfig {
             // running ≥ 100-host fleets are expected to bump this
             // (via `kanade agent rollout … --jitter 30m` or
             // `kanade config set target_version_jitter=30m`) so the
-            // Object Store fan-out doesn't synchronise.
+            // Object Store fan-out doesn't synchronise. See issue
+            // #26 for the broader "safe-by-default" debate.
             target_version_jitter: "0s".to_string(),
-            inventory_interval: "24h".to_string(),
-            inventory_jitter: "10m".to_string(),
-            inventory_enabled: true,
             heartbeat_interval: "30s".to_string(),
         }
     }
@@ -110,15 +101,6 @@ impl EffectiveConfig {
     /// is the caller's job (so that test code can stay quiet).
     pub fn heartbeat_duration(&self) -> Duration {
         humantime::parse_duration(&self.heartbeat_interval).unwrap_or(Duration::from_secs(30))
-    }
-
-    pub fn inventory_interval_duration(&self) -> Duration {
-        humantime::parse_duration(&self.inventory_interval)
-            .unwrap_or(Duration::from_secs(24 * 60 * 60))
-    }
-
-    pub fn inventory_jitter_duration(&self) -> Duration {
-        humantime::parse_duration(&self.inventory_jitter).unwrap_or(Duration::from_secs(600))
     }
 
     /// Parsed `target_version_jitter`, falling back to zero (= no
@@ -205,24 +187,6 @@ pub fn resolve(
                 .or_default()
                 .push(g.to_string());
         }
-        if scope.inventory_interval.is_some() {
-            setters
-                .entry("inventory_interval")
-                .or_default()
-                .push(g.to_string());
-        }
-        if scope.inventory_jitter.is_some() {
-            setters
-                .entry("inventory_jitter")
-                .or_default()
-                .push(g.to_string());
-        }
-        if scope.inventory_enabled.is_some() {
-            setters
-                .entry("inventory_enabled")
-                .or_default()
-                .push(g.to_string());
-        }
         if scope.heartbeat_interval.is_some() {
             setters
                 .entry("heartbeat_interval")
@@ -257,15 +221,6 @@ fn apply_scope(out: &mut EffectiveConfig, s: &ConfigScope) {
     if let Some(v) = &s.target_version_jitter {
         out.target_version_jitter = v.clone();
     }
-    if let Some(v) = &s.inventory_interval {
-        out.inventory_interval = v.clone();
-    }
-    if let Some(v) = &s.inventory_jitter {
-        out.inventory_jitter = v.clone();
-    }
-    if let Some(v) = s.inventory_enabled {
-        out.inventory_enabled = v;
-    }
     if let Some(v) = &s.heartbeat_interval {
         out.heartbeat_interval = v.clone();
     }
@@ -289,35 +244,32 @@ mod tests {
     #[test]
     fn global_only() {
         let g = ConfigScope {
-            inventory_interval: Some("12h".into()),
             heartbeat_interval: Some("60s".into()),
             ..scope()
         };
         let (eff, _) = resolve(Some(&g), &BTreeMap::new(), None, &[]);
-        assert_eq!(eff.inventory_interval, "12h");
         assert_eq!(eff.heartbeat_interval, "60s");
         // Unset fields stay at builtin defaults.
-        assert_eq!(eff.inventory_jitter, "10m");
-        assert!(eff.inventory_enabled);
+        assert_eq!(eff.target_version_jitter, "0s");
         assert!(eff.target_version.is_none());
     }
 
     #[test]
     fn group_overrides_global() {
         let global = ConfigScope {
-            inventory_interval: Some("24h".into()),
+            heartbeat_interval: Some("30s".into()),
             ..scope()
         };
         let mut groups = BTreeMap::new();
         groups.insert(
             "canary".into(),
             ConfigScope {
-                inventory_interval: Some("1h".into()),
+                heartbeat_interval: Some("5s".into()),
                 ..scope()
             },
         );
         let (eff, warns) = resolve(Some(&global), &groups, None, &["canary".into()]);
-        assert_eq!(eff.inventory_interval, "1h");
+        assert_eq!(eff.heartbeat_interval, "5s");
         assert!(warns.is_empty());
     }
 
@@ -327,46 +279,46 @@ mod tests {
         groups.insert(
             "wave1".into(),
             ConfigScope {
-                inventory_interval: Some("12h".into()),
+                heartbeat_interval: Some("30s".into()),
                 ..scope()
             },
         );
         let pc = ConfigScope {
-            inventory_interval: Some("5m".into()),
+            heartbeat_interval: Some("5s".into()),
             ..scope()
         };
         let (eff, _) = resolve(None, &groups, Some(&pc), &["wave1".into()]);
-        assert_eq!(eff.inventory_interval, "5m");
+        assert_eq!(eff.heartbeat_interval, "5s");
     }
 
     #[test]
     fn pc_overrides_global_when_no_group_match() {
         let global = ConfigScope {
-            inventory_interval: Some("24h".into()),
+            heartbeat_interval: Some("30s".into()),
             ..scope()
         };
         let pc = ConfigScope {
-            inventory_interval: Some("30m".into()),
+            heartbeat_interval: Some("5s".into()),
             ..scope()
         };
         let (eff, _) = resolve(Some(&global), &BTreeMap::new(), Some(&pc), &[]);
-        assert_eq!(eff.inventory_interval, "30m");
+        assert_eq!(eff.heartbeat_interval, "5s");
     }
 
     #[test]
     fn partial_override_only_changes_named_fields() {
         let global = ConfigScope {
-            inventory_interval: Some("24h".into()),
+            target_version_jitter: Some("30m".into()),
             heartbeat_interval: Some("30s".into()),
             ..scope()
         };
         let pc = ConfigScope {
             heartbeat_interval: Some("15s".into()),
-            // intentionally not touching inventory_interval
+            // intentionally not touching target_version_jitter
             ..scope()
         };
         let (eff, _) = resolve(Some(&global), &BTreeMap::new(), Some(&pc), &[]);
-        assert_eq!(eff.inventory_interval, "24h"); // from global
+        assert_eq!(eff.target_version_jitter, "30m"); // from global
         assert_eq!(eff.heartbeat_interval, "15s"); // from pc
     }
 
@@ -376,24 +328,24 @@ mod tests {
         groups.insert(
             "wave1".into(),
             ConfigScope {
-                inventory_interval: Some("12h".into()),
+                heartbeat_interval: Some("5s".into()),
                 ..scope()
             },
         );
         groups.insert(
             "dept-eng".into(),
             ConfigScope {
-                inventory_interval: Some("24h".into()),
+                heartbeat_interval: Some("60s".into()),
                 ..scope()
             },
         );
         let (eff, warns) = resolve(None, &groups, None, &["wave1".into(), "dept-eng".into()]);
         // "dept-eng" sorts before "wave1", so wave1 wins (last alphabetical).
-        assert_eq!(eff.inventory_interval, "12h");
+        assert_eq!(eff.heartbeat_interval, "5s");
         assert_eq!(warns.len(), 1);
         match &warns[0] {
             ResolutionWarning::MultiGroupConflict { field, groups } => {
-                assert_eq!(*field, "inventory_interval");
+                assert_eq!(*field, "heartbeat_interval");
                 assert_eq!(groups, &vec!["dept-eng".to_string(), "wave1".to_string()]);
             }
         }
@@ -405,7 +357,7 @@ mod tests {
         groups.insert(
             "wave1".into(),
             ConfigScope {
-                inventory_interval: Some("12h".into()),
+                heartbeat_interval: Some("5s".into()),
                 ..scope()
             },
         );
@@ -413,13 +365,13 @@ mod tests {
             "dept-eng".into(),
             ConfigScope {
                 // Different field — doesn't conflict.
-                heartbeat_interval: Some("15s".into()),
+                target_version_jitter: Some("15m".into()),
                 ..scope()
             },
         );
         let (eff, warns) = resolve(None, &groups, None, &["wave1".into(), "dept-eng".into()]);
-        assert_eq!(eff.inventory_interval, "12h");
-        assert_eq!(eff.heartbeat_interval, "15s");
+        assert_eq!(eff.heartbeat_interval, "5s");
+        assert_eq!(eff.target_version_jitter, "15m");
         assert!(warns.is_empty());
     }
 
@@ -432,7 +384,7 @@ mod tests {
         groups.insert(
             "canary".into(),
             ConfigScope {
-                inventory_interval: Some("1h".into()),
+                heartbeat_interval: Some("5s".into()),
                 ..scope()
             },
         );
@@ -442,7 +394,7 @@ mod tests {
             None,
             &["canary".into(), "ghost-group".into()],
         );
-        assert_eq!(eff.inventory_interval, "1h");
+        assert_eq!(eff.heartbeat_interval, "5s");
         assert!(warns.is_empty());
     }
 
@@ -467,14 +419,14 @@ mod tests {
         groups.insert(
             "wave1".into(),
             ConfigScope {
-                inventory_interval: Some("12h".into()),
+                heartbeat_interval: Some("5s".into()),
                 ..scope()
             },
         );
         // my_groups carries the same name twice — the dedup pass
         // keeps it from looking like a conflict-with-self.
         let (eff, warns) = resolve(None, &groups, None, &["wave1".into(), "wave1".into()]);
-        assert_eq!(eff.inventory_interval, "12h");
+        assert_eq!(eff.heartbeat_interval, "5s");
         assert!(warns.is_empty());
     }
 
@@ -507,9 +459,14 @@ mod tests {
 
     #[test]
     fn deserialize_tolerates_unknown_fields_for_forward_compat() {
-        // Sprint 6+ may add fields (log_level, jitter strategy, …);
-        // older agent / backend builds should keep parsing.
-        let json = r#"{"target_version":"0.3.0","future_knob":"future_value"}"#;
+        // Older agent / backend builds should keep parsing in case
+        // we add fields later. v0.20 also relies on this so pre-v0.20
+        // rows that still have inventory_interval / inventory_jitter
+        // / inventory_enabled in the bucket value parse OK as the
+        // new (smaller) ConfigScope — the dropped fields just
+        // dissolve into "unknown, ignored".
+        let json =
+            r#"{"target_version":"0.3.0","inventory_interval":"24h","future_knob":"future_value"}"#;
         let s: ConfigScope = serde_json::from_str(json).unwrap();
         assert_eq!(s.target_version.as_deref(), Some("0.3.0"));
     }
@@ -525,15 +482,15 @@ mod tests {
         groups.insert(
             "wave1".into(),
             ConfigScope {
-                inventory_interval: Some("12h".into()),
+                heartbeat_interval: Some("30s".into()),
                 ..scope()
             },
         );
         let pc = ConfigScope {
-            inventory_interval: Some("5m".into()),
+            heartbeat_interval: Some("5s".into()),
             ..scope()
         };
         let (eff, _) = resolve(None, &groups, Some(&pc), &["wave1".into()]);
-        assert_eq!(eff.inventory_interval, "5m");
+        assert_eq!(eff.heartbeat_interval, "5s");
     }
 }
