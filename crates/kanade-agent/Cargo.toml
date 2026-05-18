@@ -13,7 +13,7 @@ keywords.workspace     = true
 categories.workspace   = true
 
 [dependencies]
-kanade-shared = { path = "../kanade-shared", version = "0.20.0" }
+kanade-shared = { path = "../kanade-shared", version = "0.21.0" }
 
 anyhow     = { workspace = true }
 async-nats = { workspace = true }
@@ -42,6 +42,19 @@ uuid       = { workspace = true }
 # scaffolding plus the typed status struct (Running / Stopped + accepted
 # control codes) that SCM expects.
 windows-service = "0.8"
+# v0.21: CreateProcessAsUserW + WTSQueryUserToken for run_as: user /
+# system_gui. Feature flags scope the binding to just what we need.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Environment",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_StationsAndDesktops",
+    "Win32_System_Threading",
+] }
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 # Embeds VERSIONINFO into the .exe at build time so backend's upload

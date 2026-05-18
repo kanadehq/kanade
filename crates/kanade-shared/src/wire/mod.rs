@@ -8,7 +8,7 @@ mod result;
 
 pub use agent_config::{ConfigScope, EffectiveConfig, ResolutionWarning, resolve};
 pub use agent_groups::AgentGroups;
-pub use command::{Command, Shell};
+pub use command::{Command, RunAs, Shell};
 pub use heartbeat::Heartbeat;
 pub use inventory::{DiskInfo, HwInventory};
 pub use logs::LogsRequest;

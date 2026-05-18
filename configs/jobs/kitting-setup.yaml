@@ -30,11 +30,18 @@ description: First-boot setup pipeline (sample — no real side effects)
 execute:
   shell: powershell
   timeout: 5m
+  # v0.21: which (token, session) the agent uses to spawn the child.
+  #   system     (default) — Session 0, LocalSystem privs, no GUI.
+  #                          Use for HKLM / driver / system-wide install.
+  #   user                 — user's session + user's (UAC-filtered) privs.
+  #                          Use for HKCU / %APPDATA% / Slack notifications /
+  #                          anything that needs the user's identity or
+  #                          should show a window to them.
+  #   system_gui           — user's session + LocalSystem privs.
+  #                          Niche: admin installer with visible UI.
+  run_as: system
   script: |
     $ErrorActionPreference = 'Stop'
     Write-Output "kitting kanade-setup on $env:COMPUTERNAME at $(Get-Date -Format 'o')"
-    # Add your real bootstrap commands above this line. Anything
-    # that writes outside %ProgramData%\Kanade\data\ probably
-    # needs the agent service running as SYSTEM (which the
-    # production KanadeAgent does; the dev agent runs as the
-    # operator's user).
+    Write-Output "running as: $env:USERNAME / session $((Get-Process -Id $pid).SessionId)"
+    # Add your real bootstrap commands above this line.

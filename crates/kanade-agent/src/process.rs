@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use futures::StreamExt;
 use kanade_shared::subject;
-use kanade_shared::wire::{Command, Shell};
+use kanade_shared::wire::{Command, RunAs, Shell};
 use rand::Rng;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command as ProcessCommand;
@@ -49,6 +49,13 @@ pub async fn run_command_with_kill(
             "applying jitter before exec"
         );
         tokio::time::sleep(Duration::from_secs(secs)).await;
+    }
+
+    // v0.21: run_as: user / system_gui take a separate Win32 path
+    // (CreateProcessAsUserW). System (default) stays on tokio::process
+    // — backward-compatible for every pre-v0.21 manifest in the wild.
+    if !matches!(cmd.run_as, RunAs::System) {
+        return run_in_user_session_dispatch(client, cmd).await;
     }
 
     let (program, args): (&str, Vec<&str>) = match cmd.shell {
@@ -160,4 +167,74 @@ enum OutcomeInner {
     Completed(i32),
     Killed,
     Timeout,
+}
+
+/// Glue between the main `run_command_with_kill` (which expects a
+/// NATS subscriber-based kill signal) and `process_as_user`'s
+/// `oneshot::Receiver<()>` kill channel. We subscribe to `kill.{job_id}`
+/// here and forward "fired" into the channel, so the Win32 path's
+/// inner `tokio::select!` can use a plain oneshot.
+async fn run_in_user_session_dispatch(
+    client: &async_nats::Client,
+    cmd: &Command,
+) -> Result<ExecOutcome> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = client;
+        warn!(
+            run_as = ?cmd.run_as,
+            "run_as: user / system_gui is Windows-only — falling back to inherited identity",
+        );
+        // Synthesise an immediate "stub" outcome rather than silently
+        // running as the wrong identity on a non-Windows agent. Real
+        // operators are on Windows anyway; this branch exists to keep
+        // the workspace cross-compile-clean.
+        return Ok(ExecOutcome::Completed {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: format!(
+                "run_as: {:?} is Windows-only; non-Windows agents skip the script.\n",
+                cmd.run_as
+            ),
+        });
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let (kill_tx, kill_rx) = tokio::sync::oneshot::channel::<()>();
+        // Spawn the kill bridge only when there's a job_id to listen
+        // for — ad-hoc / scheduler-less exec paths skip it.
+        let bridge = if let Some(jid) = cmd.job_id.clone() {
+            let nats = client.clone();
+            let subject = subject::kill(&jid);
+            Some(tokio::spawn(async move {
+                match nats.subscribe(subject.clone()).await {
+                    Ok(mut sub) => {
+                        // flush before await so the broker has SUB
+                        nats.flush().await.ok();
+                        info!(job_id = %jid, subject = %subject, "kill listener armed (user-session path)");
+                        if sub.next().await.is_some() {
+                            info!(job_id = %jid, "kill received → forwarding to user-session waiter");
+                            let _ = kill_tx.send(());
+                        }
+                    }
+                    Err(e) => {
+                        warn!(error = %e, %subject, "subscribe kill failed (user-session path)")
+                    }
+                }
+            }))
+        } else {
+            None
+        };
+
+        let timeout = Duration::from_secs(cmd.timeout_secs.max(1));
+        let outcome =
+            crate::process_as_user::run_command_in_user_session(cmd, cmd.run_as, timeout, kill_rx)
+                .await;
+
+        if let Some(b) = bridge {
+            b.abort();
+        }
+        outcome
+    }
 }

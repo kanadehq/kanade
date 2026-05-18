@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::wire::Shell;
+use crate::wire::{RunAs, Shell};
 
 /// YAML job manifest (= registered "what to run", v0.18.0+).
 ///
@@ -135,6 +135,11 @@ pub struct Execute {
     /// humantime duration string (e.g. "30s", "10m"). Script-intrinsic
     /// — represents how long this script reasonably takes to run.
     pub timeout: String,
+    /// Token + session combination the agent uses to launch the
+    /// script (v0.21). Default = [`RunAs::System`] (Session 0,
+    /// LocalSystem privileges, no GUI) — matches pre-v0.21 behavior.
+    #[serde(default)]
+    pub run_as: RunAs,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]

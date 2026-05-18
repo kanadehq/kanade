@@ -7,6 +7,8 @@ mod process;
 mod self_update;
 
 #[cfg(target_os = "windows")]
+mod process_as_user;
+#[cfg(target_os = "windows")]
 mod service;
 
 use std::path::{Path, PathBuf};

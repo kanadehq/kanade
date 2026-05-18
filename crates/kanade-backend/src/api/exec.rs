@@ -73,6 +73,7 @@ pub async fn exec_manifest(
         script: manifest.execute.script.clone(),
         timeout_secs,
         jitter_secs,
+        run_as: manifest.execute.run_as,
     };
 
     let mut subjects: Vec<String> = Vec::new();

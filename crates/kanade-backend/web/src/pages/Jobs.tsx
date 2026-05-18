@@ -12,7 +12,11 @@ type JobRow = {
   id: string;
   version: string;
   description: string | null;
-  execute: { shell: 'powershell' | 'cmd'; timeout: string };
+  execute: {
+    shell: 'powershell' | 'cmd';
+    timeout: string;
+    run_as?: 'system' | 'user' | 'system_gui';
+  };
   inventory: unknown | null;
 };
 
@@ -64,6 +68,7 @@ export function Jobs() {
             <TableHead>id</TableHead>
             <TableHead>version</TableHead>
             <TableHead>shell</TableHead>
+            <TableHead>run_as</TableHead>
             <TableHead>timeout</TableHead>
             <TableHead>inventory</TableHead>
             <TableHead>description</TableHead>
@@ -76,6 +81,7 @@ export function Jobs() {
               <TableCell><code className="text-xs">{j.id}</code></TableCell>
               <TableCell><code className="text-xs">{j.version}</code></TableCell>
               <TableCell><code className="text-xs">{j.execute.shell}</code></TableCell>
+              <TableCell><code className="text-xs">{j.execute.run_as ?? 'system'}</code></TableCell>
               <TableCell><code className="text-xs">{j.execute.timeout}</code></TableCell>
               <TableCell>
                 {j.inventory

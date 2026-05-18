@@ -44,6 +44,9 @@ pub async fn execute(client: async_nats::Client, args: RunArgs) -> Result<()> {
         script,
         timeout_secs: args.timeout,
         jitter_secs: None,
+        // `kanade run` is one-shot / inline; use Job + `kanade exec`
+        // for the run_as: user / system_gui flows.
+        run_as: kanade_shared::wire::RunAs::System,
     };
 
     let result_subj = subject::results(&request_id);
