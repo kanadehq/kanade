@@ -121,8 +121,17 @@ export function Jobs() {
                 <Button
                   variant="secondary"
                   size="sm"
-                  disabled={revoke.isPending}
-                  onClick={() => revoke.mutate(j.id)}
+                  disabled={revoke.isPending && revoke.variables === j.id}
+                  onClick={() => {
+                    if (
+                      window.confirm(
+                        `Revoke ${j.id}?\n\n` +
+                          `Any in-flight Command for this manifest will be skipped on receipt by the agent's Layer 2 check (SPEC §2.6.2).\n\n` +
+                          `Reversible with the unrevoke button.`,
+                      )
+                    )
+                      revoke.mutate(j.id);
+                  }}
                   title="Flip script_status to REVOKED so in-flight Commands skip on receipt"
                 >
                   <Ban className="size-3.5" />
@@ -131,7 +140,7 @@ export function Jobs() {
                 <Button
                   variant="secondary"
                   size="sm"
-                  disabled={unrevoke.isPending}
+                  disabled={unrevoke.isPending && unrevoke.variables === j.id}
                   onClick={() => unrevoke.mutate(j.id)}
                   title="Flip script_status back to ACTIVE"
                 >

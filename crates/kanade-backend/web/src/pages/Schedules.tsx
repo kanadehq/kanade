@@ -56,16 +56,12 @@ export function Schedules() {
       }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['schedules'] }),
   });
-  // Enable is symmetrical — we just re-POST the full row with
-  // `enabled = true`. No backend endpoint here because re-enabling is
-  // strictly less dangerous than disabling and the upsert path is
-  // already shared with the cli's `kanade schedule create` flow.
+  // v0.27 (gemini #38 review): symmetrical /enable endpoint so we
+  // don't clobber concurrent edits with a full row re-POST. Backend
+  // uses kv.entry().revision + update() the same way disable does.
   const enable = useMutation({
-    mutationFn: (s: ScheduleRow) =>
-      apiFetch('/api/schedules', {
-        method: 'POST',
-        body: JSON.stringify({ ...s, enabled: true }),
-      }),
+    mutationFn: (id: string) =>
+      apiFetch(`/api/schedules/${encodeURIComponent(id)}/enable`, { method: 'POST' }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['schedules'] }),
   });
 
@@ -140,7 +136,7 @@ export function Schedules() {
                     <Button
                       variant="secondary"
                       size="sm"
-                      disabled={disable.isPending}
+                      disabled={disable.isPending && disable.variables?.id === s.id}
                       onClick={() => disable.mutate({ id: s.id, cascade: false })}
                       title="Soft disable — cron stops on next tick. In-flight Commands run."
                     >
@@ -150,7 +146,7 @@ export function Schedules() {
                     <Button
                       variant="danger"
                       size="sm"
-                      disabled={disable.isPending}
+                      disabled={disable.isPending && disable.variables?.id === s.id}
                       onClick={() => {
                         if (
                           window.confirm(
@@ -172,8 +168,8 @@ export function Schedules() {
                   <Button
                     variant="secondary"
                     size="sm"
-                    disabled={enable.isPending}
-                    onClick={() => enable.mutate(s)}
+                    disabled={enable.isPending && enable.variables === s.id}
+                    onClick={() => enable.mutate(s.id)}
                     title="Re-enable this schedule"
                   >
                     <Power className="size-3.5" />

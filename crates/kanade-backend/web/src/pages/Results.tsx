@@ -189,7 +189,7 @@ export function Results() {
                     <Button
                       variant="danger"
                       size="sm"
-                      disabled={kill.isPending}
+                      disabled={kill.isPending && kill.variables === r.job_id}
                       onClick={() => {
                         if (
                           window.confirm(
