@@ -55,7 +55,7 @@ tracing-subscriber = { workspace = true }
 # kanade-agent — without StartServiceCtrlDispatcher the backend
 # process never tells Windows it's alive and SCM kills it after
 # 30 s with Event ID 7009 / 'service did not respond'.
-windows-service = "0.8"
+windows-service = "0.8.1"
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winres = { workspace = true }
