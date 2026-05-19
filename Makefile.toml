@@ -116,6 +116,50 @@ args = ["run", "-p", "kanade-agent"]
 description = "One-shot sandbox: spawns `nats-dev` (:4223), `backend-dev` (:8081), `agent-dev` (NATS :4223), and `web-dev` (:5173) in parallel — full dev stack isolated from the installed Windows services. Ctrl+C once to tear all four down. Skip this when you'd rather iterate against the production backend — use `web-dev-prod` for that."
 run_task = { name = ["nats-dev", "backend-dev", "agent-dev", "web-dev"], parallel = true }
 
+# `agent-dev-N` (N = 1, 2, 3) spawn dev agents with distinct pc_ids
+# and isolated data/log directories so a single host can host a
+# multi-agent dev fleet. Each task overlays two env vars:
+#   * KANADE_DEV_AGENT_ID    → templated into agent.dev.toml as
+#     vars.pc_id, which then drives agent.id and the [log] path
+#   * KANADE_AGENT_DATA_DIR  → honored by default_paths::data_dir(),
+#     so outbox / state.db / local_completions.json live under the
+#     per-agent target/dev-data/agents/{pc_id}/ tree
+# Same agent.dev.toml is reused — no per-agent config file needed.
+#
+# `agent-dev-fleet-member` is the cargo-make `extend` base — keeps
+# the shared env (config path + RUST_LOG) and command in one place
+# so changes (e.g. raising the log level fleet-wide) don't have to
+# fan out by hand to every numbered task.
+
+[tasks.agent-dev-fleet-member]
+private = true
+cwd = "${CARGO_MAKE_WORKING_DIRECTORY}"
+command = "cargo"
+args = ["run", "-p", "kanade-agent"]
+env = { "KANADE_AGENT_CONFIG" = "${CARGO_MAKE_WORKING_DIRECTORY}/configs/agent.dev.toml", "RUST_LOG" = "info,kanade_agent=debug" }
+
+[tasks.agent-dev-1]
+extend = "agent-dev-fleet-member"
+private = false
+description = "Dev agent #1 — pc_id=dev-pc-1. Pair with agent-dev-2 / agent-dev-3 via `cargo make dev-fleet` to reproduce fan-out behaviour on a single host."
+env = { "KANADE_DEV_AGENT_ID" = "dev-pc-1", "KANADE_AGENT_DATA_DIR" = "${CARGO_MAKE_WORKING_DIRECTORY}/target/dev-data/agents/dev-pc-1" }
+
+[tasks.agent-dev-2]
+extend = "agent-dev-fleet-member"
+private = false
+description = "Dev agent #2 — pc_id=dev-pc-2."
+env = { "KANADE_DEV_AGENT_ID" = "dev-pc-2", "KANADE_AGENT_DATA_DIR" = "${CARGO_MAKE_WORKING_DIRECTORY}/target/dev-data/agents/dev-pc-2" }
+
+[tasks.agent-dev-3]
+extend = "agent-dev-fleet-member"
+private = false
+description = "Dev agent #3 — pc_id=dev-pc-3."
+env = { "KANADE_DEV_AGENT_ID" = "dev-pc-3", "KANADE_AGENT_DATA_DIR" = "${CARGO_MAKE_WORKING_DIRECTORY}/target/dev-data/agents/dev-pc-3" }
+
+[tasks.dev-fleet]
+description = "Multi-agent sandbox: nats-dev (:4223) + backend-dev (:8081) + web-dev (:5173) + agent-dev-{1,2,3} in parallel. Reproduces fan-out scenarios (`kanade exec --target all`) on a single host so you can spot bugs that only surface with N>1 agents (e.g. request_id collisions in execution_results)."
+run_task = { name = ["nats-dev", "backend-dev", "web-dev", "agent-dev-1", "agent-dev-2", "agent-dev-3"], parallel = true }
+
 [tasks.hook-install]
 description = "Install git pre-push hook that runs 'cargo make check'"
 script_runner = "@duckscript"
