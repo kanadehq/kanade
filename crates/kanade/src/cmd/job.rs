@@ -28,6 +28,10 @@ pub enum JobSub {
     /// List every job in the catalog.
     List,
     /// Delete a job by id. Refuses when any schedule references it.
+    /// v0.27: also writes `script_status.{id} = REVOKED` so any
+    /// in-flight Command for this manifest gets skipped by the agent's
+    /// Layer 2 check (SPEC §2.6.4 (b)). Operator-side: re-create with
+    /// `kanade job create <yaml>` + `kanade unrevoke <id>` to undo.
     Delete { id: String },
 }
 
