@@ -9,6 +9,7 @@ mod self_update;
 mod command_replay;
 mod local_scheduler;
 mod outbox;
+mod staleness;
 
 #[cfg(target_os = "windows")]
 mod cwd_expand;
@@ -100,7 +101,17 @@ pub(crate) async fn run_agent() -> Result<()> {
         "starting kanade-agent",
     );
 
-    let client = kanade_shared::nats_client::connect(&cfg.agent.nats_url).await?;
+    // v0.26: build the staleness tracker BEFORE the NATS client so we
+    // can hand its event_callback closure to the connect path. Every
+    // subsequent `Event::Connected` (initial handshake + every
+    // reconnect) stamps the tracker's `last_connected_at`. The
+    // tracker itself owns no task — `staleness()` is a pure read.
+    let staleness_tracker = staleness::Tracker::new();
+    let client = kanade_shared::nats_client::connect_with_event_callback(
+        &cfg.agent.nats_url,
+        staleness_tracker.on_event(),
+    )
+    .await?;
     info!("connected to NATS");
 
     let cmd_all = client.subscribe(subject::COMMANDS_ALL).await?;
@@ -161,11 +172,21 @@ pub(crate) async fn run_agent() -> Result<()> {
     // subscribes to it so `runs_on: agent` schedules targeting a
     // group reflect membership changes without waiting for the
     // next schedule edit.
-    let (groups_rx, _groups_handle) = groups::spawn(client.clone(), pc_id.clone(), dedup.clone());
+    let (groups_rx, _groups_handle) = groups::spawn(
+        client.clone(),
+        pc_id.clone(),
+        dedup.clone(),
+        staleness_tracker.clone(),
+    );
     // Reconnect catch-up: durable consumer on STREAM_EXEC that
     // replays the latest retained Command per subject. See
     // `crates/kanade-agent/src/command_replay.rs` for the flow.
-    command_replay::spawn(client.clone(), pc_id.clone(), dedup.clone());
+    command_replay::spawn(
+        client.clone(),
+        pc_id.clone(),
+        dedup.clone(),
+        staleness_tracker.clone(),
+    );
     // v0.24: file-based outbox for ExecResult publishes. Every
     // result the agent produces is persisted under `outbox/<rid>.json`
     // first; a background drain task publishes via JetStream and
@@ -177,11 +198,29 @@ pub(crate) async fn run_agent() -> Result<()> {
     // agent keeps firing even when the broker is unreachable. See
     // `crates/kanade-agent/src/local_scheduler.rs` for the flow.
     let completions_path = default_paths::data_dir().join("local_completions.json");
-    local_scheduler::spawn(client.clone(), pc_id.clone(), completions_path, groups_rx);
+    local_scheduler::spawn(
+        client.clone(),
+        pc_id.clone(),
+        completions_path,
+        groups_rx,
+        staleness_tracker.clone(),
+    );
 
     let _ = tokio::join!(
-        commands::command_loop(client.clone(), pc_id.clone(), dedup.clone(), cmd_all),
-        commands::command_loop(client.clone(), pc_id.clone(), dedup.clone(), cmd_self),
+        commands::command_loop(
+            client.clone(),
+            pc_id.clone(),
+            dedup.clone(),
+            staleness_tracker.clone(),
+            cmd_all,
+        ),
+        commands::command_loop(
+            client.clone(),
+            pc_id.clone(),
+            dedup.clone(),
+            staleness_tracker.clone(),
+            cmd_self,
+        ),
     );
 
     Ok(())

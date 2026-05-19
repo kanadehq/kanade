@@ -25,7 +25,7 @@ export function Nav() {
 
   return (
     <header className="border-b border-border bg-card/60 backdrop-blur-sm sticky top-0 z-10">
-      <div className="max-w-7xl mx-auto px-6 py-3 flex items-center gap-6">
+      <div className="max-w-screen-2xl mx-auto px-4 py-3 flex items-center gap-6">
         <Link to="/" className="flex items-center gap-2 group">
           {/* Baton-only crop of the canonical mark (assets/icon.svg).
               Dark variant swaps via <picture> + prefers-color-scheme.
@@ -83,7 +83,7 @@ export function Nav() {
           before the route change). */}
       {open && (
         <nav className="md:hidden border-t border-border bg-card/95 backdrop-blur-sm">
-          <div className="max-w-7xl mx-auto px-4 py-2 flex flex-col">
+          <div className="max-w-screen-2xl mx-auto px-4 py-2 flex flex-col">
             {links.map((l) => (
               <NavLink
                 key={l.to}

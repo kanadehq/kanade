@@ -13,6 +13,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::outbox;
 use crate::process::{ExecOutcome, run_command_with_kill};
+use crate::staleness::{StalenessDecision, Tracker, decide as staleness_decide};
 
 /// FIFO-bounded set of recently-seen `request_id`s. Shared between
 /// the core-sub `command_loop` and the JetStream-replay
@@ -60,6 +61,7 @@ pub async fn command_loop(
     client: async_nats::Client,
     pc_id: String,
     dedup: Arc<Mutex<DedupCache>>,
+    staleness: Tracker,
     mut sub: async_nats::Subscriber,
 ) {
     let jetstream = async_nats::jetstream::new(client.clone());
@@ -100,8 +102,9 @@ pub async fn command_loop(
         let pc_id = pc_id.clone();
         let cur = script_current.clone();
         let sta = script_status.clone();
+        let staleness = staleness.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_command(client, pc_id, cmd, cur, sta).await {
+            if let Err(e) = handle_command(client, pc_id, cmd, cur, sta, staleness).await {
                 error!(error = %e, "command handler failed");
             }
         });
@@ -114,8 +117,30 @@ pub async fn handle_command(
     cmd: Command,
     script_current: Option<Store>,
     script_status: Option<Store>,
+    staleness: Tracker,
 ) -> Result<()> {
-    // Spec §2.6 Layer 2: version-pinning + revoke check
+    // Spec §2.6 Layer 2: version-pinning + revoke check + v0.26
+    // staleness policy. The order matters:
+    //   1. staleness gate first — if the policy is `strict` and the
+    //      agent's broker view is too old, refuse to run before
+    //      consulting any KV (because a stale KV read would be
+    //      misleading). `cached` / `unchecked` flow straight through.
+    //   2. version-pin + revoke checks (unchanged from v0.22.1).
+    let staleness_now = staleness.staleness(&client);
+    match staleness_decide(&cmd.staleness, staleness_now) {
+        StalenessDecision::Proceed => {}
+        StalenessDecision::Skip { observed, allowed } => {
+            warn!(
+                cmd_id = %cmd.id,
+                request_id = %cmd.request_id,
+                observed_s = observed.as_secs(),
+                allowed_s = allowed.as_secs(),
+                "skip: staleness policy (mode=strict) exceeded — broker view too old",
+            );
+            return publish_staleness_skipped(&pc_id, &cmd, observed, allowed).await;
+        }
+    }
+
     if let Some(cur) = &script_current
         && let Ok(Some(entry)) = cur.get(&cmd.id).await
     {
@@ -242,6 +267,46 @@ fn should_skip_for_deadline(
     now: chrono::DateTime<chrono::Utc>,
 ) -> bool {
     now > deadline
+}
+
+/// v0.26: Synthesise an ExecResult for "Layer 2 strict staleness
+/// exceeded — agent couldn't verify it's running the latest version
+/// because the broker view is too old." Exit code 127 is reserved
+/// for this case (125 = deadline missed, 126 = future use). The
+/// stderr carries the observed staleness window + the configured
+/// allowance so the operator sees on the Results page why the fire
+/// was suppressed and what they'd need to change to allow it.
+async fn publish_staleness_skipped(
+    pc_id: &str,
+    cmd: &Command,
+    observed: std::time::Duration,
+    allowed: std::time::Duration,
+) -> Result<()> {
+    let now = chrono::Utc::now();
+    let stderr = format!(
+        "skipped: staleness policy (mode=strict) exceeded — agent has been disconnected for {}, max allowed {}",
+        humantime::format_duration(observed),
+        humantime::format_duration(allowed),
+    );
+    let result = ExecResult {
+        request_id: cmd.request_id.clone(),
+        pc_id: pc_id.to_string(),
+        exit_code: 127,
+        stdout: String::new(),
+        stderr,
+        started_at: now,
+        finished_at: now,
+        manifest_id: Some(cmd.id.clone()),
+    };
+    let outbox_dir = default_paths::data_dir().join("outbox");
+    let path = outbox::enqueue(&outbox_dir, &result)?;
+    info!(
+        request_id = %cmd.request_id,
+        exit_code = 127,
+        outbox = %path.display(),
+        "staleness-skip result enqueued to outbox",
+    );
+    Ok(())
 }
 
 /// Synthesise an ExecResult that mirrors a real run but flags

@@ -50,6 +50,9 @@ pub async fn execute(client: async_nats::Client, args: RunArgs) -> Result<()> {
         cwd: None,
         // Ad-hoc inline run; no scheduled tick → no deadline.
         deadline_at: None,
+        // v0.26: no Manifest behind this ad-hoc run, so use the
+        // back-compat default (`Cached`).
+        staleness: kanade_shared::wire::Staleness::Cached,
     };
 
     let result_subj = subject::results(&request_id);

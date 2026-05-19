@@ -54,13 +54,14 @@ pub fn spawn(
     client: async_nats::Client,
     pc_id: String,
     dedup: std::sync::Arc<tokio::sync::Mutex<crate::commands::DedupCache>>,
+    staleness: crate::staleness::Tracker,
 ) -> (
     tokio::sync::watch::Receiver<Vec<String>>,
     tokio::task::JoinHandle<()>,
 ) {
     let (tx, rx) = tokio::sync::watch::channel(Vec::<String>::new());
     let handle = tokio::spawn(async move {
-        if let Err(e) = manage(client, pc_id, dedup, tx).await {
+        if let Err(e) = manage(client, pc_id, dedup, staleness, tx).await {
             tracing::error!(error = ?e, "group-membership manager exited with error");
         }
     });
@@ -71,6 +72,7 @@ async fn manage(
     client: async_nats::Client,
     pc_id: String,
     dedup: std::sync::Arc<tokio::sync::Mutex<crate::commands::DedupCache>>,
+    staleness: crate::staleness::Tracker,
     groups_tx: tokio::sync::watch::Sender<Vec<String>>,
 ) -> Result<()> {
     let js = jetstream::new(client.clone());
@@ -105,6 +107,7 @@ async fn manage(
         &client,
         &pc_id,
         &dedup,
+        &staleness,
     )
     .await;
     // Publish the initial membership snapshot so `local_scheduler`
@@ -133,7 +136,7 @@ async fn manage(
                 drop = ?delta.to_unsubscribe,
                 "agent_groups update — reconciling subscriptions",
             );
-            apply_delta(&delta, &mut subs, &client, &pc_id, &dedup).await;
+            apply_delta(&delta, &mut subs, &client, &pc_id, &dedup, &staleness).await;
         }
         // Always publish — `local_scheduler` cares about the
         // membership value, not whether *core sub subscriptions*
@@ -150,6 +153,7 @@ async fn apply_delta(
     client: &async_nats::Client,
     pc_id: &str,
     dedup: &std::sync::Arc<tokio::sync::Mutex<crate::commands::DedupCache>>,
+    staleness: &crate::staleness::Tracker,
 ) {
     for g in &delta.to_unsubscribe {
         if let Some(handle) = subs.remove(g) {
@@ -170,6 +174,7 @@ async fn apply_delta(
                     client.clone(),
                     pc_id.to_string(),
                     dedup.clone(),
+                    staleness.clone(),
                     sub,
                 ));
                 subs.insert(g.clone(), handle);

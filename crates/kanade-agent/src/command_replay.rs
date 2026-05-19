@@ -55,9 +55,10 @@ pub fn spawn(
     client: async_nats::Client,
     pc_id: String,
     dedup: Arc<Mutex<DedupCache>>,
+    staleness: crate::staleness::Tracker,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        if let Err(e) = run(client, pc_id, dedup).await {
+        if let Err(e) = run(client, pc_id, dedup, staleness).await {
             error!(error = ?e, "command-replay loop exited with error");
         }
     })
@@ -67,6 +68,7 @@ async fn run(
     client: async_nats::Client,
     pc_id: String,
     dedup: Arc<Mutex<DedupCache>>,
+    staleness: crate::staleness::Tracker,
 ) -> Result<()> {
     let jetstream = async_nats::jetstream::new(client.clone());
     let stream = jetstream
@@ -157,6 +159,7 @@ async fn run(
         let pc_for_task = pc_id.clone();
         let cur = script_current.clone();
         let sta = script_status.clone();
+        let stl = staleness.clone();
         info!(
             cmd_id = %cmd.id,
             request_id = %cmd.request_id,
@@ -164,7 +167,7 @@ async fn run(
             "replay: handling missed command",
         );
         tokio::spawn(async move {
-            if let Err(e) = handle_command(client_for_task, pc_for_task, cmd, cur, sta).await {
+            if let Err(e) = handle_command(client_for_task, pc_for_task, cmd, cur, sta, stl).await {
                 error!(error = %e, "replay command handler failed");
             }
         });

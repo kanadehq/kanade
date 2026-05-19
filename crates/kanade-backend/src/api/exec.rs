@@ -77,6 +77,10 @@ pub async fn exec_manifest(
         run_as: manifest.execute.run_as,
         cwd: manifest.execute.cwd.clone(),
         deadline_at,
+        // v0.26: forward Layer 2 staleness policy to every emitted
+        // Command so the agent can apply it whether it sees the live
+        // publish or replays from STREAM_EXEC on reconnect.
+        staleness: manifest.staleness.clone(),
     };
 
     let mut subjects: Vec<String> = Vec::new();

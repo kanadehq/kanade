@@ -39,9 +39,40 @@ fn resolve_token() -> Option<String> {
 /// (Windows) or `$KANADE_NATS_TOKEN`; connects unauthenticated when
 /// neither is set.
 pub async fn connect(url: &str) -> Result<async_nats::Client> {
+    connect_inner(url, None::<fn(async_nats::Event) -> std::future::Ready<()>>).await
+}
+
+/// Same as [`connect`] but also wires an `event_callback` that fires
+/// whenever async-nats publishes a `ConnectEvent` (Connected,
+/// Disconnected, ServerError, etc.). The callback's `Future` runs on
+/// the async-nats internal task — keep it cheap and non-blocking
+/// (set a flag, send on a channel, that kind of thing) so the
+/// connection state machine isn't held up.
+///
+/// Used by the agent's v0.26 Layer 2 staleness tracker: the callback
+/// stamps a shared `Mutex<Option<Instant>>` on every Connected event,
+/// so `decide()` at fire time can answer "how long ago were we last
+/// definitely-talking-to-the-broker" without a polling loop.
+pub async fn connect_with_event_callback<F, Fut>(url: &str, cb: F) -> Result<async_nats::Client>
+where
+    F: Fn(async_nats::Event) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = ()> + Send + Sync + 'static,
+{
+    connect_inner(url, Some(cb)).await
+}
+
+async fn connect_inner<F, Fut>(url: &str, cb: Option<F>) -> Result<async_nats::Client>
+where
+    F: Fn(async_nats::Event) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = ()> + Send + Sync + 'static,
+{
     let opts = async_nats::ConnectOptions::new();
     let opts = match resolve_token() {
         Some(token) => opts.token(token),
+        None => opts,
+    };
+    let opts = match cb {
+        Some(cb) => opts.event_callback(cb),
         None => opts,
     };
     opts.connect(url)

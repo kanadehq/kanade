@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::wire::{RunAs, Shell};
+use crate::wire::{RunAs, Shell, Staleness};
 
 /// YAML job manifest (= registered "what to run", v0.18.0+).
 ///
@@ -30,6 +30,15 @@ pub struct Manifest {
     /// `display` sub-config drives the SPA's Inventory page render.
     #[serde(default)]
     pub inventory: Option<InventoryHint>,
+    /// v0.26: Layer 2 staleness policy (SPEC.md §2.6.2). Controls
+    /// what the agent does at fire time when it can't verify the
+    /// `script_current` / `script_status` KV values are fresh —
+    /// especially relevant for `runs_on: agent` schedules where
+    /// the agent may fire from cache while offline. Defaults to
+    /// `Staleness::Cached` (silently use cached values), which
+    /// matches every pre-v0.26 Manifest.
+    #[serde(default)]
+    pub staleness: Staleness,
 }
 
 /// "Who + how + when-to-stagger" — the fanout-plan side of an exec.
@@ -421,6 +430,56 @@ cooldown: 24h
     fn execute_shell_into_wire_shell() {
         assert_eq!(Shell::from(ExecuteShell::Powershell), Shell::Powershell);
         assert_eq!(Shell::from(ExecuteShell::Cmd), Shell::Cmd);
+    }
+
+    #[test]
+    fn manifest_staleness_defaults_to_cached() {
+        let yaml = r#"
+id: x
+version: 1.0.0
+execute:
+  shell: powershell
+  script: "echo"
+  timeout: 1s
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(m.staleness, Staleness::Cached);
+    }
+
+    #[test]
+    fn manifest_strict_staleness_parses() {
+        let yaml = r#"
+id: urgent-patch
+version: 2.5.1
+execute:
+  shell: powershell
+  script: Install-Hotfix
+  timeout: 5m
+staleness:
+  mode: strict
+  max_cache_age: 0s
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        match m.staleness {
+            Staleness::Strict { max_cache_age } => assert_eq!(max_cache_age, "0s"),
+            other => panic!("expected strict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn manifest_unchecked_staleness_parses() {
+        let yaml = r#"
+id: legacy
+version: 0.1.0
+execute:
+  shell: cmd
+  script: "echo"
+  timeout: 1s
+staleness:
+  mode: unchecked
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(m.staleness, Staleness::Unchecked);
     }
 
     #[test]

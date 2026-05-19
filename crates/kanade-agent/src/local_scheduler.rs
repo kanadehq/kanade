@@ -138,9 +138,10 @@ pub fn spawn(
     pc_id: String,
     completions_path: PathBuf,
     groups_rx: tokio::sync::watch::Receiver<Vec<String>>,
+    staleness: crate::staleness::Tracker,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        if let Err(e) = run(client, pc_id, completions_path, groups_rx).await {
+        if let Err(e) = run(client, pc_id, completions_path, groups_rx, staleness).await {
             error!(error = ?e, "local_scheduler loop exited with error");
         }
     })
@@ -151,6 +152,7 @@ async fn run(
     pc_id: String,
     completions_path: PathBuf,
     groups_rx: tokio::sync::watch::Receiver<Vec<String>>,
+    staleness: crate::staleness::Tracker,
 ) -> Result<()> {
     let js = async_nats::jetstream::new(client.clone());
     let schedules_kv = js
@@ -206,7 +208,10 @@ async fn run(
             if let Ok(Some(bytes)) = schedules_kv.get(&k).await
                 && let Ok(s) = serde_json::from_slice::<Schedule>(&bytes)
             {
-                reconcile_schedule(&internal, &state, &client, &pc_id, &my_groups, &s).await;
+                reconcile_schedule(
+                    &internal, &state, &client, &pc_id, &my_groups, &s, &staleness,
+                )
+                .await;
             }
         }
     }
@@ -230,6 +235,7 @@ async fn run(
     let client_for_sched = client.clone();
     let pc_id_for_sched = pc_id.clone();
     let groups_rx_for_sched = groups_rx.clone();
+    let staleness_for_sched = staleness.clone();
     let sched_task = tokio::spawn(async move {
         let mut watch = schedules_watch;
         while let Some(entry) = watch.next().await {
@@ -251,6 +257,7 @@ async fn run(
                             &pc_id_for_sched,
                             &groups_snapshot,
                             &s,
+                            &staleness_for_sched,
                         )
                         .await;
                     } else {
@@ -297,6 +304,7 @@ async fn run(
     let state_for_groups = state.clone();
     let client_for_groups = client.clone();
     let pc_id_for_groups = pc_id.clone();
+    let staleness_for_groups = staleness.clone();
     let mut groups_rx_for_watch = groups_rx;
     let groups_task = tokio::spawn(async move {
         // Skip the initial value — already used above for the boot
@@ -342,6 +350,7 @@ async fn run(
                         &pc_id_for_groups,
                         &new_groups,
                         &s,
+                        &staleness_for_groups,
                     )
                     .await;
                 }
@@ -385,6 +394,7 @@ async fn reconcile_schedule(
     pc_id: &str,
     my_groups: &[String],
     schedule: &Schedule,
+    staleness: &crate::staleness::Tracker,
 ) {
     let mine = {
         let st = state.lock().await;
@@ -405,13 +415,15 @@ async fn reconcile_schedule(
     let pc_id_for_job = pc_id.to_string();
     let state_for_job = state.clone();
     let schedule_for_job = schedule.clone();
+    let staleness_for_job = staleness.clone();
     let job = match Job::new_async(cron.as_str(), move |_uuid, _l| {
         let client = client_for_job.clone();
         let pc_id = pc_id_for_job.clone();
         let state = state_for_job.clone();
         let schedule = schedule_for_job.clone();
+        let staleness = staleness_for_job.clone();
         Box::pin(async move {
-            local_tick(&client, &pc_id, &state, &schedule).await;
+            local_tick(&client, &pc_id, &state, &schedule, &staleness).await;
         })
     }) {
         Ok(j) => j,
@@ -468,6 +480,7 @@ async fn local_tick(
     pc_id: &str,
     state: &Arc<Mutex<State>>,
     schedule: &Schedule,
+    staleness: &crate::staleness::Tracker,
 ) {
     // 1) Manifest must be cached. If not, skip and try again next tick
     //    (the jobs_watch loop may pick it up).
@@ -545,6 +558,10 @@ async fn local_tick(
         run_as: manifest.execute.run_as,
         cwd: manifest.execute.cwd.clone(),
         deadline_at: None,
+        // v0.26: forward the Manifest's Layer 2 staleness policy so
+        // `handle_command` evaluates it against the agent's current
+        // broker-connectivity reading at fire time.
+        staleness: manifest.staleness.clone(),
     };
 
     let js = async_nats::jetstream::new(client.clone());
@@ -567,6 +584,7 @@ async fn local_tick(
         cmd,
         script_current,
         script_status,
+        staleness.clone(),
     )
     .await
     {

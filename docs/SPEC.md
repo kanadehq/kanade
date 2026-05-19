@@ -22,7 +22,7 @@
   - [2.3 データ設計](#23-データ設計)
   - [2.4 命令定義 (YAML スキーマ)](#24-命令定義-yaml-スキーマ)
   - [2.5 配信戦略](#25-配信戦略)
-  - [2.6 バージョン管理と緊急停止 (3層防御)](#26-バージョン管理と緊急停止-3層防御)
+  - [2.6 バージョン管理と緊急停止 (3層防御 + オフライン補強)](#26-バージョン管理と緊急停止-3層防御--オフライン補強)
   - [2.7 セキュリティ](#27-セキュリティ)
   - [2.8 信頼性・可用性](#28-信頼性可用性)
   - [2.9 監視・運用](#29-監視運用)
@@ -714,69 +714,212 @@ while let Some(entry) = watcher.next().await {
 }
 ```
 
-## 2.6 バージョン管理と緊急停止 (3層防御)
+## 2.6 バージョン管理と緊急停止 (3層防御 + オフライン補強)
 
-### 第1層: Broker 滞留メッセージの置換
+「古い版が実行される」「revoke 済が実行される」「実行中を止めたい」の 3 つを、それぞれ独立した層で防ぐ。Sprint 6.x までで全層実装済。v0.23.0 で agent 側 local_scheduler が入って **オフライン端末からも fire が起こる** ようになったため、Layer 2 に *staleness policy* を足してオフライン時の挙動を Manifest 側から制御できるようにした (詳細は §2.6.2)。
 
-JetStream Stream の `DEPLOY` を `MaxMsgsPerSubject=1` + `DiscardPolicy::Old` で構成。同一 `commands.deploy.{job_id}` の旧版は新版 publish 時に自動削除される。
-オフラインだった Agent が復帰した際、必ず最新版だけ受信する。
+### 2.6.1 第1層: Broker 滞留メッセージの置換
+
+`STREAM_EXEC` を `max_messages_per_subject = 1` + `DiscardPolicy::Old` で構成。同一 subject (`commands.pc.{pc_id}` / `commands.group.{name}` / `commands.all`) への publish は常に最新の 1 通のみ broker 上に残り、旧版は自動的に破棄される。
+
+オフラインだった Agent が復帰すると、durable consumer (`DeliverPolicy::LastPerSubject`) で **subject ごとの最新 1 通だけ** を replay 受信する。途中の中間版は配送されないので、古い命令が遅延配送される事故を構造的に防ぐ (v0.22.1)。
 
 ```rust
-StreamConfig {
-    name: "DEPLOY".into(),
-    subjects: vec!["commands.deploy.>".into()],
+// crates/kanade-shared/src/bootstrap.rs
+js.create_or_update_stream(StreamConfig {
+    name: STREAM_EXEC.into(),                  // "EXEC"
+    subjects: vec!["commands.>".into()],       // commands.all / commands.group.X / commands.pc.Y
     max_messages_per_subject: 1,
     discard: DiscardPolicy::Old,
-    ..
+    max_age: Duration::from_secs(7 * 24 * 60 * 60),
+    ..Default::default()
+})
+.await?;
+```
+
+> spec 初版で言及していた `DEPLOY` stream / `commands.deploy.>` subject は v0.22.1 で `STREAM_EXEC` / `commands.>` に統合済。配信経路を 1 本化することで、ad-hoc exec / 定期 schedule / 緊急コマンド すべてが同じ replay 経路に乗る。
+
+### 2.6.2 第2層: 実行直前の version 照合 + staleness policy
+
+Agent は `handle_command` の冒頭で常に 2 つの KV を引いて判定する:
+
+- `BUCKET_SCRIPT_CURRENT` (`script_current`) — `cmd_id → version` を保持。backend が `kanade exec` 時に `kv.put(manifest.id, manifest.version)` で更新する。受信した `Command.version` と KV 値が一致しなければ skip。
+- `BUCKET_SCRIPT_STATUS` (`script_status`) — `cmd_id → "ACTIVE" | "REVOKED"`。`kanade revoke <cmd_id>` / `POST /api/scripts/{cmd_id}/revoke` で REVOKED に更新。REVOKED なら skip。
+
+```rust
+// crates/kanade-agent/src/commands.rs::handle_command (抜粋)
+if let Some(cur) = &script_current
+    && let Ok(Some(entry)) = cur.get(&cmd.id).await
+{
+    if String::from_utf8_lossy(&entry) != cmd.version { return Ok(()); }
+}
+if let Some(sta) = &script_status
+    && let Ok(Some(entry)) = sta.get(&cmd.id).await
+{
+    if String::from_utf8_lossy(&entry) == SCRIPT_STATUS_REVOKED { return Ok(()); }
 }
 ```
 
-### 第2層: 実行直前の version 照合
+#### オフライン時の課題
 
-Agent は実行直前に必ず `script.current.{cmd_id}` KV を参照し、受信した version と一致しない場合は実行をスキップする。
+`runs_on: agent` schedule (v0.23.0) は agent の **キャッシュされた `BUCKET_JOBS` 値** から直接 fire する。Agent が broker から切れた状態でも fire できる代わりに、`script_current` / `script_status` のリアルタイム照合が出来ない。素の `if let Ok(Some(_))` 判定だと `get` 失敗が "skipped check" として **silently 素通り** してしまい、revoke 済の命令でも走ってしまう。
 
-```rust
-let current = kv.get(&format!("script.current.{}", cmd.id)).await?;
-if cmd.version != current {
-    log::warn!("skip stale {} (current: {})", cmd.version, current);
-    return Ok(());
-}
+これは Manifest によって許容度が違う:
+- **緊急パッチ・コンプライアンス系**: 必ず最新が確認できない端末では走らせたくない (= 安全側に倒して skip)
+- **インベントリ・kitting**: オフラインでも採取は続けたい (= cache で実行 OK)
 
-let status = kv.get(&format!("script.status.{}", cmd.id)).await?;
-if status == "REVOKED" {
-    log::warn!("skip revoked command {}", cmd.id);
-    return Ok(());
-}
+Manifest 側に *staleness policy* を持たせて、Agent が fire 時にこの判断を切り替える。
 
-execute(cmd).await
+#### Staleness policy のスキーマ (Manifest.exec.staleness)
+
+```yaml
+# jobs/urgent-patch.yaml — 必ず最新版確認できないと走らせない
+id: urgent-patch
+version: "2.5.1"
+exec:
+  shell: powershell
+  script: Install-Hotfix KB1234567
+  staleness:
+    mode: strict
+    max_cache_age: 0s     # broker と現に繋がってないと skip
+
+# jobs/inventory-hw.yaml — offline でも走らせる
+id: inventory-hw
+version: "1.0.0"
+exec:
+  shell: powershell
+  script: Get-WmiObject Win32_ComputerSystem
+  staleness:
+    mode: cached          # cache 値で照合、age 制約なし
+
+# jobs/legacy.yaml — version pin / revoke 自体を無視 (旧 manifest 互換)
+id: legacy
+version: "0.1.0"
+exec:
+  shell: cmd
+  script: echo hello
+  staleness:
+    mode: unchecked
 ```
 
-### 第3層: 実行中の緊急停止
+#### Mode 仕様
 
-Agent は子プロセス起動と同時に `kill.{job_id}` を subscribe し、kill 通知受信で子プロセスを SIGKILL する。
+| mode | 動作 | 用途 |
+|---|---|---|
+| `strict` | KV `script_current` / `script_status` の cached age が `max_cache_age` 以内 → cache で照合。超過なら broker に live `kv.get()` を試みる。fail なら skip (exit 127, "staleness check failed") | 緊急パッチ、コンプライアンス、セキュリティ系 |
+| `cached` (default) | cache 値で照合。`max_cache_age` は無視。エントリ自体が無ければ ACTIVE & version match 扱い (silently proceed) | インベントリ、kitting、hourly check 等の "ベストエフォート系" |
+| `unchecked` | version pin / revoke ともに無視。受け取った Command をそのまま実行 | ローカル完結 / idempotent / 旧 Manifest 互換 |
+
+#### `max_cache_age` の意味と staleness 計測
+
+`strict` mode のみで意味を持つ。「最後に **broker と同期できていた瞬間** から、どれだけ経過しても cache を信用していいか」 のタイムアウト。
+
+KV watch は push 型なので、agent が broker に接続している限り cache は常に「同期済」と見なせる (broker 側で更新があれば push されてくる契約)。disconnect した瞬間にこの時計が動き出し、再接続で 0 にリセットされる。
 
 ```rust
-let mut child = Command::new("powershell").args(...).spawn()?;
-let mut kill_sub = client.subscribe(format!("kill.{}", job_id)).await?;
+// 概念実装
+let staleness = match (client.state(), last_connected_at) {
+    (State::Connected, _) => Duration::ZERO,
+    (_, Some(t)) => Instant::now() - t,
+    (_, None)    => Duration::MAX,            // 起動から一度も繋がってない
+};
+if matches!(policy.mode, Mode::Strict) && staleness > policy.max_cache_age {
+    return publish_skipped_result(cmd, ExitCode::StalenessExceeded /* 127 */);
+}
+```
+
+| 設定例 | セマンティクス |
+|---|---|
+| `mode: strict, max_cache_age: 0s` | fire 時点で **online でなければ skip** |
+| `mode: strict, max_cache_age: 5m` | 直近 5 分以内に broker に繋がっていれば OK (一時的な瞬断は許容) |
+| `mode: strict, max_cache_age: 1h` | 1 時間以内の disconnect なら OK。それ以上の長期 offline は skip |
+| `mode: cached` | 期限なし。cache さえあれば走る |
+
+デフォルトは `strict` ではなく **`cached`** にする。歴史的に v0.22 以前は無条件で素通りだったので、後方互換のためデフォルトを変えると既存 Manifest が突然 skip するリスクがある。緊急系は **明示的に `strict` を書くポリシー** にする。
+
+### 2.6.3 第3層: 実行中の緊急停止
+
+Agent は子プロセス起動と同時に `kill.{job_id}` を subscribe し、`tokio::select!` で `child.wait()` / `kill_sub.next()` / timeout を競争させる。kill 受信で `child.kill()` を呼び、結果は `ExecOutcome::Killed` として publish される (`run_as: user / system_gui` の Win32 path も oneshot bridge 経由で同じ経路に集約)。
+
+```rust
+// crates/kanade-agent/src/process.rs::run_command_with_kill (抜粋)
+let mut kill_sub = client.subscribe(subject::kill(&job_id)).await?;
+client.flush().await.ok();                  // SUB が登録される前の publish 取りこぼし防止
 
 tokio::select! {
     status = child.wait() => { /* 正常終了 */ }
-    _ = kill_sub.next() => {
-        child.kill().await?;
-        log::warn!("killed job {} by remote signal", job_id);
+    msg    = kill_sub.next() => {
+        child.kill().await.ok();
+        OutcomeInner::Killed
+    }
+    _ = tokio::time::sleep(timeout) => {
+        child.kill().await.ok();
+        OutcomeInner::Timeout
     }
 }
 ```
 
-**重要**: kill signal 経路は MVP 段階から必ず仕込むこと。後付けは既存スクリプト全てに kill 経路を埋め込む作業になり困難。
+> **オフライン端末への kill は原理的に届かない。** EVENTS stream に乗せても、子プロセスはもう走ってしまっているし、再接続のタイミングと kill の timing が合わない。kill は「現在 online でかつ走っている」 ケース専用と割り切る。「絶対走らせたくなかった」 ケースは Layer 2 の revoke + staleness で防ぐ。
 
-### まとめ
+### 2.6.4 オペレータの「止める」 操作 3 パターン
 
-| いつ | 仕組み | 状態 |
-|---|---|---|
-| broker に滞留 | `MaxMsgsPerSubject=1 + DiscardOld` | 新版で置換 |
-| 受信済・実行前 | KV `script.current` / `script.status` 照合 | 実行スキップ |
-| 実行中 | `kill.{job_id}` subscribe + 子プロセス kill | 強制終了 |
+SPA / CLI から見える "止める" 操作は以下の 3 種類。それぞれ Layer 1 / 2 / 3 のどれを発火させればいいかを整理する:
+
+| 起点 | in-flight 子プロセス | publish 済 / 未実行 | 未来の fire |
+|---|---|---|---|
+| **(a) exec を発行したやつを止める** (`kanade kill <jid>` / SPA) | `kill.{job_id}` publish (Layer 3) | `kanade revoke <cmd_id>` (Layer 2) | n/a (単発 exec) |
+| **(b) job (Manifest) を delete** (`kanade job delete <id>` / SPA) | (a) と同じ kill cascade | **delete 操作が同時に `script_status: REVOKED` を書く** (cascade 必須) | `BUCKET_JOBS` から消えるので backend `kanade exec` 経路 + agent local_scheduler 経路ともに自然停止 |
+| **(c) schedule を無効化** (`enabled: false` / SPA) | オプション (`--cascade-kill`) | オプション (`--cascade-revoke`) | `BUCKET_SCHEDULES` の `enabled: false` で backend scheduler + agent local_scheduler ともに次 tick で停止 |
+
+#### (b) job delete の cascade 必須化
+
+job を消すと「以後の `kanade exec` は失敗する」 (manifest 不在) し、agent の local_scheduler も `BUCKET_JOBS` の delete event を watch で受けて該当 schedule を de-register する。ところが **既に publish 済で agent 受信前 / agent 実行直前** の Command については、agent が `script_current` / `script_status` を見るだけだと止められない (manifest 削除自体は KV 上に痕跡を残さない)。
+
+そこで job delete 操作の中で、必ず以下を atomic に行う:
+1. `BUCKET_JOBS` から該当 manifest を削除
+2. `BUCKET_SCRIPT_STATUS` に `cmd_id → REVOKED` を書く
+3. AUDIT に "job delete (with revoke cascade)" イベントを emit
+
+オペレータが「やっぱり元に戻したい」 場合は、`kanade job create` で復活 (BUCKET_JOBS 戻し) → `kanade unrevoke <cmd_id>` (script_status ACTIVE 戻し) の手順。
+
+#### (c) schedule 無効化の 2 段階
+
+「これ以降の cron 発火を止めたい」 だけ (ふつう) と、「**今走ってる / 既に投げた fire も全部止めたい**」 (緊急) は意図が違う。spec として両モードを用意する:
+
+- **soft disable** (`enabled: false` のみ): 次 tick 以降の発火を止める。in-flight は触らない。
+- **hard disable** (`enabled: false` + `--cascade-revoke` + `--cascade-kill`): in-flight kill (Layer 3) + 未実行を REVOKED (Layer 2) + cron 停止 (Layer 1 相当の "未来分") をワンショットで実行。
+
+SPA の Schedule ページに「無効化」 (default = soft) と「無効化 + 進行中も停止」 (hard) の 2 ボタンを置く。CLI は `kanade schedule disable <name>` / `kanade schedule disable <name> --cascade`。
+
+### 2.6.5 イベント永続化 (revoke の遅延配送)
+
+`BUCKET_SCRIPT_STATUS` の KV watch は agent が online な瞬間しか push を受け取れない。長期オフライン端末が再接続したとき、最新状態 (= REVOKED) は KV watch の初期スナップショットで拾えるが、**「いつ revoke されたか」「途中 unrevoke を経由したか」 は KV だけだと再構成できない**。これは Layer 2 が「最新状態だけ知っていれば十分」 設計だから、原則問題ない。
+
+ただし、運用上の AUDIT のため、revoke / unrevoke / job delete / schedule disable は同時に EVENTS stream にも publish する (`events.scripts.revoked.{cmd_id}` 等)。AUDIT projector が SQLite に taking で残し、SPA の Audit ページに表示する。
+
+### 2.6.6 オフライン端末からの fire を考慮した実装責務分担
+
+| 責務 | 配置 |
+|---|---|
+| Layer 1 stream config (`max_messages_per_subject: 1`) | backend bootstrap (`kanade-shared/src/bootstrap.rs`) |
+| Layer 2 KV watch + cache + staleness check | agent (`commands::handle_command` + 新規 `staleness::Tracker`) |
+| Layer 2 cascade on job delete / schedule hard-disable | backend HTTP API + CLI |
+| Layer 3 `kill.{job_id}` subscribe + child kill | agent (`process::run_command_with_kill`) |
+| 最終 connectivity timestamp 追跡 | agent (`async_nats::Client::state()` watcher) |
+| Exit code 規約 (`125 = deadline missed`, `127 = staleness check failed`) | shared (`kanade-shared/src/exec_result.rs`) |
+| SPA UI (revoke / kill / cascade ボタン + 進行中 job 一覧) | `kanade-backend/web/src/pages/` (Jobs / Schedules / Results) |
+
+### 2.6.7 まとめ表 (operator 視点)
+
+| 防ぎたい事 | どこで | 経路 | オフライン端末 |
+|---|---|---|---|
+| 古い版が agent に届く | broker | `STREAM_EXEC` + LastPerSubject replay | ✅ 再接続時に最新だけ受信 |
+| 受信したけど古い / revoked を実行する | agent | KV `script_current` / `script_status` 照合 + staleness policy | `strict` で skip / `cached` で実行 (Manifest 側で選択) |
+| 既に走っているプロセスを止める | agent | `kill.{job_id}` subscribe + `child.kill()` | ❌ 不可 (online のみ) |
+| job 削除 = 派生する exec / schedule fire も止める | backend + agent | delete 操作が `script_status: REVOKED` cascade | Layer 2 経由で次回 fire 時に skip |
+| schedule 無効化 = soft / hard 選択 | backend + SPA | enabled: false (soft) / + revoke + kill cascade (hard) | Layer 2 経由で次回 fire 時に skip |
+
+**重要**: kill signal 経路は MVP 段階から必ず仕込むこと。後付けは既存スクリプト全てに kill 経路を埋め込む作業になり困難。staleness policy も同様で、Manifest schema に **mode フィールドが入った瞬間に旧 manifest は `cached` (= 互換動作) として解釈される** 設計にしておけば後付け破綻を防げる。
 
 ## 2.7 セキュリティ
 

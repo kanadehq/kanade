@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use super::Staleness;
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Command {
     pub id: String,
@@ -32,6 +34,14 @@ pub struct Command {
     /// outcome on the Results / Dashboard pages instead of silence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline_at: Option<DateTime<Utc>>,
+    /// v0.26: Manifest-declared Layer 2 staleness policy
+    /// (see SPEC.md §2.6.2). Forwarded from `Manifest.staleness` so
+    /// the agent can evaluate it at fire time without re-fetching the
+    /// Manifest from `BUCKET_JOBS`. Pre-v0.26 wire omits this and
+    /// `#[serde(default)]` falls back to `Staleness::Cached`, matching
+    /// pre-v0.26 behaviour (silently use cached KV values).
+    #[serde(default)]
+    pub staleness: Staleness,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +101,7 @@ mod tests {
             run_as: RunAs::System,
             cwd: None,
             deadline_at: None,
+            staleness: Staleness::Cached,
         }
     }
 

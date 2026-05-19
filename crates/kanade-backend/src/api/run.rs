@@ -84,6 +84,11 @@ pub async fn run(
         cwd: None,
         // Ad-hoc `kanade run` has no scheduled tick → no deadline.
         deadline_at: None,
+        // v0.26: ad-hoc inline run has no Manifest, so there's no
+        // operator-declared staleness policy to honour. Default to
+        // `Cached` — matching pre-v0.26 behaviour where Layer 2 was
+        // best-effort (silently pass when KV unreachable).
+        staleness: kanade_shared::wire::Staleness::Cached,
     };
 
     let result_subj = subject::results(&request_id);

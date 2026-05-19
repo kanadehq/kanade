@@ -1,0 +1,48 @@
+# Sample: a strict-staleness Manifest. The agent will REFUSE to run
+# this script if it can't verify it's still seeing the latest broker-
+# side `script_current` / `script_status` values at fire time — i.e.
+# if the agent's been disconnected from NATS for any length of time.
+#
+# Why: this represents the "must be current" category — emergency
+# hotfixes, compliance must-runs, anything where executing a stale
+# version is worse than not running at all. Pair it with the v0.23
+# `runs_on: agent` / local_scheduler path: those fire from the cached
+# `BUCKET_JOBS` entry even when offline, but with `mode: strict` the
+# agent self-suppresses to a synthetic skipped-result (exit code 127)
+# rather than running stale.
+#
+# Contrast with `inventory-hw.yaml` (no `staleness` block at all,
+# which means default `mode: cached` = "run from cache, no constraint")
+# — inventory polling is fine offline because a missed cycle just
+# means stale data, not running the wrong thing.
+
+id: urgent-patch
+version: 1.0.0
+description: |
+  Emergency hotfix install. Refuses to run on an agent that's lost
+  contact with the broker — operators must roll out a new version
+  before scheduling for offline-prone targets.
+execute:
+  shell: powershell
+  timeout: 5m
+  script: |
+    # Real installers would go here. The example just demonstrates the
+    # staleness gate firing or not.
+    Write-Output "urgent-patch v1.0.0 applied"
+
+# Staleness policy (SPEC.md §2.6.2):
+#
+#   mode: strict     - require fresh KV view of script_current /
+#                      script_status at fire time. Default for the rest
+#                      of the fleet is `cached` (use whatever the agent
+#                      has, no age limit).
+#   max_cache_age    - tolerance for momentary disconnects. "0s" means
+#                      "must be online right now", common values are
+#                      "0s" / "5m" / "1h". Required for strict mode;
+#                      see SPEC for the math.
+#
+# Tuning this: 0s is the safest default. Bump to 5m if you accept
+# brief network blips, 1h for laptops that roam off-WAN.
+staleness:
+  mode: strict
+  max_cache_age: 0s
