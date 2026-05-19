@@ -14,6 +14,12 @@ pub struct ResultRow {
     pub stderr: String,
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
     pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// v0.27: surface `execution_results.job_id` (column added in
+    /// migration 0002) so the SPA Results page can route operators
+    /// to `POST /api/jobs/{job_id}/kill` with a single click. None
+    /// when the row pre-dates migration 0002 or when the result
+    /// arrived via an ad-hoc `kanade run` (no Job behind it).
+    pub job_id: Option<String>,
 }
 
 /// Optional `status` filter on the results listing. `success` keeps
@@ -101,5 +107,9 @@ fn row_to_result(r: sqlx::sqlite::SqliteRow) -> ResultRow {
         stderr: r.try_get("stderr").unwrap_or_default(),
         started_at: r.try_get("started_at").ok(),
         finished_at: r.try_get("finished_at").ok(),
+        // try_get → ok() collapses both "column missing entirely"
+        // (legacy DB pre-migration 0002) and "column NULL" (ad-hoc
+        // `kanade run` rows) to None, which is what we want.
+        job_id: r.try_get("job_id").ok(),
     }
 }
