@@ -9,7 +9,7 @@ const links = [
   { to: '/agents', label: 'Agents' },
   { to: '/inventory', label: 'Inventory' },
   { to: '/run', label: 'Run' },
-  { to: '/results', label: 'Results' },
+  { to: '/activity', label: 'Activity' },
   { to: '/audit', label: 'Audit' },
   { to: '/logs', label: 'Logs' },
   { to: '/jobs', label: 'Jobs' },

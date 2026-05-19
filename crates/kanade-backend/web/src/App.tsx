@@ -14,8 +14,8 @@ import { Jobs } from '@/pages/Jobs';
 import { Login } from '@/pages/Login';
 import { Logs } from '@/pages/Logs';
 import { Placeholder } from '@/pages/Placeholder';
+import { Activity } from '@/pages/Activity';
 import { ResultDetail } from '@/pages/ResultDetail';
-import { Results } from '@/pages/Results';
 import { Rollout } from '@/pages/Rollout';
 import { Run } from '@/pages/Run';
 import { Schedules } from '@/pages/Schedules';
@@ -49,8 +49,15 @@ export default function App() {
               <Route path="/dashboard" element={<Dashboard />} />
               <Route path="/agents" element={<Agents />} />
               <Route path="/run" element={<Run />} />
-              <Route path="/results" element={<Results />} />
-              <Route path="/results/:requestId" element={<ResultDetail />} />
+              <Route path="/activity" element={<Activity />} />
+              <Route path="/activity/:requestId" element={<ResultDetail />} />
+              {/* Back-compat: any pre-rename /results bookmark redirects
+                  to /activity. Detail-route param is dropped — operator
+                  scrolls/filters to the row on the unified Activity
+                  page. Cheap to add, helps anyone who linked to a
+                  specific run while we were on the old name. */}
+              <Route path="/results" element={<Navigate to="/activity" replace />} />
+              <Route path="/results/*" element={<Navigate to="/activity" replace />} />
               <Route path="/audit" element={<Audit />} />
               <Route path="/logs" element={<Logs />} />
               <Route path="/inventory" element={<Inventory />} />
