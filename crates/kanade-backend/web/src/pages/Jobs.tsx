@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Ban, CircleCheck, Loader2, ScrollText, Trash2 } from 'lucide-react';
+import { useState } from 'react';
 
 import { ErrorCard } from '@/components/ErrorCard';
 import { Badge } from '@/components/ui/badge';
@@ -40,17 +41,43 @@ export function Jobs() {
   // writes the script_status KV, which the agent's handle_command
   // reads at fire time. Idempotent on the server side — re-clicking
   // is a no-op put.
+  //
+  // Round 2 review (CodeRabbit #38): a single shared `useMutation`
+  // overwrites `.variables` with every new invocation, so the
+  // previous `disabled={isPending && variables === id}` flickered
+  // back to enabled the moment a second row was clicked while the
+  // first was still inflight. Track pending IDs in a `Set<string>`
+  // updated in onMutate / onSettled — true per-row scoping that
+  // survives concurrent clicks.
+  const [pendingRevoke, setPendingRevoke] = useState<Set<string>>(new Set());
+  const [pendingUnrevoke, setPendingUnrevoke] = useState<Set<string>>(new Set());
   const revoke = useMutation({
     mutationFn: (id: string) =>
       apiFetch(`/api/scripts/${encodeURIComponent(id)}/revoke`, { method: 'POST' }),
-    // No invalidate — script_status doesn't flow into the jobs list
-    // payload today, so there's nothing to refetch. Surface success
-    // through the button's pending state + an optional toast (deferred
-    // to a follow-up; this PR keeps the dependency-set tight).
+    onMutate: (id) => {
+      setPendingRevoke((prev) => new Set(prev).add(id));
+    },
+    onSettled: (_d, _e, id) => {
+      setPendingRevoke((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    },
   });
   const unrevoke = useMutation({
     mutationFn: (id: string) =>
       apiFetch(`/api/scripts/${encodeURIComponent(id)}/unrevoke`, { method: 'POST' }),
+    onMutate: (id) => {
+      setPendingUnrevoke((prev) => new Set(prev).add(id));
+    },
+    onSettled: (_d, _e, id) => {
+      setPendingUnrevoke((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    },
   });
 
   if (isLoading) {
@@ -121,7 +148,7 @@ export function Jobs() {
                 <Button
                   variant="secondary"
                   size="sm"
-                  disabled={revoke.isPending && revoke.variables === j.id}
+                  disabled={pendingRevoke.has(j.id)}
                   onClick={() => {
                     if (
                       window.confirm(
@@ -140,7 +167,7 @@ export function Jobs() {
                 <Button
                   variant="secondary"
                   size="sm"
-                  disabled={unrevoke.isPending && unrevoke.variables === j.id}
+                  disabled={pendingUnrevoke.has(j.id)}
                   onClick={() => unrevoke.mutate(j.id)}
                   title="Flip script_status back to ACTIVE"
                 >

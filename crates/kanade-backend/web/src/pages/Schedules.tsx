@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Loader2, Power, PowerOff, Trash2, Zap } from 'lucide-react';
+import { useState } from 'react';
 
 import { ErrorCard } from '@/components/ErrorCard';
 import { Badge } from '@/components/ui/badge';
@@ -49,11 +50,28 @@ export function Schedules() {
   // script_status.{job_id} = REVOKED so any in-flight Command gets
   // skipped at agent fire time. ?cascade=false (default) = "soft
   // disable" — just stops the cron, in-flight Commands run.
+  //
+  // Round 2 review (CodeRabbit #38): per-row pending tracked via a
+  // Set<string> so concurrent disable/enable clicks across rows
+  // don't grey each other out — `mutation.variables` is a single
+  // value, useless for per-row gating.
+  const [pendingDisable, setPendingDisable] = useState<Set<string>>(new Set());
+  const [pendingEnable, setPendingEnable] = useState<Set<string>>(new Set());
   const disable = useMutation({
     mutationFn: ({ id, cascade }: { id: string; cascade: boolean }) =>
       apiFetch(`/api/schedules/${encodeURIComponent(id)}/disable?cascade=${cascade}`, {
         method: 'POST',
       }),
+    onMutate: ({ id }) => {
+      setPendingDisable((prev) => new Set(prev).add(id));
+    },
+    onSettled: (_d, _e, { id }) => {
+      setPendingDisable((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['schedules'] }),
   });
   // v0.27 (gemini #38 review): symmetrical /enable endpoint so we
@@ -62,6 +80,16 @@ export function Schedules() {
   const enable = useMutation({
     mutationFn: (id: string) =>
       apiFetch(`/api/schedules/${encodeURIComponent(id)}/enable`, { method: 'POST' }),
+    onMutate: (id) => {
+      setPendingEnable((prev) => new Set(prev).add(id));
+    },
+    onSettled: (_d, _e, id) => {
+      setPendingEnable((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['schedules'] }),
   });
 
@@ -136,7 +164,7 @@ export function Schedules() {
                     <Button
                       variant="secondary"
                       size="sm"
-                      disabled={disable.isPending && disable.variables?.id === s.id}
+                      disabled={pendingDisable.has(s.id)}
                       onClick={() => disable.mutate({ id: s.id, cascade: false })}
                       title="Soft disable — cron stops on next tick. In-flight Commands run."
                     >
@@ -146,7 +174,7 @@ export function Schedules() {
                     <Button
                       variant="danger"
                       size="sm"
-                      disabled={disable.isPending && disable.variables?.id === s.id}
+                      disabled={pendingDisable.has(s.id)}
                       onClick={() => {
                         if (
                           window.confirm(
@@ -168,7 +196,7 @@ export function Schedules() {
                   <Button
                     variant="secondary"
                     size="sm"
-                    disabled={enable.isPending && enable.variables === s.id}
+                    disabled={pendingEnable.has(s.id)}
                     onClick={() => enable.mutate(s.id)}
                     title="Re-enable this schedule"
                   >

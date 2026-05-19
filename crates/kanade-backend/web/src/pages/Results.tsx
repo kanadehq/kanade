@@ -72,9 +72,24 @@ export function Results() {
   // execution is a no-op (no subscriber). Per-row availability is
   // gated on the row carrying a job_id (ad-hoc `kanade run` rows
   // have None).
+  //
+  // Round 2 review (CodeRabbit #38): per-row pending tracked via a
+  // Set<string> so a kill click on one row doesn't disable every
+  // other row's kill button while the first request is inflight.
+  const [pendingKill, setPendingKill] = useState<Set<string>>(new Set());
   const kill = useMutation({
     mutationFn: (job_id: string) =>
       apiFetch(`/api/jobs/${encodeURIComponent(job_id)}/kill`, { method: 'POST' }),
+    onMutate: (job_id) => {
+      setPendingKill((prev) => new Set(prev).add(job_id));
+    },
+    onSettled: (_d, _e, job_id) => {
+      setPendingKill((prev) => {
+        const next = new Set(prev);
+        next.delete(job_id);
+        return next;
+      });
+    },
   });
 
   const rows = data ?? [];
@@ -189,7 +204,7 @@ export function Results() {
                     <Button
                       variant="danger"
                       size="sm"
-                      disabled={kill.isPending && kill.variables === r.job_id}
+                      disabled={r.job_id ? pendingKill.has(r.job_id) : false}
                       onClick={() => {
                         if (
                           window.confirm(
