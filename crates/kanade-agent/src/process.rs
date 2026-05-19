@@ -199,6 +199,13 @@ enum OutcomeInner {
 /// `oneshot::Receiver<()>` kill channel. We subscribe to `kill.{job_id}`
 /// here and forward "fired" into the channel, so the Win32 path's
 /// inner `tokio::select!` can use a plain oneshot.
+//
+// `clippy::needless_return` is silenced because the function body is
+// a pair of mutually-exclusive `#[cfg(...)]` blocks: on non-Windows
+// the first block needs `return` to exit the function (there's no
+// fall-through tail expression — the Windows block is compiled out).
+// The lint inspects each cfg branch in isolation and misses that.
+#[allow(clippy::needless_return)]
 async fn run_in_user_session_dispatch(
     client: &async_nats::Client,
     cmd: &Command,
