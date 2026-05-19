@@ -55,9 +55,9 @@ export function ResultDetail() {
     <div className="space-y-4">
       <div className="flex items-baseline gap-3">
         <Button variant="ghost" size="sm" asChild>
-          <Link to="/results">
+          <Link to="/activity">
             <ArrowLeft className="size-3.5" />
-            back to results
+            back to activity
           </Link>
         </Button>
         <h2 className="text-xl">

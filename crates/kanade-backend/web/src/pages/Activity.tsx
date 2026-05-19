@@ -42,7 +42,7 @@ const SINCE_PRESETS: Array<{ value: string; label: string; ms: number | null }> 
   { value: 'all', label: 'all time',  ms: null },
 ];
 
-export function Results() {
+export function Activity() {
   const [pcId, setPcId] = useState('');
   const [status, setStatus] = useState<'' | 'success' | 'failure'>('');
   const [since, setSince] = useState('24h');
@@ -99,7 +99,7 @@ export function Results() {
   return (
     <div className="space-y-4">
       <div className="flex items-baseline justify-between">
-        <h2 className="text-xl">Recent results</h2>
+        <h2 className="text-xl">Activity</h2>
         <Badge variant="violet">{rows.length} shown{isFetching && !isLoading ? '…' : ''}</Badge>
       </div>
 
@@ -151,13 +151,13 @@ export function Results() {
 
       {isLoading ? (
         <div className="flex items-center gap-2 text-muted">
-          <Loader2 className="size-4 animate-spin" />loading results…
+          <Loader2 className="size-4 animate-spin" />loading activity…
         </div>
       ) : error ? (
-        <ErrorCard title="Couldn't load results" error={error} />
+        <ErrorCard title="Couldn't load activity" error={error} />
       ) : rows.length === 0 ? (
         <Card>
-          <CardHeader><CardTitle>No results match</CardTitle></CardHeader>
+          <CardHeader><CardTitle>No activity matches</CardTitle></CardHeader>
           <CardContent className="text-muted">
             Widen the filter window or clear pc_id / status to see older runs.
           </CardContent>
@@ -186,7 +186,7 @@ export function Results() {
                       browser tabs / window split. Plain click stays
                       on the same tab. */}
                   <Link
-                    to={`/results/${encodeURIComponent(r.request_id)}`}
+                    to={`/activity/${encodeURIComponent(r.request_id)}`}
                     className="text-accent hover:underline inline-flex items-center gap-1"
                     title="Open detail page (Ctrl/⌘+click for new tab)"
                   >
@@ -209,21 +209,29 @@ export function Results() {
                   <StdioPreview requestId={r.request_id} stdout={r.stdout} stderr={r.stderr} />
                 </TableCell>
                 <TableCell>
-                  {r.job_id ? (
+                  {/* Kill is only meaningful for runs still in
+                      progress. Activity rows surface results that
+                      already landed in the DB — those rows by
+                      definition carry a finished_at, so the kill
+                      button stays hidden today. Once the upcoming
+                      "Running" view lands (running rows have no
+                      finished_at), this branch lights up
+                      automatically. */}
+                  {r.job_id && !r.finished_at ? (
                     <Button
                       variant="danger"
                       size="sm"
-                      disabled={r.job_id ? pendingKill.has(r.job_id) : false}
+                      disabled={pendingKill.has(r.job_id)}
                       onClick={() => {
                         if (
                           window.confirm(
-                            `Publish kill.${r.job_id}?\n\n` +
-                              `Any agent currently running this job's child process will terminate it. No effect if the run already finished.`,
+                            `Kill this run (${r.job_id})?\n\n` +
+                              `The agent will terminate the running child process. The run will be recorded as killed.`,
                           )
                         )
                           kill.mutate(r.job_id!);
                       }}
-                      title="Publish kill.{job_id} (Layer 3)"
+                      title="Tell the agent to terminate this job's child process"
                     >
                       <Skull className="size-3.5" />
                       kill

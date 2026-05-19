@@ -179,14 +179,13 @@ export function Schedules() {
                         if (
                           window.confirm(
                             `Hard-disable schedule ${s.id}?\n\n` +
-                              `(1) cron stops on next tick (same as soft disable)\n` +
-                              `(2) script_status.${s.job_id} → REVOKED — any Command already in flight for this job will be skipped by the agent's Layer 2 check.\n\n` +
-                              `Use this when an active rollout needs to stop NOW.`,
+                              `Stops the cron from firing AND blocks any pending or in-flight run from this schedule's job. Use this when an active rollout needs to stop immediately.\n\n` +
+                              `The referenced job (${s.job_id}) will be marked revoked — you can unrevoke it from the Jobs page later if needed.`,
                           )
                         )
                           disable.mutate({ id: s.id, cascade: true });
                       }}
-                      title="Hard disable — also revoke the underlying Job so in-flight Commands skip."
+                      title="Hard disable — stops cron AND blocks pending/in-flight runs"
                     >
                       <Zap className="size-3.5" />
                       disable + cascade

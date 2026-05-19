@@ -32,8 +32,25 @@ export function Jobs() {
   const del = useMutation({
     mutationFn: (id: string) =>
       apiFetch(`/api/jobs/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['jobs'] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['jobs'] });
+      qc.invalidateQueries({ queryKey: ['scripts-status'] });
+    },
   });
+
+  // v0.27.x: surface the script_status KV (per cmd_id ACTIVE/REVOKED)
+  // alongside the job catalog so operators can SEE whether a revoke
+  // landed instead of guessing. Empty map when the bucket is missing
+  // — silently degrades to "everything is ACTIVE" which is the safe
+  // pre-revoke default.
+  const statusQuery = useQuery({
+    queryKey: ['scripts-status'],
+    queryFn: () => apiFetch<Record<string, string>>('/api/scripts/status'),
+  });
+  const statusMap = statusQuery.data ?? {};
+  function isRevoked(id: string): boolean {
+    return statusMap[id] === 'REVOKED';
+  }
 
   // v0.27: surface Layer 2 revoke / unrevoke as per-row buttons so
   // operators don't have to drop to the CLI for a one-script gate
@@ -57,6 +74,7 @@ export function Jobs() {
     onMutate: (id) => {
       setPendingRevoke((prev) => new Set(prev).add(id));
     },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['scripts-status'] }),
     onSettled: (_d, _e, id) => {
       setPendingRevoke((prev) => {
         const next = new Set(prev);
@@ -71,6 +89,7 @@ export function Jobs() {
     onMutate: (id) => {
       setPendingUnrevoke((prev) => new Set(prev).add(id));
     },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['scripts-status'] }),
     onSettled: (_d, _e, id) => {
       setPendingUnrevoke((prev) => {
         const next = new Set(prev);
@@ -114,6 +133,7 @@ export function Jobs() {
           <TableRow>
             <TableHead>id</TableHead>
             <TableHead>version</TableHead>
+            <TableHead>status</TableHead>
             <TableHead>shell</TableHead>
             <TableHead>run_as</TableHead>
             <TableHead>cwd</TableHead>
@@ -128,6 +148,13 @@ export function Jobs() {
             <TableRow key={j.id}>
               <TableCell><code className="text-xs">{j.id}</code></TableCell>
               <TableCell><code className="text-xs">{j.version}</code></TableCell>
+              <TableCell>
+                {isRevoked(j.id) ? (
+                  <Badge variant="danger">revoked</Badge>
+                ) : (
+                  <Badge variant="success">active</Badge>
+                )}
+              </TableCell>
               <TableCell><code className="text-xs">{j.execute.shell}</code></TableCell>
               <TableCell><code className="text-xs">{j.execute.run_as ?? 'system'}</code></TableCell>
               <TableCell>
@@ -148,18 +175,18 @@ export function Jobs() {
                 <Button
                   variant="secondary"
                   size="sm"
-                  disabled={pendingRevoke.has(j.id)}
+                  disabled={pendingRevoke.has(j.id) || isRevoked(j.id)}
                   onClick={() => {
                     if (
                       window.confirm(
                         `Revoke ${j.id}?\n\n` +
-                          `Any in-flight Command for this manifest will be skipped on receipt by the agent's Layer 2 check (SPEC §2.6.2).\n\n` +
-                          `Reversible with the unrevoke button.`,
+                          `Blocks the script from running on agents. Any pending or in-flight run for this job will be skipped instead of executed, and new fires will refuse to run until you unrevoke it.\n\n` +
+                          `Reversible — click "unrevoke" to undo.`,
                       )
                     )
                       revoke.mutate(j.id);
                   }}
-                  title="Flip script_status to REVOKED so in-flight Commands skip on receipt"
+                  title={isRevoked(j.id) ? 'Already revoked' : 'Block this script from running'}
                 >
                   <Ban className="size-3.5" />
                   revoke
@@ -167,9 +194,9 @@ export function Jobs() {
                 <Button
                   variant="secondary"
                   size="sm"
-                  disabled={pendingUnrevoke.has(j.id)}
+                  disabled={pendingUnrevoke.has(j.id) || !isRevoked(j.id)}
                   onClick={() => unrevoke.mutate(j.id)}
-                  title="Flip script_status back to ACTIVE"
+                  title={isRevoked(j.id) ? 'Allow this script to run again' : 'Already active'}
                 >
                   <CircleCheck className="size-3.5" />
                   unrevoke
@@ -182,8 +209,8 @@ export function Jobs() {
                     if (
                       window.confirm(
                         `Delete job ${j.id}?\n\n` +
-                          `This also writes script_status.${j.id} = REVOKED so any in-flight Command for this manifest is skipped on receipt (v0.27 cascade).\n\n` +
-                          `Refused with 409 if any schedule references it.`,
+                          `Removes the script from the catalog. Any pending or in-flight run for this job will also be blocked (auto-revoke).\n\n` +
+                          `Refused if any schedule still references this job — delete the schedule first.`,
                       )
                     )
                       del.mutate(j.id);
