@@ -23,8 +23,12 @@ pub fn heartbeat(pc_id: &str) -> String {
     format!("heartbeat.{pc_id}")
 }
 
-pub fn kill(job_id: &str) -> String {
-    format!("kill.{job_id}")
+/// `kill.<exec_id>` — Spec §2.6 Layer 3 abort signal. The exec_id is
+/// the deployment / scheduler-fire UUID (formerly named `job_id`
+/// pre-v0.29; renamed for accuracy — every `Command.exec_id` is a
+/// per-deploy UUID, not a job-catalog id).
+pub fn kill(exec_id: &str) -> String {
+    format!("kill.{exec_id}")
 }
 
 pub fn inventory(pc_id: &str, category: &str) -> String {
@@ -80,8 +84,8 @@ mod tests {
     }
 
     #[test]
-    fn kill_formats_job_id() {
-        assert_eq!(kill("testjob1"), "kill.testjob1");
+    fn kill_formats_exec_id() {
+        assert_eq!(kill("exec-uuid-1"), "kill.exec-uuid-1");
     }
 
     #[test]

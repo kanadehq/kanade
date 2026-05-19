@@ -37,7 +37,7 @@ enum SubCmd {
     Revoke(cmd::revoke::RevokeArgs),
     /// Re-mark a previously revoked command id as ACTIVE.
     Unrevoke(cmd::revoke::UnrevokeArgs),
-    /// Publish kill.{job_id} so agents running the job terminate (spec §2.6 Layer 3).
+    /// Publish kill.{exec_id} so agents running the exec terminate (spec §2.6 Layer 3).
     Kill(cmd::kill::KillArgs),
     /// Fire a registered job (`kanade job create` it first) at its declared targets.
     Exec(cmd::exec::ExecArgs),

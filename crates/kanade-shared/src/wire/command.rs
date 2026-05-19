@@ -8,7 +8,15 @@ pub struct Command {
     pub id: String,
     pub version: String,
     pub request_id: String,
-    pub job_id: Option<String>,
+    /// v0.29 / Issue #19: the deployment / scheduler-fire UUID this
+    /// Command belongs to. Forwarded into `ExecResult.exec_id` by the
+    /// agent so the projector can attribute results back to the
+    /// originating `executions` row. `None` for ad-hoc `kanade run`
+    /// (no deployment row exists). Pre-v0.29 wire used the field name
+    /// `job_id` for this same value — `serde(alias)` keeps old
+    /// publishes in STREAM_EXEC decodable across the upgrade window.
+    #[serde(alias = "job_id")]
+    pub exec_id: Option<String>,
     pub shell: Shell,
     pub script: String,
     pub timeout_secs: u64,
@@ -93,7 +101,7 @@ mod tests {
             id: "echo-test".into(),
             version: "1.0.0".into(),
             request_id: "req-1".into(),
-            job_id: Some("dep-1".into()),
+            exec_id: Some("dep-1".into()),
             shell: Shell::Powershell,
             script: "echo hi".into(),
             timeout_secs: 30,
@@ -140,7 +148,7 @@ mod tests {
         assert_eq!(decoded.id, orig.id);
         assert_eq!(decoded.version, orig.version);
         assert_eq!(decoded.request_id, orig.request_id);
-        assert_eq!(decoded.job_id, orig.job_id);
+        assert_eq!(decoded.exec_id, orig.exec_id);
         assert_eq!(decoded.shell, orig.shell);
         assert_eq!(decoded.script, orig.script);
         assert_eq!(decoded.timeout_secs, orig.timeout_secs);
@@ -172,7 +180,7 @@ mod tests {
           "timeout_secs": 5
         }"#;
         let cmd: Command = serde_json::from_str(json).expect("decode");
-        assert!(cmd.job_id.is_none());
+        assert!(cmd.exec_id.is_none());
         assert!(cmd.jitter_secs.is_none());
         assert_eq!(cmd.shell, Shell::Cmd);
         // Pre-v0.21 wire payloads omit run_as → falls back to System.
@@ -181,6 +189,26 @@ mod tests {
         assert!(cmd.cwd.is_none());
         // Pre-v0.22 omit deadline_at → None (= no deadline).
         assert!(cmd.deadline_at.is_none());
+    }
+
+    #[test]
+    fn command_decodes_legacy_job_id_field_as_exec_id() {
+        // v0.29 / Issue #19: Commands sitting in STREAM_EXEC published
+        // by a pre-v0.29 backend still carry the field named `job_id`.
+        // The `#[serde(alias = "job_id")]` on `exec_id` keeps them
+        // decodable through the upgrade window so the agent doesn't
+        // start dropping replays on first boot of a new binary.
+        let json = r#"{
+          "id": "x",
+          "version": "1.0.0",
+          "request_id": "r",
+          "job_id": "legacy-exec-uuid",
+          "shell": "powershell",
+          "script": "echo",
+          "timeout_secs": 5
+        }"#;
+        let cmd: Command = serde_json::from_str(json).expect("decode legacy");
+        assert_eq!(cmd.exec_id.as_deref(), Some("legacy-exec-uuid"));
     }
 
     #[test]

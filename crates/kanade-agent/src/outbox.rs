@@ -141,7 +141,9 @@ mod tests {
 
     fn sample(rid: &str) -> ExecResult {
         ExecResult {
+            result_id: uuid::Uuid::new_v4().to_string(),
             request_id: rid.into(),
+            exec_id: None,
             pc_id: "minipc".into(),
             exit_code: 0,
             stdout: "ok".into(),

@@ -1,7 +1,11 @@
 //! Job endpoints:
-//!   * `POST /api/jobs/{job_id}/kill` — runtime control. Publishes on
-//!     `kill.{job_id}` so any agent currently executing a Command with
-//!     that job_id terminates its child process (spec §2.6 Layer 3).
+//!   * `POST /api/jobs/{job_id}/kill` — runtime control. Looks up every
+//!     in-flight execution of `{job_id}` from the `executions` table
+//!     (status pending / running) and publishes `kill.{exec_id}` per
+//!     deployment so agents actually receive the signal (spec §2.6
+//!     Layer 3). Pre-v0.29 this published `kill.{cmd_id}`, which no
+//!     agent subscribes to — the kill button on the SPA was effectively
+//!     a no-op since v0.27.
 //!   * `GET / POST /api/jobs` + `DELETE /api/jobs/{id}` — catalog CRUD
 //!     (v0.15). Schedules reference catalog rows by `job_id`.
 
@@ -16,6 +20,7 @@ use kanade_shared::kv::{
 use kanade_shared::manifest::{Manifest, Schedule};
 use kanade_shared::subject;
 use serde::Serialize;
+use sqlx::Row;
 use tracing::{info, warn};
 
 use super::AppState;
@@ -26,22 +31,66 @@ pub async fn kill(
     State(state): State<AppState>,
     Path(job_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    state
-        .nats
-        .publish(subject::kill(&job_id), bytes::Bytes::new())
-        .await
-        .map_err(|e| {
-            warn!(error = %e, job_id, "publish kill");
-            (
+    // v0.29 / Issue #19: the agent listens on `kill.{exec_id}`, never
+    // on `kill.{cmd_id}`. The path param here is the cmd / manifest
+    // id, so we have to expand it to every still-running exec_id and
+    // publish per-exec. status IN ('pending', 'running') skips
+    // already-completed deployments — there's nothing to kill on those.
+    let rows = sqlx::query(
+        "SELECT exec_id FROM executions \
+         WHERE job_id = ? AND status IN ('pending', 'running')",
+    )
+    .bind(&job_id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| {
+        warn!(error = %e, job_id, "kill: lookup running execs");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("lookup running execs: {e}"),
+        )
+    })?;
+
+    let exec_ids: Vec<String> = rows
+        .into_iter()
+        .map(|r| r.try_get::<String, _>("exec_id").unwrap_or_default())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if exec_ids.is_empty() {
+        // No running deployments → there's nothing to kill. Return
+        // 204 anyway: the operator's mental model is "I clicked kill,
+        // it's not running", which is what 204 + zero-published
+        // conveys. A 404 here would just confuse the SPA.
+        info!(
+            %job_id,
+            "kill: no running executions for this job (no-op)",
+        );
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
+    for exec_id in &exec_ids {
+        if let Err(e) = state
+            .nats
+            .publish(subject::kill(exec_id), bytes::Bytes::new())
+            .await
+        {
+            warn!(error = %e, %job_id, %exec_id, "publish kill failed");
+            return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("publish kill.{job_id}: {e}"),
-            )
-        })?;
-    // flush so the subject is on the wire before we ack the
+                format!("publish kill.{exec_id}: {e}"),
+            ));
+        }
+    }
+    // flush so the subjects are on the wire before we ack the
     // operator — without it, a fast operator-then-shutdown could
     // theoretically drop the kill on the floor.
     let _ = state.nats.flush().await;
-    info!(job_id = %job_id, "kill signal published");
+    info!(
+        %job_id,
+        kill_count = exec_ids.len(),
+        "kill signal fanned out to running execs",
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 

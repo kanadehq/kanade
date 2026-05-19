@@ -17,9 +17,12 @@ pub struct RunArgs {
     pub shell: String,
     #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS)]
     pub timeout: u64,
-    /// Optional job_id; when set, `kanade kill <job_id>` can terminate the run.
-    #[arg(long)]
-    pub job_id: Option<String>,
+    /// Optional exec_id (formerly `--job-id` pre-v0.29); when set,
+    /// `kanade kill <exec_id>` can terminate the run. The CLI still
+    /// accepts the historical `--job-id` flag name via clap alias so
+    /// existing scripts keep working.
+    #[arg(long, alias = "job-id")]
+    pub exec_id: Option<String>,
     /// Script body (use `--` before the script to bypass clap flag parsing).
     pub script: Vec<String>,
 }
@@ -39,7 +42,7 @@ pub async fn execute(client: async_nats::Client, args: RunArgs) -> Result<()> {
         id: "adhoc-run".to_string(),
         version: "0.0.0".to_string(),
         request_id: request_id.clone(),
-        job_id: args.job_id.clone(),
+        exec_id: args.exec_id.clone(),
         shell,
         script,
         timeout_secs: args.timeout,
@@ -66,7 +69,7 @@ pub async fn execute(client: async_nats::Client, args: RunArgs) -> Result<()> {
     info!(
         pc_id = %args.pc_id,
         request_id = %request_id,
-        job_id = ?args.job_id,
+        exec_id = ?args.exec_id,
         "sent command, waiting for result",
     );
 

@@ -10,6 +10,7 @@ use kanade_shared::kv::{BUCKET_SCRIPT_CURRENT, BUCKET_SCRIPT_STATUS, SCRIPT_STAT
 use kanade_shared::wire::Command;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
+use uuid::Uuid;
 
 use crate::outbox;
 use crate::process::{ExecOutcome, run_command_with_kill};
@@ -193,7 +194,7 @@ pub async fn handle_command(
         cmd_id = %cmd.id,
         request_id = %cmd.request_id,
         version = %cmd.version,
-        job_id = ?cmd.job_id,
+        exec_id = ?cmd.exec_id,
         "executing command",
     );
     let started_at = chrono::Utc::now();
@@ -207,12 +208,12 @@ pub async fn handle_command(
             stderr,
         } => (exit_code, stdout, stderr, None),
         ExecOutcome::Killed { stdout, stderr } => {
-            let jid = cmd.job_id.as_deref().unwrap_or("?");
+            let eid = cmd.exec_id.as_deref().unwrap_or("?");
             (
                 -1,
                 stdout,
                 stderr,
-                Some(format!("killed by remote signal (kill.{jid})")),
+                Some(format!("killed by remote signal (kill.{eid})")),
             )
         }
         ExecOutcome::Timeout { stdout, stderr } => (
@@ -229,7 +230,18 @@ pub async fn handle_command(
     };
 
     let result = ExecResult {
+        // v0.29 / Issue #19: mint per-(Command,PC) UUID so the
+        // projector's new PK survives broadcast Commands. Without
+        // this, two PCs replying to the same commands.all publish
+        // would collide on request_id and the projector would drop
+        // all but the first row again.
+        result_id: Uuid::new_v4().to_string(),
         request_id: cmd.request_id.clone(),
+        // v0.29 / Issue #19: forward `Command.exec_id` so the backend
+        // projector can increment `executions.success_count` /
+        // `failure_count` and the upcoming /api/executions endpoint
+        // can list per-PC results for one deployment.
+        exec_id: cmd.exec_id.clone(),
         pc_id: pc_id.clone(),
         exit_code,
         stdout,
@@ -237,7 +249,7 @@ pub async fn handle_command(
         started_at,
         finished_at,
         // Forward `Command.id` (the manifest's id, e.g. "inventory-hw"),
-        // NOT `Command.job_id` (a per-deploy UUID). The backend's
+        // NOT `Command.exec_id` (a per-deploy UUID). The backend's
         // results projector uses this to look up the manifest's
         // `inventory:` hint and upsert `inventory_facts` rows.
         manifest_id: Some(cmd.id.clone()),
@@ -289,7 +301,9 @@ async fn publish_staleness_skipped(
         humantime::format_duration(allowed),
     );
     let result = ExecResult {
+        result_id: Uuid::new_v4().to_string(),
         request_id: cmd.request_id.clone(),
+        exec_id: cmd.exec_id.clone(),
         pc_id: pc_id.to_string(),
         exit_code: 127,
         stdout: String::new(),
@@ -333,7 +347,9 @@ async fn publish_skipped(
         now,
     );
     let result = ExecResult {
+        result_id: Uuid::new_v4().to_string(),
         request_id: cmd.request_id.clone(),
+        exec_id: cmd.exec_id.clone(),
         pc_id: pc_id.to_string(),
         exit_code: 125,
         stdout: String::new(),
