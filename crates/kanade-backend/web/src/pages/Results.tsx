@@ -1,6 +1,7 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { Loader2, Skull } from 'lucide-react';
+import { ChevronsDown, ChevronsUp, ExternalLink, Loader2, Skull } from 'lucide-react';
 import { useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 
 import { ErrorCard } from '@/components/ErrorCard';
 import { Badge } from '@/components/ui/badge';
@@ -11,6 +12,13 @@ import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { apiFetch } from '@/lib/api';
+import { fmtIsoLocal } from '@/lib/utils';
+
+/// v0.27.x: how many chars of stdout / stderr to show in the table
+/// row's collapsed preview. The full body is fetched on demand when
+/// the operator clicks "show more" (inline expand) or opens the
+/// /results/{request_id} detail page in a new tab.
+const PREVIEW_CHARS = 200;
 
 type ResultRow = {
   request_id: string;
@@ -33,12 +41,6 @@ const SINCE_PRESETS: Array<{ value: string; label: string; ms: number | null }> 
   { value: '30d', label: 'last 30d',  ms: 30 * 24 * 60 * 60 * 1000 },
   { value: 'all', label: 'all time',  ms: null },
 ];
-
-function fmt(iso: string | null): string {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  return isNaN(d.getTime()) ? iso : d.toISOString().replace('T', ' ').replace(/\.\d+Z$/, 'Z');
-}
 
 export function Results() {
   const [pcId, setPcId] = useState('');
@@ -177,7 +179,21 @@ export function Results() {
           <TableBody>
             {rows.map((r) => (
               <TableRow key={r.request_id}>
-                <TableCell><code className="text-xs">{r.request_id.slice(0, 8)}</code></TableCell>
+                <TableCell>
+                  {/* request_id is a Link to the detail page so
+                      Ctrl/⌘ click opens a new tab — operators can
+                      compare multiple results side-by-side via
+                      browser tabs / window split. Plain click stays
+                      on the same tab. */}
+                  <Link
+                    to={`/results/${encodeURIComponent(r.request_id)}`}
+                    className="text-accent hover:underline inline-flex items-center gap-1"
+                    title="Open detail page (Ctrl/⌘+click for new tab)"
+                  >
+                    <code className="text-xs">{r.request_id.slice(0, 8)}</code>
+                    <ExternalLink className="size-3" />
+                  </Link>
+                </TableCell>
                 <TableCell><code className="text-xs">{r.pc_id}</code></TableCell>
                 <TableCell>
                   {r.job_id
@@ -187,17 +203,10 @@ export function Results() {
                 <TableCell>
                   <Badge variant={r.exit_code === 0 ? 'success' : 'danger'}>{r.exit_code}</Badge>
                 </TableCell>
-                <TableCell className="text-muted text-xs">{fmt(r.started_at)}</TableCell>
-                <TableCell className="text-muted text-xs">{fmt(r.finished_at)}</TableCell>
+                <TableCell className="text-muted text-xs">{fmtIsoLocal(r.started_at)}</TableCell>
+                <TableCell className="text-muted text-xs">{fmtIsoLocal(r.finished_at)}</TableCell>
                 <TableCell className="max-w-md">
-                  <pre className="text-xs whitespace-pre-wrap break-words bg-muted/5 p-2 rounded">
-                    {(r.stdout || '(empty)').slice(0, 200)}
-                  </pre>
-                  {r.stderr && (
-                    <pre className="text-xs whitespace-pre-wrap break-words text-danger bg-danger/5 p-2 rounded mt-1">
-                      {r.stderr.slice(0, 200)}
-                    </pre>
-                  )}
+                  <StdioPreview requestId={r.request_id} stdout={r.stdout} stderr={r.stderr} />
                 </TableCell>
                 <TableCell>
                   {r.job_id ? (
@@ -229,6 +238,95 @@ export function Results() {
         </Table>
       )}
       {kill.error && <ErrorCard title="Kill failed" error={kill.error} />}
+    </div>
+  );
+}
+
+/**
+ * Stdout / stderr preview cell with on-demand inline expansion.
+ *
+ * Default state: shows the first PREVIEW_CHARS chars of each stream,
+ * matching the historical table render. When either stream is
+ * actually longer than the preview cutoff, a "show more" button
+ * appears that toggles to a full-body view fetched lazily via
+ * GET /api/results/{request_id}. The detail page (linked via the
+ * request_id column on the same row) is the heavier alternative —
+ * dedicated tab, copy buttons, header chrome.
+ *
+ * The expanded body is bounded by max-h-96 + overflow-y-auto so an
+ * enormous payload doesn't push every other row off-screen; the
+ * detail page in a new tab is the right home for that case.
+ */
+function StdioPreview({
+  requestId,
+  stdout,
+  stderr,
+}: {
+  requestId: string;
+  stdout: string;
+  stderr: string;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const couldExpand = stdout.length > PREVIEW_CHARS || stderr.length > PREVIEW_CHARS;
+  const { data, isFetching, error } = useQuery({
+    queryKey: ['result', requestId],
+    queryFn: () =>
+      apiFetch<{ stdout: string; stderr: string }>(
+        `/api/results/${encodeURIComponent(requestId)}`,
+      ),
+    enabled: expanded,
+  });
+
+  const stdoutBody = expanded && data ? data.stdout : stdout.slice(0, PREVIEW_CHARS);
+  const stderrBody = expanded && data ? data.stderr : stderr.slice(0, PREVIEW_CHARS);
+
+  return (
+    <div>
+      <pre
+        className={
+          expanded
+            ? 'text-xs whitespace-pre-wrap break-words bg-muted/5 p-2 rounded max-h-96 overflow-y-auto'
+            : 'text-xs whitespace-pre-wrap break-words bg-muted/5 p-2 rounded'
+        }
+      >
+        {stdoutBody || '(empty)'}
+      </pre>
+      {(expanded ? stderrBody : stderr) && (
+        <pre
+          className={
+            expanded
+              ? 'text-xs whitespace-pre-wrap break-words text-danger bg-danger/5 p-2 rounded mt-1 max-h-96 overflow-y-auto'
+              : 'text-xs whitespace-pre-wrap break-words text-danger bg-danger/5 p-2 rounded mt-1'
+          }
+        >
+          {stderrBody}
+        </pre>
+      )}
+      {couldExpand && (
+        <button
+          type="button"
+          className="text-xs text-muted hover:text-fg inline-flex items-center gap-1 mt-1"
+          onClick={() => setExpanded((v) => !v)}
+        >
+          {isFetching ? (
+            <>
+              <Loader2 className="size-3 animate-spin" />
+              loading…
+            </>
+          ) : expanded ? (
+            <>
+              <ChevronsUp className="size-3" />
+              collapse
+            </>
+          ) : (
+            <>
+              <ChevronsDown className="size-3" />
+              show more
+            </>
+          )}
+        </button>
+      )}
+      {error && <span className="text-xs text-danger">fetch failed: {String(error)}</span>}
     </div>
   );
 }

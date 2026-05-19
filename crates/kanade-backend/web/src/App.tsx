@@ -14,6 +14,7 @@ import { Jobs } from '@/pages/Jobs';
 import { Login } from '@/pages/Login';
 import { Logs } from '@/pages/Logs';
 import { Placeholder } from '@/pages/Placeholder';
+import { ResultDetail } from '@/pages/ResultDetail';
 import { Results } from '@/pages/Results';
 import { Rollout } from '@/pages/Rollout';
 import { Run } from '@/pages/Run';
@@ -49,6 +50,7 @@ export default function App() {
               <Route path="/agents" element={<Agents />} />
               <Route path="/run" element={<Run />} />
               <Route path="/results" element={<Results />} />
+              <Route path="/results/:requestId" element={<ResultDetail />} />
               <Route path="/audit" element={<Audit />} />
               <Route path="/logs" element={<Logs />} />
               <Route path="/inventory" element={<Inventory />} />
