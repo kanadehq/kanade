@@ -34,6 +34,7 @@ futures    = { workspace = true }
 humantime  = { workspace = true }
 jsonwebtoken = { workspace = true }
 mime_guess = { workspace = true }
+regex      = { workspace = true }
 rust-embed = { workspace = true }
 tokio-cron-scheduler = { workspace = true }
 uuid       = { workspace = true }

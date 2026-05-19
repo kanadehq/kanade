@@ -325,7 +325,7 @@ async fn dispatch(
     plan: FanoutPlan,
     why: &str,
 ) {
-    match exec_manifest(state, manifest, plan, "scheduler").await {
+    match exec_manifest(state, manifest, plan, "scheduler", None).await {
         Ok(resp) => info!(
             %schedule_id, exec_id = %resp.exec_id, why,
             "scheduler exec ok",
@@ -486,6 +486,7 @@ async fn disable_schedule(state: &AppState, schedule: &Schedule) -> Result<()> {
         "scheduler",
         "schedule_completed",
         Some(&updated.id),
+        None,
         serde_json::json!({
             "mode": format!("{:?}", schedule.mode),
             "job_id": schedule.job_id,

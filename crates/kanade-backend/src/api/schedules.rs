@@ -10,6 +10,7 @@ use tracing::{info, warn};
 
 use crate::api::AppState;
 use crate::audit;
+use crate::audit::Caller;
 
 #[derive(Serialize)]
 pub struct ScheduleSummary {
@@ -47,6 +48,7 @@ pub async fn list(State(s): State<AppState>) -> Result<Json<Vec<Schedule>>, (Sta
 /// POST /api/schedules — upsert.
 pub async fn create(
     State(s): State<AppState>,
+    caller: Caller,
     Json(schedule): Json<Schedule>,
 ) -> Result<Json<ScheduleSummary>, (StatusCode, String)> {
     // Make sure the KV bucket exists (idempotent).
@@ -73,9 +75,10 @@ pub async fn create(
     );
     audit::record(
         &s.nats,
-        "cli",
+        "operator",
         "schedule_upsert",
         Some(&schedule.id),
+        Some(&caller),
         serde_json::json!({
             "cron": schedule.cron,
             "job_id": schedule.job_id,
@@ -129,6 +132,7 @@ pub async fn disable(
     State(s): State<AppState>,
     Path(id): Path<String>,
     Query(q): Query<DisableQuery>,
+    caller: Caller,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let schedules_kv = s
         .jetstream
@@ -223,9 +227,10 @@ pub async fn disable(
 
     audit::record(
         &s.nats,
-        "cli",
+        "operator",
         "schedule_disable",
         Some(&id),
+        Some(&caller),
         serde_json::json!({
             "cascade": cascade_applied,
             "job_id": schedule.job_id,
@@ -239,6 +244,7 @@ pub async fn disable(
 pub async fn delete(
     State(s): State<AppState>,
     Path(id): Path<String>,
+    caller: Caller,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let kv = match s.jetstream.get_key_value(BUCKET_SCHEDULES).await {
         Ok(k) => k,
@@ -253,9 +259,10 @@ pub async fn delete(
     info!(schedule_id = %id, "schedule deleted");
     audit::record(
         &s.nats,
-        "cli",
+        "operator",
         "schedule_delete",
         Some(&id),
+        Some(&caller),
         serde_json::json!({}),
     )
     .await;
