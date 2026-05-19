@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Loader2, Power, PowerOff, Trash2 } from 'lucide-react';
+import { Loader2, Power, PowerOff, Trash2, Zap } from 'lucide-react';
+import { useState } from 'react';
 
 import { ErrorCard } from '@/components/ErrorCard';
 import { Badge } from '@/components/ui/badge';
@@ -43,15 +44,52 @@ export function Schedules() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['schedules'] }),
   });
 
-  // POST /api/schedules is an upsert, so we just re-POST the full row
-  // with `enabled` flipped. The scheduler's KV watcher picks up the
-  // change and registers/unregisters the cron job on the next put.
-  const toggle = useMutation({
-    mutationFn: (s: ScheduleRow) =>
-      apiFetch('/api/schedules', {
+  // v0.27 (SPEC §2.6.4 (c)): disable goes through the dedicated
+  // endpoint that can also cascade-revoke the referenced Job.
+  // ?cascade=true = "hard disable" — stops the cron AND writes
+  // script_status.{job_id} = REVOKED so any in-flight Command gets
+  // skipped at agent fire time. ?cascade=false (default) = "soft
+  // disable" — just stops the cron, in-flight Commands run.
+  //
+  // Round 2 review (CodeRabbit #38): per-row pending tracked via a
+  // Set<string> so concurrent disable/enable clicks across rows
+  // don't grey each other out — `mutation.variables` is a single
+  // value, useless for per-row gating.
+  const [pendingDisable, setPendingDisable] = useState<Set<string>>(new Set());
+  const [pendingEnable, setPendingEnable] = useState<Set<string>>(new Set());
+  const disable = useMutation({
+    mutationFn: ({ id, cascade }: { id: string; cascade: boolean }) =>
+      apiFetch(`/api/schedules/${encodeURIComponent(id)}/disable?cascade=${cascade}`, {
         method: 'POST',
-        body: JSON.stringify({ ...s, enabled: !s.enabled }),
       }),
+    onMutate: ({ id }) => {
+      setPendingDisable((prev) => new Set(prev).add(id));
+    },
+    onSettled: (_d, _e, { id }) => {
+      setPendingDisable((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['schedules'] }),
+  });
+  // v0.27 (gemini #38 review): symmetrical /enable endpoint so we
+  // don't clobber concurrent edits with a full row re-POST. Backend
+  // uses kv.entry().revision + update() the same way disable does.
+  const enable = useMutation({
+    mutationFn: (id: string) =>
+      apiFetch(`/api/schedules/${encodeURIComponent(id)}/enable`, { method: 'POST' }),
+    onMutate: (id) => {
+      setPendingEnable((prev) => new Set(prev).add(id));
+    },
+    onSettled: (_d, _e, id) => {
+      setPendingEnable((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['schedules'] }),
   });
 
@@ -120,18 +158,52 @@ export function Schedules() {
                   ? <Badge variant="success">on</Badge>
                   : <Badge variant="danger">off</Badge>}
               </TableCell>
-              <TableCell className="flex gap-2">
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  disabled={toggle.isPending}
-                  onClick={() => toggle.mutate(s)}
-                  title={s.enabled ? 'Disable this schedule' : 'Enable this schedule'}
-                >
-                  {s.enabled
-                    ? <><PowerOff className="size-3.5" />disable</>
-                    : <><Power className="size-3.5" />enable</>}
-                </Button>
+              <TableCell className="flex flex-wrap gap-2">
+                {s.enabled ? (
+                  <>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      disabled={pendingDisable.has(s.id)}
+                      onClick={() => disable.mutate({ id: s.id, cascade: false })}
+                      title="Soft disable — cron stops on next tick. In-flight Commands run."
+                    >
+                      <PowerOff className="size-3.5" />
+                      disable
+                    </Button>
+                    <Button
+                      variant="danger"
+                      size="sm"
+                      disabled={pendingDisable.has(s.id)}
+                      onClick={() => {
+                        if (
+                          window.confirm(
+                            `Hard-disable schedule ${s.id}?\n\n` +
+                              `(1) cron stops on next tick (same as soft disable)\n` +
+                              `(2) script_status.${s.job_id} → REVOKED — any Command already in flight for this job will be skipped by the agent's Layer 2 check.\n\n` +
+                              `Use this when an active rollout needs to stop NOW.`,
+                          )
+                        )
+                          disable.mutate({ id: s.id, cascade: true });
+                      }}
+                      title="Hard disable — also revoke the underlying Job so in-flight Commands skip."
+                    >
+                      <Zap className="size-3.5" />
+                      disable + cascade
+                    </Button>
+                  </>
+                ) : (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={pendingEnable.has(s.id)}
+                    onClick={() => enable.mutate(s.id)}
+                    title="Re-enable this schedule"
+                  >
+                    <Power className="size-3.5" />
+                    enable
+                  </Button>
+                )}
                 <Button
                   variant="danger"
                   size="sm"
@@ -149,7 +221,8 @@ export function Schedules() {
         </TableBody>
       </Table>
       {del.error && <ErrorCard title="Delete failed" error={del.error} />}
-      {toggle.error && <ErrorCard title="Toggle failed" error={toggle.error} />}
+      {disable.error && <ErrorCard title="Disable failed" error={disable.error} />}
+      {enable.error && <ErrorCard title="Enable failed" error={enable.error} />}
     </div>
   );
 }

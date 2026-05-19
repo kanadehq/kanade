@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Loader2, ScrollText, Trash2 } from 'lucide-react';
+import { Ban, CircleCheck, Loader2, ScrollText, Trash2 } from 'lucide-react';
+import { useState } from 'react';
 
 import { ErrorCard } from '@/components/ErrorCard';
 import { Badge } from '@/components/ui/badge';
@@ -32,6 +33,51 @@ export function Jobs() {
     mutationFn: (id: string) =>
       apiFetch(`/api/jobs/${encodeURIComponent(id)}`, { method: 'DELETE' }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['jobs'] }),
+  });
+
+  // v0.27: surface Layer 2 revoke / unrevoke as per-row buttons so
+  // operators don't have to drop to the CLI for a one-script gate
+  // flip. Backend endpoint (POST /api/scripts/{cmd_id}/revoke) just
+  // writes the script_status KV, which the agent's handle_command
+  // reads at fire time. Idempotent on the server side — re-clicking
+  // is a no-op put.
+  //
+  // Round 2 review (CodeRabbit #38): a single shared `useMutation`
+  // overwrites `.variables` with every new invocation, so the
+  // previous `disabled={isPending && variables === id}` flickered
+  // back to enabled the moment a second row was clicked while the
+  // first was still inflight. Track pending IDs in a `Set<string>`
+  // updated in onMutate / onSettled — true per-row scoping that
+  // survives concurrent clicks.
+  const [pendingRevoke, setPendingRevoke] = useState<Set<string>>(new Set());
+  const [pendingUnrevoke, setPendingUnrevoke] = useState<Set<string>>(new Set());
+  const revoke = useMutation({
+    mutationFn: (id: string) =>
+      apiFetch(`/api/scripts/${encodeURIComponent(id)}/revoke`, { method: 'POST' }),
+    onMutate: (id) => {
+      setPendingRevoke((prev) => new Set(prev).add(id));
+    },
+    onSettled: (_d, _e, id) => {
+      setPendingRevoke((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    },
+  });
+  const unrevoke = useMutation({
+    mutationFn: (id: string) =>
+      apiFetch(`/api/scripts/${encodeURIComponent(id)}/unrevoke`, { method: 'POST' }),
+    onMutate: (id) => {
+      setPendingUnrevoke((prev) => new Set(prev).add(id));
+    },
+    onSettled: (_d, _e, id) => {
+      setPendingUnrevoke((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    },
   });
 
   if (isLoading) {
@@ -98,13 +144,48 @@ export function Jobs() {
               <TableCell className="text-xs text-muted max-w-md truncate">
                 {j.description ?? '—'}
               </TableCell>
-              <TableCell>
+              <TableCell className="flex flex-wrap gap-2">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={pendingRevoke.has(j.id)}
+                  onClick={() => {
+                    if (
+                      window.confirm(
+                        `Revoke ${j.id}?\n\n` +
+                          `Any in-flight Command for this manifest will be skipped on receipt by the agent's Layer 2 check (SPEC §2.6.2).\n\n` +
+                          `Reversible with the unrevoke button.`,
+                      )
+                    )
+                      revoke.mutate(j.id);
+                  }}
+                  title="Flip script_status to REVOKED so in-flight Commands skip on receipt"
+                >
+                  <Ban className="size-3.5" />
+                  revoke
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={pendingUnrevoke.has(j.id)}
+                  onClick={() => unrevoke.mutate(j.id)}
+                  title="Flip script_status back to ACTIVE"
+                >
+                  <CircleCheck className="size-3.5" />
+                  unrevoke
+                </Button>
                 <Button
                   variant="danger"
                   size="sm"
                   disabled={del.isPending}
                   onClick={() => {
-                    if (window.confirm(`Delete job ${j.id}?\n\n(Refused with 409 if any schedule references it.)`))
+                    if (
+                      window.confirm(
+                        `Delete job ${j.id}?\n\n` +
+                          `This also writes script_status.${j.id} = REVOKED so any in-flight Command for this manifest is skipped on receipt (v0.27 cascade).\n\n` +
+                          `Refused with 409 if any schedule references it.`,
+                      )
+                    )
                       del.mutate(j.id);
                   }}
                 >
@@ -117,6 +198,8 @@ export function Jobs() {
         </TableBody>
       </Table>
       {del.error && <ErrorCard title="Delete failed" error={del.error} />}
+      {revoke.error && <ErrorCard title="Revoke failed" error={revoke.error} />}
+      {unrevoke.error && <ErrorCard title="Unrevoke failed" error={unrevoke.error} />}
     </div>
   );
 }

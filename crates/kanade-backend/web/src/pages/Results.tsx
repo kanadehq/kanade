@@ -1,9 +1,10 @@
-import { useQuery } from '@tanstack/react-query';
-import { Loader2 } from 'lucide-react';
+import { useMutation, useQuery } from '@tanstack/react-query';
+import { Loader2, Skull } from 'lucide-react';
 import { useMemo, useState } from 'react';
 
 import { ErrorCard } from '@/components/ErrorCard';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -19,6 +20,10 @@ type ResultRow = {
   stderr: string;
   started_at: string | null;
   finished_at: string | null;
+  /** v0.27: surfaced from `execution_results.job_id`. Empty for
+   *  ad-hoc `kanade run` rows / pre-migration-0002 rows. Drives the
+   *  per-row Kill button. */
+  job_id: string | null;
 };
 
 const SINCE_PRESETS: Array<{ value: string; label: string; ms: number | null }> = [
@@ -59,6 +64,32 @@ export function Results() {
   const { data, error, isLoading, isFetching } = useQuery({
     queryKey: ['results', queryString],
     queryFn: () => apiFetch<ResultRow[]>(`/api/results?${queryString}`),
+  });
+
+  // v0.27: Layer 3 kill — publishes on `kill.{job_id}` so any agent
+  // currently running this job's child process terminates it. Only
+  // useful when the job is *currently running*; killing a completed
+  // execution is a no-op (no subscriber). Per-row availability is
+  // gated on the row carrying a job_id (ad-hoc `kanade run` rows
+  // have None).
+  //
+  // Round 2 review (CodeRabbit #38): per-row pending tracked via a
+  // Set<string> so a kill click on one row doesn't disable every
+  // other row's kill button while the first request is inflight.
+  const [pendingKill, setPendingKill] = useState<Set<string>>(new Set());
+  const kill = useMutation({
+    mutationFn: (job_id: string) =>
+      apiFetch(`/api/jobs/${encodeURIComponent(job_id)}/kill`, { method: 'POST' }),
+    onMutate: (job_id) => {
+      setPendingKill((prev) => new Set(prev).add(job_id));
+    },
+    onSettled: (_d, _e, job_id) => {
+      setPendingKill((prev) => {
+        const next = new Set(prev);
+        next.delete(job_id);
+        return next;
+      });
+    },
   });
 
   const rows = data ?? [];
@@ -135,10 +166,12 @@ export function Results() {
             <TableRow>
               <TableHead>request_id</TableHead>
               <TableHead>pc_id</TableHead>
+              <TableHead>job_id</TableHead>
               <TableHead>exit</TableHead>
               <TableHead>started</TableHead>
               <TableHead>finished</TableHead>
               <TableHead>stdout / stderr</TableHead>
+              <TableHead>actions</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -146,6 +179,11 @@ export function Results() {
               <TableRow key={r.request_id}>
                 <TableCell><code className="text-xs">{r.request_id.slice(0, 8)}</code></TableCell>
                 <TableCell><code className="text-xs">{r.pc_id}</code></TableCell>
+                <TableCell>
+                  {r.job_id
+                    ? <code className="text-xs">{r.job_id}</code>
+                    : <span className="text-muted text-xs">—</span>}
+                </TableCell>
                 <TableCell>
                   <Badge variant={r.exit_code === 0 ? 'success' : 'danger'}>{r.exit_code}</Badge>
                 </TableCell>
@@ -161,11 +199,36 @@ export function Results() {
                     </pre>
                   )}
                 </TableCell>
+                <TableCell>
+                  {r.job_id ? (
+                    <Button
+                      variant="danger"
+                      size="sm"
+                      disabled={r.job_id ? pendingKill.has(r.job_id) : false}
+                      onClick={() => {
+                        if (
+                          window.confirm(
+                            `Publish kill.${r.job_id}?\n\n` +
+                              `Any agent currently running this job's child process will terminate it. No effect if the run already finished.`,
+                          )
+                        )
+                          kill.mutate(r.job_id!);
+                      }}
+                      title="Publish kill.{job_id} (Layer 3)"
+                    >
+                      <Skull className="size-3.5" />
+                      kill
+                    </Button>
+                  ) : (
+                    <span className="text-muted text-xs">—</span>
+                  )}
+                </TableCell>
               </TableRow>
             ))}
           </TableBody>
         </Table>
       )}
+      {kill.error && <ErrorCard title="Kill failed" error={kill.error} />}
     </div>
   );
 }
