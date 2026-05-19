@@ -3,10 +3,8 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use futures::TryStreamExt;
-use kanade_shared::kv::{
-    BUCKET_JOBS, BUCKET_SCHEDULES, BUCKET_SCRIPT_STATUS, SCRIPT_STATUS_REVOKED,
-};
-use kanade_shared::manifest::{Manifest, Schedule};
+use kanade_shared::kv::{BUCKET_SCHEDULES, BUCKET_SCRIPT_STATUS, SCRIPT_STATUS_REVOKED};
+use kanade_shared::manifest::Schedule;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -132,73 +130,79 @@ pub async fn disable(
     Path(id): Path<String>,
     Query(q): Query<DisableQuery>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let schedules_kv = match s.jetstream.get_key_value(BUCKET_SCHEDULES).await {
-        Ok(k) => k,
-        Err(e) => {
+    let schedules_kv = s
+        .jetstream
+        .get_key_value(BUCKET_SCHEDULES)
+        .await
+        .map_err(|e| {
             warn!(error = %e, "schedules KV missing on disable");
-            return Err((
+            (
                 StatusCode::SERVICE_UNAVAILABLE,
                 format!("schedules bucket missing: {e}"),
-            ));
-        }
-    };
+            )
+        })?;
 
-    let bytes = match schedules_kv.get(&id).await {
-        Ok(Some(b)) => b,
-        Ok(None) => return Err((StatusCode::NOT_FOUND, format!("schedule '{id}' not found"))),
-        Err(e) => {
-            return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("KV get: {e}")));
-        }
-    };
-    let mut schedule: Schedule = serde_json::from_slice(&bytes).map_err(|e| {
+    // Fetch the full Entry (not just the value) so we can use its
+    // revision for an optimistic-concurrency `update` instead of a
+    // blind `put`. Without that, a concurrent edit (operator changing
+    // the cron expression while we're racing to disable) would be
+    // silently clobbered — gemini #37 review flagged this as a
+    // priority bug, and it lines up with the PR's "stop the rollout"
+    // story where two operators reaching for the brake at once is a
+    // realistic scenario.
+    let entry = schedules_kv
+        .entry(&id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("KV entry: {e}")))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("schedule '{id}' not found")))?;
+    let mut schedule: Schedule = serde_json::from_slice(&entry.value).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("deserialize stored schedule: {e}"),
         )
     })?;
 
-    // Soft step is always done first — revoke without a disabled
-    // schedule would still let the cron fire fresh Commands that
-    // would also be revoked, just noisier in the AUDIT log.
-    if !schedule.enabled {
+    // Only write back if there's something to change. Skipping the
+    // already-disabled case avoids a redundant watch event for the
+    // backend / agent scheduler loops.
+    if schedule.enabled {
+        schedule.enabled = false;
+        let body = serde_json::to_vec(&schedule).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("serialize schedule: {e}"),
+            )
+        })?;
+        schedules_kv
+            .update(&id, body.into(), entry.revision)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("KV update: {e}")))?;
+    } else {
         info!(schedule_id = %id, "schedule already disabled; revoke-only path");
     }
-    schedule.enabled = false;
-    let body = serde_json::to_vec(&schedule).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("serialize schedule: {e}"),
-        )
-    })?;
-    schedules_kv
-        .put(&id, body.into())
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("KV put: {e}")))?;
 
     // Cascade Layer 2: revoke the underlying Manifest so already-
     // published Commands get caught at agent fire time. Same pattern
     // as `jobs::delete`: revoke is idempotent, status KV missing in
     // dev is a 503 so callers can `kanade jetstream setup` and retry.
     let cascade_applied = if q.cascade {
-        let status_kv = match s.jetstream.get_key_value(BUCKET_SCRIPT_STATUS).await {
-            Ok(k) => k,
-            Err(e) => {
+        let status_kv = s
+            .jetstream
+            .get_key_value(BUCKET_SCRIPT_STATUS)
+            .await
+            .map_err(|e| {
                 warn!(
                     error = %e,
                     bucket = BUCKET_SCRIPT_STATUS,
                     "schedule_disable cascade: status KV unavailable",
                 );
-                return Err((
+                (
                     StatusCode::SERVICE_UNAVAILABLE,
                     format!("script_status bucket missing: {e}"),
-                ));
-            }
-        };
+                )
+            })?;
         status_kv
-            .put(
-                &schedule.job_id,
-                bytes::Bytes::from(SCRIPT_STATUS_REVOKED.as_bytes()),
-            )
+            .put(&schedule.job_id, bytes::Bytes::from(SCRIPT_STATUS_REVOKED))
             .await
             .map_err(|e| {
                 (
@@ -206,21 +210,9 @@ pub async fn disable(
                     format!("script_status put: {e}"),
                 )
             })?;
-
-        // Surface the Manifest existence in the audit payload so
-        // operators don't get a misleading "cascade succeeded" when
-        // the job_id was already a dangling reference.
-        let manifest_exists = match s.jetstream.get_key_value(BUCKET_JOBS).await {
-            Ok(jobs_kv) => match jobs_kv.get(&schedule.job_id).await {
-                Ok(Some(bytes)) => serde_json::from_slice::<Manifest>(&bytes).is_ok(),
-                _ => false,
-            },
-            Err(_) => false,
-        };
         info!(
             schedule_id = %id,
             job_id = %schedule.job_id,
-            manifest_exists,
             "schedule disabled with cascade revoke",
         );
         true
