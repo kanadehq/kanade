@@ -20,6 +20,7 @@ use tracing::{info, warn};
 
 use super::AppState;
 use crate::audit;
+use crate::audit::Caller;
 
 pub async fn kill(
     State(state): State<AppState>,
@@ -82,6 +83,7 @@ pub async fn list(State(s): State<AppState>) -> Result<Json<Vec<Manifest>>, (Sta
 /// key is `manifest.id`.
 pub async fn create(
     State(s): State<AppState>,
+    caller: Caller,
     Json(job): Json<Manifest>,
 ) -> Result<Json<JobSummary>, (StatusCode, String)> {
     let kv = s
@@ -107,9 +109,10 @@ pub async fn create(
     info!(job_id = %job.id, version = %job.version, "job upserted");
     audit::record(
         &s.nats,
-        "cli",
+        "operator",
         "job_upsert",
         Some(&job.id),
+        Some(&caller),
         serde_json::json!({
             "version": job.version,
             "inventory": job.inventory.is_some(),
@@ -136,6 +139,7 @@ pub async fn create(
 pub async fn delete(
     State(s): State<AppState>,
     Path(id): Path<String>,
+    caller: Caller,
 ) -> Result<StatusCode, (StatusCode, String)> {
     if let Ok(kv) = s.jetstream.get_key_value(BUCKET_SCHEDULES).await
         && let Ok(keys_stream) = kv.keys().await
@@ -221,9 +225,10 @@ pub async fn delete(
         );
         audit::record(
             &s.nats,
-            "cli",
+            "operator",
             "job_delete_failed_post_revoke",
             Some(&id),
+            Some(&caller),
             serde_json::json!({ "cascade_revoke": true, "error": e.to_string() }),
         )
         .await;
@@ -237,9 +242,10 @@ pub async fn delete(
     info!(job_id = %id, cascade_revoke = true, "job deleted");
     audit::record(
         &s.nats,
-        "cli",
+        "operator",
         "job_delete",
         Some(&id),
+        Some(&caller),
         serde_json::json!({ "cascade_revoke": true }),
     )
     .await;

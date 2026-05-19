@@ -1608,6 +1608,7 @@ dependencies = [
  "jsonwebtoken",
  "kanade-shared",
  "mime_guess",
+ "regex",
  "rust-embed",
  "serde",
  "serde_json",

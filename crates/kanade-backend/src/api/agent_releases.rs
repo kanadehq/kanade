@@ -26,6 +26,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use super::AppState;
+use crate::audit;
+use crate::audit::Caller;
 
 // ─── POST /api/agents/publish ────────────────────────────────────────
 
@@ -38,6 +40,7 @@ pub struct PublishResponse {
 
 pub async fn publish(
     State(state): State<AppState>,
+    caller: Caller,
     mut multipart: Multipart,
 ) -> Result<Json<PublishResponse>, (StatusCode, String)> {
     // v0.13.1: the "version" form field is gone. The Object Store
@@ -115,6 +118,19 @@ pub async fn publish(
         })?;
     info!(version, digest = ?meta.digest, "publish: agent binary uploaded");
 
+    audit::record(
+        &state.nats,
+        "operator",
+        "agent_publish",
+        Some(&version),
+        Some(&caller),
+        serde_json::json!({
+            "size": size,
+            "digest": meta.digest,
+        }),
+    )
+    .await;
+
     Ok(Json(PublishResponse {
         version,
         size,
@@ -131,6 +147,7 @@ pub async fn publish(
 pub async fn delete_release(
     State(state): State<AppState>,
     Path(version): Path<String>,
+    caller: Caller,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let kv = state
         .jetstream
@@ -197,6 +214,17 @@ pub async fn delete_release(
         }
     })?;
     info!(%version, "publish: agent binary deleted");
+
+    audit::record(
+        &state.nats,
+        "operator",
+        "agent_release_delete",
+        Some(&version),
+        Some(&caller),
+        serde_json::json!({}),
+    )
+    .await;
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -289,6 +317,7 @@ pub struct RolloutResponse {
 
 pub async fn rollout(
     State(state): State<AppState>,
+    caller: Caller,
     Json(body): Json<RolloutBody>,
 ) -> Result<Json<RolloutResponse>, (StatusCode, String)> {
     let (key, label) = match &body.scope {
@@ -350,6 +379,20 @@ pub async fn rollout(
         jitter = ?body.jitter,
         "rollout: target_version flipped via HTTP",
     );
+
+    audit::record(
+        &state.nats,
+        "operator",
+        "agent_rollout",
+        Some(&key),
+        Some(&caller),
+        serde_json::json!({
+            "version": body.version,
+            "scope_label": label,
+            "jitter": body.jitter,
+        }),
+    )
+    .await;
 
     Ok(Json(RolloutResponse {
         version: body.version,

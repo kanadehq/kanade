@@ -12,6 +12,7 @@ use uuid::Uuid;
 use crate::api::AppState;
 use crate::api::jobs;
 use crate::audit;
+use crate::audit::Caller;
 
 #[derive(Serialize, Clone)]
 pub struct ExecResponse {
@@ -22,8 +23,8 @@ pub struct ExecResponse {
     pub subjects: Vec<String>,
 }
 
-/// Core exec pipeline used by both the HTTP handler (actor = "cli") and
-/// the scheduler (actor = "scheduler"). Validates the [`FanoutPlan`],
+/// Core exec pipeline used by both the HTTP handler (actor = "operator")
+/// and the scheduler (actor = "scheduler"). Validates the [`FanoutPlan`],
 /// fans the Command out across every target subject (or schedules
 /// wave-based fan-out when `rollout` is set), pins script_current,
 /// records an `executions` row, and emits an audit event.
@@ -32,11 +33,16 @@ pub struct ExecResponse {
 /// timeout + inventory hint). `target` / `rollout` / `jitter` come
 /// from the caller's [`FanoutPlan`] — schedules carry one inline,
 /// ad-hoc execs build one from CLI flags / SPA form input.
+///
+/// `caller` is `None` for the scheduler path (no HTTP request) and
+/// `Some(_)` for operator-initiated execs, where the JWT subject and
+/// `X-Kanade-Source` header get folded into the audit payload.
 pub async fn exec_manifest(
     s: &AppState,
     manifest: Manifest,
     plan: FanoutPlan,
     actor: &str,
+    caller: Option<&Caller>,
 ) -> Result<ExecResponse, (StatusCode, String)> {
     let has_rollout = plan
         .rollout
@@ -219,6 +225,7 @@ pub async fn exec_manifest(
         actor,
         "exec",
         Some(&manifest.id),
+        caller,
         serde_json::json!({
             "exec_id": exec_id,
             "version": manifest.version,
@@ -245,6 +252,7 @@ pub async fn exec_manifest(
 pub async fn create(
     State(s): State<AppState>,
     Path(job_id): Path<String>,
+    caller: Caller,
     Json(plan): Json<FanoutPlan>,
 ) -> Result<Json<ExecResponse>, (StatusCode, String)> {
     let manifest = match jobs::fetch(&s.jetstream, &job_id).await {
@@ -266,5 +274,7 @@ pub async fn create(
             ));
         }
     };
-    exec_manifest(&s, manifest, plan, "cli").await.map(Json)
+    exec_manifest(&s, manifest, plan, "operator", Some(&caller))
+        .await
+        .map(Json)
 }

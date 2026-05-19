@@ -57,10 +57,12 @@ export function Rollout() {
       const fd = new FormData();
       fd.append('file', uploadFile);
       const token = localStorage.getItem('kanade_token') ?? '';
+      const headers: Record<string, string> = { 'X-Kanade-Source': 'spa' };
+      if (token) headers.Authorization = `Bearer ${token}`;
       const res = await fetch('/api/agents/publish', {
         method: 'POST',
         body: fd,
-        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+        headers,
       });
       if (!res.ok) {
         throw new Error(`${res.status} ${res.statusText} — ${await res.text()}`);
@@ -106,9 +108,11 @@ export function Rollout() {
   const remove = useMutation({
     mutationFn: async (v: string) => {
       const token = localStorage.getItem('kanade_token') ?? '';
+      const headers: Record<string, string> = { 'X-Kanade-Source': 'spa' };
+      if (token) headers.Authorization = `Bearer ${token}`;
       const res = await fetch(`/api/agents/releases/${encodeURIComponent(v)}`, {
         method: 'DELETE',
-        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+        headers,
       });
       if (!res.ok) {
         throw new Error(`${res.status} ${res.statusText} — ${await res.text()}`);

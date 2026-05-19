@@ -32,6 +32,10 @@ function authHeaders(): HeadersInit {
 export async function apiFetch<T = unknown>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers ?? {});
   for (const [k, v] of Object.entries(authHeaders())) headers.set(k, v as string);
+  // Lets the backend tag operator-initiated audit events with
+  // `source: "spa"` so the audit log distinguishes browser-driven
+  // actions from CLI ones without rewriting handler signatures.
+  if (!headers.has('X-Kanade-Source')) headers.set('X-Kanade-Source', 'spa');
   if (init.body && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }

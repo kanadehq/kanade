@@ -33,9 +33,21 @@ function fmt(iso: string): string {
   return isNaN(d.getTime()) ? iso : d.toISOString().replace('T', ' ').replace(/\.\d+Z$/, 'Z');
 }
 
+function actorVariant(actor: string): 'violet' | 'amber' | 'success' | 'default' {
+  switch (actor) {
+    case 'scheduler':   return 'violet';
+    case 'operator':    return 'amber';
+    case 'self-update': return 'success';
+    case 'agent':       return 'default';
+    default:            return 'default'; // future / legacy values
+  }
+}
+
 export function Audit() {
   const [actor, setActor] = useState('');
   const [action, setAction] = useState('');
+  const [target, setTarget] = useState('');
+  const [payload, setPayload] = useState('');
   const [since, setSince] = useState('24h');
   const [limit, setLimit] = useState(50);
 
@@ -50,9 +62,11 @@ export function Audit() {
     sp.set('limit', String(limit));
     if (actor)    sp.set('actor', actor);
     if (action)   sp.set('action', action);
+    if (target)   sp.set('target', target);
+    if (payload)  sp.set('payload', payload);
     if (sinceIso) sp.set('since', sinceIso);
     return sp.toString();
-  }, [actor, action, sinceIso, limit]);
+  }, [actor, action, target, payload, sinceIso, limit]);
 
   const { data, error, isLoading, isFetching } = useQuery({
     queryKey: ['audit', queryString],
@@ -69,7 +83,7 @@ export function Audit() {
       </div>
 
       <Card>
-        <CardContent className="grid grid-cols-1 sm:grid-cols-4 gap-3 p-4">
+        <CardContent className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 p-4">
           <div className="space-y-1">
             <Label htmlFor="audit-actor">actor</Label>
             <Select id="audit-actor" value={actor} onChange={(e) => setActor(e.target.value)}>
@@ -77,15 +91,34 @@ export function Audit() {
               <option value="scheduler">scheduler</option>
               <option value="operator">operator</option>
               <option value="self-update">self-update</option>
+              <option value="agent">agent</option>
             </Select>
           </div>
           <div className="space-y-1">
             <Label htmlFor="audit-action">action</Label>
             <Input
               id="audit-action"
-              placeholder="exact match — eg. exec"
+              placeholder="regex — eg. ^job_ or exec"
               value={action}
               onChange={(e) => setAction(e.target.value)}
+            />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="audit-target">target</Label>
+            <Input
+              id="audit-target"
+              placeholder="regex — eg. ^job- or schedule-foo"
+              value={target}
+              onChange={(e) => setTarget(e.target.value)}
+            />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="audit-payload">payload</Label>
+            <Input
+              id="audit-payload"
+              placeholder="regex — eg. alice or PC001"
+              value={payload}
+              onChange={(e) => setPayload(e.target.value)}
             />
           </div>
           <div className="space-y-1">
@@ -121,7 +154,7 @@ export function Audit() {
         <Card>
           <CardHeader><CardTitle>No audit events match</CardTitle></CardHeader>
           <CardContent className="text-muted">
-            Widen the filter window or clear actor / action to see older events.
+            Widen the filter window or clear actor / action / target / payload to see older events.
           </CardContent>
         </Card>
       ) : (
@@ -140,7 +173,7 @@ export function Audit() {
               <TableRow key={e.id}>
                 <TableCell className="text-muted text-xs">{fmt(e.occurred_at)}</TableCell>
                 <TableCell>
-                  <Badge variant={e.actor === 'scheduler' ? 'violet' : 'amber'}>{e.actor}</Badge>
+                  <Badge variant={actorVariant(e.actor)}>{e.actor}</Badge>
                 </TableCell>
                 <TableCell><code className="text-xs">{e.action}</code></TableCell>
                 <TableCell><code className="text-xs">{e.target ?? '—'}</code></TableCell>
