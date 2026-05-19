@@ -167,7 +167,11 @@ pub async fn delete(
     // any agent that reads them. We revoke FIRST, then delete the
     // Manifest, so that if delete somehow fails we're still in a safe
     // (revoked) state. Idempotent — re-revoking an already-REVOKED
-    // entry is a no-op put.
+    // entry is a no-op put. v0.27 round-2 review (gemini #36
+    // line 208): resolve BOTH KV handles upfront before any write —
+    // that way a missing / unreachable BUCKET_JOBS surfaces as a
+    // clean 404 with zero side effects, instead of leaking a revoke
+    // that has no matching delete.
     let status_kv = s
         .jetstream
         .get_key_value(BUCKET_SCRIPT_STATUS)
@@ -183,6 +187,11 @@ pub async fn delete(
                 format!("script_status bucket missing: {e}"),
             )
         })?;
+    let kv = s.jetstream.get_key_value(BUCKET_JOBS).await.map_err(|e| {
+        warn!(error = %e, "jobs KV missing on delete");
+        (StatusCode::NOT_FOUND, "jobs bucket missing".to_string())
+    })?;
+
     status_kv
         .put(&id, bytes::Bytes::from(SCRIPT_STATUS_REVOKED))
         .await
@@ -198,14 +207,6 @@ pub async fn delete(
                 format!("script_status put: {e}"),
             )
         })?;
-
-    let kv = match s.jetstream.get_key_value(BUCKET_JOBS).await {
-        Ok(k) => k,
-        Err(e) => {
-            warn!(error = %e, "jobs KV missing on delete");
-            return Err((StatusCode::NOT_FOUND, "jobs bucket missing".into()));
-        }
-    };
     // If the manifest delete fails *after* we successfully cascaded
     // the revoke, the operator needs to know that `script_status.{id}`
     // is now REVOKED so they can `kanade unrevoke <id>` as part of the
