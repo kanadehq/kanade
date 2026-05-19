@@ -10,7 +10,9 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use futures::TryStreamExt;
-use kanade_shared::kv::{BUCKET_JOBS, BUCKET_SCHEDULES};
+use kanade_shared::kv::{
+    BUCKET_JOBS, BUCKET_SCHEDULES, BUCKET_SCRIPT_STATUS, SCRIPT_STATUS_REVOKED,
+};
 use kanade_shared::manifest::{Manifest, Schedule};
 use kanade_shared::subject;
 use serde::Serialize;
@@ -118,6 +120,19 @@ pub async fn create(
 }
 
 /// DELETE /api/jobs/{id} — 409 if any Schedule references it.
+///
+/// v0.27 (SPEC §2.6.4 (b)) cascades a Layer 2 revoke: before the
+/// Manifest is removed from `BUCKET_JOBS`, the handler writes
+/// `script_status.{id} = REVOKED` so any Command already in flight
+/// (live core sub delivery in progress, or stored in `STREAM_EXEC`
+/// awaiting a reconnecting agent) gets skipped by the agent's
+/// `handle_command` KV check. Without this, deleting a Manifest only
+/// stops *future* exec calls — already-published Commands would
+/// still run.
+///
+/// To undo the cascade: re-create the Manifest with
+/// `kanade job create`, then `kanade unrevoke <id>` to flip
+/// `script_status` back to `ACTIVE`.
 pub async fn delete(
     State(s): State<AppState>,
     Path(id): Path<String>,
@@ -142,23 +157,90 @@ pub async fn delete(
         }
     }
 
-    let kv = match s.jetstream.get_key_value(BUCKET_JOBS).await {
-        Ok(k) => k,
-        Err(e) => {
-            warn!(error = %e, "jobs KV missing on delete");
-            return Err((StatusCode::NOT_FOUND, "jobs bucket missing".into()));
-        }
-    };
-    kv.delete(&id)
+    // v0.27 — SPEC §2.6.4 (b) cascade revoke: every job delete also
+    // writes `script_status.{cmd_id} = REVOKED` so any in-flight
+    // Command for this manifest (publish-already-emitted but the
+    // agent hasn't run yet, or about to be replayed from STREAM_EXEC
+    // on reconnect) gets caught by the Layer 2 KV check and skipped.
+    // Without this, removing a Manifest only stops *future* exec
+    // calls — Commands already in the broker would still execute on
+    // any agent that reads them. We revoke FIRST, then delete the
+    // Manifest, so that if delete somehow fails we're still in a safe
+    // (revoked) state. Idempotent — re-revoking an already-REVOKED
+    // entry is a no-op put. v0.27 round-2 review (gemini #36
+    // line 208): resolve BOTH KV handles upfront before any write —
+    // that way a missing / unreachable BUCKET_JOBS surfaces as a
+    // clean 404 with zero side effects, instead of leaking a revoke
+    // that has no matching delete.
+    let status_kv = s
+        .jetstream
+        .get_key_value(BUCKET_SCRIPT_STATUS)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("kv delete: {e}")))?;
-    info!(job_id = %id, "job deleted");
+        .map_err(|e| {
+            warn!(
+                error = %e,
+                bucket = BUCKET_SCRIPT_STATUS,
+                "job_delete cascade revoke: status KV unavailable",
+            );
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("script_status bucket missing: {e}"),
+            )
+        })?;
+    let kv = s.jetstream.get_key_value(BUCKET_JOBS).await.map_err(|e| {
+        warn!(error = %e, "jobs KV missing on delete");
+        (StatusCode::NOT_FOUND, "jobs bucket missing".to_string())
+    })?;
+
+    status_kv
+        .put(&id, bytes::Bytes::from(SCRIPT_STATUS_REVOKED))
+        .await
+        .map_err(|e| {
+            warn!(
+                error = %e,
+                job_id = %id,
+                bucket = BUCKET_SCRIPT_STATUS,
+                "job_delete cascade revoke: status KV put failed",
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("script_status put: {e}"),
+            )
+        })?;
+    // If the manifest delete fails *after* we successfully cascaded
+    // the revoke, the operator needs to know that `script_status.{id}`
+    // is now REVOKED so they can `kanade unrevoke <id>` as part of the
+    // recovery. We audit + surface the revoke state in the error body
+    // rather than silently dropping it (CodeRabbit #36 review).
+    if let Err(e) = kv.delete(&id).await {
+        warn!(
+            error = %e,
+            job_id = %id,
+            cascade_revoke = true,
+            "job_delete failed after cascade revoke",
+        );
+        audit::record(
+            &s.nats,
+            "cli",
+            "job_delete_failed_post_revoke",
+            Some(&id),
+            serde_json::json!({ "cascade_revoke": true, "error": e.to_string() }),
+        )
+        .await;
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "kv delete: {e}; script_status.{id} is already REVOKED — `kanade unrevoke {id}` to recover"
+            ),
+        ));
+    }
+    info!(job_id = %id, cascade_revoke = true, "job deleted");
     audit::record(
         &s.nats,
         "cli",
         "job_delete",
         Some(&id),
-        serde_json::json!({}),
+        serde_json::json!({ "cascade_revoke": true }),
     )
     .await;
     Ok(StatusCode::NO_CONTENT)
