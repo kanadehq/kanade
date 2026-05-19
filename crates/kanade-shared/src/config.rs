@@ -87,3 +87,64 @@ pub fn load_agent_config(path: &Path) -> Result<AgentConfig> {
 pub fn load_backend_config(path: &Path) -> Result<BackendConfig> {
     load_typed(path)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Smoke test the dev-fleet flow against `agent.dev.toml`:
+    ///   1. When `KANADE_DEV_AGENT_ID` is set, the teravars template
+    ///      resolves `vars.pc_id` to that value and propagates it
+    ///      into `agent.id` + `log.path`. Also exercises a `[vars]`
+    ///      self-reference (`pc_id` falls back to `vars.hostname`),
+    ///      which `load_merged` resolves via its internal
+    ///      fixed-point pass.
+    ///   2. Without the env, the template falls back to `system.host`
+    ///      so vanilla `cargo make agent-dev` still works.
+    ///
+    /// Both halves live in a single `#[test]` so they execute
+    /// sequentially within the cargo test runtime — splitting them
+    /// across two tests races on `KANADE_DEV_AGENT_ID` (macOS CI
+    /// turned the race up enough to fail consistently).
+    #[test]
+    fn agent_dev_toml_renders_pc_id_from_env_or_system_host() {
+        // The dev config lives at the workspace root; CARGO_MANIFEST_DIR
+        // resolves to crates/kanade-shared/, so hop up two.
+        let cfg_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("configs")
+            .join("agent.dev.toml");
+
+        // (1) env set → pc_id == env value
+        // SAFETY: env mutation is process-global; this single test
+        // body owns set + remove so no sibling test can race us.
+        unsafe {
+            std::env::set_var("KANADE_DEV_AGENT_ID", "dev-pc-render-test");
+        }
+        let cfg = load_agent_config(&cfg_path).expect("load agent.dev.toml (env set)");
+        assert_eq!(cfg.agent.id, "dev-pc-render-test");
+        assert!(
+            cfg.log.path.contains("dev-pc-render-test"),
+            "log path should embed pc_id, got {}",
+            cfg.log.path,
+        );
+
+        // (2) env removed → pc_id falls back to vars.hostname
+        // = system.host. The host string varies by box; just assert
+        // it's non-empty and not the literal template that would mean
+        // teravars failed to render.
+        unsafe {
+            std::env::remove_var("KANADE_DEV_AGENT_ID");
+        }
+        let cfg = load_agent_config(&cfg_path).expect("load agent.dev.toml (env unset)");
+        assert!(
+            !cfg.agent.id.is_empty(),
+            "pc_id should fall back to system.host"
+        );
+        assert_ne!(
+            cfg.agent.id, "{{ system.host }}",
+            "template should render, not leak"
+        );
+    }
+}

@@ -41,8 +41,31 @@ pub fn config_dir() -> PathBuf {
     }
 }
 
-/// `%ProgramData%\Kanade\data\` on Windows, `/var/lib/kanade/` on Linux.
+/// Where the agent stores its outbox, state.db, local_completions.json,
+/// staging area, etc. Defaults to:
+///   * Windows: `%ProgramData%\Kanade\data\`
+///   * Linux:   `/var/lib/kanade/`
+///
+/// Honors `KANADE_AGENT_DATA_DIR` (non-empty value wins) so a single
+/// host can run multiple isolated agents — the dev-fleet target uses
+/// this to fan out agents into `target/dev-data/agents/{pc_id}/`
+/// without two agents stomping on each other's outbox files.
 pub fn data_dir() -> PathBuf {
+    if let Some(os_path) = std::env::var_os("KANADE_AGENT_DATA_DIR").filter(|s| !s.is_empty()) {
+        // Promote relative env paths to absolute against the current
+        // cwd so the agent's outbox / state.db stay put even if a
+        // later component changes its working directory (the
+        // self_update flow notably does this on Windows). Honours the
+        // `dirs_are_os_appropriate` invariant that the rest of the
+        // codebase assumes about data_dir's return value.
+        let path = PathBuf::from(&os_path);
+        if path.is_absolute() {
+            return path;
+        }
+        return std::env::current_dir()
+            .map(|cwd| cwd.join(&path))
+            .unwrap_or_else(|_| PathBuf::from(os_path));
+    }
     #[cfg(target_os = "windows")]
     {
         program_data().join("Kanade").join("data")
@@ -114,6 +137,20 @@ mod tests {
         format!("KANADE_TEST_CFG_{test_name}_{}", std::process::id())
     }
 
+    /// Tests that touch the *real* `KANADE_AGENT_DATA_DIR` env var
+    /// (or call `data_dir()` whose return value depends on it) must
+    /// take this lock so they serialize against each other. Cargo
+    /// test parallelises across tests within a binary by default, and
+    /// macOS CI in particular cranks that parallelism high enough to
+    /// reliably catch this kind of cross-test pollution.
+    static DATA_DIR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock_data_dir_env() -> std::sync::MutexGuard<'static, ()> {
+        DATA_DIR_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn find_config_prefers_flag_over_env_and_default() {
         let env = unique_env("flag_wins");
@@ -165,8 +202,34 @@ mod tests {
         );
     }
 
+    /// Gemini #54 review: when the env override is set to a relative
+    /// path (e.g. the dev-fleet tasks use
+    /// `target/dev-data/agents/dev-pc-1`), data_dir() must still
+    /// return an absolute path — anchored against the cwd at call
+    /// time. Otherwise a later component that chdir's (the
+    /// self_update flow does, notably) would point the outbox at a
+    /// surprise location.
+    #[test]
+    fn data_dir_promotes_relative_env_to_absolute() {
+        let _g = lock_data_dir_env();
+        unsafe {
+            std::env::set_var("KANADE_AGENT_DATA_DIR", "target/dev-data/agents/dev-pc-x");
+        }
+        let p = data_dir();
+        assert!(p.is_absolute(), "expected absolute path, got {p:?}");
+        assert!(
+            p.ends_with("target/dev-data/agents/dev-pc-x")
+                || p.ends_with(r"target\dev-data\agents\dev-pc-x"),
+            "trailing components should match the env value, got {p:?}",
+        );
+        unsafe {
+            std::env::remove_var("KANADE_AGENT_DATA_DIR");
+        }
+    }
+
     #[test]
     fn dirs_are_os_appropriate() {
+        let _g = lock_data_dir_env();
         let cfg = config_dir();
         let data = data_dir();
         let logs = log_dir();
@@ -183,6 +246,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_dirs_root_at_program_data_kanade() {
+        let _g = lock_data_dir_env();
         let cfg = config_dir();
         let data = data_dir();
         let logs = log_dir();
@@ -194,6 +258,7 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn unix_dirs_match_fhs_conventions() {
+        let _g = lock_data_dir_env();
         assert_eq!(config_dir(), PathBuf::from("/etc/kanade"));
         assert_eq!(data_dir(), PathBuf::from("/var/lib/kanade"));
         assert_eq!(log_dir(), PathBuf::from("/var/log/kanade"));

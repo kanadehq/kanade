@@ -8,14 +8,28 @@
 #
 # Logs go under target/dev-data/ to avoid stepping on the prod
 # agent.log under %ProgramData%\Kanade\logs.
+#
+# Multi-agent dev (`cargo make dev-fleet`): each spawn sets
+# KANADE_DEV_AGENT_ID to a distinct value (pc-1, pc-2, …) so the
+# pc_id, log path, and data dir (via KANADE_AGENT_DATA_DIR) all fan
+# out per-agent and the three (or more) instances don't fight over
+# the same outbox / state.db. Without that env, the agent falls back
+# to system.host which is fine for the single-agent
+# `cargo make agent-dev` case.
+#
+# `vars.hostname` works as a default here because `load_merged()`
+# internally runs `resolve_in_context` against the accumulated [vars]
+# table (up to 10 iterations of fixed-point rendering), so vars
+# defined earlier in the table can be referenced from later entries.
 
 [vars]
 hostname = '{{ system.host }}'
+pc_id    = '{{ env(name="KANADE_DEV_AGENT_ID", default=vars.hostname) }}'
 
 [agent]
-id       = '{{ vars.hostname }}'
+id       = '{{ vars.pc_id }}'
 nats_url = 'nats://127.0.0.1:4223'
 
 [log]
-path  = './target/dev-data/agent.log'
+path  = './target/dev-data/agents/{{ vars.pc_id }}/agent.log'
 level = 'info'
