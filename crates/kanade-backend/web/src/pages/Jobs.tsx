@@ -216,7 +216,7 @@ export function Jobs() {
                     )}
                     {j.live.pending > 0 && (
                       <Badge
-                        variant="secondary"
+                        variant="default"
                         title="Pending: fan-out published, no results back yet (auto-expires after 1 h)"
                         className="inline-flex items-center gap-1 px-1.5"
                       >
