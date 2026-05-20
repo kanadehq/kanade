@@ -18,6 +18,20 @@ pub const BUCKET_SCHEDULES: &str = "schedules";
 /// changes what future schedule fires deploy.
 pub const BUCKET_JOBS: &str = "jobs";
 
+/// Parallel "operator source-of-truth YAML" stores keyed identically
+/// to `BUCKET_JOBS` / `BUCKET_SCHEDULES`. The agent / scheduler /
+/// projector all keep reading the JSON KVs above — these buckets
+/// exist only so the SPA's YAML editor can round-trip operator
+/// comments + script indentation + block-scalar style exactly.
+///
+/// Population is opportunistic: any `POST` with a
+/// `Content-Type: application/yaml` body stores the raw bytes here
+/// alongside the parsed JSON; JSON-content-type POSTs fall back to a
+/// `serde_yaml` dump so the buckets stay in lockstep with the JSON
+/// store (operator just loses comments on that path).
+pub const BUCKET_JOBS_YAML: &str = "jobs_yaml";
+pub const BUCKET_SCHEDULES_YAML: &str = "schedules_yaml";
+
 /// Object Store bucket holding raw agent binaries (one object per
 /// version, e.g. `0.2.0` → file bytes).
 pub const OBJECT_AGENT_RELEASES: &str = "agent_releases";
@@ -83,6 +97,8 @@ mod tests {
             BUCKET_AGENT_GROUPS,
             BUCKET_SCHEDULES,
             BUCKET_JOBS,
+            BUCKET_JOBS_YAML,
+            BUCKET_SCHEDULES_YAML,
             OBJECT_AGENT_RELEASES,
         ] {
             assert!(

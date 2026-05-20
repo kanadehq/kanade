@@ -15,9 +15,10 @@ use async_nats::jetstream::kv::Config as KvConfig;
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use axum::http::header::HeaderMap;
 use futures::TryStreamExt;
 use kanade_shared::kv::{
-    BUCKET_JOBS, BUCKET_SCHEDULES, BUCKET_SCRIPT_STATUS, SCRIPT_STATUS_REVOKED,
+    BUCKET_JOBS, BUCKET_JOBS_YAML, BUCKET_SCHEDULES, BUCKET_SCRIPT_STATUS, SCRIPT_STATUS_REVOKED,
 };
 use kanade_shared::manifest::{Manifest, Schedule};
 use kanade_shared::subject;
@@ -26,6 +27,7 @@ use sqlx::{Row, SqlitePool};
 use tracing::{info, warn};
 
 use super::AppState;
+use super::yaml_body::{YamlOrJson, mirror_yaml, yaml_headers};
 use crate::audit;
 use crate::audit::Caller;
 
@@ -223,11 +225,23 @@ async fn fetch_live_counts(
 
 /// POST /api/jobs — upsert a Manifest into the job catalog. The KV
 /// key is `manifest.id`.
+///
+/// Accepts JSON (`application/json`, default) or YAML
+/// (`application/yaml`, `text/yaml`). When the body is YAML, the raw
+/// source is mirrored verbatim into `BUCKET_JOBS_YAML` so the SPA's
+/// YAML editor preserves operator comments + script block-scalar
+/// indentation across edits. JSON callers get a `serde_yaml::to_string`
+/// fallback so the YAML bucket stays in lockstep — the operator just
+/// loses comment fidelity on that path (it has nothing to preserve).
 pub async fn create(
     State(s): State<AppState>,
     caller: Caller,
-    Json(job): Json<Manifest>,
+    body: YamlOrJson<Manifest>,
 ) -> Result<Json<JobSummary>, (StatusCode, String)> {
+    let YamlOrJson {
+        value: job,
+        raw_yaml,
+    } = body;
     let kv = s
         .jetstream
         .create_key_value(KvConfig {
@@ -237,11 +251,25 @@ pub async fn create(
         })
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("ensure KV: {e}")))?;
-    let body = serde_json::to_vec(&job)
+    let body_bytes = serde_json::to_vec(&job)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialize: {e}")))?;
-    kv.put(&job.id, body.into())
+    kv.put(&job.id, body_bytes.into())
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("KV put: {e}")))?;
+
+    // Operator-facing YAML mirror — best-effort. A failure here doesn't
+    // roll back the JSON catalog (which the scheduler / agents read)
+    // because the user's update is functionally already in place; we
+    // just may lose a round of comment preservation. Warn-log so the
+    // gap is observable.
+    let yaml_source = raw_yaml.unwrap_or_else(|| {
+        serde_yaml::to_string(&job)
+            .unwrap_or_else(|_| String::from("# YAML mirror unavailable for this entry"))
+    });
+    if let Err(e) = mirror_yaml(&s, BUCKET_JOBS_YAML, &job.id, &yaml_source).await {
+        warn!(error = %e, job_id = %job.id, "jobs: YAML mirror put failed; JSON catalog is current");
+    }
+
     let summary = JobSummary {
         id: job.id.clone(),
         version: job.version.clone(),
@@ -262,6 +290,43 @@ pub async fn create(
     )
     .await;
     Ok(Json(summary))
+}
+
+/// `GET /api/jobs/{id}/yaml` — fetch the operator's YAML source for
+/// the job, used by the SPA editor to populate Edit modals without
+/// losing comments / block-scalar formatting. Falls back to a
+/// `serde_yaml::to_string` dump of the JSON catalog row when the
+/// YAML mirror is missing (legacy entries from before this endpoint).
+pub async fn get_yaml(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<(StatusCode, HeaderMap, String), (StatusCode, String)> {
+    if let Ok(kv) = s.jetstream.get_key_value(BUCKET_JOBS_YAML).await
+        && let Ok(Some(bytes)) = kv.get(&id).await
+        && let Ok(yaml_str) = String::from_utf8(bytes.to_vec())
+    {
+        return Ok((StatusCode::OK, yaml_headers(), yaml_str));
+    }
+
+    let kv = s
+        .jetstream
+        .get_key_value(BUCKET_JOBS)
+        .await
+        .map_err(|_| (StatusCode::NOT_FOUND, format!("job '{id}' not found")))?;
+    let bytes = kv
+        .get(&id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("KV get: {e}")))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("job '{id}' not found")))?;
+    let manifest: Manifest = serde_json::from_slice(&bytes)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("decode: {e}")))?;
+    let yaml = serde_yaml::to_string(&manifest).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("encode YAML: {e}"),
+        )
+    })?;
+    Ok((StatusCode::OK, yaml_headers(), yaml))
 }
 
 /// DELETE /api/jobs/{id} — 409 if any Schedule references it.

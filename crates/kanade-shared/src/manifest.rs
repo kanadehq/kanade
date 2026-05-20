@@ -13,7 +13,7 @@ use crate::wire::{RunAs, Shell, Staleness};
 /// `deny_unknown_fields` makes operators copy-pasting an older yaml
 /// that still has `target:` / `rollout:` see a clear parse error at
 /// `kanade job create` time instead of mysteriously losing it.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub id: String,
@@ -45,7 +45,7 @@ pub struct Manifest {
 /// Used both as the POST `/api/exec/{job_id}` body and as the embedded
 /// `target` / `rollout` / `jitter` slot on [`Schedule`]. Centralising
 /// here keeps the validation + serialisation logic in one place.
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Default)]
 pub struct FanoutPlan {
     #[serde(default)]
     pub target: Target,
@@ -85,7 +85,7 @@ pub struct FanoutPlan {
 ///     column = field) on `/inventory`. Optional; when omitted the
 ///     SPA falls back to `display`, but operators usually want a
 ///     trimmer "hostname / OS / CPU / RAM" set for the fleet view.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
 pub struct InventoryHint {
     /// Detail-view columns, in order.
     pub display: Vec<DisplayField>,
@@ -95,7 +95,7 @@ pub struct InventoryHint {
     pub summary: Option<Vec<DisplayField>>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
 pub struct DisplayField {
     /// Top-level key in the stdout JSON.
     pub field: String,
@@ -108,21 +108,23 @@ pub struct DisplayField {
     pub kind: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
 pub struct Rollout {
     #[serde(default)]
     pub strategy: RolloutStrategy,
     pub waves: Vec<Wave>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(
+    Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Default,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum RolloutStrategy {
     #[default]
     Wave,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
 pub struct Wave {
     pub group: String,
     /// humantime delay measured from the deploy's publish time. wave[0]
@@ -130,7 +132,7 @@ pub struct Wave {
     pub delay: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Default)]
 pub struct Target {
     #[serde(default)]
     pub groups: Vec<String>,
@@ -147,7 +149,7 @@ impl Target {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
 pub struct Execute {
     pub shell: ExecuteShell,
     pub script: String,
@@ -172,7 +174,7 @@ pub struct Execute {
     pub cwd: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ExecuteShell {
     Powershell,
@@ -503,7 +505,7 @@ execute:
 /// referenced job (`job_id` → [`BUCKET_JOBS`]) supplies only the
 /// script body. Two schedules of the same job can target different
 /// groups on different cadences without copying the manifest.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
 pub struct Schedule {
     pub id: String,
     /// 6-field cron expression (`sec min hour day month day-of-week`),
@@ -563,7 +565,9 @@ pub struct Schedule {
 }
 
 /// v0.23 — where the cron tick fires from.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(
+    Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Default,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum RunsOn {
     /// Backend's central scheduler ticks and publishes Commands to
@@ -582,7 +586,9 @@ pub enum RunsOn {
 }
 
 /// Per-pc/per-target dedup semantics for a [`Schedule`] (v0.19).
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(
+    Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Default,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecMode {
     /// Fire on every cron tick at the whole target. Historical

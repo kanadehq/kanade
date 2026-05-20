@@ -2,13 +2,17 @@ use async_nats::jetstream::kv::Config as KvConfig;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use axum::http::header::HeaderMap;
 use futures::TryStreamExt;
-use kanade_shared::kv::{BUCKET_SCHEDULES, BUCKET_SCRIPT_STATUS, SCRIPT_STATUS_REVOKED};
+use kanade_shared::kv::{
+    BUCKET_SCHEDULES, BUCKET_SCHEDULES_YAML, BUCKET_SCRIPT_STATUS, SCRIPT_STATUS_REVOKED,
+};
 use kanade_shared::manifest::Schedule;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::api::AppState;
+use crate::api::yaml_body::{YamlOrJson, mirror_yaml, yaml_headers};
 use crate::audit;
 use crate::audit::Caller;
 
@@ -46,11 +50,22 @@ pub async fn list(State(s): State<AppState>) -> Result<Json<Vec<Schedule>>, (Sta
 }
 
 /// POST /api/schedules — upsert.
+///
+/// Accepts JSON (`application/json`, default) or YAML
+/// (`application/yaml`, `text/yaml`). YAML callers also populate the
+/// parallel `BUCKET_SCHEDULES_YAML` so the SPA editor preserves
+/// comments + formatting across edits. JSON callers fall back to a
+/// `serde_yaml::to_string` mirror — best-effort, warn-logged on
+/// failure.
 pub async fn create(
     State(s): State<AppState>,
     caller: Caller,
-    Json(schedule): Json<Schedule>,
+    body: YamlOrJson<Schedule>,
 ) -> Result<Json<ScheduleSummary>, (StatusCode, String)> {
+    let YamlOrJson {
+        value: schedule,
+        raw_yaml,
+    } = body;
     // Make sure the KV bucket exists (idempotent).
     let kv = s
         .jetstream
@@ -62,11 +77,27 @@ pub async fn create(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("ensure KV: {e}")))?;
 
-    let body = serde_json::to_vec(&schedule)
+    let body_bytes = serde_json::to_vec(&schedule)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialize: {e}")))?;
-    kv.put(&schedule.id, body.into())
+    kv.put(&schedule.id, body_bytes.into())
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("KV put: {e}")))?;
+
+    // Operator-facing YAML mirror — best-effort, same reasoning as
+    // jobs::create. Scheduler/agent read the JSON catalog; the YAML
+    // store only feeds the SPA editor.
+    let yaml_source = raw_yaml.unwrap_or_else(|| {
+        serde_yaml::to_string(&schedule)
+            .unwrap_or_else(|_| String::from("# YAML mirror unavailable for this entry"))
+    });
+    if let Err(e) = mirror_yaml(&s, BUCKET_SCHEDULES_YAML, &schedule.id, &yaml_source).await {
+        warn!(
+            error = %e,
+            schedule_id = %schedule.id,
+            "schedules: YAML mirror put failed; JSON catalog is current",
+        );
+    }
+
     info!(
         schedule_id = %schedule.id,
         cron = %schedule.cron,
@@ -92,6 +123,42 @@ pub async fn create(
         enabled: schedule.enabled,
         job_id: schedule.job_id.clone(),
     }))
+}
+
+/// `GET /api/schedules/{id}/yaml` — fetch the operator's YAML source
+/// for the schedule. Falls back to a `serde_yaml::to_string` of the
+/// JSON catalog row when the YAML mirror is missing (legacy entries
+/// from before this endpoint).
+pub async fn get_yaml(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<(StatusCode, HeaderMap, String), (StatusCode, String)> {
+    if let Ok(kv) = s.jetstream.get_key_value(BUCKET_SCHEDULES_YAML).await
+        && let Ok(Some(bytes)) = kv.get(&id).await
+        && let Ok(text) = String::from_utf8(bytes.to_vec())
+    {
+        return Ok((StatusCode::OK, yaml_headers(), text));
+    }
+
+    let kv = s
+        .jetstream
+        .get_key_value(BUCKET_SCHEDULES)
+        .await
+        .map_err(|_| (StatusCode::NOT_FOUND, format!("schedule '{id}' not found")))?;
+    let bytes = kv
+        .get(&id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("KV get: {e}")))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("schedule '{id}' not found")))?;
+    let schedule: Schedule = serde_json::from_slice(&bytes)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("decode: {e}")))?;
+    let yaml = serde_yaml::to_string(&schedule).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("encode YAML: {e}"),
+        )
+    })?;
+    Ok((StatusCode::OK, yaml_headers(), yaml))
 }
 
 /// v0.27 — query params for [`disable`].

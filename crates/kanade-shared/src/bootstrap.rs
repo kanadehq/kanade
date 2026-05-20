@@ -26,9 +26,10 @@ use async_nats::jetstream::{
 use tracing::info;
 
 use crate::kv::{
-    BUCKET_AGENT_CONFIG, BUCKET_AGENT_GROUPS, BUCKET_AGENTS_STATE, BUCKET_JOBS, BUCKET_SCHEDULES,
-    BUCKET_SCRIPT_CURRENT, BUCKET_SCRIPT_STATUS, OBJECT_AGENT_RELEASES, STREAM_AUDIT,
-    STREAM_EVENTS, STREAM_EXEC, STREAM_INVENTORY, STREAM_RESULTS,
+    BUCKET_AGENT_CONFIG, BUCKET_AGENT_GROUPS, BUCKET_AGENTS_STATE, BUCKET_JOBS, BUCKET_JOBS_YAML,
+    BUCKET_SCHEDULES, BUCKET_SCHEDULES_YAML, BUCKET_SCRIPT_CURRENT, BUCKET_SCRIPT_STATUS,
+    OBJECT_AGENT_RELEASES, STREAM_AUDIT, STREAM_EVENTS, STREAM_EXEC, STREAM_INVENTORY,
+    STREAM_RESULTS,
 };
 
 /// Idempotently create every NATS JetStream resource the kanade
@@ -179,6 +180,29 @@ pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
     .await
     .with_context(|| format!("create_or_update_key_value {BUCKET_JOBS}"))?;
     info!(bucket = BUCKET_JOBS, "ready");
+
+    // jobs_yaml / schedules_yaml — operator source-of-truth YAML
+    // alongside the JSON catalogs above. Same key shape (manifest id
+    // / schedule id), but the value is the raw YAML bytes so the
+    // SPA's YAML editor preserves comments + script block-scalar
+    // indentation across edits. Agents/scheduler don't read these.
+    js.create_or_update_key_value(KvConfig {
+        bucket: BUCKET_JOBS_YAML.into(),
+        history: 5,
+        ..Default::default()
+    })
+    .await
+    .with_context(|| format!("create_or_update_key_value {BUCKET_JOBS_YAML}"))?;
+    info!(bucket = BUCKET_JOBS_YAML, "ready");
+
+    js.create_or_update_key_value(KvConfig {
+        bucket: BUCKET_SCHEDULES_YAML.into(),
+        history: 5,
+        ..Default::default()
+    })
+    .await
+    .with_context(|| format!("create_or_update_key_value {BUCKET_SCHEDULES_YAML}"))?;
+    info!(bucket = BUCKET_SCHEDULES_YAML, "ready");
 
     // ── Object Store ─────────────────────────────────────────────
     // agent_releases — one object per version, raw exe bytes.

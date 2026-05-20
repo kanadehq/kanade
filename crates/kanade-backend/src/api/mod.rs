@@ -13,7 +13,9 @@ pub mod jobs;
 pub mod results;
 pub mod run;
 pub mod schedules;
+pub mod schemas;
 pub mod scripts;
+pub mod yaml_body;
 
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, FromRef};
@@ -95,7 +97,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/scripts/{cmd_id}/unrevoke", post(scripts::unrevoke))
         .route("/api/jobs", get(jobs::list).post(jobs::create))
         .route("/api/jobs/{id}", delete(jobs::delete))
+        .route("/api/jobs/{id}/yaml", get(jobs::get_yaml))
         .route("/api/jobs/{job_id}/kill", post(jobs::kill))
+        .route("/api/schedules/{id}/yaml", get(schedules::get_yaml))
+        .route("/api/schemas/manifest.json", get(schemas::manifest_schema))
+        .route("/api/schemas/schedule.json", get(schemas::schedule_schema))
         .route("/api/jetstream/status", get(jetstream_status::status))
         .route("/api/health/fleet", get(health::fleet))
         .route("/api/inventory/jobs", get(inventory::list_jobs))
