@@ -1,8 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Loader2, Power, PowerOff, Trash2, Zap } from 'lucide-react';
+import { FilePlus2, Loader2, Pencil, Power, PowerOff, Trash2, Zap } from 'lucide-react';
 import { useState } from 'react';
 
 import { ErrorCard } from '@/components/ErrorCard';
+import { type EditorMode, YamlEditorDialog } from '@/components/YamlEditorDialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -57,6 +58,10 @@ export function Schedules() {
   // value, useless for per-row gating.
   const [pendingDisable, setPendingDisable] = useState<Set<string>>(new Set());
   const [pendingEnable, setPendingEnable] = useState<Set<string>>(new Set());
+
+  // v0.32 / PR-B: shared Monaco-backed YAML editor — same state shape
+  // and behaviour as the Jobs page.
+  const [editor, setEditor] = useState<EditorMode | null>(null);
   const disable = useMutation({
     mutationFn: ({ id, cascade }: { id: string; cascade: boolean }) =>
       apiFetch(`/api/schedules/${encodeURIComponent(id)}/disable?cascade=${cascade}`, {
@@ -99,13 +104,38 @@ export function Schedules() {
 
   if (rows.length === 0) {
     return (
-      <Card>
-        <CardHeader><CardTitle>No schedules yet</CardTitle></CardHeader>
-        <CardContent className="text-muted">
-          Use <code>kanade schedule create &lt;schedule.yaml&gt;</code> to upsert one. YAML-form
-          creation in the web UI is on the backlog.
-        </CardContent>
-      </Card>
+      <>
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <CardTitle>No schedules yet</CardTitle>
+              <Button
+                variant="default"
+                size="sm"
+                onClick={() => setEditor({ type: 'create' })}
+              >
+                <FilePlus2 className="size-3.5" />
+                New schedule
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent className="text-muted">
+            Use <code>kanade schedule create &lt;schedule.yaml&gt;</code> on the
+            CLI, or click <strong>New schedule</strong> above to open the
+            in-browser YAML editor.
+          </CardContent>
+        </Card>
+        {editor !== null && (
+          <YamlEditorDialog
+            open
+            onOpenChange={(next) => {
+              if (!next) setEditor(null);
+            }}
+            kind="schedule"
+            mode={editor}
+          />
+        )}
+      </>
     );
   }
 
@@ -113,7 +143,18 @@ export function Schedules() {
     <div className="space-y-4">
       <div className="flex items-baseline justify-between">
         <h2 className="text-xl">Schedules</h2>
-        <Badge variant="violet">{rows.length}</Badge>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="default"
+            size="sm"
+            onClick={() => setEditor({ type: 'create' })}
+            title="Create a new schedule from a YAML template"
+          >
+            <FilePlus2 className="size-3.5" />
+            New schedule
+          </Button>
+          <Badge variant="violet">{rows.length}</Badge>
+        </div>
       </div>
       <Table>
         <TableHeader>
@@ -159,6 +200,15 @@ export function Schedules() {
                   : <Badge variant="danger">off</Badge>}
               </TableCell>
               <TableCell className="flex flex-wrap gap-2">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => setEditor({ type: 'edit', id: s.id })}
+                  title="Edit this schedule's YAML"
+                >
+                  <Pencil className="size-3.5" />
+                  edit
+                </Button>
                 {s.enabled ? (
                   <>
                     <Button
@@ -222,6 +272,16 @@ export function Schedules() {
       {del.error && <ErrorCard title="Delete failed" error={del.error} />}
       {disable.error && <ErrorCard title="Disable failed" error={disable.error} />}
       {enable.error && <ErrorCard title="Enable failed" error={enable.error} />}
+      {editor !== null && (
+        <YamlEditorDialog
+          open
+          onOpenChange={(next) => {
+            if (!next) setEditor(null);
+          }}
+          kind="schedule"
+          mode={editor}
+        />
+      )}
     </div>
   );
 }
