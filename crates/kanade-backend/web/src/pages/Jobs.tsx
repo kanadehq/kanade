@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Ban, CircleCheck, Loader2, ScrollText, Trash2 } from 'lucide-react';
+import { Ban, CircleCheck, Loader2, ScrollText, Skull, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 
 import { ErrorCard } from '@/components/ErrorCard';
@@ -20,6 +20,14 @@ type JobRow = {
     cwd?: string | null;
   };
   inventory: unknown | null;
+  /** v0.30 / PR γ: in-flight counters joined onto each row by the
+   *  backend so the Jobs page can show "is anything running right
+   *  now" — drives the per-row live chip + kill button enable
+   *  state. Zeros when no execution rows exist for this cmd. */
+  live: {
+    running: number;
+    pending: number;
+  };
 };
 
 export function Jobs() {
@@ -68,6 +76,7 @@ export function Jobs() {
   // survives concurrent clicks.
   const [pendingRevoke, setPendingRevoke] = useState<Set<string>>(new Set());
   const [pendingUnrevoke, setPendingUnrevoke] = useState<Set<string>>(new Set());
+  const [pendingKill, setPendingKill] = useState<Set<string>>(new Set());
   const revoke = useMutation({
     mutationFn: (id: string) =>
       apiFetch(`/api/scripts/${encodeURIComponent(id)}/revoke`, { method: 'POST' }),
@@ -92,6 +101,35 @@ export function Jobs() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['scripts-status'] }),
     onSettled: (_d, _e, id) => {
       setPendingUnrevoke((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    },
+  });
+
+  // v0.30 / PR γ: Layer 3 kill from the Jobs page. Distinct from
+  // revoke (Layer 2) — kill stops the currently-running child
+  // process for every in-flight exec of this cmd, but does NOT
+  // prevent the next schedule tick from firing another fresh exec.
+  // For "stop this job entirely", the operator clicks revoke
+  // alongside (the confirm dialog mentions this so they don't
+  // misread the scope). The backend's
+  // `POST /api/jobs/{cmd_id}/kill` route (v0.29) does the
+  // exec_id fan-out — pre-v0.29 it published `kill.{cmd_id}` to
+  // an empty subject, which was a silent no-op.
+  const kill = useMutation({
+    mutationFn: (id: string) =>
+      apiFetch(`/api/jobs/${encodeURIComponent(id)}/kill`, { method: 'POST' }),
+    onMutate: (id) => {
+      setPendingKill((prev) => new Set(prev).add(id));
+    },
+    // Refresh /api/jobs so the live chip recomputes once results
+    // start landing post-kill (kills land as ExecResult exit_code
+    // -1 → projector flips status from running → completed).
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['jobs'] }),
+    onSettled: (_d, _e, id) => {
+      setPendingKill((prev) => {
         const next = new Set(prev);
         next.delete(id);
         return next;
@@ -134,6 +172,7 @@ export function Jobs() {
             <TableHead>id</TableHead>
             <TableHead>version</TableHead>
             <TableHead>status</TableHead>
+            <TableHead>live</TableHead>
             <TableHead>shell</TableHead>
             <TableHead>run_as</TableHead>
             <TableHead>cwd</TableHead>
@@ -155,6 +194,29 @@ export function Jobs() {
                   <Badge variant="success">active</Badge>
                 )}
               </TableCell>
+              <TableCell>
+                {/* v0.30: per-cmd live counters — running = at least
+                    one result landed, more in flight; pending = fan
+                    -out published but no result yet. Both zero =
+                    idle, render as a muted dash to keep the row
+                    visually quiet. */}
+                {j.live.running > 0 || j.live.pending > 0 ? (
+                  <div className="flex gap-1 flex-wrap">
+                    {j.live.running > 0 && (
+                      <Badge variant="violet" title="executions with at least one result back, more in flight">
+                        running: {j.live.running}
+                      </Badge>
+                    )}
+                    {j.live.pending > 0 && (
+                      <Badge variant="secondary" title="executions published, no results back yet">
+                        pending: {j.live.pending}
+                      </Badge>
+                    )}
+                  </div>
+                ) : (
+                  <span className="text-muted text-xs">—</span>
+                )}
+              </TableCell>
               <TableCell><code className="text-xs">{j.execute.shell}</code></TableCell>
               <TableCell><code className="text-xs">{j.execute.run_as ?? 'system'}</code></TableCell>
               <TableCell>
@@ -172,6 +234,47 @@ export function Jobs() {
                 {j.description ?? '—'}
               </TableCell>
               <TableCell className="flex flex-wrap gap-2">
+                {/* v0.30 / PR γ: kill is the per-cmd Layer 3
+                    abort — terminates every running OR pending
+                    exec for this cmd (the backend handler SELECTs
+                    `status IN ('pending', 'running')`, so the SPA
+                    matches that scope). Greyed out only when both
+                    are zero so the operator can also abort a
+                    just-fired deployment before any result has
+                    landed. The confirm dialog spells out that
+                    kill does NOT prevent the next schedule fire —
+                    that's revoke's job. */}
+                {(() => {
+                  const inflight = j.live.running + j.live.pending;
+                  return (
+                    <Button
+                      variant="danger"
+                      size="sm"
+                      disabled={pendingKill.has(j.id) || inflight === 0}
+                      onClick={() => {
+                        if (
+                          window.confirm(
+                            `Kill all in-flight runs of ${j.id}?\n\n` +
+                              `${inflight} run${inflight === 1 ? '' : 's'} currently in flight ` +
+                              `(running: ${j.live.running}, pending: ${j.live.pending}). ` +
+                              `Each agent will terminate its child process and report back with exit_code -1.\n\n` +
+                              `Note: this does NOT block the next schedule tick from firing a fresh run — ` +
+                              `if you want to stop new fires too, click "revoke" alongside.`,
+                          )
+                        )
+                          kill.mutate(j.id);
+                      }}
+                      title={
+                        inflight === 0
+                          ? 'Nothing in flight for this job right now'
+                          : `Terminate ${inflight} in-flight run${inflight === 1 ? '' : 's'}`
+                      }
+                    >
+                      <Skull className="size-3.5" />
+                      kill
+                    </Button>
+                  );
+                })()}
                 <Button
                   variant="secondary"
                   size="sm"
@@ -227,6 +330,7 @@ export function Jobs() {
       {del.error && <ErrorCard title="Delete failed" error={del.error} />}
       {revoke.error && <ErrorCard title="Revoke failed" error={revoke.error} />}
       {unrevoke.error && <ErrorCard title="Unrevoke failed" error={unrevoke.error} />}
+      {kill.error && <ErrorCard title="Kill failed" error={kill.error} />}
     </div>
   );
 }

@@ -9,6 +9,8 @@
 //!   * `GET / POST /api/jobs` + `DELETE /api/jobs/{id}` — catalog CRUD
 //!     (v0.15). Schedules reference catalog rows by `job_id`.
 
+use std::collections::HashMap;
+
 use async_nats::jetstream::kv::Config as KvConfig;
 use axum::Json;
 use axum::extract::{Path, State};
@@ -20,7 +22,7 @@ use kanade_shared::kv::{
 use kanade_shared::manifest::{Manifest, Schedule};
 use kanade_shared::subject;
 use serde::Serialize;
-use sqlx::Row;
+use sqlx::{Row, SqlitePool};
 use tracing::{info, warn};
 
 use super::AppState;
@@ -102,8 +104,41 @@ pub struct JobSummary {
     pub inventory: bool,
 }
 
-/// GET /api/jobs — list every registered job.
-pub async fn list(State(s): State<AppState>) -> Result<Json<Vec<Manifest>>, (StatusCode, String)> {
+/// v0.30 / PR γ: in-flight counters joined onto each `/api/jobs`
+/// row so the Jobs page can show "is anything running right now"
+/// at a glance — the operator's decision input for kill / revoke
+/// without having to drill into Activity. Sourced from
+/// `executions.status`, which the v0.29 results projector now
+/// maintains correctly.
+#[derive(Serialize, Default, Debug, Clone, PartialEq, Eq)]
+pub struct JobLiveCounts {
+    /// `executions.status = 'running'` — at least one result has
+    /// landed but more are still in flight.
+    pub running: i64,
+    /// `executions.status = 'pending'` — fan-out published but no
+    /// result has landed yet. Distinguished from `running` so the
+    /// operator can tell "nothing reported back" from "partially
+    /// reported".
+    pub pending: i64,
+}
+
+/// `GET /api/jobs` row shape — the registered Manifest from the KV
+/// catalog plus a `live` object aggregated from the `executions`
+/// table. `serde(flatten)` keeps the Manifest fields at the JSON
+/// root so existing SPA code reading `job.id` / `job.version` keeps
+/// working unchanged.
+#[derive(Serialize)]
+pub struct JobListRow {
+    #[serde(flatten)]
+    pub manifest: Manifest,
+    pub live: JobLiveCounts,
+}
+
+/// GET /api/jobs — list every registered job + live in-flight
+/// counters from the executions table.
+pub async fn list(
+    State(s): State<AppState>,
+) -> Result<Json<Vec<JobListRow>>, (StatusCode, String)> {
     let kv = match s.jetstream.get_key_value(BUCKET_JOBS).await {
         Ok(k) => k,
         Err(_) => return Ok(Json(Vec::new())),
@@ -116,16 +151,74 @@ pub async fn list(State(s): State<AppState>) -> Result<Json<Vec<Manifest>>, (Sta
         .try_collect()
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("kv keys: {e}")))?;
-    let mut out = Vec::with_capacity(keys.len());
+    let mut manifests = Vec::with_capacity(keys.len());
     for k in keys {
         if let Ok(Some(bytes)) = kv.get(&k).await
             && let Ok(job) = serde_json::from_slice::<Manifest>(&bytes)
         {
-            out.push(job);
+            manifests.push(job);
         }
     }
-    out.sort_by(|a, b| a.id.cmp(&b.id));
+    manifests.sort_by(|a, b| a.id.cmp(&b.id));
+
+    // v0.30 / PR γ: one GROUP BY query for the whole list instead of
+    // N round-trips. `executions` lives in SQLite so this is local.
+    // A missing `executions` row for a job (= never fired since the
+    // backend started) yields the default zeros via the HashMap
+    // lookup fallback below.
+    let live_counts = fetch_live_counts(&s.pool).await.unwrap_or_else(|e| {
+        warn!(error = %e, "jobs list: live count aggregation failed; returning zeros");
+        HashMap::new()
+    });
+
+    let out: Vec<JobListRow> = manifests
+        .into_iter()
+        .map(|m| {
+            let live = live_counts.get(&m.id).cloned().unwrap_or_default();
+            JobListRow { manifest: m, live }
+        })
+        .collect();
     Ok(Json(out))
+}
+
+/// Aggregate `executions.status` counts by `job_id` so the
+/// `/api/jobs` list can attach per-row live counters in one round
+/// trip. Returned map omits jobs with no executions entirely; the
+/// caller falls back to `JobLiveCounts::default()`.
+async fn fetch_live_counts(
+    pool: &SqlitePool,
+) -> Result<HashMap<String, JobLiveCounts>, sqlx::Error> {
+    // Gemini #71 perf fix: filter on status BEFORE the aggregation
+    // so SQLite skips completed rows entirely instead of summing
+    // CASE-zeros for the (growing forever) historical tail. The
+    // resulting empty groups disappear from the output map; the
+    // caller already falls back to `JobLiveCounts::default()` for
+    // jobs not present in the map, so semantics are preserved.
+    let rows = sqlx::query(
+        "SELECT job_id,
+                SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running,
+                SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending
+           FROM executions
+          WHERE status IN ('running', 'pending')
+          GROUP BY job_id",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut out: HashMap<String, JobLiveCounts> = HashMap::with_capacity(rows.len());
+    for r in rows {
+        let job_id: String = r.try_get("job_id").unwrap_or_default();
+        if job_id.is_empty() {
+            continue;
+        }
+        out.insert(
+            job_id,
+            JobLiveCounts {
+                running: r.try_get("running").unwrap_or(0),
+                pending: r.try_get("pending").unwrap_or(0),
+            },
+        );
+    }
+    Ok(out)
 }
 
 /// POST /api/jobs — upsert a Manifest into the job catalog. The KV
@@ -317,4 +410,94 @@ pub async fn fetch(
     };
     let job: Manifest = serde_json::from_slice(&bytes)?;
     Ok(Some(job))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn fresh_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open sqlite memory");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("run migrations");
+        pool
+    }
+
+    async fn insert_exec(
+        pool: &SqlitePool,
+        exec_id: &str,
+        job_id: &str,
+        status: &str,
+        target: i64,
+    ) {
+        sqlx::query(
+            "INSERT INTO executions
+                (exec_id, job_id, version, initiated_by, target_count, status)
+             VALUES (?, ?, '1.0.0', 'tester', ?, ?)",
+        )
+        .bind(exec_id)
+        .bind(job_id)
+        .bind(target)
+        .bind(status)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn fetch_live_counts_groups_by_job_id() {
+        // Three execs for "inv-hw" (2 running, 1 pending), one exec for
+        // "patch-x" (just running). The aggregation should produce a
+        // map keyed by job_id with the right partition.
+        let pool = fresh_pool().await;
+        insert_exec(&pool, "e1", "inv-hw", "running", 10).await;
+        insert_exec(&pool, "e2", "inv-hw", "running", 10).await;
+        insert_exec(&pool, "e3", "inv-hw", "pending", 10).await;
+        insert_exec(&pool, "e4", "patch-x", "running", 5).await;
+
+        let counts = fetch_live_counts(&pool).await.unwrap();
+        assert_eq!(
+            counts.get("inv-hw"),
+            Some(&JobLiveCounts {
+                running: 2,
+                pending: 1,
+            }),
+        );
+        assert_eq!(
+            counts.get("patch-x"),
+            Some(&JobLiveCounts {
+                running: 1,
+                pending: 0,
+            }),
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_live_counts_excludes_completed() {
+        // 'completed' status (= projector saw all target_count
+        // results) shouldn't count toward live. Only 'running' and
+        // 'pending' are operationally "in flight".
+        let pool = fresh_pool().await;
+        insert_exec(&pool, "e1", "j", "completed", 5).await;
+        insert_exec(&pool, "e2", "j", "running", 5).await;
+
+        let counts = fetch_live_counts(&pool).await.unwrap();
+        let live = counts.get("j").expect("j has at least one exec");
+        assert_eq!(live.running, 1);
+        assert_eq!(live.pending, 0);
+    }
+
+    #[tokio::test]
+    async fn fetch_live_counts_empty_when_no_executions() {
+        let pool = fresh_pool().await;
+        let counts = fetch_live_counts(&pool).await.unwrap();
+        assert!(counts.is_empty());
+    }
 }
