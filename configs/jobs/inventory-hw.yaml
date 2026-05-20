@@ -80,6 +80,19 @@ inventory:
     - { field: cpu_model,  label: CPU       }
     - { field: cpu_cores,  label: Cores,    type: number }
     - { field: ram_bytes,  label: RAM,      type: bytes  }
+    # v0.30 / #39: `type: table` makes the SPA detail page render
+    # `disks: [{device_id, size_bytes, free_bytes, file_system}]`
+    # as a nested sub-table using `columns` as the schema. The
+    # fleet summary view collapses it to a row count to keep the
+    # wide list scannable.
+    - field: disks
+      label: Disks
+      type: table
+      columns:
+        - { field: device_id,   label: Drive }
+        - { field: size_bytes,  label: Size,  type: bytes }
+        - { field: free_bytes,  label: Free,  type: bytes }
+        - { field: file_system, label: FS    }
   summary:
     - { field: hostname,  label: Hostname }
     - { field: os_name,   label: OS       }
