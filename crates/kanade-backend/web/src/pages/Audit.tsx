@@ -10,6 +10,7 @@ import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { apiFetch } from '@/lib/api';
+import { fmtIsoLocal } from '@/lib/utils';
 
 type AuditRow = {
   id: number;
@@ -27,11 +28,6 @@ const SINCE_PRESETS: Array<{ value: string; label: string; ms: number | null }> 
   { value: '30d', label: 'last 30d',  ms: 30 * 24 * 60 * 60 * 1000 },
   { value: 'all', label: 'all time',  ms: null },
 ];
-
-function fmt(iso: string): string {
-  const d = new Date(iso);
-  return isNaN(d.getTime()) ? iso : d.toISOString().replace('T', ' ').replace(/\.\d+Z$/, 'Z');
-}
 
 function actorVariant(actor: string): 'violet' | 'amber' | 'success' | 'default' {
   switch (actor) {
@@ -171,7 +167,7 @@ export function Audit() {
           <TableBody>
             {rows.map((e) => (
               <TableRow key={e.id}>
-                <TableCell className="text-muted text-xs">{fmt(e.occurred_at)}</TableCell>
+                <TableCell className="text-muted text-xs">{fmtIsoLocal(e.occurred_at)}</TableCell>
                 <TableCell>
                   <Badge variant={actorVariant(e.actor)}>{e.actor}</Badge>
                 </TableCell>
