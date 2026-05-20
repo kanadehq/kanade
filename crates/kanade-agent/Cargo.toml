@@ -34,7 +34,7 @@ tracing-subscriber = { workspace = true }
 uuid       = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = "3.27.0"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # wmi crate dropped in v0.12.0 — inventory now shells out to
