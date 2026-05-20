@@ -133,6 +133,75 @@ pub(crate) async fn run_backend() -> Result<()> {
         .context("ensure_jetstream_resources")?;
     info!("jetstream resources ready");
 
+    // v0.31 / #40: walk every registered inventory manifest and
+    // CREATE TABLE IF NOT EXISTS for any `explode` specs. Idempotent
+    // — re-running is a no-op. Done at startup (vs lazily in the
+    // results projector) so cross-PC search queries can hit the
+    // derived tables immediately, even before any new result lands.
+    // CodeRabbit #85 fix: visibility on prewarm failures. Pre-fix
+    // every failure branch (KV unreachable, keys() error, per-key
+    // get() / deserialize) was silently dropped, so a busted
+    // prewarm + a later search request would 500 with "no such
+    // table" and zero startup log to explain why. Each branch
+    // now logs at warn-level. The search path's
+    // `ensure_table_cached` fallback (CR #3) covers the actual
+    // table-creation gap, but logs help diagnose root cause.
+    match jetstream
+        .get_key_value(kanade_shared::kv::BUCKET_JOBS)
+        .await
+    {
+        Ok(jobs_kv) => {
+            let mut manifests = Vec::new();
+            match jobs_kv.keys().await {
+                Ok(keys_stream) => {
+                    match futures::TryStreamExt::try_collect::<Vec<String>>(keys_stream).await {
+                        Ok(keys) => {
+                            for k in keys {
+                                match jobs_kv.get(&k).await {
+                                    Ok(Some(bytes)) => {
+                                        match serde_json::from_slice::<
+                                            kanade_shared::manifest::Manifest,
+                                        >(&bytes)
+                                        {
+                                            Ok(m) => manifests.push(m),
+                                            Err(e) => tracing::warn!(
+                                                error = %e,
+                                                job_key = %k,
+                                                "explode prewarm: manifest deserialize failed",
+                                            ),
+                                        }
+                                    }
+                                    Ok(None) => {}
+                                    Err(e) => tracing::warn!(
+                                        error = %e,
+                                        job_key = %k,
+                                        "explode prewarm: KV get failed",
+                                    ),
+                                }
+                            }
+                        }
+                        Err(e) => tracing::warn!(
+                            error = %e,
+                            "explode prewarm: collect keys failed",
+                        ),
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "explode prewarm: keys() failed",
+                ),
+            }
+            if let Err(e) = projector::explode::ensure_tables_for_jobs(&pool, manifests).await {
+                error!(error = %e, "explode: startup table-ensure pass failed (will retry per-result)");
+            }
+        }
+        Err(e) => tracing::warn!(
+            error = %e,
+            bucket = %kanade_shared::kv::BUCKET_JOBS,
+            "explode prewarm: BUCKET_JOBS KV unreachable (ok if fresh install)",
+        ),
+    }
+
     // Projectors run in the background; if either exits the backend keeps
     // serving HTTP (read-only API stays useful even if a stream is missing).
     //

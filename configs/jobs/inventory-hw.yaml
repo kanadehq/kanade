@@ -98,3 +98,20 @@ inventory:
     - { field: os_name,   label: OS       }
     - { field: cpu_cores, label: Cores,   type: number }
     - { field: ram_bytes, label: RAM,     type: bytes  }
+  # v0.31 / #40: explode `disks[]` into a derived flat table so
+  # cross-PC searches ("which PCs have C: under 10 GB free") are
+  # normal SQL filters. The backend ensures this table at startup
+  # (and the search + projector paths are idempotent) and replaces
+  # this PC's rows on every result.
+  # PK = (pc_id, job_id, device_id) — same device_id from the same
+  # PC's same job dedupes; different PCs / different scans don't
+  # collide.
+  explode:
+    - field: disks
+      table: inventory_hw_disks
+      primary_key: [device_id]
+      columns:
+        - { field: device_id,   type: text                  }
+        - { field: size_bytes,  type: integer, index: false }
+        - { field: free_bytes,  type: integer, index: true  }
+        - { field: file_system, type: text,    index: false }

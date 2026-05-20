@@ -93,6 +93,63 @@ pub struct InventoryHint {
     /// when omitted, but operators usually pick a 3-5 column subset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<Vec<DisplayField>>,
+    /// v0.31 / #40: payload arrays that should be exploded into
+    /// per-element rows of a derived SQLite table. Lets operators
+    /// answer cross-PC questions ("which PCs still have Chrome <
+    /// 120?", "C: >90% full") with normal SQL filters + indexes
+    /// instead of grepping JSON. The projector creates the derived
+    /// table on register and replaces this PC's rows on each result
+    /// (DELETE WHERE pc_id=? AND job_id=? + bulk INSERT). See
+    /// [`ExplodeSpec`] for the per-spec schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explode: Option<Vec<ExplodeSpec>>,
+}
+
+/// v0.31 / #40: declarative "flatten this JSON array into a real
+/// SQLite table" spec on an inventory manifest. The projector
+/// creates the table on first registration (CREATE TABLE IF NOT
+/// EXISTS + indexes) and writes a row per element of
+/// `payload[field]` on every result, scoped by (pc_id, job_id) so
+/// each PC's rows replace cleanly without a per-PC schema.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ExplodeSpec {
+    /// JSON array key under the payload to explode. E.g. `"apps"`
+    /// for `payload: { apps: [{...}, {...}] }`.
+    pub field: String,
+    /// Derived SQLite table name. Operators choose this — pick
+    /// something namespaced + stable (`inventory_sw_apps`, not
+    /// `apps`) so multiple inventory manifests don't collide on a
+    /// generic name.
+    pub table: String,
+    /// Element-level fields that uniquely identify a row inside one
+    /// PC's payload. The full PK is `(pc_id, job_id) + these
+    /// columns`. Required — operators must think about uniqueness
+    /// (e.g. `["name", "source"]` for installed apps because the
+    /// same name appears in multiple uninstall hives).
+    pub primary_key: Vec<String>,
+    /// Per-element fields that become columns in the derived table.
+    pub columns: Vec<ExplodeColumn>,
+}
+
+/// One column in an [`ExplodeSpec`]'s derived table.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ExplodeColumn {
+    /// JSON key under each array element. Becomes the column name
+    /// in the derived SQLite table — we don't rename.
+    pub field: String,
+    /// SQLite affinity: `"text"` (default), `"integer"`, `"real"`.
+    /// Storage maps directly via `sqlx::query.bind(...)`; type
+    /// mismatches at INSERT-time fail loudly rather than silently
+    /// dropping the row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+    /// When true, the projector creates a `CREATE INDEX` on this
+    /// column at table-creation time. Boost for the common-filter
+    /// columns (`name`, `version`) — operators mark them
+    /// explicitly, the projector won't guess.
+    #[serde(default)]
+    pub index: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
