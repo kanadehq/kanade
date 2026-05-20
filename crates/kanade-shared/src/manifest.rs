@@ -101,11 +101,25 @@ pub struct DisplayField {
     pub field: String,
     /// Human-readable column header.
     pub label: String,
-    /// Optional render hint — `"number"`, `"bytes"`, `"timestamp"`.
-    /// Defaults to plain text rendering on the SPA side.
+    /// Optional render hint — `"number"`, `"bytes"`, `"timestamp"`,
+    /// or `"table"` (#39). Defaults to plain text rendering on the
+    /// SPA side. `"table"` expects the field's value to be a JSON
+    /// array of objects and renders a nested sub-table on the
+    /// per-PC detail page using `columns` as the schema; the fleet
+    /// summary view falls back to showing the row count for
+    /// `"table"` cells so the wide list stays compact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(rename = "type")]
     pub kind: Option<String>,
+    /// v0.30 / #39: when `kind == "table"`, the SPA renders the
+    /// field's value (an array of objects like
+    /// `disks: [{ device_id, size_bytes, ... }]`) as a nested
+    /// sub-table using these columns. Each column is itself a
+    /// `DisplayField`, so the nested cells reuse the same render
+    /// hints (`bytes`, `number`, `timestamp`) — no parallel format
+    /// pipeline. Ignored for any other `kind`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub columns: Option<Vec<DisplayField>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -495,6 +509,75 @@ execute:
 "#;
         let r: Result<Manifest, _> = serde_yaml::from_str(yaml);
         assert!(r.is_err(), "expected error, got {:?}", r);
+    }
+
+    #[test]
+    fn display_field_table_kind_round_trips_with_nested_columns() {
+        // #39: `type: table` + `columns:` on a DisplayField gets
+        // round-tripped through serde so the SPA receives the
+        // nested schema verbatim. Nested columns themselves are
+        // DisplayFields so they can carry `type: bytes` /
+        // `type: number` for cell formatting.
+        let yaml = r#"
+id: inv-hw
+version: 1.0.0
+execute:
+  shell: powershell
+  script: "echo"
+  timeout: 60s
+inventory:
+  display:
+    - field: hostname
+      label: Hostname
+    - field: disks
+      label: Disks
+      type: table
+      columns:
+        - field: device_id
+          label: Drive
+        - field: size_bytes
+          label: Size
+          type: bytes
+        - field: free_bytes
+          label: Free
+          type: bytes
+        - field: file_system
+          label: FS
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        let inv = m.inventory.as_ref().expect("inventory hint");
+        let disks = inv
+            .display
+            .iter()
+            .find(|d| d.field == "disks")
+            .expect("disks display row");
+        assert_eq!(disks.kind.as_deref(), Some("table"));
+        let cols = disks.columns.as_ref().expect("table needs columns");
+        assert_eq!(cols.len(), 4);
+        assert_eq!(cols[1].field, "size_bytes");
+        assert_eq!(cols[1].kind.as_deref(), Some("bytes"));
+    }
+
+    #[test]
+    fn display_field_scalar_kind_keeps_columns_none() {
+        // Defensive: when type is a scalar (`bytes` / `number` /
+        // `timestamp`) the `columns` field stays None — the SPA
+        // uses its presence as the "render nested table" signal,
+        // so it must not leak in via serde defaults.
+        let yaml = r#"
+id: x
+version: 1.0.0
+execute:
+  shell: powershell
+  script: "echo"
+  timeout: 5s
+inventory:
+  display:
+    - { field: ram_bytes, label: RAM, type: bytes }
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        let inv = m.inventory.as_ref().unwrap();
+        assert!(inv.display[0].columns.is_none());
     }
 }
 

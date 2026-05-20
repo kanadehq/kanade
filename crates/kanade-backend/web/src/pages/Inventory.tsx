@@ -15,7 +15,14 @@ import { fmtIsoLocal } from '@/lib/utils';
 type DisplayField = {
   field: string;
   label: string;
-  type?: 'number' | 'bytes' | 'timestamp';
+  /** v0.30 / #39: `table` renders a nested sub-table on the PC
+   *  detail page using the field's array-of-objects value + the
+   *  `columns` schema. Fleet summary view falls back to a count
+   *  for table fields so the wide list stays compact. */
+  type?: 'number' | 'bytes' | 'timestamp' | 'table';
+  /** Required when `type === 'table'`. Each column is itself a
+   *  DisplayField so nested cells reuse the same render hints. */
+  columns?: DisplayField[];
 };
 
 type InventoryFact = {
@@ -73,6 +80,70 @@ function renderCell(value: unknown, kind?: string): string {
       if (typeof value === 'object') return JSON.stringify(value);
       return String(value);
   }
+}
+
+/// v0.30 / #39: scalar-cell helper used both at the top level of
+/// the PC-detail value column AND inside nested table cells.
+/// Returns a React node (so the empty-state span gets muted
+/// styling, not a literal `—` rendered as code).
+function ScalarCell({ value, kind }: { value: unknown; kind?: string }) {
+  if (value === null || value === undefined) {
+    return <span className="text-muted text-xs">—</span>;
+  }
+  return <code className="text-xs">{renderCell(value, kind)}</code>;
+}
+
+/// v0.30 / #39: nested sub-table renderer used by PcDetail when a
+/// DisplayField carries `type: 'table'`. Walks `columns` recursively
+/// via ScalarCell so child cells reuse the same `bytes`/`number`/
+/// `timestamp` formatters as the top-level table.
+///
+/// Renders nothing when `value` is not an array (operator typo on
+/// the manifest? show a muted dash); empty arrays render an empty-
+/// state row so operators distinguish "0 disks reported" from
+/// "this field isn't an array".
+function NestedTable({ value, columns }: { value: unknown; columns: DisplayField[] }) {
+  if (!Array.isArray(value)) {
+    return <span className="text-muted text-xs">— (expected an array)</span>;
+  }
+  if (value.length === 0) {
+    return <span className="text-muted text-xs">— (none)</span>;
+  }
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          {columns.map((c) => (
+            <TableHead key={c.field}>{c.label}</TableHead>
+          ))}
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {value.map((row, i) => {
+          const obj = (row ?? {}) as Record<string, unknown>;
+          return (
+            <TableRow key={i}>
+              {columns.map((c) => (
+                <TableCell key={c.field}>
+                  {/* Gemini #84 medium fix: true recursion. A nested
+                      column can itself be `type: 'table'`, so the
+                      sub-table renderer must branch the same way
+                      PcDetail does — otherwise nested-of-nested
+                      (e.g. `disks[].partitions[]`) collapsed to
+                      JSON.stringify in the cell. */}
+                  {c.type === 'table' && c.columns ? (
+                    <NestedTable value={obj[c.field]} columns={c.columns} />
+                  ) : (
+                    <ScalarCell value={obj[c.field]} kind={c.type} />
+                  )}
+                </TableCell>
+              ))}
+            </TableRow>
+          );
+        })}
+      </TableBody>
+    </Table>
+  );
 }
 
 export function Inventory() {
@@ -228,11 +299,32 @@ function FleetProbeTable({
                   onClick={() => pickPc(r.pc_id)}
                 >
                   <TableCell><code className="text-xs">{r.pc_id}</code></TableCell>
-                  {columns.map((c) => (
-                    <TableCell key={c.field}>
-                      <code className="text-xs">{renderCell(r.facts[c.field], c.type)}</code>
-                    </TableCell>
-                  ))}
+                  {columns.map((c) => {
+                    // Gemini #84 medium fix: extract once. `Array.isArray`
+                    // acts as a type guard so the inner accesses don't
+                    // need the `as unknown[]` cast repeated.
+                    const val = r.facts[c.field];
+                    return (
+                      <TableCell key={c.field}>
+                        {/* v0.30 / #39: fleet summary cells must
+                            stay compact (one row per PC, many
+                            columns). For `type: table` collapse to
+                            a row count instead of expanding the
+                            nested table inline — operator drills
+                            into the PC detail view to see the full
+                            sub-table. */}
+                        {c.type === 'table' ? (
+                          <code className="text-xs">
+                            {Array.isArray(val)
+                              ? `${val.length} row${val.length === 1 ? '' : 's'}`
+                              : '—'}
+                          </code>
+                        ) : (
+                          <code className="text-xs">{renderCell(val, c.type)}</code>
+                        )}
+                      </TableCell>
+                    );
+                  })}
                   <TableCell className="text-muted text-xs">
                     {fmtIsoLocal(r.collected_at)}
                   </TableCell>
@@ -310,8 +402,20 @@ function PcDetail({ pcId, clear }: { pcId: string; clear: () => void }) {
                     <TableBody>
                       {fact.display.map((d) => (
                         <TableRow key={d.field}>
-                          <TableCell className="text-muted">{d.label}</TableCell>
-                          <TableCell><code className="text-xs">{renderCell(factsObj[d.field], d.type)}</code></TableCell>
+                          <TableCell className="text-muted align-top">{d.label}</TableCell>
+                          <TableCell>
+                            {/* v0.30 / #39: nested sub-table for
+                                `type: table` (e.g. inventory-hw's
+                                `disks: [{ device_id, size_bytes,
+                                ... }]`). Scalars still use
+                                ScalarCell so the empty-state dash
+                                gets muted styling. */}
+                            {d.type === 'table' && d.columns ? (
+                              <NestedTable value={factsObj[d.field]} columns={d.columns} />
+                            ) : (
+                              <ScalarCell value={factsObj[d.field]} kind={d.type} />
+                            )}
+                          </TableCell>
                         </TableRow>
                       ))}
                     </TableBody>
