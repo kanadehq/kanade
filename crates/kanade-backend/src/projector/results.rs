@@ -125,24 +125,48 @@ pub async fn run(js: jetstream::Context, pool: SqlitePool) -> Result<()> {
     Ok(())
 }
 
-/// Insert one ExecResult; return `Ok(true)` when the row was inserted,
-/// `Ok(false)` when ON CONFLICT skipped it (= redelivery from
-/// JetStream's ack-timeout retry of a result we already projected).
-/// The boolean is what gates the `executions` counter bump above —
-/// without this the counters would over-count on every redelivery.
+/// v0.30 / PR α' UPSERT one ExecResult. Returns `Ok(true)` when the
+/// row's `finished_at` was set by this call (= either a fresh
+/// INSERT, OR an UPDATE that transitioned an in-flight row to
+/// finished). Returns `Ok(false)` when the row already had
+/// `finished_at` set (= JetStream redelivery of a result we already
+/// projected); the caller uses this to gate the `executions`
+/// counter bump so redeliveries don't double-count.
+///
+/// Three states this handles:
+///   1. **No row yet** (race: ExecResult lands before its matching
+///      events.started): INSERT creates a finished row directly.
+///      events.started's later redelivery ON CONFLICT-no-ops on
+///      result_id, leaving the finished row untouched.
+///   2. **In-flight row exists** (normal: events.started got there
+///      first): UPDATE flips finished_at from NULL to set, plus
+///      copies the exit_code / stdout / stderr / manifest_id. The
+///      `WHERE finished_at IS NULL` guard on the DO UPDATE prevents
+///      redelivery of the same result from re-running this branch.
+///   3. **Already-finished row** (redelivery): ON CONFLICT DO
+///      UPDATE clause's WHERE doesn't match → rows_affected = 0 →
+///      caller skips counter bump.
 async fn insert_result(pool: &SqlitePool, r: &ExecResult, result_id: &str) -> Result<bool> {
     // `result_id` is pre-resolved by the caller via
     // `r.stable_result_id()`: agent-supplied for v0.29+ payloads,
     // deterministic UUIDv5 from (request_id, pc_id) for legacy.
     // Determinism is load-bearing: JetStream redelivery of the same
-    // legacy payload must hash to the same id so ON CONFLICT skips
-    // it, otherwise the executions counters double-count.
+    // legacy payload must hash to the same id so the ON CONFLICT
+    // path triggers the WHERE-guard rather than inserting a second
+    // row.
     let rows = sqlx::query(
         "INSERT INTO execution_results (
              result_id, request_id, exec_id, pc_id, exit_code,
              stdout, stderr, started_at, finished_at, job_id
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(result_id) DO NOTHING",
+         ON CONFLICT(result_id) DO UPDATE SET
+             exit_code   = excluded.exit_code,
+             stdout      = excluded.stdout,
+             stderr      = excluded.stderr,
+             finished_at = excluded.finished_at,
+             job_id      = COALESCE(excluded.job_id, execution_results.job_id),
+             request_id  = excluded.request_id
+          WHERE execution_results.finished_at IS NULL",
     )
     .bind(result_id)
     .bind(&r.request_id)

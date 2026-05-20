@@ -35,6 +35,22 @@ pub fn inventory(pc_id: &str, category: &str) -> String {
     format!("inventory.{pc_id}.{category}")
 }
 
+/// `events.started.<exec_id>.<pc_id>` — v0.30 / PR α' lifecycle
+/// event published by the agent just before spawning a script's
+/// child process. Lets the backend project an in-flight row into
+/// `execution_results` (with `finished_at = NULL`) so the SPA
+/// Activity table can show running rows alongside finished ones.
+/// Backend subscribes via [`EVENTS_STARTED_FILTER`].
+pub fn events_started(exec_id: &str, pc_id: &str) -> String {
+    format!("events.started.{exec_id}.{pc_id}")
+}
+
+/// Wildcard the backend events projector consumes on STREAM_EVENTS.
+/// Narrow (`events.started.>`) rather than the whole `events.>` so
+/// future event types can carry their own filters without rerouting
+/// the started subset.
+pub const EVENTS_STARTED_FILTER: &str = "events.started.>";
+
 pub const INVENTORY_HW: &str = "hw";
 pub const INVENTORY_SW: &str = "sw";
 pub const INVENTORY_NET: &str = "net";
@@ -91,6 +107,19 @@ mod tests {
     #[test]
     fn logs_fetch_formats_pc_id() {
         assert_eq!(logs_fetch("minipc"), "logs.fetch.minipc");
+    }
+
+    #[test]
+    fn events_started_formats_exec_id_and_pc_id() {
+        assert_eq!(
+            events_started("exec-uuid-1", "minipc"),
+            "events.started.exec-uuid-1.minipc",
+        );
+    }
+
+    #[test]
+    fn events_started_filter_is_narrow_wildcard() {
+        assert_eq!(EVENTS_STARTED_FILTER, "events.started.>");
     }
 
     #[test]

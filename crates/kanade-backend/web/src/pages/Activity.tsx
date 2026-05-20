@@ -30,15 +30,23 @@ type ResultRow = {
    *  ad-hoc `kanade run` rows and pre-migration rows. */
   exec_id: string | null;
   pc_id: string;
-  exit_code: number;
+  /** v0.30 / PR α' unified: null means the row is still in flight
+   *  (events.started landed but no ExecResult yet). Renders as a
+   *  "running…" placeholder rather than `0` to avoid confusion with
+   *  successful exit code 0. */
+  exit_code: number | null;
   stdout: string;
   stderr: string;
   started_at: string | null;
+  /** v0.30 / PR α' unified: null while in-flight. */
   finished_at: string | null;
   /** v0.27: surfaced from `execution_results.job_id`. Empty for
    *  ad-hoc `kanade run` rows / pre-migration-0002 rows. Drives the
    *  per-row Kill button. */
   job_id: string | null;
+  /** v0.30 / PR α' unified: pinned Manifest version, populated by
+   *  events.started. None for legacy rows / result-first races. */
+  version: string | null;
 };
 
 const SINCE_PRESETS: Array<{ value: string; label: string; ms: number | null }> = [
@@ -51,7 +59,7 @@ const SINCE_PRESETS: Array<{ value: string; label: string; ms: number | null }> 
 
 export function Activity() {
   const [pcId, setPcId] = useState('');
-  const [status, setStatus] = useState<'' | 'success' | 'failure'>('');
+  const [status, setStatus] = useState<'' | 'running' | 'success' | 'failure'>('');
   const [since, setSince] = useState('24h');
   const [limit, setLimit] = useState(50);
 
@@ -127,9 +135,12 @@ export function Activity() {
             <Select
               id="res-status"
               value={status}
-              onChange={(e) => setStatus(e.target.value as '' | 'success' | 'failure')}
+              onChange={(e) =>
+                setStatus(e.target.value as '' | 'running' | 'success' | 'failure')
+              }
             >
               <option value="">(any)</option>
+              <option value="running">running (in flight)</option>
               <option value="success">success (exit 0)</option>
               <option value="failure">failure (exit ≠ 0)</option>
             </Select>
@@ -209,22 +220,38 @@ export function Activity() {
                     : <span className="text-muted text-xs">—</span>}
                 </TableCell>
                 <TableCell>
-                  <Badge variant={r.exit_code === 0 ? 'success' : 'danger'}>{r.exit_code}</Badge>
+                  {/* v0.30 / PR α' unified: exit_code is null while
+                      the row is in flight (events.started landed
+                      but no ExecResult yet). Show a 'running' badge
+                      instead of `0` or empty so operators see
+                      lifecycle clearly. */}
+                  {r.exit_code === null ? (
+                    <Badge variant="violet">running</Badge>
+                  ) : (
+                    <Badge variant={r.exit_code === 0 ? 'success' : 'danger'}>
+                      {r.exit_code}
+                    </Badge>
+                  )}
                 </TableCell>
                 <TableCell className="text-muted text-xs">{fmtIsoLocal(r.started_at)}</TableCell>
-                <TableCell className="text-muted text-xs">{fmtIsoLocal(r.finished_at)}</TableCell>
+                <TableCell className="text-muted text-xs">
+                  {/* v0.30 / PR α' unified: finished_at null = still
+                      running. fmtIsoLocal returns "—" for null
+                      which is OK but ambiguous with "no data"; show
+                      "running…" explicitly. */}
+                  {r.finished_at ? fmtIsoLocal(r.finished_at) : 'running…'}
+                </TableCell>
                 <TableCell className="max-w-md">
                   <StdioPreview resultId={r.result_id} stdout={r.stdout} stderr={r.stderr} />
                 </TableCell>
                 <TableCell>
-                  {/* Kill is only meaningful for runs still in
-                      progress. Activity rows surface results that
-                      already landed in the DB — those rows by
-                      definition carry a finished_at, so the kill
-                      button stays hidden today. Once the upcoming
-                      "Running" view lands (running rows have no
-                      finished_at), this branch lights up
-                      automatically. */}
+                  {/* v0.30 / PR α' unified: Activity now lists
+                      in-flight rows too (events.started inserts
+                      with finished_at = NULL). The condition
+                      `r.job_id && !r.finished_at` was historically
+                      always false because every Activity row had
+                      a finished_at; now it actually fires for
+                      running rows. */}
                   {r.job_id && !r.finished_at ? (
                     <Button
                       variant="danger"

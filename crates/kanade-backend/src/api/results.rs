@@ -17,10 +17,18 @@ pub struct ResultRow {
     /// migration.
     pub exec_id: Option<String>,
     pub pc_id: String,
-    pub exit_code: i64,
+    /// v0.30 / PR α' unified: NULL while the run is in-flight (the
+    /// row was created by events.started, ExecResult hasn't landed
+    /// yet). The SPA renders "—" / running placeholder for None.
+    pub exit_code: Option<i64>,
     pub stdout: String,
     pub stderr: String,
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// v0.30 / PR α' unified: NULL means the run is still in
+    /// flight. Once the matching ExecResult lands the results
+    /// projector UPSERTs and sets this to the script's finish
+    /// timestamp. Combined with `exit_code` this is the unified
+    /// "running" vs "finished" signal.
     pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
     /// v0.27: surface `execution_results.job_id` (column added in
     /// migration 0002) so the SPA Results page can route operators
@@ -28,16 +36,27 @@ pub struct ResultRow {
     /// when the row pre-dates migration 0002 or when the result
     /// arrived via an ad-hoc `kanade run` (no Job behind it).
     pub job_id: Option<String>,
+    /// v0.30 / PR α' unified: pinned Manifest version, populated by
+    /// the events.started insert (events payload carries
+    /// Command.version). None for legacy rows + result-first rows
+    /// (no events.started landed) — the Activity Finished view
+    /// falls back to "—".
+    pub version: Option<String>,
 }
 
 /// Optional `status` filter on the results listing. `success` keeps
-/// only `exit_code = 0`; `failure` keeps everything else. Anything
-/// else (or omitted) returns the unfiltered listing.
+/// only `exit_code = 0`; `failure` keeps everything else.
+/// `running` selects in-flight rows (events.started landed but no
+/// ExecResult yet, so finished_at IS NULL). Anything else (or
+/// omitted) returns the unfiltered listing.
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum StatusFilter {
     Success,
     Failure,
+    /// v0.30 / PR α' unified: in-flight rows = events.started landed
+    /// but no matching ExecResult yet. Activity Running view filter.
+    Running,
 }
 
 #[derive(Deserialize)]
@@ -67,8 +86,15 @@ pub async fn list(
     }
     if let Some(status) = &params.status {
         let cmp = match status {
+            // Both success + failure require the run to be finished
+            // (exit_code IS NOT NULL ⇒ finished_at IS NOT NULL).
+            // Pre-v0.30 schemas implicitly had exit_code NOT NULL so
+            // adding the explicit check is back-compatible.
             StatusFilter::Success => "exit_code = 0",
-            StatusFilter::Failure => "exit_code <> 0",
+            StatusFilter::Failure => "exit_code IS NOT NULL AND exit_code <> 0",
+            // v0.30 / PR α' unified: in-flight rows = finished_at
+            // not set yet. Activity Running tab filters via this.
+            StatusFilter::Running => "finished_at IS NULL",
         };
         qb.push(sep).push(cmp);
         sep = " AND ";
@@ -118,7 +144,10 @@ fn row_to_result(r: sqlx::sqlite::SqliteRow) -> ResultRow {
         request_id: r.try_get("request_id").unwrap_or_default(),
         exec_id: r.try_get("exec_id").ok(),
         pc_id: r.try_get("pc_id").unwrap_or_default(),
-        exit_code: r.try_get("exit_code").unwrap_or(0),
+        // v0.30 / PR α' unified: exit_code is now NULLABLE.
+        // try_get(...).ok() collapses absent + NULL to None — the
+        // SPA renders that as "—" / running placeholder.
+        exit_code: r.try_get("exit_code").ok(),
         stdout: r.try_get("stdout").unwrap_or_default(),
         stderr: r.try_get("stderr").unwrap_or_default(),
         started_at: r.try_get("started_at").ok(),
@@ -127,5 +156,6 @@ fn row_to_result(r: sqlx::sqlite::SqliteRow) -> ResultRow {
         // (legacy DB pre-migration 0002) and "column NULL" (ad-hoc
         // `kanade run` rows) to None, which is what we want.
         job_id: r.try_get("job_id").ok(),
+        version: r.try_get("version").ok(),
     }
 }

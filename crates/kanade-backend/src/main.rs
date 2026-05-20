@@ -165,6 +165,20 @@ pub(crate) async fn run_backend() -> Result<()> {
             }
         });
     }
+    // v0.30 / PR α' unified: project agent `events.started.*.*` into
+    // execution_results as in-flight rows. Pairs with results
+    // projector — both UPSERT against execution_results.result_id
+    // so the SPA Activity table sees one row per run that
+    // transitions from running to finished.
+    {
+        let pool = pool.clone();
+        let js = jetstream.clone();
+        tokio::spawn(async move {
+            if let Err(e) = projector::events::run(js, pool).await {
+                error!(error = %e, "events projector exited");
+            }
+        });
+    }
 
     let app_state = api::AppState {
         pool: pool.clone(),
