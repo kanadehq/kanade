@@ -5,6 +5,7 @@ pub mod agent_releases;
 pub mod agents;
 pub mod audit;
 pub mod exec;
+pub mod executions;
 pub mod health;
 pub mod inventory;
 pub mod jetstream_status;
@@ -73,7 +74,12 @@ pub fn router(state: AppState) -> Router {
                 .delete(agent_config::delete_pc),
         )
         .route("/api/results", get(results::list))
-        .route("/api/results/{request_id}", get(results::detail))
+        // v0.29 / Issue #19: path param is now `result_id` (was
+        // `request_id`); pre-v0.29 rows backfilled `result_id = request_id`
+        // so existing browser-cached deep links still resolve.
+        .route("/api/results/{result_id}", get(results::detail))
+        .route("/api/executions", get(executions::list))
+        .route("/api/executions/{exec_id}", get(executions::detail))
         .route("/api/audit", get(audit::list))
         .route("/api/exec/{job_id}", post(exec::create))
         .route(

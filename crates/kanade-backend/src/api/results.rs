@@ -7,7 +7,15 @@ use tracing::warn;
 
 #[derive(Serialize)]
 pub struct ResultRow {
+    /// v0.29 / Issue #19: PK (agent-minted per-PC UUID). For rows
+    /// projected by pre-v0.29 agents the migration backfilled
+    /// `result_id = request_id`, so old links keep resolving.
+    pub result_id: String,
     pub request_id: String,
+    /// v0.29 / Issue #19: back-link to `executions.exec_id`. `None`
+    /// for ad-hoc `kanade run` rows and for rows that pre-date the
+    /// migration.
+    pub exec_id: Option<String>,
     pub pc_id: String,
     pub exit_code: i64,
     pub stdout: String,
@@ -80,12 +88,18 @@ pub async fn list(
     Ok(Json(rows.into_iter().map(row_to_result).collect()))
 }
 
+/// `GET /api/results/{id}` — `{id}` is now `result_id` (v0.29).
+/// Pre-v0.29 rows had `result_id == request_id` after the migration
+/// backfill, so legacy links from cached browser tabs still resolve.
+/// Brand-new rows from broadcast Commands each have their own
+/// `result_id` so the SPA can finally show per-PC results that
+/// previously got de-duped to one row.
 pub async fn detail(
     State(pool): State<SqlitePool>,
-    Path(request_id): Path<String>,
+    Path(id): Path<String>,
 ) -> Result<Json<ResultRow>, StatusCode> {
-    let row = sqlx::query("SELECT * FROM execution_results WHERE request_id = ?")
-        .bind(&request_id)
+    let row = sqlx::query("SELECT * FROM execution_results WHERE result_id = ?")
+        .bind(&id)
         .fetch_optional(&pool)
         .await
         .map_err(|e| {
@@ -100,7 +114,9 @@ pub async fn detail(
 
 fn row_to_result(r: sqlx::sqlite::SqliteRow) -> ResultRow {
     ResultRow {
+        result_id: r.try_get("result_id").unwrap_or_default(),
         request_id: r.try_get("request_id").unwrap_or_default(),
+        exec_id: r.try_get("exec_id").ok(),
         pc_id: r.try_get("pc_id").unwrap_or_default(),
         exit_code: r.try_get("exit_code").unwrap_or(0),
         stdout: r.try_get("stdout").unwrap_or_default(),

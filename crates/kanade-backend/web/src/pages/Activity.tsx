@@ -17,11 +17,18 @@ import { fmtIsoLocal } from '@/lib/utils';
 /// v0.27.x: how many chars of stdout / stderr to show in the table
 /// row's collapsed preview. The full body is fetched on demand when
 /// the operator clicks "show more" (inline expand) or opens the
-/// /results/{request_id} detail page in a new tab.
+/// /activity/{result_id} detail page in a new tab.
 const PREVIEW_CHARS = 200;
 
 type ResultRow = {
+  /** v0.29 / Issue #19: agent-minted per-PC UUID and the detail-route
+   *  identifier. Pre-v0.29 rows had result_id == request_id after the
+   *  migration backfill, so old browser-cached deep links still work. */
+  result_id: string;
   request_id: string;
+  /** v0.29 / Issue #19: back-link to executions.exec_id. Null for
+   *  ad-hoc `kanade run` rows and pre-migration rows. */
+  exec_id: string | null;
   pc_id: string;
   exit_code: number;
   stdout: string;
@@ -68,12 +75,13 @@ export function Activity() {
     queryFn: () => apiFetch<ResultRow[]>(`/api/results?${queryString}`),
   });
 
-  // v0.27: Layer 3 kill — publishes on `kill.{job_id}` so any agent
-  // currently running this job's child process terminates it. Only
-  // useful when the job is *currently running*; killing a completed
-  // execution is a no-op (no subscriber). Per-row availability is
-  // gated on the row carrying a job_id (ad-hoc `kanade run` rows
-  // have None).
+  // v0.27: Layer 3 kill — POST /api/jobs/{job_id}/kill. v0.29 / Issue
+  // #19: the backend now SELECTs every still-running exec_id for the
+  // cmd and publishes kill.{exec_id} per deployment; pre-v0.29 it
+  // published kill.{cmd_id} which no agent subscribes to. So the
+  // button was a no-op since v0.27 — now actually terminates running
+  // children. Per-row availability is gated on the row carrying a
+  // job_id (ad-hoc `kanade run` rows have None).
   //
   // Round 2 review (CodeRabbit #38): per-row pending tracked via a
   // Set<string> so a kill click on one row doesn't disable every
@@ -166,7 +174,7 @@ export function Activity() {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>request_id</TableHead>
+              <TableHead>result_id</TableHead>
               <TableHead>pc_id</TableHead>
               <TableHead>job_id</TableHead>
               <TableHead>exit</TableHead>
@@ -178,19 +186,19 @@ export function Activity() {
           </TableHeader>
           <TableBody>
             {rows.map((r) => (
-              <TableRow key={r.request_id}>
+              <TableRow key={r.result_id}>
                 <TableCell>
-                  {/* request_id is a Link to the detail page so
-                      Ctrl/⌘ click opens a new tab — operators can
-                      compare multiple results side-by-side via
-                      browser tabs / window split. Plain click stays
-                      on the same tab. */}
+                  {/* result_id (v0.29) is the detail-route key — was
+                      request_id pre-v0.29 but that's no longer unique
+                      across broadcast Commands. Ctrl/⌘ click opens
+                      a new tab so operators can compare results
+                      side-by-side. */}
                   <Link
-                    to={`/activity/${encodeURIComponent(r.request_id)}`}
+                    to={`/activity/${encodeURIComponent(r.result_id)}`}
                     className="text-accent hover:underline inline-flex items-center gap-1"
                     title="Open detail page (Ctrl/⌘+click for new tab)"
                   >
-                    <code className="text-xs">{r.request_id.slice(0, 8)}</code>
+                    <code className="text-xs">{r.result_id.slice(0, 8)}</code>
                     <ExternalLink className="size-3" />
                   </Link>
                 </TableCell>
@@ -206,7 +214,7 @@ export function Activity() {
                 <TableCell className="text-muted text-xs">{fmtIsoLocal(r.started_at)}</TableCell>
                 <TableCell className="text-muted text-xs">{fmtIsoLocal(r.finished_at)}</TableCell>
                 <TableCell className="max-w-md">
-                  <StdioPreview requestId={r.request_id} stdout={r.stdout} stderr={r.stderr} />
+                  <StdioPreview resultId={r.result_id} stdout={r.stdout} stderr={r.stderr} />
                 </TableCell>
                 <TableCell>
                   {/* Kill is only meaningful for runs still in
@@ -257,30 +265,31 @@ export function Activity() {
  * matching the historical table render. When either stream is
  * actually longer than the preview cutoff, a "show more" button
  * appears that toggles to a full-body view fetched lazily via
- * GET /api/results/{request_id}. The detail page (linked via the
- * request_id column on the same row) is the heavier alternative —
- * dedicated tab, copy buttons, header chrome.
+ * GET /api/results/{result_id} (v0.29 — was /api/results/{request_id}
+ * pre-v0.29). The detail page (linked via the result_id column on
+ * the same row) is the heavier alternative — dedicated tab, copy
+ * buttons, header chrome.
  *
  * The expanded body is bounded by max-h-96 + overflow-y-auto so an
  * enormous payload doesn't push every other row off-screen; the
  * detail page in a new tab is the right home for that case.
  */
 function StdioPreview({
-  requestId,
+  resultId,
   stdout,
   stderr,
 }: {
-  requestId: string;
+  resultId: string;
   stdout: string;
   stderr: string;
 }) {
   const [expanded, setExpanded] = useState(false);
   const couldExpand = stdout.length > PREVIEW_CHARS || stderr.length > PREVIEW_CHARS;
   const { data, isFetching, error } = useQuery({
-    queryKey: ['result', requestId],
+    queryKey: ['result', resultId],
     queryFn: () =>
       apiFetch<{ stdout: string; stderr: string }>(
-        `/api/results/${encodeURIComponent(requestId)}`,
+        `/api/results/${encodeURIComponent(resultId)}`,
       ),
     enabled: expanded,
   });

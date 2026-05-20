@@ -30,9 +30,9 @@ pub enum ExecOutcome {
 /// Spawn the command's shell child, race wait / kill / timeout, collect
 /// stdout+stderr.
 ///
-/// Spec §2.6 Layer 3 — if `cmd.job_id` is set, subscribe to `kill.{job_id}`
+/// Spec §2.6 Layer 3 — if `cmd.exec_id` is set, subscribe to `kill.{exec_id}`
 /// in parallel; a kill message causes `child.kill().await` and the outcome
-/// is reported as `Killed`. A command without a `job_id` (e.g. ad-hoc CLI
+/// is reported as `Killed`. A command without an `exec_id` (e.g. ad-hoc CLI
 /// runs) still respects `timeout_secs`.
 pub async fn run_command_with_kill(
     client: &async_nats::Client,
@@ -118,9 +118,9 @@ pub async fn run_command_with_kill(
 
     let timeout_dur = Duration::from_secs(cmd.timeout_secs.max(1));
 
-    let inner = match &cmd.job_id {
-        Some(jid) => {
-            let kill_subject = subject::kill(jid);
+    let inner = match &cmd.exec_id {
+        Some(eid) => {
+            let kill_subject = subject::kill(eid);
             let mut kill_sub = client
                 .subscribe(kill_subject.clone())
                 .await
@@ -128,23 +128,23 @@ pub async fn run_command_with_kill(
             // Flush so the server has registered our SUB before any publish
             // can race past us.
             client.flush().await.ok();
-            info!(job_id = %jid, subject = %kill_subject, "kill listener armed");
+            info!(exec_id = %eid, subject = %kill_subject, "kill listener armed");
 
             tokio::select! {
                 status = child.wait() => {
-                    info!(job_id = %jid, "child exited (wait arm fired)");
+                    info!(exec_id = %eid, "child exited (wait arm fired)");
                     let s = status?;
                     OutcomeInner::Completed(s.code().unwrap_or(-1))
                 }
                 msg = kill_sub.next() => {
-                    info!(job_id = %jid, has_msg = msg.is_some(), "kill arm fired");
+                    info!(exec_id = %eid, has_msg = msg.is_some(), "kill arm fired");
                     if let Err(e) = child.kill().await {
                         warn!(error = %e, "child.kill failed (process may already be dead)");
                     }
                     OutcomeInner::Killed
                 }
                 _ = tokio::time::sleep(timeout_dur) => {
-                    info!(job_id = %jid, "timeout arm fired");
+                    info!(exec_id = %eid, "timeout arm fired");
                     if let Err(e) = child.kill().await {
                         warn!(error = %e, "child.kill on timeout failed");
                     }
@@ -196,7 +196,7 @@ enum OutcomeInner {
 
 /// Glue between the main `run_command_with_kill` (which expects a
 /// NATS subscriber-based kill signal) and `process_as_user`'s
-/// `oneshot::Receiver<()>` kill channel. We subscribe to `kill.{job_id}`
+/// `oneshot::Receiver<()>` kill channel. We subscribe to `kill.{exec_id}`
 /// here and forward "fired" into the channel, so the Win32 path's
 /// inner `tokio::select!` can use a plain oneshot.
 //
@@ -234,19 +234,19 @@ async fn run_in_user_session_dispatch(
     #[cfg(target_os = "windows")]
     {
         let (kill_tx, kill_rx) = tokio::sync::oneshot::channel::<()>();
-        // Spawn the kill bridge only when there's a job_id to listen
+        // Spawn the kill bridge only when there's an exec_id to listen
         // for — ad-hoc / scheduler-less exec paths skip it.
-        let bridge = if let Some(jid) = cmd.job_id.clone() {
+        let bridge = if let Some(eid) = cmd.exec_id.clone() {
             let nats = client.clone();
-            let subject = subject::kill(&jid);
+            let subject = subject::kill(&eid);
             Some(tokio::spawn(async move {
                 match nats.subscribe(subject.clone()).await {
                     Ok(mut sub) => {
                         // flush before await so the broker has SUB
                         nats.flush().await.ok();
-                        info!(job_id = %jid, subject = %subject, "kill listener armed (user-session path)");
+                        info!(exec_id = %eid, subject = %subject, "kill listener armed (user-session path)");
                         if sub.next().await.is_some() {
-                            info!(job_id = %jid, "kill received → forwarding to user-session waiter");
+                            info!(exec_id = %eid, "kill received → forwarding to user-session waiter");
                             let _ = kill_tx.send(());
                         }
                     }

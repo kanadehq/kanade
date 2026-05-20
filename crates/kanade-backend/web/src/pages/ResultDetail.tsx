@@ -11,7 +11,9 @@ import { apiFetch } from '@/lib/api';
 import { fmtIsoLocal } from '@/lib/utils';
 
 type ResultDetailRow = {
+  result_id: string;
   request_id: string;
+  exec_id: string | null;
   pc_id: string;
   exit_code: number;
   stdout: string;
@@ -22,10 +24,14 @@ type ResultDetailRow = {
 };
 
 /**
- * Per-request detail page (`/results/{request_id}`). Pairs with the
- * Results list table — operators open this in a new tab via Ctrl/⌘
- * click on the request_id Link to compare stdout/stderr across PCs
- * side-by-side using browser tabs / window split.
+ * Per-result detail page (`/activity/{result_id}`). Route param renamed
+ * from `requestId` to `resultId` in v0.29 / Issue #19 once result_id
+ * became the PK — pre-v0.29 deep links keep resolving because the
+ * migration backfilled result_id = request_id for legacy rows.
+ *
+ * Pairs with the Activity list table — operators open this in a new
+ * tab via Ctrl/⌘ click on the result_id Link to compare stdout/stderr
+ * across PCs side-by-side using browser tabs / window split.
  *
  * Renders the full `ExecResult` payload from `GET /api/results/{id}`
  * (no `slice` truncation, unlike the table preview). Includes
@@ -33,11 +39,11 @@ type ResultDetailRow = {
  * paste full output into an incident chat without manually selecting.
  */
 export function ResultDetail() {
-  const { requestId } = useParams<{ requestId: string }>();
+  const { resultId } = useParams<{ resultId: string }>();
   const { data, error, isLoading } = useQuery({
-    queryKey: ['result', requestId],
-    queryFn: () => apiFetch<ResultDetailRow>(`/api/results/${encodeURIComponent(requestId!)}`),
-    enabled: !!requestId,
+    queryKey: ['result', resultId],
+    queryFn: () => apiFetch<ResultDetailRow>(`/api/results/${encodeURIComponent(resultId!)}`),
+    enabled: !!resultId,
   });
 
   if (isLoading) {
@@ -49,7 +55,7 @@ export function ResultDetail() {
     );
   }
   if (error) return <ErrorCard title="Couldn't load result" error={error} />;
-  if (!data) return <ErrorCard title="Result not found" error={new Error(`${requestId}`)} />;
+  if (!data) return <ErrorCard title="Result not found" error={new Error(`${resultId}`)} />;
 
   return (
     <div className="space-y-4">
@@ -61,7 +67,7 @@ export function ResultDetail() {
           </Link>
         </Button>
         <h2 className="text-xl">
-          <code className="text-base">{data.request_id}</code>
+          <code className="text-base">{data.result_id}</code>
         </h2>
       </div>
 
@@ -85,7 +91,18 @@ export function ResultDetail() {
               )
             }
           />
+          <Field
+            label="exec_id"
+            value={
+              data.exec_id ? (
+                <code className="text-xs">{data.exec_id}</code>
+              ) : (
+                <span className="text-muted text-xs">— (ad-hoc / pre-v0.29 row)</span>
+              )
+            }
+          />
           <Field label="request_id" value={<code className="text-xs">{data.request_id}</code>} />
+          <Field label="result_id" value={<code className="text-xs">{data.result_id}</code>} />
           <Field label="started_at" value={<span className="text-muted text-xs">{fmtIsoLocal(data.started_at)}</span>} />
           <Field label="finished_at" value={<span className="text-muted text-xs">{fmtIsoLocal(data.finished_at)}</span>} />
         </CardContent>

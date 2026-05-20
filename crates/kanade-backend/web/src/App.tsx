@@ -50,7 +50,7 @@ export default function App() {
               <Route path="/agents" element={<Agents />} />
               <Route path="/run" element={<Run />} />
               <Route path="/activity" element={<Activity />} />
-              <Route path="/activity/:requestId" element={<ResultDetail />} />
+              <Route path="/activity/:resultId" element={<ResultDetail />} />
               {/* Back-compat: any pre-rename /results bookmark redirects
                   to /activity. Detail-route param is dropped — operator
                   scrolls/filters to the row on the unified Activity

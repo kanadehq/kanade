@@ -75,7 +75,7 @@ pub async fn exec_manifest(
         id: manifest.id.clone(),
         version: manifest.version.clone(),
         request_id: Uuid::new_v4().to_string(),
-        job_id: Some(exec_id.clone()),
+        exec_id: Some(exec_id.clone()),
         shell: manifest.execute.shell.into(),
         script: manifest.execute.script.clone(),
         timeout_secs,

@@ -34,10 +34,12 @@ pub struct RunRequest {
     pub script: String,
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
-    /// Optional. When set, `POST /api/jobs/<job_id>/kill` (or the
-    /// CLI's `kanade kill`) can terminate this run.
-    #[serde(default)]
-    pub job_id: Option<String>,
+    /// Optional. When set, `kanade kill <exec_id>` can terminate this
+    /// run. v0.29 / Issue #19 renamed the field from `job_id` to
+    /// `exec_id` for accuracy; `serde(alias)` keeps existing SPA POST
+    /// bodies decodable.
+    #[serde(default, alias = "job_id")]
+    pub exec_id: Option<String>,
     #[serde(default)]
     pub jitter_secs: Option<u64>,
 }
@@ -69,7 +71,7 @@ pub async fn run(
         id: "adhoc-run".to_string(),
         version: "0.0.0".to_string(),
         request_id: request_id.clone(),
-        job_id: req.job_id.clone(),
+        exec_id: req.exec_id.clone(),
         shell,
         script: req.script,
         timeout_secs: req.timeout_secs,
@@ -129,7 +131,7 @@ pub async fn run(
     info!(
         pc_id = %req.pc_id,
         request_id = %request_id,
-        job_id = ?req.job_id,
+        exec_id = ?req.exec_id,
         timeout_secs = req.timeout_secs,
         "sent command, waiting for result",
     );
