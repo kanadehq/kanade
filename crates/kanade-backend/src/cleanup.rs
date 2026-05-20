@@ -41,6 +41,13 @@ const CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// directly to `datetime('now', '-1 hour')`.
 const PENDING_TIMEOUT: &str = "-1 hour";
 
+/// v0.31 / #41: `inventory_history` retention. 90 d is enough for
+/// rollout-curve / first-seen use cases without unbounded growth.
+/// The change-only design already bounds row volume to actual
+/// fleet churn; this just bounds the tail. Operator-tunable via
+/// config in a follow-up.
+const HISTORY_RETENTION: &str = "-90 days";
+
 /// Spawn the long-running cleanup task. Runs forever; logs a warn
 /// on transient SQLite errors and continues to the next tick. The
 /// task is fire-and-forget — the returned handle is for the
@@ -70,8 +77,34 @@ pub fn spawn(pool: SqlitePool) -> tokio::task::JoinHandle<()> {
                 Ok(_) => {}
                 Err(e) => warn!(error = %e, "executions cleanup failed"),
             }
+            // v0.31 / #41: prune inventory_history rows older than
+            // HISTORY_RETENTION. Same 5 min cadence as executions
+            // cleanup so both tasks share the timer rather than
+            // running parallel sweepers.
+            match prune_inventory_history(&pool).await {
+                Ok(n) if n > 0 => info!(
+                    deleted = n,
+                    "inventory_history cleanup: pruned {n} rows older than {HISTORY_RETENTION}",
+                ),
+                Ok(_) => {}
+                Err(e) => warn!(error = %e, "inventory_history cleanup failed"),
+            }
         }
     })
+}
+
+/// Delete `inventory_history` rows older than [`HISTORY_RETENTION`].
+/// Returns the number of rows affected.
+async fn prune_inventory_history(pool: &SqlitePool) -> Result<u64> {
+    let rows = sqlx::query(
+        "DELETE FROM inventory_history
+          WHERE observed_at < datetime('now', ?)",
+    )
+    .bind(HISTORY_RETENTION)
+    .execute(pool)
+    .await
+    .context("DELETE inventory_history retention sweep")?;
+    Ok(rows.rows_affected())
 }
 
 /// Flip every `executions.status = 'pending'` row older than

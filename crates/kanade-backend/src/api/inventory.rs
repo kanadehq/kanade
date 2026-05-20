@@ -425,6 +425,94 @@ async fn load_explode_spec(
     ))
 }
 
+/// `GET /api/inventory/{manifest_id}/history/pc/{pc_id}` — per-PC
+/// timeline from `inventory_history` (#41). Optional query params:
+/// `field` (narrow to one explode field), `since` (ISO-8601 lower
+/// bound on observed_at), `limit` (default 500, ceiling 5000).
+#[derive(Serialize)]
+pub struct HistoryEventRow {
+    pub id: i64,
+    pub pc_id: String,
+    pub job_id: String,
+    pub field_path: String,
+    pub identity_json: Option<String>,
+    pub change_kind: String,
+    pub before_json: Option<String>,
+    pub after_json: Option<String>,
+    pub observed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct HistoryParams {
+    pub field: Option<String>,
+    pub since: Option<DateTime<Utc>>,
+    pub limit: Option<u32>,
+}
+
+pub async fn history_for_pc(
+    State(state): State<AppState>,
+    Path((manifest_id, pc_id)): Path<(String, String)>,
+    Query(params): Query<HistoryParams>,
+) -> Result<Json<Vec<HistoryEventRow>>, (StatusCode, String)> {
+    let limit = params.limit.unwrap_or(500).min(5000);
+    let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+        "SELECT id, pc_id, job_id, field_path, identity_json, \
+                change_kind, before_json, after_json, observed_at \
+           FROM inventory_history \
+          WHERE job_id = ",
+    );
+    qb.push_bind(manifest_id);
+    qb.push(" AND pc_id = ");
+    qb.push_bind(pc_id);
+    if let Some(f) = params.field.filter(|s| !s.is_empty()) {
+        qb.push(" AND field_path = ");
+        qb.push_bind(f);
+    }
+    if let Some(t) = params.since {
+        qb.push(" AND observed_at >= ");
+        qb.push_bind(t);
+    }
+    qb.push(" ORDER BY observed_at DESC LIMIT ");
+    qb.push_bind(limit as i64);
+
+    let rows = qb.build().fetch_all(&state.pool).await.map_err(|e| {
+        warn!(error = %e, "inventory_history per-pc query");
+        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    })?;
+
+    // Gemini #86 fix: non-nullable schema columns (id, pc_id,
+    // job_id, field_path, change_kind) propagate decode errors
+    // rather than silently `unwrap_or_default`-ing them. Schema
+    // drift turns into a clean 500 with a diagnostic instead of
+    // empty-string-laden rows hitting the SPA. Nullable columns
+    // (identity_json / before / after / observed_at) keep
+    // `.ok()` because NULL is a legitimate value.
+    let out: Result<Vec<HistoryEventRow>, _> = rows
+        .into_iter()
+        .map(|r| {
+            Ok::<_, sqlx::Error>(HistoryEventRow {
+                id: r.try_get("id")?,
+                pc_id: r.try_get("pc_id")?,
+                job_id: r.try_get("job_id")?,
+                field_path: r.try_get("field_path")?,
+                identity_json: r.try_get("identity_json").ok(),
+                change_kind: r.try_get("change_kind")?,
+                before_json: r.try_get("before_json").ok(),
+                after_json: r.try_get("after_json").ok(),
+                observed_at: r.try_get("observed_at").ok(),
+            })
+        })
+        .collect();
+    let out = out.map_err(|e| {
+        warn!(error = %e, "inventory_history row decode");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("decode history row: {e}"),
+        )
+    })?;
+    Ok(Json(out))
+}
+
 fn row_to_fact(r: sqlx::sqlite::SqliteRow) -> InventoryFact {
     let facts: serde_json::Value = r
         .try_get::<String, _>("facts_json")

@@ -279,6 +279,20 @@ pub async fn replace_rows(
     };
 
     let mut tx: Transaction<'_, Sqlite> = pool.begin().await?;
+
+    // v0.31 / #41: when the spec opts into history tracking, diff
+    // the incoming `arr` against the prior rows BEFORE the DELETE
+    // wipes them. Events written into the same transaction so a
+    // crash mid-replace either commits the full lifecycle
+    // (events + new rows) or rolls back to the previous snapshot —
+    // history never goes out of sync with the explode table.
+    if spec.track_history {
+        let events = super::history::diff_explode_rows(&mut tx, spec, pc_id, job_id, arr).await?;
+        if !events.is_empty() {
+            super::history::write_events(&mut tx, pc_id, job_id, &spec.field, &events).await?;
+        }
+    }
+
     sqlx::query(&format!(
         "DELETE FROM \"{}\" WHERE pc_id = ? AND job_id = ?",
         spec.table
@@ -396,6 +410,7 @@ mod tests {
             field: "apps".into(),
             table: "inventory_sw_apps".into(),
             primary_key: vec!["name".into(), "source".into()],
+            track_history: false,
             columns: vec![
                 ExplodeColumn {
                     field: "source".into(),

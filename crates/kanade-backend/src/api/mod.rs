@@ -110,6 +110,12 @@ pub fn router(state: AppState) -> Router {
             "/api/inventory/{manifest_id}/search/{field}",
             get(inventory::search),
         )
+        // v0.31 / #41: per-PC inventory history timeline (foundation
+        // — fleet-wide search + first_seen endpoints are follow-ups).
+        .route(
+            "/api/inventory/{manifest_id}/history/pc/{pc_id}",
+            get(inventory::history_for_pc),
+        )
         .route("/api/inventory/{pc_id}", get(inventory::list_for_pc))
         .route("/api/agents/{pc_id}/logs", get(agent_logs::tail))
         .route("/api/agents/releases", get(agent_releases::list_releases))
