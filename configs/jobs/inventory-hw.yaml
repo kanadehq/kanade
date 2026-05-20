@@ -110,6 +110,12 @@ inventory:
     - field: disks
       table: inventory_hw_disks
       primary_key: [device_id]
+      # v0.31 / #41: track add / remove / size-change events into
+      # `inventory_history` so operators can answer "when did C:
+      # free space drop sharply" and "which PCs got a new drive in
+      # the last 30 days." Default 90-day retention sweeper bounds
+      # storage.
+      track_history: true
       columns:
         - { field: device_id,   type: text                  }
         - { field: size_bytes,  type: integer, index: false }

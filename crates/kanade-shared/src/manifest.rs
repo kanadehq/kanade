@@ -126,9 +126,29 @@ pub struct ExplodeSpec {
     /// columns`. Required — operators must think about uniqueness
     /// (e.g. `["name", "source"]` for installed apps because the
     /// same name appears in multiple uninstall hives).
+    ///
+    /// v0.31 / #41: same tuple drives history identity. When
+    /// `track_history` is on, the projector serialises these
+    /// fields' values into `inventory_history.identity_json` for
+    /// every change event, so queries like "every PC that ever
+    /// installed Chrome (any source)" filter on identity_json
+    /// content without a per-manifest schema.
     pub primary_key: Vec<String>,
     /// Per-element fields that become columns in the derived table.
     pub columns: Vec<ExplodeColumn>,
+    /// v0.31 / #41: when true (default false), the projector
+    /// diffs each PC's incoming payload against the prior rows
+    /// for the same (pc_id, job_id) BEFORE the DELETE-then-INSERT
+    /// replace, and writes added / removed / changed events into
+    /// `inventory_history`. Lets operators answer time-dimension
+    /// questions ("when did Chrome 120 first appear on PC X?",
+    /// "what's the Win 11 23H2 rollout curve") without storing
+    /// per-scan snapshots. Off by default so operators opt in
+    /// per-spec — history has a real storage cost on long-lived
+    /// deployments (mitigated by the 90-day default retention
+    /// sweeper, see `cleanup` module).
+    #[serde(default)]
+    pub track_history: bool,
 }
 
 /// One column in an [`ExplodeSpec`]'s derived table.
