@@ -12,6 +12,7 @@ pub mod jetstream_status;
 pub mod jobs;
 pub mod results;
 pub mod run;
+pub mod runs;
 pub mod schedules;
 pub mod scripts;
 
@@ -80,6 +81,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/results/{result_id}", get(results::detail))
         .route("/api/executions", get(executions::list))
         .route("/api/executions/{exec_id}", get(executions::detail))
+        // v0.30 / PR α: in-flight runs from the running_runs
+        // projection (events.started → ExecResult lifecycle).
+        // Drives the SPA Activity Running tab.
+        .route("/api/runs", get(runs::list))
         .route("/api/audit", get(audit::list))
         .route("/api/exec/{job_id}", post(exec::create))
         .route(

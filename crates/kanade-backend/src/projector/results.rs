@@ -98,6 +98,26 @@ pub async fn run(js: jetstream::Context, pool: SqlitePool) -> Result<()> {
                                     "executions counter update failed",
                                 );
                             }
+                            // v0.30 / PR α: close out the matching
+                            // running_runs row so the SPA Running
+                            // tab stops showing this PC. UPDATE not
+                            // DELETE so an out-of-order start event
+                            // (started arriving after result on
+                            // JetStream redelivery) doesn't create
+                            // a ghost in-flight row — instead it
+                            // hits the existing finished_at=NOT
+                            // NULL row and the ON CONFLICT clause
+                            // in `insert_running` makes it a no-op.
+                            if let Err(e) =
+                                mark_run_finished(&pool, exec_id, &r.pc_id, r.finished_at).await
+                            {
+                                warn!(
+                                    error = %e,
+                                    exec_id,
+                                    pc_id = %r.pc_id,
+                                    "running_runs finished_at update failed",
+                                );
+                            }
                         }
                     }
                     Ok(false) => {
@@ -157,6 +177,37 @@ async fn insert_result(pool: &SqlitePool, r: &ExecResult, result_id: &str) -> Re
     .execute(pool)
     .await?;
     Ok(rows.rows_affected() > 0)
+}
+
+/// v0.30 / PR α: mark the matching `running_runs` row's
+/// `finished_at` once the ExecResult for this (exec_id, pc_id) lands.
+/// The Running tab filter is `WHERE finished_at IS NULL`, so this is
+/// what removes the row from the live view without DELETEing —
+/// keeping the row preserves the timeline for any future
+/// "recently-finished" view and avoids an out-of-order start event
+/// resurrecting a ghost in-flight row.
+///
+/// Idempotent: if no running_runs row exists yet (events.started
+/// hasn't arrived OR was never published — e.g. legacy agent pre
+/// -v0.30), this UPDATE silently affects zero rows. The
+/// events projector's later INSERT for the same (exec, pc) is
+/// blocked by ON CONFLICT, leaving a clean post-finish state.
+async fn mark_run_finished(
+    pool: &SqlitePool,
+    exec_id: &str,
+    pc_id: &str,
+    finished_at: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE running_runs SET finished_at = ?
+          WHERE exec_id = ? AND pc_id = ? AND finished_at IS NULL",
+    )
+    .bind(finished_at)
+    .bind(exec_id)
+    .bind(pc_id)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /// v0.29 / Issue #19: update the `executions` row this result belongs

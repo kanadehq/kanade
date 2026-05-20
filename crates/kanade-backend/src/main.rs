@@ -165,6 +165,19 @@ pub(crate) async fn run_backend() -> Result<()> {
             }
         });
     }
+    // v0.30 / PR α: project agent `events.started.*.*` into the new
+    // `running_runs` table. Pair with the results projector above —
+    // events inserts on script-spawn, results UPDATEs `finished_at`
+    // on ExecResult arrival. Drives the SPA Activity Running tab.
+    {
+        let pool = pool.clone();
+        let js = jetstream.clone();
+        tokio::spawn(async move {
+            if let Err(e) = projector::events::run(js, pool).await {
+                error!(error = %e, "events projector exited");
+            }
+        });
+    }
 
     let app_state = api::AppState {
         pool: pool.clone(),

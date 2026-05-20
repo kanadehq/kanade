@@ -198,6 +198,41 @@ pub async fn handle_command(
         "executing command",
     );
     let started_at = chrono::Utc::now();
+
+    // v0.30 / PR α: emit `events.started.<exec_id>.<pc_id>` BEFORE
+    // child spawn so the backend can project a per-PC "running"
+    // row for the Activity Running tab. Only emit when the Command
+    // carries an exec_id (i.e. it's a deployment from `kanade exec`
+    // or a scheduler tick, not an ad-hoc `kanade run` which has
+    // nothing to attribute to). Goes through the file outbox so
+    // offline / mid-broker-outage runs still surface on reconnect.
+    // Errors are warn-logged but never fail the run — losing a
+    // started event is annoying but ExecResult will still land
+    // and reach the operator the long way (Activity finished
+    // backfills the timeline).
+    if let Some(exec_id) = cmd.exec_id.as_deref() {
+        let event = kanade_shared::wire::EventStarted {
+            exec_id: exec_id.to_string(),
+            pc_id: pc_id.clone(),
+            started_at,
+            manifest_id: cmd.id.clone(),
+            version: cmd.version.clone(),
+        };
+        let events_outbox_dir = default_paths::data_dir().join("events-outbox");
+        match crate::events_outbox::enqueue(&events_outbox_dir, &event) {
+            Ok(p) => debug!(
+                exec_id = %exec_id,
+                events_outbox = %p.display(),
+                "started event enqueued (drain task delivers via JetStream)",
+            ),
+            Err(e) => warn!(
+                error = %e,
+                exec_id = %exec_id,
+                "events_outbox enqueue failed; running tab will miss this PC's row",
+            ),
+        }
+    }
+
     let outcome = run_command_with_kill(&client, &cmd).await?;
     let finished_at = chrono::Utc::now();
 
