@@ -11,12 +11,7 @@ import { JsonOutput } from '@/components/ui/json-output';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { apiFetch } from '@/lib/api';
 import type { AgentGroups, AgentRow, EffectiveConfigResponse, Heartbeat } from '@/lib/types';
-
-function fmtTime(iso: string | null): string {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  return isNaN(d.getTime()) ? iso : d.toISOString().replace('T', ' ').replace(/\.\d+Z$/, 'Z');
-}
+import { fmtIsoLocal } from '@/lib/utils';
 
 type ActionResult = {
   pc_id: string;
@@ -144,7 +139,7 @@ export function Agents() {
               <TableCell>{a.hostname ?? <span className="text-muted">—</span>}</TableCell>
               <TableCell className="text-muted text-xs">{a.os_family ?? '—'}</TableCell>
               <TableCell className="text-muted text-xs">{a.agent_version ?? '—'}</TableCell>
-              <TableCell className="text-muted text-xs">{fmtTime(a.last_heartbeat)}</TableCell>
+              <TableCell className="text-muted text-xs">{fmtIsoLocal(a.last_heartbeat)}</TableCell>
               <TableCell>
                 <div className="flex gap-1 flex-wrap">
                   <Button variant="secondary" size="sm" asChild>

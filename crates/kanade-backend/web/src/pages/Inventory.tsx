@@ -10,6 +10,7 @@ import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { apiFetch } from '@/lib/api';
+import { fmtIsoLocal } from '@/lib/utils';
 
 type DisplayField = {
   field: string;
@@ -62,18 +63,12 @@ function fmtNumber(v: unknown): string {
   return n.toLocaleString();
 }
 
-function fmtTimestamp(v: unknown): string {
-  if (typeof v !== 'string') return String(v ?? '—');
-  const d = new Date(v);
-  return isNaN(d.getTime()) ? v : d.toISOString().replace('T', ' ').replace(/\.\d+Z$/, 'Z');
-}
-
 function renderCell(value: unknown, kind?: string): string {
   if (value === null || value === undefined) return '—';
   switch (kind) {
     case 'bytes':     return fmtBytes(value);
     case 'number':    return fmtNumber(value);
-    case 'timestamp': return fmtTimestamp(value);
+    case 'timestamp': return typeof value === 'string' ? fmtIsoLocal(value) : String(value);
     default:
       if (typeof value === 'object') return JSON.stringify(value);
       return String(value);
@@ -239,7 +234,7 @@ function FleetProbeTable({
                     </TableCell>
                   ))}
                   <TableCell className="text-muted text-xs">
-                    {r.collected_at ? new Date(r.collected_at).toLocaleString() : '—'}
+                    {fmtIsoLocal(r.collected_at)}
                   </TableCell>
                 </TableRow>
               ))}
@@ -293,7 +288,7 @@ function PcDetail({ pcId, clear }: { pcId: string; clear: () => void }) {
                   <code className="text-sm">{fact.job_id}</code>
                 </CardTitle>
                 <CardDescription>
-                  collected {fact.collected_at ? new Date(fact.collected_at).toLocaleString() : '—'}
+                  collected {fmtIsoLocal(fact.collected_at)}
                 </CardDescription>
               </CardHeader>
               <CardContent>

@@ -12,6 +12,7 @@ import { Select } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { apiFetch } from '@/lib/api';
 import type { AgentRow } from '@/lib/types';
+import { fmtIsoLocal } from '@/lib/utils';
 
 type ReleaseRow = {
   version: string;
@@ -26,12 +27,6 @@ function fmtSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
-}
-
-function fmtTime(iso: string | null): string {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  return isNaN(d.getTime()) ? iso : d.toISOString().replace('T', ' ').replace(/\.\d+Z$/, 'Z');
 }
 
 export function Rollout() {
@@ -215,7 +210,7 @@ export function Rollout() {
               <option value="">(pick one)</option>
               {(releasesQ.data ?? []).map((r) => (
                 <option key={r.version} value={r.version}>
-                  {r.version} · {fmtSize(r.size)} · {fmtTime(r.modified)}
+                  {r.version} · {fmtSize(r.size)} · {fmtIsoLocal(r.modified)}
                 </option>
               ))}
             </Select>
@@ -330,7 +325,7 @@ export function Rollout() {
                   <TableRow key={r.version}>
                     <TableCell><code className="text-xs">{r.version}</code></TableCell>
                     <TableCell className="text-muted text-xs">{fmtSize(r.size)}</TableCell>
-                    <TableCell className="text-muted text-xs">{fmtTime(r.modified)}</TableCell>
+                    <TableCell className="text-muted text-xs">{fmtIsoLocal(r.modified)}</TableCell>
                     <TableCell className="text-muted text-xs">
                       <code>{r.digest?.slice(0, 24) ?? '—'}</code>
                     </TableCell>
