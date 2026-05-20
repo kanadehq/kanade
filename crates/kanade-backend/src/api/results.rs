@@ -1,6 +1,7 @@
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
 use tracing::warn;
@@ -63,7 +64,23 @@ pub enum StatusFilter {
 pub struct ListParams {
     #[serde(default = "default_limit")]
     pub limit: u32,
+    /// Regex on `pc_id`. Plain text without metacharacters acts as
+    /// substring search (`PC001` matches `PC0010` too — anchor with
+    /// `^PC001$` for exact).
     pub pc_id: Option<String>,
+    /// Regex on `job_id`. NULL `job_id` values are matched as the
+    /// empty string, so they pass the filter only when the regex
+    /// also matches `""` — a `^foo` filter therefore excludes NULL
+    /// rows, while leaving the field unset (or empty) keeps them.
+    pub job_id: Option<String>,
+    /// Regex on `exec_id`. Same empty-string-on-NULL semantics as
+    /// `job_id`.
+    pub exec_id: Option<String>,
+    /// Regex on `stdout` content. Match runs against the whole
+    /// stdout buffer; multiline patterns (`(?m)`) work as expected.
+    pub stdout: Option<String>,
+    /// Regex on `stderr` content — same shape as `stdout`.
+    pub stderr: Option<String>,
     pub status: Option<StatusFilter>,
     /// ISO-8601 lower bound on `recorded_at`. Anything strictly older is filtered out.
     pub since: Option<chrono::DateTime<chrono::Utc>>,
@@ -73,17 +90,44 @@ fn default_limit() -> u32 {
     50
 }
 
+// Upper bound on the prefilter window when at least one regex filter
+// is active. SQL narrows by `status` + `since` first; then we ORDER BY
+// recorded_at DESC and scan up to MAX_FETCH rows in Rust, applying the
+// compiled regexes and stopping once `limit` matches are collected.
+// Pulling the prefilter into Rust is the same trick used by
+// `api::audit::list` — sqlx 0.8 doesn't expose `create_scalar_function`
+// so a native REGEXP UDF isn't on the table. 10k rows is comfortable
+// even when `stdout` / `stderr` are kilobytes each (≈ tens of MB in
+// the worst case); operators wanting more should narrow `since`.
+const MAX_FETCH: i64 = 10_000;
+
+fn compile(opt: Option<&str>) -> Result<Option<Regex>, (StatusCode, String)> {
+    match opt.filter(|s| !s.is_empty()) {
+        Some(s) => Regex::new(s)
+            .map(Some)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid regex `{s}`: {e}"))),
+        None => Ok(None),
+    }
+}
+
 pub async fn list(
     State(pool): State<SqlitePool>,
     Query(params): Query<ListParams>,
-) -> Result<Json<Vec<ResultRow>>, StatusCode> {
+) -> Result<Json<Vec<ResultRow>>, (StatusCode, String)> {
+    let pc_re = compile(params.pc_id.as_deref())?;
+    let job_re = compile(params.job_id.as_deref())?;
+    let exec_re = compile(params.exec_id.as_deref())?;
+    let stdout_re = compile(params.stdout.as_deref())?;
+    let stderr_re = compile(params.stderr.as_deref())?;
+    let has_regex = pc_re.is_some()
+        || job_re.is_some()
+        || exec_re.is_some()
+        || stdout_re.is_some()
+        || stderr_re.is_some();
+
     let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new("SELECT * FROM execution_results");
     let mut sep = " WHERE ";
 
-    if let Some(pc) = params.pc_id.as_deref().filter(|s| !s.is_empty()) {
-        qb.push(sep).push("pc_id = ").push_bind(pc.to_owned());
-        sep = " AND ";
-    }
     if let Some(status) = &params.status {
         let cmp = match status {
             // Both success + failure require the run to be finished
@@ -101,17 +145,73 @@ pub async fn list(
     }
     if let Some(since) = params.since {
         qb.push(sep).push("recorded_at >= ").push_bind(since);
-        let _ = sep;
+        sep = " AND ";
     }
+    let _ = sep;
 
-    qb.push(" ORDER BY recorded_at DESC LIMIT ")
-        .push_bind(params.limit as i64);
+    qb.push(" ORDER BY recorded_at DESC LIMIT ");
+    let sql_limit = if has_regex {
+        MAX_FETCH
+    } else {
+        params.limit as i64
+    };
+    qb.push_bind(sql_limit);
 
     let rows = qb.build().fetch_all(&pool).await.map_err(|e| {
         warn!(error = %e, "list results");
-        StatusCode::INTERNAL_SERVER_ERROR
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "list results failed".to_string(),
+        )
     })?;
-    Ok(Json(rows.into_iter().map(row_to_result).collect()))
+
+    // Fast path: no regex filters → SQL already applied the LIMIT, so
+    // just hydrate the rows and return. Avoids the per-row `try_get`
+    // dance + the manual capacity / break logic below.
+    if !has_regex {
+        return Ok(Json(rows.into_iter().map(row_to_result).collect()));
+    }
+
+    // Regex path: match against the raw column values first so a row
+    // that's about to be dropped never pays for `String::from(stdout)`
+    // (potentially kilobytes). Only winners get hydrated into a
+    // `ResultRow`. Read the columns as `&str` borrows on the row —
+    // for SQLite NULL surfaces as Err on `try_get`, which we collapse
+    // to "" so the regex sees the documented empty-string semantics.
+    let limit = params.limit as usize;
+    let mut out: Vec<ResultRow> = Vec::with_capacity(limit.min(64));
+    for r in rows {
+        if let Some(re) = &pc_re
+            && !re.is_match(r.try_get::<&str, _>("pc_id").unwrap_or(""))
+        {
+            continue;
+        }
+        if let Some(re) = &job_re
+            && !re.is_match(r.try_get::<&str, _>("job_id").unwrap_or(""))
+        {
+            continue;
+        }
+        if let Some(re) = &exec_re
+            && !re.is_match(r.try_get::<&str, _>("exec_id").unwrap_or(""))
+        {
+            continue;
+        }
+        if let Some(re) = &stdout_re
+            && !re.is_match(r.try_get::<&str, _>("stdout").unwrap_or(""))
+        {
+            continue;
+        }
+        if let Some(re) = &stderr_re
+            && !re.is_match(r.try_get::<&str, _>("stderr").unwrap_or(""))
+        {
+            continue;
+        }
+        out.push(row_to_result(r));
+        if out.len() >= limit {
+            break;
+        }
+    }
+    Ok(Json(out))
 }
 
 /// `GET /api/results/{id}` — `{id}` is now `result_id` (v0.29).

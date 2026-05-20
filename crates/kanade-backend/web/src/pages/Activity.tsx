@@ -1,6 +1,6 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { ChevronsDown, ChevronsUp, ExternalLink, Loader2, Skull } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import { ErrorCard } from '@/components/ErrorCard';
@@ -49,6 +49,20 @@ type ResultRow = {
   version: string | null;
 };
 
+// Each regex keystroke triggers a `useQuery` refetch that scans up to
+// MAX_FETCH rows on the backend — debounce the inputs so a typed
+// pattern doesn't spam the server while the operator is still typing.
+const FILTER_DEBOUNCE_MS = 300;
+
+function useDebouncedValue<T>(value: T, delay: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(t);
+  }, [value, delay]);
+  return debounced;
+}
+
 const SINCE_PRESETS: Array<{ value: string; label: string; ms: number | null }> = [
   { value: '1h',  label: 'last 1h',   ms: 60 * 60 * 1000 },
   { value: '24h', label: 'last 24h',  ms: 24 * 60 * 60 * 1000 },
@@ -59,6 +73,10 @@ const SINCE_PRESETS: Array<{ value: string; label: string; ms: number | null }> 
 
 export function Activity() {
   const [pcId, setPcId] = useState('');
+  const [jobId, setJobId] = useState('');
+  const [execId, setExecId] = useState('');
+  const [stdoutFilter, setStdoutFilter] = useState('');
+  const [stderrFilter, setStderrFilter] = useState('');
   const [status, setStatus] = useState<'' | 'running' | 'success' | 'failure'>('');
   const [since, setSince] = useState('24h');
   const [limit, setLimit] = useState(50);
@@ -69,14 +87,24 @@ export function Activity() {
     return new Date(Date.now() - preset.ms).toISOString();
   }, [since]);
 
+  const dPcId         = useDebouncedValue(pcId,         FILTER_DEBOUNCE_MS);
+  const dJobId        = useDebouncedValue(jobId,        FILTER_DEBOUNCE_MS);
+  const dExecId       = useDebouncedValue(execId,       FILTER_DEBOUNCE_MS);
+  const dStdoutFilter = useDebouncedValue(stdoutFilter, FILTER_DEBOUNCE_MS);
+  const dStderrFilter = useDebouncedValue(stderrFilter, FILTER_DEBOUNCE_MS);
+
   const queryString = useMemo(() => {
     const sp = new URLSearchParams();
     sp.set('limit', String(limit));
-    if (pcId)     sp.set('pc_id', pcId);
-    if (status)   sp.set('status', status);
-    if (sinceIso) sp.set('since', sinceIso);
+    if (dPcId)         sp.set('pc_id', dPcId);
+    if (dJobId)        sp.set('job_id', dJobId);
+    if (dExecId)       sp.set('exec_id', dExecId);
+    if (dStdoutFilter) sp.set('stdout', dStdoutFilter);
+    if (dStderrFilter) sp.set('stderr', dStderrFilter);
+    if (status)        sp.set('status', status);
+    if (sinceIso)      sp.set('since', sinceIso);
     return sp.toString();
-  }, [pcId, status, sinceIso, limit]);
+  }, [dPcId, dJobId, dExecId, dStdoutFilter, dStderrFilter, status, sinceIso, limit]);
 
   const { data, error, isLoading, isFetching } = useQuery({
     queryKey: ['results', queryString],
@@ -120,14 +148,50 @@ export function Activity() {
       </div>
 
       <Card>
-        <CardContent className="grid grid-cols-1 sm:grid-cols-4 gap-3 p-4">
+        <CardContent className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 p-4">
           <div className="space-y-1">
             <Label htmlFor="res-pc">pc_id</Label>
             <Input
               id="res-pc"
-              placeholder="exact match"
+              placeholder="regex — eg. ^PC001 or PC001"
               value={pcId}
               onChange={(e) => setPcId(e.target.value)}
+            />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="res-job">job_id</Label>
+            <Input
+              id="res-job"
+              placeholder="regex — eg. ^job-foo"
+              value={jobId}
+              onChange={(e) => setJobId(e.target.value)}
+            />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="res-exec">exec_id</Label>
+            <Input
+              id="res-exec"
+              placeholder="regex — eg. ^abc1234"
+              value={execId}
+              onChange={(e) => setExecId(e.target.value)}
+            />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="res-stdout">stdout</Label>
+            <Input
+              id="res-stdout"
+              placeholder="regex — eg. timeout|panic"
+              value={stdoutFilter}
+              onChange={(e) => setStdoutFilter(e.target.value)}
+            />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="res-stderr">stderr</Label>
+            <Input
+              id="res-stderr"
+              placeholder="regex — eg. permission denied"
+              value={stderrFilter}
+              onChange={(e) => setStderrFilter(e.target.value)}
             />
           </div>
           <div className="space-y-1">
@@ -178,7 +242,7 @@ export function Activity() {
         <Card>
           <CardHeader><CardTitle>No activity matches</CardTitle></CardHeader>
           <CardContent className="text-muted">
-            Widen the filter window or clear pc_id / status to see older runs.
+            Widen the filter window or clear pc_id / job_id / exec_id / stdout / stderr / status to see older runs.
           </CardContent>
         </Card>
       ) : (
