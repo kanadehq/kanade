@@ -36,6 +36,8 @@ jsonwebtoken = { workspace = true }
 mime_guess = { workspace = true }
 regex      = { workspace = true }
 rust-embed = { workspace = true }
+schemars   = { workspace = true }
+serde_yaml = { workspace = true }
 tokio-cron-scheduler = { workspace = true }
 uuid       = { workspace = true }
 

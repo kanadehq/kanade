@@ -58,6 +58,11 @@ pub async fn execute(backend_url: &str, args: ScheduleArgs) -> Result<()> {
 
 async fn create(base: &str, yaml: &PathBuf) -> Result<()> {
     let body = std::fs::read_to_string(yaml).with_context(|| format!("read {yaml:?}"))?;
+    // Parse client-side first so a malformed YAML errors at the
+    // operator's shell rather than via the backend's 400 — keeps the
+    // error site obvious. Then ship the raw YAML body so the
+    // backend's BUCKET_SCHEDULES_YAML mirror preserves comments +
+    // formatting across SPA edits.
     let schedule: Schedule =
         serde_yaml::from_str(&body).with_context(|| format!("parse {yaml:?}"))?;
     info!(
@@ -70,7 +75,8 @@ async fn create(base: &str, yaml: &PathBuf) -> Result<()> {
     let url = format!("{base}/api/schedules");
     let resp = crate::http_client::authed_client()?
         .post(&url)
-        .json(&schedule)
+        .header(reqwest::header::CONTENT_TYPE, "application/yaml")
+        .body(body)
         .send()
         .await
         .with_context(|| format!("POST {url}"))?;

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use super::Staleness;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
 pub struct Command {
     pub id: String,
     pub version: String,
@@ -52,7 +52,7 @@ pub struct Command {
     pub staleness: Staleness,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Shell {
     Powershell,
@@ -74,7 +74,9 @@ pub enum Shell {
 /// console session, then launches with that hybrid token — useful
 /// when an installer needs admin power *and* needs the user to see
 /// its UI.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(
+    Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Default,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum RunAs {
     /// LocalSystem privileges in Session 0. No GUI. Historical

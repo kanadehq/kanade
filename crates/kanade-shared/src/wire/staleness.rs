@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// `Cached` and `Unchecked` carry no payload, so they collapse to
 /// just `staleness: { mode: cached }` / `staleness: { mode: unchecked }`.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, PartialEq, Eq, Default)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum Staleness {
     /// Use whatever the agent has cached for `script_current` /

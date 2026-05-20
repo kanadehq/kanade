@@ -46,13 +46,21 @@ pub async fn execute(backend_url: &str, args: JobArgs) -> Result<()> {
 
 async fn create(base: &str, yaml: &PathBuf) -> Result<()> {
     let body = std::fs::read_to_string(yaml).with_context(|| format!("read {yaml:?}"))?;
+    // Parse client-side so a malformed YAML errors before any HTTP
+    // round-trip — keeps the original error site obvious in operator
+    // shells — then POST the raw YAML body so the backend mirrors it
+    // verbatim into BUCKET_JOBS_YAML (preserves comments + block
+    // scalar indent across SPA edits). Pre-v0.31 backends only
+    // understood JSON content-type, but `application/yaml` is parsed
+    // identically on v0.31+, so the CLI sends YAML unconditionally.
     let job: Manifest = serde_yaml::from_str(&body).with_context(|| format!("parse {yaml:?}"))?;
     info!(job_id = %job.id, version = %job.version, "upserting job");
 
     let url = format!("{base}/api/jobs");
     let resp = crate::http_client::authed_client()?
         .post(&url)
-        .json(&job)
+        .header(reqwest::header::CONTENT_TYPE, "application/yaml")
+        .body(body)
         .send()
         .await
         .with_context(|| format!("POST {url}"))?;
