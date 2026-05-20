@@ -249,7 +249,7 @@ async fn upsert_inventory(
 ) -> Result<()> {
     // Validate the stdout is JSON before we store it — saves the
     // SPA from parsing garbage later.
-    let _facts: serde_json::Value = serde_json::from_str(&r.stdout)
+    let facts: serde_json::Value = serde_json::from_str(&r.stdout)
         .with_context(|| format!("manifest '{manifest_id}' stdout was not JSON"))?;
     let display_json = serde_json::to_string(&hint.display)?;
     let summary_json = hint
@@ -282,6 +282,55 @@ async fn upsert_inventory(
         manifest_id,
         "projected inventory fact",
     );
+
+    // v0.31 / #40: replace this PC's rows in each declared `explode`
+    // derived table. ensure_table is idempotent so a manifest that
+    // gained `explode` between the startup pass and this result
+    // still works. Failures per-spec are logged but don't bubble —
+    // one bad spec shouldn't take inventory_facts down with it.
+    if let Some(specs) = hint.explode.as_ref() {
+        for spec in specs {
+            // Cached: first delivery per spec pays the CREATE TABLE
+            // + CREATE INDEX cost; subsequent results just do an
+            // in-memory HashSet lookup. Pre-cache this was N DB
+            // round-trips per ExecResult per PC.
+            if let Err(e) = super::explode::ensure_table_cached(pool, spec).await {
+                warn!(
+                    error = %e,
+                    pc_id = %r.pc_id,
+                    manifest_id,
+                    table = %spec.table,
+                    "explode: ensure_table failed for this result; skipping",
+                );
+                continue;
+            }
+            match super::explode::replace_rows(
+                pool,
+                spec,
+                &r.pc_id,
+                manifest_id,
+                Some(r.finished_at),
+                &facts,
+            )
+            .await
+            {
+                Ok(n) => info!(
+                    pc_id = %r.pc_id,
+                    manifest_id,
+                    table = %spec.table,
+                    rows = n,
+                    "explode: derived rows refreshed",
+                ),
+                Err(e) => warn!(
+                    error = %e,
+                    pc_id = %r.pc_id,
+                    manifest_id,
+                    table = %spec.table,
+                    "explode: replace_rows failed for this result",
+                ),
+            }
+        }
+    }
     Ok(())
 }
 

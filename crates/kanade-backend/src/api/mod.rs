@@ -103,6 +103,13 @@ pub fn router(state: AppState) -> Router {
             "/api/inventory/by-job/{manifest_id}",
             get(inventory::list_for_job),
         )
+        // v0.31 / #40: cross-PC search over a derived `explode`
+        // table. `{field}` is the JSON array key, validated against
+        // the manifest's explode spec.
+        .route(
+            "/api/inventory/{manifest_id}/search/{field}",
+            get(inventory::search),
+        )
         .route("/api/inventory/{pc_id}", get(inventory::list_for_pc))
         .route("/api/agents/{pc_id}/logs", get(agent_logs::tail))
         .route("/api/agents/releases", get(agent_releases::list_releases))
