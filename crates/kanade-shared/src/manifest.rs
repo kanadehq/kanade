@@ -111,7 +111,17 @@ pub struct InventoryHint {
 /// EXISTS + indexes) and writes a row per element of
 /// `payload[field]` on every result, scoped by (pc_id, job_id) so
 /// each PC's rows replace cleanly without a per-PC schema.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+///
+/// v0.31.1: `schemars::JsonSchema` derive added so this type works
+/// inside [`InventoryHint`]'s derive expansion. The original v0.31.0
+/// release tag had the missing derive — release.yml's tag-driven
+/// build aborted at `the trait bound 'ExplodeSpec: JsonSchema' is
+/// not satisfied` because PR #82 (which added JsonSchema to
+/// InventoryHint) merged AFTER the inventory PRs that introduced
+/// ExplodeSpec, but the release PR's CI didn't auto-rerun against
+/// the post-#82 main. See README "v0.31.1" entry for the full
+/// retro.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
 pub struct ExplodeSpec {
     /// JSON array key under the payload to explode. E.g. `"apps"`
     /// for `payload: { apps: [{...}, {...}] }`.
@@ -152,7 +162,10 @@ pub struct ExplodeSpec {
 }
 
 /// One column in an [`ExplodeSpec`]'s derived table.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+///
+/// v0.31.1: JsonSchema derive added — same reason as
+/// [`ExplodeSpec`] above (release-blocker hotfix for v0.31.0).
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
 pub struct ExplodeColumn {
     /// JSON key under each array element. Becomes the column name
     /// in the derived SQLite table — we don't rename.
