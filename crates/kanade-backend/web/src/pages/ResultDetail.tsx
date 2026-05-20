@@ -15,12 +15,16 @@ type ResultDetailRow = {
   request_id: string;
   exec_id: string | null;
   pc_id: string;
-  exit_code: number;
+  /** v0.30 / PR α' unified: null while in-flight. */
+  exit_code: number | null;
   stdout: string;
   stderr: string;
   started_at: string | null;
+  /** v0.30 / PR α' unified: null while in-flight. */
   finished_at: string | null;
   job_id: string | null;
+  /** v0.30 / PR α' unified: pinned manifest version. */
+  version: string | null;
 };
 
 /**
@@ -79,7 +83,15 @@ export function ResultDetail() {
           <Field label="pc_id" value={<code>{data.pc_id}</code>} />
           <Field
             label="exit_code"
-            value={<Badge variant={data.exit_code === 0 ? 'success' : 'danger'}>{data.exit_code}</Badge>}
+            value={
+              data.exit_code === null ? (
+                <Badge variant="violet">running</Badge>
+              ) : (
+                <Badge variant={data.exit_code === 0 ? 'success' : 'danger'}>
+                  {data.exit_code}
+                </Badge>
+              )
+            }
           />
           <Field
             label="job_id"
@@ -103,8 +115,25 @@ export function ResultDetail() {
           />
           <Field label="request_id" value={<code className="text-xs">{data.request_id}</code>} />
           <Field label="result_id" value={<code className="text-xs">{data.result_id}</code>} />
+          <Field
+            label="version"
+            value={
+              data.version ? (
+                <code className="text-xs">{data.version}</code>
+              ) : (
+                <span className="text-muted text-xs">— (legacy row or no events.started)</span>
+              )
+            }
+          />
           <Field label="started_at" value={<span className="text-muted text-xs">{fmtIsoLocal(data.started_at)}</span>} />
-          <Field label="finished_at" value={<span className="text-muted text-xs">{fmtIsoLocal(data.finished_at)}</span>} />
+          <Field
+            label="finished_at"
+            value={
+              <span className="text-muted text-xs">
+                {data.finished_at ? fmtIsoLocal(data.finished_at) : 'running…'}
+              </span>
+            }
+          />
         </CardContent>
       </Card>
 

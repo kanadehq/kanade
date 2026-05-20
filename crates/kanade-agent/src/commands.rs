@@ -198,6 +198,46 @@ pub async fn handle_command(
         "executing command",
     );
     let started_at = chrono::Utc::now();
+    // v0.30 / PR α' unified: mint result_id once at the top of
+    // handle_command and thread it through both the EventStarted
+    // (script-spawn lifecycle event) and the ExecResult so the
+    // backend's UPSERT against `execution_results.result_id`
+    // coalesces both into a single row regardless of arrival order.
+    let result_id = Uuid::new_v4().to_string();
+
+    // Emit `events.started.<exec_id>.<pc_id>` BEFORE child spawn
+    // when the Command carries an exec_id (= deployment from
+    // `kanade exec` or scheduler tick, not ad-hoc `kanade run`).
+    // Goes through the file outbox so offline / mid-broker-outage
+    // runs still surface on reconnect. Outbox enqueue failures are
+    // warn-logged but never abort the run — losing the start
+    // lifecycle event means the row in execution_results is
+    // backfilled from the ExecResult side with default version etc.
+    if let Some(exec_id) = cmd.exec_id.as_deref() {
+        let event = kanade_shared::wire::EventStarted {
+            result_id: result_id.clone(),
+            request_id: cmd.request_id.clone(),
+            exec_id: exec_id.to_string(),
+            pc_id: pc_id.clone(),
+            started_at,
+            manifest_id: cmd.id.clone(),
+            version: cmd.version.clone(),
+        };
+        let events_outbox_dir = default_paths::data_dir().join("events-outbox");
+        match crate::events_outbox::enqueue(&events_outbox_dir, &event) {
+            Ok(p) => debug!(
+                result_id = %result_id,
+                events_outbox = %p.display(),
+                "started event enqueued (drain task delivers via JetStream)",
+            ),
+            Err(e) => warn!(
+                error = %e,
+                result_id = %result_id,
+                "events_outbox enqueue failed; in-flight view will not show this row until ExecResult lands",
+            ),
+        }
+    }
+
     let outcome = run_command_with_kill(&client, &cmd).await?;
     let finished_at = chrono::Utc::now();
 
@@ -230,12 +270,12 @@ pub async fn handle_command(
     };
 
     let result = ExecResult {
-        // v0.29 / Issue #19: mint per-(Command,PC) UUID so the
-        // projector's new PK survives broadcast Commands. Without
-        // this, two PCs replying to the same commands.all publish
-        // would collide on request_id and the projector would drop
-        // all but the first row again.
-        result_id: Uuid::new_v4().to_string(),
+        // v0.30 / PR α' unified: same `result_id` value used in the
+        // matching EventStarted above. Backend UPSERTs against
+        // `execution_results.result_id`, so the events.started
+        // insert and this ExecResult update coalesce into a single
+        // row regardless of arrival order.
+        result_id: result_id.clone(),
         request_id: cmd.request_id.clone(),
         // v0.29 / Issue #19: forward `Command.exec_id` so the backend
         // projector can increment `executions.success_count` /

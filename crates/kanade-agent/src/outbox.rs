@@ -64,13 +64,24 @@ pub fn enqueue(outbox_dir: &Path, result: &ExecResult) -> Result<PathBuf> {
 /// leave the file in place.
 pub fn spawn_drain(client: async_nats::Client, outbox_dir: PathBuf) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        // Pre-create the dir so the first enqueue + drain don't race.
-        if let Err(e) = std::fs::create_dir_all(&outbox_dir) {
-            warn!(error = %e, dir = %outbox_dir.display(), "outbox: create dir failed; drain task exiting");
-            return;
-        }
         let js = async_nats::jetstream::new(client);
+        // Mirroring events_outbox::spawn_drain (Gemini #73 high fix):
+        // retry mkdir on each loop iteration instead of dying forever.
+        // The original "die on mkdir failure" was a startup
+        // optimization but it makes a recoverable failure (permission
+        // / disk-full / parent-not-bootstrapped) permanent for the
+        // process — every subsequent enqueue would write to a dir
+        // the drain task gave up on.
         loop {
+            if let Err(e) = std::fs::create_dir_all(&outbox_dir) {
+                warn!(
+                    error = %e,
+                    dir = %outbox_dir.display(),
+                    "outbox: create dir failed; will retry next tick",
+                );
+                tokio::time::sleep(DRAIN_INTERVAL).await;
+                continue;
+            }
             drain_once(&js, &outbox_dir).await;
             tokio::time::sleep(DRAIN_INTERVAL).await;
         }
@@ -97,16 +108,18 @@ async fn drain_once(js: &async_nats::jetstream::Context, outbox_dir: &Path) {
     // perfect, but file mtime is more reliable).
     files.sort_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
 
+    // Mirroring events_outbox::drain_once (Gemini #73 high fix):
+    // don't `return` on a single file's failure — continue to
+    // subsequent files. Broker-down sweeps now log each (debug,
+    // low noise) before sleeping; the upside is that a single
+    // problematic file no longer pins the entire outbox behind it.
     for path in files {
         if let Err(e) = publish_one(js, &path).await {
-            // Stop on first failure — broker is probably down, no
-            // point hammering. Next drain tick will retry.
             debug!(
                 error = %e,
                 path = %path.display(),
-                "outbox: publish failed; will retry next tick",
+                "outbox: publish failed for this file; will retry next tick, continuing with others",
             );
-            return;
         }
     }
 }

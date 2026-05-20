@@ -7,6 +7,7 @@ mod process;
 mod self_update;
 
 mod command_replay;
+mod events_outbox;
 mod local_scheduler;
 mod outbox;
 mod staleness;
@@ -194,6 +195,14 @@ pub(crate) async fn run_agent() -> Result<()> {
     // periods longer than the async-nats client buffer.
     let outbox_dir = default_paths::data_dir().join("outbox");
     let _outbox_handle = outbox::spawn_drain(client.clone(), outbox_dir.clone());
+    // v0.30 / PR α' unified: parallel outbox for `EventStarted`
+    // lifecycle events (script-spawn time). Same atomic write +
+    // drain pattern as the ExecResult outbox; separate directory so
+    // existing v0.24 ExecResult files keep working unchanged across
+    // the upgrade.
+    let events_outbox_dir = default_paths::data_dir().join("events-outbox");
+    let _events_outbox_handle =
+        events_outbox::spawn_drain(client.clone(), events_outbox_dir.clone());
     // v0.23: schedules marked `runs_on: agent` tick locally so the
     // agent keeps firing even when the broker is unreachable. See
     // `crates/kanade-agent/src/local_scheduler.rs` for the flow.
