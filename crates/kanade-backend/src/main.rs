@@ -1,6 +1,7 @@
 mod api;
 mod audit;
 mod auth;
+mod cleanup;
 mod projector;
 mod scheduler;
 mod web;
@@ -179,6 +180,13 @@ pub(crate) async fn run_backend() -> Result<()> {
             }
         });
     }
+    // v0.30 follow-up: periodic housekeeping that flips long-stale
+    // `pending` executions to `expired`. Without this, fires whose
+    // ExecResult never lands (offline targets, `run_as: user` with
+    // no console session, agent died mid-script) pile up in the
+    // Jobs page live chip indefinitely. 5 min cadence; the function
+    // body details the policy.
+    let _cleanup_handle = cleanup::spawn(pool.clone());
 
     let app_state = api::AppState {
         pool: pool.clone(),
