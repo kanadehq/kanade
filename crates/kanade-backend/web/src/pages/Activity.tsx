@@ -20,6 +20,12 @@ import { fmtIsoLocal } from '@/lib/utils';
 /// /activity/{result_id} detail page in a new tab.
 const PREVIEW_CHARS = 200;
 
+/// First N characters of a UUID-shaped identifier (result_id /
+/// exec_id) shown in table cells; the full value is on the detail
+/// page. 8 chars × base16 = 32 bits of selectivity — plenty for
+/// disambiguating siblings in a single Activity window.
+const ID_PREVIEW_LENGTH = 8;
+
 type ResultRow = {
   /** v0.29 / Issue #19: agent-minted per-PC UUID and the detail-route
    *  identifier. Pre-v0.29 rows had result_id == request_id after the
@@ -252,6 +258,7 @@ export function Activity() {
               <TableHead>result_id</TableHead>
               <TableHead>pc_id</TableHead>
               <TableHead>job_id</TableHead>
+              <TableHead>exec_id</TableHead>
               <TableHead>exit</TableHead>
               <TableHead>started</TableHead>
               <TableHead>finished</TableHead>
@@ -273,7 +280,7 @@ export function Activity() {
                     className="text-accent hover:underline inline-flex items-center gap-1"
                     title="Open detail page (Ctrl/⌘+click for new tab)"
                   >
-                    <code className="text-xs">{r.result_id.slice(0, 8)}</code>
+                    <code className="text-xs">{r.result_id.slice(0, ID_PREVIEW_LENGTH)}</code>
                     <ExternalLink className="size-3" />
                   </Link>
                 </TableCell>
@@ -281,6 +288,11 @@ export function Activity() {
                 <TableCell>
                   {r.job_id
                     ? <code className="text-xs">{r.job_id}</code>
+                    : <span className="text-muted text-xs">—</span>}
+                </TableCell>
+                <TableCell>
+                  {r.exec_id
+                    ? <code className="text-xs">{r.exec_id.slice(0, ID_PREVIEW_LENGTH)}</code>
                     : <span className="text-muted text-xs">—</span>}
                 </TableCell>
                 <TableCell>
