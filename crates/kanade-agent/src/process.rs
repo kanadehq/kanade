@@ -10,6 +10,26 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command as ProcessCommand;
 use tracing::{info, warn};
 
+/// #43 / PR γ-bot-review: one source of truth for the PowerShell
+/// console-encoding prelude. Both the System path (this file) and the
+/// `run_as: user` path (`process_as_user.rs`) inject it, and the
+/// `powershell_prelude_forces_utf8_output` unit test asserts against
+/// this same constant — so if anyone tweaks the prelude shape in one
+/// place, the test catches drift automatically. Pre-fix the literal
+/// was duplicated three times.
+pub(crate) const POWERSHELL_UTF8_PRELUDE: &str = "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false; \
+     $OutputEncoding = [Console]::OutputEncoding; ";
+
+/// Wrap a user PowerShell script with [`POWERSHELL_UTF8_PRELUDE`] so the
+/// resulting `-Command` value forces UTF-8 on both `[Console]::OutputEncoding`
+/// and `$OutputEncoding` before the user script runs. User scripts can
+/// still override the encoding mid-run (assignment is just a property
+/// set), but the default for any script that doesn't touch encoding
+/// becomes UTF-8 instead of the system OEM codepage.
+pub(crate) fn with_powershell_utf8_prelude(user_script: &str) -> String {
+    format!("{POWERSHELL_UTF8_PRELUDE}{user_script}")
+}
+
 /// Outcome of a child-process run after kill / timeout / completion races.
 pub enum ExecOutcome {
     Completed {
@@ -58,11 +78,25 @@ pub async fn run_command_with_kill(
         return run_in_user_session_dispatch(client, cmd).await;
     }
 
+    // #43: belt-and-braces. The tolerant decoder (below, around the
+    // stdout_task / stderr_task spawn) keeps the capture useful even
+    // when PowerShell emits CP932; this prelude makes the child
+    // write UTF-8 to begin with, matching what the operator sees
+    // when they test the script locally with the same `powershell`
+    // binary. Combined, the agent's capture pipeline is both correct
+    // AND consistent with manifest authors' local-test results.
+    // cmd.exe doesn't have an equivalent one-liner that survives
+    // across legacy / unicode commands; the Cmd branch relies on the
+    // tolerant decoder alone.
+    let ps_script;
     let (program, args): (&str, Vec<&str>) = match cmd.shell {
-        Shell::Powershell => (
-            "powershell",
-            vec!["-NoProfile", "-NonInteractive", "-Command", &cmd.script],
-        ),
+        Shell::Powershell => {
+            ps_script = with_powershell_utf8_prelude(&cmd.script);
+            (
+                "powershell",
+                vec!["-NoProfile", "-NonInteractive", "-Command", &ps_script],
+            )
+        }
         Shell::Cmd => ("cmd", vec!["/C", &cmd.script]),
     };
     let mut builder = ProcessCommand::new(program);
@@ -101,19 +135,43 @@ pub async fn run_command_with_kill(
     let stdout_handle = child.stdout.take();
     let stderr_handle = child.stderr.take();
 
+    // #43: `read_to_string` is strict UTF-8 — a single invalid byte
+    // sequence makes it return `Err(InvalidData)` AND discard
+    // everything read so far. On ja-JP Windows that fires whenever
+    // a PowerShell child emits CP932-encoded Japanese on stdout
+    // (default `[Console]::OutputEncoding` is the system OEM
+    // codepage, not UTF-8). The whole inventory probe output was
+    // silently lost. Read as bytes + `String::from_utf8_lossy` so
+    // we keep every byte of useful output; invalid runs become
+    // U+FFFD and don't poison the rest of the capture. Same fix
+    // for any future locale / cmd-shell / 3rd-party tool that
+    // emits non-UTF-8 — not specific to PowerShell.
+    //
+    // Gemini #83 fix: return `(String, Option<Error>)` instead of
+    // `Result<String, Error>` so a mid-stream I/O failure (broken
+    // pipe, child crash partway through writing, etc.) preserves
+    // every byte we DID manage to read instead of throwing the
+    // partial buffer away with `?`. The caller logs the error +
+    // annotates stderr with a marker but keeps the partial capture.
     let stdout_task = tokio::spawn(async move {
-        let mut buf = String::new();
-        if let Some(mut s) = stdout_handle {
-            s.read_to_string(&mut buf).await?;
+        let mut buf = Vec::new();
+        let mut err: Option<anyhow::Error> = None;
+        if let Some(mut s) = stdout_handle
+            && let Err(e) = s.read_to_end(&mut buf).await
+        {
+            err = Some(anyhow::Error::new(e));
         }
-        Ok::<_, anyhow::Error>(buf)
+        (String::from_utf8_lossy(&buf).into_owned(), err)
     });
     let stderr_task = tokio::spawn(async move {
-        let mut buf = String::new();
-        if let Some(mut s) = stderr_handle {
-            s.read_to_string(&mut buf).await?;
+        let mut buf = Vec::new();
+        let mut err: Option<anyhow::Error> = None;
+        if let Some(mut s) = stderr_handle
+            && let Err(e) = s.read_to_end(&mut buf).await
+        {
+            err = Some(anyhow::Error::new(e));
         }
-        Ok::<_, anyhow::Error>(buf)
+        (String::from_utf8_lossy(&buf).into_owned(), err)
     });
 
     let timeout_dur = Duration::from_secs(cmd.timeout_secs.max(1));
@@ -168,14 +226,35 @@ pub async fn run_command_with_kill(
         }
     };
 
-    let stdout = stdout_task
+    // #43 / Gemini #83 fix: pre-fix `unwrap_or_default()` here
+    // silently swallowed the reader task's inner `anyhow::Error`
+    // (broken pipe, partial read on child crash, the now-impossible
+    // UTF-8 InvalidData, etc.) — producing `stdout: ""` with no log,
+    // no annotation. That's the worst kind of failure for a fleet
+    // tool: "exit 0 with empty capture" registers as a normal
+    // success. The reader tasks now return `(partial_string,
+    // Option<Error>)` so we KEEP whatever bytes we managed to read
+    // before the failure (`from_utf8_lossy` already applied) and
+    // additionally surface the error via warn-log + a marker in
+    // stderr so the result row is self-explanatory in the SPA /
+    // Activity detail view.
+    let (stdout, stdout_err) = stdout_task
         .await
-        .map_err(|e| anyhow::anyhow!("stdout task join: {e}"))?
-        .unwrap_or_default();
-    let stderr = stderr_task
+        .map_err(|e| anyhow::anyhow!("stdout task join: {e}"))?;
+    if let Some(e) = stdout_err {
+        warn!(error = %e, "stdout capture failed (kept partial)");
+    }
+    let (mut stderr, stderr_err) = stderr_task
         .await
-        .map_err(|e| anyhow::anyhow!("stderr task join: {e}"))?
-        .unwrap_or_default();
+        .map_err(|e| anyhow::anyhow!("stderr task join: {e}"))?;
+    if let Some(e) = stderr_err {
+        warn!(error = %e, "stderr capture failed (kept partial)");
+        // Append the marker AFTER the partial bytes so the partial
+        // capture stays first (operators read top-down). Newline
+        // separator handles the common case where the partial
+        // stream lacked a trailing \n.
+        stderr.push_str(&format!("\n[agent: stderr capture failed: {e}]\n"));
+    }
 
     Ok(match inner {
         OutcomeInner::Completed(code) => ExecOutcome::Completed {
@@ -268,5 +347,79 @@ async fn run_in_user_session_dispatch(
             b.abort();
         }
         outcome
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::io::AsyncReadExt;
+
+    /// Mirror the production stdout/stderr reader: read every byte
+    /// then `from_utf8_lossy`. Used to assert that invalid UTF-8
+    /// (e.g. CP932-encoded Japanese on a non-Unicode console)
+    /// doesn't wipe the capture the way `read_to_string` did pre-#43.
+    async fn capture_lossy<R: tokio::io::AsyncRead + Unpin>(mut r: R) -> String {
+        let mut buf = Vec::new();
+        r.read_to_end(&mut buf).await.unwrap();
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    #[tokio::test]
+    async fn cp932_japanese_bytes_are_kept_lossy_not_dropped() {
+        // CP932 (Shift-JIS) for "ちつ" — the byte sequence that
+        // triggers `read_to_string`'s strict-UTF-8 rejection.
+        // Pre-fix, the entire stdout buffer was discarded; post-
+        // fix, the bytes survive (as U+FFFD) and the rest of the
+        // payload around them stays intact.
+        let raw: Vec<u8> = vec![
+            b'{', b'"', b'k', b'"', b':', b'"', 0x82, 0xbf, 0x82, 0xc2, b'"', b'}',
+        ];
+        let captured = capture_lossy(tokio::io::BufReader::new(&raw[..])).await;
+        // The structural ASCII (`{"k":"…"}`) survives — that's
+        // what was being lost pre-fix.
+        assert!(captured.starts_with("{\"k\":\""), "ASCII frame preserved");
+        assert!(captured.ends_with("\"}"), "ASCII frame preserved");
+        // The Japanese bytes become U+FFFD replacement chars (not
+        // dropped silently).
+        assert!(captured.contains('\u{FFFD}'), "invalid runs marked");
+    }
+
+    #[tokio::test]
+    async fn pure_utf8_payload_round_trips() {
+        let raw = "こんにちは {\"ok\": true}".as_bytes().to_vec();
+        let captured = capture_lossy(tokio::io::BufReader::new(&raw[..])).await;
+        assert_eq!(captured, "こんにちは {\"ok\": true}");
+    }
+
+    #[tokio::test]
+    async fn empty_stream_yields_empty_string() {
+        let raw: Vec<u8> = Vec::new();
+        let captured = capture_lossy(tokio::io::BufReader::new(&raw[..])).await;
+        assert_eq!(captured, "");
+    }
+
+    #[test]
+    fn powershell_prelude_forces_utf8_output() {
+        // CodeRabbit #83 nitpick: assert against the production
+        // helper, not a duplicated literal. If anyone tweaks the
+        // prelude shape, both the production paths AND this test
+        // pick up the change automatically.
+        let user_script = "Write-Output 'hello'";
+        let combined = super::with_powershell_utf8_prelude(user_script);
+        assert!(combined.contains("[Console]::OutputEncoding"));
+        assert!(combined.contains("UTF8Encoding"));
+        assert!(combined.ends_with(user_script));
+    }
+
+    #[test]
+    fn powershell_prelude_constant_shape() {
+        // Defensive: ensures the prelude itself ends with `; ` (so
+        // the user script slots in cleanly without an explicit
+        // newline) and contains both the Console + $OutputEncoding
+        // statements operators expect when they read agent.log
+        // or the script that actually ran.
+        assert!(super::POWERSHELL_UTF8_PRELUDE.ends_with("; "));
+        assert!(super::POWERSHELL_UTF8_PRELUDE.contains("[Console]::OutputEncoding"));
+        assert!(super::POWERSHELL_UTF8_PRELUDE.contains("$OutputEncoding"));
     }
 }

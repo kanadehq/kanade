@@ -430,11 +430,25 @@ impl Drop for EnvBlockGuard {
 }
 
 fn build_command_line(cmd: &Command) -> Vec<u16> {
+    // #43: mirror the System-path UTF-8 prelude (process.rs) so a
+    // `run_as: user` PowerShell job sees the same console encoding
+    // contract as `run_as: system`. Without this, ja-JP / DE / KR
+    // / CN users hitting the user-session branch would still get
+    // CP932 / OEM bytes on stdout — and although our reader is
+    // already lossy here (the `read_to_string` helper does
+    // `from_utf8_lossy` since v0.21), the JSON inventory output
+    // becomes mojibake instead of clean text. Shared helper from
+    // `crate::process` so both spawn paths use the same prelude
+    // shape (CodeRabbit #83 nitpick: avoid duplicated literal).
+    let ps_script;
     let (program, args): (&str, Vec<&str>) = match cmd.shell {
-        Shell::Powershell => (
-            "powershell.exe",
-            vec!["-NoProfile", "-NonInteractive", "-Command", &cmd.script],
-        ),
+        Shell::Powershell => {
+            ps_script = crate::process::with_powershell_utf8_prelude(&cmd.script);
+            (
+                "powershell.exe",
+                vec!["-NoProfile", "-NonInteractive", "-Command", &ps_script],
+            )
+        }
         Shell::Cmd => ("cmd.exe", vec!["/C", &cmd.script]),
     };
     let mut full = OsString::from(program);
