@@ -1,0 +1,199 @@
+# Sample inventory probe — operator-customisable installed-software
+# snapshot delivered through the regular deploy + ExecResult pipeline.
+#
+# Pairs with `inventory-hw.yaml` (hardware snapshot). Same manifest
+# shape, same `kanade exec` / `kanade job create` workflow, just a
+# different scan target: three software sources are combined into a
+# single `apps[]` array —
+#
+#   * `x64`     — HKLM\...\Uninstall registry hive (native 64-bit installers)
+#   * `wow6432` — HKLM\WOW6432Node\... (32-bit-on-64-bit installers)
+#   * `appx`    — Get-AppxPackage -AllUsers (Windows Store / UWP packages,
+#                 framework + resource packages filtered out)
+#
+# Each entry's `source` field marks which scan produced it, so an
+# operator can filter to one origin (`source=appx`) or treat all three
+# uniformly. Without AppX, Store-installed apps (Calculator, the new
+# Edge, vendor UWP utilities) would be invisible to inventory — they
+# don't write to Uninstall hives.
+#
+# The `inventory:` section drives three SPA / API surfaces at once:
+#
+#   * `display: type: table` (v0.30 / #39) — renders `apps` as a
+#     nested sub-table on the per-PC `/inventory?pc=<id>` page.
+#
+#   * `explode:` (v0.31 / #40) — projector flattens `apps[]` into a
+#     real SQLite table (`inventory_sw_apps`) keyed by
+#     `(pc_id, job_id, key, source)`. `key` is the stable per-source
+#     id (registry's PSChildName, AppX's PackageFamilyName) — not the
+#     user-visible DisplayName, which can drift across version updates
+#     or language packs. Both `key` and `name` are indexed columns so
+#     operator searches that start from DisplayName work fast too.
+#
+#   * `track_history: true` (v0.31 / #41) — every install / uninstall
+#     / version-change becomes a row in `inventory_history`. Lets
+#     operators ask "when did Chrome 120 first appear on PC X" and
+#     "which PCs uninstalled $banned_app in the last 90 days." 90-day
+#     retention sweeper applies automatically.
+
+id: inventory-sw
+version: 0.1.0
+description: Installed software snapshot via Uninstall registry hives + AppX packages
+execute:
+  shell: powershell
+  # 120s — a fully-loaded dev box has 200-300 registry entries plus
+  # 50-100 AppX packages; the walks finish in a few seconds, but the
+  # timeout headroom protects against a stuck Get-ItemProperty on a
+  # corrupted key or a slow Get-AppxPackage on a degraded WinRT runtime.
+  timeout: 120s
+  script: |
+    $ErrorActionPreference = 'Stop'
+
+    # Three sources, mutually exclusive in identity (same DisplayName
+    # from a different source is a legitimately different row):
+    #
+    #   * `x64`     — HKLM\...\Uninstall    — native 64-bit installers
+    #   * `wow6432` — HKLM\WOW6432Node\...  — 32-bit-on-64-bit installers
+    #   * `appx`    — Get-AppxPackage       — Windows Store / UWP packages
+    #
+    # AppX needs Get-AppxPackage instead of registry walks because UWP
+    # packages don't write to Uninstall hives; their state lives in the
+    # AppX state repository.
+
+    # --- Registry hives ---
+    $hives = @(
+        @{ Path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*';            Source = 'x64'     }
+        @{ Path = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'; Source = 'wow6432' }
+    )
+
+    # Identity model (Gemini #99 review): use a stable per-source key
+    # — registry's PSChildName (the literal subkey name, e.g. a GUID
+    # like `{12345-...}` for MSI installers or `Microsoft Edge` for
+    # named keys) and AppX's PackageFamilyName (e.g.
+    # `Microsoft.WindowsCalculator_8wekyb3d8bbwe`, stable across
+    # version updates) — for primary identity, NOT the user-visible
+    # DisplayName / Name. DisplayName is non-unique (same DisplayName
+    # from x64 + appx is a real case, Microsoft.Edge being one) and
+    # can drift across versions / language packs / vendor renames,
+    # which would make `inventory_history` emit spurious "removed +
+    # added" pairs when nothing actually installed or uninstalled.
+    # `name` stays in the payload as a display field.
+    $registryApps = foreach ($hive in $hives) {
+        Get-ItemProperty -Path $hive.Path -ErrorAction SilentlyContinue |
+          Where-Object { $_.DisplayName } |
+          ForEach-Object {
+              [pscustomobject]@{
+                  source       = $hive.Source
+                  key          = [string]$_.PSChildName
+                  name         = [string]$_.DisplayName
+                  version      = if ($_.DisplayVersion) { [string]$_.DisplayVersion } else { '' }
+                  publisher    = if ($_.Publisher)      { [string]$_.Publisher }      else { '' }
+                  install_date = if ($_.InstallDate)    { [string]$_.InstallDate }    else { '' }
+              }
+          }
+    }
+
+    # --- AppX packages ---
+    # Filter out framework / resource packages (VCLibs, .NET Native
+    # runtime, language resources etc.) — those are dependency packages,
+    # not "installed apps" the operator would care about in inventory.
+    # `-AllUsers` requires admin; agent runs as SYSTEM so this is fine.
+    # PublisherDisplayName is the human-readable name; fall back to
+    # Publisher (CN=... DN string) when the manifest doesn't provide it.
+    # `key = PackageFamilyName` is stable across version updates;
+    # `PackageFullName` would change every update and is unsuitable as
+    # a history identity.
+    $appxApps = Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue |
+        Where-Object { -not $_.IsFramework -and -not $_.IsResourcePackage } |
+        ForEach-Object {
+            $pub = if ($_.PublisherDisplayName) { [string]$_.PublisherDisplayName }
+                   elseif ($_.Publisher)        { [string]$_.Publisher }
+                   else                         { '' }
+            [pscustomobject]@{
+                source       = 'appx'
+                key          = [string]$_.PackageFamilyName
+                name         = [string]$_.Name
+                version      = [string]$_.Version
+                publisher    = $pub
+                install_date = ''  # AppX doesn't expose install date directly
+            }
+        }
+
+    # CodeRabbit #99: defensive null filter — if Get-AppxPackage runs
+    # in a session where the AppX repository is unreachable / the
+    # registry walks return zero rows, ForEach-Object can emit `$null`
+    # entries that `@(...)` then preserves as a single-element array.
+    # Filtering them out keeps `inventory_sw_apps` from gaining a row
+    # whose every column is empty and history events pointing at a
+    # null identity.
+    $apps = @(@($registryApps) + @($appxApps) | Where-Object { $_ -ne $null })
+
+    # Sort by (source, key) for deterministic order — `key` is stable
+    # (Gemini #99), so two scans of an unchanged fleet produce
+    # byte-identical payloads.
+    [pscustomobject]@{
+        hostname  = $env:COMPUTERNAME
+        apps      = @($apps | Sort-Object -Property source, key)
+    } | ConvertTo-Json -Compress -Depth 5
+
+# Display config — same shape as inventory-hw.yaml.
+inventory:
+  display:
+    - { field: hostname, label: Hostname }
+    # #39: `type: table` → nested sub-table on the per-PC detail
+    # page. Operators see all installed apps inline without clicking
+    # through, with bytes / number formatters applying recursively if
+    # any column needs them (not the case for apps[] — all text).
+    - field: apps
+      label: Installed apps
+      type: table
+      columns:
+        - { field: source,       label: Source    }
+        - { field: name,         label: Name      }
+        - { field: version,      label: Version   }
+        - { field: publisher,    label: Publisher }
+        - { field: install_date, label: Installed }
+        # `key` shown last so the prominent columns stay the
+        # operator-friendly DisplayName + Version. The stable identity
+        # value (PSChildName / PackageFamilyName) is useful when a
+        # cross-PC search hits a name with multiple installs.
+        - { field: key,          label: Key       }
+  summary:
+    # Fleet view stays compact — just hostname. The Disks column
+    # collapsing to "N rows" pattern from inventory-hw doesn't apply
+    # here because operators almost never want to see app counts in
+    # the fleet roll-up (the search / history APIs are the right tool
+    # for that).
+    - { field: hostname, label: Hostname }
+  # #40: explode `apps[]` into a derived SQLite table so cross-PC
+  # queries like "which PCs run Chrome < 120" or "every machine
+  # missing $security_tool" are normal indexed SQL filters, not
+  # JSON greps. Index `name` since name-based queries are the most
+  # common shape.
+  #
+  # #41: track_history captures install / uninstall / version
+  # changes so the historical questions ("when did Chrome 120 first
+  # appear on PC X?", "fleet rollout curve") have data. 90-day
+  # retention sweeper applies automatically.
+  explode:
+    - field: apps
+      table: inventory_sw_apps
+      # Identity = (key, source). `key` is the per-source stable id —
+      # PSChildName for registry hives, PackageFamilyName for AppX —
+      # so version updates / language-pack name flips do NOT emit
+      # spurious "removed + added" history pairs (Gemini #99 review).
+      # `source` stays in the PK because the same key can occur in
+      # two sources (e.g. registry GUIDs are reused independently by
+      # x64 and wow6432).
+      # `name` is still indexed because operator searches typically
+      # start from DisplayName ("which PCs have Chrome installed?");
+      # `key` index handles cross-PC stable joins.
+      primary_key: [key, source]
+      track_history: true
+      columns:
+        - { field: source,       type: text                  }
+        - { field: key,          type: text,    index: true  }
+        - { field: name,         type: text,    index: true  }
+        - { field: version,      type: text                  }
+        - { field: publisher,    type: text                  }
+        - { field: install_date, type: text                  }
