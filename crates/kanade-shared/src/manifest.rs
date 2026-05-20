@@ -111,7 +111,7 @@ pub struct InventoryHint {
 /// EXISTS + indexes) and writes a row per element of
 /// `payload[field]` on every result, scoped by (pc_id, job_id) so
 /// each PC's rows replace cleanly without a per-PC schema.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
 pub struct ExplodeSpec {
     /// JSON array key under the payload to explode. E.g. `"apps"`
     /// for `payload: { apps: [{...}, {...}] }`.
@@ -152,7 +152,7 @@ pub struct ExplodeSpec {
 }
 
 /// One column in an [`ExplodeSpec`]'s derived table.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
 pub struct ExplodeColumn {
     /// JSON key under each array element. Becomes the column name
     /// in the derived SQLite table — we don't rename.
