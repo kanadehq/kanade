@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Ban, CircleCheck, Loader2, ScrollText, Skull, Trash2 } from 'lucide-react';
+import { Ban, CircleCheck, Hourglass, Loader2, Play, ScrollText, Skull, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 
 import { ErrorCard } from '@/components/ErrorCard';
@@ -195,21 +195,33 @@ export function Jobs() {
                 )}
               </TableCell>
               <TableCell>
-                {/* v0.30: per-cmd live counters — running = at least
-                    one result landed, more in flight; pending = fan
-                    -out published but no result yet. Both zero =
-                    idle, render as a muted dash to keep the row
-                    visually quiet. */}
+                {/* v0.30 follow-up: compact icon + count chips so
+                    both running + pending fit in a narrow column
+                    without wrapping to two lines. Tooltips carry
+                    the full semantics. Stale `pending` rows (= fire
+                    whose ExecResult never landed within 1 h) flip
+                    to `expired` via the backend cleanup task and
+                    drop out of this chip automatically. */}
                 {j.live.running > 0 || j.live.pending > 0 ? (
-                  <div className="flex gap-1 flex-wrap">
+                  <div className="flex gap-1.5 items-center">
                     {j.live.running > 0 && (
-                      <Badge variant="violet" title="executions with at least one result back, more in flight">
-                        running: {j.live.running}
+                      <Badge
+                        variant="violet"
+                        title="Running: at least one PC has reported back, more still in flight"
+                        className="inline-flex items-center gap-1 px-1.5"
+                      >
+                        <Play className="size-3" />
+                        {j.live.running}
                       </Badge>
                     )}
                     {j.live.pending > 0 && (
-                      <Badge variant="secondary" title="executions published, no results back yet">
-                        pending: {j.live.pending}
+                      <Badge
+                        variant="secondary"
+                        title="Pending: fan-out published, no results back yet (auto-expires after 1 h)"
+                        className="inline-flex items-center gap-1 px-1.5"
+                      >
+                        <Hourglass className="size-3" />
+                        {j.live.pending}
                       </Badge>
                     )}
                   </div>
@@ -234,23 +246,23 @@ export function Jobs() {
                 {j.description ?? '—'}
               </TableCell>
               <TableCell className="flex flex-wrap gap-2">
-                {/* v0.30 / PR γ: kill is the per-cmd Layer 3
-                    abort — terminates every running OR pending
-                    exec for this cmd (the backend handler SELECTs
-                    `status IN ('pending', 'running')`, so the SPA
-                    matches that scope). Greyed out only when both
-                    are zero so the operator can also abort a
-                    just-fired deployment before any result has
-                    landed. The confirm dialog spells out that
-                    kill does NOT prevent the next schedule fire —
-                    that's revoke's job. */}
+                {/* v0.30 follow-up: render each action ONLY when
+                    actionable for the current row state. The old
+                    "always render, disable when N/A" layout left
+                    4 buttons stacked 2×2 for every row regardless
+                    of whether unrevoke or kill applied — visually
+                    busy and hard to scan. Now:
+                      * kill: shown only when something is in flight
+                      * revoke: shown only when active
+                      * unrevoke: shown only when revoked
+                      * delete: always (it's the last-resort op) */}
                 {(() => {
                   const inflight = j.live.running + j.live.pending;
-                  return (
+                  return inflight > 0 ? (
                     <Button
                       variant="danger"
                       size="sm"
-                      disabled={pendingKill.has(j.id) || inflight === 0}
+                      disabled={pendingKill.has(j.id)}
                       onClick={() => {
                         if (
                           window.confirm(
@@ -264,46 +276,46 @@ export function Jobs() {
                         )
                           kill.mutate(j.id);
                       }}
-                      title={
-                        inflight === 0
-                          ? 'Nothing in flight for this job right now'
-                          : `Terminate ${inflight} in-flight run${inflight === 1 ? '' : 's'}`
-                      }
+                      title={`Terminate ${inflight} in-flight run${inflight === 1 ? '' : 's'}`}
                     >
                       <Skull className="size-3.5" />
                       kill
                     </Button>
-                  );
+                  ) : null;
                 })()}
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  disabled={pendingRevoke.has(j.id) || isRevoked(j.id)}
-                  onClick={() => {
-                    if (
-                      window.confirm(
-                        `Revoke ${j.id}?\n\n` +
-                          `Blocks the script from running on agents. Any pending or in-flight run for this job will be skipped instead of executed, and new fires will refuse to run until you unrevoke it.\n\n` +
-                          `Reversible — click "unrevoke" to undo.`,
+                {!isRevoked(j.id) && (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={pendingRevoke.has(j.id)}
+                    onClick={() => {
+                      if (
+                        window.confirm(
+                          `Revoke ${j.id}?\n\n` +
+                            `Blocks the script from running on agents. Any pending or in-flight run for this job will be skipped instead of executed, and new fires will refuse to run until you unrevoke it.\n\n` +
+                            `Reversible — click "unrevoke" to undo.`,
+                        )
                       )
-                    )
-                      revoke.mutate(j.id);
-                  }}
-                  title={isRevoked(j.id) ? 'Already revoked' : 'Block this script from running'}
-                >
-                  <Ban className="size-3.5" />
-                  revoke
-                </Button>
+                        revoke.mutate(j.id);
+                    }}
+                    title="Block this script from running"
+                  >
+                    <Ban className="size-3.5" />
+                    revoke
+                  </Button>
+                )}
+                {isRevoked(j.id) && (
                 <Button
                   variant="secondary"
                   size="sm"
-                  disabled={pendingUnrevoke.has(j.id) || !isRevoked(j.id)}
+                  disabled={pendingUnrevoke.has(j.id)}
                   onClick={() => unrevoke.mutate(j.id)}
-                  title={isRevoked(j.id) ? 'Allow this script to run again' : 'Already active'}
+                  title="Allow this script to run again"
                 >
                   <CircleCheck className="size-3.5" />
                   unrevoke
                 </Button>
+                )}
                 <Button
                   variant="danger"
                   size="sm"
