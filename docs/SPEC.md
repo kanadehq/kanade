@@ -345,8 +345,8 @@ mgmtctl logs <deploy_id>        # 結果ログ取得
 |---|---|
 | `inventory.{pc_id}.{category}` | インベントリ (category: hw, sw, net, driver 等) |
 | `events.{pc_id}.{type}` | リアルタイムイベント (power.on, session.signin 等) |
-| `events.notifications.acked.{pc_id}.{notif_id}` | ユーザーが Client App で通知を確認した記録 |
-| `events.notifications.dismissed.{pc_id}.{notif_id}` | ユーザーが通知を閉じた記録 (require_ack=false 時) |
+| `events.notifications.acked.{pc_id}.{user_sid}.{notif_id}` | ユーザーが Client App で通知を確認した記録 (`{user_sid}` で同 PC 複数ユーザーを識別) |
+| `events.notifications.dismissed.{pc_id}.{user_sid}.{notif_id}` | ユーザーが通知を閉じた記録 (require_ack=false 時) |
 | `results.{request_id}` | コマンド実行結果 |
 | `heartbeat.{pc_id}` | 死活確認 (定期) |
 
@@ -394,7 +394,7 @@ heartbeat.>     # 全死活
 | `script_current` | `{cmd_id}` | バージョン文字列 | 現行有効バージョン |
 | `script_status` | `{cmd_id}` | `"ACTIVE"` / `"REVOKED"` | 緊急停止フラグ |
 | `schedules` | `{schedule_id}` | JSON (cron, target) | スケジュール定義 (`kanade schedule create` → backend HTTP → このバケット) |
-| `notifications_read` | `{pc_id}.{notification_id}` | JSON (`{"acked_at": ..., "acked_by": "<sid>"}`) | エンドユーザー既読状態。Agent が KLP `notifications.ack` を受けて書き込み、SPA から確認状況を参照 |
+| `notifications_read` | `{pc_id}.{user_sid}.{notification_id}` | JSON (`{"acked_at": ..., "acked_by": "<sid>"}`) | エンドユーザー既読状態 (per-user)。Agent が KLP `notifications.ack` を受けて接続元 SID 付きで書き込み、SPA から確認状況を参照。`{pc_id}.{user_sid}.` プレフィクスで該当ユーザーの既読一覧を効率取得 |
 
 NATS KV のバケット名は domain-safe ASCII (英数 + `_-`) のみで `.` 不可。仕様初期に書いた `script.current` 等は実装では underscore form (`script_current`) に正規化されている。配送ジョブ進捗 (`deployments`) は SQLite に projection するので KV ではなく Stream + projector 経由 (§2.3.4)。
 
@@ -1420,7 +1420,7 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\Run
 
 **配布**: MSI パッケージ (WiX) で `Per-Machine` インストール + **ActiveSetup** で各ユーザー初回ログオン時にショートカット + Run キーを展開。Agent と同じ MSI に同梱しても、別 MSI に分けてもよい。
 
-**自己アップデート**: Tauri の updater は使わず、**Agent の self-update と同じ Object Store 経路** (`client_releases` bucket) で配布する。Client は KLP で「自分のバージョン更新が必要か」 を Agent に問い合わせ、Agent が新バイナリを `%TEMP%` に落として `kanade-client.exe` を停止 → swap → 再起動 (権限不要、ユーザー領域内で完結)。
+**自己アップデート**: Tauri の updater は使わず、**Agent の self-update と同じ Object Store 経路** (`client_releases` bucket) で配布する。Client は KLP で「自分のバージョン更新が必要か」 を Agent に問い合わせ、Agent (`LocalSystem`) が新バイナリを Object Store からダウンロード → 起動中の `kanade-client.exe` を停止 → `C:\Program Files\Kanade\` 配下を swap → 再起動。Swap 自体は `Program Files` への書き込みで特権が必要だが、これは **Agent が自身の権限で実施するため、エンドユーザーへの UAC 昇格要求は発生しない**。
 
 ## 2.12 KLP (Kanade Local Protocol)
 
@@ -1572,7 +1572,9 @@ A→C {"jsonrpc":"2.0","method":"notifications.new",
 C→A {"jsonrpc":"2.0","id":"u4","method":"notifications.ack",
      "params":{"id":"notif-9f3a"}}
 A→C {"jsonrpc":"2.0","id":"u4","result":{"acked_at":"2026-05-20T12:00:05Z"}}
-// ↑ Agent は内部で events.notifications.acked.PC1234.notif-9f3a を NATS publish
+// ↑ Agent は接続元の SID を OS から取得し、内部で
+//    events.notifications.acked.PC1234.S-1-5-21-...-1001.notif-9f3a を NATS publish
+//    (同じ PC の別ユーザーの ack と衝突しないよう {user_sid} を subject に含める)
 ```
 
 ### 2.12.9 Error Model
