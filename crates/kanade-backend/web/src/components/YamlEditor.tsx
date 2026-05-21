@@ -110,6 +110,11 @@ export default function YamlEditor({
       path={path}
       value={value}
       onChange={(next) => onChange(next ?? '')}
+      // Hard-pin `vs-dark` because the kanade SPA is dark-only today;
+      // Monaco's default `vs` (light) renders white-on-white against
+      // the app's dark chrome. When the SPA gains a light/dark toggle
+      // (tracked alongside i18n), this should follow the same source.
+      theme="vs-dark"
       options={{
         minimap: { enabled: false },
         fontSize: 13,

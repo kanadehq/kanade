@@ -330,10 +330,10 @@ export function Jobs() {
                         )
                           kill.mutate(j.id);
                       }}
-                      title={`Terminate ${inflight} in-flight run${inflight === 1 ? '' : 's'}`}
+                      title={`kill — terminate ${inflight} in-flight run${inflight === 1 ? '' : 's'}`}
+                      aria-label={`kill job ${j.id}`}
                     >
                       <Skull className="size-3.5" />
-                      kill
                     </Button>
                   ) : null;
                 })()}
@@ -341,10 +341,10 @@ export function Jobs() {
                   variant="secondary"
                   size="sm"
                   onClick={() => setEditor({ type: 'edit', id: j.id })}
-                  title="Edit this job's YAML manifest"
+                  title="edit — open this job's YAML manifest"
+                  aria-label={`edit job ${j.id}`}
                 >
                   <Pencil className="size-3.5" />
-                  edit
                 </Button>
                 {!isRevoked(j.id) && (
                   <Button
@@ -361,10 +361,10 @@ export function Jobs() {
                       )
                         revoke.mutate(j.id);
                     }}
-                    title="Block this script from running"
+                    title="revoke — block this script from running"
+                    aria-label={`revoke job ${j.id}`}
                   >
                     <Ban className="size-3.5" />
-                    revoke
                   </Button>
                 )}
                 {isRevoked(j.id) && (
@@ -373,10 +373,10 @@ export function Jobs() {
                   size="sm"
                   disabled={pendingUnrevoke.has(j.id)}
                   onClick={() => unrevoke.mutate(j.id)}
-                  title="Allow this script to run again"
+                  title="unrevoke — allow this script to run again"
+                  aria-label={`unrevoke job ${j.id}`}
                 >
                   <CircleCheck className="size-3.5" />
-                  unrevoke
                 </Button>
                 )}
                 <Button
@@ -393,9 +393,10 @@ export function Jobs() {
                     )
                       del.mutate(j.id);
                   }}
+                  title="delete — remove this job from the catalog"
+                  aria-label={`delete job ${j.id}`}
                 >
                   <Trash2 className="size-3.5" />
-                  delete
                 </Button>
               </TableCell>
             </TableRow>

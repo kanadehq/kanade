@@ -211,10 +211,10 @@ export function Schedules() {
                   variant="secondary"
                   size="sm"
                   onClick={() => setEditor({ type: 'edit', id: s.id })}
-                  title="Edit this schedule's YAML"
+                  title="edit — open this schedule's YAML"
+                  aria-label={`edit schedule ${s.id}`}
                 >
                   <Pencil className="size-3.5" />
-                  edit
                 </Button>
                 {s.enabled ? (
                   // v0.33 — merged the two "disable" buttons (Soft +
@@ -231,10 +231,10 @@ export function Schedules() {
                         variant="secondary"
                         size="sm"
                         disabled={pendingDisable.has(s.id)}
-                        title="Disable this schedule"
+                        title="disable — open soft / hard menu"
+                        aria-label={`disable menu for schedule ${s.id}`}
                       >
                         <PowerOff className="size-3.5" />
-                        disable
                         <ChevronDown className="size-3" />
                       </Button>
                     </DropdownMenuTrigger>
@@ -280,10 +280,10 @@ export function Schedules() {
                     size="sm"
                     disabled={pendingEnable.has(s.id)}
                     onClick={() => enable.mutate(s.id)}
-                    title="Re-enable this schedule"
+                    title="enable — re-enable this schedule"
+                    aria-label={`enable schedule ${s.id}`}
                   >
                     <Power className="size-3.5" />
-                    enable
                   </Button>
                 )}
                 <Button
@@ -293,9 +293,10 @@ export function Schedules() {
                   onClick={() => {
                     if (window.confirm(`Delete schedule ${s.id}?`)) del.mutate(s.id);
                   }}
+                  title="delete — remove this schedule"
+                  aria-label={`delete schedule ${s.id}`}
                 >
                   <Trash2 className="size-3.5" />
-                  delete
                 </Button>
               </TableCell>
             </TableRow>
