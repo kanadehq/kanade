@@ -1,0 +1,48 @@
+# Schedule wrapper that fires the registered job `inventory-hw` (see
+# `configs/jobs/inventory-hw.yaml`) on a 30-minute tick with a per-PC
+# 6-hour cooldown.
+#
+# Why the tick is denser than the cooldown:
+#   * `mode: once_per_pc` + `cooldown: 6h` means each PC's effective
+#     scan interval is 6h, but the scheduler re-evaluates every 30
+#     min and picks up PCs whose 6h window has elapsed. The net effect
+#     is "scan every PC roughly every 6h, but a PC that came online
+#     mid-window catches up at the next 30-min tick, not the next 6h
+#     one." Lower wake-up latency for offline-then-online machines
+#     without paying the storage/network cost of a true 30-min sweep.
+#   * Without the cooldown, every tick would re-fire and 3000 PCs
+#     would each run Get-CimInstance every 30 min — much higher load
+#     than necessary for hardware that barely changes between scans.
+#
+# Order of operations:
+#
+#   1. Register the job:
+#         kanade job create configs/jobs/inventory-hw.yaml
+#   2. Register this schedule:
+#         kanade schedule create configs/schedules/inventory-hw.yaml
+#
+# Editing the job afterwards (via `kanade job create ...` again) takes
+# effect on the next scheduled tick — no schedule re-create needed.
+
+id: inventory-hw
+cron: "0 */30 * * * *"   # every 30 min (sec min hour day month dow)
+enabled: true
+job_id: inventory-hw
+# v0.18: target lives on the schedule, not the job. Same job_id can
+# be wrapped in multiple schedules with different target/cadence.
+target:
+  all: true
+# Each PC re-fires only after its previous scan succeeded ≥6h ago.
+# `cooldown` requires `once_per_pc` / `once_per_target`; with the
+# default `every_tick` it has no effect.
+mode: once_per_pc
+cooldown: 6h
+# Stagger agent start times by up to 5 min so 3000 PCs don't all
+# run Get-CimInstance at the same wall-clock instant.
+jitter: 5m
+# Optional: replace `target` semantics with wave fanout.
+# rollout:
+#   strategy: wave
+#   waves:
+#     - { group: canary, delay: 0s }
+#     - { group: wave1,  delay: 5m }

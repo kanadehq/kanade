@@ -205,9 +205,12 @@ export function Inventory() {
           <CardHeader>
             <CardTitle>No inventory probes configured</CardTitle>
             <CardDescription>
-              Ship a probe with{' '}
-              <code>kanade schedule create configs/schedules/hourly-inventory.yaml</code>
-              {' '}from the repo, or roll your own in <code>configs/jobs/</code>.
+              Ship the bundled probes with{' '}
+              <code>kanade schedule create configs/schedules/inventory-hw.yaml</code>
+              {' '}and{' '}
+              <code>kanade schedule create configs/schedules/inventory-sw.yaml</code>
+              {' '}(hardware + installed-software snapshots), or roll your own in{' '}
+              <code>configs/jobs/</code>.
             </CardDescription>
           </CardHeader>
         </Card>
