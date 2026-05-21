@@ -28,6 +28,7 @@
   - [2.9 監視・運用](#29-監視運用)
   - [2.10 デプロイ構成とサイジング](#210-デプロイ構成とサイジング)
   - [2.11 リポジトリ・ディレクトリ構成](#211-リポジトリディレクトリ構成)
+  - [2.12 KLP (Kanade Local Protocol)](#212-klp-kanade-local-protocol)
 
 ---
 
@@ -259,6 +260,71 @@ mgmtctl logs <deploy_id>        # 結果ログ取得
 
 **型共有**: `ts-rs` で Rust の API 型から TS 型を自動生成
 
+### 2.1.5 Client App (`kanade-client`)
+
+**役割**: エンドユーザー (Windows PC 利用者、**管理者権限なし**) が自分の端末状態を把握し、管理者からの通知を受け、許可された範囲のソフトウェア更新・トラブルシューティングを自分で実行するための GUI フロントエンド。
+
+特権操作 (Office 修復、サービス再起動、レジストリ書き換え等) はすべて `LocalSystem` で動く Agent 側で実行され、Client App は UI 入力と進捗表示のみを担当する。これにより「**管理者権限を持たないエンドユーザーが自力で復旧操作を完結できる**」 を実現する。
+
+**起動形態**: ユーザーセッション上の常駐プロセス。
+- タスクトレイ常駐 + 必要時にウィンドウを開く
+- ログオン時自動起動 (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 経由)
+- MSI でのマシン全体インストール時に **ActiveSetup** で全ユーザー初回ログオン時に自動展開
+
+**実装**: **Tauri 2.x** (Rust backend + WebView2 frontend)
+- フロント: 既存 SPA (`crates/kanade-backend/web`) と同じ TS スタックを再利用、共通コンポーネントは別 crate / npm workspace に切り出して共有
+- Rust 側: `kanade-shared` 経由で型共有 (KLP の各 method 型を ts-rs export して TS から `import type` で参照)
+
+**主な責務**:
+
+1. **通知 (Notification) 表示**
+   - 起動時に未読通知があれば自動表示
+   - 過去メッセージ一覧 (既読/未読)、検索・フィルタ
+   - `priority: emergency` はモーダル + 「確認」 ボタン強制 (`require_ack: true`)
+   - 確認操作を Agent → NATS `events.notifications.acked.{pc_id}.{notif_id}` で SPA に流す ⇒ SPA 側で「該当ユーザーが何時何分に確認したか」 を追える
+
+2. **端末ヘルス・状態表示**
+   - ネットワーク / VPN 接続状態 (リアルタイム)
+   - インストール済ソフトウェアのバージョン (最新? 更新待ち?)
+   - 「**コンプライアンスチェック**」 として 5〜10 項目を ✅/⚠️/❌ 表示:
+     BitLocker 有効、AV 最新、OS パッチ最新、証明書期限 30 日超、ディスク空き 10% 超、Agent self-update 完了、等
+   - NG 項目には「修復する」 ボタン (該当する troubleshoot job をキック)
+
+3. **ソフトウェアアップデート (セルフサービス)**
+   - Manifest で `user_invokable: true` + `category: software_update` な job を「アップデート」 タブに表示
+   - ユーザーがクリック → KLP `jobs.execute` → Agent IPC 経由で `commands.pc.{pc_id}` publish → 実行は `LocalSystem` の Agent が行う (**権限昇格不要**)
+   - 進捗バー + 完了通知 + SPA への結果反映 (既存 `results.>` 経路)
+
+4. **トラブルシューティング**
+   - `category: troubleshoot` な job を「困ったとき」 タブに表示 (Teams キャッシュクリア、Office 修復、ネットワークアダプタ再起動 等)
+   - 同上の KLP 経由実行。`run_as: user` の項目はユーザーセッション側で、`run_as: system` の項目は LocalSystem で実行
+
+5. **サポート連絡 + 診断ログ収集**
+   - 「サポートに問い合わせる」 ボタン → KLP `support.upload_diagnostics` → Agent が `{pc_id, recent_inventory, last_N_events, agent_log_tail}` を Object Store にアップロード + チケット起票
+   - ヘルプデスクの初動が劇的に短縮
+
+6. **メンテナンス予約・延期申請**
+   - 自分の端末に予定された job 一覧 (今後 N 日)
+   - 配信された再起動通知の延期申請 (15分 / 30分 / 1時間)
+
+**追加候補機能** (将来):
+- パスワード期限通知 (AD 連携 or Windows API)
+- VPN / プロキシのワンクリック再接続
+- フィッシング報告ボタン (`events.security.report.{pc_id}` 起票)
+- セルフサービスソフトウェアカタログ (`category: catalog`)
+- 言語切替 (ja/en) + ダーク/ライトテーマ
+
+**設計原則**:
+
+- **NATS には直接繋がない**。NATS 認証情報 (mTLS 証明書) は LocalSystem Agent が独占管理し、Client は **KLP (§2.12)** 経由でのみ Agent と話す。
+- **特権操作は全て Agent 側**。Client は UI とユーザー入力検証のみ。
+- **OS 認証を信用する**。Client が payload に user_id を埋めても Agent は無視し、IPC 接続元 token から取った SID を使う。
+- **マルチユーザー対応**。Fast User Switching / RDP で複数ユーザーが同時にログオンしている場合、Agent は session 別に Client 接続を識別し、通知は session 単位で fan-out。
+
+**設定ファイル**: `%APPDATA%\Kanade\client.toml` (ユーザー別)
+**ログ出力先**: `%LOCALAPPDATA%\Kanade\logs\client.log`
+**バイナリ配置**: `C:\Program Files\Kanade\kanade-client.exe`
+
 ## 2.2 NATS Subject 設計
 
 ### 2.2.1 配信系 (Backend → Agent)
@@ -269,6 +335,9 @@ mgmtctl logs <deploy_id>        # 結果ログ取得
 | `commands.group.{group_name}` | グループ単位コマンド (canary, wave1 等) |
 | `commands.pc.{pc_id}` | 個別端末向けコマンド |
 | `commands.deploy.{job_id}` | 配信ジョブ (バージョン管理対象) |
+| `notifications.all` | 全台向け通知 (エンドユーザー向け、Client App で表示) |
+| `notifications.group.{group_name}` | グループ単位通知 |
+| `notifications.pc.{pc_id}` | 個別端末向け通知 |
 
 ### 2.2.2 報告系 (Agent → Backend)
 
@@ -276,6 +345,8 @@ mgmtctl logs <deploy_id>        # 結果ログ取得
 |---|---|
 | `inventory.{pc_id}.{category}` | インベントリ (category: hw, sw, net, driver 等) |
 | `events.{pc_id}.{type}` | リアルタイムイベント (power.on, session.signin 等) |
+| `events.notifications.acked.{pc_id}.{user_sid}.{notif_id}` | ユーザーが Client App で通知を確認した記録 (`{user_sid}` で同 PC 複数ユーザーを識別) |
+| `events.notifications.dismissed.{pc_id}.{user_sid}.{notif_id}` | ユーザーが通知を閉じた記録 (require_ack=false 時) |
 | `results.{request_id}` | コマンド実行結果 |
 | `heartbeat.{pc_id}` | 死活確認 (定期) |
 
@@ -309,8 +380,9 @@ heartbeat.>     # 全死活
 | `RESULTS` | `results.>` | コマンド実行結果履歴 | 30 日 |
 | `AUDIT` | `audit.>` | 監査ログ (Backend が publish) | 永続 |
 | `DEPLOY` | `commands.deploy.>` | 配信ジョブ (MaxMsgsPerSubject=1) | 7 日 |
+| `NOTIFICATIONS` | `notifications.>` | エンドユーザー向け通知履歴 (Client App 過去メッセージ表示用) | 90 日 |
 
-`DEPLOY` のみ `MaxMsgsPerSubject=1` + `DiscardPolicy::Old` で「同一 job_id の最新版のみ保持」を実現する。
+`DEPLOY` のみ `MaxMsgsPerSubject=1` + `DiscardPolicy::Old` で「同一 job_id の最新版のみ保持」を実現する。`NOTIFICATIONS` は履歴として全件残し、Client App が起動時に未読分を fetch する。
 
 ### 2.3.2 JetStream KV (現在状態)
 
@@ -322,6 +394,7 @@ heartbeat.>     # 全死活
 | `script_current` | `{cmd_id}` | バージョン文字列 | 現行有効バージョン |
 | `script_status` | `{cmd_id}` | `"ACTIVE"` / `"REVOKED"` | 緊急停止フラグ |
 | `schedules` | `{schedule_id}` | JSON (cron, target) | スケジュール定義 (`kanade schedule create` → backend HTTP → このバケット) |
+| `notifications_read` | `{pc_id}.{user_sid}.{notification_id}` | JSON (`{"acked_at": ..., "acked_by": "<sid>"}`) | エンドユーザー既読状態 (per-user)。Agent が KLP `notifications.ack` を受けて接続元 SID 付きで書き込み、SPA から確認状況を参照。`{pc_id}.{user_sid}.` プレフィクスで該当ユーザーの既読一覧を効率取得 |
 
 NATS KV のバケット名は domain-safe ASCII (英数 + `_-`) のみで `.` 不可。仕様初期に書いた `script.current` 等は実装では underscore form (`script_current`) に正規化されている。配送ジョブ進捗 (`deployments`) は SQLite に projection するので KV ではなく Stream + projector 経由 (§2.3.4)。
 
@@ -449,6 +522,13 @@ execute:
   jitter: 5m                    # 0 〜 5 分のランダム遅延
   run_as: system                # system / user
 
+# --- エンドユーザー Client App からのキック許可 (Sprint 8) ---
+user_invokable: false           # true なら Client App の「アップデート / トラブルシュート」 タブに出現
+category: troubleshoot          # software_update / troubleshoot / catalog (user_invokable=true 時のみ意味あり)
+display_name: "Temp フォルダのクリーンアップ"  # Client App での表示名 (省略時は id)
+display_description: "..."      # Client App でのツールチップ
+icon: "broom"                   # Client App でのアイコン名 (任意)
+
 rollout:                        # 配信戦略 (省略可)
   strategy: wave
   waves:
@@ -461,6 +541,32 @@ on_failure:
   alert: slack                  # slack / email / none
 
 require_approval: true          # 本番配信時に承認必須
+```
+
+**`user_invokable` フィールド**:
+- デフォルト `false` (= 従来通り、operator 起動のみ)
+- `true` の job のみ KLP `jobs.execute` 経由で実行可。Agent 側で manifest を必ず再 lookup し、`user_invokable: false` への変更が即時反映される
+- `category` でユーザー向けタブ分け: `software_update` (Chrome 更新等)、`troubleshoot` (Office 修復等)、`catalog` (任意導入アプリ)
+- `display_name` / `display_description` / `icon` は Client App UI 専用フィールド (operator UI には影響なし)
+
+**通知 Manifest** (`notifications/*.yaml`):
+
+```yaml
+id: maintenance-2026-05-20      # 必須、notification_id として使用
+priority: emergency             # info / warning / emergency
+require_ack: true               # true なら Client App でモーダル + 確認ボタン強制
+title: "緊急: ネットワーク機器メンテ"
+body: |
+  本日 22:00 から 30 分間、VPN が停止します。
+  作業中の方は事前に保存をお願いします。
+issued_by: "infra-team"
+issued_at: "2026-05-20T12:00:00+09:00"
+expires_at: "2026-05-20T23:00:00+09:00"  # 過ぎたら Client App で表示しない
+
+target:                         # job manifest と同じ形
+  groups: [tokyo-office]
+  # pcs: [PC1234]
+  # all: true
 ```
 
 ### 2.4.2 グループメンバシップ (Sprint 5 以降: server-managed)
@@ -1293,6 +1399,284 @@ C:\ProgramData\Mgmt\logs\
 - `ProgramData` は全ユーザ共通、`LocalSystem` 権限でアクセス可
 - バックアップ対象は `C:\ProgramData\Mgmt\` 配下を丸ごとで OK
 
+### 2.11.6 Client App 配置 (Windows)
+
+```
+C:\Program Files\Kanade\
+└── kanade-client.exe           # Tauri バイナリ (WebView2 ランタイムは OS 既定)
+
+%APPDATA%\Kanade\               # = C:\Users\<user>\AppData\Roaming\Kanade
+└── client.toml                 # ユーザー設定 (言語、テーマ、起動時挙動等)
+
+%LOCALAPPDATA%\Kanade\          # = C:\Users\<user>\AppData\Local\Kanade
+├── logs\
+│   └── client.log
+└── cache\                      # 通知の既読状態キャッシュ等 (Agent KV が source of truth)
+
+# 自動起動レジストリ
+HKCU\Software\Microsoft\Windows\CurrentVersion\Run
+└── KanadeClient = "C:\Program Files\Kanade\kanade-client.exe" --tray
+```
+
+**配布**: MSI パッケージ (WiX) で `Per-Machine` インストール + **ActiveSetup** で各ユーザー初回ログオン時にショートカット + Run キーを展開。Agent と同じ MSI に同梱しても、別 MSI に分けてもよい。
+
+**自己アップデート**: Tauri の updater は使わず、**Agent の self-update と同じ Object Store 経路** (`client_releases` bucket) で配布する。Client は KLP で「自分のバージョン更新が必要か」 を Agent に問い合わせ、Agent (`LocalSystem`) が新バイナリを Object Store からダウンロード → 起動中の `kanade-client.exe` を停止 → `C:\Program Files\Kanade\` 配下を swap → 再起動。Swap 自体は `Program Files` への書き込みで特権が必要だが、これは **Agent が自身の権限で実施するため、エンドユーザーへの UAC 昇格要求は発生しない**。
+
+## 2.12 KLP (Kanade Local Protocol)
+
+Client App ⇄ Agent の IPC プロトコル。OS の認証機構をそのまま使い、追加の鍵管理を不要にする。「**エンドユーザーに NATS credentials を渡さない**」 をハードに守るための層。
+
+### 2.12.1 Transport
+
+| OS | エンドポイント |
+|---|---|
+| Windows | Named Pipe `\\.\pipe\kanade-agent` |
+| Linux | Unix Domain Socket `/run/kanade/agent.sock` |
+| macOS (将来) | Unix Domain Socket `/var/run/kanade/agent.sock` |
+
+**ACL**:
+- Windows: Pipe security descriptor を `Authenticated Users` に RW、`Everyone` / `Anonymous` は拒否
+- Linux: ファイルパーミッション `0660`、`kanade-users` グループ所属のみアクセス可
+
+Agent は **1 listener、複数同時接続** を受け付ける (Fast User Switching / RDP の同時セッション対応)。
+
+### 2.12.2 Framing
+
+- **Length-prefix**: 4-byte little-endian `u32` (本体のバイト長)
+- **Body**: UTF-8 JSON 文字列
+- 最大メッセージサイズ: 1 MiB (`stdout_chunk` は分割すること)
+
+```
+[len: 4 bytes LE u32] [body: len bytes UTF-8 JSON]
+[len: 4 bytes LE u32] [body: len bytes UTF-8 JSON]
+...
+```
+
+### 2.12.3 Protocol
+
+**JSON-RPC 2.0** ([spec](https://www.jsonrpc.org/specification))。3 種類のメッセージ:
+
+| 種別 | 形状 | 用途 |
+|---|---|---|
+| Request | `{jsonrpc, id, method, params}` | Client → Agent、応答待ち |
+| Response | `{jsonrpc, id, result \| error}` | Agent → Client、Request への応答 |
+| Notification | `{jsonrpc, method, params}` (id なし) | 双方向 push (server push 含む) |
+
+Request の `id` は Client 採番 (**UUID v7 推奨** — 時系列ソート可、ログとの相関容易)。
+
+### 2.12.4 Authentication / Authorization
+
+- Connect 時に Agent が **OS から接続元 token を取得**:
+  - Windows: `GetNamedPipeClientProcessId()` → `OpenProcessToken()` → `GetTokenInformation(TokenUser, TokenSessionId)` で SID + Session ID
+  - Linux: `SO_PEERCRED` で UID + PID
+- **Payload に user_id を入れない** (Agent は OS 由来の SID/UID を真とみなす)
+- 各 method ごとに以下を強制:
+  - `jobs.execute`: manifest に `user_invokable: true` 必須 (false なら `IpcError::Unauthorized`)
+  - `jobs.kill`: 自分の接続で投げた `run_id` のみ kill 可
+  - `notifications.ack`: 自分宛 (`pc` / 自分の所属 `group` / `all`) のみ ack 可
+- レート制限: 1 接続あたり 60 req/min を超えたら `-32003 RateLimit`
+
+### 2.12.5 Method 名前空間 (v1)
+
+| Method | 種別 | 用途 |
+|---|---|---|
+| `system.handshake` | req-rep | プロトコルバージョン交渉 (接続後 1 回目に必ず呼ぶ) |
+| `system.ping` | req-rep | 死活 |
+| `system.version` | req-rep | Agent + Client App バージョン |
+| `system.log_tail` | req-rep | agent.log の末尾 N 行 (サポート問い合わせ用) |
+| `state.snapshot` | req-rep | 端末ヘルス + inventory + コンプライアンスチェックの一括スナップショット |
+| `state.subscribe` | req-rep | `state.changed` 購読開始 |
+| `state.changed` | push (A→C) | health / vpn / version 等の状態変化 |
+| `notifications.list` | req-rep | 過去通知一覧 (paginated, filter: unread/all) |
+| `notifications.subscribe` | req-rep | `notifications.new` 購読開始 |
+| `notifications.new` | push (A→C) | 新着通知 (emergency 含む) |
+| `notifications.ack` | req-rep | 既読化 (Agent → NATS `events.notifications.acked.>` publish) |
+| `jobs.list` | req-rep | `user_invokable: true` な manifest 一覧 (filter: category) |
+| `jobs.execute` | req-rep | 実行依頼。返り値は `run_id` |
+| `jobs.subscribe` | req-rep | `jobs.progress` 購読開始 |
+| `jobs.progress` | push (A→C) | stdout chunk / exit code / status 変化 |
+| `jobs.kill` | req-rep | 自接続で投げた run の停止 |
+| `support.upload_diagnostics` | req-rep | サポート問い合わせ用 zip を Object Store にアップロード |
+| `maintenance.list` | req-rep | 今後 N 日に予定された自端末向け job 一覧 |
+| `maintenance.defer` | req-rep | 配信された再起動の延期申請 (15m/30m/1h) |
+
+### 2.12.6 Handshake (接続後最初に必ず呼ぶ)
+
+```jsonc
+C→A {"jsonrpc":"2.0","id":"01931a8e-...","method":"system.handshake",
+     "params":{"client":"kanade-client","client_version":"0.1.0",
+               "protocol":[1], "features":["push.notifications","push.jobs","push.state"]}}
+
+A→C {"jsonrpc":"2.0","id":"01931a8e-...",
+     "result":{"protocol":1, "agent_version":"0.4.0",
+               "features":["push.notifications","push.jobs","push.state","support.diagnostics"],
+               "session":{"user":"DOMAIN\\alice","session_id":2,"pc_id":"PC1234"}}}
+```
+
+- `protocol`: Client が話せるバージョンの配列。Agent が話せる最大版を選んで `result.protocol` で返す。合意できなければ `-32004 StaleProtocol`
+- `features`: optional method の availability。後方互換のため追加機能は **features bit** で表明する
+- Handshake 未完了の状態で他 method を呼ぶと `-32600 InvalidRequest`
+
+### 2.12.7 Subscription Lifecycle
+
+```jsonc
+// 購読開始
+C→A {"jsonrpc":"2.0","id":"...","method":"notifications.subscribe"}
+A→C {"jsonrpc":"2.0","id":"...","result":{"subscription":"sub-n-1"}}
+
+// push (id なし notification)
+A→C {"jsonrpc":"2.0","method":"notifications.new",
+     "params":{"id":"notif-9f3a","priority":"emergency","require_ack":true,
+               "title":"...","body":"...","issued_at":"..."}}
+
+// 購読停止
+C→A {"jsonrpc":"2.0","id":"...","method":"notifications.unsubscribe",
+     "params":{"subscription":"sub-n-1"}}
+A→C {"jsonrpc":"2.0","id":"...","result":null}
+```
+
+- 切断時は Agent 側で **その接続の全 subscription を自動解除**
+- 再接続時は Client が再度 `subscribe` を呼ぶ。漏れた push は Agent 側の **未 ack KV (`notifications_read` の欠落)** から `notifications.list` で再構築できるので、push の at-most-once 保証で OK
+
+### 2.12.8 完全な対話例 (緊急通知)
+
+```jsonc
+// 接続 → handshake
+C→A {"jsonrpc":"2.0","id":"u1","method":"system.handshake",
+     "params":{"client":"kanade-client","client_version":"0.1.0","protocol":[1],
+               "features":["push.notifications","push.jobs"]}}
+A→C {"jsonrpc":"2.0","id":"u1",
+     "result":{"protocol":1,"agent_version":"0.4.0",
+               "features":["push.notifications","push.jobs","push.state"],
+               "session":{"user":"DOMAIN\\alice","session_id":2,"pc_id":"PC1234"}}}
+
+// state.snapshot (起動時の一括取得)
+C→A {"jsonrpc":"2.0","id":"u2","method":"state.snapshot"}
+A→C {"jsonrpc":"2.0","id":"u2",
+     "result":{"pc_id":"PC1234","online":true,"vpn":"connected",
+               "checks":[{"name":"bitlocker","status":"ok"},
+                         {"name":"av_signature","status":"warn","detail":"3 日前"}],
+               "agent_version":"0.4.0","target_version":"0.4.0"}}
+
+// 通知 subscribe
+C→A {"jsonrpc":"2.0","id":"u3","method":"notifications.subscribe"}
+A→C {"jsonrpc":"2.0","id":"u3","result":{"subscription":"sub-n-1"}}
+
+// 緊急通知が飛んでくる
+A→C {"jsonrpc":"2.0","method":"notifications.new",
+     "params":{"id":"notif-9f3a","priority":"emergency","require_ack":true,
+               "title":"緊急: ネットワーク機器メンテ","body":"22時から30分停止します",
+               "issued_at":"2026-05-20T12:00:00Z","issued_by":"infra-team"}}
+
+// ユーザーが「確認」ボタンを押した
+C→A {"jsonrpc":"2.0","id":"u4","method":"notifications.ack",
+     "params":{"id":"notif-9f3a"}}
+A→C {"jsonrpc":"2.0","id":"u4","result":{"acked_at":"2026-05-20T12:00:05Z"}}
+// ↑ Agent は接続元の SID を OS から取得し、内部で
+//    events.notifications.acked.PC1234.S-1-5-21-...-1001.notif-9f3a を NATS publish
+//    (同じ PC の別ユーザーの ack と衝突しないよう {user_sid} を subject に含める)
+```
+
+### 2.12.9 Error Model
+
+```jsonc
+{"jsonrpc":"2.0","id":"u5","error":{
+  "code": -32000,
+  "message": "Job not user-invokable",
+  "data": {"kind":"Unauthorized","detail":"manifest 'reboot' has user_invokable=false"}
+}}
+```
+
+| Code | Kind | 意味 |
+|---|---|---|
+| -32700 | ParseError | JSON parse 失敗 |
+| -32600 | InvalidRequest | JSON-RPC envelope が不正 / handshake 未完了 |
+| -32601 | MethodNotFound | 未知 method |
+| -32602 | InvalidParams | params の型 mismatch |
+| -32603 | InternalError | Agent 側 panic / 想定外 |
+| -32000 | Unauthorized | 認可エラー (user_invokable=false / 他人の run_id 等) |
+| -32001 | NotFound | job_id / run_id / notif_id 不在 |
+| -32002 | AgentDisconnected | Agent ↔ NATS が断、操作不可 |
+| -32003 | RateLimit | 1 接続あたりの req/sec 超過 |
+| -32004 | StaleProtocol | handshake で合意した version と非互換 |
+| -32005 | PayloadTooLarge | 1 MiB 上限超過 |
+
+### 2.12.10 Reconnection Policy (Client 側)
+
+| 状況 | Client 側挙動 |
+|---|---|
+| 初回接続失敗 | exponential backoff (1s, 2s, 4s, ..., cap 30s) で再試行 |
+| 接続中の切断 | 即座に再接続 → handshake → `state.snapshot` → 各種 `subscribe` を張り直す |
+| Agent 起動前 (boot 時の race) | 上記 backoff で待つ |
+| Pipe / Socket が存在しない | Agent service が停止中。トレイアイコンを ⚠️ 表示、「Agent サービスを開始してください」 案内 |
+
+### 2.12.11 Schema 共有
+
+KLP の全 method の params / result 型は `kanade-shared/src/ipc/` に Rust 構造体として置く:
+
+```rust
+// crates/kanade-shared/src/ipc/methods.rs
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
+
+#[derive(Serialize, Deserialize, TS, Debug)]
+#[ts(export, export_to = "ipc/")]
+#[serde(rename_all = "snake_case")]
+pub enum JobCategory {
+    SoftwareUpdate,
+    Troubleshoot,
+    Catalog,
+}
+
+#[derive(Serialize, Deserialize, TS, Debug)]
+#[ts(export, export_to = "ipc/")]
+pub struct UserInvokableJob {
+    pub id: String,
+    pub display_name: String,
+    pub display_description: Option<String>,
+    pub icon: Option<String>,
+    pub category: JobCategory,
+    pub version: String,
+    pub last_run: Option<JobRun>,
+}
+
+#[derive(Serialize, Deserialize, TS, Debug)]
+#[ts(export, export_to = "ipc/")]
+pub struct ExecuteJobParams {
+    pub id: String,
+}
+
+#[derive(Serialize, Deserialize, TS, Debug)]
+#[ts(export, export_to = "ipc/")]
+pub struct JobProgress {
+    pub run_id: String,
+    pub status: RunStatus,                   // Queued | Running | Completed | Failed | Killed
+    pub stdout_chunk: Option<String>,
+    pub stderr_chunk: Option<String>,
+    pub exit_code: Option<i32>,
+}
+```
+
+`ts-rs` で `bindings/ipc/*.ts` に export → Tauri webview の TS から `import type` で参照。**Rust ⇄ Rust (Agent ⇄ Client backend) ⇄ TS (WebView) で単一スキーマ**。API ミスマッチが起こり得ない。
+
+### 2.12.12 Observability
+
+- Agent 側 `tracing` で `klp.request.{method}` span を出す
+- Client 採番の `request_id` を span attribute に乗せる
+- KLP 経由のリクエストを SQLite `audit_log` に **operator 起動と同じ扱いで記録** する (`actor = "user:DOMAIN\\alice@PC1234"`)
+
+### 2.12.13 実装責務分担
+
+| 責務 | 配置 |
+|---|---|
+| KLP listener (Pipe / UDS) | `crates/kanade-agent/src/klp/server.rs` |
+| OS token → SID/UID 取得 | `crates/kanade-agent/src/klp/auth.rs` (cfg(windows) / cfg(unix)) |
+| Method ディスパッチ + ハンドラ | `crates/kanade-agent/src/klp/handlers/*.rs` |
+| 共有型 (params / result / error) | `crates/kanade-shared/src/ipc/` (ts-rs export) |
+| KLP client (Rust 側) | `crates/kanade-client/src-tauri/src/klp_client.rs` |
+| Tauri command bridge | `crates/kanade-client/src-tauri/src/commands.rs` |
+| WebView 側 (TS) | `crates/kanade-client/web/src/lib/klp.ts` |
+
 ---
 
 ## 付録: 実装ロードマップ
@@ -1356,6 +1740,30 @@ C:\ProgramData\Mgmt\logs\
 - [ ] NATS 3 ノードクラスタ
 - [ ] Backend 冗長化 + LB
 - [ ] SQLite → Postgres 移行 (必要時)
+
+### Sprint 8 (v0.4.0): Client App + KLP (エンドユーザー向け)
+
+- [ ] `crates/kanade-shared/src/ipc/` — KLP v1 の params / result / error 型定義 + ts-rs export
+- [ ] Agent: KLP listener (Named Pipe / UDS) + OS token 認証 + subscription manager
+- [ ] Agent: `klp::handlers` (state / notifications / jobs / support / maintenance)
+- [ ] Manifest schema 拡張: `user_invokable` / `category` / `display_name` / `display_description` / `icon`
+- [ ] Notification Manifest (`notifications/*.yaml`) + `NOTIFICATIONS` Stream + `notifications_read` KV bucket
+- [ ] Backend HTTP API: `POST /api/notifications` (publish), `GET /api/notifications/{id}/ack_status` (確認状況)
+- [ ] SPA に通知タブ追加 (作成・送信先指定・確認状況一覧)
+- [ ] `crates/kanade-client` skeleton (Tauri 2.x)
+- [ ] Client App: handshake / トレイ常駐 / 起動時未読通知ポップアップ / モーダル (emergency)
+- [ ] Client App: 通知タブ / 状態タブ (コンプライアンスチェック) / アップデートタブ / トラブルシュートタブ
+- [ ] Client App: サポート問い合わせ (`support.upload_diagnostics`) + メンテ予約延期 (`maintenance.defer`)
+- [ ] MSI パッケージング (WiX) + ActiveSetup によるユーザー初回ログオン時の自動展開
+- [ ] Client App 自己アップデート (`client_releases` Object Store bucket)
+
+### Sprint 8.5: Client App 拡張機能 (順次)
+
+- [ ] パスワード期限通知 (AD 連携 or Windows API)
+- [ ] VPN / プロキシのワンクリック再接続
+- [ ] フィッシング報告ボタン (`events.security.report.{pc_id}`)
+- [ ] セルフサービスソフトウェアカタログ (`category: catalog`)
+- [ ] 言語切替 (ja/en) + ダーク/ライトテーマ
 
 ---
 
