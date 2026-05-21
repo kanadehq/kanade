@@ -1,5 +1,5 @@
 preset = "github.com/yukimemi/pj-presets:rust-workspace"
-applied_at = "2026-05-21T10:51:10.9892076Z"
+applied_at = "2026-05-21T13:39:20.3241429Z"
 
 [[templates]]
 source = "github.com/yukimemi/pj-base"
@@ -13,8 +13,8 @@ version = "0.5.0"
 
 [[templates]]
 source = "github.com/yukimemi/pj-rust-workspace"
-rev = "cf94698558193fb6d1a9ec8d76a7ba8312baa062"
-version = "0.2.0"
+rev = "e775e7a0b157dd4c2eb7a32ff1a7b8922f20eeea"
+version = "0.3.0"
 
 [files.".agents/skills/renri/SKILL.md"]
 once_applied = true
@@ -41,7 +41,7 @@ content_hash = "38a5b230fa55a4bcad0dc5315ac2784524ca8685b4b0d471b49e6aca335b037f
 content_hash = "20d2b132c11cb0a2f382a24d0f8617411dea5565324a5405900fcc8ce4e842f6"
 
 [files.".github/workflows/release.yml"]
-once_applied = true
+content_hash = "be9919b6b6ba63d777c5c960c667bcb57390f5e6e7a4b5b7eb11103f3216c2a6"
 
 [files.".gitignore"]
 content_hash = "4bebd1c3417c33f9d1c51f011694f6d82b098bbb1a5a102ba56e97ab01a866ef"
