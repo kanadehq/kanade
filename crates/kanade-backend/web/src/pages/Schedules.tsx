@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { FilePlus2, Loader2, Pencil, Power, PowerOff, Trash2, Zap } from 'lucide-react';
+import { ChevronDown, FilePlus2, Loader2, Pencil, Power, PowerOff, Trash2, Zap } from 'lucide-react';
 import { useState } from 'react';
 
 import { ErrorCard } from '@/components/ErrorCard';
@@ -7,6 +7,13 @@ import { type EditorMode, YamlEditorDialog } from '@/components/YamlEditorDialog
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { apiFetch } from '@/lib/api';
 
@@ -210,37 +217,63 @@ export function Schedules() {
                   edit
                 </Button>
                 {s.enabled ? (
-                  <>
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      disabled={pendingDisable.has(s.id)}
-                      onClick={() => disable.mutate({ id: s.id, cascade: false })}
-                      title="Soft disable — cron stops on next tick. In-flight Commands run."
-                    >
-                      <PowerOff className="size-3.5" />
-                      disable
-                    </Button>
-                    <Button
-                      variant="danger"
-                      size="sm"
-                      disabled={pendingDisable.has(s.id)}
-                      onClick={() => {
-                        if (
-                          window.confirm(
-                            `Hard-disable schedule ${s.id}?\n\n` +
-                              `Stops the cron from firing AND blocks any pending or in-flight run from this schedule's job. Use this when an active rollout needs to stop immediately.\n\n` +
-                              `The referenced job (${s.job_id}) will be marked revoked — you can unrevoke it from the Jobs page later if needed.`,
+                  // v0.33 — merged the two "disable" buttons (Soft +
+                  // Hard cascade) into one split-button dropdown so the
+                  // Actions column stops wrapping to two rows. The
+                  // dropdown puts both choices on screen at the same
+                  // time with a one-line explainer, which reads more
+                  // safely than two adjacent buttons where the
+                  // operator might mistake the destructive variant for
+                  // the soft one.
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        disabled={pendingDisable.has(s.id)}
+                        title="Disable this schedule"
+                      >
+                        <PowerOff className="size-3.5" />
+                        disable
+                        <ChevronDown className="size-3" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem
+                        onSelect={() => disable.mutate({ id: s.id, cascade: false })}
+                      >
+                        <PowerOff className="size-4 mt-0.5 shrink-0" />
+                        <div className="flex flex-col gap-0.5">
+                          <span>Soft disable</span>
+                          <span className="text-xs text-muted">
+                            cron stops on next tick; in-flight runs continue
+                          </span>
+                        </div>
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem
+                        variant="danger"
+                        onSelect={() => {
+                          if (
+                            window.confirm(
+                              `Hard-disable schedule ${s.id}?\n\n` +
+                                `Stops the cron from firing AND blocks any pending or in-flight run from this schedule's job. Use this when an active rollout needs to stop immediately.\n\n` +
+                                `The referenced job (${s.job_id}) will be marked revoked — you can unrevoke it from the Jobs page later if needed.`,
+                            )
                           )
-                        )
-                          disable.mutate({ id: s.id, cascade: true });
-                      }}
-                      title="Hard disable — stops cron AND blocks pending/in-flight runs"
-                    >
-                      <Zap className="size-3.5" />
-                      disable + cascade
-                    </Button>
-                  </>
+                            disable.mutate({ id: s.id, cascade: true });
+                        }}
+                      >
+                        <Zap className="size-4 mt-0.5 shrink-0" />
+                        <div className="flex flex-col gap-0.5">
+                          <span>Hard disable (cascade revoke)</span>
+                          <span className="text-xs text-muted">
+                            stops cron AND blocks pending / in-flight runs
+                          </span>
+                        </div>
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                 ) : (
                   <Button
                     variant="secondary"
