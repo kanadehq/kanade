@@ -1,158 +1,202 @@
-name: Release to crates.io
+# This workflow is kata-managed by yukimemi/pj-rust-workspace; the
+# render source lives at `.github/workflows/release.yml.template`
+# upstream and the `.template` suffix keeps GitHub Actions from
+# running it inside this repo (same trick `ci.yml.template` uses).
+# Edits in the consumer PJ survive subsequent `kata apply`s because
+# template.toml registers this file with `when = "once"`.
+#
+# Workspace-shaped release pipeline. The same file works across every
+# yukimemi/* Rust workspace repo with no per-PJ patching — every
+# project-specific bit (binary names, publishable library list,
+# inter-crate dep order) is discovered from `cargo metadata` at run
+# time:
+#   * `cargo build --release --workspace --bins` builds every
+#     `[[bin]]` target in the workspace.
+#   * `jq` filters `cargo metadata`'s package list down to those
+#     with `kind: ["bin"]` and stages them under `dist/` with a
+#     per-target filename suffix (`<bin>-<target>` on Unix,
+#     `<bin>-<target>.exe` on Windows).
+#   * The release job downloads every matrix artifact and uploads
+#     them to a GitHub Release. `generate_release_notes: true` lets
+#     GitHub auto-summarise PRs and contributors since the previous
+#     tag — no per-PJ `body:` override needed.
+#   * The publish job topo-sorts every workspace member with a
+#     `publish` field that allows crates.io (i.e. not `publish:
+#     false` / `publish: []`) and `cargo publish --locked -p` each
+#     in dependency order, so a member that depends on another
+#     doesn't try to publish before its dep is on the registry.
+#
+# Each consumer repo needs the `CARGO_REGISTRY_TOKEN` secret set
+# (e.g. `gh secret set CARGO_REGISTRY_TOKEN`) before the first tag
+# push, or set `package.publish = false` on every member to skip
+# the publish job entirely.
 
-# Publish all four kanade crates to crates.io when a `v*` tag is pushed.
-# Internal `kanade-shared` dep is declared with both `path` and `version`
-# so cargo publish keeps the version on the published manifest while
-# local builds keep using the path.
-#
-# Requires the `CARGO_REGISTRY_TOKEN` repo secret (cargo login output).
-#
-# Run on Windows so the kanade-agent verify step can compile the
-# wmi crate (Windows-only dep). Publishing itself is OS-agnostic.
+name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    tags: ["v*.*.*"]
   workflow_dispatch:
 
 permissions:
-  contents: write  # upload binaries to the GitHub Release
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
-  # crates.io publish is OS-agnostic and only needs to run once per
-  # tag, so keep it on a single Windows runner (cargo publish
-  # --verify of kanade-agent needs to compile the wmi crate, which
-  # only resolves on a Windows target).
-  #
-  # `needs: build-artifacts` so a per-OS compile failure (e.g.
-  # an import that only resolves on one target — the pelite::pe
-  # path in v0.13.1, the inventory::serve_requests stub in v0.11.2)
-  # short-circuits the workflow BEFORE pushing immutable bytes to
-  # crates.io. Costs ~5 min latency for a release, buys the
-  # invariant "if it's on crates.io, every supported OS could
-  # build it."
-  publish-crates:
-    needs: build-artifacts
-    runs-on: windows-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v6.0.2
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Cache cargo registry + build
-        uses: Swatinem/rust-cache@v2.9.1
-        # rust-cache restore has flaked on transient GH Actions cache
-        # backend errors before; fall through to a cold cargo build
-        # instead of failing the whole release pipeline.
-        continue-on-error: true
-
-      # Re-build the SPA bundle before any cargo step touches
-      # kanade-backend. The committed web/dist/ is what cargo would
-      # otherwise package, and a stale dist (e.g., operator forgot
-      # to run `cargo make web-build` before bumping) shouldn't slip
-      # through to crates.io. bun's install + Vite build adds ~30s.
-      - uses: oven-sh/setup-bun@v2
-      - name: Build SPA bundle
-        working-directory: crates/kanade-backend/web
-        run: |
-          bun install --frozen-lockfile
-          bun run build
-
-      - name: Publish kanade-shared
-        run: cargo publish -p kanade-shared --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Wait for crates.io index to settle
-        shell: bash
-        run: sleep 60
-
-      - name: Publish kanade-agent
-        run: cargo publish -p kanade-agent --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      # --allow-dirty because the SPA bundle was just (re-)built in the
-      # step above — the freshly-generated `web/dist/` carries
-      # different content-hash filenames than whatever the committer
-      # had locally, so cargo's clean-tree check is guaranteed-stale
-      # for kanade-backend specifically. The published crate IS the
-      # CI-built bundle by design (rust-embed bakes it in at compile
-      # time); committing the local dist is only for `cargo run`
-      # convenience on the maintainer's box.
-      - name: Publish kanade-backend
-        run: cargo publish -p kanade-backend --allow-dirty --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Publish kanade (CLI)
-        run: cargo publish -p kanade --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-  # Build native release binaries on every supported OS and attach
-  # them to the GitHub Release. kanade-agent's wmi / windows-service
-  # crates are target_os="windows" gated, so the binary compiles
-  # cleanly on Linux / macOS — it just does nothing useful there
-  # (no WMI inventory, no SCM hooks). Backend + CLI work on all 3.
-  #
-  # This job is now the gating step for `publish-crates` (see above)
-  # — fail-fast across the OS matrix to abort the release early when
-  # a Linux- or macOS-only compile error sneaks in.
-  build-artifacts:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
-            asset_suffix: '.exe'
-            target_label: 'windows'
-          - os: ubuntu-latest
-            asset_suffix: ''
-            target_label: 'linux'
-          - os: macos-latest
-            asset_suffix: ''
-            target_label: 'macos-arm64'
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2.9.1
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-        continue-on-error: true
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
 
-      # rust-embed bakes web/dist/ into kanade-backend.exe at compile
-      # time. Build the SPA fresh on each runner before cargo builds
-      # so the artefact uploaded to the Release page carries the
-      # bundle produced from this exact commit (rather than whatever
-      # was last `cargo make web-build`-ed locally and committed).
-      - uses: oven-sh/setup-bun@v2
-      - name: Build SPA bundle
-        working-directory: crates/kanade-backend/web
+      - name: Build workspace binaries
+        run: cargo build --release --workspace --bins --target ${{ matrix.target }}
+
+      - name: Stage release artifacts
         shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
         run: |
-          bun install --frozen-lockfile
-          bun run build
-
-      - name: Build release binaries
-        run: cargo build --release --workspace --bins
-
-      # Rename per-OS for the release page. Windows keeps the bare
-      # `kanade-agent.exe` form to stay backwards-compatible with
-      # build-release.ps1 -FromRelease (it currently fetches
-      # `<bin>.exe`); Linux + macOS append a target label so the
-      # three OSes coexist on one release tag.
-      - name: Stage artefacts
-        shell: bash
-        run: |
-          mkdir -p staged
-          if [ "${{ matrix.target_label }}" = "windows" ]; then
-            cp target/release/kanade-agent.exe   staged/
-            cp target/release/kanade-backend.exe staged/
-            cp target/release/kanade.exe         staged/
-          else
-            cp target/release/kanade-agent   staged/kanade-agent-${{ matrix.target_label }}
-            cp target/release/kanade-backend staged/kanade-backend-${{ matrix.target_label }}
-            cp target/release/kanade         staged/kanade-${{ matrix.target_label }}
+          set -euo pipefail
+          mkdir -p dist
+          # `cargo metadata --no-deps` enumerates every workspace
+          # member's targets; we keep only `bin` kinds so libs flow
+          # through the `publish` job instead of becoming downloads.
+          bins=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[].targets[]
+                       | select(.kind | index("bin"))
+                       | .name' \
+            | sort -u)
+          if [ -z "$bins" ]; then
+            echo "::warning::no [[bin]] targets in this workspace; nothing to stage"
+            exit 0
           fi
-          ls -la staged/
+          for bin in $bins; do
+            if [[ "$TARGET" == *windows* ]]; then
+              src="target/$TARGET/release/$bin.exe"
+              dst="dist/$bin-$TARGET.exe"
+            else
+              src="target/$TARGET/release/$bin"
+              dst="dist/$bin-$TARGET"
+            fi
+            if [ -f "$src" ]; then
+              cp "$src" "$dst"
+              echo "staged $dst"
+            else
+              echo "::warning::missing $src (skipping)"
+            fi
+          done
+          ls -la dist/
 
-      - name: Attach to GitHub Release
-        uses: softprops/action-gh-release@v2
+      - uses: actions/upload-artifact@v7
         with:
-          files: staged/*
+          name: dist-${{ matrix.target }}
+          path: dist/*
+
+  release:
+    name: github release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+          generate_release_notes: true
           fail_on_unmatched_files: true
+
+  publish:
+    name: publish to crates.io
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish workspace members
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Workspace members allowed to publish to crates.io:
+          # cargo records `publish` as `null` (= "anywhere") or a
+          # list of registries; `[]` is the explicit opt-out.
+          publishable=$(cargo metadata --format-version 1 \
+            | jq -r '
+                .workspace_members as $members
+                | .packages
+                  | map(select(.id as $id | $members | index($id)))
+                  | map(select(
+                      .publish == null
+                      or ((.publish | type) == "array" and (.publish | index("crates-io")))
+                    ))
+                  | .[].name
+              ')
+
+          if [ -z "$publishable" ]; then
+            echo "no publishable members; skipping crates.io step"
+            exit 0
+          fi
+
+          # Topologically sort publishable members by their
+          # intra-workspace dep graph (children → parents), then
+          # publish in that order so a crate that depends on
+          # another finds its dep already on the registry.
+          edges=$(cargo metadata --format-version 1 \
+            | jq -r '
+                .workspace_members as $members
+                | .resolve.nodes
+                  | map(select(.id as $id | $members | index($id)))
+                  | .[] as $node
+                  | ($node.id | sub(" .*$"; "")) as $parent
+                  | $node.dependencies[]?
+                  | sub(" .*$"; "") as $child
+                  | "\($child) \($parent)"
+              ' \
+            | awk -v list="$publishable" 'BEGIN {
+                n = split(list, arr, /\n/);
+                for (i = 1; i <= n; i++) keep[arr[i]] = 1;
+              } { if ($1 in keep && $2 in keep) print }')
+
+          # `tsort` outputs parents first when given child→parent
+          # edges, which is exactly the publish order we want
+          # (deps before dependents). Members with no intra-
+          # workspace deps are missing from `edges`; append them
+          # so they still publish.
+          order=$( { echo "$edges" | tsort 2>/dev/null; echo "$publishable"; } \
+                   | awk '!seen[$0]++' \
+                   | grep -Fx -f <(echo "$publishable"))
+
+          echo "publish order:"
+          echo "$order" | sed 's/^/  - /'
+
+          for pkg in $order; do
+            echo "::group::cargo publish -p $pkg"
+            cargo publish --locked -p "$pkg"
+            echo "::endgroup::"
+          done
