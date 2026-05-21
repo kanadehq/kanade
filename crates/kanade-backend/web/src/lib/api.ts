@@ -29,7 +29,7 @@ function authHeaders(): HeadersInit {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
-export async function apiFetch<T = unknown>(path: string, init: RequestInit = {}): Promise<T> {
+async function apiFetchRaw(path: string, init: RequestInit = {}): Promise<{ res: Response; text: string }> {
   const headers = new Headers(init.headers ?? {});
   for (const [k, v] of Object.entries(authHeaders())) headers.set(k, v as string);
   // Lets the backend tag operator-initiated audit events with
@@ -53,5 +53,22 @@ export async function apiFetch<T = unknown>(path: string, init: RequestInit = {}
   if (!res.ok) {
     throw new ApiError(res.status, res.statusText, text);
   }
+  return { res, text };
+}
+
+export async function apiFetch<T = unknown>(path: string, init: RequestInit = {}): Promise<T> {
+  const { text } = await apiFetchRaw(path, init);
   return text ? (JSON.parse(text) as T) : (undefined as T);
+}
+
+/**
+ * Variant of `apiFetch` for endpoints that return non-JSON bodies
+ * (e.g. `GET /api/{jobs,schedules}/{id}/yaml`, which streams raw
+ * YAML). Reuses the same auth / source-tag plumbing — handlers
+ * shouldn't be re-implementing the bearer-token + X-Kanade-Source
+ * dance per consumer.
+ */
+export async function apiFetchText(path: string, init: RequestInit = {}): Promise<string> {
+  const { text } = await apiFetchRaw(path, init);
+  return text;
 }

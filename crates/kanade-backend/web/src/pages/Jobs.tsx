@@ -1,8 +1,20 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Ban, CircleCheck, Hourglass, Loader2, Play, ScrollText, Skull, Trash2 } from 'lucide-react';
+import {
+  Ban,
+  CircleCheck,
+  FilePlus2,
+  Hourglass,
+  Loader2,
+  Pencil,
+  Play,
+  ScrollText,
+  Skull,
+  Trash2,
+} from 'lucide-react';
 import { useState } from 'react';
 
 import { ErrorCard } from '@/components/ErrorCard';
+import { type EditorMode, YamlEditorDialog } from '@/components/YamlEditorDialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -77,6 +89,12 @@ export function Jobs() {
   const [pendingRevoke, setPendingRevoke] = useState<Set<string>>(new Set());
   const [pendingUnrevoke, setPendingUnrevoke] = useState<Set<string>>(new Set());
   const [pendingKill, setPendingKill] = useState<Set<string>>(new Set());
+
+  // v0.32 / PR-B: Monaco-backed YAML editor for add / edit. Null when
+  // the modal is closed; a fresh mode object opens it on the right
+  // shape ({ type: 'create' } for the "New job" button, { type:
+  // 'edit', id } for the per-row Edit button).
+  const [editor, setEditor] = useState<EditorMode | null>(null);
   const revoke = useMutation({
     mutationFn: (id: string) =>
       apiFetch(`/api/scripts/${encodeURIComponent(id)}/revoke`, { method: 'POST' }),
@@ -149,14 +167,39 @@ export function Jobs() {
 
   if (rows.length === 0) {
     return (
-      <Card>
-        <CardHeader><CardTitle>No jobs registered</CardTitle></CardHeader>
-        <CardContent className="text-muted">
-          Use <code>kanade job create &lt;manifest.yaml&gt;</code> to upsert one.
-          Schedules reference jobs by id, so the job must exist before the
-          schedule fires. YAML-form creation in the web UI is on the backlog.
-        </CardContent>
-      </Card>
+      <>
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <CardTitle>No jobs registered</CardTitle>
+              <Button
+                variant="default"
+                size="sm"
+                onClick={() => setEditor({ type: 'create' })}
+              >
+                <FilePlus2 className="size-3.5" />
+                New job
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent className="text-muted">
+            Use <code>kanade job create &lt;manifest.yaml&gt;</code> on the CLI, or
+            click <strong>New job</strong> above to open the in-browser YAML editor.
+            Schedules reference jobs by id, so the job must exist before the
+            schedule fires.
+          </CardContent>
+        </Card>
+        {editor !== null && (
+          <YamlEditorDialog
+            open
+            onOpenChange={(next) => {
+              if (!next) setEditor(null);
+            }}
+            kind="manifest"
+            mode={editor}
+          />
+        )}
+      </>
     );
   }
 
@@ -164,7 +207,18 @@ export function Jobs() {
     <div className="space-y-4">
       <div className="flex items-baseline justify-between">
         <h2 className="text-xl">Jobs</h2>
-        <Badge variant="violet">{rows.length}</Badge>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="default"
+            size="sm"
+            onClick={() => setEditor({ type: 'create' })}
+            title="Create a new job from a YAML template"
+          >
+            <FilePlus2 className="size-3.5" />
+            New job
+          </Button>
+          <Badge variant="violet">{rows.length}</Badge>
+        </div>
       </div>
       <Table>
         <TableHeader>
@@ -283,6 +337,15 @@ export function Jobs() {
                     </Button>
                   ) : null;
                 })()}
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => setEditor({ type: 'edit', id: j.id })}
+                  title="Edit this job's YAML manifest"
+                >
+                  <Pencil className="size-3.5" />
+                  edit
+                </Button>
                 {!isRevoked(j.id) && (
                   <Button
                     variant="secondary"
@@ -343,6 +406,16 @@ export function Jobs() {
       {revoke.error && <ErrorCard title="Revoke failed" error={revoke.error} />}
       {unrevoke.error && <ErrorCard title="Unrevoke failed" error={unrevoke.error} />}
       {kill.error && <ErrorCard title="Kill failed" error={kill.error} />}
+      {editor !== null && (
+        <YamlEditorDialog
+          open
+          onOpenChange={(next) => {
+            if (!next) setEditor(null);
+          }}
+          kind="manifest"
+          mode={editor}
+        />
+      )}
     </div>
   );
 }
