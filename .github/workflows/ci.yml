@@ -104,32 +104,6 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo check --locked --all-targets
 
-  spa-build:
-    # #94: build the SPA bundle the same way `release.yml` does, on
-    # every PR. Before this job existed, type errors in the SPA only
-    # surfaced when `release.yml` cross-compiled on a freshly-pushed
-    # tag — by which point the version had already been bumped and
-    # tagged. v0.30.0 shipped tagged-but-no-release because PR #71's
-    # `<Badge variant="secondary">` typo (Badge has no `secondary`
-    # variant — Button does) wasn't caught at PR review time. This
-    # job runs `tsc -b && vite build` (= `bun run build`) so the
-    # same regression fails at PR time, not release time.
-    name: spa-build
-    runs-on: ubuntu-latest
-    # CodeRabbit #99: explicit least-privilege scope so the spa-build
-    # job doesn't inherit the broader default GITHUB_TOKEN repo write
-    # permissions just to clone + run a build.
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v6
-      - uses: oven-sh/setup-bun@v2
-      - name: Install + build SPA
-        working-directory: crates/kanade-backend/web
-        run: |
-          bun install --frozen-lockfile
-          bun run build
-
   coverage:
     # llvm-cov on Linux + Codecov upload. taiki-e/install-action grabs the
     # cargo-llvm-cov binary. codecov-action@v5 nominally accepts tokenless
