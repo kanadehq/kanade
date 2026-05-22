@@ -143,6 +143,11 @@ pub struct InventoryJob {
     pub description: Option<String>,
     pub display: Vec<DisplayField>,
     pub summary: Option<Vec<DisplayField>>,
+    /// v0.35 / #87: included so the SPA Software page knows which
+    /// fields are searchable (one tab per element) and what
+    /// columns / kinds each spec has (drives the filter chip row),
+    /// without a separate per-manifest endpoint.
+    pub explode: Option<Vec<ExplodeSpec>>,
 }
 
 pub async fn list_jobs(
@@ -182,6 +187,7 @@ pub async fn list_jobs(
                 description: job.description,
                 display: hint.display,
                 summary: hint.summary,
+                explode: hint.explode,
             });
         }
     }
