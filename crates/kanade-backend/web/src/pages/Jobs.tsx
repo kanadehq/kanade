@@ -46,6 +46,13 @@ type JobRow = {
 
 export function Jobs() {
   const qc = useQueryClient();
+  // v0.34.1 (#117) wired in ConfirmDialogProvider but Jobs.tsx
+  // only added the import — the hook call itself was missing, so
+  // `confirm(...)` in the kill / revoke / delete handlers below
+  // was resolving against `window.confirm` (which takes a string
+  // and ignored the ConfirmOptions object). Adding the hook here
+  // restores the intended Promise-based modal flow.
+  const confirm = useConfirm();
   const { data, error, isLoading } = useQuery({
     queryKey: ['jobs'],
     queryFn: () => apiFetch<JobRow[]>('/api/jobs'),
