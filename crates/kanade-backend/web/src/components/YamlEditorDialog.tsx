@@ -20,6 +20,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Loader2, Save } from 'lucide-react';
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
+import { toast } from 'sonner';
 
 import { Button } from '@/components/ui/button';
 import {
@@ -30,7 +31,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { apiFetch, apiFetchText, ApiError } from '@/lib/api';
+import { apiFetch, apiFetchText, formatError } from '@/lib/api';
 
 const YamlEditor = lazy(() => import('./YamlEditor'));
 
@@ -86,12 +87,6 @@ async function postYaml(kind: EditorKind, yaml: string): Promise<unknown> {
   });
 }
 
-function formatError(err: unknown): string {
-  return err instanceof ApiError
-    ? `${err.status} — ${err.body || err.message}`
-    : String(err);
-}
-
 export function YamlEditorDialog({ open, onOpenChange, kind, mode }: YamlEditorDialogProps) {
   const qc = useQueryClient();
   const [text, setText] = useState<string>(() =>
@@ -143,7 +138,9 @@ export function YamlEditorDialog({ open, onOpenChange, kind, mode }: YamlEditorD
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: listQueryKey(kind) });
       onOpenChange(false);
+      toast.success(mode.type === 'create' ? `Created ${kind}` : `Saved ${kind}: ${mode.id}`);
     },
+    onError: (e) => toast.error(`Save failed: ${formatError(e)}`),
   });
 
   const title =

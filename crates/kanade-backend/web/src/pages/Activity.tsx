@@ -2,16 +2,18 @@ import { useMutation, useQuery } from '@tanstack/react-query';
 import { ChevronsDown, ChevronsUp, ExternalLink, Loader2, Skull } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { toast } from 'sonner';
 
 import { ErrorCard } from '@/components/ErrorCard';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { useConfirm } from '@/components/ui/confirm-dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { apiFetch } from '@/lib/api';
+import { apiFetch, formatError } from '@/lib/api';
 import { fmtIsoLocal } from '@/lib/utils';
 
 /// v0.27.x: how many chars of stdout / stderr to show in the table
@@ -78,6 +80,7 @@ const SINCE_PRESETS: Array<{ value: string; label: string; ms: number | null }> 
 ];
 
 export function Activity() {
+  const confirm = useConfirm();
   const [pcId, setPcId] = useState('');
   const [jobId, setJobId] = useState('');
   const [execId, setExecId] = useState('');
@@ -135,6 +138,8 @@ export function Activity() {
     onMutate: (job_id) => {
       setPendingKill((prev) => new Set(prev).add(job_id));
     },
+    onSuccess: (_d, job_id) => toast.success(`Kill signal sent to ${job_id}`),
+    onError: (e) => toast.error(`Kill failed: ${formatError(e)}`),
     onSettled: (_d, _e, job_id) => {
       setPendingKill((prev) => {
         const next = new Set(prev);
@@ -333,14 +338,15 @@ export function Activity() {
                       variant="danger"
                       size="sm"
                       disabled={pendingKill.has(r.job_id)}
-                      onClick={() => {
-                        if (
-                          window.confirm(
-                            `Kill this run (${r.job_id})?\n\n` +
-                              `The agent will terminate the running child process. The run will be recorded as killed.`,
-                          )
-                        )
-                          kill.mutate(r.job_id!);
+                      onClick={async () => {
+                        const ok = await confirm({
+                          title: `Kill this run (${r.job_id})?`,
+                          description:
+                            'The agent will terminate the running child process. The run will be recorded as killed.',
+                          confirmLabel: 'Kill',
+                          danger: true,
+                        });
+                        if (ok) kill.mutate(r.job_id!);
                       }}
                       title="Tell the agent to terminate this job's child process"
                     >
