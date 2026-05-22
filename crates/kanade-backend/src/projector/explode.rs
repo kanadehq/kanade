@@ -289,7 +289,7 @@ pub async fn replace_rows(
     if spec.track_history {
         let events = super::history::diff_explode_rows(&mut tx, spec, pc_id, job_id, arr).await?;
         if !events.is_empty() {
-            super::history::write_events(&mut tx, pc_id, job_id, &spec.field, &events).await?;
+            super::history::write_events(&mut tx, pc_id, job_id, &events).await?;
         }
     }
 

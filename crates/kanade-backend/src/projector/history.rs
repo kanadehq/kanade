@@ -24,12 +24,24 @@ use sqlx::{Sqlite, Transaction};
 use std::collections::HashMap;
 
 /// One change event ready to insert into `inventory_history`.
-/// Constructed by [`diff_explode_rows`] and consumed by
-/// [`write_events`].
+/// Constructed by [`diff_explode_rows`] (array-element history,
+/// `identity_json = Some(...)`) or [`diff_scalars`] (scalar field
+/// history, `identity_json = None`), consumed by [`write_events`].
+///
+/// `field_path` was carried in on the `write_events` signature
+/// pre-#93 because every event in a single batch shared it
+/// (one explode field per call). Scalar history mixes multiple
+/// fields per call (one event per changed scalar), so field_path
+/// moved onto the event itself; the explode path now stamps it
+/// per element and write_events stays unchanged for both callers.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HistoryEvent {
+    pub field_path: String,
     pub change_kind: &'static str, // "added" | "removed" | "changed"
-    pub identity_json: String,
+    /// JSON object of the explode spec's primary_key tuple values
+    /// for array-element history; `None` for scalar-field history
+    /// (the field name in `field_path` is identity enough).
+    pub identity_json: Option<String>,
     pub before_json: Option<String>,
     pub after_json: Option<String>,
 }
@@ -98,15 +110,17 @@ pub async fn diff_explode_rows(
             continue;
         }
 
-        let identity_json = identity_json_for(element, &spec.primary_key);
+        let identity_json = Some(identity_json_for(element, &spec.primary_key));
         match prior_by_key.get(&key) {
             None => events.push(HistoryEvent {
+                field_path: spec.field.clone(),
                 change_kind: "added",
                 identity_json,
                 before_json: None,
                 after_json: Some(serde_json::to_string(element)?),
             }),
             Some(prior) if rows_differ(prior, element, spec) => events.push(HistoryEvent {
+                field_path: spec.field.clone(),
                 change_kind: "changed",
                 identity_json,
                 before_json: Some(serde_json::to_string(prior)?),
@@ -121,8 +135,9 @@ pub async fn diff_explode_rows(
             continue;
         }
         events.push(HistoryEvent {
+            field_path: spec.field.clone(),
             change_kind: "removed",
-            identity_json: identity_json_for(prior, &spec.primary_key),
+            identity_json: Some(identity_json_for(prior, &spec.primary_key)),
             before_json: Some(serde_json::to_string(prior)?),
             after_json: None,
         });
@@ -131,16 +146,76 @@ pub async fn diff_explode_rows(
     Ok(events)
 }
 
+/// v0.35 / #93: diff a manifest's top-level scalar fields against
+/// the prior `inventory_facts.facts_json`. Called from `results.rs`
+/// BEFORE the inventory_facts UPSERT overwrites the prior row, so
+/// the comparison sees the actual previous values.
+///
+/// First-ever scan (`prior_facts_json = None`) emits one `added`
+/// per scalar present in the new payload. Subsequent scans only
+/// emit events for fields whose value changed — matching the
+/// volume-control discipline the array-element history follows.
+/// Same-value rescans produce zero events.
+///
+/// Values are wrapped as `{"value": <v>}` so the SPA's existing
+/// diff renderer (#92 / #113) can lift them out the same way it
+/// does column diffs in array history.
+pub fn diff_scalars(
+    prior_facts_json: Option<&str>,
+    new_facts: &JsonValue,
+    scalars: &[String],
+) -> Result<Vec<HistoryEvent>> {
+    let prior: Option<JsonValue> = prior_facts_json.map(serde_json::from_str).transpose()?;
+    let mut events = Vec::new();
+    for field in scalars {
+        let prior_val = prior.as_ref().and_then(|p| p.get(field));
+        let new_val = new_facts.get(field);
+        match (prior_val, new_val) {
+            // Field missing from new payload (rare — script chose to
+            // drop it for this run). Don't emit a `removed` for
+            // scalars; that's intentionally out of scope per the
+            // proposal in #93. Operator can still see the last seen
+            // value via the most recent `changed` event's after_json.
+            (_, None) => {}
+            // First-ever observation — emit `added`. We also fire
+            // this when prior_facts_json existed but did not
+            // include the field (manifest grew a new scalar between
+            // scans); same outcome from the operator's perspective.
+            (None, Some(v)) => {
+                events.push(HistoryEvent {
+                    field_path: field.clone(),
+                    change_kind: "added",
+                    identity_json: None,
+                    before_json: None,
+                    after_json: Some(serde_json::to_string(&serde_json::json!({ "value": v }))?),
+                });
+            }
+            (Some(p), Some(n)) if p != n => {
+                events.push(HistoryEvent {
+                    field_path: field.clone(),
+                    change_kind: "changed",
+                    identity_json: None,
+                    before_json: Some(serde_json::to_string(&serde_json::json!({ "value": p }))?),
+                    after_json: Some(serde_json::to_string(&serde_json::json!({ "value": n }))?),
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(events)
+}
+
 /// Persist a batch of change events to `inventory_history` inside
 /// the caller's transaction. Empty `events` is a no-op (typical
-/// case for fleet-stable scans). `field_path` is the manifest
-/// field name (`apps`, `disks`) so the timeline can be filtered
-/// per field.
+/// case for fleet-stable scans). `field_path` rides on each event
+/// (v0.35 / #93) so a single call can mix multiple scalar fields
+/// in one INSERT — array-element callers pass events that all
+/// share the same `spec.field` and pay nothing for the per-event
+/// stamp.
 pub async fn write_events(
     tx: &mut Transaction<'_, Sqlite>,
     pc_id: &str,
     job_id: &str,
-    field_path: &str,
     events: &[HistoryEvent],
 ) -> Result<()> {
     if events.is_empty() {
@@ -160,7 +235,7 @@ pub async fn write_events(
     qb.push_values(events, |mut b, ev| {
         b.push_bind(pc_id)
             .push_bind(job_id)
-            .push_bind(field_path)
+            .push_bind(&ev.field_path)
             .push_bind(&ev.identity_json)
             .push_bind(ev.change_kind)
             .push_bind(&ev.before_json)
@@ -397,8 +472,13 @@ mod tests {
         );
         // identity_json carries the key tuple so cross-PC search can
         // filter on "this exact app" regardless of version.
-        assert!(ev.identity_json.contains("\"name\":\"Chrome\""));
-        assert!(ev.identity_json.contains("\"source\":\"msi\""));
+        let identity = ev
+            .identity_json
+            .as_ref()
+            .expect("explode events carry identity");
+        assert!(identity.contains("\"name\":\"Chrome\""));
+        assert!(identity.contains("\"source\":\"msi\""));
+        assert_eq!(ev.field_path, "apps");
     }
 
     #[tokio::test]
@@ -452,13 +532,14 @@ mod tests {
     async fn write_events_persists_to_inventory_history() {
         let pool = fresh_pool_with_table().await;
         let events = vec![HistoryEvent {
+            field_path: "apps".into(),
             change_kind: "added",
-            identity_json: r#"{"name":"Chrome"}"#.into(),
+            identity_json: Some(r#"{"name":"Chrome"}"#.into()),
             before_json: None,
             after_json: Some(r#"{"name":"Chrome","version":"120"}"#.into()),
         }];
         let mut tx = pool.begin().await.unwrap();
-        write_events(&mut tx, "pc-1", "inventory-sw", "apps", &events)
+        write_events(&mut tx, "pc-1", "inventory-sw", &events)
             .await
             .unwrap();
         tx.commit().await.unwrap();
@@ -487,5 +568,97 @@ mod tests {
         assert_eq!(row.3, "added");
         assert_eq!(row.4, None);
         assert!(row.5.unwrap().contains("Chrome"));
+    }
+
+    // v0.35 / #93: scalar-field diff tests. No DB needed — diff_scalars
+    // is pure logic over two JsonValues, the SQL surface is exercised
+    // by the existing write_events test.
+
+    #[test]
+    fn diff_scalars_first_scan_emits_added_per_field() {
+        let new_facts = serde_json::json!({
+            "ram_bytes": 17179869184_u64,
+            "os_version": "10.0.22631",
+            "cpu_model": "Intel(R) Core(TM) i7-1165G7",
+        });
+        let events =
+            diff_scalars(None, &new_facts, &["ram_bytes".into(), "os_version".into()]).unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|e| e.change_kind == "added"));
+        assert!(events.iter().all(|e| e.identity_json.is_none()));
+        assert!(events.iter().all(|e| e.before_json.is_none()));
+        assert!(events.iter().all(|e| e.after_json.is_some()));
+        // field_path mirrors the scalar name so the SPA History tab
+        // groups it under e.g. "ram_bytes" without any extra mapping.
+        let paths: std::collections::HashSet<_> =
+            events.iter().map(|e| e.field_path.as_str()).collect();
+        assert!(paths.contains("ram_bytes"));
+        assert!(paths.contains("os_version"));
+    }
+
+    #[test]
+    fn diff_scalars_identical_rescan_emits_nothing() {
+        let prior = r#"{"ram_bytes":17179869184,"os_version":"10.0.22631"}"#;
+        let new_facts =
+            serde_json::json!({"ram_bytes": 17179869184_u64, "os_version": "10.0.22631"});
+        let events = diff_scalars(
+            Some(prior),
+            &new_facts,
+            &["ram_bytes".into(), "os_version".into()],
+        )
+        .unwrap();
+        assert!(events.is_empty(), "stable rescans must produce zero events");
+    }
+
+    #[test]
+    fn diff_scalars_value_change_emits_changed_with_value_wrapper() {
+        let prior = r#"{"os_version":"10.0.19045"}"#;
+        let new_facts = serde_json::json!({"os_version": "10.0.22631"});
+        let events = diff_scalars(Some(prior), &new_facts, &["os_version".into()]).unwrap();
+        assert_eq!(events.len(), 1);
+        let ev = &events[0];
+        assert_eq!(ev.field_path, "os_version");
+        assert_eq!(ev.change_kind, "changed");
+        assert!(ev.identity_json.is_none());
+        // The `{"value": <v>}` wrapper lets the SPA's diff renderer
+        // (#92 / #113) extract before/after via the same code path
+        // it uses on explode-row column diffs.
+        assert!(
+            ev.before_json
+                .as_ref()
+                .unwrap()
+                .contains("\"value\":\"10.0.19045\"")
+        );
+        assert!(
+            ev.after_json
+                .as_ref()
+                .unwrap()
+                .contains("\"value\":\"10.0.22631\"")
+        );
+    }
+
+    #[test]
+    fn diff_scalars_field_missing_from_new_payload_no_event() {
+        // Operator's manifest grew a `bios_version` scalar; the
+        // script for THIS run forgot to emit it. We don't fabricate
+        // a `removed` event — the value will reappear next scan when
+        // the script is fixed, and a `removed` here would mislead.
+        let prior = r#"{"bios_version":"1.30"}"#;
+        let new_facts = serde_json::json!({"ram_bytes": 1024});
+        let events = diff_scalars(Some(prior), &new_facts, &["bios_version".into()]).unwrap();
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn diff_scalars_added_when_prior_lacks_the_field() {
+        // Manifest grew a new scalar between scans (operator
+        // edited `history_scalars` and re-registered). Prior row
+        // doesn't have the field → treat as first-ever observation.
+        let prior = r#"{"ram_bytes":1024}"#;
+        let new_facts = serde_json::json!({"ram_bytes": 1024, "os_version": "10.0.22631"});
+        let events = diff_scalars(Some(prior), &new_facts, &["os_version".into()]).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].change_kind, "added");
+        assert_eq!(events[0].field_path, "os_version");
     }
 }
