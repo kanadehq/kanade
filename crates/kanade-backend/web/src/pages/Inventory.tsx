@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { Loader2, ScrollText } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 
 import { ErrorCard } from '@/components/ErrorCard';
@@ -10,7 +10,7 @@ import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { apiFetch } from '@/lib/api';
-import { fmtIsoLocal } from '@/lib/utils';
+import { cn, fmtIsoLocal } from '@/lib/utils';
 
 type DisplayField = {
   field: string;
@@ -53,6 +53,38 @@ type InventoryByJob = {
   summary: DisplayField[] | null;
   rows: InventoryRow[];
 };
+
+/** v0.34 / #92: one row from `inventory_history` — populated by the
+ *  projector's diff step (#41 / #86) and served by
+ *  `GET /api/inventory/{manifest_id}/history/pc/{pc_id}`. */
+type HistoryEventRow = {
+  id: number;
+  pc_id: string;
+  job_id: string;
+  field_path: string;
+  /** JSON of the spec's primary_key tuple, e.g. `{"key": "{ABC-...}",
+   *  "source": "x64"}` for an inventory_sw row. Null for scalar
+   *  history (future scope — array history only in v1). */
+  identity_json: string | null;
+  change_kind: 'added' | 'removed' | 'changed';
+  /** Full row snapshot before the change. Null on `added`. */
+  before_json: string | null;
+  /** Full row snapshot after. Null on `removed`. */
+  after_json: string | null;
+  observed_at: string | null;
+};
+
+type ChangeKindFilter = 'any' | 'added' | 'removed' | 'changed';
+
+const SINCE_PRESETS: Array<{ value: string; label: string; ms: number | null }> = [
+  { value: '24h', label: 'last 24h', ms: 24 * 60 * 60 * 1000 },
+  { value: '7d',  label: 'last 7d',  ms: 7 * 24 * 60 * 60 * 1000 },
+  { value: '30d', label: 'last 30d', ms: 30 * 24 * 60 * 60 * 1000 },
+  { value: '90d', label: 'last 90d', ms: 90 * 24 * 60 * 60 * 1000 },
+  { value: 'all', label: 'all time', ms: null },
+];
+
+const CHANGE_KIND_FILTERS: ChangeKindFilter[] = ['any', 'added', 'removed', 'changed'];
 
 function fmtBytes(v: unknown): string {
   const n = typeof v === 'number' ? v : Number(v);
@@ -373,62 +405,364 @@ function PcDetail({ pcId, clear }: { pcId: string; clear: () => void }) {
           </CardHeader>
         </Card>
       ) : (
-        (factsQ.data ?? []).map((fact) => {
-          const factsObj = (fact.facts ?? {}) as Record<string, unknown>;
-          return (
-            <Card key={fact.job_id}>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <ScrollText className="size-5 text-violet" />
-                  <code className="text-sm">{fact.job_id}</code>
-                </CardTitle>
-                <CardDescription>
-                  collected {fmtIsoLocal(fact.collected_at)}
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                {fact.display.length === 0 ? (
-                  <details>
-                    <summary className="cursor-pointer text-muted text-xs">raw JSON</summary>
-                    <pre className="text-xs whitespace-pre-wrap break-words mt-2 bg-muted/5 p-2 rounded">
-                      {JSON.stringify(fact.facts, null, 2)}
-                    </pre>
-                  </details>
-                ) : (
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>field</TableHead>
-                        <TableHead>value</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {fact.display.map((d) => (
-                        <TableRow key={d.field}>
-                          <TableCell className="text-muted align-top">{d.label}</TableCell>
-                          <TableCell>
-                            {/* v0.30 / #39: nested sub-table for
-                                `type: table` (e.g. inventory-hw's
-                                `disks: [{ device_id, size_bytes,
-                                ... }]`). Scalars still use
-                                ScalarCell so the empty-state dash
-                                gets muted styling. */}
-                            {d.type === 'table' && d.columns ? (
-                              <NestedTable value={factsObj[d.field]} columns={d.columns} />
-                            ) : (
-                              <ScalarCell value={factsObj[d.field]} kind={d.type} />
-                            )}
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                )}
-              </CardContent>
-            </Card>
-          );
-        })
+        (factsQ.data ?? []).map((fact) => (
+          <FactCard key={fact.job_id} fact={fact} pcId={pcId} />
+        ))
       )}
     </div>
   );
+}
+
+/** v0.34 / #92: per-card tab strip — `Now` is the v0.30 display table,
+ *  `History` is the new timeline of `inventory_history` events for
+ *  this PC + this manifest. State is local to each card so an operator
+ *  can be on different tabs across different probes simultaneously. */
+function FactCard({ fact, pcId }: { fact: InventoryFact; pcId: string }) {
+  const [tab, setTab] = useState<'now' | 'history'>('now');
+  const factsObj = (fact.facts ?? {}) as Record<string, unknown>;
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <ScrollText className="size-5 text-violet" />
+          <code className="text-sm">{fact.job_id}</code>
+        </CardTitle>
+        <CardDescription>
+          collected {fmtIsoLocal(fact.collected_at)}
+        </CardDescription>
+        <div className="mt-2 inline-flex rounded-md border border-border overflow-hidden text-xs">
+          {(['now', 'history'] as const).map((t) => (
+            <button
+              key={t}
+              onClick={() => setTab(t)}
+              className={cn(
+                'px-3 py-1 transition-colors',
+                tab === t
+                  ? 'bg-fg/10 text-fg font-medium'
+                  : 'text-muted hover:bg-fg/5 hover:text-fg',
+              )}
+            >
+              {t === 'now' ? 'Now' : 'History'}
+            </button>
+          ))}
+        </div>
+      </CardHeader>
+      <CardContent>
+        {tab === 'now' ? (
+          fact.display.length === 0 ? (
+            <details>
+              <summary className="cursor-pointer text-muted text-xs">raw JSON</summary>
+              <pre className="text-xs whitespace-pre-wrap break-words mt-2 bg-muted/5 p-2 rounded">
+                {JSON.stringify(fact.facts, null, 2)}
+              </pre>
+            </details>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>field</TableHead>
+                  <TableHead>value</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {fact.display.map((d) => (
+                  <TableRow key={d.field}>
+                    <TableCell className="text-muted align-top">{d.label}</TableCell>
+                    <TableCell>
+                      {/* v0.30 / #39: nested sub-table for
+                          `type: table` (e.g. inventory-hw's
+                          `disks: [{ device_id, size_bytes,
+                          ... }]`). Scalars still use
+                          ScalarCell so the empty-state dash
+                          gets muted styling. */}
+                      {d.type === 'table' && d.columns ? (
+                        <NestedTable value={factsObj[d.field]} columns={d.columns} />
+                      ) : (
+                        <ScalarCell value={factsObj[d.field]} kind={d.type} />
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )
+        ) : (
+          <HistoryPane manifestId={fact.job_id} pcId={pcId} />
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/** v0.34 / #92: timeline of `inventory_history` events for one
+ *  (manifest, pc) pair. Filters by `since` preset and `change_kind`
+ *  on the client (the API only takes `since`); kind is rare enough
+ *  in volume that a client-side filter is cheaper than another HTTP
+ *  param. */
+function HistoryPane({ manifestId, pcId }: { manifestId: string; pcId: string }) {
+  const [since, setSince] = useState('7d');
+  const [kind, setKind] = useState<ChangeKindFilter>('any');
+  // v0.34 / #92 follow-up: hw + sw inventory rarely changes day-to-
+  // day, so most events the operator cares about are version bumps
+  // (`changed`), not the noisier `added` / `removed` from a fresh
+  // install or rollout. `diffOnly` is a quick checkbox that locks
+  // the kind filter to `changed` without forcing the operator to
+  // reach for the dropdown each time.
+  const [diffOnly, setDiffOnly] = useState(false);
+  const effectiveKind: ChangeKindFilter = diffOnly ? 'changed' : kind;
+
+  // Gemini #113 fix: compute the sliding-window `since` lower bound
+  // INSIDE queryFn so each refetch (every 60 s while the History tab
+  // is mounted) uses `Date.now()` from that moment, not the moment
+  // the operator first picked `7d`. Without this, an operator who
+  // leaves the History tab open for hours keeps fetching the same
+  // frozen window and stops seeing new events. The queryKey uses the
+  // `since` preset value (not the computed ISO string) so the cache
+  // partitions cleanly per preset without invalidating on every
+  // millisecond tick.
+  const historyQ = useQuery({
+    queryKey: ['inventory-history', manifestId, pcId, since],
+    queryFn: () => {
+      const preset = SINCE_PRESETS.find((p) => p.value === since);
+      const sinceIso = preset?.ms
+        ? new Date(Date.now() - preset.ms).toISOString()
+        : null;
+      const sp = new URLSearchParams();
+      if (sinceIso) sp.set('since', sinceIso);
+      const qs = sp.toString();
+      return apiFetch<HistoryEventRow[]>(
+        `/api/inventory/${encodeURIComponent(manifestId)}/history/pc/${encodeURIComponent(pcId)}${
+          qs ? `?${qs}` : ''
+        }`,
+      );
+    },
+    refetchInterval: 60_000,
+  });
+
+  const filteredRows = useMemo(() => {
+    const rows = historyQ.data ?? [];
+    return effectiveKind === 'any'
+      ? rows
+      : rows.filter((r) => r.change_kind === effectiveKind);
+  }, [historyQ.data, effectiveKind]);
+
+  // Group events by local-date YYYY-MM-DD so the timeline reads as a
+  // collapsible per-day stack (matches `Audit`'s rough density without
+  // requiring a heavier <details> per row by default).
+  const grouped = useMemo(() => {
+    const byDay = new Map<string, HistoryEventRow[]>();
+    for (const r of filteredRows) {
+      const day = r.observed_at
+        ? new Date(r.observed_at).toLocaleDateString()
+        : '(no timestamp)';
+      const bucket = byDay.get(day) ?? [];
+      bucket.push(r);
+      byDay.set(day, bucket);
+    }
+    return Array.from(byDay.entries());
+  }, [filteredRows]);
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-end gap-3">
+        <div className="flex flex-col gap-1">
+          <Label htmlFor={`history-since-${manifestId}`} className="text-xs text-muted">
+            since
+          </Label>
+          <Select
+            id={`history-since-${manifestId}`}
+            value={since}
+            onChange={(e) => setSince(e.target.value)}
+          >
+            {SINCE_PRESETS.map((p) => (
+              <option key={p.value} value={p.value}>
+                {p.label}
+              </option>
+            ))}
+          </Select>
+        </div>
+        <div className="flex flex-col gap-1">
+          <Label htmlFor={`history-kind-${manifestId}`} className="text-xs text-muted">
+            kind
+          </Label>
+          <Select
+            id={`history-kind-${manifestId}`}
+            value={kind}
+            onChange={(e) => setKind(e.target.value as ChangeKindFilter)}
+            disabled={diffOnly}
+          >
+            {CHANGE_KIND_FILTERS.map((k) => (
+              <option key={k} value={k}>
+                {k}
+              </option>
+            ))}
+          </Select>
+        </div>
+        <label
+          className="flex items-center gap-2 pb-2 text-xs text-muted cursor-pointer select-none"
+          title="Hide added / removed events, show only field-level changes (= kind: changed)."
+        >
+          <input
+            type="checkbox"
+            checked={diffOnly}
+            onChange={(e) => setDiffOnly(e.target.checked)}
+            className="size-3.5 accent-fg"
+          />
+          diff only
+        </label>
+      </div>
+
+      {historyQ.isLoading ? (
+        <div className="flex items-center gap-2 text-muted text-sm">
+          <Loader2 className="size-4 animate-spin" />loading history…
+        </div>
+      ) : historyQ.error ? (
+        <ErrorCard title="Couldn't load history" error={historyQ.error} />
+      ) : grouped.length === 0 ? (
+        <div className="text-sm text-muted py-4">
+          No history yet for this PC + filter.
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {grouped.map(([day, events]) => (
+            <details key={day} open className="border border-border rounded">
+              <summary className="cursor-pointer px-3 py-2 text-sm font-medium bg-muted/5">
+                {day} <span className="text-muted font-normal">· {events.length} event{events.length === 1 ? '' : 's'}</span>
+              </summary>
+              <div className="divide-y divide-border">
+                {events.map((e) => (
+                  <HistoryEventRowView key={e.id} event={e} />
+                ))}
+              </div>
+            </details>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** v0.34 / #92: single row in the history timeline. Renders a
+ *  change-kind badge + field path + identity tuple + the relevant
+ *  before/after snippet, with a `details` expand for the full JSON. */
+function HistoryEventRowView({ event }: { event: HistoryEventRow }) {
+  const identity = useMemo(() => {
+    if (!event.identity_json) return null;
+    try {
+      return JSON.parse(event.identity_json) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  }, [event.identity_json]);
+
+  const before = useMemo(
+    () => parseJsonObject(event.before_json),
+    [event.before_json],
+  );
+  const after = useMemo(
+    () => parseJsonObject(event.after_json),
+    [event.after_json],
+  );
+
+  const diffPairs = useMemo(() => {
+    if (event.change_kind !== 'changed' || !before || !after) return null;
+    const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+    const pairs: Array<{ field: string; before: unknown; after: unknown }> = [];
+    for (const k of keys) {
+      if (!Object.is(before[k], after[k])) {
+        pairs.push({ field: k, before: before[k], after: after[k] });
+      }
+    }
+    return pairs;
+  }, [event.change_kind, before, after]);
+
+  const variant: 'success' | 'danger' | 'amber' =
+    event.change_kind === 'added'
+      ? 'success'
+      : event.change_kind === 'removed'
+        ? 'danger'
+        : 'amber';
+
+  const snapshot =
+    event.change_kind === 'added' ? after : event.change_kind === 'removed' ? before : null;
+
+  return (
+    <div className="px-3 py-2 text-sm space-y-1">
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge variant={variant}>{event.change_kind}</Badge>
+        <code className="text-xs text-muted">{event.field_path}</code>
+        {identity ? (
+          <span className="text-xs">
+            {Object.entries(identity).map(([k, v], i) => (
+              <span key={k}>
+                {i > 0 ? ' · ' : ''}
+                <span className="text-muted">{k}:</span>{' '}
+                {/* Gemini #113 fix: route identity values through the
+                    same formatValue helper the before/after diff and
+                    snapshot rows use, so null / undefined / nested
+                    objects render consistently across the timeline
+                    (was bare `String(v)` which prints `"null"` /
+                    `"[object Object]"`). */}
+                <code>{formatValue(v)}</code>
+              </span>
+            ))}
+          </span>
+        ) : null}
+        <span className="ml-auto text-xs text-muted">{fmtIsoLocal(event.observed_at)}</span>
+      </div>
+      {diffPairs ? (
+        <div className="text-xs space-y-0.5">
+          {diffPairs.map((p) => (
+            <div key={p.field}>
+              <span className="text-muted">{p.field}:</span>{' '}
+              <code className="line-through text-danger/80">{formatValue(p.before)}</code>
+              {' → '}
+              <code className="text-success">{formatValue(p.after)}</code>
+            </div>
+          ))}
+        </div>
+      ) : snapshot ? (
+        <div className="text-xs">
+          {Object.entries(snapshot).map(([k, v]) => (
+            <span key={k} className="mr-3">
+              <span className="text-muted">{k}:</span> <code>{formatValue(v)}</code>
+            </span>
+          ))}
+        </div>
+      ) : null}
+      <details className="text-xs">
+        <summary className="cursor-pointer text-muted">raw JSON</summary>
+        <pre className="whitespace-pre-wrap break-words mt-1 bg-muted/5 p-2 rounded">
+          {JSON.stringify(
+            {
+              identity: identity ?? event.identity_json,
+              before: before ?? event.before_json,
+              after: after ?? event.after_json,
+            },
+            null,
+            2,
+          )}
+        </pre>
+      </details>
+    </div>
+  );
+}
+
+function parseJsonObject(s: string | null): Record<string, unknown> | null {
+  if (!s) return null;
+  try {
+    const parsed = JSON.parse(s) as unknown;
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function formatValue(v: unknown): string {
+  if (v === null || v === undefined) return '—';
+  if (typeof v === 'string') return v;
+  return JSON.stringify(v);
 }
