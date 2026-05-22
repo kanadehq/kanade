@@ -12,14 +12,16 @@ import {
   Trash2,
 } from 'lucide-react';
 import { useState } from 'react';
+import { toast } from 'sonner';
 
 import { ErrorCard } from '@/components/ErrorCard';
 import { type EditorMode, YamlEditorDialog } from '@/components/YamlEditorDialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { useConfirm } from '@/components/ui/confirm-dialog';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { apiFetch } from '@/lib/api';
+import { apiFetch, formatError } from '@/lib/api';
 
 type JobRow = {
   id: string;
@@ -52,10 +54,12 @@ export function Jobs() {
   const del = useMutation({
     mutationFn: (id: string) =>
       apiFetch(`/api/jobs/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-    onSuccess: () => {
+    onSuccess: (_d, id) => {
       qc.invalidateQueries({ queryKey: ['jobs'] });
       qc.invalidateQueries({ queryKey: ['scripts-status'] });
+      toast.success(`Deleted job: ${id}`);
     },
+    onError: (e) => toast.error(`Delete failed: ${formatError(e)}`),
   });
 
   // v0.27.x: surface the script_status KV (per cmd_id ACTIVE/REVOKED)
@@ -101,7 +105,11 @@ export function Jobs() {
     onMutate: (id) => {
       setPendingRevoke((prev) => new Set(prev).add(id));
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['scripts-status'] }),
+    onSuccess: (_d, id) => {
+      qc.invalidateQueries({ queryKey: ['scripts-status'] });
+      toast.success(`Revoked: ${id}`);
+    },
+    onError: (e) => toast.error(`Revoke failed: ${formatError(e)}`),
     onSettled: (_d, _e, id) => {
       setPendingRevoke((prev) => {
         const next = new Set(prev);
@@ -116,7 +124,11 @@ export function Jobs() {
     onMutate: (id) => {
       setPendingUnrevoke((prev) => new Set(prev).add(id));
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['scripts-status'] }),
+    onSuccess: (_d, id) => {
+      qc.invalidateQueries({ queryKey: ['scripts-status'] });
+      toast.success(`Unrevoked: ${id}`);
+    },
+    onError: (e) => toast.error(`Unrevoke failed: ${formatError(e)}`),
     onSettled: (_d, _e, id) => {
       setPendingUnrevoke((prev) => {
         const next = new Set(prev);
@@ -145,7 +157,11 @@ export function Jobs() {
     // Refresh /api/jobs so the live chip recomputes once results
     // start landing post-kill (kills land as ExecResult exit_code
     // -1 → projector flips status from running → completed).
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['jobs'] }),
+    onSuccess: (_d, id) => {
+      qc.invalidateQueries({ queryKey: ['jobs'] });
+      toast.success(`Kill signal sent to ${id}`);
+    },
+    onError: (e) => toast.error(`Kill failed: ${formatError(e)}`),
     onSettled: (_d, _e, id) => {
       setPendingKill((prev) => {
         const next = new Set(prev);
@@ -317,18 +333,19 @@ export function Jobs() {
                       variant="danger"
                       size="sm"
                       disabled={pendingKill.has(j.id)}
-                      onClick={() => {
-                        if (
-                          window.confirm(
-                            `Kill all in-flight runs of ${j.id}?\n\n` +
-                              `${inflight} run${inflight === 1 ? '' : 's'} currently in flight ` +
-                              `(running: ${j.live.running}, pending: ${j.live.pending}). ` +
-                              `Each agent will terminate its child process and report back with exit_code -1.\n\n` +
-                              `Note: this does NOT block the next schedule tick from firing a fresh run — ` +
-                              `if you want to stop new fires too, click "revoke" alongside.`,
-                          )
-                        )
-                          kill.mutate(j.id);
+                      onClick={async () => {
+                        const ok = await confirm({
+                          title: `Kill all in-flight runs of ${j.id}?`,
+                          description:
+                            `${inflight} run${inflight === 1 ? '' : 's'} currently in flight ` +
+                            `(running: ${j.live.running}, pending: ${j.live.pending}). ` +
+                            `Each agent will terminate its child process and report back with exit_code -1.\n\n` +
+                            `Note: this does NOT block the next schedule tick from firing a fresh run — ` +
+                            `if you want to stop new fires too, click "revoke" alongside.`,
+                          confirmLabel: 'Kill',
+                          danger: true,
+                        });
+                        if (ok) kill.mutate(j.id);
                       }}
                       title={`kill — terminate ${inflight} in-flight run${inflight === 1 ? '' : 's'}`}
                       aria-label={`kill job ${j.id}`}
@@ -351,15 +368,16 @@ export function Jobs() {
                     variant="secondary"
                     size="sm"
                     disabled={pendingRevoke.has(j.id)}
-                    onClick={() => {
-                      if (
-                        window.confirm(
-                          `Revoke ${j.id}?\n\n` +
-                            `Blocks the script from running on agents. Any pending or in-flight run for this job will be skipped instead of executed, and new fires will refuse to run until you unrevoke it.\n\n` +
-                            `Reversible — click "unrevoke" to undo.`,
-                        )
-                      )
-                        revoke.mutate(j.id);
+                    onClick={async () => {
+                      const ok = await confirm({
+                        title: `Revoke ${j.id}?`,
+                        description:
+                          `Blocks the script from running on agents. Any pending or in-flight run for this job will be skipped instead of executed, and new fires will refuse to run until you unrevoke it.\n\n` +
+                          `Reversible — click "unrevoke" to undo.`,
+                        confirmLabel: 'Revoke',
+                        danger: true,
+                      });
+                      if (ok) revoke.mutate(j.id);
                     }}
                     title="revoke — block this script from running"
                     aria-label={`revoke job ${j.id}`}
@@ -383,15 +401,16 @@ export function Jobs() {
                   variant="danger"
                   size="sm"
                   disabled={del.isPending}
-                  onClick={() => {
-                    if (
-                      window.confirm(
-                        `Delete job ${j.id}?\n\n` +
-                          `Removes the script from the catalog. Any pending or in-flight run for this job will also be blocked (auto-revoke).\n\n` +
-                          `Refused if any schedule still references this job — delete the schedule first.`,
-                      )
-                    )
-                      del.mutate(j.id);
+                  onClick={async () => {
+                    const ok = await confirm({
+                      title: `Delete job ${j.id}?`,
+                      description:
+                        `Removes the script from the catalog. Any pending or in-flight run for this job will also be blocked (auto-revoke).\n\n` +
+                        `Refused if any schedule still references this job — delete the schedule first.`,
+                      confirmLabel: 'Delete',
+                      danger: true,
+                    });
+                    if (ok) del.mutate(j.id);
                   }}
                   title="delete — remove this job from the catalog"
                   aria-label={`delete job ${j.id}`}

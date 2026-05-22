@@ -1,7 +1,9 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
+import { Toaster } from 'sonner';
 
 import { ProtectedLayout } from '@/components/ProtectedLayout';
+import { ConfirmDialogProvider } from '@/components/ui/confirm-dialog';
 import { AuthProvider } from '@/lib/auth';
 import { Agents } from '@/pages/Agents';
 import { Audit } from '@/pages/Audit';
@@ -39,6 +41,14 @@ export default function App() {
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
         <AuthProvider>
+          <ConfirmDialogProvider>
+            <Toaster
+              position="bottom-right"
+              theme="dark"
+              richColors
+              closeButton
+              toastOptions={{ duration: 4000 }}
+            />
           <Routes>
             {/* Public route — the only thing reachable when not signed in. */}
             <Route path="/login" element={<Login />} />
@@ -70,6 +80,7 @@ export default function App() {
               <Route path="*" element={<Placeholder name="Not Found" />} />
             </Route>
           </Routes>
+          </ConfirmDialogProvider>
         </AuthProvider>
       </BrowserRouter>
     </QueryClientProvider>

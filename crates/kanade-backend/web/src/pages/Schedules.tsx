@@ -1,12 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ChevronDown, FilePlus2, Loader2, Pencil, Power, PowerOff, Trash2, Zap } from 'lucide-react';
 import { useState } from 'react';
+import { toast } from 'sonner';
 
 import { ErrorCard } from '@/components/ErrorCard';
 import { type EditorMode, YamlEditorDialog } from '@/components/YamlEditorDialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { useConfirm } from '@/components/ui/confirm-dialog';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -15,7 +17,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { apiFetch } from '@/lib/api';
+import { apiFetch, formatError } from '@/lib/api';
 
 type ScheduleRow = {
   id: string;
@@ -42,6 +44,7 @@ function summariseTarget(t: ScheduleRow['target']): string {
 
 export function Schedules() {
   const qc = useQueryClient();
+  const confirm = useConfirm();
   const { data, error, isLoading } = useQuery({
     queryKey: ['schedules'],
     queryFn: () => apiFetch<ScheduleRow[]>('/api/schedules'),
@@ -49,7 +52,11 @@ export function Schedules() {
 
   const del = useMutation({
     mutationFn: (id: string) => apiFetch(`/api/schedules/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['schedules'] }),
+    onSuccess: (_d, id) => {
+      qc.invalidateQueries({ queryKey: ['schedules'] });
+      toast.success(`Deleted schedule ${id}`);
+    },
+    onError: (e) => toast.error(`Delete failed: ${formatError(e)}`),
   });
 
   // v0.27 (SPEC §2.6.4 (c)): disable goes through the dedicated
@@ -84,7 +91,11 @@ export function Schedules() {
         return next;
       });
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['schedules'] }),
+    onSuccess: (_d, { id, cascade }) => {
+      qc.invalidateQueries({ queryKey: ['schedules'] });
+      toast.success(cascade ? `Hard-disabled ${id} (cascade)` : `Disabled ${id}`);
+    },
+    onError: (e) => toast.error(`Disable failed: ${formatError(e)}`),
   });
   // v0.27 (gemini #38 review): symmetrical /enable endpoint so we
   // don't clobber concurrent edits with a full row re-POST. Backend
@@ -102,7 +113,11 @@ export function Schedules() {
         return next;
       });
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['schedules'] }),
+    onSuccess: (_d, id) => {
+      qc.invalidateQueries({ queryKey: ['schedules'] });
+      toast.success(`Enabled ${id}`);
+    },
+    onError: (e) => toast.error(`Enable failed: ${formatError(e)}`),
   });
 
   if (isLoading) return <div className="flex items-center gap-2 text-muted"><Loader2 className="size-4 animate-spin" />loading schedules…</div>;
@@ -253,15 +268,16 @@ export function Schedules() {
                       <DropdownMenuSeparator />
                       <DropdownMenuItem
                         variant="danger"
-                        onSelect={() => {
-                          if (
-                            window.confirm(
-                              `Hard-disable schedule ${s.id}?\n\n` +
-                                `Stops the cron from firing AND blocks any pending or in-flight run from this schedule's job. Use this when an active rollout needs to stop immediately.\n\n` +
-                                `The referenced job (${s.job_id}) will be marked revoked — you can unrevoke it from the Jobs page later if needed.`,
-                            )
-                          )
-                            disable.mutate({ id: s.id, cascade: true });
+                        onSelect={async () => {
+                          const ok = await confirm({
+                            title: `Hard-disable schedule ${s.id}?`,
+                            description:
+                              `Stops the cron from firing AND blocks any pending or in-flight run from this schedule's job. Use this when an active rollout needs to stop immediately.\n\n` +
+                              `The referenced job (${s.job_id}) will be marked revoked — you can unrevoke it from the Jobs page later if needed.`,
+                            confirmLabel: 'Hard disable',
+                            danger: true,
+                          });
+                          if (ok) disable.mutate({ id: s.id, cascade: true });
                         }}
                       >
                         <Zap className="size-4 mt-0.5 shrink-0" />
@@ -290,8 +306,14 @@ export function Schedules() {
                   variant="danger"
                   size="sm"
                   disabled={del.isPending}
-                  onClick={() => {
-                    if (window.confirm(`Delete schedule ${s.id}?`)) del.mutate(s.id);
+                  onClick={async () => {
+                    const ok = await confirm({
+                      title: `Delete schedule ${s.id}?`,
+                      description: 'The schedule is removed from the catalog. In-flight runs are unaffected.',
+                      confirmLabel: 'Delete',
+                      danger: true,
+                    });
+                    if (ok) del.mutate(s.id);
                   }}
                   title="delete — remove this schedule"
                   aria-label={`delete schedule ${s.id}`}

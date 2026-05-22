@@ -72,3 +72,10 @@ export async function apiFetchText(path: string, init: RequestInit = {}): Promis
   const { text } = await apiFetchRaw(path, init);
   return text;
 }
+
+// Pretty-prints whatever React Query handed back as the error. ApiError
+// already carries the status + body; anything else (network error, JSON
+// parse failure, etc.) falls back to its String() form.
+export function formatError(err: unknown): string {
+  return err instanceof ApiError ? `${err.status} — ${err.body || err.message}` : String(err);
+}

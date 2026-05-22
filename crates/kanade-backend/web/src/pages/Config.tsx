@@ -1,16 +1,18 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Loader2, Save, Trash2 } from 'lucide-react';
 import { useEffect, useState } from 'react';
+import { toast } from 'sonner';
 
 import { ErrorCard } from '@/components/ErrorCard';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { useConfirm } from '@/components/ui/confirm-dialog';
 import { Input } from '@/components/ui/input';
 import { JsonOutput } from '@/components/ui/json-output';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
-import { apiFetch } from '@/lib/api';
+import { apiFetch, formatError } from '@/lib/api';
 import type { ConfigScope, EffectiveConfigResponse } from '@/lib/types';
 
 function GlobalEditor() {
@@ -27,7 +29,11 @@ function GlobalEditor() {
   const save = useMutation({
     mutationFn: (body: ConfigScope) =>
       apiFetch<ConfigScope>('/api/config', { method: 'PUT', body: JSON.stringify(body) }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['config', 'global'] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['config', 'global'] });
+      toast.success('Saved global config');
+    },
+    onError: (e) => toast.error(`Save failed: ${formatError(e)}`),
   });
 
   return (
@@ -63,6 +69,7 @@ function GlobalEditor() {
 
 function ScopeEditor() {
   const qc = useQueryClient();
+  const confirm = useConfirm();
   const [kind, setKind] = useState<'groups' | 'pcs'>('groups');
   const [name, setName] = useState('');
   const [body, setBody] = useState('');
@@ -74,14 +81,20 @@ function ScopeEditor() {
   });
   const save = useMutation({
     mutationFn: (b: ConfigScope) => apiFetch(url(), { method: 'PUT', body: JSON.stringify(b) }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['config'] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['config'] });
+      toast.success(`Saved ${url()}`);
+    },
+    onError: (e) => toast.error(`Save failed: ${formatError(e)}`),
   });
   const del = useMutation({
     mutationFn: () => apiFetch(url(), { method: 'DELETE' }),
     onSuccess: () => {
       setBody('');
       qc.invalidateQueries({ queryKey: ['config'] });
+      toast.success(`Deleted ${url()}`);
     },
+    onError: (e) => toast.error(`Delete failed: ${formatError(e)}`),
   });
 
   const lastError = load.error ?? save.error ?? del.error;
@@ -134,8 +147,14 @@ function ScopeEditor() {
           <Button
             variant="danger"
             disabled={!name.trim() || del.isPending}
-            onClick={() => {
-              if (window.confirm(`DELETE ${url()} ?`)) del.mutate();
+            onClick={async () => {
+              const ok = await confirm({
+                title: `Delete ${url()}?`,
+                description: 'Removes the override; the scope falls back through the layered config.',
+                confirmLabel: 'Delete',
+                danger: true,
+              });
+              if (ok) del.mutate();
             }}
           >
             <Trash2 className="size-3.5" />
