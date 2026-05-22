@@ -103,6 +103,23 @@ pub struct InventoryHint {
     /// [`ExplodeSpec`] for the per-spec schema.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub explode: Option<Vec<ExplodeSpec>>,
+    /// v0.35 / #93: top-level scalar fields whose changes the
+    /// projector logs to `inventory_history` (one event per
+    /// changed field per scan). Pairs with `explode[].track_history`
+    /// — that covers array elements; this covers single-valued
+    /// fields like `ram_bytes` / `os_version` / `cpu_model` /
+    /// `os_build` that operators want to track for "did the RAM
+    /// get upgraded?" / "when did Win 11 land on this PC?" /
+    /// "BIOS / firmware bumped?" questions. Field name = `field_path`
+    /// in the history row, `identity_json` is NULL, `before_json`
+    /// / `after_json` each carry `{"value": <prior or new value>}`.
+    /// First-ever observation of a scalar (no prior facts row)
+    /// emits `added`; subsequent value changes emit `changed`. No
+    /// `removed` events — a scalar disappearing from the payload
+    /// is rare and the operator can still see the last value via
+    /// the `before_json` of the most recent change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_scalars: Option<Vec<String>>,
 }
 
 /// v0.31 / #40: declarative "flatten this JSON array into a real

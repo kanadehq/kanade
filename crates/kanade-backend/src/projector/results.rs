@@ -257,6 +257,27 @@ async fn upsert_inventory(
         .as_ref()
         .map(serde_json::to_string)
         .transpose()?;
+
+    // v0.35 / #93: read the prior `facts_json` BEFORE the upsert
+    // overwrites it. We compare scalar fields below (after the
+    // upsert) so the history events line up with the new snapshot.
+    // Empty Option = first-ever scan for this (pc_id, job_id) →
+    // `diff_scalars` will emit `added` events for each declared
+    // scalar that's present in the new payload.
+    let prior_facts_json: Option<String> =
+        if hint.history_scalars.as_ref().is_some_and(|s| !s.is_empty()) {
+            sqlx::query_scalar::<_, String>(
+                "SELECT facts_json FROM inventory_facts \
+              WHERE pc_id = ? AND job_id = ?",
+            )
+            .bind(&r.pc_id)
+            .bind(manifest_id)
+            .fetch_optional(pool)
+            .await?
+        } else {
+            None
+        };
+
     sqlx::query(
         "INSERT INTO inventory_facts (
              pc_id, job_id, facts_json, display_json, summary_json,
@@ -282,6 +303,41 @@ async fn upsert_inventory(
         manifest_id,
         "projected inventory fact",
     );
+
+    // v0.35 / #93: write scalar-field history events into the same
+    // `inventory_history` table the explode-array history uses
+    // (`identity_json IS NULL` distinguishes the two). Reuses
+    // `write_events` so the SPA History tab (#92) renders these
+    // rows alongside array-element events without any UI change.
+    if let Some(scalars) = hint.history_scalars.as_ref() {
+        if !scalars.is_empty() {
+            match super::history::diff_scalars(prior_facts_json.as_deref(), &facts, scalars) {
+                Ok(events) if !events.is_empty() => {
+                    let mut tx = pool.begin().await?;
+                    if let Err(e) =
+                        super::history::write_events(&mut tx, &r.pc_id, manifest_id, &events).await
+                    {
+                        warn!(
+                            error = %e,
+                            pc_id = %r.pc_id,
+                            manifest_id,
+                            "history_scalars: write_events failed; rolling back",
+                        );
+                        let _ = tx.rollback().await;
+                    } else {
+                        tx.commit().await?;
+                    }
+                }
+                Ok(_) => { /* no scalar changed — no events */ }
+                Err(e) => warn!(
+                    error = %e,
+                    pc_id = %r.pc_id,
+                    manifest_id,
+                    "history_scalars: diff failed; skipping (other projection paths continue)",
+                ),
+            }
+        }
+    }
 
     // v0.31 / #40: replace this PC's rows in each declared `explode`
     // derived table. ensure_table is idempotent so a manifest that

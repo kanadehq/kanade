@@ -121,3 +121,16 @@ inventory:
         - { field: size_bytes,  type: integer, index: false }
         - { field: free_bytes,  type: integer, index: true  }
         - { field: file_system, type: text,    index: false }
+  # v0.35 / #93: also track changes to top-level scalar fields the
+  # script emits. `explode.track_history` above covers per-disk
+  # adds / removes / size-changes; `history_scalars` here covers
+  # the single-valued fields that operators want trended on a per-
+  # PC basis — RAM upgrades, OS bumps (10 → 11, 23H2 → 24H2),
+  # firmware / CPU swaps (rare, but useful as anomaly signals).
+  # Same `inventory_history` table, `identity_json IS NULL`
+  # distinguishes scalar events from explode-row events.
+  history_scalars:
+    - ram_bytes
+    - os_version
+    - os_build
+    - cpu_model
