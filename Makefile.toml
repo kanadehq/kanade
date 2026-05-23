@@ -110,6 +110,19 @@ cwd = "${CARGO_MAKE_WORKING_DIRECTORY}"
 command = "nats-server"
 args = ["-js", "-p", "4223", "-m", "8223", "-sd", "${CARGO_MAKE_WORKING_DIRECTORY}/target/dev-data/nats-jetstream"]
 
+[tasks.on-add]
+description = "Wired to renri's [[hooks.post_create]] — runs in a freshly created worktree"
+# `apm-install` (no `--update`) is idempotent against the existing
+# `apm.lock.yaml` — fresh worktrees install the recorded skills
+# without rewriting the lock. Upstream-refresh is delegated to
+# pj-base's `.github/workflows/apm-bump.yml` (weekly cron + manual
+# dispatch); same Renovate-equivalent pattern as `kata-apply.yml`.
+# Avoids the per-`renri add` lock churn that `apm install --update`
+# produced whenever upstream renri (or any other apm dep) had
+# moved — see yukimemi/pj-base#8 for the companion change in
+# `renri.toml.base`.
+dependencies = ["apm-install", "vcs-fetch"]
+
 [tasks.backend-dev]
 description = "Run kanade-backend in dev mode (loopback :8081, workspace-local DB + logs, auth disabled, NATS :4223). Coexists with an installed KanadeBackend Windows service running on :8080."
 # cwd pinned to the workspace root: `cargo make dev` runs in
@@ -302,10 +315,6 @@ else
     exec git fetch
 end
 '''
-
-[tasks.on-add]
-description = "Wired to renri's [[hooks.post_create]] — runs in a freshly created worktree"
-dependencies = ["apm-install-update", "vcs-fetch"]
 
 # ─── Local deploy (dev / debug) ──────────────────────────────────────
 #

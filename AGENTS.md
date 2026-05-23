@@ -11,10 +11,15 @@ here so each tool's auto-load behaviour still finds something.
 
 - **No direct push to `main`.** Open a PR.
   - Exception: trivial typo / whitespace / docs wording fixes.
-  - Exception: standalone version bumps.
 - Branch names: `feat/...`, `fix/...`, `chore/...`.
 - **PR titles + bodies in English. Commit messages in English.**
-- Tag-based releases: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+- **Releases are PR-driven, tagging is automatic.** Bump
+  `[workspace.package].version` (workspace) or `[package].version`
+  (single crate) in a `chore/release-vX.Y.Z` PR. On merge to `main`,
+  `.github/workflows/auto-tag.yml` (kata-managed) detects the bump,
+  pushes the `vX.Y.Z` tag, and that tag fires `release.yml` for
+  binary builds + crates.io publish. **Do not run `git tag` by
+  hand** — the bot tag will collide and the manual push fails.
 
 ### PR review cycle
 
@@ -22,6 +27,29 @@ here so each tool's auto-load behaviour still finds something.
   **CodeRabbit**. Wait for both bots to post, address their
   comments (push fixes to the PR branch), and merge only after
   feedback is resolved.
+- **After opening a PR, immediately enter the review-monitoring
+  loop — do not ask the user whether to start it.** Drive the
+  cadence with `/loop` — fixed-interval mode (e.g.
+  `/loop 60s …`) schedules ticks via `CronCreate`; dynamic mode
+  (no interval, `/loop …`) self-paces via `ScheduleWakeup`. The
+  agent actively pulls fresh state each tick with
+  `gh pr view <N> --json state,reviews,comments,statusCheckRollup`
+  and `gh api repos/<owner>/<repo>/pulls/<N>/comments` (the
+  latter covers inline review comments, which `gh pr view`
+  does not surface) and reacts to new bot feedback. Passive
+  watchers (background `gh` polls, file watchers, hooks) cannot
+  trigger active follow-up, so they are not a substitute —
+  without an active wake-up the agent never re-reads the PR.
+- **Default polling interval: 60s.** Gemini Code Assist /
+  CodeRabbit historically reply within ~1–3 minutes of a push or
+  thread reply, so a 60s tick catches them on the next wake-up
+  without burning cache: 60s sits well inside the 5-minute
+  prompt-cache TTL, so the conversation context stays cached
+  across ticks. Do **not** stretch the interval to 300s — that
+  is the worst-of-both window (you pay the cache miss without
+  amortizing it). If the PR is genuinely idle (all threads
+  settled, only waiting on owner approval), step **up** to
+  1200–1800s instead.
 - **Reply to reviewers after pushing a fix.** Reply on the
   corresponding review thread with an **@-mention**
   (`@gemini-code-assist` / `@coderabbitai`). Silent fixes are
@@ -33,6 +61,20 @@ here so each tool's auto-load behaviour still finds something.
 - **Merge gate**: review bots quiet AND owner explicit approval.
 - Bot-authored PRs (Renovate / Dependabot) skip the bot-review
   gate; CI green + owner approval is enough.
+- **Version-bump-only PRs** (a single `chore/release-vX.Y.Z`
+  branch whose entire diff is `[workspace.package].version` /
+  `[package].version` + the matching inter-crate refs +
+  `Cargo.lock`) **also skip the bot-review gate.** There is
+  nothing for the bots to find in a version bump, and the
+  release pipeline downstream of merge (auto-tag → release.yml)
+  is time-sensitive. CI green + owner approval is enough.
+- **Treat CodeRabbit rate-limit notices as "quiet" for the
+  merge gate.** If CodeRabbit only posts a "Review limit
+  reached" quota-exhaustion message (no findings, no inline
+  comments), it has produced no review content — there is
+  nothing to address. Re-trigger with `@coderabbitai review`
+  once the quota refills if you want a real pass; for small or
+  time-sensitive PRs, merge on owner approval without waiting.
 
 ### Worktree workflow
 
