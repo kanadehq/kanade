@@ -1,1 +1,79 @@
-{}
+{
+  "title": "Jobs",
+  "loading": "loading jobs…",
+  "errorTitle": "Couldn't load jobs",
+  "newJob": "New job",
+  "newJobTitle": "Create a new job from a YAML template",
+  "empty": {
+    "title": "No jobs registered",
+    "body": "Use <code>kanade job create &lt;manifest.yaml&gt;</code> on the CLI, or click <strong>New job</strong> above to open the in-browser YAML editor. Schedules reference jobs by id, so the job must exist before the schedule fires."
+  },
+  "columns": {
+    "id": "id",
+    "version": "version",
+    "status": "status",
+    "live": "live",
+    "shell": "shell",
+    "runAs": "run_as",
+    "cwd": "cwd",
+    "timeout": "timeout",
+    "inventory": "inventory",
+    "description": "description",
+    "actions": "actions"
+  },
+  "status": {
+    "active": "active",
+    "revoked": "revoked"
+  },
+  "live": {
+    "runningTitle": "Running: at least one PC has reported back, more still in flight",
+    "pendingTitle": "Pending: fan-out published, no results back yet (auto-expires after 1 h)"
+  },
+  "inventoryProbe": "probe",
+  "actions": {
+    "edit": "edit",
+    "editTitle": "edit — open this job's YAML manifest",
+    "editAria": "edit job {{id}}",
+    "revoke": "revoke",
+    "revokeTitle": "revoke — block this script from running",
+    "revokeAria": "revoke job {{id}}",
+    "unrevoke": "unrevoke",
+    "unrevokeTitle": "unrevoke — allow this script to run again",
+    "unrevokeAria": "unrevoke job {{id}}",
+    "kill": "kill",
+    "killTitle_one": "kill — terminate {{count}} in-flight run",
+    "killTitle_other": "kill — terminate {{count}} in-flight runs",
+    "killAria": "kill job {{id}}",
+    "delete": "delete",
+    "deleteTitle": "delete — remove this job from the catalog",
+    "deleteAria": "delete job {{id}}"
+  },
+  "confirm": {
+    "killTitle": "Kill all in-flight runs of {{id}}?",
+    "killDescription_one": "{{count}} run currently in flight (running: {{running}}, pending: {{pending}}). Each agent will terminate its child process and report back with exit_code -1.\n\nNote: this does NOT block the next schedule tick from firing a fresh run — if you want to stop new fires too, click \"revoke\" alongside.",
+    "killDescription_other": "{{count}} runs currently in flight (running: {{running}}, pending: {{pending}}). Each agent will terminate its child process and report back with exit_code -1.\n\nNote: this does NOT block the next schedule tick from firing a fresh run — if you want to stop new fires too, click \"revoke\" alongside.",
+    "killLabel": "Kill",
+    "revokeTitle": "Revoke {{id}}?",
+    "revokeDescription": "Blocks the script from running on agents. Any pending or in-flight run for this job will be skipped instead of executed, and new fires will refuse to run until you unrevoke it.\n\nReversible — click \"unrevoke\" to undo.",
+    "revokeLabel": "Revoke",
+    "deleteTitle": "Delete job {{id}}?",
+    "deleteDescription": "Removes the script from the catalog. Any pending or in-flight run for this job will also be blocked (auto-revoke).\n\nRefused if any schedule still references this job — delete the schedule first.",
+    "deleteLabel": "Delete"
+  },
+  "toast": {
+    "deleteSuccess": "Deleted job: {{id}}",
+    "deleteFailure": "Delete failed: {{error}}",
+    "revokeSuccess": "Revoked: {{id}}",
+    "revokeFailure": "Revoke failed: {{error}}",
+    "unrevokeSuccess": "Unrevoked: {{id}}",
+    "unrevokeFailure": "Unrevoke failed: {{error}}",
+    "killSuccess": "Kill signal sent to {{id}}",
+    "killFailure": "Kill failed: {{error}}"
+  },
+  "errors": {
+    "deleteTitle": "Delete failed",
+    "revokeTitle": "Revoke failed",
+    "unrevokeTitle": "Unrevoke failed",
+    "killTitle": "Kill failed"
+  }
+}

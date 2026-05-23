@@ -1,1 +1,24 @@
-{}
+{
+  "title": "Run a script on one PC",
+  "description": "Posts to <code>/api/run</code>; backend forwards over NATS and waits for the agent's <code>ExecResult</code>. Same surface as <code>kanade run &lt;pc_id&gt; -- &lt;script&gt;</code>.",
+  "fields": {
+    "pcId": "pc_id",
+    "shell": "shell",
+    "timeout": "timeout (s)",
+    "jobId": "job_id (optional)",
+    "script": "script"
+  },
+  "placeholders": {
+    "pcId": "MINIPC-01",
+    "jobId": "ad-hoc-…",
+    "script": "echo hello from kanade web"
+  },
+  "submit": "POST /api/run",
+  "errorTitle": "Run failed",
+  "result": {
+    "exitCode": "exit_code:",
+    "stdout": "stdout",
+    "stderr": "stderr",
+    "empty": "(empty)"
+  }
+}

@@ -1,6 +1,7 @@
 import { useMutation } from '@tanstack/react-query';
 import { Loader2, Play } from 'lucide-react';
 import { useState } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
 
 import { ErrorCard } from '@/components/ErrorCard';
 import { Button } from '@/components/ui/button';
@@ -22,6 +23,7 @@ type RunBody = {
 };
 
 export function Run() {
+  const { t } = useTranslation('run');
   const [pcId, setPcId] = useState('');
   const [shell, setShell] = useState('powershell');
   const [timeout, setTimeout] = useState(60);
@@ -52,27 +54,26 @@ export function Run() {
     <div className="space-y-4">
       <Card>
         <CardHeader>
-          <CardTitle>Run a script on one PC</CardTitle>
+          <CardTitle>{t('title')}</CardTitle>
           <CardDescription>
-            Posts to <code>/api/run</code>; backend forwards over NATS and waits for the agent's
-            <code> ExecResult</code>. Same surface as <code>kanade run &lt;pc_id&gt; -- &lt;script&gt;</code>.
+            <Trans ns="run" i18nKey="description" components={{ code: <code /> }} />
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
             <div>
-              <Label>pc_id</Label>
-              <Input value={pcId} onChange={(e) => setPcId(e.target.value)} placeholder="MINIPC-01" />
+              <Label>{t('fields.pcId')}</Label>
+              <Input value={pcId} onChange={(e) => setPcId(e.target.value)} placeholder={t('placeholders.pcId')} />
             </div>
             <div>
-              <Label>shell</Label>
+              <Label>{t('fields.shell')}</Label>
               <Select value={shell} onChange={(e) => setShell(e.target.value)}>
                 <option value="powershell">powershell</option>
                 <option value="cmd">cmd</option>
               </Select>
             </div>
             <div>
-              <Label>timeout (s)</Label>
+              <Label>{t('fields.timeout')}</Label>
               <Input
                 type="number"
                 min={1}
@@ -81,32 +82,32 @@ export function Run() {
               />
             </div>
             <div>
-              <Label>job_id (optional)</Label>
-              <Input value={jobId} onChange={(e) => setJobId(e.target.value)} placeholder="ad-hoc-…" />
+              <Label>{t('fields.jobId')}</Label>
+              <Input value={jobId} onChange={(e) => setJobId(e.target.value)} placeholder={t('placeholders.jobId')} />
             </div>
           </div>
           <div>
-            <Label>script</Label>
+            <Label>{t('fields.script')}</Label>
             <Textarea
               value={script}
               onChange={(e) => setScript(e.target.value)}
-              placeholder="echo hello from kanade web"
+              placeholder={t('placeholders.script')}
               className="min-h-32"
             />
           </div>
           <Button onClick={onSubmit} disabled={!pcId.trim() || !script.trim() || mut.isPending}>
             {mut.isPending ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
-            POST /api/run
+            {t('submit')}
           </Button>
         </CardContent>
       </Card>
 
-      {mut.error && <ErrorCard title="Run failed" error={mut.error} />}
+      {mut.error && <ErrorCard title={t('errorTitle')} error={mut.error} />}
       {mut.data && (
         <Card>
           <CardHeader>
             <CardTitle>
-              exit_code: <span className={mut.data.exit_code === 0 ? 'text-success' : 'text-danger'}>{mut.data.exit_code}</span>
+              {t('result.exitCode')} <span className={mut.data.exit_code === 0 ? 'text-success' : 'text-danger'}>{mut.data.exit_code}</span>
             </CardTitle>
             <CardDescription>
               {mut.data.pc_id} · {mut.data.started_at} → {mut.data.finished_at}
@@ -114,12 +115,12 @@ export function Run() {
           </CardHeader>
           <CardContent className="space-y-3">
             <div>
-              <Label>stdout</Label>
-              <JsonOutput value={mut.data.stdout || '(empty)'} />
+              <Label>{t('result.stdout')}</Label>
+              <JsonOutput value={mut.data.stdout || t('result.empty')} />
             </div>
             {mut.data.stderr && (
               <div>
-                <Label>stderr</Label>
+                <Label>{t('result.stderr')}</Label>
                 <JsonOutput value={mut.data.stderr} className="text-danger" />
               </div>
             )}

@@ -1,1 +1,79 @@
-{}
+{
+  "title": "ジョブ",
+  "loading": "ジョブを読み込み中…",
+  "errorTitle": "ジョブを読み込めませんでした",
+  "newJob": "新規ジョブ",
+  "newJobTitle": "YAML テンプレートから新しいジョブを作成します",
+  "empty": {
+    "title": "登録されているジョブがありません",
+    "body": "CLI で <code>kanade job create &lt;manifest.yaml&gt;</code> を実行するか、 上の <strong>新規ジョブ</strong> をクリックしてブラウザ内 YAML エディタを開いてください。 スケジュールはジョブを id で参照するため、 スケジュール発火前にジョブを作成しておく必要があります。"
+  },
+  "columns": {
+    "id": "id",
+    "version": "version",
+    "status": "ステータス",
+    "live": "実行中",
+    "shell": "shell",
+    "runAs": "run_as",
+    "cwd": "cwd",
+    "timeout": "timeout",
+    "inventory": "inventory",
+    "description": "説明",
+    "actions": "操作"
+  },
+  "status": {
+    "active": "有効",
+    "revoked": "無効化"
+  },
+  "live": {
+    "runningTitle": "実行中: 少なくとも 1 台の PC から応答あり、 残りは進行中",
+    "pendingTitle": "保留中: 配信済み、 結果未着 (1 時間で自動失効)"
+  },
+  "inventoryProbe": "プローブ",
+  "actions": {
+    "edit": "編集",
+    "editTitle": "編集 — このジョブの YAML マニフェストを開きます",
+    "editAria": "ジョブ {{id}} を編集",
+    "revoke": "無効化",
+    "revokeTitle": "無効化 — このスクリプトの実行をブロックします",
+    "revokeAria": "ジョブ {{id}} を無効化",
+    "unrevoke": "無効化解除",
+    "unrevokeTitle": "無効化解除 — このスクリプトを再度実行可能にします",
+    "unrevokeAria": "ジョブ {{id}} の無効化を解除",
+    "kill": "強制終了",
+    "killTitle_one": "強制終了 — 進行中の {{count}} 件を終了します",
+    "killTitle_other": "強制終了 — 進行中の {{count}} 件を終了します",
+    "killAria": "ジョブ {{id}} を強制終了",
+    "delete": "削除",
+    "deleteTitle": "削除 — このジョブをカタログから削除します",
+    "deleteAria": "ジョブ {{id}} を削除"
+  },
+  "confirm": {
+    "killTitle": "{{id}} の進行中の実行をすべて強制終了しますか?",
+    "killDescription_one": "現在 {{count}} 件が進行中です (実行中: {{running}}、 保留中: {{pending}})。 各エージェントは子プロセスを終了し、 exit_code -1 で結果を報告します。\n\n注意: これは次回スケジュール発火時の新規実行はブロックしません。 新規発火も止めたい場合は併せて「無効化」をクリックしてください。",
+    "killDescription_other": "現在 {{count}} 件が進行中です (実行中: {{running}}、 保留中: {{pending}})。 各エージェントは子プロセスを終了し、 exit_code -1 で結果を報告します。\n\n注意: これは次回スケジュール発火時の新規実行はブロックしません。 新規発火も止めたい場合は併せて「無効化」をクリックしてください。",
+    "killLabel": "強制終了",
+    "revokeTitle": "{{id}} を無効化しますか?",
+    "revokeDescription": "エージェントでのスクリプト実行をブロックします。 このジョブの保留中または進行中の実行はスキップされ、 無効化を解除するまで新規発火は拒否されます。\n\n可逆操作です — 「無効化解除」で元に戻せます。",
+    "revokeLabel": "無効化",
+    "deleteTitle": "ジョブ {{id}} を削除しますか?",
+    "deleteDescription": "カタログからスクリプトを削除します。 このジョブの保留中または進行中の実行も自動的にブロック (自動無効化) されます。\n\nこのジョブを参照しているスケジュールが残っている場合は拒否されます — 先にスケジュールを削除してください。",
+    "deleteLabel": "削除"
+  },
+  "toast": {
+    "deleteSuccess": "ジョブを削除しました: {{id}}",
+    "deleteFailure": "削除に失敗しました: {{error}}",
+    "revokeSuccess": "無効化しました: {{id}}",
+    "revokeFailure": "無効化に失敗しました: {{error}}",
+    "unrevokeSuccess": "無効化を解除しました: {{id}}",
+    "unrevokeFailure": "無効化解除に失敗しました: {{error}}",
+    "killSuccess": "{{id}} に強制終了シグナルを送信しました",
+    "killFailure": "強制終了に失敗しました: {{error}}"
+  },
+  "errors": {
+    "deleteTitle": "削除に失敗しました",
+    "revokeTitle": "無効化に失敗しました",
+    "unrevokeTitle": "無効化解除に失敗しました",
+    "killTitle": "強制終了に失敗しました"
+  }
+}
