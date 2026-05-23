@@ -431,10 +431,16 @@ function FactCard({ fact, pcId }: { fact: InventoryFact; pcId: string }) {
         <CardDescription>
           collected {fmtIsoLocal(fact.collected_at)}
         </CardDescription>
-        <div className="mt-2 inline-flex rounded-md border border-border overflow-hidden text-xs">
+        <div
+          role="group"
+          aria-label={`Tab for ${fact.job_id}`}
+          className="mt-2 inline-flex rounded-md border border-border overflow-hidden text-xs"
+        >
           {(['now', 'history'] as const).map((t) => (
             <button
               key={t}
+              type="button"
+              aria-pressed={tab === t}
               onClick={() => setTab(t)}
               className={cn(
                 'px-3 py-1 transition-colors',
@@ -502,15 +508,13 @@ function FactCard({ fact, pcId }: { fact: InventoryFact; pcId: string }) {
  *  param. */
 function HistoryPane({ manifestId, pcId }: { manifestId: string; pcId: string }) {
   const [since, setSince] = useState('7d');
+  // v0.35 follow-up: kind filter is now a single segmented control
+  // (4 mutually-exclusive buttons). The earlier shape had both a
+  // dropdown and a `diff only` checkbox — same data path, just a
+  // checkbox-shaped shortcut for kind=changed — which read as two
+  // independent controls that secretly overlapped. One control, one
+  // source of truth.
   const [kind, setKind] = useState<ChangeKindFilter>('any');
-  // v0.34 / #92 follow-up: hw + sw inventory rarely changes day-to-
-  // day, so most events the operator cares about are version bumps
-  // (`changed`), not the noisier `added` / `removed` from a fresh
-  // install or rollout. `diffOnly` is a quick checkbox that locks
-  // the kind filter to `changed` without forcing the operator to
-  // reach for the dropdown each time.
-  const [diffOnly, setDiffOnly] = useState(false);
-  const effectiveKind: ChangeKindFilter = diffOnly ? 'changed' : kind;
 
   // Gemini #113 fix: compute the sliding-window `since` lower bound
   // INSIDE queryFn so each refetch (every 60 s while the History tab
@@ -542,10 +546,8 @@ function HistoryPane({ manifestId, pcId }: { manifestId: string; pcId: string })
 
   const filteredRows = useMemo(() => {
     const rows = historyQ.data ?? [];
-    return effectiveKind === 'any'
-      ? rows
-      : rows.filter((r) => r.change_kind === effectiveKind);
-  }, [historyQ.data, effectiveKind]);
+    return kind === 'any' ? rows : rows.filter((r) => r.change_kind === kind);
+  }, [historyQ.data, kind]);
 
   // Group events by local-date YYYY-MM-DD so the timeline reads as a
   // collapsible per-day stack (matches `Audit`'s rough density without
@@ -583,34 +585,39 @@ function HistoryPane({ manifestId, pcId }: { manifestId: string; pcId: string })
           </Select>
         </div>
         <div className="flex flex-col gap-1">
-          <Label htmlFor={`history-kind-${manifestId}`} className="text-xs text-muted">
+          <span id={`history-kind-label-${manifestId}`} className="text-xs text-muted">
             kind
-          </Label>
-          <Select
-            id={`history-kind-${manifestId}`}
-            value={kind}
-            onChange={(e) => setKind(e.target.value as ChangeKindFilter)}
-            disabled={diffOnly}
+          </span>
+          <div
+            role="group"
+            aria-labelledby={`history-kind-label-${manifestId}`}
+            className="inline-flex rounded-md border border-border overflow-hidden text-xs"
           >
             {CHANGE_KIND_FILTERS.map((k) => (
-              <option key={k} value={k}>
+              <button
+                key={k}
+                type="button"
+                aria-pressed={kind === k}
+                onClick={() => setKind(k)}
+                className={cn(
+                  'px-3 py-1.5 transition-colors',
+                  kind === k
+                    ? 'bg-fg/10 text-fg font-medium'
+                    : 'text-muted hover:bg-fg/5 hover:text-fg',
+                )}
+                title={
+                  k === 'changed'
+                    ? 'Field-level diffs only (hides install / uninstall noise)'
+                    : k === 'any'
+                      ? 'Show all history events'
+                      : `Show only ${k} events`
+                }
+              >
                 {k}
-              </option>
+              </button>
             ))}
-          </Select>
+          </div>
         </div>
-        <label
-          className="flex items-center gap-2 pb-2 text-xs text-muted cursor-pointer select-none"
-          title="Hide added / removed events, show only field-level changes (= kind: changed)."
-        >
-          <input
-            type="checkbox"
-            checked={diffOnly}
-            onChange={(e) => setDiffOnly(e.target.checked)}
-            className="size-3.5 accent-fg"
-          />
-          diff only
-        </label>
       </div>
 
       {historyQ.isLoading ? (
