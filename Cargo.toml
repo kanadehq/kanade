@@ -60,7 +60,7 @@ serde_yaml         = "0.9.34"
 schemars           = { version = "1.2.1", features = ["chrono04", "uuid1"] }
 reqwest            = { version = "0.13", features = ["json"] }
 tokio-cron-scheduler = "0.15"
-rust-embed         = "8"
+rust-embed         = "8.11.0"
 mime_guess         = "2"
 jsonwebtoken       = "10.4.0"
 sha2               = "0.10"
