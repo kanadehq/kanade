@@ -155,6 +155,53 @@ apply, so don't bump them locally — Renovate is configured
 (via the kata-distributed `renovate.json`) to ignore
 `.github/workflows/ci.yml` and `.github/workflows/release.yml`
 in each PJ to avoid the bump→clobber loop.
+
+### Releasing: version bump PR + auto-tag
+
+Releases are triggered from `main` by a Cargo.toml version
+change. `.github/workflows/auto-tag.yml` is kata-managed (source:
+`yukimemi/pj-rust/.github/workflows/auto-tag.yml.tera`). It
+watches `main` and, whenever a commit lands that changes the
+top-level `version = "..."` in `Cargo.toml`, it pushes a matching
+`vX.Y.Z` tag — no manual `git tag` step is needed. The tag push
+then fires `release.yml`; see `kata:agents:rust-lib:*` or
+`kata:agents:rust-cli:*` for what release.yml does in each
+crate shape.
+
+Cut a release via a small PR — never `git push` the bump
+straight to `main`, even though the base block lists version
+bumps as an exception to "no direct push". `auto-tag.yml` only
+fires on `main`-branch pushes, so the bump must land via a merge
+either way; using a PR also gives CI a chance to gate the
+release. Enable automerge so CI green = release start:
+
+```sh
+git switch -c chore/bump-X.Y.Z
+# Edit `package.version` in Cargo.toml, then:
+cargo build                     # let Cargo.lock follow
+git commit -am "chore: bump version to X.Y.Z"
+git push -u origin chore/bump-X.Y.Z
+gh pr create --fill
+gh pr merge --auto --squash --delete-branch
+```
+
+Once CI is green the PR auto-merges. `auto-tag.yml` then pushes
+`vX.Y.Z`, which fires `release.yml`.
+
+**Repo settings to set once:** enable
+`delete_branch_on_merge=true` (Settings → General →
+"Automatically delete head branches"). The `--delete-branch`
+flag on `gh pr merge --auto` is effectively a no-op — gh
+returns as soon as automerge is enabled, so the deletion has to
+happen server-side, which requires the repo setting.
+
+**Why `KATA_APPLY_TOKEN`:** GitHub refuses to fire downstream
+workflows from tags pushed by the default `GITHUB_TOKEN`, so
+`auto-tag.yml` pushes with `KATA_APPLY_TOKEN` (the same PAT
+`kata-apply.yml` already uses). Each consumer repo needs a
+`KATA_APPLY_TOKEN` secret set; if a version-bump merge silently
+doesn't fire `release.yml`, the missing PAT is the first thing
+to check.
 <!-- kata:agents:rust:end -->
 <!-- kata:agents:rust-cli:begin -->
 ### Rust CLI release flow
