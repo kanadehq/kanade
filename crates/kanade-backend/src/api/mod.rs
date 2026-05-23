@@ -121,11 +121,28 @@ pub fn router(state: AppState) -> Router {
             "/api/inventory/{manifest_id}/search/{field}",
             get(inventory::search),
         )
-        // v0.31 / #41: per-PC inventory history timeline (foundation
-        // — fleet-wide search + first_seen endpoints are follow-ups).
+        // v0.31 / #41: per-PC inventory history timeline.
         .route(
             "/api/inventory/{manifest_id}/history/pc/{pc_id}",
             get(inventory::history_for_pc),
+        )
+        // v0.35 / #90: fleet-wide history search across PCs. Same
+        // response shape as /history/pc/{pc_id}; query string
+        // carries optional `field`, `kind`, `since`, `until`,
+        // `identity.<key>=<value>` filters plus `limit` / `offset`.
+        // Each row's `pc_id` is what distinguishes it from the
+        // per-PC variant.
+        .route(
+            "/api/inventory/{manifest_id}/history/search",
+            get(inventory::fleet_history_search),
+        )
+        // v0.35 / #91: first_seen-per-PC aggregation. Returns one
+        // row per matching PC with the earliest observed_at of any
+        // matching event — operator buckets the result by date
+        // client-side to draw the rollout-curve chart.
+        .route(
+            "/api/inventory/{manifest_id}/history/first_seen",
+            get(inventory::first_seen),
         )
         .route("/api/inventory/{pc_id}", get(inventory::list_for_pc))
         .route("/api/agents/{pc_id}/logs", get(agent_logs::tail))

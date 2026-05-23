@@ -539,6 +539,250 @@ pub async fn history_for_pc(
     Ok(Json(out))
 }
 
+/// v0.35 / #90: extract `identity.<key>=<value>` query params from a
+/// flat HashMap and validate each `<key>` against the same
+/// `[A-Za-z_][A-Za-z0-9_]{0,63}` shape we use for explode column
+/// names. The validated key is then safe to splice into a
+/// `json_extract(identity_json, '$.<key>')` SQL path — the path
+/// can't be bound, only the value can.
+fn parse_identity_filters(
+    params: &HashMap<String, String>,
+) -> Result<Vec<(String, String)>, (StatusCode, String)> {
+    let mut out = Vec::new();
+    for (k, v) in params {
+        if let Some(field) = k.strip_prefix("identity.") {
+            validate_ident(field)
+                .map_err(|e| (StatusCode::BAD_REQUEST, format!("identity.{field}: {e}")))?;
+            out.push((field.to_string(), v.clone()));
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
+}
+
+/// `GET /api/inventory/{manifest_id}/history/search` — fleet-wide
+/// (cross-PC) timeline from `inventory_history` (#90). Same row
+/// shape as `history_for_pc`, just unfiltered by pc_id so operators
+/// can answer "which PCs had Chrome installed at any point in the
+/// last 90 days?" / "did anyone roll Chrome back from 121 to 120?"
+/// without iterating over PCs themselves.
+///
+/// Query params (all optional):
+///   * `field=<spec.field>`       — narrow to one explode field
+///   * `kind=added|removed|changed`
+///   * `since=<ISO-8601>`         — observed_at >=
+///   * `until=<ISO-8601>`         — observed_at <
+///   * `identity.<key>=<value>`   — match against the JSON object
+///     stored in `identity_json` (e.g. `identity.name=Chrome` for
+///     `apps`-shape spec or `identity.device_id=C:` for `disks`).
+///     Validated against the same identifier rules as explode
+///     columns; splicing into the SQL `$.path` is safe.
+///   * `limit` (default 500, ceiling 5000), `offset`
+pub async fn fleet_history_search(
+    State(state): State<AppState>,
+    Path(manifest_id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<Vec<HistoryEventRow>>, (StatusCode, String)> {
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(500)
+        .min(5000);
+    let offset = params
+        .get("offset")
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(0);
+    let kind = params.get("kind").filter(|s| !s.is_empty());
+    if let Some(k) = kind
+        && !matches!(k.as_str(), "added" | "removed" | "changed")
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("kind must be one of added / removed / changed (got {k:?})"),
+        ));
+    }
+    let since: Option<DateTime<Utc>> = params
+        .get("since")
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            s.parse::<DateTime<Utc>>()
+                .map_err(|e| (StatusCode::BAD_REQUEST, format!("since: {e}")))
+        })
+        .transpose()?;
+    let until: Option<DateTime<Utc>> = params
+        .get("until")
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            s.parse::<DateTime<Utc>>()
+                .map_err(|e| (StatusCode::BAD_REQUEST, format!("until: {e}")))
+        })
+        .transpose()?;
+    let field = params.get("field").filter(|s| !s.is_empty());
+    let identity_filters = parse_identity_filters(&params)?;
+
+    let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+        "SELECT id, pc_id, job_id, field_path, identity_json, \
+                change_kind, before_json, after_json, observed_at \
+           FROM inventory_history \
+          WHERE job_id = ",
+    );
+    qb.push_bind(&manifest_id);
+    if let Some(f) = field {
+        qb.push(" AND field_path = ");
+        qb.push_bind(f);
+    }
+    if let Some(k) = kind {
+        qb.push(" AND change_kind = ");
+        qb.push_bind(k);
+    }
+    if let Some(t) = since {
+        qb.push(" AND observed_at >= ");
+        qb.push_bind(t);
+    }
+    if let Some(t) = until {
+        qb.push(" AND observed_at < ");
+        qb.push_bind(t);
+    }
+    for (key, value) in &identity_filters {
+        // key validated to [A-Za-z_][A-Za-z0-9_]{0,63} above, safe
+        // to interpolate into the JSON path. Value goes through
+        // bind so untrusted operator input never touches SQL text.
+        qb.push(format!(" AND json_extract(identity_json, '$.{key}') = "));
+        qb.push_bind(value);
+    }
+    qb.push(" ORDER BY observed_at DESC LIMIT ");
+    qb.push_bind(limit as i64);
+    qb.push(" OFFSET ");
+    qb.push_bind(offset as i64);
+
+    let rows = qb.build().fetch_all(&state.pool).await.map_err(|e| {
+        warn!(error = %e, "inventory_history fleet query");
+        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    })?;
+
+    let out: Result<Vec<HistoryEventRow>, _> = rows
+        .into_iter()
+        .map(|r| {
+            Ok::<_, sqlx::Error>(HistoryEventRow {
+                id: r.try_get("id")?,
+                pc_id: r.try_get("pc_id")?,
+                job_id: r.try_get("job_id")?,
+                field_path: r.try_get("field_path")?,
+                identity_json: r.try_get("identity_json").ok(),
+                change_kind: r.try_get("change_kind")?,
+                before_json: r.try_get("before_json").ok(),
+                after_json: r.try_get("after_json").ok(),
+                observed_at: r.try_get("observed_at").ok(),
+            })
+        })
+        .collect();
+    let out = out.map_err(|e| {
+        warn!(error = %e, "fleet history row decode");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("decode history row: {e}"),
+        )
+    })?;
+    Ok(Json(out))
+}
+
+/// `GET /api/inventory/{manifest_id}/history/first_seen` — for each
+/// PC matching the identity filter (e.g. `identity.name=Chrome`),
+/// return the earliest `observed_at` of any matching event. Drives
+/// the rollout-curve chart's "% of fleet on X over time" view
+/// without forcing the client to paginate /history/search and
+/// dedupe by pc_id (which gets the ordering wrong across pages).
+///
+/// Query params:
+///   * `field=<spec.field>`       — required-ish (the typical curve
+///     is per-explode-field; the SQL still runs without it but the
+///     results blend events across fields, which is rarely useful)
+///   * `identity.<key>=<value>`   — at least one is typical
+///     (otherwise every PC ever seen comes back); not enforced
+///   * `since=<ISO-8601>`         — observed_at >=
+///   * `limit` (default 5000, ceiling 5000), `offset` — pagination
+///     for fleets exceeding 5000 PCs that match the identity filter
+pub async fn first_seen(
+    State(state): State<AppState>,
+    Path(manifest_id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<Vec<FirstSeenRow>>, (StatusCode, String)> {
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(5000)
+        .min(5000);
+    // Gemini #124 fix: pagination on first_seen too — fleets with
+    // > 5000 PCs need offset to fetch the full curve. Mirrors the
+    // fleet_history_search pagination shape so client logic is
+    // identical across both endpoints.
+    let offset = params
+        .get("offset")
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(0);
+    let field = params.get("field").filter(|s| !s.is_empty());
+    let since: Option<DateTime<Utc>> = params
+        .get("since")
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            s.parse::<DateTime<Utc>>()
+                .map_err(|e| (StatusCode::BAD_REQUEST, format!("since: {e}")))
+        })
+        .transpose()?;
+    let identity_filters = parse_identity_filters(&params)?;
+
+    let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+        "SELECT pc_id, MIN(observed_at) AS first_seen_at \
+           FROM inventory_history \
+          WHERE job_id = ",
+    );
+    qb.push_bind(&manifest_id);
+    if let Some(f) = field {
+        qb.push(" AND field_path = ");
+        qb.push_bind(f);
+    }
+    if let Some(t) = since {
+        qb.push(" AND observed_at >= ");
+        qb.push_bind(t);
+    }
+    for (key, value) in &identity_filters {
+        qb.push(format!(" AND json_extract(identity_json, '$.{key}') = "));
+        qb.push_bind(value);
+    }
+    qb.push(" GROUP BY pc_id ORDER BY first_seen_at ASC LIMIT ");
+    qb.push_bind(limit as i64);
+    qb.push(" OFFSET ");
+    qb.push_bind(offset as i64);
+
+    let rows = qb.build().fetch_all(&state.pool).await.map_err(|e| {
+        warn!(error = %e, "inventory_history first_seen query");
+        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    })?;
+    let out: Result<Vec<FirstSeenRow>, _> = rows
+        .into_iter()
+        .map(|r| {
+            Ok::<_, sqlx::Error>(FirstSeenRow {
+                pc_id: r.try_get("pc_id")?,
+                first_seen_at: r.try_get("first_seen_at").ok(),
+            })
+        })
+        .collect();
+    let out = out.map_err(|e| {
+        warn!(error = %e, "first_seen row decode");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("decode first_seen row: {e}"),
+        )
+    })?;
+    Ok(Json(out))
+}
+
+#[derive(Serialize)]
+pub struct FirstSeenRow {
+    pub pc_id: String,
+    pub first_seen_at: Option<DateTime<Utc>>,
+}
+
 fn row_to_fact(r: sqlx::sqlite::SqliteRow) -> InventoryFact {
     let facts: serde_json::Value = r
         .try_get::<String, _>("facts_json")
@@ -563,5 +807,62 @@ fn row_to_fact(r: sqlx::sqlite::SqliteRow) -> InventoryFact {
         summary,
         collected_at: r.try_get("collected_at").ok(),
         recorded_at: r.try_get("recorded_at").ok(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn params(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn parse_identity_filters_empty_when_no_identity_prefix() {
+        let got = parse_identity_filters(&params(&[
+            ("field", "apps"),
+            ("kind", "added"),
+            ("since", "2026-04-01"),
+        ]))
+        .unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn parse_identity_filters_extracts_pairs() {
+        let got = parse_identity_filters(&params(&[
+            ("identity.name", "Chrome"),
+            ("identity.source", "appx"),
+            ("field", "apps"),
+        ]))
+        .unwrap();
+        // Sorted for stable assertion + stable SQL clause order.
+        assert_eq!(
+            got,
+            vec![
+                ("name".to_string(), "Chrome".to_string()),
+                ("source".to_string(), "appx".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_identity_filters_rejects_injection_attempts() {
+        // The key part splices into a json_extract path; validate_ident
+        // is the choke point that keeps SQL injection unreachable.
+        // A dotted / quoted key gets a clean 400 instead of a malformed
+        // SQL surface.
+        let err = parse_identity_filters(&params(&[("identity.name';--", "x")])).unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn parse_identity_filters_rejects_empty_field_name() {
+        let err = parse_identity_filters(&params(&[("identity.", "x")])).unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
     }
 }
