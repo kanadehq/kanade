@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { Loader2, Search } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 
 import { ErrorCard } from '@/components/ErrorCard';
@@ -47,17 +48,6 @@ type Op = 'eq' | 'contains' | 'prefix' | 'lt' | 'le' | 'gt' | 'ge' | 'ne';
 
 const TEXT_OPS: Op[] = ['eq', 'contains', 'prefix', 'ne'];
 const NUMERIC_OPS: Op[] = ['eq', 'lt', 'le', 'gt', 'ge', 'ne'];
-
-const OP_LABEL: Record<Op, string> = {
-  eq: '=',
-  contains: 'contains',
-  prefix: 'starts with',
-  lt: '<',
-  le: '≤',
-  gt: '>',
-  ge: '≥',
-  ne: '≠',
-};
 
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 5000;
@@ -107,6 +97,7 @@ function formatCell(v: unknown): string {
  *  the page covers fleet-wide inventory search in general — renamed
  *  to match. */
 export function InventorySearch() {
+  const { t } = useTranslation('search');
   const jobsQ = useQuery({
     queryKey: ['inventory-jobs'],
     queryFn: () => apiFetch<InventoryJob[]>('/api/inventory/jobs'),
@@ -228,33 +219,37 @@ export function InventorySearch() {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Search className="size-5" />
-            Inventory search
+            {t('title')}
           </CardTitle>
           <CardDescription>
-            Cross-PC search across any inventory manifest's <code>explode</code> field
-            (#40). Filter by column, page through up to {MAX_LIMIT} rows at a time.
-            Click a row to jump to that PC's inventory detail.
+            <Trans
+              ns="search"
+              i18nKey="description"
+              values={{ max: MAX_LIMIT }}
+              components={{ code: <code /> }}
+            />
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           {jobsQ.isLoading ? (
             <div className="flex items-center gap-2 text-muted">
-              <Loader2 className="size-4 animate-spin" /> loading manifests…
+              <Loader2 className="size-4 animate-spin" /> {t('loadingManifests')}
             </div>
           ) : jobsQ.error ? (
-            <ErrorCard title="Couldn't load manifest list" error={jobsQ.error} />
+            <ErrorCard title={t('loadError')} error={jobsQ.error} />
           ) : searchableJobs.length === 0 ? (
             <div className="text-sm text-muted">
-              No inventory manifests have an <code>explode</code> spec yet. Add one to a
-              manifest YAML (see <code>configs/jobs/inventory-sw.yaml</code> for an
-              example) and register it with{' '}
-              <code>kanade job create</code>.
+              <Trans
+                ns="search"
+                i18nKey="noManifests"
+                components={{ code: <code /> }}
+              />
             </div>
           ) : (
             <>
               <div className="flex flex-wrap items-end gap-3">
                 <div className="flex flex-col gap-1">
-                  <Label htmlFor="software-manifest">manifest</Label>
+                  <Label htmlFor="software-manifest">{t('labels.manifest')}</Label>
                   <Select
                     id="software-manifest"
                     value={manifestId}
@@ -298,9 +293,9 @@ export function InventorySearch() {
 
               <div className="space-y-2">
                 <div className="flex items-center gap-2">
-                  <Label className="text-xs text-muted">filters</Label>
+                  <Label className="text-xs text-muted">{t('labels.filters')}</Label>
                   <Button size="sm" variant="secondary" onClick={addFilter} disabled={columns.length === 0}>
-                    + add filter
+                    {t('buttons.addFilter')}
                   </Button>
                   {filters.length > 0 ? (
                     <Button
@@ -316,13 +311,13 @@ export function InventorySearch() {
                         setOffset(0);
                       }}
                     >
-                      clear all
+                      {t('buttons.clearAll')}
                     </Button>
                   ) : null}
                 </div>
                 {filters.length === 0 ? (
                   <div className="text-xs text-muted">
-                    No filters yet — results show up to {limit} rows from the start.
+                    {t('filters.emptyHint', { limit })}
                   </div>
                 ) : (
                   <div className="space-y-2">
@@ -350,14 +345,14 @@ export function InventorySearch() {
                           >
                             {ops.map((o) => (
                               <option key={o} value={o}>
-                                {OP_LABEL[o]}
+                                {t(`ops.${o}`)}
                               </option>
                             ))}
                           </Select>
                           <Input
                             value={f.value}
                             onChange={(e) => updateFilter(f.uid, { value: e.target.value })}
-                            placeholder="value"
+                            placeholder={t('labels.value')}
                             type={columnKind(col) === 'numeric' ? 'number' : 'text'}
                             className="w-56"
                           />
@@ -382,7 +377,7 @@ export function InventorySearch() {
               {currentJob?.manifest_id} · {currentSpec.field}
             </CardTitle>
             <CardDescription>
-              <code>{currentSpec.table}</code> · columns:{' '}
+              <code>{currentSpec.table}</code> · {t('labels.columns')}:{' '}
               {currentSpec.columns.map((c, i) => (
                 <span key={c.field}>
                   {i > 0 ? ', ' : ''}
@@ -395,25 +390,33 @@ export function InventorySearch() {
           <CardContent>
             {searchQ.isLoading ? (
               <div className="flex items-center gap-2 text-muted text-sm">
-                <Loader2 className="size-4 animate-spin" /> searching…
+                <Loader2 className="size-4 animate-spin" /> {t('results.searching')}
               </div>
             ) : searchQ.error ? (
-              <ErrorCard title="Search failed" error={searchQ.error} />
+              <ErrorCard title={t('results.error')} error={searchQ.error} />
             ) : rows.length === 0 ? (
               <div className="text-sm text-muted py-4">
-                No results match these filters.
+                {t('results.empty')}
               </div>
             ) : (
               <>
                 <div className="text-xs text-muted mb-2">
-                  Showing rows {offset + 1}–{offset + rows.length}
-                  {rows.length === limit ? ` (page size = ${limit}; more may be available)` : ''}
+                  {rows.length === limit
+                    ? t('results.showingMore', {
+                        from: offset + 1,
+                        to: offset + rows.length,
+                        limit,
+                      })
+                    : t('results.showing', {
+                        from: offset + 1,
+                        to: offset + rows.length,
+                      })}
                 </div>
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>pc_id</TableHead>
-                      <TableHead>collected_at</TableHead>
+                      <TableHead>{t('results.columns.pcId')}</TableHead>
+                      <TableHead>{t('results.columns.collectedAt')}</TableHead>
                       {currentSpec.columns.map((c) => (
                         <TableHead key={c.field}>{c.field}</TableHead>
                       ))}
@@ -469,7 +472,7 @@ export function InventorySearch() {
                 </Table>
                 <div className="flex items-center gap-2 mt-3 text-xs">
                   <Label htmlFor="software-limit" className="text-muted">
-                    page size
+                    {t('labels.pageSize')}
                   </Label>
                   <Select
                     id="software-limit"
@@ -492,7 +495,7 @@ export function InventorySearch() {
                     onClick={() => setOffset(Math.max(0, offset - limit))}
                     disabled={offset === 0}
                   >
-                    ← prev
+                    {t('buttons.prev')}
                   </Button>
                   <Button
                     size="sm"
@@ -501,11 +504,11 @@ export function InventorySearch() {
                     disabled={rows.length < limit}
                     title={
                       rows.length < limit
-                        ? 'Last page (fewer rows than the page size returned)'
-                        : 'Next page'
+                        ? t('pagination.lastPage')
+                        : t('pagination.nextPage')
                     }
                   >
-                    next →
+                    {t('buttons.next')}
                   </Button>
                 </div>
               </>

@@ -1,1 +1,81 @@
-{}
+{
+  "title": "Inventory",
+  "probeBadge_one": "{{count}} probe configured",
+  "probeBadge_other": "{{count}} probes configured",
+  "viewLabel": "view",
+  "fleetOption": "fleet (all PCs)",
+  "intro": "Probes are operator-defined PowerShell jobs tagged with an <code>inventory:</code> section in their YAML manifest. Click a row in the fleet view (below) to drill into one PC's full facts.",
+  "loadingProbes": "loading probes…",
+  "errorJobsTitle": "Couldn't load inventory jobs",
+  "noProbes": {
+    "title": "No inventory probes configured",
+    "body": "Ship the bundled probes with <code>kanade schedule create configs/schedules/inventory-hw.yaml</code> and <code>kanade schedule create configs/schedules/inventory-sw.yaml</code> (hardware + installed-software snapshots), or roll your own in <code>configs/jobs/</code>."
+  },
+  "fleet": {
+    "rowsReported_one": "{{count}} PC reported · click a row for full facts",
+    "rowsReported_other": "{{count}} PCs reported · click a row for full facts",
+    "loading": "loading…",
+    "errorTitle": "Couldn't load facts for {{manifestId}}",
+    "empty": "No facts yet. Trigger one with <code>kanade exec &lt;job-id&gt;</code> or wait for the next scheduled tick.",
+    "columns": {
+      "pcId": "pc_id",
+      "collected": "collected"
+    },
+    "nestedRowCount_one": "{{count}} row",
+    "nestedRowCount_other": "{{count}} rows"
+  },
+  "detail": {
+    "backToFleet": "← back to fleet view",
+    "loading": "loading inventory for {{pcId}}…",
+    "errorTitle": "Couldn't load inventory for {{pcId}}",
+    "empty": {
+      "title": "No facts yet for <code>{{pcId}}</code>",
+      "body": "The agent hasn't run any inventory-tagged job successfully yet."
+    },
+    "collectedAt": "collected {{when}}",
+    "tabAriaLabel": "Tab for {{jobId}}",
+    "tabs": {
+      "now": "Now",
+      "history": "History"
+    },
+    "rawJson": "raw JSON",
+    "columns": {
+      "field": "field",
+      "value": "value"
+    }
+  },
+  "nested": {
+    "expectedArray": "— (expected an array)",
+    "none": "— (none)"
+  },
+  "history": {
+    "since": "since",
+    "kind": "kind",
+    "sincePresets": {
+      "24h": "last 24h",
+      "7d": "last 7d",
+      "30d": "last 30d",
+      "90d": "last 90d",
+      "all": "all time"
+    },
+    "kinds": {
+      "any": "any",
+      "added": "added",
+      "removed": "removed",
+      "changed": "changed"
+    },
+    "kindTitles": {
+      "any": "Show all history events",
+      "added": "Show only added events",
+      "removed": "Show only removed events",
+      "changed": "Field-level diffs only (hides install / uninstall noise)"
+    },
+    "loading": "loading history…",
+    "errorTitle": "Couldn't load history",
+    "empty": "No history yet for this PC + filter.",
+    "noTimestamp": "(no timestamp)",
+    "dayEvents_one": "· {{count}} event",
+    "dayEvents_other": "· {{count}} events",
+    "rawJson": "raw JSON"
+  }
+}

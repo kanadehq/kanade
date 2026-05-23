@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { Loader2, ScrollText } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
 
 import { ErrorCard } from '@/components/ErrorCard';
@@ -76,12 +77,12 @@ type HistoryEventRow = {
 
 type ChangeKindFilter = 'any' | 'added' | 'removed' | 'changed';
 
-const SINCE_PRESETS: Array<{ value: string; label: string; ms: number | null }> = [
-  { value: '24h', label: 'last 24h', ms: 24 * 60 * 60 * 1000 },
-  { value: '7d',  label: 'last 7d',  ms: 7 * 24 * 60 * 60 * 1000 },
-  { value: '30d', label: 'last 30d', ms: 30 * 24 * 60 * 60 * 1000 },
-  { value: '90d', label: 'last 90d', ms: 90 * 24 * 60 * 60 * 1000 },
-  { value: 'all', label: 'all time', ms: null },
+const SINCE_PRESETS: Array<{ value: string; ms: number | null }> = [
+  { value: '24h', ms: 24 * 60 * 60 * 1000 },
+  { value: '7d',  ms: 7 * 24 * 60 * 60 * 1000 },
+  { value: '30d', ms: 30 * 24 * 60 * 60 * 1000 },
+  { value: '90d', ms: 90 * 24 * 60 * 60 * 1000 },
+  { value: 'all', ms: null },
 ];
 
 const CHANGE_KIND_FILTERS: ChangeKindFilter[] = ['any', 'added', 'removed', 'changed'];
@@ -135,11 +136,12 @@ function ScalarCell({ value, kind }: { value: unknown; kind?: string }) {
 /// state row so operators distinguish "0 disks reported" from
 /// "this field isn't an array".
 function NestedTable({ value, columns }: { value: unknown; columns: DisplayField[] }) {
+  const { t } = useTranslation('inventory');
   if (!Array.isArray(value)) {
-    return <span className="text-muted text-xs">— (expected an array)</span>;
+    return <span className="text-muted text-xs">{t('nested.expectedArray')}</span>;
   }
   if (value.length === 0) {
-    return <span className="text-muted text-xs">— (none)</span>;
+    return <span className="text-muted text-xs">{t('nested.none')}</span>;
   }
   return (
     <Table>
@@ -179,6 +181,7 @@ function NestedTable({ value, columns }: { value: unknown; columns: DisplayField
 }
 
 export function Inventory() {
+  const { t } = useTranslation('inventory');
   const [search, setSearch] = useSearchParams();
   const initialPc = search.get('pc') ?? '';
   const [pcId, setPcId] = useState(initialPc);
@@ -203,46 +206,47 @@ export function Inventory() {
   return (
     <div className="space-y-4">
       <div className="flex items-baseline justify-between">
-        <h2 className="text-xl">Inventory</h2>
+        <h2 className="text-xl">{t('title')}</h2>
         <Badge variant="violet">
-          {(jobsQ.data ?? []).length} probe{(jobsQ.data ?? []).length === 1 ? '' : 's'} configured
+          {t('probeBadge', { count: (jobsQ.data ?? []).length })}
         </Badge>
       </div>
 
       <Card>
         <CardContent className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-4">
           <div className="space-y-1">
-            <Label htmlFor="inv-pc">view</Label>
+            <Label htmlFor="inv-pc">{t('viewLabel')}</Label>
             <Select id="inv-pc" value={pcId} onChange={(e) => setPcId(e.target.value)}>
-              <option value="">fleet (all PCs)</option>
+              <option value="">{t('fleetOption')}</option>
               {pcId && <option value={pcId}>{pcId}</option>}
             </Select>
           </div>
           <div className="space-y-1 text-xs text-muted self-end pb-2">
-            Probes are operator-defined PowerShell jobs tagged with an{' '}
-            <code>inventory:</code> section in their YAML manifest. Click a row in
-            the fleet view (below) to drill into one PC's full facts.
+            <Trans
+              ns="inventory"
+              i18nKey="intro"
+              components={{ code: <code /> }}
+            />
           </div>
         </CardContent>
       </Card>
 
       {jobsQ.isLoading ? (
         <div className="flex items-center gap-2 text-muted">
-          <Loader2 className="size-4 animate-spin" />loading probes…
+          <Loader2 className="size-4 animate-spin" />{t('loadingProbes')}
         </div>
       ) : jobsQ.error ? (
-        <ErrorCard title="Couldn't load inventory jobs" error={jobsQ.error} />
+        <ErrorCard title={t('errorJobsTitle')} error={jobsQ.error} />
       ) : (jobsQ.data ?? []).length === 0 ? (
         <Card>
           <CardHeader>
-            <CardTitle>No inventory probes configured</CardTitle>
+            <CardTitle>{t('noProbes.title')}</CardTitle>
             <CardDescription>
-              Ship the bundled probes with{' '}
-              <code>kanade schedule create configs/schedules/inventory-hw.yaml</code>
-              {' '}and{' '}
-              <code>kanade schedule create configs/schedules/inventory-sw.yaml</code>
-              {' '}(hardware + installed-software snapshots), or roll your own in{' '}
-              <code>configs/jobs/</code>.
+              <Trans
+                ns="inventory"
+                i18nKey="noProbes.body"
+                components={{ code: <code /> }}
+              />
             </CardDescription>
           </CardHeader>
         </Card>
@@ -280,6 +284,7 @@ function FleetProbeTable({
   job: InventoryJob;
   pickPc: (pc: string) => void;
 }) {
+  const { t } = useTranslation('inventory');
   const byJob = useQuery({
     queryKey: ['inventory-by-job', job.manifest_id],
     queryFn: () =>
@@ -300,30 +305,33 @@ function FleetProbeTable({
           )}
         </CardTitle>
         <CardDescription>
-          {(byJob.data?.rows ?? []).length} PC{(byJob.data?.rows ?? []).length === 1 ? '' : 's'} reported · click a row for full facts
+          {t('fleet.rowsReported', { count: (byJob.data?.rows ?? []).length })}
         </CardDescription>
       </CardHeader>
       <CardContent>
         {byJob.isLoading ? (
           <div className="flex items-center gap-2 text-muted">
-            <Loader2 className="size-4 animate-spin" />loading…
+            <Loader2 className="size-4 animate-spin" />{t('fleet.loading')}
           </div>
         ) : byJob.error ? (
-          <ErrorCard title={`Couldn't load facts for ${job.manifest_id}`} error={byJob.error} />
+          <ErrorCard title={t('fleet.errorTitle', { manifestId: job.manifest_id })} error={byJob.error} />
         ) : (byJob.data?.rows ?? []).length === 0 ? (
           <div className="text-muted text-sm">
-            No facts yet. Trigger one with <code>kanade exec &lt;job-id&gt;</code>{' '}
-            or wait for the next scheduled tick.
+            <Trans
+              ns="inventory"
+              i18nKey="fleet.empty"
+              components={{ code: <code /> }}
+            />
           </div>
         ) : (
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>pc_id</TableHead>
+                <TableHead>{t('fleet.columns.pcId')}</TableHead>
                 {columns.map((c) => (
                   <TableHead key={c.field}>{c.label}</TableHead>
                 ))}
-                <TableHead className="text-muted text-xs">collected</TableHead>
+                <TableHead className="text-muted text-xs">{t('fleet.columns.collected')}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -351,7 +359,7 @@ function FleetProbeTable({
                         {c.type === 'table' ? (
                           <code className="text-xs">
                             {Array.isArray(val)
-                              ? `${val.length} row${val.length === 1 ? '' : 's'}`
+                              ? t('fleet.nestedRowCount', { count: val.length })
                               : '—'}
                           </code>
                         ) : (
@@ -375,6 +383,7 @@ function FleetProbeTable({
 
 /// Detail view: vertical "field / value" per probe for one PC.
 function PcDetail({ pcId, clear }: { pcId: string; clear: () => void }) {
+  const { t } = useTranslation('inventory');
   const factsQ = useQuery({
     queryKey: ['inventory-facts', pcId],
     queryFn: () => apiFetch<InventoryFact[]>(`/api/inventory/${encodeURIComponent(pcId)}`),
@@ -385,22 +394,29 @@ function PcDetail({ pcId, clear }: { pcId: string; clear: () => void }) {
     <div className="space-y-4">
       <div className="text-sm">
         <button onClick={clear} className="underline text-muted hover:text-fg">
-          ← back to fleet view
+          {t('detail.backToFleet')}
         </button>
       </div>
 
       {factsQ.isLoading ? (
         <div className="flex items-center gap-2 text-muted">
-          <Loader2 className="size-4 animate-spin" />loading inventory for {pcId}…
+          <Loader2 className="size-4 animate-spin" />{t('detail.loading', { pcId })}
         </div>
       ) : factsQ.error ? (
-        <ErrorCard title={`Couldn't load inventory for ${pcId}`} error={factsQ.error} />
+        <ErrorCard title={t('detail.errorTitle', { pcId })} error={factsQ.error} />
       ) : (factsQ.data ?? []).length === 0 ? (
         <Card>
           <CardHeader>
-            <CardTitle>No facts yet for <code>{pcId}</code></CardTitle>
+            <CardTitle>
+              <Trans
+                ns="inventory"
+                i18nKey="detail.empty.title"
+                values={{ pcId }}
+                components={{ code: <code /> }}
+              />
+            </CardTitle>
             <CardDescription>
-              The agent hasn't run any inventory-tagged job successfully yet.
+              {t('detail.empty.body')}
             </CardDescription>
           </CardHeader>
         </Card>
@@ -418,6 +434,7 @@ function PcDetail({ pcId, clear }: { pcId: string; clear: () => void }) {
  *  this PC + this manifest. State is local to each card so an operator
  *  can be on different tabs across different probes simultaneously. */
 function FactCard({ fact, pcId }: { fact: InventoryFact; pcId: string }) {
+  const { t } = useTranslation('inventory');
   const [tab, setTab] = useState<'now' | 'history'>('now');
   const factsObj = (fact.facts ?? {}) as Record<string, unknown>;
 
@@ -429,27 +446,27 @@ function FactCard({ fact, pcId }: { fact: InventoryFact; pcId: string }) {
           <code className="text-sm">{fact.job_id}</code>
         </CardTitle>
         <CardDescription>
-          collected {fmtIsoLocal(fact.collected_at)}
+          {t('detail.collectedAt', { when: fmtIsoLocal(fact.collected_at) })}
         </CardDescription>
         <div
           role="group"
-          aria-label={`Tab for ${fact.job_id}`}
+          aria-label={t('detail.tabAriaLabel', { jobId: fact.job_id })}
           className="mt-2 inline-flex rounded-md border border-border overflow-hidden text-xs"
         >
-          {(['now', 'history'] as const).map((t) => (
+          {(['now', 'history'] as const).map((tk) => (
             <button
-              key={t}
+              key={tk}
               type="button"
-              aria-pressed={tab === t}
-              onClick={() => setTab(t)}
+              aria-pressed={tab === tk}
+              onClick={() => setTab(tk)}
               className={cn(
                 'px-3 py-1 transition-colors',
-                tab === t
+                tab === tk
                   ? 'bg-fg/10 text-fg font-medium'
                   : 'text-muted hover:bg-fg/5 hover:text-fg',
               )}
             >
-              {t === 'now' ? 'Now' : 'History'}
+              {tk === 'now' ? t('detail.tabs.now') : t('detail.tabs.history')}
             </button>
           ))}
         </div>
@@ -458,7 +475,7 @@ function FactCard({ fact, pcId }: { fact: InventoryFact; pcId: string }) {
         {tab === 'now' ? (
           fact.display.length === 0 ? (
             <details>
-              <summary className="cursor-pointer text-muted text-xs">raw JSON</summary>
+              <summary className="cursor-pointer text-muted text-xs">{t('detail.rawJson')}</summary>
               <pre className="text-xs whitespace-pre-wrap break-words mt-2 bg-muted/5 p-2 rounded">
                 {JSON.stringify(fact.facts, null, 2)}
               </pre>
@@ -467,8 +484,8 @@ function FactCard({ fact, pcId }: { fact: InventoryFact; pcId: string }) {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>field</TableHead>
-                  <TableHead>value</TableHead>
+                  <TableHead>{t('detail.columns.field')}</TableHead>
+                  <TableHead>{t('detail.columns.value')}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -507,6 +524,7 @@ function FactCard({ fact, pcId }: { fact: InventoryFact; pcId: string }) {
  *  in volume that a client-side filter is cheaper than another HTTP
  *  param. */
 function HistoryPane({ manifestId, pcId }: { manifestId: string; pcId: string }) {
+  const { t } = useTranslation('inventory');
   const [since, setSince] = useState('7d');
   // v0.35 follow-up: kind filter is now a single segmented control
   // (4 mutually-exclusive buttons). The earlier shape had both a
@@ -557,20 +575,20 @@ function HistoryPane({ manifestId, pcId }: { manifestId: string; pcId: string })
     for (const r of filteredRows) {
       const day = r.observed_at
         ? new Date(r.observed_at).toLocaleDateString()
-        : '(no timestamp)';
+        : t('history.noTimestamp');
       const bucket = byDay.get(day) ?? [];
       bucket.push(r);
       byDay.set(day, bucket);
     }
     return Array.from(byDay.entries());
-  }, [filteredRows]);
+  }, [filteredRows, t]);
 
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-end gap-3">
         <div className="flex flex-col gap-1">
           <Label htmlFor={`history-since-${manifestId}`} className="text-xs text-muted">
-            since
+            {t('history.since')}
           </Label>
           <Select
             id={`history-since-${manifestId}`}
@@ -579,14 +597,14 @@ function HistoryPane({ manifestId, pcId }: { manifestId: string; pcId: string })
           >
             {SINCE_PRESETS.map((p) => (
               <option key={p.value} value={p.value}>
-                {p.label}
+                {t(`history.sincePresets.${p.value}` as const)}
               </option>
             ))}
           </Select>
         </div>
         <div className="flex flex-col gap-1">
           <span id={`history-kind-label-${manifestId}`} className="text-xs text-muted">
-            kind
+            {t('history.kind')}
           </span>
           <div
             role="group"
@@ -605,15 +623,9 @@ function HistoryPane({ manifestId, pcId }: { manifestId: string; pcId: string })
                     ? 'bg-fg/10 text-fg font-medium'
                     : 'text-muted hover:bg-fg/5 hover:text-fg',
                 )}
-                title={
-                  k === 'changed'
-                    ? 'Field-level diffs only (hides install / uninstall noise)'
-                    : k === 'any'
-                      ? 'Show all history events'
-                      : `Show only ${k} events`
-                }
+                title={t(`history.kindTitles.${k}` as const)}
               >
-                {k}
+                {t(`history.kinds.${k}` as const)}
               </button>
             ))}
           </div>
@@ -622,20 +634,20 @@ function HistoryPane({ manifestId, pcId }: { manifestId: string; pcId: string })
 
       {historyQ.isLoading ? (
         <div className="flex items-center gap-2 text-muted text-sm">
-          <Loader2 className="size-4 animate-spin" />loading history…
+          <Loader2 className="size-4 animate-spin" />{t('history.loading')}
         </div>
       ) : historyQ.error ? (
-        <ErrorCard title="Couldn't load history" error={historyQ.error} />
+        <ErrorCard title={t('history.errorTitle')} error={historyQ.error} />
       ) : grouped.length === 0 ? (
         <div className="text-sm text-muted py-4">
-          No history yet for this PC + filter.
+          {t('history.empty')}
         </div>
       ) : (
         <div className="space-y-4">
           {grouped.map(([day, events]) => (
             <details key={day} open className="border border-border rounded">
               <summary className="cursor-pointer px-3 py-2 text-sm font-medium bg-muted/5">
-                {day} <span className="text-muted font-normal">· {events.length} event{events.length === 1 ? '' : 's'}</span>
+                {day} <span className="text-muted font-normal">{t('history.dayEvents', { count: events.length })}</span>
               </summary>
               <div className="divide-y divide-border">
                 {events.map((e) => (
@@ -654,6 +666,7 @@ function HistoryPane({ manifestId, pcId }: { manifestId: string; pcId: string })
  *  change-kind badge + field path + identity tuple + the relevant
  *  before/after snippet, with a `details` expand for the full JSON. */
 function HistoryEventRowView({ event }: { event: HistoryEventRow }) {
+  const { t } = useTranslation('inventory');
   const identity = useMemo(() => {
     if (!event.identity_json) return null;
     try {
@@ -697,7 +710,7 @@ function HistoryEventRowView({ event }: { event: HistoryEventRow }) {
   return (
     <div className="px-3 py-2 text-sm space-y-1">
       <div className="flex flex-wrap items-center gap-2">
-        <Badge variant={variant}>{event.change_kind}</Badge>
+        <Badge variant={variant}>{t(`history.kinds.${event.change_kind}` as const)}</Badge>
         <code className="text-xs text-muted">{event.field_path}</code>
         {identity ? (
           <span className="text-xs">
@@ -739,7 +752,7 @@ function HistoryEventRowView({ event }: { event: HistoryEventRow }) {
         </div>
       ) : null}
       <details className="text-xs">
-        <summary className="cursor-pointer text-muted">raw JSON</summary>
+        <summary className="cursor-pointer text-muted">{t('history.rawJson')}</summary>
         <pre className="whitespace-pre-wrap break-words mt-1 bg-muted/5 p-2 rounded">
           {JSON.stringify(
             {

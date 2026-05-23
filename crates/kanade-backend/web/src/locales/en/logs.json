@@ -1,1 +1,26 @@
-{}
+{
+  "title": "Agent logs",
+  "countBadge_one": "{{count}} line",
+  "countBadge_other": "{{count}} lines",
+  "countBadgeEmpty": "—",
+  "filters": {
+    "pcId": "pc_id",
+    "tail": "tail lines",
+    "autoRefresh": "auto-refresh",
+    "pickOne": "(pick one)",
+    "autoRefreshOptions": {
+      "off": "off",
+      "on": "every 5s"
+    }
+  },
+  "actions": {
+    "refresh": "refresh"
+  },
+  "empty": {
+    "intro": "Pick a pc_id above to fetch its agent log over <code>logs.fetch.&lt;pc_id&gt;</code>.",
+    "timeout": "The agent must be online — the request times out after 10s.",
+    "pre": "(empty)"
+  },
+  "loading": "fetching logs from {{pcId}}…",
+  "errorTitle": "Couldn't fetch logs from {{pcId}}"
+}

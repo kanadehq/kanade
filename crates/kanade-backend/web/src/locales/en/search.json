@@ -1,1 +1,48 @@
-{}
+{
+  "title": "Inventory search",
+  "description": "Cross-PC search across any inventory manifest's <code>explode</code> field (#40). Filter by column, page through up to {{max}} rows at a time. Click a row to jump to that PC's inventory detail.",
+  "loadingManifests": "loading manifests…",
+  "loadError": "Couldn't load manifest list",
+  "noManifests": "No inventory manifests have an <code>explode</code> spec yet. Add one to a manifest YAML (see <code>configs/jobs/inventory-sw.yaml</code> for an example) and register it with <code>kanade job create</code>.",
+  "labels": {
+    "manifest": "manifest",
+    "filters": "filters",
+    "pageSize": "page size",
+    "value": "value",
+    "columns": "columns"
+  },
+  "ops": {
+    "eq": "=",
+    "contains": "contains",
+    "prefix": "starts with",
+    "lt": "<",
+    "le": "≤",
+    "gt": ">",
+    "ge": "≥",
+    "ne": "≠"
+  },
+  "buttons": {
+    "addFilter": "+ add filter",
+    "clearAll": "clear all",
+    "prev": "← prev",
+    "next": "next →"
+  },
+  "filters": {
+    "emptyHint": "No filters yet — results show up to {{limit}} rows from the start."
+  },
+  "results": {
+    "searching": "searching…",
+    "error": "Search failed",
+    "empty": "No results match these filters.",
+    "showing": "Showing rows {{from}}–{{to}}",
+    "showingMore": "Showing rows {{from}}–{{to}} (page size = {{limit}}; more may be available)",
+    "columns": {
+      "pcId": "pc_id",
+      "collectedAt": "collected_at"
+    }
+  },
+  "pagination": {
+    "lastPage": "Last page (fewer rows than the page size returned)",
+    "nextPage": "Next page"
+  }
+}

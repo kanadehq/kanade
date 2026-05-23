@@ -1,1 +1,81 @@
-{}
+{
+  "title": "インベントリ",
+  "probeBadge_one": "プローブ {{count}} 件",
+  "probeBadge_other": "プローブ {{count}} 件",
+  "viewLabel": "表示",
+  "fleetOption": "フリート (全 PC)",
+  "intro": "プローブは、YAML マニフェストの <code>inventory:</code> セクションでタグ付けされた、 オペレーター定義の PowerShell ジョブです。 下のフリートビューで行をクリックすると、 PC ごとの完全なファクトを確認できます。",
+  "loadingProbes": "プローブを読み込み中…",
+  "errorJobsTitle": "インベントリジョブを読み込めませんでした",
+  "noProbes": {
+    "title": "インベントリプローブが設定されていません",
+    "body": "同梱のプローブを <code>kanade schedule create configs/schedules/inventory-hw.yaml</code> と <code>kanade schedule create configs/schedules/inventory-sw.yaml</code> で展開する (ハードウェア + インストール済みソフトウェアのスナップショット) か、 <code>configs/jobs/</code> 配下に独自のプローブを作成してください。"
+  },
+  "fleet": {
+    "rowsReported_one": "{{count}} 台の PC が報告済み · 行をクリックすると完全なファクトを表示",
+    "rowsReported_other": "{{count}} 台の PC が報告済み · 行をクリックすると完全なファクトを表示",
+    "loading": "読み込み中…",
+    "errorTitle": "{{manifestId}} のファクトを読み込めませんでした",
+    "empty": "まだファクトがありません。 <code>kanade exec &lt;job-id&gt;</code> で 1 回実行するか、 次回のスケジュール実行をお待ちください。",
+    "columns": {
+      "pcId": "pc_id",
+      "collected": "収集日時"
+    },
+    "nestedRowCount_one": "{{count}} 行",
+    "nestedRowCount_other": "{{count}} 行"
+  },
+  "detail": {
+    "backToFleet": "← フリートビューに戻る",
+    "loading": "{{pcId}} のインベントリを読み込み中…",
+    "errorTitle": "{{pcId}} のインベントリを読み込めませんでした",
+    "empty": {
+      "title": "<code>{{pcId}}</code> のファクトがまだありません",
+      "body": "エージェントがまだ inventory タグ付きジョブを正常に実行していません。"
+    },
+    "collectedAt": "収集日時 {{when}}",
+    "tabAriaLabel": "{{jobId}} のタブ",
+    "tabs": {
+      "now": "現在",
+      "history": "履歴"
+    },
+    "rawJson": "生 JSON",
+    "columns": {
+      "field": "項目",
+      "value": "値"
+    }
+  },
+  "nested": {
+    "expectedArray": "— (配列が必要です)",
+    "none": "— (なし)"
+  },
+  "history": {
+    "since": "期間",
+    "kind": "種別",
+    "sincePresets": {
+      "24h": "直近 24 時間",
+      "7d": "直近 7 日",
+      "30d": "直近 30 日",
+      "90d": "直近 90 日",
+      "all": "全期間"
+    },
+    "kinds": {
+      "any": "すべて",
+      "added": "追加",
+      "removed": "削除",
+      "changed": "変更"
+    },
+    "kindTitles": {
+      "any": "すべての履歴イベントを表示",
+      "added": "追加イベントのみを表示",
+      "removed": "削除イベントのみを表示",
+      "changed": "フィールド単位の差分のみ (インストール / アンインストールのノイズを非表示)"
+    },
+    "loading": "履歴を読み込み中…",
+    "errorTitle": "履歴を読み込めませんでした",
+    "empty": "この PC とフィルター条件に該当する履歴はまだありません。",
+    "noTimestamp": "(タイムスタンプなし)",
+    "dayEvents_one": "· {{count}} 件",
+    "dayEvents_other": "· {{count}} 件",
+    "rawJson": "生 JSON"
+  }
+}

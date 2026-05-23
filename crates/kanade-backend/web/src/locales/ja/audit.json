@@ -1,1 +1,50 @@
-{}
+{
+  "title": "監査ログ",
+  "countBadge_one": "{{count}} 件表示",
+  "countBadge_other": "{{count}} 件表示",
+  "countBadgeFetching_one": "{{count}} 件表示…",
+  "countBadgeFetching_other": "{{count}} 件表示…",
+  "loading": "監査ログを読み込み中…",
+  "errorTitle": "監査ログを読み込めませんでした",
+  "empty": {
+    "title": "該当する監査イベントがありません",
+    "body": "フィルター期間を広げるか、 actor / action / target / payload をクリアすると、 過去のイベントが表示されます。"
+  },
+  "filters": {
+    "actor": "実行主体",
+    "action": "アクション",
+    "target": "対象",
+    "payload": "ペイロード",
+    "since": "期間",
+    "limit": "件数",
+    "placeholders": {
+      "action": "正規表現 — 例: ^job_ または exec",
+      "target": "正規表現 — 例: ^job- または schedule-foo",
+      "payload": "正規表現 — 例: alice または PC001"
+    },
+    "actorOptions": {
+      "any": "(すべて)",
+      "scheduler": "scheduler",
+      "operator": "operator",
+      "selfUpdate": "self-update",
+      "agent": "agent"
+    },
+    "sincePresets": {
+      "1h": "直近 1 時間",
+      "24h": "直近 24 時間",
+      "7d": "直近 7 日",
+      "30d": "直近 30 日",
+      "all": "全期間"
+    }
+  },
+  "columns": {
+    "when": "日時",
+    "actor": "実行主体",
+    "action": "アクション",
+    "target": "対象",
+    "payload": "ペイロード"
+  },
+  "payload": {
+    "show": "表示"
+  }
+}

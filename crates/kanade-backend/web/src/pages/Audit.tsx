@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { Loader2 } from 'lucide-react';
 import { useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { ErrorCard } from '@/components/ErrorCard';
 import { Badge } from '@/components/ui/badge';
@@ -21,12 +22,12 @@ type AuditRow = {
   occurred_at: string;
 };
 
-const SINCE_PRESETS: Array<{ value: string; label: string; ms: number | null }> = [
-  { value: '1h',  label: 'last 1h',   ms: 60 * 60 * 1000 },
-  { value: '24h', label: 'last 24h',  ms: 24 * 60 * 60 * 1000 },
-  { value: '7d',  label: 'last 7d',   ms: 7 * 24 * 60 * 60 * 1000 },
-  { value: '30d', label: 'last 30d',  ms: 30 * 24 * 60 * 60 * 1000 },
-  { value: 'all', label: 'all time',  ms: null },
+const SINCE_PRESETS: Array<{ value: string; ms: number | null }> = [
+  { value: '1h',  ms: 60 * 60 * 1000 },
+  { value: '24h', ms: 24 * 60 * 60 * 1000 },
+  { value: '7d',  ms: 7 * 24 * 60 * 60 * 1000 },
+  { value: '30d', ms: 30 * 24 * 60 * 60 * 1000 },
+  { value: 'all', ms: null },
 ];
 
 function actorVariant(actor: string): 'violet' | 'amber' | 'success' | 'default' {
@@ -40,6 +41,7 @@ function actorVariant(actor: string): 'violet' | 'amber' | 'success' | 'default'
 }
 
 export function Audit() {
+  const { t } = useTranslation('audit');
   const [actor, setActor] = useState('');
   const [action, setAction] = useState('');
   const [target, setTarget] = useState('');
@@ -74,59 +76,65 @@ export function Audit() {
   return (
     <div className="space-y-4">
       <div className="flex items-baseline justify-between">
-        <h2 className="text-xl">Audit log</h2>
-        <Badge variant="violet">{rows.length} shown{isFetching && !isLoading ? '…' : ''}</Badge>
+        <h2 className="text-xl">{t('title')}</h2>
+        <Badge variant="violet">
+          {isFetching && !isLoading
+            ? t('countBadgeFetching', { count: rows.length })
+            : t('countBadge', { count: rows.length })}
+        </Badge>
       </div>
 
       <Card>
         <CardContent className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 p-4">
           <div className="space-y-1">
-            <Label htmlFor="audit-actor">actor</Label>
+            <Label htmlFor="audit-actor">{t('filters.actor')}</Label>
             <Select id="audit-actor" value={actor} onChange={(e) => setActor(e.target.value)}>
-              <option value="">(any)</option>
-              <option value="scheduler">scheduler</option>
-              <option value="operator">operator</option>
-              <option value="self-update">self-update</option>
-              <option value="agent">agent</option>
+              <option value="">{t('filters.actorOptions.any')}</option>
+              <option value="scheduler">{t('filters.actorOptions.scheduler')}</option>
+              <option value="operator">{t('filters.actorOptions.operator')}</option>
+              <option value="self-update">{t('filters.actorOptions.selfUpdate')}</option>
+              <option value="agent">{t('filters.actorOptions.agent')}</option>
             </Select>
           </div>
           <div className="space-y-1">
-            <Label htmlFor="audit-action">action</Label>
+            <Label htmlFor="audit-action">{t('filters.action')}</Label>
             <Input
               id="audit-action"
-              placeholder="regex — eg. ^job_ or exec"
+              placeholder={t('filters.placeholders.action')}
               value={action}
               onChange={(e) => setAction(e.target.value)}
             />
           </div>
           <div className="space-y-1">
-            <Label htmlFor="audit-target">target</Label>
+            <Label htmlFor="audit-target">{t('filters.target')}</Label>
             <Input
               id="audit-target"
-              placeholder="regex — eg. ^job- or schedule-foo"
+              placeholder={t('filters.placeholders.target')}
               value={target}
               onChange={(e) => setTarget(e.target.value)}
             />
           </div>
           <div className="space-y-1">
-            <Label htmlFor="audit-payload">payload</Label>
+            <Label htmlFor="audit-payload">{t('filters.payload')}</Label>
             <Input
               id="audit-payload"
-              placeholder="regex — eg. alice or PC001"
+              placeholder={t('filters.placeholders.payload')}
               value={payload}
               onChange={(e) => setPayload(e.target.value)}
             />
           </div>
           <div className="space-y-1">
-            <Label htmlFor="audit-since">since</Label>
+            <Label htmlFor="audit-since">{t('filters.since')}</Label>
             <Select id="audit-since" value={since} onChange={(e) => setSince(e.target.value)}>
               {SINCE_PRESETS.map((p) => (
-                <option key={p.value} value={p.value}>{p.label}</option>
+                <option key={p.value} value={p.value}>
+                  {t(`filters.sincePresets.${p.value}`)}
+                </option>
               ))}
             </Select>
           </div>
           <div className="space-y-1">
-            <Label htmlFor="audit-limit">limit</Label>
+            <Label htmlFor="audit-limit">{t('filters.limit')}</Label>
             <Select
               id="audit-limit"
               value={String(limit)}
@@ -142,26 +150,26 @@ export function Audit() {
 
       {isLoading ? (
         <div className="flex items-center gap-2 text-muted">
-          <Loader2 className="size-4 animate-spin" />loading audit log…
+          <Loader2 className="size-4 animate-spin" />{t('loading')}
         </div>
       ) : error ? (
-        <ErrorCard title="Couldn't load audit log" error={error} />
+        <ErrorCard title={t('errorTitle')} error={error} />
       ) : rows.length === 0 ? (
         <Card>
-          <CardHeader><CardTitle>No audit events match</CardTitle></CardHeader>
+          <CardHeader><CardTitle>{t('empty.title')}</CardTitle></CardHeader>
           <CardContent className="text-muted">
-            Widen the filter window or clear actor / action / target / payload to see older events.
+            {t('empty.body')}
           </CardContent>
         </Card>
       ) : (
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>when</TableHead>
-              <TableHead>actor</TableHead>
-              <TableHead>action</TableHead>
-              <TableHead>target</TableHead>
-              <TableHead>payload</TableHead>
+              <TableHead>{t('columns.when')}</TableHead>
+              <TableHead>{t('columns.actor')}</TableHead>
+              <TableHead>{t('columns.action')}</TableHead>
+              <TableHead>{t('columns.target')}</TableHead>
+              <TableHead>{t('columns.payload')}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -175,7 +183,7 @@ export function Audit() {
                 <TableCell><code className="text-xs">{e.target ?? '—'}</code></TableCell>
                 <TableCell>
                   <details>
-                    <summary className="cursor-pointer text-muted text-xs">show</summary>
+                    <summary className="cursor-pointer text-muted text-xs">{t('payload.show')}</summary>
                     <pre className="text-xs whitespace-pre-wrap break-words mt-2 bg-muted/5 p-2 rounded">
                       {JSON.stringify(e.payload, null, 2)}
                     </pre>

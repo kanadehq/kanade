@@ -1,18 +1,22 @@
 import { Construction } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 
-export function Placeholder({ name }: { name: string }) {
+/// Catch-all route renderer. App.tsx wires this at `path="*"` with a
+/// `name="Not Found"` prop today; future routes that are wired up
+/// before their real page component lands can mount this with their
+/// feature name so the operator sees "Foo — coming soon" rather than
+/// a misleading "Not Found".
+export function Placeholder({ name = 'Page' }: { name?: string } = {}) {
+  const { t } = useTranslation('common');
   return (
     <Card>
       <CardHeader className="items-center text-center">
         <Construction className="size-10 text-amber" />
-        <CardTitle>{name} — coming soon</CardTitle>
+        <CardTitle>{t('comingSoon.title', { name })}</CardTitle>
       </CardHeader>
-      <CardContent className="text-center text-muted">
-        This page is on the SPA port plan. The endpoint behind it works today (see the legacy
-        vanilla SPA at v0.4.0); the React rebuild is incremental.
-      </CardContent>
+      <CardContent className="text-center text-muted">{t('comingSoon.description')}</CardContent>
     </Card>
   );
 }

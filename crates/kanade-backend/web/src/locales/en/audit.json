@@ -1,1 +1,50 @@
-{}
+{
+  "title": "Audit log",
+  "countBadge_one": "{{count}} shown",
+  "countBadge_other": "{{count}} shown",
+  "countBadgeFetching_one": "{{count}} shown…",
+  "countBadgeFetching_other": "{{count}} shown…",
+  "loading": "loading audit log…",
+  "errorTitle": "Couldn't load audit log",
+  "empty": {
+    "title": "No audit events match",
+    "body": "Widen the filter window or clear actor / action / target / payload to see older events."
+  },
+  "filters": {
+    "actor": "actor",
+    "action": "action",
+    "target": "target",
+    "payload": "payload",
+    "since": "since",
+    "limit": "limit",
+    "placeholders": {
+      "action": "regex — eg. ^job_ or exec",
+      "target": "regex — eg. ^job- or schedule-foo",
+      "payload": "regex — eg. alice or PC001"
+    },
+    "actorOptions": {
+      "any": "(any)",
+      "scheduler": "scheduler",
+      "operator": "operator",
+      "selfUpdate": "self-update",
+      "agent": "agent"
+    },
+    "sincePresets": {
+      "1h": "last 1h",
+      "24h": "last 24h",
+      "7d": "last 7d",
+      "30d": "last 30d",
+      "all": "all time"
+    }
+  },
+  "columns": {
+    "when": "when",
+    "actor": "actor",
+    "action": "action",
+    "target": "target",
+    "payload": "payload"
+  },
+  "payload": {
+    "show": "show"
+  }
+}
