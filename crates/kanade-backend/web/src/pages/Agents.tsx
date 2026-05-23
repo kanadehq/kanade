@@ -48,7 +48,7 @@ export function Agents() {
 
   const ping = useMutation({
     mutationFn: (pcId: string) =>
-      apiFetch<{ heartbeat: Heartbeat }>(`/api/agents/${encodeURIComponent(pcId)}/ping?wait_secs=45`, {
+      apiFetch<{ heartbeat: Heartbeat }>(`/api/agents/${encodeURIComponent(pcId)}/ping`, {
         method: 'POST',
       }),
   });
