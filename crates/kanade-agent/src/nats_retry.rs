@@ -97,7 +97,7 @@ pub async fn wait_for_kv(
     js: &jetstream::Context,
     client: &async_nats::Client,
     tracker: &Tracker,
-    bucket: &'static str,
+    bucket: &str,
     label: &'static str,
 ) -> jetstream::kv::Store {
     let mut backoff = INITIAL_BACKOFF;
@@ -129,7 +129,7 @@ pub async fn wait_for_stream(
     js: &jetstream::Context,
     client: &async_nats::Client,
     tracker: &Tracker,
-    name: &'static str,
+    name: &str,
     label: &'static str,
 ) -> jetstream::stream::Stream {
     let mut backoff = INITIAL_BACKOFF;
@@ -166,7 +166,7 @@ pub async fn wait_for_consumer<C>(
     stream: &jetstream::stream::Stream,
     client: &async_nats::Client,
     tracker: &Tracker,
-    name: &'static str,
+    name: &str,
     label: &'static str,
     config: C,
 ) -> jetstream::consumer::Consumer<C>

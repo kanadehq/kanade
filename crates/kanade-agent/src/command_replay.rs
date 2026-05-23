@@ -21,7 +21,6 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
 use async_nats::jetstream::consumer::DeliverPolicy;
 use async_nats::jetstream::consumer::pull::Config as PullConfig;
 use futures::StreamExt;
@@ -31,6 +30,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
 use crate::commands::{DedupCache, handle_command};
+use crate::nats_retry;
 
 /// Stable consumer name per agent so JetStream remembers the ack
 /// position across agent restarts. Reconnecting with the same name
@@ -58,9 +58,7 @@ pub fn spawn(
     staleness: crate::staleness::Tracker,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        if let Err(e) = run(client, pc_id, dedup, staleness).await {
-            error!(error = ?e, "command-replay loop exited with error");
-        }
+        run(client, pc_id, dedup, staleness).await;
     })
 }
 
@@ -69,17 +67,29 @@ async fn run(
     pc_id: String,
     dedup: Arc<Mutex<DedupCache>>,
     staleness: crate::staleness::Tracker,
-) -> Result<()> {
+) {
     let jetstream = async_nats::jetstream::new(client.clone());
-    let stream = jetstream
-        .get_stream(STREAM_EXEC)
-        .await
-        .with_context(|| format!("get stream {STREAM_EXEC}"))?;
-
     let name = consumer_name(&pc_id);
-    let consumer = stream
-        .get_or_create_consumer(
+
+    loop {
+        let stream = nats_retry::wait_for_stream(
+            &jetstream,
+            &client,
+            &staleness,
+            STREAM_EXEC,
+            "command_replay",
+        )
+        .await;
+        let consumer = nats_retry::wait_for_consumer(
+            &stream,
+            &client,
+            &staleness,
+            // Stable per-agent consumer name so JetStream resumes
+            // at the previous ack position across agent / broker
+            // restarts. `wait_for_consumer` clones the config each
+            // retry — pull configs are tiny so the cost is fine.
             &name,
+            "command_replay",
             PullConfig {
                 durable_name: Some(name.clone()),
                 ack_policy: async_nats::jetstream::consumer::AckPolicy::Explicit,
@@ -89,90 +99,104 @@ async fn run(
                 // ever seen". On reconnect, the agent catches up to
                 // the freshest state without replaying old fires.
                 deliver_policy: DeliverPolicy::LastPerSubject,
-                // Stream filter is `commands.>`. We could narrow with
-                // filter_subjects to (`commands.all`,
-                // `commands.pc.<me>`, `commands.group.<g>`) but groups
-                // are dynamic and recreating the consumer on every
-                // membership flip is more complex than client-side
-                // filtering. Bandwidth at fleet sizes we care about
-                // is fine.
+                // Stream filter is `commands.>`. We could narrow
+                // with filter_subjects to (`commands.all`,
+                // `commands.pc.<me>`, `commands.group.<g>`) but
+                // groups are dynamic and recreating the consumer on
+                // every membership flip is more complex than
+                // client-side filtering. Bandwidth at fleet sizes
+                // we care about is fine.
                 filter_subject: "commands.>".into(),
                 ..Default::default()
             },
         )
-        .await
-        .with_context(|| format!("ensure consumer {name}"))?;
-    info!(
-        stream = STREAM_EXEC,
-        consumer = %name,
-        pc_id = %pc_id,
-        "command-replay consumer ready",
-    );
+        .await;
+        info!(
+            stream = STREAM_EXEC,
+            consumer = %name,
+            pc_id = %pc_id,
+            "command-replay consumer ready",
+        );
 
-    let script_current = jetstream
-        .get_key_value(kanade_shared::kv::BUCKET_SCRIPT_CURRENT)
-        .await
-        .ok();
-    let script_status = jetstream
-        .get_key_value(kanade_shared::kv::BUCKET_SCRIPT_STATUS)
-        .await
-        .ok();
+        // script_current / script_status are advisory — agents run
+        // with whatever they manage to fetch. Pre-existing `.ok()`
+        // semantics retained.
+        let script_current = jetstream
+            .get_key_value(kanade_shared::kv::BUCKET_SCRIPT_CURRENT)
+            .await
+            .ok();
+        let script_status = jetstream
+            .get_key_value(kanade_shared::kv::BUCKET_SCRIPT_STATUS)
+            .await
+            .ok();
 
-    let mut messages = consumer.messages().await.context("messages stream")?;
-    while let Some(msg) = messages.next().await {
-        let msg = match msg {
+        let mut messages = match consumer.messages().await {
             Ok(m) => m,
             Err(e) => {
-                warn!(error = %e, "replay consumer error");
+                warn!(error = %e, "command-replay messages stream failed; reopening");
+                nats_retry::reopen_pause().await;
                 continue;
             }
         };
-        // Ack early — even if we decide to skip below (not for me,
-        // duplicate, etc.), we don't want broker redelivery.
-        let _ = msg.ack().await;
+        while let Some(msg) = messages.next().await {
+            let msg = match msg {
+                Ok(m) => m,
+                Err(e) => {
+                    warn!(error = %e, "replay consumer error");
+                    continue;
+                }
+            };
+            // Ack early — even if we decide to skip below (not for
+            // me, duplicate, etc.), we don't want broker
+            // redelivery.
+            let _ = msg.ack().await;
 
-        let cmd: Command = match serde_json::from_slice(&msg.payload) {
-            Ok(c) => c,
-            Err(e) => {
-                warn!(error = %e, subject = %msg.subject, "deserialize replay command");
+            let cmd: Command = match serde_json::from_slice(&msg.payload) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(error = %e, subject = %msg.subject, "deserialize replay command");
+                    continue;
+                }
+            };
+
+            if !is_for_me(&msg.subject, &pc_id) {
+                debug!(subject = %msg.subject, "replay msg not for this pc; dropping");
                 continue;
             }
-        };
 
-        if !is_for_me(&msg.subject, &pc_id) {
-            debug!(subject = %msg.subject, "replay msg not for this pc; dropping");
-            continue;
-        }
+            // Dedup against the core-sub path: if we already saw
+            // this request_id (because the core sub delivered it
+            // live), drop it here.
+            if !dedup.lock().await.insert(cmd.request_id.clone()) {
+                debug!(
+                    request_id = %cmd.request_id,
+                    "replay dedup: already seen via core sub or earlier replay",
+                );
+                continue;
+            }
 
-        // Dedup against the core-sub path: if we already saw this
-        // request_id (because the core sub delivered it live), drop
-        // it here.
-        if !dedup.lock().await.insert(cmd.request_id.clone()) {
-            debug!(
+            let client_for_task = client.clone();
+            let pc_for_task = pc_id.clone();
+            let cur = script_current.clone();
+            let sta = script_status.clone();
+            let stl = staleness.clone();
+            info!(
+                cmd_id = %cmd.id,
                 request_id = %cmd.request_id,
-                "replay dedup: already seen via core sub or earlier replay",
+                subject = %msg.subject,
+                "replay: handling missed command",
             );
-            continue;
+            tokio::spawn(async move {
+                if let Err(e) =
+                    handle_command(client_for_task, pc_for_task, cmd, cur, sta, stl).await
+                {
+                    error!(error = %e, "replay command handler failed");
+                }
+            });
         }
-
-        let client_for_task = client.clone();
-        let pc_for_task = pc_id.clone();
-        let cur = script_current.clone();
-        let sta = script_status.clone();
-        let stl = staleness.clone();
-        info!(
-            cmd_id = %cmd.id,
-            request_id = %cmd.request_id,
-            subject = %msg.subject,
-            "replay: handling missed command",
-        );
-        tokio::spawn(async move {
-            if let Err(e) = handle_command(client_for_task, pc_for_task, cmd, cur, sta, stl).await {
-                error!(error = %e, "replay command handler failed");
-            }
-        });
+        warn!(consumer = %name, "command-replay messages stream ended; reopening");
+        nats_retry::reopen_pause().await;
     }
-    Ok(())
 }
 
 /// True when `subject` addresses this agent — `commands.all` always
