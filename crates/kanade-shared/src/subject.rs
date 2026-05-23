@@ -62,6 +62,16 @@ pub fn logs_fetch(pc_id: &str) -> String {
     format!("logs.fetch.{pc_id}")
 }
 
+/// `agents.<pc_id>.ping` — v0.38 / #133 request/reply for the
+/// active "ping" round-trip. The agent answers with a fresh
+/// `Heartbeat` on demand instead of the backend waiting up to ~30 s
+/// for the next periodic heartbeat tick to land. Distinct subject
+/// from `heartbeat.<pc_id>` so the periodic publisher is unaffected
+/// and old agents that don't subscribe simply time the request out.
+pub fn ping(pc_id: &str) -> String {
+    format!("agents.{pc_id}.ping")
+}
+
 // v0.14: subject::inventory_request was retired alongside the
 // hardcoded inventory loop. On-demand collection now goes through
 // the normal exec path (`kanade exec configs/jobs/inventory-
@@ -107,6 +117,11 @@ mod tests {
     #[test]
     fn logs_fetch_formats_pc_id() {
         assert_eq!(logs_fetch("minipc"), "logs.fetch.minipc");
+    }
+
+    #[test]
+    fn ping_formats_pc_id() {
+        assert_eq!(ping("minipc"), "agents.minipc.ping");
     }
 
     #[test]

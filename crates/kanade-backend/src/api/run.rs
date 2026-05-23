@@ -19,7 +19,11 @@ use super::AppState;
 
 const DEFAULT_RUN_TIMEOUT_SECS: u64 = 60;
 const RESULT_WAIT_PADDING_SECS: u64 = 10;
-const DEFAULT_PING_WAIT_SECS: u64 = 45;
+// v0.38 / #133: short timeout. The active-ping responder replies in
+// single-digit ms on a healthy agent, so 5 s is generous; anything
+// longer just keeps the operator's SPA spinner alive after the agent
+// is definitely unreachable.
+const DEFAULT_PING_WAIT_SECS: u64 = 5;
 
 /// Body of `POST /api/run`. Maps loosely to the YAML manifest's
 /// inline-script form (spec §2.4.1) but with the request_id
@@ -161,11 +165,13 @@ pub async fn run(
     Ok(Json(result))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 pub struct PingQuery {
-    /// Seconds to wait for one heartbeat. Default 45 (the agent's
-    /// default heartbeat cadence is 30s, so 45s comfortably catches
-    /// the next tick even with jitter).
+    /// Seconds to wait for the agent's ping reply. Default 5 (a
+    /// live agent's responder turns around in single-digit ms; the
+    /// short timeout means a wedged or unreachable agent surfaces
+    /// fast in the SPA). Honored as the request timeout passed to
+    /// `nats.request`.
     #[serde(default = "default_ping_wait")]
     pub wait_secs: u64,
 }
@@ -179,37 +185,57 @@ pub struct PingResponse {
     pub heartbeat: Heartbeat,
 }
 
+/// v0.38 / #133: active ping. Previous shape subscribed to the
+/// periodic `heartbeat.<pc_id>` and waited up to ~45 s for the next
+/// scheduled tick to land — average 15 s of operator-perceived
+/// latency. Now publishes a request on `subject::ping(pc_id)` and
+/// the agent's ping responder replies with a fresh Heartbeat in
+/// single-digit ms.
+///
+/// Pre-#133 agents don't subscribe to that subject, so the request
+/// times out → 408. Same operator-visible surface as the old
+/// "no heartbeat within timeout" path; no coordinated upgrade
+/// needed.
 pub async fn ping(
     State(state): State<AppState>,
     Path(pc_id): Path<String>,
     Query(q): Query<PingQuery>,
 ) -> Result<Json<PingResponse>, (StatusCode, String)> {
-    let subj = subject::heartbeat(&pc_id);
-    let mut sub = state.nats.subscribe(subj.clone()).await.map_err(|e| {
-        warn!(error = %e, pc_id, "subscribe heartbeat");
+    // Clamp to >=1s. `?wait_secs=0` would make `tokio::time::timeout`
+    // fire on the very next poll, returning 408 before the request
+    // ever reaches NATS — a fingerprint that looks like an offline
+    // agent but isn't. 1 s is still well above the single-digit-ms
+    // round trip a healthy agent serves.
+    let wait_secs = q.wait_secs.max(1);
+    let subj = subject::ping(&pc_id);
+    info!(pc_id = %pc_id, subject = %subj, "ping: request");
+    let reply = tokio::time::timeout(
+        Duration::from_secs(wait_secs),
+        state.nats.request(subj.clone(), bytes::Bytes::new()),
+    )
+    .await
+    .map_err(|_| {
         (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("subscribe {subj}: {e}"),
+            StatusCode::REQUEST_TIMEOUT,
+            format!("no ping reply from {pc_id} within {wait_secs}s"),
         )
+    })?
+    .map_err(|e| {
+        // NoResponders means no agent is subscribed to
+        // `agents.<pc_id>.ping` — operator-visible == "agent
+        // offline / not yet upgraded to #133". Surface as 408 so
+        // the SPA renders the same "no heartbeat" UX it did before
+        // this refactor. Other request errors (broker disconnect,
+        // invalid subject) keep 500.
+        let status = if matches!(e.kind(), async_nats::client::RequestErrorKind::NoResponders) {
+            StatusCode::REQUEST_TIMEOUT
+        } else {
+            warn!(error = %e, pc_id, "ping request failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        (status, format!("nats request {subj}: {e}"))
     })?;
-    let _ = state.nats.flush().await;
-
-    info!(pc_id = %pc_id, wait_secs = q.wait_secs, "ping: waiting for heartbeat");
-    let msg = tokio::time::timeout(Duration::from_secs(q.wait_secs), sub.next())
-        .await
-        .map_err(|_| {
-            (
-                StatusCode::REQUEST_TIMEOUT,
-                format!("no heartbeat from {pc_id} within {}s", q.wait_secs),
-            )
-        })?
-        .ok_or_else(|| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "heartbeat subscription closed".to_string(),
-            )
-        })?;
-    let hb: Heartbeat = serde_json::from_slice(&msg.payload).map_err(|e| {
+    let hb: Heartbeat = serde_json::from_slice(&reply.payload).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("decode Heartbeat: {e}"),

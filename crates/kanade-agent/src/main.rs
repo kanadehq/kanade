@@ -3,6 +3,7 @@ mod config_supervisor;
 mod groups;
 mod heartbeat;
 mod logs;
+mod ping;
 mod process;
 mod self_update;
 
@@ -149,6 +150,19 @@ pub(crate) async fn run_agent() -> Result<()> {
         client.clone(),
         pc_id.clone(),
         std::path::PathBuf::from(&cfg.log.path),
+    ));
+    // v0.38 / #133: active ping responder. Independent of the
+    // periodic heartbeat loop so an operator's "ping" round-trips
+    // in single-digit ms instead of waiting up to ~30 s for the
+    // next scheduled tick.
+    tokio::spawn(ping::serve(
+        client.clone(),
+        pc_id.clone(),
+        AGENT_VERSION.to_string(),
+        std::env::var("COMPUTERNAME")
+            .ok()
+            .or_else(|| std::env::var("HOSTNAME").ok()),
+        Some(std::env::consts::OS.to_string()),
     ));
 
     // Group membership: Sprint 5 moves this from agent.toml (per-box
