@@ -32,6 +32,11 @@ pub struct AppState {
     pub pool: SqlitePool,
     pub nats: async_nats::Client,
     pub jetstream: async_nats::jetstream::Context,
+    /// v0.35 / #88: explode-spec lookup cache, kept fresh by a KV
+    /// `watch_all()` on BUCKET_JOBS. The /inventory/.../search/...
+    /// hot path hits this instead of a NATS round-trip per request.
+    /// `Clone` is cheap (Arc).
+    pub explode_spec_cache: crate::projector::spec_cache::ExplodeSpecCache,
 }
 
 impl FromRef<AppState> for SqlitePool {

@@ -19,7 +19,7 @@ use kanade_shared::default_paths;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
@@ -257,10 +257,35 @@ pub(crate) async fn run_backend() -> Result<()> {
     // body details the policy.
     let _cleanup_handle = cleanup::spawn(pool.clone());
 
+    // v0.35 / #88: explode-spec lookup cache. Built once, cloned
+    // (cheap — Arc) into AppState for the search hot path and into
+    // a watcher task that keeps it in sync with BUCKET_JOBS writes.
+    // Prewarm walks every registered manifest at startup so the
+    // first batch of search requests doesn't pay the cold-miss
+    // latency.
+    let explode_spec_cache = projector::spec_cache::ExplodeSpecCache::new();
+    match projector::spec_cache::prewarm(&explode_spec_cache, &jetstream).await {
+        Ok(n) => info!(cached = n, "explode spec cache prewarm done"),
+        Err(e) => warn!(
+            error = %e,
+            "explode spec cache prewarm failed (watcher + miss-path fallback will recover)",
+        ),
+    }
+    {
+        let cache = explode_spec_cache.clone();
+        let js = jetstream.clone();
+        tokio::spawn(async move {
+            if let Err(e) = projector::spec_cache::run(cache, js).await {
+                error!(error = %e, "explode spec cache watcher exited");
+            }
+        });
+    }
+
     let app_state = api::AppState {
         pool: pool.clone(),
         nats,
         jetstream,
+        explode_spec_cache,
     };
 
     // Scheduler runs alongside the projectors; if it can't init (no
