@@ -393,11 +393,23 @@ pub async fn search(
 /// Fetch one manifest's [`ExplodeSpec`] by field name. Returns
 /// 404 for unknown manifest / unknown field so the caller doesn't
 /// have to disambiguate.
+///
+/// v0.35 / #88: in-memory cache (kept fresh by a KV `watch_all()`
+/// on `BUCKET_JOBS`) is consulted first. Cache hit avoids the
+/// ~30 ms NATS KV round-trip per search request — load-bearing
+/// for the SPA Software page (#87) where each filter-chip
+/// keystroke fires a request. Cold-cache miss / startup race /
+/// watcher fell behind all fall back to the KV path below and
+/// repopulate the cache on success.
 async fn load_explode_spec(
     state: &AppState,
     manifest_id: &str,
     field: &str,
 ) -> Result<ExplodeSpec, (StatusCode, String)> {
+    if let Some(hit) = state.explode_spec_cache.get(manifest_id, field).await {
+        return Ok(hit);
+    }
+
     let kv = state
         .jetstream
         .get_key_value(BUCKET_JOBS)
@@ -425,6 +437,14 @@ async fn load_explode_spec(
         StatusCode::NOT_FOUND,
         format!("manifest {manifest_id:?} has no explode specs"),
     ))?;
+    // Populate the cache before answering — subsequent requests
+    // for any field on this manifest go straight through. Empty
+    // hint.explode would have errored above; here `specs` always
+    // has at least one entry.
+    state
+        .explode_spec_cache
+        .insert(manifest_id.to_string(), specs.clone())
+        .await;
     specs.into_iter().find(|s| s.field == field).ok_or((
         StatusCode::NOT_FOUND,
         format!("manifest {manifest_id:?} has no explode field {field:?}"),
