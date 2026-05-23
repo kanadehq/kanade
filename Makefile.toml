@@ -63,8 +63,27 @@ args = ["publish", "--dry-run", "--allow-dirty"]
 [tasks.web-install]
 description = "Install kanade-backend SPA deps via bun"
 cwd = "${CARGO_MAKE_WORKING_DIRECTORY}/crates/kanade-backend/web"
-command = "bun"
-args = ["install"]
+# duckscript body so the bun-presence check runs cross-platform.
+# `renri add` calls this via the post_create hook, and a backend-
+# only contributor who doesn't keep a JS toolchain around shouldn't
+# have worktree creation fail on an SPA install step — pure Rust
+# work in the worktree stays buildable. SPA work needs bun anyway,
+# so the explicit `bun missing` log surfaces clearly.
+#
+# --ignore-scripts skips postinstall hooks that occasionally trip
+# over ENOTCONN on Windows (some packages reach out to the network
+# during postinstall). The deps we actually need at runtime — vite,
+# monaco, react etc. — don't require their postinstalls.
+script_runner = "@duckscript"
+script = '''
+bun_path = which bun
+bun_missing = is_empty ${bun_path}
+if ${bun_missing}
+    echo "skipping web-install: bun not on PATH"
+else
+    exec --fail-on-error bun install --ignore-scripts
+end
+'''
 
 [tasks.web-build]
 description = "Build the React SPA into web/dist (consumed by rust-embed)"

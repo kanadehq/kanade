@@ -20,3 +20,14 @@ show_pr = true
 type = "command"
 run = "cargo make on-add"
 shell = "auto"
+
+# Install the SPA's bun deps so a fresh worktree can build / preview
+# the kanade-backend frontend immediately. Without this every new
+# worktree hits `Cannot find module .../vite` on the first SPA build
+# and the operator has to run `bun install` by hand. Kept as its own
+# hook rather than wired into the language-agnostic `on-add` task so
+# it doesn't trip non-SPA projects that share the pj-rust base.
+[[hooks.post_create]]
+type = "command"
+run = "cargo make web-install"
+shell = "auto"
