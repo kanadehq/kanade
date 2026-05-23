@@ -62,25 +62,25 @@ args = ["publish", "--dry-run", "--allow-dirty"]
 
 [tasks.web-install]
 description = "Install kanade-backend SPA deps via bun"
-cwd = "crates/kanade-backend/web"
+cwd = "${CARGO_MAKE_WORKING_DIRECTORY}/crates/kanade-backend/web"
 command = "bun"
 args = ["install"]
 
 [tasks.web-build]
 description = "Build the React SPA into web/dist (consumed by rust-embed)"
-cwd = "crates/kanade-backend/web"
+cwd = "${CARGO_MAKE_WORKING_DIRECTORY}/crates/kanade-backend/web"
 command = "bun"
 args = ["run", "build"]
 
 [tasks.web-dev]
 description = "Vite dev server with HMR — proxies /api to the dev backend on :8081 (paired with `cargo make backend-dev`)."
-cwd = "crates/kanade-backend/web"
+cwd = "${CARGO_MAKE_WORKING_DIRECTORY}/crates/kanade-backend/web"
 command = "bun"
 args = ["run", "dev"]
 
 [tasks.web-dev-prod]
 description = "Vite dev server with HMR — proxies /api to the installed KanadeBackend service on :8080. Use this to iterate on the UI against the real fleet data; SPA login dialog needs the operator's bearer token if KANADE_AUTH_STATIC_TOKEN is configured."
-cwd = "crates/kanade-backend/web"
+cwd = "${CARGO_MAKE_WORKING_DIRECTORY}/crates/kanade-backend/web"
 env = { "BACKEND_PROXY" = "http://localhost:8080" }
 command = "bun"
 args = ["run", "dev"]

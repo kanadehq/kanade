@@ -8,10 +8,18 @@ import { cn } from '@/lib/utils';
 // Sidebar groups: same three semantic clusters introduced in #52,
 // but rendered vertically so the at-a-glance scan target is one
 // short column instead of a row of 13+ entries crammed across the
-// header. Order within each group is the existing one.
-const groups: { label: string; links: { to: string; label: string }[] }[] = [
+// header. Order within each group is the existing one. Each group
+// carries an accent class so the section label borrows one of the
+// kanade brand colours (violet → amber → teal, same gradient as the
+// logo) and reads visually distinct from the link rows below it.
+const groups: {
+  label: string;
+  accent: string;
+  links: { to: string; label: string }[];
+}[] = [
   {
     label: 'Execute',
+    accent: 'text-violet-light',
     links: [
       { to: '/run', label: 'Run' },
       { to: '/exec', label: 'Exec' },
@@ -19,6 +27,7 @@ const groups: { label: string; links: { to: string; label: string }[] }[] = [
   },
   {
     label: 'Observe',
+    accent: 'text-amber-light',
     links: [
       { to: '/agents', label: 'Agents' },
       { to: '/inventory', label: 'Inventory' },
@@ -30,6 +39,7 @@ const groups: { label: string; links: { to: string; label: string }[] }[] = [
   },
   {
     label: 'Manage',
+    accent: 'text-teal-light',
     links: [
       { to: '/jobs', label: 'Jobs' },
       { to: '/schedules', label: 'Schedules' },
@@ -65,28 +75,49 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
       </Link>
 
       <nav className="flex-1 overflow-y-auto px-2 pb-3">
-        {groups.map((g) => (
-          <div key={g.label} className="mt-4 first:mt-1">
-            <div className="px-3 pb-1 text-muted text-[10px] font-semibold uppercase tracking-wider">
+        {groups.map((g, idx) => (
+          <div
+            key={g.label}
+            // Top border + padding between groups (except for the
+            // first one) separates the three sections visually so
+            // the operator's eye can chunk them at a glance instead
+            // of reading 13 rows linearly.
+            className={cn(
+              'flex flex-col',
+              idx === 0 ? 'mt-1' : 'mt-3 pt-3 border-t border-border/60',
+            )}
+          >
+            {/* h3 (not div) so screen readers can navigate the
+                sidebar by section heading instead of having to crawl
+                every link. The visual chrome is unchanged. */}
+            <h3
+              className={cn(
+                'px-3 pb-1 text-[10px] font-semibold uppercase tracking-wider',
+                g.accent,
+              )}
+            >
               {g.label}
-            </div>
-            <div className="flex flex-col">
-              {g.links.map((l) => (
-                <NavLink
-                  key={l.to}
-                  to={l.to}
-                  onClick={onNavigate}
-                  className={({ isActive }) =>
-                    cn(
-                      'px-3 py-1.5 rounded-md text-sm font-medium transition-colors',
-                      isActive ? 'bg-muted/15 text-fg' : 'text-muted hover:text-fg hover:bg-muted/10',
-                    )
-                  }
-                >
-                  {l.label}
-                </NavLink>
-              ))}
-            </div>
+            </h3>
+            {g.links.map((l) => (
+              <NavLink
+                key={l.to}
+                to={l.to}
+                onClick={onNavigate}
+                // pl-5 indents the link a notch to the right of the
+                // header so the parent–child relationship reads
+                // without anyone having to think about it.
+                className={({ isActive }) =>
+                  cn(
+                    'pl-5 pr-3 py-1.5 rounded-md text-sm font-medium transition-colors',
+                    isActive
+                      ? 'bg-muted/15 text-fg'
+                      : 'text-muted hover:text-fg hover:bg-muted/10',
+                  )
+                }
+              >
+                {l.label}
+              </NavLink>
+            ))}
           </div>
         ))}
       </nav>
