@@ -21,6 +21,7 @@
 
 import { Editor, loader } from '@monaco-editor/react';
 import * as monaco from 'monaco-editor';
+import { useEffect, useState } from 'react';
 // Vite-specific `?worker` imports — the bundler resolves these to
 // hashed worker chunks under `dist/assets/` at build time and
 // instantiating the class gives us a Worker pointing at that chunk.
@@ -93,6 +94,32 @@ export interface YamlEditorProps {
   readOnly?: boolean;
 }
 
+// Wrap the `prefers-color-scheme: dark` MediaQueryList lookup so SSR
+// shells, jsdom test environments, or any host that ships without
+// `matchMedia` short-circuit to `null` instead of crashing on the
+// `.matches` read.
+function darkModeMql(): MediaQueryList | null {
+  if (typeof window === 'undefined') return null;
+  if (typeof window.matchMedia !== 'function') return null;
+  return window.matchMedia('(prefers-color-scheme: dark)');
+}
+
+// Mirror the operator's OS `prefers-color-scheme` into a boolean and
+// keep it in sync with system changes. Monaco's theme prop is the
+// only viable knob — its CSS variables aren't reactive — so we feed
+// it `vs-dark` / `vs` directly based on this hook.
+function usePrefersDark(): boolean {
+  const [dark, setDark] = useState(() => darkModeMql()?.matches ?? false);
+  useEffect(() => {
+    const mql = darkModeMql();
+    if (!mql) return;
+    const handler = (e: MediaQueryListEvent) => setDark(e.matches);
+    mql.addEventListener('change', handler);
+    return () => mql.removeEventListener('change', handler);
+  }, []);
+  return dark;
+}
+
 export default function YamlEditor({
   value,
   onChange,
@@ -102,6 +129,7 @@ export default function YamlEditor({
 }: YamlEditorProps) {
   ensureMonacoBootstrapped();
   const path = kind === 'manifest' ? 'manifest.yaml' : 'schedule.yaml';
+  const prefersDark = usePrefersDark();
 
   return (
     <Editor
@@ -110,11 +138,12 @@ export default function YamlEditor({
       path={path}
       value={value}
       onChange={(next) => onChange(next ?? '')}
-      // Hard-pin `vs-dark` because the kanade SPA is dark-only today;
-      // Monaco's default `vs` (light) renders white-on-white against
-      // the app's dark chrome. When the SPA gains a light/dark toggle
-      // (tracked alongside i18n), this should follow the same source.
-      theme="vs-dark"
+      // Mirror the operator's OS preference so the editor doesn't
+      // render as a dark island on a white card (or vice versa).
+      // The two stock Monaco themes are the cheap path; if the SPA
+      // ever ships an operator-level theme toggle, point this at
+      // that source instead.
+      theme={prefersDark ? 'vs-dark' : 'vs'}
       options={{
         minimap: { enabled: false },
         fontSize: 13,
