@@ -1,0 +1,9 @@
+{
+  "title": "設定",
+  "description": "オペレーター設定。 ブラウザのローカルストレージに保存され、 別端末との同期はありません。",
+  "language": {
+    "title": "言語",
+    "label": "UI 言語",
+    "persistedHint": "localStorage に保存され、 即座に反映されます。"
+  }
+}

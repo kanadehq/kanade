@@ -1,0 +1,53 @@
+{
+  "nav": {
+    "groups": {
+      "execute": "実行",
+      "observe": "監視",
+      "manage": "管理"
+    },
+    "run": "実行",
+    "exec": "コマンド",
+    "agents": "エージェント",
+    "inventory": "インベントリ",
+    "search": "検索",
+    "activity": "アクティビティ",
+    "audit": "監査ログ",
+    "logs": "ログ",
+    "jobs": "ジョブ",
+    "schedules": "スケジュール",
+    "rollout": "ロールアウト",
+    "config": "設定",
+    "jetstream": "JetStream",
+    "settings": "オペレーター設定"
+  },
+  "menu": {
+    "open": "メニューを開く",
+    "close": "メニューを閉じる"
+  },
+  "auth": {
+    "signedIn": "サインイン中",
+    "login": "ログイン",
+    "logout": "ログアウト"
+  },
+  "actions": {
+    "save": "保存",
+    "cancel": "キャンセル",
+    "delete": "削除",
+    "edit": "編集",
+    "add": "追加",
+    "confirm": "実行",
+    "loading": "読み込み中…",
+    "saving": "保存中…",
+    "retry": "再試行",
+    "close": "閉じる",
+    "search": "検索",
+    "clear": "クリア",
+    "refresh": "更新",
+    "back": "戻る"
+  },
+  "states": {
+    "loading": "読み込み中…",
+    "empty": "データなし",
+    "error": "エラー"
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "nav": {
+    "groups": {
+      "execute": "Execute",
+      "observe": "Observe",
+      "manage": "Manage"
+    },
+    "run": "Run",
+    "exec": "Exec",
+    "agents": "Agents",
+    "inventory": "Inventory",
+    "search": "Search",
+    "activity": "Activity",
+    "audit": "Audit",
+    "logs": "Logs",
+    "jobs": "Jobs",
+    "schedules": "Schedules",
+    "rollout": "Rollout",
+    "config": "Config",
+    "jetstream": "JetStream",
+    "settings": "Settings"
+  },
+  "menu": {
+    "open": "Open menu",
+    "close": "Close menu"
+  },
+  "auth": {
+    "signedIn": "Signed in",
+    "login": "login",
+    "logout": "logout"
+  },
+  "actions": {
+    "save": "Save",
+    "cancel": "Cancel",
+    "delete": "Delete",
+    "edit": "Edit",
+    "add": "Add",
+    "confirm": "Confirm",
+    "loading": "Loading…",
+    "saving": "Saving…",
+    "retry": "Retry",
+    "close": "Close",
+    "search": "Search",
+    "clear": "Clear",
+    "refresh": "Refresh",
+    "back": "Back"
+  },
+  "states": {
+    "loading": "Loading…",
+    "empty": "No data",
+    "error": "Error"
+  }
+}
