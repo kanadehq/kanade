@@ -1,0 +1,9 @@
+{
+  "title": "Settings",
+  "description": "Operator preferences. Stored locally — they don't sync across browsers or devices.",
+  "language": {
+    "title": "Language",
+    "label": "UI language",
+    "persistedHint": "Saved to localStorage; takes effect immediately."
+  }
+}

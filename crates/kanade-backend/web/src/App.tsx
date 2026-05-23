@@ -22,6 +22,7 @@ import { Rollout } from '@/pages/Rollout';
 import { Run } from '@/pages/Run';
 import { Schedules } from '@/pages/Schedules';
 import { InventorySearch } from '@/pages/Search';
+import { Settings } from '@/pages/Settings';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -83,6 +84,7 @@ export default function App() {
               <Route path="/rollout" element={<Rollout />} />
               <Route path="/config" element={<Config />} />
               <Route path="/jetstream" element={<JetStream />} />
+              <Route path="/settings" element={<Settings />} />
               <Route path="*" element={<Placeholder name="Not Found" />} />
             </Route>
           </Routes>

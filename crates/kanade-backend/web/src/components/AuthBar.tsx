@@ -1,4 +1,5 @@
 import { LogIn, LogOut } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 
 import { Button } from '@/components/ui/button';
@@ -10,14 +11,15 @@ import { useAuth } from '@/lib/auth';
 /// expired-token redirect lands somewhere meaningful.
 export function AuthBar() {
   const { isAuthenticated, logout } = useAuth();
+  const { t } = useTranslation('common');
 
   if (isAuthenticated) {
     return (
       <div className="flex items-center gap-3">
-        <span className="text-xs text-muted hidden sm:inline">auth: signed in</span>
+        <span className="text-xs text-muted hidden sm:inline">{t('auth.signedIn')}</span>
         <Button variant="secondary" size="sm" onClick={logout}>
           <LogOut className="size-3.5" />
-          logout
+          {t('auth.logout')}
         </Button>
       </div>
     );
@@ -27,7 +29,7 @@ export function AuthBar() {
     <Button variant="secondary" size="sm" asChild>
       <Link to="/login">
         <LogIn className="size-3.5" />
-        login
+        {t('auth.login')}
       </Link>
     </Button>
   );

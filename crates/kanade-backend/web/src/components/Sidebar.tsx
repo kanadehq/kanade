@@ -1,5 +1,6 @@
 import { Menu, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Link, NavLink, useLocation } from 'react-router-dom';
 
 import { AuthBar } from '@/components/AuthBar';
@@ -12,45 +13,49 @@ import { cn } from '@/lib/utils';
 // carries an accent class so the section label borrows one of the
 // kanade brand colours (violet → amber → teal, same gradient as the
 // logo) and reads visually distinct from the link rows below it.
+// Labels are translation keys (resolved at render time); the
+// structural metadata (path, accent) stays in code.
 const groups: {
-  label: string;
+  labelKey: string;
   accent: string;
-  links: { to: string; label: string }[];
+  links: { to: string; labelKey: string }[];
 }[] = [
   {
-    label: 'Execute',
+    labelKey: 'nav.groups.execute',
     accent: 'text-violet-light',
     links: [
-      { to: '/run', label: 'Run' },
-      { to: '/exec', label: 'Exec' },
+      { to: '/run', labelKey: 'nav.run' },
+      { to: '/exec', labelKey: 'nav.exec' },
     ],
   },
   {
-    label: 'Observe',
+    labelKey: 'nav.groups.observe',
     accent: 'text-amber-light',
     links: [
-      { to: '/agents', label: 'Agents' },
-      { to: '/inventory', label: 'Inventory' },
-      { to: '/inventory/search', label: 'Search' },
-      { to: '/activity', label: 'Activity' },
-      { to: '/audit', label: 'Audit' },
-      { to: '/logs', label: 'Logs' },
+      { to: '/agents', labelKey: 'nav.agents' },
+      { to: '/inventory', labelKey: 'nav.inventory' },
+      { to: '/inventory/search', labelKey: 'nav.search' },
+      { to: '/activity', labelKey: 'nav.activity' },
+      { to: '/audit', labelKey: 'nav.audit' },
+      { to: '/logs', labelKey: 'nav.logs' },
     ],
   },
   {
-    label: 'Manage',
+    labelKey: 'nav.groups.manage',
     accent: 'text-teal-light',
     links: [
-      { to: '/jobs', label: 'Jobs' },
-      { to: '/schedules', label: 'Schedules' },
-      { to: '/rollout', label: 'Rollout' },
-      { to: '/config', label: 'Config' },
-      { to: '/jetstream', label: 'JetStream' },
+      { to: '/jobs', labelKey: 'nav.jobs' },
+      { to: '/schedules', labelKey: 'nav.schedules' },
+      { to: '/rollout', labelKey: 'nav.rollout' },
+      { to: '/config', labelKey: 'nav.config' },
+      { to: '/jetstream', labelKey: 'nav.jetstream' },
+      { to: '/settings', labelKey: 'nav.settings' },
     ],
   },
 ];
 
 function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
+  const { t } = useTranslation('common');
   return (
     <>
       <Link
@@ -77,7 +82,7 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
       <nav className="flex-1 overflow-y-auto px-2 pb-3">
         {groups.map((g, idx) => (
           <div
-            key={g.label}
+            key={g.labelKey}
             // Top border + padding between groups (except for the
             // first one) separates the three sections visually so
             // the operator's eye can chunk them at a glance instead
@@ -96,7 +101,7 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
                 g.accent,
               )}
             >
-              {g.label}
+              {t(g.labelKey)}
             </h3>
             {g.links.map((l) => (
               <NavLink
@@ -115,7 +120,7 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
                   )
                 }
               >
-                {l.label}
+                {t(l.labelKey)}
               </NavLink>
             ))}
           </div>
@@ -140,6 +145,7 @@ const SIDEBAR_WIDTH_CLASS = 'w-56';
 export function Sidebar() {
   const [open, setOpen] = useState(false);
   const location = useLocation();
+  const { t } = useTranslation('common');
 
   // Close the mobile drawer when the route changes — clicking a
   // link inside the drawer fires the NavLink before this effect, so
@@ -171,7 +177,7 @@ export function Sidebar() {
         <div className="flex items-center gap-3 px-4 py-3">
           <button
             type="button"
-            aria-label="Open menu"
+            aria-label={t('menu.open')}
             aria-expanded={open}
             onClick={() => setOpen(true)}
             className="inline-flex items-center justify-center h-9 w-9 rounded-md text-muted hover:text-fg hover:bg-muted/10"
@@ -220,7 +226,7 @@ export function Sidebar() {
           >
             <button
               type="button"
-              aria-label="Close menu"
+              aria-label={t('menu.close')}
               onClick={() => setOpen(false)}
               className="absolute top-3 right-3 inline-flex items-center justify-center h-8 w-8 rounded-md text-muted hover:text-fg hover:bg-muted/10"
             >
