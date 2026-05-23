@@ -1,51 +1,85 @@
 @import "tailwindcss";
 
-@theme {
-  /* kanade brand palette — the same violet → amber → teal gradient
-     the title in the legacy SPA used, exposed as Tailwind color
-     tokens so component utilities can pick them up. */
+/* Tailwind 4's `@theme` block emits utilities at build time — values
+   are baked into the generated CSS, so wrapping a second `@theme
+   inline` in `@media (prefers-color-scheme: dark)` doesn't work:
+   Tailwind processes the block once and loses the @media. The
+   working pattern is *indirection*: declare each surface token as
+   `var(--something)` once in @theme, and then redefine those
+   underlying CSS variables at runtime via :root + @media. The
+   utilities (`bg-bg`, `text-fg`, etc.) keep working, but the
+   colour they resolve to follows the operator's OS preference. */
+
+@theme inline {
+  /* kanade brand palette — exposed as Tailwind tokens. The base
+     hues stay constant across themes; only the readable text tints
+     (-light) and the semantic surfaces (bg/card/border/…) swap. */
   --color-violet: #5b3a8c;
   --color-amber: #d4a017;
   --color-teal: #2a9d8f;
 
-  /* Lighter tints of the same hues — the base brand tokens are tuned
-     for icon / accent backgrounds, and on a dark surface the violet
-     in particular sinks into the background as readable text. The
-     `-light` variants share the hue but lift the value enough to
-     read as text on `bg-card`. */
-  --color-violet-light: #a78bfa;
-  --color-amber-light: #fcd34d;
-  --color-teal-light: #5eead4;
+  /* Surface-aware text tints for brand-colored section headings.
+     The base brand tokens are tuned for icon / accent backgrounds;
+     rendering them as small text on `bg-card` fails contrast on
+     one side of the light/dark divide or the other depending on
+     which way the value sits. */
+  --color-violet-light: var(--violet-light);
+  --color-amber-light: var(--amber-light);
+  --color-teal-light: var(--teal-light);
 
-  /* Semantic surface tokens. Light defaults; the .dark variant
-     below swaps the values when the prefers-color-scheme media
-     query fires. shadcn-style flat palette, deliberately limited. */
-  --color-bg: #fafaf7;
-  --color-fg: #1a1a1a;
-  --color-card: #ffffff;
-  --color-border: #d8d4c8;
-  --color-muted: #5a5a5a;
-  --color-muted-fg: #5a5a5a;
-  --color-accent: #5b3a8c;
-  --color-accent-fg: #ffffff;
-  --color-success: #2a9d8f;
-  --color-danger: #d4374c;
+  /* Semantic surface tokens — shadcn-style flat palette,
+     deliberately limited. Each resolves at runtime via the CSS
+     variables declared below. */
+  --color-bg: var(--bg);
+  --color-fg: var(--fg);
+  --color-card: var(--card);
+  --color-border: var(--border);
+  --color-muted: var(--muted);
+  --color-muted-fg: var(--muted-fg);
+  --color-accent: var(--accent);
+  --color-accent-fg: var(--accent-fg);
+  --color-success: var(--success);
+  --color-danger: var(--danger);
 
   --radius: 0.5rem;
 }
 
+:root {
+  /* Light-mode values — the defaults. */
+  --bg: #fafaf7;
+  --fg: #1a1a1a;
+  --card: #ffffff;
+  --border: #d8d4c8;
+  --muted: #5a5a5a;
+  --muted-fg: #5a5a5a;
+  --accent: #5b3a8c;
+  --accent-fg: #ffffff;
+  --success: #2a9d8f;
+  --danger: #d4374c;
+
+  /* Darker tints of the brand hues — legible against the white card. */
+  --violet-light: #4c2785;
+  --amber-light: #8a6510;
+  --teal-light: #1d6a60;
+}
+
 @media (prefers-color-scheme: dark) {
-  @theme inline {
-    --color-bg: #16181c;
-    --color-fg: #f5f0e6;
-    --color-card: #1d2026;
-    --color-border: #2c2f36;
-    --color-muted: #b8b2a4;
-    --color-muted-fg: #8a8478;
-    --color-accent: #9a73d9;
-    --color-accent-fg: #ffffff;
-    --color-success: #4dc4b5;
-    --color-danger: #ed6b80;
+  :root {
+    --bg: #16181c;
+    --fg: #f5f0e6;
+    --card: #1d2026;
+    --border: #2c2f36;
+    --muted: #b8b2a4;
+    --muted-fg: #8a8478;
+    --accent: #9a73d9;
+    --accent-fg: #ffffff;
+    --success: #4dc4b5;
+    --danger: #ed6b80;
+
+    /* Lighter pastels — legible against the dark card. */
+    --violet-light: #a78bfa;
+    --amber-light: #fcd34d;
+    --teal-light: #5eead4;
   }
 }
 

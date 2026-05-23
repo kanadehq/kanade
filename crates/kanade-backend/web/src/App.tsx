@@ -45,7 +45,11 @@ export default function App() {
           <ConfirmDialogProvider>
             <Toaster
               position="bottom-right"
-              theme="dark"
+              // Honour the operator's OS preference instead of pinning
+              // dark — paired with the matching prefers-color-scheme
+              // override in index.css so toasts blend into either
+              // theme rather than punching out as a dark island.
+              theme="system"
               richColors
               closeButton
               toastOptions={{ duration: 4000 }}
