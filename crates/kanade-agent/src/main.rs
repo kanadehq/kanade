@@ -10,6 +10,7 @@ mod self_update;
 mod command_replay;
 mod events_outbox;
 mod local_scheduler;
+mod nats_retry;
 mod outbox;
 mod staleness;
 
