@@ -25,7 +25,7 @@ use std::sync::{Mutex, OnceLock};
 use anyhow::{Result, anyhow, bail};
 use kanade_shared::manifest::{ExplodeColumn, ExplodeSpec, Manifest};
 use serde_json::Value as JsonValue;
-use sqlx::{Sqlite, SqlitePool, Transaction};
+use sqlx::{AssertSqlSafe, Sqlite, SqlitePool, Transaction};
 use tracing::{info, warn};
 
 /// Gemini #85 fix: in-memory cache of derived tables we've already
@@ -174,12 +174,12 @@ pub fn create_index_sqls(spec: &ExplodeSpec) -> Result<Vec<String>> {
 /// so a new manifest works without a backend restart.
 pub async fn ensure_table(pool: &SqlitePool, spec: &ExplodeSpec) -> Result<()> {
     let table_sql = create_table_sql(spec)?;
-    sqlx::query(&table_sql)
+    sqlx::query(AssertSqlSafe(table_sql))
         .execute(pool)
         .await
         .map_err(|e| anyhow!("create table {}: {e}", spec.table))?;
     for index_sql in create_index_sqls(spec)? {
-        sqlx::query(&index_sql)
+        sqlx::query(AssertSqlSafe(index_sql))
             .execute(pool)
             .await
             .map_err(|e| anyhow!("create index for {}: {e}", spec.table))?;
@@ -293,10 +293,10 @@ pub async fn replace_rows(
         }
     }
 
-    sqlx::query(&format!(
+    sqlx::query(AssertSqlSafe(format!(
         "DELETE FROM \"{}\" WHERE pc_id = ? AND job_id = ?",
         spec.table
-    ))
+    )))
     .bind(pc_id)
     .bind(job_id)
     .execute(&mut *tx)
@@ -322,7 +322,7 @@ pub async fn replace_rows(
 
     let mut inserted = 0;
     for element in arr {
-        let mut q = sqlx::query(&insert_sql)
+        let mut q = sqlx::query(AssertSqlSafe(insert_sql.as_str()))
             .bind(pc_id)
             .bind(job_id)
             .bind(collected_at);
@@ -345,9 +345,9 @@ pub async fn replace_rows(
 }
 
 async fn delete_rows(pool: &SqlitePool, table: &str, pc_id: &str, job_id: &str) -> Result<()> {
-    sqlx::query(&format!(
+    sqlx::query(AssertSqlSafe(format!(
         "DELETE FROM \"{table}\" WHERE pc_id = ? AND job_id = ?"
-    ))
+    )))
     .bind(pc_id)
     .bind(job_id)
     .execute(pool)
@@ -359,10 +359,10 @@ async fn delete_rows(pool: &SqlitePool, table: &str, pc_id: &str, job_id: &str) 
 /// Pull `element[col.field]` and bind it to the query with the
 /// right type. JSON null → SQL NULL; missing key → SQL NULL.
 fn bind_column<'q>(
-    q: sqlx::query::Query<'q, Sqlite, sqlx::sqlite::SqliteArguments<'q>>,
+    q: sqlx::query::Query<'q, Sqlite, sqlx::sqlite::SqliteArguments>,
     col: &ExplodeColumn,
     element: &'q JsonValue,
-) -> sqlx::query::Query<'q, Sqlite, sqlx::sqlite::SqliteArguments<'q>> {
+) -> sqlx::query::Query<'q, Sqlite, sqlx::sqlite::SqliteArguments> {
     let v = element.get(&col.field);
     match (col.kind.as_deref(), v) {
         (_, None) | (_, Some(JsonValue::Null)) => q.bind(Option::<String>::None),

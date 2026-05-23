@@ -156,7 +156,7 @@ mod tests {
                 (exec_id, job_id, version, initiated_by, target_count, status, initiated_at)
              VALUES (?, 'j', '1.0', 'tester', 1, ?, datetime('now', '{offset_minutes} minutes'))"
         );
-        sqlx::query(&sql)
+        sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(exec_id)
             .bind(status)
             .execute(pool)
