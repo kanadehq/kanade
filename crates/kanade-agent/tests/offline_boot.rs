@@ -40,7 +40,16 @@ const HEARTBEAT_INTERVAL_SECS: u64 = 1;
 /// Max time we wait for a heartbeat in the success branches.
 /// Generous enough to absorb the agent's own `wait_for_kv` backoff
 /// (1 s, 2 s, 4 s, …) plus the broker's bootstrap RTT.
-const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(15);
+///
+/// Bumped from 15 s to 30 s after the first Integration run on
+/// Windows ran `recovers_after_broker_restart` over budget: the
+/// agent's subsystems (`config_supervisor` / `command_replay` /
+/// `local_scheduler` / `groups`) all race to re-establish their
+/// watches / consumers after the broker is killed, each hitting
+/// `wait_for_kv`'s exponential backoff (1 + 2 + 4 + 8 = 15 s
+/// worst case) — exactly at the old budget. 30 s gives a healthy
+/// margin without dragging the green-run wall time.
+const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Wait for an obviously-bogus port to disappoint the agent. Pick
 /// something the kernel will reject quickly — 1 (reserved) works on
