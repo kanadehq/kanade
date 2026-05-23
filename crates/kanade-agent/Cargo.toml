@@ -45,7 +45,7 @@ async-nats = { workspace = true }
 kanade-shared = { workspace = true }
 # Allocate a free TCP port per spawned nats-server so multiple
 # integration tests can run in parallel without colliding.
-portpicker = "0.1"
+portpicker = "0.1.1"
 # Skip integration tests cleanly when `nats-server` isn't in PATH
 # (developer running `--ignored` on a fresh checkout).
 which = "8"
