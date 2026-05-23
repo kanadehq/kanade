@@ -1,0 +1,204 @@
+import { Menu, X } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Link, NavLink, useLocation } from 'react-router-dom';
+
+import { AuthBar } from '@/components/AuthBar';
+import { cn } from '@/lib/utils';
+
+// Sidebar groups: same three semantic clusters introduced in #52,
+// but rendered vertically so the at-a-glance scan target is one
+// short column instead of a row of 13+ entries crammed across the
+// header. Order within each group is the existing one.
+const groups: { label: string; links: { to: string; label: string }[] }[] = [
+  {
+    label: 'Execute',
+    links: [
+      { to: '/run', label: 'Run' },
+      { to: '/exec', label: 'Exec' },
+    ],
+  },
+  {
+    label: 'Observe',
+    links: [
+      { to: '/agents', label: 'Agents' },
+      { to: '/inventory', label: 'Inventory' },
+      { to: '/inventory/search', label: 'Search' },
+      { to: '/activity', label: 'Activity' },
+      { to: '/audit', label: 'Audit' },
+      { to: '/logs', label: 'Logs' },
+    ],
+  },
+  {
+    label: 'Manage',
+    links: [
+      { to: '/jobs', label: 'Jobs' },
+      { to: '/schedules', label: 'Schedules' },
+      { to: '/rollout', label: 'Rollout' },
+      { to: '/config', label: 'Config' },
+      { to: '/jetstream', label: 'JetStream' },
+    ],
+  },
+];
+
+function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
+  return (
+    <>
+      <Link
+        to="/"
+        onClick={onNavigate}
+        className="flex items-center gap-2 px-4 py-4 group"
+      >
+        {/* Baton-only crop of the canonical mark (assets/icon.svg).
+            Dark variant swaps via <picture> + prefers-color-scheme.
+            The 奏 kanji lives in the title text below, not the icon. */}
+        <picture>
+          <source media="(prefers-color-scheme: dark)" srcSet="/icon-dark.svg" />
+          <img
+            src="/icon.svg"
+            alt="kanade baton"
+            className="h-7 w-auto transition-transform group-hover:rotate-3"
+          />
+        </picture>
+        <h1 className="text-xl font-extrabold bg-gradient-to-br from-violet via-amber to-teal bg-clip-text text-transparent">
+          奏 kanade
+        </h1>
+      </Link>
+
+      <nav className="flex-1 overflow-y-auto px-2 pb-3">
+        {groups.map((g) => (
+          <div key={g.label} className="mt-4 first:mt-1">
+            <div className="px-3 pb-1 text-muted text-[10px] font-semibold uppercase tracking-wider">
+              {g.label}
+            </div>
+            <div className="flex flex-col">
+              {g.links.map((l) => (
+                <NavLink
+                  key={l.to}
+                  to={l.to}
+                  onClick={onNavigate}
+                  className={({ isActive }) =>
+                    cn(
+                      'px-3 py-1.5 rounded-md text-sm font-medium transition-colors',
+                      isActive ? 'bg-muted/15 text-fg' : 'text-muted hover:text-fg hover:bg-muted/10',
+                    )
+                  }
+                >
+                  {l.label}
+                </NavLink>
+              ))}
+            </div>
+          </div>
+        ))}
+      </nav>
+
+      <div className="px-3 py-3 border-t border-border">
+        <AuthBar />
+      </div>
+    </>
+  );
+}
+
+// Single shared definition of the sidebar's visual width keeps the
+// fixed-position aside and the mobile drawer in sync. Bumping this
+// value is one place — but Tailwind's JIT requires literal class
+// names, so the matching `md:pl-56` on the layout wrapper has to be
+// updated by hand. See ProtectedLayout.tsx; the two must stay in
+// lockstep.
+const SIDEBAR_WIDTH_CLASS = 'w-56';
+
+export function Sidebar() {
+  const [open, setOpen] = useState(false);
+  const location = useLocation();
+
+  // Close the mobile drawer when the route changes — clicking a
+  // link inside the drawer fires the NavLink before this effect, so
+  // we react to location changes rather than relying on each
+  // NavLink's onClick. Without this an inbound /search?q= query
+  // change wouldn't dismiss the drawer either.
+  useEffect(() => {
+    setOpen(false);
+  }, [location.pathname]);
+
+  // Block body scroll when the mobile drawer is open so the
+  // underlying page doesn't scroll behind the overlay.
+  useEffect(() => {
+    if (open) {
+      const prev = document.body.style.overflow;
+      document.body.style.overflow = 'hidden';
+      return () => {
+        document.body.style.overflow = prev;
+      };
+    }
+  }, [open]);
+
+  return (
+    <>
+      {/* Mobile top bar — slim row above the page that exposes the
+          hamburger. Auth lives in the sidebar body so it isn't
+          duplicated here. */}
+      <header className="md:hidden sticky top-0 z-20 bg-card/80 backdrop-blur-sm border-b border-border">
+        <div className="flex items-center gap-3 px-4 py-3">
+          <button
+            type="button"
+            aria-label="Open menu"
+            aria-expanded={open}
+            onClick={() => setOpen(true)}
+            className="inline-flex items-center justify-center h-9 w-9 rounded-md text-muted hover:text-fg hover:bg-muted/10"
+          >
+            <Menu className="size-5" />
+          </button>
+          <Link to="/" className="flex items-center gap-2">
+            <picture>
+              <source media="(prefers-color-scheme: dark)" srcSet="/icon-dark.svg" />
+              <img src="/icon.svg" alt="kanade baton" className="h-6 w-auto" />
+            </picture>
+            <h1 className="text-lg font-extrabold bg-gradient-to-br from-violet via-amber to-teal bg-clip-text text-transparent">
+              奏 kanade
+            </h1>
+          </Link>
+        </div>
+      </header>
+
+      {/* Desktop sidebar — fixed to the left edge, full height. The
+          page content gets a matching left margin (set on the layout
+          wrapper) so it doesn't render under the aside. */}
+      <aside
+        className={cn(
+          'hidden md:flex md:flex-col md:fixed md:inset-y-0 md:left-0 md:z-10 border-r border-border bg-card/60 backdrop-blur-sm',
+          SIDEBAR_WIDTH_CLASS,
+        )}
+      >
+        <SidebarBody />
+      </aside>
+
+      {/* Mobile drawer — full-height slide-in from the left when the
+          hamburger is tapped. Backdrop closes the drawer; route
+          changes close it too (see effect above). */}
+      {open && (
+        <div className="md:hidden fixed inset-0 z-30 flex">
+          <div
+            className="absolute inset-0 bg-bg/70 backdrop-blur-sm"
+            onClick={() => setOpen(false)}
+            aria-hidden
+          />
+          <aside
+            className={cn(
+              'relative flex flex-col h-full bg-card border-r border-border',
+              SIDEBAR_WIDTH_CLASS,
+            )}
+          >
+            <button
+              type="button"
+              aria-label="Close menu"
+              onClick={() => setOpen(false)}
+              className="absolute top-3 right-3 inline-flex items-center justify-center h-8 w-8 rounded-md text-muted hover:text-fg hover:bg-muted/10"
+            >
+              <X className="size-4" />
+            </button>
+            <SidebarBody onNavigate={() => setOpen(false)} />
+          </aside>
+        </div>
+      )}
+    </>
+  );
+}
