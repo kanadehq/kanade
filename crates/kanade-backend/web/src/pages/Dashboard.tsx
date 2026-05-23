@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   Clock,
+  Gauge,
   HelpCircle,
   Server,
   Users,
@@ -11,11 +12,35 @@ import {
   XCircle,
 } from 'lucide-react';
 
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { ApiError, apiFetch } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import type { AgentRow, JetstreamSnapshot } from '@/lib/types';
+
+/** v0.37 / agent perf: per-job duration aggregates from
+ *  /api/health/scan_durations. One row per job_id that finished
+ *  at least once in the window. Renders as the "Scan duration"
+ *  card below — slowest first so the operator's first glance
+ *  catches the probe that's hurting. */
+type ScanDurationStats = {
+  job_id: string;
+  count: number;
+  min_ms: number;
+  p50_ms: number;
+  p95_ms: number;
+  p99_ms: number;
+  max_ms: number;
+  mean_ms: number;
+};
+
+function fmtMs(ms: number): string {
+  if (ms < 1) return '<1 ms';
+  if (ms < 1000) return `${ms} ms`;
+  return `${(ms / 1000).toFixed(2)} s`;
+}
 
 type FleetHealth = {
   status: 'ok' | 'unknown' | 'degraded';
@@ -126,6 +151,11 @@ export function Dashboard() {
       }
     },
     refetchInterval: 30_000,
+  });
+  const scanDurQ = useQuery({
+    queryKey: ['scan-durations'],
+    queryFn: () => apiFetch<ScanDurationStats[]>('/api/health/scan_durations'),
+    refetchInterval: 60_000,
   });
 
   const agents = agentsQ.data ?? [];
@@ -330,6 +360,64 @@ export function Dashboard() {
           </CardContent>
         </Card>
       </div>
+
+      {/* v0.37 / agent perf: scan duration aggregates per job_id
+          over the last 24 h. Sorted slowest-first so a probe that
+          starts hurting jumps to the top of the card without the
+          operator having to scan a list. Empty state when no
+          finished rows in the window (e.g. fresh install). */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Gauge className="size-5 text-violet" />
+            Scan duration (last 24 h, slowest first)
+          </CardTitle>
+          <CardDescription>
+            Per-job execution time from <code>execution_results.{`{started,finished}_at`}</code>.
+            Use to spot a probe that's gotten unexpectedly slow without checking individual rows.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {scanDurQ.isLoading ? (
+            <div className="text-muted text-sm">Loading…</div>
+          ) : scanDurQ.error ? (
+            <div className="text-danger text-sm">
+              Couldn't load: {String(scanDurQ.error)}
+            </div>
+          ) : (scanDurQ.data ?? []).length === 0 ? (
+            <div className="text-muted text-sm">
+              No finished executions in the last 24 h.
+            </div>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>job_id</TableHead>
+                  <TableHead className="text-right">count</TableHead>
+                  <TableHead className="text-right">p50</TableHead>
+                  <TableHead className="text-right">p95</TableHead>
+                  <TableHead className="text-right">p99</TableHead>
+                  <TableHead className="text-right">max</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {(scanDurQ.data ?? []).map((r) => (
+                  <TableRow key={r.job_id}>
+                    <TableCell>
+                      <code className="text-sm">{r.job_id}</code>
+                    </TableCell>
+                    <TableCell className="text-right text-muted text-xs">{r.count}</TableCell>
+                    <TableCell className="text-right">{fmtMs(r.p50_ms)}</TableCell>
+                    <TableCell className="text-right">{fmtMs(r.p95_ms)}</TableCell>
+                    <TableCell className="text-right">{fmtMs(r.p99_ms)}</TableCell>
+                    <TableCell className="text-right text-muted">{fmtMs(r.max_ms)}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>
