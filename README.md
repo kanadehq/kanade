@@ -408,10 +408,12 @@ the PDB.
 `crates/kanade-agent/tests/offline_boot.rs` exercises the offline-
 tolerant boot path from #137 end-to-end by spawning a real
 `nats-server` and the agent binary. The tests are `#[ignore]`-gated
-because `nats-server` isn't installed on the workspace's CI runners
-yet — see [#165] for the CI follow-up.
+so `cargo test` (and `cargo make check`) stays fast for local dev
+without needing `nats-server` on every machine. The dedicated
+[`Integration` workflow] installs `nats-server` per runner (Linux /
+macOS / Windows) and opts in via `--ignored`.
 
-Install `nats-server` first:
+To run them locally, install `nats-server` first:
 
 | Platform | Command                              |
 |----------|--------------------------------------|
@@ -432,8 +434,8 @@ arrives within timeout" depending on the case, and tears everything
 down on Drop. If `nats-server` isn't on `PATH`, each test logs a
 clear "skipping" message instead of panicking.
 
-[#165]: https://github.com/yukimemi/kanade/issues/165
 [GitHub release]: https://github.com/nats-io/nats-server/releases
+[`Integration` workflow]: ./.github/workflows/integration.yml
 
 ## Production install layout
 
