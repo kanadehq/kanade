@@ -37,8 +37,12 @@
 //! fail." Subsystems that need to surface a "bucket truly absent
 //! forever" signal would have to layer their own timeout, but the
 //! existing design (silent retry forever) matches the agent's
-//! offline-first posture and that's deliberate. See #140 for the
-//! plan to demote repeated failures from `warn!` to `debug!`.
+//! offline-first posture and that's deliberate.
+//!
+//! Failure-log severity follows a streak-aware pattern (#140): the
+//! first failure in a streak emits `warn!`, subsequent failures emit
+//! `debug!`, and the first successful call after a streak emits an
+//! `info!` summary with the failure count. See [`log_failure`].
 //!
 //! ## Why not use async-nats's own reconnect?
 //!
@@ -70,7 +74,7 @@ use std::time::Duration;
 use async_nats::connection::State;
 use async_nats::jetstream;
 use rand::Rng;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::staleness::Tracker;
 
@@ -101,21 +105,26 @@ pub async fn wait_for_kv(
     label: &'static str,
 ) -> jetstream::kv::Store {
     let mut backoff = INITIAL_BACKOFF;
+    let mut consecutive_failures: u32 = 0;
     loop {
         gate_on_connection(client, tracker, label, "kv").await;
         match js.get_key_value(bucket).await {
             Ok(store) => {
+                if consecutive_failures > 0 {
+                    info!(
+                        label,
+                        kind = "kv",
+                        resource = bucket,
+                        consecutive_failures,
+                        "nats_retry: kv recovered",
+                    );
+                }
                 debug!(label, bucket, "nats_retry: kv ready");
                 return store;
             }
             Err(e) => {
-                warn!(
-                    label,
-                    bucket,
-                    error = %e,
-                    backoff_secs = backoff.as_secs(),
-                    "nats_retry: kv unavailable, retrying after backoff",
-                );
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                log_failure(consecutive_failures, backoff, "kv", label, bucket, &e);
                 sleep_or_wake(backoff, tracker).await;
                 backoff = next_backoff(backoff);
             }
@@ -133,21 +142,26 @@ pub async fn wait_for_stream(
     label: &'static str,
 ) -> jetstream::stream::Stream {
     let mut backoff = INITIAL_BACKOFF;
+    let mut consecutive_failures: u32 = 0;
     loop {
         gate_on_connection(client, tracker, label, "stream").await;
         match js.get_stream(name).await {
             Ok(s) => {
+                if consecutive_failures > 0 {
+                    info!(
+                        label,
+                        kind = "stream",
+                        resource = name,
+                        consecutive_failures,
+                        "nats_retry: stream recovered",
+                    );
+                }
                 debug!(label, stream = name, "nats_retry: stream ready");
                 return s;
             }
             Err(e) => {
-                warn!(
-                    label,
-                    stream = name,
-                    error = %e,
-                    backoff_secs = backoff.as_secs(),
-                    "nats_retry: stream unavailable, retrying after backoff",
-                );
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                log_failure(consecutive_failures, backoff, "stream", label, name, &e);
                 sleep_or_wake(backoff, tracker).await;
                 backoff = next_backoff(backoff);
             }
@@ -174,21 +188,26 @@ where
     C: jetstream::consumer::IntoConsumerConfig + jetstream::consumer::FromConsumer + Clone,
 {
     let mut backoff = INITIAL_BACKOFF;
+    let mut consecutive_failures: u32 = 0;
     loop {
         gate_on_connection(client, tracker, label, "consumer").await;
         match stream.get_or_create_consumer(name, config.clone()).await {
             Ok(c) => {
+                if consecutive_failures > 0 {
+                    info!(
+                        label,
+                        kind = "consumer",
+                        resource = name,
+                        consecutive_failures,
+                        "nats_retry: consumer recovered",
+                    );
+                }
                 debug!(label, consumer = name, "nats_retry: consumer ready");
                 return c;
             }
             Err(e) => {
-                warn!(
-                    label,
-                    consumer = name,
-                    error = %e,
-                    backoff_secs = backoff.as_secs(),
-                    "nats_retry: consumer unavailable, retrying after backoff",
-                );
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                log_failure(consecutive_failures, backoff, "consumer", label, name, &e);
                 sleep_or_wake(backoff, tracker).await;
                 backoff = next_backoff(backoff);
             }
@@ -219,6 +238,52 @@ pub async fn reopen_pause() {
 // ----------------------------------------------------------------
 // Internals
 // ----------------------------------------------------------------
+
+/// Log one retry-attempt failure with severity that depends on
+/// whether this is the first failure in the current streak (#140).
+///
+/// - First failure (`consecutive == 1`): `warn!` so operators see
+///   the initial "broker / bucket unavailable" signal once per
+///   streak.
+/// - Subsequent failures (`consecutive >= 2`): `debug!`. Without
+///   this, a multi-hour outage spams `warn!` once per backoff
+///   tick (every 5 min after the cap) for the duration of the
+///   outage — operationally useless and crowds out actual signal.
+///
+/// On the next successful `wait_for_*` call the counter starts
+/// fresh, so the next streak after a recovery will warn again on
+/// its first failure. That's the "recovery → first failure after
+/// success → back to warn" behavior #140 asked for; recovery
+/// itself is logged at `info!` by the success path.
+fn log_failure(
+    consecutive: u32,
+    backoff: Duration,
+    kind: &'static str,
+    label: &'static str,
+    resource: &str,
+    error: &dyn std::fmt::Display,
+) {
+    if consecutive == 1 {
+        warn!(
+            label,
+            kind,
+            resource,
+            error = %error,
+            backoff_secs = backoff.as_secs(),
+            "nats_retry: unavailable, retrying after backoff",
+        );
+    } else {
+        debug!(
+            label,
+            kind,
+            resource,
+            error = %error,
+            backoff_secs = backoff.as_secs(),
+            consecutive_failures = consecutive,
+            "nats_retry: still unavailable, retrying after backoff",
+        );
+    }
+}
 
 /// If the client isn't currently `State::Connected`, park on the
 /// tracker's wake until either it fires or a short timeout elapses.
