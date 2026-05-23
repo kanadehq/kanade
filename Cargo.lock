@@ -1550,7 +1550,7 @@ dependencies = [
 
 [[package]]
 name = "kanade"
-version = "0.35.1"
+version = "0.36.0"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -1573,7 +1573,7 @@ dependencies = [
 
 [[package]]
 name = "kanade-agent"
-version = "0.35.1"
+version = "0.36.0"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -1601,7 +1601,7 @@ dependencies = [
 
 [[package]]
 name = "kanade-backend"
-version = "0.35.1"
+version = "0.36.0"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -1635,7 +1635,7 @@ dependencies = [
 
 [[package]]
 name = "kanade-shared"
-version = "0.35.1"
+version = "0.36.0"
 dependencies = [
  "anyhow",
  "async-nats",
