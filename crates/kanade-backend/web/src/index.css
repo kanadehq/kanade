@@ -8,6 +8,15 @@
   --color-amber: #d4a017;
   --color-teal: #2a9d8f;
 
+  /* Lighter tints of the same hues — the base brand tokens are tuned
+     for icon / accent backgrounds, and on a dark surface the violet
+     in particular sinks into the background as readable text. The
+     `-light` variants share the hue but lift the value enough to
+     read as text on `bg-card`. */
+  --color-violet-light: #a78bfa;
+  --color-amber-light: #fcd34d;
+  --color-teal-light: #5eead4;
+
   /* Semantic surface tokens. Light defaults; the .dark variant
      below swaps the values when the prefers-color-scheme media
      query fires. shadcn-style flat palette, deliberately limited. */
