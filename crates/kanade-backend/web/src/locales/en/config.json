@@ -1,1 +1,68 @@
-{}
+{
+  "global": {
+    "title": "Global ConfigScope",
+    "description": "Whole-fleet default. Per-group / per-pc overrides win over this.",
+    "loading": "loading…",
+    "loadErrorTitle": "Couldn't load global config",
+    "saveErrorTitle": "Save failed",
+    "saveButton": "save global",
+    "toast": {
+      "saveSuccess": "Saved global config",
+      "saveFailure": "Save failed: {{error}}"
+    },
+    "alerts": {
+      "invalidJson": "Body must be valid JSON: {{error}}"
+    }
+  },
+  "scope": {
+    "title": "Per-group / Per-PC override",
+    "description": "Partial ConfigScope — only fields you set survive. Empty fields fall through to the global scope.",
+    "labels": {
+      "scope": "scope",
+      "name": "name"
+    },
+    "kindOptions": {
+      "groups": "groups.<name>",
+      "pcs": "pcs.<pc_id>"
+    },
+    "placeholders": {
+      "name": "canary or MINIPC-01",
+      "body": "{\"target_version\":\"0.4.0\"}"
+    },
+    "buttons": {
+      "load": "load",
+      "save": "save",
+      "delete": "delete"
+    },
+    "errorTitle": "Scope op failed",
+    "alerts": {
+      "invalidJson": "Body must be valid JSON: {{error}}"
+    },
+    "confirm": {
+      "deleteTitle": "Delete {{url}}?",
+      "deleteDescription": "Removes the override; the scope falls back through the layered config.",
+      "deleteLabel": "Delete"
+    },
+    "toast": {
+      "saveSuccess": "Saved {{url}}",
+      "saveFailure": "Save failed: {{error}}",
+      "deleteSuccess": "Deleted {{url}}",
+      "deleteFailure": "Delete failed: {{error}}"
+    }
+  },
+  "effective": {
+    "title": "Effective config for one PC",
+    "description": "Same view the agent's <code>config_supervisor</code> computes locally. Built-in → global → groups (last-wins) → pc.",
+    "labels": {
+      "pcId": "pc_id",
+      "warnings": "warnings"
+    },
+    "placeholders": {
+      "pcId": "MINIPC-01"
+    },
+    "buttons": {
+      "resolve": "resolve"
+    },
+    "errorTitle": "Resolve failed"
+  }
+}

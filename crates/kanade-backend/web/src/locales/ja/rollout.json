@@ -1,1 +1,58 @@
-{}
+{
+  "title": "エージェントロールアウト",
+  "intro": "2段階方式: バイナリをアップロードしてから、対象スコープの <code>target_version</code> を切り替えます。",
+  "upload": {
+    "title": "1. バイナリをアップロード",
+    "description": "<code>/api/agents/publish</code> に POST します (本文上限 64 MB)。 オブジェクトストアのキーはバイナリ内蔵の VERSIONINFO リソースから自動抽出されるため、 ラベルを入力する必要はなく、ラベルとバイナリの不一致も発生しません。 CLI: <code>kanade agent publish &lt;binary&gt;</code>。",
+    "fileLabel": "バイナリ (.exe / Linux / macOS)",
+    "uploadButton": "アップロード",
+    "noFileError": "先にファイルを選択してください",
+    "successPrefix": "アップロード完了:",
+    "errorTitle": "アップロードに失敗しました"
+  },
+  "rolloutPanel": {
+    "title": "2. バージョンをロールアウト",
+    "description": "下の表で <strong>ロールアウト</strong> をクリックすると、 フォームに値を自動入力できます。",
+    "versionLabel": "バージョン",
+    "versionPickerPlaceholder": "(選択してください)",
+    "jitterLabel": "ジッター (humantime)",
+    "jitterPlaceholder": "例: 5m, 30m, 1h, 0s",
+    "scopeLabel": "スコープ",
+    "scopeOptions": {
+      "global": "グローバル (フリート全体)",
+      "group": "グループ",
+      "pc": "単一 PC"
+    },
+    "scopeValueLabel": {
+      "none": "—",
+      "group": "グループ名",
+      "pc": "pc_id"
+    },
+    "scopeValuePlaceholder": {
+      "global": "対象外",
+      "group": "例: canary"
+    },
+    "rolloutButton": "ロールアウト",
+    "jitterBadge": "ジッター {{jitter}}",
+    "errorTitle": "ロールアウトに失敗しました"
+  },
+  "releases": {
+    "title": "オブジェクトストアのリリース",
+    "description": "<code>/api/agents/releases</code> より。 <strong>ロールアウト</strong> をクリックすると、上のフォームを対象行に合わせて入力します。 <strong>削除</strong> はオブジェクトストアからバイナリを削除します (どこかのスコープがまだ対象としている場合は 409 で拒否されます)。",
+    "loading": "読み込み中…",
+    "errorTitle": "リリース一覧を読み込めませんでした",
+    "empty": "オブジェクトストアが空です — 上でバイナリをアップロードするか、 <code>kanade agent publish &lt;binary&gt;</code> を実行してください。",
+    "columns": {
+      "version": "バージョン",
+      "size": "サイズ",
+      "modified": "更新日時",
+      "digest": "ダイジェスト",
+      "actions": "操作"
+    },
+    "actions": {
+      "rollout": "ロールアウト…"
+    },
+    "confirmDelete": "リリース {{version}} を削除しますか? この操作は取り消せません。",
+    "deleteErrorTitle": "削除に失敗しました"
+  }
+}

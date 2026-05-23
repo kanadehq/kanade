@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { Loader2, RefreshCw } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
 
 import { ErrorCard } from '@/components/ErrorCard';
@@ -14,6 +15,7 @@ import { apiFetch } from '@/lib/api';
 import type { AgentRow } from '@/lib/types';
 
 export function Logs() {
+  const { t } = useTranslation('logs');
   const [search, setSearch] = useSearchParams();
   const initialPc = search.get('pc') ?? '';
   const [pcId, setPcId] = useState(initialPc);
@@ -63,10 +65,12 @@ export function Logs() {
   return (
     <div className="space-y-4">
       <div className="flex items-baseline justify-between">
-        <h2 className="text-xl">Agent logs</h2>
+        <h2 className="text-xl">{t('title')}</h2>
         {pcId && (
           <Badge variant="violet">
-            {logsQ.data ? `${logsQ.data.split('\n').length - 1} lines` : '—'}
+            {logsQ.data
+              ? t('countBadge', { count: logsQ.data.split('\n').length - 1 })
+              : t('countBadgeEmpty')}
           </Badge>
         )}
       </div>
@@ -74,16 +78,16 @@ export function Logs() {
       <Card>
         <CardContent className="grid grid-cols-1 sm:grid-cols-4 gap-3 p-4">
           <div className="space-y-1">
-            <Label htmlFor="logs-pc">pc_id</Label>
+            <Label htmlFor="logs-pc">{t('filters.pcId')}</Label>
             <Select id="logs-pc" value={pcId} onChange={(e) => setPcId(e.target.value)}>
-              <option value="">(pick one)</option>
+              <option value="">{t('filters.pickOne')}</option>
               {(agentsQ.data ?? []).map((a) => (
                 <option key={a.pc_id} value={a.pc_id}>{a.pc_id}</option>
               ))}
             </Select>
           </div>
           <div className="space-y-1">
-            <Label htmlFor="logs-tail">tail lines</Label>
+            <Label htmlFor="logs-tail">{t('filters.tail')}</Label>
             <Input
               id="logs-tail"
               type="number"
@@ -94,14 +98,14 @@ export function Logs() {
             />
           </div>
           <div className="space-y-1">
-            <Label htmlFor="logs-auto">auto-refresh</Label>
+            <Label htmlFor="logs-auto">{t('filters.autoRefresh')}</Label>
             <Select
               id="logs-auto"
               value={autoRefresh ? 'on' : 'off'}
               onChange={(e) => setAutoRefresh(e.target.value === 'on')}
             >
-              <option value="off">off</option>
-              <option value="on">every 5s</option>
+              <option value="off">{t('filters.autoRefreshOptions.off')}</option>
+              <option value="on">{t('filters.autoRefreshOptions.on')}</option>
             </Select>
           </div>
           <div className="space-y-1">
@@ -113,7 +117,7 @@ export function Logs() {
               className="w-full"
             >
               <RefreshCw className={logsQ.isFetching ? 'size-4 mr-2 animate-spin' : 'size-4 mr-2'} />
-              refresh
+              {t('actions.refresh')}
             </Button>
           </div>
         </CardContent>
@@ -122,22 +126,24 @@ export function Logs() {
       {!pcId ? (
         <Card>
           <CardContent className="p-6 text-muted text-sm">
-            Pick a pc_id above to fetch its agent log over <code>logs.fetch.&lt;pc_id&gt;</code>.
-            The agent must be online — the request times out after 10s.
+            <Trans ns="logs" i18nKey="empty.intro" components={{ code: <code /> }} />
+            {' '}
+            {t('empty.timeout')}
           </CardContent>
         </Card>
       ) : logsQ.isLoading ? (
         <div className="flex items-center gap-2 text-muted">
-          <Loader2 className="size-4 animate-spin" />fetching logs from {pcId}…
+          <Loader2 className="size-4 animate-spin" />
+          {t('loading', { pcId })}
         </div>
       ) : logsQ.error ? (
-        <ErrorCard title={`Couldn't fetch logs from ${pcId}`} error={logsQ.error} />
+        <ErrorCard title={t('errorTitle', { pcId })} error={logsQ.error} />
       ) : (
         <pre
           ref={preRef}
           className="text-xs whitespace-pre-wrap break-words bg-muted/5 border border-border rounded p-3 max-h-[70vh] overflow-auto font-mono"
         >
-          {logsQ.data || '(empty)'}
+          {logsQ.data || t('empty.pre')}
         </pre>
       )}
     </div>

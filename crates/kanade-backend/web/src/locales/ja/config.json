@@ -1,1 +1,68 @@
-{}
+{
+  "global": {
+    "title": "グローバル ConfigScope",
+    "description": "フリート全体の既定値です。グループ単位 / PC 単位のオーバーライドが優先されます。",
+    "loading": "読み込み中…",
+    "loadErrorTitle": "グローバル設定を読み込めませんでした",
+    "saveErrorTitle": "保存に失敗しました",
+    "saveButton": "グローバルを保存",
+    "toast": {
+      "saveSuccess": "グローバル設定を保存しました",
+      "saveFailure": "保存に失敗しました: {{error}}"
+    },
+    "alerts": {
+      "invalidJson": "本文は有効な JSON である必要があります: {{error}}"
+    }
+  },
+  "scope": {
+    "title": "グループ / PC 単位のオーバーライド",
+    "description": "部分的な ConfigScope です。設定したフィールドのみが反映され、空のフィールドはグローバルスコープにフォールバックします。",
+    "labels": {
+      "scope": "スコープ",
+      "name": "名前"
+    },
+    "kindOptions": {
+      "groups": "groups.<name>",
+      "pcs": "pcs.<pc_id>"
+    },
+    "placeholders": {
+      "name": "canary や MINIPC-01 など",
+      "body": "{\"target_version\":\"0.4.0\"}"
+    },
+    "buttons": {
+      "load": "読込",
+      "save": "保存",
+      "delete": "削除"
+    },
+    "errorTitle": "スコープ操作に失敗しました",
+    "alerts": {
+      "invalidJson": "本文は有効な JSON である必要があります: {{error}}"
+    },
+    "confirm": {
+      "deleteTitle": "{{url}} を削除しますか？",
+      "deleteDescription": "このオーバーライドを削除すると、スコープは階層化された設定にフォールバックします。",
+      "deleteLabel": "削除"
+    },
+    "toast": {
+      "saveSuccess": "{{url}} を保存しました",
+      "saveFailure": "保存に失敗しました: {{error}}",
+      "deleteSuccess": "{{url}} を削除しました",
+      "deleteFailure": "削除に失敗しました: {{error}}"
+    }
+  },
+  "effective": {
+    "title": "単一 PC の実効設定",
+    "description": "エージェントの <code>config_supervisor</code> がローカルで計算するのと同じビューです。組み込み → グローバル → グループ (後勝ち) → PC の順に適用されます。",
+    "labels": {
+      "pcId": "pc_id",
+      "warnings": "警告"
+    },
+    "placeholders": {
+      "pcId": "MINIPC-01"
+    },
+    "buttons": {
+      "resolve": "解決"
+    },
+    "errorTitle": "解決に失敗しました"
+  }
+}

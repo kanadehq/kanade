@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Loader2, Save, Trash2 } from 'lucide-react';
 import { useEffect, useState } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 
 import { ErrorCard } from '@/components/ErrorCard';
@@ -16,6 +17,7 @@ import { apiFetch, formatError } from '@/lib/api';
 import type { ConfigScope, EffectiveConfigResponse } from '@/lib/types';
 
 function GlobalEditor() {
+  const { t } = useTranslation('config');
   const qc = useQueryClient();
   const { data, error, isLoading } = useQuery({
     queryKey: ['config', 'global'],
@@ -31,43 +33,42 @@ function GlobalEditor() {
       apiFetch<ConfigScope>('/api/config', { method: 'PUT', body: JSON.stringify(body) }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['config', 'global'] });
-      toast.success('Saved global config');
+      toast.success(t('global.toast.saveSuccess'));
     },
-    onError: (e) => toast.error(`Save failed: ${formatError(e)}`),
+    onError: (e) => toast.error(t('global.toast.saveFailure', { error: formatError(e) })),
   });
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Global ConfigScope</CardTitle>
-        <CardDescription>
-          Whole-fleet default. Per-group / per-pc overrides win over this.
-        </CardDescription>
+        <CardTitle>{t('global.title')}</CardTitle>
+        <CardDescription>{t('global.description')}</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
-        {isLoading && <div className="text-muted flex items-center gap-2"><Loader2 className="size-4 animate-spin" />loading…</div>}
-        {error && <ErrorCard title="Couldn't load global config" error={error} />}
+        {isLoading && <div className="text-muted flex items-center gap-2"><Loader2 className="size-4 animate-spin" />{t('global.loading')}</div>}
+        {error && <ErrorCard title={t('global.loadErrorTitle')} error={error} />}
         <Textarea value={draft} onChange={(e) => setDraft(e.target.value)} className="min-h-40" />
         <Button
           onClick={() => {
             try {
               save.mutate(JSON.parse(draft));
             } catch (e) {
-              window.alert(`Body must be valid JSON: ${(e as Error).message}`);
+              toast.error(t('global.alerts.invalidJson', { error: (e as Error).message }));
             }
           }}
           disabled={save.isPending}
         >
           {save.isPending ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
-          save global
+          {t('global.saveButton')}
         </Button>
-        {save.error && <ErrorCard title="Save failed" error={save.error} />}
+        {save.error && <ErrorCard title={t('global.saveErrorTitle')} error={save.error} />}
       </CardContent>
     </Card>
   );
 }
 
 function ScopeEditor() {
+  const { t } = useTranslation('config');
   const qc = useQueryClient();
   const confirm = useConfirm();
   const [kind, setKind] = useState<'groups' | 'pcs'>('groups');
@@ -83,18 +84,18 @@ function ScopeEditor() {
     mutationFn: (b: ConfigScope) => apiFetch(url(), { method: 'PUT', body: JSON.stringify(b) }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['config'] });
-      toast.success(`Saved ${url()}`);
+      toast.success(t('scope.toast.saveSuccess', { url: url() }));
     },
-    onError: (e) => toast.error(`Save failed: ${formatError(e)}`),
+    onError: (e) => toast.error(t('scope.toast.saveFailure', { error: formatError(e) })),
   });
   const del = useMutation({
     mutationFn: () => apiFetch(url(), { method: 'DELETE' }),
     onSuccess: () => {
       setBody('');
       qc.invalidateQueries({ queryKey: ['config'] });
-      toast.success(`Deleted ${url()}`);
+      toast.success(t('scope.toast.deleteSuccess', { url: url() }));
     },
-    onError: (e) => toast.error(`Delete failed: ${formatError(e)}`),
+    onError: (e) => toast.error(t('scope.toast.deleteFailure', { error: formatError(e) })),
   });
 
   const lastError = load.error ?? save.error ?? del.error;
@@ -102,33 +103,31 @@ function ScopeEditor() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Per-group / Per-PC override</CardTitle>
-        <CardDescription>
-          Partial ConfigScope — only fields you set survive. Empty fields fall through to the global scope.
-        </CardDescription>
+        <CardTitle>{t('scope.title')}</CardTitle>
+        <CardDescription>{t('scope.description')}</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         <div className="grid grid-cols-1 md:grid-cols-[160px_1fr_auto] gap-3 items-end">
           <div>
-            <Label>scope</Label>
+            <Label>{t('scope.labels.scope')}</Label>
             <Select value={kind} onChange={(e) => setKind(e.target.value as 'groups' | 'pcs')}>
-              <option value="groups">groups.&lt;name&gt;</option>
-              <option value="pcs">pcs.&lt;pc_id&gt;</option>
+              <option value="groups">{t('scope.kindOptions.groups')}</option>
+              <option value="pcs">{t('scope.kindOptions.pcs')}</option>
             </Select>
           </div>
           <div>
-            <Label>name</Label>
-            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="canary or MINIPC-01" />
+            <Label>{t('scope.labels.name')}</Label>
+            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder={t('scope.placeholders.name')} />
           </div>
           <Button variant="secondary" disabled={!name.trim() || load.isPending} onClick={() => load.mutate()}>
-            load
+            {t('scope.buttons.load')}
           </Button>
         </div>
         <Textarea
           value={body}
           onChange={(e) => setBody(e.target.value)}
           className="min-h-32"
-          placeholder='{"target_version":"0.4.0"}'
+          placeholder={t('scope.placeholders.body')}
         />
         <div className="flex gap-2">
           <Button
@@ -136,38 +135,39 @@ function ScopeEditor() {
               try {
                 save.mutate(JSON.parse(body));
               } catch (e) {
-                window.alert(`Body must be valid JSON: ${(e as Error).message}`);
+                toast.error(t('scope.alerts.invalidJson', { error: (e as Error).message }));
               }
             }}
             disabled={!name.trim() || save.isPending}
           >
             {save.isPending ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
-            save
+            {t('scope.buttons.save')}
           </Button>
           <Button
             variant="danger"
             disabled={!name.trim() || del.isPending}
             onClick={async () => {
               const ok = await confirm({
-                title: `Delete ${url()}?`,
-                description: 'Removes the override; the scope falls back through the layered config.',
-                confirmLabel: 'Delete',
+                title: t('scope.confirm.deleteTitle', { url: url() }),
+                description: t('scope.confirm.deleteDescription'),
+                confirmLabel: t('scope.confirm.deleteLabel'),
                 danger: true,
               });
               if (ok) del.mutate();
             }}
           >
             <Trash2 className="size-3.5" />
-            delete
+            {t('scope.buttons.delete')}
           </Button>
         </div>
-        {lastError && <ErrorCard title="Scope op failed" error={lastError} />}
+        {lastError && <ErrorCard title={t('scope.errorTitle')} error={lastError} />}
       </CardContent>
     </Card>
   );
 }
 
 function EffectiveResolver() {
+  const { t } = useTranslation('config');
   const [pcId, setPcId] = useState('');
   const mut = useMutation({
     mutationFn: () => apiFetch<EffectiveConfigResponse>(`/api/agents/${encodeURIComponent(pcId)}/effective_config`),
@@ -176,28 +176,32 @@ function EffectiveResolver() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Effective config for one PC</CardTitle>
+        <CardTitle>{t('effective.title')}</CardTitle>
         <CardDescription>
-          Same view the agent's config_supervisor computes locally. Built-in → global → groups (last-wins) → pc.
+          <Trans
+            ns="config"
+            i18nKey="effective.description"
+            components={{ code: <code /> }}
+          />
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         <div className="flex gap-3 items-end">
           <div className="flex-1">
-            <Label>pc_id</Label>
-            <Input value={pcId} onChange={(e) => setPcId(e.target.value)} placeholder="MINIPC-01" />
+            <Label>{t('effective.labels.pcId')}</Label>
+            <Input value={pcId} onChange={(e) => setPcId(e.target.value)} placeholder={t('effective.placeholders.pcId')} />
           </div>
           <Button onClick={() => mut.mutate()} disabled={!pcId.trim() || mut.isPending} variant="secondary">
-            resolve
+            {t('effective.buttons.resolve')}
           </Button>
         </div>
-        {mut.error && <ErrorCard title="Resolve failed" error={mut.error} />}
+        {mut.error && <ErrorCard title={t('effective.errorTitle')} error={mut.error} />}
         {mut.data && (
           <div className="space-y-2">
             <JsonOutput value={mut.data.effective} />
             {mut.data.warnings.length > 0 && (
               <div className="text-xs">
-                <Label>warnings</Label>
+                <Label>{t('effective.labels.warnings')}</Label>
                 <ul className="list-disc pl-5 text-amber">
                   {mut.data.warnings.map((w, i) => <li key={i}>{w}</li>)}
                 </ul>

@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { CheckCircle2, Loader2, Rocket, Trash2, Upload } from 'lucide-react';
 import { useState } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
 
 import { ErrorCard } from '@/components/ErrorCard';
 import { Badge } from '@/components/ui/badge';
@@ -30,6 +31,7 @@ function fmtSize(bytes: number): string {
 }
 
 export function Rollout() {
+  const { t } = useTranslation('rollout');
   const qc = useQueryClient();
   const [version, setVersion] = useState('');
   const [scopeKind, setScopeKind] = useState<ScopeKind>('group');
@@ -48,7 +50,7 @@ export function Rollout() {
 
   const upload = useMutation({
     mutationFn: async () => {
-      if (!uploadFile) throw new Error('pick a file first');
+      if (!uploadFile) throw new Error(t('upload.noFileError'));
       const fd = new FormData();
       fd.append('file', uploadFile);
       const token = localStorage.getItem('kanade_token') ?? '';
@@ -125,12 +127,19 @@ export function Rollout() {
     (scopeKind === 'global' || (!!scopeValue && scopeValue.length > 0)) &&
     !rollout.isPending;
 
+  const scopeValueLabel =
+    scopeKind === 'global'
+      ? t('rolloutPanel.scopeValueLabel.none')
+      : scopeKind === 'group'
+      ? t('rolloutPanel.scopeValueLabel.group')
+      : t('rolloutPanel.scopeValueLabel.pc');
+
   return (
     <div className="space-y-6">
       <div className="flex items-baseline justify-between">
-        <h2 className="text-xl">Agent rollout</h2>
+        <h2 className="text-xl">{t('title')}</h2>
         <span className="text-xs text-muted">
-          Two-step: upload a binary, then flip <code>target_version</code> on one scope.
+          <Trans ns="rollout" i18nKey="intro" components={{ code: <code /> }} />
         </span>
       </div>
 
@@ -138,18 +147,15 @@ export function Rollout() {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Upload className="size-5 text-violet" />
-            1. Upload a binary
+            {t('upload.title')}
           </CardTitle>
           <CardDescription>
-            POSTs to <code>/api/agents/publish</code> (64 MB body limit). The Object
-            Store key is auto-extracted from the binary's embedded VERSIONINFO
-            resource — no label to type, no chance of a label/binary mismatch.
-            CLI: <code>kanade agent publish &lt;binary&gt;</code>.
+            <Trans ns="rollout" i18nKey="upload.description" components={{ code: <code /> }} />
           </CardDescription>
         </CardHeader>
         <CardContent className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div className="space-y-1">
-            <Label htmlFor="up-file">binary (.exe / Linux / macOS)</Label>
+            <Label htmlFor="up-file">{t('upload.fileLabel')}</Label>
             <Input
               id="up-file"
               type="file"
@@ -168,7 +174,7 @@ export function Rollout() {
               ) : (
                 <Upload className="size-4 mr-2" />
               )}
-              Upload
+              {t('upload.uploadButton')}
             </Button>
           </div>
         </CardContent>
@@ -181,14 +187,14 @@ export function Rollout() {
           {upload.isSuccess && upload.data && (
             <span className="flex items-center gap-2 text-sm text-success">
               <CheckCircle2 className="size-4" />
-              uploaded as <code className="text-xs">{upload.data.version}</code>
+              {t('upload.successPrefix')} <code className="text-xs">{upload.data.version}</code>
               {' '}({fmtSize(upload.data.size)})
             </span>
           )}
         </CardContent>
         {upload.error && (
           <CardContent className="pt-0">
-            <ErrorCard title="Upload failed" error={upload.error} />
+            <ErrorCard title={t('upload.errorTitle')} error={upload.error} />
           </CardContent>
         )}
       </Card>
@@ -197,17 +203,17 @@ export function Rollout() {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Rocket className="size-5 text-violet" />
-            2. Roll out a version
+            {t('rolloutPanel.title')}
           </CardTitle>
           <CardDescription>
-            Or click <strong>Roll out</strong> on a row in the table below to pre-fill the form.
+            <Trans ns="rollout" i18nKey="rolloutPanel.description" components={{ strong: <strong /> }} />
           </CardDescription>
         </CardHeader>
         <CardContent className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div className="space-y-1">
-            <Label htmlFor="ro-version">version</Label>
+            <Label htmlFor="ro-version">{t('rolloutPanel.versionLabel')}</Label>
             <Select id="ro-version" value={version} onChange={(e) => setVersion(e.target.value)}>
-              <option value="">(pick one)</option>
+              <option value="">{t('rolloutPanel.versionPickerPlaceholder')}</option>
               {(releasesQ.data ?? []).map((r) => (
                 <option key={r.version} value={r.version}>
                   {r.version} · {fmtSize(r.size)} · {fmtIsoLocal(r.modified)}
@@ -216,37 +222,35 @@ export function Rollout() {
             </Select>
           </div>
           <div className="space-y-1">
-            <Label htmlFor="ro-jitter">jitter (humantime)</Label>
+            <Label htmlFor="ro-jitter">{t('rolloutPanel.jitterLabel')}</Label>
             <Input
               id="ro-jitter"
-              placeholder="e.g. 5m, 30m, 1h, 0s"
+              placeholder={t('rolloutPanel.jitterPlaceholder')}
               value={jitter}
               onChange={(e) => setJitter(e.target.value)}
             />
           </div>
           <div className="space-y-1">
-            <Label htmlFor="ro-scope-kind">scope</Label>
+            <Label htmlFor="ro-scope-kind">{t('rolloutPanel.scopeLabel')}</Label>
             <Select
               id="ro-scope-kind"
               value={scopeKind}
               onChange={(e) => setScopeKind(e.target.value as ScopeKind)}
             >
-              <option value="global">global (whole fleet)</option>
-              <option value="group">group</option>
-              <option value="pc">single PC</option>
+              <option value="global">{t('rolloutPanel.scopeOptions.global')}</option>
+              <option value="group">{t('rolloutPanel.scopeOptions.group')}</option>
+              <option value="pc">{t('rolloutPanel.scopeOptions.pc')}</option>
             </Select>
           </div>
           <div className="space-y-1">
-            <Label htmlFor="ro-scope-value">
-              {scopeKind === 'global' ? '—' : scopeKind === 'group' ? 'group name' : 'pc_id'}
-            </Label>
+            <Label htmlFor="ro-scope-value">{scopeValueLabel}</Label>
             {scopeKind === 'pc' ? (
               <Select
                 id="ro-scope-value"
                 value={scopeValue}
                 onChange={(e) => setScopeValue(e.target.value)}
               >
-                <option value="">(pick one)</option>
+                <option value="">{t('rolloutPanel.versionPickerPlaceholder')}</option>
                 {(agentsQ.data ?? []).map((a) => (
                   <option key={a.pc_id} value={a.pc_id}>{a.pc_id}</option>
                 ))}
@@ -254,7 +258,11 @@ export function Rollout() {
             ) : (
               <Input
                 id="ro-scope-value"
-                placeholder={scopeKind === 'global' ? 'n/a' : 'e.g. canary'}
+                placeholder={
+                  scopeKind === 'global'
+                    ? t('rolloutPanel.scopeValuePlaceholder.global')
+                    : t('rolloutPanel.scopeValuePlaceholder.group')
+                }
                 value={scopeValue}
                 onChange={(e) => setScopeValue(e.target.value)}
                 disabled={scopeKind === 'global'}
@@ -269,55 +277,58 @@ export function Rollout() {
             ) : (
               <Rocket className="size-4 mr-2" />
             )}
-            Roll out
+            {t('rolloutPanel.rolloutButton')}
           </Button>
           {rollout.isSuccess && rollout.data && (
             <span className="flex items-center gap-2 text-sm text-success">
               <CheckCircle2 className="size-4" />
               {rollout.data.scope_label} → {rollout.data.version}
               {rollout.data.jitter && (
-                <Badge variant="violet">jitter {rollout.data.jitter}</Badge>
+                <Badge variant="violet">
+                  {t('rolloutPanel.jitterBadge', { jitter: rollout.data.jitter })}
+                </Badge>
               )}
             </span>
           )}
         </CardContent>
         {rollout.error && (
           <CardContent className="pt-0">
-            <ErrorCard title="Rollout failed" error={rollout.error} />
+            <ErrorCard title={t('rolloutPanel.errorTitle')} error={rollout.error} />
           </CardContent>
         )}
       </Card>
 
       <Card>
         <CardHeader>
-          <CardTitle>Object Store releases</CardTitle>
+          <CardTitle>{t('releases.title')}</CardTitle>
           <CardDescription>
-            From <code>/api/agents/releases</code>. Click <strong>Roll out</strong> to
-            point the form above at a row; <strong>Delete</strong> removes the binary
-            from the Object Store (refused with 409 if any scope still targets it).
+            <Trans
+              ns="rollout"
+              i18nKey="releases.description"
+              components={{ code: <code />, strong: <strong /> }}
+            />
           </CardDescription>
         </CardHeader>
         <CardContent>
           {releasesQ.isLoading ? (
             <div className="flex items-center gap-2 text-muted">
-              <Loader2 className="size-4 animate-spin" />loading…
+              <Loader2 className="size-4 animate-spin" />{t('releases.loading')}
             </div>
           ) : releasesQ.error ? (
-            <ErrorCard title="Couldn't load releases" error={releasesQ.error} />
+            <ErrorCard title={t('releases.errorTitle')} error={releasesQ.error} />
           ) : (releasesQ.data ?? []).length === 0 ? (
             <div className="text-muted text-sm">
-              Object Store empty — upload a binary above (or run{' '}
-              <code>kanade agent publish &lt;binary&gt;</code>).
+              <Trans ns="rollout" i18nKey="releases.empty" components={{ code: <code /> }} />
             </div>
           ) : (
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>version</TableHead>
-                  <TableHead>size</TableHead>
-                  <TableHead>modified</TableHead>
-                  <TableHead>digest</TableHead>
-                  <TableHead className="text-right">actions</TableHead>
+                  <TableHead>{t('releases.columns.version')}</TableHead>
+                  <TableHead>{t('releases.columns.size')}</TableHead>
+                  <TableHead>{t('releases.columns.modified')}</TableHead>
+                  <TableHead>{t('releases.columns.digest')}</TableHead>
+                  <TableHead className="text-right">{t('releases.columns.actions')}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -337,13 +348,13 @@ export function Rollout() {
                           onClick={() => setVersion(r.version)}
                         >
                           <Rocket className="size-3.5" />
-                          Roll out…
+                          {t('releases.actions.rollout')}
                         </Button>
                         <Button
                           size="sm"
                           variant="danger"
                           onClick={() => {
-                            if (confirm(`Delete release ${r.version}? This cannot be undone.`)) {
+                            if (confirm(t('releases.confirmDelete', { version: r.version }))) {
                               remove.mutate(r.version);
                             }
                           }}
@@ -360,7 +371,7 @@ export function Rollout() {
           )}
           {remove.error && (
             <div className="mt-3">
-              <ErrorCard title="Delete failed" error={remove.error} />
+              <ErrorCard title={t('releases.deleteErrorTitle')} error={remove.error} />
             </div>
           )}
         </CardContent>

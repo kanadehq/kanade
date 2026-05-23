@@ -1,1 +1,19 @@
-{}
+{
+  "title": "JetStream health",
+  "description": "Live probe of <code>/api/jetstream/status</code>. Missing rows immediately after broker boot are normal — backend auto-bootstraps every resource on startup.",
+  "sections": {
+    "streams": "Streams",
+    "kvBuckets": "KV buckets",
+    "objectStores": "Object stores"
+  },
+  "columns": {
+    "name": "name",
+    "status": "status"
+  },
+  "status": {
+    "ok": "ok",
+    "missing": "missing"
+  },
+  "loading": "loading…",
+  "errorTitle": "Couldn't load JetStream status"
+}

@@ -1,1 +1,58 @@
-{}
+{
+  "title": "Agent rollout",
+  "intro": "Two-step: upload a binary, then flip <code>target_version</code> on one scope.",
+  "upload": {
+    "title": "1. Upload a binary",
+    "description": "POSTs to <code>/api/agents/publish</code> (64 MB body limit). The Object Store key is auto-extracted from the binary's embedded VERSIONINFO resource — no label to type, no chance of a label/binary mismatch. CLI: <code>kanade agent publish &lt;binary&gt;</code>.",
+    "fileLabel": "binary (.exe / Linux / macOS)",
+    "uploadButton": "Upload",
+    "noFileError": "pick a file first",
+    "successPrefix": "uploaded as",
+    "errorTitle": "Upload failed"
+  },
+  "rolloutPanel": {
+    "title": "2. Roll out a version",
+    "description": "Or click <strong>Roll out</strong> on a row in the table below to pre-fill the form.",
+    "versionLabel": "version",
+    "versionPickerPlaceholder": "(pick one)",
+    "jitterLabel": "jitter (humantime)",
+    "jitterPlaceholder": "e.g. 5m, 30m, 1h, 0s",
+    "scopeLabel": "scope",
+    "scopeOptions": {
+      "global": "global (whole fleet)",
+      "group": "group",
+      "pc": "single PC"
+    },
+    "scopeValueLabel": {
+      "none": "—",
+      "group": "group name",
+      "pc": "pc_id"
+    },
+    "scopeValuePlaceholder": {
+      "global": "n/a",
+      "group": "e.g. canary"
+    },
+    "rolloutButton": "Roll out",
+    "jitterBadge": "jitter {{jitter}}",
+    "errorTitle": "Rollout failed"
+  },
+  "releases": {
+    "title": "Object Store releases",
+    "description": "From <code>/api/agents/releases</code>. Click <strong>Roll out</strong> to point the form above at a row; <strong>Delete</strong> removes the binary from the Object Store (refused with 409 if any scope still targets it).",
+    "loading": "loading…",
+    "errorTitle": "Couldn't load releases",
+    "empty": "Object Store empty — upload a binary above (or run <code>kanade agent publish &lt;binary&gt;</code>).",
+    "columns": {
+      "version": "version",
+      "size": "size",
+      "modified": "modified",
+      "digest": "digest",
+      "actions": "actions"
+    },
+    "actions": {
+      "rollout": "Roll out…"
+    },
+    "confirmDelete": "Delete release {{version}}? This cannot be undone.",
+    "deleteErrorTitle": "Delete failed"
+  }
+}

@@ -1,1 +1,26 @@
-{}
+{
+  "title": "エージェントログ",
+  "countBadge_one": "{{count}} 行",
+  "countBadge_other": "{{count}} 行",
+  "countBadgeEmpty": "—",
+  "filters": {
+    "pcId": "pc_id",
+    "tail": "末尾行数",
+    "autoRefresh": "自動更新",
+    "pickOne": "(選択してください)",
+    "autoRefreshOptions": {
+      "off": "オフ",
+      "on": "5秒ごと"
+    }
+  },
+  "actions": {
+    "refresh": "更新"
+  },
+  "empty": {
+    "intro": "上で pc_id を選択すると、 <code>logs.fetch.&lt;pc_id&gt;</code> 経由でエージェントログを取得します。",
+    "timeout": "エージェントがオンラインである必要があります。 リクエストは 10 秒でタイムアウトします。",
+    "pre": "(空)"
+  },
+  "loading": "{{pcId}} からログを取得中…",
+  "errorTitle": "{{pcId}} からログを取得できませんでした"
+}
