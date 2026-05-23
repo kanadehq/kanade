@@ -49,7 +49,7 @@ tempfile = "3.27.0"
 windows-service = "0.8.1"
 # v0.21: CreateProcessAsUserW + WTSQueryUserToken for run_as: user /
 # system_gui. Feature flags scope the binding to just what we need.
-windows = { version = "0.62", features = [
+windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Storage_FileSystem",
