@@ -11,6 +11,16 @@ export type AgentRow = {
   agent_version: string | null;
   last_heartbeat: string | null;
   updated_at: string | null;
+  // v0.37 Part 2: agent process self-perf — populated by 0.37+
+  // agents. Older agents leave these null and the SPA renders a
+  // blank cell. `agent_cpu_pct` is percent-of-one-core (sysinfo
+  // convention; a process pegging 2 cores = 200). `*_bytes` are
+  // absolute since process start; the SPA can diff successive
+  // snapshots if it wants a rate.
+  agent_cpu_pct: number | null;
+  agent_rss_bytes: number | null;
+  agent_disk_read_bytes: number | null;
+  agent_disk_written_bytes: number | null;
 };
 
 export type Heartbeat = {

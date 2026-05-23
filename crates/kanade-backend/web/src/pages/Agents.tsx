@@ -19,6 +19,26 @@ type ActionResult = {
   value: unknown;
 };
 
+/** v0.37 Part 2: per-cell formatters for the perf columns. Null
+ *  values render as em-dash so pre-0.37 agents (which don't carry
+ *  the fields) leave the column visibly blank rather than `0`. */
+function fmtPct(v: number | null): string {
+  if (v === null || v === undefined || !Number.isFinite(v)) return '—';
+  return `${v.toFixed(1)}%`;
+}
+
+function fmtBytes(v: number | null): string {
+  if (v === null || v === undefined || !Number.isFinite(v) || v < 0) return '—';
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  let i = 0;
+  let n = v;
+  while (n >= 1024 && i < units.length - 1) {
+    n /= 1024;
+    i++;
+  }
+  return `${n < 10 ? n.toFixed(1) : Math.round(n)} ${units[i]}`;
+}
+
 export function Agents() {
   const { data, error, isLoading } = useQuery({
     queryKey: ['agents'],
@@ -129,6 +149,22 @@ export function Agents() {
             <TableHead>os</TableHead>
             <TableHead>agent</TableHead>
             <TableHead>last heartbeat</TableHead>
+            {/* v0.37 Part 2: agent process self-perf columns. Pre-
+                0.37 agents leave these null and the cell renders
+                as an em-dash, so the table stays usable during a
+                rolling upgrade. */}
+            <TableHead className="text-right" title="Agent process CPU % (one core = 100)">
+              cpu
+            </TableHead>
+            <TableHead className="text-right" title="Agent process resident set size">
+              rss
+            </TableHead>
+            <TableHead className="text-right" title="Disk bytes read since process start">
+              rd
+            </TableHead>
+            <TableHead className="text-right" title="Disk bytes written since process start">
+              wr
+            </TableHead>
             <TableHead>actions</TableHead>
           </TableRow>
         </TableHeader>
@@ -140,6 +176,10 @@ export function Agents() {
               <TableCell className="text-muted text-xs">{a.os_family ?? '—'}</TableCell>
               <TableCell className="text-muted text-xs">{a.agent_version ?? '—'}</TableCell>
               <TableCell className="text-muted text-xs">{fmtIsoLocal(a.last_heartbeat)}</TableCell>
+              <TableCell className="text-right text-muted text-xs">{fmtPct(a.agent_cpu_pct)}</TableCell>
+              <TableCell className="text-right text-muted text-xs">{fmtBytes(a.agent_rss_bytes)}</TableCell>
+              <TableCell className="text-right text-muted text-xs">{fmtBytes(a.agent_disk_read_bytes)}</TableCell>
+              <TableCell className="text-right text-muted text-xs">{fmtBytes(a.agent_disk_written_bytes)}</TableCell>
               <TableCell>
                 <div className="flex gap-1 flex-wrap">
                   <Button variant="secondary" size="sm" asChild>
