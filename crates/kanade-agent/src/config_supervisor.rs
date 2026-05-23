@@ -22,6 +22,9 @@ use kanade_shared::wire::{AgentGroups, ConfigScope, EffectiveConfig, ResolutionW
 use tokio::sync::watch;
 use tracing::{info, warn};
 
+use crate::nats_retry;
+use crate::staleness::Tracker;
+
 #[derive(Debug, PartialEq, Eq)]
 enum CfgKeyKind<'a> {
     Global,
@@ -181,123 +184,168 @@ impl State {
     }
 }
 
-/// Spawn the supervisor and hand back the watch receiver
-/// subscribers will use.
-pub fn spawn(client: async_nats::Client, pc_id: String) -> watch::Receiver<EffectiveConfig> {
+/// Spawn the supervisor and hand back the watch receiver subscribers
+/// will use.
+///
+/// v0.38 / #137: takes a [`Tracker`] so the inner reconnect loop can
+/// short-circuit its backoff sleep on a Connected event. The
+/// supervisor outlives broker outages — it republishes the current
+/// `EffectiveConfig` on every reconnect, picking up edits made while
+/// disconnected — so subscribers (heartbeat / inventory /
+/// self_update) keep getting fresh settings without an agent
+/// restart.
+pub fn spawn(
+    client: async_nats::Client,
+    pc_id: String,
+    tracker: Tracker,
+) -> watch::Receiver<EffectiveConfig> {
     let (tx, rx) = watch::channel(EffectiveConfig::builtin_defaults());
-    tokio::spawn(run(client, pc_id, tx));
+    tokio::spawn(run(client, pc_id, tracker, tx));
     rx
 }
 
-async fn run(client: async_nats::Client, pc_id: String, tx: watch::Sender<EffectiveConfig>) {
+async fn run(
+    client: async_nats::Client,
+    pc_id: String,
+    tracker: Tracker,
+    tx: watch::Sender<EffectiveConfig>,
+) {
     let js = jetstream::new(client.clone());
 
-    let cfg_kv = match js.get_key_value(BUCKET_AGENT_CONFIG).await {
-        Ok(k) => k,
-        Err(e) => {
-            warn!(
-                error = %e,
-                bucket = BUCKET_AGENT_CONFIG,
-                "agent_config KV bucket missing — supervisor idle (built-in defaults stand)"
-            );
-            return;
-        }
-    };
-    let groups_kv = match js.get_key_value(BUCKET_AGENT_GROUPS).await {
-        Ok(k) => k,
-        Err(e) => {
-            warn!(
-                error = %e,
-                bucket = BUCKET_AGENT_GROUPS,
-                "agent_groups KV bucket missing — supervisor idle"
-            );
-            return;
-        }
-    };
-
+    // Long-lived state: persists across reconnects. We swap into it
+    // *only* when `initial_sync` succeeds end-to-end, so a transient
+    // walk failure can't briefly publish `builtin_defaults` to
+    // subscribers (which would revert heartbeat / inventory cadences
+    // to defaults until the next watch event).
+    //
+    // The initial `State::default()` value is never read (every
+    // execution path that reaches `publish` first does
+    // `state = new_state`), but the binding must exist for the swap
+    // and the inner watch loop's `state.apply_*_change` calls.
+    #[allow(unused_assignments)]
     let mut state = State::default();
-    initial_sync(&cfg_kv, &groups_kv, &pc_id, &mut state).await;
-    publish(&tx, &state);
-
-    // Watch both buckets concurrently. watch_all on agent_config
-    // surfaces every key change; watch(pc_id) on agent_groups
-    // surfaces our membership flips.
-    let mut cfg_watch = match cfg_kv.watch_all().await {
-        Ok(w) => w,
-        Err(e) => {
-            warn!(error = %e, "watch_all agent_config");
-            return;
-        }
-    };
-    let mut groups_watch = match groups_kv.watch(&pc_id).await {
-        Ok(w) => w,
-        Err(e) => {
-            warn!(error = %e, "watch agent_groups for pc");
-            return;
-        }
-    };
 
     loop {
-        tokio::select! {
-            entry = cfg_watch.next() => {
-                let Some(entry) = entry else { return };
-                let entry = match entry {
-                    Ok(e) => e,
-                    Err(e) => { warn!(error = %e, "agent_config watch entry"); continue; }
-                };
-                let is_delete = matches!(
-                    entry.operation,
-                    async_nats::jetstream::kv::Operation::Delete
-                        | async_nats::jetstream::kv::Operation::Purge
-                );
-                if state.apply_cfg_change(&entry.key, &entry.value, is_delete, &pc_id)
-                    == ChangeOutcome::Touched
-                {
-                    publish(&tx, &state);
-                }
-            }
-            entry = groups_watch.next() => {
-                let Some(entry) = entry else { return };
-                let entry = match entry {
-                    Ok(e) => e,
-                    Err(e) => { warn!(error = %e, "agent_groups watch entry"); continue; }
-                };
-                let is_delete = matches!(
-                    entry.operation,
-                    async_nats::jetstream::kv::Operation::Delete
-                        | async_nats::jetstream::kv::Operation::Purge
-                );
-                if state.apply_groups_change(&entry.value, is_delete) == ChangeOutcome::Touched {
-                    publish(&tx, &state);
-                }
-            }
+        let cfg_kv =
+            nats_retry::wait_for_kv(&js, &client, &tracker, BUCKET_AGENT_CONFIG, "agent_config")
+                .await;
+        let groups_kv =
+            nats_retry::wait_for_kv(&js, &client, &tracker, BUCKET_AGENT_GROUPS, "agent_groups")
+                .await;
+
+        // Build the new state into a *fresh* `State::default()` so
+        // we can detect partial-walk failure and skip the swap. The
+        // existing `state` keeps running until both walks succeed,
+        // which preserves heartbeat / inventory cadences during a
+        // transient KV-walk failure (Gemini #147 review).
+        let mut new_state = State::default();
+        if initial_sync(&cfg_kv, &groups_kv, &pc_id, &mut new_state)
+            .await
+            .is_err()
+        {
+            warn!(
+                "config_supervisor: initial_sync incomplete; keeping previous EffectiveConfig and reopening"
+            );
+            nats_retry::reopen_pause().await;
+            continue;
         }
+        state = new_state;
+        publish(&tx, &state);
+
+        // Watch both buckets concurrently. watch_all on agent_config
+        // surfaces every key change; watch(pc_id) on agent_groups
+        // surfaces our membership flips.
+        let mut cfg_watch = match cfg_kv.watch_all().await {
+            Ok(w) => w,
+            Err(e) => {
+                warn!(error = %e, "watch_all agent_config failed; reopening");
+                nats_retry::reopen_pause().await;
+                continue;
+            }
+        };
+        let mut groups_watch = match groups_kv.watch(&pc_id).await {
+            Ok(w) => w,
+            Err(e) => {
+                warn!(error = %e, "watch agent_groups for pc failed; reopening");
+                nats_retry::reopen_pause().await;
+                continue;
+            }
+        };
+
+        // Inner watch loop. `break` (instead of `return`) on either
+        // watch dropping so the outer reconnect loop reopens both.
+        let dropped = 'inner: loop {
+            tokio::select! {
+                entry = cfg_watch.next() => {
+                    let Some(entry) = entry else { break 'inner "agent_config" };
+                    let entry = match entry {
+                        Ok(e) => e,
+                        Err(e) => { warn!(error = %e, "agent_config watch entry"); continue; }
+                    };
+                    let is_delete = matches!(
+                        entry.operation,
+                        async_nats::jetstream::kv::Operation::Delete
+                            | async_nats::jetstream::kv::Operation::Purge
+                    );
+                    if state.apply_cfg_change(&entry.key, &entry.value, is_delete, &pc_id)
+                        == ChangeOutcome::Touched
+                    {
+                        publish(&tx, &state);
+                    }
+                }
+                entry = groups_watch.next() => {
+                    let Some(entry) = entry else { break 'inner "agent_groups" };
+                    let entry = match entry {
+                        Ok(e) => e,
+                        Err(e) => { warn!(error = %e, "agent_groups watch entry"); continue; }
+                    };
+                    let is_delete = matches!(
+                        entry.operation,
+                        async_nats::jetstream::kv::Operation::Delete
+                            | async_nats::jetstream::kv::Operation::Purge
+                    );
+                    if state.apply_groups_change(&entry.value, is_delete) == ChangeOutcome::Touched {
+                        publish(&tx, &state);
+                    }
+                }
+            }
+        };
+        warn!(dropped, "config_supervisor watch ended; reopening");
+        nats_retry::reopen_pause().await;
     }
 }
 
+/// Walk both KV buckets into `state`. Returns `Err(())` if either
+/// `kv.keys()` or `groups_kv.get(pc_id)` fails — caller must NOT swap
+/// the result into the live state, because a partial walk would
+/// silently drop config rows. Per-row decode / get failures inside
+/// the keys() walk are logged but tolerated (they're row-level
+/// problems, not connectivity-level).
 async fn initial_sync(
     cfg_kv: &jetstream::kv::Store,
     groups_kv: &jetstream::kv::Store,
     pc_id: &str,
     state: &mut State,
-) {
+) -> Result<(), ()> {
     // Walk every current row in agent_config and apply it.
-    match cfg_kv.keys().await {
-        Ok(mut keys) => {
-            while let Some(k) = keys.next().await {
-                let key = match k {
-                    Ok(k) => k,
-                    Err(e) => {
-                        warn!(error = %e, "agent_config keys()");
-                        continue;
-                    }
-                };
-                if let Ok(Some(bytes)) = cfg_kv.get(&key).await {
-                    state.apply_cfg_change(&key, &bytes, false, pc_id);
-                }
-            }
+    let mut keys = match cfg_kv.keys().await {
+        Ok(k) => k,
+        Err(e) => {
+            warn!(error = %e, "agent_config keys() initial sync failed");
+            return Err(());
         }
-        Err(e) => warn!(error = %e, "agent_config keys() initial sync"),
+    };
+    while let Some(k) = keys.next().await {
+        let key = match k {
+            Ok(k) => k,
+            Err(e) => {
+                warn!(error = %e, "agent_config keys() entry");
+                continue;
+            }
+        };
+        if let Ok(Some(bytes)) = cfg_kv.get(&key).await {
+            state.apply_cfg_change(&key, &bytes, false, pc_id);
+        }
     }
 
     // Read our own groups row.
@@ -311,8 +359,12 @@ async fn initial_sync(
                 "no agent_groups row yet — starting with empty membership"
             );
         }
-        Err(e) => warn!(error = %e, "agent_groups get initial sync"),
+        Err(e) => {
+            warn!(error = %e, "agent_groups get initial sync failed");
+            return Err(());
+        }
     }
+    Ok(())
 }
 
 fn publish(tx: &watch::Sender<EffectiveConfig>, state: &State) {
