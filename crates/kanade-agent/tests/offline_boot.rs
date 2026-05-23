@@ -41,15 +41,12 @@ const HEARTBEAT_INTERVAL_SECS: u64 = 1;
 /// Generous enough to absorb the agent's own `wait_for_kv` backoff
 /// plus the broker's bootstrap RTT plus runner jitter.
 ///
-/// History: started at 15 s, bumped to 30 s after the first
-/// Windows Integration run flaked (PR #180), then to 60 s here
-/// per Gemini's #180 review. The `wait_for_kv` schedule is
-/// 1 + 2 + 4 + 8 = 15 s nominal but jitters up to ±25%, so a
-/// burst that misses one cycle and rolls into the next 16 s slot
-/// already approaches 30 s. 60 s keeps the test resilient against
-/// any reasonable Windows-runner slowness; `tokio::time::timeout`
-/// returns the instant the heartbeat arrives, so the green-run
-/// wall time is unchanged.
+/// The `wait_for_kv` schedule is 1 + 2 + 4 + 8 = 15 s nominal but
+/// jitters up to ±25%, so a burst that misses one cycle and rolls
+/// into the next 16 s slot already approaches 30 s. 60 s keeps
+/// the test resilient against Windows-runner slowness;
+/// `tokio::time::timeout` returns the instant the heartbeat
+/// arrives, so the green-run wall time is unchanged.
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Wait for an obviously-bogus port to disappoint the agent. Pick
