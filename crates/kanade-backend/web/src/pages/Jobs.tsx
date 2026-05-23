@@ -12,6 +12,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { useState } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 
 import { ErrorCard } from '@/components/ErrorCard';
@@ -45,6 +46,7 @@ type JobRow = {
 };
 
 export function Jobs() {
+  const { t } = useTranslation('jobs');
   const qc = useQueryClient();
   // v0.34.1 (#117) wired in ConfirmDialogProvider but Jobs.tsx
   // only added the import — the hook call itself was missing, so
@@ -64,9 +66,9 @@ export function Jobs() {
     onSuccess: (_d, id) => {
       qc.invalidateQueries({ queryKey: ['jobs'] });
       qc.invalidateQueries({ queryKey: ['scripts-status'] });
-      toast.success(`Deleted job: ${id}`);
+      toast.success(t('toast.deleteSuccess', { id }));
     },
-    onError: (e) => toast.error(`Delete failed: ${formatError(e)}`),
+    onError: (e) => toast.error(t('toast.deleteFailure', { error: formatError(e) })),
   });
 
   // v0.27.x: surface the script_status KV (per cmd_id ACTIVE/REVOKED)
@@ -114,9 +116,9 @@ export function Jobs() {
     },
     onSuccess: (_d, id) => {
       qc.invalidateQueries({ queryKey: ['scripts-status'] });
-      toast.success(`Revoked: ${id}`);
+      toast.success(t('toast.revokeSuccess', { id }));
     },
-    onError: (e) => toast.error(`Revoke failed: ${formatError(e)}`),
+    onError: (e) => toast.error(t('toast.revokeFailure', { error: formatError(e) })),
     onSettled: (_d, _e, id) => {
       setPendingRevoke((prev) => {
         const next = new Set(prev);
@@ -133,9 +135,9 @@ export function Jobs() {
     },
     onSuccess: (_d, id) => {
       qc.invalidateQueries({ queryKey: ['scripts-status'] });
-      toast.success(`Unrevoked: ${id}`);
+      toast.success(t('toast.unrevokeSuccess', { id }));
     },
-    onError: (e) => toast.error(`Unrevoke failed: ${formatError(e)}`),
+    onError: (e) => toast.error(t('toast.unrevokeFailure', { error: formatError(e) })),
     onSettled: (_d, _e, id) => {
       setPendingUnrevoke((prev) => {
         const next = new Set(prev);
@@ -166,9 +168,9 @@ export function Jobs() {
     // -1 → projector flips status from running → completed).
     onSuccess: (_d, id) => {
       qc.invalidateQueries({ queryKey: ['jobs'] });
-      toast.success(`Kill signal sent to ${id}`);
+      toast.success(t('toast.killSuccess', { id }));
     },
-    onError: (e) => toast.error(`Kill failed: ${formatError(e)}`),
+    onError: (e) => toast.error(t('toast.killFailure', { error: formatError(e) })),
     onSettled: (_d, _e, id) => {
       setPendingKill((prev) => {
         const next = new Set(prev);
@@ -181,11 +183,11 @@ export function Jobs() {
   if (isLoading) {
     return (
       <div className="flex items-center gap-2 text-muted">
-        <Loader2 className="size-4 animate-spin" />loading jobs…
+        <Loader2 className="size-4 animate-spin" />{t('loading')}
       </div>
     );
   }
-  if (error) return <ErrorCard title="Couldn't load jobs" error={error} />;
+  if (error) return <ErrorCard title={t('errorTitle')} error={error} />;
   const rows = data ?? [];
 
   if (rows.length === 0) {
@@ -194,22 +196,26 @@ export function Jobs() {
         <Card>
           <CardHeader>
             <div className="flex items-center justify-between">
-              <CardTitle>No jobs registered</CardTitle>
+              <CardTitle>{t('empty.title')}</CardTitle>
               <Button
                 variant="default"
                 size="sm"
                 onClick={() => setEditor({ type: 'create' })}
               >
                 <FilePlus2 className="size-3.5" />
-                New job
+                {t('newJob')}
               </Button>
             </div>
           </CardHeader>
           <CardContent className="text-muted">
-            Use <code>kanade job create &lt;manifest.yaml&gt;</code> on the CLI, or
-            click <strong>New job</strong> above to open the in-browser YAML editor.
-            Schedules reference jobs by id, so the job must exist before the
-            schedule fires.
+            <Trans
+              ns="jobs"
+              i18nKey="empty.body"
+              components={{
+                code: <code />,
+                strong: <strong />,
+              }}
+            />
           </CardContent>
         </Card>
         {editor !== null && (
@@ -229,16 +235,16 @@ export function Jobs() {
   return (
     <div className="space-y-4">
       <div className="flex items-baseline justify-between">
-        <h2 className="text-xl">Jobs</h2>
+        <h2 className="text-xl">{t('title')}</h2>
         <div className="flex items-center gap-2">
           <Button
             variant="default"
             size="sm"
             onClick={() => setEditor({ type: 'create' })}
-            title="Create a new job from a YAML template"
+            title={t('newJobTitle')}
           >
             <FilePlus2 className="size-3.5" />
-            New job
+            {t('newJob')}
           </Button>
           <Badge variant="violet">{rows.length}</Badge>
         </div>
@@ -246,17 +252,17 @@ export function Jobs() {
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead>id</TableHead>
-            <TableHead>version</TableHead>
-            <TableHead>status</TableHead>
-            <TableHead>live</TableHead>
-            <TableHead>shell</TableHead>
-            <TableHead>run_as</TableHead>
-            <TableHead>cwd</TableHead>
-            <TableHead>timeout</TableHead>
-            <TableHead>inventory</TableHead>
-            <TableHead>description</TableHead>
-            <TableHead>actions</TableHead>
+            <TableHead>{t('columns.id')}</TableHead>
+            <TableHead>{t('columns.version')}</TableHead>
+            <TableHead>{t('columns.status')}</TableHead>
+            <TableHead>{t('columns.live')}</TableHead>
+            <TableHead>{t('columns.shell')}</TableHead>
+            <TableHead>{t('columns.runAs')}</TableHead>
+            <TableHead>{t('columns.cwd')}</TableHead>
+            <TableHead>{t('columns.timeout')}</TableHead>
+            <TableHead>{t('columns.inventory')}</TableHead>
+            <TableHead>{t('columns.description')}</TableHead>
+            <TableHead>{t('columns.actions')}</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -266,9 +272,9 @@ export function Jobs() {
               <TableCell><code className="text-xs">{j.version}</code></TableCell>
               <TableCell>
                 {isRevoked(j.id) ? (
-                  <Badge variant="danger">revoked</Badge>
+                  <Badge variant="danger">{t('status.revoked')}</Badge>
                 ) : (
-                  <Badge variant="success">active</Badge>
+                  <Badge variant="success">{t('status.active')}</Badge>
                 )}
               </TableCell>
               <TableCell>
@@ -284,7 +290,7 @@ export function Jobs() {
                     {j.live.running > 0 && (
                       <Badge
                         variant="violet"
-                        title="Running: at least one PC has reported back, more still in flight"
+                        title={t('live.runningTitle')}
                         className="inline-flex items-center gap-1 px-1.5"
                       >
                         <Play className="size-3" />
@@ -294,7 +300,7 @@ export function Jobs() {
                     {j.live.pending > 0 && (
                       <Badge
                         variant="amber"
-                        title="Pending: fan-out published, no results back yet (auto-expires after 1 h)"
+                        title={t('live.pendingTitle')}
                         className="inline-flex items-center gap-1 px-1.5"
                       >
                         <Hourglass className="size-3" />
@@ -316,7 +322,7 @@ export function Jobs() {
               <TableCell><code className="text-xs">{j.execute.timeout}</code></TableCell>
               <TableCell>
                 {j.inventory
-                  ? <Badge variant="violet"><ScrollText className="size-3" />probe</Badge>
+                  ? <Badge variant="violet"><ScrollText className="size-3" />{t('inventoryProbe')}</Badge>
                   : <span className="text-muted text-xs">—</span>}
               </TableCell>
               <TableCell className="text-xs text-muted max-w-md truncate">
@@ -342,20 +348,19 @@ export function Jobs() {
                       disabled={pendingKill.has(j.id)}
                       onClick={async () => {
                         const ok = await confirm({
-                          title: `Kill all in-flight runs of ${j.id}?`,
-                          description:
-                            `${inflight} run${inflight === 1 ? '' : 's'} currently in flight ` +
-                            `(running: ${j.live.running}, pending: ${j.live.pending}). ` +
-                            `Each agent will terminate its child process and report back with exit_code -1.\n\n` +
-                            `Note: this does NOT block the next schedule tick from firing a fresh run — ` +
-                            `if you want to stop new fires too, click "revoke" alongside.`,
-                          confirmLabel: 'Kill',
+                          title: t('confirm.killTitle', { id: j.id }),
+                          description: t('confirm.killDescription', {
+                            count: inflight,
+                            running: j.live.running,
+                            pending: j.live.pending,
+                          }),
+                          confirmLabel: t('confirm.killLabel'),
                           danger: true,
                         });
                         if (ok) kill.mutate(j.id);
                       }}
-                      title={`kill — terminate ${inflight} in-flight run${inflight === 1 ? '' : 's'}`}
-                      aria-label={`kill job ${j.id}`}
+                      title={t('actions.killTitle', { count: inflight })}
+                      aria-label={t('actions.killAria', { id: j.id })}
                     >
                       <Skull className="size-3.5" />
                     </Button>
@@ -365,8 +370,8 @@ export function Jobs() {
                   variant="secondary"
                   size="sm"
                   onClick={() => setEditor({ type: 'edit', id: j.id })}
-                  title="edit — open this job's YAML manifest"
-                  aria-label={`edit job ${j.id}`}
+                  title={t('actions.editTitle')}
+                  aria-label={t('actions.editAria', { id: j.id })}
                 >
                   <Pencil className="size-3.5" />
                 </Button>
@@ -377,17 +382,15 @@ export function Jobs() {
                     disabled={pendingRevoke.has(j.id)}
                     onClick={async () => {
                       const ok = await confirm({
-                        title: `Revoke ${j.id}?`,
-                        description:
-                          `Blocks the script from running on agents. Any pending or in-flight run for this job will be skipped instead of executed, and new fires will refuse to run until you unrevoke it.\n\n` +
-                          `Reversible — click "unrevoke" to undo.`,
-                        confirmLabel: 'Revoke',
+                        title: t('confirm.revokeTitle', { id: j.id }),
+                        description: t('confirm.revokeDescription'),
+                        confirmLabel: t('confirm.revokeLabel'),
                         danger: true,
                       });
                       if (ok) revoke.mutate(j.id);
                     }}
-                    title="revoke — block this script from running"
-                    aria-label={`revoke job ${j.id}`}
+                    title={t('actions.revokeTitle')}
+                    aria-label={t('actions.revokeAria', { id: j.id })}
                   >
                     <Ban className="size-3.5" />
                   </Button>
@@ -398,8 +401,8 @@ export function Jobs() {
                   size="sm"
                   disabled={pendingUnrevoke.has(j.id)}
                   onClick={() => unrevoke.mutate(j.id)}
-                  title="unrevoke — allow this script to run again"
-                  aria-label={`unrevoke job ${j.id}`}
+                  title={t('actions.unrevokeTitle')}
+                  aria-label={t('actions.unrevokeAria', { id: j.id })}
                 >
                   <CircleCheck className="size-3.5" />
                 </Button>
@@ -410,17 +413,15 @@ export function Jobs() {
                   disabled={del.isPending}
                   onClick={async () => {
                     const ok = await confirm({
-                      title: `Delete job ${j.id}?`,
-                      description:
-                        `Removes the script from the catalog. Any pending or in-flight run for this job will also be blocked (auto-revoke).\n\n` +
-                        `Refused if any schedule still references this job — delete the schedule first.`,
-                      confirmLabel: 'Delete',
+                      title: t('confirm.deleteTitle', { id: j.id }),
+                      description: t('confirm.deleteDescription'),
+                      confirmLabel: t('confirm.deleteLabel'),
                       danger: true,
                     });
                     if (ok) del.mutate(j.id);
                   }}
-                  title="delete — remove this job from the catalog"
-                  aria-label={`delete job ${j.id}`}
+                  title={t('actions.deleteTitle')}
+                  aria-label={t('actions.deleteAria', { id: j.id })}
                 >
                   <Trash2 className="size-3.5" />
                 </Button>
@@ -429,10 +430,10 @@ export function Jobs() {
           ))}
         </TableBody>
       </Table>
-      {del.error && <ErrorCard title="Delete failed" error={del.error} />}
-      {revoke.error && <ErrorCard title="Revoke failed" error={revoke.error} />}
-      {unrevoke.error && <ErrorCard title="Unrevoke failed" error={unrevoke.error} />}
-      {kill.error && <ErrorCard title="Kill failed" error={kill.error} />}
+      {del.error && <ErrorCard title={t('errors.deleteTitle')} error={del.error} />}
+      {revoke.error && <ErrorCard title={t('errors.revokeTitle')} error={revoke.error} />}
+      {unrevoke.error && <ErrorCard title={t('errors.unrevokeTitle')} error={unrevoke.error} />}
+      {kill.error && <ErrorCard title={t('errors.killTitle')} error={kill.error} />}
       {editor !== null && (
         <YamlEditorDialog
           open

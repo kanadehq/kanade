@@ -1,1 +1,34 @@
-{}
+{
+  "title": "登録済みジョブを実行",
+  "description": "選択したターゲットに対して <code>/api/exec/&lt;job_id&gt;</code> へ POST します。新しいジョブの登録は <code>kanade job create &lt;manifest.yaml&gt;</code> を使用してください。ウェーブロールアウトはスケジュール側で管理し、アドホック実行では扱いません。",
+  "loadingJobs": "ジョブを読み込み中…",
+  "errors": {
+    "loadJobs": "ジョブを読み込めませんでした",
+    "execFailed": "実行に失敗しました"
+  },
+  "empty": "登録済みのジョブがありません。まず <code>kanade job create &lt;manifest.yaml&gt;</code> を実行してください。",
+  "fields": {
+    "jobId": "job_id",
+    "target": "ターゲット",
+    "groups": "グループ (カンマ区切り)",
+    "pcs": "pc_ids (カンマ区切り)",
+    "jitter": "ジッター (任意、humantime 形式 — 例: 30s, 5m)"
+  },
+  "options": {
+    "pickOne": "(選択してください)",
+    "all": "全エージェント",
+    "groups": "特定のグループ",
+    "pcs": "特定の PC"
+  },
+  "placeholders": {
+    "groups": "canary,wave1",
+    "pcs": "minipc-01,minipc-02"
+  },
+  "submit": "POST /api/exec/{{jobId}}",
+  "submitFallback": "<job_id>",
+  "accepted": {
+    "title": "実行を受け付けました",
+    "summary_one": "{{count}} 件のターゲット · {{subjects}} 件のサブジェクト",
+    "summary_other": "{{count}} 件のターゲット · {{subjects}} 件のサブジェクト"
+  }
+}

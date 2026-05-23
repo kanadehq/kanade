@@ -1,1 +1,34 @@
-{}
+{
+  "title": "Exec a registered job",
+  "description": "Posts to <code>/api/exec/&lt;job_id&gt;</code> with the chosen target. Register new jobs with <code>kanade job create &lt;manifest.yaml&gt;</code>; wave rollouts live on the schedule yaml side, not on ad-hoc exec.",
+  "loadingJobs": "loading jobs…",
+  "errors": {
+    "loadJobs": "Couldn't load jobs",
+    "execFailed": "Exec failed"
+  },
+  "empty": "No registered jobs. Run <code>kanade job create &lt;manifest.yaml&gt;</code> first.",
+  "fields": {
+    "jobId": "job_id",
+    "target": "target",
+    "groups": "groups (comma-separated)",
+    "pcs": "pc_ids (comma-separated)",
+    "jitter": "jitter (optional, humantime — e.g. 30s, 5m)"
+  },
+  "options": {
+    "pickOne": "(pick one)",
+    "all": "all agents",
+    "groups": "specific group(s)",
+    "pcs": "specific pc(s)"
+  },
+  "placeholders": {
+    "groups": "canary,wave1",
+    "pcs": "minipc-01,minipc-02"
+  },
+  "submit": "POST /api/exec/{{jobId}}",
+  "submitFallback": "<job_id>",
+  "accepted": {
+    "title": "Exec accepted",
+    "summary_one": "{{count}} target · {{subjects}} subject(s)",
+    "summary_other": "{{count}} targets · {{subjects}} subject(s)"
+  }
+}

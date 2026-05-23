@@ -1,6 +1,7 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { Loader2, Send } from 'lucide-react';
 import { useState } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
 
 import { ErrorCard } from '@/components/ErrorCard';
 import { Button } from '@/components/ui/button';
@@ -36,6 +37,7 @@ function splitCsv(s: string): string[] {
 }
 
 export function Exec() {
+  const { t } = useTranslation('exec');
   const [jobId, setJobId] = useState('');
   const [mode, setMode] = useState<TargetMode>('all');
   const [groups, setGroups] = useState('');
@@ -78,36 +80,40 @@ export function Exec() {
     <div className="space-y-4">
       <Card>
         <CardHeader>
-          <CardTitle>Exec a registered job</CardTitle>
+          <CardTitle>{t('title')}</CardTitle>
           <CardDescription>
-            Posts to <code>/api/exec/&lt;job_id&gt;</code> with the chosen
-            target. Register new jobs with{' '}
-            <code>kanade job create &lt;manifest.yaml&gt;</code>; wave rollouts
-            live on the schedule yaml side, not on ad-hoc exec.
+            <Trans
+              ns="exec"
+              i18nKey="description"
+              components={{ code: <code /> }}
+            />
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
           {jobsQ.isLoading ? (
             <div className="flex items-center gap-2 text-muted">
-              <Loader2 className="size-4 animate-spin" />loading jobs…
+              <Loader2 className="size-4 animate-spin" />{t('loadingJobs')}
             </div>
           ) : jobsQ.error ? (
-            <ErrorCard title="Couldn't load jobs" error={jobsQ.error} />
+            <ErrorCard title={t('errors.loadJobs')} error={jobsQ.error} />
           ) : jobs.length === 0 ? (
             <div className="text-muted text-sm">
-              No registered jobs. Run <code>kanade job create &lt;manifest.yaml&gt;</code>{' '}
-              first.
+              <Trans
+                ns="exec"
+                i18nKey="empty"
+                components={{ code: <code /> }}
+              />
             </div>
           ) : (
             <>
               <div className="space-y-1">
-                <Label htmlFor="exec-job">job_id</Label>
+                <Label htmlFor="exec-job">{t('fields.jobId')}</Label>
                 <Select
                   id="exec-job"
                   value={jobId}
                   onChange={(e) => setJobId(e.target.value)}
                 >
-                  <option value="">(pick one)</option>
+                  <option value="">{t('options.pickOne')}</option>
                   {jobs.map((j) => (
                     <option key={j.id} value={j.id}>
                       {j.id} — v{j.version}
@@ -118,43 +124,43 @@ export function Exec() {
               </div>
 
               <div className="space-y-1">
-                <Label htmlFor="exec-target">target</Label>
+                <Label htmlFor="exec-target">{t('fields.target')}</Label>
                 <Select
                   id="exec-target"
                   value={mode}
                   onChange={(e) => setMode(e.target.value as TargetMode)}
                 >
-                  <option value="all">all agents</option>
-                  <option value="groups">specific group(s)</option>
-                  <option value="pcs">specific pc(s)</option>
+                  <option value="all">{t('options.all')}</option>
+                  <option value="groups">{t('options.groups')}</option>
+                  <option value="pcs">{t('options.pcs')}</option>
                 </Select>
               </div>
 
               {mode === 'groups' && (
                 <div className="space-y-1">
-                  <Label htmlFor="exec-groups">groups (comma-separated)</Label>
+                  <Label htmlFor="exec-groups">{t('fields.groups')}</Label>
                   <Input
                     id="exec-groups"
                     value={groups}
                     onChange={(e) => setGroups(e.target.value)}
-                    placeholder="canary,wave1"
+                    placeholder={t('placeholders.groups')}
                   />
                 </div>
               )}
               {mode === 'pcs' && (
                 <div className="space-y-1">
-                  <Label htmlFor="exec-pcs">pc_ids (comma-separated)</Label>
+                  <Label htmlFor="exec-pcs">{t('fields.pcs')}</Label>
                   <Input
                     id="exec-pcs"
                     value={pcs}
                     onChange={(e) => setPcs(e.target.value)}
-                    placeholder="minipc-01,minipc-02"
+                    placeholder={t('placeholders.pcs')}
                   />
                 </div>
               )}
 
               <div className="space-y-1">
-                <Label htmlFor="exec-jitter">jitter (optional, humantime — e.g. 30s, 5m)</Label>
+                <Label htmlFor="exec-jitter">{t('fields.jitter')}</Label>
                 <Input
                   id="exec-jitter"
                   value={jitter}
@@ -172,18 +178,21 @@ export function Exec() {
             {mut.isPending
               ? <Loader2 className="size-4 animate-spin" />
               : <Send className="size-4" />}
-            POST /api/exec/{jobId || '<job_id>'}
+            {t('submit', { jobId: jobId || t('submitFallback') })}
           </Button>
         </CardContent>
       </Card>
 
-      {mut.error && <ErrorCard title="Exec failed" error={mut.error} />}
+      {mut.error && <ErrorCard title={t('errors.execFailed')} error={mut.error} />}
       {mut.data && (
         <Card>
           <CardHeader>
-            <CardTitle>Exec accepted</CardTitle>
+            <CardTitle>{t('accepted.title')}</CardTitle>
             <CardDescription>
-              {mut.data.target_count} target(s) · {mut.data.subjects.length} subject(s)
+              {t('accepted.summary', {
+                count: mut.data.target_count,
+                subjects: mut.data.subjects.length,
+              })}
             </CardDescription>
           </CardHeader>
           <CardContent>

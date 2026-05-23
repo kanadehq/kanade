@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ChevronDown, FilePlus2, Loader2, Pencil, Power, PowerOff, Trash2, Zap } from 'lucide-react';
 import { useState } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 
 import { ErrorCard } from '@/components/ErrorCard';
@@ -34,15 +35,16 @@ type ScheduleRow = {
   enabled: boolean;
 };
 
-function summariseTarget(t: ScheduleRow['target']): string {
-  if (t.all) return 'all';
+function summariseTarget(target: ScheduleRow['target'], allLabel: string): string {
+  if (target.all) return allLabel;
   const parts: string[] = [];
-  if (t.groups.length) parts.push(`groups: ${t.groups.join(', ')}`);
-  if (t.pcs.length) parts.push(`pcs: ${t.pcs.join(', ')}`);
+  if (target.groups.length) parts.push(`groups: ${target.groups.join(', ')}`);
+  if (target.pcs.length) parts.push(`pcs: ${target.pcs.join(', ')}`);
   return parts.join(' · ') || '—';
 }
 
 export function Schedules() {
+  const { t } = useTranslation('schedules');
   const qc = useQueryClient();
   const confirm = useConfirm();
   const { data, error, isLoading } = useQuery({
@@ -54,9 +56,9 @@ export function Schedules() {
     mutationFn: (id: string) => apiFetch(`/api/schedules/${encodeURIComponent(id)}`, { method: 'DELETE' }),
     onSuccess: (_d, id) => {
       qc.invalidateQueries({ queryKey: ['schedules'] });
-      toast.success(`Deleted schedule ${id}`);
+      toast.success(t('toast.deleted', { id }));
     },
-    onError: (e) => toast.error(`Delete failed: ${formatError(e)}`),
+    onError: (e) => toast.error(t('toast.deleteFailed', { error: formatError(e) })),
   });
 
   // v0.27 (SPEC §2.6.4 (c)): disable goes through the dedicated
@@ -93,9 +95,9 @@ export function Schedules() {
     },
     onSuccess: (_d, { id, cascade }) => {
       qc.invalidateQueries({ queryKey: ['schedules'] });
-      toast.success(cascade ? `Hard-disabled ${id} (cascade)` : `Disabled ${id}`);
+      toast.success(cascade ? t('toast.hardDisabled', { id }) : t('toast.softDisabled', { id }));
     },
-    onError: (e) => toast.error(`Disable failed: ${formatError(e)}`),
+    onError: (e) => toast.error(t('toast.disableFailed', { error: formatError(e) })),
   });
   // v0.27 (gemini #38 review): symmetrical /enable endpoint so we
   // don't clobber concurrent edits with a full row re-POST. Backend
@@ -115,13 +117,13 @@ export function Schedules() {
     },
     onSuccess: (_d, id) => {
       qc.invalidateQueries({ queryKey: ['schedules'] });
-      toast.success(`Enabled ${id}`);
+      toast.success(t('toast.enabled', { id }));
     },
-    onError: (e) => toast.error(`Enable failed: ${formatError(e)}`),
+    onError: (e) => toast.error(t('toast.enableFailed', { error: formatError(e) })),
   });
 
-  if (isLoading) return <div className="flex items-center gap-2 text-muted"><Loader2 className="size-4 animate-spin" />loading schedules…</div>;
-  if (error) return <ErrorCard title="Couldn't load schedules" error={error} />;
+  if (isLoading) return <div className="flex items-center gap-2 text-muted"><Loader2 className="size-4 animate-spin" />{t('loading')}</div>;
+  if (error) return <ErrorCard title={t('errorTitle')} error={error} />;
   const rows = data ?? [];
 
   if (rows.length === 0) {
@@ -130,21 +132,26 @@ export function Schedules() {
         <Card>
           <CardHeader>
             <div className="flex items-center justify-between">
-              <CardTitle>No schedules yet</CardTitle>
+              <CardTitle>{t('empty.title')}</CardTitle>
               <Button
                 variant="default"
                 size="sm"
                 onClick={() => setEditor({ type: 'create' })}
               >
                 <FilePlus2 className="size-3.5" />
-                New schedule
+                {t('newSchedule')}
               </Button>
             </div>
           </CardHeader>
           <CardContent className="text-muted">
-            Use <code>kanade schedule create &lt;schedule.yaml&gt;</code> on the
-            CLI, or click <strong>New schedule</strong> above to open the
-            in-browser YAML editor.
+            <Trans
+              ns="schedules"
+              i18nKey="empty.body"
+              components={{
+                code: <code />,
+                strong: <strong />,
+              }}
+            />
           </CardContent>
         </Card>
         {editor !== null && (
@@ -164,16 +171,16 @@ export function Schedules() {
   return (
     <div className="space-y-4">
       <div className="flex items-baseline justify-between">
-        <h2 className="text-xl">Schedules</h2>
+        <h2 className="text-xl">{t('title')}</h2>
         <div className="flex items-center gap-2">
           <Button
             variant="default"
             size="sm"
             onClick={() => setEditor({ type: 'create' })}
-            title="Create a new schedule from a YAML template"
+            title={t('newScheduleTitle')}
           >
             <FilePlus2 className="size-3.5" />
-            New schedule
+            {t('newSchedule')}
           </Button>
           <Badge variant="violet">{rows.length}</Badge>
         </div>
@@ -181,19 +188,19 @@ export function Schedules() {
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead>id</TableHead>
-            <TableHead>cron</TableHead>
-            <TableHead>job_id</TableHead>
-            <TableHead>target</TableHead>
-            <TableHead>runs_on</TableHead>
-            <TableHead>mode</TableHead>
-            <TableHead>cooldown</TableHead>
-            <TableHead>deadline</TableHead>
-            <TableHead>auto-off</TableHead>
-            <TableHead>jitter</TableHead>
-            <TableHead>rollout</TableHead>
-            <TableHead>enabled</TableHead>
-            <TableHead>actions</TableHead>
+            <TableHead>{t('columns.id')}</TableHead>
+            <TableHead>{t('columns.cron')}</TableHead>
+            <TableHead>{t('columns.jobId')}</TableHead>
+            <TableHead>{t('columns.target')}</TableHead>
+            <TableHead>{t('columns.runsOn')}</TableHead>
+            <TableHead>{t('columns.mode')}</TableHead>
+            <TableHead>{t('columns.cooldown')}</TableHead>
+            <TableHead>{t('columns.deadline')}</TableHead>
+            <TableHead>{t('columns.autoOff')}</TableHead>
+            <TableHead>{t('columns.jitter')}</TableHead>
+            <TableHead>{t('columns.rollout')}</TableHead>
+            <TableHead>{t('columns.enabled')}</TableHead>
+            <TableHead>{t('columns.actions')}</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -202,32 +209,32 @@ export function Schedules() {
               <TableCell><code className="text-xs">{s.id}</code></TableCell>
               <TableCell><code className="text-xs">{s.cron}</code></TableCell>
               <TableCell><code className="text-xs">{s.job_id}</code></TableCell>
-              <TableCell className="text-xs">{summariseTarget(s.target)}</TableCell>
+              <TableCell className="text-xs">{summariseTarget(s.target, t('target.all'))}</TableCell>
               <TableCell><code className="text-xs">{s.runs_on}</code></TableCell>
               <TableCell><code className="text-xs">{s.mode}</code></TableCell>
               <TableCell><code className="text-xs">{s.cooldown ?? '—'}</code></TableCell>
               <TableCell><code className="text-xs">{s.starting_deadline ?? '—'}</code></TableCell>
               <TableCell className="text-xs">
-                {s.auto_disable_when_done ? 'yes' : <span className="text-muted">—</span>}
+                {s.auto_disable_when_done ? t('autoOff.yes') : <span className="text-muted">—</span>}
               </TableCell>
               <TableCell><code className="text-xs">{s.jitter ?? '—'}</code></TableCell>
               <TableCell className="text-xs">
                 {s.rollout
-                  ? `${s.rollout.waves.length} wave(s)`
+                  ? t('rollout', { count: s.rollout.waves.length })
                   : <span className="text-muted">—</span>}
               </TableCell>
               <TableCell>
                 {s.enabled
-                  ? <Badge variant="success">on</Badge>
-                  : <Badge variant="danger">off</Badge>}
+                  ? <Badge variant="success">{t('status.on')}</Badge>
+                  : <Badge variant="danger">{t('status.off')}</Badge>}
               </TableCell>
               <TableCell className="flex flex-wrap gap-2">
                 <Button
                   variant="secondary"
                   size="sm"
                   onClick={() => setEditor({ type: 'edit', id: s.id })}
-                  title="edit — open this schedule's YAML"
-                  aria-label={`edit schedule ${s.id}`}
+                  title={t('actions.editTitle')}
+                  aria-label={t('actions.editAria', { id: s.id })}
                 >
                   <Pencil className="size-3.5" />
                 </Button>
@@ -246,8 +253,8 @@ export function Schedules() {
                         variant="secondary"
                         size="sm"
                         disabled={pendingDisable.has(s.id)}
-                        title="disable — open soft / hard menu"
-                        aria-label={`disable menu for schedule ${s.id}`}
+                        title={t('actions.disableMenuTitle')}
+                        aria-label={t('actions.disableMenuAria', { id: s.id })}
                       >
                         <PowerOff className="size-3.5" />
                         <ChevronDown className="size-3" />
@@ -259,9 +266,9 @@ export function Schedules() {
                       >
                         <PowerOff className="size-4 mt-0.5 shrink-0" />
                         <div className="flex flex-col gap-0.5">
-                          <span>Soft disable</span>
+                          <span>{t('actions.softDisable')}</span>
                           <span className="text-xs text-muted">
-                            cron stops on next tick; in-flight runs continue
+                            {t('actions.softDisableHint')}
                           </span>
                         </div>
                       </DropdownMenuItem>
@@ -270,11 +277,9 @@ export function Schedules() {
                         variant="danger"
                         onSelect={async () => {
                           const ok = await confirm({
-                            title: `Hard-disable schedule ${s.id}?`,
-                            description:
-                              `Stops the cron from firing AND blocks any pending or in-flight run from this schedule's job. Use this when an active rollout needs to stop immediately.\n\n` +
-                              `The referenced job (${s.job_id}) will be marked revoked — you can unrevoke it from the Jobs page later if needed.`,
-                            confirmLabel: 'Hard disable',
+                            title: t('confirm.hardDisableTitle', { id: s.id }),
+                            description: t('confirm.hardDisableDescription', { id: s.id, jobId: s.job_id }),
+                            confirmLabel: t('confirm.hardDisableLabel'),
                             danger: true,
                           });
                           if (ok) disable.mutate({ id: s.id, cascade: true });
@@ -282,9 +287,9 @@ export function Schedules() {
                       >
                         <Zap className="size-4 mt-0.5 shrink-0" />
                         <div className="flex flex-col gap-0.5">
-                          <span>Hard disable (cascade revoke)</span>
+                          <span>{t('actions.hardDisable')}</span>
                           <span className="text-xs text-muted">
-                            stops cron AND blocks pending / in-flight runs
+                            {t('actions.hardDisableHint')}
                           </span>
                         </div>
                       </DropdownMenuItem>
@@ -296,8 +301,8 @@ export function Schedules() {
                     size="sm"
                     disabled={pendingEnable.has(s.id)}
                     onClick={() => enable.mutate(s.id)}
-                    title="enable — re-enable this schedule"
-                    aria-label={`enable schedule ${s.id}`}
+                    title={t('actions.enableTitle')}
+                    aria-label={t('actions.enableAria', { id: s.id })}
                   >
                     <Power className="size-3.5" />
                   </Button>
@@ -308,15 +313,15 @@ export function Schedules() {
                   disabled={del.isPending}
                   onClick={async () => {
                     const ok = await confirm({
-                      title: `Delete schedule ${s.id}?`,
-                      description: 'The schedule is removed from the catalog. In-flight runs are unaffected.',
-                      confirmLabel: 'Delete',
+                      title: t('confirm.deleteTitle', { id: s.id }),
+                      description: t('confirm.deleteDescription'),
+                      confirmLabel: t('confirm.deleteLabel'),
                       danger: true,
                     });
                     if (ok) del.mutate(s.id);
                   }}
-                  title="delete — remove this schedule"
-                  aria-label={`delete schedule ${s.id}`}
+                  title={t('actions.deleteTitle')}
+                  aria-label={t('actions.deleteAria', { id: s.id })}
                 >
                   <Trash2 className="size-3.5" />
                 </Button>
@@ -325,9 +330,9 @@ export function Schedules() {
           ))}
         </TableBody>
       </Table>
-      {del.error && <ErrorCard title="Delete failed" error={del.error} />}
-      {disable.error && <ErrorCard title="Disable failed" error={disable.error} />}
-      {enable.error && <ErrorCard title="Enable failed" error={enable.error} />}
+      {del.error && <ErrorCard title={t('errors.deleteFailed')} error={del.error} />}
+      {disable.error && <ErrorCard title={t('errors.disableFailed')} error={disable.error} />}
+      {enable.error && <ErrorCard title={t('errors.enableFailed')} error={enable.error} />}
       {editor !== null && (
         <YamlEditorDialog
           open

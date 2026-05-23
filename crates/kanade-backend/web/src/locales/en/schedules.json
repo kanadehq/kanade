@@ -1,1 +1,74 @@
-{}
+{
+  "title": "Schedules",
+  "loading": "loading schedules…",
+  "errorTitle": "Couldn't load schedules",
+  "empty": {
+    "title": "No schedules yet",
+    "body": "Use <code>kanade schedule create &lt;schedule.yaml&gt;</code> on the CLI, or click <strong>New schedule</strong> above to open the in-browser YAML editor."
+  },
+  "newSchedule": "New schedule",
+  "newScheduleTitle": "Create a new schedule from a YAML template",
+  "columns": {
+    "id": "id",
+    "cron": "cron",
+    "jobId": "job_id",
+    "target": "target",
+    "runsOn": "runs_on",
+    "mode": "mode",
+    "cooldown": "cooldown",
+    "deadline": "deadline",
+    "autoOff": "auto-off",
+    "jitter": "jitter",
+    "rollout": "rollout",
+    "enabled": "enabled",
+    "actions": "actions"
+  },
+  "target": {
+    "all": "all"
+  },
+  "autoOff": {
+    "yes": "yes"
+  },
+  "rollout_one": "{{count}} wave",
+  "rollout_other": "{{count}} waves",
+  "status": {
+    "on": "on",
+    "off": "off"
+  },
+  "actions": {
+    "editTitle": "edit — open this schedule's YAML",
+    "editAria": "edit schedule {{id}}",
+    "disableMenuTitle": "disable — open soft / hard menu",
+    "disableMenuAria": "disable menu for schedule {{id}}",
+    "softDisable": "Soft disable",
+    "softDisableHint": "cron stops on next tick; in-flight runs continue",
+    "hardDisable": "Hard disable (cascade revoke)",
+    "hardDisableHint": "stops cron AND blocks pending / in-flight runs",
+    "enableTitle": "enable — re-enable this schedule",
+    "enableAria": "enable schedule {{id}}",
+    "deleteTitle": "delete — remove this schedule",
+    "deleteAria": "delete schedule {{id}}"
+  },
+  "confirm": {
+    "hardDisableTitle": "Hard-disable schedule {{id}}?",
+    "hardDisableDescription": "Stops the cron from firing AND blocks any pending or in-flight run from this schedule's job. Use this when an active rollout needs to stop immediately.\n\nThe referenced job ({{jobId}}) will be marked revoked — you can unrevoke it from the Jobs page later if needed.",
+    "hardDisableLabel": "Hard disable",
+    "deleteTitle": "Delete schedule {{id}}?",
+    "deleteDescription": "The schedule is removed from the catalog. In-flight runs are unaffected.",
+    "deleteLabel": "Delete"
+  },
+  "toast": {
+    "deleted": "Deleted schedule {{id}}",
+    "deleteFailed": "Delete failed: {{error}}",
+    "softDisabled": "Disabled {{id}}",
+    "hardDisabled": "Hard-disabled {{id}} (cascade)",
+    "disableFailed": "Disable failed: {{error}}",
+    "enabled": "Enabled {{id}}",
+    "enableFailed": "Enable failed: {{error}}"
+  },
+  "errors": {
+    "deleteFailed": "Delete failed",
+    "disableFailed": "Disable failed",
+    "enableFailed": "Enable failed"
+  }
+}
