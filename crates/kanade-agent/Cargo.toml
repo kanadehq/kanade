@@ -36,6 +36,22 @@ sysinfo    = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3.27.0"
+# Integration test harness (Issue #141) needs to talk to the same
+# broker the agent does — pin to workspace `async-nats` so wire
+# protocol stays in lockstep.
+async-nats = { workspace = true }
+# JetStream bootstrap helper lives in kanade-shared. Reuse from the
+# integration tests instead of duplicating the stream / KV catalogue.
+kanade-shared = { workspace = true }
+# Allocate a free TCP port per spawned nats-server so multiple
+# integration tests can run in parallel without colliding.
+portpicker = "0.1"
+# Skip integration tests cleanly when `nats-server` isn't in PATH
+# (developer running `--ignored` on a fresh checkout).
+which = "8"
+# Workspace deps used by integration tests but already in
+# [dependencies] don't need re-declaration; the agent's own
+# integration tests inherit them.
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # wmi crate dropped in v0.12.0 — inventory now shells out to

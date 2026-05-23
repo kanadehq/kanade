@@ -403,6 +403,38 @@ sqlx + reqwest + tokio-cron-scheduler + jsonwebtoken all sit in one
 workspace; line-tables-only keeps backtraces useful without exploding
 the PDB.
 
+### Integration tests (kanade-agent)
+
+`crates/kanade-agent/tests/offline_boot.rs` exercises the offline-
+tolerant boot path from #137 end-to-end by spawning a real
+`nats-server` and the agent binary. The tests are `#[ignore]`-gated
+because `nats-server` isn't installed on the workspace's CI runners
+yet — see [#165] for the CI follow-up.
+
+Install `nats-server` first:
+
+| Platform | Command                              |
+|----------|--------------------------------------|
+| Windows  | `scoop install nats-server`          |
+| macOS    | `brew install nats-server`           |
+| Linux    | [GitHub release], or your distro's package manager |
+
+Then:
+
+```powershell
+cargo test -p kanade-agent --test offline_boot -- --ignored --nocapture
+```
+
+Total runtime is ~30 s. Each test spawns its own broker on a free
+port and a fresh agent process with a temp `agent.toml`, asserts
+either "agent stays alive without broker" or "agent's heartbeat
+arrives within timeout" depending on the case, and tears everything
+down on Drop. If `nats-server` isn't on `PATH`, each test logs a
+clear "skipping" message instead of panicking.
+
+[#165]: https://github.com/yukimemi/kanade/issues/165
+[GitHub release]: https://github.com/nats-io/nats-server/releases
+
 ## Production install layout
 
 `cargo install` drops the binaries under `~/.cargo/bin/` (user-local).
