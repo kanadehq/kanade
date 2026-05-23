@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_nats::connection::State;
+use tokio::sync::Notify;
 use tokio::time::Instant;
 
 /// Shared, cheap-to-clone handle to the agent's "last known
@@ -32,6 +33,11 @@ struct TrackerInner {
     /// `Event::Connected`. `None` ⇒ never connected since agent
     /// start.
     last_connected_at: Mutex<Option<Instant>>,
+    /// v0.38 / #137: wake-on-Connected for offline-tolerant
+    /// subsystems. `wait_connected()` futures attached before the
+    /// next handshake observe `notify_waiters()` and proceed without
+    /// burning through their exponential-backoff sleep.
+    connected: Notify,
 }
 
 impl Tracker {
@@ -55,9 +61,27 @@ impl Tracker {
                 if let Ok(mut g) = inner.last_connected_at.lock() {
                     *g = Some(Instant::now());
                 }
+                // v0.38 / #137: kick every wait_connected() future.
+                // Subsystem retry loops park on this between backoff
+                // sleeps, so this is what makes broker-recovery
+                // catch-up feel instant instead of "happens whenever
+                // the next 5-minute tick lands."
+                inner.connected.notify_waiters();
             }
             std::future::ready(())
         }
+    }
+
+    /// Park until the next `Event::Connected` lands.
+    ///
+    /// **Not edge-aware**: a Notify only delivers to waiters present
+    /// at the moment `notify_waiters()` is called. Callers must
+    /// always pair this with a fallback timer (see `nats_retry`'s
+    /// backoff `select!`) so a missed event — async-nats dispatches
+    /// `Event::Connected` via `try_send` and silently drops if its
+    /// channel is full — doesn't park the caller forever.
+    pub async fn wait_connected(&self) {
+        self.inner.connected.notified().await;
     }
 
     /// "How stale" is the agent's view of the broker right now?

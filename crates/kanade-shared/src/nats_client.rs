@@ -66,7 +66,15 @@ where
     F: Fn(async_nats::Event) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = ()> + Send + Sync + 'static,
 {
-    let opts = async_nats::ConnectOptions::new();
+    // v0.38 / #137: offline-tolerant boot. Without
+    // `retry_on_initial_connect`, `opts.connect(url).await` blocks-then-
+    // errors when the broker is unreachable at startup — the agent
+    // process dies, SCM ticks its restart counter, and the offline-
+    // tolerant subsystems (local_scheduler, outbox drain) never spawn.
+    // With this flag, connect() returns `Ok(Client)` immediately and
+    // async-nats does the reconnect in the background; subscribe()
+    // calls queue the SUB frame until the link is up.
+    let opts = async_nats::ConnectOptions::new().retry_on_initial_connect();
     let opts = match resolve_token() {
         Some(token) => opts.token(token),
         None => opts,

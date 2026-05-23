@@ -10,6 +10,7 @@ mod self_update;
 mod command_replay;
 mod events_outbox;
 mod local_scheduler;
+mod nats_retry;
 mod outbox;
 mod staleness;
 
@@ -133,7 +134,7 @@ pub(crate) async fn run_agent() -> Result<()> {
     // from the agent_config KV bucket and watched live. The
     // supervisor publishes the resolved EffectiveConfig on a watch
     // channel; heartbeat / inventory / self_update subscribe.
-    let cfg_rx = config_supervisor::spawn(client.clone(), pc_id.clone());
+    let cfg_rx = config_supervisor::spawn(client.clone(), pc_id.clone(), staleness_tracker.clone());
 
     tokio::spawn(heartbeat::heartbeat_loop(
         client.clone(),

@@ -13,7 +13,6 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Context, Result};
 use async_nats::jetstream;
 use futures::StreamExt;
 use kanade_shared::kv::BUCKET_AGENT_GROUPS;
@@ -23,6 +22,7 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::commands;
+use crate::nats_retry;
 
 /// Outcome of comparing the currently-subscribed groups against the
 /// fleet manager's desired set: what to spawn and what to abort.
@@ -40,16 +40,18 @@ impl SubscriptionDelta {
     }
 }
 
-/// Top-level group-membership manager. Run as a spawned task; exits
-/// if either the KV bucket is missing (broker hasn't been
-/// `kanade jetstream bootstrap`-ed yet) or the watch stream errors
-/// terminally. Per-group subscribe tasks are aborted on removal so
-/// agents that lose membership stop processing further commands
-/// for that group within a NATS heartbeat.
-/// Spawn the group-membership manager + return a watch channel
+/// Spawn the group-membership manager and hand back a watch channel
 /// carrying the current membership list. Local consumers
-/// (`local_scheduler`) can subscribe to it to re-reconcile their
-/// own state when the agent's groups change.
+/// (`local_scheduler`) can subscribe to it to re-reconcile their own
+/// state when the agent's groups change.
+///
+/// The spawned task is offline-tolerant (v0.38 / #137): if the broker
+/// is unreachable at boot it backs off and retries via
+/// [`nats_retry::wait_for_kv`]; if the watch ends because of a
+/// disconnect, the wrapper restarts it. Per-group SUB subscriptions
+/// outlive the reconnect cycle — async-nats re-issues them
+/// internally — so the `subs` map is held across iterations to avoid
+/// double-subscribe on every reopen.
 pub fn spawn(
     client: async_nats::Client,
     pc_id: String,
@@ -61,9 +63,7 @@ pub fn spawn(
 ) {
     let (tx, rx) = tokio::sync::watch::channel(Vec::<String>::new());
     let handle = tokio::spawn(async move {
-        if let Err(e) = manage(client, pc_id, dedup, staleness, tx).await {
-            tracing::error!(error = ?e, "group-membership manager exited with error");
-        }
+        manage(client, pc_id, dedup, staleness, tx).await;
     });
     (rx, handle)
 }
@@ -74,77 +74,97 @@ async fn manage(
     dedup: std::sync::Arc<tokio::sync::Mutex<crate::commands::DedupCache>>,
     staleness: crate::staleness::Tracker,
     groups_tx: tokio::sync::watch::Sender<Vec<String>>,
-) -> Result<()> {
+) {
     let js = jetstream::new(client.clone());
-    let kv = match js.get_key_value(BUCKET_AGENT_GROUPS).await {
-        Ok(k) => k,
-        Err(e) => {
-            warn!(
-                error = %e,
-                bucket = BUCKET_AGENT_GROUPS,
-                "agent_groups KV bucket missing — group subscriptions idle until bootstrap"
-            );
-            return Ok(());
-        }
-    };
 
+    // Persist across reconnects. Each per-group `command_loop` task
+    // backs onto a NATS Subscriber that async-nats reconnects
+    // automatically; aborting + respawning them on every broker
+    // drop would defeat that. Stale handles (e.g. a command_loop
+    // that exited because its Subscriber closed) just sit in the
+    // map until the agent restarts — acceptable tradeoff since
+    // diff_groups will simply skip re-subscribing for any group
+    // still in `current ∩ desired`.
     let mut subs: HashMap<String, JoinHandle<()>> = HashMap::new();
 
-    let initial_desired = match kv.get(&pc_id).await {
-        Ok(Some(bytes)) => parse_groups(&bytes),
-        Ok(None) => {
-            info!(pc_id = %pc_id, "no agent_groups entry — starting with empty membership");
-            Vec::new()
-        }
-        Err(e) => {
-            warn!(error = %e, "initial agent_groups KV read failed");
-            Vec::new()
-        }
-    };
-    apply_delta(
-        &diff_groups::<String, String>(&[], &initial_desired),
-        &mut subs,
-        &client,
-        &pc_id,
-        &dedup,
-        &staleness,
-    )
-    .await;
-    // Publish the initial membership snapshot so `local_scheduler`
-    // boots with the right set instead of [] until the first watch
-    // event fires.
-    let _ = groups_tx.send(initial_desired);
+    loop {
+        let kv = nats_retry::wait_for_kv(
+            &js,
+            &client,
+            &staleness,
+            BUCKET_AGENT_GROUPS,
+            "agent_groups",
+        )
+        .await;
 
-    let mut watch = kv
-        .watch(&pc_id)
-        .await
-        .context("watch agent_groups KV key")?;
-    while let Some(entry) = watch.next().await {
-        let bytes = match entry {
-            Ok(e) => e.value,
+        // Re-prime on every (re)connect: pick up edits that landed
+        // while we were disconnected.
+        //
+        // Gemini #147 fix: a transient `kv.get` error must NOT fall
+        // through with `desired = []`, which would diff against
+        // `current=subs.keys()` and abort every per-group SUB the
+        // agent is running. Pause + reopen instead so the membership
+        // stays intact until the next read succeeds.
+        let desired = match kv.get(&pc_id).await {
+            Ok(Some(bytes)) => parse_groups(&bytes),
+            Ok(None) => {
+                info!(pc_id = %pc_id, "no agent_groups entry — starting with empty membership");
+                Vec::new()
+            }
             Err(e) => {
-                warn!(error = %e, "agent_groups watch entry");
+                warn!(error = %e, "initial agent_groups KV read failed; pausing and reopening");
+                nats_retry::reopen_pause().await;
                 continue;
             }
         };
-        let desired = parse_groups(&bytes);
         let current: Vec<String> = subs.keys().cloned().collect();
         let delta = diff_groups(&current, &desired);
         if !delta.is_empty() {
             info!(
                 add = ?delta.to_subscribe,
                 drop = ?delta.to_unsubscribe,
-                "agent_groups update — reconciling subscriptions",
+                "agent_groups (re-)prime — reconciling subscriptions",
             );
             apply_delta(&delta, &mut subs, &client, &pc_id, &dedup, &staleness).await;
         }
-        // Always publish — `local_scheduler` cares about the
-        // membership value, not whether *core sub subscriptions*
-        // changed (they can be a no-op when membership stayed the
-        // same modulo ordering).
         let _ = groups_tx.send(desired);
+
+        let mut watch = match kv.watch(&pc_id).await {
+            Ok(w) => w,
+            Err(e) => {
+                warn!(error = %e, "watch agent_groups KV key failed; reopening");
+                nats_retry::reopen_pause().await;
+                continue;
+            }
+        };
+        while let Some(entry) = watch.next().await {
+            let bytes = match entry {
+                Ok(e) => e.value,
+                Err(e) => {
+                    warn!(error = %e, "agent_groups watch entry");
+                    continue;
+                }
+            };
+            let desired = parse_groups(&bytes);
+            let current: Vec<String> = subs.keys().cloned().collect();
+            let delta = diff_groups(&current, &desired);
+            if !delta.is_empty() {
+                info!(
+                    add = ?delta.to_subscribe,
+                    drop = ?delta.to_unsubscribe,
+                    "agent_groups update — reconciling subscriptions",
+                );
+                apply_delta(&delta, &mut subs, &client, &pc_id, &dedup, &staleness).await;
+            }
+            // Always publish — local_scheduler cares about the
+            // membership value itself, not whether *core sub*
+            // subscriptions changed (they can be a no-op when
+            // membership stayed the same modulo ordering).
+            let _ = groups_tx.send(desired);
+        }
+        warn!("agent_groups watch ended; reopening");
+        nats_retry::reopen_pause().await;
     }
-    Ok(())
 }
 
 async fn apply_delta(

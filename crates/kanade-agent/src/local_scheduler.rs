@@ -42,10 +42,11 @@ use kanade_shared::manifest::{ExecMode, Manifest, RunsOn, Schedule};
 use kanade_shared::wire::Command;
 use tokio::sync::Mutex;
 use tokio_cron_scheduler::{Job, JobScheduler};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::commands::handle_command;
+use crate::nats_retry;
 
 /// In-memory state shared across the watch loops and the tick
 /// callbacks. Wrapped in a single `Mutex<State>` because the scheduler
@@ -141,9 +142,7 @@ pub fn spawn(
     staleness: crate::staleness::Tracker,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        if let Err(e) = run(client, pc_id, completions_path, groups_rx, staleness).await {
-            error!(error = ?e, "local_scheduler loop exited with error");
-        }
+        run(client, pc_id, completions_path, groups_rx, staleness).await;
     })
 }
 
@@ -153,24 +152,23 @@ async fn run(
     completions_path: PathBuf,
     groups_rx: tokio::sync::watch::Receiver<Vec<String>>,
     staleness: crate::staleness::Tracker,
-) -> Result<()> {
+) {
     let js = async_nats::jetstream::new(client.clone());
-    let schedules_kv = js
-        .get_key_value(BUCKET_SCHEDULES)
-        .await
-        .with_context(|| format!("get KV {BUCKET_SCHEDULES}"))?;
-    let jobs_kv = js
-        .get_key_value(BUCKET_JOBS)
-        .await
-        .with_context(|| format!("get KV {BUCKET_JOBS}"))?;
 
-    let internal = JobScheduler::new()
-        .await
-        .context("init internal JobScheduler")?;
-    internal
-        .start()
-        .await
-        .context("start internal JobScheduler")?;
+    // The internal scheduler doesn't talk to NATS, so it's created
+    // unconditionally — even a broker-down boot lets `local_tick`
+    // fire as soon as we've re-primed the cache after recovery.
+    let internal = match JobScheduler::new().await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(error = %e, "local_scheduler: JobScheduler::new failed; aborting subsystem");
+            return;
+        }
+    };
+    if let Err(e) = internal.start().await {
+        warn!(error = %e, "local_scheduler: JobScheduler::start failed; aborting subsystem");
+        return;
+    }
 
     let completions = State::load_completions(&completions_path);
     info!(
@@ -186,128 +184,274 @@ async fn run(
         completions_path,
     }));
 
-    // 1) Prime the job cache so initial-load schedule registrations
-    //    can find their Manifest.
-    prime_jobs_cache(&jobs_kv, &state).await;
-
-    // 2) Initial group membership snapshot from the watch channel
-    //    (`groups::spawn` publishes the current value the moment the
-    //    KV read finishes, so this borrow is safe even before any
-    //    edit fires).
-    let my_groups = groups_rx.borrow().clone();
-    info!(
-        pc_id = %pc_id,
-        groups = ?my_groups,
-        "local_scheduler: initial group membership snapshot",
+    // Long-lived auxiliary task: react to group-membership flips even
+    // while the schedules / jobs watches are mid-reopen. Uses
+    // `wait_for_kv` so a flip during a broker outage queues up
+    // properly instead of being lost.
+    let _groups_task = spawn_groups_change_task(
+        client.clone(),
+        pc_id.clone(),
+        staleness.clone(),
+        groups_rx.clone(),
+        internal.clone(),
+        state.clone(),
     );
 
-    // 3) Initial pass over schedules KV.
-    if let Ok(keys) = schedules_kv.keys().await {
-        let keys: Vec<String> = keys.try_collect().await.unwrap_or_default();
-        for k in keys {
-            if let Ok(Some(bytes)) = schedules_kv.get(&k).await
-                && let Ok(s) = serde_json::from_slice::<Schedule>(&bytes)
-            {
-                reconcile_schedule(
-                    &internal, &state, &client, &pc_id, &my_groups, &s, &staleness,
-                )
-                .await;
+    // Outer reconnect loop. Owns schedules_kv + jobs_kv handles and
+    // both `watch_all` streams; re-syncs caches + reconciles on
+    // every (re-)entry so edits made during a disconnect get picked
+    // up.
+    loop {
+        let schedules_kv = nats_retry::wait_for_kv(
+            &js,
+            &client,
+            &staleness,
+            BUCKET_SCHEDULES,
+            "local_scheduler",
+        )
+        .await;
+        let jobs_kv =
+            nats_retry::wait_for_kv(&js, &client, &staleness, BUCKET_JOBS, "local_scheduler").await;
+
+        // Walk both KVs into FRESH collections first. Don't touch
+        // live state until both walks succeed end-to-end — a partial
+        // failure must NOT clear the in-memory caches (Gemini #147
+        // review: a transient keys() error would otherwise leave
+        // the scheduler empty until the next watch event arrives).
+        let new_jobs = match collect_jobs(&jobs_kv).await {
+            Ok(j) => j,
+            Err(()) => {
+                warn!("local_scheduler: jobs KV walk failed; keeping previous state and reopening");
+                nats_retry::reopen_pause().await;
+                continue;
             }
+        };
+        let new_schedules = match collect_schedules(&schedules_kv).await {
+            Ok(s) => s,
+            Err(()) => {
+                warn!(
+                    "local_scheduler: schedules KV walk failed; keeping previous state and reopening"
+                );
+                nats_retry::reopen_pause().await;
+                continue;
+            }
+        };
+
+        let my_groups = groups_rx.borrow().clone();
+        info!(
+            pc_id = %pc_id,
+            groups = ?my_groups,
+            jobs = new_jobs.len(),
+            schedules = new_schedules.len(),
+            "local_scheduler: applying resync",
+        );
+        apply_resync(
+            &internal,
+            &state,
+            &client,
+            &pc_id,
+            &my_groups,
+            &staleness,
+            new_jobs,
+            new_schedules,
+        )
+        .await;
+        let count = state.lock().await.registered.len();
+        info!(count, "local_scheduler: registered schedules after resync");
+
+        let mut schedules_watch = match schedules_kv.watch_all().await {
+            Ok(w) => w,
+            Err(e) => {
+                warn!(error = %e, "schedules KV watch_all failed; reopening");
+                nats_retry::reopen_pause().await;
+                continue;
+            }
+        };
+        let mut jobs_watch = match jobs_kv.watch_all().await {
+            Ok(w) => w,
+            Err(e) => {
+                warn!(error = %e, "jobs KV watch_all failed; reopening");
+                nats_retry::reopen_pause().await;
+                continue;
+            }
+        };
+
+        // Inner select loop. `break` (with label) on either watch
+        // dropping so we re-prime both together.
+        let dropped = 'inner: loop {
+            tokio::select! {
+                entry = schedules_watch.next() => {
+                    let Some(entry) = entry else { break 'inner "schedules" };
+                    let entry = match entry {
+                        Ok(e) => e,
+                        Err(e) => { warn!(error = %e, "schedules watch error"); continue; }
+                    };
+                    let groups_snapshot = groups_rx.borrow().clone();
+                    match entry.operation {
+                        Operation::Put => {
+                            if let Ok(s) = serde_json::from_slice::<Schedule>(&entry.value) {
+                                reconcile_schedule(
+                                    &internal, &state, &client, &pc_id, &groups_snapshot, &s, &staleness,
+                                )
+                                .await;
+                            } else {
+                                warn!(key = %entry.key, "deserialize Schedule on watch");
+                            }
+                        }
+                        Operation::Delete | Operation::Purge => {
+                            unregister_locally(&internal, &state, &entry.key).await;
+                        }
+                    }
+                }
+                entry = jobs_watch.next() => {
+                    let Some(entry) = entry else { break 'inner "jobs" };
+                    let entry = match entry {
+                        Ok(e) => e,
+                        Err(e) => { warn!(error = %e, "jobs watch error"); continue; }
+                    };
+                    let mut s = state.lock().await;
+                    match entry.operation {
+                        Operation::Put => {
+                            if let Ok(m) = serde_json::from_slice::<Manifest>(&entry.value) {
+                                s.jobs.insert(entry.key.clone(), m);
+                                debug!(job_id = %entry.key, "local_scheduler: cached job manifest");
+                            }
+                        }
+                        Operation::Delete | Operation::Purge => {
+                            s.jobs.remove(&entry.key);
+                        }
+                    }
+                }
+            }
+        };
+        warn!(dropped, "local_scheduler watch ended; reopening");
+        nats_retry::reopen_pause().await;
+    }
+}
+
+/// Walk `BUCKET_JOBS` into a fresh in-memory map. Returns `Err(())`
+/// if `kv.keys()` itself fails — caller must treat that as
+/// "connectivity-level failure, keep existing cache" rather than
+/// "no jobs" (Gemini #147 review).
+async fn collect_jobs(
+    jobs_kv: &async_nats::jetstream::kv::Store,
+) -> Result<HashMap<String, Manifest>, ()> {
+    let keys = match jobs_kv.keys().await {
+        Ok(k) => k,
+        Err(e) => {
+            warn!(error = %e, "local_scheduler: jobs_kv.keys() failed");
+            return Err(());
+        }
+    };
+    let keys: Vec<String> = keys.try_collect().await.unwrap_or_default();
+    let mut out = HashMap::with_capacity(keys.len());
+    for k in keys {
+        if let Ok(Some(bytes)) = jobs_kv.get(&k).await
+            && let Ok(m) = serde_json::from_slice::<Manifest>(&bytes)
+        {
+            out.insert(k, m);
         }
     }
-    let count = state.lock().await.registered.len();
-    info!(count, "local_scheduler: registered initial schedules");
+    Ok(out)
+}
 
-    // 4) Three concurrent watch loops:
-    //   * schedules KV → reconcile / unregister per entry
-    //   * jobs KV       → keep the Manifest cache fresh
-    //   * groups_rx     → membership changes → re-reconcile ALL
-    //                     cached schedules so group-targeted ones
-    //                     get picked up / dropped right away
-    let schedules_watch = schedules_kv
-        .watch_all()
-        .await
-        .context("schedules KV watch_all")?;
-    let jobs_watch = jobs_kv.watch_all().await.context("jobs KV watch_all")?;
-
-    let internal_for_sched = internal.clone();
-    let state_for_sched = state.clone();
-    let client_for_sched = client.clone();
-    let pc_id_for_sched = pc_id.clone();
-    let groups_rx_for_sched = groups_rx.clone();
-    let staleness_for_sched = staleness.clone();
-    let sched_task = tokio::spawn(async move {
-        let mut watch = schedules_watch;
-        while let Some(entry) = watch.next().await {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(e) => {
-                    warn!(error = %e, "schedules watch error");
-                    continue;
-                }
-            };
-            let groups_snapshot = groups_rx_for_sched.borrow().clone();
-            match entry.operation {
-                Operation::Put => {
-                    if let Ok(s) = serde_json::from_slice::<Schedule>(&entry.value) {
-                        reconcile_schedule(
-                            &internal_for_sched,
-                            &state_for_sched,
-                            &client_for_sched,
-                            &pc_id_for_sched,
-                            &groups_snapshot,
-                            &s,
-                            &staleness_for_sched,
-                        )
-                        .await;
-                    } else {
-                        warn!(key = %entry.key, "deserialize Schedule on watch");
-                    }
-                }
-                Operation::Delete | Operation::Purge => {
-                    unregister_locally(&internal_for_sched, &state_for_sched, &entry.key).await;
-                }
-            }
+/// Walk `BUCKET_SCHEDULES` into a fresh list. Returns `Err(())` on
+/// keys() failure — same rationale as [`collect_jobs`].
+async fn collect_schedules(
+    schedules_kv: &async_nats::jetstream::kv::Store,
+) -> Result<Vec<Schedule>, ()> {
+    let keys = match schedules_kv.keys().await {
+        Ok(k) => k,
+        Err(e) => {
+            warn!(error = %e, "local_scheduler: schedules_kv.keys() failed");
+            return Err(());
         }
-    });
-
-    let state_for_jobs = state.clone();
-    let jobs_task = tokio::spawn(async move {
-        let mut watch = jobs_watch;
-        while let Some(entry) = watch.next().await {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(e) => {
-                    warn!(error = %e, "jobs watch error");
-                    continue;
-                }
-            };
-            let mut s = state_for_jobs.lock().await;
-            match entry.operation {
-                Operation::Put => {
-                    if let Ok(m) = serde_json::from_slice::<Manifest>(&entry.value) {
-                        s.jobs.insert(entry.key.clone(), m);
-                        debug!(job_id = %entry.key, "local_scheduler: cached job manifest");
-                    }
-                }
-                Operation::Delete | Operation::Purge => {
-                    s.jobs.remove(&entry.key);
-                }
-            }
+    };
+    let keys: Vec<String> = keys.try_collect().await.unwrap_or_default();
+    let mut out = Vec::with_capacity(keys.len());
+    for k in keys {
+        if let Ok(Some(bytes)) = schedules_kv.get(&k).await
+            && let Ok(s) = serde_json::from_slice::<Schedule>(&bytes)
+        {
+            out.push(s);
         }
-    });
+    }
+    Ok(out)
+}
 
-    // v0.24: group-membership change handler. Re-reconciles every
-    // schedule the agent already knows about so target.groups overlap
-    // re-evaluates without waiting for the next schedule edit.
-    let internal_for_groups = internal.clone();
-    let state_for_groups = state.clone();
-    let client_for_groups = client.clone();
-    let pc_id_for_groups = pc_id.clone();
-    let staleness_for_groups = staleness.clone();
-    let mut groups_rx_for_watch = groups_rx;
-    let groups_task = tokio::spawn(async move {
-        // Skip the initial value — already used above for the boot
+/// Atomically apply a fresh `new_jobs` / `new_schedules` snapshot.
+/// Schedules that disappeared from KV (vs the in-memory cache) are
+/// unregistered; remaining schedules are reconciled against the
+/// new job manifests. Replaces the old `reset_state + prime` path
+/// which would clear in-memory caches *before* trying to refill
+/// them — a partial walk failure left the scheduler empty.
+#[allow(clippy::too_many_arguments)]
+async fn apply_resync(
+    internal: &JobScheduler,
+    state: &Arc<Mutex<State>>,
+    client: &async_nats::Client,
+    pc_id: &str,
+    my_groups: &[String],
+    staleness: &crate::staleness::Tracker,
+    new_jobs: HashMap<String, Manifest>,
+    new_schedules: Vec<Schedule>,
+) {
+    // Swap the jobs map atomically — under the lock so `local_tick`
+    // sees either the old map in full or the new map in full, never
+    // a half-cleared one.
+    {
+        let mut st = state.lock().await;
+        st.jobs = new_jobs;
+    }
+
+    // Find schedules that vanished from KV → unregister them. Done
+    // before the reconciliations so the diff is unambiguous.
+    let new_ids: std::collections::HashSet<String> =
+        new_schedules.iter().map(|s| s.id.clone()).collect();
+    let stale_ids: Vec<String> = {
+        let st = state.lock().await;
+        st.schedules
+            .keys()
+            .filter(|id| !new_ids.contains(*id))
+            .cloned()
+            .collect()
+    };
+    for id in stale_ids {
+        unregister_locally(internal, state, &id).await;
+    }
+
+    // Reconcile each schedule from the new snapshot. Updates the
+    // cron registration in place where the schedule changed
+    // (target / cron / enabled); no-ops where it's identical.
+    for s in &new_schedules {
+        reconcile_schedule(internal, state, client, pc_id, my_groups, s, staleness).await;
+    }
+}
+
+/// v0.24: group-membership change handler. Re-reconciles every
+/// schedule the agent already knows about so `target.groups` overlap
+/// re-evaluates without waiting for the next schedule edit. Uses
+/// `wait_for_kv` so a flip during a broker outage queues up and
+/// reconciles once the link is back instead of being silently
+/// dropped (`groups_rx.changed()` is edge-triggered; if we miss the
+/// edge by being mid-disconnect we never get it again).
+///
+/// When the schedules-KV walk fails (`collect_schedules` returns
+/// `Err(())`), we skip the iteration and wait for the next group
+/// flip — better to defer reconciliation than to interpret a
+/// transient read failure as "schedules vanished" and drop every
+/// agent-side cron (sub-agent #147 review).
+fn spawn_groups_change_task(
+    client: async_nats::Client,
+    pc_id: String,
+    staleness: crate::staleness::Tracker,
+    mut groups_rx_for_watch: tokio::sync::watch::Receiver<Vec<String>>,
+    internal: JobScheduler,
+    state: Arc<Mutex<State>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let js = async_nats::jetstream::new(client.clone());
+        // Skip the initial value — already used in run()'s prime
         // pass. Future changes flow through here.
         loop {
             if groups_rx_for_watch.changed().await.is_err() {
@@ -318,75 +462,80 @@ async fn run(
                 groups = ?new_groups,
                 "local_scheduler: group membership changed; re-reconciling all schedules",
             );
-            let cached: Vec<Schedule> = {
-                let st = state_for_groups.lock().await;
-                st.schedules.values().cloned().collect()
-            };
-            // Also need to consider schedules that AREN'T currently
-            // registered (= weren't ours before but might be now).
-            // Walk schedules KV again.
-            let js = async_nats::jetstream::new(client_for_groups.clone());
-            let kv = match js.get_key_value(BUCKET_SCHEDULES).await {
-                Ok(k) => k,
-                Err(e) => {
-                    warn!(error = %e, "groups change: schedules KV unavailable");
+            // Walk schedules KV again with retry semantics — a flip
+            // during broker-down would otherwise be lost.
+            let kv = nats_retry::wait_for_kv(
+                &js,
+                &client,
+                &staleness,
+                BUCKET_SCHEDULES,
+                "local_scheduler_groups",
+            )
+            .await;
+            let new_schedules = match collect_schedules(&kv).await {
+                Ok(s) => s,
+                Err(()) => {
+                    warn!(
+                        "local_scheduler: groups change resync — schedules walk failed; skipping iteration"
+                    );
                     continue;
                 }
             };
-            let keys: Vec<String> = match kv.keys().await {
-                Ok(s) => s.try_collect().await.unwrap_or_default(),
-                Err(_) => Vec::new(),
+            // Compute the set of current schedules so we can drop
+            // any that vanished. Done before reconciles so the diff
+            // is unambiguous.
+            let new_ids: std::collections::HashSet<String> =
+                new_schedules.iter().map(|s| s.id.clone()).collect();
+            let stale_ids: Vec<String> = {
+                let st = state.lock().await;
+                st.schedules
+                    .keys()
+                    .filter(|id| !new_ids.contains(*id))
+                    .cloned()
+                    .collect()
             };
-            let mut seen = std::collections::HashSet::new();
-            for k in keys {
-                seen.insert(k.clone());
-                if let Ok(Some(bytes)) = kv.get(&k).await
-                    && let Ok(s) = serde_json::from_slice::<Schedule>(&bytes)
-                {
-                    reconcile_schedule(
-                        &internal_for_groups,
-                        &state_for_groups,
-                        &client_for_groups,
-                        &pc_id_for_groups,
-                        &new_groups,
-                        &s,
-                        &staleness_for_groups,
-                    )
-                    .await;
-                }
+            for id in stale_ids {
+                unregister_locally(&internal, &state, &id).await;
             }
-            // Drop schedules that disappeared from KV between
-            // the schedule-watch pass and now.
-            for cached_s in cached {
-                if !seen.contains(&cached_s.id) {
-                    unregister_locally(&internal_for_groups, &state_for_groups, &cached_s.id).await;
-                }
+            for s in &new_schedules {
+                reconcile_schedule(
+                    &internal,
+                    &state,
+                    &client,
+                    &pc_id,
+                    &new_groups,
+                    s,
+                    &staleness,
+                )
+                .await;
             }
         }
-    });
-
-    let _ = tokio::join!(sched_task, jobs_task, groups_task);
-    Ok(())
-}
-
-async fn prime_jobs_cache(jobs_kv: &async_nats::jetstream::kv::Store, state: &Arc<Mutex<State>>) {
-    let Ok(keys) = jobs_kv.keys().await else {
-        return;
-    };
-    let keys: Vec<String> = keys.try_collect().await.unwrap_or_default();
-    for k in keys {
-        if let Ok(Some(bytes)) = jobs_kv.get(&k).await
-            && let Ok(m) = serde_json::from_slice::<Manifest>(&bytes)
-        {
-            state.lock().await.jobs.insert(k, m);
-        }
-    }
+    })
 }
 
 // v0.24: `read_my_groups` removed — membership now flows through the
 // `groups::spawn` watch channel that `local_scheduler` subscribes to,
 // so we no longer poll the KV ourselves.
 
+/// Reconcile a single schedule: drop any existing cron registration
+/// for the same id, then re-register it if it targets this agent.
+///
+/// Holds `state.lock()` for the entire body — including across the
+/// async `internal.remove()` and `internal.add()` calls. This is
+/// deliberate: two concurrent callers (the inner watch loop and
+/// `spawn_groups_change_task`) can otherwise interleave their
+/// `internal.add` calls and leave two cron entries for the same
+/// schedule_id in the scheduler while `state.registered` records
+/// only the second uuid — an orphaned cron that double-fires every
+/// tick until the agent restarts (sub-agent #147 review F1).
+///
+/// The lock-across-await is supported by `tokio::sync::Mutex` and
+/// is acceptable here because reconciles are infrequent (per Put
+/// event from the schedules KV watch, or per group-change flip).
+/// The cron callback (`local_tick`) also locks `state`, but it does
+/// so briefly and only inside the tick handler — never while
+/// reconcile is running, since reconcile holds the lock for ~ms
+/// (internal.add is in-memory).
 async fn reconcile_schedule(
     internal: &JobScheduler,
     state: &Arc<Mutex<State>>,
@@ -396,14 +545,19 @@ async fn reconcile_schedule(
     schedule: &Schedule,
     staleness: &crate::staleness::Tracker,
 ) {
-    let mine = {
-        let st = state.lock().await;
-        st.matching(schedule, pc_id, my_groups)
-    };
+    let mut st = state.lock().await;
+    let mine = st.matching(schedule, pc_id, my_groups);
 
     // Always unregister an existing copy first — cron / target /
     // enabled edits all need to land.
-    unregister_locally(internal, state, &schedule.id).await;
+    if let Some(uuid) = st.registered.remove(&schedule.id) {
+        st.schedules.remove(&schedule.id);
+        if let Err(e) = internal.remove(&uuid).await {
+            warn!(error = %e, schedule_id = %schedule.id, "local_scheduler: remove failed");
+        } else {
+            info!(schedule_id = %schedule.id, "local_scheduler: unregistered");
+        }
+    }
 
     if !mine {
         return;
@@ -447,11 +601,8 @@ async fn reconcile_schedule(
             return;
         }
     };
-    {
-        let mut st = state.lock().await;
-        st.schedules.insert(schedule.id.clone(), schedule.clone());
-        st.registered.insert(schedule.id.clone(), job_uuid);
-    }
+    st.schedules.insert(schedule.id.clone(), schedule.clone());
+    st.registered.insert(schedule.id.clone(), job_uuid);
     info!(
         schedule_id = %schedule_id,
         cron = %cron,
