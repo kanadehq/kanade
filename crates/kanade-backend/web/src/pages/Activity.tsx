@@ -1,6 +1,7 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { ChevronsDown, ChevronsUp, ExternalLink, Loader2, Skull } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import { toast } from 'sonner';
 
@@ -71,15 +72,16 @@ function useDebouncedValue<T>(value: T, delay: number): T {
   return debounced;
 }
 
-const SINCE_PRESETS: Array<{ value: string; label: string; ms: number | null }> = [
-  { value: '1h',  label: 'last 1h',   ms: 60 * 60 * 1000 },
-  { value: '24h', label: 'last 24h',  ms: 24 * 60 * 60 * 1000 },
-  { value: '7d',  label: 'last 7d',   ms: 7 * 24 * 60 * 60 * 1000 },
-  { value: '30d', label: 'last 30d',  ms: 30 * 24 * 60 * 60 * 1000 },
-  { value: 'all', label: 'all time',  ms: null },
+const SINCE_PRESETS: Array<{ value: string; ms: number | null }> = [
+  { value: '1h',  ms: 60 * 60 * 1000 },
+  { value: '24h', ms: 24 * 60 * 60 * 1000 },
+  { value: '7d',  ms: 7 * 24 * 60 * 60 * 1000 },
+  { value: '30d', ms: 30 * 24 * 60 * 60 * 1000 },
+  { value: 'all', ms: null },
 ];
 
 export function Activity() {
+  const { t } = useTranslation('activity');
   const confirm = useConfirm();
   const [pcId, setPcId] = useState('');
   const [jobId, setJobId] = useState('');
@@ -138,8 +140,8 @@ export function Activity() {
     onMutate: (job_id) => {
       setPendingKill((prev) => new Set(prev).add(job_id));
     },
-    onSuccess: (_d, job_id) => toast.success(`Kill signal sent to ${job_id}`),
-    onError: (e) => toast.error(`Kill failed: ${formatError(e)}`),
+    onSuccess: (_d, job_id) => toast.success(t('toast.killSuccess', { jobId: job_id })),
+    onError: (e) => toast.error(t('toast.killFailure', { error: formatError(e) })),
     onSettled: (_d, _e, job_id) => {
       setPendingKill((prev) => {
         const next = new Set(prev);
@@ -154,59 +156,63 @@ export function Activity() {
   return (
     <div className="space-y-4">
       <div className="flex items-baseline justify-between">
-        <h2 className="text-xl">Activity</h2>
-        <Badge variant="violet">{rows.length} shown{isFetching && !isLoading ? '…' : ''}</Badge>
+        <h2 className="text-xl">{t('title')}</h2>
+        <Badge variant="violet">
+          {isFetching && !isLoading
+            ? t('countBadgeFetching', { count: rows.length })
+            : t('countBadge', { count: rows.length })}
+        </Badge>
       </div>
 
       <Card>
         <CardContent className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 p-4">
           <div className="space-y-1">
-            <Label htmlFor="res-pc">pc_id</Label>
+            <Label htmlFor="res-pc">{t('filters.pcId')}</Label>
             <Input
               id="res-pc"
-              placeholder="regex — eg. ^PC001 or PC001"
+              placeholder={t('filters.placeholders.pcId')}
               value={pcId}
               onChange={(e) => setPcId(e.target.value)}
             />
           </div>
           <div className="space-y-1">
-            <Label htmlFor="res-job">job_id</Label>
+            <Label htmlFor="res-job">{t('filters.jobId')}</Label>
             <Input
               id="res-job"
-              placeholder="regex — eg. ^job-foo"
+              placeholder={t('filters.placeholders.jobId')}
               value={jobId}
               onChange={(e) => setJobId(e.target.value)}
             />
           </div>
           <div className="space-y-1">
-            <Label htmlFor="res-exec">exec_id</Label>
+            <Label htmlFor="res-exec">{t('filters.execId')}</Label>
             <Input
               id="res-exec"
-              placeholder="regex — eg. ^abc1234"
+              placeholder={t('filters.placeholders.execId')}
               value={execId}
               onChange={(e) => setExecId(e.target.value)}
             />
           </div>
           <div className="space-y-1">
-            <Label htmlFor="res-stdout">stdout</Label>
+            <Label htmlFor="res-stdout">{t('filters.stdout')}</Label>
             <Input
               id="res-stdout"
-              placeholder="regex — eg. timeout|panic"
+              placeholder={t('filters.placeholders.stdout')}
               value={stdoutFilter}
               onChange={(e) => setStdoutFilter(e.target.value)}
             />
           </div>
           <div className="space-y-1">
-            <Label htmlFor="res-stderr">stderr</Label>
+            <Label htmlFor="res-stderr">{t('filters.stderr')}</Label>
             <Input
               id="res-stderr"
-              placeholder="regex — eg. permission denied"
+              placeholder={t('filters.placeholders.stderr')}
               value={stderrFilter}
               onChange={(e) => setStderrFilter(e.target.value)}
             />
           </div>
           <div className="space-y-1">
-            <Label htmlFor="res-status">status</Label>
+            <Label htmlFor="res-status">{t('filters.status')}</Label>
             <Select
               id="res-status"
               value={status}
@@ -214,22 +220,24 @@ export function Activity() {
                 setStatus(e.target.value as '' | 'running' | 'success' | 'failure')
               }
             >
-              <option value="">(any)</option>
-              <option value="running">running (in flight)</option>
-              <option value="success">success (exit 0)</option>
-              <option value="failure">failure (exit ≠ 0)</option>
+              <option value="">{t('filters.statusOptions.any')}</option>
+              <option value="running">{t('filters.statusOptions.running')}</option>
+              <option value="success">{t('filters.statusOptions.success')}</option>
+              <option value="failure">{t('filters.statusOptions.failure')}</option>
             </Select>
           </div>
           <div className="space-y-1">
-            <Label htmlFor="res-since">since</Label>
+            <Label htmlFor="res-since">{t('filters.since')}</Label>
             <Select id="res-since" value={since} onChange={(e) => setSince(e.target.value)}>
               {SINCE_PRESETS.map((p) => (
-                <option key={p.value} value={p.value}>{p.label}</option>
+                <option key={p.value} value={p.value}>
+                  {t(`filters.sincePresets.${p.value}`)}
+                </option>
               ))}
             </Select>
           </div>
           <div className="space-y-1">
-            <Label htmlFor="res-limit">limit</Label>
+            <Label htmlFor="res-limit">{t('filters.limit')}</Label>
             <Select
               id="res-limit"
               value={String(limit)}
@@ -245,30 +253,30 @@ export function Activity() {
 
       {isLoading ? (
         <div className="flex items-center gap-2 text-muted">
-          <Loader2 className="size-4 animate-spin" />loading activity…
+          <Loader2 className="size-4 animate-spin" />{t('loading')}
         </div>
       ) : error ? (
-        <ErrorCard title="Couldn't load activity" error={error} />
+        <ErrorCard title={t('errorTitle')} error={error} />
       ) : rows.length === 0 ? (
         <Card>
-          <CardHeader><CardTitle>No activity matches</CardTitle></CardHeader>
+          <CardHeader><CardTitle>{t('empty.title')}</CardTitle></CardHeader>
           <CardContent className="text-muted">
-            Widen the filter window or clear pc_id / job_id / exec_id / stdout / stderr / status to see older runs.
+            {t('empty.body')}
           </CardContent>
         </Card>
       ) : (
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>result_id</TableHead>
-              <TableHead>pc_id</TableHead>
-              <TableHead>job_id</TableHead>
-              <TableHead>exec_id</TableHead>
-              <TableHead>exit</TableHead>
-              <TableHead>started</TableHead>
-              <TableHead>finished</TableHead>
-              <TableHead>stdout / stderr</TableHead>
-              <TableHead>actions</TableHead>
+              <TableHead>{t('columns.resultId')}</TableHead>
+              <TableHead>{t('columns.pcId')}</TableHead>
+              <TableHead>{t('columns.jobId')}</TableHead>
+              <TableHead>{t('columns.execId')}</TableHead>
+              <TableHead>{t('columns.exit')}</TableHead>
+              <TableHead>{t('columns.started')}</TableHead>
+              <TableHead>{t('columns.finished')}</TableHead>
+              <TableHead>{t('columns.stdio')}</TableHead>
+              <TableHead>{t('columns.actions')}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -283,7 +291,7 @@ export function Activity() {
                   <Link
                     to={`/activity/${encodeURIComponent(r.result_id)}`}
                     className="text-accent hover:underline inline-flex items-center gap-1"
-                    title="Open detail page (Ctrl/⌘+click for new tab)"
+                    title={t('actions.openDetail')}
                   >
                     <code className="text-xs">{r.result_id.slice(0, ID_PREVIEW_LENGTH)}</code>
                     <ExternalLink className="size-3" />
@@ -307,7 +315,7 @@ export function Activity() {
                       instead of `0` or empty so operators see
                       lifecycle clearly. */}
                   {r.exit_code === null ? (
-                    <Badge variant="violet">running</Badge>
+                    <Badge variant="violet">{t('status.running')}</Badge>
                   ) : (
                     <Badge variant={r.exit_code === 0 ? 'success' : 'danger'}>
                       {r.exit_code}
@@ -320,7 +328,7 @@ export function Activity() {
                       running. fmtIsoLocal returns "—" for null
                       which is OK but ambiguous with "no data"; show
                       "running…" explicitly. */}
-                  {r.finished_at ? fmtIsoLocal(r.finished_at) : 'running…'}
+                  {r.finished_at ? fmtIsoLocal(r.finished_at) : t('status.runningEllipsis')}
                 </TableCell>
                 <TableCell className="max-w-md">
                   <StdioPreview resultId={r.result_id} stdout={r.stdout} stderr={r.stderr} />
@@ -340,18 +348,17 @@ export function Activity() {
                       disabled={pendingKill.has(r.job_id)}
                       onClick={async () => {
                         const ok = await confirm({
-                          title: `Kill this run (${r.job_id})?`,
-                          description:
-                            'The agent will terminate the running child process. The run will be recorded as killed.',
-                          confirmLabel: 'Kill',
+                          title: t('confirm.killTitle', { jobId: r.job_id }),
+                          description: t('confirm.killDescription'),
+                          confirmLabel: t('confirm.killLabel'),
                           danger: true,
                         });
                         if (ok) kill.mutate(r.job_id!);
                       }}
-                      title="Tell the agent to terminate this job's child process"
+                      title={t('actions.killTitle')}
                     >
                       <Skull className="size-3.5" />
-                      kill
+                      {t('actions.kill')}
                     </Button>
                   ) : (
                     <span className="text-muted text-xs">—</span>
@@ -362,7 +369,7 @@ export function Activity() {
           </TableBody>
         </Table>
       )}
-      {kill.error && <ErrorCard title="Kill failed" error={kill.error} />}
+      {kill.error && <ErrorCard title={t('killErrorTitle')} error={kill.error} />}
     </div>
   );
 }
@@ -392,6 +399,7 @@ function StdioPreview({
   stdout: string;
   stderr: string;
 }) {
+  const { t } = useTranslation('activity');
   const [expanded, setExpanded] = useState(false);
   const couldExpand = stdout.length > PREVIEW_CHARS || stderr.length > PREVIEW_CHARS;
   const { data, isFetching, error } = useQuery({
@@ -415,7 +423,7 @@ function StdioPreview({
             : 'text-xs whitespace-pre-wrap break-words bg-muted/5 p-2 rounded'
         }
       >
-        {stdoutBody || '(empty)'}
+        {stdoutBody || t('stdio.empty')}
       </pre>
       {(expanded ? stderrBody : stderr) && (
         <pre
@@ -437,22 +445,22 @@ function StdioPreview({
           {isFetching ? (
             <>
               <Loader2 className="size-3 animate-spin" />
-              loading…
+              {t('stdio.loading')}
             </>
           ) : expanded ? (
             <>
               <ChevronsUp className="size-3" />
-              collapse
+              {t('actions.collapse')}
             </>
           ) : (
             <>
               <ChevronsDown className="size-3" />
-              show more
+              {t('actions.showMore')}
             </>
           )}
         </button>
       )}
-      {error && <span className="text-xs text-danger">fetch failed: {String(error)}</span>}
+      {error && <span className="text-xs text-danger">{t('stdio.fetchFailed', { error: String(error) })}</span>}
     </div>
   );
 }

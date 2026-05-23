@@ -1,0 +1,42 @@
+{
+  "loading": "結果を読み込み中…",
+  "errors": {
+    "loadFailed": "結果を読み込めませんでした",
+    "notFound": "結果が見つかりません"
+  },
+  "backToActivity": "アクティビティに戻る",
+  "metadata": {
+    "title": "メタデータ"
+  },
+  "fields": {
+    "pcId": "pc_id",
+    "exitCode": "exit_code",
+    "jobId": "job_id",
+    "execId": "exec_id",
+    "requestId": "request_id",
+    "resultId": "result_id",
+    "version": "version",
+    "startedAt": "started_at",
+    "finishedAt": "finished_at"
+  },
+  "values": {
+    "running": "実行中",
+    "runningEllipsis": "実行中…",
+    "noJob": "— (アドホック実行、Job なし)",
+    "noExecId": "— (アドホック / v0.29 以前の行)",
+    "noVersion": "— (レガシー行または events.started なし)"
+  },
+  "stream": {
+    "stdout": "stdout",
+    "stderr": "stderr",
+    "empty": "空",
+    "char_one": "{{count}} 文字",
+    "char_other": "{{count}} 文字",
+    "emptyStdoutHint": "(stdout なし)",
+    "emptyStderrHint": "(stderr なし)",
+    "copy": "コピー",
+    "copied": "コピー済",
+    "copyTitle": "本文全体をクリップボードへコピー",
+    "nothingToCopy": "コピーする内容がありません"
+  }
+}

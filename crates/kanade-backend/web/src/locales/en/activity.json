@@ -1,1 +1,80 @@
-{}
+{
+  "title": "Activity",
+  "countBadge_one": "{{count}} shown",
+  "countBadge_other": "{{count}} shown",
+  "countBadgeFetching_one": "{{count}} shown…",
+  "countBadgeFetching_other": "{{count}} shown…",
+  "loading": "loading activity…",
+  "errorTitle": "Couldn't load activity",
+  "empty": {
+    "title": "No activity matches",
+    "body": "Widen the filter window or clear pc_id / job_id / exec_id / stdout / stderr / status to see older runs."
+  },
+  "filters": {
+    "pcId": "pc_id",
+    "jobId": "job_id",
+    "execId": "exec_id",
+    "stdout": "stdout",
+    "stderr": "stderr",
+    "status": "status",
+    "since": "since",
+    "limit": "limit",
+    "placeholders": {
+      "pcId": "regex — eg. ^PC001 or PC001",
+      "jobId": "regex — eg. ^job-foo",
+      "execId": "regex — eg. ^abc1234",
+      "stdout": "regex — eg. timeout|panic",
+      "stderr": "regex — eg. permission denied"
+    },
+    "statusOptions": {
+      "any": "(any)",
+      "running": "running (in flight)",
+      "success": "success (exit 0)",
+      "failure": "failure (exit ≠ 0)"
+    },
+    "sincePresets": {
+      "1h": "last 1h",
+      "24h": "last 24h",
+      "7d": "last 7d",
+      "30d": "last 30d",
+      "all": "all time"
+    }
+  },
+  "columns": {
+    "resultId": "result_id",
+    "pcId": "pc_id",
+    "jobId": "job_id",
+    "execId": "exec_id",
+    "exit": "exit",
+    "started": "started",
+    "finished": "finished",
+    "stdio": "stdout / stderr",
+    "actions": "actions"
+  },
+  "status": {
+    "running": "running",
+    "runningEllipsis": "running…"
+  },
+  "actions": {
+    "kill": "kill",
+    "killTitle": "Tell the agent to terminate this job's child process",
+    "showMore": "show more",
+    "collapse": "collapse",
+    "openDetail": "Open detail page (Ctrl/⌘+click for new tab)"
+  },
+  "confirm": {
+    "killTitle": "Kill this run ({{jobId}})?",
+    "killDescription": "The agent will terminate the running child process. The run will be recorded as killed.",
+    "killLabel": "Kill"
+  },
+  "toast": {
+    "killSuccess": "Kill signal sent to {{jobId}}",
+    "killFailure": "Kill failed: {{error}}"
+  },
+  "killErrorTitle": "Kill failed",
+  "stdio": {
+    "empty": "(empty)",
+    "loading": "loading…",
+    "fetchFailed": "fetch failed: {{error}}"
+  }
+}

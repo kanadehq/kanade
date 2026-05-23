@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { ArrowLeft, Check, Copy, Loader2 } from 'lucide-react';
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Link, useParams } from 'react-router-dom';
 
 import { ErrorCard } from '@/components/ErrorCard';
@@ -43,6 +44,7 @@ type ResultDetailRow = {
  * paste full output into an incident chat without manually selecting.
  */
 export function ResultDetail() {
+  const { t } = useTranslation('result-detail');
   const { resultId } = useParams<{ resultId: string }>();
   const { data, error, isLoading } = useQuery({
     queryKey: ['result', resultId],
@@ -54,12 +56,12 @@ export function ResultDetail() {
     return (
       <div className="flex items-center gap-2 text-muted">
         <Loader2 className="size-4 animate-spin" />
-        loading result…
+        {t('loading')}
       </div>
     );
   }
-  if (error) return <ErrorCard title="Couldn't load result" error={error} />;
-  if (!data) return <ErrorCard title="Result not found" error={new Error(`${resultId}`)} />;
+  if (error) return <ErrorCard title={t('errors.loadFailed')} error={error} />;
+  if (!data) return <ErrorCard title={t('errors.notFound')} error={new Error(`${resultId}`)} />;
 
   return (
     <div className="space-y-4">
@@ -67,7 +69,7 @@ export function ResultDetail() {
         <Button variant="ghost" size="sm" asChild>
           <Link to="/activity">
             <ArrowLeft className="size-3.5" />
-            back to activity
+            {t('backToActivity')}
           </Link>
         </Button>
         <h2 className="text-xl">
@@ -77,15 +79,15 @@ export function ResultDetail() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-sm">Metadata</CardTitle>
+          <CardTitle className="text-sm">{t('metadata.title')}</CardTitle>
         </CardHeader>
         <CardContent className="grid grid-cols-1 sm:grid-cols-2 gap-y-2 gap-x-6 text-sm">
-          <Field label="pc_id" value={<code>{data.pc_id}</code>} />
+          <Field label={t('fields.pcId')} value={<code>{data.pc_id}</code>} />
           <Field
-            label="exit_code"
+            label={t('fields.exitCode')}
             value={
               data.exit_code === null ? (
-                <Badge variant="violet">running</Badge>
+                <Badge variant="violet">{t('values.running')}</Badge>
               ) : (
                 <Badge variant={data.exit_code === 0 ? 'success' : 'danger'}>
                   {data.exit_code}
@@ -94,51 +96,51 @@ export function ResultDetail() {
             }
           />
           <Field
-            label="job_id"
+            label={t('fields.jobId')}
             value={
               data.job_id ? (
                 <code>{data.job_id}</code>
               ) : (
-                <span className="text-muted text-xs">— (ad-hoc run, no Job)</span>
+                <span className="text-muted text-xs">{t('values.noJob')}</span>
               )
             }
           />
           <Field
-            label="exec_id"
+            label={t('fields.execId')}
             value={
               data.exec_id ? (
                 <code className="text-xs">{data.exec_id}</code>
               ) : (
-                <span className="text-muted text-xs">— (ad-hoc / pre-v0.29 row)</span>
+                <span className="text-muted text-xs">{t('values.noExecId')}</span>
               )
             }
           />
-          <Field label="request_id" value={<code className="text-xs">{data.request_id}</code>} />
-          <Field label="result_id" value={<code className="text-xs">{data.result_id}</code>} />
+          <Field label={t('fields.requestId')} value={<code className="text-xs">{data.request_id}</code>} />
+          <Field label={t('fields.resultId')} value={<code className="text-xs">{data.result_id}</code>} />
           <Field
-            label="version"
+            label={t('fields.version')}
             value={
               data.version ? (
                 <code className="text-xs">{data.version}</code>
               ) : (
-                <span className="text-muted text-xs">— (legacy row or no events.started)</span>
+                <span className="text-muted text-xs">{t('values.noVersion')}</span>
               )
             }
           />
-          <Field label="started_at" value={<span className="text-muted text-xs">{fmtIsoLocal(data.started_at)}</span>} />
+          <Field label={t('fields.startedAt')} value={<span className="text-muted text-xs">{fmtIsoLocal(data.started_at)}</span>} />
           <Field
-            label="finished_at"
+            label={t('fields.finishedAt')}
             value={
               <span className="text-muted text-xs">
-                {data.finished_at ? fmtIsoLocal(data.finished_at) : 'running…'}
+                {data.finished_at ? fmtIsoLocal(data.finished_at) : t('values.runningEllipsis')}
               </span>
             }
           />
         </CardContent>
       </Card>
 
-      <StreamPane title="stdout" body={data.stdout} emptyHint="(no stdout)" />
-      <StreamPane title="stderr" body={data.stderr} emptyHint="(no stderr)" danger />
+      <StreamPane title={t('stream.stdout')} body={data.stdout} emptyHint={t('stream.emptyStdoutHint')} />
+      <StreamPane title={t('stream.stderr')} body={data.stderr} emptyHint={t('stream.emptyStderrHint')} danger />
     </div>
   );
 }
@@ -163,6 +165,7 @@ function StreamPane({
   emptyHint: string;
   danger?: boolean;
 }) {
+  const { t } = useTranslation('result-detail');
   const [copied, setCopied] = useState(false);
   const empty = body.length === 0;
 
@@ -184,7 +187,7 @@ function StreamPane({
         <CardTitle className="text-sm flex items-center gap-2">
           {title}
           <span className="text-muted text-xs font-normal">
-            ({empty ? 'empty' : `${body.length} char${body.length === 1 ? '' : 's'}`})
+            ({empty ? t('stream.empty') : t('stream.char', { count: body.length })})
           </span>
         </CardTitle>
         <Button
@@ -192,10 +195,10 @@ function StreamPane({
           size="sm"
           onClick={onCopy}
           disabled={empty}
-          title={empty ? 'Nothing to copy' : 'Copy full body to clipboard'}
+          title={empty ? t('stream.nothingToCopy') : t('stream.copyTitle')}
         >
           {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-          {copied ? 'copied' : 'copy'}
+          {copied ? t('stream.copied') : t('stream.copy')}
         </Button>
       </CardHeader>
       <CardContent>

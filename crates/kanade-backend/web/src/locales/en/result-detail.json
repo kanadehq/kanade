@@ -1,0 +1,42 @@
+{
+  "loading": "loading result…",
+  "errors": {
+    "loadFailed": "Couldn't load result",
+    "notFound": "Result not found"
+  },
+  "backToActivity": "back to activity",
+  "metadata": {
+    "title": "Metadata"
+  },
+  "fields": {
+    "pcId": "pc_id",
+    "exitCode": "exit_code",
+    "jobId": "job_id",
+    "execId": "exec_id",
+    "requestId": "request_id",
+    "resultId": "result_id",
+    "version": "version",
+    "startedAt": "started_at",
+    "finishedAt": "finished_at"
+  },
+  "values": {
+    "running": "running",
+    "runningEllipsis": "running…",
+    "noJob": "— (ad-hoc run, no Job)",
+    "noExecId": "— (ad-hoc / pre-v0.29 row)",
+    "noVersion": "— (legacy row or no events.started)"
+  },
+  "stream": {
+    "stdout": "stdout",
+    "stderr": "stderr",
+    "empty": "empty",
+    "char_one": "{{count}} char",
+    "char_other": "{{count}} chars",
+    "emptyStdoutHint": "(no stdout)",
+    "emptyStderrHint": "(no stderr)",
+    "copy": "copy",
+    "copied": "copied",
+    "copyTitle": "Copy full body to clipboard",
+    "nothingToCopy": "Nothing to copy"
+  }
+}
