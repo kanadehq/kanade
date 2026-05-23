@@ -1,1 +1,39 @@
-{}
+{
+  "title": "Agents",
+  "countBadge": "{{count}} known",
+  "loading": "loading agents…",
+  "errorTitle": "Couldn't load agents",
+  "empty": {
+    "title": "No agents yet",
+    "body": "Boot a kanade-agent service and it'll show up here within one heartbeat."
+  },
+  "intro": "Baseline liveness only — open <inventoryLink>Inventory</inventoryLink> (or click <strong>facts</strong>) for richer per-host details collected by operator-defined probes.",
+  "columns": {
+    "pcId": "pc_id",
+    "hostname": "hostname",
+    "os": "os",
+    "agent": "agent",
+    "lastHeartbeat": "last heartbeat",
+    "cpu": "cpu",
+    "rss": "rss",
+    "rd": "rd",
+    "wr": "wr",
+    "actions": "actions"
+  },
+  "columnTitles": {
+    "cpu": "Agent process CPU % (one core = 100)",
+    "rss": "Agent process resident set size",
+    "rd": "Disk bytes read since process start",
+    "wr": "Disk bytes written since process start"
+  },
+  "actions": {
+    "facts": "facts",
+    "ping": "ping",
+    "groups": "groups",
+    "effective": "effective"
+  },
+  "groupsPrompt": "Comma-separated group names for {{pcId}} (current: {{current}})",
+  "groupsNone": "(none)",
+  "groupsCancelled": "(cancelled)",
+  "groupsLoading": "loading…"
+}

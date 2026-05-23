@@ -1,1 +1,9 @@
-{}
+{
+  "title": "奏 kanade",
+  "subtitle": "Sign in with your bearer token",
+  "tokenLabel": "bearer token",
+  "tokenPlaceholder": "paste token here",
+  "submit": "Sign in",
+  "iconAlt": "kanade",
+  "hint": "The token matches whatever the backend was deployed with — either <code>StaticToken</code> (passed to <code>deploy-backend.ps1</code>) or a signed JWT (<code>aud=kanade</code>). Stored in <code>localStorage</code>; log out from the nav to clear."
+}

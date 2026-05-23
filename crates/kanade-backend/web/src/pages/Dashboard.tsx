@@ -11,6 +11,7 @@ import {
   Wifi,
   XCircle,
 } from 'lucide-react';
+import { Trans, useTranslation } from 'react-i18next';
 
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 
@@ -87,6 +88,13 @@ function fmtRelative(iso: string | null): string {
 // an agent dropping offline within ~2 min instead of ~25h.
 const ACTIVE_THRESHOLD_MS = 2 * 60 * 1000;
 
+// React Query refetch cadence shared by every panel on this page,
+// and the same value the i18n strings interpolate as `{{seconds}}` —
+// keeps the displayed "auto-refresh: Ns" copy in lockstep with the
+// actual polling interval. Bump in one place.
+const REFRESH_INTERVAL_MS = 30_000;
+const REFRESH_INTERVAL_SECONDS = REFRESH_INTERVAL_MS / 1000;
+
 function StatBlock({
   label,
   value,
@@ -116,25 +124,26 @@ function StatBlock({
 }
 
 export function Dashboard() {
+  const { t } = useTranslation('dashboard');
   const agentsQ = useQuery({
     queryKey: ['agents'],
     queryFn: () => apiFetch<AgentRow[]>('/api/agents'),
-    refetchInterval: 30_000,
+    refetchInterval: REFRESH_INTERVAL_MS,
   });
   const jsQ = useQuery({
     queryKey: ['jetstream-status'],
     queryFn: () => apiFetch<JetstreamSnapshot>('/api/jetstream/status'),
-    refetchInterval: 30_000,
+    refetchInterval: REFRESH_INTERVAL_MS,
   });
   const resultsQ = useQuery({
     queryKey: ['results-recent'],
     queryFn: () => apiFetch<ResultRow[]>('/api/results?limit=8'),
-    refetchInterval: 30_000,
+    refetchInterval: REFRESH_INTERVAL_MS,
   });
   const auditQ = useQuery({
     queryKey: ['audit-recent'],
     queryFn: () => apiFetch<AuditRow[]>('/api/audit?limit=8'),
-    refetchInterval: 30_000,
+    refetchInterval: REFRESH_INTERVAL_MS,
   });
   // /api/health/fleet returns 503 when degraded so we have to peel
   // the body off the ApiError to render the rollup either way.
@@ -150,7 +159,7 @@ export function Dashboard() {
         throw e;
       }
     },
-    refetchInterval: 30_000,
+    refetchInterval: REFRESH_INTERVAL_MS,
   });
   const scanDurQ = useQuery({
     queryKey: ['scan-durations'],
@@ -177,9 +186,9 @@ export function Dashboard() {
   const healthMeta = health
     ? (
         {
-          ok:       { icon: CheckCircle2,  tone: 'success' as const, label: 'all green',     hint: 'agents fresh, JetStream healthy' },
-          unknown:  { icon: HelpCircle,    tone: 'default' as const, label: 'unknown',       hint: 'no agents reporting yet' },
-          degraded: { icon: AlertTriangle, tone: 'danger'  as const, label: 'degraded',      hint: 'fleet attention needed' },
+          ok:       { icon: CheckCircle2,  tone: 'success' as const, statusKey: 'ok' as const },
+          unknown:  { icon: HelpCircle,    tone: 'default' as const, statusKey: 'unknown' as const },
+          degraded: { icon: AlertTriangle, tone: 'danger'  as const, statusKey: 'degraded' as const },
         }
       )[health.status]
     : null;
@@ -187,8 +196,10 @@ export function Dashboard() {
   return (
     <div className="space-y-6">
       <div className="flex items-baseline justify-between">
-        <h2 className="text-2xl">Dashboard</h2>
-        <span className="text-xs text-muted">auto-refresh: 30s</span>
+        <h2 className="text-2xl">{t('title')}</h2>
+        <span className="text-xs text-muted">
+          {t('autoRefresh', { seconds: REFRESH_INTERVAL_SECONDS })}
+        </span>
       </div>
 
       {health && healthMeta && (
@@ -203,7 +214,7 @@ export function Dashboard() {
                   healthMeta.tone === 'default' && 'text-muted',
                 )}
               />
-              Fleet health
+              {t('fleetHealth.title')}
               <Badge
                 variant={
                   healthMeta.tone === 'success' ? 'success'
@@ -211,41 +222,50 @@ export function Dashboard() {
                   : 'amber'
                 }
               >
-                {healthMeta.label}
+                {t(`fleetHealth.status.${healthMeta.statusKey}.label`)}
               </Badge>
             </CardTitle>
             <CardDescription>
-              From <code>/api/health/fleet</code> · {healthMeta.hint}
+              <Trans
+                ns="dashboard"
+                i18nKey="fleetHealth.description"
+                values={{ hint: t(`fleetHealth.status.${healthMeta.statusKey}.hint`) }}
+                components={{ code: <code /> }}
+              />
             </CardDescription>
           </CardHeader>
           <CardContent className="grid grid-cols-2 md:grid-cols-4 gap-6">
             <StatBlock
-              label="agents"
+              label={t('fleetHealth.stats.agents.label')}
               value={`${health.agents.active} / ${health.agents.known}`}
-              hint="active / known"
+              hint={t('fleetHealth.stats.agents.hint')}
               tone={health.agents.stale > 0 ? 'danger' : 'default'}
             />
             <StatBlock
-              label="stale agents"
+              label={t('fleetHealth.stats.staleAgents.label')}
               value={health.agents.stale}
               tone={health.agents.stale > 0 ? 'danger' : 'success'}
-              hint="last inventory ≥ 25h"
+              hint={t('fleetHealth.stats.staleAgents.hint')}
             />
             <StatBlock
-              label="JetStream"
+              label={t('fleetHealth.stats.jetstream.label')}
               value={`${health.jetstream.healthy} / ${health.jetstream.total}`}
               tone={health.jetstream.all_ok ? 'success' : 'danger'}
               hint={
                 health.jetstream.missing.length > 0
-                  ? `missing: ${health.jetstream.missing.join(', ')}`
-                  : 'streams + KV + obj store'
+                  ? t('fleetHealth.stats.jetstream.hintMissing', {
+                      names: health.jetstream.missing.join(', '),
+                    })
+                  : t('fleetHealth.stats.jetstream.hintHealthy')
               }
             />
             <StatBlock
-              label={`failures / ${health.recent_results.window_hours}h`}
+              label={t('fleetHealth.stats.failures.label', {
+                hours: health.recent_results.window_hours,
+              })}
               value={`${health.recent_results.failed} / ${health.recent_results.total}`}
               tone={health.recent_results.failed > 0 ? 'danger' : 'default'}
-              hint="exit_code ≠ 0 / runs"
+              hint={t('fleetHealth.stats.failures.hint')}
             />
           </CardContent>
         </Card>
@@ -256,17 +276,23 @@ export function Dashboard() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <Users className="size-5 text-violet" />
-              Fleet
+              {t('fleet.title')}
             </CardTitle>
-            <CardDescription>Snapshot from <code>/api/agents</code></CardDescription>
+            <CardDescription>
+              <Trans
+                ns="dashboard"
+                i18nKey="fleet.description"
+                components={{ code: <code /> }}
+              />
+            </CardDescription>
           </CardHeader>
           <CardContent className="flex gap-8 items-end">
-            <StatBlock label="known" value={agents.length} />
+            <StatBlock label={t('fleet.stats.known')} value={agents.length} />
             <StatBlock
-              label="active (heartbeat &lt; 2m)"
+              label={t('fleet.stats.activeLabel')}
               value={active}
               tone={active === agents.length && agents.length > 0 ? 'success' : 'default'}
-              hint="based on last heartbeat (~30s cadence)"
+              hint={t('fleet.stats.activeHint')}
             />
           </CardContent>
         </Card>
@@ -275,24 +301,30 @@ export function Dashboard() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <Server className="size-5 text-violet" />
-              JetStream
+              {t('jetstream.title')}
             </CardTitle>
-            <CardDescription>From <code>/api/jetstream/status</code></CardDescription>
+            <CardDescription>
+              <Trans
+                ns="dashboard"
+                i18nKey="jetstream.description"
+                components={{ code: <code /> }}
+              />
+            </CardDescription>
           </CardHeader>
           <CardContent className="flex gap-8 items-end">
             <StatBlock
-              label="resources"
+              label={t('jetstream.resources.label')}
               value={js ? `${jsOk} / ${jsRows.length}` : '—'}
               tone={jsAllOk ? 'success' : js ? 'danger' : 'default'}
-              hint="streams + KV + object stores"
+              hint={t('jetstream.resources.hint')}
             />
             {js && (
               <div className="flex flex-col gap-1">
                 {jsAllOk ? (
-                  <Badge variant="success">all healthy</Badge>
+                  <Badge variant="success">{t('jetstream.allHealthy')}</Badge>
                 ) : (
                   <Badge variant="danger">
-                    {jsRows.length - jsOk} missing
+                    {t('jetstream.missing', { count: jsRows.length - jsOk })}
                   </Badge>
                 )}
               </div>
@@ -304,10 +336,12 @@ export function Dashboard() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <Activity className="size-5 text-violet" />
-              Recent results
+              {t('recentResults.title')}
             </CardTitle>
             <CardDescription>
-              Last {recentTotal} · {recentFail > 0 ? `${recentFail} failed` : 'all green'}
+              {recentFail > 0
+                ? t('recentResults.descriptionFailed', { count: recentTotal, failed: recentFail })
+                : t('recentResults.descriptionAllGreen', { count: recentTotal })}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-2">
@@ -325,7 +359,7 @@ export function Dashboard() {
               </div>
             ))}
             {(resultsQ.data ?? []).length === 0 && (
-              <div className="text-muted text-sm">No results yet.</div>
+              <div className="text-muted text-sm">{t('recentResults.empty')}</div>
             )}
           </CardContent>
         </Card>
@@ -334,9 +368,9 @@ export function Dashboard() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <Clock className="size-5 text-violet" />
-              Recent activity
+              {t('recentActivity.title')}
             </CardTitle>
-            <CardDescription>Audit feed</CardDescription>
+            <CardDescription>{t('recentActivity.description')}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-2">
             {(auditQ.data ?? []).map((e) => (
@@ -355,7 +389,7 @@ export function Dashboard() {
               </div>
             ))}
             {(auditQ.data ?? []).length === 0 && (
-              <div className="text-muted text-sm">No audit events yet.</div>
+              <div className="text-muted text-sm">{t('recentActivity.empty')}</div>
             )}
           </CardContent>
         </Card>
@@ -370,34 +404,37 @@ export function Dashboard() {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Gauge className="size-5 text-violet" />
-            Scan duration (last 24 h, slowest first)
+            {t('scanDuration.title')}
           </CardTitle>
           <CardDescription>
-            Per-job execution time from <code>execution_results.{`{started,finished}_at`}</code>.
-            Use to spot a probe that's gotten unexpectedly slow without checking individual rows.
+            <Trans
+              ns="dashboard"
+              i18nKey="scanDuration.description"
+              components={{ code: <code /> }}
+            />
           </CardDescription>
         </CardHeader>
         <CardContent>
           {scanDurQ.isLoading ? (
-            <div className="text-muted text-sm">Loading…</div>
+            <div className="text-muted text-sm">{t('actions.loading', { ns: 'common' })}</div>
           ) : scanDurQ.error ? (
             <div className="text-danger text-sm">
-              Couldn't load: {String(scanDurQ.error)}
+              {t('scanDuration.error', { error: String(scanDurQ.error) })}
             </div>
           ) : (scanDurQ.data ?? []).length === 0 ? (
             <div className="text-muted text-sm">
-              No finished executions in the last 24 h.
+              {t('scanDuration.empty')}
             </div>
           ) : (
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>job_id</TableHead>
-                  <TableHead className="text-right">count</TableHead>
-                  <TableHead className="text-right">p50</TableHead>
-                  <TableHead className="text-right">p95</TableHead>
-                  <TableHead className="text-right">p99</TableHead>
-                  <TableHead className="text-right">max</TableHead>
+                  <TableHead>{t('scanDuration.table.jobId')}</TableHead>
+                  <TableHead className="text-right">{t('scanDuration.table.count')}</TableHead>
+                  <TableHead className="text-right">{t('scanDuration.table.p50')}</TableHead>
+                  <TableHead className="text-right">{t('scanDuration.table.p95')}</TableHead>
+                  <TableHead className="text-right">{t('scanDuration.table.p99')}</TableHead>
+                  <TableHead className="text-right">{t('scanDuration.table.max')}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -423,32 +460,40 @@ export function Dashboard() {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Wifi className="size-5 text-violet" />
-            Resource detail
+            {t('resourceDetail.title')}
           </CardTitle>
         </CardHeader>
         <CardContent>
           {js ? (
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
-              {(['streams', 'kv_buckets', 'object_stores'] as const).map((kind) => (
-                <div key={kind}>
-                  <div className="text-xs uppercase tracking-wide text-muted mb-1">{kind.replace('_', ' ')}</div>
-                  <ul className="space-y-1">
-                    {js[kind].map((r) => (
-                      <li key={r.name} className="flex items-center gap-2">
-                        {r.exists ? (
-                          <CheckCircle2 className="size-3.5 text-success" />
-                        ) : (
-                          <XCircle className="size-3.5 text-danger" />
-                        )}
-                        <code className="text-xs">{r.name}</code>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ))}
+              {(['streams', 'kv_buckets', 'object_stores'] as const).map((kind) => {
+                const kindKey =
+                  kind === 'streams' ? 'streams'
+                  : kind === 'kv_buckets' ? 'kvBuckets'
+                  : 'objectStores';
+                return (
+                  <div key={kind}>
+                    <div className="text-xs uppercase tracking-wide text-muted mb-1">
+                      {t(`resourceDetail.kind.${kindKey}`)}
+                    </div>
+                    <ul className="space-y-1">
+                      {js[kind].map((r) => (
+                        <li key={r.name} className="flex items-center gap-2">
+                          {r.exists ? (
+                            <CheckCircle2 className="size-3.5 text-success" />
+                          ) : (
+                            <XCircle className="size-3.5 text-danger" />
+                          )}
+                          <code className="text-xs">{r.name}</code>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                );
+              })}
             </div>
           ) : (
-            <div className="text-muted text-sm">Loading…</div>
+            <div className="text-muted text-sm">{t('actions.loading', { ns: 'common' })}</div>
           )}
         </CardContent>
       </Card>
