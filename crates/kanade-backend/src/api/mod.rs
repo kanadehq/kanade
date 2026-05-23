@@ -109,6 +109,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/schemas/schedule.json", get(schemas::schedule_schema))
         .route("/api/jetstream/status", get(jetstream_status::status))
         .route("/api/health/fleet", get(health::fleet))
+        // v0.37 / agent perf: per-job duration aggregates
+        // (p50 / p95 / p99) over a recent window. Pure SQL over the
+        // existing execution_results.{started,finished}_at — no
+        // agent-side instrumentation needed.
+        .route("/api/health/scan_durations", get(health::scan_durations))
         .route("/api/inventory/jobs", get(inventory::list_jobs))
         .route(
             "/api/inventory/by-job/{manifest_id}",
