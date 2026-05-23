@@ -1,1 +1,9 @@
-{}
+{
+  "title": "奏 kanade",
+  "subtitle": "ベアラートークンでサインイン",
+  "tokenLabel": "ベアラートークン",
+  "tokenPlaceholder": "トークンを貼り付け",
+  "submit": "サインイン",
+  "iconAlt": "kanade",
+  "hint": "バックエンドのデプロイ時に設定されたトークン (<code>deploy-backend.ps1</code> に渡した <code>StaticToken</code>、 または <code>aud=kanade</code> の署名付き JWT) を入力します。 <code>localStorage</code> に保存され、 ナビからログアウトで削除されます。"
+}

@@ -1,1 +1,94 @@
-{}
+{
+  "title": "ダッシュボード",
+  "autoRefresh": "自動更新: {{seconds}}秒",
+  "fleetHealth": {
+    "title": "フリートの健康状態",
+    "description": "<code>/api/health/fleet</code> より · {{hint}}",
+    "status": {
+      "ok": {
+        "label": "正常",
+        "hint": "エージェント新鮮、JetStream 正常"
+      },
+      "unknown": {
+        "label": "不明",
+        "hint": "エージェントからの報告なし"
+      },
+      "degraded": {
+        "label": "劣化",
+        "hint": "フリートに対応が必要です"
+      }
+    },
+    "stats": {
+      "agents": {
+        "label": "エージェント",
+        "hint": "アクティブ / 登録済"
+      },
+      "staleAgents": {
+        "label": "未応答エージェント",
+        "hint": "最終インベントリ 25時間以上前"
+      },
+      "jetstream": {
+        "label": "JetStream",
+        "hintHealthy": "ストリーム + KV + オブジェクトストア",
+        "hintMissing": "欠落: {{names}}"
+      },
+      "failures": {
+        "label": "失敗 / {{hours}}時間",
+        "hint": "exit_code ≠ 0 / 実行数"
+      }
+    }
+  },
+  "fleet": {
+    "title": "フリート",
+    "description": "<code>/api/agents</code> のスナップショット",
+    "stats": {
+      "known": "登録済",
+      "activeLabel": "アクティブ (ハートビート < 2分)",
+      "activeHint": "直近ハートビート基準 (約30秒間隔)"
+    }
+  },
+  "jetstream": {
+    "title": "JetStream",
+    "description": "<code>/api/jetstream/status</code> より",
+    "resources": {
+      "label": "リソース",
+      "hint": "ストリーム + KV + オブジェクトストア"
+    },
+    "allHealthy": "すべて正常",
+    "missing_one": "{{count}} 件欠落",
+    "missing_other": "{{count}} 件欠落"
+  },
+  "recentResults": {
+    "title": "最近の結果",
+    "descriptionAllGreen": "直近 {{count}} 件 · すべて正常",
+    "descriptionFailed": "直近 {{count}} 件 · {{failed}} 件失敗",
+    "empty": "結果はまだありません。"
+  },
+  "recentActivity": {
+    "title": "最近のアクティビティ",
+    "description": "監査フィード",
+    "empty": "監査イベントはまだありません。"
+  },
+  "scanDuration": {
+    "title": "スキャン所要時間 (直近 24時間、遅い順)",
+    "description": "<code>execution_results.{started,finished}_at</code> から算出したジョブ別実行時間。個別の行を確認しなくても、急に遅くなったプローブを発見できます。",
+    "error": "読み込めませんでした: {{error}}",
+    "empty": "直近 24時間に完了した実行はありません。",
+    "table": {
+      "jobId": "job_id",
+      "count": "件数",
+      "p50": "p50",
+      "p95": "p95",
+      "p99": "p99",
+      "max": "最大"
+    }
+  },
+  "resourceDetail": {
+    "title": "リソース詳細",
+    "kind": {
+      "streams": "ストリーム",
+      "kvBuckets": "KV バケット",
+      "objectStores": "オブジェクトストア"
+    }
+  }
+}

@@ -1,1 +1,94 @@
-{}
+{
+  "title": "Dashboard",
+  "autoRefresh": "auto-refresh: {{seconds}}s",
+  "fleetHealth": {
+    "title": "Fleet health",
+    "description": "From <code>/api/health/fleet</code> · {{hint}}",
+    "status": {
+      "ok": {
+        "label": "all green",
+        "hint": "agents fresh, JetStream healthy"
+      },
+      "unknown": {
+        "label": "unknown",
+        "hint": "no agents reporting yet"
+      },
+      "degraded": {
+        "label": "degraded",
+        "hint": "fleet attention needed"
+      }
+    },
+    "stats": {
+      "agents": {
+        "label": "agents",
+        "hint": "active / known"
+      },
+      "staleAgents": {
+        "label": "stale agents",
+        "hint": "last inventory ≥ 25h"
+      },
+      "jetstream": {
+        "label": "JetStream",
+        "hintHealthy": "streams + KV + obj store",
+        "hintMissing": "missing: {{names}}"
+      },
+      "failures": {
+        "label": "failures / {{hours}}h",
+        "hint": "exit_code ≠ 0 / runs"
+      }
+    }
+  },
+  "fleet": {
+    "title": "Fleet",
+    "description": "Snapshot from <code>/api/agents</code>",
+    "stats": {
+      "known": "known",
+      "activeLabel": "active (heartbeat < 2m)",
+      "activeHint": "based on last heartbeat (~30s cadence)"
+    }
+  },
+  "jetstream": {
+    "title": "JetStream",
+    "description": "From <code>/api/jetstream/status</code>",
+    "resources": {
+      "label": "resources",
+      "hint": "streams + KV + object stores"
+    },
+    "allHealthy": "all healthy",
+    "missing_one": "{{count}} missing",
+    "missing_other": "{{count}} missing"
+  },
+  "recentResults": {
+    "title": "Recent results",
+    "descriptionAllGreen": "Last {{count}} · all green",
+    "descriptionFailed": "Last {{count}} · {{failed}} failed",
+    "empty": "No results yet."
+  },
+  "recentActivity": {
+    "title": "Recent activity",
+    "description": "Audit feed",
+    "empty": "No audit events yet."
+  },
+  "scanDuration": {
+    "title": "Scan duration (last 24 h, slowest first)",
+    "description": "Per-job execution time from <code>execution_results.{started,finished}_at</code>. Use to spot a probe that's gotten unexpectedly slow without checking individual rows.",
+    "error": "Couldn't load: {{error}}",
+    "empty": "No finished executions in the last 24 h.",
+    "table": {
+      "jobId": "job_id",
+      "count": "count",
+      "p50": "p50",
+      "p95": "p95",
+      "p99": "p99",
+      "max": "max"
+    }
+  },
+  "resourceDetail": {
+    "title": "Resource detail",
+    "kind": {
+      "streams": "streams",
+      "kvBuckets": "kv buckets",
+      "objectStores": "object stores"
+    }
+  }
+}

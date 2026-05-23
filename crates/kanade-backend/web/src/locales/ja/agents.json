@@ -1,1 +1,39 @@
-{}
+{
+  "title": "エージェント",
+  "countBadge": "{{count}} 台",
+  "loading": "エージェントを読み込み中…",
+  "errorTitle": "エージェントを読み込めませんでした",
+  "empty": {
+    "title": "エージェントがまだいません",
+    "body": "kanade-agent サービスを起動すると、最初のハートビートでここに表示されます。"
+  },
+  "intro": "ここでは死活状況のみ表示します。 ホストごとの詳細は <inventoryLink>インベントリ</inventoryLink> (または <strong>facts</strong> ボタン) から、 オペレーター定義のプローブで収集した情報を確認してください。",
+  "columns": {
+    "pcId": "pc_id",
+    "hostname": "ホスト名",
+    "os": "OS",
+    "agent": "エージェント",
+    "lastHeartbeat": "最終ハートビート",
+    "cpu": "CPU",
+    "rss": "RSS",
+    "rd": "読込",
+    "wr": "書込",
+    "actions": "操作"
+  },
+  "columnTitles": {
+    "cpu": "エージェントプロセスの CPU % (1 コア = 100)",
+    "rss": "エージェントプロセスの常駐セットサイズ",
+    "rd": "プロセス開始からのディスク読込バイト数",
+    "wr": "プロセス開始からのディスク書込バイト数"
+  },
+  "actions": {
+    "facts": "facts",
+    "ping": "ping",
+    "groups": "グループ",
+    "effective": "有効設定"
+  },
+  "groupsPrompt": "{{pcId}} のグループ名 (カンマ区切り、 現在: {{current}})",
+  "groupsNone": "(なし)",
+  "groupsCancelled": "(キャンセル)",
+  "groupsLoading": "読み込み中…"
+}
