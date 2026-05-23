@@ -9,15 +9,14 @@
 //!
 //! ## Why `#[ignore]`?
 //!
-//! `nats-server` isn't installed in the workspace's CI runners
-//! yet (see #165 for the follow-up). Without the binary, these
-//! tests would fail noisily on every default `cargo test` invocation
-//! and break the green/red signal. The `#[ignore]` gate keeps the
-//! suite out of the default run; the file-level
-//! `skip_if_no_nats_server!` macro turns a missing binary into a
-//! clean "skipping" log so the manual `--ignored` invocation on a
-//! fresh checkout doesn't panic with a confusing process-not-found
-//! error.
+//! The dedicated `Integration` workflow (`.github/workflows/integration.yml`)
+//! installs `nats-server` per runner and opts in via `-- --ignored`.
+//! The local `cargo test` / `cargo make check` paths skip these
+//! tests so they stay fast on machines without `nats-server`. The
+//! file-level `skip_if_no_nats_server!` macro turns a missing
+//! binary into a clean "skipping" log so the manual `--ignored`
+//! invocation on a fresh checkout doesn't panic with a confusing
+//! process-not-found error.
 //!
 //! Run with:
 //!

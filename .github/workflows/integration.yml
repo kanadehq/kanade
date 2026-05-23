@@ -1,0 +1,101 @@
+# Offline-boot regression coverage from #141 (closes #165).
+#
+# Lives in its own workflow file (not the kata-managed ci.yml) so a
+# future `kata apply` from the upstream preset doesn't clobber the
+# integration job. Triggers match ci.yml — push to main + every PR
+# + manual dispatch — so the agent's offline-tolerant boot path is
+# verified end-to-end on every change.
+
+name: Integration
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Pinned so a `nats-server` release with a behaviour change can't
+  # silently break the offline_boot suite. Bump when intentionally
+  # upgrading.
+  NATS_SERVER_VERSION: "2.14.1"
+
+jobs:
+  offline-boot:
+    # Spawns a real `nats-server` + the agent binary per test;
+    # verifies the agent (a) survives broker-unavailable boot,
+    # (b) catches up when broker appears, (c) reconnects after
+    # broker restart. The suite is `#[ignore]`-gated so the main
+    # `cargo test` in ci.yml stays fast for runners without
+    # `nats-server`; this job explicitly opts in via `-- --ignored`.
+    name: offline-boot (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Same save-only-on-main policy as ci.yml's other matrix
+          # jobs — see ci.yml:30-35 for the windows tar.exe rationale.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install nats-server (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          archive="nats-server-v${NATS_SERVER_VERSION}-linux-amd64"
+          curl -fsSL -o ns.tar.gz \
+            "https://github.com/nats-io/nats-server/releases/download/v${NATS_SERVER_VERSION}/${archive}.tar.gz"
+          tar -xzf ns.tar.gz
+          # Linux/macOS install into /usr/local/bin which is on
+          # PATH for the default bash shell on GitHub-hosted runners
+          # (no GITHUB_PATH append needed); the Windows step below
+          # has to opt in explicitly via $env:GITHUB_PATH.
+          sudo mv "${archive}/nats-server" /usr/local/bin/
+          nats-server --version
+
+      - name: Install nats-server (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          # macos-latest is arm64 (macOS 14+ runners). If GitHub ever
+          # pivots back to Intel-only macos-latest, switch the arch
+          # suffix to amd64.
+          archive="nats-server-v${NATS_SERVER_VERSION}-darwin-arm64"
+          curl -fsSL -o ns.tar.gz \
+            "https://github.com/nats-io/nats-server/releases/download/v${NATS_SERVER_VERSION}/${archive}.tar.gz"
+          tar -xzf ns.tar.gz
+          sudo mv "${archive}/nats-server" /usr/local/bin/
+          nats-server --version
+
+      - name: Install nats-server (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Match the Linux/macOS `set -euo pipefail` strictness so a
+          # 404 on a renamed release archive surfaces with a clean
+          # "download failed" instead of a confusing "Expand-Archive:
+          # path does not exist" downstream.
+          $ErrorActionPreference = 'Stop'
+          $archive = "nats-server-v$env:NATS_SERVER_VERSION-windows-amd64"
+          $url = "https://github.com/nats-io/nats-server/releases/download/v$env:NATS_SERVER_VERSION/$archive.zip"
+          Invoke-WebRequest -Uri $url -OutFile ns.zip
+          Expand-Archive ns.zip -DestinationPath .
+          $bin = Join-Path $PWD $archive
+          # Append to GITHUB_PATH so the harness's
+          # `which("nats-server")` probe finds the binary.
+          Add-Content -Path $env:GITHUB_PATH -Value $bin
+          & "$bin\nats-server.exe" --version
+
+      - name: Offline-boot integration tests
+        run: cargo test -p kanade-agent --test offline_boot -- --ignored
