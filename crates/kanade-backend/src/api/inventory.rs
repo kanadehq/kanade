@@ -18,7 +18,7 @@ use futures::StreamExt;
 use kanade_shared::kv::BUCKET_JOBS;
 use kanade_shared::manifest::{DisplayField, ExplodeSpec, Manifest};
 use serde::Serialize;
-use sqlx::Row;
+use sqlx::{AssertSqlSafe, Row};
 use tracing::warn;
 
 use crate::projector::explode::validate_ident;
@@ -335,7 +335,7 @@ pub async fn search(
         " ORDER BY pc_id, collected_at DESC LIMIT {limit} OFFSET {offset}"
     ));
 
-    let mut q = sqlx::query(&sql);
+    let mut q = sqlx::query(AssertSqlSafe(sql));
     for b in &binds {
         q = q.bind(b);
     }

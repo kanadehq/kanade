@@ -20,7 +20,7 @@
 use anyhow::Result;
 use kanade_shared::manifest::ExplodeSpec;
 use serde_json::Value as JsonValue;
-use sqlx::{Sqlite, Transaction};
+use sqlx::{AssertSqlSafe, Sqlite, Transaction};
 use std::collections::HashMap;
 
 /// One change event ready to insert into `inventory_history`.
@@ -74,7 +74,7 @@ pub async fn diff_explode_rows(
         select_cols.join(", "),
         spec.table,
     );
-    let prior_rows: Vec<sqlx::sqlite::SqliteRow> = sqlx::query(&prior_sql)
+    let prior_rows: Vec<sqlx::sqlite::SqliteRow> = sqlx::query(AssertSqlSafe(prior_sql))
         .bind(pc_id)
         .bind(job_id)
         .fetch_all(&mut **tx)
