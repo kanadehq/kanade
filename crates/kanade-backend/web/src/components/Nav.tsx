@@ -23,7 +23,7 @@ const groups: { label: string; links: { to: string; label: string }[] }[] = [
     links: [
       { to: '/agents', label: 'Agents' },
       { to: '/inventory', label: 'Inventory' },
-      { to: '/software', label: 'Software' },
+      { to: '/inventory/search', label: 'Search' },
       { to: '/activity', label: 'Activity' },
       { to: '/audit', label: 'Audit' },
       { to: '/logs', label: 'Logs' },

@@ -21,7 +21,7 @@ import { ResultDetail } from '@/pages/ResultDetail';
 import { Rollout } from '@/pages/Rollout';
 import { Run } from '@/pages/Run';
 import { Schedules } from '@/pages/Schedules';
-import { Software } from '@/pages/Software';
+import { InventorySearch } from '@/pages/Search';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -72,7 +72,7 @@ export default function App() {
               <Route path="/audit" element={<Audit />} />
               <Route path="/logs" element={<Logs />} />
               <Route path="/inventory" element={<Inventory />} />
-              <Route path="/software" element={<Software />} />
+              <Route path="/inventory/search" element={<InventorySearch />} />
               <Route path="/jobs" element={<Jobs />} />
               <Route path="/schedules" element={<Schedules />} />
               <Route path="/exec" element={<Exec />} />

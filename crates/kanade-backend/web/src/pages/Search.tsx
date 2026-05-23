@@ -97,10 +97,16 @@ function formatCell(v: unknown): string {
   return JSON.stringify(v);
 }
 
-/** v0.35 / #87: fleet-level Software / cross-PC search page. Drives
+/** v0.35 / #87: cross-PC inventory search page. Drives
  *  `GET /api/inventory/{manifest_id}/search/{field}` programmatically
- *  so operators don't have to know the Django-style URL syntax. */
-export function Software() {
+ *  so operators don't have to know the Django-style URL syntax.
+ *
+ *  Originally named `Software` because the motivating use case was
+ *  "find PCs with X app installed", but `explode:` manifests can
+ *  flatten any array (disks / network adapters / services / …) so
+ *  the page covers fleet-wide inventory search in general — renamed
+ *  to match. */
+export function InventorySearch() {
   const jobsQ = useQuery({
     queryKey: ['inventory-jobs'],
     queryFn: () => apiFetch<InventoryJob[]>('/api/inventory/jobs'),
@@ -222,7 +228,7 @@ export function Software() {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Search className="size-5" />
-            Software / fleet search
+            Inventory search
           </CardTitle>
           <CardDescription>
             Cross-PC search across any inventory manifest's <code>explode</code> field
