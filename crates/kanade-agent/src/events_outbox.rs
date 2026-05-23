@@ -30,6 +30,12 @@ use tracing::{debug, info, warn};
 
 const DRAIN_INTERVAL: Duration = Duration::from_secs(1);
 
+/// Hard upper bound on how long we'll wait for a single publish's
+/// PubAck before giving up on that file for this drain iteration.
+/// Matches `outbox::ACK_TIMEOUT`; see that constant's doc for the
+/// rationale (#139).
+const ACK_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Atomically persist one `EventStarted` to `events_outbox_dir`.
 /// Filename is `<result_id>.json` — guaranteed unique per (exec,
 /// pc) run because the agent mints `result_id` once per
@@ -146,7 +152,14 @@ async fn publish_one(js: &async_nats::jetstream::Context, path: &Path) -> Result
         .publish(subj.clone(), bytes.clone().into())
         .await
         .with_context(|| format!("publish {subj}"))?;
-    let _ack = ack_future.await.with_context(|| format!("ack {subj}"))?;
+    // Bounded ack wait (#139): a wedged broker or a stalled
+    // upstream stream must not pin the whole drain loop behind one
+    // file. On timeout the file stays on disk for the next drain
+    // iteration to retry.
+    let _ack = tokio::time::timeout(ACK_TIMEOUT, ack_future)
+        .await
+        .with_context(|| format!("ack timeout {subj} after {}s", ACK_TIMEOUT.as_secs()))?
+        .with_context(|| format!("ack {subj}"))?;
     std::fs::remove_file(path).with_context(|| format!("remove {path:?}"))?;
     info!(
         result_id = %event.result_id,

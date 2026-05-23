@@ -124,6 +124,16 @@ async fn drain_once(js: &async_nats::jetstream::Context, outbox_dir: &Path) {
     }
 }
 
+/// Hard upper bound on how long we'll wait for a single publish's
+/// PubAck before giving up on that file for this drain iteration.
+/// async-nats keeps the publish-side metadata until the ack arrives
+/// so a healthy broker resolves the future in single-digit ms; the
+/// cap exists to ensure a wedged broker (or an upstream stream
+/// stalled on storage I/O) can't pin the whole drain loop behind
+/// one file (#139). The file stays on disk and the next drain
+/// iteration tries again.
+const ACK_TIMEOUT: Duration = Duration::from_secs(30);
+
 async fn publish_one(js: &async_nats::jetstream::Context, path: &Path) -> Result<()> {
     let bytes = std::fs::read(path).with_context(|| format!("read {path:?}"))?;
     let result: ExecResult =
@@ -137,7 +147,17 @@ async fn publish_one(js: &async_nats::jetstream::Context, path: &Path) -> Result
     // message durably; awaiting blocks while the broker is
     // unreachable. That blocking IS the point — we don't want to
     // delete the outbox file before we know the broker has it.
-    let _ack = ack_future.await.with_context(|| format!("ack {subj}"))?;
+    //
+    // …but it must be *bounded*. Without the timeout, one file
+    // whose stream is misconfigured (or one publish whose ack
+    // dropped on the wire) would block every subsequent file in
+    // the drain loop's `for` body, indefinitely. The 30 s cap
+    // forces us to move on so the rest of the queue keeps draining;
+    // the file isn't deleted, so the next iteration re-tries.
+    let _ack = tokio::time::timeout(ACK_TIMEOUT, ack_future)
+        .await
+        .with_context(|| format!("ack timeout {subj} after {}s", ACK_TIMEOUT.as_secs()))?
+        .with_context(|| format!("ack {subj}"))?;
     std::fs::remove_file(path).with_context(|| format!("remove {path:?}"))?;
     info!(
         request_id = %result.request_id,
