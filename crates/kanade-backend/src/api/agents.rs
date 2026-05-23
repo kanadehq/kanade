@@ -21,6 +21,17 @@ pub struct AgentRow {
     pub agent_version: Option<String>,
     pub last_heartbeat: Option<chrono::DateTime<chrono::Utc>>,
     pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// v0.37 Part 2: agent process self-perf — populated by the
+    /// heartbeat projector when the agent supplies these (a pre-
+    /// 0.37 agent's heartbeat omits them and the field stays None).
+    /// `agent_cpu_pct` is a percent-of-one-core (sysinfo
+    /// convention; 200 on a process pegging 2 cores). `*_bytes`
+    /// fields are absolute since process start; the SPA diffs
+    /// successive snapshots locally if it wants rates.
+    pub agent_cpu_pct: Option<f64>,
+    pub agent_rss_bytes: Option<i64>,
+    pub agent_disk_read_bytes: Option<i64>,
+    pub agent_disk_written_bytes: Option<i64>,
 }
 
 pub async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<AgentRow>>, StatusCode> {
@@ -60,5 +71,9 @@ fn row_to_agent(r: sqlx::sqlite::SqliteRow) -> AgentRow {
         agent_version: r.try_get("agent_version").ok(),
         last_heartbeat: r.try_get("last_heartbeat").ok(),
         updated_at: r.try_get("updated_at").ok(),
+        agent_cpu_pct: r.try_get("agent_cpu_pct").ok(),
+        agent_rss_bytes: r.try_get("agent_rss_bytes").ok(),
+        agent_disk_read_bytes: r.try_get("agent_disk_read_bytes").ok(),
+        agent_disk_written_bytes: r.try_get("agent_disk_written_bytes").ok(),
     }
 }
