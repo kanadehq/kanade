@@ -1,5 +1,5 @@
 <!-- kata:agents:base:begin -->
-## yukimemi/* shared conventions
+## Shared conventions
 
 This file is the agent-agnostic source of truth (per the
 [agents.md](https://agents.md) convention). The matching
@@ -124,7 +124,7 @@ upstream template repo (`yukimemi/pj-base` / `yukimemi/pj-rust` /
 <!-- kata:agents:rust:begin -->
 ### Rust workflow
 
-This repo follows the yukimemi/* Rust toolchain conventions. The
+This repo follows the shared Rust toolchain conventions. The
 language-agnostic conventions block above (`kata:agents:base:*`)
 covers git workflow, PR review cycle, and worktree usage.
 
@@ -156,7 +156,7 @@ the reason in the relevant module.
 `rustfmt.toml` and `clippy.toml` are kata-managed (sourced from
 `yukimemi/pj-rust`). Edits to those files in this repo won't
 survive the next `kata apply`; if a setting is wrong, push the
-fix to `yukimemi/pj-rust` so every yukimemi/* Rust project picks
+fix to `yukimemi/pj-rust` so every Rust project using these templates picks
 it up.
 
 ### CI workflow
