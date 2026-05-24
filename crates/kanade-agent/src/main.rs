@@ -3,6 +3,7 @@ mod config_supervisor;
 mod groups;
 mod heartbeat;
 mod host_perf;
+mod klp;
 mod logs;
 mod ping;
 mod process;
@@ -176,6 +177,15 @@ pub(crate) async fn run_agent() -> Result<()> {
             .or_else(|| std::env::var("HOSTNAME").ok()),
         Some(std::env::consts::OS.to_string()),
     ));
+
+    // KLP listener (SPEC §2.12) — Windows Named Pipe today, Linux
+    // UDS in a follow-up. The detached JoinHandle is intentional:
+    // the foundation PR has no graceful-shutdown path and the
+    // listener should run for the agent's full lifetime.
+    let _klp_handle = klp::server::spawn(klp::server::ListenerContext {
+        pc_id: std::sync::Arc::from(pc_id.as_str()),
+        agent_version: std::sync::Arc::from(AGENT_VERSION),
+    });
 
     // Group membership: Sprint 5 moves this from agent.toml (per-box
     // local config) to a server-managed KV bucket. The manager reads
