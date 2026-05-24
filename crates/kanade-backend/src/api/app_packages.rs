@@ -29,11 +29,12 @@
 use axum::Json;
 use axum::body::{Body, Bytes};
 use axum::extract::{Multipart, Path, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use futures::StreamExt;
 use kanade_shared::kv::OBJECT_APP_PACKAGES;
 use serde::Serialize;
+use tokio::io::AsyncReadExt;
 use tokio_util::io::ReaderStream;
 use tracing::{info, warn};
 
@@ -244,9 +245,71 @@ pub async fn list_packages(
 
 // ─── GET /api/app-packages/{name}/{version} ──────────────────────────
 
+/// Parsed `Range:` header. `bytes=N-` (suffix-less open) and
+/// `bytes=N-M` (closed interval) supported; multipart ranges and
+/// suffix-only `bytes=-N` (last N bytes) are not — operators
+/// don't need them, and skipping them keeps the response-builder
+/// simple.
+#[derive(Debug, PartialEq, Eq)]
+struct ByteRange {
+    start: u64,
+    /// Inclusive end byte; `None` ⇒ "to end of object".
+    end: Option<u64>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RangeResult {
+    None,
+    Valid(ByteRange),
+    Invalid,
+}
+
+/// Pull a `bytes=N-[M]` Range out of an optional header value,
+/// validated against the object's total size. Returns
+/// `RangeResult::Invalid` for malformed / out-of-bounds requests
+/// (caller maps to 416 Range Not Satisfiable).
+fn parse_range(header: Option<&str>, total_size: u64) -> RangeResult {
+    let Some(h) = header else {
+        return RangeResult::None;
+    };
+    let Some(bytes) = h.strip_prefix("bytes=") else {
+        return RangeResult::Invalid;
+    };
+    let Some((start_str, end_str)) = bytes.split_once('-') else {
+        return RangeResult::Invalid;
+    };
+    // Reject suffix range `bytes=-N` for now (would need a
+    // separate seek strategy, and no operator-facing tool sends
+    // it).
+    if start_str.is_empty() {
+        return RangeResult::Invalid;
+    }
+    let Ok(start) = start_str.parse::<u64>() else {
+        return RangeResult::Invalid;
+    };
+    let end = if end_str.is_empty() {
+        None
+    } else {
+        let Ok(e) = end_str.parse::<u64>() else {
+            return RangeResult::Invalid;
+        };
+        Some(e)
+    };
+    if start >= total_size {
+        return RangeResult::Invalid;
+    }
+    if let Some(e) = end
+        && (e >= total_size || e < start)
+    {
+        return RangeResult::Invalid;
+    }
+    RangeResult::Valid(ByteRange { start, end })
+}
+
 pub async fn download(
     State(state): State<AppState>,
     Path((name, version)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
     validate_segment("name", &name)?;
     validate_segment("version", &version)?;
@@ -257,7 +320,7 @@ pub async fn download(
         .get_object_store(OBJECT_APP_PACKAGES)
         .await
         .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e.to_string()))?;
-    let obj = match store.get(key.as_str()).await {
+    let mut obj = match store.get(key.as_str()).await {
         Ok(o) => o,
         Err(e) => {
             let msg = e.to_string();
@@ -272,28 +335,112 @@ pub async fn download(
         }
     };
 
-    // Stream directly from the Object Store to the response body
-    // — never buffer the (potentially 256 MB) payload in RAM.
-    // `Object` implements `AsyncRead`; `ReaderStream` turns that
-    // into the `Stream<Item = Result<Bytes, _>>` axum's
-    // `Body::from_stream` expects.
-    let size = obj.info().size as u64;
+    // Snapshot metadata before consuming the AsyncRead.
+    let total_size = obj.info().size as u64;
+    let digest = obj.info().digest.clone();
+
+    // `ETag: "<digest>"` — the Object Store stores a content
+    // digest per object, so we can hand the client a strong
+    // validator for free. Clients that resume across re-uploads
+    // can guard with `If-Match` to refuse mid-flight version
+    // drift (operator re-uploaded the same name/version with
+    // new bytes while a download was paused).
+    let etag = digest.as_deref().map(|d| format!("\"{d}\""));
+    if let Some(ref expected) = etag
+        && let Some(if_match) = headers.get(header::IF_MATCH)
+        && let Ok(s) = if_match.to_str()
+        && s != expected
+    {
+        return Err((
+            StatusCode::PRECONDITION_FAILED,
+            format!("If-Match {s:?} doesn't match current ETag {expected:?}"),
+        ));
+    }
+
     let suggested_filename = format!("{name}-{version}");
-    Ok((
-        [
-            (header::CONTENT_TYPE, "application/octet-stream".to_string()),
-            (header::CONTENT_LENGTH, size.to_string()),
-            (
-                header::CONTENT_DISPOSITION,
-                // Hint for browser-driven downloads from the SPA.
-                // Programmatic clients (PowerShell `-OutFile`)
-                // ignore this and use their own path.
-                format!("attachment; filename=\"{suggested_filename}\""),
-            ),
-        ],
-        Body::from_stream(ReaderStream::new(obj)),
-    )
-        .into_response())
+    let range = parse_range(
+        headers.get(header::RANGE).and_then(|v| v.to_str().ok()),
+        total_size,
+    );
+
+    match range {
+        RangeResult::Invalid => Err((
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            format!("Range header invalid or out of bounds for object size {total_size}"),
+        )),
+        RangeResult::None => {
+            // Full-content response. Stream directly from the
+            // Object Store — never buffer the (potentially
+            // multi-hundred-MB) payload in RAM.
+            let mut resp = (
+                [
+                    (header::CONTENT_TYPE, "application/octet-stream".to_string()),
+                    (header::CONTENT_LENGTH, total_size.to_string()),
+                    (header::ACCEPT_RANGES, "bytes".to_string()),
+                    (
+                        header::CONTENT_DISPOSITION,
+                        format!("attachment; filename=\"{suggested_filename}\""),
+                    ),
+                ],
+                Body::from_stream(ReaderStream::new(obj)),
+            )
+                .into_response();
+            if let Some(etag) = etag
+                && let Ok(v) = etag.parse()
+            {
+                resp.headers_mut().insert(header::ETAG, v);
+            }
+            Ok(resp)
+        }
+        RangeResult::Valid(ByteRange { start, end }) => {
+            let end_inclusive = end.unwrap_or(total_size - 1);
+            let body_len = end_inclusive - start + 1;
+
+            // TODO(perf): async-nats' Object Store doesn't expose
+            // chunk-level reads, so resuming a partial download
+            // forces the backend to read+discard the prefix from
+            // NATS. WAN traffic to the client IS bounded by
+            // `body_len` (the actual win), but the
+            // backend ↔ broker leg still ships the skipped bytes.
+            // Swap to chunk-level read once async-nats publishes
+            // a `get_chunks(name, start_chunk)` style API.
+            if start > 0 {
+                let mut taker = (&mut obj).take(start);
+                tokio::io::copy(&mut taker, &mut tokio::io::sink())
+                    .await
+                    .map_err(|e| {
+                        warn!(error = %e, %key, start, "range skip");
+                        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+                    })?;
+            }
+            let limited = obj.take(body_len);
+
+            let mut resp = (
+                StatusCode::PARTIAL_CONTENT,
+                [
+                    (header::CONTENT_TYPE, "application/octet-stream".to_string()),
+                    (header::CONTENT_LENGTH, body_len.to_string()),
+                    (header::ACCEPT_RANGES, "bytes".to_string()),
+                    (
+                        header::CONTENT_RANGE,
+                        format!("bytes {start}-{end_inclusive}/{total_size}"),
+                    ),
+                    (
+                        header::CONTENT_DISPOSITION,
+                        format!("attachment; filename=\"{suggested_filename}\""),
+                    ),
+                ],
+                Body::from_stream(ReaderStream::new(limited)),
+            )
+                .into_response();
+            if let Some(etag) = etag
+                && let Ok(v) = etag.parse()
+            {
+                resp.headers_mut().insert(header::ETAG, v);
+            }
+            Ok(resp)
+        }
+    }
 }
 
 // ─── DELETE /api/app-packages/{name}/{version} ───────────────────────
@@ -379,5 +526,93 @@ mod tests {
         assert!(validate_segment("version", "0.41.0-beta.2").is_ok());
         assert!(validate_segment("version", "2025.03").is_ok());
         assert!(validate_segment("name", "webex_meetings").is_ok());
+    }
+
+    // ---- parse_range ----
+
+    #[test]
+    fn parse_range_none_when_header_missing() {
+        assert_eq!(parse_range(None, 100), RangeResult::None);
+    }
+
+    #[test]
+    fn parse_range_open_ended_resume() {
+        // `bytes=50-` — "give me bytes 50 through end". This is
+        // the shape PowerShell `-Resume` sends.
+        assert_eq!(
+            parse_range(Some("bytes=50-"), 100),
+            RangeResult::Valid(ByteRange {
+                start: 50,
+                end: None
+            }),
+        );
+    }
+
+    #[test]
+    fn parse_range_closed_interval() {
+        assert_eq!(
+            parse_range(Some("bytes=10-99"), 100),
+            RangeResult::Valid(ByteRange {
+                start: 10,
+                end: Some(99),
+            }),
+        );
+    }
+
+    #[test]
+    fn parse_range_rejects_missing_bytes_prefix() {
+        assert_eq!(parse_range(Some("0-10"), 100), RangeResult::Invalid);
+    }
+
+    #[test]
+    fn parse_range_rejects_suffix_form_today() {
+        // `bytes=-50` (last 50 bytes) — not implemented; should
+        // fall through to 416 so the client retries with a
+        // canonical form.
+        assert_eq!(parse_range(Some("bytes=-50"), 100), RangeResult::Invalid);
+    }
+
+    #[test]
+    fn parse_range_rejects_start_past_eof() {
+        assert_eq!(parse_range(Some("bytes=100-"), 100), RangeResult::Invalid);
+        assert_eq!(
+            parse_range(Some("bytes=200-300"), 100),
+            RangeResult::Invalid
+        );
+    }
+
+    #[test]
+    fn parse_range_rejects_end_past_eof() {
+        // Total = 100 ⇒ last valid byte is 99.
+        assert_eq!(parse_range(Some("bytes=50-100"), 100), RangeResult::Invalid);
+    }
+
+    #[test]
+    fn parse_range_rejects_end_before_start() {
+        assert_eq!(parse_range(Some("bytes=50-40"), 100), RangeResult::Invalid);
+    }
+
+    #[test]
+    fn parse_range_rejects_garbage_numbers() {
+        assert_eq!(
+            parse_range(Some("bytes=abc-def"), 100),
+            RangeResult::Invalid
+        );
+        assert_eq!(parse_range(Some("bytes=10-xyz"), 100), RangeResult::Invalid);
+    }
+
+    #[test]
+    fn parse_range_zero_offset_is_valid_full_resume() {
+        // Edge: `bytes=0-` is technically valid — equivalent to
+        // a full GET but with the Range/206 round-trip. Accept
+        // it so clients (PowerShell -Resume on a fresh download)
+        // don't choke.
+        assert_eq!(
+            parse_range(Some("bytes=0-"), 100),
+            RangeResult::Valid(ByteRange {
+                start: 0,
+                end: None
+            }),
+        );
     }
 }
