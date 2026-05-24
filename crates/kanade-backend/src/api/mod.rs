@@ -7,6 +7,7 @@ pub mod audit;
 pub mod exec;
 pub mod executions;
 pub mod health;
+pub mod host_perf;
 pub mod inventory;
 pub mod jetstream_status;
 pub mod jobs;
@@ -50,6 +51,11 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/api/agents", get(agents::list))
         .route("/api/agents/{pc_id}", get(agents::detail))
+        // v0.40 Part 1: per-PC host-wide perf time-series. Bucketed
+        // server-side via `?from=&to=&step=` so the SPA chart can
+        // feed the response directly into Recharts without further
+        // down-sampling.
+        .route("/api/agents/{pc_id}/perf", get(host_perf::perf))
         .route(
             "/api/agents/{pc_id}/groups",
             get(agent_groups::list_groups)

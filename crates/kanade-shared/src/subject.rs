@@ -23,6 +23,16 @@ pub fn heartbeat(pc_id: &str) -> String {
     format!("heartbeat.{pc_id}")
 }
 
+/// `host_perf.<pc_id>` — Phase 1 of the perf telemetry pipeline. The
+/// agent publishes a whole-host CPU / Memory / Disk I/O / Network
+/// snapshot here on the cadence set by `host_perf_interval` in
+/// agent_config (default 60 s). Distinct subject from `heartbeat.<pc_id>`
+/// so the periodic heartbeat publisher stays untouched and pre-host_perf
+/// backends that don't subscribe simply ignore the new traffic.
+pub fn host_perf(pc_id: &str) -> String {
+    format!("host_perf.{pc_id}")
+}
+
 /// `kill.<exec_id>` — Spec §2.6 Layer 3 abort signal. The exec_id is
 /// the deployment / scheduler-fire UUID (formerly named `job_id`
 /// pre-v0.29; renamed for accuracy — every `Command.exec_id` is a
@@ -107,6 +117,12 @@ mod tests {
     #[test]
     fn heartbeat_formats_pc_id() {
         assert_eq!(heartbeat("minipc"), "heartbeat.minipc");
+    }
+
+    #[test]
+    fn host_perf_formats_pc_id() {
+        assert_eq!(host_perf("minipc"), "host_perf.minipc");
+        assert_eq!(host_perf("PC1234"), "host_perf.PC1234");
     }
 
     #[test]

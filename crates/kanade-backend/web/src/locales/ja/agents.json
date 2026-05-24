@@ -35,5 +35,6 @@
   "groupsPrompt": "{{pcId}} のグループ名 (カンマ区切り、 現在: {{current}})",
   "groupsNone": "(なし)",
   "groupsCancelled": "(キャンセル)",
-  "groupsLoading": "読み込み中…"
+  "groupsLoading": "読み込み中…",
+  "rowLinkTitle": "PC ごとのパフォーマンスチャートを開く"
 }

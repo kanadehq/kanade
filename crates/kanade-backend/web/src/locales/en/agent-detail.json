@@ -1,0 +1,44 @@
+{
+  "backToList": "Back to agents",
+  "loading": "loading agent…",
+  "errorTitle": "Couldn't load agent",
+  "notFound": "Agent not found",
+  "meta": {
+    "pcId": "pc_id",
+    "hostname": "hostname",
+    "os": "os",
+    "agent": "agent version",
+    "lastHeartbeat": "last heartbeat"
+  },
+  "perf": {
+    "title": "Host performance",
+    "intro": "Whole-machine CPU / Memory / Disk I/O / Network sampled every {{interval}} by the kanade-agent's host_perf loop. Older agents (< 0.40) don't publish this — the chart will be empty for those until they upgrade.",
+    "rangeLabel": "Range",
+    "loading": "loading perf…",
+    "errorTitle": "Couldn't load perf data",
+    "empty": "No samples in this range yet.",
+    "ranges": {
+      "1h": "1 hour",
+      "6h": "6 hours",
+      "24h": "24 hours",
+      "7d": "7 days",
+      "30d": "30 days"
+    },
+    "charts": {
+      "cpu": "CPU",
+      "memory": "Memory",
+      "disk": "Disk I/O",
+      "network": "Network"
+    },
+    "series": {
+      "cpu_pct": "CPU %",
+      "mem_used": "Memory used",
+      "mem_total": "Memory total",
+      "disk_read": "Read",
+      "disk_written": "Written",
+      "net_rx": "RX",
+      "net_tx": "TX"
+    },
+    "stepNote": "Server-side bucket: {{step}}"
+  }
+}

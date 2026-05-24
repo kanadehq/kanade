@@ -35,5 +35,6 @@
   "groupsPrompt": "Comma-separated group names for {{pcId}} (current: {{current}})",
   "groupsNone": "(none)",
   "groupsCancelled": "(cancelled)",
-  "groupsLoading": "loading…"
+  "groupsLoading": "loading…",
+  "rowLinkTitle": "Open per-PC perf charts"
 }

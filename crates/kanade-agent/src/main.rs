@@ -2,6 +2,7 @@ mod commands;
 mod config_supervisor;
 mod groups;
 mod heartbeat;
+mod host_perf;
 mod logs;
 mod ping;
 mod process;
@@ -140,6 +141,16 @@ pub(crate) async fn run_agent() -> Result<()> {
         client.clone(),
         pc_id.clone(),
         AGENT_VERSION.to_string(),
+        cfg_rx.clone(),
+    ));
+    // v0.40 Part 1: host-wide perf snapshot publisher. Runs on its
+    // own cadence (default 60 s) so the slightly heavier host-wide
+    // sysinfo refresh stays out of the 30 s heartbeat loop. Pre-0.40
+    // backends without a host_perf projector simply ignore the
+    // traffic, so the agent can be upgraded ahead of the backend.
+    tokio::spawn(host_perf::host_perf_loop(
+        client.clone(),
+        pc_id.clone(),
         cfg_rx.clone(),
     ));
     tokio::spawn(self_update::run(

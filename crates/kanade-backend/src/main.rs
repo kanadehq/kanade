@@ -235,6 +235,19 @@ pub(crate) async fn run_backend() -> Result<()> {
             }
         });
     }
+    // v0.40 Part 1: host-wide perf time-series projector. Same core-
+    // NATS direct-subscribe shape as heartbeat (gaps acceptable, no
+    // JetStream durability cost); writes to host_perf_samples
+    // (append-only) instead of UPSERTing into agents.
+    {
+        let pool = pool.clone();
+        let nats_client = nats.clone();
+        tokio::spawn(async move {
+            if let Err(e) = projector::host_perf::run(nats_client, pool).await {
+                error!(error = %e, "host_perf projector exited");
+            }
+        });
+    }
     // v0.30 / PR α' unified: project agent `events.started.*.*` into
     // execution_results as in-flight rows. Pairs with results
     // projector — both UPSERT against execution_results.result_id

@@ -57,6 +57,13 @@ pub struct ConfigScope {
     pub target_version_jitter: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub heartbeat_interval: Option<String>,
+    /// Cadence for the whole-host perf snapshot loop (`host_perf.<pc_id>`).
+    /// Separate from `heartbeat_interval` because the host-wide
+    /// sysinfo refresh is slightly heavier than the per-process self-
+    /// perf one (memory + disk + network counters in addition to CPU)
+    /// and gappier data is acceptable for graphing. Default 60 s.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_perf_interval: Option<String>,
 }
 
 impl ConfigScope {
@@ -64,6 +71,7 @@ impl ConfigScope {
         self.target_version.is_none()
             && self.target_version_jitter.is_none()
             && self.heartbeat_interval.is_none()
+            && self.host_perf_interval.is_none()
     }
 }
 
@@ -78,6 +86,7 @@ pub struct EffectiveConfig {
     pub target_version: Option<String>,
     pub target_version_jitter: String,
     pub heartbeat_interval: String,
+    pub host_perf_interval: String,
 }
 
 impl EffectiveConfig {
@@ -93,6 +102,12 @@ impl EffectiveConfig {
             // #26 for the broader "safe-by-default" debate.
             target_version_jitter: "0s".to_string(),
             heartbeat_interval: "30s".to_string(),
+            // 60 s default: 2× the heartbeat cadence so the chart has
+            // a roughly aligned point every other heartbeat, while
+            // keeping the host-wide sysinfo refresh (which on Citrix /
+            // RDS hosts is the heaviest call we make) out of the
+            // tight 30 s loop.
+            host_perf_interval: "60s".to_string(),
         }
     }
 
@@ -101,6 +116,12 @@ impl EffectiveConfig {
     /// is the caller's job (so that test code can stay quiet).
     pub fn heartbeat_duration(&self) -> Duration {
         humantime::parse_duration(&self.heartbeat_interval).unwrap_or(Duration::from_secs(30))
+    }
+
+    /// Parsed `host_perf_interval`, falling back to the built-in
+    /// 60 s default on a malformed string.
+    pub fn host_perf_duration(&self) -> Duration {
+        humantime::parse_duration(&self.host_perf_interval).unwrap_or(Duration::from_secs(60))
     }
 
     /// Parsed `target_version_jitter`, falling back to zero (= no
@@ -193,6 +214,12 @@ pub fn resolve(
                 .or_default()
                 .push(g.to_string());
         }
+        if scope.host_perf_interval.is_some() {
+            setters
+                .entry("host_perf_interval")
+                .or_default()
+                .push(g.to_string());
+        }
     }
     for (field, groups) in setters {
         if groups.len() > 1 {
@@ -223,6 +250,9 @@ fn apply_scope(out: &mut EffectiveConfig, s: &ConfigScope) {
     }
     if let Some(v) = &s.heartbeat_interval {
         out.heartbeat_interval = v.clone();
+    }
+    if let Some(v) = &s.host_perf_interval {
+        out.host_perf_interval = v.clone();
     }
 }
 

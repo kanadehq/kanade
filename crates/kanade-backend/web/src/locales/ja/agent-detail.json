@@ -1,0 +1,44 @@
+{
+  "backToList": "エージェント一覧へ",
+  "loading": "エージェント情報を読み込み中…",
+  "errorTitle": "エージェント情報を読み込めませんでした",
+  "notFound": "該当エージェントが見つかりません",
+  "meta": {
+    "pcId": "pc_id",
+    "hostname": "ホスト名",
+    "os": "OS",
+    "agent": "エージェントバージョン",
+    "lastHeartbeat": "最終ハートビート"
+  },
+  "perf": {
+    "title": "ホスト パフォーマンス",
+    "intro": "kanade-agent の host_perf ループが {{interval}} ごとに収集する、 PC 全体の CPU / メモリ / ディスク I/O / ネットワーク。 0.40 より前のエージェントは未送信のため、 アップグレードまでチャートは空になります。",
+    "rangeLabel": "範囲",
+    "loading": "パフォーマンスデータを読み込み中…",
+    "errorTitle": "パフォーマンスデータを読み込めませんでした",
+    "empty": "この範囲のサンプルはまだありません。",
+    "ranges": {
+      "1h": "1 時間",
+      "6h": "6 時間",
+      "24h": "24 時間",
+      "7d": "7 日",
+      "30d": "30 日"
+    },
+    "charts": {
+      "cpu": "CPU",
+      "memory": "メモリ",
+      "disk": "ディスク I/O",
+      "network": "ネットワーク"
+    },
+    "series": {
+      "cpu_pct": "CPU %",
+      "mem_used": "メモリ使用",
+      "mem_total": "メモリ総量",
+      "disk_read": "読込",
+      "disk_written": "書込",
+      "net_rx": "受信",
+      "net_tx": "送信"
+    },
+    "stepNote": "サーバ側バケット: {{step}}"
+  }
+}

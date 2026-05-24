@@ -18,7 +18,7 @@
  * string while a lazy-loaded chunk catches up.
  */
 
-import i18n from 'i18next';
+import i18n, { type InitOptions, type ResourceLanguage } from 'i18next';
 import LanguageDetector from 'i18next-browser-languagedetector';
 import { initReactI18next } from 'react-i18next';
 
@@ -35,8 +35,12 @@ type CatalogModule = { default: Record<string, unknown> };
 // `import.meta.glob` with `eager: true` is resolved at build time —
 // Vite emits static imports, so there's no runtime fetch and the
 // shape is identical to hand-written imports.
-function loadCatalog(modules: Record<string, CatalogModule>): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
+//
+// Return type is `ResourceLanguage` (not `Record<string, unknown>`)
+// so the result drops straight into i18next's `resources[lang]` slot
+// without TS rejecting the looser shape.
+function loadCatalog(modules: Record<string, CatalogModule>): ResourceLanguage {
+  const out: ResourceLanguage = {};
   for (const [path, mod] of Object.entries(modules)) {
     // Path looks like `/src/locales/en/common.json`; the namespace
     // is the basename without the extension.
@@ -49,29 +53,32 @@ function loadCatalog(modules: Record<string, CatalogModule>): Record<string, unk
 const enCatalogs = import.meta.glob<CatalogModule>('@/locales/en/*.json', { eager: true });
 const jaCatalogs = import.meta.glob<CatalogModule>('@/locales/ja/*.json', { eager: true });
 
-void i18n
-  .use(LanguageDetector)
-  .use(initReactI18next)
-  .init({
-    resources: {
-      en: loadCatalog(enCatalogs),
-      ja: loadCatalog(jaCatalogs),
-    },
-    fallbackLng: 'en',
-    supportedLngs: ['en', 'ja'],
-    interpolation: {
-      // React already escapes — i18next's default HTML escape would
-      // double-encode things like `&` inside translation strings.
-      escapeValue: false,
-    },
-    detection: {
-      // Read the operator's preference from localStorage first; fall
-      // back to the navigator language; persist explicit picks to
-      // localStorage so the next session opens in the right locale.
-      order: ['localStorage', 'navigator'],
-      lookupLocalStorage: 'kanade_lang',
-      caches: ['localStorage'],
-    },
-  });
+// i18next v26's `init()` overload picker mis-resolves an inlined
+// object literal to the no-args `Callback` overload, surfacing
+// "resources does not exist in type 'Callback'" — naming the type
+// explicitly forces the InitOptions overload. Behaviour is unchanged.
+const initOpts: InitOptions = {
+  resources: {
+    en: loadCatalog(enCatalogs),
+    ja: loadCatalog(jaCatalogs),
+  },
+  fallbackLng: 'en',
+  supportedLngs: ['en', 'ja'],
+  interpolation: {
+    // React already escapes — i18next's default HTML escape would
+    // double-encode things like `&` inside translation strings.
+    escapeValue: false,
+  },
+  detection: {
+    // Read the operator's preference from localStorage first; fall
+    // back to the navigator language; persist explicit picks to
+    // localStorage so the next session opens in the right locale.
+    order: ['localStorage', 'navigator'],
+    lookupLocalStorage: 'kanade_lang',
+    caches: ['localStorage'],
+  },
+};
+
+void i18n.use(LanguageDetector).use(initReactI18next).init(initOpts);
 
 export default i18n;

@@ -9,4 +9,4 @@ pub mod secrets;
 pub mod subject;
 pub mod wire;
 
-pub use wire::{Command, DiskInfo, ExecResult, Heartbeat, HwInventory, Shell};
+pub use wire::{Command, DiskInfo, ExecResult, Heartbeat, HostPerf, HwInventory, Shell};
