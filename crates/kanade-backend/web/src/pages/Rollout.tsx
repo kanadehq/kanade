@@ -57,7 +57,10 @@ export function Rollout() {
       // (see #218 fix), so the browser can fill in the multipart
       // boundary itself. Auth + X-Kanade-Source still come from
       // the central wrapper.
-      return apiFetch<{ version: string; size: number; digest: string | null }>(
+      // Reuse ReleaseRow's shape minus `modified` (the publish
+      // response omits it because the broker stamps the row at
+      // put-time — the list endpoint reads it back on next GET).
+      return apiFetch<Omit<ReleaseRow, 'modified'>>(
         '/api/agents/publish',
         { method: 'POST', body: fd },
       );
