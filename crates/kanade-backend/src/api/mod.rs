@@ -18,6 +18,7 @@ pub mod results;
 pub mod run;
 pub mod schedules;
 pub mod schemas;
+pub mod script_objects;
 pub mod scripts;
 pub mod yaml_body;
 
@@ -39,6 +40,16 @@ const PUBLISH_BODY_LIMIT: usize = 64 * 1024 * 1024;
 /// streaming refactor in `app_packages::download` notes the
 /// upgrade path.
 const APP_PACKAGE_BODY_LIMIT: usize = 256 * 1024 * 1024;
+
+/// 4 MB upper bound for `POST /api/script-objects/{name}/{version}`.
+/// Manifest scripts are typically PowerShell / Bash bodies measured
+/// in KB; 4 MB is generous enough to absorb embedded base64 helper
+/// blobs without becoming a DoS lever the way the installer cap is.
+/// If a future operator workflow needs to ship a script > 4 MB, the
+/// right answer is almost always "split the binary helper into an
+/// `app_packages` upload + a thin wrapper script that fetches it"
+/// rather than relaxing this cap.
+const SCRIPT_OBJECT_BODY_LIMIT: usize = 4 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -210,6 +221,20 @@ pub fn router(state: AppState) -> Router {
                 .post(app_packages::publish)
                 .delete(app_packages::delete_package)
                 .layer(DefaultBodyLimit::max(APP_PACKAGE_BODY_LIMIT)),
+        )
+        // Manifest-script Object Store (yukimemi/kanade#210). Sibling
+        // of `app_packages`; distinct lifecycle (manifest-coupled vs
+        // operator-curated installers) so the bucket + audit channels
+        // are kept separate — see `kanade-shared::kv::OBJECT_SCRIPTS`.
+        // Note: route prefix is `/api/script-objects` to avoid
+        // collision with the existing `/api/scripts/...` revoke flow.
+        .route("/api/script-objects", get(script_objects::list_objects))
+        .route(
+            "/api/script-objects/{name}/{version}",
+            get(script_objects::download)
+                .post(script_objects::publish)
+                .delete(script_objects::delete_object)
+                .layer(DefaultBodyLimit::max(SCRIPT_OBJECT_BODY_LIMIT)),
         )
         .with_state(state)
         // Everything else (`/`, `/assets/...`, hash-router paths) is served
