@@ -111,14 +111,29 @@ impl KlpClient {
         write_frame(&mut *pipe, &body)
             .await
             .context("write frame")?;
-        let resp_bytes = read_frame(&mut *pipe).await.context("read frame")?;
+
+        // Read until we get a Response. An interleaved push
+        // notification (state.changed once that handler is
+        // active, etc.) would otherwise desync the pipe — we'd
+        // bail with the response still in the buffer, and every
+        // subsequent request would correlate the wrong frame.
+        // Per-Response unsolicited messages from the agent are
+        // spec-legal (SPEC §2.12.3); skip them and keep reading.
+        let resp = loop {
+            let resp_bytes = read_frame(&mut *pipe).await.context("read frame")?;
+            let msg: RpcMessage =
+                serde_json::from_slice(&resp_bytes).context("decode KLP response envelope")?;
+            match msg {
+                RpcMessage::Response(resp) => break resp,
+                RpcMessage::Notification(notif) => {
+                    debug!(method = %notif.method, "klp_client: skipping unsolicited notification");
+                    continue;
+                }
+                RpcMessage::Request(_) => bail!("agent sent a Request, expected Response"),
+            }
+        };
         drop(pipe);
 
-        let msg: RpcMessage =
-            serde_json::from_slice(&resp_bytes).context("decode KLP response envelope")?;
-        let RpcMessage::Response(resp) = msg else {
-            bail!("expected Response, got {msg:?}");
-        };
         if resp.id.as_deref() != Some(id.as_str()) {
             bail!("response id mismatch: expected {id:?}, got {:?}", resp.id);
         }

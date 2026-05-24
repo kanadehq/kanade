@@ -73,12 +73,19 @@ async function onPingClick() {
   }
 }
 
+// Defensive escape for any string we splice into `innerHTML`.
+// Covers the OWASP XSS prevention basics: `&` (encoding entity),
+// `<` / `>` (tag delimiters), `"` and `'` (attribute delimiters),
+// and `/` (closing-tag boundary). Overly broad for our own
+// controlled inputs but the cost is rounding-error.
 function escapeHtml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;")
+    .replace(/\//g, "&#x2F;");
 }
 
 window.addEventListener("DOMContentLoaded", () => {

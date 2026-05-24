@@ -66,21 +66,32 @@ pub fn run() {
         .setup(move |_app| {
             // `app.handle()` will be needed here in the next PR
             // (emit a "klp-ready" event the WebView listens for
-            // so it can re-render without the 5 s retry loop).
-            // Today the setup just spawns the connect attempt and
-            // stashes the client; the WebView polls.
+            // so it can re-render without the WebView's polling
+            // loop). Today the setup retries the connect itself
+            // — the user might launch the client before the
+            // agent service has finished starting, and a one-shot
+            // attempt would leave `AppState::klp` `None` forever
+            // (the WebView's `get_handshake` retry only reads the
+            // cache, it doesn't trigger a fresh connect).
             let slot = klp_slot.clone();
             tauri::async_runtime::spawn(async move {
-                match KlpClient::connect().await {
-                    Ok(client) => {
-                        info!(
-                            agent_version = %client.handshake().agent_version,
-                            "KLP client ready",
-                        );
-                        *slot.lock().await = Some(client);
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "KLP client connect failed at startup");
+                loop {
+                    match KlpClient::connect().await {
+                        Ok(client) => {
+                            info!(
+                                agent_version = %client.handshake().agent_version,
+                                "KLP client ready",
+                            );
+                            *slot.lock().await = Some(client);
+                            return;
+                        }
+                        Err(e) => {
+                            warn!(
+                                error = %e,
+                                "KLP client connect failed; retrying in 5s",
+                            );
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        }
                     }
                 }
             });
