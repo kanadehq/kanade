@@ -68,6 +68,11 @@ windows-service = "0.8.1"
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_Security",
+    # SDDL → SECURITY_DESCRIPTOR for the KLP Named Pipe ACL (SPEC
+    # §2.12.1: `Authenticated Users RW, deny Anonymous`). Needs
+    # `ConvertStringSecurityDescriptorToSecurityDescriptorW` from
+    # the Authorization sub-feature.
+    "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
     "Win32_System_Environment",
     "Win32_System_IO",

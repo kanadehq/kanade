@@ -8,6 +8,8 @@
 //! - [`framing`] — SPEC §2.12.2 length-prefixed JSON codec.
 //! - [`auth`] — OS token → SID/Session-id derivation
 //!   (`GetNamedPipeClientProcessId` chain).
+//! - [`security`] — Named Pipe SECURITY_DESCRIPTOR construction
+//!   (SPEC §2.12.1: Authenticated Users RW, deny Anonymous).
 //! - [`connection`] — per-connection state (handshake gate,
 //!   peer credentials).
 //! - [`dispatcher`] — method routing + envelope assembly.
@@ -23,4 +25,5 @@ pub mod connection;
 pub mod dispatcher;
 pub mod framing;
 pub mod handlers;
+pub mod security;
 pub mod server;

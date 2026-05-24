@@ -14,16 +14,13 @@
 //! scaffolding that the production code path can't reach (avoids
 //! dead-code warnings on clippy's Linux/macOS jobs).
 //!
-//! Security descriptor: this PR uses the OS-default SD (full
-//! control: LocalSystem + administrators + creator owner; read:
-//! Everyone). SPEC §2.12.1 wants `Authenticated Users RW, deny
-//! Everyone / Anonymous` — that needs a hand-built SECURITY_
-//! DESCRIPTOR via Win32 ACL APIs, which is verbose enough to be
-//! its own focused PR. Documented as a known limitation; the
-//! Client App PR can't actually ship without this being tightened
-//! (a non-admin user can't write to the pipe under the default
-//! SD), so the SD upgrade is the precursor to client work, not
-//! optional.
+//! Security descriptor: every pipe instance is created with the
+//! SDDL-derived [`PipeSecurity`] (`Authenticated Users RW, deny
+//! Anonymous` per SPEC §2.12.1). The SD is built once on listener
+//! startup and reused for every re-arm because Windows copies the
+//! SD into each new pipe handle internally
+//! (`CreateNamedPipe`-with-`lpSecurityAttributes`). See
+//! `crate::klp::security` for the SDDL breakdown.
 
 use std::sync::Arc;
 
@@ -37,6 +34,7 @@ use crate::klp::auth::resolve_peer;
 use crate::klp::connection::ConnectionState;
 use crate::klp::dispatcher::dispatch_request;
 use crate::klp::framing::{read_frame, write_frame};
+use crate::klp::security::PipeSecurity;
 
 /// SPEC §2.12.1 — Windows Named Pipe endpoint.
 pub const PIPE_NAME: &str = r"\\.\pipe\kanade-agent";
@@ -61,16 +59,34 @@ pub fn spawn(ctx: ListenerContext) -> tokio::task::JoinHandle<Result<()>> {
 }
 
 async fn run(ctx: ListenerContext) -> Result<()> {
+    // Build the SECURITY_DESCRIPTOR once and reuse for every
+    // pipe instance — Windows copies the SD into each new pipe
+    // handle internally, so the same SA pointer is safe across
+    // arbitrarily many `create` calls. Built before any pipe
+    // operations so a malformed SDDL fails fast at agent startup
+    // instead of mid-loop.
+    let security = PipeSecurity::new().context("build KLP pipe SECURITY_DESCRIPTOR")?;
+
     // `first_pipe_instance(true)` makes the initial create fail
     // loudly if another process is squatting the pipe name —
     // safer than silently sharing a name. This one creation IS
     // allowed to bubble up because there's no working state yet
     // and the agent operator should see the failure on startup.
-    let mut server = ServerOptions::new()
-        .first_pipe_instance(true)
-        .create(PIPE_NAME)
-        .with_context(|| format!("create Named Pipe {PIPE_NAME}"))?;
-    info!(pipe = PIPE_NAME, "KLP listener ready");
+    //
+    // SAFETY: `security.as_ptr()` is valid for the duration of
+    // this synchronous call; `security` is borrowed (not moved)
+    // through the loop so the pointer stays valid.
+    let mut server = unsafe {
+        ServerOptions::new()
+            .first_pipe_instance(true)
+            .create_with_security_attributes_raw(PIPE_NAME, security.as_ptr())
+    }
+    .with_context(|| format!("create Named Pipe {PIPE_NAME}"))?;
+    info!(
+        pipe = PIPE_NAME,
+        sd = "Authenticated Users RW, deny Anonymous",
+        "KLP listener ready",
+    );
 
     loop {
         if let Err(e) = server.connect().await {
@@ -79,13 +95,13 @@ async fn run(ctx: ListenerContext) -> Result<()> {
             // is broken; reseat with the same retry policy used
             // for re-arm below so the listener doesn't die from a
             // transient OS hiccup.
-            server = create_with_retry().await;
+            server = create_with_retry(&security).await;
             continue;
         }
 
         // Re-arm BEFORE spawning the connection task so the next
         // client doesn't see a brief "no listener" window.
-        let next = create_with_retry().await;
+        let next = create_with_retry(&security).await;
         let connected = std::mem::replace(&mut server, next);
 
         let task_ctx = ctx.clone();
@@ -108,10 +124,16 @@ async fn run(ctx: ListenerContext) -> Result<()> {
 /// Backoff schedule: 200 ms, 400 ms, 800 ms, … capped at 30 s.
 /// Logs each failure at WARN so operators can spot a persistent
 /// issue in the agent log instead of a silent stall.
-async fn create_with_retry() -> NamedPipeServer {
+async fn create_with_retry(security: &PipeSecurity) -> NamedPipeServer {
     let mut delay_ms: u64 = 200;
     loop {
-        match ServerOptions::new().create(PIPE_NAME) {
+        // SAFETY: `security.as_ptr()` is valid for the duration
+        // of this synchronous call (the caller borrows
+        // `security` through the loop body).
+        let result = unsafe {
+            ServerOptions::new().create_with_security_attributes_raw(PIPE_NAME, security.as_ptr())
+        };
+        match result {
             Ok(server) => return server,
             Err(e) => {
                 warn!(
