@@ -26,7 +26,13 @@ use serde::{Deserialize, Serialize};
 /// table 1:1 — this is the one place in the codebase that breaks
 /// from the otherwise-uniform `snake_case` convention, because the
 /// spec doc shows PascalCase wire and we keep that contract.
+///
+/// `#[non_exhaustive]` so SPEC §2.12.9 can grow new error kinds in
+/// a future revision without forcing a wire-protocol bump —
+/// downstream Rust consumers see a compile-time nudge to add a
+/// wildcard arm.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ErrorKind {
     /// `-32700` — request body wasn't valid JSON.
     ParseError,

@@ -53,8 +53,11 @@ pub struct Notification {
 
 /// Severity ladder. Drives the SPA color, toast/dialog choice, and
 /// whether the Client App grabs window focus on push arrival.
+/// `#[non_exhaustive]` so a future SPEC can add severities (e.g.
+/// `Critical` above Emergency) without a wire bump.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum NotificationPriority {
     /// Background-style toast. Routine maintenance reminders.
     Info,

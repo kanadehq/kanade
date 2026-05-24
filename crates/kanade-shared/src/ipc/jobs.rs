@@ -18,9 +18,11 @@ use serde::{Deserialize, Serialize};
 // ---------- shared types ----------
 
 /// Job category from the manifest's `category:` field. Drives which
-/// Client App tab the job appears in.
+/// Client App tab the job appears in. `#[non_exhaustive]` leaves
+/// room for SPEC additions (new tabs) without a wire bump.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum JobCategory {
     /// Chrome / Edge / Office / runtime updaters. Appears in the
     /// "アップデート" tab.
@@ -40,8 +42,11 @@ pub enum JobCategory {
 /// `Queued` ⇒ accepted but not started yet (waiting on the
 /// concurrent-run cap or staleness check); the very first
 /// `jobs.progress` push usually moves straight to `Running`.
+/// `#[non_exhaustive]` so a future SPEC can add states like
+/// `Skipped` (staleness gate) without a wire bump.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum RunStatus {
     /// Accepted, not yet spawned.
     Queued,

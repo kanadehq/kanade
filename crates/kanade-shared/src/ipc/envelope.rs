@@ -30,6 +30,7 @@
 //! the envelope staying method-agnostic, which is what makes the
 //! dispatcher implementable as a `match method.as_str()` block.
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use super::error::RpcError;
@@ -82,10 +83,18 @@ pub struct RpcNotification {
 /// two field options) so the type system enforces the spec's
 /// "exactly one of" requirement: it's impossible to construct a
 /// response that has both, or neither.
+///
+/// `id` is [`Option<String>`] because JSON-RPC 2.0 mandates `null`
+/// for errors that fire BEFORE the request id can be parsed —
+/// [`super::error::ErrorKind::ParseError`] (the body wasn't valid
+/// JSON at all) and [`super::error::ErrorKind::InvalidRequest`]
+/// (envelope rejected). [`RpcResponse::err_anonymous`] is the
+/// dedicated constructor for that case; the happy-path [`Self::ok`]
+/// / [`Self::err`] keep the `String` ergonomic.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
 pub struct RpcResponse {
     pub jsonrpc: String,
-    pub id: String,
+    pub id: Option<String>,
     #[serde(flatten)]
     pub payload: RpcResponsePayload,
 }
@@ -161,20 +170,61 @@ impl RpcResponse {
     pub fn ok<R: Serialize>(id: impl Into<String>, result: &R) -> Result<Self, serde_json::Error> {
         Ok(Self {
             jsonrpc: JSONRPC_VERSION.to_string(),
-            id: id.into(),
+            id: Some(id.into()),
             payload: RpcResponsePayload::Ok {
                 result: serde_json::to_value(result)?,
             },
         })
     }
 
-    /// Build an error response from a [`RpcError`].
+    /// Build an error response correlated to a known request `id`.
     pub fn err(id: impl Into<String>, error: RpcError) -> Self {
         Self {
             jsonrpc: JSONRPC_VERSION.to_string(),
-            id: id.into(),
+            id: Some(id.into()),
             payload: RpcResponsePayload::Err { error },
         }
+    }
+
+    /// Build an error response with `id: null` — the JSON-RPC 2.0
+    /// shape for errors that fire before the request id can be
+    /// parsed (`ParseError` on un-decodable JSON; `InvalidRequest`
+    /// on an envelope missing required fields). Distinct from
+    /// [`Self::err`] so the type system makes "I don't have an id
+    /// to correlate" an explicit choice.
+    pub fn err_anonymous(error: RpcError) -> Self {
+        Self {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id: None,
+            payload: RpcResponsePayload::Err { error },
+        }
+    }
+}
+
+/// Decode a method's `params` payload from the envelope's
+/// [`serde_json::Value`] slot, treating `Value::Null` (the wire
+/// shape for an omitted `params` field, per SPEC §2.12.3) as
+/// equivalent to `P::default()`.
+///
+/// Solves the "empty params struct can't deserialize from null"
+/// hole: methods like `system.ping` SHOULD omit `params`
+/// (envelope.rs:55 doc), which arrives as `Value::Null`, but
+/// `serde_json::from_value::<PingParams>(Null)` would fail because
+/// PingParams expects an object. Routing every params decode
+/// through this helper lets the dispatcher accept both the
+/// canonical absent form and an explicit `params: {}` without
+/// per-method branching.
+///
+/// Wrong-shape non-null inputs (e.g. an array where an object is
+/// expected) still fail loudly through normal serde decoding — the
+/// helper only widens the null case.
+pub fn decode_params<P: DeserializeOwned + Default>(
+    value: serde_json::Value,
+) -> Result<P, serde_json::Error> {
+    if value.is_null() {
+        Ok(P::default())
+    } else {
+        serde_json::from_value(value)
     }
 }
 
@@ -301,7 +351,7 @@ mod tests {
             other => panic!("expected Request, got {other:?}"),
         }
         match serde_json::from_str::<RpcMessage>(response_wire).unwrap() {
-            RpcMessage::Response(r) => assert_eq!(r.id, "u1"),
+            RpcMessage::Response(r) => assert_eq!(r.id.as_deref(), Some("u1")),
             other => panic!("expected Response, got {other:?}"),
         }
     }
@@ -312,5 +362,65 @@ mod tests {
         let r = RpcResponse::ok("u4", &()).expect("encode");
         let v = serde_json::to_value(&r).unwrap();
         assert!(v["result"].is_null(), "wire: {v}");
+    }
+
+    #[test]
+    fn err_anonymous_serialises_id_as_null() {
+        // JSON-RPC 2.0 mandates `id: null` for errors that fire
+        // before the request id can be parsed (ParseError /
+        // InvalidRequest). Wire MUST carry `"id": null` literally,
+        // not omit the field.
+        let r = RpcResponse::err_anonymous(RpcError::bare(ErrorKind::ParseError));
+        let v = serde_json::to_value(&r).unwrap();
+        assert!(v["id"].is_null(), "wire: {v}");
+        assert_eq!(v["error"]["code"], -32700);
+    }
+
+    #[test]
+    fn anonymous_error_response_round_trips() {
+        let wire = r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Parse error"}}"#;
+        let back: RpcResponse = serde_json::from_str(wire).expect("decode");
+        assert!(back.id.is_none(), "decoded id should be None for null wire");
+        match back.payload {
+            RpcResponsePayload::Err { error } => assert_eq!(error.code, -32700),
+            other => panic!("expected Err payload, got {other:?}"),
+        }
+    }
+
+    // --- decode_params helper (Gemini #1 fix) ---
+
+    #[derive(Serialize, Deserialize, Default, Debug, PartialEq)]
+    struct EmptyParams {}
+
+    #[derive(Serialize, Deserialize, Default, Debug, PartialEq)]
+    struct WithDefaults {
+        #[serde(default)]
+        lines: u32,
+    }
+
+    #[test]
+    fn decode_params_treats_null_as_default() {
+        // The reason this helper exists: methods like system.ping
+        // SHOULD omit `params` (envelope wire-form), which decodes
+        // as Value::Null. Direct from_value::<EmptyParams>(Null)
+        // would fail; the helper routes it to P::default().
+        let p: EmptyParams = decode_params(serde_json::Value::Null).expect("null → default");
+        assert_eq!(p, EmptyParams {});
+
+        let p: WithDefaults = decode_params(serde_json::Value::Null).expect("null → default");
+        assert_eq!(p.lines, 0);
+    }
+
+    #[test]
+    fn decode_params_passes_through_explicit_object() {
+        // Non-null inputs go through normal serde — wrong shape
+        // still fails loudly so InvalidParams detection isn't
+        // weakened.
+        let p: WithDefaults =
+            decode_params(serde_json::json!({"lines": 42})).expect("explicit object");
+        assert_eq!(p.lines, 42);
+
+        let err: Result<WithDefaults, _> = decode_params(serde_json::json!(["wrong", "shape"]));
+        assert!(err.is_err(), "non-object input must still fail");
     }
 }

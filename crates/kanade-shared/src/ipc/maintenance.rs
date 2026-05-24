@@ -51,12 +51,12 @@ pub struct MaintenanceItem {
     /// Next absolute time this schedule will fire at this PC,
     /// computed from the schedule's cron expression. UTC.
     pub next_fire_at: chrono::DateTime<chrono::Utc>,
-    /// `true` if this is the schedule's *deferable* run — currently
+    /// `true` if this is the schedule's *deferrable* run — currently
     /// only true for reboot manifests with `category:
     /// software_update`. SPA enables the "延期申請" button when
     /// true.
     #[serde(default)]
-    pub deferable: bool,
+    pub deferrable: bool,
 }
 
 // ---------- maintenance.defer ----------
@@ -70,17 +70,28 @@ pub struct MaintenanceDeferParams {
     pub duration: DeferDuration,
 }
 
-/// Allowed defer windows per SPEC §2.1. The fixed set avoids
-/// operators having to think about long-tail "user deferred 3 days"
-/// scenarios — anything bigger goes through the helpdesk.
+/// Allowed defer windows per SPEC §2.1 (`15分 / 30分 / 1時間`). The
+/// fixed set avoids operators having to think about long-tail "user
+/// deferred 3 days" scenarios — anything bigger goes through the
+/// helpdesk.
+///
+/// Wire form mirrors SPEC §2.1's `15m / 30m / 1h` humantime
+/// shorthand verbatim so JSON payloads read like operator-spoken
+/// shorthand. The `#[non_exhaustive]` annotation leaves room for
+/// future SPEC bumps to add windows (e.g. `2h`) without forcing a
+/// wire-protocol version change — downstream Rust consumers see a
+/// compile-time nudge to add a wildcard arm.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum DeferDuration {
     /// 15 minutes.
+    #[serde(rename = "15m")]
     M15,
     /// 30 minutes.
+    #[serde(rename = "30m")]
     M30,
     /// 1 hour.
+    #[serde(rename = "1h")]
     H1,
 }
 
@@ -117,7 +128,7 @@ mod tests {
     }
 
     #[test]
-    fn item_with_deferable_round_trips() {
+    fn item_with_deferrable_round_trips() {
         let t = chrono::Utc
             .with_ymd_and_hms(2026, 5, 25, 14, 30, 0)
             .unwrap();
@@ -126,22 +137,27 @@ mod tests {
             manifest_id: "reboot".into(),
             display_name: "再起動".into(),
             next_fire_at: t,
-            deferable: true,
+            deferrable: true,
         };
         let json = serde_json::to_string(&i).unwrap();
         let back: MaintenanceItem = serde_json::from_str(&json).unwrap();
         assert_eq!(back.schedule_id, i.schedule_id);
         assert_eq!(back.display_name, "再起動");
         assert_eq!(back.next_fire_at, t);
-        assert!(back.deferable);
+        assert!(back.deferrable);
     }
 
     #[test]
-    fn defer_duration_serialises_snake_case() {
+    fn defer_duration_wire_matches_spec_2_1_humantime() {
+        // SPEC §2.1 writes the windows as `15分 / 30分 / 1時間`,
+        // and the documented operator shorthand is humantime
+        // (`15m / 30m / 1h`). Pin the wire so a future enum rename
+        // can't silently drift the Client App's "延期" button
+        // payloads.
         for (variant, expected) in [
-            (DeferDuration::M15, "\"m15\""),
-            (DeferDuration::M30, "\"m30\""),
-            (DeferDuration::H1, "\"h1\""),
+            (DeferDuration::M15, "\"15m\""),
+            (DeferDuration::M30, "\"30m\""),
+            (DeferDuration::H1, "\"1h\""),
         ] {
             let s = serde_json::to_string(&variant).unwrap();
             assert_eq!(s, expected, "encode {variant:?}");
@@ -173,12 +189,12 @@ mod tests {
     }
 
     #[test]
-    fn item_deferable_defaults_to_false() {
+    fn item_deferrable_defaults_to_false() {
         let wire = r#"{
             "schedule_id":"x","manifest_id":"y","display_name":"z",
             "next_fire_at":"2026-05-24T00:00:00Z"
         }"#;
         let i: MaintenanceItem = serde_json::from_str(wire).unwrap();
-        assert!(!i.deferable);
+        assert!(!i.deferrable);
     }
 }
