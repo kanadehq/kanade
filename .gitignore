@@ -41,3 +41,5 @@ Thumbs.db
 # `apm install --update`); the apm_modules/ source cache is not.
 apm_modules/
 # kata:gitignore:base:end
+
+.claude/scheduled_tasks.lock
