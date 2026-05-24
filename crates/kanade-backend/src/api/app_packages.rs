@@ -27,13 +27,14 @@
 //! an ambiguous path).
 
 use axum::Json;
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::{Multipart, Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use futures::StreamExt;
 use kanade_shared::kv::OBJECT_APP_PACKAGES;
 use serde::Serialize;
+use tokio_util::io::ReaderStream;
 use tracing::{info, warn};
 
 use super::AppState;
@@ -85,7 +86,11 @@ pub async fn publish(
     validate_segment("name", &name)?;
     validate_segment("version", &version)?;
 
-    let mut bytes: Option<Vec<u8>> = None;
+    // `field.bytes()` already returns a refcounted `Bytes` slice
+    // over the multipart body's buffer; cloning to `Vec<u8>` would
+    // double-allocate up to 256 MB. Hold the original instead and
+    // wrap with `Cursor<Bytes>` for `Object Store::put`.
+    let mut bytes: Option<Bytes> = None;
     while let Some(field) = multipart.next_field().await.map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
@@ -94,11 +99,12 @@ pub async fn publish(
     })? {
         match field.name().unwrap_or("") {
             "file" => {
-                let buf = field
-                    .bytes()
-                    .await
-                    .map_err(|e| (StatusCode::BAD_REQUEST, format!("read file field: {e}")))?;
-                bytes = Some(buf.to_vec());
+                bytes = Some(
+                    field
+                        .bytes()
+                        .await
+                        .map_err(|e| (StatusCode::BAD_REQUEST, format!("read file field: {e}")))?,
+                );
             }
             other => {
                 warn!(
@@ -207,12 +213,15 @@ pub async fn list_packages(
                 continue;
             }
         };
-        let modified = meta.modified.and_then(|t| {
-            let nanos = t.unix_timestamp_nanos();
-            let secs = (nanos.div_euclid(1_000_000_000)) as i64;
-            let nsec = (nanos.rem_euclid(1_000_000_000)) as u32;
-            chrono::DateTime::<chrono::Utc>::from_timestamp(secs, nsec).map(|d| d.to_rfc3339())
-        });
+        // `time::OffsetDateTime` exposes the seconds + sub-second
+        // components separately, so we skip the nanos-divide
+        // jig the agent_releases module currently does (kept
+        // there for back-compat; sibling-cleanup is a separate
+        // PR if it gets noticed).
+        let modified = meta
+            .modified
+            .and_then(|t| chrono::DateTime::from_timestamp(t.unix_timestamp(), t.nanosecond()))
+            .map(|d| d.to_rfc3339());
         rows.push(PackageRow {
             name,
             version,
@@ -248,7 +257,7 @@ pub async fn download(
         .get_object_store(OBJECT_APP_PACKAGES)
         .await
         .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e.to_string()))?;
-    let mut obj = match store.get(key.as_str()).await {
+    let obj = match store.get(key.as_str()).await {
         Ok(o) => o,
         Err(e) => {
             let msg = e.to_string();
@@ -263,29 +272,26 @@ pub async fn download(
         }
     };
 
-    // Read into memory. Future-work for huge installers: stream
-    // via `Body::from_stream` once we have something past 64 MB
-    // in the bucket. For now the upload cap matches the read
-    // strategy.
-    let mut buf = Vec::with_capacity(obj.info().size);
-    tokio::io::copy(&mut obj, &mut buf).await.map_err(|e| {
-        warn!(error = %e, %key, "object copy");
-        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-    })?;
-
+    // Stream directly from the Object Store to the response body
+    // — never buffer the (potentially 256 MB) payload in RAM.
+    // `Object` implements `AsyncRead`; `ReaderStream` turns that
+    // into the `Stream<Item = Result<Bytes, _>>` axum's
+    // `Body::from_stream` expects.
+    let size = obj.info().size as u64;
     let suggested_filename = format!("{name}-{version}");
     Ok((
         [
-            (header::CONTENT_TYPE, "application/octet-stream"),
+            (header::CONTENT_TYPE, "application/octet-stream".to_string()),
+            (header::CONTENT_LENGTH, size.to_string()),
             (
                 header::CONTENT_DISPOSITION,
                 // Hint for browser-driven downloads from the SPA.
                 // Programmatic clients (PowerShell `-OutFile`)
                 // ignore this and use their own path.
-                &format!("attachment; filename=\"{suggested_filename}\""),
+                format!("attachment; filename=\"{suggested_filename}\""),
             ),
         ],
-        Body::from(buf),
+        Body::from_stream(ReaderStream::new(obj)),
     )
         .into_response())
 }
