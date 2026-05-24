@@ -13,6 +13,7 @@ members = [
     "crates/kanade-agent",
     "crates/kanade-backend",
     "crates/kanade",
+    "crates/kanade-client",
 ]
 
 [workspace.package]

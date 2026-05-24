@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Kanade</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Kanade Client</h1>
+      <section id="status">
+        <p class="muted">Connecting to agent…</p>
+      </section>
+      <section id="ping-section" hidden>
+        <button id="ping-btn">Ping agent</button>
+        <p id="ping-result" class="muted"></p>
+      </section>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

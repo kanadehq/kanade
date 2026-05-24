@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default permission set for the Kanade Client App's main window. Tauri 2.x's ACL gates which built-in commands (window controls, clipboard, etc.) the WebView can invoke; custom commands registered via `invoke_handler!` are always allowed for the same app so they don't need an entry here.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default"
+  ]
+}

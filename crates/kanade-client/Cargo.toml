@@ -1,0 +1,53 @@
+[package]
+name = "kanade-client"
+description = "End-user-facing Tauri Client App for the kanade endpoint-management system. Talks to the LocalSystem agent over the KLP Named Pipe (SPEC §2.12); presents a tray + window UI for notifications / health / self-service jobs."
+readme = "../../README.md"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+homepage.workspace     = true
+authors.workspace      = true
+keywords.workspace     = true
+categories.workspace   = true
+
+# The Client App targets Windows endpoints (SPEC §2.1's
+# "ログオン時自動起動 (HKCU…Run)" + the Named Pipe transport in
+# SPEC §2.12.1). Tauri's runtime and the KLP Named Pipe client
+# are both Windows-bound here, so we cfg-gate every Tauri-stack
+# dependency to `target_os = "windows"`. Linux/macOS CI builds
+# kanade-client as an empty shim that prints + exits (see
+# src/main.rs). Linux UDS support lands in a follow-up PR and
+# will widen the gate.
+
+[dependencies]
+kanade-shared = { workspace = true }
+
+# Cross-platform bits used by the non-Windows shim path too.
+anyhow = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Tauri 2.x runtime. No extra features yet — system tray /
+# notification plugins land in follow-up PRs as their handlers
+# come online.
+tauri = { version = "2", features = [] }
+# Serde for the IPC commands' params / results.
+serde      = { workspace = true }
+serde_json = { workspace = true }
+# Tokio runtime for the KLP pipe I/O. Reuse the workspace's
+# pin so the wire types stay in lockstep with the agent side.
+tokio    = { workspace = true }
+tracing  = { workspace = true }
+tracing-subscriber = { workspace = true }
+# UUID v7 for KLP request ids (SPEC §2.12.3 "UUID v7 推奨").
+uuid    = { workspace = true }
+chrono  = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.build-dependencies]
+# `tauri-build` reads `tauri.conf.json` at build time and
+# generates the context macro consumed in `app::run`. Gated to
+# Windows targets so non-Windows CI doesn't have to compile
+# Tauri's build helper (which transitively pulls in heavy
+# platform-specific deps).
+tauri-build = { version = "2", features = [] }
