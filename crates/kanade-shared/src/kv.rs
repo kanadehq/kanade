@@ -58,6 +58,30 @@ pub const OBJECT_AGENT_RELEASES: &str = "agent_releases";
 ///   freely; agent releases follow the release.yml pipeline).
 pub const OBJECT_APP_PACKAGES: &str = "app_packages";
 
+/// Object Store holding **manifest script bodies** referenced by
+/// `Execute::script_object` (SPEC §2.4.1's alternative to inline
+/// `script:` / repo-local `script_file:`). Per yukimemi/kanade
+/// issue #210, this is the "Plan B 4-bucket layout" sibling of
+/// `app_packages` — separated because scripts have a different
+/// lifecycle than installer binaries:
+///
+/// - Smaller (typical KB-to-low-MB, vs MB-to-hundreds-of-MB
+///   installers).
+/// - Coupled to manifest versions (script lifecycle = manifest
+///   lifecycle; the `script_current` / `script_status` KV gates
+///   in SPEC §2.6.2 already track manifest versions, so a
+///   matching dedicated bucket keeps the audit story aligned).
+/// - Different access pattern (every Command execute potentially
+///   fetches; vs installer fetched once per fleet deploy).
+///
+/// Object keys follow the same `<name>/<version>` shape as
+/// `app_packages` so the SPA / operator tooling stays uniform.
+/// For manifest-driven scripts `<name>` is the manifest id and
+/// `<version>` is the manifest version, but the bucket itself
+/// imposes no semantics on the pair — operator-uploaded
+/// ad-hoc scripts can use any `<name>/<version>` they like.
+pub const OBJECT_SCRIPTS: &str = "scripts";
+
 /// Key inside [`BUCKET_AGENT_CONFIG`] carrying the broadcast target
 /// version. Agents watch this key and self-update when their running
 /// version drifts.
@@ -123,6 +147,7 @@ mod tests {
             BUCKET_SCHEDULES_YAML,
             OBJECT_AGENT_RELEASES,
             OBJECT_APP_PACKAGES,
+            OBJECT_SCRIPTS,
         ] {
             assert!(
                 !name.contains('.'),

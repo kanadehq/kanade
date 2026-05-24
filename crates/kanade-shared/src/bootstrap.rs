@@ -28,8 +28,8 @@ use tracing::info;
 use crate::kv::{
     BUCKET_AGENT_CONFIG, BUCKET_AGENT_GROUPS, BUCKET_AGENTS_STATE, BUCKET_JOBS, BUCKET_JOBS_YAML,
     BUCKET_SCHEDULES, BUCKET_SCHEDULES_YAML, BUCKET_SCRIPT_CURRENT, BUCKET_SCRIPT_STATUS,
-    OBJECT_AGENT_RELEASES, OBJECT_APP_PACKAGES, STREAM_AUDIT, STREAM_EVENTS, STREAM_EXEC,
-    STREAM_INVENTORY, STREAM_RESULTS,
+    OBJECT_AGENT_RELEASES, OBJECT_APP_PACKAGES, OBJECT_SCRIPTS, STREAM_AUDIT, STREAM_EVENTS,
+    STREAM_EXEC, STREAM_INVENTORY, STREAM_RESULTS,
 };
 
 /// Idempotently create every NATS JetStream resource the kanade
@@ -226,6 +226,19 @@ pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
     .await
     .with_context(|| format!("create_object_store {OBJECT_APP_PACKAGES}"))?;
     info!(store = OBJECT_APP_PACKAGES, "ready");
+
+    // scripts — manifest script bodies referenced by
+    // `Execute::script_object` (SPEC §2.4.1). Sibling of
+    // `app_packages`; see `kanade-shared::kv::OBJECT_SCRIPTS` for
+    // the bucket-split rationale (smaller payloads + manifest-
+    // coupled lifecycle vs operator-curated installers).
+    js.create_object_store(ObjectStoreConfig {
+        bucket: OBJECT_SCRIPTS.into(),
+        ..Default::default()
+    })
+    .await
+    .with_context(|| format!("create_object_store {OBJECT_SCRIPTS}"))?;
+    info!(store = OBJECT_SCRIPTS, "ready");
 
     Ok(())
 }
