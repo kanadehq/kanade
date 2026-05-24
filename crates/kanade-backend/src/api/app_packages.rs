@@ -396,14 +396,15 @@ pub async fn download(
             let end_inclusive = end.unwrap_or(total_size - 1);
             let body_len = end_inclusive - start + 1;
 
-            // TODO(perf): async-nats' Object Store doesn't expose
-            // chunk-level reads, so resuming a partial download
-            // forces the backend to read+discard the prefix from
-            // NATS. WAN traffic to the client IS bounded by
-            // `body_len` (the actual win), but the
-            // backend ↔ broker leg still ships the skipped bytes.
-            // Swap to chunk-level read once async-nats publishes
-            // a `get_chunks(name, start_chunk)` style API.
+            // Perf note (tracked in yukimemi/kanade#209):
+            // async-nats' Object Store doesn't expose chunk-level
+            // reads, so resuming a partial download forces the
+            // backend to read+discard the prefix from NATS. WAN
+            // traffic to the client IS bounded by `body_len`
+            // (the actual win), but the backend ↔ broker leg
+            // still ships the skipped bytes. Swap to chunk-level
+            // read once async-nats publishes a
+            // `get_chunks(name, start_chunk)` style API.
             if start > 0 {
                 let mut taker = (&mut obj).take(start);
                 tokio::io::copy(&mut taker, &mut tokio::io::sink())
