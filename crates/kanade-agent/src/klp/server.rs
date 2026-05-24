@@ -46,8 +46,8 @@ pub const PIPE_NAME: &str = r"\\.\pipe\kanade-agent";
 /// task. Kept small and cheap to clone so each connection gets its
 /// own copy without lifetime gymnastics: `Arc<str>` strings,
 /// `watch::Receiver` (Arc-backed) for the live config view, and a
-/// per-conn `PathBuf` (one allocation, fine — handlers don't run
-/// in tight loops).
+/// per-conn `PathBuf` (one allocation per accept, fine — handlers
+/// don't run in tight loops).
 #[derive(Clone)]
 pub struct ListenerContext {
     pub pc_id: Arc<str>,
@@ -57,9 +57,13 @@ pub struct ListenerContext {
     /// current `target_version`; future handlers (state.snapshot,
     /// etc.) will read other fields.
     pub config_rx: watch::Receiver<EffectiveConfig>,
-    /// On-disk path to agent.log. `system.log_tail` reads it to
-    /// bundle recent log lines into a support response.
-    pub log_path: Arc<PathBuf>,
+    /// On-disk path to the log-file template (the bare
+    /// `cfg.log.path`; the active file resolves to
+    /// `<stem>.YYYY-MM-DD.<ext>` via
+    /// [`crate::logs::locate_active_file`]). `system.log_tail`
+    /// reads it to bundle recent log lines into a support
+    /// response.
+    pub log_path: PathBuf,
 }
 
 /// Spawn the KLP listener. Returns immediately with a detached
@@ -184,7 +188,7 @@ async fn handle_connection(mut pipe: NamedPipeServer, ctx: ListenerContext) -> R
         ctx.pc_id.to_string(),
         ctx.agent_version.to_string(),
         ctx.config_rx.clone(),
-        (*ctx.log_path).clone(),
+        ctx.log_path.clone(),
     );
 
     loop {

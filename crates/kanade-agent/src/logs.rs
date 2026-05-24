@@ -99,7 +99,12 @@ async fn read_tail(path: &Path, n: usize) -> Result<Vec<u8>> {
 /// directory; we pick the alphabetically last one matching the
 /// template. Falls back to the bare template path if no rotated
 /// files exist yet (e.g. brand-new agent on first day).
-async fn locate_active_file(template: &Path) -> Result<PathBuf> {
+///
+/// Exposed `pub(crate)` so the KLP `system.log_tail` handler can
+/// resolve the same actual file the NATS `logs.fetch` path uses
+/// (the bare template stored in `cfg.log.path` is never written
+/// to on disk by the appender's `Rotation::DAILY` config).
+pub(crate) async fn locate_active_file(template: &Path) -> Result<PathBuf> {
     let dir = template
         .parent()
         .with_context(|| format!("log template '{}' has no parent dir", template.display()))?;

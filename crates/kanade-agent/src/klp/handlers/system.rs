@@ -104,9 +104,10 @@ pub fn handle_ping(_conn: &ConnectionState, _params: PingParams) -> HandlerResul
 ///
 /// `target_agent_version` comes from the live `EffectiveConfig`
 /// the supervisor (Sprint 6) publishes on the watch channel; when
-/// the KV stack has set no rollout target, it falls back to the
-/// running version (so the SPA's "restart pending" banner stays
-/// hidden when nothing's actually pending).
+/// the KV stack has set no rollout target (or set the empty
+/// string by mistake), it falls back to the running version so
+/// the SPA's "restart pending" banner stays hidden when nothing's
+/// actually pending.
 ///
 /// `target_client_version` is `None` until the backend publishes
 /// a pinned Client App version through a future config field —
@@ -115,11 +116,17 @@ pub fn handle_version(
     conn: &ConnectionState,
     _params: VersionParams,
 ) -> HandlerResult<VersionResult> {
+    // Defensive filter against `Some("")` — a backend that
+    // confuses "cleared" with "empty string" would otherwise
+    // surface `target_agent_version = ""` and trip a phantom
+    // restart banner on the SPA.
     let target = conn
         .config_rx
         .borrow()
         .target_version
-        .clone()
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
         .unwrap_or_else(|| conn.agent_version.clone());
     Ok(VersionResult {
         agent_version: conn.agent_version.clone(),
@@ -131,14 +138,30 @@ pub fn handle_version(
 /// `system.log_tail` — last N lines of `agent.log` for support
 /// handoff.
 ///
-/// Two clamps to keep responses bounded:
-/// - Caller's `lines` is capped at [`LOG_TAIL_HARD_CAP`]; if they
-///   asked for more, `truncated` is set so the SPA can warn the
-///   user to fetch the full log via
-///   `support.upload_diagnostics`.
+/// The `log_path` on `ConnectionState` is the *template* path from
+/// `cfg.log.path` (e.g. `agent.log`); the daily-rotation
+/// `tracing_appender` actually writes to
+/// `<dir>/<stem>.YYYY-MM-DD.<ext>`, so we resolve to the active
+/// file via [`crate::logs::locate_active_file`] before reading
+/// (same function the NATS `logs.fetch` path uses).
+///
+/// Clamping semantics:
+/// - Caller's `lines` is capped at [`LOG_TAIL_HARD_CAP`]. When
+///   the cap kicks in (caller asked for more than the cap),
+///   `truncated` is set so the SPA can prompt to escalate to
+///   `support.upload_diagnostics`. `truncated` is NOT set merely
+///   because the file has more lines than the caller asked for
+///   — the caller got what they asked for.
 /// - File-not-found returns an empty `lines` (not an error) — the
 ///   agent's logger may not have written anything yet on a fresh
 ///   boot.
+///
+/// TODO(performance): currently slurps the whole resolved file
+/// into a `String` before taking the tail slice. Fine for daily-
+/// rotated files (typically ≤ a few MB), but a chatty long-uptime
+/// endpoint could hit hundreds of MB. A follow-up should switch
+/// to a bounded reverse-read (`File::seek` to `len - K`, read
+/// forward) for files past a size threshold.
 pub async fn handle_log_tail(
     conn: &ConnectionState,
     params: LogTailParams,
@@ -146,12 +169,31 @@ pub async fn handle_log_tail(
     let requested = params.lines.min(LOG_TAIL_HARD_CAP);
     let truncated = params.lines > LOG_TAIL_HARD_CAP;
 
-    let body = match tokio::fs::read_to_string(&conn.log_path).await {
+    let active_path = match crate::logs::locate_active_file(&conn.log_path).await {
+        Ok(p) => p,
+        Err(e) => {
+            // `locate_active_file` only fails when the directory
+            // itself is missing — treat the same as a missing
+            // active file. Surface for diagnostics but don't
+            // block the caller's UI.
+            warn!(
+                error = %e,
+                template = %conn.log_path.display(),
+                "system.log_tail: log directory missing, returning empty result",
+            );
+            return Ok(LogTailResult {
+                lines: vec![],
+                truncated,
+            });
+        }
+    };
+
+    let body = match tokio::fs::read_to_string(&active_path).await {
         Ok(s) => s,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             warn!(
-                path = %conn.log_path.display(),
-                "system.log_tail: agent.log not found, returning empty result",
+                path = %active_path.display(),
+                "system.log_tail: log file not found, returning empty result",
             );
             return Ok(LogTailResult {
                 lines: vec![],
@@ -161,7 +203,7 @@ pub async fn handle_log_tail(
         Err(e) => {
             return Err(RpcError::new(
                 ErrorKind::InternalError,
-                format!("read agent.log ({}): {e}", conn.log_path.display()),
+                format!("read agent.log ({}): {e}", active_path.display()),
             ));
         }
     };
@@ -351,18 +393,39 @@ mod tests {
 
     #[tokio::test]
     async fn log_tail_returns_empty_when_file_missing() {
-        // Fresh-boot scenario: agent.log doesn't exist yet. Don't
-        // error — return an empty result so the SPA support flow
-        // works the first time it's invoked.
+        // Fresh-boot scenario: parent dir exists (the agent set
+        // up its log directory at startup) but no log file has
+        // been written yet. Don't error — return an empty result
+        // so the SPA support flow works the first time it's
+        // invoked.
+        let tmpdir = tempfile::tempdir().unwrap();
         let conn = fresh_conn_with(
             EffectiveConfig::builtin_defaults(),
-            PathBuf::from("definitely-does-not-exist.log"),
+            tmpdir.path().join("agent.log"),
         );
         let result = handle_log_tail(&conn, LogTailParams::default())
             .await
             .expect("missing file is not an error");
         assert!(result.lines.is_empty());
         assert!(!result.truncated);
+    }
+
+    #[tokio::test]
+    async fn log_tail_picks_rotated_file_matching_template() {
+        // The HIGH bug from agy's review: tracing_appender writes
+        // to `<stem>.YYYY-MM-DD.<ext>`, not the bare template
+        // path. The handler must resolve to the active file via
+        // locate_active_file before reading.
+        let tmpdir = tempfile::tempdir().unwrap();
+        let template = tmpdir.path().join("agent.log");
+        // The actual file the appender would have created today.
+        let active = tmpdir.path().join("agent.2026-05-24.log");
+        std::fs::write(&active, "first\nsecond\nthird\n").unwrap();
+        let conn = fresh_conn_with(EffectiveConfig::builtin_defaults(), template);
+        let result = handle_log_tail(&conn, LogTailParams { lines: 10 })
+            .await
+            .expect("locate_active_file should find the rotated file");
+        assert_eq!(result.lines, vec!["first", "second", "third"]);
     }
 
     #[tokio::test]

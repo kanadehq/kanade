@@ -96,10 +96,17 @@ pub struct LogTailResult {
     /// `tracing-subscriber` format, so SPA support flows can
     /// concatenate with `"\n"` for display.
     pub lines: Vec<String>,
-    /// `true` when the agent truncated the response — caller asked
-    /// for more than the agent's per-call cap. Surfaced so support
+    /// `true` when the caller's request was clamped down to the
+    /// agent's per-call cap (the agent currently caps at 1000
+    /// lines per call to keep the response inside the 1 MiB
+    /// framing cap from SPEC §2.12.2). Surfaced so support
     /// tooling can warn the user to also pull the file from disk
     /// via `support.upload_diagnostics`.
+    ///
+    /// NOT set merely because the on-disk file has more lines
+    /// than what the caller asked for: if you asked for 200 and
+    /// got 200, `truncated` is `false` even when the file holds
+    /// 50 000 — the agent gave you exactly what you requested.
     #[serde(default)]
     pub truncated: bool,
 }
