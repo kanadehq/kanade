@@ -57,6 +57,27 @@ pub async fn exec_manifest(
         ));
     }
 
+    // Defensive — the write paths (`POST /api/jobs`, `kanade job
+    // create`) already gate every manifest through
+    // `Manifest::validate()` before it lands in BUCKET_JOBS, so by
+    // the time exec_manifest sees one we expect exactly one of
+    // script / script_file / script_object to be set. Re-check
+    // here so a hypothetical write path that bypassed validation
+    // (direct NATS KV poke, downgrade-then-upgrade) bails with a
+    // clear 400 instead of crashing the unwrap below.
+    manifest
+        .execute
+        .validate_script_source()
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    // `script_file` / `script_object` resolvers haven't shipped
+    // yet (yukimemi/kanade#210 follow-up work) — refuse cleanly
+    // so the operator sees a real error instead of a silent
+    // empty-script Command.
+    let inline_script = manifest.execute.script.as_deref().filter(|s| !s.is_empty()).ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "execute.script_file / script_object resolver not yet implemented (tracked in yukimemi/kanade#210)".to_string(),
+    ))?;
+
     let timeout_secs = humantime::parse_duration(&manifest.execute.timeout)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid timeout: {e}")))?
         .as_secs();
@@ -77,7 +98,7 @@ pub async fn exec_manifest(
         request_id: Uuid::new_v4().to_string(),
         exec_id: Some(exec_id.clone()),
         shell: manifest.execute.shell.into(),
-        script: manifest.execute.script.clone(),
+        script: inline_script.to_owned(),
         timeout_secs,
         jitter_secs,
         run_as: manifest.execute.run_as,

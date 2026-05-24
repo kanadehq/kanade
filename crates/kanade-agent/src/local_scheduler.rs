@@ -686,6 +686,18 @@ async fn local_tick(
     // 3) Build a Command in-process (no NATS hop) and call
     //    handle_command directly. Skip the deadline (= None) since
     //    we just fired this very instant — no delivery lag.
+    // Same defence as backend::api::exec — the agent's local
+    // scheduler bypasses the HTTP write path entirely, so refuse
+    // manifests that point at `script_file` / `script_object`
+    // until the resolver lands (yukimemi/kanade#210 follow-up).
+    let Some(inline_script) = manifest.execute.script.as_deref().filter(|s| !s.is_empty()) else {
+        warn!(
+            schedule_id = %schedule.id,
+            job_id = %manifest.id,
+            "local_scheduler: manifest uses script_file/script_object — resolver TODO (#210), skipping fire",
+        );
+        return;
+    };
     let timeout_secs = humantime::parse_duration(&manifest.execute.timeout)
         .ok()
         .map(|d| d.as_secs())
@@ -703,7 +715,7 @@ async fn local_tick(
         request_id: Uuid::new_v4().to_string(),
         exec_id: Some(exec_id),
         shell: manifest.execute.shell.into(),
-        script: manifest.execute.script.clone(),
+        script: inline_script.to_owned(),
         timeout_secs,
         jitter_secs,
         run_as: manifest.execute.run_as,

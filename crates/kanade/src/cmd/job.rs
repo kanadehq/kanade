@@ -54,6 +54,12 @@ async fn create(base: &str, yaml: &PathBuf) -> Result<()> {
     // understood JSON content-type, but `application/yaml` is parsed
     // identically on v0.31+, so the CLI sends YAML unconditionally.
     let job: Manifest = serde_yaml::from_str(&body).with_context(|| format!("parse {yaml:?}"))?;
+    // SPEC §2.4.1: keep the operator's failure-site obvious by
+    // catching script-source ambiguity here rather than letting
+    // the backend round-trip it back as a 400.
+    if let Err(e) = job.validate() {
+        anyhow::bail!("{yaml:?}: {e}");
+    }
     info!(job_id = %job.id, version = %job.version, "upserting job");
 
     let url = format!("{base}/api/jobs");
