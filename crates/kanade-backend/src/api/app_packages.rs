@@ -50,8 +50,23 @@ fn object_key(name: &str, version: &str) -> String {
 }
 
 /// Validate the path-param halves are usable as Object Store key
-/// segments. Reject empty strings + slashes; everything else
-/// (dots, dashes, semver labels) is fine.
+/// segments AND as raw substrings of an HTTP
+/// `Content-Disposition: attachment; filename="…"` header.
+///
+/// Restrictions:
+/// - non-empty
+/// - no `/` (would create ambiguous Object Store paths)
+/// - ASCII-printable only — rejects control characters
+///   (`U+0000..U+001F`, `U+007F`) AND non-ASCII so the
+///   `filename=` quoted-string in the download response stays
+///   well-formed without RFC 5987 percent-encoding
+/// - no `"` / `\` — quoted-string delimiters; escaping them
+///   inline is possible but accepting them only forces every
+///   downstream tool (URL-bar paste, scripts, audit log) to
+///   re-quote, so we just reject at the door
+///
+/// Common semver / calendar / lib-name forms (`0.41.0`,
+/// `2025.03`, `webex-meetings`, `kanade_client`) all pass.
 fn validate_segment(label: &str, value: &str) -> Result<(), (StatusCode, String)> {
     if value.is_empty() {
         return Err((
@@ -64,6 +79,26 @@ fn validate_segment(label: &str, value: &str) -> Result<(), (StatusCode, String)
             StatusCode::BAD_REQUEST,
             format!("{label} must not contain '/'"),
         ));
+    }
+    for c in value.chars() {
+        if !c.is_ascii() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("{label} must be ASCII-printable (rejected non-ASCII character {c:?})"),
+            ));
+        }
+        if c.is_ascii_control() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("{label} must not contain control characters"),
+            ));
+        }
+        if c == '"' || c == '\\' {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("{label} must not contain '\"' or '\\\\'"),
+            ));
+        }
     }
     Ok(())
 }
@@ -201,8 +236,17 @@ pub async fn list_packages(
     })?;
 
     let mut rows = Vec::new();
-    while let Some(meta) = list.next().await {
-        let Ok(meta) = meta else { continue };
+    while let Some(item) = list.next().await {
+        // Propagate stream errors instead of silently truncating
+        // — a partial list returned as `200 OK` would lie to the
+        // operator about what's in the bucket.
+        let meta = item.map_err(|e| {
+            warn!(error = %e, "app_packages.list: object metadata stream error");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("list app packages: {e}"),
+            )
+        })?;
         // Object key is `<name>/<version>` — split on the LAST
         // slash so future packages with a slash-containing name
         // wouldn't trip the parser (defensive; current
@@ -364,10 +408,21 @@ pub async fn download(
     );
 
     match range {
-        RangeResult::Invalid => Err((
-            StatusCode::RANGE_NOT_SATISFIABLE,
-            format!("Range header invalid or out of bounds for object size {total_size}"),
-        )),
+        RangeResult::Invalid => {
+            // RFC 7233 §4.4: a 416 response SHOULD include a
+            // `Content-Range: bytes */<complete-length>` header
+            // so the client knows how to retry with a satisfiable
+            // range. Hand-build the Response so we can set both
+            // status + header in one shot.
+            let body =
+                format!("Range header invalid or out of bounds for object size {total_size}\n");
+            Ok((
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                [(header::CONTENT_RANGE, format!("bytes */{total_size}"))],
+                body,
+            )
+                .into_response())
+        }
         RangeResult::None => {
             // Full-content response. Stream directly from the
             // Object Store — never buffer the (potentially
@@ -527,6 +582,34 @@ mod tests {
         assert!(validate_segment("version", "0.41.0-beta.2").is_ok());
         assert!(validate_segment("version", "2025.03").is_ok());
         assert!(validate_segment("name", "webex_meetings").is_ok());
+    }
+
+    #[test]
+    fn validate_segment_rejects_non_ascii() {
+        // Japanese package names look fine on the SPA but would
+        // break `Content-Disposition: filename="…"` without RFC
+        // 5987 percent-encoding. Reject at the door so the
+        // download header stays simple.
+        let err = validate_segment("name", "勤怠アプリ").unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("non-ASCII"));
+    }
+
+    #[test]
+    fn validate_segment_rejects_control_characters() {
+        let err = validate_segment("name", "kanade\nclient").unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("control"));
+    }
+
+    #[test]
+    fn validate_segment_rejects_quote_and_backslash() {
+        // Either character would break the quoted-string in
+        // Content-Disposition without escape gymnastics.
+        let err = validate_segment("name", "a\"b").unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        let err = validate_segment("name", "a\\b").unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
     }
 
     // ---- parse_range ----
