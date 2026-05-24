@@ -227,13 +227,13 @@ async fn handle_connection(pipe: NamedPipeServer, ctx: ListenerContext) -> Resul
     // 2. Drop `conn` — `SubscriptionRegistry::Drop` aborts each
     //    forwarder task, which causes their `push_tx` clones to
     //    drop on the next runtime poll.
-    // 3. Abort the writer task explicitly so any forwarder that
-    //    hasn't yielded yet can't keep the writer alive
-    //    indefinitely — its in-flight frame is dropped silently
-    //    (the client is disconnecting anyway).
+    // 3. `await` the writer — its `push_rx.recv()` returns `None`
+    //    once every sender has dropped, and only THEN does the
+    //    writer exit. That order is what lets a parse / oversize
+    //    error queued just before the read loop exits actually
+    //    reach the client; an `abort()` here would discard it.
     drop(push_tx);
     drop(conn);
-    writer_handle.abort();
     let _ = writer_handle.await;
 
     read_loop_result
