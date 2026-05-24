@@ -195,11 +195,17 @@ impl ScriptCache {
 /// Free-function form of the atomic-write so the disk-side unit
 /// tests can exercise it without spinning up a real jetstream
 /// `Context`.
+///
+/// Tmp file uses a per-call random suffix (vs a fixed `.tmp`) so
+/// two concurrent fetches resolving the same digest don't clobber
+/// each other's in-flight write before the rename — Gemini #214
+/// MED finding.
 async fn write_atomic_into(dir: &Path, final_path: &Path, bytes: &[u8]) -> Result<()> {
     tokio::fs::create_dir_all(dir)
         .await
         .with_context(|| format!("mkdir {}", dir.display()))?;
-    let tmp = final_path.with_extension("tmp");
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let tmp = final_path.with_extension(format!("{suffix}.tmp"));
     tokio::fs::write(&tmp, bytes)
         .await
         .with_context(|| format!("write {}", tmp.display()))?;
@@ -257,10 +263,16 @@ mod tests {
             .await
             .expect("write_atomic");
         assert_eq!(tokio::fs::read(&path).await.expect("read back"), b"echo hi");
-        assert!(
-            !path.with_extension("tmp").exists(),
-            "tmp file should be renamed away"
-        );
+        // After the rename, no `<sha>.<uuid>.tmp` scratch file
+        // should remain — walk the dir and assert nothing matches
+        // that pattern (per-call random suffix means we can't
+        // construct the exact expected name here).
+        let mut rd = tokio::fs::read_dir(&dir).await.expect("read_dir");
+        while let Some(entry) = rd.next_entry().await.expect("next_entry") {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            assert!(!name.ends_with(".tmp"), "leftover tmp file: {name}");
+        }
     }
 
     #[tokio::test]
@@ -277,5 +289,47 @@ mod tests {
             .await
             .expect("second");
         assert_eq!(tokio::fs::read(&path).await.expect("read back"), b"second");
+    }
+
+    #[tokio::test]
+    async fn write_atomic_concurrent_same_sha_does_not_corrupt() {
+        // Gemini #214 MED: two commands fetching the same script
+        // (same sha) could previously clobber each other's `.tmp`
+        // mid-write before rename. With per-call random suffix the
+        // races are isolated; the final file is one of the two
+        // candidate bodies in full (never a half-written mix).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = std::sync::Arc::new(tmp.path().to_path_buf());
+        let path = dir.join("samesha");
+
+        let n_writers = 8usize;
+        let body_a = vec![b'A'; 4096];
+        let body_b = vec![b'B'; 4096];
+
+        let mut handles = Vec::with_capacity(n_writers);
+        for i in 0..n_writers {
+            let dir = dir.clone();
+            let path = path.clone();
+            let bytes = if i.is_multiple_of(2) {
+                body_a.clone()
+            } else {
+                body_b.clone()
+            };
+            handles.push(tokio::spawn(async move {
+                write_atomic_into(&dir, &path, &bytes).await
+            }));
+        }
+        for h in handles {
+            h.await.expect("join").expect("write_atomic_into");
+        }
+
+        let final_bytes = tokio::fs::read(&path).await.expect("final read");
+        assert_eq!(final_bytes.len(), 4096, "final length matches one body");
+        let all_a = final_bytes.iter().all(|&b| b == b'A');
+        let all_b = final_bytes.iter().all(|&b| b == b'B');
+        assert!(
+            all_a || all_b,
+            "final file is one of the candidate bodies, not a mix",
+        );
     }
 }
