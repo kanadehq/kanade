@@ -7,6 +7,7 @@ import { ConfirmDialogProvider } from '@/components/ui/confirm-dialog';
 import { AuthProvider } from '@/lib/auth';
 import { AgentDetail } from '@/pages/AgentDetail';
 import { Agents } from '@/pages/Agents';
+import { Apps } from '@/pages/Apps';
 import { Audit } from '@/pages/Audit';
 import { Config } from '@/pages/Config';
 import { Dashboard } from '@/pages/Dashboard';
@@ -84,6 +85,7 @@ export default function App() {
               <Route path="/schedules" element={<Schedules />} />
               <Route path="/exec" element={<Exec />} />
               <Route path="/rollout" element={<Rollout />} />
+              <Route path="/apps" element={<Apps />} />
               <Route path="/config" element={<Config />} />
               <Route path="/jetstream" element={<JetStream />} />
               <Route path="/settings" element={<Settings />} />

@@ -1,0 +1,72 @@
+{
+  "title": "アプリ配信",
+  "intro": "2 種類の汎用 Object Store バケットを操作: <code>app_packages</code> (バイナリ) と <code>scripts</code> (manifest スクリプト本体)。",
+  "appPackages": {
+    "title": "App packages",
+    "description": "<code>/api/app-packages</code> (#207) に対する操作。<code>&lt;name&gt;/&lt;version&gt;</code> でキー付けされた、operator が curate するインストーラ / バイナリ。kanade-client app や Webex / Teams / カスタム MSI 等のサードパーティ インストーラもここ。Body 上限 256 MB。",
+    "upload": {
+      "nameLabel": "名前",
+      "namePlaceholder": "例: kanade-client",
+      "versionLabel": "バージョン",
+      "versionPlaceholder": "例: 0.42.0",
+      "fileLabel": "ファイル",
+      "uploadButton": "アップロード",
+      "noFileError": "ファイルを選択してください",
+      "noNameError": "名前は必須です",
+      "noVersionError": "バージョンは必須です",
+      "successPrefix": "登録完了:",
+      "errorTitle": "アップロード失敗"
+    },
+    "list": {
+      "loading": "読み込み中…",
+      "errorTitle": "App packages の取得に失敗",
+      "empty": "バケットは空です — 上のフォームでアップロードするか、<code>/api/app-packages/&lt;name&gt;/&lt;version&gt;</code> に curl で POST してください。",
+      "columns": {
+        "name": "名前",
+        "version": "バージョン",
+        "size": "サイズ",
+        "modified": "更新日時",
+        "digest": "digest",
+        "actions": "操作"
+      },
+      "confirmDeleteTitle": "App package {{name}}/{{version}} を削除しますか？",
+      "confirmDeleteDescription": "OBJECT_APP_PACKAGES からバイト列を削除します。元に戻せません — 復旧には再アップロードが必要です。",
+      "confirmDeleteButton": "削除",
+      "deleteErrorTitle": "削除失敗"
+    }
+  },
+  "scriptObjects": {
+    "title": "Script objects",
+    "description": "<code>/api/script-objects</code> (#211) に対する操作。manifest の <code>execute.script_object</code> から参照されるスクリプト本体 — agent が exec 時に fetch + sha 検証 (#214)。Body 上限は 4 MB (インストーラではなく PowerShell / shell スクリプト想定)。",
+    "upload": {
+      "nameLabel": "名前",
+      "namePlaceholder": "例: inventory-os",
+      "versionLabel": "バージョン",
+      "versionPlaceholder": "例: 1.0.0",
+      "fileLabel": "ファイル",
+      "uploadButton": "アップロード",
+      "noFileError": "ファイルを選択してください",
+      "noNameError": "名前は必須です",
+      "noVersionError": "バージョンは必須です",
+      "successPrefix": "登録完了:",
+      "errorTitle": "アップロード失敗"
+    },
+    "list": {
+      "loading": "読み込み中…",
+      "errorTitle": "Script objects の取得に失敗",
+      "empty": "バケットは空です — 上のフォームでアップロードするか、<code>/api/script-objects/&lt;name&gt;/&lt;version&gt;</code> に curl で POST してください。",
+      "columns": {
+        "name": "名前",
+        "version": "バージョン",
+        "size": "サイズ",
+        "modified": "更新日時",
+        "digest": "digest",
+        "actions": "操作"
+      },
+      "confirmDeleteTitle": "Script object {{name}}/{{version}} を削除しますか？",
+      "confirmDeleteDescription": "OBJECT_SCRIPTS からバイト列を削除します。元に戻せません — 該当 object を参照している manifest は再アップロードまで exec 失敗します。",
+      "confirmDeleteButton": "削除",
+      "deleteErrorTitle": "削除失敗"
+    }
+  }
+}

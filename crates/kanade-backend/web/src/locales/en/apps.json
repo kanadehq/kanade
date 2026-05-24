@@ -1,0 +1,72 @@
+{
+  "title": "Apps",
+  "intro": "Upload + manage the two generic Object Store buckets: <code>app_packages</code> (binaries) and <code>scripts</code> (manifest script bodies).",
+  "appPackages": {
+    "title": "App packages",
+    "description": "From <code>/api/app-packages</code> (#207). Operator-curated installers / binaries keyed by <code>&lt;name&gt;/&lt;version&gt;</code>. The kanade-client app + third-party installers (Webex, Teams, custom MSIs) live here. 256 MB body limit.",
+    "upload": {
+      "nameLabel": "name",
+      "namePlaceholder": "e.g. kanade-client",
+      "versionLabel": "version",
+      "versionPlaceholder": "e.g. 0.42.0",
+      "fileLabel": "file",
+      "uploadButton": "Upload",
+      "noFileError": "pick a file first",
+      "noNameError": "name is required",
+      "noVersionError": "version is required",
+      "successPrefix": "uploaded as",
+      "errorTitle": "Upload failed"
+    },
+    "list": {
+      "loading": "loading…",
+      "errorTitle": "Couldn't load app packages",
+      "empty": "Bucket empty — upload a binary above (or POST to <code>/api/app-packages/&lt;name&gt;/&lt;version&gt;</code> via curl).",
+      "columns": {
+        "name": "name",
+        "version": "version",
+        "size": "size",
+        "modified": "modified",
+        "digest": "digest",
+        "actions": "actions"
+      },
+      "confirmDeleteTitle": "Delete app package {{name}}/{{version}}?",
+      "confirmDeleteDescription": "Removes the bytes from OBJECT_APP_PACKAGES. This cannot be undone — re-upload to restore.",
+      "confirmDeleteButton": "Delete",
+      "deleteErrorTitle": "Delete failed"
+    }
+  },
+  "scriptObjects": {
+    "title": "Script objects",
+    "description": "From <code>/api/script-objects</code> (#211). Manifest script bodies referenced by <code>execute.script_object</code> — agents fetch + sha-verify at exec time (#214). 4 MB body limit, since these are PowerShell / shell bodies, not installer payloads.",
+    "upload": {
+      "nameLabel": "name",
+      "namePlaceholder": "e.g. inventory-os",
+      "versionLabel": "version",
+      "versionPlaceholder": "e.g. 1.0.0",
+      "fileLabel": "file",
+      "uploadButton": "Upload",
+      "noFileError": "pick a file first",
+      "noNameError": "name is required",
+      "noVersionError": "version is required",
+      "successPrefix": "uploaded as",
+      "errorTitle": "Upload failed"
+    },
+    "list": {
+      "loading": "loading…",
+      "errorTitle": "Couldn't load script objects",
+      "empty": "Bucket empty — upload a script above (or POST to <code>/api/script-objects/&lt;name&gt;/&lt;version&gt;</code> via curl).",
+      "columns": {
+        "name": "name",
+        "version": "version",
+        "size": "size",
+        "modified": "modified",
+        "digest": "digest",
+        "actions": "actions"
+      },
+      "confirmDeleteTitle": "Delete script object {{name}}/{{version}}?",
+      "confirmDeleteDescription": "Removes the bytes from OBJECT_SCRIPTS. This cannot be undone — manifests referencing this object will fail at exec until you re-upload.",
+      "confirmDeleteButton": "Delete",
+      "deleteErrorTitle": "Delete failed"
+    }
+  }
+}

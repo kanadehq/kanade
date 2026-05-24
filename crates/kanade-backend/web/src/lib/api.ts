@@ -36,7 +36,12 @@ async function apiFetchRaw(path: string, init: RequestInit = {}): Promise<{ res:
   // `source: "spa"` so the audit log distinguishes browser-driven
   // actions from CLI ones without rewriting handler signatures.
   if (!headers.has('X-Kanade-Source')) headers.set('X-Kanade-Source', 'spa');
-  if (init.body && !headers.has('Content-Type')) {
+  // FormData bodies must NOT have a manually-set Content-Type — the
+  // browser fills in `multipart/form-data; boundary=...` only if the
+  // header is absent. Setting `application/json` here would route
+  // multipart bytes through the wrong parser on the backend (silent
+  // 400 with a "missing 'file' field" body).
+  if (init.body && !headers.has('Content-Type') && !(init.body instanceof FormData)) {
     headers.set('Content-Type', 'application/json');
   }
 
