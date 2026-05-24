@@ -207,6 +207,8 @@ pub(crate) async fn run_agent() -> Result<()> {
     let _klp_handle = klp::server::spawn(klp::server::ListenerContext {
         pc_id: std::sync::Arc::from(pc_id.as_str()),
         agent_version: std::sync::Arc::from(AGENT_VERSION),
+        config_rx: cfg_rx.clone(),
+        log_path: std::sync::Arc::new(std::path::PathBuf::from(&cfg.log.path)),
     });
 
     // Group membership: Sprint 5 moves this from agent.toml (per-box

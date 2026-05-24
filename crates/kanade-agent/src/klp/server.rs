@@ -22,12 +22,15 @@
 //! (`CreateNamedPipe`-with-`lpSecurityAttributes`). See
 //! `crate::klp::security` for the SDDL breakdown.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use kanade_shared::ipc::envelope::{RpcMessage, RpcResponse};
 use kanade_shared::ipc::error::{ErrorKind, RpcError};
+use kanade_shared::wire::EffectiveConfig;
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 use crate::klp::auth::resolve_peer;
@@ -41,11 +44,22 @@ pub const PIPE_NAME: &str = r"\\.\pipe\kanade-agent";
 
 /// Shared configuration injected into every spawned per-connection
 /// task. Kept small and cheap to clone so each connection gets its
-/// own copy without lifetime gymnastics.
+/// own copy without lifetime gymnastics: `Arc<str>` strings,
+/// `watch::Receiver` (Arc-backed) for the live config view, and a
+/// per-conn `PathBuf` (one allocation, fine — handlers don't run
+/// in tight loops).
 #[derive(Clone)]
 pub struct ListenerContext {
     pub pc_id: Arc<str>,
     pub agent_version: Arc<str>,
+    /// Live view of the agent's effective config (Sprint 6's
+    /// supervisor watch channel). `system.version` reads the
+    /// current `target_version`; future handlers (state.snapshot,
+    /// etc.) will read other fields.
+    pub config_rx: watch::Receiver<EffectiveConfig>,
+    /// On-disk path to agent.log. `system.log_tail` reads it to
+    /// bundle recent log lines into a support response.
+    pub log_path: Arc<PathBuf>,
 }
 
 /// Spawn the KLP listener. Returns immediately with a detached
@@ -165,7 +179,13 @@ async fn handle_connection(mut pipe: NamedPipeServer, ctx: ListenerContext) -> R
         "KLP peer connected",
     );
 
-    let mut conn = ConnectionState::new(peer, ctx.pc_id.to_string(), ctx.agent_version.to_string());
+    let mut conn = ConnectionState::new(
+        peer,
+        ctx.pc_id.to_string(),
+        ctx.agent_version.to_string(),
+        ctx.config_rx.clone(),
+        (*ctx.log_path).clone(),
+    );
 
     loop {
         let frame = match read_frame(&mut pipe).await {
@@ -214,7 +234,7 @@ async fn handle_connection(mut pipe: NamedPipeServer, ctx: ListenerContext) -> R
 
         match msg {
             RpcMessage::Request(req) => {
-                let resp = dispatch_request(&mut conn, req);
+                let resp = dispatch_request(&mut conn, req).await;
                 let body = serde_json::to_vec(&resp).context("encode RpcResponse")?;
                 if let Err(e) = write_frame(&mut pipe, &body).await {
                     warn!(error = %e, "KLP write error; closing connection");
