@@ -33,6 +33,9 @@ use kanade_shared::ipc::envelope::{RpcRequest, RpcResponse, decode_params};
 use kanade_shared::ipc::error::{ErrorKind, RpcError};
 use kanade_shared::ipc::handshake::HandshakeParams;
 use kanade_shared::ipc::method;
+use kanade_shared::ipc::state::{
+    StateSnapshotParams, StateSubscribeParams, StateUnsubscribeParams,
+};
 use kanade_shared::ipc::system::{LogTailParams, PingParams, VersionParams};
 use tracing::warn;
 
@@ -103,6 +106,28 @@ async fn dispatch_inner(
             let result = handlers::system::handle_log_tail(conn, params).await?;
             serde_json::to_value(&result).map_err(internal)
         }
+        method::STATE_SNAPSHOT => {
+            let params: StateSnapshotParams =
+                decode_params(req.params.clone()).map_err(invalid_params)?;
+            let result = handlers::state::handle_state_snapshot(conn, params)?;
+            serde_json::to_value(&result).map_err(internal)
+        }
+        method::STATE_SUBSCRIBE => {
+            let params: StateSubscribeParams =
+                decode_params(req.params.clone()).map_err(invalid_params)?;
+            let result = handlers::state::handle_state_subscribe(conn, params)?;
+            serde_json::to_value(&result).map_err(internal)
+        }
+        method::STATE_UNSUBSCRIBE => {
+            // StateUnsubscribeParams has the required `subscription`
+            // field — no Default, so route directly through serde
+            // like the handshake path.
+            let params: StateUnsubscribeParams =
+                serde_json::from_value(req.params.clone()).map_err(invalid_params)?;
+            handlers::state::handle_state_unsubscribe(conn, params)?;
+            // SPEC §2.12.7's unsubscribe response is `{"result":null}`.
+            Ok(serde_json::Value::Null)
+        }
         // Every other v1 method is reserved but not implemented
         // in this PR — answer MethodNotFound so client code can
         // tell "agent doesn't know about this" apart from
@@ -137,21 +162,37 @@ mod tests {
     use crate::klp::auth::PeerCredentials;
     use kanade_shared::ipc::envelope::RpcResponsePayload;
     use kanade_shared::ipc::handshake::PROTOCOL_V1;
+    use kanade_shared::ipc::state::StateSnapshot;
     use kanade_shared::wire::EffectiveConfig;
     use std::path::PathBuf;
-    use tokio::sync::watch;
+    use tokio::sync::{mpsc, watch};
+
+    fn dummy_snapshot() -> StateSnapshot {
+        StateSnapshot {
+            pc_id: "PC1234".into(),
+            online: true,
+            vpn: "unknown".into(),
+            checks: vec![],
+            agent_version: "0.41.0".into(),
+            target_version: "0.41.0".into(),
+        }
+    }
 
     fn fresh_conn() -> ConnectionState {
-        let (_tx, rx) = watch::channel(EffectiveConfig::builtin_defaults());
+        let (_cfg_tx, cfg_rx) = watch::channel(EffectiveConfig::builtin_defaults());
+        let (_state_tx, state_rx) = watch::channel(dummy_snapshot());
+        let (push_tx, _push_rx) = mpsc::channel(8);
         ConnectionState::new(
             PeerCredentials {
                 user: "DOMAIN\\alice".into(),
                 session_id: 2,
             },
             "PC1234".into(),
-            "0.40.0".into(),
-            rx,
+            "0.41.0".into(),
+            cfg_rx,
+            state_rx,
             PathBuf::from("agent.log"),
+            push_tx,
         )
     }
 

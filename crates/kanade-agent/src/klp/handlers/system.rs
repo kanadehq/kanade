@@ -223,13 +223,27 @@ pub async fn handle_log_tail(
 mod tests {
     use super::*;
     use crate::klp::auth::PeerCredentials;
+    use kanade_shared::ipc::state::StateSnapshot;
     use kanade_shared::wire::EffectiveConfig;
     use std::path::PathBuf;
     use tempfile::NamedTempFile;
-    use tokio::sync::watch;
+    use tokio::sync::{mpsc, watch};
+
+    fn dummy_snapshot() -> StateSnapshot {
+        StateSnapshot {
+            pc_id: "PC1234".into(),
+            online: true,
+            vpn: "unknown".into(),
+            checks: vec![],
+            agent_version: "0.40.0".into(),
+            target_version: "0.40.0".into(),
+        }
+    }
 
     fn fresh_conn_with(cfg: EffectiveConfig, log_path: PathBuf) -> ConnectionState {
-        let (_tx, rx) = watch::channel(cfg);
+        let (_cfg_tx, cfg_rx) = watch::channel(cfg);
+        let (_state_tx, state_rx) = watch::channel(dummy_snapshot());
+        let (push_tx, _push_rx) = mpsc::channel(8);
         ConnectionState::new(
             PeerCredentials {
                 user: "DOMAIN\\alice".into(),
@@ -237,8 +251,10 @@ mod tests {
             },
             "PC1234".into(),
             "0.40.0".into(),
-            rx,
+            cfg_rx,
+            state_rx,
             log_path,
+            push_tx,
         )
     }
 

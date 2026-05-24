@@ -4,17 +4,22 @@
 //! Module layout matches SPEC §2.12.13's "実装責務分担" table:
 //!
 //! - [`server`] — Windows Named Pipe listener + per-connection
-//!   read/write loop.
+//!   read/write split (reader task + writer task fed via mpsc).
 //! - [`framing`] — SPEC §2.12.2 length-prefixed JSON codec.
 //! - [`auth`] — OS token → SID/Session-id derivation
 //!   (`GetNamedPipeClientProcessId` chain).
 //! - [`security`] — Named Pipe SECURITY_DESCRIPTOR construction
 //!   (SPEC §2.12.1: Authenticated Users RW, deny Anonymous).
 //! - [`connection`] — per-connection state (handshake gate,
-//!   peer credentials).
+//!   peer credentials, subscription registry, push channel).
 //! - [`dispatcher`] — method routing + envelope assembly.
+//! - [`state`] — endpoint state evaluator (background task);
+//!   feeds the `state.snapshot` cache and the `state.changed`
+//!   push stream.
+//! - [`subscriptions`] — per-connection registry of active push
+//!   forwarder tasks; aborts on disconnect.
 //! - [`handlers`] — per-namespace method implementations
-//!   (`system.*` in this PR; state/notifications/jobs/support/
+//!   (`system.*` + `state.*` today; notifications/jobs/support/
 //!   maintenance land in follow-up PRs).
 //!
 //! Wire types are owned by [`kanade_shared::ipc`]; the agent side
@@ -27,3 +32,5 @@ pub mod framing;
 pub mod handlers;
 pub mod security;
 pub mod server;
+pub mod state;
+pub mod subscriptions;
