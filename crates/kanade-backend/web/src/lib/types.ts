@@ -121,3 +121,42 @@ export type ProcessesResponse = {
   latest_at: string | null;
   processes: ProcessRow[];
 };
+
+// v0.41 / Phase 3: fleet-wide aggregates. Three sibling endpoints
+// under /api/perf/* power the Dashboard cards.
+export type FleetPerfPoint = {
+  at: string;
+  value: number | null;
+};
+
+export type FleetPerfResponse = {
+  metric: string;
+  agg: string;
+  from: string;
+  to: string;
+  step_seconds: number;
+  points: FleetPerfPoint[];
+};
+
+export type TopPerfRow = {
+  pc_id: string;
+  hostname: string | null;
+  value: number;
+};
+
+export type TopPerfResponse = {
+  metric: string;
+  window_seconds: number;
+  rows: TopPerfRow[];
+};
+
+export type ActiveInvestigation = {
+  pc_id: string;
+  hostname: string | null;
+  latest_at: string;
+};
+
+export type ActiveInvestigationsResponse = {
+  window_seconds: number;
+  rows: ActiveInvestigation[];
+};

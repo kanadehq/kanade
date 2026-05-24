@@ -4,14 +4,29 @@ import {
   AlertTriangle,
   CheckCircle2,
   Clock,
+  Cpu,
   Gauge,
   HelpCircle,
+  LineChart as LineChartIcon,
+  MemoryStick,
+  Search,
   Server,
   Users,
   Wifi,
   XCircle,
 } from 'lucide-react';
 import { Trans, useTranslation } from 'react-i18next';
+import { Link } from 'react-router-dom';
+import {
+  CartesianGrid,
+  Legend,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
 
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 
@@ -19,7 +34,13 @@ import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { ApiError, apiFetch } from '@/lib/api';
 import { cn } from '@/lib/utils';
-import type { AgentRow, JetstreamSnapshot } from '@/lib/types';
+import type {
+  ActiveInvestigationsResponse,
+  AgentRow,
+  FleetPerfResponse,
+  JetstreamSnapshot,
+  TopPerfResponse,
+} from '@/lib/types';
 
 /** v0.37 / agent perf: per-job duration aggregates from
  *  /api/health/scan_durations. One row per job_id that finished
@@ -80,6 +101,39 @@ function fmtRelative(iso: string | null): string {
   const hr = Math.floor(min / 60);
   if (hr < 24) return `${hr}h ago`;
   return `${Math.floor(hr / 24)}d ago`;
+}
+
+function fmtBytes(v: number | null | undefined): string {
+  if (v === null || v === undefined || !Number.isFinite(v) || v < 0) return '—';
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  let i = 0;
+  let n = v;
+  while (n >= 1024 && i < units.length - 1) {
+    n /= 1024;
+    i++;
+  }
+  return `${n < 10 ? n.toFixed(1) : Math.round(n)} ${units[i]}`;
+}
+
+function fmtAxisTime(iso: string): string {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// Recharts label/value formatters narrowed from the broad
+// `ReactNode` / `ValueType | undefined` shapes Tooltip passes in.
+function tooltipLabel(label: unknown): string {
+  return typeof label === 'string' ? fmtRelative(label) : '';
+}
+function tooltipPct(value: unknown): string {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? `${value.toFixed(1)}%`
+    : '—';
+}
+function tooltipBytes(value: unknown): string {
+  return typeof value === 'number' ? fmtBytes(value) : '—';
 }
 
 // 2 min — covers the default 30s heartbeat cadence with several
@@ -165,6 +219,51 @@ export function Dashboard() {
     queryKey: ['scan-durations'],
     queryFn: () => apiFetch<ScanDurationStats[]>('/api/health/scan_durations'),
     refetchInterval: 60_000,
+  });
+
+  // v0.41 / Phase 3: fleet aggregate cards. The 24h CPU+Mem
+  // sparkline shares a single query that fetches each metric
+  // separately (sparkline cards each hit `/api/perf/fleet` with a
+  // different metric, both 15 min bucket → 96 points over 24h).
+  const FLEET_PERF_WINDOW_HOURS = 24;
+  const fleetPerfFrom = new Date(
+    Date.now() - FLEET_PERF_WINDOW_HOURS * 60 * 60 * 1000,
+  ).toISOString();
+  const fleetCpuQ = useQuery({
+    queryKey: ['fleet-perf', 'cpu', fleetPerfFrom],
+    queryFn: () =>
+      apiFetch<FleetPerfResponse>(
+        `/api/perf/fleet?metric=cpu_pct&agg=avg&from=${encodeURIComponent(fleetPerfFrom)}&step=15m`,
+      ),
+    refetchInterval: REFRESH_INTERVAL_MS,
+  });
+  const fleetMemQ = useQuery({
+    queryKey: ['fleet-perf', 'mem', fleetPerfFrom],
+    queryFn: () =>
+      apiFetch<FleetPerfResponse>(
+        `/api/perf/fleet?metric=mem_used_bytes&agg=avg&from=${encodeURIComponent(fleetPerfFrom)}&step=15m`,
+      ),
+    refetchInterval: REFRESH_INTERVAL_MS,
+  });
+  const topCpuQ = useQuery({
+    queryKey: ['top-perf', 'cpu'],
+    queryFn: () =>
+      apiFetch<TopPerfResponse>('/api/perf/top?metric=cpu_pct&window=5m&limit=5'),
+    refetchInterval: REFRESH_INTERVAL_MS,
+  });
+  const topMemQ = useQuery({
+    queryKey: ['top-perf', 'mem'],
+    queryFn: () =>
+      apiFetch<TopPerfResponse>(
+        '/api/perf/top?metric=mem_used_bytes&window=5m&limit=5',
+      ),
+    refetchInterval: REFRESH_INTERVAL_MS,
+  });
+  const activeInvQ = useQuery({
+    queryKey: ['active-investigations'],
+    queryFn: () =>
+      apiFetch<ActiveInvestigationsResponse>('/api/perf/active-investigations'),
+    refetchInterval: REFRESH_INTERVAL_MS,
   });
 
   const agents = agentsQ.data ?? [];
@@ -394,6 +493,242 @@ export function Dashboard() {
           </CardContent>
         </Card>
       </div>
+
+      {/* v0.41 / Phase 3: fleet-wide perf aggregates. The sparkline
+          card plus the two Top-N tables give the operator a
+          three-second read on "anything pegging the fleet RIGHT
+          now". The "investigations" card is the safety net for
+          process_perf toggles left on by mistake. */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <LineChartIcon className="size-5 text-violet" />
+            {t('fleetPerf.title')}
+          </CardTitle>
+          <CardDescription>
+            <Trans
+              ns="dashboard"
+              i18nKey="fleetPerf.description"
+              components={{ code: <code /> }}
+            />
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {(fleetCpuQ.data?.points.length ?? 0) === 0 &&
+          (fleetMemQ.data?.points.length ?? 0) === 0 ? (
+            <div className="text-muted text-sm">{t('fleetPerf.empty')}</div>
+          ) : (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <div className="space-y-1">
+                <div className="text-xs uppercase tracking-wide text-muted">
+                  {t('fleetPerf.series.cpu')}
+                </div>
+                <ResponsiveContainer width="100%" height={180}>
+                  <LineChart
+                    data={fleetCpuQ.data?.points ?? []}
+                    margin={{ top: 8, right: 12, bottom: 4, left: 0 }}
+                  >
+                    <CartesianGrid strokeDasharray="3 3" className="stroke-muted/30" />
+                    <XAxis dataKey="at" tickFormatter={fmtAxisTime} fontSize={11} />
+                    <YAxis
+                      domain={[0, 100]}
+                      tickFormatter={(v) => `${v}%`}
+                      fontSize={11}
+                      width={45}
+                    />
+                    <Tooltip labelFormatter={tooltipLabel} formatter={tooltipPct} />
+                    <Legend />
+                    <Line
+                      type="monotone"
+                      dataKey="value"
+                      name={t('fleetPerf.series.cpu')}
+                      stroke="#8b5cf6"
+                      strokeWidth={2}
+                      dot={false}
+                      isAnimationActive={false}
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+              <div className="space-y-1">
+                <div className="text-xs uppercase tracking-wide text-muted">
+                  {t('fleetPerf.series.mem')}
+                </div>
+                <ResponsiveContainer width="100%" height={180}>
+                  <LineChart
+                    data={fleetMemQ.data?.points ?? []}
+                    margin={{ top: 8, right: 12, bottom: 4, left: 0 }}
+                  >
+                    <CartesianGrid strokeDasharray="3 3" className="stroke-muted/30" />
+                    <XAxis dataKey="at" tickFormatter={fmtAxisTime} fontSize={11} />
+                    <YAxis tickFormatter={fmtBytes} fontSize={11} width={70} />
+                    <Tooltip labelFormatter={tooltipLabel} formatter={tooltipBytes} />
+                    <Legend />
+                    <Line
+                      type="monotone"
+                      dataKey="value"
+                      name={t('fleetPerf.series.mem')}
+                      stroke="#06b6d4"
+                      strokeWidth={2}
+                      dot={false}
+                      isAnimationActive={false}
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Cpu className="size-5 text-violet" />
+              {t('topCpu.title')}
+            </CardTitle>
+            <CardDescription>
+              <Trans
+                ns="dashboard"
+                i18nKey="topCpu.description"
+                components={{ code: <code /> }}
+              />
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {(topCpuQ.data?.rows ?? []).length === 0 ? (
+              <div className="text-muted text-sm">{t('topCpu.empty')}</div>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>{t('topTable.pcId')}</TableHead>
+                    <TableHead>{t('topTable.hostname')}</TableHead>
+                    <TableHead className="text-right">{t('topTable.value')}</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {(topCpuQ.data?.rows ?? []).map((r) => (
+                    <TableRow key={r.pc_id}>
+                      <TableCell>
+                        <Link
+                          to={`/agents/${encodeURIComponent(r.pc_id)}`}
+                          className="hover:underline"
+                        >
+                          <code className="text-xs">{r.pc_id}</code>
+                        </Link>
+                      </TableCell>
+                      <TableCell className="text-muted text-xs">
+                        {r.hostname ?? '—'}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums">
+                        {r.value.toFixed(1)}%
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <MemoryStick className="size-5 text-violet" />
+              {t('topMem.title')}
+            </CardTitle>
+            <CardDescription>
+              <Trans
+                ns="dashboard"
+                i18nKey="topMem.description"
+                components={{ code: <code /> }}
+              />
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {(topMemQ.data?.rows ?? []).length === 0 ? (
+              <div className="text-muted text-sm">{t('topMem.empty')}</div>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>{t('topTable.pcId')}</TableHead>
+                    <TableHead>{t('topTable.hostname')}</TableHead>
+                    <TableHead className="text-right">{t('topTable.value')}</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {(topMemQ.data?.rows ?? []).map((r) => (
+                    <TableRow key={r.pc_id}>
+                      <TableCell>
+                        <Link
+                          to={`/agents/${encodeURIComponent(r.pc_id)}`}
+                          className="hover:underline"
+                        >
+                          <code className="text-xs">{r.pc_id}</code>
+                        </Link>
+                      </TableCell>
+                      <TableCell className="text-muted text-xs">
+                        {r.hostname ?? '—'}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums">
+                        {fmtBytes(r.value)}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Search className="size-5 text-violet" />
+            {t('activeInvestigations.title')}
+          </CardTitle>
+          <CardDescription>
+            <Trans
+              ns="dashboard"
+              i18nKey="activeInvestigations.description"
+              components={{ code: <code />, strong: <strong /> }}
+            />
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {(activeInvQ.data?.rows ?? []).length === 0 ? (
+            <div className="text-muted text-sm">{t('activeInvestigations.empty')}</div>
+          ) : (
+            <div className="space-y-2">
+              {(activeInvQ.data?.rows ?? []).map((r) => (
+                <div
+                  key={r.pc_id}
+                  className="flex items-center gap-3 text-sm"
+                >
+                  <Badge variant="amber" className="shrink-0">
+                    {t('activeInvestigations.latest', {
+                      age: fmtRelative(r.latest_at),
+                    })}
+                  </Badge>
+                  <Link
+                    to={`/agents/${encodeURIComponent(r.pc_id)}`}
+                    className="hover:underline"
+                  >
+                    <code className="text-xs">{r.pc_id}</code>
+                  </Link>
+                  {r.hostname && (
+                    <span className="text-muted text-xs">· {r.hostname}</span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       {/* v0.37 / agent perf: scan duration aggregates per job_id
           over the last 24 h. Sorted slowest-first so a probe that
