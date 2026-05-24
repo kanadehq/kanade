@@ -44,8 +44,8 @@ pub enum ConfigSub {
         scope: ScopeSel,
     },
     /// Set one field. `<spec>` is `<field>=<value>` (e.g.
-    /// `heartbeat_interval=15s`, `target_version_jitter=30m`,
-    /// `target_version=0.3.0`).
+    /// `heartbeat_interval=15s`, `host_perf_interval=2m`,
+    /// `target_version_jitter=30m`, `target_version=0.3.0`).
     Set {
         spec: String,
         #[command(flatten)]
@@ -224,8 +224,9 @@ fn apply_field(scope: &mut ConfigScope, field: &str, value: Option<&str>) -> Res
         "target_version" => scope.target_version = value.map(String::from),
         "target_version_jitter" => scope.target_version_jitter = value.map(String::from),
         "heartbeat_interval" => scope.heartbeat_interval = value.map(String::from),
+        "host_perf_interval" => scope.host_perf_interval = value.map(String::from),
         other => bail!(
-            "unknown field '{other}' — supported: target_version, target_version_jitter, heartbeat_interval"
+            "unknown field '{other}' — supported: target_version, target_version_jitter, heartbeat_interval, host_perf_interval"
         ),
     }
     Ok(())

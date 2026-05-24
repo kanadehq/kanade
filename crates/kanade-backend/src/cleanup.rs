@@ -48,6 +48,13 @@ const PENDING_TIMEOUT: &str = "-1 hour";
 /// config in a follow-up.
 const HISTORY_RETENTION: &str = "-90 days";
 
+/// v0.40 Part 1: `host_perf_samples` retention. 30 d is the SPA's
+/// longest range selector and covers month-over-month investigations
+/// (rare). At 60 s sample cadence × 30 d × 1000 PCs ≈ 43 M rows,
+/// which SQLite handles fine. Beyond 30 d a rollup pass is more
+/// appropriate than a raw retention bump — TBD when fleets grow.
+const PERF_RETENTION: &str = "-30 days";
+
 /// Spawn the long-running cleanup task. Runs forever; logs a warn
 /// on transient SQLite errors and continues to the next tick. The
 /// task is fire-and-forget — the returned handle is for the
@@ -89,8 +96,34 @@ pub fn spawn(pool: SqlitePool) -> tokio::task::JoinHandle<()> {
                 Ok(_) => {}
                 Err(e) => warn!(error = %e, "inventory_history cleanup failed"),
             }
+            // v0.40 Part 1: prune host_perf_samples rows older than
+            // PERF_RETENTION. Same shared-timer pattern.
+            match prune_host_perf_samples(&pool).await {
+                Ok(n) if n > 0 => info!(
+                    deleted = n,
+                    "host_perf_samples cleanup: pruned {n} rows older than {PERF_RETENTION}",
+                ),
+                Ok(_) => {}
+                Err(e) => warn!(error = %e, "host_perf_samples cleanup failed"),
+            }
         }
     })
+}
+
+/// Delete `host_perf_samples` rows older than [`PERF_RETENTION`].
+/// Returns the number of rows affected. The `at` column is indexed
+/// (`idx_host_perf_samples_at`) so this scans efficiently even with
+/// tens of millions of rows.
+async fn prune_host_perf_samples(pool: &SqlitePool) -> Result<u64> {
+    let rows = sqlx::query(
+        "DELETE FROM host_perf_samples
+          WHERE at < datetime('now', ?)",
+    )
+    .bind(PERF_RETENTION)
+    .execute(pool)
+    .await
+    .context("DELETE host_perf_samples retention sweep")?;
+    Ok(rows.rows_affected())
 }
 
 /// Delete `inventory_history` rows older than [`HISTORY_RETENTION`].

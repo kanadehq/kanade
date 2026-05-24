@@ -177,7 +177,15 @@ export function Agents() {
         <TableBody>
           {agents.map((a) => (
             <TableRow key={a.pc_id}>
-              <TableCell><code className="text-xs">{a.pc_id}</code></TableCell>
+              <TableCell>
+                <Link
+                  to={`/agents/${encodeURIComponent(a.pc_id)}`}
+                  className="hover:underline"
+                  title={t('rowLinkTitle')}
+                >
+                  <code className="text-xs">{a.pc_id}</code>
+                </Link>
+              </TableCell>
               <TableCell>{a.hostname ?? <span className="text-muted">—</span>}</TableCell>
               <TableCell className="text-muted text-xs">{a.os_family ?? '—'}</TableCell>
               <TableCell className="text-muted text-xs">{a.agent_version ?? '—'}</TableCell>

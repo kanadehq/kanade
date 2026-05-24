@@ -5,6 +5,7 @@ import { Toaster } from 'sonner';
 import { ProtectedLayout } from '@/components/ProtectedLayout';
 import { ConfirmDialogProvider } from '@/components/ui/confirm-dialog';
 import { AuthProvider } from '@/lib/auth';
+import { AgentDetail } from '@/pages/AgentDetail';
 import { Agents } from '@/pages/Agents';
 import { Audit } from '@/pages/Audit';
 import { Config } from '@/pages/Config';
@@ -64,6 +65,7 @@ export default function App() {
               <Route path="/" element={<Navigate to="/dashboard" replace />} />
               <Route path="/dashboard" element={<Dashboard />} />
               <Route path="/agents" element={<Agents />} />
+              <Route path="/agents/:pcId" element={<AgentDetail />} />
               <Route path="/run" element={<Run />} />
               <Route path="/activity" element={<Activity />} />
               <Route path="/activity/:resultId" element={<ResultDetail />} />
