@@ -50,6 +50,11 @@ export type ConfigScope = {
   target_version_jitter?: string;
   heartbeat_interval?: string;
   host_perf_interval?: string;
+  // v0.41 / Phase 2: opt-in per-process telemetry. See
+  // [`ConfigScope::process_perf_enabled`] on the Rust side.
+  process_perf_enabled?: boolean;
+  process_perf_expires_at?: string;
+  process_perf_top_n?: number;
 };
 
 export type EffectiveConfig = {
@@ -57,6 +62,9 @@ export type EffectiveConfig = {
   target_version_jitter: string;
   heartbeat_interval: string;
   host_perf_interval: string;
+  process_perf_enabled: boolean;
+  process_perf_expires_at: string | null;
+  process_perf_top_n: number;
 };
 
 export type EffectiveConfigResponse = {
@@ -94,4 +102,22 @@ export type PerfResponse = {
   to: string;
   step_seconds: number;
   points: PerfPoint[];
+};
+
+// v0.41 / Phase 2: per-PC top-N per-process snapshot from
+// /api/agents/{pc_id}/processes. Empty `processes` + null `latest_at`
+// when process_perf has never been enabled for this PC.
+export type ProcessRow = {
+  pid: number;
+  name: string;
+  cpu_pct: number;
+  rss_bytes: number;
+  disk_read_bytes_per_sec: number | null;
+  disk_written_bytes_per_sec: number | null;
+};
+
+export type ProcessesResponse = {
+  pc_id: string;
+  latest_at: string | null;
+  processes: ProcessRow[];
 };

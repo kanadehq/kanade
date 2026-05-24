@@ -14,6 +14,7 @@ import {
   YAxis,
 } from 'recharts';
 
+import { AgentProcessSection } from '@/components/AgentProcessSection';
 import { ErrorCard } from '@/components/ErrorCard';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -342,6 +343,8 @@ export function AgentDetail() {
           )}
         </CardContent>
       </Card>
+
+      <AgentProcessSection pcId={agent.pc_id} />
     </div>
   );
 }

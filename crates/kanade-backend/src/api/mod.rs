@@ -11,6 +11,7 @@ pub mod host_perf;
 pub mod inventory;
 pub mod jetstream_status;
 pub mod jobs;
+pub mod process_perf;
 pub mod results;
 pub mod run;
 pub mod schedules;
@@ -56,6 +57,15 @@ pub fn router(state: AppState) -> Router {
         // feed the response directly into Recharts without further
         // down-sampling.
         .route("/api/agents/{pc_id}/perf", get(host_perf::perf))
+        // v0.41 / Phase 2: latest top-N per-process snapshot for a
+        // host that an operator has opted into investigation mode.
+        // Empty `processes` array + null `latest_at` if process_perf
+        // was never enabled for this PC (or its samples have aged
+        // out of the 7-day retention).
+        .route(
+            "/api/agents/{pc_id}/processes",
+            get(process_perf::processes),
+        )
         .route(
             "/api/agents/{pc_id}/groups",
             get(agent_groups::list_groups)

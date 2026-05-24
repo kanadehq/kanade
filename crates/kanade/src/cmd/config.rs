@@ -45,7 +45,10 @@ pub enum ConfigSub {
     },
     /// Set one field. `<spec>` is `<field>=<value>` (e.g.
     /// `heartbeat_interval=15s`, `host_perf_interval=2m`,
-    /// `target_version_jitter=30m`, `target_version=0.3.0`).
+    /// `process_perf_enabled=true`,
+    /// `process_perf_expires_at=2026-05-24T15:30:00Z`,
+    /// `process_perf_top_n=20`, `target_version_jitter=30m`,
+    /// `target_version=0.3.0`).
     Set {
         spec: String,
         #[command(flatten)]
@@ -225,8 +228,38 @@ fn apply_field(scope: &mut ConfigScope, field: &str, value: Option<&str>) -> Res
         "target_version_jitter" => scope.target_version_jitter = value.map(String::from),
         "heartbeat_interval" => scope.heartbeat_interval = value.map(String::from),
         "host_perf_interval" => scope.host_perf_interval = value.map(String::from),
+        "process_perf_enabled" => {
+            scope.process_perf_enabled = match value {
+                None => None,
+                Some(v) => Some(v.parse::<bool>().with_context(|| {
+                    format!("process_perf_enabled: expected true|false, got {v:?}")
+                })?),
+            };
+        }
+        "process_perf_expires_at" => {
+            scope.process_perf_expires_at = match value {
+                None => None,
+                Some(v) => Some(
+                    chrono::DateTime::parse_from_rfc3339(v)
+                        .with_context(|| {
+                            format!(
+                                "process_perf_expires_at: expected RFC3339 timestamp, got {v:?}"
+                            )
+                        })?
+                        .with_timezone(&chrono::Utc),
+                ),
+            };
+        }
+        "process_perf_top_n" => {
+            scope.process_perf_top_n = match value {
+                None => None,
+                Some(v) => Some(v.parse::<u32>().with_context(|| {
+                    format!("process_perf_top_n: expected positive integer, got {v:?}")
+                })?),
+            };
+        }
         other => bail!(
-            "unknown field '{other}' — supported: target_version, target_version_jitter, heartbeat_interval, host_perf_interval"
+            "unknown field '{other}' — supported: target_version, target_version_jitter, heartbeat_interval, host_perf_interval, process_perf_enabled, process_perf_expires_at, process_perf_top_n"
         ),
     }
     Ok(())
