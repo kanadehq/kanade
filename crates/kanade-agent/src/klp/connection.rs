@@ -6,17 +6,21 @@
 //! must survive across reconnects (e.g. the operator audit log)
 //! lives elsewhere — at the connection level we only track what's
 //! locally relevant: the handshake gate, the agreed protocol
-//! version, the peer's identity, plus the cheaply-cloneable
-//! globals (config watch handle, log path, agent identity) handler
-//! code needs to do its work without reaching into module state.
+//! version, the peer's identity, the cheaply-cloneable globals
+//! (config + state watches, log path, agent identity) handler
+//! code needs to do its work without reaching into module state,
+//! and the subscription registry + push channel that connect
+//! handlers to the writer task.
 
 use std::path::PathBuf;
 
 use kanade_shared::ipc::handshake::HandshakeSession;
+use kanade_shared::ipc::state::StateSnapshot;
 use kanade_shared::wire::EffectiveConfig;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
 use super::auth::PeerCredentials;
+use super::subscriptions::SubscriptionRegistry;
 
 /// State shared across handlers for a single open KLP connection.
 ///
@@ -47,12 +51,27 @@ pub struct ConnectionState {
     /// cheap because [`watch::Receiver`] is just an Arc-shared
     /// slot.
     pub config_rx: watch::Receiver<EffectiveConfig>,
+    /// Live view of the latest endpoint state snapshot produced
+    /// by `klp::state::eval_loop`. `state.snapshot` returns
+    /// `borrow().clone()`; `state.subscribe` spawns a forwarder
+    /// that awaits `changed()` and pushes a `state.changed`
+    /// notification per tick.
+    pub state_rx: watch::Receiver<StateSnapshot>,
     /// On-disk path to the rotating agent.log file. Used by
     /// `system.log_tail` to bundle recent log lines into a
-    /// support response. Owned `PathBuf` so the handler doesn't
-    /// touch an `Arc<Path>` lifetime; one allocation per
-    /// connection is fine.
+    /// support response.
     pub log_path: PathBuf,
+    /// Tracks every push-stream subscription this connection has
+    /// opened. The `Drop` impl aborts all outstanding forwarder
+    /// tasks so a careless client (no explicit unsubscribe)
+    /// doesn't leak tasks.
+    pub subscriptions: SubscriptionRegistry,
+    /// Shared channel into the connection's writer task.
+    /// Handlers AND subscription forwarders both send encoded
+    /// frames here; the writer task drains and writes to the
+    /// pipe. Bounded so a misbehaving forwarder can't OOM the
+    /// agent.
+    pub push_tx: mpsc::Sender<Vec<u8>>,
     /// `Some(v)` once `system.handshake` succeeded; `None`
     /// otherwise. The dispatcher uses this as the gate for
     /// non-handshake methods.
@@ -62,22 +81,28 @@ pub struct ConnectionState {
 impl ConnectionState {
     /// Build the pre-handshake state for a freshly-accepted
     /// connection. The caller (the listener task) clones cheap
-    /// globals — `config_rx` via [`watch::Receiver::clone`],
-    /// `log_path` + identity strings via owned values — into the
-    /// fresh state.
+    /// globals — `config_rx` / `state_rx` via
+    /// [`watch::Receiver::clone`], `log_path` + identity strings
+    /// via owned values — into the fresh state.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         peer: PeerCredentials,
         pc_id: String,
         agent_version: String,
         config_rx: watch::Receiver<EffectiveConfig>,
+        state_rx: watch::Receiver<StateSnapshot>,
         log_path: PathBuf,
+        push_tx: mpsc::Sender<Vec<u8>>,
     ) -> Self {
         Self {
             peer,
             pc_id,
             agent_version,
             config_rx,
+            state_rx,
             log_path,
+            subscriptions: SubscriptionRegistry::new(),
+            push_tx,
             agreed_protocol: None,
         }
     }
@@ -121,32 +146,47 @@ mod tests {
         }
     }
 
+    fn dummy_snapshot() -> StateSnapshot {
+        StateSnapshot {
+            pc_id: "PC1234".into(),
+            online: true,
+            vpn: "unknown".into(),
+            checks: vec![],
+            agent_version: "0.41.0".into(),
+            target_version: "0.41.0".into(),
+        }
+    }
+
     fn fresh_state() -> ConnectionState {
-        let (_tx, rx) = watch::channel(EffectiveConfig::builtin_defaults());
+        let (_cfg_tx, cfg_rx) = watch::channel(EffectiveConfig::builtin_defaults());
+        let (_state_tx, state_rx) = watch::channel(dummy_snapshot());
+        let (push_tx, _push_rx) = mpsc::channel(8);
         ConnectionState::new(
             dummy_peer(),
             "PC1234".into(),
-            "0.40.0".into(),
-            rx,
+            "0.41.0".into(),
+            cfg_rx,
+            state_rx,
             PathBuf::from("agent.log"),
+            push_tx,
         )
     }
 
-    #[test]
-    fn fresh_connection_is_pre_handshake() {
+    #[tokio::test]
+    async fn fresh_connection_is_pre_handshake() {
         let s = fresh_state();
         assert!(!s.handshake_complete());
     }
 
-    #[test]
-    fn mark_handshake_unlocks_method_set() {
+    #[tokio::test]
+    async fn mark_handshake_unlocks_method_set() {
         let mut s = fresh_state();
         s.mark_handshake(1);
         assert!(s.handshake_complete());
     }
 
-    #[test]
-    fn session_uses_authoritative_os_identity() {
+    #[tokio::test]
+    async fn session_uses_authoritative_os_identity() {
         // Critical invariant per SPEC §2.12.4: the session that
         // ships back to the client is built from the peer (OS) and
         // the agent's pc_id, never from any payload field.

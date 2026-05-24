@@ -203,13 +203,31 @@ pub(crate) async fn run_agent() -> Result<()> {
     // UDS in a follow-up. The detached JoinHandle is intentional:
     // the foundation PR has no graceful-shutdown path and the
     // listener should run for the agent's full lifetime.
+    //
+    // The state evaluator runs on a 30 s cadence in its own task
+    // and publishes StateSnapshots to a watch channel that the
+    // KLP listener fans out to subscribers (state.subscribe).
+    // Seed the watch with `eval_once` synchronously so the first
+    // `state.snapshot` call returns real data without waiting for
+    // a tick.
     #[cfg(target_os = "windows")]
-    let _klp_handle = klp::server::spawn(klp::server::ListenerContext {
-        pc_id: std::sync::Arc::from(pc_id.as_str()),
-        agent_version: std::sync::Arc::from(AGENT_VERSION),
-        config_rx: cfg_rx.clone(),
-        log_path: std::path::PathBuf::from(&cfg.log.path),
-    });
+    {
+        let initial_snapshot = klp::state::eval_once(&pc_id, AGENT_VERSION, &cfg_rx.borrow());
+        let (state_tx, state_rx) = tokio::sync::watch::channel(initial_snapshot);
+        tokio::spawn(klp::state::eval_loop(
+            state_tx,
+            cfg_rx.clone(),
+            pc_id.clone(),
+            AGENT_VERSION.to_string(),
+        ));
+        let _klp_handle = klp::server::spawn(klp::server::ListenerContext {
+            pc_id: std::sync::Arc::from(pc_id.as_str()),
+            agent_version: std::sync::Arc::from(AGENT_VERSION),
+            config_rx: cfg_rx.clone(),
+            state_rx,
+            log_path: std::path::PathBuf::from(&cfg.log.path),
+        });
+    }
 
     // Group membership: Sprint 5 moves this from agent.toml (per-box
     // local config) to a server-managed KV bucket. The manager reads
