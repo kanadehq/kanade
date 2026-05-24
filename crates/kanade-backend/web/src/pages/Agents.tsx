@@ -163,18 +163,13 @@ export function Agents() {
             {/* v0.37 Part 2: agent process self-perf columns. Pre-
                 0.37 agents leave these null and the cell renders
                 as an em-dash, so the table stays usable during a
-                rolling upgrade. */}
+                rolling upgrade. Headers are prefixed "agent" so the
+                columns are clearly the agent process, not the host. */}
             <TableHead className="text-right" title={t('columnTitles.cpu')}>
               {t('columns.cpu')}
             </TableHead>
             <TableHead className="text-right" title={t('columnTitles.rss')}>
               {t('columns.rss')}
-            </TableHead>
-            <TableHead className="text-right" title={t('columnTitles.rd')}>
-              {t('columns.rd')}
-            </TableHead>
-            <TableHead className="text-right" title={t('columnTitles.wr')}>
-              {t('columns.wr')}
             </TableHead>
             <TableHead>{t('columns.actions')}</TableHead>
           </TableRow>
@@ -189,8 +184,6 @@ export function Agents() {
               <TableCell className="text-muted text-xs">{fmtIsoLocal(a.last_heartbeat)}</TableCell>
               <TableCell className="text-right text-muted text-xs">{fmtPct(a.agent_cpu_pct)}</TableCell>
               <TableCell className="text-right text-muted text-xs">{fmtBytes(a.agent_rss_bytes)}</TableCell>
-              <TableCell className="text-right text-muted text-xs">{fmtBytes(a.agent_disk_read_bytes)}</TableCell>
-              <TableCell className="text-right text-muted text-xs">{fmtBytes(a.agent_disk_written_bytes)}</TableCell>
               <TableCell>
                 <div className="flex gap-1 flex-wrap">
                   <Button variant="secondary" size="sm" asChild>
