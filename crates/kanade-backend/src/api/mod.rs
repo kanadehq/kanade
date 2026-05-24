@@ -87,6 +87,14 @@ pub fn router(state: AppState) -> Router {
             "/api/agents/{pc_id}/processes",
             get(process_perf::processes),
         )
+        // v0.42: stacked per-process time-series chart driver. Same
+        // table as /processes, but bucketed in SQL with the window-
+        // wide top-N names pinned for stable series colouring.
+        // Anything outside the top-N collapses into one `other` series.
+        .route(
+            "/api/agents/{pc_id}/processes/timeline",
+            get(process_perf::timeline),
+        )
         .route(
             "/api/agents/{pc_id}/groups",
             get(agent_groups::list_groups)

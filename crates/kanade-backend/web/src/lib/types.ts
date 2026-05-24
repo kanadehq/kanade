@@ -122,6 +122,28 @@ export type ProcessesResponse = {
   processes: ProcessRow[];
 };
 
+// v0.42: per-process bucketed time-series from
+// /api/agents/{pc_id}/processes/timeline. Drives the stacked-area
+// chart in AgentProcessSection. `names` is the stable legend order
+// (window-wide top-N descending, then "other" if any tail collapsed);
+// each `points[i].values` is a name → bucket-averaged value map with
+// missing names meaning "process wasn't observed in this bucket"
+// (Recharts should treat absent as 0 when stacking).
+export type ProcessTimelinePoint = {
+  at: string;
+  values: Record<string, number>;
+};
+
+export type ProcessTimelineResponse = {
+  pc_id: string;
+  metric: string;
+  from: string;
+  to: string;
+  step_seconds: number;
+  names: string[];
+  points: ProcessTimelinePoint[];
+};
+
 // v0.41 / Phase 3: fleet-wide aggregates. Three sibling endpoints
 // under /api/perf/* power the Dashboard cards.
 export type FleetPerfPoint = {
