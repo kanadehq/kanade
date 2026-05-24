@@ -38,10 +38,25 @@ deployed client:
    string per release (semver / calendar / git sha all work; see
    `kanade-shared::kv::OBJECT_APP_PACKAGES` for the constraints).
 
-2. **Pin the version in the script.** Edit `Version` (and
-   `BackendBase` if your backend isn't at the default URL) in
-   `scripts/install-kanade-client.ps1`. Both knobs sit at the top
-   of the file under `--- Configurable knobs ---`.
+2. **Pin the version + sha in the script.** Edit three knobs at
+   the top of `scripts/install-kanade-client.ps1`
+   (`--- Configurable knobs ---`):
+
+   - `$Version` — string you uploaded under in step 1.
+   - `$BackendBase` — only if your backend isn't at the default
+     URL.
+   - `$ExpectedSha256` — operator-computed digest of the binary,
+     pasted in hex. Get it with:
+
+     ```powershell
+     Get-FileHash target\release\kanade-client.exe -Algorithm SHA256
+     ```
+
+   The script refuses to install unless the downloaded bytes
+   match `$ExpectedSha256` — a poisoned upload / MITM-substituted
+   binary fails fast instead of being silently promoted under
+   `LocalSystem`. Leaving the field blank is also a hard error
+   (`fail fast at the verification step` per the script doc).
 
 3. **Register + deploy.**
 
