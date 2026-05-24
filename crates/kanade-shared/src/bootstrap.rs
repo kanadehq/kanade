@@ -28,8 +28,8 @@ use tracing::info;
 use crate::kv::{
     BUCKET_AGENT_CONFIG, BUCKET_AGENT_GROUPS, BUCKET_AGENTS_STATE, BUCKET_JOBS, BUCKET_JOBS_YAML,
     BUCKET_SCHEDULES, BUCKET_SCHEDULES_YAML, BUCKET_SCRIPT_CURRENT, BUCKET_SCRIPT_STATUS,
-    OBJECT_AGENT_RELEASES, STREAM_AUDIT, STREAM_EVENTS, STREAM_EXEC, STREAM_INVENTORY,
-    STREAM_RESULTS,
+    OBJECT_AGENT_RELEASES, OBJECT_APP_PACKAGES, STREAM_AUDIT, STREAM_EVENTS, STREAM_EXEC,
+    STREAM_INVENTORY, STREAM_RESULTS,
 };
 
 /// Idempotently create every NATS JetStream resource the kanade
@@ -213,6 +213,19 @@ pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
     .await
     .with_context(|| format!("create_object_store {OBJECT_AGENT_RELEASES}"))?;
     info!(store = OBJECT_AGENT_RELEASES, "ready");
+
+    // app_packages — generic operator-uploaded binary distribution
+    // (kanade-client today; third-party installers like Webex /
+    // Teams once those flows land). Object keys are
+    // `<name>/<version>`; see `kanade-shared::kv::OBJECT_APP_PACKAGES`
+    // for the full rationale.
+    js.create_object_store(ObjectStoreConfig {
+        bucket: OBJECT_APP_PACKAGES.into(),
+        ..Default::default()
+    })
+    .await
+    .with_context(|| format!("create_object_store {OBJECT_APP_PACKAGES}"))?;
+    info!(store = OBJECT_APP_PACKAGES, "ready");
 
     Ok(())
 }

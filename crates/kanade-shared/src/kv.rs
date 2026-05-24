@@ -36,6 +36,28 @@ pub const BUCKET_SCHEDULES_YAML: &str = "schedules_yaml";
 /// version, e.g. `0.2.0` → file bytes).
 pub const OBJECT_AGENT_RELEASES: &str = "agent_releases";
 
+/// Object Store holding **generic application packages** — anything
+/// the agent / kitting scripts pull down + install on endpoints.
+/// First consumer is the kanade-client app, but the bucket is
+/// intentionally generic: third-party installers (Webex, Teams,
+/// custom MSI bundles), upgrade scripts, configuration archives,
+/// etc. all live here.
+///
+/// Object keys are `<name>/<version>` — operator picks `<name>`
+/// once per package family (e.g. `kanade-client`,
+/// `webex-meetings`), then `<version>` per release (e.g.
+/// `0.41.0`, `2025.03`). Slashes are explicitly allowed by NATS
+/// Object Store key rules; the SPA / CLI / HTTP routes all carry
+/// the pair as two path segments.
+///
+/// Why a separate bucket from `agent_releases`:
+/// - `agent_releases` is fleet-critical (the agent's own self-
+///   update path). Keeping it small + audited matters.
+/// - `app_packages` is operator-curated user-space content. The
+///   lifecycle is different (operators add/remove packages
+///   freely; agent releases follow the release.yml pipeline).
+pub const OBJECT_APP_PACKAGES: &str = "app_packages";
+
 /// Key inside [`BUCKET_AGENT_CONFIG`] carrying the broadcast target
 /// version. Agents watch this key and self-update when their running
 /// version drifts.
@@ -100,6 +122,7 @@ mod tests {
             BUCKET_JOBS_YAML,
             BUCKET_SCHEDULES_YAML,
             OBJECT_AGENT_RELEASES,
+            OBJECT_APP_PACKAGES,
         ] {
             assert!(
                 !name.contains('.'),
