@@ -3,6 +3,7 @@ pub mod agent_groups;
 pub mod agent_logs;
 pub mod agent_releases;
 pub mod agents;
+pub mod app_packages;
 pub mod audit;
 pub mod exec;
 pub mod executions;
@@ -29,6 +30,15 @@ use sqlx::SqlitePool;
 /// kanade-agent.exe is ~13 MB on Windows; 64 MB leaves headroom for
 /// debug builds and future on-disk growth without becoming a DoS vector.
 const PUBLISH_BODY_LIMIT: usize = 64 * 1024 * 1024;
+
+/// 256 MB upper bound for `POST /api/app-packages/{name}/{version}`.
+/// Bigger than `PUBLISH_BODY_LIMIT` because app packages cover
+/// third-party installers (Webex / Teams / Office plug-ins) whose
+/// MSI bundles routinely run 100-200 MB. If a fleet ships larger
+/// payloads (eg. multi-architecture installer bundles), the
+/// streaming refactor in `app_packages::download` notes the
+/// upgrade path.
+const APP_PACKAGE_BODY_LIMIT: usize = 256 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -187,6 +197,19 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/agents/publish",
             post(agent_releases::publish).layer(DefaultBodyLimit::max(PUBLISH_BODY_LIMIT)),
+        )
+        // Generic app-package distribution (kanade-client today;
+        // third-party installers like Webex / Teams next). Distinct
+        // from `agent_releases` so the lifecycles + audit channels
+        // don't overlap — see `kanade-shared::kv::OBJECT_APP_PACKAGES`
+        // for the rationale.
+        .route("/api/app-packages", get(app_packages::list_packages))
+        .route(
+            "/api/app-packages/{name}/{version}",
+            get(app_packages::download)
+                .post(app_packages::publish)
+                .delete(app_packages::delete_package)
+                .layer(DefaultBodyLimit::max(APP_PACKAGE_BODY_LIMIT)),
         )
         .with_state(state)
         // Everything else (`/`, `/assets/...`, hash-router paths) is served
