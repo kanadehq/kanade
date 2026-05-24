@@ -18,7 +18,35 @@ pub struct Command {
     #[serde(alias = "job_id")]
     pub exec_id: Option<String>,
     pub shell: Shell,
+    /// Inline script body, OR empty when [`script_object`] is set.
+    /// Mutually exclusive with `script_object` at the wire level —
+    /// backend builders fill one or the other (never both) and the
+    /// agent's resolver picks the populated one. Pre-v0.43 wire
+    /// always carries this populated.
+    ///
+    /// [`script_object`]: Self::script_object
     pub script: String,
+    /// SPEC §2.4.1 / yukimemi/kanade#210: Object Store reference
+    /// (`<name>/<version>` key into `OBJECT_SCRIPTS`). When set,
+    /// the agent fetches the body via `script_cache` and verifies
+    /// its sha256 against [`script_object_sha256`] before launching.
+    /// `None` ⇒ inline `script` carries the body (legacy + the
+    /// majority of jobs).
+    ///
+    /// [`script_object_sha256`]: Self::script_object_sha256
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_object: Option<String>,
+    /// Hex-encoded sha256 of the bytes the operator approved at
+    /// Command-build time. Required when [`script_object`] is set;
+    /// the agent treats a mismatch on fetch as "operator
+    /// re-uploaded the script between exec submission and agent
+    /// fire" and aborts the run rather than silently executing the
+    /// new bytes. Pre-v0.43 wire omits this; the resolver path
+    /// requires both fields to be `Some`.
+    ///
+    /// [`script_object`]: Self::script_object
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_object_sha256: Option<String>,
     pub timeout_secs: u64,
     pub jitter_secs: Option<u64>,
     /// Which (token, session) combination the agent should launch the
@@ -106,6 +134,8 @@ mod tests {
             exec_id: Some("dep-1".into()),
             shell: Shell::Powershell,
             script: "echo hi".into(),
+            script_object: None,
+            script_object_sha256: None,
             timeout_secs: 30,
             jitter_secs: Some(5),
             run_as: RunAs::System,
@@ -191,6 +221,37 @@ mod tests {
         assert!(cmd.cwd.is_none());
         // Pre-v0.22 omit deadline_at → None (= no deadline).
         assert!(cmd.deadline_at.is_none());
+        // Pre-v0.43 wire omits both script_object fields — agent
+        // falls back to the inline `script` body.
+        assert!(cmd.script_object.is_none());
+        assert!(cmd.script_object_sha256.is_none());
+    }
+
+    #[test]
+    fn command_round_trips_script_object_fields() {
+        // yukimemi/kanade#210: backend builds Commands carrying an
+        // OBJECT_SCRIPTS reference + the operator-approved digest;
+        // agent resolves on fetch. Both fields must survive a JSON
+        // round-trip with the same shape.
+        let cmd = Command {
+            script: String::new(),
+            script_object: Some("cleanup-disk-temp/1.0.1".into()),
+            script_object_sha256: Some(
+                "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".into(),
+            ),
+            ..sample_command()
+        };
+        let json = serde_json::to_string(&cmd).expect("encode");
+        let back: Command = serde_json::from_str(&json).expect("decode");
+        assert_eq!(back.script, "");
+        assert_eq!(
+            back.script_object.as_deref(),
+            Some("cleanup-disk-temp/1.0.1")
+        );
+        assert_eq!(
+            back.script_object_sha256.as_deref(),
+            Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+        );
     }
 
     #[test]

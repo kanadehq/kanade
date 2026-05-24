@@ -1,7 +1,8 @@
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use kanade_shared::kv::BUCKET_SCRIPT_CURRENT;
+use base64::Engine as _;
+use kanade_shared::kv::{BUCKET_SCRIPT_CURRENT, OBJECT_SCRIPTS};
 use kanade_shared::manifest::{FanoutPlan, Manifest};
 use kanade_shared::subject;
 use kanade_shared::wire::Command;
@@ -69,14 +70,20 @@ pub async fn exec_manifest(
         .execute
         .validate_script_source()
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    // `script_file` / `script_object` resolvers haven't shipped
-    // yet (yukimemi/kanade#210 follow-up work) — refuse cleanly
-    // so the operator sees a real error instead of a silent
-    // empty-script Command.
-    let inline_script = manifest.execute.script.as_deref().filter(|s| !s.is_empty()).ok_or((
-        StatusCode::NOT_IMPLEMENTED,
-        "execute.script_file / script_object resolver not yet implemented (tracked in yukimemi/kanade#210)".to_string(),
-    ))?;
+    // Resolve the manifest's script source into the wire shape the
+    // agent expects:
+    //   - inline `script:`     → Command { script: <body>,
+    //                                      script_object: None }
+    //   - `script_object: k`   → look up the OBJECT_SCRIPTS digest
+    //                            for `k` and emit Command { script: "",
+    //                            script_object: Some(k),
+    //                            script_object_sha256: Some(<digest>) };
+    //                            the agent's script_cache pulls the body
+    //                            at exec time (yukimemi/kanade#210).
+    // `script_file:` is operator-side only — the CLI inlines its
+    // contents into `script` before POSTing, so it never reaches us
+    // as an unresolved alternative.
+    let (inline_script, script_object_ref) = resolve_script_source(s, &manifest).await?;
 
     let timeout_secs = humantime::parse_duration(&manifest.execute.timeout)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid timeout: {e}")))?
@@ -98,7 +105,9 @@ pub async fn exec_manifest(
         request_id: Uuid::new_v4().to_string(),
         exec_id: Some(exec_id.clone()),
         shell: manifest.execute.shell.into(),
-        script: inline_script.to_owned(),
+        script: inline_script.clone(),
+        script_object: script_object_ref.as_ref().map(|(k, _)| k.clone()),
+        script_object_sha256: script_object_ref.as_ref().map(|(_, d)| d.clone()),
         timeout_secs,
         jitter_secs,
         run_as: manifest.execute.run_as,
@@ -298,4 +307,99 @@ pub async fn create(
     exec_manifest(&s, manifest, plan, "operator", Some(&caller))
         .await
         .map(Json)
+}
+
+/// Look up the wire shape for the manifest's script source.
+///
+/// Returns a tuple of `(inline_body, script_object_ref)`:
+///
+///   * Inline path — `(body, None)`. The Command embeds the body
+///     directly (matching pre-#210 wire).
+///   * Object Store path — `(String::new(), Some((key, sha256)))`.
+///     The agent's script_cache fetches the body keyed by `key`,
+///     verifies the bytes against `sha256`, then executes.
+///
+/// The Object Store path snapshots the current digest at exec
+/// submission. If the operator re-uploads `key` with new bytes
+/// between submission and the agent's fire, the agent's sha
+/// check fails and the run aborts — that's the intended safety
+/// net for the "operator re-uploaded mid-rollout" case.
+async fn resolve_script_source(
+    s: &AppState,
+    manifest: &Manifest,
+) -> Result<(String, Option<(String, String)>), (StatusCode, String)> {
+    if let Some(inline) = manifest.execute.script.as_deref().filter(|s| !s.is_empty()) {
+        return Ok((inline.to_owned(), None));
+    }
+
+    let key = manifest.execute.script_object.as_deref().ok_or((
+        StatusCode::BAD_REQUEST,
+        "execute: one of `script` or `script_object` must be set \
+         (Manifest::validate() should have caught this earlier)"
+            .to_string(),
+    ))?;
+
+    let store = s
+        .jetstream
+        .get_object_store(OBJECT_SCRIPTS)
+        .await
+        .map_err(|e| {
+            warn!(error = %e, "exec: get_object_store scripts");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!(
+                    "Object Store '{OBJECT_SCRIPTS}' missing — \
+                     run `kanade jetstream setup`"
+                ),
+            )
+        })?;
+    let info = store.info(key).await.map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("not found") || msg.contains("no objects") {
+            (
+                StatusCode::NOT_FOUND,
+                format!("script_object '{key}' not found in OBJECT_SCRIPTS"),
+            )
+        } else {
+            warn!(error = %e, %key, "exec: object_store.info");
+            (StatusCode::INTERNAL_SERVER_ERROR, msg)
+        }
+    })?;
+
+    // NATS Object Store emits digests as `SHA-256=<base64url-no-pad>`
+    // (JetStream protocol). The agent's script_cache verifies by
+    // computing sha256(bytes) and hex-comparing, so re-encode to hex
+    // once here — keeps the wire field operator-readable and frees
+    // the agent from a base64 dep.
+    let raw = info.digest.as_deref().ok_or((
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!(
+            "script_object '{key}' has no digest metadata — \
+             broker should always populate it"
+        ),
+    ))?;
+    let b64 = raw.strip_prefix("SHA-256=").unwrap_or(raw);
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(b64)
+        .map_err(|e| {
+            warn!(error = %e, %key, raw, "exec: decode object_store digest");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("decode digest for '{key}': {e}"),
+            )
+        })?;
+    let digest = hex_lower(&bytes);
+
+    Ok((String::new(), Some((key.to_owned(), digest))))
+}
+
+/// Lower-case hex-encode without pulling `hex` as a fresh dep.
+/// Output matches sha2's standard formatting on the agent side.
+fn hex_lower(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(out, "{b:02x}");
+    }
+    out
 }

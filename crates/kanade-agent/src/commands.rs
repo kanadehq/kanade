@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use crate::outbox;
 use crate::process::{ExecOutcome, run_command_with_kill};
+use crate::script_cache::ScriptCache;
 use crate::staleness::{StalenessDecision, Tracker, decide as staleness_decide};
 
 /// FIFO-bounded set of recently-seen `request_id`s. Shared between
@@ -64,6 +65,7 @@ pub async fn command_loop(
     dedup: Arc<Mutex<DedupCache>>,
     staleness: Tracker,
     mut sub: async_nats::Subscriber,
+    script_cache: ScriptCache,
 ) {
     let jetstream = async_nats::jetstream::new(client.clone());
     let script_current = jetstream.get_key_value(BUCKET_SCRIPT_CURRENT).await.ok();
@@ -104,8 +106,11 @@ pub async fn command_loop(
         let cur = script_current.clone();
         let sta = script_status.clone();
         let staleness = staleness.clone();
+        let script_cache = script_cache.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_command(client, pc_id, cmd, cur, sta, staleness).await {
+            if let Err(e) =
+                handle_command(client, pc_id, cmd, cur, sta, staleness, script_cache).await
+            {
                 error!(error = %e, "command handler failed");
             }
         });
@@ -115,10 +120,11 @@ pub async fn command_loop(
 pub async fn handle_command(
     client: async_nats::Client,
     pc_id: String,
-    cmd: Command,
+    mut cmd: Command,
     script_current: Option<Store>,
     script_status: Option<Store>,
     staleness: Tracker,
+    script_cache: ScriptCache,
 ) -> Result<()> {
     // Spec §2.6 Layer 2: version-pinning + revoke check + v0.26
     // staleness policy. The order matters:
@@ -187,6 +193,49 @@ pub async fn handle_command(
                 "skip: starting deadline expired",
             );
             return publish_skipped(&client, &pc_id, &cmd, deadline, now).await;
+        }
+    }
+
+    // #210: resolve OBJECT_SCRIPTS-backed scripts just in time.
+    // Backend's exec.rs builds Commands with `script: ""` +
+    // `script_object: Some(key)` + `script_object_sha256: Some(d)`
+    // when the manifest uses `script_object:`. Fill `cmd.script`
+    // here so the rest of the dispatch (run_command_with_kill,
+    // stdout/stderr capture, exec_id event emission) stays
+    // identical to the inline-script path.
+    if cmd.script.is_empty()
+        && let Some(key) = cmd.script_object.as_deref()
+    {
+        let sha = cmd.script_object_sha256.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Command {request_id} has script_object={key} but no script_object_sha256 \
+                 — wire builder bug",
+                request_id = cmd.request_id,
+            )
+        })?;
+        match script_cache.resolve(key, sha).await {
+            Ok(body) => {
+                debug!(
+                    cmd_id = %cmd.id,
+                    request_id = %cmd.request_id,
+                    %key,
+                    sha256 = %sha,
+                    size = body.len(),
+                    "script_object resolved",
+                );
+                cmd.script = body;
+            }
+            Err(e) => {
+                warn!(
+                    cmd_id = %cmd.id,
+                    request_id = %cmd.request_id,
+                    %key,
+                    sha256 = %sha,
+                    error = %e,
+                    "script_object resolve failed — aborting run",
+                );
+                return Err(e);
+            }
         }
     }
 

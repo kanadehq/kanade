@@ -45,6 +45,10 @@ pub async fn execute(client: async_nats::Client, args: RunArgs) -> Result<()> {
         exec_id: args.exec_id.clone(),
         shell,
         script,
+        // `kanade run` is always inline — there's no Manifest behind
+        // it to carry a script_object reference (#210).
+        script_object: None,
+        script_object_sha256: None,
         timeout_secs: args.timeout,
         jitter_secs: None,
         // `kanade run` is one-shot / inline; use Job + `kanade exec`

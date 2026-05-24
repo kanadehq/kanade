@@ -65,6 +65,10 @@ rust-embed         = "8.11.0"
 mime_guess         = "2.0.5"
 jsonwebtoken       = "10.4.0"
 sha2               = "0.11.0"
+# Decoding NATS Object Store digest strings (`SHA-256=<base64>`)
+# back into raw bytes so the agent's hex-formatted Command field
+# (#210 / #213) compares cleanly with sha2's hex output.
+base64             = "0.22.1"
 winreg             = "0.56"
 pelite             = "0.10"
 # v0.37 Part 2: agent process self-perf via NT process info APIs

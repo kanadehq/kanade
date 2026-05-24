@@ -24,6 +24,7 @@ mod events_outbox;
 mod local_scheduler;
 mod nats_retry;
 mod outbox;
+mod script_cache;
 mod staleness;
 
 #[cfg(target_os = "windows")]
@@ -246,6 +247,16 @@ pub(crate) async fn run_agent() -> Result<()> {
     // request_id; the second arrival is dropped.
     let dedup = commands::shared_dedup_cache();
 
+    // #210: OBJECT_SCRIPTS-backed manifest scripts. Constructed
+    // once here (cheap Clone — jetstream::Context is Arc-internal)
+    // and threaded into every dispatch path (groups subs + replay +
+    // live sub + local scheduler) so they all share one cache
+    // directory.
+    let script_cache = script_cache::ScriptCache::new(
+        async_nats::jetstream::new(client.clone()),
+        default_paths::data_dir().join("script_cache"),
+    );
+
     // v0.24: groups::spawn returns a watch::Receiver<Vec<String>>
     // carrying the current membership list. `local_scheduler`
     // subscribes to it so `runs_on: agent` schedules targeting a
@@ -256,7 +267,9 @@ pub(crate) async fn run_agent() -> Result<()> {
         pc_id.clone(),
         dedup.clone(),
         staleness_tracker.clone(),
+        script_cache.clone(),
     );
+
     // Reconnect catch-up: durable consumer on STREAM_EXEC that
     // replays the latest retained Command per subject. See
     // `crates/kanade-agent/src/command_replay.rs` for the flow.
@@ -265,6 +278,7 @@ pub(crate) async fn run_agent() -> Result<()> {
         pc_id.clone(),
         dedup.clone(),
         staleness_tracker.clone(),
+        script_cache.clone(),
     );
     // v0.24: file-based outbox for ExecResult publishes. Every
     // result the agent produces is persisted under `outbox/<rid>.json`
@@ -291,6 +305,7 @@ pub(crate) async fn run_agent() -> Result<()> {
         completions_path,
         groups_rx,
         staleness_tracker.clone(),
+        script_cache.clone(),
     );
 
     let _ = tokio::join!(
@@ -300,6 +315,7 @@ pub(crate) async fn run_agent() -> Result<()> {
             dedup.clone(),
             staleness_tracker.clone(),
             cmd_all,
+            script_cache.clone(),
         ),
         commands::command_loop(
             client.clone(),
@@ -307,6 +323,7 @@ pub(crate) async fn run_agent() -> Result<()> {
             dedup.clone(),
             staleness_tracker.clone(),
             cmd_self,
+            script_cache.clone(),
         ),
     );
 

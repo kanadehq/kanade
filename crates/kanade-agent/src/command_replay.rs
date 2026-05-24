@@ -31,6 +31,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::commands::{DedupCache, handle_command};
 use crate::nats_retry;
+use crate::script_cache::ScriptCache;
 
 /// Stable consumer name per agent so JetStream remembers the ack
 /// position across agent restarts. Reconnecting with the same name
@@ -56,9 +57,10 @@ pub fn spawn(
     pc_id: String,
     dedup: Arc<Mutex<DedupCache>>,
     staleness: crate::staleness::Tracker,
+    script_cache: ScriptCache,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        run(client, pc_id, dedup, staleness).await;
+        run(client, pc_id, dedup, staleness, script_cache).await;
     })
 }
 
@@ -67,6 +69,7 @@ async fn run(
     pc_id: String,
     dedup: Arc<Mutex<DedupCache>>,
     staleness: crate::staleness::Tracker,
+    script_cache: ScriptCache,
 ) {
     let jetstream = async_nats::jetstream::new(client.clone());
     let name = consumer_name(&pc_id);
@@ -180,6 +183,7 @@ async fn run(
             let cur = script_current.clone();
             let sta = script_status.clone();
             let stl = staleness.clone();
+            let sc = script_cache.clone();
             info!(
                 cmd_id = %cmd.id,
                 request_id = %cmd.request_id,
@@ -188,7 +192,7 @@ async fn run(
             );
             tokio::spawn(async move {
                 if let Err(e) =
-                    handle_command(client_for_task, pc_for_task, cmd, cur, sta, stl).await
+                    handle_command(client_for_task, pc_for_task, cmd, cur, sta, stl, sc).await
                 {
                     error!(error = %e, "replay command handler failed");
                 }

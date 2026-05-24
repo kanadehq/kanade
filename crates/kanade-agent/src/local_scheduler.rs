@@ -47,6 +47,7 @@ use uuid::Uuid;
 
 use crate::commands::handle_command;
 use crate::nats_retry;
+use crate::script_cache::ScriptCache;
 
 /// In-memory state shared across the watch loops and the tick
 /// callbacks. Wrapped in a single `Mutex<State>` because the scheduler
@@ -140,9 +141,18 @@ pub fn spawn(
     completions_path: PathBuf,
     groups_rx: tokio::sync::watch::Receiver<Vec<String>>,
     staleness: crate::staleness::Tracker,
+    script_cache: ScriptCache,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        run(client, pc_id, completions_path, groups_rx, staleness).await;
+        run(
+            client,
+            pc_id,
+            completions_path,
+            groups_rx,
+            staleness,
+            script_cache,
+        )
+        .await;
     })
 }
 
@@ -152,6 +162,7 @@ async fn run(
     completions_path: PathBuf,
     groups_rx: tokio::sync::watch::Receiver<Vec<String>>,
     staleness: crate::staleness::Tracker,
+    script_cache: ScriptCache,
 ) {
     let js = async_nats::jetstream::new(client.clone());
 
@@ -195,6 +206,7 @@ async fn run(
         groups_rx.clone(),
         internal.clone(),
         state.clone(),
+        script_cache.clone(),
     );
 
     // Outer reconnect loop. Owns schedules_kv + jobs_kv handles and
@@ -252,6 +264,7 @@ async fn run(
             &pc_id,
             &my_groups,
             &staleness,
+            &script_cache,
             new_jobs,
             new_schedules,
         )
@@ -291,7 +304,7 @@ async fn run(
                         Operation::Put => {
                             if let Ok(s) = serde_json::from_slice::<Schedule>(&entry.value) {
                                 reconcile_schedule(
-                                    &internal, &state, &client, &pc_id, &groups_snapshot, &s, &staleness,
+                                    &internal, &state, &client, &pc_id, &groups_snapshot, &s, &staleness, &script_cache,
                                 )
                                 .await;
                             } else {
@@ -393,6 +406,7 @@ async fn apply_resync(
     pc_id: &str,
     my_groups: &[String],
     staleness: &crate::staleness::Tracker,
+    script_cache: &ScriptCache,
     new_jobs: HashMap<String, Manifest>,
     new_schedules: Vec<Schedule>,
 ) {
@@ -424,7 +438,17 @@ async fn apply_resync(
     // cron registration in place where the schedule changed
     // (target / cron / enabled); no-ops where it's identical.
     for s in &new_schedules {
-        reconcile_schedule(internal, state, client, pc_id, my_groups, s, staleness).await;
+        reconcile_schedule(
+            internal,
+            state,
+            client,
+            pc_id,
+            my_groups,
+            s,
+            staleness,
+            script_cache,
+        )
+        .await;
     }
 }
 
@@ -441,6 +465,7 @@ async fn apply_resync(
 /// flip — better to defer reconciliation than to interpret a
 /// transient read failure as "schedules vanished" and drop every
 /// agent-side cron (sub-agent #147 review).
+#[allow(clippy::too_many_arguments)]
 fn spawn_groups_change_task(
     client: async_nats::Client,
     pc_id: String,
@@ -448,6 +473,7 @@ fn spawn_groups_change_task(
     mut groups_rx_for_watch: tokio::sync::watch::Receiver<Vec<String>>,
     internal: JobScheduler,
     state: Arc<Mutex<State>>,
+    script_cache: ScriptCache,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let js = async_nats::jetstream::new(client.clone());
@@ -506,6 +532,7 @@ fn spawn_groups_change_task(
                     &new_groups,
                     s,
                     &staleness,
+                    &script_cache,
                 )
                 .await;
             }
@@ -536,6 +563,7 @@ fn spawn_groups_change_task(
 /// so briefly and only inside the tick handler — never while
 /// reconcile is running, since reconcile holds the lock for ~ms
 /// (internal.add is in-memory).
+#[allow(clippy::too_many_arguments)]
 async fn reconcile_schedule(
     internal: &JobScheduler,
     state: &Arc<Mutex<State>>,
@@ -544,6 +572,7 @@ async fn reconcile_schedule(
     my_groups: &[String],
     schedule: &Schedule,
     staleness: &crate::staleness::Tracker,
+    script_cache: &ScriptCache,
 ) {
     let mut st = state.lock().await;
     let mine = st.matching(schedule, pc_id, my_groups);
@@ -570,14 +599,24 @@ async fn reconcile_schedule(
     let state_for_job = state.clone();
     let schedule_for_job = schedule.clone();
     let staleness_for_job = staleness.clone();
+    let script_cache_for_job = script_cache.clone();
     let job = match Job::new_async(cron.as_str(), move |_uuid, _l| {
         let client = client_for_job.clone();
         let pc_id = pc_id_for_job.clone();
         let state = state_for_job.clone();
         let schedule = schedule_for_job.clone();
         let staleness = staleness_for_job.clone();
+        let script_cache = script_cache_for_job.clone();
         Box::pin(async move {
-            local_tick(&client, &pc_id, &state, &schedule, &staleness).await;
+            local_tick(
+                &client,
+                &pc_id,
+                &state,
+                &schedule,
+                &staleness,
+                &script_cache,
+            )
+            .await;
         })
     }) {
         Ok(j) => j,
@@ -632,6 +671,7 @@ async fn local_tick(
     state: &Arc<Mutex<State>>,
     schedule: &Schedule,
     staleness: &crate::staleness::Tracker,
+    script_cache: &ScriptCache,
 ) {
     // 1) Manifest must be cached. If not, skip and try again next tick
     //    (the jobs_watch loop may pick it up).
@@ -686,17 +726,40 @@ async fn local_tick(
     // 3) Build a Command in-process (no NATS hop) and call
     //    handle_command directly. Skip the deadline (= None) since
     //    we just fired this very instant — no delivery lag.
-    // Same defence as backend::api::exec — the agent's local
-    // scheduler bypasses the HTTP write path entirely, so refuse
-    // manifests that point at `script_file` / `script_object`
-    // until the resolver lands (yukimemi/kanade#210 follow-up).
-    let Some(inline_script) = manifest.execute.script.as_deref().filter(|s| !s.is_empty()) else {
-        warn!(
-            schedule_id = %schedule.id,
-            job_id = %manifest.id,
-            "local_scheduler: manifest uses script_file/script_object — resolver TODO (#210), skipping fire",
-        );
-        return;
+    //
+    // #210: build the Command in the same shape backend's exec.rs
+    // would — inline body for `script:` manifests, or
+    // (script: "", script_object: Some(key), script_object_sha256:
+    // Some(broker digest)) for `script_object:` ones. The unified
+    // `handle_command` resolver path in commands.rs then does the
+    // actual fetch + cache + sha verify, so this local-fire flow
+    // shares one implementation with the network-fire flow.
+    let (script_body, script_object_ref) = match (
+        manifest.execute.script.as_deref().filter(|s| !s.is_empty()),
+        manifest.execute.script_object.as_deref(),
+    ) {
+        (Some(inline), _) => (inline.to_owned(), None),
+        (None, Some(key)) => match script_cache.digest_of(key).await {
+            Ok(digest) => (String::new(), Some((key.to_owned(), digest))),
+            Err(e) => {
+                warn!(
+                    schedule_id = %schedule.id,
+                    job_id = %manifest.id,
+                    %key,
+                    error = %e,
+                    "local_scheduler: script_object digest lookup failed; skipping tick",
+                );
+                return;
+            }
+        },
+        (None, None) => {
+            warn!(
+                schedule_id = %schedule.id,
+                job_id = %manifest.id,
+                "local_scheduler: manifest has no script source — Manifest::validate() should have caught this; skipping tick",
+            );
+            return;
+        }
     };
     let timeout_secs = humantime::parse_duration(&manifest.execute.timeout)
         .ok()
@@ -715,7 +778,9 @@ async fn local_tick(
         request_id: Uuid::new_v4().to_string(),
         exec_id: Some(exec_id),
         shell: manifest.execute.shell.into(),
-        script: inline_script.to_owned(),
+        script: script_body,
+        script_object: script_object_ref.as_ref().map(|(k, _)| k.clone()),
+        script_object_sha256: script_object_ref.as_ref().map(|(_, d)| d.clone()),
         timeout_secs,
         jitter_secs,
         run_as: manifest.execute.run_as,
@@ -748,6 +813,7 @@ async fn local_tick(
         script_current,
         script_status,
         staleness.clone(),
+        script_cache.clone(),
     )
     .await
     {
