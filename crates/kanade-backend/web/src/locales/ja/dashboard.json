@@ -90,5 +90,35 @@
       "kvBuckets": "KV バケット",
       "objectStores": "オブジェクトストア"
     }
+  },
+  "fleetPerf": {
+    "title": "フリートパフォーマンス (直近 24時間)",
+    "description": "全 PC の平均、 15 分バケット。 ソース: <code>/api/perf/fleet</code>。",
+    "empty": "ホストパフォーマンスのサンプルはまだありません — エージェントは 60 秒間隔で送信します。",
+    "series": {
+      "cpu": "CPU 平均 %",
+      "mem": "メモリ平均"
+    }
+  },
+  "topCpu": {
+    "title": "CPU Top (直近 5 分)",
+    "description": "直近 5 分平均で CPU% の高い PC ランキング。 <code>pc_id</code> クリックで詳細チャートへ。",
+    "empty": "対象期間のサンプルなし。"
+  },
+  "topMem": {
+    "title": "メモリ Top (直近 5 分)",
+    "description": "直近 5 分平均でメモリ使用量の高い PC ランキング。",
+    "empty": "対象期間のサンプルなし。"
+  },
+  "topTable": {
+    "pcId": "pc_id",
+    "hostname": "ホスト名",
+    "value": "値"
+  },
+  "activeInvestigations": {
+    "title": "プロセス詳細計測中",
+    "description": "直近 5 分以内に <code>process_perf</code> サンプルを送信した PC。 解除し忘れは各エージェント詳細ページの <strong>今すぐ停止</strong> から。",
+    "empty": "現在プロセス詳細計測中の PC はありません。",
+    "latest": "最終サンプル {{age}} 前"
   }
 }

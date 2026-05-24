@@ -90,5 +90,35 @@
       "kvBuckets": "kv buckets",
       "objectStores": "object stores"
     }
+  },
+  "fleetPerf": {
+    "title": "Fleet performance (last 24 h)",
+    "description": "Average across every reporting PC, bucketed 15 min. Source: <code>/api/perf/fleet</code>.",
+    "empty": "No host-perf samples yet — agents publish on a 60 s cadence.",
+    "series": {
+      "cpu": "CPU avg %",
+      "mem": "Memory avg"
+    }
+  },
+  "topCpu": {
+    "title": "Top CPU (last 5 min)",
+    "description": "PCs ranked by average CPU% over the recent window. Click <code>pc_id</code> for the per-host charts.",
+    "empty": "No samples in window."
+  },
+  "topMem": {
+    "title": "Top memory (last 5 min)",
+    "description": "PCs ranked by average memory used over the recent window.",
+    "empty": "No samples in window."
+  },
+  "topTable": {
+    "pcId": "pc_id",
+    "hostname": "hostname",
+    "value": "value"
+  },
+  "activeInvestigations": {
+    "title": "Process-detail investigations",
+    "description": "PCs that have published a <code>process_perf</code> sample in the last 5 min. Clear stragglers with the <strong>Disable now</strong> button on each agent's detail page.",
+    "empty": "No PCs in investigation mode right now.",
+    "latest": "{{age}} since last sample"
   }
 }
