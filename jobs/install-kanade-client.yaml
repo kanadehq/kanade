@@ -1,0 +1,54 @@
+# Sprint 8 install Manifest for the Tauri kanade-client app
+# (yukimemi/kanade#210). The script body lives in the sibling
+# `scripts/install-kanade-client.ps1` and gets inlined by
+# `kanade job create` (#215) before the manifest is stored —
+# operators read the script as a normal `.ps1`, the backend
+# sees one fully-resolved `Manifest` row.
+#
+# The script itself pulls the kanade-client binary from
+# OBJECT_APP_PACKAGES (#207) via the operator-facing
+# `/api/app-packages/kanade-client/<version>` endpoint, so the
+# operator's workflow is:
+#
+#   1. Build kanade-client on a release host
+#      (`cargo build -p kanade-client --release` or via
+#      `release.yml` once the publish step lands).
+#   2. Upload the binary to OBJECT_APP_PACKAGES:
+#         curl -F "file=@kanade-client.exe" \
+#           http://<backend>/api/app-packages/kanade-client/0.42.0
+#   3. Edit `BackendBase` + `Version` in
+#      `scripts/install-kanade-client.ps1`.
+#   4. `kanade job create jobs/install-kanade-client.yaml`
+#   5. `kanade exec install-kanade-client --target ...`
+#
+# `require_approval: true` because client-app rollouts touch the
+# end-user-visible install path; gating behind an explicit ack
+# matches the "operator must intend" posture for the SPA action.
+
+id: install-kanade-client
+version: 0.1.0
+description: "Install / update the kanade-client Tauri app from OBJECT_APP_PACKAGES (#210)"
+
+execute:
+  shell: powershell
+  script_file: scripts/install-kanade-client.ps1
+  timeout: 180s
+  # System session so the install lands under %ProgramFiles%; the
+  # client itself is launched manually by the end user
+  # (`activesetup: いらない` per Sprint 8 review), so no per-user
+  # bootstrap runs here.
+  run_as: system
+
+require_approval: true
+
+# Stdout JSON is consumed by the inventory projector
+# (kanade-backend::projector::results), so the SPA's Inventory
+# page surfaces "what version of kanade-client is on each PC" at
+# a glance. Operators rolling out an upgrade can spot stragglers
+# without ssh-ing into endpoints.
+inventory:
+  display:
+    - { field: version, label: Version }
+    - { field: path, label: Install path }
+  summary:
+    - { field: version, label: Client version }
