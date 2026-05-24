@@ -47,9 +47,25 @@ here so each tool's auto-load behaviour still finds something.
   prompt-cache TTL, so the conversation context stays cached
   across ticks. Do **not** stretch the interval to 300s — that
   is the worst-of-both window (you pay the cache miss without
-  amortizing it). If the PR is genuinely idle (all threads
-  settled, only waiting on owner approval), step **up** to
-  1200–1800s instead.
+  amortizing it). If the PR is idle but a bot re-review is still
+  expected (e.g. a CodeRabbit rate-limit refill window), step
+  **up** to 1200–1800s instead.
+- **Stop the loop entirely when only owner approval is missing.**
+  Once review bots are quiet (or quiet-by-exception — version-bump
+  skip, Renovate/Dependabot skip), CI is green, and there is no
+  other expected follow-up, the *only* remaining action is human
+  approval. GitHub already notifies the owner; the agent
+  re-entering on every cron tick to find the same "still waiting
+  on owner" state burns cache and adds no value. Stop scheduling
+  further wake-ups (`CronDelete` in fixed-interval mode; simply
+  omit the next `ScheduleWakeup` in dynamic mode) and report the
+  wait state to the user. The owner restarts the loop after their
+  next push if a fresh bot pass is wanted, or merges directly.
+  (A CodeRabbit rate-limit window doesn't qualify on its own — a
+  re-review is still expected once the quota refills, so step up
+  to 1200–1800s instead and let it ride. Stopping is only correct
+  when the owner has explicitly chosen to skip the bot pass per
+  the rate-limit exception below.)
 - **Reply to reviewers after pushing a fix.** Reply on the
   corresponding review thread with an **@-mention**
   (`@gemini-code-assist` / `@coderabbitai`). Silent fixes are
