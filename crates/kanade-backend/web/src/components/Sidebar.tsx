@@ -47,6 +47,7 @@ const groups: {
       { to: '/jobs', labelKey: 'nav.jobs' },
       { to: '/schedules', labelKey: 'nav.schedules' },
       { to: '/rollout', labelKey: 'nav.rollout' },
+      { to: '/apps', labelKey: 'nav.apps' },
       { to: '/config', labelKey: 'nav.config' },
       { to: '/jetstream', labelKey: 'nav.jetstream' },
       { to: '/settings', labelKey: 'nav.settings' },

@@ -16,6 +16,7 @@
     "jobs": "Jobs",
     "schedules": "Schedules",
     "rollout": "Rollout",
+    "apps": "Apps",
     "config": "Config",
     "jetstream": "JetStream",
     "settings": "Settings"

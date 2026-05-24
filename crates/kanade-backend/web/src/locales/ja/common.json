@@ -16,6 +16,7 @@
     "jobs": "ジョブ",
     "schedules": "スケジュール",
     "rollout": "ロールアウト",
+    "apps": "アプリ配信",
     "config": "設定",
     "jetstream": "JetStream",
     "settings": "オペレーター設定"
