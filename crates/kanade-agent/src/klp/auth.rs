@@ -152,9 +152,18 @@ mod windows_impl {
         }
 
         let user = unsafe {
-            let token_user = &*(buf.as_ptr() as *const TOKEN_USER);
-            // SAFETY: the SID lives inside `buf`, which outlives
-            // the lookup call below.
+            // `buf` is a `Vec<u8>` with 1-byte alignment, but
+            // `TOKEN_USER` wants pointer alignment (8 bytes on
+            // x64). A `&*(buf.as_ptr() as *const TOKEN_USER)`
+            // would be UB per the Rust reference even though the
+            // OS allocator usually returns a sufficiently-aligned
+            // backing buffer in practice. `read_unaligned` copies
+            // the struct onto the stack without an alignment
+            // assumption, so we get a well-aligned local.
+            //
+            // SAFETY: the embedded `PSID` still points into
+            // `buf`, which outlives `lookup_friendly` below.
+            let token_user: TOKEN_USER = std::ptr::read_unaligned(buf.as_ptr().cast());
             lookup_friendly(token_user.User.Sid).unwrap_or_else(|_| "<unknown>".into())
         };
 
@@ -203,9 +212,17 @@ mod windows_impl {
             )
             .context("LookupAccountSidW (resize) failed")?;
             // Win32 documents that, on success, the size fields
-            // count characters EXCLUDING the trailing nul.
-            let user = String::from_utf16_lossy(&name[..name_len as usize]);
-            let domain = String::from_utf16_lossy(&domain[..domain_len as usize]);
+            // count characters EXCLUDING the trailing nul. The
+            // defensive trim_end_matches('\0') guards against
+            // quirky DCs / orphaned accounts where a stray nul
+            // slips through — cheap insurance, doesn't affect
+            // the well-behaved path.
+            let user = String::from_utf16_lossy(&name[..name_len as usize])
+                .trim_end_matches('\0')
+                .to_string();
+            let domain = String::from_utf16_lossy(&domain[..domain_len as usize])
+                .trim_end_matches('\0')
+                .to_string();
             Ok(format!("{domain}\\{user}"))
         }
     }

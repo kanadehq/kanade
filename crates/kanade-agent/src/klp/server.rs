@@ -63,7 +63,9 @@ pub fn spawn(ctx: ListenerContext) -> tokio::task::JoinHandle<Result<()>> {
 async fn run(ctx: ListenerContext) -> Result<()> {
     // `first_pipe_instance(true)` makes the initial create fail
     // loudly if another process is squatting the pipe name —
-    // safer than silently sharing a name.
+    // safer than silently sharing a name. This one creation IS
+    // allowed to bubble up because there's no working state yet
+    // and the agent operator should see the failure on startup.
     let mut server = ServerOptions::new()
         .first_pipe_instance(true)
         .create(PIPE_NAME)
@@ -72,20 +74,18 @@ async fn run(ctx: ListenerContext) -> Result<()> {
 
     loop {
         if let Err(e) = server.connect().await {
-            warn!(error = %e, "KLP server.connect() failed; retrying");
-            // Recreate before retrying so a broken handle
-            // doesn't poison the loop.
-            server = ServerOptions::new()
-                .create(PIPE_NAME)
-                .with_context(|| format!("recreate Named Pipe {PIPE_NAME} after connect error"))?;
+            warn!(error = %e, "KLP server.connect() failed; reseating listener");
+            // A connect failure usually means the current handle
+            // is broken; reseat with the same retry policy used
+            // for re-arm below so the listener doesn't die from a
+            // transient OS hiccup.
+            server = create_with_retry().await;
             continue;
         }
 
         // Re-arm BEFORE spawning the connection task so the next
         // client doesn't see a brief "no listener" window.
-        let next = ServerOptions::new()
-            .create(PIPE_NAME)
-            .with_context(|| format!("re-create Named Pipe {PIPE_NAME}"))?;
+        let next = create_with_retry().await;
         let connected = std::mem::replace(&mut server, next);
 
         let task_ctx = ctx.clone();
@@ -94,6 +94,36 @@ async fn run(ctx: ListenerContext) -> Result<()> {
                 warn!(error = %e, "KLP connection task failed");
             }
         });
+    }
+}
+
+/// Re-create the Named Pipe instance, retrying with bounded
+/// exponential backoff on transient failures. Returns only on
+/// success — the listener task MUST stay alive for the agent's
+/// lifetime, so a propagated `?` exit (foundation PR's earlier
+/// approach) would let a momentary OS-resource pressure (handle
+/// table full, etc.) permanently kill the KLP transport with no
+/// path back short of an agent restart.
+///
+/// Backoff schedule: 200 ms, 400 ms, 800 ms, … capped at 30 s.
+/// Logs each failure at WARN so operators can spot a persistent
+/// issue in the agent log instead of a silent stall.
+async fn create_with_retry() -> NamedPipeServer {
+    let mut delay_ms: u64 = 200;
+    loop {
+        match ServerOptions::new().create(PIPE_NAME) {
+            Ok(server) => return server,
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    delay_ms,
+                    pipe = PIPE_NAME,
+                    "KLP create() failed; backing off and retrying",
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                delay_ms = (delay_ms * 2).min(30_000);
+            }
+        }
     }
 }
 
@@ -122,11 +152,27 @@ async fn handle_connection(mut pipe: NamedPipeServer, ctx: ListenerContext) -> R
                 debug!(user = %conn.peer.user, "KLP client disconnected (EOF)");
                 return Ok(());
             }
-            Err(e) => {
-                warn!(error = %e, "KLP frame read error; closing connection");
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                // Only `read_frame`'s oversize-header rejection
+                // arrives as `InvalidData` (see framing.rs). Tell
+                // the client they overflowed the 1 MiB cap so
+                // they can split into `stdout_chunk`s next time.
+                warn!(error = %e, "KLP oversize frame; closing connection");
                 let _ =
                     write_anonymous_error(&mut pipe, ErrorKind::PayloadTooLarge, &e.to_string())
                         .await;
+                return Ok(());
+            }
+            Err(e) => {
+                // ConnectionReset / ConnectionAborted / generic
+                // I/O errors mean the pipe is already dead;
+                // trying to write a response would just emit a
+                // confusing follow-up error log. Close silently.
+                debug!(
+                    error = %e,
+                    user = %conn.peer.user,
+                    "KLP connection torn down by I/O error",
+                );
                 return Ok(());
             }
         };
