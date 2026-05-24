@@ -57,13 +57,14 @@ pub fn spawn(
     pc_id: String,
     dedup: std::sync::Arc<tokio::sync::Mutex<crate::commands::DedupCache>>,
     staleness: crate::staleness::Tracker,
+    script_cache: crate::script_cache::ScriptCache,
 ) -> (
     tokio::sync::watch::Receiver<Vec<String>>,
     tokio::task::JoinHandle<()>,
 ) {
     let (tx, rx) = tokio::sync::watch::channel(Vec::<String>::new());
     let handle = tokio::spawn(async move {
-        manage(client, pc_id, dedup, staleness, tx).await;
+        manage(client, pc_id, dedup, staleness, script_cache, tx).await;
     });
     (rx, handle)
 }
@@ -73,6 +74,7 @@ async fn manage(
     pc_id: String,
     dedup: std::sync::Arc<tokio::sync::Mutex<crate::commands::DedupCache>>,
     staleness: crate::staleness::Tracker,
+    script_cache: crate::script_cache::ScriptCache,
     groups_tx: tokio::sync::watch::Sender<Vec<String>>,
 ) {
     let js = jetstream::new(client.clone());
@@ -125,7 +127,16 @@ async fn manage(
                 drop = ?delta.to_unsubscribe,
                 "agent_groups (re-)prime — reconciling subscriptions",
             );
-            apply_delta(&delta, &mut subs, &client, &pc_id, &dedup, &staleness).await;
+            apply_delta(
+                &delta,
+                &mut subs,
+                &client,
+                &pc_id,
+                &dedup,
+                &staleness,
+                &script_cache,
+            )
+            .await;
         }
         let _ = groups_tx.send(desired);
 
@@ -154,7 +165,16 @@ async fn manage(
                     drop = ?delta.to_unsubscribe,
                     "agent_groups update — reconciling subscriptions",
                 );
-                apply_delta(&delta, &mut subs, &client, &pc_id, &dedup, &staleness).await;
+                apply_delta(
+                    &delta,
+                    &mut subs,
+                    &client,
+                    &pc_id,
+                    &dedup,
+                    &staleness,
+                    &script_cache,
+                )
+                .await;
             }
             // Always publish — local_scheduler cares about the
             // membership value itself, not whether *core sub*
@@ -167,6 +187,7 @@ async fn manage(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn apply_delta(
     delta: &SubscriptionDelta,
     subs: &mut HashMap<String, JoinHandle<()>>,
@@ -174,6 +195,7 @@ async fn apply_delta(
     pc_id: &str,
     dedup: &std::sync::Arc<tokio::sync::Mutex<crate::commands::DedupCache>>,
     staleness: &crate::staleness::Tracker,
+    script_cache: &crate::script_cache::ScriptCache,
 ) {
     for g in &delta.to_unsubscribe {
         if let Some(handle) = subs.remove(g) {
@@ -196,6 +218,7 @@ async fn apply_delta(
                     dedup.clone(),
                     staleness.clone(),
                     sub,
+                    script_cache.clone(),
                 ));
                 subs.insert(g.clone(), handle);
                 info!(group = %g, "subscribed to group");

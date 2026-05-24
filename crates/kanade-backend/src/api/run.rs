@@ -78,6 +78,11 @@ pub async fn run(
         exec_id: req.exec_id.clone(),
         shell,
         script: req.script,
+        // Backend ad-hoc `POST /api/run` is always inline; the
+        // Object Store reference path lives on the manifest-driven
+        // `POST /api/exec/{job_id}` flow (#210).
+        script_object: None,
+        script_object_sha256: None,
         timeout_secs: req.timeout_secs,
         jitter_secs: req.jitter_secs,
         // `kanade run` is inherently inline / one-PC / synchronous,
