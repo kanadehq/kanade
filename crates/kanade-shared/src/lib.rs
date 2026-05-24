@@ -2,6 +2,7 @@ pub mod bootstrap;
 pub mod config;
 pub mod default_paths;
 pub mod exe_version;
+pub mod ipc;
 pub mod kv;
 pub mod manifest;
 pub mod nats_client;
