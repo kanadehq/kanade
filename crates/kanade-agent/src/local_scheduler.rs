@@ -474,32 +474,43 @@ async fn apply_resync(
     // which `local_tick` treats the same as "no cached digest" =
     // skip-with-warn. The manifest still gets cached so a later
     // resync with a healthier broker can populate the digest.
-    let mut resolved: HashMap<String, ResolvedJob> = HashMap::with_capacity(new_jobs.len());
-    for (id, manifest) in new_jobs {
-        let script_object_sha256 = match manifest.execute.script_object.as_deref() {
-            Some(key) => match script_cache.digest_of(key).await {
-                Ok(d) => Some(d),
-                Err(e) => {
-                    warn!(
-                        job_id = %id,
-                        %key,
-                        error = %e,
-                        "apply_resync: script_object digest fetch failed; \
-                         tick will skip until next successful resync",
-                    );
-                    None
-                }
-            },
-            None => None,
-        };
-        resolved.insert(
-            id,
-            ResolvedJob {
-                manifest,
-                script_object_sha256,
-            },
-        );
-    }
+    //
+    // Digests are resolved in parallel via `join_all` (Gemini #216
+    // MED) so a fleet with many `script_object:` manifests doesn't
+    // serialize N round-trips. Inline-only manifests skip the
+    // network entirely — the async branch returns immediately.
+    let resolve_futs = new_jobs.into_iter().map(|(id, manifest)| {
+        let script_cache = script_cache.clone();
+        async move {
+            let script_object_sha256 = match manifest.execute.script_object.as_deref() {
+                Some(key) => match script_cache.digest_of(key).await {
+                    Ok(d) => Some(d),
+                    Err(e) => {
+                        warn!(
+                            job_id = %id,
+                            %key,
+                            error = %e,
+                            "apply_resync: script_object digest fetch failed; \
+                             tick will skip until next successful resync",
+                        );
+                        None
+                    }
+                },
+                None => None,
+            };
+            (
+                id,
+                ResolvedJob {
+                    manifest,
+                    script_object_sha256,
+                },
+            )
+        }
+    });
+    let resolved: HashMap<String, ResolvedJob> = futures::future::join_all(resolve_futs)
+        .await
+        .into_iter()
+        .collect();
 
     // Swap the jobs map atomically — under the lock so `local_tick`
     // sees either the old map in full or the new map in full, never
