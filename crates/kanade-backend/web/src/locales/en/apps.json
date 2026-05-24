@@ -29,7 +29,9 @@
         "digest": "digest",
         "actions": "actions"
       },
-      "confirmDelete": "Delete app package {{name}}/{{version}}? This cannot be undone.",
+      "confirmDeleteTitle": "Delete app package {{name}}/{{version}}?",
+      "confirmDeleteDescription": "Removes the bytes from OBJECT_APP_PACKAGES. This cannot be undone — re-upload to restore.",
+      "confirmDeleteButton": "Delete",
       "deleteErrorTitle": "Delete failed"
     }
   },
@@ -61,7 +63,9 @@
         "digest": "digest",
         "actions": "actions"
       },
-      "confirmDelete": "Delete script object {{name}}/{{version}}? This cannot be undone.",
+      "confirmDeleteTitle": "Delete script object {{name}}/{{version}}?",
+      "confirmDeleteDescription": "Removes the bytes from OBJECT_SCRIPTS. This cannot be undone — manifests referencing this object will fail at exec until you re-upload.",
+      "confirmDeleteButton": "Delete",
       "deleteErrorTitle": "Delete failed"
     }
   }

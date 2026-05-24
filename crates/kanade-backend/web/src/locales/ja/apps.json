@@ -29,7 +29,9 @@
         "digest": "digest",
         "actions": "操作"
       },
-      "confirmDelete": "App package {{name}}/{{version}} を削除しますか？元に戻せません。",
+      "confirmDeleteTitle": "App package {{name}}/{{version}} を削除しますか？",
+      "confirmDeleteDescription": "OBJECT_APP_PACKAGES からバイト列を削除します。元に戻せません — 復旧には再アップロードが必要です。",
+      "confirmDeleteButton": "削除",
       "deleteErrorTitle": "削除失敗"
     }
   },
@@ -61,7 +63,9 @@
         "digest": "digest",
         "actions": "操作"
       },
-      "confirmDelete": "Script object {{name}}/{{version}} を削除しますか？元に戻せません。",
+      "confirmDeleteTitle": "Script object {{name}}/{{version}} を削除しますか？",
+      "confirmDeleteDescription": "OBJECT_SCRIPTS からバイト列を削除します。元に戻せません — 該当 object を参照している manifest は再アップロードまで exec 失敗します。",
+      "confirmDeleteButton": "削除",
       "deleteErrorTitle": "削除失敗"
     }
   }

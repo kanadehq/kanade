@@ -6,6 +6,7 @@ import { Trans, useTranslation } from 'react-i18next';
 import { ErrorCard } from '@/components/ErrorCard';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { useConfirm } from '@/components/ui/confirm-dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -52,6 +53,7 @@ function fmtSize(bytes: number): string {
 function ObjectStoreSection({ ns, queryKey, endpoint, icon, accept }: SectionConfig) {
   const { t } = useTranslation('apps');
   const qc = useQueryClient();
+  const confirm = useConfirm();
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [name, setName] = useState('');
   const [version, setVersion] = useState('');
@@ -61,6 +63,13 @@ function ObjectStoreSection({ ns, queryKey, endpoint, icon, accept }: SectionCon
     queryFn: () => apiFetch<StoreRow[]>(endpoint),
   });
 
+  type PublishResponse = {
+    name: string;
+    version: string;
+    size: number;
+    digest: string | null;
+  };
+
   const upload = useMutation({
     mutationFn: async () => {
       if (!uploadFile) throw new Error(t(`${ns}.upload.noFileError`));
@@ -68,22 +77,14 @@ function ObjectStoreSection({ ns, queryKey, endpoint, icon, accept }: SectionCon
       if (!version.trim()) throw new Error(t(`${ns}.upload.noVersionError`));
       const fd = new FormData();
       fd.append('file', uploadFile);
-      const token = localStorage.getItem('kanade_token') ?? '';
-      const headers: Record<string, string> = { 'X-Kanade-Source': 'spa' };
-      if (token) headers.Authorization = `Bearer ${token}`;
-      const res = await fetch(
+      // apiFetch now skips its default JSON Content-Type for
+      // FormData bodies (Gemini #218 HIGH), so the browser can
+      // fill in `multipart/form-data; boundary=…` itself. Auth +
+      // X-Kanade-Source still come from the central wrapper.
+      return apiFetch<PublishResponse>(
         `${endpoint}/${encodeURIComponent(name.trim())}/${encodeURIComponent(version.trim())}`,
-        { method: 'POST', body: fd, headers },
+        { method: 'POST', body: fd },
       );
-      if (!res.ok) {
-        throw new Error(`${res.status} ${res.statusText} — ${await res.text()}`);
-      }
-      return (await res.json()) as {
-        name: string;
-        version: string;
-        size: number;
-        digest: string | null;
-      };
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: [...queryKey] });
@@ -95,16 +96,10 @@ function ObjectStoreSection({ ns, queryKey, endpoint, icon, accept }: SectionCon
 
   const remove = useMutation({
     mutationFn: async (target: { name: string; version: string }) => {
-      const token = localStorage.getItem('kanade_token') ?? '';
-      const headers: Record<string, string> = { 'X-Kanade-Source': 'spa' };
-      if (token) headers.Authorization = `Bearer ${token}`;
-      const res = await fetch(
+      await apiFetch<void>(
         `${endpoint}/${encodeURIComponent(target.name)}/${encodeURIComponent(target.version)}`,
-        { method: 'DELETE', headers },
+        { method: 'DELETE' },
       );
-      if (!res.ok) {
-        throw new Error(`${res.status} ${res.statusText} — ${await res.text()}`);
-      }
       return target;
     },
     onSuccess: () => {
@@ -229,15 +224,17 @@ function ObjectStoreSection({ ns, queryKey, endpoint, icon, accept }: SectionCon
                     <Button
                       size="sm"
                       variant="danger"
-                      onClick={() => {
-                        if (
-                          confirm(
-                            t(`${ns}.list.confirmDelete`, {
-                              name: r.name,
-                              version: r.version,
-                            }),
-                          )
-                        ) {
+                      onClick={async () => {
+                        const ok = await confirm({
+                          title: t(`${ns}.list.confirmDeleteTitle`, {
+                            name: r.name,
+                            version: r.version,
+                          }),
+                          description: t(`${ns}.list.confirmDeleteDescription`),
+                          confirmLabel: t(`${ns}.list.confirmDeleteButton`),
+                          danger: true,
+                        });
+                        if (ok) {
                           remove.mutate({ name: r.name, version: r.version });
                         }
                       }}
