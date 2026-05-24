@@ -71,6 +71,31 @@
       "rss": "rss",
       "diskRead": "disk read/s",
       "diskWritten": "disk written/s"
+    },
+    "chart": {
+      "title": "Process timeline",
+      "intro": "Top processes across the selected window, stacked by name. Legend colours are pinned across the window ({{top}} names + other).",
+      "rangeLabel": "Range",
+      "topLabel": "Top",
+      "metricLabel": "Metric",
+      "loading": "loading timeline…",
+      "errorTitle": "Couldn't load timeline",
+      "empty": "No samples in this range yet.",
+      "other": "other",
+      "stepNote": "Server-side bucket: {{step}}",
+      "ranges": {
+        "15m": "15 minutes",
+        "30m": "30 minutes",
+        "1h": "1 hour",
+        "6h": "6 hours",
+        "24h": "24 hours"
+      },
+      "metrics": {
+        "cpu": "CPU %",
+        "rss": "Memory (RSS)",
+        "disk_read": "Disk read/s",
+        "disk_written": "Disk written/s"
+      }
     }
   }
 }
