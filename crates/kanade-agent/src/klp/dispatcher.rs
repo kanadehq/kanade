@@ -24,12 +24,16 @@
 //!   never reach this function — they're handled by the
 //!   per-connection task in `server.rs` (it sends
 //!   `err_anonymous(ParseError)` and drops the connection).
+//!
+//! `dispatch_request` is async because some handlers do file I/O
+//! (`system.log_tail`); pure-CPU handlers (handshake, ping,
+//! version) just await trivially.
 
 use kanade_shared::ipc::envelope::{RpcRequest, RpcResponse, decode_params};
 use kanade_shared::ipc::error::{ErrorKind, RpcError};
 use kanade_shared::ipc::handshake::HandshakeParams;
 use kanade_shared::ipc::method;
-use kanade_shared::ipc::system::PingParams;
+use kanade_shared::ipc::system::{LogTailParams, PingParams, VersionParams};
 use tracing::warn;
 
 use super::connection::ConnectionState;
@@ -39,8 +43,8 @@ use super::handlers;
 /// [`RpcResponse`] — even handler errors get wrapped into the
 /// envelope (KLP is a closed two-party protocol; we never just
 /// drop a request id without a reply).
-pub fn dispatch_request(conn: &mut ConnectionState, req: RpcRequest) -> RpcResponse {
-    let result = dispatch_inner(conn, &req);
+pub async fn dispatch_request(conn: &mut ConnectionState, req: RpcRequest) -> RpcResponse {
+    let result = dispatch_inner(conn, &req).await;
     match result {
         Ok(value) => RpcResponse {
             jsonrpc: kanade_shared::ipc::envelope::JSONRPC_VERSION.to_string(),
@@ -54,7 +58,7 @@ pub fn dispatch_request(conn: &mut ConnectionState, req: RpcRequest) -> RpcRespo
 /// Inner dispatch returning the typed-as-Value result OR an
 /// `RpcError`. Separated so the [`RpcResponse`] envelope assembly
 /// happens in exactly one place above.
-fn dispatch_inner(
+async fn dispatch_inner(
     conn: &mut ConnectionState,
     req: &RpcRequest,
 ) -> std::result::Result<serde_json::Value, RpcError> {
@@ -85,6 +89,18 @@ fn dispatch_inner(
         method::SYSTEM_PING => {
             let params: PingParams = decode_params(req.params.clone()).map_err(invalid_params)?;
             let result = handlers::system::handle_ping(conn, params)?;
+            serde_json::to_value(&result).map_err(internal)
+        }
+        method::SYSTEM_VERSION => {
+            let params: VersionParams =
+                decode_params(req.params.clone()).map_err(invalid_params)?;
+            let result = handlers::system::handle_version(conn, params)?;
+            serde_json::to_value(&result).map_err(internal)
+        }
+        method::SYSTEM_LOG_TAIL => {
+            let params: LogTailParams =
+                decode_params(req.params.clone()).map_err(invalid_params)?;
+            let result = handlers::system::handle_log_tail(conn, params).await?;
             serde_json::to_value(&result).map_err(internal)
         }
         // Every other v1 method is reserved but not implemented
@@ -121,8 +137,12 @@ mod tests {
     use crate::klp::auth::PeerCredentials;
     use kanade_shared::ipc::envelope::RpcResponsePayload;
     use kanade_shared::ipc::handshake::PROTOCOL_V1;
+    use kanade_shared::wire::EffectiveConfig;
+    use std::path::PathBuf;
+    use tokio::sync::watch;
 
     fn fresh_conn() -> ConnectionState {
+        let (_tx, rx) = watch::channel(EffectiveConfig::builtin_defaults());
         ConnectionState::new(
             PeerCredentials {
                 user: "DOMAIN\\alice".into(),
@@ -130,6 +150,8 @@ mod tests {
             },
             "PC1234".into(),
             "0.40.0".into(),
+            rx,
+            PathBuf::from("agent.log"),
         )
     }
 
@@ -147,8 +169,8 @@ mod tests {
         .unwrap()
     }
 
-    #[test]
-    fn pre_handshake_ping_returns_invalid_request() {
+    #[tokio::test]
+    async fn pre_handshake_ping_returns_invalid_request() {
         let mut conn = fresh_conn();
         let req = RpcRequest {
             jsonrpc: kanade_shared::ipc::envelope::JSONRPC_VERSION.to_string(),
@@ -156,7 +178,7 @@ mod tests {
             method: method::SYSTEM_PING.to_string(),
             params: serde_json::Value::Null,
         };
-        let resp = dispatch_request(&mut conn, req);
+        let resp = dispatch_request(&mut conn, req).await;
         match resp.payload {
             RpcResponsePayload::Err { error } => {
                 let data = error.data.expect("data populated");
@@ -167,11 +189,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn handshake_then_ping_succeeds() {
+    #[tokio::test]
+    async fn handshake_then_ping_succeeds() {
         let mut conn = fresh_conn();
 
-        let h_resp = dispatch_request(&mut conn, handshake_req());
+        let h_resp = dispatch_request(&mut conn, handshake_req()).await;
         assert!(
             matches!(h_resp.payload, RpcResponsePayload::Ok { .. }),
             "handshake should succeed: {:?}",
@@ -187,7 +209,7 @@ mod tests {
             // exists for.
             params: serde_json::Value::Null,
         };
-        let p_resp = dispatch_request(&mut conn, p_req);
+        let p_resp = dispatch_request(&mut conn, p_req).await;
         match p_resp.payload {
             RpcResponsePayload::Ok { result } => {
                 assert!(result.get("agent_time").is_some(), "wire: {result}");
@@ -196,11 +218,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn unknown_method_returns_method_not_found() {
+    #[tokio::test]
+    async fn unknown_method_returns_method_not_found() {
         let mut conn = fresh_conn();
         // Handshake first so we get past the gate.
-        let _ = dispatch_request(&mut conn, handshake_req());
+        let _ = dispatch_request(&mut conn, handshake_req()).await;
 
         let req = RpcRequest {
             jsonrpc: kanade_shared::ipc::envelope::JSONRPC_VERSION.to_string(),
@@ -208,7 +230,7 @@ mod tests {
             method: "jobs.list".to_string(),
             params: serde_json::Value::Null,
         };
-        let resp = dispatch_request(&mut conn, req);
+        let resp = dispatch_request(&mut conn, req).await;
         match resp.payload {
             RpcResponsePayload::Err { error } => {
                 let data = error.data.expect("data populated");
@@ -218,8 +240,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn handshake_with_wrong_params_returns_invalid_params() {
+    #[tokio::test]
+    async fn handshake_with_wrong_params_returns_invalid_params() {
         let mut conn = fresh_conn();
         // Send malformed params (array instead of object) — should
         // route to InvalidParams, not crash the dispatcher.
@@ -229,7 +251,7 @@ mod tests {
             method: method::SYSTEM_HANDSHAKE.to_string(),
             params: serde_json::json!(["wrong", "shape"]),
         };
-        let resp = dispatch_request(&mut conn, req);
+        let resp = dispatch_request(&mut conn, req).await;
         match resp.payload {
             RpcResponsePayload::Err { error } => {
                 let data = error.data.expect("data populated");
@@ -239,12 +261,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn response_id_correlates_to_request_id() {
+    #[tokio::test]
+    async fn response_id_correlates_to_request_id() {
         let mut conn = fresh_conn();
         let mut req = handshake_req();
         req.id = "correlation-test-123".into();
-        let resp = dispatch_request(&mut conn, req);
+        let resp = dispatch_request(&mut conn, req).await;
         assert_eq!(resp.id.as_deref(), Some("correlation-test-123"));
     }
 }

@@ -6,10 +6,15 @@
 //! must survive across reconnects (e.g. the operator audit log)
 //! lives elsewhere — at the connection level we only track what's
 //! locally relevant: the handshake gate, the agreed protocol
-//! version, the peer's identity, and (in a later PR)
-//! per-connection subscription handles.
+//! version, the peer's identity, plus the cheaply-cloneable
+//! globals (config watch handle, log path, agent identity) handler
+//! code needs to do its work without reaching into module state.
+
+use std::path::PathBuf;
 
 use kanade_shared::ipc::handshake::HandshakeSession;
+use kanade_shared::wire::EffectiveConfig;
+use tokio::sync::watch;
 
 use super::auth::PeerCredentials;
 
@@ -36,6 +41,18 @@ pub struct ConnectionState {
     /// responses without needing each handler to import the
     /// crate-root constant.
     pub agent_version: String,
+    /// Live view of the agent's effective config (Sprint 6's
+    /// config supervisor). Handlers needing the rollout target
+    /// version, etc. read `config_rx.borrow()` per call —
+    /// cheap because [`watch::Receiver`] is just an Arc-shared
+    /// slot.
+    pub config_rx: watch::Receiver<EffectiveConfig>,
+    /// On-disk path to the rotating agent.log file. Used by
+    /// `system.log_tail` to bundle recent log lines into a
+    /// support response. Owned `PathBuf` so the handler doesn't
+    /// touch an `Arc<Path>` lifetime; one allocation per
+    /// connection is fine.
+    pub log_path: PathBuf,
     /// `Some(v)` once `system.handshake` succeeded; `None`
     /// otherwise. The dispatcher uses this as the gate for
     /// non-handshake methods.
@@ -44,12 +61,23 @@ pub struct ConnectionState {
 
 impl ConnectionState {
     /// Build the pre-handshake state for a freshly-accepted
-    /// connection.
-    pub fn new(peer: PeerCredentials, pc_id: String, agent_version: String) -> Self {
+    /// connection. The caller (the listener task) clones cheap
+    /// globals — `config_rx` via [`watch::Receiver::clone`],
+    /// `log_path` + identity strings via owned values — into the
+    /// fresh state.
+    pub fn new(
+        peer: PeerCredentials,
+        pc_id: String,
+        agent_version: String,
+        config_rx: watch::Receiver<EffectiveConfig>,
+        log_path: PathBuf,
+    ) -> Self {
         Self {
             peer,
             pc_id,
             agent_version,
+            config_rx,
+            log_path,
             agreed_protocol: None,
         }
     }
@@ -93,15 +121,26 @@ mod tests {
         }
     }
 
+    fn fresh_state() -> ConnectionState {
+        let (_tx, rx) = watch::channel(EffectiveConfig::builtin_defaults());
+        ConnectionState::new(
+            dummy_peer(),
+            "PC1234".into(),
+            "0.40.0".into(),
+            rx,
+            PathBuf::from("agent.log"),
+        )
+    }
+
     #[test]
     fn fresh_connection_is_pre_handshake() {
-        let s = ConnectionState::new(dummy_peer(), "PC1234".into(), "0.40.0".into());
+        let s = fresh_state();
         assert!(!s.handshake_complete());
     }
 
     #[test]
     fn mark_handshake_unlocks_method_set() {
-        let mut s = ConnectionState::new(dummy_peer(), "PC1234".into(), "0.40.0".into());
+        let mut s = fresh_state();
         s.mark_handshake(1);
         assert!(s.handshake_complete());
     }
@@ -111,7 +150,7 @@ mod tests {
         // Critical invariant per SPEC §2.12.4: the session that
         // ships back to the client is built from the peer (OS) and
         // the agent's pc_id, never from any payload field.
-        let s = ConnectionState::new(dummy_peer(), "PC1234".into(), "0.40.0".into());
+        let s = fresh_state();
         let session = s.session();
         assert_eq!(session.user, "DOMAIN\\alice");
         assert_eq!(session.session_id, 2);
