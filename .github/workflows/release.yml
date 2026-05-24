@@ -14,7 +14,7 @@
 # but with cleanly separated ownership.
 #
 # Workspace-shaped release pipeline. The same file works across every
-# yukimemi/* Rust workspace repo with no per-PJ patching — every
+# Rust workspace repo using these templates with no per-PJ patching — every
 # project-specific bit (binary names, publishable library list,
 # inter-crate dep order) is discovered from `cargo metadata` at run
 # time:

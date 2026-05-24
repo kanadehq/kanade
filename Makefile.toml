@@ -1,6 +1,6 @@
 [config]
 # cargo-make's default is to enter every workspace member and run the
-# requested task once per member. The yukimemi/* convention runs cargo
+# requested task once per member. The convention here runs cargo
 # directly at the workspace root with --workspace / --all-targets
 # (see pj-rust's Makefile.toml), so per-member recursion just
 # duplicates work and slows `cargo make check` noticeably.
@@ -90,6 +90,67 @@ description = "Build the React SPA into web/dist (consumed by rust-embed)"
 cwd = "${CARGO_MAKE_WORKING_DIRECTORY}/crates/kanade-backend/web"
 command = "bun"
 args = ["run", "build"]
+
+[tasks.apm-install-update]
+description = "Refresh APM dependencies to upstream latest. Skipped when apm.yml/apm absent, or when apm.lock.yaml already records the current upstream renri HEAD (kicks in on every cargo make on-add after the first to keep worktree creation fast)."
+script_runner = "@duckscript"
+script = '''
+exists = is_path_exists "apm.yml"
+if not ${exists}
+    echo "no apm.yml; skipping apm-install-update"
+    exit 0
+end
+apm_path = which apm
+if is_empty ${apm_path}
+    echo "apm CLI not on PATH; skipping apm-install-update (install via aka.ms/apm-unix or your platform's package manager)"
+    exit 0
+end
+
+# Fast-path: if apm.lock.yaml already records the current
+# upstream HEAD of yukimemi/renri (the only APM dependency for
+# projects using these templates), don't re-run `apm install --update` —
+# git ls-remote is ~100ms, an actual reinstall is several
+# seconds. This makes `cargo make on-add` cheap on every
+# `renri add` after the first.
+lock_exists = is_path_exists "apm.lock.yaml"
+if ${lock_exists}
+    ls_result = exec git ls-remote https://github.com/yukimemi/renri.git refs/heads/main
+    ls_ok = eq ${ls_result.code} 0
+    if ${ls_ok}
+        upstream_line = trim ${ls_result.stdout}
+        # `substring` errors out (failing the whole task) if the
+        # input is shorter than the requested range, so length-check
+        # *before* the call. Empty / short `upstream_line` happens
+        # when `git ls-remote` succeeds-with-empty (deleted main ref,
+        # weird CI mirror, etc.) — in that case we skip the fast-
+        # path and fall through to a real `apm install --update`.
+        line_len = length ${upstream_line}
+        line_long_enough = greater_than ${line_len} 39
+        if ${line_long_enough}
+            upstream_sha = substring ${upstream_line} 0 40
+            # Defense-in-depth: still re-check sha_len in case
+            # duckscript's substring semantics ever change.
+            # `contains "haystack" ""` returns true (empty needle is
+            # always a substring), so a stray empty sha would also
+            # incorrectly skip the install without this guard.
+            sha_len = length ${upstream_sha}
+            sha_valid = eq ${sha_len} 40
+        else
+            sha_valid = set false
+        end
+        if ${sha_valid}
+            lock_body = readfile apm.lock.yaml
+            already_synced = contains ${lock_body} ${upstream_sha}
+            if ${already_synced}
+                echo "apm.lock.yaml already at upstream renri ${upstream_sha}; skipping apm install --update"
+                exit 0
+            end
+        end
+    end
+end
+
+exec apm install --update -t copilot,claude,gemini
+'''
 
 [tasks.web-dev]
 description = "Vite dev server with HMR — proxies /api to the dev backend on :8081 (paired with `cargo make backend-dev`)."
@@ -230,67 +291,6 @@ if is_empty ${apm_path}
     exit 0
 end
 exec apm install -t copilot,claude,gemini
-'''
-
-[tasks.apm-install-update]
-description = "Refresh APM dependencies to upstream latest. Skipped when apm.yml/apm absent, or when apm.lock.yaml already records the current upstream renri HEAD (kicks in on every cargo make on-add after the first to keep worktree creation fast)."
-script_runner = "@duckscript"
-script = '''
-exists = is_path_exists "apm.yml"
-if not ${exists}
-    echo "no apm.yml; skipping apm-install-update"
-    exit 0
-end
-apm_path = which apm
-if is_empty ${apm_path}
-    echo "apm CLI not on PATH; skipping apm-install-update (install via aka.ms/apm-unix or your platform's package manager)"
-    exit 0
-end
-
-# Fast-path: if apm.lock.yaml already records the current
-# upstream HEAD of yukimemi/renri (the only APM dependency for
-# yukimemi/* projects), don't re-run `apm install --update` —
-# git ls-remote is ~100ms, an actual reinstall is several
-# seconds. This makes `cargo make on-add` cheap on every
-# `renri add` after the first.
-lock_exists = is_path_exists "apm.lock.yaml"
-if ${lock_exists}
-    ls_result = exec git ls-remote https://github.com/yukimemi/renri.git refs/heads/main
-    ls_ok = eq ${ls_result.code} 0
-    if ${ls_ok}
-        upstream_line = trim ${ls_result.stdout}
-        # `substring` errors out (failing the whole task) if the
-        # input is shorter than the requested range, so length-check
-        # *before* the call. Empty / short `upstream_line` happens
-        # when `git ls-remote` succeeds-with-empty (deleted main ref,
-        # weird CI mirror, etc.) — in that case we skip the fast-
-        # path and fall through to a real `apm install --update`.
-        line_len = length ${upstream_line}
-        line_long_enough = greater_than ${line_len} 39
-        if ${line_long_enough}
-            upstream_sha = substring ${upstream_line} 0 40
-            # Defense-in-depth: still re-check sha_len in case
-            # duckscript's substring semantics ever change.
-            # `contains "haystack" ""` returns true (empty needle is
-            # always a substring), so a stray empty sha would also
-            # incorrectly skip the install without this guard.
-            sha_len = length ${upstream_sha}
-            sha_valid = eq ${sha_len} 40
-        else
-            sha_valid = set false
-        end
-        if ${sha_valid}
-            lock_body = readfile apm.lock.yaml
-            already_synced = contains ${lock_body} ${upstream_sha}
-            if ${already_synced}
-                echo "apm.lock.yaml already at upstream renri ${upstream_sha}; skipping apm install --update"
-                exit 0
-            end
-        end
-    end
-end
-
-exec apm install --update -t copilot,claude,gemini
 '''
 
 [tasks.setup]
