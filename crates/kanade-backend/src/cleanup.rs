@@ -55,6 +55,15 @@ const HISTORY_RETENTION: &str = "-90 days";
 /// appropriate than a raw retention bump — TBD when fleets grow.
 const PERF_RETENTION: &str = "-30 days";
 
+/// v0.41 / Phase 2: `process_perf_samples` retention. 7 d is much
+/// tighter than host_perf because process-perf is N rows per tick
+/// (top-N) instead of 1, and the operator use case is "investigation
+/// now / a few hours back", not "monthly trend". Process-perf only
+/// populates while an operator has flipped a PC into investigation
+/// mode, so the absolute row count is bounded by active windows
+/// regardless of fleet size.
+const PROCESS_PERF_RETENTION: &str = "-7 days";
+
 /// Spawn the long-running cleanup task. Runs forever; logs a warn
 /// on transient SQLite errors and continues to the next tick. The
 /// task is fire-and-forget — the returned handle is for the
@@ -106,8 +115,34 @@ pub fn spawn(pool: SqlitePool) -> tokio::task::JoinHandle<()> {
                 Ok(_) => {}
                 Err(e) => warn!(error = %e, "host_perf_samples cleanup failed"),
             }
+            // v0.41 / Phase 2: prune process_perf_samples rows older
+            // than PROCESS_PERF_RETENTION. Tighter retention than
+            // host_perf because the table is N rows per tick.
+            match prune_process_perf_samples(&pool).await {
+                Ok(n) if n > 0 => info!(
+                    deleted = n,
+                    "process_perf_samples cleanup: pruned {n} rows older than {PROCESS_PERF_RETENTION}",
+                ),
+                Ok(_) => {}
+                Err(e) => warn!(error = %e, "process_perf_samples cleanup failed"),
+            }
         }
     })
+}
+
+/// Delete `process_perf_samples` rows older than
+/// [`PROCESS_PERF_RETENTION`]. The `at` column is indexed
+/// (`idx_process_perf_samples_at`) so the scan stays cheap.
+async fn prune_process_perf_samples(pool: &SqlitePool) -> Result<u64> {
+    let rows = sqlx::query(
+        "DELETE FROM process_perf_samples
+          WHERE at < datetime('now', ?)",
+    )
+    .bind(PROCESS_PERF_RETENTION)
+    .execute(pool)
+    .await
+    .context("DELETE process_perf_samples retention sweep")?;
+    Ok(rows.rows_affected())
 }
 
 /// Delete `host_perf_samples` rows older than [`PERF_RETENTION`].

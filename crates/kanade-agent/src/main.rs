@@ -6,6 +6,7 @@ mod host_perf;
 mod logs;
 mod ping;
 mod process;
+mod process_perf;
 mod self_update;
 
 mod command_replay;
@@ -149,6 +150,17 @@ pub(crate) async fn run_agent() -> Result<()> {
     // backends without a host_perf projector simply ignore the
     // traffic, so the agent can be upgraded ahead of the backend.
     tokio::spawn(host_perf::host_perf_loop(
+        client.clone(),
+        pc_id.clone(),
+        cfg_rx.clone(),
+    ));
+    // v0.41 / Phase 2: per-process telemetry. The loop itself is
+    // always spawned, but it stays quiet until the operator flips
+    // `process_perf_enabled=true` on this PC's agent_config row
+    // (and `process_perf_expires_at` is still in the future). When
+    // the deadline passes the loop auto-stops publishing without
+    // needing the operator to come back and unset the flag.
+    tokio::spawn(process_perf::process_perf_loop(
         client.clone(),
         pc_id.clone(),
         cfg_rx.clone(),

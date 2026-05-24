@@ -64,6 +64,29 @@ pub struct ConfigScope {
     /// and gappier data is acceptable for graphing. Default 60 s.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host_perf_interval: Option<String>,
+    /// v0.41 / Phase 2: operator-driven opt-in for the heavy per-
+    /// process snapshot loop (`process_perf.<pc_id>`). Default off
+    /// because walking the full process table is the most expensive
+    /// sysinfo call on Citrix / RDS hosts; flip on only when an
+    /// operator is actively investigating a host. Paired with
+    /// `process_perf_expires_at` to auto-disable after a window —
+    /// see [`EffectiveConfig::process_perf_active_at`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_perf_enabled: Option<bool>,
+    /// Wall-clock RFC3339 timestamp after which `process_perf_enabled`
+    /// is considered expired and the agent stops publishing process
+    /// snapshots — even if the flag itself is still `true`. Lets the
+    /// SPA toggle "ON for 30 m" without the operator having to come
+    /// back and clear the flag manually. `None` (or the past) +
+    /// enabled=true means "indefinitely on" (rare; mostly a test path).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_perf_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Top-N processes (ordered by CPU%) the agent publishes per tick.
+    /// 20 by default — enough to cover the usual suspects on a
+    /// constrained host without ballooning the projector row volume
+    /// when several PCs are simultaneously in investigation mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_perf_top_n: Option<u32>,
 }
 
 impl ConfigScope {
@@ -72,6 +95,9 @@ impl ConfigScope {
             && self.target_version_jitter.is_none()
             && self.heartbeat_interval.is_none()
             && self.host_perf_interval.is_none()
+            && self.process_perf_enabled.is_none()
+            && self.process_perf_expires_at.is_none()
+            && self.process_perf_top_n.is_none()
     }
 }
 
@@ -87,6 +113,12 @@ pub struct EffectiveConfig {
     pub target_version_jitter: String,
     pub heartbeat_interval: String,
     pub host_perf_interval: String,
+    /// v0.41 / Phase 2 — see [`ConfigScope::process_perf_enabled`].
+    pub process_perf_enabled: bool,
+    /// v0.41 / Phase 2 — see [`ConfigScope::process_perf_expires_at`].
+    pub process_perf_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// v0.41 / Phase 2 — see [`ConfigScope::process_perf_top_n`].
+    pub process_perf_top_n: u32,
 }
 
 impl EffectiveConfig {
@@ -108,6 +140,27 @@ impl EffectiveConfig {
             // RDS hosts is the heaviest call we make) out of the
             // tight 30 s loop.
             host_perf_interval: "60s".to_string(),
+            // Off by default. Per-process collection walks the full
+            // OS process table — the most expensive sysinfo call —
+            // so the fleet pays nothing until an operator opts a
+            // specific host into "investigation mode".
+            process_perf_enabled: false,
+            process_perf_expires_at: None,
+            process_perf_top_n: 20,
+        }
+    }
+
+    /// Returns true when process-perf collection should actually run
+    /// **right now**: the flag is set AND no expiry has passed.
+    /// Centralised here so agent / backend / SPA all agree on the
+    /// active-vs-expired distinction.
+    pub fn process_perf_active_at(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
+        if !self.process_perf_enabled {
+            return false;
+        }
+        match self.process_perf_expires_at {
+            None => true,
+            Some(deadline) => now < deadline,
         }
     }
 
@@ -220,6 +273,24 @@ pub fn resolve(
                 .or_default()
                 .push(g.to_string());
         }
+        if scope.process_perf_enabled.is_some() {
+            setters
+                .entry("process_perf_enabled")
+                .or_default()
+                .push(g.to_string());
+        }
+        if scope.process_perf_expires_at.is_some() {
+            setters
+                .entry("process_perf_expires_at")
+                .or_default()
+                .push(g.to_string());
+        }
+        if scope.process_perf_top_n.is_some() {
+            setters
+                .entry("process_perf_top_n")
+                .or_default()
+                .push(g.to_string());
+        }
     }
     for (field, groups) in setters {
         if groups.len() > 1 {
@@ -253,6 +324,15 @@ fn apply_scope(out: &mut EffectiveConfig, s: &ConfigScope) {
     }
     if let Some(v) = &s.host_perf_interval {
         out.host_perf_interval = v.clone();
+    }
+    if let Some(v) = s.process_perf_enabled {
+        out.process_perf_enabled = v;
+    }
+    if let Some(v) = s.process_perf_expires_at {
+        out.process_perf_expires_at = Some(v);
+    }
+    if let Some(v) = s.process_perf_top_n {
+        out.process_perf_top_n = v;
     }
 }
 

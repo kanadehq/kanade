@@ -6,6 +6,7 @@ mod heartbeat;
 mod host_perf;
 mod inventory;
 mod logs;
+mod process_perf;
 mod result;
 mod staleness;
 
@@ -17,5 +18,6 @@ pub use heartbeat::Heartbeat;
 pub use host_perf::HostPerf;
 pub use inventory::{DiskInfo, HwInventory};
 pub use logs::LogsRequest;
+pub use process_perf::{ProcessPerf, ProcessSnapshot};
 pub use result::ExecResult;
 pub use staleness::Staleness;

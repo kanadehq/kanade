@@ -248,6 +248,20 @@ pub(crate) async fn run_backend() -> Result<()> {
             }
         });
     }
+    // v0.41 / Phase 2: per-process perf time-series projector. Only
+    // sees traffic while an operator has opted a PC into investigation
+    // mode (process_perf_enabled=true + expires_at in the future); on
+    // a quiet fleet this projector wakes up and immediately blocks
+    // back on the subscription with no DB writes.
+    {
+        let pool = pool.clone();
+        let nats_client = nats.clone();
+        tokio::spawn(async move {
+            if let Err(e) = projector::process_perf::run(nats_client, pool).await {
+                error!(error = %e, "process_perf projector exited");
+            }
+        });
+    }
     // v0.30 / PR α' unified: project agent `events.started.*.*` into
     // execution_results as in-flight rows. Pairs with results
     // projector — both UPSERT against execution_results.result_id

@@ -40,5 +40,37 @@
       "net_tx": "送信"
     },
     "stepNote": "サーバ側バケット: {{step}}"
+  },
+  "process": {
+    "title": "プロセス詳細",
+    "intro": "デフォルト OFF。 プロセステーブル全体の取得は sysinfo で最も重いので、 調査中のホストのみ ON にしてください。 指定時間経過で自動 OFF (agent 側で publish を止める) になるので、 解除し忘れる心配はありません。",
+    "statusOff": "OFF",
+    "statusActive": "稼働中",
+    "statusExpired": "期限切れ",
+    "remaining": "残り {{remaining}}",
+    "expiredAt": "期限: {{at}}",
+    "durationLabel": "計測時間",
+    "durations": {
+      "30m": "30 分",
+      "1h": "1 時間",
+      "6h": "6 時間",
+      "24h": "24 時間"
+    },
+    "enable": "{{duration}} 計測 ON",
+    "extend": "タイマー再開始",
+    "disable": "今すぐ停止",
+    "loading": "プロセスデータを読み込み中…",
+    "errorTitle": "プロセスデータを読み込めませんでした",
+    "emptyOff": "上の ON ボタンを押すと計測が始まります。",
+    "emptyOn": "最初のサンプル待ち — デフォルトの周期 (~60 秒) で 1 回目が届きます。",
+    "latestAt": "計測時刻: {{at}}",
+    "columns": {
+      "pid": "PID",
+      "name": "プロセス名",
+      "cpu": "CPU %",
+      "rss": "RSS",
+      "diskRead": "読込/秒",
+      "diskWritten": "書込/秒"
+    }
   }
 }

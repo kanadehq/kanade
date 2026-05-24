@@ -40,5 +40,37 @@
       "net_tx": "TX"
     },
     "stepNote": "Server-side bucket: {{step}}"
+  },
+  "process": {
+    "title": "Process detail",
+    "intro": "Off by default — walking the full process table is the most expensive sysinfo call we make, so opt in per-PC only while you're investigating. Auto-disables when the timer below expires; the agent stops publishing samples without you having to come back and clear the flag.",
+    "statusOff": "OFF",
+    "statusActive": "active",
+    "statusExpired": "expired",
+    "remaining": "expires in {{remaining}}",
+    "expiredAt": "deadline was {{at}}",
+    "durationLabel": "Duration",
+    "durations": {
+      "30m": "30 minutes",
+      "1h": "1 hour",
+      "6h": "6 hours",
+      "24h": "24 hours"
+    },
+    "enable": "Enable for {{duration}}",
+    "extend": "Restart timer",
+    "disable": "Disable now",
+    "loading": "loading processes…",
+    "errorTitle": "Couldn't load process data",
+    "emptyOff": "Enable process detail above to start collecting samples.",
+    "emptyOn": "Waiting for the first sample — should arrive within one cadence tick (~60 s by default).",
+    "latestAt": "Sampled at {{at}}",
+    "columns": {
+      "pid": "pid",
+      "name": "name",
+      "cpu": "cpu %",
+      "rss": "rss",
+      "diskRead": "disk read/s",
+      "diskWritten": "disk written/s"
+    }
   }
 }

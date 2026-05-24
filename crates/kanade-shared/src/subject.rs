@@ -33,6 +33,17 @@ pub fn host_perf(pc_id: &str) -> String {
     format!("host_perf.{pc_id}")
 }
 
+/// `process_perf.<pc_id>` — Phase 2: top-N per-process snapshot
+/// published only while `process_perf_enabled` is `true` AND the
+/// `process_perf_expires_at` deadline is in the future. Separate
+/// subject from `host_perf.<pc_id>` because process-perf is an
+/// opt-in investigation mode — having its own subject lets the
+/// projector skip the heavy table entirely for hosts that never
+/// turn it on.
+pub fn process_perf(pc_id: &str) -> String {
+    format!("process_perf.{pc_id}")
+}
+
 /// `kill.<exec_id>` — Spec §2.6 Layer 3 abort signal. The exec_id is
 /// the deployment / scheduler-fire UUID (formerly named `job_id`
 /// pre-v0.29; renamed for accuracy — every `Command.exec_id` is a
@@ -123,6 +134,12 @@ mod tests {
     fn host_perf_formats_pc_id() {
         assert_eq!(host_perf("minipc"), "host_perf.minipc");
         assert_eq!(host_perf("PC1234"), "host_perf.PC1234");
+    }
+
+    #[test]
+    fn process_perf_formats_pc_id() {
+        assert_eq!(process_perf("minipc"), "process_perf.minipc");
+        assert_eq!(process_perf("PC1234"), "process_perf.PC1234");
     }
 
     #[test]
