@@ -512,12 +512,17 @@ target:                         # いずれか必須
 
 execute:
   shell: powershell             # powershell / cmd / wsl
+  # スクリプト本体: script / script_file / script_object のうち
+  # **ちょうど 1 つ**を指定。複数指定や全省略は `kanade job create`
+  # / `POST /api/jobs` の parse 時点で 400 リジェクト。空文字列
+  # (`script: ""`) は「未設定」と等価に扱う (block scalar をコメ
+  # ントアウトしただけの操作を許容する) 。
   script: |                     # インライン (small)
     $temp = [System.IO.Path]::GetTempPath()
     Remove-Item "$temp\*" -Recurse -Force -ErrorAction SilentlyContinue
     Write-Output "cleaned: $temp"
-  # script_file: scripts/cleanup.ps1  # 別ファイル参照 (large)
-  # script_object: installers/setup.ps1  # Object Store から取得
+  # script_file: scripts/cleanup.ps1                   # repo-local file (CLI が読んで script に差し込む)
+  # script_object: cleanup-disk-temp/1.0.1            # OBJECT_SCRIPTS の `<name>/<version>` キー
   timeout: 600s
   jitter: 5m                    # 0 〜 5 分のランダム遅延
   run_as: system                # system / user

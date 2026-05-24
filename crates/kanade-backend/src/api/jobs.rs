@@ -242,6 +242,10 @@ pub async fn create(
         value: job,
         raw_yaml,
     } = body;
+    // SPEC §2.4.1: exactly one of script / script_file /
+    // script_object must be set. Enforce at the write boundary
+    // so the JOBS KV never stores ambiguous manifests.
+    job.validate().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let kv = s
         .jetstream
         .create_key_value(KvConfig {

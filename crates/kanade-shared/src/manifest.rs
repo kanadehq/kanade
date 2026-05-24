@@ -258,9 +258,49 @@ impl Target {
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Execute {
     pub shell: ExecuteShell,
-    pub script: String,
+    /// Inline script body. Mutually exclusive with [`script_file`]
+    /// and [`script_object`]; exactly one of the three must be set
+    /// (enforced by [`Execute::validate_script_source`] at the
+    /// write-side parse boundaries — `kanade job create` and
+    /// `POST /api/jobs`).
+    ///
+    /// Empty string is treated as **unset** so operators can swap
+    /// to a `script_file:` / `script_object:` alternative just by
+    /// commenting out the body, without having to also drop the
+    /// `script:` key entirely.
+    ///
+    /// [`script_file`]: Self::script_file
+    /// [`script_object`]: Self::script_object
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script: Option<String>,
+    /// Repo-local file path resolved by the operator-side CLI at
+    /// `kanade job create` time. The CLI reads the file, slots its
+    /// contents into `script`, and clears this field before
+    /// POSTing — so the backend / agents never see `script_file`
+    /// in stored manifests. SPEC §2.4.1.
+    ///
+    /// Resolver lands in a follow-up PR
+    /// (yukimemi/kanade#210); today this field passes parse-time
+    /// validation but the operator-side CLI bails with "not yet
+    /// implemented" until the resolver ships, so manifests that
+    /// reach the backend with `script_file` set are treated as a
+    /// schema-bug.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_file: Option<String>,
+    /// Object Store reference (`<name>/<version>`) into the
+    /// `scripts` bucket (`OBJECT_SCRIPTS`). Agents fetch the body
+    /// at Execute time via `/api/script-objects/{name}/{version}`
+    /// and cache it locally. SPEC §2.4.1.
+    ///
+    /// Resolver lands in the same follow-up PR as `script_file`;
+    /// today this field passes parse-time validation but the
+    /// backend / agent exec paths bail with "not yet implemented"
+    /// when they see it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_object: Option<String>,
     /// humantime duration string (e.g. "30s", "10m"). Script-intrinsic
     /// — represents how long this script reasonably takes to run.
     pub timeout: String,
@@ -280,6 +320,48 @@ pub struct Execute {
     /// it via teravars before `kanade job create`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+}
+
+impl Execute {
+    /// Treat an empty `script:` body as "intentionally unset". Operators
+    /// commenting out a block-scalar tend to leave the key behind, and
+    /// failing the validator on `script: ""` would surprise them.
+    fn has_inline_script(&self) -> bool {
+        matches!(&self.script, Some(s) if !s.is_empty())
+    }
+
+    /// Enforce that exactly one of `script` / `script_file` /
+    /// `script_object` is set. Called at the write-side parse
+    /// boundaries (CLI `kanade job create` + backend
+    /// `POST /api/jobs`) so ambiguous YAML is rejected before it
+    /// reaches the JOBS KV. Read paths (projector, agent
+    /// scheduler, list endpoints) skip this check — they only ever
+    /// see what the write path already validated.
+    pub fn validate_script_source(&self) -> Result<(), String> {
+        let inline = self.has_inline_script();
+        let file = self.script_file.is_some();
+        let obj = self.script_object.is_some();
+        let set = [inline, file, obj].into_iter().filter(|b| *b).count();
+        match set {
+            1 => Ok(()),
+            0 => Err("execute: one of `script`, `script_file`, `script_object` must be set".into()),
+            _ => Err(format!(
+                "execute: only one of `script` / `script_file` / `script_object` may be set \
+                 (got script={inline}, script_file={file}, script_object={obj})"
+            )),
+        }
+    }
+}
+
+impl Manifest {
+    /// Cross-field semantic checks that don't fit into pure serde
+    /// derive. Currently delegates to
+    /// [`Execute::validate_script_source`] — see that method's
+    /// docs for the rationale on which call sites should run this.
+    pub fn validate(&self) -> Result<(), String> {
+        self.execute.validate_script_source()?;
+        Ok(())
+    }
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq)]
@@ -342,9 +424,144 @@ execute:
         assert_eq!(m.id, "echo-test");
         assert_eq!(m.version, "0.0.1");
         assert!(matches!(m.execute.shell, ExecuteShell::Powershell));
-        assert_eq!(m.execute.script.trim(), "echo 'kanade'");
+        assert_eq!(
+            m.execute.script.as_deref().map(str::trim),
+            Some("echo 'kanade'")
+        );
+        assert!(m.execute.script_file.is_none());
+        assert!(m.execute.script_object.is_none());
         assert_eq!(m.execute.timeout, "30s");
         assert!(!m.require_approval);
+        m.validate()
+            .expect("inline-script manifest passes validation");
+    }
+
+    fn execute_with(
+        script: Option<&str>,
+        script_file: Option<&str>,
+        script_object: Option<&str>,
+    ) -> Execute {
+        Execute {
+            shell: ExecuteShell::Powershell,
+            script: script.map(str::to_owned),
+            script_file: script_file.map(str::to_owned),
+            script_object: script_object.map(str::to_owned),
+            timeout: "30s".into(),
+            run_as: RunAs::default(),
+            cwd: None,
+        }
+    }
+
+    #[test]
+    fn validate_accepts_inline_script() {
+        let e = execute_with(Some("echo hi"), None, None);
+        assert!(e.validate_script_source().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_script_file_alone() {
+        let e = execute_with(None, Some("scripts/cleanup.ps1"), None);
+        assert!(e.validate_script_source().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_script_object_alone() {
+        let e = execute_with(None, None, Some("cleanup/1.0.0"));
+        assert!(e.validate_script_source().is_ok());
+    }
+
+    #[test]
+    fn validate_treats_empty_inline_script_as_unset() {
+        // `script: ""` + `script_object` set is the natural shape
+        // when an operator comments out the YAML block-scalar body
+        // but leaves the key. Should pass.
+        let e = execute_with(Some(""), None, Some("cleanup/1.0.0"));
+        assert!(e.validate_script_source().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_zero_sources() {
+        let e = execute_with(None, None, None);
+        let err = e.validate_script_source().unwrap_err();
+        assert!(err.contains("must be set"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_empty_inline_only() {
+        let e = execute_with(Some(""), None, None);
+        let err = e.validate_script_source().unwrap_err();
+        assert!(err.contains("must be set"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_inline_plus_file() {
+        let e = execute_with(Some("echo hi"), Some("scripts/cleanup.ps1"), None);
+        let err = e.validate_script_source().unwrap_err();
+        assert!(err.contains("only one of"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_inline_plus_object() {
+        let e = execute_with(Some("echo hi"), None, Some("cleanup/1.0.0"));
+        let err = e.validate_script_source().unwrap_err();
+        assert!(err.contains("only one of"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_file_plus_object() {
+        let e = execute_with(None, Some("scripts/cleanup.ps1"), Some("cleanup/1.0.0"));
+        let err = e.validate_script_source().unwrap_err();
+        assert!(err.contains("only one of"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_all_three() {
+        let e = execute_with(
+            Some("echo hi"),
+            Some("scripts/cleanup.ps1"),
+            Some("cleanup/1.0.0"),
+        );
+        let err = e.validate_script_source().unwrap_err();
+        assert!(err.contains("only one of"), "got: {err}");
+    }
+
+    #[test]
+    fn manifest_deserialises_script_object_yaml() {
+        // SPEC §2.4.1 example shape with the Object Store
+        // reference picked over inline.
+        let yaml = r#"
+id: cleanup-disk-temp
+version: 1.0.1
+execute:
+  shell: powershell
+  script_object: cleanup-disk-temp/1.0.1
+  timeout: 600s
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(
+            m.execute.script_object.as_deref(),
+            Some("cleanup-disk-temp/1.0.1")
+        );
+        assert!(m.execute.script.is_none());
+        m.validate()
+            .expect("script_object-only manifest passes validation");
+    }
+
+    #[test]
+    fn manifest_rejects_typo_in_script_field_name() {
+        // `deny_unknown_fields` on Execute catches `script_objectt`
+        // and similar fat-fingers at parse time instead of letting
+        // them silently fall through to "all three unset".
+        let yaml = r#"
+id: typo
+version: 1.0.0
+execute:
+  shell: powershell
+  script_objectt: oops
+  timeout: 30s
+"#;
+        let r: Result<Manifest, _> = serde_yaml::from_str(yaml);
+        assert!(r.is_err(), "expected parse error, got {r:?}");
     }
 
     #[test]
