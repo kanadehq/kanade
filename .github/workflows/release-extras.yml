@@ -1,0 +1,104 @@
+# Release-extras — sibling to `release.yml` for project-specific
+# post-tag steps. `release.yml` is kata-managed (template.toml
+# registers it `when = "always"`), so per-PJ additions have to live
+# in a separate workflow file or they'd be clobbered on every kata
+# apply. The release.yml comment block documents this contract.
+#
+# Today's contract: when a `v*.*.*` tag pushes AND the operator has
+# configured `KANADE_BACKEND_URL` (+ optional `KANADE_BACKEND_TOKEN`)
+# as repo secrets, this workflow builds kanade-client.exe and POSTs
+# it to that backend's `/api/app-packages/kanade-client/<version>`
+# (#207). That closes the loop opened by #217 — `install-kanade-client.yaml`
+# can then deploy the freshly-tagged client without an operator
+# curl step in between.
+#
+# When the secrets are unset, the job short-circuits with a notice
+# annotation explaining what to set to enable the publish — open
+# forks aren't accidentally trying to POST somewhere they shouldn't.
+
+name: Release extras
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  # `workflow_dispatch` lets an operator manually re-publish a
+  # specific tag's client without re-tagging — useful for the
+  # "rebuilt with a fix to the installer manifest" case.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish-client-to-backend:
+    name: Publish kanade-client to operator backend
+    runs-on: windows-latest
+    env:
+      KANADE_BACKEND_URL: ${{ secrets.KANADE_BACKEND_URL }}
+      KANADE_BACKEND_TOKEN: ${{ secrets.KANADE_BACKEND_TOKEN }}
+    steps:
+      # Gate the rest of the job on whether secrets are configured.
+      # `if:` can't reference `secrets.*` directly, so we pass them
+      # via `env:` (above) and check in shell. Output drives the
+      # subsequent step-level `if:` conditions.
+      - name: Short-circuit when no backend configured
+        id: gate
+        shell: bash
+        run: |
+          if [[ -z "${KANADE_BACKEND_URL:-}" ]]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::KANADE_BACKEND_URL secret not set — skipping publish. Set repo secrets KANADE_BACKEND_URL (+ optional KANADE_BACKEND_TOKEN bearer) to auto-upload kanade-client.exe to OBJECT_APP_PACKAGES on tag push."
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v6
+        if: steps.gate.outputs.configured == 'true'
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.gate.outputs.configured == 'true'
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.gate.outputs.configured == 'true'
+
+      # Build only kanade-client (not the full workspace) — this is
+      # the only target this workflow ships. release.yml's matrix
+      # already builds every workspace bin for the GitHub Release
+      # artifacts; this is a separate consumer with a different
+      # destination.
+      - name: Build kanade-client (release)
+        if: steps.gate.outputs.configured == 'true'
+        run: cargo build -p kanade-client --release --target x86_64-pc-windows-msvc
+
+      # Resolve the version from the pushed tag (strip leading `v`)
+      # for manual workflow_dispatch runs that target an older tag,
+      # `GITHUB_REF_NAME` is still the tag name, so the same shape
+      # works.
+      - name: POST kanade-client.exe to backend
+        if: steps.gate.outputs.configured == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          binary="target/x86_64-pc-windows-msvc/release/kanade-client.exe"
+          if [[ ! -f "$binary" ]]; then
+            echo "::error::expected $binary missing — cargo build step did not produce the artifact"
+            exit 1
+          fi
+          size=$(wc -c < "$binary")
+          url="${KANADE_BACKEND_URL%/}/api/app-packages/kanade-client/${version}"
+          echo "Uploading kanade-client ${version} (${size} bytes) to ${url}"
+          curl_args=(
+            --fail-with-body
+            --silent
+            --show-error
+            -F "file=@${binary}"
+            -H "X-Kanade-Source: release-workflow"
+          )
+          if [[ -n "${KANADE_BACKEND_TOKEN:-}" ]]; then
+            curl_args+=(-H "Authorization: Bearer ${KANADE_BACKEND_TOKEN}")
+          fi
+          curl "${curl_args[@]}" "${url}"
+          echo "Publish succeeded — operator can now `kanade exec install-kanade-client` without a manual curl step."
