@@ -52,6 +52,16 @@ async fn create(base: &str, yaml: &PathBuf) -> Result<()> {
     let mut job: Manifest =
         serde_yaml::from_str(&raw).with_context(|| format!("parse {yaml:?}"))?;
 
+    // SPEC §2.4.1: exactly-one-of script / script_file / script_object.
+    // Validate BEFORE inlining script_file (Gemini #215 HIGH) so a
+    // manifest declaring both `script:` and `script_file:` is caught
+    // — otherwise the inlining below would silently merge the two
+    // sources into one populated `script`, sneaking the manifest
+    // past `Manifest::validate()`'s exclusivity check.
+    if let Err(e) = job.validate() {
+        anyhow::bail!("{yaml:?}: {e}");
+    }
+
     // SPEC §2.4.1 / #210: `script_file:` is operator-side sugar that
     // points at a repo-local file the CLI inlines into `execute.script`
     // before submission. The backend never sees the field — it works
@@ -97,12 +107,6 @@ async fn create(base: &str, yaml: &PathBuf) -> Result<()> {
         (raw, true)
     };
 
-    // SPEC §2.4.1: keep the operator's failure-site obvious by
-    // catching script-source ambiguity here rather than letting
-    // the backend round-trip it back as a 400.
-    if let Err(e) = job.validate() {
-        anyhow::bail!("{yaml:?}: {e}");
-    }
     info!(
         job_id = %job.id,
         version = %job.version,
@@ -201,6 +205,32 @@ mod tests {
         assert_eq!(
             resolve_script_file_path(yaml, abs),
             std::path::PathBuf::from(abs),
+        );
+    }
+
+    #[test]
+    fn manifest_with_both_script_and_script_file_fails_validation() {
+        // Gemini #215 HIGH regression guard: the create flow must
+        // call `Manifest::validate()` BEFORE inlining script_file
+        // into script, otherwise an operator manifest declaring
+        // both sources is silently merged and the duplicate goes
+        // undetected. This test exercises the Manifest validator
+        // directly — the create() function's own ordering is
+        // documented at the call site and covered by integration.
+        let yaml = r#"
+id: ambiguous
+version: 1.0.0
+execute:
+  shell: powershell
+  script: "echo inline"
+  script_file: scripts/cleanup.ps1
+  timeout: 30s
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        let err = m.validate().expect_err("validate should reject");
+        assert!(
+            err.contains("only one of"),
+            "expected exclusivity error, got: {err}",
         );
     }
 
