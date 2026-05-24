@@ -1,0 +1,33 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "kanade-client",
+  "version": "0.41.0",
+  "identifier": "com.yukimemi.kanade-client",
+  "build": {
+    "frontendDist": "../web/dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "cd web && bun dev",
+    "beforeBuildCommand": "cd web && bun run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Kanade",
+        "width": 720,
+        "height": 480,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": false,
+    "category": "Utility",
+    "shortDescription": "kanade Client App",
+    "longDescription": "End-user-facing companion to the kanade agent: notifications, health, self-service jobs, support handoff."
+  }
+}
