@@ -73,7 +73,7 @@ pub async fn exec_manifest(
     // yet (yukimemi/kanade#210 follow-up work) — refuse cleanly
     // so the operator sees a real error instead of a silent
     // empty-script Command.
-    let inline_script = manifest.execute.script.clone().filter(|s| !s.is_empty()).ok_or((
+    let inline_script = manifest.execute.script.as_deref().filter(|s| !s.is_empty()).ok_or((
         StatusCode::NOT_IMPLEMENTED,
         "execute.script_file / script_object resolver not yet implemented (tracked in yukimemi/kanade#210)".to_string(),
     ))?;
@@ -98,7 +98,7 @@ pub async fn exec_manifest(
         request_id: Uuid::new_v4().to_string(),
         exec_id: Some(exec_id.clone()),
         shell: manifest.execute.shell.into(),
-        script: inline_script.clone(),
+        script: inline_script.to_owned(),
         timeout_secs,
         jitter_secs,
         run_as: manifest.execute.run_as,
