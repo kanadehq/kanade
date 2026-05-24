@@ -49,12 +49,38 @@ use crate::commands::handle_command;
 use crate::nats_retry;
 use crate::script_cache::ScriptCache;
 
+/// A Manifest plus any pre-resolved metadata `local_tick` needs to
+/// build a Command without touching the broker.
+///
+/// `script_object_sha256` is populated at `apply_resync` time (when
+/// the broker is by definition reachable — we just listed
+/// BUCKET_JOBS); `local_tick` reads it from cache so a
+/// `runs_on: agent` schedule keeps firing `script_object:`
+/// manifests after the broker goes away.
+///
+/// `None` covers two cases:
+///   - inline-`script:` manifests (no digest needed)
+///   - `script_object:` manifests whose digest fetch failed at
+///     the last resync (broker race, bucket missing, …); these
+///     skip the tick the same way pre-cache code did
+#[derive(Clone, Debug)]
+struct ResolvedJob {
+    manifest: Manifest,
+    /// Lowercase hex sha256 the agent's script_cache will verify
+    /// fetched bytes against. Only set when `manifest.execute
+    /// .script_object` is `Some` AND `digest_of` succeeded.
+    script_object_sha256: Option<String>,
+}
+
 /// In-memory state shared across the watch loops and the tick
 /// callbacks. Wrapped in a single `Mutex<State>` because the scheduler
 /// only ticks one job at a time and the watch loops are also serial.
 struct State {
-    /// Latest snapshot of every job in BUCKET_JOBS.
-    jobs: HashMap<String, Manifest>,
+    /// Latest snapshot of every job in BUCKET_JOBS plus any
+    /// pre-resolved script_object digest (Gemini #214 HIGH fix —
+    /// keeps `local_tick` offline-tolerant by removing its network
+    /// round-trip).
+    jobs: HashMap<String, ResolvedJob>,
     /// schedule_id → internal cron Uuid (for removing the Job).
     registered: HashMap<String, Uuid>,
     /// schedule_id → cached Schedule (so the tick callback knows
@@ -322,15 +348,42 @@ async fn run(
                         Ok(e) => e,
                         Err(e) => { warn!(error = %e, "jobs watch error"); continue; }
                     };
-                    let mut s = state.lock().await;
                     match entry.operation {
                         Operation::Put => {
-                            if let Ok(m) = serde_json::from_slice::<Manifest>(&entry.value) {
-                                s.jobs.insert(entry.key.clone(), m);
-                                debug!(job_id = %entry.key, "local_scheduler: cached job manifest");
-                            }
+                            let Ok(m) = serde_json::from_slice::<Manifest>(&entry.value) else {
+                                warn!(key = %entry.key, "local_scheduler: parse Manifest from jobs watch");
+                                continue;
+                            };
+                            // Resolve digest BEFORE taking the lock —
+                            // the call is a NATS round-trip and we
+                            // don't want `local_tick` blocked behind
+                            // it. Falls back to None on broker
+                            // failure (tick skips that job until the
+                            // next watch event succeeds).
+                            let sha = match m.execute.script_object.as_deref() {
+                                Some(key) => match script_cache.digest_of(key).await {
+                                    Ok(d) => Some(d),
+                                    Err(e) => {
+                                        warn!(
+                                            job_id = %entry.key,
+                                            %key,
+                                            error = %e,
+                                            "jobs watch: digest fetch failed; caching manifest with digest=None",
+                                        );
+                                        None
+                                    }
+                                },
+                                None => None,
+                            };
+                            let mut s = state.lock().await;
+                            s.jobs.insert(
+                                entry.key.clone(),
+                                ResolvedJob { manifest: m, script_object_sha256: sha },
+                            );
+                            debug!(job_id = %entry.key, "local_scheduler: cached job manifest");
                         }
                         Operation::Delete | Operation::Purge => {
+                            let mut s = state.lock().await;
                             s.jobs.remove(&entry.key);
                         }
                     }
@@ -410,12 +463,50 @@ async fn apply_resync(
     new_jobs: HashMap<String, Manifest>,
     new_schedules: Vec<Schedule>,
 ) {
+    // Resolve each manifest into a `ResolvedJob` — pre-fetch the
+    // OBJECT_SCRIPTS digest for `script_object:` manifests so
+    // `local_tick` reads it from cache (offline-tolerant; Gemini
+    // #214 HIGH). Digest fetches happen here because we're already
+    // talking to the broker — wait_for_kv returned the manifests
+    // moments ago, so the digest_of call is on a warm path.
+    //
+    // A failed digest_of degrades to `script_object_sha256: None`,
+    // which `local_tick` treats the same as "no cached digest" =
+    // skip-with-warn. The manifest still gets cached so a later
+    // resync with a healthier broker can populate the digest.
+    let mut resolved: HashMap<String, ResolvedJob> = HashMap::with_capacity(new_jobs.len());
+    for (id, manifest) in new_jobs {
+        let script_object_sha256 = match manifest.execute.script_object.as_deref() {
+            Some(key) => match script_cache.digest_of(key).await {
+                Ok(d) => Some(d),
+                Err(e) => {
+                    warn!(
+                        job_id = %id,
+                        %key,
+                        error = %e,
+                        "apply_resync: script_object digest fetch failed; \
+                         tick will skip until next successful resync",
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
+        resolved.insert(
+            id,
+            ResolvedJob {
+                manifest,
+                script_object_sha256,
+            },
+        );
+    }
+
     // Swap the jobs map atomically — under the lock so `local_tick`
     // sees either the old map in full or the new map in full, never
     // a half-cleared one.
     {
         let mut st = state.lock().await;
-        st.jobs = new_jobs;
+        st.jobs = resolved;
     }
 
     // Find schedules that vanished from KV → unregister them. Done
@@ -673,12 +764,13 @@ async fn local_tick(
     staleness: &crate::staleness::Tracker,
     script_cache: &ScriptCache,
 ) {
-    // 1) Manifest must be cached. If not, skip and try again next tick
-    //    (the jobs_watch loop may pick it up).
-    let manifest = {
+    // 1) Manifest + (optional) pre-resolved script_object digest
+    //    must be cached. If not, skip and try again next tick (the
+    //    jobs_watch loop may pick it up).
+    let resolved = {
         let st = state.lock().await;
         match st.jobs.get(&schedule.job_id).cloned() {
-            Some(m) => m,
+            Some(r) => r,
             None => {
                 warn!(
                     schedule_id = %schedule.id,
@@ -689,6 +781,10 @@ async fn local_tick(
             }
         }
     };
+    let ResolvedJob {
+        manifest,
+        script_object_sha256: cached_digest,
+    } = resolved;
 
     // 2) Mode-based dedup against local_completions.
     let now = Utc::now();
@@ -727,32 +823,32 @@ async fn local_tick(
     //    handle_command directly. Skip the deadline (= None) since
     //    we just fired this very instant — no delivery lag.
     //
-    // #210: build the Command in the same shape backend's exec.rs
-    // would — inline body for `script:` manifests, or
-    // (script: "", script_object: Some(key), script_object_sha256:
-    // Some(broker digest)) for `script_object:` ones. The unified
-    // `handle_command` resolver path in commands.rs then does the
-    // actual fetch + cache + sha verify, so this local-fire flow
-    // shares one implementation with the network-fire flow.
+    // #210 / Gemini #214 HIGH: build the Command in the same shape
+    // backend's exec.rs would — inline body for `script:` manifests,
+    // or (script: "", script_object: Some(key), script_object_sha256:
+    // Some(cached_digest)) for `script_object:` ones. The digest was
+    // pre-resolved at apply_resync / jobs_watch time, so this path
+    // doesn't touch the broker — `runs_on: agent` keeps firing
+    // script_object jobs during broker outages from the last
+    // successful resync's cache.
     let (script_body, script_object_ref) = match (
         manifest.execute.script.as_deref().filter(|s| !s.is_empty()),
         manifest.execute.script_object.as_deref(),
+        cached_digest,
     ) {
-        (Some(inline), _) => (inline.to_owned(), None),
-        (None, Some(key)) => match script_cache.digest_of(key).await {
-            Ok(digest) => (String::new(), Some((key.to_owned(), digest))),
-            Err(e) => {
-                warn!(
-                    schedule_id = %schedule.id,
-                    job_id = %manifest.id,
-                    %key,
-                    error = %e,
-                    "local_scheduler: script_object digest lookup failed; skipping tick",
-                );
-                return;
-            }
-        },
-        (None, None) => {
+        (Some(inline), _, _) => (inline.to_owned(), None),
+        (None, Some(key), Some(digest)) => (String::new(), Some((key.to_owned(), digest))),
+        (None, Some(key), None) => {
+            warn!(
+                schedule_id = %schedule.id,
+                job_id = %manifest.id,
+                %key,
+                "local_scheduler: script_object digest not in cache (last resync's fetch failed); \
+                 skipping tick — next successful resync will populate it",
+            );
+            return;
+        }
+        (None, None, _) => {
             warn!(
                 schedule_id = %schedule.id,
                 job_id = %manifest.id,
