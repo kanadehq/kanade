@@ -14,6 +14,7 @@ import {
 } from 'recharts';
 
 import { ErrorCard } from '@/components/ErrorCard';
+import { TimeRangePicker } from '@/components/TimeRangePicker';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -27,6 +28,14 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { apiFetch } from '@/lib/api';
+import {
+  DEFAULT_STEP_KEYS,
+  DEFAULT_STEP_SECS,
+  type PresetOption,
+  type RangeValue,
+  type StepOption,
+  useResolvedRange,
+} from '@/lib/timeRange';
 import type {
   ConfigScope,
   EffectiveConfigResponse,
@@ -54,17 +63,17 @@ const COUNTDOWN_TICK_MS = 1000;
  *  efficiently. */
 const POLL_TICK_MS = 5000;
 
-/** Chart range → server-side bucket size. Same convention as the
- *  host_perf chart on the parent page: pick `step` so each range
- *  lands in ~30-180 buckets, the band where Recharts and the eye
- *  both stay happy.
+/** Preset choices the chart's TimeRangePicker surfaces. Steps are
+ *  picked so each preset lands in ~30–180 Recharts buckets — the
+ *  band where Recharts and the eye both stay happy.
  *
- *  process_perf retention is 7 days so the longest range we expose
- *  here is 24h — anything beyond would routinely fall off the back
- *  of the table mid-zoom. */
-type ChartRangeKey = '15m' | '30m' | '1h' | '6h' | '24h';
-const CHART_RANGE_TO_STEP: Record<
-  ChartRangeKey,
+ *  Custom mode (handled by TimeRangePicker) lets the operator escape
+ *  these presets for incident investigation; presets just cover the
+ *  "I'm watching this host live" path with one click. */
+const CHART_PRESET_KEYS = ['15m', '30m', '1h', '6h', '24h'] as const;
+type ChartPresetKey = (typeof CHART_PRESET_KEYS)[number];
+const CHART_PRESET_SPECS: Record<
+  ChartPresetKey,
   { fromSecondsAgo: number; step: string; stepSecs: number }
 > = {
   '15m': { fromSecondsAgo: 15 * 60, step: '30s', stepSecs: 30 },
@@ -73,6 +82,12 @@ const CHART_RANGE_TO_STEP: Record<
   '6h': { fromSecondsAgo: 6 * 60 * 60, step: '5m', stepSecs: 300 },
   '24h': { fromSecondsAgo: 24 * 60 * 60, step: '15m', stepSecs: 900 },
 };
+
+// Custom-mode step keys come from lib/timeRange (DEFAULT_STEP_KEYS /
+// DEFAULT_STEP_SECS) — same set the host_perf chart uses, just with
+// a process_perf-scoped i18n key for the visible label. 30s is the
+// finest the agent's publish cadence makes useful; 4h still gives
+// ~42 buckets across a full 7-day retention window.
 
 /** Metric the chart projects. Matches the backend's `TimelineMetric`
  *  alias accepting `cpu`/`rss`/`disk_read`/`disk_written`. */
@@ -83,11 +98,6 @@ const CHART_METRICS: ChartMetric[] = ['cpu', 'rss', 'disk_read', 'disk_written']
  *  see more tail processes step up without uncapping the legend. */
 const TOP_N_OPTIONS = [5, 10] as const;
 type TopNOption = (typeof TOP_N_OPTIONS)[number];
-
-/** Right-edge advance: align with the finest bucket we offer. The
- *  memo below floors "now" to a bucket boundary so React Query only
- *  refetches when the floored value actually crosses a bucket. */
-const CHART_RIGHT_EDGE_TICK_MS = 30_000;
 
 /** Stable palette for the stacked series. Pinned by index so the
  *  same "rank N in window" name keeps the same colour across renders.
@@ -400,32 +410,34 @@ export function AgentProcessSection({ pcId }: { pcId: string }) {
 
 function ProcessTimelineChart({ pcId }: { pcId: string }) {
   const { t } = useTranslation('agent-detail');
-  const [range, setRange] = useState<ChartRangeKey>('30m');
+  const [range, setRange] = useState<RangeValue>({
+    mode: 'preset',
+    presetKey: '30m',
+  });
   const [metric, setMetric] = useState<ChartMetric>('cpu');
   const [topN, setTopN] = useState<TopNOption>(5);
 
-  // Floor "now" to the active step so the React Query key only
-  // changes on a bucket crossing — same pattern as the host_perf
-  // chart on the parent page.
-  const [tick, setTick] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => setTick((t) => t + 1), CHART_RIGHT_EDGE_TICK_MS);
-    return () => clearInterval(id);
-  }, []);
-  const { fromIso, toIso, stepStr } = useMemo(() => {
-    const { fromSecondsAgo, step, stepSecs } = CHART_RANGE_TO_STEP[range];
-    const stepMs = stepSecs * 1000;
-    const toMs = Math.floor(Date.now() / stepMs) * stepMs;
-    const fromMs = toMs - fromSecondsAgo * 1000;
-    return {
-      fromIso: new Date(fromMs).toISOString(),
-      toIso: new Date(toMs).toISOString(),
-      stepStr: step,
-    };
-    // `tick` is the heartbeat dep — see the host_perf chart memo for
-    // the same pattern.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [range, tick]);
+  const presets = useMemo<PresetOption[]>(
+    () =>
+      CHART_PRESET_KEYS.map((k) => ({
+        key: k,
+        label: t(`process.chart.ranges.${k}`),
+        ...CHART_PRESET_SPECS[k],
+      })),
+    [t],
+  );
+  const stepOptions = useMemo<StepOption[]>(
+    () =>
+      DEFAULT_STEP_KEYS.map((k) => ({
+        value: k,
+        secs: DEFAULT_STEP_SECS[k],
+        label: t(`process.chart.customSteps.${k}`),
+      })),
+    [t],
+  );
+
+  const resolved = useResolvedRange(range, presets);
+  const { fromIso, toIso, step: stepStr } = resolved;
 
   const timelineQ = useQuery({
     queryKey: ['processes-timeline', pcId, metric, topN, fromIso, toIso, stepStr],
@@ -438,7 +450,7 @@ function ProcessTimelineChart({ pcId }: { pcId: string }) {
           `&step=${encodeURIComponent(stepStr)}` +
           `&top=${topN}`,
       ),
-    enabled: !!pcId,
+    enabled: !!pcId && !resolved.isInvalid,
   });
 
   // Recharts wants a flat row per x-tick: { at, "chrome.exe": 42, ... }.
@@ -473,7 +485,7 @@ function ProcessTimelineChart({ pcId }: { pcId: string }) {
 
   return (
     <div className="space-y-2">
-      <div className="flex flex-wrap items-center justify-between gap-2">
+      <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="space-y-0.5">
           <h3 className="text-sm font-medium">{t('process.chart.title')}</h3>
           <p className="text-xs text-muted">
@@ -495,20 +507,6 @@ function ProcessTimelineChart({ pcId }: { pcId: string }) {
               </option>
             ))}
           </Select>
-          <span className="text-xs text-muted">
-            {t('process.chart.rangeLabel')}
-          </span>
-          <Select
-            value={range}
-            onChange={(e) => setRange(e.target.value as ChartRangeKey)}
-            className="w-28"
-          >
-            {(Object.keys(CHART_RANGE_TO_STEP) as ChartRangeKey[]).map((k) => (
-              <option key={k} value={k}>
-                {t(`process.chart.ranges.${k}`)}
-              </option>
-            ))}
-          </Select>
           <span className="text-xs text-muted">{t('process.chart.topLabel')}</span>
           <Select
             value={String(topN)}
@@ -523,6 +521,22 @@ function ProcessTimelineChart({ pcId }: { pcId: string }) {
           </Select>
         </div>
       </div>
+      <TimeRangePicker
+        value={range}
+        onChange={setRange}
+        presets={presets}
+        stepOptions={stepOptions}
+        texts={{
+          rangeLabel: t('process.chart.rangeLabel'),
+          modeLabel: t('process.chart.modeLabel'),
+          modePreset: t('process.chart.modePreset'),
+          modeCustom: t('process.chart.modeCustom'),
+          fromLabel: t('process.chart.fromLabel'),
+          toLabel: t('process.chart.toLabel'),
+          stepLabel: t('process.chart.stepLabel'),
+          invalidHint: t('process.chart.invalidRange'),
+        }}
+      />
       <div className="text-xs text-muted">
         {t('process.chart.stepNote', { step: stepStr })}
       </div>
