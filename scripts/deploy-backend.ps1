@@ -116,6 +116,104 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# === Agent-mode knobs (yukimemi/kanade#210 follow-up) =====================
+# When this script is uploaded to OBJECT_SCRIPTS via
+# `kanade script publish deploy-backend <v> <edited-copy>` and a
+# manifest references it through `execute.script_object`, PowerShell
+# runs the body with NO CLI args — the `param()` block above takes
+# defaults, so `$SourceDir = $PSScriptRoot` ends up `$null` and the
+# existing folder-install path fails fast.
+#
+# The agent-mode hook below fills that gap: when an operator edits
+# the three `$Agent*` constants BEFORE publishing, the script
+# downloads kanade-backend.exe from OBJECT_APP_PACKAGES into a temp
+# staging dir + reuses the existing backend.toml on the destination
+# host + then runs the existing install flow against that staging
+# dir.
+#
+# Leave the three knobs empty (= default) to keep the original
+# manual `-SourceDir <folder>` flow working unchanged for operators
+# invoking the script by hand.
+#
+# `Get-FileHash <kanade-backend.exe> -Algorithm SHA256` for the
+# Sha256 value — mismatch aborts before the swap so a MITM /
+# corrupted upload leaves the existing install intact.
+$AgentSourceUrl     = ''   # e.g. 'http://kanade-backend.local:8080'
+$AgentSourceVersion = ''   # e.g. '0.43.0'
+$AgentSourceSha256  = ''   # lowercase hex of the uploaded .exe
+$AgentDownloadTimeoutSecs = 120
+# ===========================================================================
+
+# If the agent-mode knobs are set, download the binary into a temp
+# staging dir + repoint `$SourceDir` at it before the existing
+# install flow runs.
+$AgentStaging = $null
+
+# Trap defined BEFORE any throw-prone code in agent mode (Gemini
+# #224 MED). PowerShell's `trap` only catches terminating errors
+# that fire AFTER its definition statement in the same scope, so
+# placing it after the download/sha-verify block would miss those
+# failures entirely and leak the staging dir. The `$AgentStaging`
+# variable is initialised to `$null` above so the trap body's
+# Test-Path guard never throws on a not-yet-bound name.
+# `break` re-throws the original error after cleanup — don't
+# swallow.
+trap {
+    if ($AgentStaging -and (Test-Path $AgentStaging)) {
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $AgentStaging
+    }
+    break
+}
+
+if ($AgentSourceUrl) {
+    if (-not $AgentSourceVersion) {
+        throw 'deploy-backend (agent mode): $AgentSourceVersion must be set alongside $AgentSourceUrl.'
+    }
+    if (-not $AgentSourceSha256) {
+        throw 'deploy-backend (agent mode): $AgentSourceSha256 must be set — leaving it blank would silently install whatever the backend serves.'
+    }
+
+    $tmpRoot = [System.IO.Path]::GetTempPath()
+    $AgentStaging = Join-Path $tmpRoot ('kanade-deploy-' + [System.Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $AgentStaging | Out-Null
+    $stagedExe = Join-Path $AgentStaging 'kanade-backend.exe'
+
+    $url = "$($AgentSourceUrl.TrimEnd('/'))/api/app-packages/kanade-backend/$AgentSourceVersion"
+    Write-Host "deploy-backend (agent mode): downloading kanade-backend $AgentSourceVersion from $url"
+    # If this throws (network, 404, timeout), the trap above
+    # fires and clears $AgentStaging before rethrowing — no
+    # leaked tmp dir per failed upgrade.
+    Invoke-WebRequest -Uri $url -OutFile $stagedExe -UseBasicParsing -TimeoutSec $AgentDownloadTimeoutSecs | Out-Null
+
+    # Sha verify BEFORE swap — same posture as install-kanade-client.ps1.
+    # Explicit Remove-Item + throw kept around the cleanup is
+    # redundant with the trap (which would also fire) — leaving
+    # the inline cleanup so the mismatch message ships even if
+    # the trap is bypassed by a future refactor.
+    $actual = (Get-FileHash $stagedExe -Algorithm SHA256).Hash.ToLowerInvariant()
+    $expected = $AgentSourceSha256.ToLowerInvariant()
+    if ($actual -ne $expected) {
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $AgentStaging
+        throw "deploy-backend (agent mode): sha256 mismatch — expected=$expected actual=$actual. Refusing to install (possible MITM / corrupted upload)."
+    }
+    Write-Host "deploy-backend (agent mode): sha256 verified"
+
+    # backend.toml: prefer the one already installed (operator's
+    # production config). Agent-mode is an upgrade path, not a
+    # fresh install — error fast if no existing config is present
+    # rather than silently reaching for the default sample.
+    $existingConfig = Join-Path (Join-Path $env:ProgramData 'Kanade') 'config\backend.toml'
+    if (Test-Path $existingConfig) {
+        Copy-Item -Force $existingConfig (Join-Path $AgentStaging 'backend.toml')
+        Write-Host "deploy-backend (agent mode): reusing existing backend.toml from $existingConfig"
+    } else {
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $AgentStaging
+        throw "deploy-backend (agent mode): no existing backend.toml at $existingConfig — agent-mode is an upgrade path, not a fresh install. Run with -SourceDir <folder> manually for the initial install."
+    }
+
+    $SourceDir = $AgentStaging
+}
+
 # Write a secret value to HKLM\SOFTWARE\kanade\<subkey>\<value> and
 # strip non-admin ACEs from the leaf key. Used to provision NATS
 # tokens, HTTP static tokens, and JWT signing secrets — see the
@@ -344,3 +442,10 @@ Write-Host ''
 Write-Host "Installed bin: $exeDst"
 Write-Host "Runtime root:  $dataRoot"
 & $exeDst --version
+
+# Agent-mode staging dir cleanup on success. The `trap` above
+# handles failure paths; this clears the temp dir for the happy
+# path so the agent doesn't leak a staging dir per upgrade.
+if ($AgentStaging -and (Test-Path $AgentStaging)) {
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $AgentStaging
+}

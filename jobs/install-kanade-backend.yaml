@@ -1,0 +1,52 @@
+# Sprint 8 / #210 follow-up: self-update path for kanade-backend.
+# Run an agent on the backend host, register this manifest, exec
+# against `target.pcs: [<backend-host>]` — the agent stops the
+# KanadeBackend service, replaces the .exe, and starts it back up.
+# Result publishes to NATS while the backend is briefly down; the
+# backend projects the missed row when it comes back (JetStream
+# RESULTS stream is durable, agent → NATS → backend has no agent
+# → backend HTTP dependency).
+#
+# Workflow (operator side, edit version per release):
+#
+#   1. `kanade app publish kanade-backend 0.43.0 \
+#        target/release/kanade-backend.exe`
+#   2. Copy `scripts/deploy-backend.ps1` locally, set:
+#        $AgentSourceUrl     = '<backend URL>'
+#        $AgentSourceVersion = '0.43.0'
+#        $AgentSourceSha256  = '<Get-FileHash ... -Algorithm SHA256>'
+#      then `kanade script publish deploy-backend 0.43.0 <edited copy>`
+#   3. Update `version:` below + `script_object:` to match.
+#   4. `kanade job create jobs/install-kanade-backend.yaml`
+#   5. `kanade exec install-kanade-backend --target pcs=<backend-host>`
+#
+# `require_approval: true` is the SPEC §2.4.1 marker for "operator
+# must explicitly ack before fan-out". Today the field parses but
+# doesn't gate anything (parse-only since #213) — kept here so the
+# manifest is correct against the SPEC and starts gating once the
+# approval flow lands.
+
+id: install-kanade-backend
+version: 0.1.0
+description: "Update kanade-backend on its host via deploy-backend.ps1 (#210 follow-up)"
+
+execute:
+  shell: powershell
+  # `deploy-backend.ps1` lives in OBJECT_SCRIPTS (per
+  # `kanade script publish deploy-backend ...` in the workflow
+  # above). Agent fetches + sha-verifies it from there at exec
+  # time (#214). The script's "agent-mode" knobs (edited before
+  # the publish) tell it which kanade-backend version to pull
+  # from OBJECT_APP_PACKAGES.
+  script_object: deploy-backend/0.43.0
+  # Generous timeout: download up to ~30s on slow links + service
+  # stop (up to 30s WaitForStatus) + copy + service start (up to
+  # 30s WaitForStatus) + headroom for sc.exe failure-config.
+  timeout: 300s
+  # MUST run as LocalSystem — Stop-Service / Start-Service / sc.exe
+  # all need admin. Agent already runs as LocalSystem in prod, so
+  # this is the default anyway; spelt out so a future runas-default
+  # change can't silently break the install.
+  run_as: system
+
+require_approval: true
