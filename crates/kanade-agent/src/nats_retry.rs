@@ -215,6 +215,112 @@ where
     }
 }
 
+/// Wait until [`jetstream::Context::get_object_store`] succeeds for
+/// `bucket`. Same retry contract as [`wait_for_kv`].
+///
+/// Sibling of [`wait_for_kv`] / [`wait_for_stream`] / [`wait_for_consumer`]
+/// added to cover [`self_update::run`](crate::self_update) — which
+/// previously returned permanently when the agent booted before
+/// the broker had `OBJECT_AGENT_RELEASES` provisioned. Live test
+/// found the dead task: agent that booted at T0 with no bucket
+/// stayed permanently no-op even after the bucket was provisioned
+/// at T1.
+pub async fn wait_for_object_store(
+    js: &jetstream::Context,
+    client: &async_nats::Client,
+    tracker: &Tracker,
+    bucket: &str,
+    label: &'static str,
+) -> jetstream::object_store::ObjectStore {
+    let mut backoff = INITIAL_BACKOFF;
+    let mut consecutive_failures: u32 = 0;
+    loop {
+        gate_on_connection(client, tracker, label, "object_store").await;
+        match js.get_object_store(bucket).await {
+            Ok(s) => {
+                if consecutive_failures > 0 {
+                    info!(
+                        label,
+                        kind = "object_store",
+                        resource = bucket,
+                        consecutive_failures,
+                        "nats_retry: object_store recovered",
+                    );
+                }
+                debug!(label, bucket, "nats_retry: object_store ready");
+                return s;
+            }
+            Err(e) => {
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                log_failure(
+                    consecutive_failures,
+                    backoff,
+                    "object_store",
+                    label,
+                    bucket,
+                    &e,
+                );
+                sleep_or_wake(backoff, tracker).await;
+                backoff = next_backoff(backoff);
+            }
+        }
+    }
+}
+
+/// Wait until `client.subscribe(subject)` succeeds. Same retry
+/// contract as [`wait_for_kv`].
+///
+/// Used by single-subscriber tasks (ping responder, logs.fetch
+/// handler) that bind exactly one core-NATS subscription at boot.
+/// Pre-fix sites returned permanently on the first `Err`, so a
+/// transient at-boot subscribe failure killed those features
+/// until the next agent restart.
+pub async fn wait_for_subscribe(
+    client: &async_nats::Client,
+    tracker: &Tracker,
+    subject: &str,
+    label: &'static str,
+) -> async_nats::Subscriber {
+    let mut backoff = INITIAL_BACKOFF;
+    let mut consecutive_failures: u32 = 0;
+    loop {
+        gate_on_connection(client, tracker, label, "subscribe").await;
+        // `client.subscribe` takes `impl ToSubject`; the `&str`
+        // impl `to_owned()`s into a `Subject` internally, so this
+        // borrow + per-call to_owned is equivalent to taking
+        // `String` + cloning per retry. Caller sites avoid an
+        // extra clone (Gemini #226).
+        match client.subscribe(subject.to_owned()).await {
+            Ok(s) => {
+                if consecutive_failures > 0 {
+                    info!(
+                        label,
+                        kind = "subscribe",
+                        resource = %subject,
+                        consecutive_failures,
+                        "nats_retry: subscribe recovered",
+                    );
+                }
+                debug!(label, subject = %subject, "nats_retry: subscribe ready");
+                return s;
+            }
+            Err(e) => {
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                log_failure(
+                    consecutive_failures,
+                    backoff,
+                    "subscribe",
+                    label,
+                    subject,
+                    &e,
+                );
+                sleep_or_wake(backoff, tracker).await;
+                backoff = next_backoff(backoff);
+            }
+        }
+    }
+}
+
 /// Short fixed gap a subsystem should sleep before reopening a watch
 /// that returned None. Keeps a flapping broker from spinning the
 /// outer `loop { ... }` at 100% CPU.

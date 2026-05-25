@@ -28,34 +28,43 @@ const REPLY_BYTE_CAP: usize = 800 * 1024;
 /// request. Each request runs synchronously on this task — log
 /// fetches are infrequent enough that fan-out spawning would just
 /// add complexity.
-pub async fn serve(client: async_nats::Client, pc_id: String, log_path: PathBuf) {
+pub async fn serve(
+    client: async_nats::Client,
+    pc_id: String,
+    log_path: PathBuf,
+    tracker: crate::staleness::Tracker,
+) {
     let subject = subject::logs_fetch(&pc_id);
-    let mut sub = match client.subscribe(subject.clone()).await {
-        Ok(s) => s,
-        Err(e) => {
-            warn!(error = %e, subject = %subject, "subscribe logs.fetch failed");
-            return;
-        }
-    };
-    info!(subject = %subject, log_path = %log_path.display(), "logs.fetch handler ready");
 
-    while let Some(msg) = sub.next().await {
-        let Some(reply) = msg.reply.clone() else {
-            warn!("logs.fetch without reply subject — operator must use request/reply");
-            continue;
-        };
-        let req: LogsRequest = serde_json::from_slice(&msg.payload).unwrap_or_default();
-        let body = match read_tail(&log_path, req.tail_lines as usize).await {
-            Ok(b) => b,
-            Err(e) => {
-                let err_msg = format!("logs.fetch: {e:#}");
-                warn!(error = %e, "logs.fetch handler errored");
-                err_msg.into_bytes()
+    // Outer reconnect loop: pre-fix `match client.subscribe ... Err
+    // => return;` killed the logs.fetch handler permanently when the
+    // first subscribe failed. Now we back off + retry, and reopen
+    // if the subscription ever closes.
+    loop {
+        let mut sub =
+            crate::nats_retry::wait_for_subscribe(&client, &tracker, &subject, "logs").await;
+        info!(subject = %subject, log_path = %log_path.display(), "logs.fetch handler ready");
+
+        while let Some(msg) = sub.next().await {
+            let Some(reply) = msg.reply.clone() else {
+                warn!("logs.fetch without reply subject — operator must use request/reply");
+                continue;
+            };
+            let req: LogsRequest = serde_json::from_slice(&msg.payload).unwrap_or_default();
+            let body = match read_tail(&log_path, req.tail_lines as usize).await {
+                Ok(b) => b,
+                Err(e) => {
+                    let err_msg = format!("logs.fetch: {e:#}");
+                    warn!(error = %e, "logs.fetch handler errored");
+                    err_msg.into_bytes()
+                }
+            };
+            if let Err(e) = client.publish(reply, body.into()).await {
+                warn!(error = %e, "publish logs.fetch reply");
             }
-        };
-        if let Err(e) = client.publish(reply, body.into()).await {
-            warn!(error = %e, "publish logs.fetch reply");
         }
+        warn!(subject = %subject, "logs.fetch subscription closed; reopening");
+        crate::nats_retry::reopen_pause().await;
     }
 }
 
