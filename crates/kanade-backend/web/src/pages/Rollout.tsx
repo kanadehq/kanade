@@ -53,18 +53,17 @@ export function Rollout() {
       if (!uploadFile) throw new Error(t('upload.noFileError'));
       const fd = new FormData();
       fd.append('file', uploadFile);
-      const token = localStorage.getItem('kanade_token') ?? '';
-      const headers: Record<string, string> = { 'X-Kanade-Source': 'spa' };
-      if (token) headers.Authorization = `Bearer ${token}`;
-      const res = await fetch('/api/agents/publish', {
-        method: 'POST',
-        body: fd,
-        headers,
-      });
-      if (!res.ok) {
-        throw new Error(`${res.status} ${res.statusText} — ${await res.text()}`);
-      }
-      return (await res.json()) as { version: string; size: number; digest: string | null };
+      // apiFetch leaves Content-Type unset for FormData bodies
+      // (see #218 fix), so the browser can fill in the multipart
+      // boundary itself. Auth + X-Kanade-Source still come from
+      // the central wrapper.
+      // Reuse ReleaseRow's shape minus `modified` (the publish
+      // response omits it because the broker stamps the row at
+      // put-time — the list endpoint reads it back on next GET).
+      return apiFetch<Omit<ReleaseRow, 'modified'>>(
+        '/api/agents/publish',
+        { method: 'POST', body: fd },
+      );
     },
     onSuccess: (data) => {
       qc.invalidateQueries({ queryKey: ['agent-releases'] });
@@ -104,16 +103,9 @@ export function Rollout() {
 
   const remove = useMutation({
     mutationFn: async (v: string) => {
-      const token = localStorage.getItem('kanade_token') ?? '';
-      const headers: Record<string, string> = { 'X-Kanade-Source': 'spa' };
-      if (token) headers.Authorization = `Bearer ${token}`;
-      const res = await fetch(`/api/agents/releases/${encodeURIComponent(v)}`, {
+      await apiFetch<void>(`/api/agents/releases/${encodeURIComponent(v)}`, {
         method: 'DELETE',
-        headers,
       });
-      if (!res.ok) {
-        throw new Error(`${res.status} ${res.statusText} — ${await res.text()}`);
-      }
       return v;
     },
     onSuccess: (v) => {
