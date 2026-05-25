@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod app;
 pub mod config;
 pub mod exec;
 pub mod group;
@@ -9,3 +10,4 @@ pub mod ping;
 pub mod revoke;
 pub mod run;
 pub mod schedule;
+pub mod script;

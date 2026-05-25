@@ -1,0 +1,181 @@
+//! `kanade script` — manage the manifest-script Object Store
+//! (`OBJECT_SCRIPTS`, #211).
+//!
+//! Sibling of `kanade app` — same NATS-direct shape, different
+//! bucket. This one holds the PowerShell / shell / etc. bodies
+//! that manifests reference via `execute.script_object` (#213
+//! schema, #214 agent fetch). Bodies are bounded at 4 MB
+//! (vs `app_packages`'s 256 MB) — scripts are KB-to-MB text, not
+//! installer binaries.
+//!
+//! Object key shape is `<name>/<version>` — same as `app`. For
+//! manifest-driven scripts `<name>` is conventionally the manifest
+//! id and `<version>` matches the manifest version, but the bucket
+//! imposes no policy (operator-uploaded ad-hoc scripts can use any
+//! pair they like).
+
+use std::path::PathBuf;
+
+use anyhow::{Context, Result, bail};
+use clap::{Args, Subcommand};
+use futures::StreamExt;
+use kanade_shared::kv::OBJECT_SCRIPTS;
+use tracing::info;
+
+#[derive(Args, Debug)]
+pub struct ScriptArgs {
+    #[command(subcommand)]
+    pub sub: ScriptSub,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ScriptSub {
+    /// Upload a script body to the scripts Object Store under
+    /// `<name>/<version>`. Use this for bodies referenced by a
+    /// manifest's `execute.script_object` field — agents fetch +
+    /// sha-verify at exec time (#214).
+    Publish {
+        /// Script "name" — typically the referencing manifest's id.
+        name: String,
+        /// Script "version" — typically the referencing manifest's
+        /// version. Operator picks any scheme; the bucket just stores
+        /// the pair as the key.
+        version: String,
+        /// Path to the script file (.ps1 / .sh / .py / …).
+        file: PathBuf,
+    },
+    /// List every `<name>/<version>` row in the bucket — size +
+    /// digest + last-modified.
+    List,
+    /// Delete a single script version. No-op + clear message when
+    /// the key isn't present.
+    Delete { name: String, version: String },
+}
+
+pub async fn execute(client: async_nats::Client, args: ScriptArgs) -> Result<()> {
+    match args.sub {
+        ScriptSub::Publish {
+            name,
+            version,
+            file,
+        } => publish(client, name, version, file).await,
+        ScriptSub::List => list(client).await,
+        ScriptSub::Delete { name, version } => delete(client, name, version).await,
+    }
+}
+
+/// Mirror of `kanade-backend::api::script_objects::validate_segment`.
+/// See the matching note in `cmd::app::validate_segment` — keeping
+/// a CLI-side copy fails fast on a typo before round-tripping to
+/// the bucket.
+fn validate_segment(label: &str, value: &str) -> Result<()> {
+    if value.is_empty() {
+        bail!("{label} must be non-empty");
+    }
+    if value.contains('/') {
+        bail!("{label} must not contain '/'");
+    }
+    for c in value.chars() {
+        if !c.is_ascii() {
+            bail!("{label} must be ASCII-printable (rejected non-ASCII {c:?})");
+        }
+        if c.is_ascii_control() {
+            bail!("{label} must not contain control characters");
+        }
+        if c == '"' || c == '\\' {
+            bail!("{label} must not contain '\"' or '\\\\'");
+        }
+    }
+    Ok(())
+}
+
+async fn publish(
+    client: async_nats::Client,
+    name: String,
+    version: String,
+    file: PathBuf,
+) -> Result<()> {
+    validate_segment("name", &name)?;
+    validate_segment("version", &version)?;
+
+    let bytes = tokio::fs::read(&file)
+        .await
+        .with_context(|| format!("read {file:?}"))?;
+    let size = bytes.len();
+    info!(name, version, size, "uploading script object");
+
+    let js = async_nats::jetstream::new(client);
+    let store = js.get_object_store(OBJECT_SCRIPTS).await.with_context(|| {
+        format!("object store '{OBJECT_SCRIPTS}' missing — run `kanade jetstream setup`")
+    })?;
+    let key = format!("{name}/{version}");
+    let mut cursor = std::io::Cursor::new(bytes);
+    let meta = store
+        .put(key.as_str(), &mut cursor)
+        .await
+        .context("object_store.put")?;
+    info!(name, version, digest = ?meta.digest, "script object uploaded");
+
+    println!("published: {key}");
+    println!("  object_store : {OBJECT_SCRIPTS}/{key}");
+    println!("  size         : {size} bytes");
+    if let Some(d) = meta.digest.as_deref() {
+        println!("  digest       : {d}");
+    }
+    println!();
+    println!("Reference from a manifest with:");
+    println!("  execute:");
+    println!("    shell: powershell");
+    println!("    script_object: {key}");
+    println!("    timeout: 600s");
+    Ok(())
+}
+
+async fn list(client: async_nats::Client) -> Result<()> {
+    let js = async_nats::jetstream::new(client);
+    let store = js.get_object_store(OBJECT_SCRIPTS).await.with_context(|| {
+        format!("object store '{OBJECT_SCRIPTS}' missing — run `kanade jetstream setup`")
+    })?;
+    let mut list = store.list().await.context("object_store.list")?;
+    let mut rows: Vec<(String, usize, Option<String>)> = Vec::new();
+    while let Some(item) = list.next().await {
+        let meta = item.context("list script objects")?;
+        rows.push((meta.name, meta.size, meta.digest));
+    }
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    if rows.is_empty() {
+        println!("(no script objects)");
+        return Ok(());
+    }
+    for (key, size, digest) in rows {
+        let dgst = digest.as_deref().unwrap_or("—");
+        println!("{key}\t{size}\t{dgst}");
+    }
+    Ok(())
+}
+
+async fn delete(client: async_nats::Client, name: String, version: String) -> Result<()> {
+    validate_segment("name", &name)?;
+    validate_segment("version", &version)?;
+    let js = async_nats::jetstream::new(client);
+    let store = js.get_object_store(OBJECT_SCRIPTS).await.with_context(|| {
+        format!("object store '{OBJECT_SCRIPTS}' missing — run `kanade jetstream setup`")
+    })?;
+    let key = format!("{name}/{version}");
+    match store.delete(key.as_str()).await {
+        Ok(()) => {
+            info!(%key, "script object deleted");
+            println!("deleted: {key}");
+            Ok(())
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") || msg.contains("no objects") {
+                println!("not present: {key} (idempotent no-op)");
+                Ok(())
+            } else {
+                Err(e).with_context(|| format!("object_store.delete {key}"))
+            }
+        }
+    }
+}
