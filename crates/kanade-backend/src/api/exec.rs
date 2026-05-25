@@ -379,7 +379,15 @@ async fn resolve_script_source(
         ),
     ))?;
     let b64 = raw.strip_prefix("SHA-256=").unwrap_or(raw);
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+    // NATS async-nats emits digests in URL-safe base64 WITH `=`
+    // padding (e.g. `SHA-256=pzGZSHXYLupCjS_RB0lmdLNHpgyH53Y5vI8XYhb2H1o=`).
+    // `URL_SAFE_NO_PAD` rejects the trailing `=`; `URL_SAFE` accepts
+    // both padded and unpadded forms. The original NO_PAD pick was
+    // a copy-paste error from a URL-safe-id case — broker side
+    // empirically uses padding. Bug surfaced during a live
+    // install-kanade-backend self-test (#222 + #224 flow) with a
+    // 500 "Invalid padding" out of /api/exec/<job>.
+    let bytes = base64::engine::general_purpose::URL_SAFE
         .decode(b64)
         .map_err(|e| {
             warn!(error = %e, %key, raw, "exec: decode object_store digest");

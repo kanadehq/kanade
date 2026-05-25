@@ -133,7 +133,12 @@ impl ScriptCache {
             .as_deref()
             .ok_or_else(|| anyhow!("script_object '{key}' has no broker digest"))?;
         let b64 = raw.strip_prefix("SHA-256=").unwrap_or(raw);
-        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        // NATS async-nats emits URL-safe base64 WITH `=` padding —
+        // `URL_SAFE_NO_PAD` rejects it. Use `URL_SAFE` which accepts
+        // both padded and unpadded forms (symmetric with the backend
+        // fix in `exec::resolve_script_source`). The original NO_PAD
+        // pick was a copy-paste error; broker side empirically pads.
+        let bytes = base64::engine::general_purpose::URL_SAFE
             .decode(b64)
             .with_context(|| format!("decode digest for '{key}' (raw='{raw}')"))?;
         Ok(hex_lower(&bytes))
