@@ -14,6 +14,13 @@
     "title": "Host performance",
     "intro": "Whole-machine CPU / Memory / Disk I/O / Network sampled every {{interval}} by the kanade-agent's host_perf loop. Older agents (< 0.40) don't publish this — the chart will be empty for those until they upgrade.",
     "rangeLabel": "Range",
+    "modeLabel": "Mode",
+    "modePreset": "Preset",
+    "modeCustom": "Custom",
+    "fromLabel": "From",
+    "toLabel": "To",
+    "stepLabel": "Step",
+    "invalidRange": "From must be before To.",
     "loading": "loading perf…",
     "errorTitle": "Couldn't load perf data",
     "empty": "No samples in this range yet.",
@@ -23,6 +30,14 @@
       "24h": "24 hours",
       "7d": "7 days",
       "30d": "30 days"
+    },
+    "customSteps": {
+      "30s": "30 sec",
+      "1m": "1 min",
+      "5m": "5 min",
+      "15m": "15 min",
+      "1h": "1 hour",
+      "4h": "4 hours"
     },
     "charts": {
       "cpu": "CPU",
@@ -76,6 +91,13 @@
       "title": "Process timeline",
       "intro": "Top processes across the selected window, stacked by name. Legend colours are pinned across the window ({{top}} names + other).",
       "rangeLabel": "Range",
+      "modeLabel": "Mode",
+      "modePreset": "Preset",
+      "modeCustom": "Custom",
+      "fromLabel": "From",
+      "toLabel": "To",
+      "stepLabel": "Step",
+      "invalidRange": "From must be before To.",
       "topLabel": "Top",
       "metricLabel": "Metric",
       "loading": "loading timeline…",
@@ -89,6 +111,14 @@
         "1h": "1 hour",
         "6h": "6 hours",
         "24h": "24 hours"
+      },
+      "customSteps": {
+        "30s": "30 sec",
+        "1m": "1 min",
+        "5m": "5 min",
+        "15m": "15 min",
+        "1h": "1 hour",
+        "4h": "4 hours"
       },
       "metrics": {
         "cpu": "CPU %",

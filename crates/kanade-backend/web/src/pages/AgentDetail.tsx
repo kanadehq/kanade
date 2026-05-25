@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { ArrowLeft, Loader2 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useParams } from 'react-router-dom';
 import {
@@ -16,25 +16,32 @@ import {
 
 import { AgentProcessSection } from '@/components/AgentProcessSection';
 import { ErrorCard } from '@/components/ErrorCard';
+import { TimeRangePicker } from '@/components/TimeRangePicker';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Select } from '@/components/ui/select';
 import { apiFetch } from '@/lib/api';
+import {
+  DEFAULT_STEP_KEYS,
+  DEFAULT_STEP_SECS,
+  type PresetOption,
+  type RangeValue,
+  type StepOption,
+  useResolvedRange,
+} from '@/lib/timeRange';
 import type { AgentRow, PerfResponse } from '@/lib/types';
 import { fmtIsoLocal } from '@/lib/utils';
 
-type RangeKey = '1h' | '6h' | '24h' | '7d' | '30d';
+// Preset keys exposed by the host_perf range picker. Kept as a const
+// tuple so the locale-key lookup below stays type-checked.
+const PRESET_KEYS = ['1h', '6h', '24h', '7d', '30d'] as const;
+type PresetKey = (typeof PRESET_KEYS)[number];
 
-/** Range-to-server-bucket map. Step is picked so the chart fits in
- *  roughly 60-200 points regardless of zoom — Recharts handles that
- *  range smoothly and the eye can't usefully resolve more on a typical
- *  detail-page chart width.
- *
- *  `stepSecs` mirrors `step` numerically so the page-level tick logic
- *  can floor "now" to a bucket boundary without re-parsing the
- *  humantime string. */
-const RANGE_TO_STEP: Record<RangeKey, { fromSecondsAgo: number; step: string; stepSecs: number }> = {
+/** Each preset's window + matching server-side bucket size. Steps
+ *  are picked so the chart fits in ~60–200 Recharts points regardless
+ *  of zoom; the matching `stepSecs` lets the resolver floor "now" to
+ *  a bucket boundary without re-parsing the humantime string. */
+const PRESET_SPECS: Record<PresetKey, { fromSecondsAgo: number; step: string; stepSecs: number }> = {
   '1h': { fromSecondsAgo: 60 * 60, step: '1m', stepSecs: 60 },
   '6h': { fromSecondsAgo: 6 * 60 * 60, step: '5m', stepSecs: 300 },
   '24h': { fromSecondsAgo: 24 * 60 * 60, step: '15m', stepSecs: 900 },
@@ -42,13 +49,10 @@ const RANGE_TO_STEP: Record<RangeKey, { fromSecondsAgo: number; step: string; st
   '30d': { fromSecondsAgo: 30 * 24 * 60 * 60, step: '4h', stepSecs: 14400 },
 };
 
-/** Heartbeat that drives the chart's right-edge advance. We tick
- *  once per minute (the finest bucket size in use); the memo below
- *  floors "now" to the active step's boundary, so within a single
- *  bucket the floored value stays put and React Query doesn't
- *  refire. On a bucket crossing the floored value jumps and the
- *  query refetches, sliding the chart forward in discrete steps. */
-const RIGHT_EDGE_TICK_MS = 60_000;
+// Custom-mode step keys come from lib/timeRange (DEFAULT_STEP_KEYS /
+// DEFAULT_STEP_SECS) so the host_perf and process_perf chart pages
+// stay in sync; only the per-page i18n key for the visible label
+// stays local.
 
 function fmtBytes(v: number | null | undefined): string {
   if (v === null || v === undefined || !Number.isFinite(v) || v < 0) return '—';
@@ -94,7 +98,10 @@ function tooltipBytesPerSec(value: unknown): string {
 export function AgentDetail() {
   const { t } = useTranslation('agent-detail');
   const { pcId = '' } = useParams<{ pcId: string }>();
-  const [range, setRange] = useState<RangeKey>('1h');
+  const [range, setRange] = useState<RangeValue>({
+    mode: 'preset',
+    presetKey: '1h',
+  });
 
   const agentQ = useQuery({
     queryKey: ['agent', pcId],
@@ -102,47 +109,42 @@ export function AgentDetail() {
     enabled: !!pcId,
   });
 
-  // Once-per-minute tick that the memo depends on. Plain state +
-  // setInterval keeps it simple; the tick value itself is unused —
-  // we only need a dep that changes to invalidate the memo.
-  const [tick, setTick] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => setTick((t) => t + 1), RIGHT_EDGE_TICK_MS);
-    return () => clearInterval(id);
-  }, []);
+  const presets = useMemo<PresetOption[]>(
+    () =>
+      PRESET_KEYS.map((k) => ({
+        key: k,
+        label: t(`perf.ranges.${k}`),
+        ...PRESET_SPECS[k],
+      })),
+    [t],
+  );
+  const stepOptions = useMemo<StepOption[]>(
+    () =>
+      DEFAULT_STEP_KEYS.map((k) => ({
+        value: k,
+        secs: DEFAULT_STEP_SECS[k],
+        label: t(`perf.customSteps.${k}`),
+      })),
+    [t],
+  );
 
-  // Recompute from/to each tick so the right edge advances to "now"
-  // while the user keeps the page open — Gemini Code Assist #192
-  // caught the earlier `[range]`-only deps pinning the chart to the
-  // open-time snapshot. "now" is floored to the active step's bucket
-  // boundary, so the iso strings (= React Query keys) only change on
-  // a bucket crossing, NOT on every minute tick when the floored
-  // value happens to stay put — that keeps refetch traffic aligned
-  // with the actual data resolution.
-  const { fromIso, toIso, stepStr } = useMemo(() => {
-    const { fromSecondsAgo, step, stepSecs } = RANGE_TO_STEP[range];
-    const stepMs = stepSecs * 1000;
-    const toMs = Math.floor(Date.now() / stepMs) * stepMs;
-    const fromMs = toMs - fromSecondsAgo * 1000;
-    return {
-      fromIso: new Date(fromMs).toISOString(),
-      toIso: new Date(toMs).toISOString(),
-      stepStr: step,
-    };
-    // `tick` is intentionally in the deps even though its value
-    // isn't read — see comment block above.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [range, tick]);
+  // useResolvedRange handles both modes: it ticks for presets (right
+  // edge follows the wall clock, floored to a bucket boundary so
+  // React Query keys only change on a real bucket crossing) and
+  // freezes the clock for custom ranges (user-picked absolute
+  // endpoints stay put while they investigate).
+  const resolved = useResolvedRange(range, presets);
+  const { fromIso, toIso, step: stepStr } = resolved;
 
   const perfQ = useQuery({
-    queryKey: ['agent-perf', pcId, range, fromIso, toIso],
+    queryKey: ['agent-perf', pcId, fromIso, toIso, stepStr],
     queryFn: () =>
       apiFetch<PerfResponse>(
         `/api/agents/${encodeURIComponent(pcId)}/perf?from=${encodeURIComponent(
           fromIso,
         )}&to=${encodeURIComponent(toIso)}&step=${encodeURIComponent(stepStr)}`,
       ),
-    enabled: !!pcId,
+    enabled: !!pcId && !resolved.isInvalid,
   });
 
   if (agentQ.isLoading) {
@@ -190,24 +192,28 @@ export function AgentDetail() {
       </Card>
 
       <Card>
-        <CardHeader className="flex flex-row items-center justify-between gap-3">
+        <CardHeader className="flex flex-row flex-wrap items-start justify-between gap-3">
           <div className="space-y-1">
             <CardTitle className="text-base">{t('perf.title')}</CardTitle>
             <p className="text-xs text-muted">{t('perf.intro', { interval: '60s' })}</p>
           </div>
-          <div className="flex items-center gap-2 shrink-0">
-            <span className="text-xs text-muted">{t('perf.rangeLabel')}</span>
-            <Select
+          <div className="shrink-0">
+            <TimeRangePicker
               value={range}
-              onChange={(e) => setRange(e.target.value as RangeKey)}
-              className="w-32"
-            >
-              {(Object.keys(RANGE_TO_STEP) as RangeKey[]).map((k) => (
-                <option key={k} value={k}>
-                  {t(`perf.ranges.${k}`)}
-                </option>
-              ))}
-            </Select>
+              onChange={setRange}
+              presets={presets}
+              stepOptions={stepOptions}
+              texts={{
+                rangeLabel: t('perf.rangeLabel'),
+                modeLabel: t('perf.modeLabel'),
+                modePreset: t('perf.modePreset'),
+                modeCustom: t('perf.modeCustom'),
+                fromLabel: t('perf.fromLabel'),
+                toLabel: t('perf.toLabel'),
+                stepLabel: t('perf.stepLabel'),
+                invalidHint: t('perf.invalidRange'),
+              }}
+            />
           </div>
         </CardHeader>
         <CardContent className="space-y-6">
