@@ -146,10 +146,25 @@ $AgentDownloadTimeoutSecs = 120
 
 # If the agent-mode knobs are set, download the binary into a temp
 # staging dir + repoint `$SourceDir` at it before the existing
-# install flow runs. The `trap` block at the bottom of this section
-# cleans up the staging dir on any subsequent failure so a repeated
-# failed upgrade doesn't leak temp dirs.
+# install flow runs.
 $AgentStaging = $null
+
+# Trap defined BEFORE any throw-prone code in agent mode (Gemini
+# #224 MED). PowerShell's `trap` only catches terminating errors
+# that fire AFTER its definition statement in the same scope, so
+# placing it after the download/sha-verify block would miss those
+# failures entirely and leak the staging dir. The `$AgentStaging`
+# variable is initialised to `$null` above so the trap body's
+# Test-Path guard never throws on a not-yet-bound name.
+# `break` re-throws the original error after cleanup — don't
+# swallow.
+trap {
+    if ($AgentStaging -and (Test-Path $AgentStaging)) {
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $AgentStaging
+    }
+    break
+}
+
 if ($AgentSourceUrl) {
     if (-not $AgentSourceVersion) {
         throw 'deploy-backend (agent mode): $AgentSourceVersion must be set alongside $AgentSourceUrl.'
@@ -165,9 +180,16 @@ if ($AgentSourceUrl) {
 
     $url = "$($AgentSourceUrl.TrimEnd('/'))/api/app-packages/kanade-backend/$AgentSourceVersion"
     Write-Host "deploy-backend (agent mode): downloading kanade-backend $AgentSourceVersion from $url"
+    # If this throws (network, 404, timeout), the trap above
+    # fires and clears $AgentStaging before rethrowing — no
+    # leaked tmp dir per failed upgrade.
     Invoke-WebRequest -Uri $url -OutFile $stagedExe -UseBasicParsing -TimeoutSec $AgentDownloadTimeoutSecs | Out-Null
 
     # Sha verify BEFORE swap — same posture as install-kanade-client.ps1.
+    # Explicit Remove-Item + throw kept around the cleanup is
+    # redundant with the trap (which would also fire) — leaving
+    # the inline cleanup so the mismatch message ships even if
+    # the trap is bypassed by a future refactor.
     $actual = (Get-FileHash $stagedExe -Algorithm SHA256).Hash.ToLowerInvariant()
     $expected = $AgentSourceSha256.ToLowerInvariant()
     if ($actual -ne $expected) {
@@ -190,17 +212,6 @@ if ($AgentSourceUrl) {
     }
 
     $SourceDir = $AgentStaging
-}
-
-# Anything that goes wrong from here on must still clean up the
-# agent-mode staging dir. The trap fires on terminating errors
-# (ErrorActionPreference = 'Stop' makes most things terminating).
-# `break` re-throws after cleanup — don't swallow.
-trap {
-    if ($AgentStaging -and (Test-Path $AgentStaging)) {
-        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $AgentStaging
-    }
-    break
 }
 
 # Write a secret value to HKLM\SOFTWARE\kanade\<subkey>\<value> and
