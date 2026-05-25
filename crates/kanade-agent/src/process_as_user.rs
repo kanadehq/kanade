@@ -38,7 +38,7 @@ use std::os::windows::io::{FromRawHandle, OwnedHandle};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use kanade_shared::wire::{Command, RunAs, Shell};
 use tokio::sync::oneshot;
 use tracing::{info, warn};
@@ -71,9 +71,12 @@ pub async fn run_command_in_user_session(
 ) -> Result<ExecOutcome> {
     debug_assert!(matches!(run_as, RunAs::User | RunAs::SystemGui));
 
-    let cmd_line = build_command_line(cmd);
+    let (cmd_line, _temp_script) = build_command_line(cmd)?;
     let cwd = cmd.cwd.clone();
     // 1) Spawn on a blocking thread (Win32 dance is sync).
+    //    `_temp_script` (if any) stays in scope here until this fn
+    //    returns; PowerShell parses the .ps1 at spawn time so the
+    //    file only needs to live across `spawn_native`.
     let SpawnHandles {
         process,
         stdout_read,
@@ -429,7 +432,9 @@ impl Drop for EnvBlockGuard {
     }
 }
 
-fn build_command_line(cmd: &Command) -> Vec<u16> {
+fn build_command_line(
+    cmd: &Command,
+) -> Result<(Vec<u16>, Option<crate::process::TempPowerShellScript>)> {
     // #43: mirror the System-path UTF-8 prelude (process.rs) so a
     // `run_as: user` PowerShell job sees the same console encoding
     // contract as `run_as: system`. Without this, ja-JP / DE / KR
@@ -440,13 +445,33 @@ fn build_command_line(cmd: &Command) -> Vec<u16> {
     // becomes mojibake instead of clean text. Shared helper from
     // `crate::process` so both spawn paths use the same prelude
     // shape (CodeRabbit #83 nitpick: avoid duplicated literal).
-    let ps_script;
+    // -File via tempfile (vs -Command): see the matching block in
+    // `process::run_command_with_kill` for the rationale. Same
+    // change here so run_as: user / system_gui scripts get the same
+    // operator-friendly semantics (param() / [CmdletBinding()] etc.
+    // parse correctly).
+    let mut temp_script: Option<crate::process::TempPowerShellScript> = None;
+    let path_owned: String;
     let (program, args): (&str, Vec<&str>) = match cmd.shell {
         Shell::Powershell => {
-            ps_script = crate::process::with_powershell_utf8_prelude(&cmd.script);
+            let body = crate::process::with_powershell_utf8_prelude(&cmd.script);
+            let staged = crate::process::TempPowerShellScript::write(&body)?;
+            path_owned = staged
+                .path()
+                .to_str()
+                .context("kanade-agent-scripts temp path is not valid UTF-8")?
+                .to_string();
+            temp_script = Some(staged);
             (
                 "powershell.exe",
-                vec!["-NoProfile", "-NonInteractive", "-Command", &ps_script],
+                vec![
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    path_owned.as_str(),
+                ],
             )
         }
         Shell::Cmd => ("cmd.exe", vec!["/C", &cmd.script]),
@@ -461,5 +486,5 @@ fn build_command_line(cmd: &Command) -> Vec<u16> {
     }
     let mut wide: Vec<u16> = full.encode_wide().collect();
     wide.push(0);
-    wide
+    Ok((wide, temp_script))
 }

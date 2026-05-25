@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -9,6 +10,7 @@ use rand::Rng;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command as ProcessCommand;
 use tracing::{info, warn};
+use uuid::Uuid;
 
 /// #43 / PR γ-bot-review: one source of truth for the PowerShell
 /// console-encoding prelude. Both the System path (this file) and the
@@ -21,13 +23,68 @@ pub(crate) const POWERSHELL_UTF8_PRELUDE: &str = "[Console]::OutputEncoding = Ne
      $OutputEncoding = [Console]::OutputEncoding; ";
 
 /// Wrap a user PowerShell script with [`POWERSHELL_UTF8_PRELUDE`] so the
-/// resulting `-Command` value forces UTF-8 on both `[Console]::OutputEncoding`
+/// resulting `-File` body forces UTF-8 on both `[Console]::OutputEncoding`
 /// and `$OutputEncoding` before the user script runs. User scripts can
 /// still override the encoding mid-run (assignment is just a property
 /// set), but the default for any script that doesn't touch encoding
 /// becomes UTF-8 instead of the system OEM codepage.
 pub(crate) fn with_powershell_utf8_prelude(user_script: &str) -> String {
     format!("{POWERSHELL_UTF8_PRELUDE}{user_script}")
+}
+
+/// PowerShell script staged to a temp `.ps1` file so `powershell -File`
+/// can read it as a full script (param() / [CmdletBinding()] / …
+/// headers all parse correctly). `powershell -Command "<body>"`
+/// parses the body as a command-line expression and rejects
+/// function-style headers — the install-kanade-backend test on
+/// 2026-05-26 hit this when operators tried to ship
+/// `scripts/deploy-backend.ps1` (a normal .ps1 with a param block)
+/// via `script_object`.
+///
+/// Cleanup-on-drop: the file is removed when the struct goes out
+/// of scope. PowerShell reads the script into memory at startup,
+/// so deleting the file mid-run doesn't affect the running
+/// process — but we still keep the struct alive for the function's
+/// duration in case PowerShell ever needs to re-read (e.g. to
+/// dot-source itself).
+pub(crate) struct TempPowerShellScript {
+    path: PathBuf,
+}
+
+impl TempPowerShellScript {
+    /// Stage `body` to a fresh `.ps1` under
+    /// `%TEMP%/kanade-agent-scripts/`. Prepends a UTF-8 BOM so
+    /// `powershell -File` reads the body as UTF-8 regardless of the
+    /// system codepage — matches what the `-Command`-mode prelude
+    /// was achieving for output, but for the SCRIPT FILE itself.
+    pub fn write(body: &str) -> Result<Self> {
+        let dir = std::env::temp_dir().join("kanade-agent-scripts");
+        std::fs::create_dir_all(&dir).with_context(|| format!("mkdir {}", dir.display()))?;
+        let path = dir.join(format!("kanade-{}.ps1", Uuid::new_v4().simple()));
+        // UTF-8 BOM (0xEF 0xBB 0xBF) — PowerShell uses it to detect
+        // UTF-8 encoding without a `chcp 65001` dance. Without it,
+        // a ja-JP host running default CP932 would mis-parse any
+        // multi-byte sequence in the script body (operator strings,
+        // comments, etc.).
+        let mut bytes = Vec::with_capacity(3 + body.len());
+        bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+        bytes.extend_from_slice(body.as_bytes());
+        std::fs::write(&path, &bytes).with_context(|| format!("write {}", path.display()))?;
+        Ok(Self { path })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempPowerShellScript {
+    fn drop(&mut self) {
+        // Best-effort. Leak on rare error is OK — temp dir gets GC'd
+        // by Windows eventually, and the agent isn't producing
+        // many of these (one per Command execution).
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 /// Outcome of a child-process run after kill / timeout / completion races.
@@ -88,16 +145,53 @@ pub async fn run_command_with_kill(
     // cmd.exe doesn't have an equivalent one-liner that survives
     // across legacy / unicode commands; the Cmd branch relies on the
     // tolerant decoder alone.
-    let ps_script;
+    // Keep `_temp_script` alive through the spawn + wait/race so
+    // the `.ps1` on disk outlives the child's startup (PowerShell
+    // reads the body into memory at parse time, but holding the
+    // file longer is defensive against future dot-source / re-parse
+    // patterns).
+    let _temp_script;
     let (program, args): (&str, Vec<&str>) = match cmd.shell {
         Shell::Powershell => {
-            ps_script = with_powershell_utf8_prelude(&cmd.script);
+            // `-File <tempfile>` (vs the old `-Command "<body>"`):
+            // a body with `[CmdletBinding()] / param(...)` headers
+            // is valid as a script file but a parse error as a
+            // command-line expression. Switching to -File means
+            // operators can ship normal .ps1 files through
+            // `script_object` without rewriting them. UTF-8 prelude
+            // still leads the body (controls stdout encoding); the
+            // BOM-prefixed file makes PowerShell parse the body
+            // itself as UTF-8 regardless of system codepage.
+            //
+            // `-ExecutionPolicy Bypass` is needed because -File
+            // honors the host's ExecutionPolicy (Restricted blocks
+            // .ps1 entirely); -Command mode silently bypassed it.
+            // Adding Bypass keeps behavioural parity with the
+            // pre-fix path.
+            let body = with_powershell_utf8_prelude(&cmd.script);
+            _temp_script = Some(TempPowerShellScript::write(&body)?);
+            let path = _temp_script
+                .as_ref()
+                .unwrap()
+                .path()
+                .to_str()
+                .context("kanade-agent-scripts temp path is not valid UTF-8")?;
             (
                 "powershell",
-                vec!["-NoProfile", "-NonInteractive", "-Command", &ps_script],
+                vec![
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    path,
+                ],
             )
         }
-        Shell::Cmd => ("cmd", vec!["/C", &cmd.script]),
+        Shell::Cmd => {
+            _temp_script = None;
+            ("cmd", vec!["/C", &cmd.script])
+        }
     };
     let mut builder = ProcessCommand::new(program);
     builder
@@ -421,5 +515,36 @@ mod tests {
         assert!(super::POWERSHELL_UTF8_PRELUDE.ends_with("; "));
         assert!(super::POWERSHELL_UTF8_PRELUDE.contains("[Console]::OutputEncoding"));
         assert!(super::POWERSHELL_UTF8_PRELUDE.contains("$OutputEncoding"));
+    }
+
+    #[test]
+    fn temp_powershell_script_writes_bom_then_body() {
+        let script = "[CmdletBinding()] param([string]$X='a'); Write-Output $X";
+        let staged = super::TempPowerShellScript::write(script).expect("write");
+        let bytes = std::fs::read(staged.path()).expect("read back");
+        // BOM is the first three bytes — PowerShell uses it to
+        // detect UTF-8 without depending on the system codepage.
+        assert_eq!(
+            &bytes[..3],
+            &[0xEF, 0xBB, 0xBF],
+            "BOM not at start of staged file",
+        );
+        let body_bytes = &bytes[3..];
+        assert_eq!(std::str::from_utf8(body_bytes).unwrap(), script);
+        // Filename ends with `.ps1` so `powershell -File` recognises
+        // it as a script (not a plain text file).
+        assert_eq!(
+            staged.path().extension().and_then(|s| s.to_str()),
+            Some("ps1")
+        );
+    }
+
+    #[test]
+    fn temp_powershell_script_drop_removes_file() {
+        let staged = super::TempPowerShellScript::write("Write-Output 'x'").expect("write");
+        let path = staged.path().to_path_buf();
+        assert!(path.exists(), "file should exist before drop");
+        drop(staged);
+        assert!(!path.exists(), "file should be gone after drop");
     }
 }
