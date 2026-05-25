@@ -46,8 +46,7 @@ pub async fn serve(
     // back off + retry, and if the subscription ever closes (broker
     // restart, server-side cleanup) we reopen.
     loop {
-        let mut sub =
-            crate::nats_retry::wait_for_subscribe(&client, &tracker, subj.clone(), "ping").await;
+        let mut sub = crate::nats_retry::wait_for_subscribe(&client, &tracker, &subj, "ping").await;
         info!(subject = %subj, "ping responder ready");
 
         while let Some(msg) = sub.next().await {

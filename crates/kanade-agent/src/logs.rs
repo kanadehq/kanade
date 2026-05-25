@@ -42,7 +42,7 @@ pub async fn serve(
     // if the subscription ever closes.
     loop {
         let mut sub =
-            crate::nats_retry::wait_for_subscribe(&client, &tracker, subject.clone(), "logs").await;
+            crate::nats_retry::wait_for_subscribe(&client, &tracker, &subject, "logs").await;
         info!(subject = %subject, log_path = %log_path.display(), "logs.fetch handler ready");
 
         while let Some(msg) = sub.next().await {

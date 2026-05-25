@@ -278,14 +278,19 @@ pub async fn wait_for_object_store(
 pub async fn wait_for_subscribe(
     client: &async_nats::Client,
     tracker: &Tracker,
-    subject: String,
+    subject: &str,
     label: &'static str,
 ) -> async_nats::Subscriber {
     let mut backoff = INITIAL_BACKOFF;
     let mut consecutive_failures: u32 = 0;
     loop {
         gate_on_connection(client, tracker, label, "subscribe").await;
-        match client.subscribe(subject.clone()).await {
+        // `client.subscribe` takes `impl ToSubject`; the `&str`
+        // impl `to_owned()`s into a `Subject` internally, so this
+        // borrow + per-call to_owned is equivalent to taking
+        // `String` + cloning per retry. Caller sites avoid an
+        // extra clone (Gemini #226).
+        match client.subscribe(subject.to_owned()).await {
             Ok(s) => {
                 if consecutive_failures > 0 {
                     info!(
@@ -306,7 +311,7 @@ pub async fn wait_for_subscribe(
                     backoff,
                     "subscribe",
                     label,
-                    &subject,
+                    subject,
                     &e,
                 );
                 sleep_or_wake(backoff, tracker).await;
