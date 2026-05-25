@@ -26,7 +26,11 @@ pub(crate) const POWERSHELL_UTF8_PRELUDE: &str = "[Console]::OutputEncoding = Ne
 /// Process-wide staging directory for temp `.ps1` files.
 ///
 /// Layout: `%ProgramData%/Kanade/agent-scripts/<uuid>/` on Windows,
-/// `$TMPDIR/kanade-agent-scripts/<uuid>/` elsewhere (dev / tests only).
+/// `$TMPDIR/kanade-agent-<uuid>/` elsewhere (dev / tests only —
+/// non-Windows skips the static `agent-scripts/` segment because
+/// `$TMPDIR` is world-writable and a predictable parent would
+/// open up a symlink-redirect attack; see staging_dir for the
+/// full rationale).
 ///
 /// Hierarchy rationale: the static `agent-scripts/` segment is the
 /// logical category (greppable / observable / single-command
@@ -76,18 +80,32 @@ fn staging_dir() -> Result<PathBuf> {
     if let Some(p) = guard.as_ref() {
         return Ok(p.clone());
     }
-    let category_root = if cfg!(target_os = "windows") {
-        std::env::var_os("ProgramData")
+    // Platforms diverge here for security reasons (Gemini PR #231
+    // HIGH): the windows path has an admin-controlled category
+    // parent under `%ProgramData%`, so we can safely nest a
+    // grep-friendly static `agent-scripts/` segment in. On
+    // non-Windows the natural parent is `$TMPDIR` (typically
+    // `/tmp/`), which is world-writable; a predictable static
+    // child like `/tmp/kanade-agent-scripts/` could be
+    // pre-created by another local user as a symlink to (say)
+    // `/etc/`, and a subsequent `create_dir_all` would follow it
+    // and let us write files outside the intended tree. We mitigate
+    // by skipping the static segment entirely on non-Windows —
+    // the per-process UUID dir (created with `create_dir`,
+    // non-clobber) sits directly under `$TMPDIR`, with an
+    // unguessable name that can't be pre-empted.
+    let dir = if cfg!(target_os = "windows") {
+        let category = std::env::var_os("ProgramData")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
             .join("Kanade")
-            .join("agent-scripts")
+            .join("agent-scripts");
+        std::fs::create_dir_all(&category)
+            .with_context(|| format!("create_dir_all {}", category.display()))?;
+        category.join(Uuid::new_v4().simple().to_string())
     } else {
-        std::env::temp_dir().join("kanade-agent-scripts")
+        std::env::temp_dir().join(format!("kanade-agent-{}", Uuid::new_v4().simple()))
     };
-    std::fs::create_dir_all(&category_root)
-        .with_context(|| format!("create_dir_all {}", category_root.display()))?;
-    let dir = category_root.join(Uuid::new_v4().simple().to_string());
     std::fs::create_dir(&dir).with_context(|| format!("create_dir {}", dir.display()))?;
     *guard = Some(dir.clone());
     Ok(dir)
