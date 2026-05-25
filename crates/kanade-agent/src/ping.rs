@@ -36,45 +36,51 @@ pub async fn serve(
     agent_version: String,
     hostname: Option<String>,
     os_family: Option<String>,
+    tracker: crate::staleness::Tracker,
 ) {
     let subj = subject::ping(&pc_id);
-    let mut sub = match client.subscribe(subj.clone()).await {
-        Ok(s) => s,
-        Err(e) => {
-            warn!(error = %e, subject = %subj, "subscribe ping failed");
-            return;
-        }
-    };
-    info!(subject = %subj, "ping responder ready");
 
-    while let Some(msg) = sub.next().await {
-        let Some(reply) = msg.reply.clone() else {
-            // Pure publishes hit this subject only if the operator
-            // typoed an `nats pub` — log + ignore.
-            warn!(subject = %subj, "ping without reply subject — skipping");
-            continue;
-        };
-        let hb = Heartbeat {
-            pc_id: pc_id.clone(),
-            at: Utc::now(),
-            agent_version: agent_version.clone(),
-            hostname: hostname.clone(),
-            os_family: os_family.clone(),
-            // See module docs: perf fields stay None on ping replies.
-            agent_cpu_pct: None,
-            agent_rss_bytes: None,
-            agent_disk_read_bytes: None,
-            agent_disk_written_bytes: None,
-        };
-        let payload = match serde_json::to_vec(&hb) {
-            Ok(b) => b,
-            Err(e) => {
-                warn!(error = %e, "ping: serialize Heartbeat");
+    // Outer reconnect loop: pre-fix `match client.subscribe ... Err
+    // => return;` killed the ping responder permanently when the
+    // first subscribe failed (e.g. broker still booting). Now we
+    // back off + retry, and if the subscription ever closes (broker
+    // restart, server-side cleanup) we reopen.
+    loop {
+        let mut sub =
+            crate::nats_retry::wait_for_subscribe(&client, &tracker, subj.clone(), "ping").await;
+        info!(subject = %subj, "ping responder ready");
+
+        while let Some(msg) = sub.next().await {
+            let Some(reply) = msg.reply.clone() else {
+                // Pure publishes hit this subject only if the operator
+                // typoed an `nats pub` — log + ignore.
+                warn!(subject = %subj, "ping without reply subject — skipping");
                 continue;
+            };
+            let hb = Heartbeat {
+                pc_id: pc_id.clone(),
+                at: Utc::now(),
+                agent_version: agent_version.clone(),
+                hostname: hostname.clone(),
+                os_family: os_family.clone(),
+                // See module docs: perf fields stay None on ping replies.
+                agent_cpu_pct: None,
+                agent_rss_bytes: None,
+                agent_disk_read_bytes: None,
+                agent_disk_written_bytes: None,
+            };
+            let payload = match serde_json::to_vec(&hb) {
+                Ok(b) => b,
+                Err(e) => {
+                    warn!(error = %e, "ping: serialize Heartbeat");
+                    continue;
+                }
+            };
+            if let Err(e) = client.publish(reply, payload.into()).await {
+                warn!(error = %e, "publish ping reply");
             }
-        };
-        if let Err(e) = client.publish(reply, payload.into()).await {
-            warn!(error = %e, "publish ping reply");
         }
+        warn!(subject = %subj, "ping subscription closed; reopening");
+        crate::nats_retry::reopen_pause().await;
     }
 }

@@ -52,19 +52,29 @@ pub async fn run(
     client: async_nats::Client,
     running_version: String,
     mut cfg_rx: watch::Receiver<EffectiveConfig>,
+    tracker: crate::staleness::Tracker,
 ) {
-    let js = jetstream::new(client);
+    let js = jetstream::new(client.clone());
 
-    let store = match js.get_object_store(OBJECT_AGENT_RELEASES).await {
-        Ok(s) => s,
-        Err(_) => {
-            info!(
-                store = OBJECT_AGENT_RELEASES,
-                "agent_releases Object Store missing — self-update idle"
-            );
-            return;
-        }
-    };
+    // Pre-fix used `match get_object_store ... Err => return;` which
+    // permanently killed the self-update subsystem when the bucket
+    // wasn't provisioned at boot. Live test found a fleet of agents
+    // booted at T0 with no `OBJECT_AGENT_RELEASES` had self-update
+    // dead-as-doorknob even after the bucket was provisioned at T1
+    // — only an agent restart unstuck them.
+    //
+    // Retry with backoff. `wait_for_object_store` returns as soon as
+    // the bucket is reachable (which the broker reconnect path wakes
+    // the tracker for), so recovery is essentially instant once the
+    // operator runs `kanade jetstream setup`.
+    let store = crate::nats_retry::wait_for_object_store(
+        &js,
+        &client,
+        &tracker,
+        OBJECT_AGENT_RELEASES,
+        "self_update",
+    )
+    .await;
 
     // Boot-time loop check: if last_swap.json says we already tried
     // this target with the same running_version, the binary at that

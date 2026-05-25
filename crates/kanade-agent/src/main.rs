@@ -180,11 +180,13 @@ pub(crate) async fn run_agent() -> Result<()> {
         client.clone(),
         AGENT_VERSION.to_string(),
         cfg_rx.clone(),
+        staleness_tracker.clone(),
     ));
     tokio::spawn(logs::serve(
         client.clone(),
         pc_id.clone(),
         std::path::PathBuf::from(&cfg.log.path),
+        staleness_tracker.clone(),
     ));
     // v0.38 / #133: active ping responder. Independent of the
     // periodic heartbeat loop so an operator's "ping" round-trips
@@ -198,6 +200,7 @@ pub(crate) async fn run_agent() -> Result<()> {
             .ok()
             .or_else(|| std::env::var("HOSTNAME").ok()),
         Some(std::env::consts::OS.to_string()),
+        staleness_tracker.clone(),
     ));
 
     // KLP listener (SPEC §2.12) — Windows Named Pipe today, Linux
