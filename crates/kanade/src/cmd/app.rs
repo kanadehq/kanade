@@ -103,11 +103,15 @@ async fn publish(
     validate_segment("name", &name)?;
     validate_segment("version", &version)?;
 
-    let bytes = tokio::fs::read(&binary)
+    // Stream from disk instead of slurping (Gemini #222 MED).
+    // App packages can hit 256 MB — buffering the whole binary
+    // would peak the CLI's RSS unnecessarily, and `Object Store::put`
+    // already takes `&mut impl AsyncRead`, so streaming is the
+    // natural shape.
+    let mut file = tokio::fs::File::open(&binary)
         .await
-        .with_context(|| format!("read {binary:?}"))?;
-    let size = bytes.len();
-    info!(name, version, size, "uploading app package");
+        .with_context(|| format!("open {binary:?}"))?;
+    info!(name, version, "uploading app package");
 
     let js = async_nats::jetstream::new(client);
     let store = js
@@ -117,16 +121,15 @@ async fn publish(
             format!("object store '{OBJECT_APP_PACKAGES}' missing — run `kanade jetstream setup`")
         })?;
     let key = format!("{name}/{version}");
-    let mut cursor = std::io::Cursor::new(bytes);
     let meta = store
-        .put(key.as_str(), &mut cursor)
+        .put(key.as_str(), &mut file)
         .await
         .context("object_store.put")?;
-    info!(name, version, digest = ?meta.digest, "app package uploaded");
+    info!(name, version, size = meta.size, digest = ?meta.digest, "app package uploaded");
 
     println!("published: {key}");
     println!("  object_store : {OBJECT_APP_PACKAGES}/{key}");
-    println!("  size         : {size} bytes");
+    println!("  size         : {} bytes", meta.size);
     if let Some(d) = meta.digest.as_deref() {
         println!("  digest       : {d}");
     }
@@ -142,21 +145,39 @@ async fn list(client: async_nats::Client) -> Result<()> {
             format!("object store '{OBJECT_APP_PACKAGES}' missing — run `kanade jetstream setup`")
         })?;
     let mut list = store.list().await.context("object_store.list")?;
-    let mut rows: Vec<(String, usize, Option<String>)> = Vec::new();
+    let mut rows: Vec<Row> = Vec::new();
     while let Some(item) = list.next().await {
         let meta = item.context("list app packages")?;
-        rows.push((meta.name, meta.size, meta.digest));
+        rows.push(Row {
+            key: meta.name,
+            size: meta.size,
+            digest: meta.digest,
+            modified: meta
+                .modified
+                .and_then(|t| chrono::DateTime::from_timestamp(t.unix_timestamp(), t.nanosecond()))
+                .map(|d| d.to_rfc3339()),
+        });
     }
-    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    rows.sort_by(|a, b| a.key.cmp(&b.key));
     if rows.is_empty() {
         println!("(no app packages)");
         return Ok(());
     }
-    for (key, size, digest) in rows {
-        let dgst = digest.as_deref().unwrap_or("—");
-        println!("{key}\t{size}\t{dgst}");
+    for row in rows {
+        let dgst = row.digest.as_deref().unwrap_or("—");
+        let modt = row.modified.as_deref().unwrap_or("—");
+        // TSV: `<key>\t<size>\t<modified>\t<digest>` — shell-pipe
+        // friendly. SPA Apps page (#218) renders the same fields.
+        println!("{}\t{}\t{}\t{}", row.key, row.size, modt, dgst);
     }
     Ok(())
+}
+
+struct Row {
+    key: String,
+    size: usize,
+    digest: Option<String>,
+    modified: Option<String>,
 }
 
 async fn delete(client: async_nats::Client, name: String, version: String) -> Result<()> {

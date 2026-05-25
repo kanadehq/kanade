@@ -98,27 +98,28 @@ async fn publish(
     validate_segment("name", &name)?;
     validate_segment("version", &version)?;
 
-    let bytes = tokio::fs::read(&file)
+    // Stream from disk (Gemini #222 MED) — bodies cap at 4 MB so
+    // the OOM angle is mild here, but matching the `app publish`
+    // shape keeps the two commands symmetrical for review.
+    let mut reader = tokio::fs::File::open(&file)
         .await
-        .with_context(|| format!("read {file:?}"))?;
-    let size = bytes.len();
-    info!(name, version, size, "uploading script object");
+        .with_context(|| format!("open {file:?}"))?;
+    info!(name, version, "uploading script object");
 
     let js = async_nats::jetstream::new(client);
     let store = js.get_object_store(OBJECT_SCRIPTS).await.with_context(|| {
         format!("object store '{OBJECT_SCRIPTS}' missing — run `kanade jetstream setup`")
     })?;
     let key = format!("{name}/{version}");
-    let mut cursor = std::io::Cursor::new(bytes);
     let meta = store
-        .put(key.as_str(), &mut cursor)
+        .put(key.as_str(), &mut reader)
         .await
         .context("object_store.put")?;
-    info!(name, version, digest = ?meta.digest, "script object uploaded");
+    info!(name, version, size = meta.size, digest = ?meta.digest, "script object uploaded");
 
     println!("published: {key}");
     println!("  object_store : {OBJECT_SCRIPTS}/{key}");
-    println!("  size         : {size} bytes");
+    println!("  size         : {} bytes", meta.size);
     if let Some(d) = meta.digest.as_deref() {
         println!("  digest       : {d}");
     }
@@ -137,21 +138,37 @@ async fn list(client: async_nats::Client) -> Result<()> {
         format!("object store '{OBJECT_SCRIPTS}' missing — run `kanade jetstream setup`")
     })?;
     let mut list = store.list().await.context("object_store.list")?;
-    let mut rows: Vec<(String, usize, Option<String>)> = Vec::new();
+    let mut rows: Vec<Row> = Vec::new();
     while let Some(item) = list.next().await {
         let meta = item.context("list script objects")?;
-        rows.push((meta.name, meta.size, meta.digest));
+        rows.push(Row {
+            key: meta.name,
+            size: meta.size,
+            digest: meta.digest,
+            modified: meta
+                .modified
+                .and_then(|t| chrono::DateTime::from_timestamp(t.unix_timestamp(), t.nanosecond()))
+                .map(|d| d.to_rfc3339()),
+        });
     }
-    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    rows.sort_by(|a, b| a.key.cmp(&b.key));
     if rows.is_empty() {
         println!("(no script objects)");
         return Ok(());
     }
-    for (key, size, digest) in rows {
-        let dgst = digest.as_deref().unwrap_or("—");
-        println!("{key}\t{size}\t{dgst}");
+    for row in rows {
+        let dgst = row.digest.as_deref().unwrap_or("—");
+        let modt = row.modified.as_deref().unwrap_or("—");
+        println!("{}\t{}\t{}\t{}", row.key, row.size, modt, dgst);
     }
     Ok(())
+}
+
+struct Row {
+    key: String,
+    size: usize,
+    digest: Option<String>,
+    modified: Option<String>,
 }
 
 async fn delete(client: async_nats::Client, name: String, version: String) -> Result<()> {
