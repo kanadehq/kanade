@@ -1,4 +1,7 @@
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -9,25 +12,161 @@ use rand::Rng;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command as ProcessCommand;
 use tracing::{info, warn};
+use uuid::Uuid;
 
-/// #43 / PR γ-bot-review: one source of truth for the PowerShell
-/// console-encoding prelude. Both the System path (this file) and the
-/// `run_as: user` path (`process_as_user.rs`) inject it, and the
-/// `powershell_prelude_forces_utf8_output` unit test asserts against
-/// this same constant — so if anyone tweaks the prelude shape in one
-/// place, the test catches drift automatically. Pre-fix the literal
-/// was duplicated three times.
+/// #43: PowerShell console-encoding prelude. Lives in the
+/// launcher script (see [`TempPowerShellLaunch`]) so the user
+/// script's `[CmdletBinding()] / param(...)` headers stay at the
+/// top of their own physical file (PowerShell rejects them
+/// anywhere else). Both `run_as: System` and `run_as: user /
+/// system_gui` paths route through the same launcher.
 pub(crate) const POWERSHELL_UTF8_PRELUDE: &str = "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false; \
      $OutputEncoding = [Console]::OutputEncoding; ";
 
-/// Wrap a user PowerShell script with [`POWERSHELL_UTF8_PRELUDE`] so the
-/// resulting `-Command` value forces UTF-8 on both `[Console]::OutputEncoding`
-/// and `$OutputEncoding` before the user script runs. User scripts can
-/// still override the encoding mid-run (assignment is just a property
-/// set), but the default for any script that doesn't touch encoding
-/// becomes UTF-8 instead of the system OEM codepage.
-pub(crate) fn with_powershell_utf8_prelude(user_script: &str) -> String {
-    format!("{POWERSHELL_UTF8_PRELUDE}{user_script}")
+/// Process-wide staging directory for temp `.ps1` files.
+///
+/// Layout: `%ProgramData%/Kanade/agent-scripts-<uuid>/` on Windows,
+/// `$TMPDIR/kanade-agent-<uuid>/` elsewhere (dev / tests only).
+///
+/// Why `%ProgramData%` and not `%TEMP%`: the agent runs as
+/// LocalSystem; `%TEMP%` for SYSTEM is `C:\Windows\Temp` whose
+/// default ACL does NOT grant Users read access to SYSTEM-created
+/// files. That breaks `run_as: user / system_gui` (child runs as a
+/// non-admin user and would get "access denied" reading the
+/// staged script). `C:\ProgramData` propagates an inherited
+/// "Users: Read & execute" ACE to files SYSTEM creates inside it,
+/// which is exactly what the user-session child needs. Scripts
+/// already travel over NATS where the operator can see them, so
+/// local-read by other users on the box is an acceptable trade.
+///
+/// The UUID suffix prevents a malicious pre-create (symlink, etc.)
+/// because the directory name is unguessable; `create_dir`
+/// (non-clobber) on the leaf is belt-and-braces against the
+/// astronomically-unlikely UUID collision.
+fn staging_dir() -> Result<PathBuf> {
+    static SLOT: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+    let slot = SLOT.get_or_init(|| Mutex::new(None));
+    let mut guard = slot.lock().expect("staging_dir mutex poisoned");
+    if let Some(p) = guard.as_ref() {
+        return Ok(p.clone());
+    }
+    let root = if cfg!(target_os = "windows") {
+        std::env::var_os("ProgramData")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
+            .join("Kanade")
+    } else {
+        std::env::temp_dir()
+    };
+    std::fs::create_dir_all(&root).with_context(|| format!("create_dir_all {}", root.display()))?;
+    let dir = root.join(format!("agent-scripts-{}", Uuid::new_v4().simple()));
+    std::fs::create_dir(&dir).with_context(|| format!("create_dir {}", dir.display()))?;
+    *guard = Some(dir.clone());
+    Ok(dir)
+}
+
+/// A PowerShell script staged to a single temp `.ps1` file.
+///
+/// Used as a building block by [`TempPowerShellLaunch`]; not invoked
+/// directly by the spawn path anymore (the spawn path stages a
+/// launcher/user pair so user-script `[CmdletBinding()] / param(...)`
+/// blocks stay at the top of their file).
+///
+/// Cleanup-on-drop: the file is removed when the struct goes out of
+/// scope. PowerShell reads the script into memory at parse time, so
+/// deleting the file mid-run doesn't affect the running process.
+pub(crate) struct TempPowerShellScript {
+    path: PathBuf,
+}
+
+impl TempPowerShellScript {
+    /// Stage `body` to a fresh BOM-prefixed `.ps1` under the
+    /// per-process [`staging_dir`]. Uses `create_new` semantics
+    /// (Windows `CREATE_NEW` / POSIX `O_EXCL`) so an attacker can't
+    /// substitute the file via a TOCTOU race against the UUID name.
+    pub fn write(body: &str) -> Result<Self> {
+        let dir = staging_dir()?;
+        let path = dir.join(format!("kanade-{}.ps1", Uuid::new_v4().simple()));
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .with_context(|| format!("create_new {}", path.display()))?;
+        // UTF-8 BOM (0xEF 0xBB 0xBF) — PowerShell uses it to detect
+        // UTF-8 encoding without a `chcp 65001` dance. Without it,
+        // a ja-JP host running default CP932 would mis-parse any
+        // multi-byte sequence in the script body.
+        f.write_all(&[0xEF, 0xBB, 0xBF])
+            .with_context(|| format!("write BOM {}", path.display()))?;
+        f.write_all(body.as_bytes())
+            .with_context(|| format!("write body {}", path.display()))?;
+        Ok(Self { path })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempPowerShellScript {
+    fn drop(&mut self) {
+        // Best-effort. The staging dir itself is never removed
+        // (process-lifetime, cleaned by Storage Sense / TEMP GC).
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// A staged user script + launcher pair invoked as
+/// `powershell -File <launcher>`.
+///
+/// Why a pair instead of one file: PowerShell only honors
+/// `[CmdletBinding()] / param(...)` when they're at the **top** of
+/// the script's physical file — prepending an encoding prelude to
+/// the same file (the simpler approach) silently breaks any
+/// operator-shipped `.ps1` that opens with those headers (e.g.
+/// `scripts/deploy-backend.ps1`, surfaced by the
+/// install-kanade-backend live test on 2026-05-26).
+///
+/// Solution: the launcher sets `[Console]::OutputEncoding` etc.
+/// then calls the user script via `&` (call operator), which spawns
+/// a fresh script scope where the user's `param(...)` block applies
+/// to the user file's own arguments.
+pub(crate) struct TempPowerShellLaunch {
+    launcher: TempPowerShellScript,
+    // Kept alive for the launcher's `-File` invocation. The
+    // `_user` underscore marks it dead-code-wise; presence in the
+    // struct is the entire point.
+    _user: TempPowerShellScript,
+}
+
+impl TempPowerShellLaunch {
+    pub fn stage(user_body: &str) -> Result<Self> {
+        let user = TempPowerShellScript::write(user_body)?;
+        // PowerShell single-quoted string literal — escape embedded
+        // `'` by doubling. `to_string_lossy` instead of fallible
+        // `to_str` so a TEMP path with non-UTF-8 surrogates (rare
+        // on Windows but technically representable) still produces
+        // a path we can hand to PowerShell.
+        let user_path = user.path().to_string_lossy().replace('\'', "''");
+        // No explicit `exit $LASTEXITCODE` propagation: that would
+        // make us exit nonzero even when the user script HANDLED a
+        // native command's failure (`$LASTEXITCODE` remains set
+        // from the last native call, not the script's overall
+        // status). PowerShell's default is to exit 0 unless the
+        // user script itself calls `exit N` — which IS propagated
+        // because `exit` aborts the host process, not just the
+        // call-operator scope.
+        let launcher_body = format!("{POWERSHELL_UTF8_PRELUDE}& '{user_path}' @args\n");
+        let launcher = TempPowerShellScript::write(&launcher_body)?;
+        Ok(Self {
+            launcher,
+            _user: user,
+        })
+    }
+
+    pub fn launcher_path(&self) -> &Path {
+        self.launcher.path()
+    }
 }
 
 /// Outcome of a child-process run after kill / timeout / completion races.
@@ -88,16 +227,54 @@ pub async fn run_command_with_kill(
     // cmd.exe doesn't have an equivalent one-liner that survives
     // across legacy / unicode commands; the Cmd branch relies on the
     // tolerant decoder alone.
-    let ps_script;
+    // Keep `_launch` alive through spawn + wait so both staged
+    // files (launcher + user script) outlive PowerShell's parse.
+    // PowerShell loads scripts into memory at parse time, so
+    // removal-on-drop after wait is safe.
+    // Both `_launch` and `launcher_path_owned` are declared in the
+    // outer scope so their backing storage outlives the `args` Vec
+    // (which borrows `&str` into `launcher_path_owned`). `Option`
+    // sidesteps the "value assigned but never read" lint that
+    // dummy-init in the Cmd branch would trip.
+    //
+    // `-File <launcher>` (vs the old `-Command "<body>"`): a body
+    // with `[CmdletBinding()] / param(...)` headers is valid as a
+    // script file but a parse error as a command-line expression.
+    // The launcher sets UTF-8 console encoding then
+    // `& '<user.ps1>' @args` — that call-operator boundary means
+    // headers at the top of the user file stay at the top of THEIR
+    // physical script, which is what PowerShell requires.
+    //
+    // `-ExecutionPolicy Bypass` is needed because -File honors the
+    // host's ExecutionPolicy (Restricted blocks .ps1 entirely);
+    // -Command mode silently bypassed it. Adding Bypass keeps
+    // behavioural parity with the pre-fix path.
+    let _launch: Option<TempPowerShellLaunch>;
+    let launcher_path_owned: Option<String>;
     let (program, args): (&str, Vec<&str>) = match cmd.shell {
         Shell::Powershell => {
-            ps_script = with_powershell_utf8_prelude(&cmd.script);
+            let launch = TempPowerShellLaunch::stage(&cmd.script)?;
+            launcher_path_owned = Some(launch.launcher_path().to_string_lossy().into_owned());
+            _launch = Some(launch);
             (
                 "powershell",
-                vec!["-NoProfile", "-NonInteractive", "-Command", &ps_script],
+                vec![
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    launcher_path_owned.as_deref().unwrap(),
+                ],
             )
         }
-        Shell::Cmd => ("cmd", vec!["/C", &cmd.script]),
+        Shell::Cmd => {
+            _launch = None;
+            // launcher_path_owned stays uninitialized — the Cmd
+            // args Vec doesn't borrow from it, so the compiler
+            // doesn't require an init on this branch.
+            ("cmd", vec!["/C", &cmd.script])
+        }
     };
     let mut builder = ProcessCommand::new(program);
     builder
@@ -399,19 +576,6 @@ mod tests {
     }
 
     #[test]
-    fn powershell_prelude_forces_utf8_output() {
-        // CodeRabbit #83 nitpick: assert against the production
-        // helper, not a duplicated literal. If anyone tweaks the
-        // prelude shape, both the production paths AND this test
-        // pick up the change automatically.
-        let user_script = "Write-Output 'hello'";
-        let combined = super::with_powershell_utf8_prelude(user_script);
-        assert!(combined.contains("[Console]::OutputEncoding"));
-        assert!(combined.contains("UTF8Encoding"));
-        assert!(combined.ends_with(user_script));
-    }
-
-    #[test]
     fn powershell_prelude_constant_shape() {
         // Defensive: ensures the prelude itself ends with `; ` (so
         // the user script slots in cleanly without an explicit
@@ -421,5 +585,108 @@ mod tests {
         assert!(super::POWERSHELL_UTF8_PRELUDE.ends_with("; "));
         assert!(super::POWERSHELL_UTF8_PRELUDE.contains("[Console]::OutputEncoding"));
         assert!(super::POWERSHELL_UTF8_PRELUDE.contains("$OutputEncoding"));
+    }
+
+    #[test]
+    fn temp_powershell_script_writes_bom_then_body_verbatim() {
+        // Regression for the CodeRabbit finding on PR #230 first
+        // pass: the staged user file MUST contain the body
+        // verbatim. Any prelude prepended here would push
+        // `[CmdletBinding()] / param(...)` headers off the top of
+        // the file and re-introduce the parse error the PR was
+        // meant to fix.
+        let script = "[CmdletBinding()] param([string]$X='a'); Write-Output $X";
+        let staged = super::TempPowerShellScript::write(script).expect("write");
+        let bytes = std::fs::read(staged.path()).expect("read back");
+        assert_eq!(
+            &bytes[..3],
+            &[0xEF, 0xBB, 0xBF],
+            "BOM not at start of staged file",
+        );
+        let body_bytes = &bytes[3..];
+        assert_eq!(
+            std::str::from_utf8(body_bytes).unwrap(),
+            script,
+            "user body must be verbatim — no prelude prefix",
+        );
+        assert_eq!(
+            staged.path().extension().and_then(|s| s.to_str()),
+            Some("ps1"),
+        );
+    }
+
+    #[test]
+    fn temp_powershell_script_drop_removes_file() {
+        let staged = super::TempPowerShellScript::write("Write-Output 'x'").expect("write");
+        let path = staged.path().to_path_buf();
+        assert!(path.exists(), "file should exist before drop");
+        drop(staged);
+        assert!(!path.exists(), "file should be gone after drop");
+    }
+
+    #[test]
+    fn temp_powershell_launch_user_file_has_no_prelude() {
+        let user_script =
+            "[CmdletBinding()] param([string]$Foo = 'bar'); Write-Output \"got:$Foo\"";
+        let launch = super::TempPowerShellLaunch::stage(user_script).expect("stage");
+        // Find the user file via the launcher body (it embeds the
+        // single-quoted path). We don't expose the user path
+        // directly because callers never need it — but the test
+        // does, to assert "no prelude on the user side".
+        let launcher_text = std::fs::read_to_string(launch.launcher_path()).expect("read launcher");
+        let start = launcher_text
+            .find("& '")
+            .expect("launcher should invoke user script via call operator");
+        let after = &launcher_text[start + 3..];
+        let end = after.find('\'').expect("launcher path closes its quote");
+        let user_path_in_launcher: String = after[..end].replace("''", "'");
+
+        let user_bytes = std::fs::read(&user_path_in_launcher).expect("read user file");
+        // BOM + body verbatim. NO prelude. The launcher carries the
+        // prelude so the user file's headers stay at the top.
+        assert_eq!(&user_bytes[..3], &[0xEF, 0xBB, 0xBF]);
+        let body = std::str::from_utf8(&user_bytes[3..]).unwrap();
+        assert_eq!(body, user_script);
+        assert!(
+            !body.contains("[Console]::OutputEncoding"),
+            "user file must not carry the encoding prelude",
+        );
+    }
+
+    #[test]
+    fn temp_powershell_launch_launcher_carries_prelude_then_invokes_user() {
+        let launch = super::TempPowerShellLaunch::stage("Write-Output 'hi'").expect("stage");
+        let launcher_text = std::fs::read_to_string(launch.launcher_path()).expect("read launcher");
+        assert!(
+            launcher_text.contains("[Console]::OutputEncoding"),
+            "launcher must set console encoding before invoking user",
+        );
+        assert!(
+            launcher_text.contains("& '") && launcher_text.contains("' @args"),
+            "launcher must invoke user via call operator with @args splat",
+        );
+        // Prelude precedes the call operator (encoding takes
+        // effect before any user output).
+        let prelude_pos = launcher_text.find("[Console]::OutputEncoding").unwrap();
+        let call_pos = launcher_text.find("& '").unwrap();
+        assert!(prelude_pos < call_pos);
+    }
+
+    #[test]
+    fn temp_powershell_launch_drop_removes_both_files() {
+        let launch = super::TempPowerShellLaunch::stage("Write-Output 'x'").expect("stage");
+        let launcher_path = launch.launcher_path().to_path_buf();
+        // Pull user path out of the launcher body before drop.
+        let launcher_text = std::fs::read_to_string(&launcher_path).expect("read launcher");
+        let start = launcher_text.find("& '").unwrap() + 3;
+        let end = launcher_text[start..].find('\'').unwrap();
+        let user_path =
+            std::path::PathBuf::from(launcher_text[start..start + end].replace("''", "'"));
+
+        assert!(launcher_path.exists());
+        assert!(user_path.exists());
+        drop(launch);
+        assert!(!launcher_path.exists(), "launcher must be removed on drop");
+        assert!(!user_path.exists(), "user file must be removed on drop");
     }
 }

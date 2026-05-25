@@ -71,9 +71,12 @@ pub async fn run_command_in_user_session(
 ) -> Result<ExecOutcome> {
     debug_assert!(matches!(run_as, RunAs::User | RunAs::SystemGui));
 
-    let cmd_line = build_command_line(cmd);
+    let (cmd_line, _launch) = build_command_line(cmd)?;
     let cwd = cmd.cwd.clone();
     // 1) Spawn on a blocking thread (Win32 dance is sync).
+    //    `_launch` (if any) stays in scope here until this fn
+    //    returns; PowerShell parses both staged files at spawn
+    //    time so they only need to live across `spawn_native`.
     let SpawnHandles {
         process,
         stdout_read,
@@ -429,24 +432,40 @@ impl Drop for EnvBlockGuard {
     }
 }
 
-fn build_command_line(cmd: &Command) -> Vec<u16> {
-    // #43: mirror the System-path UTF-8 prelude (process.rs) so a
-    // `run_as: user` PowerShell job sees the same console encoding
-    // contract as `run_as: system`. Without this, ja-JP / DE / KR
-    // / CN users hitting the user-session branch would still get
-    // CP932 / OEM bytes on stdout — and although our reader is
-    // already lossy here (the `read_to_string` helper does
-    // `from_utf8_lossy` since v0.21), the JSON inventory output
-    // becomes mojibake instead of clean text. Shared helper from
-    // `crate::process` so both spawn paths use the same prelude
-    // shape (CodeRabbit #83 nitpick: avoid duplicated literal).
-    let ps_script;
+fn build_command_line(
+    cmd: &Command,
+) -> Result<(Vec<u16>, Option<crate::process::TempPowerShellLaunch>)> {
+    // PowerShell launcher pattern (see
+    // `crate::process::TempPowerShellLaunch` for the rationale):
+    // - The launcher carries the UTF-8 console-encoding prelude
+    //   (#43, ja-JP / DE / KR / CN users get clean stdout instead
+    //   of CP932 / OEM bytes).
+    // - The launcher invokes the user script via `&` so the user
+    //   script's `[CmdletBinding()] / param(...)` headers stay at
+    //   the top of their physical file (PowerShell rejects them
+    //   anywhere else).
+    // - Staging dir is `%ProgramData%/Kanade/agent-scripts-<uuid>/`
+    //   which inherits "Users: Read & execute" — important here
+    //   because the agent (LocalSystem) writes the file but the
+    //   child runs as the user, and `C:\Windows\Temp` would block
+    //   the child's read.
+    let mut launch: Option<crate::process::TempPowerShellLaunch> = None;
+    let path_owned: String;
     let (program, args): (&str, Vec<&str>) = match cmd.shell {
         Shell::Powershell => {
-            ps_script = crate::process::with_powershell_utf8_prelude(&cmd.script);
+            let staged = crate::process::TempPowerShellLaunch::stage(&cmd.script)?;
+            path_owned = staged.launcher_path().to_string_lossy().into_owned();
+            launch = Some(staged);
             (
                 "powershell.exe",
-                vec!["-NoProfile", "-NonInteractive", "-Command", &ps_script],
+                vec![
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    path_owned.as_str(),
+                ],
             )
         }
         Shell::Cmd => ("cmd.exe", vec!["/C", &cmd.script]),
@@ -461,5 +480,5 @@ fn build_command_line(cmd: &Command) -> Vec<u16> {
     }
     let mut wide: Vec<u16> = full.encode_wide().collect();
     wide.push(0);
-    wide
+    Ok((wide, launch))
 }
