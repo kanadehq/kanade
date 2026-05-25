@@ -379,15 +379,30 @@ async fn resolve_script_source(
         ),
     ))?;
     let b64 = raw.strip_prefix("SHA-256=").unwrap_or(raw);
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(b64)
-        .map_err(|e| {
-            warn!(error = %e, %key, raw, "exec: decode object_store digest");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("decode digest for '{key}': {e}"),
-            )
-        })?;
+    // NATS async-nats emits digests in URL-safe base64 WITH `=`
+    // padding (e.g. `SHA-256=pzGZSHXYLupCjS_RB0lmdLNHpgyH53Y5vI8XYhb2H1o=`).
+    // The original `URL_SAFE_NO_PAD` rejected the trailing `=` (a
+    // copy-paste from a URL-safe-id case). Use an Indifferent
+    // padding-mode config so a future broker emitting unpadded
+    // digests doesn't break us — the crate's stock `URL_SAFE`
+    // engine has `RequireCanonical` (Gemini #225) which would
+    // re-introduce the same fragility in the other direction.
+    // Bug surfaced during a live install-kanade-backend self-test
+    // (#222 + #224 flow) as a 500 "Invalid padding" from
+    // /api/exec/<job>.
+    use base64::alphabet::URL_SAFE;
+    use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
+    static DECODER: GeneralPurpose = GeneralPurpose::new(
+        &URL_SAFE,
+        GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent),
+    );
+    let bytes = DECODER.decode(b64).map_err(|e| {
+        warn!(error = %e, %key, raw, "exec: decode object_store digest");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("decode digest for '{key}': {e}"),
+        )
+    })?;
     let digest = hex_lower(&bytes);
 
     Ok((String::new(), Some((key.to_owned(), digest))))
