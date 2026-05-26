@@ -46,7 +46,11 @@ apm_modules/
 
 # mdBook build output. Source lives in book/src/, translations in
 # book/po/; build artifacts are deployed by .github/workflows/docs.yml.
-# `book/book/` is the default mdbook output dir; `book/build/` is
-# the multi-language layout (build/en/, build/ja/) the CI uses.
+# `book/book/` is the default mdbook output dir, `book/build/` is
+# the multi-language layout (build/en/, build/ja/) the CI uses,
+# `book/po-tmp/` is the scratch dir from `po/README.md`'s
+# extract-template workflow (cleaned up at the end of that flow
+# but ignored here in case the operator interrupts it).
 /book/book/
 /book/build/
+/book/po-tmp/

@@ -36,5 +36,13 @@ boost-title = 2
 # entries fall back to the source English, so a partial
 # translation shows whichever paragraphs haven't been touched yet
 # in English instead of an empty page.
+#
+# Intentionally no `[output.xgettext]` section here, despite the
+# `book/po/README.md` workflow using mdbook-xgettext: registering
+# a second renderer makes the html output land under
+# `build/en/html/` instead of `build/en/`, which would break the
+# `/kanade/en/` GH Pages path. The extraction workflow sets
+# `MDBOOK_OUTPUT__XGETTEXT__POT_FILE=...` instead, which enables
+# the renderer for that single invocation only.
 [preprocessor.gettext]
 after = ["links"]
