@@ -10,6 +10,7 @@
     - [Updating kanade-client](./operations/agent-mediated-updates/client.md)
     - [Updating NATS server](./operations/agent-mediated-updates/nats.md)
     - [Updating kanade-agent itself](./operations/agent-mediated-updates/agent-self.md)
+- [Removing kanade (undeploy)](./operations/undeploy.md)
 
 # For developers
 
