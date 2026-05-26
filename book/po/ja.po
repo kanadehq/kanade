@@ -30,27 +30,27 @@ msgstr "概要"
 
 #: src\SUMMARY.md:8 src\operations/agent-mediated-updates/index.md:1
 msgid "Agent-mediated updates"
-msgstr ""
+msgstr "agent 経由のアップデート"
 
 #: src\SUMMARY.md:9 src\operations/agent-mediated-updates/backend.md:1
 msgid "Updating kanade-backend"
-msgstr ""
+msgstr "kanade-backend のアップデート"
 
 #: src\SUMMARY.md:10 src\operations/agent-mediated-updates/client.md:1
 msgid "Updating kanade-client"
-msgstr ""
+msgstr "kanade-client のアップデート"
 
 #: src\SUMMARY.md:11 src\operations/agent-mediated-updates/nats.md:1
 msgid "Updating NATS server"
-msgstr ""
+msgstr "NATS サーバーのアップデート"
 
 #: src\SUMMARY.md:12 src\operations/agent-mediated-updates/agent-self.md:1
 msgid "Updating kanade-agent itself"
-msgstr ""
+msgstr "kanade-agent 自身のアップデート"
 
 #: src\SUMMARY.md:14
 msgid "For developers"
-msgstr ""
+msgstr "開発者向け"
 
 #: src\SUMMARY.md:16 src\developing/writing-agent-scripts.md:1
 msgid "Writing scripts for the agent"
@@ -58,7 +58,7 @@ msgstr ""
 
 #: src\SUMMARY.md:20 src\reference/spec.md:1
 msgid "Spec (legacy single-page)"
-msgstr ""
+msgstr "仕様 (旧 single-page)"
 
 #: src\introduction.md:3
 msgid ""
@@ -67,64 +67,76 @@ msgid ""
 "inventory, and stream live perf data from hundreds of PCs at once. The "
 "pieces:"
 msgstr ""
+"**kanade — 奏** は Windows 端末群の管理システムです。operator はひとつの "
+"CLI / SPA から、数百台規模の PC に対してスクリプト実行・ソフトウェア配布・"
+"インベントリ収集・ライブのパフォーマンスデータ取得を一気にこなせます。"
+"構成要素:"
 
 #: src\introduction.md:8
 msgid "Component"
-msgstr ""
+msgstr "コンポーネント"
 
 #: src\introduction.md:8
 msgid "What it is"
-msgstr ""
+msgstr "役割"
 
 #: src\introduction.md:10
 msgid "**kanade-agent**"
-msgstr ""
+msgstr "**kanade-agent**"
 
 #: src\introduction.md:10
 msgid ""
 "Service that runs on each managed PC. Subscribes to NATS, executes commands, "
 "ships results."
 msgstr ""
+"管理対象 PC 上で動く Windows サービス。NATS を購読し、コマンドを実行して結果"
+"を送り返します。"
 
 #: src\introduction.md:11
 msgid "**kanade-backend**"
-msgstr ""
+msgstr "**kanade-backend**"
 
 #: src\introduction.md:11
 msgid ""
 "HTTP API + projector. Persists state, serves the SPA, exposes operator "
 "endpoints."
 msgstr ""
+"HTTP API + projector。状態を永続化し、SPA を配信し、operator 用エンドポイント"
+"を公開します。"
 
 #: src\introduction.md:12
 msgid "**kanade-client**"
-msgstr ""
+msgstr "**kanade-client**"
 
 #: src\introduction.md:12
 msgid "Optional Tauri desktop app. End-user-facing surface."
-msgstr ""
+msgstr "オプションの Tauri デスクトップアプリ。エンドユーザー向け UI。"
 
 #: src\introduction.md:13
 msgid "**NATS server**"
-msgstr ""
+msgstr "**NATS server**"
 
 #: src\introduction.md:13
 msgid ""
 "Message broker for command fan-out + result aggregation. The agent talks "
 "NATS-only; the backend reads NATS too."
 msgstr ""
+"コマンドのファンアウトと結果集約を担うメッセージブローカー。agent は NATS "
+"だけと話し、backend も NATS から読みます。"
 
 #: src\introduction.md:14
 msgid "**kanade CLI**"
-msgstr ""
+msgstr "**kanade CLI**"
 
 #: src\introduction.md:14
 msgid "Operator-facing command line: publish binaries, fire jobs, query state."
 msgstr ""
+"operator が使うコマンドライン。バイナリの publish、ジョブの起動、状態の照会"
+"を行います。"
 
 #: src\introduction.md:16
 msgid "This site covers two audiences:"
-msgstr ""
+msgstr "このサイトは 2 種類の読者を想定しています:"
 
 #: src\introduction.md:18
 msgid ""
@@ -132,6 +144,8 @@ msgid ""
 "ssh-ing into endpoints (see [Agent-mediated "
 "updates](./operations/agent-mediated-updates/index.md))."
 msgstr ""
+"**operator** (kanade fleet の運用者) — 各端末に ssh せずに各コンポーネントを"
+"アップデートする方法 ([agent 経由のアップデート](./operations/agent-mediated-updates/index.md) 参照)。"
 
 #: src\introduction.md:21
 msgid ""
@@ -139,6 +153,8 @@ msgid ""
 "what doesn't, what changed in recent agent versions (see [Writing scripts "
 "for the agent](./developing/writing-agent-scripts.md))."
 msgstr ""
+"**開発者** (agent が実行する PowerShell ジョブを書く人) — 何が動いて何が動か"
+"ないか、最近の agent バージョンで何が変わったか ([agent 向けスクリプトを書く](./developing/writing-agent-scripts.md) 参照)。"
 
 #: src\introduction.md:25
 msgid ""
@@ -146,14 +162,16 @@ msgid ""
 "(the legacy single-page document; will be split into chapters as the docs "
 "site fills out)."
 msgstr ""
+"詳細なプロトコル / on-wire 仕様は [Spec](./reference/spec.md) にあります "
+"(旧 single-page ドキュメント。docs サイトが整うにつれて章別に分割予定)。"
 
 #: src\operations/overview.md:1
 msgid "Operations overview"
-msgstr ""
+msgstr "運用概要"
 
 #: src\operations/overview.md:3
 msgid "Day-2 operations in kanade fall into two flows:"
-msgstr ""
+msgstr "kanade の day-2 運用は 2 つのフローに分かれます:"
 
 #: src\operations/overview.md:5
 msgid ""
@@ -163,6 +181,11 @@ msgid ""
 "`scripts/deploy-backend.ps1`, `scripts/deploy-nats.ps1`. Run **manually** on "
 "the target host."
 msgstr ""
+"**直接インストール** — まっさらなホストにバイナリと config を置いて Windows "
+"サービスを登録します。最初の agent、最初の backend、NATS サーバーをブート"
+"ストラップするときに使います。スクリプト: `scripts/deploy-agent.ps1`、"
+"`scripts/deploy-backend.ps1`、`scripts/deploy-nats.ps1`。対象ホスト上で"
+"**手動で**実行します。"
 
 #: src\operations/overview.md:11
 msgid ""
@@ -172,33 +195,44 @@ msgid ""
 "the agent fetches, verifies, swaps, and restarts services. This is the bulk "
 "of day-2 operations."
 msgstr ""
+"**agent 経由のアップデート** — agent がいったん動き出せば、その agent 自身が "
+"ssh / RDP なしで同じホスト上の他コンポーネントをインストール・更新できます。"
+"operator はバイナリとスクリプト本体をブローカーに publish し、ジョブを起動。"
+"agent が fetch・検証・swap・サービス再起動を行います。day-2 運用の大半はこれ。"
 
 #: src\operations/overview.md:18
 msgid ""
 "The agent-mediated flow has the same shape regardless of what you're "
 "updating:"
 msgstr ""
+"agent 経由フローの形は、何をアップデートする場合でも同じです:"
 
 #: src\operations/overview.md:34
 msgid "Component-specific guides:"
-msgstr ""
+msgstr "コンポーネント別ガイド:"
 
 #: src\operations/overview.md:36
 msgid ""
 "[kanade-backend](./agent-mediated-updates/backend.md) — the HTTP / projector "
 "binary"
 msgstr ""
+"[kanade-backend](./agent-mediated-updates/backend.md) — HTTP / projector "
+"バイナリ"
 
 #: src\operations/overview.md:38
 msgid ""
 "[kanade-client](./agent-mediated-updates/client.md) — the Tauri end-user app"
 msgstr ""
+"[kanade-client](./agent-mediated-updates/client.md) — Tauri 製の"
+"エンドユーザーアプリ"
 
 #: src\operations/overview.md:40
 msgid ""
 "[NATS server](./agent-mediated-updates/nats.md) — the broker itself (yes, "
 "you can update the broker over the broker)"
 msgstr ""
+"[NATS サーバー](./agent-mediated-updates/nats.md) — ブローカー本体 (はい、"
+"ブローカー越しにブローカーをアップデートできます)"
 
 #: src\operations/overview.md:42
 msgid ""
@@ -206,6 +240,9 @@ msgid ""
 "self-update path (different from the other three; it uses a dedicated "
 "rollout bucket, not the generic OBJECT_APP_PACKAGES + script pair)"
 msgstr ""
+"[kanade-agent 自身](./agent-mediated-updates/agent-self.md) — agent の "
+"self-update 経路 (他 3 つと違い、汎用の OBJECT_APP_PACKAGES + script ペア"
+"ではなく専用の rollout バケットを使います)"
 
 #: src\operations/agent-mediated-updates/index.md:3
 msgid ""
@@ -214,149 +251,165 @@ msgid ""
 "component — including the backend it talks to, the broker that carries its "
 "messages, and the agent itself."
 msgstr ""
+"agent は万能インストーラーです。対象ホストで動き出してしまえば、他のどの"
+"コンポーネントをアップデートするときも operator がホストに直接触る必要は"
+"ありません — agent が話している backend も、メッセージを運ぶブローカーも、"
+"agent 自身も対象です。"
 
 #: src\operations/agent-mediated-updates/index.md:8
 msgid "This chapter has one page per component:"
-msgstr ""
+msgstr "この章はコンポーネントごとに 1 ページずつあります:"
 
 #: src\operations/agent-mediated-updates/index.md:10
 msgid "[kanade-backend](./backend.md)"
-msgstr ""
+msgstr "[kanade-backend](./backend.md)"
 
 #: src\operations/agent-mediated-updates/index.md:11
 msgid "[kanade-client](./client.md)"
-msgstr ""
+msgstr "[kanade-client](./client.md)"
 
 #: src\operations/agent-mediated-updates/index.md:12
 msgid "[NATS server](./nats.md)"
-msgstr ""
+msgstr "[NATS サーバー](./nats.md)"
 
 #: src\operations/agent-mediated-updates/index.md:13
 msgid "[kanade-agent self-update](./agent-self.md)"
-msgstr ""
+msgstr "[kanade-agent self-update](./agent-self.md)"
 
 #: src\operations/agent-mediated-updates/index.md:15
 msgid "Common machinery used by all of them:"
-msgstr ""
+msgstr "全コンポーネントで共通の仕組み:"
 
 #: src\operations/agent-mediated-updates/index.md:17
 msgid "Bucket / Stream"
-msgstr ""
+msgstr "バケット / ストリーム"
 
 #: src\operations/agent-mediated-updates/index.md:17
 #: src\operations/agent-mediated-updates/agent-self.md:10
 msgid "Purpose"
-msgstr ""
+msgstr "用途"
 
 #: src\operations/agent-mediated-updates/index.md:19
 msgid "`OBJECT_APP_PACKAGES`"
-msgstr ""
+msgstr "`OBJECT_APP_PACKAGES`"
 
 #: src\operations/agent-mediated-updates/index.md:19
 msgid ""
 "Generic binary storage (backend, client, NATS server, …). Keyed by "
 "`<name>/<version>`."
 msgstr ""
+"汎用バイナリストレージ (backend、client、NATS サーバーなど)。キーは "
+"`<name>/<version>`。"
 
 #: src\operations/agent-mediated-updates/index.md:20
 msgid "`OBJECT_SCRIPTS`"
-msgstr ""
+msgstr "`OBJECT_SCRIPTS`"
 
 #: src\operations/agent-mediated-updates/index.md:20
 msgid ""
 "PowerShell script bodies referenced by manifests via `script_object`. Keyed "
 "by `<name>/<version>`."
 msgstr ""
+"マニフェストが `script_object` で参照する PowerShell スクリプト本体。"
+"キーは `<name>/<version>`。"
 
 #: src\operations/agent-mediated-updates/index.md:21
 #: src\operations/agent-mediated-updates/agent-self.md:12
 msgid "`OBJECT_AGENT_RELEASES`"
-msgstr ""
+msgstr "`OBJECT_AGENT_RELEASES`"
 
 #: src\operations/agent-mediated-updates/index.md:21
 msgid ""
 "Agent binaries only. Separate from `APP_PACKAGES` because agent rollout has "
 "its own watcher / target_version flow."
 msgstr ""
+"agent バイナリ専用。agent の rollout 専用の watcher / target_version "
+"フローを持つので `APP_PACKAGES` とは別バケットになっています。"
 
 #: src\operations/agent-mediated-updates/index.md:22
 msgid "`agent_config` (KV)"
-msgstr ""
+msgstr "`agent_config` (KV)"
 
 #: src\operations/agent-mediated-updates/index.md:22
 msgid ""
 "Layered config — global / per-group / per-PC. `target_version` lives here."
 msgstr ""
+"レイヤード config — global / グループ別 / PC 別。`target_version` はここ"
+"に置かれます。"
 
 #: src\operations/agent-mediated-updates/index.md:23
 msgid "`jobs` (KV)"
-msgstr ""
+msgstr "`jobs` (KV)"
 
 #: src\operations/agent-mediated-updates/index.md:23
 msgid "Job catalog. Each entry is a manifest the operator can `exec`."
 msgstr ""
+"ジョブカタログ。各エントリは operator が `exec` できるマニフェストです。"
 
 #: src\operations/agent-mediated-updates/index.md:25
 msgid "The CLI surface:"
-msgstr ""
+msgstr "CLI コマンド一覧:"
 
 #: src\operations/agent-mediated-updates/index.md:27
 msgid "Command"
-msgstr ""
+msgstr "コマンド"
 
 #: src\operations/agent-mediated-updates/index.md:27
 msgid "What it does"
-msgstr ""
+msgstr "動作"
 
 #: src\operations/agent-mediated-updates/index.md:29
 msgid "`kanade app publish <name> <version> <file>`"
-msgstr ""
+msgstr "`kanade app publish <name> <version> <file>`"
 
 #: src\operations/agent-mediated-updates/index.md:29
 msgid "Upload to `OBJECT_APP_PACKAGES`."
-msgstr ""
+msgstr "`OBJECT_APP_PACKAGES` にアップロード。"
 
 #: src\operations/agent-mediated-updates/index.md:30
 msgid "`kanade script publish <name> <version> <file>`"
-msgstr ""
+msgstr "`kanade script publish <name> <version> <file>`"
 
 #: src\operations/agent-mediated-updates/index.md:30
 msgid "Upload to `OBJECT_SCRIPTS`."
-msgstr ""
+msgstr "`OBJECT_SCRIPTS` にアップロード。"
 
 #: src\operations/agent-mediated-updates/index.md:31
 msgid "`kanade job create <yaml>`"
-msgstr ""
+msgstr "`kanade job create <yaml>`"
 
 #: src\operations/agent-mediated-updates/index.md:31
 msgid "Upsert a job manifest into the `jobs` KV."
-msgstr ""
+msgstr "`jobs` KV にジョブマニフェストを upsert。"
 
 #: src\operations/agent-mediated-updates/index.md:32
 msgid "`kanade exec <job-id> --pcs <pc> [--pcs <pc> …]`"
-msgstr ""
+msgstr "`kanade exec <job-id> --pcs <pc> [--pcs <pc> …]`"
 
 #: src\operations/agent-mediated-updates/index.md:32
 msgid "Fire a registered job at a set of PCs."
-msgstr ""
+msgstr "登録済みジョブを PC 群に対して起動。"
 
 #: src\operations/agent-mediated-updates/index.md:33
 msgid "`kanade agent publish <file>`"
-msgstr ""
+msgstr "`kanade agent publish <file>`"
 
 #: src\operations/agent-mediated-updates/index.md:33
 msgid "Upload an agent binary (version extracted from PE VERSIONINFO)."
 msgstr ""
+"agent バイナリをアップロード (バージョンは PE VERSIONINFO から自動抽出)。"
 
 #: src\operations/agent-mediated-updates/index.md:34
 msgid "`kanade agent rollout <version> --pc \\| --group \\| --global`"
-msgstr ""
+msgstr "`kanade agent rollout <version> --pc \\| --group \\| --global`"
 
 #: src\operations/agent-mediated-updates/index.md:34
 msgid ""
 "Flip `target_version` on the chosen scope; agents pick it up via their "
 "self-update watcher."
 msgstr ""
+"指定スコープの `target_version` を切り替え。各 agent は self-update "
+"watcher 経由でこれを拾います。"
 
 #: src\operations/agent-mediated-updates/backend.md:3
 msgid ""
@@ -365,10 +418,14 @@ msgid ""
 "the service, swaps the binary, starts it back up — while the operator never "
 "logs into the host."
 msgstr ""
+"backend は管理対象ホスト 1 台 (またはそれ以上) で Windows サービスとして"
+"動いています。agent 経由のアップデートとはつまり、そのホスト上で動いている "
+"agent がサービスを止め、バイナリを差し替え、再起動するという話 — operator は"
+"そのホストに一度もログインしません。"
 
 #: src\operations/agent-mediated-updates/backend.md:8
 msgid "End-to-end flow"
-msgstr ""
+msgstr "end-to-end フロー"
 
 #: src\operations/agent-mediated-updates/backend.md:41
 msgid ""
@@ -377,26 +434,29 @@ msgid ""
 "by the script before the swap (binary integrity, defined by the operator in "
 "`$AgentSourceSha256`)."
 msgstr ""
+"sha チェックが 2 段ある理由は意図的: スクリプト本体のハッシュは agent が"
+"実行前に検証 (スクリプトの完全性)、バイナリのハッシュはスクリプトが swap "
+"前に検証 (バイナリの完全性、operator が `$AgentSourceSha256` で指定)。"
 
 #: src\operations/agent-mediated-updates/backend.md:47
 #: src\operations/agent-mediated-updates/client.md:28
 #: src\operations/agent-mediated-updates/agent-self.md:33
 msgid "Step-by-step"
-msgstr ""
+msgstr "ステップごとの手順"
 
 #: src\operations/agent-mediated-updates/backend.md:49
 msgid "1. Build kanade-backend"
-msgstr ""
+msgstr "1. kanade-backend をビルド"
 
 #: src\operations/agent-mediated-updates/backend.md:55
 msgid "Output: `target/release/kanade-backend.exe`."
-msgstr ""
+msgstr "出力: `target/release/kanade-backend.exe`。"
 
 #: src\operations/agent-mediated-updates/backend.md:57
 #: src\operations/agent-mediated-updates/client.md:38
 #: src\operations/agent-mediated-updates/nats.md:64
 msgid "2. Publish the binary"
-msgstr ""
+msgstr "2. バイナリを publish"
 
 #: src\operations/agent-mediated-updates/backend.md:63
 msgid ""
@@ -404,14 +464,18 @@ msgid ""
 "prints the sha-256 digest. **Copy the digest** — you'll need its "
 "lowercase-hex form for the script."
 msgstr ""
+"これでバイナリが `OBJECT_APP_PACKAGES/kanade-backend/0.43.0` にアップ"
+"ロードされ、sha-256 digest が表示されます。**digest を控えておきましょう** — "
+"後でスクリプトに lowercase-hex 形式で書き込みます。"
 
 #: src\operations/agent-mediated-updates/backend.md:67
 msgid "3. Edit `scripts/deploy-backend.ps1`"
-msgstr ""
+msgstr "3. `scripts/deploy-backend.ps1` を編集"
 
 #: src\operations/agent-mediated-updates/backend.md:69
 msgid "Make a local copy. Set the four `$Agent*` knobs at the top:"
 msgstr ""
+"ローカルコピーを作って、先頭の 4 つの `$Agent*` ノブをセットします:"
 
 #: src\operations/agent-mediated-updates/backend.md:71
 msgid ""
@@ -422,6 +486,12 @@ msgid ""
 "$AgentSourceAuthToken = '<bearer for the backend HTTP API>'\n"
 "```"
 msgstr ""
+"```powershell\n"
+"$AgentSourceUrl       = 'http://kanade-backend.example.com:8080'\n"
+"$AgentSourceVersion   = '0.43.0'\n"
+"$AgentSourceSha256    = '<kanade-backend.exe の lowercase hex>'\n"
+"$AgentSourceAuthToken = '<backend HTTP API 用 bearer>'\n"
+"```"
 
 #: src\operations/agent-mediated-updates/backend.md:78
 msgid ""
@@ -429,12 +499,17 @@ msgid ""
 "it's running in \"agent mode\" (downloading from the backend) vs the "
 "manual-install mode (local folder of files)."
 msgstr ""
+"スクリプトの他の部分は触らないでください — このノブが「agent モード」"
+"(backend からダウンロード) と「手動インストールモード」(ローカルフォルダから "
+"読み込み) を切り替えるトリガになっています。"
 
 #: src\operations/agent-mediated-updates/backend.md:82
 msgid ""
 "The `$AgentSourceSha256` is the hex form of `Get-FileHash kanade-backend.exe "
 "-Algorithm SHA256`."
 msgstr ""
+"`$AgentSourceSha256` は `Get-FileHash kanade-backend.exe -Algorithm SHA256` "
+"の hex 形式の値です。"
 
 #: src\operations/agent-mediated-updates/backend.md:85
 msgid ""
@@ -442,12 +517,17 @@ msgid ""
 "it. The base64 from the CLI is URL-safe and may be unpadded, so the "
 "PowerShell snippet needs to re-pad before `FromBase64String` accepts it:"
 msgstr ""
+"`kanade app publish` の出力にある base64url 形式しか手元にない場合は decode "
+"します。CLI から出る base64 は URL-safe で padding なしのことがあるので、"
+"`FromBase64String` に通す前に padding を補う必要があります:"
 
 #: src\operations/agent-mediated-updates/backend.md:97
 msgid ""
 "Or in Python: `python -c \"import base64; "
 "print(base64.urlsafe_b64decode('<b64>' + '=' * (-len('<b64>') % 4)).hex())\"`"
 msgstr ""
+"Python の場合: `python -c \"import base64; "
+"print(base64.urlsafe_b64decode('<b64>' + '=' * (-len('<b64>') % 4)).hex())\"`"
 
 #: src\operations/agent-mediated-updates/backend.md:100
 msgid ""
@@ -455,18 +535,21 @@ msgid ""
 "the backend's `/api/app-packages/<name>/<ver>` endpoint returns HTTP 401 "
 "without it. Leave empty only for no-auth lab setups."
 msgstr ""
+"`$AgentSourceAuthToken` は 2026-05-26 の live test 以降必須です — backend "
+"の `/api/app-packages/<name>/<ver>` エンドポイントは token なしだと HTTP 401 "
+"を返します。auth なしの lab 環境のときだけ空のままで OK。"
 
 #: src\operations/agent-mediated-updates/backend.md:105
 msgid "4. Publish the edited script"
-msgstr ""
+msgstr "4. 編集したスクリプトを publish"
 
 #: src\operations/agent-mediated-updates/backend.md:111
 msgid "Upload goes to `OBJECT_SCRIPTS/deploy-backend/0.43.0`."
-msgstr ""
+msgstr "アップロード先は `OBJECT_SCRIPTS/deploy-backend/0.43.0`。"
 
 #: src\operations/agent-mediated-updates/backend.md:113
 msgid "5. Register / update the job"
-msgstr ""
+msgstr "5. ジョブを登録 / 更新"
 
 #: src\operations/agent-mediated-updates/backend.md:115
 msgid ""
@@ -474,16 +557,19 @@ msgid ""
 "`version:` + `script_object:` to point at the version you just published, "
 "then upsert:"
 msgstr ""
+"リポジトリの `jobs/install-kanade-backend.yaml` がテンプレートです。"
+"`version:` と `script_object:` をいま publish したバージョンに合わせて編集"
+"してから upsert:"
 
 #: src\operations/agent-mediated-updates/backend.md:120
 #: src\operations/agent-mediated-updates/client.md:69
 #: src\operations/agent-mediated-updates/nats.md:93
 msgid "id"
-msgstr ""
+msgstr "id"
 
 #: src\operations/agent-mediated-updates/backend.md:120
 msgid "install-kanade-backend"
-msgstr ""
+msgstr "install-kanade-backend"
 
 #: src\operations/agent-mediated-updates/backend.md:120
 #: src\operations/agent-mediated-updates/client.md:69
@@ -491,86 +577,93 @@ msgstr ""
 #: src\operations/agent-mediated-updates/client.md:84
 #: src\operations/agent-mediated-updates/nats.md:93
 msgid "version"
-msgstr ""
+msgstr "version"
 
 #: src\operations/agent-mediated-updates/backend.md:121
 #: src\operations/agent-mediated-updates/client.md:70
 #: src\operations/agent-mediated-updates/nats.md:94
 msgid "execute"
-msgstr ""
+msgstr "execute"
 
 #: src\operations/agent-mediated-updates/backend.md:123
 #: src\operations/agent-mediated-updates/client.md:72
 #: src\operations/agent-mediated-updates/nats.md:96
 msgid "shell"
-msgstr ""
+msgstr "shell"
 
 #: src\operations/agent-mediated-updates/backend.md:123
 #: src\operations/agent-mediated-updates/client.md:72
 #: src\operations/agent-mediated-updates/nats.md:96
 msgid "powershell"
-msgstr ""
+msgstr "powershell"
 
 #: src\operations/agent-mediated-updates/backend.md:124
 #: src\operations/agent-mediated-updates/nats.md:97
 msgid "script_object"
-msgstr ""
+msgstr "script_object"
 
 #: src\operations/agent-mediated-updates/backend.md:124
 msgid "deploy-backend/0.43.0"
-msgstr ""
+msgstr "deploy-backend/0.43.0"
 
 #: src\operations/agent-mediated-updates/backend.md:125
 #: src\operations/agent-mediated-updates/nats.md:98
 msgid "timeout"
-msgstr ""
+msgstr "timeout"
 
 #: src\operations/agent-mediated-updates/backend.md:125
 #: src\operations/agent-mediated-updates/nats.md:98
 msgid "300s"
-msgstr ""
+msgstr "300s"
 
 #: src\operations/agent-mediated-updates/backend.md:126
 #: src\operations/agent-mediated-updates/client.md:75
 #: src\operations/agent-mediated-updates/nats.md:99
 msgid "run_as"
-msgstr ""
+msgstr "run_as"
 
 #: src\operations/agent-mediated-updates/backend.md:126
 #: src\operations/agent-mediated-updates/client.md:75
 #: src\operations/agent-mediated-updates/nats.md:99
 msgid "system"
-msgstr ""
+msgstr "system"
 
 #: src\operations/agent-mediated-updates/backend.md:126
 #: src\operations/agent-mediated-updates/client.md:76
 #: src\operations/agent-mediated-updates/nats.md:99
 msgid "require_approval"
-msgstr ""
+msgstr "require_approval"
 
 #: src\operations/agent-mediated-updates/backend.md:134
 msgid ""
 "`run_as: system` is required: `Stop-Service` / `Start-Service` / `sc.exe` "
 "all need admin. The agent already runs as LocalSystem in production."
 msgstr ""
+"`run_as: system` は必須です: `Stop-Service` / `Start-Service` / `sc.exe` は"
+"いずれも admin が必要です。本番環境では agent は LocalSystem で動いている"
+"ので問題ありません。"
 
 #: src\operations/agent-mediated-updates/backend.md:138
 msgid "6. Fire it"
-msgstr ""
+msgstr "6. 起動"
 
 #: src\operations/agent-mediated-updates/backend.md:144
 msgid ""
 "The CLI returns an `exec_id` immediately. The actual install happens "
 "asynchronously on the target."
 msgstr ""
+"CLI はすぐに `exec_id` を返します。実際のインストールは対象ホスト上で非同期"
+"に走ります。"
 
 #: src\operations/agent-mediated-updates/backend.md:147
 msgid "7. Verify"
-msgstr ""
+msgstr "7. 確認"
 
 #: src\operations/agent-mediated-updates/backend.md:149
 msgid "Query the backend's results endpoint (or watch the SPA Activity view):"
 msgstr ""
+"backend の results エンドポイントを叩く (もしくは SPA の Activity ビューを"
+"見る):"
 
 #: src\operations/agent-mediated-updates/backend.md:152
 msgid ""
@@ -579,80 +672,90 @@ msgid ""
 "  \"http://<backend>/api/results?limit=5\"\n"
 "```"
 msgstr ""
+"```pwsh\n"
+"curl -H \"Authorization: Bearer <token>\" `\n"
+"  \"http://<backend>/api/results?limit=5\"\n"
+"```"
 
 #: src\operations/agent-mediated-updates/backend.md:157
 msgid ""
 "Look for your `exec_id` with `exit_code: 0` and a `stdout` that ends with "
 "`kanade-backend <new-version>`."
 msgstr ""
+"自分の `exec_id` が `exit_code: 0` で、`stdout` が `kanade-backend "
+"<new-version>` で終わっていれば成功です。"
 
 #: src\operations/agent-mediated-updates/backend.md:160
 #: src\operations/agent-mediated-updates/agent-self.md:90
 msgid "What can go wrong"
-msgstr ""
+msgstr "ありがちなトラブル"
 
 #: src\operations/agent-mediated-updates/backend.md:162
 #: src\operations/agent-mediated-updates/agent-self.md:92
 msgid "Symptom"
-msgstr ""
+msgstr "症状"
 
 #: src\operations/agent-mediated-updates/backend.md:162
 #: src\operations/agent-mediated-updates/agent-self.md:92
 msgid "Cause"
-msgstr ""
+msgstr "原因"
 
 #: src\operations/agent-mediated-updates/backend.md:162
 #: src\operations/agent-mediated-updates/agent-self.md:92
 msgid "Fix"
-msgstr ""
+msgstr "対処"
 
 #: src\operations/agent-mediated-updates/backend.md:164
 msgid "`[CmdletBinding()]` / `param()` parse error in stderr"
-msgstr ""
+msgstr "stderr に `[CmdletBinding()]` / `param()` の parse error"
 
 #: src\operations/agent-mediated-updates/backend.md:164
 msgid "Agent older than 0.42.2 (running `-Command` mode)"
-msgstr ""
+msgstr "agent が 0.42.2 より古い (`-Command` モードで動いている)"
 
 #: src\operations/agent-mediated-updates/backend.md:164
 msgid ""
 "Upgrade the agent first via `kanade agent rollout` (see [agent "
 "self-update](./agent-self.md))."
 msgstr ""
+"まず `kanade agent rollout` で agent をアップグレード ([agent "
+"self-update](./agent-self.md) 参照)。"
 
 #: src\operations/agent-mediated-updates/backend.md:165
 msgid "`Invoke-WebRequest : missing bearer token`"
-msgstr ""
+msgstr "`Invoke-WebRequest : missing bearer token`"
 
 #: src\operations/agent-mediated-updates/backend.md:165
 msgid "`$AgentSourceAuthToken` empty but backend requires auth"
-msgstr ""
+msgstr "`$AgentSourceAuthToken` が空だが backend が auth を要求している"
 
 #: src\operations/agent-mediated-updates/backend.md:165
 msgid "Set it."
-msgstr ""
+msgstr "値をセットする。"
 
 #: src\operations/agent-mediated-updates/backend.md:166
 msgid "`sha256 mismatch — expected=<x> actual=<y>`"
-msgstr ""
+msgstr "`sha256 mismatch — expected=<x> actual=<y>`"
 
 #: src\operations/agent-mediated-updates/backend.md:166
 msgid "Hash in script doesn't match the published binary"
-msgstr ""
+msgstr "スクリプトの hash が publish されたバイナリと一致しない"
 
 #: src\operations/agent-mediated-updates/backend.md:166
 msgid ""
 "Re-publish or recompute the hash. The script aborts BEFORE the swap, so the "
 "existing install is intact."
 msgstr ""
+"再 publish するか hash を計算し直す。スクリプトは swap の **前** に abort "
+"するので、既存のインストールは無事です。"
 
 #: src\operations/agent-mediated-updates/backend.md:167
 msgid "Job runs but kanade-backend doesn't come back up"
-msgstr ""
+msgstr "ジョブは実行されたが kanade-backend が起動してこない"
 
 #: src\operations/agent-mediated-updates/backend.md:167
 msgid "Service-failure / config drift on target"
-msgstr ""
+msgstr "対象ホストでのサービス起動失敗 / config の不整合"
 
 #: src\operations/agent-mediated-updates/backend.md:167
 msgid ""
@@ -660,6 +763,8 @@ msgid ""
 "can fetch it via `kanade logs <pc>` (when implemented) or you can pull the "
 "file directly."
 msgstr ""
+"対象ホストの `C:\\ProgramData\\Kanade\\log\\backend.*.log` を読む。"
+"agent 経由で `kanade logs <pc>` で取れる (実装後) か、直接ファイルを引き上げる。"
 
 #: src\operations/agent-mediated-updates/client.md:3
 msgid ""
@@ -668,99 +773,108 @@ msgid ""
 "`jobs` KV. The shape mirrors [backend updates](./backend.md) — only the "
 "script content and package name differ."
 msgstr ""
+"Tauri デスクトップクライアントは backend と同じやり方で端末に配布します: "
+"バイナリは `OBJECT_APP_PACKAGES`、スクリプトは `OBJECT_SCRIPTS`、ジョブは "
+"`jobs` KV。形は [backend のアップデート](./backend.md) と同じで、スクリプト"
+"内容とパッケージ名だけが違います。"
 
 #: src\operations/agent-mediated-updates/client.md:9
 msgid "What's different from backend updates"
-msgstr ""
+msgstr "backend のアップデートとの違い"
 
 #: src\operations/agent-mediated-updates/client.md:11
 msgid "Aspect"
-msgstr ""
+msgstr "項目"
 
 #: src\operations/agent-mediated-updates/client.md:11
 msgid "kanade-backend"
-msgstr ""
+msgstr "kanade-backend"
 
 #: src\operations/agent-mediated-updates/client.md:11
 msgid "kanade-client"
-msgstr ""
+msgstr "kanade-client"
 
 #: src\operations/agent-mediated-updates/client.md:13
 msgid "Service to (re)start"
-msgstr ""
+msgstr "(再) 起動するサービス"
 
 #: src\operations/agent-mediated-updates/client.md:13
 msgid "`KanadeBackend` (Windows service)"
-msgstr ""
+msgstr "`KanadeBackend` (Windows サービス)"
 
 #: src\operations/agent-mediated-updates/client.md:13
 msgid "None — the client is launched by the user"
-msgstr ""
+msgstr "なし — クライアントはユーザーが起動する"
 
 #: src\operations/agent-mediated-updates/client.md:14
 msgid "Install location"
-msgstr ""
+msgstr "インストール先"
 
 #: src\operations/agent-mediated-updates/client.md:14
 msgid "`%ProgramFiles%\\Kanade\\kanade-backend.exe`"
-msgstr ""
+msgstr "`%ProgramFiles%\\Kanade\\kanade-backend.exe`"
 
 #: src\operations/agent-mediated-updates/client.md:14
 msgid "`%ProgramFiles%\\Kanade\\kanade-client.exe`"
-msgstr ""
+msgstr "`%ProgramFiles%\\Kanade\\kanade-client.exe`"
 
 #: src\operations/agent-mediated-updates/client.md:15
 msgid "Script in repo"
-msgstr ""
+msgstr "リポジトリ内のスクリプト"
 
 #: src\operations/agent-mediated-updates/client.md:15
 msgid "`scripts/deploy-backend.ps1`"
-msgstr ""
+msgstr "`scripts/deploy-backend.ps1`"
 
 #: src\operations/agent-mediated-updates/client.md:15
 msgid ""
 "`jobs/scripts/install-kanade-client.ps1` (lives in the manifest's "
 "script_file path)"
 msgstr ""
+"`jobs/scripts/install-kanade-client.ps1` (マニフェストの script_file パス)"
 
 #: src\operations/agent-mediated-updates/client.md:16
 msgid "Manifest file ref"
-msgstr ""
+msgstr "マニフェストの参照方法"
 
 #: src\operations/agent-mediated-updates/client.md:16
 msgid "`script_object: deploy-backend/<v>`"
-msgstr ""
+msgstr "`script_object: deploy-backend/<v>`"
 
 #: src\operations/agent-mediated-updates/client.md:16
 msgid ""
 "`script_file: jobs/scripts/install-kanade-client.ps1` (inlined at `kanade "
 "job create`)"
 msgstr ""
+"`script_file: jobs/scripts/install-kanade-client.ps1` (`kanade job create` "
+"時に inline 展開)"
 
 #: src\operations/agent-mediated-updates/client.md:17
 msgid "Atomic swap pattern"
-msgstr ""
+msgstr "atomic swap のやり方"
 
 #: src\operations/agent-mediated-updates/client.md:17
 msgid "Stop service → copy → start service"
-msgstr ""
+msgstr "サービス停止 → コピー → サービス起動"
 
 #: src\operations/agent-mediated-updates/client.md:17
 msgid "Stage to `<exe>.new` → `Move-Item` → drop `<exe>.old`"
-msgstr ""
+msgstr "`<exe>.new` にステージ → `Move-Item` → `<exe>.old` を削除"
 
 #: src\operations/agent-mediated-updates/client.md:18
 msgid "Inventory projection"
-msgstr ""
+msgstr "インベントリへの射影"
 
 #: src\operations/agent-mediated-updates/client.md:18
 msgid "None (the backend reports its own version)"
-msgstr ""
+msgstr "なし (backend は自分自身でバージョンを報告)"
 
 #: src\operations/agent-mediated-updates/client.md:18
 msgid ""
 "`inventory:` block emits per-PC client version into the SPA Inventory page"
 msgstr ""
+"`inventory:` ブロックが PC ごとのクライアントバージョンを SPA Inventory "
+"ページに出す"
 
 #: src\operations/agent-mediated-updates/client.md:20
 msgid ""
@@ -770,22 +884,27 @@ msgid ""
 "`script_file` for historical reasons; the backend manifest uses "
 "`script_object` because it was rewritten to test the Object Store path."
 msgstr ""
+"両方の形が使えます — `script_object` (OBJECT_SCRIPTS から hash で参照、"
+"agent が必要時に fetch) と `script_file` (`kanade job create` 時にスクリプト"
+"本体をマニフェストに inline 展開)。client マニフェストは歴史的経緯で "
+"`script_file`、backend マニフェストは Object Store パスをテストするために "
+"`script_object` に書き換えられました。"
 
 #: src\operations/agent-mediated-updates/client.md:30
 msgid "1. Build kanade-client"
-msgstr ""
+msgstr "1. kanade-client をビルド"
 
 #: src\operations/agent-mediated-updates/client.md:36
 msgid "Output: `target/release/kanade-client.exe`."
-msgstr ""
+msgstr "出力: `target/release/kanade-client.exe`。"
 
 #: src\operations/agent-mediated-updates/client.md:44
 msgid "3. Edit `jobs/scripts/install-kanade-client.ps1`"
-msgstr ""
+msgstr "3. `jobs/scripts/install-kanade-client.ps1` を編集"
 
 #: src\operations/agent-mediated-updates/client.md:46
 msgid "Set the three knobs at the top:"
-msgstr ""
+msgstr "先頭の 3 つのノブをセット:"
 
 #: src\operations/agent-mediated-updates/client.md:48
 msgid ""
@@ -795,6 +914,11 @@ msgid ""
 "$ExpectedSha256 = '<lowercase hex of kanade-client.exe>'\n"
 "```"
 msgstr ""
+"```powershell\n"
+"$BackendBase    = 'http://kanade-backend.example.com:8080'\n"
+"$Version        = '0.42.0'\n"
+"$ExpectedSha256 = '<kanade-client.exe の lowercase hex>'\n"
+"```"
 
 #: src\operations/agent-mediated-updates/client.md:54
 msgid ""
@@ -806,72 +930,82 @@ msgid ""
 "kanade-backend](./backend.md#3-edit-scriptsdeploy-backendps1)). A "
 "first-class `$ClientSourceAuthToken` knob is on the backlog."
 msgstr ""
+"backend のスクリプトと違い、こちらにはまだ明示的な auth-token ノブが"
+"ありません — `Invoke-WebRequest -UseDefaultCredentials` か "
+"`/api/app-packages/kanade-client/<v>` ルートに auth がない前提で動いて"
+"います。backend がこのエンドポイントを gate している場合は、backend "
+"スクリプトと同じ要領で `Invoke-WebRequest` の呼び出しに `Authorization` "
+"ヘッダを追加してください ([kanade-backend のアップデート](./backend.md#3-edit-scriptsdeploy-backendps1) 参照)。"
+"`$ClientSourceAuthToken` というファーストクラスのノブは backlog に積んで"
+"あります。"
 
 #: src\operations/agent-mediated-updates/client.md:64
 msgid "4. Register / update the job"
-msgstr ""
+msgstr "4. ジョブを登録 / 更新"
 
 #: src\operations/agent-mediated-updates/client.md:66
 msgid "`jobs/install-kanade-client.yaml`:"
-msgstr ""
+msgstr "`jobs/install-kanade-client.yaml`:"
 
 #: src\operations/agent-mediated-updates/client.md:69
 msgid "install-kanade-client"
-msgstr ""
+msgstr "install-kanade-client"
 
 #: src\operations/agent-mediated-updates/client.md:73
 msgid "script_file"
-msgstr ""
+msgstr "script_file"
 
 #: src\operations/agent-mediated-updates/client.md:73
 msgid ""
 "jobs/scripts/install-kanade-client.ps1   # body inlined at `job create`\n"
 "  timeout"
 msgstr ""
+"jobs/scripts/install-kanade-client.ps1   # `job create` 時に inline 展開\n"
+"  timeout"
 
 #: src\operations/agent-mediated-updates/client.md:74
 msgid "180s"
-msgstr ""
+msgstr "180s"
 
 #: src\operations/agent-mediated-updates/client.md:78
 msgid "inventory"
-msgstr ""
+msgstr "inventory"
 
 #: src\operations/agent-mediated-updates/client.md:80
 msgid "display"
-msgstr ""
+msgstr "display"
 
 #: src\operations/agent-mediated-updates/client.md:81
 #: src\operations/agent-mediated-updates/client.md:82
 #: src\operations/agent-mediated-updates/client.md:84
 msgid "field"
-msgstr ""
+msgstr "field"
 
 #: src\operations/agent-mediated-updates/client.md:81
 #: src\operations/agent-mediated-updates/client.md:82
 #: src\operations/agent-mediated-updates/client.md:84
 msgid "label"
-msgstr ""
+msgstr "label"
 
 #: src\operations/agent-mediated-updates/client.md:81
 msgid "Version"
-msgstr ""
+msgstr "Version"
 
 #: src\operations/agent-mediated-updates/client.md:82
 msgid "path"
-msgstr ""
+msgstr "path"
 
 #: src\operations/agent-mediated-updates/client.md:82
 msgid "Install path"
-msgstr ""
+msgstr "Install path"
 
 #: src\operations/agent-mediated-updates/client.md:83
 msgid "summary"
-msgstr ""
+msgstr "summary"
 
 #: src\operations/agent-mediated-updates/client.md:84
 msgid "Client version"
-msgstr ""
+msgstr "Client version"
 
 #: src\operations/agent-mediated-updates/client.md:91
 msgid ""
@@ -880,24 +1014,30 @@ msgid ""
 "Inventory page. Operators can spot stragglers from a fleet-wide table — no "
 "ssh needed."
 msgstr ""
+"`inventory:` ブロックは projector に「スクリプトの stdout は単一の JSON "
+"blob で、`version` / `path` フィールドが SPA の Inventory ページに反映される」"
+"と伝えます。operator は fleet 全体のテーブルから取り残し端末を見つけられ、"
+"ssh は不要です。"
 
 #: src\operations/agent-mediated-updates/client.md:96
 msgid "5. Fire it"
-msgstr ""
+msgstr "5. 起動"
 
 #: src\operations/agent-mediated-updates/client.md:102
 msgid "Or against a group:"
-msgstr ""
+msgstr "もしくはグループ単位で:"
 
 #: src\operations/agent-mediated-updates/client.md:108
 msgid "6. Verify in the SPA"
-msgstr ""
+msgstr "6. SPA で確認"
 
 #: src\operations/agent-mediated-updates/client.md:110
 msgid ""
 "Open the SPA Inventory page (or query `/api/inventory?app=kanade-client`) "
 "and confirm the target hosts report the new version."
 msgstr ""
+"SPA の Inventory ページを開く (もしくは `/api/inventory?app=kanade-client` を"
+"叩く) と、対象ホストが新しいバージョンを報告しているはずです。"
 
 #: src\operations/agent-mediated-updates/nats.md:3
 msgid ""
@@ -906,12 +1046,18 @@ msgid ""
 "losing the agent's connection mid-job. The machinery handles this with two "
 "mechanisms working together:"
 msgstr ""
+"管理対象ホスト上のブローカーをアップデートするのは一番面白いケースです。"
+"なぜなら agent は **ブローカー越しにブローカーと話す** から — NATS を止めると "
+"ジョブの途中で agent との接続が切れます。これに対しては 2 つの仕組みが"
+"組み合わさって対処しています:"
 
 #: src\operations/agent-mediated-updates/nats.md:8
 msgid ""
 "**Reconnect.** The agent's NATS client reconnects automatically on broker "
 "restart. No human intervention needed."
 msgstr ""
+"**再接続。** agent の NATS クライアントはブローカー再起動時に自動再接続します。"
+"人の介入は不要。"
 
 #: src\operations/agent-mediated-updates/nats.md:10
 msgid ""
@@ -920,6 +1066,9 @@ msgid ""
 "back. The result row reaches the backend as soon as the new NATS server is "
 "up."
 msgstr ""
+"**outbox。** ブローカーが落ちている間に発生したジョブ結果は "
+"`%ProgramData%\\Kanade\\outbox\\` に貯められ、接続が戻り次第再送されます。"
+"新しい NATS サーバーが立ち上がるとすぐに result row が backend に届きます。"
 
 #: src\operations/agent-mediated-updates/nats.md:15
 msgid ""
@@ -927,49 +1076,57 @@ msgid ""
 "Stops the service, swaps the binary, Starts it — and the agent transparently "
 "rides out the broker gap."
 msgstr ""
+"したがってフローは [backend のアップデート](./backend.md) と同じ — スクリプト"
+"はサービスを止めてバイナリを差し替え再起動し、agent はブローカーの空白期間を"
+"透過的にやり過ごします。"
 
 #: src\operations/agent-mediated-updates/nats.md:20
 msgid "Caveats specific to NATS updates"
-msgstr ""
+msgstr "NATS アップデート固有の注意点"
 
 #: src\operations/agent-mediated-updates/nats.md:22
 msgid "Concern"
-msgstr ""
+msgstr "懸念"
 
 #: src\operations/agent-mediated-updates/nats.md:22
 msgid "Reality"
-msgstr ""
+msgstr "実際"
 
 #: src\operations/agent-mediated-updates/nats.md:24
 msgid "Will the result row be lost?"
-msgstr ""
+msgstr "result row はロストする？"
 
 #: src\operations/agent-mediated-updates/nats.md:24
 msgid "No — outbox persists it across the broker outage and drains on reconnect."
 msgstr ""
+"いいえ — outbox がブローカー停止中を跨いで保持し、再接続時に drain します。"
 
 #: src\operations/agent-mediated-updates/nats.md:25
 msgid "Can I update from the SPA?"
-msgstr ""
+msgstr "SPA からアップデートできる？"
 
 #: src\operations/agent-mediated-updates/nats.md:25
 msgid ""
 "Yes, same as any job — `kanade exec install-kanade-nats --pcs <broker-host>`."
 msgstr ""
+"はい、他のジョブと同じです — `kanade exec install-kanade-nats --pcs "
+"<broker-host>`。"
 
 #: src\operations/agent-mediated-updates/nats.md:26
 msgid "What if NATS doesn't come back up?"
-msgstr ""
+msgstr "NATS が再起動してこなかったら？"
 
 #: src\operations/agent-mediated-updates/nats.md:26
 msgid ""
 "The result will sit in the outbox indefinitely. Operators should monitor "
 "`outbox/` on the broker host as a leading indicator."
 msgstr ""
+"result は outbox にずっと残ります。operator はブローカーホストの `outbox/` を"
+"先行指標として監視するべき。"
 
 #: src\operations/agent-mediated-updates/nats.md:27
 msgid "What if the new NATS version is incompatible (JetStream upgrade etc.)?"
-msgstr ""
+msgstr "新しい NATS バージョンに互換性がなかったら (JetStream のアップグレードなど)？"
 
 #: src\operations/agent-mediated-updates/nats.md:27
 msgid ""
@@ -977,16 +1134,21 @@ msgid ""
 "health, then roll out fleet-wide. The 5-min cache TTL for SPA queries means "
 "you'll see the canary's state within a few minutes."
 msgstr ""
+"まず canary 1 台に rollout (`--pcs <one-broker>`)、outbox と backend "
+"の健全性を見てから fleet 全体に展開。SPA クエリは 5 分の cache TTL がある"
+"ので canary の状態は数分以内に見えます。"
 
 #: src\operations/agent-mediated-updates/nats.md:29
 msgid "Manual install (bootstrap)"
-msgstr ""
+msgstr "手動インストール (ブートストラップ)"
 
 #: src\operations/agent-mediated-updates/nats.md:31
 msgid ""
 "For the very first install — when there's no agent on the broker host yet — "
 "use the direct workflow:"
 msgstr ""
+"初回インストール (ブローカーホストにまだ agent がない状態) では直接ワーク"
+"フローを使います:"
 
 #: src\operations/agent-mediated-updates/nats.md:40
 msgid ""
@@ -996,10 +1158,15 @@ msgid ""
 "registers the `KanadeNats` Windows service, opens TCP 4222 (broker) + 8222 "
 "(monitoring HTTP), and starts the service."
 msgstr ""
+"これで `nats-server.exe` を `%ProgramFiles%\\Kanade\\` に、"
+"`nats-server.conf` を `%ProgramData%\\Kanade\\config\\` にインストール "
+"(bearer token を平文で保存するので ACL を SYSTEM + Administrators のみに"
+"絞ります)、`KanadeNats` Windows サービスを登録、TCP 4222 (broker) と 8222 "
+"(monitoring HTTP) を開放、サービスを起動します。"
 
 #: src\operations/agent-mediated-updates/nats.md:47
 msgid "Agent-mediated update (steady state)"
-msgstr ""
+msgstr "agent 経由のアップデート (定常運用)"
 
 #: src\operations/agent-mediated-updates/nats.md:49
 msgid ""
@@ -1007,30 +1174,37 @@ msgid ""
 "`$AgentSource*` knobs yet — agent-mode is on the backlog. The shape below is "
 "what it WILL look like once the knobs land."
 msgstr ""
+"**ステータス:** template のみ。`scripts/deploy-nats.ps1` はまだ "
+"`$AgentSource*` ノブを持っていません — agent モードは backlog 行きです。"
+"下記はノブが入った後の想定形です。"
 
 #: src\operations/agent-mediated-updates/nats.md:53
 msgid "1. Build / fetch nats-server.exe"
-msgstr ""
+msgstr "1. nats-server.exe をビルド or 取得"
 
 #: src\operations/agent-mediated-updates/nats.md:55
 msgid "Either:"
-msgstr ""
+msgstr "どちらか:"
 
 #: src\operations/agent-mediated-updates/nats.md:61
 msgid ""
 "…or download it directly from "
 "[github.com/nats-io/nats-server/releases](https://github.com/nats-io/nats-server/releases)."
 msgstr ""
+"…もしくは [github.com/nats-io/nats-server/releases](https://github.com/nats-io/nats-server/releases) "
+"から直接ダウンロード。"
 
 #: src\operations/agent-mediated-updates/nats.md:70
 msgid "3. Edit deploy-nats.ps1"
-msgstr ""
+msgstr "3. deploy-nats.ps1 を編集"
 
 #: src\operations/agent-mediated-updates/nats.md:72
 msgid ""
 "Once the agent-mode knobs ship, the pattern matches "
 "[deploy-backend.ps1](./backend.md#3-edit-scriptsdeploy-backendps1):"
 msgstr ""
+"agent モードノブが入ったあとは、パターンは "
+"[deploy-backend.ps1](./backend.md#3-edit-scriptsdeploy-backendps1) と同じ:"
 
 #: src\operations/agent-mediated-updates/nats.md:75
 msgid ""
@@ -1041,26 +1215,32 @@ msgid ""
 "$AgentSourceAuthToken = '<bearer for the backend HTTP API>'\n"
 "```"
 msgstr ""
+"```powershell\n"
+"$AgentSourceUrl       = 'http://kanade-backend.example.com:8080'\n"
+"$AgentSourceVersion   = '2.10.20'\n"
+"$AgentSourceSha256    = '<nats-server.exe の lowercase hex>'\n"
+"$AgentSourceAuthToken = '<backend HTTP API 用 bearer>'\n"
+"```"
 
 #: src\operations/agent-mediated-updates/nats.md:82
 msgid "4. Publish + register + exec"
-msgstr ""
+msgstr "4. publish + 登録 + exec"
 
 #: src\operations/agent-mediated-updates/nats.md:90
 msgid "The job manifest will look like:"
-msgstr ""
+msgstr "ジョブマニフェストはこんな形になります:"
 
 #: src\operations/agent-mediated-updates/nats.md:93
 msgid "install-kanade-nats"
-msgstr ""
+msgstr "install-kanade-nats"
 
 #: src\operations/agent-mediated-updates/nats.md:97
 msgid "deploy-nats/2.10.20"
-msgstr ""
+msgstr "deploy-nats/2.10.20"
 
 #: src\operations/agent-mediated-updates/nats.md:103
 msgid "5. Verify"
-msgstr ""
+msgstr "5. 確認"
 
 #: src\operations/agent-mediated-updates/nats.md:105
 msgid ""
@@ -1068,6 +1248,9 @@ msgid ""
 "in `/api/results`. Confirm the new NATS version via the broker's monitoring "
 "endpoint:"
 msgstr ""
+"ブローカーが復帰すると outbox が drain され、`/api/results` に result row が"
+"出てきます。新しい NATS バージョンはブローカーの monitoring エンドポイントで"
+"確認:"
 
 #: src\operations/agent-mediated-updates/nats.md:109
 msgid ""
@@ -1075,10 +1258,13 @@ msgid ""
 "curl http://<broker>:8222/varz | python -m json.tool | rg version\n"
 "```"
 msgstr ""
+"```pwsh\n"
+"curl http://<broker>:8222/varz | python -m json.tool | rg version\n"
+"```"
 
 #: src\operations/agent-mediated-updates/nats.md:113
 msgid "Why we don't need a separate \"broker update\" mechanism"
-msgstr ""
+msgstr "なぜ独立した「broker update」機構が要らないのか"
 
 #: src\operations/agent-mediated-updates/nats.md:115
 msgid ""
@@ -1087,6 +1273,11 @@ msgid ""
 "chicken-and-egg. The outbox + reconnect pair makes that unnecessary: the "
 "result is \"merely delayed\", not \"lost\". One transport, one mental model."
 msgstr ""
+"初期の設計では「ブローカー越しにブローカーを更新する鶏卵問題」を避けるため"
+"に専用のブートストラップチャネル (agent が broker update 専用に使う並列 NATS "
+"接続) を検討していました。outbox + 再接続のペアによってこれは不要に: "
+"結果は「失われる」のではなく「遅延するだけ」。トランスポートはひとつ、"
+"メンタルモデルもひとつで済みます。"
 
 #: src\operations/agent-mediated-updates/agent-self.md:3
 msgid ""
@@ -1095,34 +1286,42 @@ msgid ""
 "because the agent has to swap its own running binary without ssh — a tighter "
 "loop than the generic install jobs."
 msgstr ""
+"agent の self-update は唯一 `OBJECT_APP_PACKAGES` + `script_object` ジョブ"
+"を **使わない** コンポーネントです。agent は ssh なしで自分自身の動いている"
+"バイナリを差し替える必要がある — 汎用 install ジョブよりタイトなループのため"
+"専用の仕組みを持っています。"
 
 #: src\operations/agent-mediated-updates/agent-self.md:8
 msgid "Mechanism"
-msgstr ""
+msgstr "仕組み"
 
 #: src\operations/agent-mediated-updates/agent-self.md:10
 msgid "Bucket / Key"
-msgstr ""
+msgstr "バケット / キー"
 
 #: src\operations/agent-mediated-updates/agent-self.md:12
 msgid ""
 "Agent binaries, keyed by `<version>`. Separate from `OBJECT_APP_PACKAGES` so "
 "the rollout watcher only fires on agent updates."
 msgstr ""
+"agent バイナリ。キーは `<version>`。rollout watcher が agent アップデート"
+"だけに反応するように、`OBJECT_APP_PACKAGES` とは別バケット。"
 
 #: src\operations/agent-mediated-updates/agent-self.md:13
 msgid "`agent_config.<scope>.target_version`"
-msgstr ""
+msgstr "`agent_config.<scope>.target_version`"
 
 #: src\operations/agent-mediated-updates/agent-self.md:13
 msgid ""
 "The version each scope (global / group / pc) should be on. Watched by the "
 "agent's `self_update` loop."
 msgstr ""
+"各スコープ (global / グループ / pc) があるべきバージョン。agent の "
+"`self_update` ループがこれを watch しています。"
 
 #: src\operations/agent-mediated-updates/agent-self.md:15
 msgid "Flow:"
-msgstr ""
+msgstr "フロー:"
 
 #: src\operations/agent-mediated-updates/agent-self.md:26
 msgid ""
@@ -1132,40 +1331,48 @@ msgid ""
 "the agent would never self-update on that boot. Post-#226 the watcher "
 "retries with backoff until the broker is reachable."
 msgstr ""
+"rollout watcher は cold broker (ホスト再起動後に agent と broker が同時に"
+"立ち上がる、など) に耐えなければなりません。#226 以前は最初の "
+"`get_object_store` 呼び出しで `Err(_) => return;` してしまうと watcher が"
+"恒久的に死んでいて、その起動セッション中は agent が二度と self-update しません"
+"でした。#226 以降は watcher が backoff で再試行し、broker に到達できるまで"
+"あきらめません。"
 
 #: src\operations/agent-mediated-updates/agent-self.md:35
 msgid "1. Build the agent"
-msgstr ""
+msgstr "1. agent をビルド"
 
 #: src\operations/agent-mediated-updates/agent-self.md:41
 msgid "Output: `target/release/kanade-agent.exe`."
-msgstr ""
+msgstr "出力: `target/release/kanade-agent.exe`。"
 
 #: src\operations/agent-mediated-updates/agent-self.md:43
 msgid "2. Publish"
-msgstr ""
+msgstr "2. publish"
 
 #: src\operations/agent-mediated-updates/agent-self.md:49
 msgid ""
 "The CLI extracts the version from the PE VERSIONINFO resource — no "
 "`--version` flag, no chance of a label / binary mismatch."
 msgstr ""
+"CLI は PE VERSIONINFO リソースからバージョンを自動抽出します — `--version` "
+"フラグ不要、ラベルとバイナリの不一致もあり得ません。"
 
 #: src\operations/agent-mediated-updates/agent-self.md:52
 msgid "3. Roll out"
-msgstr ""
+msgstr "3. roll out"
 
 #: src\operations/agent-mediated-updates/agent-self.md:54
 msgid "Pick a scope. Start with one canary host:"
-msgstr ""
+msgstr "スコープを選びます。canary 1 台から:"
 
 #: src\operations/agent-mediated-updates/agent-self.md:60
 msgid "Watch via ping:"
-msgstr ""
+msgstr "ping で確認:"
 
 #: src\operations/agent-mediated-updates/agent-self.md:67
 msgid "If happy, widen:"
-msgstr ""
+msgstr "問題なければ範囲を広げる:"
 
 #: src\operations/agent-mediated-updates/agent-self.md:75
 msgid ""
@@ -1173,10 +1380,13 @@ msgid ""
 "doesn't hammer the OS service manager on every host at once. Recommended for "
 "fleets ≥ 100 hosts."
 msgstr ""
+"`--jitter` は実際の swap タイミングをある幅で分散させ、大きな fan-out 時に"
+"全ホストの OS サービスマネージャを同時に叩かないようにします。100 台以上の "
+"fleet では推奨。"
 
 #: src\operations/agent-mediated-updates/agent-self.md:79
 msgid "4. Verify"
-msgstr ""
+msgstr "4. 確認"
 
 #: src\operations/agent-mediated-updates/agent-self.md:86
 msgid ""
@@ -1184,30 +1394,37 @@ msgid ""
 "`agent_version` column should converge to the new version within `jitter` + "
 "~30s heartbeat cadence."
 msgstr ""
+"あとは SPA の Agents ページ (もしくは `/api/agents`) で fleet 全体を"
+"スポットチェック: `agent_version` 列は `jitter` + 約 30 秒の heartbeat "
+"間隔以内に新バージョンに収束するはず。"
 
 #: src\operations/agent-mediated-updates/agent-self.md:94
 msgid "`kanade agent rollout` says \"version not in OBJECT_AGENT_RELEASES\""
-msgstr ""
+msgstr "`kanade agent rollout` が \"version not in OBJECT_AGENT_RELEASES\" と言う"
 
 #: src\operations/agent-mediated-updates/agent-self.md:94
 msgid "Typo or wrong scope"
-msgstr ""
+msgstr "typo もしくはスコープ違い"
 
 #: src\operations/agent-mediated-updates/agent-self.md:94
 msgid ""
 "Re-check with `kanade agent current` and `kanade jetstream object list "
 "agent_releases`."
 msgstr ""
+"`kanade agent current` と `kanade jetstream object list agent_releases` で"
+"再確認。"
 
 #: src\operations/agent-mediated-updates/agent-self.md:95
 msgid "`kanade ping <host>` still shows the old version after several minutes"
-msgstr ""
+msgstr "数分経っても `kanade ping <host>` が古いバージョンを返す"
 
 #: src\operations/agent-mediated-updates/agent-self.md:95
 msgid ""
 "Agent didn't self-update — either the watcher's dead (pre-#226 agent) or the "
 "host can't reach the broker"
 msgstr ""
+"agent が self-update しなかった — watcher が死んでいる (#226 以前の agent) "
+"か、ホストが broker に到達できない"
 
 #: src\operations/agent-mediated-updates/agent-self.md:95
 msgid ""
@@ -1215,10 +1432,13 @@ msgid ""
 "self_update is silent (no \"checking target_version\" log lines), the agent "
 "is too old; bootstrap manually with `deploy-agent.ps1`."
 msgstr ""
+"対象ホストの `%ProgramData%\\Kanade\\log\\agent.*.log` をチェック。"
+"self_update が無言なら (「checking target_version」ログがない)、agent が"
+"古すぎる; `deploy-agent.ps1` で手動ブートストラップ。"
 
 #: src\operations/agent-mediated-updates/agent-self.md:96
 msgid "Agent flaps: starts, immediately exits with `exit_code: 1`"
-msgstr ""
+msgstr "agent が flap する: 起動するも `exit_code: 1` ですぐ落ちる"
 
 #: src\operations/agent-mediated-updates/agent-self.md:96
 msgid ""
@@ -1226,28 +1446,37 @@ msgid ""
 "failure-actions restart it, it crashes again — observable in Event Viewer as "
 "a Service Control Manager error cluster"
 msgstr ""
+"このホストでは新バイナリがダメ (config の不整合、依存欠落など)。SCM の "
+"failure-actions が再起動しまた落ちる — Event Viewer に Service Control "
+"Manager のエラーがまとまって見える"
 
 #: src\operations/agent-mediated-updates/agent-self.md:96
 msgid ""
 "Roll back: `kanade agent rollout <prev-version> --pcs <host>`. The host will "
 "swap back at the next watcher tick."
 msgstr ""
+"ロールバック: `kanade agent rollout <prev-version> --pcs <host>`。"
+"次の watcher tick でホストは元のバージョンに戻ります。"
 
 #: src\operations/agent-mediated-updates/agent-self.md:98
 msgid "Why a separate bucket / scope?"
-msgstr ""
+msgstr "なぜ別のバケット / スコープか？"
 
 #: src\operations/agent-mediated-updates/agent-self.md:100
 msgid ""
 "`OBJECT_APP_PACKAGES` is a generic blob store keyed by `<name>/<version>`. "
 "The agent rollout pattern needs:"
 msgstr ""
+"`OBJECT_APP_PACKAGES` は `<name>/<version>` をキーにした汎用 blob ストア"
+"です。agent rollout パターンに必要なのは:"
 
 #: src\operations/agent-mediated-updates/agent-self.md:103
 msgid ""
 "A watcher that fires _only_ on agent changes (cheap KV watch on one specific "
 "key, not a poll over a bucket of many names)."
 msgstr ""
+"agent の変更**だけ**に反応する watcher (たくさんの名前が入ったバケットを poll "
+"するのではなく、特定の 1 つの KV キーを安価に watch)。"
 
 #: src\operations/agent-mediated-updates/agent-self.md:105
 msgid ""
@@ -1255,18 +1484,25 @@ msgid ""
 "`agent_config.<scope>.target_version` IS the answer to \"what should I be "
 "running\" without the agent enumerating."
 msgstr ""
+"「既知の全バージョン」ではなくスコープごとの「現在の target」セマンティクス "
+"— `agent_config.<scope>.target_version` こそが「自分は何を動かすべきか」の"
+"答えで、agent 側で列挙する必要がない。"
 
 #: src\operations/agent-mediated-updates/agent-self.md:108
 msgid ""
 "Operator UX (`kanade agent publish` / `rollout`) that's divergent enough "
 "from `kanade app publish` to warrant its own subcommand tree."
 msgstr ""
+"operator 向け UX (`kanade agent publish` / `rollout`) が `kanade app "
+"publish` とは別サブコマンドツリーに分けるに足るくらい違う。"
 
 #: src\operations/agent-mediated-updates/agent-self.md:112
 msgid ""
 "So agents get `OBJECT_AGENT_RELEASES` + a layered config KV; the other "
 "components share `OBJECT_APP_PACKAGES` + per-app jobs."
 msgstr ""
+"というわけで agent は `OBJECT_AGENT_RELEASES` + レイヤード config KV を、"
+"他のコンポーネントは `OBJECT_APP_PACKAGES` + アプリ別ジョブを共有します。"
 
 #: src\developing/writing-agent-scripts.md:3
 msgid ""
@@ -1583,16 +1819,22 @@ msgid ""
 "The full protocol / on-wire spec hasn't been migrated into the book yet. The "
 "authoritative source is the single-file version in the repo:"
 msgstr ""
+"フルのプロトコル / on-wire 仕様はまだ book に取り込まれていません。"
+"オーソリティはリポジトリの single-file 版です:"
 
 #: src\reference/spec.md:7
 msgid ""
 "[**docs/SPEC.md** on "
 "GitHub](https://github.com/yukimemi/kanade/blob/main/docs/SPEC.md)"
 msgstr ""
+"[**docs/SPEC.md** on "
+"GitHub](https://github.com/yukimemi/kanade/blob/main/docs/SPEC.md)"
 
 #: src\reference/spec.md:9
 msgid ""
 "Splitting it into chapters under this section is a follow-up once the rest "
 "of the operator / developer guides settle."
 msgstr ""
+"このセクション配下に章分割するのは、operator / 開発者ガイドが落ち着いてから"
+"の follow-up とします。"
 
