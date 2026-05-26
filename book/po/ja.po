@@ -1,0 +1,1598 @@
+
+msgid ""
+msgstr ""
+"Project-Id-Version: kanade — 奏\n"
+"POT-Creation-Date: 2026-05-26T23:34:48+09:00\n"
+"PO-Revision-Date: \n"
+"Last-Translator: \n"
+"Language-Team: \n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Language: ja\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+#: src\SUMMARY.md:1
+msgid "Summary"
+msgstr "目次"
+
+#: src\SUMMARY.md:3 src\introduction.md:1
+msgid "Introduction"
+msgstr "はじめに"
+
+#: src\SUMMARY.md:5
+msgid "Operations"
+msgstr "運用"
+
+#: src\SUMMARY.md:7
+msgid "Overview"
+msgstr "概要"
+
+#: src\SUMMARY.md:8 src\operations/agent-mediated-updates/index.md:1
+msgid "Agent-mediated updates"
+msgstr ""
+
+#: src\SUMMARY.md:9 src\operations/agent-mediated-updates/backend.md:1
+msgid "Updating kanade-backend"
+msgstr ""
+
+#: src\SUMMARY.md:10 src\operations/agent-mediated-updates/client.md:1
+msgid "Updating kanade-client"
+msgstr ""
+
+#: src\SUMMARY.md:11 src\operations/agent-mediated-updates/nats.md:1
+msgid "Updating NATS server"
+msgstr ""
+
+#: src\SUMMARY.md:12 src\operations/agent-mediated-updates/agent-self.md:1
+msgid "Updating kanade-agent itself"
+msgstr ""
+
+#: src\SUMMARY.md:14
+msgid "For developers"
+msgstr ""
+
+#: src\SUMMARY.md:16 src\developing/writing-agent-scripts.md:1
+msgid "Writing scripts for the agent"
+msgstr ""
+
+#: src\SUMMARY.md:20 src\reference/spec.md:1
+msgid "Spec (legacy single-page)"
+msgstr ""
+
+#: src\introduction.md:3
+msgid ""
+"**kanade — 奏** is an endpoint management system for Windows fleets. It gives "
+"an operator a single CLI / SPA to run scripts, install software, gather "
+"inventory, and stream live perf data from hundreds of PCs at once. The "
+"pieces:"
+msgstr ""
+
+#: src\introduction.md:8
+msgid "Component"
+msgstr ""
+
+#: src\introduction.md:8
+msgid "What it is"
+msgstr ""
+
+#: src\introduction.md:10
+msgid "**kanade-agent**"
+msgstr ""
+
+#: src\introduction.md:10
+msgid ""
+"Service that runs on each managed PC. Subscribes to NATS, executes commands, "
+"ships results."
+msgstr ""
+
+#: src\introduction.md:11
+msgid "**kanade-backend**"
+msgstr ""
+
+#: src\introduction.md:11
+msgid ""
+"HTTP API + projector. Persists state, serves the SPA, exposes operator "
+"endpoints."
+msgstr ""
+
+#: src\introduction.md:12
+msgid "**kanade-client**"
+msgstr ""
+
+#: src\introduction.md:12
+msgid "Optional Tauri desktop app. End-user-facing surface."
+msgstr ""
+
+#: src\introduction.md:13
+msgid "**NATS server**"
+msgstr ""
+
+#: src\introduction.md:13
+msgid ""
+"Message broker for command fan-out + result aggregation. The agent talks "
+"NATS-only; the backend reads NATS too."
+msgstr ""
+
+#: src\introduction.md:14
+msgid "**kanade CLI**"
+msgstr ""
+
+#: src\introduction.md:14
+msgid "Operator-facing command line: publish binaries, fire jobs, query state."
+msgstr ""
+
+#: src\introduction.md:16
+msgid "This site covers two audiences:"
+msgstr ""
+
+#: src\introduction.md:18
+msgid ""
+"**Operators** running a kanade fleet — how to update each component without "
+"ssh-ing into endpoints (see [Agent-mediated "
+"updates](./operations/agent-mediated-updates/index.md))."
+msgstr ""
+
+#: src\introduction.md:21
+msgid ""
+"**Developers** writing PowerShell jobs the agent will execute — what works, "
+"what doesn't, what changed in recent agent versions (see [Writing scripts "
+"for the agent](./developing/writing-agent-scripts.md))."
+msgstr ""
+
+#: src\introduction.md:25
+msgid ""
+"The detailed protocol / on-wire spec lives at [Spec](./reference/spec.md) "
+"(the legacy single-page document; will be split into chapters as the docs "
+"site fills out)."
+msgstr ""
+
+#: src\operations/overview.md:1
+msgid "Operations overview"
+msgstr ""
+
+#: src\operations/overview.md:3
+msgid "Day-2 operations in kanade fall into two flows:"
+msgstr ""
+
+#: src\operations/overview.md:5
+msgid ""
+"**Direct install** — drop binaries + config on a fresh host and register the "
+"Windows service. Used to bootstrap the first agent, the initial backend, and "
+"the NATS server. Scripts: `scripts/deploy-agent.ps1`, "
+"`scripts/deploy-backend.ps1`, `scripts/deploy-nats.ps1`. Run **manually** on "
+"the target host."
+msgstr ""
+
+#: src\operations/overview.md:11
+msgid ""
+"**Agent-mediated update** — once an agent is running, the agent itself can "
+"install / update other components on its own host without ssh / RDP. The "
+"operator publishes binaries + script bodies to the broker, then fires a job; "
+"the agent fetches, verifies, swaps, and restarts services. This is the bulk "
+"of day-2 operations."
+msgstr ""
+
+#: src\operations/overview.md:18
+msgid ""
+"The agent-mediated flow has the same shape regardless of what you're "
+"updating:"
+msgstr ""
+
+#: src\operations/overview.md:34
+msgid "Component-specific guides:"
+msgstr ""
+
+#: src\operations/overview.md:36
+msgid ""
+"[kanade-backend](./agent-mediated-updates/backend.md) — the HTTP / projector "
+"binary"
+msgstr ""
+
+#: src\operations/overview.md:38
+msgid ""
+"[kanade-client](./agent-mediated-updates/client.md) — the Tauri end-user app"
+msgstr ""
+
+#: src\operations/overview.md:40
+msgid ""
+"[NATS server](./agent-mediated-updates/nats.md) — the broker itself (yes, "
+"you can update the broker over the broker)"
+msgstr ""
+
+#: src\operations/overview.md:42
+msgid ""
+"[kanade-agent itself](./agent-mediated-updates/agent-self.md) — the agent "
+"self-update path (different from the other three; it uses a dedicated "
+"rollout bucket, not the generic OBJECT_APP_PACKAGES + script pair)"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/index.md:3
+msgid ""
+"The agent is the universal installer. Once it's running on a target host, "
+"the operator never needs to touch the host directly to update any other "
+"component — including the backend it talks to, the broker that carries its "
+"messages, and the agent itself."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/index.md:8
+msgid "This chapter has one page per component:"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/index.md:10
+msgid "[kanade-backend](./backend.md)"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/index.md:11
+msgid "[kanade-client](./client.md)"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/index.md:12
+msgid "[NATS server](./nats.md)"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/index.md:13
+msgid "[kanade-agent self-update](./agent-self.md)"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/index.md:15
+msgid "Common machinery used by all of them:"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/index.md:17
+msgid "Bucket / Stream"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/index.md:17
+#: src\operations/agent-mediated-updates/agent-self.md:10
+msgid "Purpose"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/index.md:19
+msgid "`OBJECT_APP_PACKAGES`"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/index.md:19
+msgid ""
+"Generic binary storage (backend, client, NATS server, …). Keyed by "
+"`<name>/<version>`."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/index.md:20
+msgid "`OBJECT_SCRIPTS`"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/index.md:20
+msgid ""
+"PowerShell script bodies referenced by manifests via `script_object`. Keyed "
+"by `<name>/<version>`."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/index.md:21
+#: src\operations/agent-mediated-updates/agent-self.md:12
+msgid "`OBJECT_AGENT_RELEASES`"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/index.md:21
+msgid ""
+"Agent binaries only. Separate from `APP_PACKAGES` because agent rollout has "
+"its own watcher / target_version flow."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/index.md:22
+msgid "`agent_config` (KV)"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/index.md:22
+msgid ""
+"Layered config — global / per-group / per-PC. `target_version` lives here."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/index.md:23
+msgid "`jobs` (KV)"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/index.md:23
+msgid "Job catalog. Each entry is a manifest the operator can `exec`."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/index.md:25
+msgid "The CLI surface:"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/index.md:27
+msgid "Command"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/index.md:27
+msgid "What it does"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/index.md:29
+msgid "`kanade app publish <name> <version> <file>`"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/index.md:29
+msgid "Upload to `OBJECT_APP_PACKAGES`."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/index.md:30
+msgid "`kanade script publish <name> <version> <file>`"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/index.md:30
+msgid "Upload to `OBJECT_SCRIPTS`."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/index.md:31
+msgid "`kanade job create <yaml>`"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/index.md:31
+msgid "Upsert a job manifest into the `jobs` KV."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/index.md:32
+msgid "`kanade exec <job-id> --pcs <pc> [--pcs <pc> …]`"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/index.md:32
+msgid "Fire a registered job at a set of PCs."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/index.md:33
+msgid "`kanade agent publish <file>`"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/index.md:33
+msgid "Upload an agent binary (version extracted from PE VERSIONINFO)."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/index.md:34
+msgid "`kanade agent rollout <version> --pc \\| --group \\| --global`"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/index.md:34
+msgid ""
+"Flip `target_version` on the chosen scope; agents pick it up via their "
+"self-update watcher."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:3
+msgid ""
+"The backend lives on one (or more) of your managed hosts as a Windows "
+"service. Agent-mediated update means: an agent running on that host stops "
+"the service, swaps the binary, starts it back up — while the operator never "
+"logs into the host."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:8
+msgid "End-to-end flow"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:41
+msgid ""
+"The two sha checks are intentional: the script body's hash is verified by "
+"the agent before execution (script integrity); the binary's hash is verified "
+"by the script before the swap (binary integrity, defined by the operator in "
+"`$AgentSourceSha256`)."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:47
+#: src\operations/agent-mediated-updates/client.md:28
+#: src\operations/agent-mediated-updates/agent-self.md:33
+msgid "Step-by-step"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:49
+msgid "1. Build kanade-backend"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:55
+msgid "Output: `target/release/kanade-backend.exe`."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:57
+#: src\operations/agent-mediated-updates/client.md:38
+#: src\operations/agent-mediated-updates/nats.md:64
+msgid "2. Publish the binary"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:63
+msgid ""
+"This uploads the binary to `OBJECT_APP_PACKAGES/kanade-backend/0.43.0` and "
+"prints the sha-256 digest. **Copy the digest** — you'll need its "
+"lowercase-hex form for the script."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:67
+msgid "3. Edit `scripts/deploy-backend.ps1`"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:69
+msgid "Make a local copy. Set the four `$Agent*` knobs at the top:"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:71
+msgid ""
+"```powershell\n"
+"$AgentSourceUrl       = 'http://kanade-backend.example.com:8080'\n"
+"$AgentSourceVersion   = '0.43.0'\n"
+"$AgentSourceSha256    = '<lowercase hex of kanade-backend.exe>'\n"
+"$AgentSourceAuthToken = '<bearer for the backend HTTP API>'\n"
+"```"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:78
+msgid ""
+"Leave the rest of the script alone — those knobs are how the script knows "
+"it's running in \"agent mode\" (downloading from the backend) vs the "
+"manual-install mode (local folder of files)."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:82
+msgid ""
+"The `$AgentSourceSha256` is the hex form of `Get-FileHash kanade-backend.exe "
+"-Algorithm SHA256`."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:85
+msgid ""
+"If you only have the base64url form printed by `kanade app publish`, decode "
+"it. The base64 from the CLI is URL-safe and may be unpadded, so the "
+"PowerShell snippet needs to re-pad before `FromBase64String` accepts it:"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:97
+msgid ""
+"Or in Python: `python -c \"import base64; "
+"print(base64.urlsafe_b64decode('<b64>' + '=' * (-len('<b64>') % 4)).hex())\"`"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:100
+msgid ""
+"The `$AgentSourceAuthToken` is required as of the live test on 2026-05-26 — "
+"the backend's `/api/app-packages/<name>/<ver>` endpoint returns HTTP 401 "
+"without it. Leave empty only for no-auth lab setups."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:105
+msgid "4. Publish the edited script"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:111
+msgid "Upload goes to `OBJECT_SCRIPTS/deploy-backend/0.43.0`."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:113
+msgid "5. Register / update the job"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:115
+msgid ""
+"`jobs/install-kanade-backend.yaml` in the repo is the template. Edit "
+"`version:` + `script_object:` to point at the version you just published, "
+"then upsert:"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:120
+#: src\operations/agent-mediated-updates/client.md:69
+#: src\operations/agent-mediated-updates/nats.md:93
+msgid "id"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:120
+msgid "install-kanade-backend"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:120
+#: src\operations/agent-mediated-updates/client.md:69
+#: src\operations/agent-mediated-updates/client.md:81
+#: src\operations/agent-mediated-updates/client.md:84
+#: src\operations/agent-mediated-updates/nats.md:93
+msgid "version"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:121
+#: src\operations/agent-mediated-updates/client.md:70
+#: src\operations/agent-mediated-updates/nats.md:94
+msgid "execute"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:123
+#: src\operations/agent-mediated-updates/client.md:72
+#: src\operations/agent-mediated-updates/nats.md:96
+msgid "shell"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:123
+#: src\operations/agent-mediated-updates/client.md:72
+#: src\operations/agent-mediated-updates/nats.md:96
+msgid "powershell"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:124
+#: src\operations/agent-mediated-updates/nats.md:97
+msgid "script_object"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:124
+msgid "deploy-backend/0.43.0"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:125
+#: src\operations/agent-mediated-updates/nats.md:98
+msgid "timeout"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:125
+#: src\operations/agent-mediated-updates/nats.md:98
+msgid "300s"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:126
+#: src\operations/agent-mediated-updates/client.md:75
+#: src\operations/agent-mediated-updates/nats.md:99
+msgid "run_as"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:126
+#: src\operations/agent-mediated-updates/client.md:75
+#: src\operations/agent-mediated-updates/nats.md:99
+msgid "system"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:126
+#: src\operations/agent-mediated-updates/client.md:76
+#: src\operations/agent-mediated-updates/nats.md:99
+msgid "require_approval"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:134
+msgid ""
+"`run_as: system` is required: `Stop-Service` / `Start-Service` / `sc.exe` "
+"all need admin. The agent already runs as LocalSystem in production."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:138
+msgid "6. Fire it"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:144
+msgid ""
+"The CLI returns an `exec_id` immediately. The actual install happens "
+"asynchronously on the target."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:147
+msgid "7. Verify"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:149
+msgid "Query the backend's results endpoint (or watch the SPA Activity view):"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:152
+msgid ""
+"```pwsh\n"
+"curl -H \"Authorization: Bearer <token>\" `\n"
+"  \"http://<backend>/api/results?limit=5\"\n"
+"```"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:157
+msgid ""
+"Look for your `exec_id` with `exit_code: 0` and a `stdout` that ends with "
+"`kanade-backend <new-version>`."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:160
+#: src\operations/agent-mediated-updates/agent-self.md:90
+msgid "What can go wrong"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:162
+#: src\operations/agent-mediated-updates/agent-self.md:92
+msgid "Symptom"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:162
+#: src\operations/agent-mediated-updates/agent-self.md:92
+msgid "Cause"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:162
+#: src\operations/agent-mediated-updates/agent-self.md:92
+msgid "Fix"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:164
+msgid "`[CmdletBinding()]` / `param()` parse error in stderr"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:164
+msgid "Agent older than 0.42.2 (running `-Command` mode)"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:164
+msgid ""
+"Upgrade the agent first via `kanade agent rollout` (see [agent "
+"self-update](./agent-self.md))."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:165
+msgid "`Invoke-WebRequest : missing bearer token`"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:165
+msgid "`$AgentSourceAuthToken` empty but backend requires auth"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:165
+msgid "Set it."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:166
+msgid "`sha256 mismatch — expected=<x> actual=<y>`"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:166
+msgid "Hash in script doesn't match the published binary"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:166
+msgid ""
+"Re-publish or recompute the hash. The script aborts BEFORE the swap, so the "
+"existing install is intact."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:167
+msgid "Job runs but kanade-backend doesn't come back up"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:167
+msgid "Service-failure / config drift on target"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:167
+msgid ""
+"Read `C:\\ProgramData\\Kanade\\log\\backend.*.log` on the target. The agent "
+"can fetch it via `kanade logs <pc>` (when implemented) or you can pull the "
+"file directly."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:3
+msgid ""
+"The Tauri desktop client is shipped to endpoints the same way as the "
+"backend: binary in `OBJECT_APP_PACKAGES`, script in `OBJECT_SCRIPTS`, job in "
+"`jobs` KV. The shape mirrors [backend updates](./backend.md) — only the "
+"script content and package name differ."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:9
+msgid "What's different from backend updates"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:11
+msgid "Aspect"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:11
+msgid "kanade-backend"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:11
+msgid "kanade-client"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:13
+msgid "Service to (re)start"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:13
+msgid "`KanadeBackend` (Windows service)"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:13
+msgid "None — the client is launched by the user"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:14
+msgid "Install location"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:14
+msgid "`%ProgramFiles%\\Kanade\\kanade-backend.exe`"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:14
+msgid "`%ProgramFiles%\\Kanade\\kanade-client.exe`"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:15
+msgid "Script in repo"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:15
+msgid "`scripts/deploy-backend.ps1`"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:15
+msgid ""
+"`jobs/scripts/install-kanade-client.ps1` (lives in the manifest's "
+"script_file path)"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:16
+msgid "Manifest file ref"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:16
+msgid "`script_object: deploy-backend/<v>`"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:16
+msgid ""
+"`script_file: jobs/scripts/install-kanade-client.ps1` (inlined at `kanade "
+"job create`)"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:17
+msgid "Atomic swap pattern"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:17
+msgid "Stop service → copy → start service"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:17
+msgid "Stage to `<exe>.new` → `Move-Item` → drop `<exe>.old`"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:18
+msgid "Inventory projection"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:18
+msgid "None (the backend reports its own version)"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:18
+msgid ""
+"`inventory:` block emits per-PC client version into the SPA Inventory page"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:20
+msgid ""
+"Both shapes — `script_object` (referenced by hash from OBJECT_SCRIPTS, agent "
+"fetches on demand) and `script_file` (script body inlined into the manifest "
+"at `kanade job create` time) — are supported. The client manifest uses "
+"`script_file` for historical reasons; the backend manifest uses "
+"`script_object` because it was rewritten to test the Object Store path."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:30
+msgid "1. Build kanade-client"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:36
+msgid "Output: `target/release/kanade-client.exe`."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:44
+msgid "3. Edit `jobs/scripts/install-kanade-client.ps1`"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:46
+msgid "Set the three knobs at the top:"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:48
+msgid ""
+"```powershell\n"
+"$BackendBase    = 'http://kanade-backend.example.com:8080'\n"
+"$Version        = '0.42.0'\n"
+"$ExpectedSha256 = '<lowercase hex of kanade-client.exe>'\n"
+"```"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:54
+msgid ""
+"Unlike the backend script, this one doesn't have an explicit auth-token knob "
+"yet — it relies on `Invoke-WebRequest -UseDefaultCredentials` or the absence "
+"of auth on the `/api/app-packages/kanade-client/<v>` route. If your backend "
+"gates that endpoint, add an `Authorization` header to the "
+"`Invoke-WebRequest` call the same way the backend script does (see [Updating "
+"kanade-backend](./backend.md#3-edit-scriptsdeploy-backendps1)). A "
+"first-class `$ClientSourceAuthToken` knob is on the backlog."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:64
+msgid "4. Register / update the job"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:66
+msgid "`jobs/install-kanade-client.yaml`:"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:69
+msgid "install-kanade-client"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:73
+msgid "script_file"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:73
+msgid ""
+"jobs/scripts/install-kanade-client.ps1   # body inlined at `job create`\n"
+"  timeout"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:74
+msgid "180s"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:78
+msgid "inventory"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:80
+msgid "display"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:81
+#: src\operations/agent-mediated-updates/client.md:82
+#: src\operations/agent-mediated-updates/client.md:84
+msgid "field"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:81
+#: src\operations/agent-mediated-updates/client.md:82
+#: src\operations/agent-mediated-updates/client.md:84
+msgid "label"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:81
+msgid "Version"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:82
+msgid "path"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:82
+msgid "Install path"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:83
+msgid "summary"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:84
+msgid "Client version"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:91
+msgid ""
+"The `inventory:` block tells the projector that the script's stdout is a "
+"single JSON blob whose `version` / `path` fields populate the SPA's "
+"Inventory page. Operators can spot stragglers from a fleet-wide table — no "
+"ssh needed."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:96
+msgid "5. Fire it"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:102
+msgid "Or against a group:"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:108
+msgid "6. Verify in the SPA"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/client.md:110
+msgid ""
+"Open the SPA Inventory page (or query `/api/inventory?app=kanade-client`) "
+"and confirm the target hosts report the new version."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:3
+msgid ""
+"Updating the broker on a managed host is the most interesting case because "
+"the agent **talks to the broker over the broker** — stopping NATS means "
+"losing the agent's connection mid-job. The machinery handles this with two "
+"mechanisms working together:"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:8
+msgid ""
+"**Reconnect.** The agent's NATS client reconnects automatically on broker "
+"restart. No human intervention needed."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:10
+msgid ""
+"**Outbox.** Job results produced while the broker is down are queued under "
+"`%ProgramData%\\Kanade\\outbox\\` and replayed once the connection comes "
+"back. The result row reaches the backend as soon as the new NATS server is "
+"up."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:15
+msgid ""
+"So the flow looks the same as [backend updates](./backend.md) — the script "
+"Stops the service, swaps the binary, Starts it — and the agent transparently "
+"rides out the broker gap."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:20
+msgid "Caveats specific to NATS updates"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:22
+msgid "Concern"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:22
+msgid "Reality"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:24
+msgid "Will the result row be lost?"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:24
+msgid "No — outbox persists it across the broker outage and drains on reconnect."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:25
+msgid "Can I update from the SPA?"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:25
+msgid ""
+"Yes, same as any job — `kanade exec install-kanade-nats --pcs <broker-host>`."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:26
+msgid "What if NATS doesn't come back up?"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:26
+msgid ""
+"The result will sit in the outbox indefinitely. Operators should monitor "
+"`outbox/` on the broker host as a leading indicator."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:27
+msgid "What if the new NATS version is incompatible (JetStream upgrade etc.)?"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:27
+msgid ""
+"Roll a single canary first (`--pcs <one-broker>`), watch outbox + backend "
+"health, then roll out fleet-wide. The 5-min cache TTL for SPA queries means "
+"you'll see the canary's state within a few minutes."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:29
+msgid "Manual install (bootstrap)"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:31
+msgid ""
+"For the very first install — when there's no agent on the broker host yet — "
+"use the direct workflow:"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:40
+msgid ""
+"This installs `nats-server.exe` to `%ProgramFiles%\\Kanade\\` and "
+"`nats-server.conf` to `%ProgramData%\\Kanade\\config\\` (with ACL hardened "
+"to SYSTEM + Administrators because the bearer token lives in plaintext), "
+"registers the `KanadeNats` Windows service, opens TCP 4222 (broker) + 8222 "
+"(monitoring HTTP), and starts the service."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:47
+msgid "Agent-mediated update (steady state)"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:49
+msgid ""
+"**Status:** template-only. `scripts/deploy-nats.ps1` doesn't ship "
+"`$AgentSource*` knobs yet — agent-mode is on the backlog. The shape below is "
+"what it WILL look like once the knobs land."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:53
+msgid "1. Build / fetch nats-server.exe"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:55
+msgid "Either:"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:61
+msgid ""
+"…or download it directly from "
+"[github.com/nats-io/nats-server/releases](https://github.com/nats-io/nats-server/releases)."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:70
+msgid "3. Edit deploy-nats.ps1"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:72
+msgid ""
+"Once the agent-mode knobs ship, the pattern matches "
+"[deploy-backend.ps1](./backend.md#3-edit-scriptsdeploy-backendps1):"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:75
+msgid ""
+"```powershell\n"
+"$AgentSourceUrl       = 'http://kanade-backend.example.com:8080'\n"
+"$AgentSourceVersion   = '2.10.20'\n"
+"$AgentSourceSha256    = '<lowercase hex of nats-server.exe>'\n"
+"$AgentSourceAuthToken = '<bearer for the backend HTTP API>'\n"
+"```"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:82
+msgid "4. Publish + register + exec"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:90
+msgid "The job manifest will look like:"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:93
+msgid "install-kanade-nats"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:97
+msgid "deploy-nats/2.10.20"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:103
+msgid "5. Verify"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:105
+msgid ""
+"After the broker comes back, the outbox drains and you'll see the result row "
+"in `/api/results`. Confirm the new NATS version via the broker's monitoring "
+"endpoint:"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:109
+msgid ""
+"```pwsh\n"
+"curl http://<broker>:8222/varz | python -m json.tool | rg version\n"
+"```"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:113
+msgid "Why we don't need a separate \"broker update\" mechanism"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:115
+msgid ""
+"Earlier designs considered a dedicated bootstrap channel (parallel NATS link "
+"the agent uses just for broker updates) to avoid the self-update-over-broker "
+"chicken-and-egg. The outbox + reconnect pair makes that unnecessary: the "
+"result is \"merely delayed\", not \"lost\". One transport, one mental model."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/agent-self.md:3
+msgid ""
+"Agent self-update is the only component that **doesn't** use "
+"`OBJECT_APP_PACKAGES` + a `script_object` job. It has dedicated machinery "
+"because the agent has to swap its own running binary without ssh — a tighter "
+"loop than the generic install jobs."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/agent-self.md:8
+msgid "Mechanism"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/agent-self.md:10
+msgid "Bucket / Key"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/agent-self.md:12
+msgid ""
+"Agent binaries, keyed by `<version>`. Separate from `OBJECT_APP_PACKAGES` so "
+"the rollout watcher only fires on agent updates."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/agent-self.md:13
+msgid "`agent_config.<scope>.target_version`"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/agent-self.md:13
+msgid ""
+"The version each scope (global / group / pc) should be on. Watched by the "
+"agent's `self_update` loop."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/agent-self.md:15
+msgid "Flow:"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/agent-self.md:26
+msgid ""
+"The rollout watcher has to survive a cold broker (e.g. agent and broker boot "
+"at the same time after a host reboot). Pre-#226 a permanent `Err(_) => "
+"return;` on the first `get_object_store` call killed the watcher forever; "
+"the agent would never self-update on that boot. Post-#226 the watcher "
+"retries with backoff until the broker is reachable."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/agent-self.md:35
+msgid "1. Build the agent"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/agent-self.md:41
+msgid "Output: `target/release/kanade-agent.exe`."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/agent-self.md:43
+msgid "2. Publish"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/agent-self.md:49
+msgid ""
+"The CLI extracts the version from the PE VERSIONINFO resource — no "
+"`--version` flag, no chance of a label / binary mismatch."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/agent-self.md:52
+msgid "3. Roll out"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/agent-self.md:54
+msgid "Pick a scope. Start with one canary host:"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/agent-self.md:60
+msgid "Watch via ping:"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/agent-self.md:67
+msgid "If happy, widen:"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/agent-self.md:75
+msgid ""
+"`--jitter` spreads the actual swap moment across a window so a wide fan-out "
+"doesn't hammer the OS service manager on every host at once. Recommended for "
+"fleets ≥ 100 hosts."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/agent-self.md:79
+msgid "4. Verify"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/agent-self.md:86
+msgid ""
+"Then a fleet-wide spot-check via the SPA Agents page (or `/api/agents`): the "
+"`agent_version` column should converge to the new version within `jitter` + "
+"~30s heartbeat cadence."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/agent-self.md:94
+msgid "`kanade agent rollout` says \"version not in OBJECT_AGENT_RELEASES\""
+msgstr ""
+
+#: src\operations/agent-mediated-updates/agent-self.md:94
+msgid "Typo or wrong scope"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/agent-self.md:94
+msgid ""
+"Re-check with `kanade agent current` and `kanade jetstream object list "
+"agent_releases`."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/agent-self.md:95
+msgid "`kanade ping <host>` still shows the old version after several minutes"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/agent-self.md:95
+msgid ""
+"Agent didn't self-update — either the watcher's dead (pre-#226 agent) or the "
+"host can't reach the broker"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/agent-self.md:95
+msgid ""
+"Check `%ProgramData%\\Kanade\\log\\agent.*.log` on the target. If "
+"self_update is silent (no \"checking target_version\" log lines), the agent "
+"is too old; bootstrap manually with `deploy-agent.ps1`."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/agent-self.md:96
+msgid "Agent flaps: starts, immediately exits with `exit_code: 1`"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/agent-self.md:96
+msgid ""
+"The new binary is bad on this host (config drift, missing dep, etc.). SCM's "
+"failure-actions restart it, it crashes again — observable in Event Viewer as "
+"a Service Control Manager error cluster"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/agent-self.md:96
+msgid ""
+"Roll back: `kanade agent rollout <prev-version> --pcs <host>`. The host will "
+"swap back at the next watcher tick."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/agent-self.md:98
+msgid "Why a separate bucket / scope?"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/agent-self.md:100
+msgid ""
+"`OBJECT_APP_PACKAGES` is a generic blob store keyed by `<name>/<version>`. "
+"The agent rollout pattern needs:"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/agent-self.md:103
+msgid ""
+"A watcher that fires _only_ on agent changes (cheap KV watch on one specific "
+"key, not a poll over a bucket of many names)."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/agent-self.md:105
+msgid ""
+"A \"current target\" semantic per scope, not just \"all known versions\" — "
+"`agent_config.<scope>.target_version` IS the answer to \"what should I be "
+"running\" without the agent enumerating."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/agent-self.md:108
+msgid ""
+"Operator UX (`kanade agent publish` / `rollout`) that's divergent enough "
+"from `kanade app publish` to warrant its own subcommand tree."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/agent-self.md:112
+msgid ""
+"So agents get `OBJECT_AGENT_RELEASES` + a layered config KV; the other "
+"components share `OBJECT_APP_PACKAGES` + per-app jobs."
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:3
+msgid ""
+"PowerShell scripts the agent will run are _almost_ normal `.ps1` files. This "
+"page collects the gotchas that aren't obvious from the script source alone."
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:7
+msgid "The agent stages scripts on disk and runs them via `-File`"
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:9
+msgid ""
+"As of [PR #230](https://github.com/yukimemi/kanade/pull/230) (agent version "
+"0.42.0+), the agent:"
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:12
+msgid ""
+"Writes your script body to a temp `.ps1` under "
+"`%ProgramData%\\Kanade\\agent-scripts\\<UUID>\\kanade-<UUID>.ps1` (Windows) "
+"or `$TMPDIR/kanade-agent-<UUID>/kanade-<UUID>.ps1` (non-Windows dev only)."
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:16
+msgid ""
+"Writes a _launcher_ `.ps1` next to it that sets UTF-8 console encoding then "
+"`& '<your-script>' @args`."
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:18
+msgid ""
+"Spawns `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "
+"<launcher>`."
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:21
+msgid "This means your script:"
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:23
+msgid ""
+"**Can** have `[CmdletBinding()]` and `param(...)` at the top. The "
+"call-operator boundary in the launcher gives your script its own scope where "
+"those headers are valid."
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:26
+msgid ""
+"**Should not** rely on `$PSCommandPath` matching the operator's source path "
+"— it'll be the staged temp file."
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:28
+msgid "**Should not** write to `$PSScriptRoot` (see next section)."
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:30
+msgid ""
+"Pre-0.42.0 agents used `powershell -Command \"<body>\"`, which parses the "
+"body as a command-line expression and rejects `[CmdletBinding()]` as a "
+"syntax error. If you see \"Unexpected token '\\[CmdletBinding()\\]'\" in "
+"stderr, the host's agent is too old — upgrade it (see [agent "
+"self-update](../operations/agent-mediated-updates/agent-self.md))."
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:37
+msgid "`$PSScriptRoot` is read-only for `run_as: user`"
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:39
+msgid ""
+"When `run_as: user` (or `system_gui`), the child process runs as the "
+"logged-in user — not as the LocalSystem agent that wrote the staged file. "
+"The staging directory inherits its ACL from `%ProgramData%`, which grants "
+"users **Read & Execute but not Modify**."
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:45
+msgid "That means:"
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:57
+msgid ""
+"Write to `$env:TEMP`, `$env:LOCALAPPDATA`, or an absolute path under the "
+"user's profile instead. Even for `run_as: system` (where SYSTEM can write to "
+"its own staged dir), the directory is cleaned up when the script exits, so "
+"writing siblings is fragile either way."
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:63
+msgid "Identity table"
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:65
+msgid "`run_as:` (manifest)"
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:65
+msgid "Child identity"
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:65
+msgid "Reads `$PSScriptRoot`"
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:65
+msgid "Writes `$PSScriptRoot`"
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:65
+msgid "Has admin"
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:67
+msgid "`system` (default)"
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:67
+msgid "LocalSystem"
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:67
+#: src\developing/writing-agent-scripts.md:68
+#: src\developing/writing-agent-scripts.md:69
+msgid "✓"
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:67
+#: src\developing/writing-agent-scripts.md:69
+msgid "✓ but pointless (GC'd)"
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:67
+#: src\developing/writing-agent-scripts.md:69
+msgid "yes"
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:68
+msgid "`user`"
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:68
+msgid "Logged-in user"
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:68
+msgid "✗ access denied"
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:68
+msgid "no"
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:69
+msgid "`system_gui`"
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:69
+msgid "LocalSystem, in user session"
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:71
+msgid ""
+"`system_gui` is the \"PsExec `-i -s`\" pattern — admin privilege but visible "
+"in the user's desktop session (useful for GUI tools that need both elevation "
+"and an interactive window)."
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:75
+msgid "stdout vs Write-Host"
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:77
+msgid ""
+"The backend's result projector reads **stdout** as the script's output. If "
+"your manifest has an `inventory:` block, stdout is parsed as a single JSON "
+"blob."
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:81
+msgid ""
+"Use `Write-Host` for progress chatter — it goes to the host stream, NOT "
+"stdout, so it doesn't pollute the JSON parse."
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:84
+msgid ""
+"```powershell\n"
+"Write-Host \"Downloading...\"         # → host stream (logged but ignored by "
+"projector)\n"
+"Write-Output ($obj | ConvertTo-Json) # → stdout (parsed)\n"
+"```"
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:89
+msgid ""
+"Avoid `Write-Output` for chatter — anything on stdout that isn't the "
+"expected JSON will fail the inventory parse."
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:92
+msgid "UTF-8 by default"
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:94
+msgid ""
+"The launcher sets `[Console]::OutputEncoding = UTF-8` and `$OutputEncoding = "
+"UTF-8` before invoking your script, so any stdout / stderr you produce is "
+"UTF-8 regardless of the host's system codepage. Operator-shipped scripts "
+"with Japanese / DE / KR / CN strings show up correctly in the SPA Activity "
+"view without per-host workarounds."
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:101
+msgid ""
+"If you explicitly need OEM / CP932 / Shift-JIS output (e.g. calling a legacy "
+"CLI that ignores `$OutputEncoding`), set it yourself in the script after the "
+"launcher prelude has run — your assignment takes precedence."
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:106
+msgid "Native command exit codes"
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:108
+msgid ""
+"If your script ends with a successful native command run, the overall exit "
+"is 0 — that's PowerShell's default. If a native command fails "
+"(`$LASTEXITCODE -ne 0`) and you DON'T handle it, PowerShell still exits 0 — "
+"`$ErrorActionPreference = 'Stop'` does **not** save you here."
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:114
+msgid ""
+"Windows PowerShell 5.1 (the default on Windows endpoints — and what the "
+"agent's `powershell.exe` resolves to) treats native command non-zero exits "
+"as non-terminating regardless of `$ErrorActionPreference`. PowerShell 7.3+ "
+"adds `$PSNativeCommandUseErrorActionPreference = $true` which makes them "
+"terminating, but that's not available in the deployment target. **Always "
+"check `$LASTEXITCODE` explicitly.**"
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:122
+msgid ""
+"The agent does NOT auto-propagate `$LASTEXITCODE` either — that would exit "
+"nonzero even when your script handled the native error gracefully. If you "
+"want the script's exit code to reflect a specific native call, propagate it "
+"yourself:"
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:127
+msgid ""
+"```powershell\n"
+"& git pull\n"
+"if ($LASTEXITCODE -ne 0) { throw \"git pull failed with exit code "
+"$LASTEXITCODE\" }\n"
+"# or, if you want the exact native code propagated:\n"
+"if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n"
+"```"
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:134
+msgid ""
+"`throw` is usually preferable because it produces a clean PowerShell error "
+"record (which the `trap { … break }` cleanup pattern can intercept) and "
+"exits non-zero. `exit $LASTEXITCODE` is right when the caller cares about "
+"the exact code."
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:139
+msgid "Timeouts"
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:141
+msgid ""
+"The manifest's `timeout:` is enforced by the agent. When it fires, the agent "
+"calls `child.kill()` on the PowerShell process — no graceful shutdown, no "
+"trap, no finally. Plan for it:"
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:145
+msgid "Budget the script to finish in `timeout * 0.6` and leave headroom."
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:147
+msgid ""
+"Use `trap { ... ; break }` for cleanup of resources that need explicit "
+"release (staging dirs, lock files) — `trap` fires on terminating errors, NOT "
+"on the agent's kill. Don't rely on it for the timeout case."
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:151
+msgid ""
+"If you need cooperative cancellation, poll a sentinel file or a registry "
+"value and exit early. The agent has no way to send the script a graceful "
+"\"wrap up\" signal."
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:155
+msgid "Killing a running job"
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:157
+msgid ""
+"`kanade kill <exec_id>` publishes a kill message the agent subscribes to. On "
+"receipt, the agent calls `child.kill()` — same hard-kill as the timeout "
+"path. Operators get an immediate result row marked `Killed` with whatever "
+"stdout / stderr the agent managed to capture before termination."
+msgstr ""
+
+#: src\reference/spec.md:3
+msgid ""
+"The full protocol / on-wire spec hasn't been migrated into the book yet. The "
+"authoritative source is the single-file version in the repo:"
+msgstr ""
+
+#: src\reference/spec.md:7
+msgid ""
+"[**docs/SPEC.md** on "
+"GitHub](https://github.com/yukimemi/kanade/blob/main/docs/SPEC.md)"
+msgstr ""
+
+#: src\reference/spec.md:9
+msgid ""
+"Splitting it into chapters under this section is a follow-up once the rest "
+"of the operator / developer guides settle."
+msgstr ""
+

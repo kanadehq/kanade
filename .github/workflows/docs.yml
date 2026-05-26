@@ -23,10 +23,11 @@ permissions:
 
 env:
   MDBOOK_VERSION: 0.4.40
+  MDBOOK_I18N_HELPERS_VERSION: 0.3.6
 
 jobs:
   build:
-    name: Build mdBook
+    name: Build mdBook (en + ja)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -38,15 +39,51 @@ jobs:
             | tar -xz -C "$RUNNER_TEMP/mdbook"
           echo "$RUNNER_TEMP/mdbook" >> "$GITHUB_PATH"
 
-      - name: Build
+      - name: Install mdbook-i18n-helpers
+        run: cargo install mdbook-i18n-helpers --version "${MDBOOK_I18N_HELPERS_VERSION}" --locked
+
+      - name: Build English (default, source language)
         working-directory: book
-        run: mdbook build
+        env:
+          MDBOOK_OUTPUT__HTML__SITE_URL: /kanade/en/
+        run: mdbook build -d build/en
+
+      - name: Build Japanese
+        working-directory: book
+        env:
+          MDBOOK_BOOK__LANGUAGE: ja
+          MDBOOK_OUTPUT__HTML__SITE_URL: /kanade/ja/
+        run: mdbook build -d build/ja
+
+      - name: Write root redirect (/kanade/ → /kanade/en/)
+        working-directory: book
+        run: |
+          cat > build/index.html <<'HTML'
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <title>kanade — 奏</title>
+            <meta http-equiv="refresh" content="0; url=./en/">
+            <link rel="canonical" href="./en/">
+            <script>
+              // Prefer the visitor's browser language when it asks for ja-*.
+              var lang = (navigator.language || navigator.userLanguage || '').toLowerCase();
+              location.replace(lang.startsWith('ja') ? './ja/' : './en/');
+            </script>
+          </head>
+          <body>
+            Redirecting to <a href="./en/">English docs</a> /
+            <a href="./ja/">日本語ドキュメント</a>.
+          </body>
+          </html>
+          HTML
 
       - name: Upload site
         if: github.ref == 'refs/heads/main'
         uses: actions/upload-pages-artifact@v3
         with:
-          path: book/book
+          path: book/build
 
   deploy:
     name: Deploy to GitHub Pages

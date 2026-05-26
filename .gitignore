@@ -44,6 +44,9 @@ apm_modules/
 
 .claude/scheduled_tasks.lock
 
-# mdBook build output (book/book/). Source lives in book/src/;
-# build artifacts are deployed by .github/workflows/docs.yml.
+# mdBook build output. Source lives in book/src/, translations in
+# book/po/; build artifacts are deployed by .github/workflows/docs.yml.
+# `book/book/` is the default mdbook output dir; `book/build/` is
+# the multi-language layout (build/en/, build/ja/) the CI uses.
 /book/book/
+/book/build/

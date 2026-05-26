@@ -10,7 +10,11 @@ default-theme = "navy"
 preferred-dark-theme = "navy"
 git-repository-url = "https://github.com/yukimemi/kanade"
 edit-url-template = "https://github.com/yukimemi/kanade/edit/main/book/{path}"
-site-url = "/kanade/"
+# Empty default so `mdbook serve` and local `mdbook build` produce
+# assets at the root. CI overrides this via
+# MDBOOK_OUTPUT__HTML__SITE_URL to /kanade/en/ or /kanade/ja/
+# for the GH Pages deploy (see .github/workflows/docs.yml).
+site-url = ""
 
 [output.html.fold]
 enable = true
@@ -23,3 +27,14 @@ use-boolean-and = true
 boost-title = 2
 
 [preprocessor.links]
+
+# mdbook-gettext applies translations from `book/po/<lang>.po` at
+# build time. With no MDBOOK_BOOK__LANGUAGE set, it's a no-op and
+# English (the source) renders directly. With
+# MDBOOK_BOOK__LANGUAGE=ja the msgids in the markdown source are
+# replaced with the matching msgstr from po/ja.po. Untranslated
+# entries fall back to the source English, so a partial
+# translation shows whichever paragraphs haven't been touched yet
+# in English instead of an empty page.
+[preprocessor.gettext]
+after = ["links"]
