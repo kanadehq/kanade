@@ -1,0 +1,25 @@
+[book]
+title = "kanade — 奏"
+description = "Operator + developer documentation for the kanade endpoint management system."
+authors = ["yukimemi"]
+language = "en"
+src = "src"
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/yukimemi/kanade"
+edit-url-template = "https://github.com/yukimemi/kanade/edit/main/book/{path}"
+site-url = "/kanade/"
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.search]
+enable = true
+limit-results = 30
+use-boolean-and = true
+boost-title = 2
+
+[preprocessor.links]

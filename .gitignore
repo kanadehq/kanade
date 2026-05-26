@@ -43,3 +43,7 @@ apm_modules/
 # kata:gitignore:base:end
 
 .claude/scheduled_tasks.lock
+
+# mdBook build output (book/book/). Source lives in book/src/;
+# build artifacts are deployed by .github/workflows/docs.yml.
+/book/book/
