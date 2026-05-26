@@ -80,10 +80,22 @@ script knows it's running in "agent mode" (downloading from the
 backend) vs the manual-install mode (local folder of files).
 
 > The `$AgentSourceSha256` is the hex form of
-> `Get-FileHash kanade-backend.exe -Algorithm SHA256`. If you
-> only have the base64 form from `kanade app publish`, decode
-> it: `[BitConverter]::ToString([Convert]::FromBase64String($b64.Replace('-', '+').Replace('_', '/'))).Replace('-', '').ToLowerInvariant()`
-> or `python -c "import base64; print(base64.urlsafe_b64decode('<b64>').hex())"`.
+> `Get-FileHash kanade-backend.exe -Algorithm SHA256`.
+>
+> If you only have the base64url form printed by
+> `kanade app publish`, decode it. The base64 from the CLI is
+> URL-safe and may be unpadded, so the PowerShell snippet needs
+> to re-pad before `FromBase64String` accepts it:
+>
+> ```powershell
+> $b64 = '<paste the SHA-256= value here, without the SHA-256= prefix>'
+> $b64 = $b64.Replace('-', '+').Replace('_', '/')
+> if ($b64.Length % 4) { $b64 += '=' * (4 - $b64.Length % 4) }
+> [BitConverter]::ToString([Convert]::FromBase64String($b64)).Replace('-', '').ToLowerInvariant()
+> ```
+>
+> Or in Python:
+> `python -c "import base64; print(base64.urlsafe_b64decode('<b64>' + '=' * (-len('<b64>') % 4)).hex())"`
 
 > The `$AgentSourceAuthToken` is required as of the live test on
 > 2026-05-26 — the backend's `/api/app-packages/<name>/<ver>`

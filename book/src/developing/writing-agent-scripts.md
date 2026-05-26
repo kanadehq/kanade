@@ -55,7 +55,7 @@ Set-Content -Path $PSScriptRoot\log.log
 ```
 
 Write to `$env:TEMP`, `$env:LOCALAPPDATA`, or an absolute path
-under the user's profile instead. Even for `run_as: System` (where
+under the user's profile instead. Even for `run_as: system` (where
 SYSTEM can write to its own staged dir), the directory is cleaned
 up when the script exits, so writing siblings is fragile either
 way.
@@ -108,21 +108,33 @@ your assignment takes precedence.
 If your script ends with a successful native command run, the
 overall exit is 0 — that's PowerShell's default. If a native
 command fails (`$LASTEXITCODE -ne 0`) and you DON'T handle it,
-PowerShell still exits 0 unless you explicitly `exit
-$LASTEXITCODE` or set `$ErrorActionPreference = 'Stop'`.
+PowerShell still exits 0 — `$ErrorActionPreference = 'Stop'`
+does **not** save you here.
 
-The agent does NOT auto-propagate `$LASTEXITCODE` — that would
-exit nonzero even when your script handled the native error
-gracefully. If you want the exit code to reflect a specific
-native call, propagate it yourself:
+> Windows PowerShell 5.1 (the default on Windows endpoints — and
+> what the agent's `powershell.exe` resolves to) treats native
+> command non-zero exits as non-terminating regardless of
+> `$ErrorActionPreference`. PowerShell 7.3+ adds
+> `$PSNativeCommandUseErrorActionPreference = $true` which makes
+> them terminating, but that's not available in the deployment
+> target. **Always check `$LASTEXITCODE` explicitly.**
+
+The agent does NOT auto-propagate `$LASTEXITCODE` either — that
+would exit nonzero even when your script handled the native error
+gracefully. If you want the script's exit code to reflect a
+specific native call, propagate it yourself:
 
 ```powershell
 & git pull
+if ($LASTEXITCODE -ne 0) { throw "git pull failed with exit code $LASTEXITCODE" }
+# or, if you want the exact native code propagated:
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
-…or set `$ErrorActionPreference = 'Stop'` at the top to make
-native failures terminating.
+`throw` is usually preferable because it produces a clean
+PowerShell error record (which the `trap { … break }` cleanup
+pattern can intercept) and exits non-zero. `exit $LASTEXITCODE`
+is right when the caller cares about the exact code.
 
 ## Timeouts
 

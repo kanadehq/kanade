@@ -13,7 +13,7 @@ package name differ.
 | Service to (re)start | `KanadeBackend` (Windows service) | None — the client is launched by the user |
 | Install location | `%ProgramFiles%\Kanade\kanade-backend.exe` | `%ProgramFiles%\Kanade\kanade-client.exe` |
 | Script in repo | `scripts/deploy-backend.ps1` | `jobs/scripts/install-kanade-client.ps1` (lives in the manifest's script_file path) |
-| Manifest file ref | `script_object: deploy-backend/<v>` | `script_file: scripts/install-kanade-client.ps1` (inlined at `kanade job create`) |
+| Manifest file ref | `script_object: deploy-backend/<v>` | `script_file: jobs/scripts/install-kanade-client.ps1` (inlined at `kanade job create`) |
 | Atomic swap pattern | Stop service → copy → start service | Stage to `<exe>.new` → `Move-Item` → drop `<exe>.old` |
 | Inventory projection | None (the backend reports its own version) | `inventory:` block emits per-PC client version into the SPA Inventory page |
 
