@@ -94,7 +94,15 @@ if ($svc) {
 if ($svc) {
     Write-Host "Removing $ServiceName from SCM"
     & sc.exe delete $ServiceName | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "sc.exe delete failed (exit $LASTEXITCODE)" }
+    # 1072 = ERROR_SERVICE_MARKED_FOR_DELETION: an open handle
+    # (services.msc, perf counters, another script) is holding
+    # the service; SCM accepted the delete and will complete it
+    # once the handle closes. Treat the same as success and fall
+    # through to the wait loop — re-running the script after a
+    # half-stuck removal should still converge to "gone".
+    if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 1072) {
+        throw "sc.exe delete failed (exit $LASTEXITCODE)"
+    }
     # SCM removes the entry asynchronously — wait until Get-Service
     # confirms it's gone, otherwise a follow-up `deploy-agent.ps1
     # -Recreate` could race the pending deletion.
@@ -107,20 +115,21 @@ if ($svc) {
     }
 }
 
-# --- Remove binary -----------------------------------------------------------
-if (Test-Path $exeDst) {
-    Write-Host "Removing $exeDst"
-    Remove-Item -Path $exeDst -Force
-    # Self_update may have left an <exe>.new mid-swap. Sweep too.
-    $stale = @("$exeDst.new", "$exeDst.old") | Where-Object { Test-Path $_ }
-    foreach ($s in $stale) {
-        Write-Host "Removing stale $s"
-        Remove-Item -Path $s -Force
+# --- Remove binary (+ swap artefacts) ----------------------------------------
+# Iterate over all three paths so a partial previous run that
+# removed $exeDst but left $exeDst.new / .old behind (e.g. via
+# self_update mid-swap) still gets cleaned. Pattern matches
+# undeploy-client.ps1 for consistency.
+$removedAny = $false
+foreach ($p in @($exeDst, "$exeDst.new", "$exeDst.old")) {
+    if (Test-Path $p) {
+        Write-Host "Removing $p"
+        Remove-Item -Path $p -Force
+        $removedAny = $true
     }
-    # If $binDir is empty after removal, leave it — the directory
-    # itself is owned by Program Files conventions and harmless.
-} else {
-    Write-Host "$exeDst not present, skipping binary removal"
+}
+if (-not $removedAny) {
+    Write-Host "$exeDst not present (and no swap artefacts), skipping binary removal"
 }
 
 # --- Registry secrets --------------------------------------------------------

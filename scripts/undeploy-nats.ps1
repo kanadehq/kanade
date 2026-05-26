@@ -105,7 +105,11 @@ if ($svc) {
 if ($svc) {
     Write-Host "Removing $ServiceName from SCM"
     & sc.exe delete $ServiceName | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "sc.exe delete failed (exit $LASTEXITCODE)" }
+    # 1072 = ERROR_SERVICE_MARKED_FOR_DELETION: see undeploy-agent.ps1
+    # for the rationale.
+    if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 1072) {
+        throw "sc.exe delete failed (exit $LASTEXITCODE)"
+    }
     $deadline = (Get-Date).AddSeconds(30)
     while ((Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) {
         Start-Sleep -Milliseconds 250

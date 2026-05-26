@@ -93,7 +93,11 @@ if ($svc) {
 if ($svc) {
     Write-Host "Removing $ServiceName from SCM"
     & sc.exe delete $ServiceName | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "sc.exe delete failed (exit $LASTEXITCODE)" }
+    # 1072 = ERROR_SERVICE_MARKED_FOR_DELETION: see undeploy-agent.ps1
+    # for the rationale (handle held by services.msc / perf etc.).
+    if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 1072) {
+        throw "sc.exe delete failed (exit $LASTEXITCODE)"
+    }
     $deadline = (Get-Date).AddSeconds(30)
     while ((Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) {
         Start-Sleep -Milliseconds 250
@@ -103,17 +107,20 @@ if ($svc) {
     }
 }
 
-# --- Remove binary -----------------------------------------------------------
-if (Test-Path $exeDst) {
-    Write-Host "Removing $exeDst"
-    Remove-Item -Path $exeDst -Force
-    $stale = @("$exeDst.new", "$exeDst.old") | Where-Object { Test-Path $_ }
-    foreach ($s in $stale) {
-        Write-Host "Removing stale $s"
-        Remove-Item -Path $s -Force
+# --- Remove binary (+ swap artefacts) ----------------------------------------
+# Iterate over all three paths so a partial previous run that
+# removed $exeDst but left $exeDst.new / .old behind still gets
+# cleaned. Pattern matches undeploy-client.ps1 for consistency.
+$removedAny = $false
+foreach ($p in @($exeDst, "$exeDst.new", "$exeDst.old")) {
+    if (Test-Path $p) {
+        Write-Host "Removing $p"
+        Remove-Item -Path $p -Force
+        $removedAny = $true
     }
-} else {
-    Write-Host "$exeDst not present, skipping binary removal"
+}
+if (-not $removedAny) {
+    Write-Host "$exeDst not present (and no swap artefacts), skipping binary removal"
 }
 
 # --- Firewall ----------------------------------------------------------------
@@ -170,7 +177,12 @@ if ($Purge) {
         )
         $dataDir = Join-Path $dataRoot 'data'
         if (Test-Path $dataDir) {
-            $backendPaths += Get-ChildItem -Path $dataDir -Include '*.db', '*.db-shm', '*.db-wal' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+            # Gemini PR #238 HIGH: `Get-ChildItem -Include` on a
+            # directory path silently matches nothing — `-Include`
+            # requires the path itself to end in a wildcard. Joining
+            # `*` is the documented fix and is what makes the filter
+            # actually fire.
+            $backendPaths += Get-ChildItem -Path (Join-Path $dataDir '*') -Include '*.db', '*.db-shm', '*.db-wal' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
         }
         $logsDir = Join-Path $dataRoot 'logs'
         if (Test-Path $logsDir) {
