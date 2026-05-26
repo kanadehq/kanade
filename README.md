@@ -8,7 +8,10 @@
 [![CI](https://github.com/yukimemi/kanade/actions/workflows/ci.yml/badge.svg)](https://github.com/yukimemi/kanade/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/yukimemi/kanade/graph/badge.svg)](https://codecov.io/gh/yukimemi/kanade)
 [![crates.io](https://img.shields.io/crates/v/kanade.svg)](https://crates.io/crates/kanade)
+[![docs](https://img.shields.io/badge/docs-yukimemi.github.io%2Fkanade-blue)](https://yukimemi.github.io/kanade/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/yukimemi/kanade/blob/main/LICENSE)
+
+📚 **Docs site:** <https://yukimemi.github.io/kanade/>
 
 </div>
 
