@@ -138,9 +138,16 @@ $ErrorActionPreference = 'Stop'
 # `Get-FileHash <kanade-backend.exe> -Algorithm SHA256` for the
 # Sha256 value — mismatch aborts before the swap so a MITM /
 # corrupted upload leaves the existing install intact.
-$AgentSourceUrl     = ''   # e.g. 'http://kanade-backend.local:8080'
-$AgentSourceVersion = ''   # e.g. '0.43.0'
-$AgentSourceSha256  = ''   # lowercase hex of the uploaded .exe
+$AgentSourceUrl       = ''   # e.g. 'http://kanade-backend.local:8080'
+$AgentSourceVersion   = ''   # e.g. '0.43.0'
+$AgentSourceSha256    = ''   # lowercase hex of the uploaded .exe
+# Live test on 2026-05-26 surfaced: the backend's
+# /api/app-packages/<name>/<version> endpoint requires a bearer
+# token (HTTP 401 "missing bearer token" otherwise). Set this
+# to the same token the agent uses against the backend HTTP API
+# (typically the static / JWT bearer issued out-of-band). Leave
+# empty if the backend doesn't gate app-packages on auth.
+$AgentSourceAuthToken = ''
 $AgentDownloadTimeoutSecs = 120
 # ===========================================================================
 
@@ -183,7 +190,11 @@ if ($AgentSourceUrl) {
     # If this throws (network, 404, timeout), the trap above
     # fires and clears $AgentStaging before rethrowing — no
     # leaked tmp dir per failed upgrade.
-    Invoke-WebRequest -Uri $url -OutFile $stagedExe -UseBasicParsing -TimeoutSec $AgentDownloadTimeoutSecs | Out-Null
+    $iwrHeaders = @{}
+    if ($AgentSourceAuthToken) {
+        $iwrHeaders['Authorization'] = "Bearer $AgentSourceAuthToken"
+    }
+    Invoke-WebRequest -Uri $url -OutFile $stagedExe -UseBasicParsing -TimeoutSec $AgentDownloadTimeoutSecs -Headers $iwrHeaders | Out-Null
 
     # Sha verify BEFORE swap — same posture as install-kanade-client.ps1.
     # Explicit Remove-Item + throw kept around the cleanup is

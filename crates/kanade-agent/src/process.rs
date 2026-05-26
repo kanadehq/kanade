@@ -25,8 +25,20 @@ pub(crate) const POWERSHELL_UTF8_PRELUDE: &str = "[Console]::OutputEncoding = Ne
 
 /// Process-wide staging directory for temp `.ps1` files.
 ///
-/// Layout: `%ProgramData%/Kanade/agent-scripts-<uuid>/` on Windows,
-/// `$TMPDIR/kanade-agent-<uuid>/` elsewhere (dev / tests only).
+/// Layout: `%ProgramData%/Kanade/agent-scripts/<uuid>/` on Windows,
+/// `$TMPDIR/kanade-agent-<uuid>/` elsewhere (dev / tests only —
+/// non-Windows skips the static `agent-scripts/` segment because
+/// `$TMPDIR` is world-writable and a predictable parent would
+/// open up a symlink-redirect attack; see staging_dir for the
+/// full rationale).
+///
+/// Hierarchy rationale: the static `agent-scripts/` segment is the
+/// logical category (greppable / observable / single-command
+/// cleanup with `rmdir agent-scripts\`); the per-process `<uuid>/`
+/// subdir provides isolation. Bundling the two into one segment
+/// (`agent-scripts-<uuid>/`) — as the first pass did — made
+/// per-process dirs look like siblings of the category itself,
+/// which is harder to scan visually and to clean up in bulk.
 ///
 /// Why `%ProgramData%` and not `%TEMP%`: the agent runs as
 /// LocalSystem; `%TEMP%` for SYSTEM is `C:\Windows\Temp` whose
@@ -39,10 +51,28 @@ pub(crate) const POWERSHELL_UTF8_PRELUDE: &str = "[Console]::OutputEncoding = Ne
 /// already travel over NATS where the operator can see them, so
 /// local-read by other users on the box is an acceptable trade.
 ///
-/// The UUID suffix prevents a malicious pre-create (symlink, etc.)
-/// because the directory name is unguessable; `create_dir`
-/// (non-clobber) on the leaf is belt-and-braces against the
-/// astronomically-unlikely UUID collision.
+/// Security shape:
+/// - The static parent (`Kanade/agent-scripts/`) is created with
+///   `create_dir_all`; pre-existence is fine because we never
+///   write directly to it — only ever to a UUID subdir.
+/// - The per-process UUID subdir is created with `create_dir`
+///   (non-clobber). An attacker can't pre-create it because the
+///   UUID is unguessable.
+/// - Per-file staging uses `OpenOptions::create_new` (Windows
+///   `CREATE_NEW` / POSIX `O_EXCL`) — defence in depth against
+///   the astronomically-unlikely UUID collision and against
+///   anyone with write into the UUID dir (Users default ACL
+///   doesn't grant write, so this is belt-and-braces).
+///
+/// Gotcha for script authors targeting `run_as: user`:
+/// `$PSScriptRoot` (= this UUID dir) is **read-only** for the
+/// child user — the default ProgramData ACL grants Users
+/// "Read & Execute" but not Modify. A user script that does
+/// `New-Item $PSScriptRoot\out.txt` or similar will get access
+/// denied. Use `$env:TEMP` / `$env:LOCALAPPDATA` / an absolute
+/// path under the user's profile instead. Even for `run_as:
+/// System` (where SYSTEM can write here), the dir is cleaned up
+/// on script exit, so writing siblings is fragile either way.
 fn staging_dir() -> Result<PathBuf> {
     static SLOT: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
     let slot = SLOT.get_or_init(|| Mutex::new(None));
@@ -50,16 +80,32 @@ fn staging_dir() -> Result<PathBuf> {
     if let Some(p) = guard.as_ref() {
         return Ok(p.clone());
     }
-    let root = if cfg!(target_os = "windows") {
-        std::env::var_os("ProgramData")
+    // Platforms diverge here for security reasons (Gemini PR #231
+    // HIGH): the windows path has an admin-controlled category
+    // parent under `%ProgramData%`, so we can safely nest a
+    // grep-friendly static `agent-scripts/` segment in. On
+    // non-Windows the natural parent is `$TMPDIR` (typically
+    // `/tmp/`), which is world-writable; a predictable static
+    // child like `/tmp/kanade-agent-scripts/` could be
+    // pre-created by another local user as a symlink to (say)
+    // `/etc/`, and a subsequent `create_dir_all` would follow it
+    // and let us write files outside the intended tree. We mitigate
+    // by skipping the static segment entirely on non-Windows —
+    // the per-process UUID dir (created with `create_dir`,
+    // non-clobber) sits directly under `$TMPDIR`, with an
+    // unguessable name that can't be pre-empted.
+    let dir = if cfg!(target_os = "windows") {
+        let category = std::env::var_os("ProgramData")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
             .join("Kanade")
+            .join("agent-scripts");
+        std::fs::create_dir_all(&category)
+            .with_context(|| format!("create_dir_all {}", category.display()))?;
+        category.join(Uuid::new_v4().simple().to_string())
     } else {
-        std::env::temp_dir()
+        std::env::temp_dir().join(format!("kanade-agent-{}", Uuid::new_v4().simple()))
     };
-    std::fs::create_dir_all(&root).with_context(|| format!("create_dir_all {}", root.display()))?;
-    let dir = root.join(format!("agent-scripts-{}", Uuid::new_v4().simple()));
     std::fs::create_dir(&dir).with_context(|| format!("create_dir {}", dir.display()))?;
     *guard = Some(dir.clone());
     Ok(dir)
