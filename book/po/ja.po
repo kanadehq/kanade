@@ -1122,7 +1122,7 @@ msgid ""
 "`outbox/` on the broker host as a leading indicator."
 msgstr ""
 "result は outbox にずっと残ります。operator はブローカーホストの `outbox/` を"
-"先行指標として監視するべき。"
+"復帰失敗の早期サインとして監視するべき。"
 
 #: src\operations/agent-mediated-updates/nats.md:27
 msgid "What if the new NATS version is incompatible (JetStream upgrade etc.)?"
@@ -1135,8 +1135,8 @@ msgid ""
 "you'll see the canary's state within a few minutes."
 msgstr ""
 "まず canary 1 台に rollout (`--pcs <one-broker>`)、outbox と backend "
-"の健全性を見てから fleet 全体に展開。SPA クエリは 5 分の cache TTL がある"
-"ので canary の状態は数分以内に見えます。"
+"の健全性を見てから fleet 全体に展開。SPA クエリには 5 分の cache TTL がある"
+"ので canary の状態は数分以内に反映されます。"
 
 #: src\operations/agent-mediated-updates/nats.md:29
 msgid "Manual install (bootstrap)"
@@ -1287,8 +1287,8 @@ msgid ""
 "loop than the generic install jobs."
 msgstr ""
 "agent の self-update は唯一 `OBJECT_APP_PACKAGES` + `script_object` ジョブ"
-"を **使わない** コンポーネントです。agent は ssh なしで自分自身の動いている"
-"バイナリを差し替える必要がある — 汎用 install ジョブよりタイトなループのため"
+"を **使わない** コンポーネントです。agent は ssh なしで現在実行中の自分自身"
+"のバイナリを差し替える必要があり、汎用 install ジョブよりタイトなループのため"
 "専用の仕組みを持っています。"
 
 #: src\operations/agent-mediated-updates/agent-self.md:8
@@ -1446,9 +1446,9 @@ msgid ""
 "failure-actions restart it, it crashes again — observable in Event Viewer as "
 "a Service Control Manager error cluster"
 msgstr ""
-"このホストでは新バイナリがダメ (config の不整合、依存欠落など)。SCM の "
-"failure-actions が再起動しまた落ちる — Event Viewer に Service Control "
-"Manager のエラーがまとまって見える"
+"このホストでは新バイナリが起動できない (config の不整合、依存欠落など)。SCM "
+"の failure-actions により再起動が試みられるが再びクラッシュする — Event "
+"Viewer に Service Control Manager のエラーが連続して記録される"
 
 #: src\operations/agent-mediated-updates/agent-self.md:96
 msgid ""
@@ -1782,11 +1782,11 @@ msgid ""
 "The manifest's `timeout:` is enforced by the agent. When it fires, the agent "
 "calls `child.kill()` on the PowerShell process — no graceful shutdown, no "
 "trap, no finally. Plan for it:"
-msgstr "マニフェストの `timeout:` は agent によって enforced されます。発火すると agent は PowerShell プロセスに `child.kill()` を呼びます — graceful な shutdown も trap も finally もありません。それを前提に設計してください:"
+msgstr "マニフェストの `timeout:` は agent によって適用されます。発火すると agent は PowerShell プロセスに `child.kill()` を呼びます — graceful な shutdown も trap も finally もありません。それを前提に設計してください:"
 
 #: src\developing/writing-agent-scripts.md:145
 msgid "Budget the script to finish in `timeout * 0.6` and leave headroom."
-msgstr "スクリプトが `timeout * 0.6` で終わるように予算を組み、余裕を残す。"
+msgstr "スクリプトが `timeout * 0.6` で終わるように実行時間を見積もり、余裕を残す。"
 
 #: src\developing/writing-agent-scripts.md:147
 msgid ""
