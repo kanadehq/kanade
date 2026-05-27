@@ -54,7 +54,7 @@ msgstr "開発者向け"
 
 #: src\SUMMARY.md:16 src\developing/writing-agent-scripts.md:1
 msgid "Writing scripts for the agent"
-msgstr ""
+msgstr "agent 向けスクリプトを書く"
 
 #: src\SUMMARY.md:20 src\reference/spec.md:1
 msgid "Spec (legacy single-page)"
@@ -1122,7 +1122,7 @@ msgid ""
 "`outbox/` on the broker host as a leading indicator."
 msgstr ""
 "result は outbox にずっと残ります。operator はブローカーホストの `outbox/` を"
-"先行指標として監視するべき。"
+"復帰失敗の早期サインとして監視するべき。"
 
 #: src\operations/agent-mediated-updates/nats.md:27
 msgid "What if the new NATS version is incompatible (JetStream upgrade etc.)?"
@@ -1135,8 +1135,8 @@ msgid ""
 "you'll see the canary's state within a few minutes."
 msgstr ""
 "まず canary 1 台に rollout (`--pcs <one-broker>`)、outbox と backend "
-"の健全性を見てから fleet 全体に展開。SPA クエリは 5 分の cache TTL がある"
-"ので canary の状態は数分以内に見えます。"
+"の健全性を見てから fleet 全体に展開。SPA クエリには 5 分の cache TTL がある"
+"ので canary の状態は数分以内に反映されます。"
 
 #: src\operations/agent-mediated-updates/nats.md:29
 msgid "Manual install (bootstrap)"
@@ -1287,8 +1287,8 @@ msgid ""
 "loop than the generic install jobs."
 msgstr ""
 "agent の self-update は唯一 `OBJECT_APP_PACKAGES` + `script_object` ジョブ"
-"を **使わない** コンポーネントです。agent は ssh なしで自分自身の動いている"
-"バイナリを差し替える必要がある — 汎用 install ジョブよりタイトなループのため"
+"を **使わない** コンポーネントです。agent は ssh なしで現在実行中の自分自身"
+"のバイナリを差し替える必要があり、汎用 install ジョブよりタイトなループのため"
 "専用の仕組みを持っています。"
 
 #: src\operations/agent-mediated-updates/agent-self.md:8
@@ -1446,9 +1446,9 @@ msgid ""
 "failure-actions restart it, it crashes again — observable in Event Viewer as "
 "a Service Control Manager error cluster"
 msgstr ""
-"このホストでは新バイナリがダメ (config の不整合、依存欠落など)。SCM の "
-"failure-actions が再起動しまた落ちる — Event Viewer に Service Control "
-"Manager のエラーがまとまって見える"
+"このホストでは新バイナリが起動できない (config の不整合、依存欠落など)。SCM "
+"の failure-actions により再起動が試みられるが再びクラッシュする — Event "
+"Viewer に Service Control Manager のエラーが連続して記録される"
 
 #: src\operations/agent-mediated-updates/agent-self.md:96
 msgid ""
@@ -1508,57 +1508,57 @@ msgstr ""
 msgid ""
 "PowerShell scripts the agent will run are _almost_ normal `.ps1` files. This "
 "page collects the gotchas that aren't obvious from the script source alone."
-msgstr ""
+msgstr "agent が実行する PowerShell スクリプトは _ほぼ_ 通常の `.ps1` ファイルです。このページは、スクリプトのソースを見るだけでは分からない罠をまとめます。"
 
 #: src\developing/writing-agent-scripts.md:7
 msgid "The agent stages scripts on disk and runs them via `-File`"
-msgstr ""
+msgstr "agent はスクリプトをディスクに staging してから `-File` で実行する"
 
 #: src\developing/writing-agent-scripts.md:9
 msgid ""
 "As of [PR #230](https://github.com/yukimemi/kanade/pull/230) (agent version "
 "0.42.0+), the agent:"
-msgstr ""
+msgstr "[PR #230](https://github.com/yukimemi/kanade/pull/230) (agent version 0.42.0+) 以降、agent は次の動作をします:"
 
 #: src\developing/writing-agent-scripts.md:12
 msgid ""
 "Writes your script body to a temp `.ps1` under "
 "`%ProgramData%\\Kanade\\agent-scripts\\<UUID>\\kanade-<UUID>.ps1` (Windows) "
 "or `$TMPDIR/kanade-agent-<UUID>/kanade-<UUID>.ps1` (non-Windows dev only)."
-msgstr ""
+msgstr "スクリプト本体を temp の `.ps1` に書き出します。Windows なら `%ProgramData%\\Kanade\\agent-scripts\\<UUID>\\kanade-<UUID>.ps1`、それ以外 (dev のみ) なら `$TMPDIR/kanade-agent-<UUID>/kanade-<UUID>.ps1`。"
 
 #: src\developing/writing-agent-scripts.md:16
 msgid ""
 "Writes a _launcher_ `.ps1` next to it that sets UTF-8 console encoding then "
 "`& '<your-script>' @args`."
-msgstr ""
+msgstr "その隣に _launcher_ `.ps1` を書き、UTF-8 コンソールエンコーディングを設定してから `& '<your-script>' @args` でユーザースクリプトを呼びます。"
 
 #: src\developing/writing-agent-scripts.md:18
 msgid ""
 "Spawns `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "
 "<launcher>`."
-msgstr ""
+msgstr "`powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File <launcher>` を spawn します。"
 
 #: src\developing/writing-agent-scripts.md:21
 msgid "This means your script:"
-msgstr ""
+msgstr "結果として、あなたのスクリプトでは:"
 
 #: src\developing/writing-agent-scripts.md:23
 msgid ""
 "**Can** have `[CmdletBinding()]` and `param(...)` at the top. The "
 "call-operator boundary in the launcher gives your script its own scope where "
 "those headers are valid."
-msgstr ""
+msgstr "先頭に `[CmdletBinding()]` や `param(...)` を **書けます**。launcher の call-operator 境界が独自スコープを生み、その中ではヘッダーが有効です。"
 
 #: src\developing/writing-agent-scripts.md:26
 msgid ""
 "**Should not** rely on `$PSCommandPath` matching the operator's source path "
 "— it'll be the staged temp file."
-msgstr ""
+msgstr "`$PSCommandPath` が operator のソースパスと一致することを **期待しないで**ください — staged 後の temp ファイルパスになります。"
 
 #: src\developing/writing-agent-scripts.md:28
 msgid "**Should not** write to `$PSScriptRoot` (see next section)."
-msgstr ""
+msgstr "`$PSScriptRoot` に **書き込まないで**ください (次節参照)。"
 
 #: src\developing/writing-agent-scripts.md:30
 msgid ""
@@ -1571,7 +1571,7 @@ msgstr ""
 
 #: src\developing/writing-agent-scripts.md:37
 msgid "`$PSScriptRoot` is read-only for `run_as: user`"
-msgstr ""
+msgstr "`run_as: user` のとき `$PSScriptRoot` は読み取り専用"
 
 #: src\developing/writing-agent-scripts.md:39
 msgid ""
@@ -1579,11 +1579,11 @@ msgid ""
 "logged-in user — not as the LocalSystem agent that wrote the staged file. "
 "The staging directory inherits its ACL from `%ProgramData%`, which grants "
 "users **Read & Execute but not Modify**."
-msgstr ""
+msgstr "`run_as: user` (または `system_gui`) のとき、子プロセスはログオン中のユーザーとして動きます — staged ファイルを書いた LocalSystem の agent ではありません。staging ディレクトリは `%ProgramData%` から ACL を継承していて、Users には **Read & Execute は許可されるが Modify は許可されません**。"
 
 #: src\developing/writing-agent-scripts.md:45
 msgid "That means:"
-msgstr ""
+msgstr "つまり:"
 
 #: src\developing/writing-agent-scripts.md:57
 msgid ""
@@ -1591,79 +1591,79 @@ msgid ""
 "user's profile instead. Even for `run_as: system` (where SYSTEM can write to "
 "its own staged dir), the directory is cleaned up when the script exits, so "
 "writing siblings is fragile either way."
-msgstr ""
+msgstr "代わりに `$env:TEMP`、`$env:LOCALAPPDATA`、ユーザープロファイル配下の絶対パスのいずれかに書いてください。`run_as: system` (SYSTEM が自分の staged dir に書ける) であっても、スクリプト終了時にディレクトリは掃除されるので、隣接ファイル書き込みはいずれにせよ壊れやすいです。"
 
 #: src\developing/writing-agent-scripts.md:63
 msgid "Identity table"
-msgstr ""
+msgstr "実行 identity 一覧"
 
 #: src\developing/writing-agent-scripts.md:65
 msgid "`run_as:` (manifest)"
-msgstr ""
+msgstr "`run_as:` (マニフェスト)"
 
 #: src\developing/writing-agent-scripts.md:65
 msgid "Child identity"
-msgstr ""
+msgstr "子プロセスの identity"
 
 #: src\developing/writing-agent-scripts.md:65
 msgid "Reads `$PSScriptRoot`"
-msgstr ""
+msgstr "`$PSScriptRoot` を読める"
 
 #: src\developing/writing-agent-scripts.md:65
 msgid "Writes `$PSScriptRoot`"
-msgstr ""
+msgstr "`$PSScriptRoot` に書ける"
 
 #: src\developing/writing-agent-scripts.md:65
 msgid "Has admin"
-msgstr ""
+msgstr "admin 権限あり"
 
 #: src\developing/writing-agent-scripts.md:67
 msgid "`system` (default)"
-msgstr ""
+msgstr "`system` (デフォルト)"
 
 #: src\developing/writing-agent-scripts.md:67
 msgid "LocalSystem"
-msgstr ""
+msgstr "LocalSystem"
 
 #: src\developing/writing-agent-scripts.md:67
 #: src\developing/writing-agent-scripts.md:68
 #: src\developing/writing-agent-scripts.md:69
 msgid "✓"
-msgstr ""
+msgstr "✓"
 
 #: src\developing/writing-agent-scripts.md:67
 #: src\developing/writing-agent-scripts.md:69
 msgid "✓ but pointless (GC'd)"
-msgstr ""
+msgstr "✓ (ただし無意味、GC される)"
 
 #: src\developing/writing-agent-scripts.md:67
 #: src\developing/writing-agent-scripts.md:69
 msgid "yes"
-msgstr ""
+msgstr "はい"
 
 #: src\developing/writing-agent-scripts.md:68
 msgid "`user`"
-msgstr ""
+msgstr "`user`"
 
 #: src\developing/writing-agent-scripts.md:68
 msgid "Logged-in user"
-msgstr ""
+msgstr "ログオン中のユーザー"
 
 #: src\developing/writing-agent-scripts.md:68
 msgid "✗ access denied"
-msgstr ""
+msgstr "✗ access denied"
 
 #: src\developing/writing-agent-scripts.md:68
 msgid "no"
-msgstr ""
+msgstr "いいえ"
 
 #: src\developing/writing-agent-scripts.md:69
 msgid "`system_gui`"
-msgstr ""
+msgstr "`system_gui`"
 
 #: src\developing/writing-agent-scripts.md:69
 msgid "LocalSystem, in user session"
-msgstr ""
+msgstr "LocalSystem (ユーザーセッション内)"
 
 #: src\developing/writing-agent-scripts.md:71
 msgid ""
@@ -1674,20 +1674,20 @@ msgstr ""
 
 #: src\developing/writing-agent-scripts.md:75
 msgid "stdout vs Write-Host"
-msgstr ""
+msgstr "stdout vs Write-Host"
 
 #: src\developing/writing-agent-scripts.md:77
 msgid ""
 "The backend's result projector reads **stdout** as the script's output. If "
 "your manifest has an `inventory:` block, stdout is parsed as a single JSON "
 "blob."
-msgstr ""
+msgstr "backend の result projector はスクリプト出力として **stdout** を読みます。マニフェストに `inventory:` ブロックがあると、stdout は単一の JSON blob としてパースされます。"
 
 #: src\developing/writing-agent-scripts.md:81
 msgid ""
 "Use `Write-Host` for progress chatter — it goes to the host stream, NOT "
 "stdout, so it doesn't pollute the JSON parse."
-msgstr ""
+msgstr "進捗メッセージには `Write-Host` を使ってください — host ストリームに行き、stdout には行かないので JSON パースを汚しません。"
 
 #: src\developing/writing-agent-scripts.md:84
 msgid ""
@@ -1702,11 +1702,11 @@ msgstr ""
 msgid ""
 "Avoid `Write-Output` for chatter — anything on stdout that isn't the "
 "expected JSON will fail the inventory parse."
-msgstr ""
+msgstr "メッセージ出力に `Write-Output` は使わないこと — stdout に期待される JSON 以外が混ざると inventory パースが失敗します。"
 
 #: src\developing/writing-agent-scripts.md:92
 msgid "UTF-8 by default"
-msgstr ""
+msgstr "デフォルトで UTF-8"
 
 #: src\developing/writing-agent-scripts.md:94
 msgid ""
@@ -1715,18 +1715,18 @@ msgid ""
 "UTF-8 regardless of the host's system codepage. Operator-shipped scripts "
 "with Japanese / DE / KR / CN strings show up correctly in the SPA Activity "
 "view without per-host workarounds."
-msgstr ""
+msgstr "launcher はスクリプト起動前に `[Console]::OutputEncoding = UTF-8` と `$OutputEncoding = UTF-8` を設定するので、ホストのシステムコードページに関係なくあなたの stdout / stderr は UTF-8 になります。日本語 / DE / KR / CN を含む operator スクリプトも、ホスト個別の workaround なしに SPA Activity ビューで正しく表示されます。"
 
 #: src\developing/writing-agent-scripts.md:101
 msgid ""
 "If you explicitly need OEM / CP932 / Shift-JIS output (e.g. calling a legacy "
 "CLI that ignores `$OutputEncoding`), set it yourself in the script after the "
 "launcher prelude has run — your assignment takes precedence."
-msgstr ""
+msgstr "明示的に OEM / CP932 / Shift-JIS 出力が必要なら (`$OutputEncoding` を無視する legacy CLI を呼ぶケースなど)、launcher の prelude が走ったあとにスクリプト内で自分で設定してください — あなたの代入が優先されます。"
 
 #: src\developing/writing-agent-scripts.md:106
 msgid "Native command exit codes"
-msgstr ""
+msgstr "ネイティブコマンドの exit code"
 
 #: src\developing/writing-agent-scripts.md:108
 msgid ""
@@ -1734,7 +1734,7 @@ msgid ""
 "is 0 — that's PowerShell's default. If a native command fails "
 "(`$LASTEXITCODE -ne 0`) and you DON'T handle it, PowerShell still exits 0 — "
 "`$ErrorActionPreference = 'Stop'` does **not** save you here."
-msgstr ""
+msgstr "スクリプトが成功した native コマンドで終わると全体の exit は 0 — これは PowerShell のデフォルトです。native コマンドが失敗 (`$LASTEXITCODE -ne 0`) してハンドリングしないと、PowerShell は依然として 0 で終了します — `$ErrorActionPreference = 'Stop'` は **救ってくれません**。"
 
 #: src\developing/writing-agent-scripts.md:114
 msgid ""
@@ -1744,7 +1744,7 @@ msgid ""
 "adds `$PSNativeCommandUseErrorActionPreference = $true` which makes them "
 "terminating, but that's not available in the deployment target. **Always "
 "check `$LASTEXITCODE` explicitly.**"
-msgstr ""
+msgstr "Windows PowerShell 5.1 (Windows エンドポイントのデフォルト、agent の `powershell.exe` が解決する先) は `$ErrorActionPreference` に関わらず native コマンドの非ゼロ exit を non-terminating として扱います。PowerShell 7.3+ で `$PSNativeCommandUseErrorActionPreference = $true` が追加されてこれを terminating にできますが、デプロイターゲットでは使えません。**必ず `$LASTEXITCODE` を明示的にチェックしてください。**"
 
 #: src\developing/writing-agent-scripts.md:122
 msgid ""
@@ -1752,7 +1752,7 @@ msgid ""
 "nonzero even when your script handled the native error gracefully. If you "
 "want the script's exit code to reflect a specific native call, propagate it "
 "yourself:"
-msgstr ""
+msgstr "agent も `$LASTEXITCODE` を自動 propagate しません — そうしてしまうと、スクリプトが native エラーを正しく処理した場合でも非ゼロで終わってしまうからです。特定の native 呼び出しの exit code をスクリプトの exit に反映させたい場合は自分で propagate してください:"
 
 #: src\developing/writing-agent-scripts.md:127
 msgid ""
@@ -1771,29 +1771,29 @@ msgid ""
 "record (which the `trap { … break }` cleanup pattern can intercept) and "
 "exits non-zero. `exit $LASTEXITCODE` is right when the caller cares about "
 "the exact code."
-msgstr ""
+msgstr "通常は `throw` のほうが望ましい — クリーンな PowerShell エラーレコードを生成し (`trap { … break }` クリーンアップパターンが捕まえられる) かつ非ゼロで終わるからです。`exit $LASTEXITCODE` は呼び出し側が正確な exit code を気にする場合に向きます。"
 
 #: src\developing/writing-agent-scripts.md:139
 msgid "Timeouts"
-msgstr ""
+msgstr "タイムアウト"
 
 #: src\developing/writing-agent-scripts.md:141
 msgid ""
 "The manifest's `timeout:` is enforced by the agent. When it fires, the agent "
 "calls `child.kill()` on the PowerShell process — no graceful shutdown, no "
 "trap, no finally. Plan for it:"
-msgstr ""
+msgstr "マニフェストの `timeout:` は agent によって適用されます。発火すると agent は PowerShell プロセスに `child.kill()` を呼びます — graceful な shutdown も trap も finally もありません。それを前提に設計してください:"
 
 #: src\developing/writing-agent-scripts.md:145
 msgid "Budget the script to finish in `timeout * 0.6` and leave headroom."
-msgstr ""
+msgstr "スクリプトが `timeout * 0.6` で終わるように実行時間を見積もり、余裕を残す。"
 
 #: src\developing/writing-agent-scripts.md:147
 msgid ""
 "Use `trap { ... ; break }` for cleanup of resources that need explicit "
 "release (staging dirs, lock files) — `trap` fires on terminating errors, NOT "
 "on the agent's kill. Don't rely on it for the timeout case."
-msgstr ""
+msgstr "明示的解放が要るリソース (staging dir、lock ファイル) のクリーンアップには `trap { ... ; break }` を使う — `trap` は terminating エラーで発火し、agent の kill では発火しません。timeout ケースには頼らないこと。"
 
 #: src\developing/writing-agent-scripts.md:151
 msgid ""
@@ -1804,7 +1804,7 @@ msgstr ""
 
 #: src\developing/writing-agent-scripts.md:155
 msgid "Killing a running job"
-msgstr ""
+msgstr "実行中ジョブの kill"
 
 #: src\developing/writing-agent-scripts.md:157
 msgid ""
@@ -1812,7 +1812,7 @@ msgid ""
 "receipt, the agent calls `child.kill()` — same hard-kill as the timeout "
 "path. Operators get an immediate result row marked `Killed` with whatever "
 "stdout / stderr the agent managed to capture before termination."
-msgstr ""
+msgstr "`kanade kill <exec_id>` は agent が購読する kill メッセージを publish します。受信すると agent は `child.kill()` を呼びます — timeout 経路と同じ hard-kill。operator にはただちに `Killed` マークの result row が届き、終了前に agent がキャプチャできた stdout / stderr が付きます。"
 
 #: src\reference/spec.md:3
 msgid ""
