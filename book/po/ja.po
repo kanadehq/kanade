@@ -1838,3 +1838,174 @@ msgstr ""
 "このセクション配下に章分割するのは、operator / 開発者ガイドが落ち着いてから"
 "の follow-up とします。"
 
+#: src\SUMMARY.md:13
+msgid "Removing kanade (undeploy)"
+msgstr "kanade を取り除く (undeploy)"
+
+#: src\operations/undeploy.md:1
+msgid "Removing kanade from a host (undeploy)"
+msgstr "kanade をホストから取り除く (undeploy)"
+
+#: src\operations/undeploy.md:3
+msgid "Production rollback path. When a host needs to come off kanade — because a rollout broke something, the host is being decommissioned, or you just want a clean slate to re-install from — there's one undeploy script per component, mirroring the deploy script that put it there."
+msgstr "本番でのロールバック経路。rollout で何かが壊れた、ホストを廃止する、再インストール用にまっさらな状態に戻したい — そんなときホストから kanade を剥がすために、deploy と対になる undeploy スクリプトをコンポーネントごとに 1 本ずつ用意しています。"
+
+#: src\operations/undeploy.md:9
+msgid "Deploy"
+msgstr "Deploy"
+
+#: src\operations/undeploy.md:9
+msgid "Undeploy"
+msgstr "Undeploy"
+
+#: src\operations/undeploy.md:11 src\operations/undeploy.md:56
+msgid "Agent"
+msgstr "Agent"
+
+#: src\operations/undeploy.md:11
+msgid "`scripts/deploy-agent.ps1`"
+msgstr ""
+
+#: src\operations/undeploy.md:11
+msgid "`scripts/undeploy-agent.ps1`"
+msgstr ""
+
+#: src\operations/undeploy.md:12 src\operations/undeploy.md:57
+msgid "Backend"
+msgstr "Backend"
+
+#: src\operations/undeploy.md:12
+msgid "`scripts/undeploy-backend.ps1`"
+msgstr ""
+
+#: src\operations/undeploy.md:13
+msgid "NATS server"
+msgstr "NATS server"
+
+#: src\operations/undeploy.md:13
+msgid "`scripts/deploy-nats.ps1`"
+msgstr ""
+
+#: src\operations/undeploy.md:13
+msgid "`scripts/undeploy-nats.ps1`"
+msgstr ""
+
+#: src\operations/undeploy.md:14
+msgid "Client (Tauri)"
+msgstr "Client (Tauri)"
+
+#: src\operations/undeploy.md:14
+msgid "`jobs/scripts/install-kanade-client.ps1` (agent-driven)"
+msgstr ""
+
+#: src\operations/undeploy.md:14
+msgid "`scripts/undeploy-client.ps1`"
+msgstr ""
+
+#: src\operations/undeploy.md:20
+msgid "Default posture: safe"
+msgstr "デフォルトの姿勢: 安全側"
+
+#: src\operations/undeploy.md:22
+msgid "Run with no flags and the script:"
+msgstr "フラグなしで実行するとスクリプトは:"
+
+#: src\operations/undeploy.md:24
+msgid "Stops the Windows service."
+msgstr "Windows サービスを停止します。"
+
+#: src\operations/undeploy.md:25
+msgid "Unregisters it from SCM (waits for the entry to actually disappear, so a re-deploy doesn't race a pending removal)."
+msgstr "SCM からサービスを unregister します (エントリが実際に消えるまで待つので、後続の再 deploy が pending な削除と race しません)。"
+
+#: src\operations/undeploy.md:27
+msgid "Removes the installed binary from `%ProgramFiles%\\Kanade\\`, including any half-completed `<exe>.new` / `<exe>.old` swap artefacts."
+msgstr "`%ProgramFiles%\\Kanade\\` からインストール済みバイナリを削除します。中途半端な `<exe>.new` / `<exe>.old` の swap 残骸もまとめて削除。"
+
+#: src\operations/undeploy.md:30
+msgid "Removes any inbound firewall rule the deploy script created (pass `-KeepFirewall` to skip this — useful when an external WAF / Group Policy owns the rule)."
+msgstr "deploy スクリプトが作成した inbound のファイアウォールルールを削除します (`-KeepFirewall` で skip 可 — 外部の WAF / グループポリシーがルールを管理している場合に有用)。"
+
+#: src\operations/undeploy.md:33
+msgid "**Keeps** everything under `%ProgramData%\\Kanade\\` (config, logs, JetStream data, SQLite DB, …) so forensics / rollback / re-deploy can proceed without losing state."
+msgstr "`%ProgramData%\\Kanade\\` 配下 (config、log、JetStream データ、SQLite DB、…) は **残します**。フォレンジック / rollback / 再 deploy が state を失わずに進められるように。"
+
+#: src\operations/undeploy.md:36
+msgid "**Keeps** registry-stored secrets at `HKLM:\\SOFTWARE\\kanade\\<role>\\*`."
+msgstr "`HKLM:\\SOFTWARE\\kanade\\<role>\\*` のレジストリ secret も **残します**。"
+
+#: src\operations/undeploy.md:42
+msgid "`-Purge`: destructive cleanup"
+msgstr "`-Purge`: 破壊的クリーンアップ"
+
+#: src\operations/undeploy.md:44
+msgid "Adds:"
+msgstr "追加で:"
+
+#: src\operations/undeploy.md:46
+msgid "Removes the component's exclusive entries under `%ProgramData%\\Kanade\\`. Crucially, **only the component's own files** — agent / backend / NATS share the same root and each script avoids touching the others' files."
+msgstr "そのコンポーネント固有の `%ProgramData%\\Kanade\\` 配下エントリを削除します。重要なのは **そのコンポーネント自身のファイルだけ** — agent / backend / NATS は同じ root を共有しているので、各スクリプトは他のコンポーネントのファイルには触れません。"
+
+#: src\operations/undeploy.md:50
+msgid "Removes the matching `HKLM:\\SOFTWARE\\kanade\\<role>\\*` key (unless `-KeepSecrets` is also passed — useful when multiple components share the same bearer)."
+msgstr "対応する `HKLM:\\SOFTWARE\\kanade\\<role>\\*` キーを削除します (`-KeepSecrets` を併せて渡すとスキップ — 複数コンポーネントで同じ bearer を共有しているときに有用)。"
+
+#: src\operations/undeploy.md:54
+msgid "What `-Purge` removes"
+msgstr "`-Purge` が削除するもの"
+
+#: src\operations/undeploy.md:56
+msgid "`config\\agent.toml`, `logs\\agent.*.log`, `outbox\\`, `HKLM:\\SOFTWARE\\kanade\\agent\\`"
+msgstr "`config\\agent.toml`、`logs\\agent.*.log`、`outbox\\`、`HKLM:\\SOFTWARE\\kanade\\agent\\`"
+
+#: src\operations/undeploy.md:57
+msgid "`config\\backend.toml`, `data\\*.db*` (**SQLite — historical results / inventory wiped**), `logs\\backend.*.log`, `HKLM:\\SOFTWARE\\kanade\\backend\\`"
+msgstr "`config\\backend.toml`、`data\\*.db*` (**SQLite — 過去の results / inventory が消える**)、`logs\\backend.*.log`、`HKLM:\\SOFTWARE\\kanade\\backend\\`"
+
+#: src\operations/undeploy.md:58
+msgid "NATS"
+msgstr "NATS"
+
+#: src\operations/undeploy.md:58
+msgid "`config\\nats-server.conf`, `nats\\` (**JetStream — all KV / Object Store / streams wiped**), `logs\\nats*.log`"
+msgstr "`config\\nats-server.conf`、`nats\\` (**JetStream — KV / Object Store / streams すべて消える**)、`logs\\nats*.log`"
+
+#: src\operations/undeploy.md:59
+msgid "Client"
+msgstr "Client"
+
+#: src\operations/undeploy.md:59
+msgid "Nothing extra (no per-user state yet)"
+msgstr "追加なし (per-user な state はまだ存在しない)"
+
+#: src\operations/undeploy.md:61
+msgid "⚠️  `undeploy-nats.ps1 -Purge` and `undeploy-backend.ps1 -Purge` are the dangerous ones. The first wipes the fleet's entire JetStream state (agent_releases, app_packages, scripts, jobs, agent_config, results stream); the second wipes the projector's historical SQLite. **Both are unrecoverable without out-of-band backups.** The scripts print a loud banner before running."
+msgstr "⚠️  危険なのは `undeploy-nats.ps1 -Purge` と `undeploy-backend.ps1 -Purge`。前者は fleet 全体の JetStream state (agent_releases、app_packages、scripts、jobs、agent_config、results stream) を消し、後者は projector の歴史 SQLite を消します。**どちらも out-of-band バックアップ無しではリカバリ不能**。スクリプトは実行前に目立つバナーを出します。"
+
+#: src\operations/undeploy.md:69
+msgid "Rollback recipes"
+msgstr "ロールバックの定石"
+
+#: src\operations/undeploy.md:71
+msgid "Bad rollout on one canary host"
+msgstr "canary 1 台で rollout が壊れたとき"
+
+#: src\operations/undeploy.md:80
+msgid "Decommission a host permanently"
+msgstr "ホストを恒久的に廃止する"
+
+#: src\operations/undeploy.md:86
+msgid "Wipe a dev box for a clean re-install"
+msgstr "dev box を再インストール用にまっさらにする"
+
+#: src\operations/undeploy.md:96
+msgid "Rebuild a single bad service without touching state"
+msgstr "state は触らず壊れたサービスだけ作り直す"
+
+#: src\operations/undeploy.md:103
+msgid "What undeploy does NOT do"
+msgstr "undeploy が**やらない**こと"
+
+#: src\operations/undeploy.md:115
+msgid "It doesn't touch NATS-side state when you remove the agent — the agent's `target_version` entry under `agent_config.pcs.<pc>` stays in the KV. Clean those up server-side with `kanade jetstream kv del agent_config pcs.<pc>.target_version` if needed."
+msgstr "agent を取り除いても NATS 側の state には触れません — agent の `target_version` エントリは `agent_config.pcs.<pc>` 配下の KV に残ります。必要なら server 側で `kanade jetstream kv del agent_config pcs.<pc>.target_version` で掃除してください。"

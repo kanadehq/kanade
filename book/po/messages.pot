@@ -2,7 +2,7 @@
 msgid ""
 msgstr ""
 "Project-Id-Version: kanade — 奏\n"
-"POT-Creation-Date: 2026-05-26T23:34:48+09:00\n"
+"POT-Creation-Date: 2026-05-27T18:51:22+09:00\n"
 "PO-Revision-Date: \n"
 "Last-Translator: \n"
 "Language-Team: \n"
@@ -48,15 +48,19 @@ msgstr ""
 msgid "Updating kanade-agent itself"
 msgstr ""
 
-#: src\SUMMARY.md:14
+#: src\SUMMARY.md:13
+msgid "Removing kanade (undeploy)"
+msgstr ""
+
+#: src\SUMMARY.md:15
 msgid "For developers"
 msgstr ""
 
-#: src\SUMMARY.md:16 src\developing/writing-agent-scripts.md:1
+#: src\SUMMARY.md:17 src\developing/writing-agent-scripts.md:1
 msgid "Writing scripts for the agent"
 msgstr ""
 
-#: src\SUMMARY.md:20 src\reference/spec.md:1
+#: src\SUMMARY.md:21 src\reference/spec.md:1
 msgid "Spec (legacy single-page)"
 msgstr ""
 
@@ -68,7 +72,8 @@ msgid ""
 "pieces:"
 msgstr ""
 
-#: src\introduction.md:8
+#: src\introduction.md:8 src\operations/undeploy.md:9
+#: src\operations/undeploy.md:54
 msgid "Component"
 msgstr ""
 
@@ -714,6 +719,7 @@ msgid "Script in repo"
 msgstr ""
 
 #: src\operations/agent-mediated-updates/client.md:15
+#: src\operations/undeploy.md:12
 msgid "`scripts/deploy-backend.ps1`"
 msgstr ""
 
@@ -1266,6 +1272,243 @@ msgstr ""
 msgid ""
 "So agents get `OBJECT_AGENT_RELEASES` + a layered config KV; the other "
 "components share `OBJECT_APP_PACKAGES` + per-app jobs."
+msgstr ""
+
+#: src\operations/undeploy.md:1
+msgid "Removing kanade from a host (undeploy)"
+msgstr ""
+
+#: src\operations/undeploy.md:3
+msgid ""
+"Production rollback path. When a host needs to come off kanade — because a "
+"rollout broke something, the host is being decommissioned, or you just want "
+"a clean slate to re-install from — there's one undeploy script per "
+"component, mirroring the deploy script that put it there."
+msgstr ""
+
+#: src\operations/undeploy.md:9
+msgid "Deploy"
+msgstr ""
+
+#: src\operations/undeploy.md:9
+msgid "Undeploy"
+msgstr ""
+
+#: src\operations/undeploy.md:11 src\operations/undeploy.md:56
+msgid "Agent"
+msgstr ""
+
+#: src\operations/undeploy.md:11
+msgid "`scripts/deploy-agent.ps1`"
+msgstr ""
+
+#: src\operations/undeploy.md:11
+msgid "`scripts/undeploy-agent.ps1`"
+msgstr ""
+
+#: src\operations/undeploy.md:12 src\operations/undeploy.md:57
+msgid "Backend"
+msgstr ""
+
+#: src\operations/undeploy.md:12
+msgid "`scripts/undeploy-backend.ps1`"
+msgstr ""
+
+#: src\operations/undeploy.md:13
+msgid "NATS server"
+msgstr ""
+
+#: src\operations/undeploy.md:13
+msgid "`scripts/deploy-nats.ps1`"
+msgstr ""
+
+#: src\operations/undeploy.md:13
+msgid "`scripts/undeploy-nats.ps1`"
+msgstr ""
+
+#: src\operations/undeploy.md:14
+msgid "Client (Tauri)"
+msgstr ""
+
+#: src\operations/undeploy.md:14
+msgid "`jobs/scripts/install-kanade-client.ps1` (agent-driven)"
+msgstr ""
+
+#: src\operations/undeploy.md:14
+msgid "`scripts/undeploy-client.ps1`"
+msgstr ""
+
+#: src\operations/undeploy.md:16
+msgid ""
+"All four are admin-only and idempotent — safe to re-run after a partial "
+"uninstall, safe to run when the component is already gone (each step logs "
+"\"not present, skipping\" and moves on)."
+msgstr ""
+
+#: src\operations/undeploy.md:20
+msgid "Default posture: safe"
+msgstr ""
+
+#: src\operations/undeploy.md:22
+msgid "Run with no flags and the script:"
+msgstr ""
+
+#: src\operations/undeploy.md:24
+msgid "Stops the Windows service."
+msgstr ""
+
+#: src\operations/undeploy.md:25
+msgid ""
+"Unregisters it from SCM (waits for the entry to actually disappear, so a "
+"re-deploy doesn't race a pending removal)."
+msgstr ""
+
+#: src\operations/undeploy.md:27
+msgid ""
+"Removes the installed binary from `%ProgramFiles%\\Kanade\\`, including any "
+"half-completed `<exe>.new` / `<exe>.old` swap artefacts."
+msgstr ""
+
+#: src\operations/undeploy.md:30
+msgid ""
+"Removes any inbound firewall rule the deploy script created (pass "
+"`-KeepFirewall` to skip this — useful when an external WAF / Group Policy "
+"owns the rule)."
+msgstr ""
+
+#: src\operations/undeploy.md:33
+msgid ""
+"**Keeps** everything under `%ProgramData%\\Kanade\\` (config, logs, "
+"JetStream data, SQLite DB, …) so forensics / rollback / re-deploy can "
+"proceed without losing state."
+msgstr ""
+
+#: src\operations/undeploy.md:36
+msgid ""
+"**Keeps** registry-stored secrets at `HKLM:\\SOFTWARE\\kanade\\<role>\\*`."
+msgstr ""
+
+#: src\operations/undeploy.md:39
+msgid ""
+"That's enough for the common case: \"this host's kanade is misbehaving, get "
+"it off without destroying state\"."
+msgstr ""
+
+#: src\operations/undeploy.md:42
+msgid "`-Purge`: destructive cleanup"
+msgstr ""
+
+#: src\operations/undeploy.md:44
+msgid "Adds:"
+msgstr ""
+
+#: src\operations/undeploy.md:46
+msgid ""
+"Removes the component's exclusive entries under `%ProgramData%\\Kanade\\`. "
+"Crucially, **only the component's own files** — agent / backend / NATS share "
+"the same root and each script avoids touching the others' files."
+msgstr ""
+
+#: src\operations/undeploy.md:50
+msgid ""
+"Removes the matching `HKLM:\\SOFTWARE\\kanade\\<role>\\*` key (unless "
+"`-KeepSecrets` is also passed — useful when multiple components share the "
+"same bearer)."
+msgstr ""
+
+#: src\operations/undeploy.md:54
+msgid "What `-Purge` removes"
+msgstr ""
+
+#: src\operations/undeploy.md:56
+msgid ""
+"`config\\agent.toml`, `logs\\agent.*.log`, `outbox\\`, "
+"`HKLM:\\SOFTWARE\\kanade\\agent\\`"
+msgstr ""
+
+#: src\operations/undeploy.md:57
+msgid ""
+"`config\\backend.toml`, `data\\*.db*` (**SQLite — historical results / "
+"inventory wiped**), `logs\\backend.*.log`, "
+"`HKLM:\\SOFTWARE\\kanade\\backend\\`"
+msgstr ""
+
+#: src\operations/undeploy.md:58
+msgid "NATS"
+msgstr ""
+
+#: src\operations/undeploy.md:58
+msgid ""
+"`config\\n"
+"ats-server.conf`, `nats\\` (**JetStream — all KV / Object Store / streams "
+"wiped**), `logs\\n"
+"ats*.log`"
+msgstr ""
+
+#: src\operations/undeploy.md:59
+msgid "Client"
+msgstr ""
+
+#: src\operations/undeploy.md:59
+msgid "Nothing extra (no per-user state yet)"
+msgstr ""
+
+#: src\operations/undeploy.md:61
+msgid ""
+"⚠️  `undeploy-nats.ps1 -Purge` and `undeploy-backend.ps1 -Purge` are the "
+"dangerous ones. The first wipes the fleet's entire JetStream state "
+"(agent_releases, app_packages, scripts, jobs, agent_config, results stream); "
+"the second wipes the projector's historical SQLite. **Both are unrecoverable "
+"without out-of-band backups.** The scripts print a loud banner before "
+"running."
+msgstr ""
+
+#: src\operations/undeploy.md:69
+msgid "Rollback recipes"
+msgstr ""
+
+#: src\operations/undeploy.md:71
+msgid "Bad rollout on one canary host"
+msgstr ""
+
+#: src\operations/undeploy.md:80
+msgid "Decommission a host permanently"
+msgstr ""
+
+#: src\operations/undeploy.md:86
+msgid "Wipe a dev box for a clean re-install"
+msgstr ""
+
+#: src\operations/undeploy.md:96
+msgid "Rebuild a single bad service without touching state"
+msgstr ""
+
+#: src\operations/undeploy.md:103
+msgid "What undeploy does NOT do"
+msgstr ""
+
+#: src\operations/undeploy.md:105
+msgid ""
+"It doesn't notify the rest of the fleet that this host has gone away — the "
+"backend will keep listing it under \"agents\" until its heartbeat ages out "
+"(`/api/agents` staleness threshold). If you want it removed from the SPA "
+"immediately, delete the row via the backend API after undeploy."
+msgstr ""
+
+#: src\operations/undeploy.md:110
+msgid ""
+"It doesn't roll back the deployed binary to a previous version. \"Roll "
+"back\" in this script's vocabulary means \"remove entirely\"; if you want to "
+"swap to an older version, re-run the matching `deploy-*.ps1` against a "
+"folder containing the older binary."
+msgstr ""
+
+#: src\operations/undeploy.md:115
+msgid ""
+"It doesn't touch NATS-side state when you remove the agent — the agent's "
+"`target_version` entry under `agent_config.pcs.<pc>` stays in the KV. Clean "
+"those up server-side with `kanade jetstream kv del agent_config "
+"pcs.<pc>.target_version` if needed."
 msgstr ""
 
 #: src\developing/writing-agent-scripts.md:3
