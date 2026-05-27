@@ -1980,7 +1980,7 @@ msgstr "追加なし (per-user な state はまだ存在しない)"
 
 #: src\operations/undeploy.md:61
 msgid "⚠️  `undeploy-nats.ps1 -Purge` and `undeploy-backend.ps1 -Purge` are the dangerous ones. The first wipes the fleet's entire JetStream state (agent_releases, app_packages, scripts, jobs, agent_config, results stream); the second wipes the projector's historical SQLite. **Both are unrecoverable without out-of-band backups.** The scripts print a loud banner before running."
-msgstr "⚠️  危険なのは `undeploy-nats.ps1 -Purge` と `undeploy-backend.ps1 -Purge`。前者は fleet 全体の JetStream state (agent_releases、app_packages、scripts、jobs、agent_config、results stream) を消し、後者は projector の歴史 SQLite を消します。**どちらも out-of-band バックアップ無しではリカバリ不能**。スクリプトは実行前に目立つバナーを出します。"
+msgstr "⚠️  危険なのは `undeploy-nats.ps1 -Purge` と `undeploy-backend.ps1 -Purge`。前者は fleet 全体の JetStream state (agent_releases、app_packages、scripts、jobs、agent_config、results stream) を消し、後者は projector の過去の SQLite を消します。**どちらも out-of-band バックアップ無しではリカバリ不能**。スクリプトは実行前に目立つバナーを出します。"
 
 #: src\operations/undeploy.md:69
 msgid "Rollback recipes"
