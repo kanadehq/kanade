@@ -2009,3 +2009,781 @@ msgstr "undeploy が**やらない**こと"
 #: src\operations/undeploy.md:115
 msgid "It doesn't touch NATS-side state when you remove the agent — the agent's `target_version` entry under `agent_config.pcs.<pc>` stays in the KV. Clean those up server-side with `kanade jetstream kv del agent_config pcs.<pc>.target_version` if needed."
 msgstr "agent を取り除いても NATS 側の state には触れません — agent の `target_version` エントリは `agent_config.pcs.<pc>` 配下の KV に残ります。必要なら server 側で `kanade jetstream kv del agent_config pcs.<pc>.target_version` で掃除してください。"
+
+#: src\SUMMARY.md:6
+msgid "1. Getting Started"
+msgstr "1. 導入ガイド"
+
+#: src\SUMMARY.md:8
+msgid "Quickstart"
+msgstr "クイックスタート"
+
+#: src\SUMMARY.md:9
+msgid "System Architecture"
+msgstr "システムアーキテクチャ"
+
+#: src\SUMMARY.md:12
+msgid "2. Operations"
+msgstr "2. 運用ガイド"
+
+#: src\SUMMARY.md:15
+msgid "Installation and Deployment"
+msgstr "インストールとデプロイ"
+
+#: src\SUMMARY.md:16
+msgid "Agent-Mediated Updates"
+msgstr "エージェント経由の更新"
+
+#: src\SUMMARY.md:23
+msgid "3. Developer Guide"
+msgstr "3. 開発者ガイド"
+
+#: src\SUMMARY.md:26
+msgid "Workflow and Contribution"
+msgstr "開発フローとコントリビューション"
+
+#: src\SUMMARY.md:29
+msgid "4. Reference"
+msgstr "4. リファレンス"
+
+#: src\SUMMARY.md:32
+msgid "Configuration Reference"
+msgstr "設定リファレンス"
+
+#: src\getting-started/quickstart.md:1
+msgid "Developer Quickstart"
+msgstr "開発者クイックスタート"
+
+#: src\getting-started/architecture.md:1
+msgid "System Architecture"
+msgstr "システムアーキテクチャ"
+
+#: src\operations/deploy.md:1
+msgid "Installation and Deployment"
+msgstr "インストールとデプロイ"
+
+#: src\developing/workflow.md:1
+msgid "Developer Workflow and Contribution"
+msgstr "開発者ワークフローとコントリビューション"
+
+#: src\reference/config.md:1
+msgid "Configuration Reference"
+msgstr "設定リファレンス"
+
+#: src\getting-started/quickstart.md:3
+msgid "This guide gets you up and running with a local `kanade` development environment."
+msgstr "このガイドでは、ローカルの `kanade` 開発環境をセットアップして起動する手順を説明します。"
+
+#: src\getting-started/quickstart.md:5 src\operations/deploy.md:17
+msgid "## 1. Prerequisites"
+msgstr "## 1. 前提条件"
+
+#: src\getting-started/quickstart.md:7
+msgid "Before starting, ensure you have the following installed on your Windows machine:"
+msgstr "開始する前に、Windows マシンに以下がインストールされていることを確認してください。"
+
+#: src\getting-started/quickstart.md:8
+msgid "- [Rust toolchain](https://rustup.rs/) (stable channel)"
+msgstr "- [Rust ツールチェーン](https://rustup.rs/) (stable チャンネル)"
+
+#: src\getting-started/quickstart.md:9
+msgid "- [cargo-make](https://sagiegurari.github.io/cargo-make/) (run `cargo install --force cargo-make`)"
+msgstr "- [cargo-make](https://sagiegurari.github.io/cargo-make/) (`cargo install --force cargo-make` でインストール)"
+
+#: src\getting-started/quickstart.md:10
+msgid "- [bun](https://bun.sh/) (for SPA dependency management and build execution)"
+msgstr "- [bun](https://bun.sh/) (SPA の依存関係管理とビルド実行用)"
+
+#: src\getting-started/quickstart.md:11
+msgid "- [gsudo](https://github.com/gerardog/gsudo) (for local service deployment tests)"
+msgstr "- [gsudo](https://github.com/gerardog/gsudo) (ローカルのサービスデプロイテスト用)"
+
+#: src\getting-started/quickstart.md:12
+msgid "- [nats-server](https://github.com/nats-io/nats-server) (runnable from PATH)"
+msgstr "- [nats-server](https://github.com/nats-io/nats-server) (PATH から実行可能であること)"
+
+#: src\getting-started/quickstart.md:14
+msgid "## 2. One-Time Setup"
+msgstr "## 2. 初回セットアップ"
+
+#: src\getting-started/quickstart.md:16
+msgid "Run the following command at the workspace root to register the git pre-push hooks and install agent skills defined in `apm.yml`:"
+msgstr "ワークスペースのルートで以下のコマンドを実行し、git の pre-push フックを登録し、`apm.yml` で定義されたエージェントスキルをインストールします。"
+
+#: src\getting-started/quickstart.md:22
+msgid "## 3. Launching the Dev Sandbox"
+msgstr "## 3. 開発サンドボックス of 起動"
+
+#: src\getting-started/quickstart.md:24
+msgid "You can spin up a fully isolated, multi-component development stack on your local host using a single command:"
+msgstr "単一のコマンドを使用するだけで、ローカルホスト上に完全に分離されたマルチコンポーネント開発スタックを起動できます。"
+
+#: src\getting-started/quickstart.md:30
+msgid "This task runs the following services concurrently in a loopback sandbox:"
+msgstr "このタスクは、ループバックサンドボックス内で以下のサービスを並行して実行します。"
+
+#: src\getting-started/quickstart.md:31
+msgid "1. **nats-dev**: Unauthenticated NATS broker listening on port `4223`."
+msgstr "1. **nats-dev**: ポート `4223` で待機する、認証なしの NATS ブローカー。"
+
+#: src\getting-started/quickstart.md:32
+msgid "2. **backend-dev**: Dev API server listening on port `8081` with auth disabled."
+msgstr "2. **backend-dev**: 認証が無効化された、ポート `8081` で待機する開発用 API サーバー。"
+
+#: src\getting-started/quickstart.md:33
+msgid "3. **agent-dev**: Local dev agent talking to the dev NATS broker on `4223`."
+msgstr "3. **agent-dev**: ポート `4223` の開発用 NATS ブローカーと通信する、ローカルの開発用エージェント。"
+
+#: src\getting-started/quickstart.md:34
+msgid "4. **web-dev**: Vite dev server for the React SPA listening on `http://localhost:5173`."
+msgstr "4. **web-dev**: `http://localhost:5173` で待機する、React SPA 用の Vite 開発サーバー。"
+
+#: src\getting-started/quickstart.md:36
+msgid "Press `Ctrl+C` to tear down all components cleanly."
+msgstr "`Ctrl+C` を押すことで、すべてのコンポーネントをクリーンに終了できます。"
+
+#: src\getting-started/quickstart.md:38
+msgid "## 4. Multi-Agent Fleet Simulation"
+msgstr "## 4. 複数エージェントフリートのシミュレーション"
+
+#: src\getting-started/quickstart.md:40
+msgid "To debug behavior that only shows up when managing multiple machines (e.g. concurrent execution result projection or ID collisions), you can launch a multi-agent sandbox:"
+msgstr "複数のマシンを管理しているときにのみ発生する動作（並行実行結果のプロジェクションや ID 衝突など）をデバッグするために、マルチエージェントサンドボックスを起動できます。"
+
+#: src\getting-started/quickstart.md:46
+msgid "This spawns the NATS broker, backend, and SPA, plus three separate dev agents with independent IDs (`dev-pc-1`, `dev-pc-2`, `dev-pc-3`) and isolated state databases."
+msgstr "これにより、NATS ブローカー、バックエンド、SPA に加えて、独立した ID（`dev-pc-1`、`dev-pc-2`、`dev-pc-3`）と隔離された状態データベースを持つ 3 つの個別開発用エージェントが起動します。"
+
+#: src\getting-started/quickstart.md:48
+msgid "## 5. Local Deploy Testing"
+msgstr "## 5. ローカルデプロイのテスト"
+
+#: src\getting-started/quickstart.md:50
+msgid "If you want to test the full lifecycle of installing components as Windows services (mirroring production environments), use the local deployment scripts:"
+msgstr "Windows サービスとしてコンポーネントをインストールする全ライフサイクル（本番環境の模倣）をテストしたい場合は、ローカルデプロイスクリプトを使用します。"
+
+#: src\getting-started/quickstart.md:57
+msgid "# Installs CLI, agent, backend, and NATS services locally via gsudo elevation"
+msgstr "# gsudo 権限昇格を介して、CLI、エージェント、バックエンド、および NATS サービスをローカルにインストールします"
+
+#: src\getting-started/quickstart.md:60
+msgid "After deployment, you can verify and interact with the real Windows services. Use the following task to stop and cleanly delete the services when finished:"
+msgstr "デプロイ後、実際の Windows サービスを確認して対話できます。完了したら、以下のタスクを使用してサービスを停止し、きれいに削除します。"
+
+#: src\getting-started/architecture.md:3
+msgid "`kanade` is designed to manage hundreds of Windows endpoints concurrently, safely, and asynchronously."
+msgstr "`kanade` は、数百台の Windows エンドポイントを並行して、安全に、そして非同期で管理するように設計されています。"
+
+#: src\getting-started/architecture.md:5
+msgid "## Component Topology"
+msgstr "## コンポーネントトポロジー"
+
+#: src\getting-started/architecture.md:7
+msgid "The system consists of five main components, coordinated through an event-driven pub/sub structure:"
+msgstr "システムは 5 つの主要コンポーネントで構成されており、イベント駆動型の pub/sub 構造を介して調整されます。"
+
+#: src\getting-started/architecture.md:35
+msgid "### 1. kanade-agent"
+msgstr "### 1. kanade-agent"
+
+#: src\getting-started/architecture.md:36
+msgid "A high-performance Windows service running on each managed host."
+msgstr "各管理対象ホスト上で動作する高性能な Windows サービスです。"
+
+#: src\getting-started/architecture.md:37 src\getting-started/architecture.md:43 src\getting-started/architecture.md:48 src\getting-started/architecture.md:53 src\getting-started/architecture.md:59
+msgid "- **Role**: Core executor."
+msgstr "- **役割**: コア実行エンジン。"
+
+#: src\getting-started/architecture.md:38
+msgid "- **Communication**: Establishes an outbound-only NATS connection. It does not open any inbound ports, making it firewall-friendly."
+msgstr "- **通信**: アウトバウンド専用の NATS 接続を確立します。インバウンドポートを開かないため、ファイアウォールに優しい設計です。"
+
+#: src\getting-started/architecture.md:39
+msgid "- **Capabilities**: Launches secure, isolated PowerShell subprocesses, inventories hardware/software specs, streams live performance data (CPU, RSS memory, disk I/O), and manages local packages."
+msgstr "- **機能**: 安全に隔離された PowerShell サブプロセスを起動し、ハードウェア/ソフトウェアのスペック情報の収集、ライブパフォーマンスデータ（CPU、RSSメモリ、ディスクI/O）のストリーミング、およびローカルパッケージの管理を行います。"
+
+#: src\getting-started/architecture.md:41
+msgid "### 2. kanade-backend"
+msgstr "### 2. kanade-backend"
+
+#: src\getting-started/architecture.md:42
+msgid "The central HTTP API and projection server."
+msgstr "中央の HTTP API およびプロジェクションサーバーです。"
+
+#: src\getting-started/architecture.md:43
+msgid "- **Role**: Coordinates commands, processes incoming telemetry, and hosts the operator Web interface."
+msgstr "- **役割**: コマンドの調整、受信テレメトリの処理、およびオペレーター用 Web インターフェースの提供。"
+
+#: src\getting-started/architecture.md:44
+msgid "- **State management**: Persists events, activity logs, and status records in a localized SQLite database."
+msgstr "- **状態管理**: イベント、アクティビティログ、およびステータスレコードをローカルの SQLite データベースに永続化します。"
+
+#: src\getting-started/architecture.md:45
+msgid "- **Projector pattern**: Subscribes to the NATS command-response stream, parses incoming payloads, and projects them into state tables in real-time."
+msgstr "- **プロジェクターパターン**: NATS コマンドレスポンスストリームを購読し、受信したペイロードを解析して、リアルタイムで状態テーブルに反映（投影）します。"
+
+#: src\getting-started/architecture.md:47
+msgid "### 3. NATS Broker (with JetStream)"
+msgstr "### 3. NATS ブローカー (with JetStream)"
+
+#: src\getting-started/architecture.md:48
+msgid "The message transport layer of the entire fleet."
+msgstr "フリート全体のメッセージ転送レイヤーです。"
+
+#: src\getting-started/architecture.md:48
+msgid "- **Role**: Lightweight, high-throughput message broker."
+msgstr "- **役割**: 軽量かつ高スループットなメッセージブローカー。"
+
+#: src\getting-started/architecture.md:49
+msgid "- **JetStream**: Retains command streams, job registrations, and file storage (using NATS Object Store buckets for distributing packages and agent scripts)."
+msgstr "- **JetStream**: コマンドストリーム、ジョブ登録、およびファイルストレージ（パッケージやエージェントスクリプトを配信するための NATS オブジェクトストアバケットを使用）を保持します。"
+
+#: src\getting-started/architecture.md:50
+msgid "- **Isolation**: Decouples the backend from the agents. If the backend is offline or restarting, agents continue execution and cache outbox records, pushing them once connection resumes."
+msgstr "- **疎結合**: バックエンドとエージェントを切り離します。バックエンドがオフラインまたは再起動中であっても、エージェントは実行を継続して送信トレイにレコードをキャッシュし、接続が再開されたらそれらをプッシュします。"
+
+#: src\getting-started/architecture.md:52
+msgid "### 4. kanade-client"
+msgstr "### 4. kanade-client"
+
+#: src\getting-started/architecture.md:53
+msgid "An optional Tauri desktop application running in the logged-in user's desktop session on endpoints."
+msgstr "エンドポイント上のログインユーザーのデスクトップセッションで動作する、オプションの Tauri デスクトップアプリケーションです。"
+
+#: src\getting-started/architecture.md:54
+msgid "- **Communication**: Shares state with the local `kanade-agent` via secured local IPC mechanisms."
+msgstr "- **通信**: セキュリティで保護されたローカル IPC メカニズムを介して、ローカルの `kanade-agent` と状態を共有します。"
+
+#: src\getting-started/architecture.md:58
+msgid "### 5. kanade CLI"
+msgstr "### 5. kanade CLI"
+
+#: src\getting-started/architecture.md:59
+msgid "The primary command-line tool for operators."
+msgstr "オペレーター向けの主要なコマンドラインツールです。"
+
+#: src\getting-started/architecture.md:59
+msgid "- **Role**: Packages and publishes software updates, submits and executes job manifests, and queries live fleet inventory from the command-line."
+msgstr "- **役割**: ソフトウェアアップデートのパッケージングと公開、ジョブマニフェストの送信と実行、およびコマンドラインからのライブフリートインベントリの照会。"
+
+#: src\getting-started/architecture.md:61
+msgid "## Security & Reliability Design"
+msgstr "## セキュリティと信頼性の設計"
+
+#: src\getting-started/architecture.md:63
+msgid "### Outbound-only Connections"
+msgstr "### アウトバウンド専用接続"
+
+#: src\getting-started/architecture.md:65
+msgid "Agents strictly communicate with the NATS broker by initiating outbound TCP connections. No firewall ports need to be opened on endpoints, neutralizing the risk of lateral traversal or external port scanning."
+msgstr "エージェントは、アウトバウンド TCP 接続を開始することによってのみ NATS ブローカーと通信します。エンドポイント側でファイアウォールポートを開く必要がないため、横移動や外部からのポートスキャンのリスクを排除できます。"
+
+#: src\getting-started/architecture.md:67
+msgid "### Agent Job Sandboxing"
+msgstr "### エージェントジョブのサンドボックス化"
+
+#: src\getting-started/architecture.md:69
+msgid "When executing scripts, the agent stages commands in `%ProgramData%\\Kanade\\agent-scripts` and executes them using customized launcher templates."
+msgstr "スクリプトを実行する際、エージェントは `%ProgramData%\\Kanade\\agent-scripts` 内にコマンドを配置（ステージング）し、カスタマイズされたランチャテンプレートを使用して実行します。"
+
+#: src\getting-started/architecture.md:70
+msgid "Administrators can enforce identity configurations via job manifests, specifying `run_as: system` (for elevated system management) or `run_as: user` (to run safely under the active user's credentials with restricted directory ACLs)."
+msgstr "管理者はジョブマニフェストを介して実行アイデンティティの設定を強制でき、`run_as: system`（昇格したシステム管理用）または `run_as: user`（制限されたディレクトリ ACL を使用して、アクティブなユーザーの資格情報の下で安全に実行する用）を指定できます。"
+
+#: src\operations/deploy.md:3
+msgid "This section details how to bootstrap `kanade` components as native Windows services in production or staging environments."
+msgstr "このセクションでは、本番環境またはステージング環境で `kanade` コンポーネントをネイティブの Windows サービスとしてブートストラップする方法を詳しく説明します。"
+
+#: src\operations/deploy.md:5
+msgid "## Deployment Model"
+msgstr "## デプロイモデル"
+
+#: src\operations/deploy.md:7
+msgid "Production hosts and target endpoints run `kanade` components as background Windows services. This ensures high availability and automatic startup."
+msgstr "本番ホストと管理対象エンドポイントは、`kanade` コンポーネントをバックグラウンドの Windows サービスとして実行します。これにより、高可用性と自動起動が保証されます。"
+
+#: src\operations/deploy.md:9
+msgid "Service Name"
+msgstr "サービス名"
+
+#: src\operations/deploy.md:9
+msgid "Triple / Binary"
+msgstr "トリプル / バイナリ"
+
+#: src\operations/deploy.md:9
+msgid "Config Source"
+msgstr "設定ソース"
+
+#: src\operations/deploy.md:9
+msgid "Typical Target"
+msgstr "典型的なターゲット"
+
+#: src\operations/deploy.md:11
+msgid "**KanadeNats**"
+msgstr "**KanadeNats**"
+
+#: src\operations/deploy.md:11
+msgid "`nats-server.exe`"
+msgstr "`nats-server.exe`"
+
+#: src\operations/deploy.md:11
+msgid "Hardened Registry / Registry-baked CLI flags"
+msgstr "保護されたレジストリ / レジストリ保存の CLI フラグ"
+
+#: src\operations/deploy.md:11 src\operations/deploy.md:12
+msgid "Central server"
+msgstr "中央サーバー"
+
+#: src\operations/deploy.md:12
+msgid "**KanadeBackend**"
+msgstr "**KanadeBackend**"
+
+#: src\operations/deploy.md:12
+msgid "`kanade-backend.exe`"
+msgstr "`kanade-backend.exe`"
+
+#: src\operations/deploy.md:12
+msgid "Hardened Registry / Config file"
+msgstr "保護されたレジストリ / 設定ファイル"
+
+#: src\operations/deploy.md:13
+msgid "**KanadeAgent**"
+msgstr "**KanadeAgent**"
+
+#: src\operations/deploy.md:13
+msgid "`kanade-agent.exe`"
+msgstr "`kanade-agent.exe`"
+
+#: src\operations/deploy.md:13
+msgid "Hardened Registry / Local state DB"
+msgstr "保護されたレジストリ / ローカル状態 DB"
+
+#: src\operations/deploy.md:13
+msgid "Managed endpoints"
+msgstr "管理対象エンドポイント"
+
+#: src\operations/deploy.md:19
+msgid "- **Host OS**: Windows 10/11 or Windows Server 2016+."
+msgstr "- **ホスト OS**: Windows 10/11 または Windows Server 2016+。"
+
+#: src\operations/deploy.md:20
+msgid "- **gsudo**: Required to perform elevated installations from standard user shells (or run commands from an Administrator-level PowerShell prompt)."
+msgstr "- **gsudo**: 標準のユーザシェルから管理者権限でインストールを実行する（または管理者権限の PowerShell プロンプトからコマンドを実行する）ために必要です。"
+
+#: src\operations/deploy.md:21
+msgid "- **Network Routing**: Managed endpoints must be able to reach the NATS server port (default `4222`) over TCP."
+msgstr "- **ネットワークルーティング**: 管理対象エンドポイントが TCP 経由で NATS サーバーポート（デフォルト `4222`）に到達できる必要があります。"
+
+#: src\operations/deploy.md:23
+msgid "## 2. Setting Up the NATS Server (Broker)"
+msgstr "## 2. NATS サーバー (ブローカー) のセットアップ"
+
+#: src\operations/deploy.md:25
+msgid "The NATS server acts as the messaging core."
+msgstr "NATS サーバーはメッセージングのコアとして機能します。"
+
+#: src\operations/deploy.md:27
+msgid "1. Stage the deployment bundle using `scripts/build-release.ps1 -Roles nats`."
+msgstr "1. `scripts/build-release.ps1 -Roles nats` を使用して、デプロイメントバンドルをステージングします。"
+
+#: src\operations/deploy.md:28
+msgid "2. Deploy the service with elevation:"
+msgstr "2. 管理者権限でサービスをデプロイします:"
+
+#: src\operations/deploy.md:30
+msgid "# Elevated PowerShell prompt"
+msgstr "# 管理者権限の PowerShell プロンプト"
+
+#: src\operations/deploy.md:34
+msgid "This installs the **KanadeNats** service, configures it to run under the local system account, sets up JetStream data directories, and locks down the secure authorization token in the Windows registry."
+msgstr "これにより、**KanadeNats** サービスがインストールされ、ローカルシステムアカウントで実行されるよう構成され、JetStream データディレクトリがセットアップされ、安全な認証トークンが Windows レジストリ内にロックダウンされます。"
+
+#: src\operations/deploy.md:36
+msgid "## 3. Deploying the Backend API & SPA"
+msgstr "## 3. バックエンド API & SPA のデプロイ"
+
+#: src\operations/deploy.md:38
+msgid "The backend manages operator connections and processes event logs."
+msgstr "バックエンドは、オペレーター接続を管理し、イベントログを処理します。"
+
+#: src\operations/deploy.md:40
+msgid "1. Stage the backend binaries and React SPA bundle using `scripts/build-release.ps1 -Roles backend`."
+msgstr "1. `scripts/build-release.ps1 -Roles backend` を使用して、バックエンドバイナリと React SPA バンドルをステージングします。"
+
+#: src\operations/deploy.md:41
+msgid "2. Deploy the service:"
+msgstr "2. サービスをデプロイします:"
+
+#: src\operations/deploy.md:48
+msgid "`-NatsToken`: Connects the backend to the local NATS server securely."
+msgstr "`-NatsToken`: バックエンドをローカルの NATS サーバーに安全に接続します。"
+
+#: src\operations/deploy.md:49
+msgid "`-StaticToken`: Defines the API bearer token required for operator CLI/SPA logins."
+msgstr "`-StaticToken`: オペレーターの CLI/SPA ログインに必要な API ベアラートークンを定義します。"
+
+#: src\operations/deploy.md:51
+msgid "The deployment script registers the **KanadeBackend** Windows service, sets the appropriate ACLs, and verifies the endpoint."
+msgstr "デプロイスクリプトは、**KanadeBackend** Windows サービスを登録し、適切な ACL を設定して、エンドポイントを検証します。"
+
+#: src\operations/deploy.md:53
+msgid "## 4. Installing the Agent on Target Endpoints"
+msgstr "## 4. 対象エンドポイントへのエージェントのインストール"
+
+#: src\operations/deploy.md:55
+msgid "Install the agent on every endpoint PC that you want to manage."
+msgstr "管理対象のすべてのエンドポイント PC にエージェントをインストールします。"
+
+#: src\operations/deploy.md:57
+msgid "1. Stage the agent bundle using `scripts/build-release.ps1 -Roles agent`."
+msgstr "1. `scripts/build-release.ps1 -Roles agent` を使用して、エージェントバンドルをステージングします。"
+
+#: src\operations/deploy.md:58
+msgid "2. Copy the contents of the `dist/agent` folder to the target PC."
+msgstr "2. `dist/agent` フォルダの内容を対象 PC にコピーします。"
+
+#: src\operations/deploy.md:59
+msgid "3. On the target PC, run the installer:"
+msgstr "3. 対象 PC 上で、インストーラーを実行します:"
+
+#: src\operations/deploy.md:65
+msgid "The script:"
+msgstr "スクリプトの動作:"
+
+#: src\operations/deploy.md:67
+msgid "- Places `kanade-agent.exe` into its destination directory."
+msgstr "- `kanade-agent.exe` をインストール先ディレクトリに配置します。"
+
+#: src\operations/deploy.md:68
+msgid "- Secures the configuration and NATS token in the Windows registry path (`HKLM:\\SOFTWARE\\Kanade\\agent`)."
+msgstr "- Windows レジストリパス (`HKLM:\\SOFTWARE\\Kanade\\agent`) 内の設定と NATS トークンを保護します。"
+
+#: src\operations/deploy.md:69
+msgid "- Registers and starts the **KanadeAgent** service."
+msgstr "- **KanadeAgent** サービスを登録して起動します。"
+
+#: src\operations/deploy.md:71
+msgid "Once the service is active, the agent establishes an outbound NATS connection, subscribes to command streams, and reports its online heartbeat back to the fleet backend."
+msgstr "サービスが起動すると、エージェントはアウトバウンド NATS 接続を確立し、コマンドストリームを購読し、オンラインのハートビートをフリートバックエンドに報告します。"
+
+#: src\developing/workflow.md:3
+msgid "This document outlines the standard workflows, lint/test requirements, and VCS branching guidelines for contributors working on the `kanade` codebase."
+msgstr "このドキュメントでは、`kanade` コードベースで作業するコントリビューター向けの標準的な開発ワークフロー、lint/テストの要件、および VCS ブランチのガイドラインについて説明します。"
+
+#: src\developing/workflow.md:7
+msgid "1. Quality Gates (Pre-Push & CI)"
+msgstr "1. クオリティゲート (Pre-Push & CI)"
+
+#: src\developing/workflow.md:9
+msgid "The local test suite must be green before you push or submit PRs. This matches the automated checks running on GitHub Actions."
+msgstr "プッシュや PR の送信を行う前に、ローカルのテストスイートがすべてグリーンである必要があります。これは GitHub Actions で実行される自動チェックと同じものです。"
+
+#: src\developing/workflow.md:12
+msgid "# Run formatting check, clippy checks, target tests, and cargo lock checks"
+msgstr "# フォーマットチェック、clippy チェック、ターゲットテスト、および cargo ロックチェックを実行します"
+
+#: src\developing/workflow.md:16
+msgid "**FMT & Clippy**: We maintain a strict zero-warning policy. Do not sprinkle `#[allow(clippy::...)]` unless there is a strong architectural justification."
+msgstr "**FMT & Clippy**: 私たちは厳格なゼロワーニングポリシーを維持しています。強力な設計上の正当な理由がない限り、`#[allow(clippy::...)]` を散布しないでください。"
+
+#: src\developing/workflow.md:17
+msgid "**TDD (Test-Driven Development)**: Follow Kent Beck's TDD methodology. Write failing tests first to define the _what_, then implement the code to satisfy them."
+msgstr "**TDD (テスト駆動開発)**: Kent Beck の TDD 手法に従ってください。最初に失敗するテストを書いて「何を」行うかを定義し、次にそれを満たすコードを実装します。"
+
+#: src\developing/workflow.md:21
+msgid "2. Worktree Management with `renri`"
+msgstr "2. `renri` によるワークツリー管理"
+
+#: src\developing/workflow.md:23
+msgid "For isolated feature development, we use [`renri`](https://github.com/yukimemi/renri) to manage lightweight repository worktrees. This prevents staging pollution, keeps your main checkout clean, and allows you to switch tasks instantly."
+msgstr "隔離された機能開発のために、私たちは [`renri`](https://github.com/yukimemi/renri) を使用して軽量なリポジトリワークツリーを管理します。これにより、ステージの汚染を防ぎ、メインチェックアウトをクリーンに保ち、瞬時にタスクを切り替えることができます。"
+
+#: src\developing/workflow.md:25
+msgid "Why `renri`?"
+msgstr "なぜ `renri` なのか？"
+
+#: src\developing/workflow.md:26
+msgid "In co-located Git and Jujutsu (jj) environments, managing worktrees manually can get complex. `renri` simplifies this by automatically wrapping VCS-specific worktree creation (favoring `jj` when configured) and cleanups."
+msgstr "Git と Jujutsu (jj) がコロケーションされた環境では、ワークツリーを手動で管理するのは複雑になります。`renri` は、VCS 固有のワークツリー作成（設定されている場合は `jj` を優先）とクリーンアップを自動的にラッピングすることで、これを簡素化します。"
+
+#: src\developing/workflow.md:28
+msgid "Common Commands"
+msgstr "よく使うコマンド"
+
+#: src\developing/workflow.md:31
+msgid "# Create an isolated worktree (uses Jujutsu by default if present)"
+msgstr "# 隔離されたワークツリーを作成します (存在するならデフォルトで Jujutsu を使用)"
+
+#: src\developing/workflow.md:33
+msgid "# Force a Git-native worktree (bypassing jj)"
+msgstr "# Git ネイティブのワークツリーを強制的に作成します (jj をバイパス)"
+
+#: src\developing/workflow.md:36
+msgid "# Clean up and delete a worktree after merging"
+msgstr "# マージ後にワークツリーをクリーンアップして削除します"
+
+#: src\developing/workflow.md:39
+msgid "# Garbage-collect and prune stale or broken worktrees"
+msgstr "# 古くなった、または破損したワークツリーをガベージコレクションしてクリーンアップします"
+
+#: src\developing/workflow.md:44
+msgid "_Note: Worktree creation automatically invokes the cargo-make `on-add` hook to fetch remote refs and bootstrap APM configurations immediately._"
+msgstr "_注意: ワークツリー作成時に自動的に cargo-make の `on-add` フックが呼び出され、リモートの参照を取得して APM 設定を直ちにセットアップします。_"
+
+#: src\developing/workflow.md:48
+msgid "3. Co-located Jujutsu (jj) & Git Workflow"
+msgstr "3. コロケーションされた Jujutsu (jj) & Git ワークフロー"
+
+#: src\developing/workflow.md:50
+msgid "Our development environment is configured with co-located Git and Jujutsu. We prefer `jj` for local version control due to its safe, conflict-free commit model."
+msgstr "開発環境は、Git と Jujutsu がコロケーションされるよう設定されています。ローカルのバージョン管理には、安全で競合のないコミットモデルを持つ `jj` を好んで使用します。"
+
+#: src\developing/workflow.md:52
+msgid "Guidelines"
+msgstr "ガイドライン"
+
+#: src\developing/workflow.md:53
+msgid "**No Direct Push to `main`**: All changes must land via a Pull Request."
+msgstr "**`main` への直接プッシュ禁止**: すべての変更は Pull Request 経由でマージされる必要があります。"
+
+#: src\developing/workflow.md:54
+msgid "**Branch/Bookmark Naming**:"
+msgstr "**ブランチ/ブックマークの命名規則**:"
+
+#: src\developing/workflow.md:55
+msgid "`feat/...` for new features."
+msgstr "`feat/...` は新機能用。"
+
+#: src\developing/workflow.md:56
+msgid "`fix/...` for bugs."
+msgstr "`fix/...` はバグ修正用。"
+
+#: src\developing/workflow.md:57
+msgid "`chore/...` for infrastructure, dependency bumps, or releases."
+msgstr "`chore/...` はインフラ、依存関係の更新、またはリリース用。"
+
+#: src\developing/workflow.md:58
+msgid "**Commit Messages**: Write commit messages, PR titles, and bodies in **English**."
+msgstr "**コミットメッセージ**: コミットメッセージ、PR タイトル、本文は**英語**で記述してください。"
+
+#: src\developing/workflow.md:59
+msgid "**Version Bumps**: Release version bumps are managed exclusively via PRs on `main` and automated tagging pipelines. Never run `git tag` manually."
+msgstr "**バージョン更新**: リリースのバージョン更新は、`main` への PR と自動タグ付けパイプラインを介してのみ管理されます。手動で `git tag` を実行しないでください。"
+
+#: src\developing/workflow.md:63
+msgid "4. Documentation Policy"
+msgstr "4. ドキュメントポリシー"
+
+#: src\developing/workflow.md:65
+msgid "Documentation must stay in lock-step with code changes. Whenever you add or modify features:"
+msgstr "ドキュメントは、コードの変更と常に完全に同期している必要があります。機能を追加または変更した場合は常に、以下を実行してください:"
+
+#: src\developing/workflow.md:67
+msgid "Update docstrings and comments explaining the _why_ (avoid comments restating _how_)."
+msgstr "コード内のコメントや docstring を更新し、「なぜ」そのようにしたのかを説明します（「どのように」やっているかを単に再記述するコメントは避けてください）。"
+
+#: src\developing/workflow.md:68
+msgid "Update the relevant book pages (written in English under `book/src/`)."
+msgstr "関連する book ページ（`book/src/` 配下に英語で記述）を更新します。"
+
+#: src\developing/workflow.md:69
+msgid "Synchronize localization catalogs by running the translation template generator."
+msgstr "翻訳テンプレートジェネレーターを実行して、ローカライズカタログ（ポファイル）を同期します。"
+
+#: src\reference/config.md:3
+msgid "`kanade` services rely on structured configurations loaded from TOML files, environment variables, or registry paths."
+msgstr "`kanade` サービスは、TOML ファイル、環境変数、またはレジストリパスから読み込まれる構造化された設定に依存しています。"
+
+#: src\reference/config.md:7
+msgid "1. Agent Configuration"
+msgstr "1. エージェント設定"
+
+#: src\reference/config.md:9
+msgid "The agent searches for its configuration via the `KANADE_AGENT_CONFIG` environment variable or falls back to native paths."
+msgstr "エージェントは `KANADE_AGENT_CONFIG` 環境変数を介して設定を検索し、存在しない場合はネイティブパスにフォールバックします。"
+
+#: src\reference/config.md:11
+msgid "Dev Configuration (`configs/agent.dev.toml`)"
+msgstr "開発用設定 (`configs/agent.dev.toml`)"
+
+#: src\reference/config.md:13
+msgid "```toml\n# Dev configuration schema\n[agent]\nid = \"dev-pc\"\nnats_url = \"nats://localhost:4223\"\ndata_dir = \"target/dev-data/agent\"\n\n[log]\nlevel = \"debug\"\nfile = \"target/dev-data/agent/logs/agent.log\"\n```"
+msgstr "```toml\n# 開発用設定スキーマ\n[agent]\nid = \"dev-pc\"\nnats_url = \"nats://localhost:4223\"\ndata_dir = \"target/dev-data/agent\"\n\n[log]\nlevel = \"debug\"\nfile = \"target/dev-data/agent/logs/agent.log\"\n```"
+
+#: src\reference/config.md:25 src\reference/config.md:53
+msgid "Configuration Parameters"
+msgstr "設定パラメータ"
+
+#: src\reference/config.md:27 src\reference/config.md:55
+msgid "Field"
+msgstr "フィールド"
+
+#: src\reference/config.md:27 src\reference/config.md:55
+msgid "Type"
+msgstr "型"
+
+#: src\reference/config.md:27 src\reference/config.md:55
+msgid "Description"
+msgstr "説明"
+
+#: src\reference/config.md:27 src\reference/config.md:55
+msgid "Environment Override"
+msgstr "環境変数による上書き"
+
+#: src\reference/config.md:29
+msgid "`agent.id`"
+msgstr "`agent.id`"
+
+#: src\reference/config.md:29 src\reference/config.md:30
+#: src\reference/config.md:32 src\reference/config.md:57
+#: src\reference/config.md:58 src\reference/config.md:59
+msgid "String"
+msgstr "String"
+
+#: src\reference/config.md:29
+msgid "Unique hardware identifier (`pc_id`)."
+msgstr "ユニークなハードウェア識別子 (`pc_id`)。"
+
+#: src\reference/config.md:29
+msgid "`KANADE_DEV_AGENT_ID` (templated)"
+msgstr "`KANADE_DEV_AGENT_ID` (テンプレート化)"
+
+#: src\reference/config.md:30
+msgid "`agent.nats_url`"
+msgstr "`agent.nats_url`"
+
+#: src\reference/config.md:30
+msgid "Network address of the NATS broker."
+msgstr "NATS ブローカー of ネットワークアドレス。"
+
+#: src\reference/config.md:30 src\reference/config.md:58
+msgid "`KANADE_NATS_URL`"
+msgstr "`KANADE_NATS_URL`"
+
+#: src\reference/config.md:31
+msgid "`agent.data_dir`"
+msgstr "`agent.data_dir`"
+
+#: src\reference/config.md:31 src\reference/config.md:33
+msgid "Path"
+msgstr "Path"
+
+#: src\reference/config.md:31
+msgid "Root path to cache outbox scripts, state database, and local completions."
+msgstr "送信トレイのスクリプト、状態データベース、およびローカルの補完データをキャッシュするルートパス。"
+
+#: src\reference/config.md:31
+msgid "`KANADE_AGENT_DATA_DIR`"
+msgstr "`KANADE_AGENT_DATA_DIR`"
+
+#: src\reference/config.md:32
+msgid "`log.level`"
+msgstr "`log.level`"
+
+#: src\reference/config.md:32
+msgid "Logging verbosity (`error`, `warn`, `info`, `debug`, `trace`)."
+msgstr "ログ出力レベルの冗長度 (`error`, `warn`, `info`, `debug`, `trace`)。"
+
+#: src\reference/config.md:32
+msgid "`RUST_LOG`"
+msgstr "`RUST_LOG`"
+
+#: src\reference/config.md:33
+msgid "`log.file`"
+msgstr "`log.file`"
+
+#: src\reference/config.md:33
+msgid "Filepath destination for rolling logs."
+msgstr "ローリングログの書き出し先ファイルパス。"
+
+#: src\reference/config.md:33
+msgid "\\-"
+msgstr "\\-"
+
+#: src\reference/config.md:37
+msgid "2. Backend Configuration"
+msgstr "2. バックエンド設定"
+
+#: src\reference/config.md:39
+msgid "The backend coordination layer retrieves its configurations from the file specified by `KANADE_BACKEND_CONFIG` or registers default structures."
+msgstr "バックエンドの調整レイヤーは `KANADE_BACKEND_CONFIG` で指定されたファイルから設定を取得し、指定がない場合はデフォルトの構造体を登録します。"
+
+#: src\reference/config.md:41
+msgid "Dev Configuration (`configs/backend.dev.toml`)"
+msgstr "開発用設定 (`configs/backend.dev.toml`)"
+
+#: src\reference/config.md:43
+msgid "```toml\n[backend]\nlisten_addr = \"127.0.0.1:8081\"\nnats_url = \"nats://localhost:4223\"\ndatabase_url = \"sqlite://target/dev-data/backend/state.db\"\n\n[auth]\n# Auth settings\n```"
+msgstr "```toml\n[backend]\nlisten_addr = \"127.0.0.1:8081\"\nnats_url = \"nats://localhost:4223\"\ndatabase_url = \"sqlite://target/dev-data/backend/state.db\"\n\n[auth]\n# 認証設定\n```"
+
+#: src\reference/config.md:57
+msgid "`backend.listen_addr`"
+msgstr "`backend.listen_addr`"
+
+#: src\reference/config.md:57
+msgid "Network bind address for HTTP/WebSocket traffic."
+msgstr "HTTP/WebSocket トラフィック用のネットワークバインド文字列。"
+
+#: src\reference/config.md:57
+msgid "`KANADE_BIND_ADDR`"
+msgstr "`KANADE_BIND_ADDR`"
+
+#: src\reference/config.md:58
+msgid "`backend.nats_url`"
+msgstr "`backend.nats_url`"
+
+#: src\reference/config.md:58
+msgid "Target NATS broker URL."
+msgstr "対象とする NATS ブローカーの URL。"
+
+#: src\reference/config.md:59
+msgid "`backend.database_url`"
+msgstr "`backend.database_url`"
+
+#: src\reference/config.md:59
+msgid "SQLite database connection string."
+msgstr "SQLite データベースへの接続文字列。"
+
+#: src\reference/config.md:59
+msgid "`DATABASE_URL`"
+msgstr "`DATABASE_URL`"
+
+#: src\reference/config.md:60
+msgid "`auth.disable`"
+msgstr "`auth.disable`"
+
+#: src\reference/config.md:60
+msgid "Boolean"
+msgstr "Boolean"
+
+#: src\reference/config.md:60
+msgid "Set to true to disable operator token validation (dev environment only)."
+msgstr "オペレーターのトークン検証を無効にするには true を設定します (開発環境でのみ有効)。"
+
+#: src\reference/config.md:60
+msgid "`KANADE_AUTH_DISABLE`"
+msgstr "`KANADE_AUTH_DISABLE`"
+
+#: src\reference/config.md:64
+msgid "3. Windows Registry Integration"
+msgstr "3. Windows レジストリ統合"
+
+#: src\reference/config.md:66
+msgid "In production environments, security-sensitive tokens (like NATS client tokens and administrative API bearer tokens) are stored in the secure Windows Registry rather than plaintext files."
+msgstr "本番環境では、セキュリティに敏感なトークン（NATS クライアントトークンや管理用 API ベアラートークンなど）は、プレーンテキストファイルではなく、保護された Windows レジストリに保存されます。"
+
+#: src\reference/config.md:68
+msgid "Key Paths"
+msgstr "キーパス"
+
+#: src\reference/config.md:69
+msgid "**Agent Settings**: `HKLM:\\SOFTWARE\\Kanade\\agent`"
+msgstr "**エージェント設定**: `HKLM:\\SOFTWARE\\Kanade\\agent`"
+
+#: src\reference/config.md:70
+msgid "**Backend Settings**: `HKLM:\\SOFTWARE\\Kanade\\backend`"
+msgstr "**バックエンド設定**: `HKLM:\\SOFTWARE\\Kanade\\backend`"
+
+#: src\reference/config.md:72
+msgid "These registry paths are protected with local ACL configurations, allowing read permissions strictly to `SYSTEM` and designated operators."
+msgstr "これらのレジストリパスはローカルの ACL 設定で保護されており、`SYSTEM` および指定されたオペレーターにのみ読み取り権限が厳密に制限されます。"
