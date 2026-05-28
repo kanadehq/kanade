@@ -83,6 +83,14 @@ pub struct ObsEvent {
     /// agent-emitted milestones where the only candidate is the
     /// `at` timestamp + kind, which the backend can synthesize
     /// from those fields if needed).
+    ///
+    /// `#[serde(default)]` so an agent publisher that has no id
+    /// to emit can omit the field entirely; serde fills `None`
+    /// rather than refusing the message. Without this, agent
+    /// versions that always send the field can deserialize but
+    /// future ones that drop it on `null` cases would silently
+    /// land in the warn-log → projector drop path.
+    #[serde(default)]
     pub event_record_id: Option<String>,
 
     /// Free-form per-kind details. The wire stays narrow
@@ -97,6 +105,12 @@ pub struct ObsEvent {
     ///
     /// Backend projector stores this as TEXT (the JSON
     /// representation); SPA renders it kind-aware.
+    ///
+    /// `#[serde(default)]` so a publisher emitting a bare-presence
+    /// event can omit the field entirely (serde fills
+    /// `Value::Null`) rather than being forced to write
+    /// `"payload": null` on every line.
+    #[serde(default)]
     pub payload: serde_json::Value,
 }
 
@@ -145,10 +159,12 @@ mod tests {
     #[test]
     fn obs_event_missing_event_record_id_deserialises() {
         // Agent-emitted milestones (e.g. agent_started) have no
-        // natural EventRecordID equivalent. The wire field is
-        // `Option<String>`; a publisher that omits it entirely
-        // should still parse — confirms the serde default of
-        // `Option` (= None on missing) is what we want.
+        // natural EventRecordID equivalent. The field is
+        // `Option<String>` annotated `#[serde(default)]`, so a
+        // publisher omitting it entirely lands as `None` rather
+        // than failing the deserialise. Gemini #247 HIGH —
+        // without the explicit default, serde requires Option
+        // fields to be present (allowed to be null, not absent).
         let s = r#"{
             "pc_id": "minipc",
             "at": "2026-05-28T10:00:00Z",
@@ -159,5 +175,24 @@ mod tests {
         let e: ObsEvent = serde_json::from_str(s).unwrap();
         assert_eq!(e.event_record_id, None);
         assert_eq!(e.kind, "agent_started");
+    }
+
+    #[test]
+    fn obs_event_missing_payload_defaults_to_null() {
+        // Bare-presence events (boot / shutdown / agent_started)
+        // have no per-kind details. A publisher that omits the
+        // `payload` field entirely should parse — `#[serde(default)]`
+        // on the field fills `Value::Null` so the projector's
+        // `INSERT` sees the same value as if the publisher had
+        // written `"payload": null` explicitly.
+        let s = r#"{
+            "pc_id": "minipc",
+            "at": "2026-05-28T10:00:00Z",
+            "kind": "boot",
+            "source": "winlog:System",
+            "event_record_id": "1"
+        }"#;
+        let e: ObsEvent = serde_json::from_str(s).unwrap();
+        assert_eq!(e.payload, serde_json::Value::Null);
     }
 }
