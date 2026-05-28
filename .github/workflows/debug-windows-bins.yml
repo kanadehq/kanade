@@ -14,14 +14,22 @@ permissions:
   contents: read
 
 jobs:
-  workspace-bins-verbose:
-    name: cargo build --workspace --bins -vv (windows-latest)
+  workspace-bins-mirror-release:
+    # Mirrors release.yml's build step exactly — same checkout
+    # version, same toolchain action, WITH Swatinem/rust-cache,
+    # NO -vv. If the bug reproduces here but not in the -vv-only
+    # diagnostic that was tried first, rust-cache (or the lack of
+    # -vv) is implicated. If it still doesn't reproduce, the
+    # remaining difference is the matrix wrapper around the
+    # release.yml job — that's all that's left.
+    name: cargo build --workspace --bins (mirrors release.yml exactly)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
 
       - name: Disk space before
         shell: bash
@@ -30,11 +38,11 @@ jobs:
       - name: cargo --version
         run: cargo --version --verbose
 
-      - name: cargo build -vv (capture)
+      - name: cargo build (capture stdout+stderr)
         shell: bash
         run: |
           set -o pipefail
-          cargo build --release --workspace --bins --target x86_64-pc-windows-msvc -vv 2>&1 | tee build.log
+          cargo build --release --workspace --bins --target x86_64-pc-windows-msvc 2>&1 | tee build.log
           echo "exit_code=$?"
 
       - name: Disk space after
