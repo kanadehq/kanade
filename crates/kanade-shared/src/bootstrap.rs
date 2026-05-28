@@ -105,15 +105,24 @@ pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
     .with_context(|| format!("create_or_update_stream {STREAM_AUDIT}"))?;
     info!(stream = STREAM_AUDIT, "ready");
 
-    // OBS_EVENTS — per-PC observability timeline (Issue #246). 90-day
-    // rolling window matches `obs_events` table retention so a
+    // OBS_EVENTS — per-PC observability timeline (Issue #246). The
+    // 90-day window matches `obs_events` table retention so a
     // backend bootstrapping after long downtime can catch up but
     // doesn't carry data the table will discard anyway. Subject
     // filter `obs.>` catches every PC without a per-PC subscription.
+    //
+    // Days-to-seconds is spelt out once instead of `90 * 24 * 60 *
+    // 60` open-coded across bootstrap + cleanup; the matching prune
+    // window in `kanade-backend::cleanup` quotes the same number
+    // separately (SQLite-relative string syntax there, not a
+    // duration), so it can't share a constant — but a single
+    // arithmetic spell-out here makes the relationship grep-able.
+    const SECS_PER_DAY: u64 = 24 * 60 * 60;
+    const OBS_EVENTS_RETENTION_DAYS: u64 = 90;
     js.create_or_update_stream(StreamConfig {
         name: STREAM_OBS_EVENTS.into(),
         subjects: vec!["obs.>".into()],
-        max_age: Duration::from_secs(90 * 24 * 60 * 60),
+        max_age: Duration::from_secs(OBS_EVENTS_RETENTION_DAYS * SECS_PER_DAY),
         ..Default::default()
     })
     .await
