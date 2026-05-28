@@ -64,6 +64,13 @@ const PERF_RETENTION: &str = "-30 days";
 /// regardless of fleet size.
 const PROCESS_PERF_RETENTION: &str = "-7 days";
 
+/// Issue #246: `obs_events` retention. 90 d matches the
+/// `inventory_history` window so operators have one mental "how
+/// far back can I look" answer across timeline surfaces. Cadence
+/// is low (~50/day/PC), so 90 d × 1000 PCs ≈ 4.5 M rows — easily
+/// within SQLite limits.
+const OBS_EVENTS_RETENTION: &str = "-90 days";
+
 /// Spawn the long-running cleanup task. Runs forever; logs a warn
 /// on transient SQLite errors and continues to the next tick. The
 /// task is fire-and-forget — the returned handle is for the
@@ -126,8 +133,34 @@ pub fn spawn(pool: SqlitePool) -> tokio::task::JoinHandle<()> {
                 Ok(_) => {}
                 Err(e) => warn!(error = %e, "process_perf_samples cleanup failed"),
             }
+            // Issue #246: prune obs_events rows older than
+            // OBS_EVENTS_RETENTION. Same shared-timer pattern.
+            match prune_obs_events(&pool).await {
+                Ok(n) if n > 0 => info!(
+                    deleted = n,
+                    "obs_events cleanup: pruned {n} rows older than {OBS_EVENTS_RETENTION}",
+                ),
+                Ok(_) => {}
+                Err(e) => warn!(error = %e, "obs_events cleanup failed"),
+            }
         }
     })
+}
+
+/// Delete `obs_events` rows older than [`OBS_EVENTS_RETENTION`].
+/// `idx_obs_events_pc_at` covers `at DESC` range scans cheaply, so
+/// the DELETE walks the natural index order even at a few million
+/// rows.
+async fn prune_obs_events(pool: &SqlitePool) -> Result<u64> {
+    let rows = sqlx::query(
+        "DELETE FROM obs_events
+          WHERE at < datetime('now', ?)",
+    )
+    .bind(OBS_EVENTS_RETENTION)
+    .execute(pool)
+    .await
+    .context("DELETE obs_events retention sweep")?;
+    Ok(rows.rows_affected())
 }
 
 /// Delete `process_perf_samples` rows older than
