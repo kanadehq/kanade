@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::Staleness;
+use crate::manifest::EmitConfig;
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
 pub struct Command {
@@ -78,6 +79,15 @@ pub struct Command {
     /// pre-v0.26 behaviour (silently use cached KV values).
     #[serde(default)]
     pub staleness: Staleness,
+    /// Issue #246: forwarded from `Manifest.emit` so the agent
+    /// doesn't have to re-fetch the manifest at fire time. When
+    /// `Some` and `EmitKind::Events`, the agent parses script
+    /// stdout as NDJSON `ObsEvent` and publishes each line on
+    /// `obs.<pc_id>`. Pre-#246 wire omits this; the `#[serde(default)]`
+    /// fallback to `None` preserves prior behaviour (stdout flows
+    /// to `ExecResult` unchanged).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emit: Option<EmitConfig>,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,6 +152,7 @@ mod tests {
             cwd: None,
             deadline_at: None,
             staleness: Staleness::Cached,
+            emit: None,
         }
     }
 

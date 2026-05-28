@@ -23,6 +23,7 @@ mod command_replay;
 mod events_outbox;
 mod local_scheduler;
 mod nats_retry;
+mod obs_outbox;
 mod outbox;
 mod script_cache;
 mod staleness;
@@ -298,6 +299,12 @@ pub(crate) async fn run_agent() -> Result<()> {
     let events_outbox_dir = default_paths::data_dir().join("events-outbox");
     let _events_outbox_handle =
         events_outbox::spawn_drain(client.clone(), events_outbox_dir.clone());
+    // Issue #246: per-PC observability event outbox + drain. Distinct
+    // from `events-outbox/` above (which carries `EventStarted`
+    // lifecycle events) — `obs-outbox/` carries the timeline
+    // `ObsEvent`s a script emits via `emit.type: events` manifests.
+    let obs_outbox_dir = default_paths::data_dir().join("obs-outbox");
+    let _obs_outbox_handle = obs_outbox::spawn_drain(client.clone(), obs_outbox_dir.clone());
     // v0.23: schedules marked `runs_on: agent` tick locally so the
     // agent keeps firing even when the broker is unreachable. See
     // `crates/kanade-agent/src/local_scheduler.rs` for the flow.

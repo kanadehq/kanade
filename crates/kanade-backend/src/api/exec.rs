@@ -117,6 +117,10 @@ pub async fn exec_manifest(
         // Command so the agent can apply it whether it sees the live
         // publish or replays from STREAM_EXEC on reconnect.
         staleness: manifest.staleness.clone(),
+        // Issue #246: forward the manifest's observability emit hint
+        // so the agent can route stdout NDJSON to obs-outbox without
+        // a manifest re-fetch.
+        emit: manifest.emit.clone(),
     };
 
     let mut subjects: Vec<String> = Vec::new();

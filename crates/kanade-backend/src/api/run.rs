@@ -100,6 +100,9 @@ pub async fn run(
         // `Cached` — matching pre-v0.26 behaviour where Layer 2 was
         // best-effort (silently pass when KV unreachable).
         staleness: kanade_shared::wire::Staleness::Cached,
+        // Issue #246: ad-hoc runs have no manifest, so no emit
+        // hint either. Treat stdout as plain text.
+        emit: None,
     };
 
     let result_subj = subject::results(&request_id);
