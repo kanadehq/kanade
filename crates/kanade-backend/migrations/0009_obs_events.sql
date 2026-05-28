@@ -51,3 +51,12 @@ CREATE INDEX idx_obs_events_pc_at ON obs_events(pc_id, at DESC);
 -- today") walk by (kind, at DESC). Cheap secondary index on a
 -- short string column, well worth the write cost.
 CREATE INDEX idx_obs_events_kind_at ON obs_events(kind, at DESC);
+
+-- Retention sweep (`prune_obs_events` in cleanup.rs) walks by
+-- `WHERE at < cutoff` with no other predicate. Neither composite
+-- index above can serve that scan efficiently (their leading
+-- columns are pc_id / kind, not at), so without this single-
+-- column index the DELETE would full-scan the table on every
+-- 5-minute tick. Cheap to maintain; cleanup walks are the most
+-- consistent write-heavy access pattern after inserts.
+CREATE INDEX idx_obs_events_at ON obs_events(at);

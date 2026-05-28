@@ -23,6 +23,7 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, SqlitePool};
 use tracing::warn;
 
@@ -113,25 +114,48 @@ pub async fn list(
 
     let events = rows
         .into_iter()
-        .map(|r| {
-            // `payload` is TEXT in the table; round-trip through
-            // serde_json::Value to give the SPA structured JSON
-            // rather than a stringified blob.
-            let raw: String = r.try_get("payload").unwrap_or_else(|_| "null".into());
-            let payload = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
-            EventRow {
-                id: r.try_get("id").unwrap_or_default(),
-                pc_id: r.try_get("pc_id").unwrap_or_default(),
-                at: r.try_get("at").unwrap_or_else(|_| Utc::now()),
-                kind: r.try_get("kind").unwrap_or_default(),
-                source: r.try_get("source").unwrap_or_default(),
-                event_record_id: r.try_get("event_record_id").ok(),
-                payload,
+        .filter_map(|r| match row_to_event(&r) {
+            Ok(e) => Some(e),
+            Err(e) => {
+                // Gemini #248 HIGH: surface schema mismatches /
+                // type errors instead of returning blank fields.
+                // We can't propagate the error here without
+                // changing the response shape; warn-log + drop
+                // the row keeps the API consistent while making
+                // any bug operator-visible via agent.log.
+                warn!(error = %e, "obs_events: drop row that failed to decode");
+                None
             }
         })
         .collect();
 
     Ok(Json(ListResponse { events }))
+}
+
+/// Decode one `obs_events` row into an `EventRow`. Errors propagate
+/// (vs the previous `unwrap_or_default()` shape which silently
+/// returned empty strings on a column-rename / type mismatch). The
+/// caller drops the row + logs; an alternative would be to 500 the
+/// whole response, but a single bad row in a 200-row page
+/// shouldn't take the whole timeline down.
+fn row_to_event(r: &SqliteRow) -> sqlx::Result<EventRow> {
+    let raw: String = r.try_get("payload")?;
+    // `payload` is JSON text we stored ourselves, so a parse
+    // failure means data corruption (someone hand-edited the
+    // table) rather than a schema mismatch — bubble the same
+    // error type out so the warn-log captures both cases.
+    let payload = serde_json::from_str(&raw).map_err(|e| {
+        sqlx::Error::Decode(format!("obs_events.payload not valid JSON: {e}").into())
+    })?;
+    Ok(EventRow {
+        id: r.try_get("id")?,
+        pc_id: r.try_get("pc_id")?,
+        at: r.try_get("at")?,
+        kind: r.try_get("kind")?,
+        source: r.try_get("source")?,
+        event_record_id: r.try_get("event_record_id")?,
+        payload,
+    })
 }
 
 #[derive(Serialize)]
@@ -148,9 +172,17 @@ pub async fn kinds(State(pool): State<SqlitePool>) -> Result<Json<KindsResponse>
             warn!(error = %e, "obs_events kinds query");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+    // Drop rows that fail to decode (same handling rationale as
+    // `list` above — operator sees the warn, the API stays useful).
     let kinds = rows
         .into_iter()
-        .map(|r| r.try_get::<String, _>("kind").unwrap_or_default())
+        .filter_map(|r| match r.try_get::<String, _>("kind") {
+            Ok(k) => Some(k),
+            Err(e) => {
+                warn!(error = %e, "obs_events kinds: drop row that failed to decode kind");
+                None
+            }
+        })
         .collect();
     Ok(Json(KindsResponse { kinds }))
 }
@@ -192,17 +224,11 @@ pub async fn recent(
 
     let events = rows
         .into_iter()
-        .map(|r| {
-            let raw: String = r.try_get("payload").unwrap_or_else(|_| "null".into());
-            let payload = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
-            EventRow {
-                id: r.try_get("id").unwrap_or_default(),
-                pc_id: r.try_get("pc_id").unwrap_or_default(),
-                at: r.try_get("at").unwrap_or_else(|_| Utc::now()),
-                kind: r.try_get("kind").unwrap_or_default(),
-                source: r.try_get("source").unwrap_or_default(),
-                event_record_id: r.try_get("event_record_id").ok(),
-                payload,
+        .filter_map(|r| match row_to_event(&r) {
+            Ok(e) => Some(e),
+            Err(e) => {
+                warn!(error = %e, "obs_events recent: drop row that failed to decode");
+                None
             }
         })
         .collect();
