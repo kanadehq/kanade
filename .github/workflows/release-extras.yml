@@ -120,6 +120,13 @@ jobs:
   upload-windows-bins:
     name: Upload Windows agent + backend + CLI to release
     runs-on: windows-latest
+    # `gh release view "$tag"` further down assumes the ref is a tag;
+    # if someone runs `workflow_dispatch` against `main` (or any branch)
+    # the poll loop would just time out. Cheaper to skip the job
+    # outright. Both `push: tags` and `workflow_dispatch --ref vX.Y.Z`
+    # set `github.ref` to `refs/tags/vX.Y.Z`, so this guard only blocks
+    # dispatch-against-a-branch.
+    if: startsWith(github.ref, 'refs/tags/')
     # Default top-level perms are `contents: read`; the release upload
     # call below needs `contents: write` on this job only.
     permissions:

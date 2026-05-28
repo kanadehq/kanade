@@ -285,8 +285,14 @@ Original error: $($_.Exception.Message)
                 if (Test-Path $temp) { Remove-Item -Recurse -Force $temp }
             }
         } else {
-            # Default: download from GitHub Releases.
-            $url = "https://github.com/$GitHubRepo/releases/download/v$Version/$exeName"
+            # Default: download from GitHub Releases. release.yml stages
+            # bins as `<crate>-<target>.exe` (target-suffixed so a single
+            # release page can carry every platform without name clashes),
+            # so the asset name differs from the local deploy filename
+            # (`$exeName`, e.g. `kanade-agent.exe`) that deploy-<role>.ps1
+            # expects.
+            $assetName = "$($spec.Crate)-x86_64-pc-windows-msvc.exe"
+            $url = "https://github.com/$GitHubRepo/releases/download/v$Version/$assetName"
             Write-Host "Downloading $url"
             try {
                 Invoke-WebRequest -Uri $url -OutFile $exeDst -UseBasicParsing
@@ -294,6 +300,10 @@ Original error: $($_.Exception.Message)
                 throw @"
 Failed to download $url
   - Asset missing on the release? Check https://github.com/$GitHubRepo/releases/tag/v$Version
+  - release.yml's Windows matrix entry silently drops kanade-{agent,backend,CLI}.exe;
+    release-extras.yml's upload-windows-bins job backfills them on tag push. If you're
+    pulling an older tag from before that job landed, run
+    `gh workflow run release-extras.yml --ref v$Version` to backfill the missing assets.
   - First v0.3.x tags published before the GitHub-Release-upload step landed won't have assets;
     use -FromCrates for those, or -FromSource against a checkout.
 Original error: $($_.Exception.Message)
