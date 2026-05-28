@@ -4,17 +4,31 @@
 # in a separate workflow file or they'd be clobbered on every kata
 # apply. The release.yml comment block documents this contract.
 #
-# Today's contract: when a `v*.*.*` tag pushes AND the operator has
-# configured `KANADE_BACKEND_URL` (+ optional `KANADE_BACKEND_TOKEN`)
-# as repo secrets, this workflow builds kanade-client.exe and POSTs
-# it to that backend's `/api/app-packages/kanade-client/<version>`
-# (#207). That closes the loop opened by #217 — `install-kanade-client.yaml`
-# can then deploy the freshly-tagged client without an operator
-# curl step in between.
+# Two jobs run on every `v*.*.*` tag push:
 #
-# When the secrets are unset, the job short-circuits with a notice
-# annotation explaining what to set to enable the publish — open
-# forks aren't accidentally trying to POST somewhere they shouldn't.
+# 1. `publish-client-to-backend` — when `KANADE_BACKEND_URL` (+ optional
+#    `KANADE_BACKEND_TOKEN`) are configured as repo secrets, builds
+#    kanade-client.exe and POSTs it to that backend's
+#    `/api/app-packages/kanade-client/<version>` (#207). Closes the loop
+#    opened by #217 — `install-kanade-client.yaml` can then deploy the
+#    freshly-tagged client without an operator curl step in between.
+#    When the secrets are unset the job short-circuits with a notice
+#    annotation explaining what to set, so open forks aren't accidentally
+#    trying to POST somewhere they shouldn't.
+#
+# 2. `upload-windows-bins` — rebuilds kanade-agent.exe, kanade-backend.exe
+#    and kanade.exe for `x86_64-pc-windows-msvc` and `gh release upload`s
+#    them to the release release.yml just created. release.yml's Windows
+#    matrix entry runs `cargo build --release --workspace --bins` and
+#    reports success, but only one of the four workspace bins actually
+#    lands in `target/x86_64-pc-windows-msvc/release/` (currently
+#    kanade-client.exe; in v0.41.x it was kanade-backend.exe), so the
+#    GitHub Release ships with three Windows bins missing. Until the
+#    root cause is chased down in `pj-rust-workspace`, building the
+#    missing three per-package on a fresh windows-latest runner produces
+#    them reliably (same shape `publish-client-to-backend` has used since
+#    #221). `build-release.ps1`'s default GitHub-Releases path depends on
+#    these assets being present.
 
 name: Release extras
 
@@ -102,3 +116,76 @@ jobs:
           fi
           curl "${curl_args[@]}" "${url}"
           echo "Publish succeeded — operator can now `kanade exec install-kanade-client` without a manual curl step."
+
+  upload-windows-bins:
+    name: Upload Windows agent + backend + CLI to release
+    runs-on: windows-latest
+    # `gh release view "$tag"` further down assumes the ref is a tag;
+    # if someone runs `workflow_dispatch` against `main` (or any branch)
+    # the poll loop would just time out. Cheaper to skip the job
+    # outright. Both `push: tags` and `workflow_dispatch --ref vX.Y.Z`
+    # set `github.ref` to `refs/tags/vX.Y.Z`, so this guard only blocks
+    # dispatch-against-a-branch.
+    if: startsWith(github.ref, 'refs/tags/')
+    # Default top-level perms are `contents: read`; the release upload
+    # call below needs `contents: write` on this job only.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+
+      # Per-package + sequential. `cargo build --workspace --bins` is
+      # exactly what release.yml runs and it silently drops three of
+      # four bins on windows-latest; building one package at a time
+      # mirrors what `publish-client-to-backend` already does for
+      # kanade-client and has been reliable since #221.
+      - name: Build missing Windows bins
+        run: |
+          cargo build -p kanade-agent   --release --target x86_64-pc-windows-msvc
+          cargo build -p kanade-backend --release --target x86_64-pc-windows-msvc
+          cargo build -p kanade         --release --target x86_64-pc-windows-msvc
+
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          target=x86_64-pc-windows-msvc
+
+          # release.yml runs in parallel with us; the release isn't
+          # created until its `build` matrix (~13 min on Windows) plus
+          # the `release` job complete. Our cargo build above also
+          # takes ~13 min, so the release is usually already there by
+          # the time we reach this step — but poll for up to 10 min
+          # to cover slow runs. Bail loudly if the release never
+          # appears (release.yml's `build` matrix probably failed).
+          for i in $(seq 1 20); do
+            if gh release view "$tag" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+              echo "Release $tag is available."
+              break
+            fi
+            echo "Release $tag not yet published (attempt $i/20), sleeping 30s..."
+            sleep 30
+          done
+          if ! gh release view "$tag" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "::error::Release $tag was never created — release.yml probably failed; aborting upload."
+            exit 1
+          fi
+
+          for bin in kanade-agent kanade-backend kanade; do
+            src="target/${target}/release/${bin}.exe"
+            dst="${bin}-${target}.exe"
+            if [[ ! -f "$src" ]]; then
+              echo "::error::expected $src missing — per-package cargo build did not produce the artifact"
+              exit 1
+            fi
+            cp "$src" "$dst"
+            echo "Uploading $dst to release $tag"
+            gh release upload "$tag" "$dst" --clobber --repo "${GITHUB_REPOSITORY}"
+          done
