@@ -80,19 +80,6 @@ export function Events() {
   const [since, setSince] = useState(search.get('since') ?? '24h');
   const [limit, setLimit] = useState(Number(search.get('limit')) || 200);
 
-  // Mirror filters into the URL so a timeline drill-down link is
-  // shareable / reload-safe (same shape as Logs).
-  useEffect(() => {
-    const next = new URLSearchParams();
-    if (pcId)   next.set('pc', pcId);
-    if (kind)   next.set('kind', kind);
-    if (source) next.set('source', source);
-    if (since && since !== '24h') next.set('since', since);
-    if (limit && limit !== 200)   next.set('limit', String(limit));
-    setSearch(next, { replace: true });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pcId, kind, source, since, limit]);
-
   const sinceIso = useMemo(() => {
     const preset = SINCE_PRESETS.find((p) => p.value === since);
     if (!preset?.ms) return null;
@@ -101,6 +88,23 @@ export function Events() {
 
   const dPcId   = useDebouncedValue(pcId,   FILTER_DEBOUNCE_MS);
   const dSource = useDebouncedValue(source, FILTER_DEBOUNCE_MS);
+
+  // Mirror filters into the URL so a timeline drill-down link is
+  // shareable / reload-safe (same shape as Logs). Uses the debounced
+  // values for the typed-text inputs so a keystroke doesn't write a
+  // partial URL on every change (Gemini #252 HIGH). `replace: true`
+  // keeps these writes out of the back/forward stack, so polluting
+  // history is a non-issue — no separate URL→state sync needed.
+  useEffect(() => {
+    const next = new URLSearchParams();
+    if (dPcId)   next.set('pc', dPcId);
+    if (kind)    next.set('kind', kind);
+    if (dSource) next.set('source', dSource);
+    if (since && since !== '24h') next.set('since', since);
+    if (limit && limit !== 200)   next.set('limit', String(limit));
+    setSearch(next, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dPcId, kind, dSource, since, limit]);
 
   const queryString = useMemo(() => {
     const sp = new URLSearchParams();
