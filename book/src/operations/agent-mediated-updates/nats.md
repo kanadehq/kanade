@@ -34,7 +34,7 @@ host yet — use the direct workflow:
 ```pwsh
 .\scripts\build-release.ps1 -Roles nats       # fetches nats-server.exe
                                               # from github.com/nats-io/nats-server/releases
-.\scripts\deploy-nats.ps1 -NatsToken '<token>'
+.\scripts\deploy\nats.ps1 -NatsToken '<token>'
 ```
 
 This installs `nats-server.exe` to `%ProgramFiles%\Kanade\` and
@@ -46,7 +46,7 @@ service.
 
 ## Agent-mediated update (steady state)
 
-> **Status:** template-only. `scripts/deploy-nats.ps1` doesn't
+> **Status:** template-only. `scripts/deploy/nats.ps1` doesn't
 > ship `$AgentSource*` knobs yet — agent-mode is on the backlog.
 > The shape below is what it WILL look like once the knobs land.
 
@@ -70,7 +70,7 @@ kanade app publish nats-server 2.10.20 .\nats-server.exe
 ### 3. Edit deploy-nats.ps1
 
 Once the agent-mode knobs ship, the pattern matches
-[deploy-backend.ps1](./backend.md#3-edit-scriptsdeploy-backendps1):
+[deploy/backend.ps1](./backend.md#3-edit-scriptsdeploybackendps1):
 
 ```powershell
 $AgentSourceUrl       = 'http://kanade-backend.example.com:8080'

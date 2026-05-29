@@ -5,8 +5,8 @@ Day-2 operations in kanade fall into two flows:
 1. **Direct install** — drop binaries + config on a fresh host and
    register the Windows service. Used to bootstrap the first agent,
    the initial backend, and the NATS server. Scripts:
-   `scripts/deploy-agent.ps1`, `scripts/deploy-backend.ps1`,
-   `scripts/deploy-nats.ps1`. Run **manually** on the target host.
+   `scripts/deploy/agent.ps1`, `scripts/deploy/backend.ps1`,
+   `scripts/deploy/nats.ps1`. Run **manually** on the target host.
 
 2. **Agent-mediated update** — once an agent is running, the agent
    itself can install / update other components on its own host

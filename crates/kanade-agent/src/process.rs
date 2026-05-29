@@ -170,7 +170,7 @@ impl Drop for TempPowerShellScript {
 /// the script's physical file — prepending an encoding prelude to
 /// the same file (the simpler approach) silently breaks any
 /// operator-shipped `.ps1` that opens with those headers (e.g.
-/// `scripts/deploy-backend.ps1`, surfaced by the
+/// `scripts/deploy/backend.ps1`, surfaced by the
 /// install-kanade-backend live test on 2026-05-26).
 ///
 /// Solution: the launcher sets `[Console]::OutputEncoding` etc.

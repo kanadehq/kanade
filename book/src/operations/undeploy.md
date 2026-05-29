@@ -8,10 +8,10 @@ deploy script that put it there.
 
 | Component | Deploy | Undeploy |
 |-----------|--------|----------|
-| Agent | `scripts/deploy-agent.ps1` | `scripts/undeploy-agent.ps1` |
-| Backend | `scripts/deploy-backend.ps1` | `scripts/undeploy-backend.ps1` |
-| NATS server | `scripts/deploy-nats.ps1` | `scripts/undeploy-nats.ps1` |
-| Client (Tauri) | `jobs/scripts/install-kanade-client.ps1` (agent-driven) | `scripts/undeploy-client.ps1` |
+| Agent | `scripts/deploy/agent.ps1` | `scripts/undeploy/agent.ps1` |
+| Backend | `scripts/deploy/backend.ps1` | `scripts/undeploy/backend.ps1` |
+| NATS server | `scripts/deploy/nats.ps1` | `scripts/undeploy/nats.ps1` |
+| Client (Tauri) | `configs/jobs/installers/scripts/install-kanade-client.ps1` (agent-driven) | `scripts/undeploy/client.ps1` |
 
 All four are admin-only and idempotent — safe to re-run after a
 partial uninstall, safe to run when the component is already
@@ -72,32 +72,32 @@ Adds:
 
 ```pwsh
 # On the canary, as Admin:
-.\scripts\undeploy-agent.ps1            # safe default
+.\scripts\undeploy\agent.ps1            # safe default
 # kanade is now off the host. Re-deploy when ready:
-.\scripts\deploy-agent.ps1 -SourceDir C:\path\to\prev-version
+.\scripts\deploy\agent.ps1 -SourceDir C:\path\to\prev-version
 ```
 
 ### Decommission a host permanently
 
 ```pwsh
-.\scripts\undeploy-agent.ps1 -Purge
+.\scripts\undeploy\agent.ps1 -Purge
 ```
 
 ### Wipe a dev box for a clean re-install
 
 ```pwsh
-.\scripts\undeploy-agent.ps1 -Purge
-.\scripts\undeploy-backend.ps1 -Purge   # ⚠️ SQLite gone
-.\scripts\undeploy-nats.ps1 -Purge      # ⚠️ JetStream gone
-.\scripts\undeploy-client.ps1
+.\scripts\undeploy\agent.ps1 -Purge
+.\scripts\undeploy\backend.ps1 -Purge   # ⚠️ SQLite gone
+.\scripts\undeploy\nats.ps1 -Purge      # ⚠️ JetStream gone
+.\scripts\undeploy\client.ps1
 # Now nothing about kanade exists on the box.
 ```
 
 ### Rebuild a single bad service without touching state
 
 ```pwsh
-.\scripts\undeploy-backend.ps1          # safe default: SQLite intact
-.\scripts\deploy-backend.ps1 -Recreate  # fresh service registration, same data
+.\scripts\undeploy\backend.ps1          # safe default: SQLite intact
+.\scripts\deploy\backend.ps1 -Recreate  # fresh service registration, same data
 ```
 
 ## What undeploy does NOT do

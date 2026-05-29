@@ -479,8 +479,8 @@ msgstr ""
 msgid ""
 "**Direct install** — drop binaries + config on a fresh host and register the "
 "Windows service. Used to bootstrap the first agent, the initial backend, and "
-"the NATS server. Scripts: `scripts/deploy-agent.ps1`, "
-"`scripts/deploy-backend.ps1`, `scripts/deploy-nats.ps1`. Run **manually** on "
+"the NATS server. Scripts: `scripts/deploy/agent.ps1`, "
+"`scripts/deploy/backend.ps1`, `scripts/deploy/nats.ps1`. Run **manually** on "
 "the target host."
 msgstr ""
 
@@ -954,7 +954,7 @@ msgid ""
 msgstr ""
 
 #: src\operations/agent-mediated-updates/backend.md:67
-msgid "3. Edit `scripts/deploy-backend.ps1`"
+msgid "3. Edit `scripts/deploy/backend.ps1`"
 msgstr ""
 
 #: src\operations/agent-mediated-updates/backend.md:69
@@ -1018,9 +1018,9 @@ msgstr ""
 
 #: src\operations/agent-mediated-updates/backend.md:115
 msgid ""
-"`jobs/install-kanade-backend.yaml` in the repo is the template. Edit "
-"`version:` + `script_object:` to point at the version you just published, "
-"then upsert:"
+"`configs/jobs/installers/install-kanade-backend.yaml` in the repo is the "
+"template. Edit `version:` + `script_object:` to point at the version you "
+"just published, then upsert:"
 msgstr ""
 
 #: src\operations/agent-mediated-updates/backend.md:120
@@ -1263,13 +1263,13 @@ msgstr ""
 
 #: src\operations/agent-mediated-updates/client.md:15
 #: src\operations/undeploy.md:12
-msgid "`scripts/deploy-backend.ps1`"
+msgid "`scripts/deploy/backend.ps1`"
 msgstr ""
 
 #: src\operations/agent-mediated-updates/client.md:15
 msgid ""
-"`jobs/scripts/install-kanade-client.ps1` (lives in the manifest's "
-"script_file path)"
+"`configs/jobs/installers/scripts/install-kanade-client.ps1` (lives in the "
+"manifest's script_file path)"
 msgstr ""
 
 #: src\operations/agent-mediated-updates/client.md:16
@@ -1282,8 +1282,8 @@ msgstr ""
 
 #: src\operations/agent-mediated-updates/client.md:16
 msgid ""
-"`script_file: jobs/scripts/install-kanade-client.ps1` (inlined at `kanade "
-"job create`)"
+"`script_file: scripts/install-kanade-client.ps1` (relative to the manifest "
+"YAML; inlined at `kanade job create`)"
 msgstr ""
 
 #: src\operations/agent-mediated-updates/client.md:17
@@ -1329,7 +1329,7 @@ msgid "Output: `target/release/kanade-client.exe`."
 msgstr ""
 
 #: src\operations/agent-mediated-updates/client.md:44
-msgid "3. Edit `jobs/scripts/install-kanade-client.ps1`"
+msgid "3. Edit `configs/jobs/installers/scripts/install-kanade-client.ps1`"
 msgstr ""
 
 #: src\operations/agent-mediated-updates/client.md:46
@@ -1352,7 +1352,7 @@ msgid ""
 "of auth on the `/api/app-packages/kanade-client/<v>` route. If your backend "
 "gates that endpoint, add an `Authorization` header to the "
 "`Invoke-WebRequest` call the same way the backend script does (see [Updating "
-"kanade-backend](./backend.md#3-edit-scriptsdeploy-backendps1)). A "
+"kanade-backend](./backend.md#3-edit-scriptsdeploybackendps1)). A "
 "first-class `$ClientSourceAuthToken` knob is on the backlog."
 msgstr ""
 
@@ -1361,7 +1361,7 @@ msgid "4. Register / update the job"
 msgstr ""
 
 #: src\operations/agent-mediated-updates/client.md:66
-msgid "`jobs/install-kanade-client.yaml`:"
+msgid "`configs/jobs/installers/install-kanade-client.yaml`:"
 msgstr ""
 
 #: src\operations/agent-mediated-updates/client.md:69
@@ -1374,7 +1374,8 @@ msgstr ""
 
 #: src\operations/agent-mediated-updates/client.md:73
 msgid ""
-"jobs/scripts/install-kanade-client.ps1   # body inlined at `job create`\n"
+"scripts/install-kanade-client.ps1   # body inlined at `job create` (relative "
+"to the manifest YAML)\n"
 "  timeout"
 msgstr ""
 
@@ -1552,7 +1553,7 @@ msgstr ""
 
 #: src\operations/agent-mediated-updates/nats.md:49
 msgid ""
-"**Status:** template-only. `scripts/deploy-nats.ps1` doesn't ship "
+"**Status:** template-only. `scripts/deploy/nats.ps1` doesn't ship "
 "`$AgentSource*` knobs yet — agent-mode is on the backlog. The shape below is "
 "what it WILL look like once the knobs land."
 msgstr ""
@@ -1578,7 +1579,7 @@ msgstr ""
 #: src\operations/agent-mediated-updates/nats.md:72
 msgid ""
 "Once the agent-mode knobs ship, the pattern matches "
-"[deploy-backend.ps1](./backend.md#3-edit-scriptsdeploy-backendps1):"
+"[deploy/backend.ps1](./backend.md#3-edit-scriptsdeploybackendps1):"
 msgstr ""
 
 #: src\operations/agent-mediated-updates/nats.md:75
@@ -1842,11 +1843,11 @@ msgid "Agent"
 msgstr ""
 
 #: src\operations/undeploy.md:11
-msgid "`scripts/deploy-agent.ps1`"
+msgid "`scripts/deploy/agent.ps1`"
 msgstr ""
 
 #: src\operations/undeploy.md:11
-msgid "`scripts/undeploy-agent.ps1`"
+msgid "`scripts/undeploy/agent.ps1`"
 msgstr ""
 
 #: src\operations/undeploy.md:12 src\operations/undeploy.md:57
@@ -1854,7 +1855,7 @@ msgid "Backend"
 msgstr ""
 
 #: src\operations/undeploy.md:12
-msgid "`scripts/undeploy-backend.ps1`"
+msgid "`scripts/undeploy/backend.ps1`"
 msgstr ""
 
 #: src\operations/undeploy.md:13
@@ -1862,11 +1863,11 @@ msgid "NATS server"
 msgstr ""
 
 #: src\operations/undeploy.md:13
-msgid "`scripts/deploy-nats.ps1`"
+msgid "`scripts/deploy/nats.ps1`"
 msgstr ""
 
 #: src\operations/undeploy.md:13
-msgid "`scripts/undeploy-nats.ps1`"
+msgid "`scripts/undeploy/nats.ps1`"
 msgstr ""
 
 #: src\operations/undeploy.md:14
@@ -1874,11 +1875,11 @@ msgid "Client (Tauri)"
 msgstr ""
 
 #: src\operations/undeploy.md:14
-msgid "`jobs/scripts/install-kanade-client.ps1` (agent-driven)"
+msgid "`configs/jobs/installers/scripts/install-kanade-client.ps1` (agent-driven)"
 msgstr ""
 
 #: src\operations/undeploy.md:14
-msgid "`scripts/undeploy-client.ps1`"
+msgid "`scripts/undeploy/client.ps1`"
 msgstr ""
 
 #: src\operations/undeploy.md:16

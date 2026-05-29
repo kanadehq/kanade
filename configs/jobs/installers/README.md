@@ -1,12 +1,20 @@
-# `jobs/` — operator manifest catalog
+# `configs/jobs/installers/` — kanade-component install manifests
 
-This directory holds the `kanade Job` manifests operators register
-into the backend via `kanade job create <yaml>` (SPEC §2.4.1).
+This directory holds the `kanade Job` manifests that install /
+update the kanade components themselves (backend, client). They
+sit under `configs/jobs/` alongside the example operational
+manifests but in a dedicated `installers/` subdir so the two
+intents read separately at a glance: the sibling `inventory-*`,
+`collect-winlog-events`, `kitting-setup`, `urgent-patch` are
+**examples**; the manifests here are **first-class infrastructure**
+that the project itself depends on for upgrades.
+
+Operators register them via `kanade job create <yaml>` (SPEC §2.4.1).
 
 ## Layout
 
 ```
-jobs/
+configs/jobs/installers/
 ├── README.md                       — this file
 ├── install-kanade-client.yaml      — client-app install/upgrade (#210, script_file)
 ├── install-kanade-backend.yaml     — backend self-update (#210, script_object)
@@ -15,7 +23,7 @@ jobs/
 ```
 
 The backend self-update doesn't ship a co-located `.ps1` here —
-its install script is the existing `scripts/deploy-backend.ps1`
+its install script is the existing `scripts/deploy/backend.ps1`
 at the repo root (used for manual installs too). The manifest
 references it via `script_object:` after the operator publishes
 an edited copy to `OBJECT_SCRIPTS` (see the section below).
@@ -62,7 +70,7 @@ deployed client:
 3. **Register + deploy.**
 
    ```bash
-   kanade job create jobs/install-kanade-client.yaml
+   kanade job create configs/jobs/installers/install-kanade-client.yaml
    kanade exec install-kanade-client --target groups=canary
    ```
 
@@ -91,7 +99,7 @@ Five steps per backend release:
    ```
 
 2. **Stamp the install script with this release's coordinates.**
-   Copy `scripts/deploy-backend.ps1` locally and set the three
+   Copy `scripts/deploy/backend.ps1` locally and set the three
    `$Agent*` knobs near the top of the file:
 
    ```powershell
@@ -100,7 +108,7 @@ Five steps per backend release:
    $AgentSourceSha256  = (Get-FileHash target\release\kanade-backend.exe -Algorithm SHA256).Hash
    ```
 
-   Leave them blank in the canonical `scripts/deploy-backend.ps1`
+   Leave them blank in the canonical `scripts/deploy/backend.ps1`
    (the manual `-SourceDir` install flow depends on the
    blank-default branch). The edits only live in the per-release
    copy you publish in step 3.
@@ -119,7 +127,7 @@ Five steps per backend release:
    match, then register.**
 
    ```bash
-   kanade job create jobs/install-kanade-backend.yaml
+   kanade job create configs/jobs/installers/install-kanade-backend.yaml
    ```
 
 5. **Exec against the backend host.**
@@ -142,7 +150,7 @@ Five steps per backend release:
 ### Bootstrap note
 
 Agent-mode is strictly an **upgrade** path. The first install of
-the backend has to happen manually (`scripts/deploy-backend.ps1`
+the backend has to happen manually (`scripts/deploy/backend.ps1`
 with `-SourceDir <folder containing exe + toml>`) — agent-mode
 errors out hard when no existing `backend.toml` is present at the
 canonical destination, because guessing a fresh config from the
@@ -161,7 +169,7 @@ pick is per-script:
   POSTing. Agent fetches the manifest once and has the script.
 
 - **`script_object:` (install-kanade-backend)** — the install
-  logic is `scripts/deploy-backend.ps1` which the operator also
+  logic is `scripts/deploy/backend.ps1` which the operator also
   runs manually for fresh installs. Keeping it under explicit
   version control in `OBJECT_SCRIPTS` (separate lifecycle from
   the manifest) means we publish per-release copies with the
