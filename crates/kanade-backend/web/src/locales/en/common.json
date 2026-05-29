@@ -11,6 +11,7 @@
     "inventory": "Inventory",
     "search": "Search",
     "activity": "Activity",
+    "events": "Events",
     "audit": "Audit",
     "logs": "Logs",
     "jobs": "Jobs",

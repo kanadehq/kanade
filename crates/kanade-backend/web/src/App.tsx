@@ -11,6 +11,7 @@ import { Apps } from '@/pages/Apps';
 import { Audit } from '@/pages/Audit';
 import { Config } from '@/pages/Config';
 import { Dashboard } from '@/pages/Dashboard';
+import { Events } from '@/pages/Events';
 import { Exec } from '@/pages/Exec';
 import { Inventory } from '@/pages/Inventory';
 import { JetStream } from '@/pages/JetStream';
@@ -70,6 +71,7 @@ export default function App() {
               <Route path="/run" element={<Run />} />
               <Route path="/activity" element={<Activity />} />
               <Route path="/activity/:resultId" element={<ResultDetail />} />
+              <Route path="/events" element={<Events />} />
               {/* Back-compat: any pre-rename /results bookmark redirects
                   to /activity. Detail-route param is dropped — operator
                   scrolls/filters to the row on the unified Activity

@@ -36,6 +36,7 @@ const groups: {
       { to: '/inventory', labelKey: 'nav.inventory' },
       { to: '/inventory/search', labelKey: 'nav.search' },
       { to: '/activity', labelKey: 'nav.activity' },
+      { to: '/events', labelKey: 'nav.events' },
       { to: '/audit', labelKey: 'nav.audit' },
       { to: '/logs', labelKey: 'nav.logs' },
     ],
