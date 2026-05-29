@@ -334,7 +334,7 @@ pub async fn handle_command(
             cmd.emit.as_ref().map(|e| e.kind),
             Some(kanade_shared::manifest::EmitKind::Events),
         ) {
-        forward_obs_events(&stdout, &pc_id);
+        forward_obs_events(stdout, pc_id.clone()).await;
         // Don't ship the NDJSON itself in stdout; the events are
         // now in obs-outbox and the Activity row's stdout would
         // just duplicate them.
@@ -394,45 +394,69 @@ pub async fn handle_command(
 /// the others. Empty lines (the natural NDJSON trailing newline +
 /// any blank lines a script accidentally emits) are skipped
 /// silently.
-fn forward_obs_events(stdout: &str, pc_id: &str) {
+///
+/// Gemini #249 high: the parse + per-line `enqueue` (tmp write +
+/// rename) is synchronous file I/O on the Tokio runtime thread.
+/// For a 50-event poll that's ~50 ms of blocked executor time per
+/// agent — measurable on a busy host. Wrap the whole batch in
+/// `spawn_blocking` so the executor stays free; the moved values
+/// (`stdout`, `pc_id`) are owned strings the closure can carry.
+async fn forward_obs_events(stdout: String, pc_id: String) {
     use kanade_shared::wire::ObsEvent;
     let obs_outbox_dir = default_paths::data_dir().join("obs-outbox");
-    let mut ok = 0usize;
-    let mut bad = 0usize;
-    for (i, raw) in stdout.lines().enumerate() {
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let mut event: ObsEvent = match serde_json::from_str(trimmed) {
-            Ok(e) => e,
-            Err(e) => {
+    // Hoist the `create_dir_all` out of the per-event hot path
+    // (Gemini #249 medium). One syscall per batch instead of per
+    // event.
+    if let Err(e) = crate::obs_outbox::ensure_outbox_dir(&obs_outbox_dir) {
+        warn!(error = %e, "obs: ensure_outbox_dir failed; aborting forward");
+        return;
+    }
+    let pc_id_log = pc_id.clone();
+    let (ok, bad) = tokio::task::spawn_blocking(move || {
+        let mut ok = 0usize;
+        let mut bad = 0usize;
+        for (i, raw) in stdout.lines().enumerate() {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let mut event: ObsEvent = match serde_json::from_str(trimmed) {
+                Ok(e) => e,
+                Err(e) => {
+                    warn!(
+                        line_no = i + 1,
+                        error = %e,
+                        "obs: stdout line is not a valid ObsEvent JSON; skipping",
+                    );
+                    bad += 1;
+                    continue;
+                }
+            };
+            // Scripts that emit a hard-coded `pc_id` (the docs
+            // example does this) would race with PC renames.
+            // Override with the agent's authoritative value —
+            // `obs.<pc_id>` subject and the backend UNIQUE-key
+            // column both need to match.
+            event.pc_id = pc_id.clone();
+            if let Err(e) = crate::obs_outbox::enqueue(&obs_outbox_dir, &event) {
                 warn!(
                     line_no = i + 1,
                     error = %e,
-                    "obs: stdout line is not a valid ObsEvent JSON; skipping",
+                    "obs: enqueue to outbox failed; line dropped",
                 );
                 bad += 1;
-                continue;
+            } else {
+                ok += 1;
             }
-        };
-        // Scripts that emit a hard-coded `pc_id` (the docs example
-        // does this) would race with PC renames. Override with the
-        // agent's authoritative value — `obs.<pc_id>` subject and
-        // the backend UNIQUE-key column both need to match.
-        event.pc_id = pc_id.to_string();
-        if let Err(e) = crate::obs_outbox::enqueue(&obs_outbox_dir, &event) {
-            warn!(
-                line_no = i + 1,
-                error = %e,
-                "obs: enqueue to outbox failed; line dropped",
-            );
-            bad += 1;
-        } else {
-            ok += 1;
         }
-    }
-    info!(ok, bad, pc_id, "obs: forwarded NDJSON stdout to obs-outbox",);
+        (ok, bad)
+    })
+    .await
+    .unwrap_or_else(|e| {
+        warn!(error = %e, "obs: forwarder task panicked / cancelled");
+        (0, 0)
+    });
+    info!(ok, bad, pc_id = %pc_id_log, "obs: forwarded NDJSON stdout to obs-outbox");
 }
 
 /// Pure deadline check — boundary policy: `now > deadline` skips,

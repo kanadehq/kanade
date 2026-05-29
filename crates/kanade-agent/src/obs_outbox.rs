@@ -43,14 +43,27 @@ const DRAIN_INTERVAL: Duration = Duration::from_secs(1);
 /// rationale (#139).
 const ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Idempotently make sure the outbox directory exists. Cheap on
+/// the steady state (one stat call) but on a long-tail-busy agent
+/// the per-enqueue `create_dir_all` adds up — Gemini #249 medium.
+/// Hoist this to the caller (e.g. `forward_obs_events` calls once
+/// before the loop, drain task calls once per tick) so the
+/// per-event `enqueue` skips the syscall entirely on the hot path.
+pub fn ensure_outbox_dir(obs_outbox_dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(obs_outbox_dir)
+        .with_context(|| format!("create obs outbox dir {obs_outbox_dir:?}"))
+}
+
 /// Atomically persist one `ObsEvent` to `obs_outbox_dir`. Filename
 /// is `<uuid>.json` — the UUID exists only for filesystem
 /// uniqueness; the event's own dedup key is the
 /// `(pc_id, source, event_record_id)` triplet that the backend's
 /// UNIQUE constraint enforces.
+///
+/// PRE-CONDITION: `obs_outbox_dir` exists. Call
+/// [`ensure_outbox_dir`] once before a batch of enqueues to make
+/// this side-effect-free.
 pub fn enqueue(obs_outbox_dir: &Path, event: &ObsEvent) -> Result<PathBuf> {
-    std::fs::create_dir_all(obs_outbox_dir)
-        .with_context(|| format!("create obs outbox dir {obs_outbox_dir:?}"))?;
     let file_id = Uuid::new_v4().simple().to_string();
     let final_path = obs_outbox_dir.join(format!("{file_id}.json"));
     let tmp_path = obs_outbox_dir.join(format!("{file_id}.json.tmp"));
@@ -136,8 +149,13 @@ async fn publish_one(js: &async_nats::jetstream::Context, path: &Path) -> Result
         }
     };
     let subj = subject::obs(&event.pc_id);
+    // Gemini #249 medium: pass `bytes` by move (`bytes.into()`)
+    // instead of `bytes.clone().into()`. `bytes` is unused after
+    // this call, so the clone was an unnecessary heap allocation
+    // per published event — significant at the ~50/day/PC × N PCs
+    // scale.
     let ack_future = js
-        .publish(subj.clone(), bytes.clone().into())
+        .publish(subj.clone(), bytes.into())
         .await
         .with_context(|| format!("publish {subj}"))?;
     let _ack = tokio::time::timeout(ACK_TIMEOUT, ack_future)
