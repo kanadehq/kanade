@@ -897,6 +897,10 @@ async fn local_tick(
         // `handle_command` evaluates it against the agent's current
         // broker-connectivity reading at fire time.
         staleness: manifest.staleness.clone(),
+        // Issue #246: forward the manifest's observability emit hint
+        // so the agent routes stdout NDJSON to obs-outbox on fire.
+        // Same forward rationale as `staleness` — no manifest re-fetch.
+        emit: manifest.emit.clone(),
     };
 
     let js = async_nats::jetstream::new(client.clone());

@@ -30,6 +30,21 @@ pub struct Manifest {
     /// `display` sub-config drives the SPA's Inventory page render.
     #[serde(default)]
     pub inventory: Option<InventoryHint>,
+    /// Issue #246: opt-in marker that this job emits per-line
+    /// observability events on stdout (one JSON `ObsEvent` per
+    /// newline). When present, the agent — after the script exits
+    /// successfully — parses each non-empty stdout line as an
+    /// `ObsEvent`, publishes it on `obs.<pc_id>` via the
+    /// `obs_outbox`, and (intentionally) **omits the stdout from
+    /// the `ExecResult`** so the timeline data doesn't double up
+    /// in `execution_results.stdout` (which would multiply rows
+    /// by ~50/day/PC of noise).
+    ///
+    /// Distinct from `inventory:` (single JSON object → projector
+    /// upsert) — events are append-only timeline points consumed
+    /// by the dedicated `obs_events` table.
+    #[serde(default)]
+    pub emit: Option<EmitConfig>,
     /// v0.26: Layer 2 staleness policy (SPEC.md §2.6.2). Controls
     /// what the agent does at fire time when it can't verify the
     /// `script_current` / `script_status` KV values are fresh —
@@ -120,6 +135,42 @@ pub struct InventoryHint {
     /// the `before_json` of the most recent change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history_scalars: Option<Vec<String>>,
+}
+
+/// Issue #246 — `emit:` manifest block for jobs whose stdout is
+/// NDJSON observability events (one `ObsEvent` per line). Parallel
+/// to `inventory:` but for the append-only timeline pipeline; see
+/// `Manifest::emit` for the full contract.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct EmitConfig {
+    /// What kind of payload the agent should expect on stdout. Only
+    /// `events` is defined today (parses each non-empty line as
+    /// `ObsEvent` and publishes on `obs.<pc_id>`); future variants
+    /// (e.g. metrics streams, structured trace events) plug in here.
+    #[serde(rename = "type")]
+    pub kind: EmitKind,
+    /// Operator hint for where the script keeps its own state — the
+    /// watermark file the PowerShell / sh body reads + writes
+    /// between runs so it only emits NEW events since the last
+    /// poll. The agent doesn't read this; it's documentation that
+    /// the SPA (and `kanade job edit`) can surface to operators
+    /// reviewing the manifest. Optional; the script is allowed to
+    /// keep state anywhere (registry, env, etc.) — the field's
+    /// presence makes the convention discoverable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watermark_path: Option<String>,
+}
+
+/// `emit.type` enum. Lowercase serde so manifests read
+/// `type: events` rather than `Events`.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum EmitKind {
+    /// Per-line `ObsEvent` JSON. Agent parses + publishes on
+    /// `obs.<pc_id>`, drops the stdout from the resulting
+    /// `ExecResult`.
+    Events,
 }
 
 /// v0.31 / #40: declarative "flatten this JSON array into a real

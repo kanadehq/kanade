@@ -60,6 +60,9 @@ pub async fn execute(client: async_nats::Client, args: RunArgs) -> Result<()> {
         // v0.26: no Manifest behind this ad-hoc run, so use the
         // back-compat default (`Cached`).
         staleness: kanade_shared::wire::Staleness::Cached,
+        // Issue #246: no Manifest → no emit hint. Stdout flows
+        // back via ExecResult unchanged.
+        emit: None,
     };
 
     let result_subj = subject::results(&request_id);
