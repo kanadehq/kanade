@@ -1,0 +1,45 @@
+{
+  "title": "Events",
+  "countBadge_one": "{{count}} shown",
+  "countBadge_other": "{{count}} shown",
+  "countBadgeFetching_one": "{{count}} shown…",
+  "countBadgeFetching_other": "{{count}} shown…",
+  "loading": "loading events…",
+  "errorTitle": "Couldn't load events",
+  "empty": {
+    "title": "No events match",
+    "body": "Widen the time window or clear pc / kind / source to see more rows. Agents emit events via the collect-winlog-events manifest; a freshly bootstrapped fleet may still be backfilling."
+  },
+  "filters": {
+    "pcId": "pc",
+    "kind": "kind",
+    "source": "source",
+    "since": "since",
+    "limit": "limit",
+    "placeholders": {
+      "pcId": "exact match — eg. minipc",
+      "source": "exact match — eg. winlog:Security"
+    },
+    "kindOptions": {
+      "any": "(any)"
+    },
+    "sincePresets": {
+      "1h": "last 1h",
+      "24h": "last 24h",
+      "7d": "last 7d",
+      "30d": "last 30d",
+      "all": "all time"
+    }
+  },
+  "columns": {
+    "when": "when",
+    "pcId": "pc",
+    "kind": "kind",
+    "source": "source",
+    "recordId": "record id",
+    "payload": "payload"
+  },
+  "payload": {
+    "show": "show"
+  }
+}
