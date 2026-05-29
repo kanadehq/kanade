@@ -58,10 +58,27 @@ execute:
     $watermarkPath = Join-Path $stateDir 'winlog-events-watermark.txt'
     $watermarks = @{}
     if (Test-Path $watermarkPath) {
-        foreach ($line in Get-Content $watermarkPath -ErrorAction SilentlyContinue) {
-            if ([string]::IsNullOrWhiteSpace($line)) { continue }
-            $parts = $line -split "`t", 2
-            if ($parts.Length -eq 2) { $watermarks[$parts[0]] = [int64]$parts[1] }
+        # Gemini #250 medium: a corrupted watermark line (non-integer
+        # RecordId, malformed key) would throw inside the [int64] cast
+        # under `$ErrorActionPreference = 'Stop'` and pin the script
+        # to failure forever. Wrap each line's parse in try/catch; a
+        # bad row gets warned + dropped, the remaining good rows
+        # still load. If the WHOLE file is unreadable (permissions /
+        # disk error), bootstrap from "last 24h" same as a missing file.
+        try {
+            foreach ($line in Get-Content $watermarkPath -ErrorAction Stop) {
+                if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                $parts = $line -split "`t", 2
+                if ($parts.Length -ne 2) { continue }
+                try {
+                    $watermarks[$parts[0]] = [int64]$parts[1]
+                } catch {
+                    Write-Warning "winlog watermark: dropping malformed line ($($parts[0])): $_"
+                }
+            }
+        } catch {
+            Write-Warning "winlog watermark: file unreadable, bootstrapping fresh: $_"
+            $watermarks = @{}
         }
     }
 
@@ -101,12 +118,23 @@ execute:
     # history can backfill out-of-band.
     $bootstrapStart = (Get-Date).AddHours(-24)
 
+    # Gemini #250 high: subsequent runs (with a watermark in hand)
+    # ALSO need a StartTime, otherwise Get-WinEvent scans the entire
+    # event log from the beginning for the configured IDs — slow on
+    # boxes with months of Security log retention (4624/4634 dominate
+    # log volume). Use the same 24h rolling window: events older than
+    # that won't be re-emitted on this tick, and the watermark+RecordId
+    # filter de-dups within the window. Trade: an agent offline > 24h
+    # misses events older than 24h before its reconnect; acceptable
+    # since the timeline is "what's happening now" rather than a
+    # forensic archive.
     foreach ($s in $sources) {
         $key = "$($s.Log):$($s.Kind)"
         $cutoff = $watermarks[$key]
-        $filter = @{ LogName = $s.Log; Id = $s.Id }
-        if ($null -eq $cutoff -or $cutoff -eq 0) {
-            $filter['StartTime'] = $bootstrapStart
+        $filter = @{
+            LogName   = $s.Log
+            Id        = $s.Id
+            StartTime = $bootstrapStart
         }
         $events = Get-WinEvent -FilterHashtable $filter -ErrorAction SilentlyContinue
         if ($null -eq $events) { continue }
@@ -121,14 +149,17 @@ execute:
             if ($s.Log -eq 'Security' -and $s.Id -eq 4624) {
                 # 4624 schema: TargetUserName (event[5]), LogonType (event[8]).
                 # `Properties` ordering is stable across Win 10+/Server.
-                if ($e.Properties.Count -ge 9) {
+                # Gemini #250 medium: null-check Properties before
+                # `.Count` — exotic event-source corruption can leave
+                # `$e.Properties` null even when the row itself exists.
+                if ($null -ne $e.Properties -and $e.Properties.Count -ge 9) {
                     $payload = @{
                         user       = [string]$e.Properties[5].Value
                         logon_type = [int]$e.Properties[8].Value
                     }
                 }
             } elseif ($s.Log -eq 'Security' -and $s.Id -eq 4634) {
-                if ($e.Properties.Count -ge 5) {
+                if ($null -ne $e.Properties -and $e.Properties.Count -ge 5) {
                     $payload = @{
                         user       = [string]$e.Properties[1].Value
                         logon_type = [int]$e.Properties[4].Value
