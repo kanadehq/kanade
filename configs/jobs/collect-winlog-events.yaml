@@ -1,0 +1,198 @@
+# Issue #246 — Windows Event Log → per-PC observability timeline.
+#
+# Pipes Security log (logon / logoff) and System log (boot /
+# shutdown / sleep / resume / unexpected_shutdown) into the
+# `obs_events` stream via the `emit:` manifest block:
+#
+#   1. PowerShell script reads its watermark file (one TEXT line
+#      per `(source, kind)` row: `<RecordId>\n`). On first run the
+#      file is absent → the script seeds from "last 24h" so a brand-
+#      new agent gets a sensible bootstrap window instead of either
+#      "nothing" or "all history since the box was built".
+#   2. Get-WinEvent walks each (log, ID set) since that watermark.
+#   3. Each event becomes ONE JSON `ObsEvent` on stdout (NDJSON —
+#      one event per line, see `wire::ObsEvent` for the schema).
+#   4. Watermark file is updated AFTER all events emit so a crash
+#      mid-run re-emits — the backend's UNIQUE constraint on
+#      (pc_id, source, event_record_id) collapses re-sends.
+#   5. Agent's `emit.type=events` handler (PR #3 / #249) parses
+#      each line as `ObsEvent` and enqueues to obs-outbox. Stdout
+#      is dropped from the resulting `ExecResult.stdout` so the
+#      timeline data doesn't double-up in execution_results.
+#
+# Schedule (see `configs/schedules/collect-winlog-events.yaml`)
+# fires every 15 min — short enough that a logon shows up on the
+# SPA Activity timeline before the user has finished booting their
+# IDE, long enough that a 1000-PC fleet doesn't hammer the broker.
+#
+# Required by Security log (4624 / 4634): `run_as: system` because
+# `Get-WinEvent -LogName Security` needs SeSecurityPrivilege. The
+# agent already runs as LocalSystem in prod so this is the default
+# anyway; spelt out so a future runas-default change can't silently
+# break event collection.
+
+id: collect-winlog-events
+version: 0.1.0
+description: "Windows Event Log → ObsEvent timeline (logon / logoff / boot / shutdown / sleep / resume)"
+
+execute:
+  shell: powershell
+  # 60 s on the timeout — a busy box with 15 min of accumulated
+  # events should finish in seconds; the headroom protects against
+  # a stuck Get-WinEvent against a corrupted .evtx (rare, but
+  # observed in practice).
+  timeout: 60s
+  run_as: system
+  script: |
+    $ErrorActionPreference = 'Stop'
+
+    # Watermark file: one line per (log, kind) — `<log>:<kind>\t<lastRecordId>`.
+    # Stored under %ProgramData%\Kanade\state\ so the agent's outbox /
+    # logs / config dirs stay structurally separate. First run reads
+    # nothing → bootstrap from "last 24h" per (log, kind) so a fresh
+    # agent doesn't dump every event since the box was built.
+    $stateDir = Join-Path $env:ProgramData 'Kanade\state'
+    if (-not (Test-Path $stateDir)) {
+        New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
+    }
+    $watermarkPath = Join-Path $stateDir 'winlog-events-watermark.txt'
+    $watermarks = @{}
+    if (Test-Path $watermarkPath) {
+        # Gemini #250 medium: a corrupted watermark line (non-integer
+        # RecordId, malformed key) would throw inside the [int64] cast
+        # under `$ErrorActionPreference = 'Stop'` and pin the script
+        # to failure forever. Wrap each line's parse in try/catch; a
+        # bad row gets warned + dropped, the remaining good rows
+        # still load. If the WHOLE file is unreadable (permissions /
+        # disk error), bootstrap from "last 24h" same as a missing file.
+        try {
+            foreach ($line in Get-Content $watermarkPath -ErrorAction Stop) {
+                if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                $parts = $line -split "`t", 2
+                if ($parts.Length -ne 2) { continue }
+                try {
+                    $watermarks[$parts[0]] = [int64]$parts[1]
+                } catch {
+                    Write-Warning "winlog watermark: dropping malformed line ($($parts[0])): $_"
+                }
+            }
+        } catch {
+            Write-Warning "winlog watermark: file unreadable, bootstrapping fresh: $_"
+            $watermarks = @{}
+        }
+    }
+
+    # Source matrix: (log, event_id, kind). Hard-coded list rather
+    # than a config lookup so the agent script is self-contained;
+    # adding a new kind = one row + a redeploy.
+    #
+    # Security 4624 / 4634 — logon / logoff. We don't filter on
+    # LogonType here (interactive vs network vs batch); the SPA can
+    # filter on `payload.logon_type` if an operator only wants
+    # interactive logons. Capturing all of them keeps the data set
+    # rich for fleet investigations.
+    #
+    # System 12 / 13 — kernel-general boot / shutdown.
+    # System 41    — unexpected shutdown (kernel-power, "the system
+    #                rebooted without cleanly shutting down").
+    # System 42 / 107 — kernel-power sleep / resume.
+    # System 6005 / 6006 — Event Log service start / stop, a stable
+    #                fallback signal for boot/shutdown when the
+    #                kernel-general 12/13 are noisy.
+    $sources = @(
+        @{ Log='Security'; Id=4624; Kind='logon' }
+        @{ Log='Security'; Id=4634; Kind='logoff' }
+        @{ Log='System';   Id=12;   Kind='boot' }
+        @{ Log='System';   Id=13;   Kind='shutdown' }
+        @{ Log='System';   Id=41;   Kind='unexpected_shutdown' }
+        @{ Log='System';   Id=42;   Kind='sleep' }
+        @{ Log='System';   Id=107;  Kind='resume' }
+        @{ Log='System';   Id=6005; Kind='log_service_started' }
+        @{ Log='System';   Id=6006; Kind='log_service_stopped' }
+    )
+
+    # Bootstrap window for first run / new (log, kind) entries. 24h
+    # keeps the seeded set bounded; the watermark immediately moves
+    # forward so the next tick only catches NEW events. Older
+    # history isn't ever back-filled — operators wanting deep
+    # history can backfill out-of-band.
+    $bootstrapStart = (Get-Date).AddHours(-24)
+
+    # Gemini #250 high: subsequent runs (with a watermark in hand)
+    # ALSO need a StartTime, otherwise Get-WinEvent scans the entire
+    # event log from the beginning for the configured IDs — slow on
+    # boxes with months of Security log retention (4624/4634 dominate
+    # log volume). Use the same 24h rolling window: events older than
+    # that won't be re-emitted on this tick, and the watermark+RecordId
+    # filter de-dups within the window. Trade: an agent offline > 24h
+    # misses events older than 24h before its reconnect; acceptable
+    # since the timeline is "what's happening now" rather than a
+    # forensic archive.
+    foreach ($s in $sources) {
+        $key = "$($s.Log):$($s.Kind)"
+        $cutoff = $watermarks[$key]
+        $filter = @{
+            LogName   = $s.Log
+            Id        = $s.Id
+            StartTime = $bootstrapStart
+        }
+        $events = Get-WinEvent -FilterHashtable $filter -ErrorAction SilentlyContinue
+        if ($null -eq $events) { continue }
+        # Sort ascending so the projector sees events in source order
+        # (helps SQLite's INSERT-after-UNIQUE-check pattern stay on
+        # the natural index ordering).
+        $events = $events | Sort-Object -Property RecordId
+        $maxSeen = $cutoff
+        foreach ($e in $events) {
+            if ($null -ne $cutoff -and $e.RecordId -le $cutoff) { continue }
+            $payload = $null
+            if ($s.Log -eq 'Security' -and $s.Id -eq 4624) {
+                # 4624 schema: TargetUserName (event[5]), LogonType (event[8]).
+                # `Properties` ordering is stable across Win 10+/Server.
+                # Gemini #250 medium: null-check Properties before
+                # `.Count` — exotic event-source corruption can leave
+                # `$e.Properties` null even when the row itself exists.
+                if ($null -ne $e.Properties -and $e.Properties.Count -ge 9) {
+                    $payload = @{
+                        user       = [string]$e.Properties[5].Value
+                        logon_type = [int]$e.Properties[8].Value
+                    }
+                }
+            } elseif ($s.Log -eq 'Security' -and $s.Id -eq 4634) {
+                if ($null -ne $e.Properties -and $e.Properties.Count -ge 5) {
+                    $payload = @{
+                        user       = [string]$e.Properties[1].Value
+                        logon_type = [int]$e.Properties[4].Value
+                    }
+                }
+            }
+            # `ConvertTo-Json -Depth 5 -Compress` keeps one JSON
+            # value per `Write-Output`; the agent splits stdout on
+            # newlines. `null` payloads serialise as JSON `null`.
+            $obj = [ordered]@{
+                pc_id           = $env:COMPUTERNAME
+                at              = $e.TimeCreated.ToUniversalTime().ToString('o')
+                kind            = $s.Kind
+                source          = "winlog:$($s.Log)"
+                event_record_id = [string]$e.RecordId
+                payload         = $payload
+            }
+            Write-Output ($obj | ConvertTo-Json -Depth 5 -Compress)
+            if ($null -eq $maxSeen -or $e.RecordId -gt $maxSeen) { $maxSeen = $e.RecordId }
+        }
+        if ($null -ne $maxSeen -and $maxSeen -ne $cutoff) { $watermarks[$key] = $maxSeen }
+    }
+
+    # Persist watermark file LAST (after all stdout has been emitted)
+    # so a crash mid-loop re-emits on the next tick. The agent's
+    # backend UNIQUE constraint on (pc_id, source, event_record_id)
+    # makes the re-emit a no-op.
+    $tmp = "$watermarkPath.tmp"
+    $watermarks.GetEnumerator() |
+        ForEach-Object { "{0}`t{1}" -f $_.Key, $_.Value } |
+        Set-Content -Path $tmp -Encoding utf8 -Force
+    Move-Item -Force -Path $tmp -Destination $watermarkPath
+
+emit:
+  type: events
+  watermark_path: state/winlog-events-watermark.txt
