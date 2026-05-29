@@ -13,6 +13,7 @@ pub mod host_perf;
 pub mod inventory;
 pub mod jetstream_status;
 pub mod jobs;
+pub mod obs_events;
 pub mod process_perf;
 pub mod results;
 pub mod run;
@@ -85,6 +86,12 @@ pub fn router(state: AppState) -> Router {
         // (process_perf-active) list.
         .route("/api/perf/fleet", get(fleet_perf::fleet))
         .route("/api/perf/top", get(fleet_perf::top))
+        // Issue #246: per-PC observability timeline. `list` powers
+        // the SPA Events page; `kinds` populates its filter chip;
+        // `recent` is the dashboard "latest activity" feed.
+        .route("/api/obs_events", get(obs_events::list))
+        .route("/api/obs_events/kinds", get(obs_events::kinds))
+        .route("/api/obs_events/recent", get(obs_events::recent))
         .route(
             "/api/perf/active-investigations",
             get(fleet_perf::active_investigations),
