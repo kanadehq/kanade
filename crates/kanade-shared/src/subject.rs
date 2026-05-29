@@ -44,6 +44,22 @@ pub fn process_perf(pc_id: &str) -> String {
     format!("process_perf.{pc_id}")
 }
 
+/// `obs.<pc_id>` — per-PC observability event stream (Issue #246).
+/// The agent publishes one [`crate::wire::ObsEvent`] per timeline
+/// event (sign-in / out, power on / off, sleep / resume, agent
+/// milestones, diagnostic bundle pointers). Distinct from
+/// `events.started.*` (in-flight script lifecycle) and
+/// `host_perf.<pc_id>` (numeric telemetry) — `obs.*` is the
+/// semantic-event stream the SPA Timeline page consumes.
+pub fn obs(pc_id: &str) -> String {
+    format!("obs.{pc_id}")
+}
+
+/// `obs.>` — filter the backend projector subscribes to so a new
+/// PC starts flowing into the timeline without any per-PC SUB
+/// registration. Pairs with [`obs`] for publish.
+pub const OBS_FILTER: &str = "obs.>";
+
 /// `kill.<exec_id>` — Spec §2.6 Layer 3 abort signal. The exec_id is
 /// the deployment / scheduler-fire UUID (formerly named `job_id`
 /// pre-v0.29; renamed for accuracy — every `Command.exec_id` is a
@@ -140,6 +156,17 @@ mod tests {
     fn process_perf_formats_pc_id() {
         assert_eq!(process_perf("minipc"), "process_perf.minipc");
         assert_eq!(process_perf("PC1234"), "process_perf.PC1234");
+    }
+
+    #[test]
+    fn obs_formats_pc_id() {
+        assert_eq!(obs("minipc"), "obs.minipc");
+        assert_eq!(obs("PC1234"), "obs.PC1234");
+    }
+
+    #[test]
+    fn obs_filter_constant() {
+        assert_eq!(OBS_FILTER, "obs.>");
     }
 
     #[test]

@@ -126,6 +126,17 @@ pub const STREAM_EXEC: &str = "EXEC";
 pub const STREAM_EVENTS: &str = "EVENTS";
 pub const STREAM_AUDIT: &str = "AUDIT";
 
+/// JetStream stream backing the per-PC observability event pipeline
+/// (Issue #246). Distinct from [`STREAM_EVENTS`] (in-flight script
+/// lifecycle) — `STREAM_OBS_EVENTS` carries the timeline data the
+/// SPA's Events page consumes: sign-in/out, power on/off, sleep/
+/// resume, agent milestones, diagnostic bundle pointers. The agent
+/// publishes on `obs.<pc_id>` (see [`crate::subject::obs`]) and
+/// this stream catches everything matching [`crate::subject::OBS_FILTER`]
+/// so a backend that boots after the agent doesn't miss any
+/// already-emitted events.
+pub const STREAM_OBS_EVENTS: &str = "OBS_EVENTS";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,6 +180,7 @@ mod tests {
             STREAM_EXEC,
             STREAM_EVENTS,
             STREAM_AUDIT,
+            STREAM_OBS_EVENTS,
         ];
         let mut deduped = names.to_vec();
         deduped.sort_unstable();
