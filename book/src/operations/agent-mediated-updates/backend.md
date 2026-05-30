@@ -64,7 +64,7 @@ This uploads the binary to `OBJECT_APP_PACKAGES/kanade-backend/0.43.0`
 and prints the sha-256 digest. **Copy the digest** — you'll need
 its lowercase-hex form for the script.
 
-### 3. Edit `scripts/deploy-backend.ps1`
+### 3. Edit `scripts/deploy/backend.ps1`
 
 Make a local copy. Set the four `$Agent*` knobs at the top:
 
@@ -112,7 +112,7 @@ Upload goes to `OBJECT_SCRIPTS/deploy-backend/0.43.0`.
 
 ### 5. Register / update the job
 
-`jobs/install-kanade-backend.yaml` in the repo is the template.
+`configs/jobs/installers/install-kanade-backend.yaml` in the repo is the template.
 Edit `version:` + `script_object:` to point at the version you
 just published, then upsert:
 

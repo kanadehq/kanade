@@ -18,7 +18,7 @@
 #           http://<backend>/api/app-packages/kanade-client/0.42.0
 #   3. Edit `BackendBase` + `Version` in
 #      `scripts/install-kanade-client.ps1`.
-#   4. `kanade job create jobs/install-kanade-client.yaml`
+#   4. `kanade job create configs/jobs/installers/install-kanade-client.yaml`
 #   5. `kanade exec install-kanade-client --target ...`
 #
 # `require_approval: true` because client-app rollouts touch the

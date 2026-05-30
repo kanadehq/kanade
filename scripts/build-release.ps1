@@ -192,9 +192,15 @@ foreach ($role in $Roles) {
     Write-Host "=== $role ==="
 
     $cfgSrc    = Join-Path $configsDir $cfgName
-    $deploySrc = Join-Path $repoRoot "scripts\$deployPs"
+    # `deploy-<role>.ps1` was reorganised to `scripts/deploy/<role>.ps1`
+    # — the source filename dropped the verb prefix once we had a
+    # dedicated subdir, but the dist staging keeps the verb-prefixed
+    # name so the artifact end-users extract still reads as
+    # "deploy-agent.ps1" / "deploy-backend.ps1" / "deploy-nats.ps1".
+    $deploySrcName = $deployPs.Replace('deploy-', '')
+    $deploySrc     = Join-Path $repoRoot "scripts\deploy\$deploySrcName"
     if (-not (Test-Path $cfgSrc))    { throw "Missing $cfgName under configs/ ($cfgSrc)." }
-    if (-not (Test-Path $deploySrc)) { throw "Missing $deployPs under scripts\ ($deploySrc)." }
+    if (-not (Test-Path $deploySrc)) { throw "Missing $deploySrcName under scripts\deploy\ ($deploySrc)." }
 
     $exeDst = Join-Path $stage $exeName
 

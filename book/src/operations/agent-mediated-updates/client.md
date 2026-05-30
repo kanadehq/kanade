@@ -12,8 +12,8 @@ package name differ.
 |--------|----------------|---------------|
 | Service to (re)start | `KanadeBackend` (Windows service) | None — the client is launched by the user |
 | Install location | `%ProgramFiles%\Kanade\kanade-backend.exe` | `%ProgramFiles%\Kanade\kanade-client.exe` |
-| Script in repo | `scripts/deploy-backend.ps1` | `jobs/scripts/install-kanade-client.ps1` (lives in the manifest's script_file path) |
-| Manifest file ref | `script_object: deploy-backend/<v>` | `script_file: jobs/scripts/install-kanade-client.ps1` (inlined at `kanade job create`) |
+| Script in repo | `scripts/deploy/backend.ps1` | `configs/jobs/installers/scripts/install-kanade-client.ps1` (lives in the manifest's script_file path) |
+| Manifest file ref | `script_object: deploy-backend/<v>` | `script_file: scripts/install-kanade-client.ps1` (relative to the manifest YAML; inlined at `kanade job create`) |
 | Atomic swap pattern | Stop service → copy → start service | Stage to `<exe>.new` → `Move-Item` → drop `<exe>.old` |
 | Inventory projection | None (the backend reports its own version) | `inventory:` block emits per-PC client version into the SPA Inventory page |
 
@@ -41,7 +41,7 @@ Output: `target/release/kanade-client.exe`.
 kanade app publish kanade-client 0.42.0 target/release/kanade-client.exe
 ```
 
-### 3. Edit `jobs/scripts/install-kanade-client.ps1`
+### 3. Edit `configs/jobs/installers/scripts/install-kanade-client.ps1`
 
 Set the three knobs at the top:
 
@@ -58,19 +58,19 @@ $ExpectedSha256 = '<lowercase hex of kanade-client.exe>'
 > backend gates that endpoint, add an `Authorization` header to
 > the `Invoke-WebRequest` call the same way the backend script
 > does (see
-> [Updating kanade-backend](./backend.md#3-edit-scriptsdeploy-backendps1)).
+> [Updating kanade-backend](./backend.md#3-edit-scriptsdeploybackendps1)).
 > A first-class `$ClientSourceAuthToken` knob is on the backlog.
 
 ### 4. Register / update the job
 
-`jobs/install-kanade-client.yaml`:
+`configs/jobs/installers/install-kanade-client.yaml`:
 
 ```yaml
 id: install-kanade-client
 version: 0.42.0
 execute:
   shell: powershell
-  script_file: jobs/scripts/install-kanade-client.ps1   # body inlined at `job create`
+  script_file: scripts/install-kanade-client.ps1   # body inlined at `job create` (relative to the manifest YAML)
   timeout: 180s
   run_as: system
 

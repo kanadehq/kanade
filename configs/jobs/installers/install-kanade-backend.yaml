@@ -11,13 +11,13 @@
 #
 #   1. `kanade app publish kanade-backend 0.43.0 \
 #        target/release/kanade-backend.exe`
-#   2. Copy `scripts/deploy-backend.ps1` locally, set:
+#   2. Copy `scripts/deploy/backend.ps1` locally, set:
 #        $AgentSourceUrl     = '<backend URL>'
 #        $AgentSourceVersion = '0.43.0'
 #        $AgentSourceSha256  = '<Get-FileHash ... -Algorithm SHA256>'
 #      then `kanade script publish deploy-backend 0.43.0 <edited copy>`
 #   3. Update `version:` below + `script_object:` to match.
-#   4. `kanade job create jobs/install-kanade-backend.yaml`
+#   4. `kanade job create configs/jobs/installers/install-kanade-backend.yaml`
 #   5. `kanade exec install-kanade-backend --target pcs=<backend-host>`
 #
 # `require_approval: true` is the SPEC §2.4.1 marker for "operator
