@@ -327,9 +327,9 @@ export function Jobs() {
               </TableCell>
               <TableCell
                 className="text-xs text-muted max-w-md truncate"
-                title={j.description ?? undefined}
+                title={j.description || undefined}
               >
-                {j.description ?? '—'}
+                {j.description || '—'}
               </TableCell>
               <TableCell className="flex flex-nowrap gap-2">
                 {/* v0.30 follow-up: render each action ONLY when
