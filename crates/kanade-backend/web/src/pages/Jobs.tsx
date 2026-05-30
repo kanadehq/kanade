@@ -325,10 +325,13 @@ export function Jobs() {
                   ? <Badge variant="violet"><ScrollText className="size-3" />{t('inventoryProbe')}</Badge>
                   : <span className="text-muted text-xs">—</span>}
               </TableCell>
-              <TableCell className="text-xs text-muted max-w-md truncate">
-                {j.description ?? '—'}
+              <TableCell
+                className="text-xs text-muted max-w-md truncate"
+                title={j.description || undefined}
+              >
+                {j.description || '—'}
               </TableCell>
-              <TableCell className="flex flex-wrap gap-2">
+              <TableCell className="flex flex-nowrap gap-2">
                 {/* v0.30 follow-up: render each action ONLY when
                     actionable for the current row state. The old
                     "always render, disable when N/A" layout left
