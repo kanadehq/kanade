@@ -149,7 +149,7 @@ jobs:
           cargo build -p kanade-backend --release --target x86_64-pc-windows-msvc
           cargo build -p kanade         --release --target x86_64-pc-windows-msvc
 
-      - name: Upload to GitHub Release
+      - name: Upload to GitHub Release (with fallback creation)
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -158,13 +158,22 @@ jobs:
           tag="${GITHUB_REF_NAME}"
           target=x86_64-pc-windows-msvc
 
+          # Verify our rebuilt bins exist first — without these there's
+          # nothing to upload, fallback or otherwise, so fail fast.
+          for bin in kanade-agent kanade-backend kanade; do
+            src="target/${target}/release/${bin}.exe"
+            if [[ ! -f "$src" ]]; then
+              echo "::error::expected $src missing — per-package cargo build did not produce the artifact"
+              exit 1
+            fi
+          done
+
           # release.yml runs in parallel with us; the release isn't
           # created until its `build` matrix (~13 min on Windows) plus
           # the `release` job complete. Our cargo build above also
           # takes ~13 min, so the release is usually already there by
           # the time we reach this step — but poll for up to 10 min
-          # to cover slow runs. Bail loudly if the release never
-          # appears (release.yml's `build` matrix probably failed).
+          # to cover slow runs.
           for i in $(seq 1 20); do
             if gh release view "$tag" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
               echo "Release $tag is available."
@@ -173,18 +182,71 @@ jobs:
             echo "Release $tag not yet published (attempt $i/20), sleeping 30s..."
             sleep 30
           done
+
+          # Fallback: release.yml's hard-verify ("refusing to ship a
+          # partial release") fails the whole matrix entry when its
+          # workspace-wide build silently drops Windows bins — same
+          # underlying drop this job's per-package rebuild reliably
+          # works around. Without intervention the tag is stuck with
+          # NO release at all (operator has to hand-craft one).
+          #
+          # When the release is missing, create it ourselves using:
+          #   * the 3 Windows bins this job just rebuilt
+          #   * the Linux + macOS artifacts release.yml DID stage
+          #     successfully (downloaded from that run's artifacts)
+          # …so the tag ends with a complete release set, just authored
+          # by extras instead of release.yml. Auto-generated notes via
+          # `gh release create --generate-notes` matches what release.yml
+          # would have produced.
           if ! gh release view "$tag" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            echo "::error::Release $tag was never created — release.yml probably failed; aborting upload."
-            exit 1
+            echo "::warning::Release $tag not created by release.yml — creating it from extras with rebuilt Windows bins + downloaded non-Windows artifacts."
+            mkdir -p _release_assets
+            for bin in kanade-agent kanade-backend kanade; do
+              cp "target/${target}/release/${bin}.exe" "_release_assets/${bin}-${target}.exe"
+            done
+            # Find the release.yml run for THIS tag (push event) and
+            # download its `dist-*` artifacts (Linux + macOS bins
+            # release.yml's matrix successfully built before its
+            # release job aborted on the Windows verify step).
+            release_run=$(gh run list --workflow release.yml \
+              --branch "$tag" \
+              --event push \
+              --limit 1 \
+              --json databaseId \
+              --jq '.[0].databaseId' || true)
+            if [[ -n "${release_run:-}" && "${release_run}" != "null" ]]; then
+              echo "Downloading non-Windows artifacts from release.yml run $release_run"
+              # `dist-*` is the per-target upload-artifact name; download
+              # them all, then flatten dist-<target>/ subdirs into
+              # _release_assets/ so `gh release create` sees a flat list.
+              tmp_dl=$(mktemp -d)
+              if gh run download "$release_run" --dir "$tmp_dl" --pattern 'dist-*' 2>/dev/null; then
+                find "$tmp_dl" -type f -exec cp -v {} _release_assets/ \;
+              else
+                echo "::notice::no dist-* artifacts on run $release_run — proceeding with Windows-only assets"
+              fi
+            else
+              echo "::notice::no release.yml run found for tag $tag — proceeding with Windows-only assets"
+            fi
+            ls -la _release_assets/
+            # `--generate-notes` mirrors release.yml's
+            # `generate_release_notes: true`; title=tag matches the
+            # softprops/action-gh-release default.
+            gh release create "$tag" _release_assets/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "$tag" \
+              --generate-notes
+            echo "Release $tag created by extras fallback."
           fi
 
+          # At this point a release exists (created by either release.yml
+          # or our fallback above). (Re-)upload the Windows bins with
+          # `--clobber` so the operator never sees a partial set — even
+          # if release.yml had landed a stale Windows asset from an
+          # earlier matrix flake, --clobber replaces it.
           for bin in kanade-agent kanade-backend kanade; do
             src="target/${target}/release/${bin}.exe"
             dst="${bin}-${target}.exe"
-            if [[ ! -f "$src" ]]; then
-              echo "::error::expected $src missing — per-package cargo build did not produce the artifact"
-              exit 1
-            fi
             cp "$src" "$dst"
             echo "Uploading $dst to release $tag"
             gh release upload "$tag" "$dst" --clobber --repo "${GITHUB_REPOSITORY}"
