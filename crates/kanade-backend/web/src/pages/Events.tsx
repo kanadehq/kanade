@@ -417,6 +417,13 @@ function EventsTimeline({ events }: { events: EventRow[] }) {
   );
 }
 
+// Time-unit constants shared by the heatmap's bucket math. At module
+// scope so the bucket-size useMemo + the continuous-buckets useMemo
+// + the human-label code all read from the same source (Gemini #268
+// HIGH cleanup).
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+
 /**
  * PC × time-bucket heatmap. Where the scatter above shows each
  * individual event as a point, the heatmap aggregates into buckets
@@ -459,11 +466,9 @@ function EventsHeatmap({ events }: { events: EventRow[] }) {
       if (ts > hi) hi = ts;
     }
     const span = isFinite(hi - lo) ? hi - lo : 0;
-    const HOUR = 60 * 60 * 1000;
-    const DAY = 24 * HOUR;
-    if (span <= 24 * HOUR) {
+    if (span <= 24 * HOUR_MS) {
       return {
-        bucketMs: HOUR,
+        bucketMs: HOUR_MS,
         alignBucket: (ts: number) => {
           const d = new Date(ts);
           d.setMinutes(0, 0, 0);
@@ -475,9 +480,9 @@ function EventsHeatmap({ events }: { events: EventRow[] }) {
         },
       };
     }
-    if (span <= 7 * DAY) {
+    if (span <= 7 * DAY_MS) {
       return {
-        bucketMs: 6 * HOUR,
+        bucketMs: 6 * HOUR_MS,
         alignBucket: (ts: number) => {
           const d = new Date(ts);
           d.setHours(Math.floor(d.getHours() / 6) * 6, 0, 0, 0);
@@ -490,7 +495,7 @@ function EventsHeatmap({ events }: { events: EventRow[] }) {
       };
     }
     return {
-      bucketMs: DAY,
+      bucketMs: DAY_MS,
       alignBucket: (ts: number) => {
         const d = new Date(ts);
         d.setHours(0, 0, 0, 0);
@@ -503,25 +508,61 @@ function EventsHeatmap({ events }: { events: EventRow[] }) {
     };
   }, [events]);
 
-  // (pc, bucket) → count. Also tracks the bucket key set + max for
-  // colour normalisation.
+  // (pc, bucket) → count + a CONTINUOUS bucket axis spanning lo..hi.
+  //
+  // Iterating from min to max in bucket-sized steps (instead of
+  // collecting only the buckets that had events) is what makes the
+  // X axis honest — idle stretches between events must show up as a
+  // run of empty cells, otherwise non-consecutive bucket times
+  // render side-by-side and recurrence patterns get misread (Gemini
+  // #268 HIGH / CodeRabbit #268 Major).
+  //
+  // Date arithmetic via `setHours` / `setDate` (instead of raw
+  // millisecond addition) keeps the iteration DST-safe — on a
+  // forward-DST day a 24h span wall-clock-walks as 23 calendar
+  // hours, and the setter handles that without dropping the last
+  // bucket.
   const { buckets, counts, max } = useMemo(() => {
-    const set = new Set<number>();
     const map = new Map<string, number>();
     let max = 0;
+    let lo = Infinity;
+    let hi = -Infinity;
     for (const ev of events) {
       const ts = Date.parse(ev.at);
       if (Number.isNaN(ts)) continue;
+      if (ts < lo) lo = ts;
+      if (ts > hi) hi = ts;
       const b = alignBucket(ts);
-      set.add(b);
       const key = `${ev.pc_id}|${b}`;
       const next = (map.get(key) ?? 0) + 1;
       map.set(key, next);
       if (next > max) max = next;
     }
-    const buckets = Array.from(set).sort((a, b) => a - b);
+    const buckets: number[] = [];
+    if (isFinite(lo) && isFinite(hi)) {
+      const end = alignBucket(hi);
+      let current = alignBucket(lo);
+      // Hard cap — a misconfigured filter (e.g. 30-day window with
+      // a daily bucket and a clock skew) shouldn't blow up the DOM.
+      // 400 cells × 50 PCs still renders cleanly; past that the
+      // operator should narrow the window.
+      while (current <= end && buckets.length < 400) {
+        buckets.push(current);
+        const d = new Date(current);
+        if (bucketMs === HOUR_MS) {
+          d.setHours(d.getHours() + 1);
+        } else if (bucketMs === DAY_MS) {
+          d.setDate(d.getDate() + 1);
+        } else {
+          // 6h bucket: step in hours so DST shifts realign on the
+          // next 6h boundary instead of drifting an hour ahead.
+          d.setHours(d.getHours() + bucketMs / HOUR_MS);
+        }
+        current = d.getTime();
+      }
+    }
     return { buckets, counts: map, max };
-  }, [events, alignBucket]);
+  }, [events, alignBucket, bucketMs]);
 
   if (buckets.length === 0 || pcs.length === 0) return null;
 
@@ -534,9 +575,7 @@ function EventsHeatmap({ events }: { events: EventRow[] }) {
   // the title so the operator knows whether they're reading "events
   // per hour" or "events per day" without inferring from the column
   // labels.
-  const HOUR = 60 * 60 * 1000;
-  const DAY = 24 * HOUR;
-  const bucketLabel = bucketMs === HOUR ? '1h' : bucketMs === DAY ? '1d' : `${bucketMs / HOUR}h`;
+  const bucketLabel = bucketMs === HOUR_MS ? '1h' : bucketMs === DAY_MS ? '1d' : `${bucketMs / HOUR_MS}h`;
 
   return (
     <Card>
