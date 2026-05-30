@@ -113,10 +113,20 @@ async fn publish(
     // here) for kanade-* binaries. Explicit `--version` overrides for
     // non-PE inputs (MSIs, scripts) where extraction returns None.
     //
-    // The extractor needs the full bytes in memory, but the upload
-    // path below streams from disk to keep RSS bounded for 256 MB
-    // app packages. So when extraction is needed we slurp once for
-    // the header read, then re-open the file as a stream for put().
+    // The slurp below buffers the whole binary in RAM (pelite needs a
+    // contiguous `&[u8]`, and we read the full file rather than just
+    // the PE header for the same reason `kanade agent publish` does).
+    // The streaming upload path below benefits separately — it doesn't
+    // help here, so the RSS spike during extraction is real.
+    //
+    // In practice this is bounded: every binary that actually carries
+    // a VERSIONINFO (i.e. takes the slurp path at all) is one of the
+    // `winres`-built kanade-* binaries — those are tens of MB. Vendor
+    // MSIs that hit the 256 MB ceiling never reach the slurp branch
+    // because extraction would return None — the operator MUST pass
+    // `--version` for them, and the explicit-flag path skips the read.
+    // If a future package family lands that's both large AND
+    // VERSIONINFO-tagged, switch this to memmap2 (Gemini #263 MED).
     let resolved_version = match version {
         Some(v) => v,
         None => {
