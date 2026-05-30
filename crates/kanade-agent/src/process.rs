@@ -502,12 +502,6 @@ enum OutcomeInner {
 /// here and forward "fired" into the channel, so the Win32 path's
 /// inner `tokio::select!` can use a plain oneshot.
 //
-// `clippy::needless_return` is silenced because the function body is
-// a pair of mutually-exclusive `#[cfg(...)]` blocks: on non-Windows
-// the first block needs `return` to exit the function (there's no
-// fall-through tail expression — the Windows block is compiled out).
-// The lint inspects each cfg branch in isolation and misses that.
-#[allow(clippy::needless_return)]
 async fn run_in_user_session_dispatch(
     client: &async_nats::Client,
     cmd: &Command,
@@ -523,14 +517,14 @@ async fn run_in_user_session_dispatch(
         // running as the wrong identity on a non-Windows agent. Real
         // operators are on Windows anyway; this branch exists to keep
         // the workspace cross-compile-clean.
-        return Ok(ExecOutcome::Completed {
+        Ok(ExecOutcome::Completed {
             exit_code: 0,
             stdout: String::new(),
             stderr: format!(
                 "run_as: {:?} is Windows-only; non-Windows agents skip the script.\n",
                 cmd.run_as
             ),
-        });
+        })
     }
 
     #[cfg(target_os = "windows")]
