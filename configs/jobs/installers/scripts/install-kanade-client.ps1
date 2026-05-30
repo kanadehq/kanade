@@ -88,7 +88,10 @@ $downloadArgs = @{
     TimeoutSec      = $DownloadTimeoutSecs
 }
 if (-not [string]::IsNullOrWhiteSpace($ClientSourceAuthToken)) {
-    $downloadArgs.Headers = @{ Authorization = "Bearer $ClientSourceAuthToken" }
+    # `.Trim()` guards against accidental whitespace from copy-paste
+    # (a leading newline silently sends `Bearer \n<token>` and the
+    # backend 401s with a confusing "missing bearer token" — Gemini #265).
+    $downloadArgs.Headers = @{ Authorization = "Bearer $($ClientSourceAuthToken.Trim())" }
 }
 Invoke-WebRequest @downloadArgs | Out-Null
 
