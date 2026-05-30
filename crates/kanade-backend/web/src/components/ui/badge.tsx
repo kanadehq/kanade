@@ -3,8 +3,12 @@ import type { HTMLAttributes } from 'react';
 
 import { cn } from '@/lib/utils';
 
+// `whitespace-nowrap` so a badge with an icon + label (e.g.
+// `<ScrollText/>プローブ` on the Jobs page INVENTORY column) doesn't
+// wrap mid-word when the cell is narrow — pill rows on tight columns
+// were rendering as two-line pills.
 const badgeVariants = cva(
-  'inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium transition-colors',
+  'inline-flex items-center whitespace-nowrap rounded-full border px-2.5 py-0.5 text-xs font-medium transition-colors',
   {
     variants: {
       variant: {
