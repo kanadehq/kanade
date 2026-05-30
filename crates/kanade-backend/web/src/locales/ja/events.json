@@ -44,5 +44,11 @@
   },
   "chart": {
     "title": "PC 別タイムライン"
+  },
+  "heatmap": {
+    "title": "PC × 時間アクティビティ",
+    "bucketHint": "(バケット: {{bucket}})",
+    "cellTooltip_one": "{{count}} 件",
+    "cellTooltip_other": "{{count}} 件"
   }
 }
