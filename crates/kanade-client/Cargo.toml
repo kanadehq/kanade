@@ -51,3 +51,9 @@ chrono  = { workspace = true }
 # Tauri's build helper (which transitively pulls in heavy
 # platform-specific deps).
 tauri-build = { version = "2", features = [] }
+# #260: build.rs syncs `version` in tauri.conf.json with the
+# workspace's CARGO_PKG_VERSION before tauri-build runs, so the
+# binary's embedded VERSIONINFO ProductVersion stays in lockstep
+# with the Cargo version instead of drifting to whatever was last
+# hand-edited.
+serde_json = { workspace = true }
