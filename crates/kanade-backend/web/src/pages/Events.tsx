@@ -340,15 +340,19 @@ function EventsTimeline({ events }: { events: EventRow[] }) {
 
   // Decide X-axis tick format: short HH:mm when the window fits in a
   // day; switch to MM/DD HH:mm for multi-day ranges so the operator
-  // can tell which Tuesday is which.
+  // can tell which Tuesday is which. useMemo keeps the function ref
+  // stable across re-renders so Recharts doesn't trip its animation
+  // diff on tooltip hover (Gemini #267 MEDIUM).
   const spanMs = tMax - tMin;
-  const fmtTick = (v: number) => {
-    const d = new Date(v);
-    if (spanMs > 24 * 60 * 60 * 1000) {
-      return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
-    }
-    return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
-  };
+  const fmtTick = useMemo(() => {
+    return (v: number) => {
+      const d = new Date(v);
+      if (spanMs > 24 * 60 * 60 * 1000) {
+        return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+      }
+      return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+    };
+  }, [spanMs]);
 
   return (
     <Card>
@@ -384,12 +388,19 @@ function EventsTimeline({ events }: { events: EventRow[] }) {
               cursor={{ strokeDasharray: '3 3' }}
               content={({ active, payload }) => {
                 if (!active || !payload?.length) return null;
-                const p = payload[0].payload as { ev: EventRow };
+                // Recharts can surface synthetic hover frames (e.g.
+                // during cursor transitions) where `payload[0].payload`
+                // exists but the embedded `ev` doesn't yet — bail out
+                // before destructuring to avoid a tooltip-render crash
+                // (Gemini #267 MEDIUM).
+                const p = payload[0].payload as { ev?: EventRow } | undefined;
+                if (!p?.ev) return null;
+                const { ev } = p;
                 return (
                   <div className="bg-card border border-border rounded px-2 py-1.5 text-xs shadow-md">
-                    <div className="font-semibold">{p.ev.kind}</div>
-                    <div className="text-muted">{fmtIsoLocal(p.ev.at)}</div>
-                    <div><code>{p.ev.pc_id}</code> · <code>{p.ev.source}</code></div>
+                    <div className="font-semibold">{ev.kind}</div>
+                    <div className="text-muted">{fmtIsoLocal(ev.at)}</div>
+                    <div><code>{ev.pc_id}</code> · <code>{ev.source}</code></div>
                   </div>
                 );
               }}
