@@ -51,15 +51,12 @@ $Version        = '0.42.0'
 $ExpectedSha256 = '<lowercase hex of kanade-client.exe>'
 ```
 
-> Unlike the backend script, this one doesn't have an explicit
-> auth-token knob yet — it relies on
-> `Invoke-WebRequest -UseDefaultCredentials` or the absence of
-> auth on the `/api/app-packages/kanade-client/<v>` route. If your
-> backend gates that endpoint, add an `Authorization` header to
-> the `Invoke-WebRequest` call the same way the backend script
-> does (see
-> [Updating kanade-backend](./backend.md#3-edit-scriptsdeploybackendps1)).
-> A first-class `$ClientSourceAuthToken` knob is on the backlog.
+> Set `$ClientSourceAuthToken` to the backend's bearer when auth
+> is enabled — same token the agent uses against the rest of
+> `/api/*`. Leave it blank for dev / smoke-test setups where the
+> `/api/app-packages/kanade-client/<v>` route is unauthenticated.
+> Mirrors the `$AgentSourceAuthToken` knob in
+> [scripts/deploy/backend.ps1](./backend.md#3-edit-scriptsdeploybackendps1).
 
 ### 4. Register / update the job
 

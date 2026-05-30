@@ -37,6 +37,14 @@ $Version     = '0.42.0'
 # MITM-substituted binary won't match this hash, and the script
 # refuses to promote it.
 $ExpectedSha256 = ''
+# Bearer token for the backend's `/api/app-packages/<name>/<version>`
+# route. Required when backend auth is enabled (the production
+# posture — KANADE_AUTH_STATIC_TOKEN / KANADE_JWT_SECRET set on the
+# backend host). Leave empty only if the backend route is
+# unauthenticated (dev / smoke-test setups). Mirrors the
+# `$AgentSourceAuthToken` knob in `scripts/deploy/backend.ps1` — same
+# token both scripts use against the same gated endpoint.
+$ClientSourceAuthToken = ''
 # How long to wait for the binary download before aborting. The
 # parent manifest's `timeout: 180s` budgets the whole job; pick a
 # value comfortably below that so a wedged backend surfaces as a
@@ -69,7 +77,20 @@ New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 Remove-Item -Force -ErrorAction SilentlyContinue $NewPath
 
 Write-Host "Downloading kanade-client $Version from $Url"
-Invoke-WebRequest -Uri $Url -OutFile $NewPath -UseBasicParsing -TimeoutSec $DownloadTimeoutSecs | Out-Null
+# When $ClientSourceAuthToken is set, send `Authorization: Bearer <token>`
+# so the gated backend route (production posture) doesn't 401. Hash
+# splat keeps the no-token dev path argument-equivalent to the
+# pre-#259 invocation.
+$downloadArgs = @{
+    Uri             = $Url
+    OutFile         = $NewPath
+    UseBasicParsing = $true
+    TimeoutSec      = $DownloadTimeoutSecs
+}
+if (-not [string]::IsNullOrWhiteSpace($ClientSourceAuthToken)) {
+    $downloadArgs.Headers = @{ Authorization = "Bearer $ClientSourceAuthToken" }
+}
+Invoke-WebRequest @downloadArgs | Out-Null
 
 # --- Integrity check -----------------------------------------------------
 # Compute sha256 of the downloaded bytes and compare to the

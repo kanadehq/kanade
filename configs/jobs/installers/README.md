@@ -48,8 +48,8 @@ deployed client:
    round-trip — so this works even when the backend itself is
    restarting.
 
-2. **Pin the version + sha in the script.** Edit three knobs at
-   the top of `scripts/install-kanade-client.ps1`
+2. **Pin the version + sha + token in the script.** Edit the
+   knobs at the top of `scripts/install-kanade-client.ps1`
    (`--- Configurable knobs ---`):
 
    - `$Version` — string you uploaded under in step 1.
@@ -61,6 +61,13 @@ deployed client:
      ```powershell
      Get-FileHash target\release\kanade-client.exe -Algorithm SHA256
      ```
+
+   - `$ClientSourceAuthToken` — bearer for the backend's
+     `/api/app-packages/<name>/<version>` route. Required when
+     backend auth is enabled (production posture); leave empty
+     for dev / smoke-test setups where the route is open. Same
+     token the agent uses against `/api/*` from
+     `KANADE_AUTH_TOKEN`.
 
    The script refuses to install unless the downloaded bytes
    match `$ExpectedSha256` — a poisoned upload / MITM-substituted
