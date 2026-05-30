@@ -41,5 +41,8 @@
   },
   "payload": {
     "show": "表示"
+  },
+  "chart": {
+    "title": "PC 別タイムライン"
   }
 }
