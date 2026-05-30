@@ -33,20 +33,25 @@ pub enum AppSub {
     /// goes straight at NATS, no backend HTTP round-trip.
     ///
     /// Operators pick `<name>` once per package family
-    /// (e.g. `kanade-client`, `kanade-backend`, `webex-meetings`)
-    /// and `<version>` per release. Both parameters echo back as
-    /// the Object Store key, so a typo at submit time is silently
-    /// recoverable with a follow-up `kanade app delete`.
+    /// (e.g. `kanade-client`, `kanade-backend`, `webex-meetings`).
+    /// `<version>` defaults to the binary's embedded VERSIONINFO
+    /// (same pelite extraction as `kanade agent publish`) — pass
+    /// `--version` to override (vendor MSIs / non-PE binaries need
+    /// the explicit label).
     Publish {
         /// Package family name. Slash-free, ASCII-printable; see
         /// `kanade-backend::api::app_packages::validate_segment`
         /// for the full set of restrictions the HTTP side enforces.
         name: String,
-        /// Version string (semver / calendar / git sha — operator's
-        /// choice). Same character restrictions as `name`.
-        version: String,
         /// Path to the binary to upload.
         binary: PathBuf,
+        /// Version label. When omitted, extracted from the binary's
+        /// embedded VERSIONINFO (Windows PE built with `winres` —
+        /// every kanade-* binary qualifies). Required for binaries
+        /// without VERSIONINFO (most vendor installers) — fails fast
+        /// rather than silently uploading under an empty version.
+        #[arg(long)]
+        version: Option<String>,
     },
     /// List every `<name>/<version>` row in the bucket — size +
     /// digest + last-modified.
@@ -60,9 +65,9 @@ pub async fn execute(client: async_nats::Client, args: AppArgs) -> Result<()> {
     match args.sub {
         AppSub::Publish {
             name,
-            version,
             binary,
-        } => publish(client, name, version, binary).await,
+            version,
+        } => publish(client, name, binary, version).await,
         AppSub::List => list(client).await,
         AppSub::Delete { name, version } => delete(client, name, version).await,
     }
@@ -97,11 +102,37 @@ fn validate_segment(label: &str, value: &str) -> Result<()> {
 async fn publish(
     client: async_nats::Client,
     name: String,
-    version: String,
     binary: PathBuf,
+    version: Option<String>,
 ) -> Result<()> {
     validate_segment("name", &name)?;
-    validate_segment("version", &version)?;
+
+    // #261: default version to the binary's embedded VERSIONINFO —
+    // same pelite extractor that `kanade agent publish` uses. Avoids
+    // the operator typing the version twice (once in the build, once
+    // here) for kanade-* binaries. Explicit `--version` overrides for
+    // non-PE inputs (MSIs, scripts) where extraction returns None.
+    //
+    // The extractor needs the full bytes in memory, but the upload
+    // path below streams from disk to keep RSS bounded for 256 MB
+    // app packages. So when extraction is needed we slurp once for
+    // the header read, then re-open the file as a stream for put().
+    let resolved_version = match version {
+        Some(v) => v,
+        None => {
+            let bytes = tokio::fs::read(&binary)
+                .await
+                .with_context(|| format!("read {binary:?}"))?;
+            kanade_shared::exe_version::extract_pe_version(&bytes).with_context(|| {
+                format!(
+                    "no --version given and couldn't extract VERSIONINFO from {binary:?} \
+                     (Windows PE built with `winres`? otherwise pass `--version <label>`)"
+                )
+            })?
+        }
+    };
+    validate_segment("version", &resolved_version)?;
+    let version = resolved_version;
 
     // Stream from disk instead of slurping (Gemini #222 MED).
     // App packages can hit 256 MB — buffering the whole binary
