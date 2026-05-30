@@ -43,27 +43,43 @@ fn sync_tauri_version() {
 
     let original = fs::read_to_string(&conf_path)
         .unwrap_or_else(|e| panic!("read {}: {e}", conf_path.display()));
-    let mut conf: serde_json::Value = serde_json::from_str(&original)
-        .unwrap_or_else(|e| panic!("parse {}: {e}", conf_path.display()));
 
-    let current = conf
-        .get("version")
-        .and_then(|v| v.as_str())
-        .map(String::from);
-    if current.as_deref() == Some(cargo_version.as_str()) {
+    // Targeted string-replace on the `"version": "X.Y.Z"` field
+    // rather than a full JSON round-trip — `serde_json::Value` uses
+    // `BTreeMap` for objects (unless `preserve_order` is enabled
+    // workspace-wide) and silently re-sorts every key alphabetically
+    // on re-serialize, producing a huge spurious diff on the bump
+    // PR. Slicing keeps the rest of the file byte-identical (Gemini
+    // #266 HIGH). Also lets us drop `serde_json` from
+    // build-dependencies entirely (Gemini #266 MEDIUM).
+    const PATTERN: &str = "\"version\": \"";
+    let Some(start_idx) = original.find(PATTERN) else {
+        panic!(
+            "could not find {PATTERN:?} field in {} — has the file been hand-edited into a shape build.rs can't parse?",
+            conf_path.display()
+        );
+    };
+    let val_start = start_idx + PATTERN.len();
+    let Some(end_offset) = original[val_start..].find('"') else {
+        panic!(
+            "malformed \"version\" field in {} (unterminated string)",
+            conf_path.display()
+        );
+    };
+    let val_end = val_start + end_offset;
+    let current_version = &original[val_start..val_end];
+
+    if current_version == cargo_version {
         return; // already in sync — skip the rewrite
     }
 
-    conf["version"] = serde_json::Value::String(cargo_version.clone());
-    // `to_string_pretty` matches Tauri's own formatting (2-space
-    // indent, trailing newline) so the diff against a hand-edited
-    // file stays minimal.
-    let updated = serde_json::to_string_pretty(&conf).expect("re-serialize tauri.conf.json") + "\n";
+    let mut updated = String::with_capacity(original.len() + cargo_version.len());
+    updated.push_str(&original[..val_start]);
+    updated.push_str(&cargo_version);
+    updated.push_str(&original[val_end..]);
     fs::write(&conf_path, updated).unwrap_or_else(|e| panic!("write {}: {e}", conf_path.display()));
 
     println!(
-        "cargo:warning=tauri.conf.json version synced: {:?} -> {} (was drifting; #260)",
-        current.as_deref().unwrap_or("(missing)"),
-        cargo_version
+        "cargo:warning=tauri.conf.json version synced: {current_version:?} -> {cargo_version} (was drifting; #260)"
     );
 }
