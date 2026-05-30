@@ -126,6 +126,30 @@ pub async fn exec_manifest(
     let mut subjects: Vec<String> = Vec::new();
     let mut target_count: u32 = 0;
 
+    // #258: pin script_current BEFORE any publish (both rollout-wave
+    // and plain target paths below). The agent's Layer 2 staleness
+    // gate (commands.rs:151) compares the incoming cmd.version against
+    // script_current.<id> — if the KV still holds the previous bump's
+    // value when the command arrives, the agent silently drops the
+    // first exec after every job bump. JetStream's KV propagation
+    // isn't synchronous with the NATS publish that follows, so the
+    // original ordering (publish → flush → put) raced even on a
+    // single-node broker.
+    match s.jetstream.get_key_value(BUCKET_SCRIPT_CURRENT).await {
+        Ok(kv) => {
+            if let Err(e) = kv
+                .put(
+                    &manifest.id,
+                    bytes::Bytes::from(manifest.version.clone().into_bytes()),
+                )
+                .await
+            {
+                warn!(error = %e, cmd_id = %manifest.id, "script_current put failed");
+            }
+        }
+        Err(e) => warn!(error = %e, "script_current KV missing; skipping version pin"),
+    }
+
     if let Some(rollout) = plan.rollout.as_ref() {
         // Wave-based fan-out: pre-validate every delay so a bad humantime
         // string aborts the whole exec instead of silently failing on a
@@ -209,21 +233,6 @@ pub async fn exec_manifest(
         }
     }
     let _ = s.nats.flush().await;
-
-    match s.jetstream.get_key_value(BUCKET_SCRIPT_CURRENT).await {
-        Ok(kv) => {
-            if let Err(e) = kv
-                .put(
-                    &manifest.id,
-                    bytes::Bytes::from(manifest.version.clone().into_bytes()),
-                )
-                .await
-            {
-                warn!(error = %e, cmd_id = %manifest.id, "script_current put failed");
-            }
-        }
-        Err(e) => warn!(error = %e, "script_current KV missing; skipping version pin"),
-    }
 
     sqlx::query(
         "INSERT INTO executions (exec_id, job_id, version, initiated_by, target_count, status)
