@@ -44,5 +44,11 @@
   },
   "chart": {
     "title": "Per-PC timeline"
+  },
+  "heatmap": {
+    "title": "PC × time activity",
+    "bucketHint": "(bucket: {{bucket}})",
+    "cellTooltip_one": "{{count}} event",
+    "cellTooltip_other": "{{count}} events"
   }
 }

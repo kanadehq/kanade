@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { Loader2 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
 import {
@@ -239,6 +239,7 @@ export function Events() {
       ) : (
         <>
           <EventsTimeline events={rows} />
+          <EventsHeatmap events={rows} />
           <Table>
           <TableHeader>
             <TableRow>
@@ -411,6 +412,244 @@ function EventsTimeline({ events }: { events: EventRow[] }) {
             ))}
           </ScatterChart>
         </ResponsiveContainer>
+      </CardContent>
+    </Card>
+  );
+}
+
+// Time-unit constants shared by the heatmap's bucket math. At module
+// scope so the bucket-size useMemo + the continuous-buckets useMemo
+// + the human-label code all read from the same source (Gemini #268
+// HIGH cleanup).
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+
+/**
+ * PC × time-bucket heatmap. Where the scatter above shows each
+ * individual event as a point, the heatmap aggregates into buckets
+ * so longer windows (a week, a month) collapse into a readable
+ * grid of "this PC, this hour: 12 events" cells. Useful for
+ * spotting recurring patterns the scatter loses in cloud-density.
+ *
+ * Bucket size auto-adapts to the rendered window:
+ *   ≤ 24h → 1 hour buckets  (max 24 columns)
+ *   ≤ 7d  → 6 hour buckets  (max 28 columns)
+ *   else  → 1 day buckets   (matches the operator's "since: 30d" pick)
+ *
+ * Colour intensity uses the same violet hue as `chart.kindColor`'s
+ * informational bucket, scaled by `count / max(count)` so the
+ * busiest cell is fully saturated. CSS grid + per-cell opacity keeps
+ * the impl dependency-free (no heatmap library) — Recharts doesn't
+ * ship a heatmap component.
+ */
+function EventsHeatmap({ events }: { events: EventRow[] }) {
+  const { t } = useTranslation('events');
+
+  // PC list — same shape as the scatter so the two charts read in the
+  // same row order when stacked.
+  const pcs = useMemo(() => {
+    const set = new Set(events.map((e) => e.pc_id));
+    return Array.from(set).sort();
+  }, [events]);
+
+  // Determine the bucket size + the bucket alignment fn. Aligning to
+  // wall-clock boundaries (top-of-hour, midnight) keeps the columns
+  // labelled with round numbers operators can match against their
+  // own log of "what was I doing at 14:00".
+  const { bucketMs, alignBucket, fmtBucket } = useMemo(() => {
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const ev of events) {
+      const ts = Date.parse(ev.at);
+      if (Number.isNaN(ts)) continue;
+      if (ts < lo) lo = ts;
+      if (ts > hi) hi = ts;
+    }
+    const span = isFinite(hi - lo) ? hi - lo : 0;
+    if (span <= 24 * HOUR_MS) {
+      return {
+        bucketMs: HOUR_MS,
+        alignBucket: (ts: number) => {
+          const d = new Date(ts);
+          d.setMinutes(0, 0, 0);
+          return d.getTime();
+        },
+        fmtBucket: (ts: number) => {
+          const d = new Date(ts);
+          return `${d.getHours().toString().padStart(2, '0')}`;
+        },
+      };
+    }
+    if (span <= 7 * DAY_MS) {
+      return {
+        bucketMs: 6 * HOUR_MS,
+        alignBucket: (ts: number) => {
+          const d = new Date(ts);
+          d.setHours(Math.floor(d.getHours() / 6) * 6, 0, 0, 0);
+          return d.getTime();
+        },
+        fmtBucket: (ts: number) => {
+          const d = new Date(ts);
+          return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours().toString().padStart(2, '0')}`;
+        },
+      };
+    }
+    return {
+      bucketMs: DAY_MS,
+      alignBucket: (ts: number) => {
+        const d = new Date(ts);
+        d.setHours(0, 0, 0, 0);
+        return d.getTime();
+      },
+      fmtBucket: (ts: number) => {
+        const d = new Date(ts);
+        return `${d.getMonth() + 1}/${d.getDate()}`;
+      },
+    };
+  }, [events]);
+
+  // (pc, bucket) → count + a CONTINUOUS bucket axis spanning lo..hi.
+  //
+  // Iterating from min to max in bucket-sized steps (instead of
+  // collecting only the buckets that had events) is what makes the
+  // X axis honest — idle stretches between events must show up as a
+  // run of empty cells, otherwise non-consecutive bucket times
+  // render side-by-side and recurrence patterns get misread (Gemini
+  // #268 HIGH / CodeRabbit #268 Major).
+  //
+  // Date arithmetic via `setHours` / `setDate` (instead of raw
+  // millisecond addition) keeps the iteration DST-safe — on a
+  // forward-DST day a 24h span wall-clock-walks as 23 calendar
+  // hours, and the setter handles that without dropping the last
+  // bucket.
+  const { buckets, counts, max } = useMemo(() => {
+    const map = new Map<string, number>();
+    let max = 0;
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const ev of events) {
+      const ts = Date.parse(ev.at);
+      if (Number.isNaN(ts)) continue;
+      if (ts < lo) lo = ts;
+      if (ts > hi) hi = ts;
+      const b = alignBucket(ts);
+      const key = `${ev.pc_id}|${b}`;
+      const next = (map.get(key) ?? 0) + 1;
+      map.set(key, next);
+      if (next > max) max = next;
+    }
+    const buckets: number[] = [];
+    if (isFinite(lo) && isFinite(hi)) {
+      const end = alignBucket(hi);
+      let current = alignBucket(lo);
+      // Hard cap — a misconfigured filter (e.g. 30-day window with
+      // a daily bucket and a clock skew) shouldn't blow up the DOM.
+      // 400 cells × 50 PCs still renders cleanly; past that the
+      // operator should narrow the window.
+      while (current <= end && buckets.length < 400) {
+        buckets.push(current);
+        const d = new Date(current);
+        if (bucketMs === HOUR_MS) {
+          d.setHours(d.getHours() + 1);
+        } else if (bucketMs === DAY_MS) {
+          d.setDate(d.getDate() + 1);
+        } else {
+          // 6h bucket: step in hours so DST shifts realign on the
+          // next 6h boundary instead of drifting an hour ahead.
+          d.setHours(d.getHours() + bucketMs / HOUR_MS);
+        }
+        current = d.getTime();
+      }
+    }
+    return { buckets, counts: map, max };
+  }, [events, alignBucket, bucketMs]);
+
+  if (buckets.length === 0 || pcs.length === 0) return null;
+
+  // Empty cell base + busiest-cell colour. Same violet the
+  // informational bucket of `kindColor` uses, so the page's chart
+  // palette stays consistent.
+  const cellBase = '#8b5cf6'; // violet-500
+
+  // Human label for the auto-picked bucket size — surfaced next to
+  // the title so the operator knows whether they're reading "events
+  // per hour" or "events per day" without inferring from the column
+  // labels.
+  const bucketLabel = bucketMs === HOUR_MS ? '1h' : bucketMs === DAY_MS ? '1d' : `${bucketMs / HOUR_MS}h`;
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm">
+          {t('heatmap.title')}
+          <span className="ml-2 text-xs text-muted font-normal">
+            {t('heatmap.bucketHint', { bucket: bucketLabel })}
+          </span>
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="pt-0 overflow-x-auto">
+        <div
+          style={{
+            display: 'grid',
+            // First column = PC name label, then one column per bucket.
+            // `auto` for the label so it sizes to the widest pc_id,
+            // `minmax(18px, 1fr)` for cells so they stay visible on a
+            // wide window but tile cleanly on a narrow one.
+            gridTemplateColumns: `auto repeat(${buckets.length}, minmax(18px, 1fr))`,
+            gap: '2px',
+            fontSize: '10px',
+          }}
+        >
+          {/* header row: empty corner + bucket labels */}
+          <div />
+          {buckets.map((b) => (
+            <div key={b} className="text-muted text-center leading-none pt-1" title={fmtIsoLocal(new Date(b).toISOString())}>
+              {fmtBucket(b)}
+            </div>
+          ))}
+          {/* per-PC rows: pc_id label + cells. Fragment shorthand
+              `<>` doesn't accept a `key`, so use the explicit
+              React.Fragment form to silence the reconciler warning. */}
+          {pcs.map((pc) => (
+            <Fragment key={pc}>
+              <div className="text-muted pr-2 self-center">
+                <code className="text-[10px]">{pc}</code>
+              </div>
+              {buckets.map((b) => {
+                const c = counts.get(`${pc}|${b}`) ?? 0;
+                // Linear scale (count/max) saturates fast on long-tail
+                // event distributions, but for the 0..~20 range typical
+                // of a fleet's daily logon/sleep tally it reads well
+                // enough that the log-scale alternative isn't worth
+                // the explanation overhead.
+                const alpha = c === 0 ? 0 : 0.15 + 0.85 * (c / max);
+                return (
+                  <div
+                    key={`${pc}-${b}`}
+                    className="rounded-sm h-5"
+                    style={{
+                      backgroundColor: c === 0
+                        ? 'rgba(148, 163, 184, 0.08)' // slate-400 very light = "no events"
+                        : `rgba(139, 92, 246, ${alpha})`,
+                    }}
+                    title={`${pc} · ${fmtIsoLocal(new Date(b).toISOString())}: ${t('heatmap.cellTooltip', { count: c })}`}
+                  />
+                );
+              })}
+            </Fragment>
+          ))}
+        </div>
+        {/* Legend strip: 0 → max, gradient swatch */}
+        <div className="mt-3 flex items-center gap-2 text-xs text-muted">
+          <span>0</span>
+          <div
+            className="h-3 w-32 rounded-sm"
+            style={{
+              background: `linear-gradient(to right, rgba(148,163,184,0.08), ${cellBase})`,
+            }}
+          />
+          <span>{max}</span>
+        </div>
       </CardContent>
     </Card>
   );
