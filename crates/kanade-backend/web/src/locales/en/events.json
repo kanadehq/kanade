@@ -41,5 +41,8 @@
   },
   "payload": {
     "show": "show"
+  },
+  "chart": {
+    "title": "Per-PC timeline"
   }
 }

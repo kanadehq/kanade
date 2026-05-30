@@ -3,6 +3,16 @@ import { Loader2 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
+import {
+  CartesianGrid,
+  Legend,
+  ResponsiveContainer,
+  Scatter,
+  ScatterChart,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
 
 import { ErrorCard } from '@/components/ErrorCard';
 import { Badge } from '@/components/ui/badge';
@@ -69,6 +79,21 @@ function kindVariant(kind: string): 'success' | 'amber' | 'danger' | 'violet' | 
     default:
       return 'amber';
   }
+}
+
+// Hex equivalents of the Tailwind palette used in `kindVariant` —
+// Recharts needs concrete fills, not class names. Kept aligned with
+// the existing chart colours in AgentDetail.tsx so the operator's
+// eye carries between pages.
+const KIND_COLORS: Record<string, string> = {
+  success: '#10b981', // emerald-500
+  amber:   '#f59e0b', // amber-500
+  danger:  '#ef4444', // red-500
+  violet:  '#8b5cf6', // violet-500
+  default: '#94a3b8', // slate-400
+};
+function kindColor(kind: string): string {
+  return KIND_COLORS[kindVariant(kind)] ?? KIND_COLORS.default;
 }
 
 export function Events() {
@@ -212,7 +237,9 @@ export function Events() {
           </CardContent>
         </Card>
       ) : (
-        <Table>
+        <>
+          <EventsTimeline events={rows} />
+          <Table>
           <TableHeader>
             <TableRow>
               <TableHead>{t('columns.when')}</TableHead>
@@ -249,7 +276,142 @@ export function Events() {
             ))}
           </TableBody>
         </Table>
+        </>
       )}
     </div>
+  );
+}
+
+/**
+ * Per-PC timeline scatter — X axis is time, Y axis is PC name,
+ * point colour encodes `kind`. One Scatter series per kind so the
+ * legend doubles as a colour key and operators can pick a kind to
+ * highlight just by hovering its legend entry.
+ *
+ * Sits above the existing detail table on the Events page; both
+ * read from the same `rows` array so toggling filters at the top
+ * narrows the chart and table together.
+ */
+function EventsTimeline({ events }: { events: EventRow[] }) {
+  const { t } = useTranslation('events');
+
+  // Stable PC list (sorted) drives the Y axis category domain. Doing
+  // this once via useMemo so re-renders for tooltip hover don't
+  // re-sort the list and confuse Recharts' axis caching.
+  const pcs = useMemo(() => {
+    const set = new Set(events.map((e) => e.pc_id));
+    return Array.from(set).sort();
+  }, [events]);
+
+  // Group points by kind so we can render one Scatter series per
+  // kind (auto-coloured legend). Each point carries the original
+  // event so the tooltip can render full context.
+  const byKind = useMemo(() => {
+    const out: Record<string, Array<{ ts: number; pc: string; ev: EventRow }>> = {};
+    for (const ev of events) {
+      const ts = Date.parse(ev.at);
+      if (Number.isNaN(ts)) continue;
+      (out[ev.kind] ??= []).push({ ts, pc: ev.pc_id, ev });
+    }
+    return out;
+  }, [events]);
+
+  // Height scales with PC count so a fleet-wide view doesn't squash
+  // every row; floor at 200 keeps the single-PC case readable.
+  const chartHeight = Math.max(200, 48 + pcs.length * 36);
+
+  // Pre-compute the time window so the X axis is consistent across
+  // re-renders. Recharts can auto-domain, but `type="number"`
+  // requires an explicit domain to render the axis labels right.
+  const [tMin, tMax] = useMemo(() => {
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const ev of events) {
+      const ts = Date.parse(ev.at);
+      if (Number.isNaN(ts)) continue;
+      if (ts < lo) lo = ts;
+      if (ts > hi) hi = ts;
+    }
+    if (!isFinite(lo) || !isFinite(hi)) return [Date.now() - 60_000, Date.now()];
+    // Pad 2% on each side so points don't hug the axis.
+    const pad = Math.max(60_000, (hi - lo) * 0.02);
+    return [lo - pad, hi + pad];
+  }, [events]);
+
+  // Decide X-axis tick format: short HH:mm when the window fits in a
+  // day; switch to MM/DD HH:mm for multi-day ranges so the operator
+  // can tell which Tuesday is which. useMemo keeps the function ref
+  // stable across re-renders so Recharts doesn't trip its animation
+  // diff on tooltip hover (Gemini #267 MEDIUM).
+  const spanMs = tMax - tMin;
+  const fmtTick = useMemo(() => {
+    return (v: number) => {
+      const d = new Date(v);
+      if (spanMs > 24 * 60 * 60 * 1000) {
+        return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+      }
+      return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+    };
+  }, [spanMs]);
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm">{t('chart.title')}</CardTitle>
+      </CardHeader>
+      <CardContent className="pt-0">
+        <ResponsiveContainer width="100%" height={chartHeight}>
+          <ScatterChart margin={{ top: 8, right: 24, bottom: 16, left: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" className="stroke-muted/30" />
+            <XAxis
+              type="number"
+              dataKey="ts"
+              domain={[tMin, tMax]}
+              tickFormatter={fmtTick}
+              tick={{ fontSize: 11 }}
+              stroke="currentColor"
+              className="text-muted"
+            />
+            <YAxis
+              type="category"
+              dataKey="pc"
+              // Explicit domain pins the row order even when a kind
+              // series doesn't include every PC.
+              domain={pcs}
+              allowDuplicatedCategory={false}
+              tick={{ fontSize: 11 }}
+              width={120}
+              stroke="currentColor"
+              className="text-muted"
+            />
+            <Tooltip
+              cursor={{ strokeDasharray: '3 3' }}
+              content={({ active, payload }) => {
+                if (!active || !payload?.length) return null;
+                // Recharts can surface synthetic hover frames (e.g.
+                // during cursor transitions) where `payload[0].payload`
+                // exists but the embedded `ev` doesn't yet — bail out
+                // before destructuring to avoid a tooltip-render crash
+                // (Gemini #267 MEDIUM).
+                const p = payload[0].payload as { ev?: EventRow } | undefined;
+                if (!p?.ev) return null;
+                const { ev } = p;
+                return (
+                  <div className="bg-card border border-border rounded px-2 py-1.5 text-xs shadow-md">
+                    <div className="font-semibold">{ev.kind}</div>
+                    <div className="text-muted">{fmtIsoLocal(ev.at)}</div>
+                    <div><code>{ev.pc_id}</code> · <code>{ev.source}</code></div>
+                  </div>
+                );
+              }}
+            />
+            <Legend wrapperStyle={{ fontSize: 11 }} />
+            {Object.entries(byKind).map(([k, pts]) => (
+              <Scatter key={k} name={k} data={pts} fill={kindColor(k)} />
+            ))}
+          </ScatterChart>
+        </ResponsiveContainer>
+      </CardContent>
+    </Card>
   );
 }
