@@ -148,7 +148,15 @@ $AgentSourceSha256    = ''   # lowercase hex of the uploaded .exe
 # (typically the static / JWT bearer issued out-of-band). Leave
 # empty if the backend doesn't gate app-packages on auth.
 $AgentSourceAuthToken = ''
-$AgentDownloadTimeoutSecs = 120
+# How long BITS keeps retrying after a transient transfer error
+# before giving up. The actual download time itself is unbounded —
+# a healthy connection takes as long as it needs to ship the bytes
+# (multi-GB on a slow link is fine), and this knob only caps the
+# recovery window after errors. 1800 = 30 min absorbs several
+# `RetryInterval`s (default 600 s) so a wobbly LAN during a deploy
+# window doesn't abort half-way. The outer manifest `timeout:`
+# still bounds the total job, so a wedged backend surfaces there.
+$AgentDownloadRetryTimeoutSecs = 1800
 # ===========================================================================
 
 # If the agent-mode knobs are set, download the binary into a temp
@@ -186,15 +194,34 @@ if ($AgentSourceUrl) {
     $stagedExe = Join-Path $AgentStaging 'kanade-backend.exe'
 
     $url = "$($AgentSourceUrl.TrimEnd('/'))/api/app-packages/kanade-backend/$AgentSourceVersion"
-    Write-Host "deploy-backend (agent mode): downloading kanade-backend $AgentSourceVersion from $url"
-    # If this throws (network, 404, timeout), the trap above
-    # fires and clears $AgentStaging before rethrowing — no
-    # leaked tmp dir per failed upgrade.
-    $iwrHeaders = @{}
+    Write-Host "deploy-backend (agent mode): downloading kanade-backend $AgentSourceVersion from $url (BITS)"
+    # Use BITS (Background Intelligent Transfer Service) so multi-GB
+    # downloads survive transient network drops — BITS resumes from
+    # the last received byte instead of restarting from zero, which
+    # matters once kanade-backend ships with embedded resources / a
+    # larger SPA bundle. `-Priority Foreground` runs at interactive
+    # speed (we want this to finish quickly during a deploy window,
+    # not throttle to background). Bearer auth via -CustomHeaders
+    # (BITS module on PS 5.1+ ships this parameter).
+    #
+    # If this throws (fatal HTTP error, BITS service stopped, sha
+    # mismatch below), the trap above fires and clears
+    # $AgentStaging before rethrowing — no leaked tmp dir per
+    # failed upgrade.
+    $bitsHeaders = @()
     if ($AgentSourceAuthToken) {
-        $iwrHeaders['Authorization'] = "Bearer $AgentSourceAuthToken"
+        $bitsHeaders += "Authorization: Bearer $($AgentSourceAuthToken.Trim())"
     }
-    Invoke-WebRequest -Uri $url -OutFile $stagedExe -UseBasicParsing -TimeoutSec $AgentDownloadTimeoutSecs -Headers $iwrHeaders | Out-Null
+    $bitsArgs = @{
+        Source       = $url
+        Destination  = $stagedExe
+        Priority     = 'Foreground'
+        RetryTimeout = $AgentDownloadRetryTimeoutSecs
+    }
+    if ($bitsHeaders.Count -gt 0) {
+        $bitsArgs.CustomHeaders = $bitsHeaders
+    }
+    Start-BitsTransfer @bitsArgs
 
     # Sha verify BEFORE swap — same posture as install-kanade-client.ps1.
     # Explicit Remove-Item + throw kept around the cleanup is
