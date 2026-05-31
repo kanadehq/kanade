@@ -45,12 +45,19 @@ $ExpectedSha256 = ''
 # `$AgentSourceAuthToken` knob in `scripts/deploy/backend.ps1` — same
 # token both scripts use against the same gated endpoint.
 $ClientSourceAuthToken = ''
-# How long to wait for the binary download before aborting. The
-# parent manifest's `timeout: 180s` budgets the whole job; pick a
-# value comfortably below that so a wedged backend surfaces as a
-# download failure rather than a job timeout (which can't
-# distinguish "network slow" from "script broken").
-$DownloadTimeoutSecs = 60
+# How long BITS keeps retrying after a transient transfer error
+# before giving up. Different shape from the old -TimeoutSec knob:
+# the actual download time is unbounded (a healthy connection takes
+# as long as it needs to ship the bytes — important once multi-GB
+# kanade-client bundles land), and this only caps the recovery
+# window after a connection drop / 5xx. 1800 = 30 min absorbs
+# several `RetryInterval`s (default 600 s) so a wobbly link
+# completes via resume rather than aborting. The parent manifest's
+# `timeout:` still bounds the whole job, so a wedged backend
+# surfaces there — bump that knob if a fleet starts shipping
+# packages whose first-try download exceeds the current 180 s
+# budget.
+$DownloadRetryTimeoutSecs = 1800
 # -------------------------------------------------------------------------
 
 if ([string]::IsNullOrWhiteSpace($ExpectedSha256)) {
@@ -76,24 +83,31 @@ New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 # it's our rollback artifact if a prior swap aborted mid-way.
 Remove-Item -Force -ErrorAction SilentlyContinue $NewPath
 
-Write-Host "Downloading kanade-client $Version from $Url"
-# When $ClientSourceAuthToken is set, send `Authorization: Bearer <token>`
-# so the gated backend route (production posture) doesn't 401. Hash
-# splat keeps the no-token dev path argument-equivalent to the
-# pre-#259 invocation.
-$downloadArgs = @{
-    Uri             = $Url
-    OutFile         = $NewPath
-    UseBasicParsing = $true
-    TimeoutSec      = $DownloadTimeoutSecs
-}
+Write-Host "Downloading kanade-client $Version from $Url (BITS)"
+# Use BITS (Background Intelligent Transfer Service) so multi-GB
+# downloads survive transient network drops — BITS resumes from
+# the last received byte instead of restarting from zero, which
+# matters once the kanade-client bundle grows past ~100 MB.
+# `-Priority Foreground` runs at interactive speed (operator is
+# waiting on this install, not running it as a background job).
+# Bearer auth via -CustomHeaders (BITS module on PS 5.1+).
+$bitsHeaders = @()
 if (-not [string]::IsNullOrWhiteSpace($ClientSourceAuthToken)) {
     # `.Trim()` guards against accidental whitespace from copy-paste
     # (a leading newline silently sends `Bearer \n<token>` and the
     # backend 401s with a confusing "missing bearer token" — Gemini #265).
-    $downloadArgs.Headers = @{ Authorization = "Bearer $($ClientSourceAuthToken.Trim())" }
+    $bitsHeaders += "Authorization: Bearer $($ClientSourceAuthToken.Trim())"
 }
-Invoke-WebRequest @downloadArgs | Out-Null
+$bitsArgs = @{
+    Source       = $Url
+    Destination  = $NewPath
+    Priority     = 'Foreground'
+    RetryTimeout = $DownloadRetryTimeoutSecs
+}
+if ($bitsHeaders.Count -gt 0) {
+    $bitsArgs.CustomHeaders = $bitsHeaders
+}
+Start-BitsTransfer @bitsArgs
 
 # --- Integrity check -----------------------------------------------------
 # Compute sha256 of the downloaded bytes and compare to the

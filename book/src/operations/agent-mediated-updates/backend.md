@@ -162,6 +162,7 @@ ends with `kanade-backend <new-version>`.
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | `[CmdletBinding()]` / `param()` parse error in stderr | Agent older than 0.42.2 (running `-Command` mode) | Upgrade the agent first via `kanade agent rollout` (see [agent self-update](./agent-self.md)). |
-| `Invoke-WebRequest : missing bearer token` | `$AgentSourceAuthToken` empty but backend requires auth | Set it. |
+| `Start-BitsTransfer : HTTP status 401` | `$AgentSourceAuthToken` empty but backend requires auth | Set it. |
+| `Start-BitsTransfer : The transfer encountered an error` / job state `TransientError` | BITS service not running, or target machine's WinHTTP can't reach `$AgentSourceUrl` | `Get-Service BITS`; check WinHTTP proxy with `netsh winhttp show proxy` (BITS uses WinHTTP, not IE/WinINet). |
 | `sha256 mismatch — expected=<x> actual=<y>` | Hash in script doesn't match the published binary | Re-publish or recompute the hash. The script aborts BEFORE the swap, so the existing install is intact. |
 | Job runs but kanade-backend doesn't come back up | Service-failure / config drift on target | Read `C:\ProgramData\Kanade\log\backend.*.log` on the target. The agent can fetch it via `kanade logs <pc>` (when implemented) or you can pull the file directly. |
