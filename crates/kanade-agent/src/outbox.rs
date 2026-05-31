@@ -220,11 +220,14 @@ async fn offload_overflow(
     let mut overflowed = false;
     if result.stdout.len() > STDOUT_INLINE_THRESHOLD {
         let key = format!("{}/stdout", result.request_id);
-        // `put` takes &mut impl AsyncRead — wrap the existing String
-        // bytes in a Cursor so we don't have to allocate a second copy.
-        // The stdout String stays owned by `result` (we move it into
-        // empty after the upload).
-        let mut cursor = std::io::Cursor::new(result.stdout.as_bytes().to_vec());
+        // `mem::take` moves the String out + leaves an empty one in
+        // its place; `into_bytes` is then a zero-copy reuse of the
+        // String's buffer. Avoids the extra `to_vec` clone that the
+        // first draft did on a (potentially) multi-MB payload
+        // (Gemini #282 MEDIUM).
+        let stdout_bytes = std::mem::take(&mut result.stdout).into_bytes();
+        let bytes_len = stdout_bytes.len();
+        let mut cursor = std::io::Cursor::new(stdout_bytes);
         store
             .put(key.as_str(), &mut cursor)
             .await
@@ -232,16 +235,19 @@ async fn offload_overflow(
         info!(
             request_id = %result.request_id,
             key,
-            bytes = result.stdout.len(),
+            bytes = bytes_len,
             "outbox: stdout overflowed to OBJECT_RESULT_OUTPUT (#227)",
         );
-        result.stdout = String::new();
         result.stdout_object = Some(key);
         overflowed = true;
     }
     if result.stderr.len() > STDOUT_INLINE_THRESHOLD {
         let key = format!("{}/stderr", result.request_id);
-        let mut cursor = std::io::Cursor::new(result.stderr.as_bytes().to_vec());
+        // Same zero-copy `mem::take` + `into_bytes` shape as stdout
+        // above (Gemini #282 MEDIUM).
+        let stderr_bytes = std::mem::take(&mut result.stderr).into_bytes();
+        let bytes_len = stderr_bytes.len();
+        let mut cursor = std::io::Cursor::new(stderr_bytes);
         store
             .put(key.as_str(), &mut cursor)
             .await
@@ -249,10 +255,9 @@ async fn offload_overflow(
         info!(
             request_id = %result.request_id,
             key,
-            bytes = result.stderr.len(),
+            bytes = bytes_len,
             "outbox: stderr overflowed to OBJECT_RESULT_OUTPUT (#227)",
         );
-        result.stderr = String::new();
         result.stderr_object = Some(key);
         overflowed = true;
     }

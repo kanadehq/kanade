@@ -259,7 +259,11 @@ async fn deref_overflow(js: &async_nats::jetstream::Context, r: &mut ExecResult)
         .await
         .with_context(|| format!("get_object_store {OBJECT_RESULT_OUTPUT}"))?;
 
-    if let Some(key) = r.stdout_object.clone() {
+    // `Option::take` moves the String out + leaves None in one shot,
+    // saving the explicit follow-up `r.stdout_object = None` plus a
+    // redundant `clone` of the key just to satisfy the borrow checker
+    // (Gemini #282 MEDIUM).
+    if let Some(key) = r.stdout_object.take() {
         let bytes = read_object(&store, &key)
             .await
             .with_context(|| format!("deref stdout_object {key}"))?;
@@ -269,14 +273,12 @@ async fn deref_overflow(js: &async_nats::jetstream::Context, r: &mut ExecResult)
         // as the agent's capture side, which has used `from_utf8_lossy`
         // since the CP932 incident.
         r.stdout = String::from_utf8_lossy(&bytes).into_owned();
-        r.stdout_object = None;
     }
-    if let Some(key) = r.stderr_object.clone() {
+    if let Some(key) = r.stderr_object.take() {
         let bytes = read_object(&store, &key)
             .await
             .with_context(|| format!("deref stderr_object {key}"))?;
         r.stderr = String::from_utf8_lossy(&bytes).into_owned();
-        r.stderr_object = None;
     }
     Ok(())
 }
