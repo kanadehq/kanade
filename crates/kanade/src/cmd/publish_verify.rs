@@ -107,11 +107,15 @@ async fn read_and_hash(store: &ObjectStore, key: &str) -> Result<(String, usize)
         hasher.update(&buf[..n]);
         total += n;
     }
-    // NATS uses base64url (no padding) for the digest portion. The
-    // `=` separator after `SHA-256` is part of the string format, not
-    // base64 padding.
+    // NATS Object Store digest format is `SHA-256=<base64url-with-pad>`
+    // — async-nats 0.48 uses `URL_SAFE` (the padded URL-safe variant,
+    // trailing `=` and all) when it stamps `ObjectInfo.digest`. Match
+    // that exactly so the string comparison succeeds; an earlier draft
+    // used `URL_SAFE_NO_PAD` and made the verify exhaust every retry
+    // because the `=` padding was always missing (CodeRabbit #279
+    // CRITICAL).
     use base64::Engine;
-    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize());
+    let b64 = base64::engine::general_purpose::URL_SAFE.encode(hasher.finalize());
     Ok((format!("SHA-256={b64}"), total))
 }
 
