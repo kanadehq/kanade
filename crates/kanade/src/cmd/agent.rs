@@ -127,6 +127,20 @@ async fn publish(client: async_nats::Client, binary: PathBuf) -> Result<()> {
         .context("object_store.put")?;
     info!(version, digest = ?meta.digest, "agent binary uploaded");
 
+    // #277: same JetStream read-after-write window as `app publish`.
+    // Block until a `get(key)` returns the same bytes we just put,
+    // so downstream consumers (`kanade agent rollout` triggers an
+    // agent self-update path that fetches from this very key) don't
+    // race against the upstream race.
+    super::publish_verify::verify_readback(
+        &store,
+        version.as_str(),
+        meta.digest.as_deref(),
+        meta.size,
+    )
+    .await
+    .context("publish read-back verify")?;
+
     println!("published: {version}");
     println!("  object_store : {OBJECT_AGENT_RELEASES}/{version}");
     println!();

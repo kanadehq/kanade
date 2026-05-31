@@ -7,6 +7,7 @@ pub mod jetstream;
 pub mod job;
 pub mod kill;
 pub mod ping;
+pub mod publish_verify;
 pub mod revoke;
 pub mod run;
 pub mod schedule;
