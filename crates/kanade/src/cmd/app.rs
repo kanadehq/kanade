@@ -168,6 +168,18 @@ async fn publish(
         .context("object_store.put")?;
     info!(name, version, size = meta.size, digest = ?meta.digest, "app package uploaded");
 
+    // #277: a downstream `store.get(key)` (e.g. backend serving
+    // /api/app-packages/...) can read stale / partial bytes for ~30-
+    // 180 s after `put` returns on at least single-node JetStream.
+    // Block on a read-back hash check here so the operator only sees
+    // "published" once the bytes are actually consumable; without it,
+    // a `kanade exec install-kanade-backend --pcs ...` fired
+    // immediately after publish 50/50 fails with a sha-mismatch on
+    // the agent side.
+    super::publish_verify::verify_readback(&store, key.as_str(), meta.digest.as_deref(), meta.size)
+        .await
+        .context("publish read-back verify")?;
+
     println!("published: {key}");
     println!("  object_store : {OBJECT_APP_PACKAGES}/{key}");
     println!("  size         : {} bytes", meta.size);
