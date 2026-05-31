@@ -186,9 +186,19 @@ pub struct JobProgress {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stderr_chunk: Option<String>,
     /// Populated on the terminal push only. Agents stamp the actual
-    /// process exit code (or one of the synthetic codes: 124 =
-    /// timeout, 125 = deadline-skipped, 127 = staleness-skipped,
-    /// 137 = killed).
+    /// process exit code from the child. Synthetic non-process
+    /// outcomes (timeout, remote kill) are surfaced as `Some(-1)`
+    /// with the `status` field carrying the distinguishing
+    /// information (`Failed` / `Killed`), not via a reserved
+    /// exit-code number.
+    ///
+    /// Note: the sibling `ExecResult` wire (manifest exec →
+    /// backend, NOT this KLP flow) DOES partition synthetic skip
+    /// codes (124 / 125 / 126 / 127) for the agent's pre-exec
+    /// staleness gates. See the doc on
+    /// `kanade-agent::commands::publish_staleness_skipped` for
+    /// the table. JobProgress's exit_code does not share that
+    /// partition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
 }

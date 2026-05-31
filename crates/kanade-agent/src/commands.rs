@@ -160,7 +160,12 @@ pub async fn handle_command(
                 request_id = %cmd.request_id,
                 "skip stale command (version mismatch)",
             );
-            return Ok(());
+            // #271: publish a synthetic skipped-result so the
+            // `executions` row this command belongs to transitions
+            // out of `pending` rather than rotting forever and
+            // inflating the /api/jobs `実行中` counter. Same shape
+            // as the Layer 1 staleness / deadline-expired skips.
+            return publish_version_mismatch_skipped(&pc_id, &cmd, &expected).await;
         }
     }
     if let Some(sta) = &script_status
@@ -173,7 +178,10 @@ pub async fn handle_command(
                 request_id = %cmd.request_id,
                 "skip revoked command",
             );
-            return Ok(());
+            // #271: same fix as the version-mismatch path — emit a
+            // synthetic result so the executions row can reach
+            // `completed` instead of stranding `pending`.
+            return publish_revoked_skipped(&pc_id, &cmd).await;
         }
     }
 
@@ -482,10 +490,19 @@ fn should_skip_for_deadline(
 /// v0.26: Synthesise an ExecResult for "Layer 2 strict staleness
 /// exceeded — agent couldn't verify it's running the latest version
 /// because the broker view is too old." Exit code 127 is reserved
-/// for this case (125 = deadline missed, 126 = future use). The
-/// stderr carries the observed staleness window + the configured
-/// allowance so the operator sees on the Results page why the fire
-/// was suppressed and what they'd need to change to allow it.
+/// for this case. Agent-side skip exit codes are partitioned:
+///
+/// | Code | Meaning                                | Helper                            |
+/// |------|----------------------------------------|-----------------------------------|
+/// | 124  | Layer 2 version-pin mismatch (#271)    | `publish_version_mismatch_skipped`|
+/// | 125  | deadline_at expired                    | `publish_skipped`                 |
+/// | 126  | Layer 2 revoked (#271)                 | `publish_revoked_skipped`         |
+/// | 127  | Layer 1 staleness (mode=strict)        | `publish_staleness_skipped`       |
+///
+/// The stderr carries the observed staleness window + the
+/// configured allowance so the operator sees on the Results page
+/// why the fire was suppressed and what they'd need to change to
+/// allow it.
 async fn publish_staleness_skipped(
     pc_id: &str,
     cmd: &Command,
@@ -567,6 +584,90 @@ async fn publish_skipped(
         exit_code = 125,
         outbox = %path.display(),
         "synthetic skipped-result enqueued to outbox",
+    );
+    Ok(())
+}
+
+/// #271: Synthesise an ExecResult for "Layer 2 version-pin
+/// mismatch — incoming Command's version doesn't match the
+/// `script_current.<id>` KV value the backend just published."
+/// Exit code 124 distinguishes this from the sibling skip paths
+/// (see the table on [`publish_staleness_skipped`]).
+///
+/// Without this synthetic result, the matching `executions` row
+/// stays at `status='pending'` forever and the `/api/jobs` `実行中`
+/// counter monotonically inflates across every stale skip — the
+/// bug #271 documents from the 0.43.1 → 0.43.2 bump.
+async fn publish_version_mismatch_skipped(
+    pc_id: &str,
+    cmd: &Command,
+    expected: &str,
+) -> Result<()> {
+    let now = chrono::Utc::now();
+    let stderr = format!(
+        "skipped: version-pin mismatch — script_current[{}] = {expected}, command brought {}",
+        cmd.id, cmd.version,
+    );
+    let result = ExecResult {
+        result_id: Uuid::new_v4().to_string(),
+        request_id: cmd.request_id.clone(),
+        exec_id: cmd.exec_id.clone(),
+        pc_id: pc_id.to_string(),
+        exit_code: 124,
+        stdout: String::new(),
+        stderr,
+        started_at: now,
+        finished_at: now,
+        stdout_object: None,
+        stderr_object: None,
+        manifest_id: Some(cmd.id.clone()),
+    };
+    let outbox_dir = default_paths::data_dir().join("outbox");
+    let path = outbox::enqueue(&outbox_dir, &result)?;
+    info!(
+        request_id = %cmd.request_id,
+        exit_code = 124,
+        outbox = %path.display(),
+        "version-mismatch skip result enqueued to outbox",
+    );
+    Ok(())
+}
+
+/// #271: Synthesise an ExecResult for "Layer 2 revoked — the
+/// operator marked this manifest revoked via
+/// `script_status.<id> = revoked` before the agent received this
+/// Command." Exit code 126 distinguishes this from the sibling
+/// skip paths (see the table on [`publish_staleness_skipped`]).
+///
+/// Same `executions`-row rationale as
+/// [`publish_version_mismatch_skipped`].
+async fn publish_revoked_skipped(pc_id: &str, cmd: &Command) -> Result<()> {
+    let now = chrono::Utc::now();
+    let stderr = format!(
+        "skipped: command was revoked (script_status[{}] = revoked)",
+        cmd.id,
+    );
+    let result = ExecResult {
+        result_id: Uuid::new_v4().to_string(),
+        request_id: cmd.request_id.clone(),
+        exec_id: cmd.exec_id.clone(),
+        pc_id: pc_id.to_string(),
+        exit_code: 126,
+        stdout: String::new(),
+        stderr,
+        started_at: now,
+        finished_at: now,
+        stdout_object: None,
+        stderr_object: None,
+        manifest_id: Some(cmd.id.clone()),
+    };
+    let outbox_dir = default_paths::data_dir().join("outbox");
+    let path = outbox::enqueue(&outbox_dir, &result)?;
+    info!(
+        request_id = %cmd.request_id,
+        exit_code = 126,
+        outbox = %path.display(),
+        "revoked skip result enqueued to outbox",
     );
     Ok(())
 }
