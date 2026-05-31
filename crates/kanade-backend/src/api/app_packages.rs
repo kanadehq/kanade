@@ -173,10 +173,42 @@ pub async fn publish(
                     ));
                 }
                 info!(name, version, key, "app_packages: streaming upload");
+                // Peek the first chunk before we call `put`. Without
+                // this an empty `file` (operator typo, broken upload
+                // client) would still reach `put`, which overwrites
+                // the existing object at `<name>/<version>` with a
+                // 0-byte blob before the size-check rejects the
+                // request — silently corrupting a healthy package
+                // (Gemini #284 HIGH).
+                //
+                // `Field::chunk()` reads the next data chunk without
+                // consuming the whole field, so we get the streaming
+                // shape back by chaining the chunk we just held back
+                // onto the rest of the field's `Stream` impl below.
+                let mut field = field;
+                let first_chunk = match field
+                    .chunk()
+                    .await
+                    .map_err(|e| (StatusCode::BAD_REQUEST, format!("read file field: {e}")))?
+                {
+                    Some(c) if !c.is_empty() => c,
+                    _ => {
+                        return Err((StatusCode::BAD_REQUEST, "'file' field is empty".into()));
+                    }
+                };
                 // axum's `Field` implements `Stream<Item = Result<Bytes,
                 // MultipartError>>`; map the error so `StreamReader`'s
-                // `AsyncRead` impl can surface it as `io::Error`.
-                let body_stream = field.map_err(std::io::Error::other);
+                // `AsyncRead` impl can surface it as `io::Error`, then
+                // re-attach the peeked chunk at the head with `iter +
+                // chain` so `put` sees the full body in order.
+                // `stream::iter` (vs `stream::once(async { ... })`)
+                // returns an `Unpin` stream — `chain` requires both
+                // sides be `Unpin` because the result is consumed
+                // through `StreamReader`'s `AsyncRead` impl.
+                let first_stream =
+                    futures::stream::iter(std::iter::once(Ok::<_, std::io::Error>(first_chunk)));
+                let rest_stream = field.map_err(std::io::Error::other);
+                let body_stream = first_stream.chain(rest_stream);
                 let mut reader = StreamReader::new(body_stream);
                 let m = store.put(key.as_str(), &mut reader).await.map_err(|e| {
                     warn!(error = %e, %key, "object_store.put");
@@ -189,20 +221,29 @@ pub async fn publish(
                     field = field_name,
                     "app_packages.publish: draining unknown multipart field"
                 );
-                // Consume the body so the parser advances. Cheap on
-                // the small-field path (operators only send `file`
-                // today) and bounded by the request body limit.
-                let _ = field.bytes().await.map_err(|e| {
+                // Drain chunk-by-chunk instead of `field.bytes()` —
+                // the latter buffers the whole field, which is the
+                // exact RAM spike the new streaming `file` path
+                // avoids. Unknown fields are rare and small in
+                // practice, but a misbehaving client could attach a
+                // multi-MB sidecar and we shouldn't allocate to skip
+                // it (CodeRabbit #284 Major).
+                let mut field = field;
+                while let Some(_chunk) = field.chunk().await.map_err(|e| {
                     (
                         StatusCode::BAD_REQUEST,
                         format!("drain field {field_name:?}: {e}"),
                     )
-                })?;
+                })? {}
             }
         }
     }
     let meta = meta.ok_or((StatusCode::BAD_REQUEST, "missing 'file' field".into()))?;
     let size = meta.size as u64;
+    // `size == 0` shouldn't reach here anymore — the chunk-peek at
+    // the start of the `file` arm catches empty bodies before any
+    // `put` runs. Keep this as a defensive belt-and-braces: a future
+    // refactor that drops the peek would still fail closed.
     if size == 0 {
         return Err((StatusCode::BAD_REQUEST, "'file' field is empty".into()));
     }

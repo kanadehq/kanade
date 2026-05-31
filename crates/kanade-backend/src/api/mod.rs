@@ -33,20 +33,30 @@ use sqlx::SqlitePool;
 /// debug builds and future on-disk growth without becoming a DoS vector.
 const PUBLISH_BODY_LIMIT: usize = 64 * 1024 * 1024;
 
-/// 8 GB upper bound for `POST /api/app-packages/{name}/{version}`.
-/// Bigger than `PUBLISH_BODY_LIMIT` because app packages cover
-/// third-party installers (Webex / Teams / Office plug-ins, plus
-/// the occasional multi-GB SDK / VM image) whose bundles can run
-/// from ~100 MB MSIs up to several-GB ISOs. The handler streams
-/// the multipart field directly into `ObjectStore::put` (chunked
-/// at ~128 KB per JetStream publish), so this cap caps the *cap*
-/// — RSS stays flat regardless of payload size.
+/// 8 GB upper bound for `POST /api/app-packages/{name}/{version}`
+/// on 64-bit targets. Bigger than `PUBLISH_BODY_LIMIT` because app
+/// packages cover third-party installers (Webex / Teams / Office
+/// plug-ins, plus the occasional multi-GB SDK / VM image) whose
+/// bundles can run from ~100 MB MSIs up to several-GB ISOs. The
+/// handler streams the multipart field directly into
+/// `ObjectStore::put` (chunked at ~128 KB per JetStream publish),
+/// so this cap caps the *cap* — RSS stays flat regardless of
+/// payload size.
 ///
 /// Bump higher if a fleet ships > 8 GB single files; the JetStream
 /// stream backing `OBJECT_APP_PACKAGES` has no per-message size
 /// limit and the operator's only other constraint is
 /// `max_file_store` in `configs/nats-server.conf` (50 GB default).
+///
+/// 32-bit fallback: `8 * 1024 * 1024 * 1024` overflows the `usize`
+/// type on 32-bit targets. Backend builds we ship are all 64-bit
+/// today, but `cargo check` on a 32-bit target would refuse to
+/// compile without a guard — fall back to `usize::MAX` (= ~4 GB
+/// minus a page) there. Gemini #284 MEDIUM.
+#[cfg(target_pointer_width = "64")]
 const APP_PACKAGE_BODY_LIMIT: usize = 8 * 1024 * 1024 * 1024;
+#[cfg(not(target_pointer_width = "64"))]
+const APP_PACKAGE_BODY_LIMIT: usize = usize::MAX;
 
 /// 4 MB upper bound for `POST /api/script-objects/{name}/{version}`.
 /// Manifest scripts are typically PowerShell / Bash bodies measured
