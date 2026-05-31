@@ -362,6 +362,14 @@ pub async fn handle_command(
         stderr,
         started_at,
         finished_at,
+        // #227: outbox-drain side fills these in when stdout / stderr
+        // exceeds the inline threshold and gets offloaded to
+        // OBJECT_RESULT_OUTPUT. Stays None at enqueue time so the
+        // outbox file on disk preserves the full bytes (drain task
+        // re-runs the overflow check on every iteration — idempotent
+        // re-upload to same key).
+        stdout_object: None,
+        stderr_object: None,
         // Forward `Command.id` (the manifest's id, e.g. "inventory-hw"),
         // NOT `Command.exec_id` (a per-deploy UUID). The backend's
         // results projector uses this to look up the manifest's
@@ -500,6 +508,8 @@ async fn publish_staleness_skipped(
         stderr,
         started_at: now,
         finished_at: now,
+        stdout_object: None,
+        stderr_object: None,
         manifest_id: Some(cmd.id.clone()),
     };
     let outbox_dir = default_paths::data_dir().join("outbox");
@@ -546,6 +556,8 @@ async fn publish_skipped(
         stderr,
         started_at: now,
         finished_at: now,
+        stdout_object: None,
+        stderr_object: None,
         manifest_id: Some(cmd.id.clone()),
     };
     let outbox_dir = default_paths::data_dir().join("outbox");

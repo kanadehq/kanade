@@ -37,10 +37,29 @@ pub struct ExecResult {
     pub exec_id: Option<String>,
     pub pc_id: String,
     pub exit_code: i32,
+    /// stdout. Empty string when [`Self::stdout_object`] is set — the
+    /// agent overflowed the bytes into [`crate::kv::OBJECT_RESULT_OUTPUT`]
+    /// because the inline payload would have exceeded NATS's default
+    /// `max_payload` (#227). The backend projector derefs the pointer
+    /// before inserting; SQLite still stores the full text inline so
+    /// the SPA Activity page reads unchanged.
     pub stdout: String,
     pub stderr: String,
     pub started_at: chrono::DateTime<chrono::Utc>,
     pub finished_at: chrono::DateTime<chrono::Utc>,
+    /// Object Store key under [`crate::kv::OBJECT_RESULT_OUTPUT`] when
+    /// `stdout` overflowed the agent's inline threshold (#227). Set to
+    /// `Some("<request_id>/stdout")` by the agent's outbox drain; the
+    /// backend projector fetches the bytes from that key and uses them
+    /// in place of the (empty) `stdout` field. `None` for the common
+    /// small-stdout case + every pre-#227 payload (`serde(default)`
+    /// keeps older results decodable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout_object: Option<String>,
+    /// Sibling of `stdout_object` for the stderr stream. Same key
+    /// shape (`<request_id>/stderr`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr_object: Option<String>,
     /// v0.13: the manifest id that produced this result. Sourced
     /// from `Command.id` (which is the YAML `manifest.id`, e.g.
     /// `"inventory-hw"`). Distinct from the per-deploy UUID stored
@@ -90,6 +109,8 @@ mod tests {
             stderr: String::new(),
             started_at: t0,
             finished_at: t1,
+            stdout_object: None,
+            stderr_object: None,
             manifest_id: Some("inventory-hw".into()),
         };
         let json = serde_json::to_string(&r).unwrap();
@@ -197,6 +218,8 @@ mod tests {
             stderr: String::new(),
             started_at: chrono::Utc.with_ymd_and_hms(2026, 5, 16, 0, 0, 0).unwrap(),
             finished_at: chrono::Utc.with_ymd_and_hms(2026, 5, 16, 0, 0, 0).unwrap(),
+            stdout_object: None,
+            stderr_object: None,
             manifest_id: None,
         };
         assert_eq!(r.stable_result_id(), "agent-minted-uuid");

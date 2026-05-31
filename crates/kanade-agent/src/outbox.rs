@@ -29,6 +29,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use kanade_shared::ExecResult;
+use kanade_shared::kv::{OBJECT_RESULT_OUTPUT, STDOUT_INLINE_THRESHOLD};
 use kanade_shared::subject;
 use tracing::{debug, info, warn};
 
@@ -136,11 +137,27 @@ const ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
 async fn publish_one(js: &async_nats::jetstream::Context, path: &Path) -> Result<()> {
     let bytes = std::fs::read(path).with_context(|| format!("read {path:?}"))?;
-    let result: ExecResult =
+    let mut result: ExecResult =
         serde_json::from_slice(&bytes).with_context(|| format!("parse {path:?}"))?;
+
+    // #227: offload stdout / stderr > 256 KB to OBJECT_RESULT_OUTPUT
+    // BEFORE the NATS publish — the inline ExecResult would otherwise
+    // breach the broker's default 1 MB max_payload and lock the
+    // outbox into a reconnect loop. Upload + replace + serialize a
+    // fresh smaller payload; the on-disk file keeps the full bytes
+    // so a retry after broker outage re-runs the upload (idempotent
+    // — same key + same bytes hash to the same object on re-put).
+    let overflowed = offload_overflow(js, &mut result).await?;
+    let publish_bytes = if overflowed {
+        serde_json::to_vec(&result)
+            .with_context(|| format!("re-serialise overflow ExecResult for {path:?}"))?
+    } else {
+        bytes
+    };
+
     let subj = subject::results(&result.request_id);
     let ack_future = js
-        .publish(subj.clone(), bytes.clone().into())
+        .publish(subj.clone(), publish_bytes.into())
         .await
         .with_context(|| format!("publish {subj}"))?;
     // ack_future resolves with the PubAck when the broker has the
@@ -167,6 +184,81 @@ async fn publish_one(js: &async_nats::jetstream::Context, path: &Path) -> Result
     Ok(())
 }
 
+/// Inspect `result.stdout` / `.stderr`; for each one over the inline
+/// threshold, upload the bytes to `OBJECT_RESULT_OUTPUT` under
+/// `<request_id>/{stdout,stderr}`, clear the inline field, and set
+/// the matching pointer. Returns whether any field was overflowed so
+/// the caller knows to re-serialize (small case stays a zero-copy
+/// publish of the on-disk bytes).
+///
+/// Upload is idempotent: same `<request_id>` key + same bytes hash
+/// to the same object on `put`. Re-runs after broker outage replay
+/// the upload without producing duplicate keys.
+async fn offload_overflow(
+    js: &async_nats::jetstream::Context,
+    result: &mut ExecResult,
+) -> Result<bool> {
+    if result.stdout.len() <= STDOUT_INLINE_THRESHOLD
+        && result.stderr.len() <= STDOUT_INLINE_THRESHOLD
+    {
+        return Ok(false);
+    }
+    // Cheap to call even on the small-case branch — we only land
+    // here when at least one field is over the threshold. Skip the
+    // bucket lookup for the small case above (kept the early return
+    // to avoid a redundant get_object_store call per publish).
+    let store = js
+        .get_object_store(OBJECT_RESULT_OUTPUT)
+        .await
+        .with_context(|| {
+            format!(
+                "get_object_store {OBJECT_RESULT_OUTPUT} — \
+                 was bootstrap::ensure_jetstream_resources run on the backend?"
+            )
+        })?;
+
+    let mut overflowed = false;
+    if result.stdout.len() > STDOUT_INLINE_THRESHOLD {
+        let key = format!("{}/stdout", result.request_id);
+        // `put` takes &mut impl AsyncRead — wrap the existing String
+        // bytes in a Cursor so we don't have to allocate a second copy.
+        // The stdout String stays owned by `result` (we move it into
+        // empty after the upload).
+        let mut cursor = std::io::Cursor::new(result.stdout.as_bytes().to_vec());
+        store
+            .put(key.as_str(), &mut cursor)
+            .await
+            .with_context(|| format!("object_store.put {key}"))?;
+        info!(
+            request_id = %result.request_id,
+            key,
+            bytes = result.stdout.len(),
+            "outbox: stdout overflowed to OBJECT_RESULT_OUTPUT (#227)",
+        );
+        result.stdout = String::new();
+        result.stdout_object = Some(key);
+        overflowed = true;
+    }
+    if result.stderr.len() > STDOUT_INLINE_THRESHOLD {
+        let key = format!("{}/stderr", result.request_id);
+        let mut cursor = std::io::Cursor::new(result.stderr.as_bytes().to_vec());
+        store
+            .put(key.as_str(), &mut cursor)
+            .await
+            .with_context(|| format!("object_store.put {key}"))?;
+        info!(
+            request_id = %result.request_id,
+            key,
+            bytes = result.stderr.len(),
+            "outbox: stderr overflowed to OBJECT_RESULT_OUTPUT (#227)",
+        );
+        result.stderr = String::new();
+        result.stderr_object = Some(key);
+        overflowed = true;
+    }
+    Ok(overflowed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,6 +275,8 @@ mod tests {
             stderr: String::new(),
             started_at: Utc.with_ymd_and_hms(2026, 5, 19, 0, 0, 0).unwrap(),
             finished_at: Utc.with_ymd_and_hms(2026, 5, 19, 0, 0, 1).unwrap(),
+            stdout_object: None,
+            stderr_object: None,
             manifest_id: Some("inventory-hw".into()),
         }
     }

@@ -2,9 +2,10 @@ use anyhow::{Context, Result};
 use async_nats::jetstream::{self, consumer::pull::Config as PullConfig};
 use futures::StreamExt;
 use kanade_shared::ExecResult;
-use kanade_shared::kv::{BUCKET_JOBS, STREAM_RESULTS};
+use kanade_shared::kv::{BUCKET_JOBS, OBJECT_RESULT_OUTPUT, STREAM_RESULTS};
 use kanade_shared::manifest::{InventoryHint, Manifest};
 use sqlx::SqlitePool;
+use tokio::io::AsyncReadExt;
 use tracing::{info, warn};
 
 const CONSUMER_NAME: &str = "backend_results_projector";
@@ -69,7 +70,28 @@ pub async fn run(js: jetstream::Context, pool: SqlitePool) -> Result<()> {
             }
         };
         match serde_json::from_slice::<ExecResult>(&msg.payload) {
-            Ok(r) => {
+            Ok(mut r) => {
+                // #227: deref overflow pointers BEFORE projection.
+                // Agent uploads stdout / stderr > 256 KB into
+                // OBJECT_RESULT_OUTPUT and clears the inline field;
+                // here we fetch the bytes back so SQLite + the SPA
+                // Activity page see the full text. Pointer-less
+                // results (the common small-output case + every
+                // pre-#227 payload) skip the bucket fetch entirely.
+                if let Err(e) = deref_overflow(&js, &mut r).await {
+                    warn!(
+                        error = %e,
+                        request_id = %r.request_id,
+                        "results: failed to deref OBJECT_RESULT_OUTPUT pointer — \
+                         row will land with empty stdout/stderr (#227)",
+                    );
+                    // Continue with the (empty) inline fields rather
+                    // than NACK — repeated NACK + redelivery would
+                    // pin the consumer behind one broken row. The
+                    // operator can re-fetch via the Object Store
+                    // directly if the row needs to be re-projected.
+                }
+
                 // Resolve once and reuse for log + insert. For v0.29+
                 // agents this is just `r.result_id`; for legacy
                 // payloads this is the deterministic UUIDv5 derived
@@ -213,6 +235,66 @@ async fn bump_exec_counters(pool: &SqlitePool, exec_id: &str, exit_code: i32) ->
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// #227: when the agent overflowed stdout / stderr into
+/// `OBJECT_RESULT_OUTPUT`, fetch the bytes back and put them into
+/// the inline fields the rest of the projector + SQLite expect.
+/// Pointer-less results (the common small-output case + every
+/// pre-#227 payload) short-circuit so the bucket isn't touched at
+/// all on the hot path.
+///
+/// One bucket lookup per overflowed field. Each Object Store get
+/// is bounded — async-nats streams chunks back over a transient
+/// consumer that completes when the metadata-recorded `chunks`
+/// count is exhausted. No timeout wrapper here yet; if a wedged
+/// bucket ever pins the projector we'd add one (matching the
+/// `ACK_TIMEOUT` shape in the agent's outbox.rs).
+async fn deref_overflow(js: &async_nats::jetstream::Context, r: &mut ExecResult) -> Result<()> {
+    if r.stdout_object.is_none() && r.stderr_object.is_none() {
+        return Ok(());
+    }
+    let store = js
+        .get_object_store(OBJECT_RESULT_OUTPUT)
+        .await
+        .with_context(|| format!("get_object_store {OBJECT_RESULT_OUTPUT}"))?;
+
+    if let Some(key) = r.stdout_object.clone() {
+        let bytes = read_object(&store, &key)
+            .await
+            .with_context(|| format!("deref stdout_object {key}"))?;
+        // The bucket holds UTF-8 (it came from PowerShell's UTF-8
+        // capture in process.rs). `from_utf8_lossy` keeps a single
+        // malformed byte from killing the whole row — same posture
+        // as the agent's capture side, which has used `from_utf8_lossy`
+        // since the CP932 incident.
+        r.stdout = String::from_utf8_lossy(&bytes).into_owned();
+        r.stdout_object = None;
+    }
+    if let Some(key) = r.stderr_object.clone() {
+        let bytes = read_object(&store, &key)
+            .await
+            .with_context(|| format!("deref stderr_object {key}"))?;
+        r.stderr = String::from_utf8_lossy(&bytes).into_owned();
+        r.stderr_object = None;
+    }
+    Ok(())
+}
+
+/// Inner: pull an Object Store key end-to-end into a Vec<u8>.
+/// Sized via `info().size` so the underlying allocation is
+/// one-shot — important when an operator runs a 4.6 MB stdout
+/// (the original repro for #227) so the read doesn't grow the
+/// Vec ten times en route.
+async fn read_object(
+    store: &async_nats::jetstream::object_store::ObjectStore,
+    key: &str,
+) -> Result<Vec<u8>> {
+    let mut obj = store.get(key).await.context("object_store.get")?;
+    let cap = obj.info().size;
+    let mut buf = Vec::with_capacity(cap);
+    obj.read_to_end(&mut buf).await.context("read_to_end")?;
+    Ok(buf)
 }
 
 /// Look up the registered job for `r.manifest_id`; if its manifest
@@ -420,6 +502,8 @@ mod tests {
             stderr: String::new(),
             started_at: chrono::Utc.with_ymd_and_hms(2026, 5, 20, 0, 0, 0).unwrap(),
             finished_at: chrono::Utc.with_ymd_and_hms(2026, 5, 20, 0, 0, 1).unwrap(),
+            stdout_object: None,
+            stderr_object: None,
             manifest_id: None,
         }
     }
