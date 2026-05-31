@@ -33,14 +33,20 @@ use sqlx::SqlitePool;
 /// debug builds and future on-disk growth without becoming a DoS vector.
 const PUBLISH_BODY_LIMIT: usize = 64 * 1024 * 1024;
 
-/// 256 MB upper bound for `POST /api/app-packages/{name}/{version}`.
+/// 8 GB upper bound for `POST /api/app-packages/{name}/{version}`.
 /// Bigger than `PUBLISH_BODY_LIMIT` because app packages cover
-/// third-party installers (Webex / Teams / Office plug-ins) whose
-/// MSI bundles routinely run 100-200 MB. If a fleet ships larger
-/// payloads (eg. multi-architecture installer bundles), the
-/// streaming refactor in `app_packages::download` notes the
-/// upgrade path.
-const APP_PACKAGE_BODY_LIMIT: usize = 256 * 1024 * 1024;
+/// third-party installers (Webex / Teams / Office plug-ins, plus
+/// the occasional multi-GB SDK / VM image) whose bundles can run
+/// from ~100 MB MSIs up to several-GB ISOs. The handler streams
+/// the multipart field directly into `ObjectStore::put` (chunked
+/// at ~128 KB per JetStream publish), so this cap caps the *cap*
+/// — RSS stays flat regardless of payload size.
+///
+/// Bump higher if a fleet ships > 8 GB single files; the JetStream
+/// stream backing `OBJECT_APP_PACKAGES` has no per-message size
+/// limit and the operator's only other constraint is
+/// `max_file_store` in `configs/nats-server.conf` (50 GB default).
+const APP_PACKAGE_BODY_LIMIT: usize = 8 * 1024 * 1024 * 1024;
 
 /// 4 MB upper bound for `POST /api/script-objects/{name}/{version}`.
 /// Manifest scripts are typically PowerShell / Bash bodies measured

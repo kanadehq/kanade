@@ -27,15 +27,15 @@
 //! an ambiguous path).
 
 use axum::Json;
-use axum::body::{Body, Bytes};
+use axum::body::Body;
 use axum::extract::{Multipart, Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use futures::StreamExt;
+use futures::{StreamExt, TryStreamExt};
 use kanade_shared::kv::OBJECT_APP_PACKAGES;
 use serde::Serialize;
 use tokio::io::AsyncReadExt;
-use tokio_util::io::ReaderStream;
+use tokio_util::io::{ReaderStream, StreamReader};
 use tracing::{info, warn};
 
 use super::AppState;
@@ -122,43 +122,23 @@ pub async fn publish(
     validate_segment("name", &name)?;
     validate_segment("version", &version)?;
 
-    // `field.bytes()` already returns a refcounted `Bytes` slice
-    // over the multipart body's buffer; cloning to `Vec<u8>` would
-    // double-allocate up to 256 MB. Hold the original instead and
-    // wrap with `Cursor<Bytes>` for `Object Store::put`.
-    let mut bytes: Option<Bytes> = None;
-    while let Some(field) = multipart.next_field().await.map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("read multipart field: {e}"),
-        )
-    })? {
-        match field.name().unwrap_or("") {
-            "file" => {
-                bytes = Some(
-                    field
-                        .bytes()
-                        .await
-                        .map_err(|e| (StatusCode::BAD_REQUEST, format!("read file field: {e}")))?,
-                );
-            }
-            other => {
-                warn!(
-                    field = other,
-                    "app_packages.publish: ignoring unknown multipart field"
-                );
-            }
-        }
-    }
-    let bytes = bytes.ok_or((StatusCode::BAD_REQUEST, "missing 'file' field".into()))?;
-    if bytes.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "'file' field is empty".into()));
-    }
-
-    let size = bytes.len() as u64;
+    // Stream the `file` field straight into `ObjectStore::put`
+    // instead of `field.bytes()` which buffers the entire payload
+    // in RAM. With the body limit at 8 GB (`APP_PACKAGE_BODY_LIMIT`)
+    // and multi-GB ISOs / multi-arch installers in scope, buffering
+    // would OOM the backend on the first concurrent upload. The
+    // streaming path keeps backend RSS flat at the multipart parser's
+    // internal chunk size (~8 KB) regardless of payload size; async-
+    // nats re-chunks at ~128 KB per JetStream publish, so the broker
+    // sees a stream of small messages too.
+    //
+    // `field.name()` is available before we touch the body, so we
+    // can dispatch on the field name and only consume the `file`
+    // field as a stream. Other fields (none in the current contract;
+    // operators sometimes attach metadata in scratch tests) get
+    // drained via `field.bytes()` into a discarded Vec so the
+    // multipart parser advances cleanly to the next field.
     let key = object_key(&name, &version);
-    info!(name, version, size, key, "app_packages: uploading");
-
     let store = state
         .jetstream
         .get_object_store(OBJECT_APP_PACKAGES)
@@ -172,12 +152,61 @@ pub async fn publish(
                 ),
             )
         })?;
-    let mut cursor = std::io::Cursor::new(bytes);
-    let meta = store.put(key.as_str(), &mut cursor).await.map_err(|e| {
-        warn!(error = %e, %key, "object_store.put");
-        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-    })?;
-    info!(name, version, digest = ?meta.digest, "app_packages: uploaded");
+
+    let mut meta = None;
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("read multipart field: {e}"),
+        )
+    })? {
+        // Snapshot the name before consuming `field` — `field.name()`
+        // borrows from `field`, and the `file` arm needs to take
+        // ownership for the streaming `put` call below.
+        let field_name = field.name().unwrap_or("").to_string();
+        match field_name.as_str() {
+            "file" => {
+                if meta.is_some() {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "multipart body has more than one 'file' field".into(),
+                    ));
+                }
+                info!(name, version, key, "app_packages: streaming upload");
+                // axum's `Field` implements `Stream<Item = Result<Bytes,
+                // MultipartError>>`; map the error so `StreamReader`'s
+                // `AsyncRead` impl can surface it as `io::Error`.
+                let body_stream = field.map_err(std::io::Error::other);
+                let mut reader = StreamReader::new(body_stream);
+                let m = store.put(key.as_str(), &mut reader).await.map_err(|e| {
+                    warn!(error = %e, %key, "object_store.put");
+                    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+                })?;
+                meta = Some(m);
+            }
+            _ => {
+                warn!(
+                    field = field_name,
+                    "app_packages.publish: draining unknown multipart field"
+                );
+                // Consume the body so the parser advances. Cheap on
+                // the small-field path (operators only send `file`
+                // today) and bounded by the request body limit.
+                let _ = field.bytes().await.map_err(|e| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        format!("drain field {field_name:?}: {e}"),
+                    )
+                })?;
+            }
+        }
+    }
+    let meta = meta.ok_or((StatusCode::BAD_REQUEST, "missing 'file' field".into()))?;
+    let size = meta.size as u64;
+    if size == 0 {
+        return Err((StatusCode::BAD_REQUEST, "'file' field is empty".into()));
+    }
+    info!(name, version, size, digest = ?meta.digest, "app_packages: uploaded");
 
     audit::record(
         &state.nats,
