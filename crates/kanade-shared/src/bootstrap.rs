@@ -28,8 +28,8 @@ use tracing::info;
 use crate::kv::{
     BUCKET_AGENT_CONFIG, BUCKET_AGENT_GROUPS, BUCKET_AGENTS_STATE, BUCKET_JOBS, BUCKET_JOBS_YAML,
     BUCKET_SCHEDULES, BUCKET_SCHEDULES_YAML, BUCKET_SCRIPT_CURRENT, BUCKET_SCRIPT_STATUS,
-    OBJECT_AGENT_RELEASES, OBJECT_APP_PACKAGES, OBJECT_SCRIPTS, STREAM_AUDIT, STREAM_EVENTS,
-    STREAM_EXEC, STREAM_INVENTORY, STREAM_OBS_EVENTS, STREAM_RESULTS,
+    OBJECT_AGENT_RELEASES, OBJECT_APP_PACKAGES, OBJECT_RESULT_OUTPUT, OBJECT_SCRIPTS, STREAM_AUDIT,
+    STREAM_EVENTS, STREAM_EXEC, STREAM_INVENTORY, STREAM_OBS_EVENTS, STREAM_RESULTS,
 };
 
 /// Idempotently create every NATS JetStream resource the kanade
@@ -263,6 +263,24 @@ pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
     .await
     .with_context(|| format!("create_object_store {OBJECT_SCRIPTS}"))?;
     info!(store = OBJECT_SCRIPTS, "ready");
+
+    // result_output — overflow stdout / stderr blobs for the
+    // `ExecResult` wire kind (#227). Anything larger than the agent's
+    // 256 KB inline threshold gets uploaded here under
+    // `<request_id>/{stdout,stderr}`; the backend's results
+    // projector derefs the pointer fields before INSERT so SQLite
+    // + the SPA see the full text inline. 30-day max_age matches
+    // STREAM_RESULTS so the lifetimes stay in lockstep — a row still
+    // resolvable in execution_results never points at a missing
+    // blob.
+    js.create_object_store(ObjectStoreConfig {
+        bucket: OBJECT_RESULT_OUTPUT.into(),
+        max_age: Duration::from_secs(SECS_PER_DAY * 30),
+        ..Default::default()
+    })
+    .await
+    .with_context(|| format!("create_object_store {OBJECT_RESULT_OUTPUT}"))?;
+    info!(store = OBJECT_RESULT_OUTPUT, "ready");
 
     Ok(())
 }

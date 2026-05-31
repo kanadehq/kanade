@@ -82,6 +82,42 @@ pub const OBJECT_APP_PACKAGES: &str = "app_packages";
 /// ad-hoc scripts can use any `<name>/<version>` they like.
 pub const OBJECT_SCRIPTS: &str = "scripts";
 
+/// Object Store holding **overflow stdout / stderr blobs** for the
+/// `ExecResult` wire kind (#227). The default NATS `max_payload` is
+/// 1 MB; a result whose stdout / stderr exceeds it would reject the
+/// publish and pin the agent's outbox in a reconnect loop. The agent
+/// uploads any stdout / stderr larger than `STDOUT_INLINE_THRESHOLD`
+/// (256 KB, picked at 1/4 of the default max_payload so the rest of
+/// the ExecResult fields fit alongside) into this bucket and replaces
+/// the inline field with [`crate::wire::ExecResult::stdout_object`] /
+/// `stderr_object` pointers. Backend's results projector derefs the
+/// pointers before INSERT so downstream consumers (SQLite, SPA
+/// Activity, inventory projector) see the full text the same way
+/// they always have.
+///
+/// Object keys follow the shape `<request_id>/{stdout,stderr}` so
+/// stdout + stderr for the same execution share a sibling prefix —
+/// makes `kanade jetstream` listings group naturally and keeps the
+/// per-key namespace tight against duplicate uploads.
+///
+/// Per-bucket retention (not a stream-wide TTL since async-nats
+/// object_store inherits stream config): matches `STREAM_RESULTS`'s
+/// 30-day retention so an operator who can still query the result
+/// row in SQLite can also fetch the original blob if the inline
+/// copy ever needs re-projection.
+pub const OBJECT_RESULT_OUTPUT: &str = "result_output";
+
+/// Inline threshold for `ExecResult.stdout` / `.stderr`. Larger
+/// payloads overflow into [`OBJECT_RESULT_OUTPUT`]. 256 KB = 1/4 of
+/// the NATS default `max_payload` (1 MB) so the rest of the
+/// ExecResult JSON (request_id, exec_id, etc.) easily fits below the
+/// publish-reject ceiling.
+///
+/// Lives next to the bucket constant rather than on the agent side
+/// so the SPA / future operator tooling can quote the same threshold
+/// when explaining "why this result has no inline stdout".
+pub const STDOUT_INLINE_THRESHOLD: usize = 256 * 1024;
+
 /// Key inside [`BUCKET_AGENT_CONFIG`] carrying the broadcast target
 /// version. Agents watch this key and self-update when their running
 /// version drifts.
@@ -159,6 +195,7 @@ mod tests {
             OBJECT_AGENT_RELEASES,
             OBJECT_APP_PACKAGES,
             OBJECT_SCRIPTS,
+            OBJECT_RESULT_OUTPUT,
         ] {
             assert!(
                 !name.contains('.'),
