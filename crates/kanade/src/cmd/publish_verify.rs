@@ -26,7 +26,7 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use async_nats::jetstream::object_store::ObjectStore;
 use sha2::{Digest, Sha256};
-use tokio::io::AsyncReadExt;
+use tokio::io::{self, AsyncReadExt};
 use tracing::warn;
 
 /// Maximum verification attempts (= 1 try + 4 retries). Per-attempt
@@ -118,18 +118,20 @@ async fn read_and_hash(store: &ObjectStore, key: &str) -> Result<(String, usize)
 /// Fallback when the server didn't compute a digest — just confirm
 /// the read-back returns the right number of bytes. Catches the
 /// "empty / truncated" cases without depending on hash equality.
+/// Streams into `io::sink()` so a 256 MB app package doesn't briefly
+/// double-allocate on the heap (Gemini #279 HIGH); the size is all
+/// we needed, never the bytes themselves.
 async fn verify_size_only(store: &ObjectStore, key: &str, expected_size: usize) -> Result<()> {
     let mut delay = Duration::from_millis(200);
     for attempt in 1..=MAX_ATTEMPTS {
         let res = async {
             let mut obj = store.get(key).await?;
-            let mut buf = Vec::with_capacity(expected_size);
-            obj.read_to_end(&mut buf).await?;
-            Ok::<usize, anyhow::Error>(buf.len())
+            let n = io::copy(&mut obj, &mut io::sink()).await?;
+            Ok::<u64, anyhow::Error>(n)
         }
         .await;
         match res {
-            Ok(got) if got == expected_size => return Ok(()),
+            Ok(got) if got as usize == expected_size => return Ok(()),
             Ok(got) => warn!(
                 attempt,
                 expected_size, got, "publish read-back size mismatch (#277, no digest)"
