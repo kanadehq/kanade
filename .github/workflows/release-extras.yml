@@ -4,43 +4,28 @@
 # in a separate workflow file or they'd be clobbered on every kata
 # apply. The release.yml comment block documents this contract.
 #
-# Three jobs run on every `v*.*.*` tag push:
+# One job runs on every `v*.*.*` tag push:
 #
-# 1. `publish-client-to-backend` — when `KANADE_BACKEND_URL` (+ optional
-#    `KANADE_BACKEND_TOKEN`) are configured as repo secrets, builds
-#    kanade-client.exe and POSTs it to that backend's
-#    `/api/app-packages/kanade-client/<version>` (#207). Closes the loop
-#    opened by #217 — `install-kanade-client.yaml` can then deploy the
-#    freshly-tagged client without an operator curl step in between.
-#    When the secrets are unset the job short-circuits with a notice
-#    annotation explaining what to set, so open forks aren't accidentally
-#    trying to POST somewhere they shouldn't.
+# `publish-client-to-backend` — when `KANADE_BACKEND_URL` (+ optional
+# `KANADE_BACKEND_TOKEN`) are configured as repo secrets, builds
+# kanade-client.exe and POSTs it to that backend's
+# `/api/app-packages/kanade-client/<version>` (#207). Closes the loop
+# opened by #217 — `install-kanade-client.yaml` can then deploy the
+# freshly-tagged client without an operator curl step in between.
+# When the secrets are unset the job short-circuits with a notice
+# annotation explaining what to set, so open forks aren't accidentally
+# trying to POST somewhere they shouldn't. This job stays here because
+# release.yml has no client→operator-backend path; it is NOT redundant
+# with the kata-managed pipeline.
 #
-# 2. `upload-windows-bins` — rebuilds kanade-agent.exe, kanade-backend.exe
-#    and kanade.exe for `x86_64-pc-windows-msvc` and `gh release upload`s
-#    them to the release release.yml just created. release.yml's Windows
-#    matrix entry runs `cargo build --release --workspace --bins` and
-#    reports success, but only one of the four workspace bins actually
-#    lands in `target/x86_64-pc-windows-msvc/release/` (currently
-#    kanade-client.exe; in v0.41.x it was kanade-backend.exe), so the
-#    GitHub Release ships with three Windows bins missing. Until the
-#    root cause is chased down in `pj-rust-workspace`, building the
-#    missing three per-package on a fresh windows-latest runner produces
-#    them reliably (same shape `publish-client-to-backend` has used since
-#    #221). `build-release.ps1`'s default GitHub-Releases path depends on
-#    these assets being present.
-#
-# 3. `publish-crates` — runs `cargo publish` for every publishable
-#    workspace member on Linux, decoupled from release.yml's
-#    Windows-gated `publish` job. release.yml's publish is
-#    `needs: build`, so the windows-msvc multi-bin drop skips
-#    crates.io on every tag (crates.io stalled at 0.43.1 while tags
-#    reached 0.43.7). crates.io needs no Windows binary, so we
-#    publish here until the build is fixed upstream in
-#    pj-rust-workspace. An "already uploaded" collision (with
-#    release.yml's publish, once it runs again, or a manual
-#    re-dispatch) is treated as a skip, so the job is safe to double-
-#    run.
+# History: this file also carried `upload-windows-bins` and
+# `publish-crates`, both workarounds for the windows-msvc multi-bin
+# hardlink race that failed release.yml's build and (via `needs:
+# build`) blocked the GitHub Release + crates.io publish. That race is
+# fixed at the source in pj-rust-workspace 0.3.1 (release.yml now
+# builds windows-msvc per-package, applied in #309), so release.yml's
+# native `release` + `publish` jobs cover all bins (incl. the Windows
+# client) and crates.io again — the two fallbacks were removed.
 
 name: Release extras
 
@@ -128,245 +113,3 @@ jobs:
           fi
           curl "${curl_args[@]}" "${url}"
           echo "Publish succeeded — operator can now `kanade exec install-kanade-client` without a manual curl step."
-
-  upload-windows-bins:
-    name: Upload Windows agent + backend + CLI to release
-    runs-on: windows-latest
-    # `gh release view "$tag"` further down assumes the ref is a tag;
-    # if someone runs `workflow_dispatch` against `main` (or any branch)
-    # the poll loop would just time out. Cheaper to skip the job
-    # outright. Both `push: tags` and `workflow_dispatch --ref vX.Y.Z`
-    # set `github.ref` to `refs/tags/vX.Y.Z`, so this guard only blocks
-    # dispatch-against-a-branch.
-    if: startsWith(github.ref, 'refs/tags/')
-    # Default top-level perms are `contents: read`; the release upload
-    # call below needs `contents: write` on this job only.
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
-      - uses: Swatinem/rust-cache@v2
-
-      # Per-package + sequential. `cargo build --workspace --bins` is
-      # exactly what release.yml runs and it silently drops three of
-      # four bins on windows-latest; building one package at a time
-      # mirrors what `publish-client-to-backend` already does for
-      # kanade-client and has been reliable since #221.
-      - name: Build missing Windows bins
-        run: |
-          cargo build -p kanade-agent   --release --target x86_64-pc-windows-msvc
-          cargo build -p kanade-backend --release --target x86_64-pc-windows-msvc
-          cargo build -p kanade         --release --target x86_64-pc-windows-msvc
-
-      - name: Upload to GitHub Release (with fallback creation)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
-          target=x86_64-pc-windows-msvc
-
-          # Verify our rebuilt bins exist first — without these there's
-          # nothing to upload, fallback or otherwise, so fail fast.
-          for bin in kanade-agent kanade-backend kanade; do
-            src="target/${target}/release/${bin}.exe"
-            if [[ ! -f "$src" ]]; then
-              echo "::error::expected $src missing — per-package cargo build did not produce the artifact"
-              exit 1
-            fi
-          done
-
-          # release.yml runs in parallel with us; the release isn't
-          # created until its `build` matrix (~13 min on Windows) plus
-          # the `release` job complete. Our cargo build above also
-          # takes ~13 min, so the release is usually already there by
-          # the time we reach this step — but poll for up to 10 min
-          # to cover slow runs.
-          for i in $(seq 1 20); do
-            if gh release view "$tag" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-              echo "Release $tag is available."
-              break
-            fi
-            echo "Release $tag not yet published (attempt $i/20), sleeping 30s..."
-            sleep 30
-          done
-
-          # Fallback: release.yml's hard-verify ("refusing to ship a
-          # partial release") fails the whole matrix entry when its
-          # workspace-wide build silently drops Windows bins — same
-          # underlying drop this job's per-package rebuild reliably
-          # works around. Without intervention the tag is stuck with
-          # NO release at all (operator has to hand-craft one).
-          #
-          # When the release is missing, create it ourselves using:
-          #   * the 3 Windows bins this job just rebuilt
-          #   * the Linux + macOS artifacts release.yml DID stage
-          #     successfully (downloaded from that run's artifacts)
-          # …so the tag ends with a complete release set, just authored
-          # by extras instead of release.yml. Auto-generated notes via
-          # `gh release create --generate-notes` matches what release.yml
-          # would have produced.
-          if ! gh release view "$tag" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            echo "::warning::Release $tag not created by release.yml — creating it from extras with rebuilt Windows bins + downloaded non-Windows artifacts."
-            mkdir -p _release_assets
-            for bin in kanade-agent kanade-backend kanade; do
-              cp "target/${target}/release/${bin}.exe" "_release_assets/${bin}-${target}.exe"
-            done
-            # Find the release.yml run for THIS tag (push event) and
-            # download its `dist-*` artifacts (Linux + macOS bins
-            # release.yml's matrix successfully built before its
-            # release job aborted on the Windows verify step).
-            release_run=$(gh run list --workflow release.yml \
-              --branch "$tag" \
-              --event push \
-              --limit 1 \
-              --json databaseId \
-              --jq '.[0].databaseId' || true)
-            if [[ -n "${release_run:-}" && "${release_run}" != "null" ]]; then
-              echo "Downloading non-Windows artifacts from release.yml run $release_run"
-              # `dist-*` is the per-target upload-artifact name; download
-              # them all, then flatten dist-<target>/ subdirs into
-              # _release_assets/ so `gh release create` sees a flat list.
-              tmp_dl=$(mktemp -d)
-              if gh run download "$release_run" --dir "$tmp_dl" --pattern 'dist-*' 2>/dev/null; then
-                find "$tmp_dl" -type f -exec cp -v {} _release_assets/ \;
-              else
-                echo "::notice::no dist-* artifacts on run $release_run — proceeding with Windows-only assets"
-              fi
-            else
-              echo "::notice::no release.yml run found for tag $tag — proceeding with Windows-only assets"
-            fi
-            ls -la _release_assets/
-            # `--generate-notes` mirrors release.yml's
-            # `generate_release_notes: true`; title=tag matches the
-            # softprops/action-gh-release default.
-            gh release create "$tag" _release_assets/* \
-              --repo "${GITHUB_REPOSITORY}" \
-              --title "$tag" \
-              --generate-notes
-            echo "Release $tag created by extras fallback."
-          fi
-
-          # At this point a release exists (created by either release.yml
-          # or our fallback above). (Re-)upload the Windows bins with
-          # `--clobber` so the operator never sees a partial set — even
-          # if release.yml had landed a stale Windows asset from an
-          # earlier matrix flake, --clobber replaces it.
-          for bin in kanade-agent kanade-backend kanade; do
-            src="target/${target}/release/${bin}.exe"
-            dst="${bin}-${target}.exe"
-            cp "$src" "$dst"
-            echo "Uploading $dst to release $tag"
-            gh release upload "$tag" "$dst" --clobber --repo "${GITHUB_REPOSITORY}"
-          done
-
-  publish-crates:
-    name: Publish workspace to crates.io
-    runs-on: ubuntu-latest
-    # release.yml owns crates.io publishing too, but its `publish` job
-    # is `needs: build` — so the windows-msvc multi-bin drop (which
-    # fails the build matrix) skips the crates.io publish on EVERY tag.
-    # That's why crates.io stalled at 0.43.1 while tags marched on to
-    # 0.43.7. crates.io publishing needs no Windows binary — it's a
-    # plain `cargo publish` on Linux — so we run it here, decoupled
-    # from the flaky Windows build, until pj-rust-workspace fixes the
-    # build upstream. Once that lands and release.yml's publish runs
-    # again, this job double-runs harmlessly: the already-published
-    # guard below treats "already uploaded" as success, so whichever
-    # job wins the race, the other no-ops.
-    #
-    # Runs on tag pushes (the normal release path) AND on manual
-    # `workflow_dispatch` against any ref. The dispatch path is what
-    # backfills crates.io when a version's tag predates this job
-    # (e.g. v0.43.7, tagged before publish-crates existed): dispatch on
-    # `main` and the checkout below publishes whatever version
-    # `Cargo.toml` currently holds. Unlike upload-windows-bins this job
-    # never does `gh release view "$tag"`, so a non-tag ref is fine.
-    if: >-
-      startsWith(github.ref, 'refs/tags/')
-      || github.event_name == 'workflow_dispatch'
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Publish workspace members (topo order, skip already-published)
-        shell: bash
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          if [[ -z "${CARGO_REGISTRY_TOKEN:-}" ]]; then
-            echo "::error::CARGO_REGISTRY_TOKEN secret not set — cannot publish to crates.io"
-            exit 1
-          fi
-
-          # Discovery + topo-sort mirror release.yml's publish job (kept
-          # byte-compatible so a future upstream fix is a drop-in). A
-          # member is publishable unless `publish` is `false`/`[]`; we
-          # publish deps before dependents so cargo finds each on the
-          # registry. See release.yml for the cargo-1.78 id-format note.
-          publishable=$(cargo metadata --format-version 1 \
-            | jq -r '
-                .workspace_members as $members
-                | .packages
-                  | map(select(.id as $id | $members | index($id)))
-                  | map(select(
-                      .publish == null
-                      or ((.publish | type) == "array" and (.publish | index("crates-io")))
-                    ))
-                  | .[].name
-              ')
-
-          if [ -z "$publishable" ]; then
-            echo "no publishable members; skipping crates.io step"
-            exit 0
-          fi
-
-          edges=$(cargo metadata --format-version 1 \
-            | jq -r '
-                .workspace_members as $members
-                | .packages
-                  | map(select(.id as $id | $members | index($id)))
-                  | .[]
-                  | .name as $parent
-                  | .dependencies[]?
-                  | select(.kind != "dev")
-                  | "\(.name) \($parent)"
-              ' \
-            | awk -v list="$publishable" 'BEGIN {
-                n = split(list, arr, /\n/);
-                for (i = 1; i <= n; i++) keep[arr[i]] = 1;
-              } { if ($1 in keep && $2 in keep) print }')
-
-          order=$( { echo "$edges" | tsort 2>/dev/null; echo "$publishable"; } \
-                   | awk '!seen[$0]++' \
-                   | grep -Fx -f <(echo "$publishable"))
-
-          echo "publish order:"
-          echo "$order" | sed 's/^/  - /'
-
-          for pkg in $order; do
-            echo "::group::cargo publish -p $pkg"
-            # Capture output so an "already uploaded" collision (this job
-            # racing release.yml's publish, or a manual re-dispatch of a
-            # tag) is a skip, not a hard failure. Any OTHER error still
-            # fails the step so real problems stay loud.
-            if out=$(cargo publish --locked -p "$pkg" 2>&1); then
-              echo "$out"
-            else
-              echo "$out"
-              if echo "$out" | grep -qiE "already (uploaded|exists)|is already uploaded|crate version .* is already"; then
-                echo "::notice::$pkg @ this version is already on crates.io — skipping"
-              else
-                echo "::error::cargo publish -p $pkg failed (see log above)"
-                exit 1
-              fi
-            fi
-            echo "::endgroup::"
-          done
