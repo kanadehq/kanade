@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use futures::StreamExt;
 use kanade_shared::subject;
 use kanade_shared::wire::{Command, RunAs, Shell};
-use rand::Rng;
+use rand::RngExt;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command as ProcessCommand;
 use tracing::{info, warn};

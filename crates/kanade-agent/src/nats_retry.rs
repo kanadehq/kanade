@@ -73,7 +73,7 @@ use std::time::Duration;
 
 use async_nats::connection::State;
 use async_nats::jetstream;
-use rand::Rng;
+use rand::RngExt;
 use tracing::{debug, info, warn};
 
 use crate::staleness::Tracker;

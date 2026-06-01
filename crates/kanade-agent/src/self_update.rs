@@ -232,7 +232,7 @@ async fn sleep_jitter(max: Duration) {
     let pick = if secs == 0 {
         0
     } else {
-        use rand::Rng;
+        use rand::RngExt;
         rand::rng().random_range(0..=secs)
     };
     info!(
