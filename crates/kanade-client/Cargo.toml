@@ -31,7 +31,7 @@ anyhow = { workspace = true }
 # Tauri 2.x runtime. No extra features yet — system tray /
 # notification plugins land in follow-up PRs as their handlers
 # come online.
-tauri = { version = "2", features = [] }
+tauri = { version = "2.11.2", features = [] }
 # Serde for the IPC commands' params / results.
 serde      = { workspace = true }
 serde_json = { workspace = true }
@@ -59,4 +59,4 @@ chrono  = { workspace = true }
 # preserves the file's original key order, formatting, and any
 # future comments — anything an `serde_json::Value` round-trip
 # would silently rewrite alphabetically (Gemini #266).
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2.6.2", features = [] }
