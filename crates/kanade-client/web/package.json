@@ -9,7 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.0.0"
+    "@tauri-apps/api": "^2.11.0"
   },
   "devDependencies": {
     "typescript": "^5.5.0",
