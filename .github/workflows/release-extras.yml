@@ -279,8 +279,16 @@ jobs:
     # guard below treats "already uploaded" as success, so whichever
     # job wins the race, the other no-ops.
     #
-    # Same tag guard as upload-windows-bins: only run for tag refs.
-    if: startsWith(github.ref, 'refs/tags/')
+    # Runs on tag pushes (the normal release path) AND on manual
+    # `workflow_dispatch` against any ref. The dispatch path is what
+    # backfills crates.io when a version's tag predates this job
+    # (e.g. v0.43.7, tagged before publish-crates existed): dispatch on
+    # `main` and the checkout below publishes whatever version
+    # `Cargo.toml` currently holds. Unlike upload-windows-bins this job
+    # never does `gh release view "$tag"`, so a non-tag ref is fine.
+    if: >-
+      startsWith(github.ref, 'refs/tags/')
+      || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
