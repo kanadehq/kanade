@@ -52,6 +52,12 @@
     "empty": "No data",
     "error": "Error"
   },
+  "pcPicker": {
+    "placeholder": "Search pc_id or hostname…",
+    "loading": "Searching…",
+    "noMatch": "No matching host",
+    "remove": "Remove {{pcId}}"
+  },
   "comingSoon": {
     "title": "{{name}} — coming soon",
     "description": "This page is on the SPA port plan. The endpoint behind it works today; the React rebuild is incremental."

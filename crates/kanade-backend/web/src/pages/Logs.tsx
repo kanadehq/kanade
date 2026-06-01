@@ -5,14 +5,13 @@ import { Trans, useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
 
 import { ErrorCard } from '@/components/ErrorCard';
+import { PcPicker } from '@/components/PcPicker';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
-import { apiFetch } from '@/lib/api';
-import type { AgentRow } from '@/lib/types';
 
 export function Logs() {
   const { t } = useTranslation('logs');
@@ -34,11 +33,6 @@ export function Logs() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pcId]);
-
-  const agentsQ = useQuery({
-    queryKey: ['agents'],
-    queryFn: () => apiFetch<AgentRow[]>('/api/agents'),
-  });
 
   const logsQ = useQuery({
     enabled: !!pcId,
@@ -79,12 +73,7 @@ export function Logs() {
         <CardContent className="grid grid-cols-1 sm:grid-cols-4 gap-3 p-4">
           <div className="space-y-1">
             <Label htmlFor="logs-pc">{t('filters.pcId')}</Label>
-            <Select id="logs-pc" value={pcId} onChange={(e) => setPcId(e.target.value)}>
-              <option value="">{t('filters.pickOne')}</option>
-              {(agentsQ.data ?? []).map((a) => (
-                <option key={a.pc_id} value={a.pc_id}>{a.pc_id}</option>
-              ))}
-            </Select>
+            <PcPicker id="logs-pc" value={pcId} onChange={setPcId} />
           </div>
           <div className="space-y-1">
             <Label htmlFor="logs-tail">{t('filters.tail')}</Label>

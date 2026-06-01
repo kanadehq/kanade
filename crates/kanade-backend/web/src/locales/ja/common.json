@@ -52,6 +52,12 @@
     "empty": "データなし",
     "error": "エラー"
   },
+  "pcPicker": {
+    "placeholder": "pc_id / ホスト名で検索…",
+    "loading": "検索中…",
+    "noMatch": "該当するホストがありません",
+    "remove": "{{pcId}} を削除"
+  },
   "comingSoon": {
     "title": "{{name}} — 準備中",
     "description": "このページは SPA 移植計画に含まれています。背後のエンドポイントは現時点で動作します。 React への再構築は段階的に進めています。"
