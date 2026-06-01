@@ -4,7 +4,7 @@
 # in a separate workflow file or they'd be clobbered on every kata
 # apply. The release.yml comment block documents this contract.
 #
-# Two jobs run on every `v*.*.*` tag push:
+# Three jobs run on every `v*.*.*` tag push:
 #
 # 1. `publish-client-to-backend` — when `KANADE_BACKEND_URL` (+ optional
 #    `KANADE_BACKEND_TOKEN`) are configured as repo secrets, builds
@@ -29,6 +29,18 @@
 #    them reliably (same shape `publish-client-to-backend` has used since
 #    #221). `build-release.ps1`'s default GitHub-Releases path depends on
 #    these assets being present.
+#
+# 3. `publish-crates` — runs `cargo publish` for every publishable
+#    workspace member on Linux, decoupled from release.yml's
+#    Windows-gated `publish` job. release.yml's publish is
+#    `needs: build`, so the windows-msvc multi-bin drop skips
+#    crates.io on every tag (crates.io stalled at 0.43.1 while tags
+#    reached 0.43.7). crates.io needs no Windows binary, so we
+#    publish here until the build is fixed upstream in
+#    pj-rust-workspace. An "already uploaded" collision (with
+#    release.yml's publish, once it runs again, or a manual
+#    re-dispatch) is treated as a skip, so the job is safe to double-
+#    run.
 
 name: Release extras
 
@@ -250,4 +262,103 @@ jobs:
             cp "$src" "$dst"
             echo "Uploading $dst to release $tag"
             gh release upload "$tag" "$dst" --clobber --repo "${GITHUB_REPOSITORY}"
+          done
+
+  publish-crates:
+    name: Publish workspace to crates.io
+    runs-on: ubuntu-latest
+    # release.yml owns crates.io publishing too, but its `publish` job
+    # is `needs: build` — so the windows-msvc multi-bin drop (which
+    # fails the build matrix) skips the crates.io publish on EVERY tag.
+    # That's why crates.io stalled at 0.43.1 while tags marched on to
+    # 0.43.7. crates.io publishing needs no Windows binary — it's a
+    # plain `cargo publish` on Linux — so we run it here, decoupled
+    # from the flaky Windows build, until pj-rust-workspace fixes the
+    # build upstream. Once that lands and release.yml's publish runs
+    # again, this job double-runs harmlessly: the already-published
+    # guard below treats "already uploaded" as success, so whichever
+    # job wins the race, the other no-ops.
+    #
+    # Same tag guard as upload-windows-bins: only run for tag refs.
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Publish workspace members (topo order, skip already-published)
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${CARGO_REGISTRY_TOKEN:-}" ]]; then
+            echo "::error::CARGO_REGISTRY_TOKEN secret not set — cannot publish to crates.io"
+            exit 1
+          fi
+
+          # Discovery + topo-sort mirror release.yml's publish job (kept
+          # byte-compatible so a future upstream fix is a drop-in). A
+          # member is publishable unless `publish` is `false`/`[]`; we
+          # publish deps before dependents so cargo finds each on the
+          # registry. See release.yml for the cargo-1.78 id-format note.
+          publishable=$(cargo metadata --format-version 1 \
+            | jq -r '
+                .workspace_members as $members
+                | .packages
+                  | map(select(.id as $id | $members | index($id)))
+                  | map(select(
+                      .publish == null
+                      or ((.publish | type) == "array" and (.publish | index("crates-io")))
+                    ))
+                  | .[].name
+              ')
+
+          if [ -z "$publishable" ]; then
+            echo "no publishable members; skipping crates.io step"
+            exit 0
+          fi
+
+          edges=$(cargo metadata --format-version 1 \
+            | jq -r '
+                .workspace_members as $members
+                | .packages
+                  | map(select(.id as $id | $members | index($id)))
+                  | .[]
+                  | .name as $parent
+                  | .dependencies[]?
+                  | select(.kind != "dev")
+                  | "\(.name) \($parent)"
+              ' \
+            | awk -v list="$publishable" 'BEGIN {
+                n = split(list, arr, /\n/);
+                for (i = 1; i <= n; i++) keep[arr[i]] = 1;
+              } { if ($1 in keep && $2 in keep) print }')
+
+          order=$( { echo "$edges" | tsort 2>/dev/null; echo "$publishable"; } \
+                   | awk '!seen[$0]++' \
+                   | grep -Fx -f <(echo "$publishable"))
+
+          echo "publish order:"
+          echo "$order" | sed 's/^/  - /'
+
+          for pkg in $order; do
+            echo "::group::cargo publish -p $pkg"
+            # Capture output so an "already uploaded" collision (this job
+            # racing release.yml's publish, or a manual re-dispatch of a
+            # tag) is a skip, not a hard failure. Any OTHER error still
+            # fails the step so real problems stay loud.
+            if out=$(cargo publish --locked -p "$pkg" 2>&1); then
+              echo "$out"
+            else
+              echo "$out"
+              if echo "$out" | grep -qiE "already (uploaded|exists)|is already uploaded|crate version .* is already"; then
+                echo "::notice::$pkg @ this version is already on crates.io — skipping"
+              else
+                echo "::error::cargo publish -p $pkg failed (see log above)"
+                exit 1
+              fi
+            fi
+            echo "::endgroup::"
           done
