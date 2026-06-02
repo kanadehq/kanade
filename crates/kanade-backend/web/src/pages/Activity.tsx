@@ -6,6 +6,7 @@ import { Link } from 'react-router-dom';
 import { toast } from 'sonner';
 
 import { ErrorCard } from '@/components/ErrorCard';
+import { PcPicker } from '@/components/PcPicker';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -168,11 +169,13 @@ export function Activity() {
         <CardContent className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 p-4">
           <div className="space-y-1">
             <Label htmlFor="res-pc">{t('filters.pcId')}</Label>
-            <Input
+            {/* filter mode keeps free text so the regex/substring backend filter still works */}
+            <PcPicker
+              mode="filter"
               id="res-pc"
               placeholder={t('filters.placeholders.pcId')}
               value={pcId}
-              onChange={(e) => setPcId(e.target.value)}
+              onChange={setPcId}
             />
           </div>
           <div className="space-y-1">
