@@ -5,6 +5,7 @@ import { Trans, useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
 
 import { ErrorCard } from '@/components/ErrorCard';
+import { PcPicker } from '@/components/PcPicker';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Label } from '@/components/ui/label';
@@ -216,10 +217,8 @@ export function Inventory() {
         <CardContent className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-4">
           <div className="space-y-1">
             <Label htmlFor="inv-pc">{t('viewLabel')}</Label>
-            <Select id="inv-pc" value={pcId} onChange={(e) => setPcId(e.target.value)}>
-              <option value="">{t('fleetOption')}</option>
-              {pcId && <option value={pcId}>{pcId}</option>}
-            </Select>
+            {/* single-select; clearing the box returns to the fleet view */}
+            <PcPicker id="inv-pc" value={pcId} onChange={setPcId} placeholder={t('fleetOption')} />
           </div>
           <div className="space-y-1 text-xs text-muted self-end pb-2">
             <Trans
