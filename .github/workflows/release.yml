@@ -107,11 +107,16 @@ jobs:
 
           # (package, bin) pairs for every [[bin]] target in the
           # workspace — drives the verify + deps-recovery below.
+          # `tr -d '\r'`: jq on windows-latest emits CRLF, which would
+          # otherwise leave a trailing \r on each bin name — it then
+          # rides into the recovered/staged filenames as
+          # `kanade-agent\r-<target>.exe` (a corrupt asset name).
           bins_list=$(cargo metadata --no-deps --format-version 1 \
             | jq -r '.packages[] as $p
                        | $p.targets[]
                        | select(.kind | index("bin"))
                        | "\($p.name)\t\(.name)"' \
+            | tr -d '\r' \
             | sort -u)
 
           cargo build --release --workspace --bins --target "$TARGET"
@@ -186,10 +191,14 @@ jobs:
           # `cargo metadata --no-deps` enumerates every workspace
           # member's targets; we keep only `bin` kinds so libs flow
           # through the `publish` job instead of becoming downloads.
+          # `tr -d '\r'` strips the CRLF jq emits on windows-latest (see
+          # the build step) so the staged `dist/<bin>-<target>.exe`
+          # name doesn't pick up a stray \r.
           bins=$(cargo metadata --no-deps --format-version 1 \
             | jq -r '.packages[].targets[]
                        | select(.kind | index("bin"))
                        | .name' \
+            | tr -d '\r' \
             | sort -u)
           if [ -z "$bins" ]; then
             echo "::warning::no [[bin]] targets in this workspace; nothing to stage"
