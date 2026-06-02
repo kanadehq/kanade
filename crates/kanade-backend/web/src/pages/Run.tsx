@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 
 import { ErrorCard } from '@/components/ErrorCard';
+import { PcPicker } from '@/components/PcPicker';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -63,7 +64,7 @@ export function Run() {
           <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
             <div>
               <Label>{t('fields.pcId')}</Label>
-              <Input value={pcId} onChange={(e) => setPcId(e.target.value)} placeholder={t('placeholders.pcId')} />
+              <PcPicker value={pcId} onChange={setPcId} placeholder={t('placeholders.pcId')} />
             </div>
             <div>
               <Label>{t('fields.shell')}</Label>
