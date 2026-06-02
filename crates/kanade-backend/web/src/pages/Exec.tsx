@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 
 import { ErrorCard } from '@/components/ErrorCard';
+import { PcPicker } from '@/components/PcPicker';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -41,7 +42,7 @@ export function Exec() {
   const [jobId, setJobId] = useState('');
   const [mode, setMode] = useState<TargetMode>('all');
   const [groups, setGroups] = useState('');
-  const [pcs, setPcs] = useState('');
+  const [pcs, setPcs] = useState<string[]>([]);
   const [jitter, setJitter] = useState('');
 
   const jobsQ = useQuery({
@@ -64,7 +65,7 @@ export function Exec() {
       target: {
         all: mode === 'all',
         groups: mode === 'groups' ? splitCsv(groups) : [],
-        pcs: mode === 'pcs' ? splitCsv(pcs) : [],
+        pcs: mode === 'pcs' ? pcs : [],
       },
     };
     if (jitter.trim()) plan.jitter = jitter.trim();
@@ -74,7 +75,7 @@ export function Exec() {
   const targetReady =
     mode === 'all'
       || (mode === 'groups' && splitCsv(groups).length > 0)
-      || (mode === 'pcs' && splitCsv(pcs).length > 0);
+      || (mode === 'pcs' && pcs.length > 0);
 
   return (
     <div className="space-y-4">
@@ -150,12 +151,8 @@ export function Exec() {
               {mode === 'pcs' && (
                 <div className="space-y-1">
                   <Label htmlFor="exec-pcs">{t('fields.pcs')}</Label>
-                  <Input
-                    id="exec-pcs"
-                    value={pcs}
-                    onChange={(e) => setPcs(e.target.value)}
-                    placeholder={t('placeholders.pcs')}
-                  />
+                  {/* multi-select: pick several existing PCs as removable chips */}
+                  <PcPicker mode="multi" id="exec-pcs" value={pcs} onChange={setPcs} />
                 </div>
               )}
 
