@@ -77,6 +77,12 @@ windows = { version = "0.62.2", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Environment",
     "Win32_System_IO",
+    # v0.43: Job Objects so a kill/timeout tears down the whole
+    # process tree (host + descendants), not just the immediate
+    # powershell/cmd. Fixes the "強制終了 → 実行中 のまま" hang where
+    # an orphaned grandchild kept the stdout pipe open and the agent
+    # never returned an ExecResult.
+    "Win32_System_JobObjects",
     "Win32_System_Pipes",
     "Win32_System_RemoteDesktop",
     "Win32_System_StationsAndDesktops",
