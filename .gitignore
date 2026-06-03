@@ -19,6 +19,11 @@ Cargo.lock.bak
 # the cargo install entirely. Multi-GB once primed; never commit.
 /.cargo-stage-cache/
 
+# Embedded SPA build output (rust-embed bakes this at compile time).
+# Rebuilt by `cargo make web-build` in CI before cargo build/publish,
+# so it's no longer committed.
+/crates/kanade-backend/web/dist/
+
 # NOTE: kata-managed base block (begin/end markers below) sits just
 # after this point. The Rust ignores above live OUTSIDE the kata
 # section so they're owned by the project, not the pj-base template.
