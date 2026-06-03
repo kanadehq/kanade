@@ -13,7 +13,7 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::outbox;
-use crate::process::{ExecOutcome, run_command_with_kill};
+use crate::process::{ExecOutcome, apply_jitter, run_command_with_kill};
 use crate::script_cache::ScriptCache;
 use crate::staleness::{StalenessDecision, Tracker, decide as staleness_decide};
 
@@ -246,6 +246,20 @@ pub async fn handle_command(
             }
         }
     }
+
+    // Jitter BEFORE we log "executing command" and stamp `started_at`,
+    // so the log line, the recorded duration (`finished_at -
+    // started_at`), and the events.started lifecycle event all reflect
+    // the real execution start — not the per-PC fleet-stagger wait. It
+    // previously sat inside `run_command_with_kill`, i.e. after the
+    // timestamp, so a 5-min jitter inflated the dashboard 所要時間 well
+    // past the job's `timeout:` even though the script itself finished
+    // in seconds (the timeout arm only ever bounded the post-jitter
+    // execution), and "executing command" logged minutes before
+    // anything ran. apply_jitter emits its own "applying jitter" line,
+    // so the wait is still visible in the logs. The "実行中" view
+    // likewise no longer lights up during the jitter wait.
+    apply_jitter(&cmd).await;
 
     info!(
         cmd_id = %cmd.id,

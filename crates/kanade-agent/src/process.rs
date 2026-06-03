@@ -232,6 +232,33 @@ pub enum ExecOutcome {
     },
 }
 
+/// Spec §2.5.1 jitter — sleep a random `[0, jitter_secs)` interval so a
+/// wide fan-out doesn't hit the OS at the same instant on every PC.
+///
+/// Called from `handle_command` *before* `started_at` is stamped (it used
+/// to live at the top of `run_command_with_kill`, i.e. after the
+/// timestamp). Keeping the stagger-wait outside the timing window means
+/// the recorded duration (`finished_at - started_at`) measures only the
+/// script's real runtime — matching `timeout:`, which has always bounded
+/// the post-jitter execution alone. Ad-hoc `kanade run` sets
+/// `jitter_secs: None`, so this is a no-op there.
+///
+/// The `> 1` guard (not `> 0`): `jitter_secs == 1` would make the range
+/// `0..1`, which `random_range` collapses to a constant `0` — a
+/// zero-duration sleep plus a misleading "applying jitter" log line. Skip
+/// it so a 1-second jitter config is a true no-op.
+pub async fn apply_jitter(cmd: &Command) {
+    if let Some(j) = cmd.jitter_secs.filter(|&s| s > 1) {
+        let secs = rand::rng().random_range(0..j);
+        info!(
+            jitter_secs = j,
+            sleep_secs = secs,
+            "applying jitter before exec"
+        );
+        tokio::time::sleep(Duration::from_secs(secs)).await;
+    }
+}
+
 /// Spawn the command's shell child, race wait / kill / timeout, collect
 /// stdout+stderr.
 ///
@@ -243,19 +270,6 @@ pub async fn run_command_with_kill(
     client: &async_nats::Client,
     cmd: &Command,
 ) -> Result<ExecOutcome> {
-    // Spec §2.5.1 jitter — sleep a random `[0, jitter_secs)` interval
-    // before spawning the child so a wide fan-out doesn't hit the OS at
-    // the same instant on every PC.
-    if let Some(j) = cmd.jitter_secs.filter(|&s| s > 0) {
-        let secs = rand::rng().random_range(0..j);
-        info!(
-            jitter_secs = j,
-            sleep_secs = secs,
-            "applying jitter before exec"
-        );
-        tokio::time::sleep(Duration::from_secs(secs)).await;
-    }
-
     // v0.21: run_as: user / system_gui take a separate Win32 path
     // (CreateProcessAsUserW). System (default) stays on tokio::process
     // — backward-compatible for every pre-v0.21 manifest in the wild.
