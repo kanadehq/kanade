@@ -288,26 +288,48 @@ path = 'logs/backend.log'
 level = 'info'
 ```
 
-## Authentication
+## Authentication & RBAC
 
 `/api/*` is protected by a single middleware (`crates/kanade-backend/src/auth.rs`).
-Three modes:
+A request is admitted by the first of these that matches:
 
 | Mode | Selector | Use for |
 |---|---|---|
-| open | `KANADE_AUTH_DISABLE=1` | local dev, `cargo run` |
-| static bearer | `StaticToken` registry value or `$KANADE_AUTH_STATIC_TOKEN` | single-operator fleets — paste the same secret on the SPA login + `kanade` CLI |
-| HS256 JWT | `JwtSecret` registry value or `$KANADE_JWT_SECRET` | full multi-user setup; sign tokens out-of-band with `aud=kanade` |
+| open | `KANADE_AUTH_DISABLE=1` | local dev, `cargo run` (synthesises an admin) |
+| service token | `StaticToken` registry value or `$KANADE_AUTH_STATIC_TOKEN` | CI / non-interactive automation — **admin-equivalent**, no account row |
+| account JWT | username + password → `POST /api/auth/login` mints an HS256 token | the normal path for humans; carries the caller's role |
 
-Precedence: `DISABLE` > static bearer > JWT. Backend with none of the three
-set falls back to a hard-coded dev secret and logs a loud warning — fine for
-one-shot debugging, **never** for production.
+A non-matching bearer falls through from the service token to JWT validation,
+so a service token and per-user JWTs coexist. With none of the three set the
+backend falls back to a hard-coded dev secret and logs a loud warning — fine
+for one-shot debugging, **never** for production.
 
-Each secret resolves registry-first, env-second:
+### Roles
+
+Accounts live in the SQLite `users` table (argon2id password hashes). Each
+account has one hierarchical role — `admin ⊇ operator ⊇ viewer`:
+
+| Role | Can |
+|---|---|
+| `viewer` | read-only — every `GET /api/*` (dashboards, inventory, logs, audit) |
+| `operator` | viewer **+** fleet mutations (exec / kill / schedules / jobs / config / releases / uploads) |
+| `admin` | operator **+** account management (create / role / disable / delete) |
+
+Enforcement is server-side (`route_layer` guards reject 403); the SPA also
+hides controls above the caller's role. **Role and `disabled` are re-read from
+the DB on every request**, so disabling an account or changing its role takes
+effect immediately — existing tokens don't stay valid until expiry.
+
+### Secrets
+
+`JwtSecret` signs and verifies the minted tokens; it's the fleet-wide skeleton
+key, so it lives **only on the backend host**. Each secret resolves
+registry-first, env-second:
 
 ```text
-StaticToken:  HKLM\SOFTWARE\kanade\backend\StaticToken  →  $KANADE_AUTH_STATIC_TOKEN
-JwtSecret:    HKLM\SOFTWARE\kanade\backend\JwtSecret    →  $KANADE_JWT_SECRET
+StaticToken:           HKLM\SOFTWARE\kanade\backend\StaticToken            →  $KANADE_AUTH_STATIC_TOKEN
+JwtSecret:             HKLM\SOFTWARE\kanade\backend\JwtSecret              →  $KANADE_JWT_SECRET
+BootstrapAdminPassword:HKLM\SOFTWARE\kanade\backend\BootstrapAdminPassword →  $KANADE_BOOTSTRAP_ADMIN_PASSWORD
 ```
 
 Provision the registry values with `deploy-backend.ps1` so the script can
@@ -315,26 +337,42 @@ strip non-admin ACEs from the key (SYSTEM + Administrators read only). The
 env vars stay for `cargo run` / `cargo make dev` / non-Windows hosts.
 `KANADE_AUTH_DISABLE` stays env-only — it's a presence flag, not a secret.
 
+> **Note:** the registry values are stored as plaintext `REG_SZ` protected by
+> a SYSTEM + Administrators ACL. That defends against non-admin users but not
+> against offline disk / hive-backup theft; DPAPI / external-vault hardening is
+> a tracked follow-up.
+
+### Bootstrapping the first admin
+
+On startup, if the `users` table is empty the backend seeds a single admin
+from `BootstrapAdminPassword` (registry) / `$KANADE_BOOTSTRAP_ADMIN_PASSWORD`
+(username defaults to `admin`, override with `$KANADE_BOOTSTRAP_ADMIN_USER`).
+The seeded account is flagged must-change-password. If no bootstrap password is
+configured, no admin is seeded (a warning is logged) — set one and restart, or
+fall back to the static service token.
+
+### Clients
+
 Clients send `Authorization: Bearer <token>` on every `/api/*` request:
 
-- **SPA**: stores the token in `localStorage`; click `login` in the top-right
-  nav to paste, `logout` to clear. A 401 from the backend auto-clears the
-  stored token and re-prompts.
-- **CLI**: reads `$env:KANADE_AUTH_TOKEN`. Set it once per shell session
-  (or export it from a shell profile). The CLI sends the same header
-  regardless of which auth mode the backend is running.
+- **SPA**: sign in with username + password on the login page; the token is
+  kept in `localStorage`. Role is shown in the sidebar; admins get an
+  **Accounts** page. A 401 auto-clears the token and re-prompts.
+- **CLI**: `kanade login` exchanges credentials for a token; export it as
+  `$env:KANADE_AUTH_TOKEN` for subsequent commands. `kanade account …`
+  (admin) manages users.
 
 ```powershell
 # Backend side — production (registry, hardened ACL)
-.\deploy-backend.ps1 -StaticToken 'kanade-fleet-secret-2026'
+.\deploy-backend.ps1 -JwtSecret 'sign-key-2026' -BootstrapAdminPassword 'change-me-now'
 
-# Backend side — dev (env, current shell only)
-$env:KANADE_AUTH_STATIC_TOKEN = "kanade-fleet-secret-2026"
-.\deploy-backend.ps1
+# Operator side (CLI) — log in, then run fleet commands
+$env:KANADE_AUTH_TOKEN = (kanade login --username admin --token-only)
+kanade account create alice --role operator      # admin only
+kanade exec jobs\echo-test.yaml                  # operator+
 
-# Operator side (CLI)
-$env:KANADE_AUTH_TOKEN = "kanade-fleet-secret-2026"
-kanade exec jobs\echo-test.yaml
+# CI / automation — admin-equivalent service token, no login round-trip
+$env:KANADE_AUTH_TOKEN = "kanade-fleet-secret-2026"   # matches backend StaticToken
 ```
 
 ### NATS authentication

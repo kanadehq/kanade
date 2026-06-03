@@ -116,6 +116,16 @@ pub(crate) async fn run_backend() -> Result<()> {
         .context("run migrations")?;
     info!("sqlite migrations applied");
 
+    // RBAC bootstrap: seed the first admin account if the users table
+    // is empty (chicken-and-egg). Reads the password registry-first
+    // (HKLM\SOFTWARE\kanade\backend\BootstrapAdminPassword) /
+    // env-second ($KANADE_BOOTSTRAP_ADMIN_PASSWORD); a loud warning is
+    // logged either way. Without it, the only entry is the static
+    // service token / KANADE_AUTH_DISABLE.
+    if let Err(e) = api::accounts::seed_bootstrap_admin(&pool).await {
+        warn!(error = %e, "bootstrap admin seed failed");
+    }
+
     // NATS connect + JetStream context. The shared helper picks up
     // $KANADE_NATS_TOKEN when set and attaches it as the bearer
     // token; same env name + same semantics across agent / backend /
@@ -340,7 +350,12 @@ pub(crate) async fn run_backend() -> Result<()> {
     }
 
     let app = api::router(app_state)
-        .layer(axum::middleware::from_fn(auth::verify))
+        // RBAC middleware needs the SQLite pool to re-read the caller's
+        // authoritative role / disabled flag on every request.
+        .layer(axum::middleware::from_fn_with_state(
+            pool.clone(),
+            auth::verify,
+        ))
         .layer(TraceLayer::new_for_http());
 
     let listener = TcpListener::bind(&cfg.server.bind)

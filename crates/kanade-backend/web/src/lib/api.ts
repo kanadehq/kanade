@@ -11,6 +11,8 @@
  *      unauthenticated.
  */
 
+import { toast } from 'sonner';
+
 export const AUTH_EXPIRED_EVENT = 'kanade:auth-expired';
 const TOKEN_KEY = 'kanade_token';
 
@@ -54,6 +56,13 @@ async function apiFetchRaw(path: string, init: RequestInit = {}): Promise<{ res:
     // to /login. We still throw the ApiError so the calling query
     // surfaces an error state instead of returning undefined.
     window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
+  }
+  // 403 = authenticated but under-privileged (RBAC). The SPA hides most
+  // operator/admin controls from viewers, but anything that slips
+  // through (deep links, stale UI) gets consistent feedback here rather
+  // than a silent failure.
+  if (res.status === 403) {
+    toast.error(text || 'You do not have permission to perform this action.');
   }
   if (!res.ok) {
     throw new ApiError(res.status, res.statusText, text);

@@ -12,6 +12,7 @@ import { JsonOutput } from '@/components/ui/json-output';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { apiFetch } from '@/lib/api';
+import { useAuth } from '@/lib/auth';
 
 type JobRow = { id: string; version: string; description: string | null };
 
@@ -39,6 +40,8 @@ function splitCsv(s: string): string[] {
 
 export function Exec() {
   const { t } = useTranslation('exec');
+  const { hasRole } = useAuth();
+  const canOperate = hasRole('operator');
   const [jobId, setJobId] = useState('');
   const [mode, setMode] = useState<TargetMode>('all');
   const [groups, setGroups] = useState('');
@@ -170,13 +173,17 @@ export function Exec() {
 
           <Button
             onClick={onFire}
-            disabled={!jobId || !targetReady || mut.isPending}
+            disabled={!canOperate || !jobId || !targetReady || mut.isPending}
+            title={canOperate ? undefined : t('rbac.operatorRequired', { ns: 'common' })}
           >
             {mut.isPending
               ? <Loader2 className="size-4 animate-spin" />
               : <Send className="size-4" />}
             {t('submit', { jobId: jobId || t('submitFallback') })}
           </Button>
+          {!canOperate && (
+            <p className="text-xs text-muted mt-2">{t('rbac.operatorRequired', { ns: 'common' })}</p>
+          )}
         </CardContent>
       </Card>
 

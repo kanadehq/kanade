@@ -1,3 +1,4 @@
+pub mod accounts;
 pub mod agent_config;
 pub mod agent_groups;
 pub mod agent_logs;
@@ -25,7 +26,7 @@ pub mod yaml_body;
 
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, FromRef};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, patch, post, put};
 use sqlx::SqlitePool;
 
 /// 64 MB upper bound for `POST /api/agents/publish` multipart bodies.
@@ -87,8 +88,27 @@ impl FromRef<AppState> for SqlitePool {
 }
 
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    // RBAC is layered per group, not per handler:
+    //   * `base`     — public health + login, plus read-only (`GET`)
+    //                  and self-service routes that any authenticated
+    //                  caller (viewer+) may hit. `/api/auth/login` is
+    //                  allow-listed in `auth::verify`, so it is reachable
+    //                  without a token.
+    //   * `operator` — fleet mutations (exec / kill / config writes /
+    //                  releases / object-store uploads). `route_layer`
+    //                  with `auth::require_operator` rejects viewers 403.
+    //   * `admin`    — account management. `route_layer` with
+    //                  `auth::require_admin`.
+    //
+    // Merging combines same-path/different-method routers, so e.g.
+    // `GET /api/config` (base) and `PUT /api/config` (operator) coexist
+    // with the read open to viewers and the write gated to operators.
+    let base = Router::new()
         .route("/health", get(health))
+        // RBAC: credential login (public), self identity, self password.
+        .route("/api/auth/login", post(accounts::login))
+        .route("/api/auth/me", get(accounts::me))
+        .route("/api/auth/change-password", post(accounts::change_password))
         .route("/api/agents", get(agents::list))
         .route("/api/agents/{pc_id}", get(agents::detail))
         // v0.40 Part 1: per-PC host-wide perf time-series. Bucketed
@@ -129,36 +149,14 @@ pub fn router(state: AppState) -> Router {
             "/api/agents/{pc_id}/processes/timeline",
             get(process_perf::timeline),
         )
-        .route(
-            "/api/agents/{pc_id}/groups",
-            get(agent_groups::list_groups)
-                .put(agent_groups::set_groups)
-                .post(agent_groups::add_group),
-        )
-        .route(
-            "/api/agents/{pc_id}/groups/{group}",
-            delete(agent_groups::remove_group),
-        )
+        .route("/api/agents/{pc_id}/groups", get(agent_groups::list_groups))
         .route(
             "/api/agents/{pc_id}/effective_config",
             get(agent_config::effective),
         )
-        .route(
-            "/api/config",
-            get(agent_config::get_global).put(agent_config::put_global),
-        )
-        .route(
-            "/api/groups/{name}/config",
-            get(agent_config::get_group)
-                .put(agent_config::put_group)
-                .delete(agent_config::delete_group),
-        )
-        .route(
-            "/api/pcs/{pc_id}/config",
-            get(agent_config::get_pc)
-                .put(agent_config::put_pc)
-                .delete(agent_config::delete_pc),
-        )
+        .route("/api/config", get(agent_config::get_global))
+        .route("/api/groups/{name}/config", get(agent_config::get_group))
+        .route("/api/pcs/{pc_id}/config", get(agent_config::get_pc))
         .route("/api/results", get(results::list))
         // v0.29 / Issue #19: path param is now `result_id` (was
         // `request_id`); pre-v0.29 rows backfilled `result_id = request_id`
@@ -167,22 +165,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/executions", get(executions::list))
         .route("/api/executions/{exec_id}", get(executions::detail))
         .route("/api/audit", get(audit::list))
-        .route("/api/exec/{job_id}", post(exec::create))
-        .route(
-            "/api/schedules",
-            get(schedules::list).post(schedules::create),
-        )
-        .route("/api/schedules/{id}", delete(schedules::delete))
-        .route("/api/schedules/{id}/disable", post(schedules::disable))
-        .route("/api/run", post(run::run))
-        .route("/api/agents/{pc_id}/ping", post(run::ping))
+        .route("/api/schedules", get(schedules::list))
         .route("/api/scripts/status", get(scripts::list_status))
-        .route("/api/scripts/{cmd_id}/revoke", post(scripts::revoke))
-        .route("/api/scripts/{cmd_id}/unrevoke", post(scripts::unrevoke))
-        .route("/api/jobs", get(jobs::list).post(jobs::create))
-        .route("/api/jobs/{id}", delete(jobs::delete))
+        .route("/api/jobs", get(jobs::list))
         .route("/api/jobs/{id}/yaml", get(jobs::get_yaml))
-        .route("/api/jobs/{job_id}/kill", post(jobs::kill))
         .route("/api/schedules/{id}/yaml", get(schedules::get_yaml))
         .route("/api/schemas/manifest.json", get(schemas::manifest_schema))
         .route("/api/schemas/schedule.json", get(schemas::schedule_schema))
@@ -231,6 +217,47 @@ pub fn router(state: AppState) -> Router {
         .route("/api/inventory/{pc_id}", get(inventory::list_for_pc))
         .route("/api/agents/{pc_id}/logs", get(agent_logs::tail))
         .route("/api/agents/releases", get(agent_releases::list_releases))
+        .route("/api/app-packages", get(app_packages::list_packages))
+        .route(
+            "/api/app-packages/{name}/{version}",
+            get(app_packages::download),
+        )
+        .route("/api/script-objects", get(script_objects::list_objects))
+        .route(
+            "/api/script-objects/{name}/{version}",
+            get(script_objects::download),
+        );
+
+    // Fleet mutations — operator+ only.
+    let operator = Router::new()
+        .route(
+            "/api/agents/{pc_id}/groups",
+            put(agent_groups::set_groups).post(agent_groups::add_group),
+        )
+        .route(
+            "/api/agents/{pc_id}/groups/{group}",
+            delete(agent_groups::remove_group),
+        )
+        .route("/api/config", put(agent_config::put_global))
+        .route(
+            "/api/groups/{name}/config",
+            put(agent_config::put_group).delete(agent_config::delete_group),
+        )
+        .route(
+            "/api/pcs/{pc_id}/config",
+            put(agent_config::put_pc).delete(agent_config::delete_pc),
+        )
+        .route("/api/exec/{job_id}", post(exec::create))
+        .route("/api/schedules", post(schedules::create))
+        .route("/api/schedules/{id}", delete(schedules::delete))
+        .route("/api/schedules/{id}/disable", post(schedules::disable))
+        .route("/api/run", post(run::run))
+        .route("/api/agents/{pc_id}/ping", post(run::ping))
+        .route("/api/scripts/{cmd_id}/revoke", post(scripts::revoke))
+        .route("/api/scripts/{cmd_id}/unrevoke", post(scripts::unrevoke))
+        .route("/api/jobs", post(jobs::create))
+        .route("/api/jobs/{id}", delete(jobs::delete))
+        .route("/api/jobs/{job_id}/kill", post(jobs::kill))
         .route(
             "/api/agents/releases/{version}",
             delete(agent_releases::delete_release),
@@ -245,11 +272,9 @@ pub fn router(state: AppState) -> Router {
         // from `agent_releases` so the lifecycles + audit channels
         // don't overlap — see `kanade-shared::kv::OBJECT_APP_PACKAGES`
         // for the rationale.
-        .route("/api/app-packages", get(app_packages::list_packages))
         .route(
             "/api/app-packages/{name}/{version}",
-            get(app_packages::download)
-                .post(app_packages::publish)
+            post(app_packages::publish)
                 .delete(app_packages::delete_package)
                 .layer(DefaultBodyLimit::max(APP_PACKAGE_BODY_LIMIT)),
         )
@@ -259,14 +284,25 @@ pub fn router(state: AppState) -> Router {
         // are kept separate — see `kanade-shared::kv::OBJECT_SCRIPTS`.
         // Note: route prefix is `/api/script-objects` to avoid
         // collision with the existing `/api/scripts/...` revoke flow.
-        .route("/api/script-objects", get(script_objects::list_objects))
         .route(
             "/api/script-objects/{name}/{version}",
-            get(script_objects::download)
-                .post(script_objects::publish)
+            post(script_objects::publish)
                 .delete(script_objects::delete_object)
                 .layer(DefaultBodyLimit::max(SCRIPT_OBJECT_BODY_LIMIT)),
         )
+        .route_layer(axum::middleware::from_fn(crate::auth::require_operator));
+
+    // Account management — admin only.
+    let admin = Router::new()
+        .route("/api/accounts", get(accounts::list).post(accounts::create))
+        .route(
+            "/api/accounts/{username}",
+            patch(accounts::update).delete(accounts::delete),
+        )
+        .route_layer(axum::middleware::from_fn(crate::auth::require_admin));
+
+    base.merge(operator)
+        .merge(admin)
         .with_state(state)
         // Everything else (`/`, `/assets/...`, hash-router paths) is served
         // from the rust-embed bundle. The fallback runs after the API routes

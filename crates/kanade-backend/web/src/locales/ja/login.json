@@ -1,9 +1,12 @@
 {
   "title": "奏 kanade",
-  "subtitle": "ベアラートークンでサインイン",
-  "tokenLabel": "ベアラートークン",
-  "tokenPlaceholder": "トークンを貼り付け",
+  "subtitle": "アカウントでサインイン",
+  "usernameLabel": "ユーザー名",
+  "usernamePlaceholder": "ユーザー名",
+  "passwordLabel": "パスワード",
+  "passwordPlaceholder": "パスワード",
   "submit": "サインイン",
+  "submitting": "サインイン中…",
   "iconAlt": "kanade",
-  "hint": "バックエンドのデプロイ時に設定されたトークン (<code>deploy-backend.ps1</code> に渡した <code>StaticToken</code>、 または <code>aud=kanade</code> の署名付き JWT) を入力します。 <code>localStorage</code> に保存され、 ナビからログアウトで削除されます。"
+  "hint": "アカウントは管理者が管理します。 パスワードを忘れた場合は管理者にリセットを依頼してください。 セッショントークンは localStorage に保存され、 ナビからログアウトで削除されます。"
 }

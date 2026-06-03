@@ -5,9 +5,11 @@ import { Toaster } from 'sonner';
 import { ProtectedLayout } from '@/components/ProtectedLayout';
 import { ConfirmDialogProvider } from '@/components/ui/confirm-dialog';
 import { AuthProvider } from '@/lib/auth';
+import { Accounts } from '@/pages/Accounts';
 import { AgentDetail } from '@/pages/AgentDetail';
 import { Agents } from '@/pages/Agents';
 import { Apps } from '@/pages/Apps';
+import { ChangePassword } from '@/pages/ChangePassword';
 import { Audit } from '@/pages/Audit';
 import { Config } from '@/pages/Config';
 import { Dashboard } from '@/pages/Dashboard';
@@ -91,6 +93,10 @@ export default function App() {
               <Route path="/config" element={<Config />} />
               <Route path="/jetstream" element={<JetStream />} />
               <Route path="/settings" element={<Settings />} />
+              {/* RBAC: account management (admin-gated inside the page +
+                  backend) and self-service forced password change. */}
+              <Route path="/accounts" element={<Accounts />} />
+              <Route path="/change-password" element={<ChangePassword />} />
               <Route path="*" element={<Placeholder name="Not Found" />} />
             </Route>
           </Routes>

@@ -1,3 +1,4 @@
+pub mod account;
 pub mod agent;
 pub mod app;
 pub mod config;
@@ -6,6 +7,7 @@ pub mod group;
 pub mod jetstream;
 pub mod job;
 pub mod kill;
+pub mod login;
 pub mod ping;
 pub mod publish_verify;
 pub mod revoke;
