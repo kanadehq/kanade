@@ -3,6 +3,7 @@ mod config_supervisor;
 mod groups;
 mod heartbeat;
 mod host_perf;
+mod job_object;
 mod logs;
 mod ping;
 mod process;

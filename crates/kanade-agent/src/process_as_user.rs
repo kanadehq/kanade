@@ -55,12 +55,13 @@ use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnviron
 use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
 use windows::Win32::System::Threading::{
-    CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW, GetCurrentProcess,
-    GetExitCodeProcess, INFINITE, OpenProcessToken, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
-    STARTUPINFOW, TerminateProcess, WaitForSingleObject,
+    CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW,
+    GetCurrentProcess, GetExitCodeProcess, INFINITE, OpenProcessToken, PROCESS_INFORMATION,
+    ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOW, TerminateProcess, WaitForSingleObject,
 };
 use windows::core::PWSTR;
 
+use crate::job_object::JobObject;
 use crate::process::ExecOutcome;
 
 pub async fn run_command_in_user_session(
@@ -79,6 +80,7 @@ pub async fn run_command_in_user_session(
     //    time so they only need to live across `spawn_native`.
     let SpawnHandles {
         process,
+        job,
         stdout_read,
         stderr_read,
     } = tokio::task::spawn_blocking(move || spawn_native(&cmd_line, run_as, cwd.as_deref()))
@@ -100,15 +102,15 @@ pub async fn run_command_in_user_session(
     let wait_outcome: WaitOutcome = tokio::select! {
         biased;
         _ = &mut kill => {
-            info!(target: "kanade_agent::process_as_user", "kill arm fired — TerminateProcess");
-            terminate(process.raw());
+            info!(target: "kanade_agent::process_as_user", "kill arm fired — terminating job tree");
+            terminate_tree(&job, process.raw());
             // wait should return imminently; if not we still record Killed.
             let _ = (&mut wait).await;
             WaitOutcome::Killed
         }
         _ = tokio::time::sleep(timeout) => {
-            info!(target: "kanade_agent::process_as_user", "timeout arm fired — TerminateProcess");
-            terminate(process.raw());
+            info!(target: "kanade_agent::process_as_user", "timeout arm fired — terminating job tree");
+            terminate_tree(&job, process.raw());
             let _ = (&mut wait).await;
             WaitOutcome::Timeout
         }
@@ -141,6 +143,10 @@ pub async fn run_command_in_user_session(
 
 struct SpawnHandles {
     process: SafeHandle,
+    /// The Job the host + its descendants were assigned to. `None`
+    /// when Job creation/assignment failed — the caller then falls
+    /// back to single-process `TerminateProcess`.
+    job: Option<JobObject>,
     stdout_read: OwnedHandle,
     stderr_read: OwnedHandle,
 }
@@ -216,7 +222,11 @@ fn spawn_native(cmd_line: &[u16], run_as: RunAs, cwd: Option<&str>) -> Result<Sp
 
         let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
         let mut cmd_buf: Vec<u16> = cmd_line.to_vec();
-        let flags = CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW;
+        // CREATE_SUSPENDED so we can assign the process to a Job
+        // Object BEFORE it runs a single instruction — that makes the
+        // Job capture race-free (no descendant can be spawned, and
+        // thus escape the Job, until we ResumeThread below).
+        let flags = CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW | CREATE_SUSPENDED;
 
         // CreateProcessAsUserW's lpCurrentDirectory wants a
         // NUL-terminated wide string or NULL (= inherit parent's cwd).
@@ -267,6 +277,40 @@ fn spawn_native(cmd_line: &[u16], run_as: RunAs, cwd: Option<&str>) -> Result<Sp
                 GetLastError(),
             );
         }
+
+        // Assign the (still-suspended) process to a Job Object so a
+        // later kill/timeout can terminate the whole tree at once. A
+        // failure here degrades to single-process TerminateProcess
+        // (job = None) rather than refusing to spawn — better a
+        // narrower kill than no run at all.
+        let job = match JobObject::assign_handle(pi.hProcess) {
+            Ok(j) => Some(j),
+            Err(e) => {
+                warn!(
+                    target: "kanade_agent::process_as_user",
+                    error = %e,
+                    "job object assign failed; kill falls back to single-process terminate",
+                );
+                None
+            }
+        };
+
+        // Release the suspended main thread now that the Job is in
+        // place. ResumeThread returns (DWORD)-1 on failure; if that
+        // ever happens the child would be wedged suspended forever, so
+        // tear down whatever we created and bail rather than leak a
+        // frozen process + its pipes.
+        if ResumeThread(pi.hThread) == u32::MAX {
+            let err = GetLastError();
+            let _ = CloseHandle(pi.hThread);
+            if let Some(j) = &job {
+                j.terminate();
+            } else {
+                let _ = TerminateProcess(pi.hProcess, 1);
+            }
+            let _ = CloseHandle(pi.hProcess);
+            bail!("ResumeThread failed (Win32 err {err:?})");
+        }
         let _ = CloseHandle(pi.hThread);
 
         // Drop parent's copy of child-end handles so the child's exit
@@ -276,6 +320,7 @@ fn spawn_native(cmd_line: &[u16], run_as: RunAs, cwd: Option<&str>) -> Result<Sp
 
         Ok(SpawnHandles {
             process: SafeHandle::new(pi.hProcess),
+            job,
             stdout_read,
             stderr_read,
         })
@@ -407,6 +452,18 @@ fn wait_native(process: HANDLE) -> Result<WaitOutcome> {
                 GetLastError()
             ))
         }
+    }
+}
+
+/// Kill the child on kill/timeout. Prefers the Job Object (whole
+/// tree — host + every descendant) so an orphaned grandchild can't
+/// keep the stdout/stderr pipes open and wedge the drain. Falls back
+/// to single-process `TerminateProcess` only when no Job was assigned.
+fn terminate_tree(job: &Option<JobObject>, process: HANDLE) {
+    if let Some(j) = job {
+        j.terminate();
+    } else {
+        terminate(process);
     }
 }
 

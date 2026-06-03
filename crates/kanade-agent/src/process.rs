@@ -355,6 +355,41 @@ pub async fn run_command_with_kill(
         .spawn()
         .with_context(|| format!("spawn {program}"))?;
 
+    // Job Object: put the host (`powershell` / `cmd`) — and every
+    // descendant it spawns — into a kernel Job so a kill/timeout can
+    // terminate the WHOLE tree at once. Without this, `child.kill()`
+    // only reaps the host; a grandchild (e.g. a job that runs
+    // `claude`) would be orphaned AND keep the inherited stdout/stderr
+    // pipe handles open, so the `read_to_end` drain below would never
+    // hit EOF and this fn would hang forever — leaving the Activity
+    // row stuck on "実行中" after a 強制終了 click. On non-Windows
+    // `job` is always `None` and we fall back to the single-process
+    // kill. Assign failure (e.g. an OS without nested-Job support)
+    // also degrades to the single-process path with a warning.
+    let job: Option<crate::job_object::JobObject> = {
+        #[cfg(target_os = "windows")]
+        {
+            match child.raw_handle() {
+                Some(h) => {
+                    match crate::job_object::JobObject::assign_handle(
+                        windows::Win32::Foundation::HANDLE(h),
+                    ) {
+                        Ok(j) => Some(j),
+                        Err(e) => {
+                            warn!(error = %e, "job object assign failed; kill falls back to single-process terminate");
+                            None
+                        }
+                    }
+                }
+                None => None,
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            None
+        }
+    };
+
     let stdout_handle = child.stdout.take();
     let stderr_handle = child.stderr.take();
 
@@ -419,14 +454,22 @@ pub async fn run_command_with_kill(
                 }
                 msg = kill_sub.next() => {
                     info!(exec_id = %eid, has_msg = msg.is_some(), "kill arm fired");
-                    if let Err(e) = child.kill().await {
+                    // Terminate the whole Job (host + descendants) so
+                    // orphaned grandchildren can't keep the pipes open
+                    // and hang the drain. Fall back to the single
+                    // child when no Job was assigned.
+                    if let Some(j) = &job {
+                        j.terminate();
+                    } else if let Err(e) = child.kill().await {
                         warn!(error = %e, "child.kill failed (process may already be dead)");
                     }
                     OutcomeInner::Killed
                 }
                 _ = tokio::time::sleep(timeout_dur) => {
                     info!(exec_id = %eid, "timeout arm fired");
-                    if let Err(e) = child.kill().await {
+                    if let Some(j) = &job {
+                        j.terminate();
+                    } else if let Err(e) = child.kill().await {
                         warn!(error = %e, "child.kill on timeout failed");
                     }
                     OutcomeInner::Timeout
@@ -440,7 +483,9 @@ pub async fn run_command_with_kill(
                     OutcomeInner::Completed(s.code().unwrap_or(-1))
                 }
                 _ = tokio::time::sleep(timeout_dur) => {
-                    if let Err(e) = child.kill().await {
+                    if let Some(j) = &job {
+                        j.terminate();
+                    } else if let Err(e) = child.kill().await {
                         warn!(error = %e, "child.kill on timeout failed");
                     }
                     OutcomeInner::Timeout
