@@ -1,0 +1,46 @@
+{
+  "title": "Accounts",
+  "subtitle": "Manage who can sign in and what they can do.",
+  "forbidden": "Admin role required to manage accounts.",
+  "createTitle": "Create account",
+  "createHint": "Username required and password must be at least 8 characters.",
+  "username": "Username",
+  "password": "Password",
+  "newPassword": "New password",
+  "role": "Role",
+  "status": "Status",
+  "created": "Created",
+  "actions": "Actions",
+  "submit": "Create",
+  "enabled": "Enabled",
+  "disabled": "Disabled",
+  "enable": "Enable",
+  "disable": "Disable",
+  "resetPassword": "Reset password",
+  "delete": "Delete",
+  "cancel": "Cancel",
+  "mustChange": "must change password",
+  "resetTitle": "Reset password for {{username}}",
+  "confirmDelete": "Delete account {{username}}?",
+  "roles": {
+    "viewer": "viewer",
+    "operator": "operator",
+    "admin": "admin"
+  },
+  "toast": {
+    "created": "Created {{username}}",
+    "deleted": "Account deleted",
+    "passwordReset": "Password reset — the user must change it on next login"
+  },
+  "changePw": {
+    "title": "Change password",
+    "subtitle": "Choose a new password to continue.",
+    "old": "Current password",
+    "new": "New password",
+    "confirm": "Confirm new password",
+    "submit": "Change password",
+    "mismatch": "New passwords do not match.",
+    "tooShort": "Password must be at least 8 characters.",
+    "success": "Password changed."
+  }
+}

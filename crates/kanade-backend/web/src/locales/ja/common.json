@@ -20,6 +20,7 @@
     "apps": "アプリ配信",
     "config": "設定",
     "jetstream": "JetStream",
+    "accounts": "アカウント",
     "settings": "オペレーター設定"
   },
   "menu": {
@@ -29,7 +30,8 @@
   "auth": {
     "signedIn": "サインイン中",
     "login": "ログイン",
-    "logout": "ログアウト"
+    "logout": "ログアウト",
+    "changePassword": "パスワード変更"
   },
   "actions": {
     "save": "保存",
@@ -51,6 +53,10 @@
     "loading": "読み込み中…",
     "empty": "データなし",
     "error": "エラー"
+  },
+  "rbac": {
+    "operatorRequired": "operator 権限が必要です — 管理者に権限付与を依頼してください。",
+    "adminRequired": "admin 権限が必要です。"
   },
   "pcPicker": {
     "placeholder": "pc_id / ホスト名で検索…",

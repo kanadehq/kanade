@@ -58,6 +58,10 @@ enum SubCmd {
     /// Manage groups: list fleet-wide, add/remove PC memberships,
     /// list PCs in a given group.
     Group(cmd::group::GroupArgs),
+    /// Log in with username/password; prints a JWT for KANADE_AUTH_TOKEN.
+    Login(cmd::login::LoginArgs),
+    /// Admin-only RBAC account management (create / role / disable / …).
+    Account(cmd::account::AccountArgs),
 }
 
 #[tokio::main]
@@ -83,6 +87,10 @@ async fn main() -> Result<()> {
         return cmd::job::execute(&backend_url, args).await;
     } else if let SubCmd::Schedule(args) = command {
         return cmd::schedule::execute(&backend_url, args).await;
+    } else if let SubCmd::Login(args) = command {
+        return cmd::login::execute(&backend_url, args).await;
+    } else if let SubCmd::Account(args) = command {
+        return cmd::account::execute(&backend_url, args).await;
     }
 
     // The remaining subcommands need NATS. Shared helper picks up
@@ -103,7 +111,11 @@ async fn main() -> Result<()> {
         SubCmd::Script(args) => cmd::script::execute(client, args).await,
         SubCmd::Config(args) => cmd::config::execute(client, args).await,
         SubCmd::Group(args) => cmd::group::execute(client, args).await,
-        SubCmd::Exec(_) | SubCmd::Job(_) | SubCmd::Schedule(_) => {
+        SubCmd::Exec(_)
+        | SubCmd::Job(_)
+        | SubCmd::Schedule(_)
+        | SubCmd::Login(_)
+        | SubCmd::Account(_) => {
             unreachable!("handled above")
         }
     }

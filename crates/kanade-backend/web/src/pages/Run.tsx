@@ -13,6 +13,7 @@ import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { apiFetch } from '@/lib/api';
+import { useAuth } from '@/lib/auth';
 import type { ExecResult } from '@/lib/types';
 
 type RunBody = {
@@ -25,6 +26,8 @@ type RunBody = {
 
 export function Run() {
   const { t } = useTranslation('run');
+  const { hasRole } = useAuth();
+  const canOperate = hasRole('operator');
   const [pcId, setPcId] = useState('');
   const [shell, setShell] = useState('powershell');
   const [timeout, setTimeout] = useState(60);
@@ -96,10 +99,17 @@ export function Run() {
               className="min-h-32"
             />
           </div>
-          <Button onClick={onSubmit} disabled={!pcId.trim() || !script.trim() || mut.isPending}>
+          <Button
+            onClick={onSubmit}
+            disabled={!canOperate || !pcId.trim() || !script.trim() || mut.isPending}
+            title={canOperate ? undefined : t('rbac.operatorRequired', { ns: 'common' })}
+          >
             {mut.isPending ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
             {t('submit')}
           </Button>
+          {!canOperate && (
+            <p className="text-xs text-muted mt-2">{t('rbac.operatorRequired', { ns: 'common' })}</p>
+          )}
         </CardContent>
       </Card>
 

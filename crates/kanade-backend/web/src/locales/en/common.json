@@ -20,6 +20,7 @@
     "apps": "Apps",
     "config": "Config",
     "jetstream": "JetStream",
+    "accounts": "Accounts",
     "settings": "Settings"
   },
   "menu": {
@@ -29,7 +30,8 @@
   "auth": {
     "signedIn": "Signed in",
     "login": "login",
-    "logout": "logout"
+    "logout": "logout",
+    "changePassword": "Change password"
   },
   "actions": {
     "save": "Save",
@@ -51,6 +53,10 @@
     "loading": "Loading…",
     "empty": "No data",
     "error": "Error"
+  },
+  "rbac": {
+    "operatorRequired": "Operator role required — ask an admin for access.",
+    "adminRequired": "Admin role required."
   },
   "pcPicker": {
     "placeholder": "Search pc_id or hostname…",

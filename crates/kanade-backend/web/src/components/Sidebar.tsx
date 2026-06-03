@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { Link, NavLink, useLocation } from 'react-router-dom';
 
 import { AuthBar } from '@/components/AuthBar';
+import { useAuth } from '@/lib/auth';
 import { cn } from '@/lib/utils';
 
 // Sidebar groups: same three semantic clusters introduced in #52,
@@ -18,7 +19,7 @@ import { cn } from '@/lib/utils';
 const groups: {
   labelKey: string;
   accent: string;
-  links: { to: string; labelKey: string }[];
+  links: { to: string; labelKey: string; adminOnly?: boolean }[];
 }[] = [
   {
     labelKey: 'nav.groups.execute',
@@ -51,6 +52,7 @@ const groups: {
       { to: '/apps', labelKey: 'nav.apps' },
       { to: '/config', labelKey: 'nav.config' },
       { to: '/jetstream', labelKey: 'nav.jetstream' },
+      { to: '/accounts', labelKey: 'nav.accounts', adminOnly: true },
       { to: '/settings', labelKey: 'nav.settings' },
     ],
   },
@@ -58,6 +60,7 @@ const groups: {
 
 function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
   const { t } = useTranslation('common');
+  const { hasRole } = useAuth();
   return (
     <>
       <Link
@@ -105,7 +108,9 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
             >
               {t(g.labelKey)}
             </h3>
-            {g.links.map((l) => (
+            {g.links
+              .filter((l) => !l.adminOnly || hasRole('admin'))
+              .map((l) => (
               <NavLink
                 key={l.to}
                 to={l.to}

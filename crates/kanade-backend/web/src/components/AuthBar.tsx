@@ -1,4 +1,4 @@
-import { LogIn, LogOut } from 'lucide-react';
+import { KeyRound, LogIn, LogOut } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 
@@ -10,17 +10,29 @@ import { useAuth } from '@/lib/auth';
 /// the Login page now (replaces the v0.11.x modal dialog) so an
 /// expired-token redirect lands somewhere meaningful.
 export function AuthBar() {
-  const { isAuthenticated, logout } = useAuth();
+  const { isAuthenticated, logout, username, role } = useAuth();
   const { t } = useTranslation('common');
 
   if (isAuthenticated) {
     return (
-      <div className="flex items-center gap-3">
-        <span className="text-xs text-muted hidden sm:inline">{t('auth.signedIn')}</span>
-        <Button variant="secondary" size="sm" onClick={logout}>
-          <LogOut className="size-3.5" />
-          {t('auth.logout')}
-        </Button>
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          {/* Identity + role so the operator always knows which
+              account / privilege level they're acting as. */}
+          <div className="text-xs font-medium truncate">{username ?? t('auth.signedIn')}</div>
+          {role && <div className="text-[10px] uppercase tracking-wide text-muted">{role}</div>}
+        </div>
+        <div className="flex items-center gap-1">
+          <Button variant="ghost" size="icon" asChild title={t('auth.changePassword')}>
+            <Link to="/change-password" aria-label={t('auth.changePassword')}>
+              <KeyRound className="size-3.5" />
+            </Link>
+          </Button>
+          <Button variant="secondary" size="sm" onClick={logout}>
+            <LogOut className="size-3.5" />
+            {t('auth.logout')}
+          </Button>
+        </div>
       </div>
     );
   }
