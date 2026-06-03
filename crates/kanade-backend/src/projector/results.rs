@@ -168,6 +168,15 @@ pub async fn run(js: jetstream::Context, pool: SqlitePool) -> Result<()> {
 ///   3. **Already-finished row** (redelivery): ON CONFLICT DO
 ///      UPDATE clause's WHERE doesn't match → rows_affected = 0 →
 ///      caller skips counter bump.
+///   4. **Reaped placeholder** (#332): the cleanup task stamped
+///      `finished_at` + `reaped = 1` on an in-flight row whose result
+///      never arrived. If the *real* result then shows up late (outage
+///      / partition heal / a job that ran past the 24 h reap window),
+///      the `OR reaped = 1` disjunct lets it overwrite the placeholder
+///      and the SET clears `reaped` back to 0 — so the real output
+///      replaces the "[backend: reaped …]" note instead of being
+///      silently dropped (gemini review, PR #332). A subsequent
+///      redelivery then hits state 3 (finished, reaped = 0) and no-ops.
 async fn insert_result(pool: &SqlitePool, r: &ExecResult, result_id: &str) -> Result<bool> {
     // `result_id` is pre-resolved by the caller via
     // `r.stable_result_id()`: agent-supplied for v0.29+ payloads,
@@ -186,9 +195,11 @@ async fn insert_result(pool: &SqlitePool, r: &ExecResult, result_id: &str) -> Re
              stdout      = excluded.stdout,
              stderr      = excluded.stderr,
              finished_at = excluded.finished_at,
+             reaped      = 0,
              job_id      = COALESCE(excluded.job_id, execution_results.job_id),
              request_id  = excluded.request_id
-          WHERE execution_results.finished_at IS NULL",
+          WHERE execution_results.finished_at IS NULL
+             OR execution_results.reaped = 1",
     )
     .bind(result_id)
     .bind(&r.request_id)
@@ -627,5 +638,53 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(row.0, "running");
+    }
+
+    #[tokio::test]
+    async fn reaped_placeholder_is_overwritten_by_late_result() {
+        // #332 / gemini review: a row the cleanup task reaped
+        // (finished_at set, reaped = 1, sentinel exit_code) must still
+        // accept the REAL ExecResult if it arrives late (outage heal /
+        // a job that ran past the 24 h reap window). Without the
+        // `OR reaped = 1` disjunct the genuine output is silently lost.
+        let pool = fresh_pool().await;
+        sqlx::query(
+            "INSERT INTO execution_results
+                (result_id, request_id, pc_id, exit_code, stdout, stderr,
+                 started_at, finished_at, reaped)
+             VALUES ('res-late', 'req-1', 'pc-1', -1, '', '[backend: reaped …]',
+                     datetime('now', '-2 days'), datetime('now', '-1 day'), 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mut r = sample("res-late", "req-1", "pc-1", Some("exec-1"));
+        r.exit_code = 0;
+        r.stdout = "real output".into();
+        let affected = insert_result(&pool, &r, "res-late").await.unwrap();
+        assert!(
+            affected,
+            "late real result must overwrite the reaped placeholder",
+        );
+
+        let row: (i64, String, i64) = sqlx::query_as(
+            "SELECT exit_code, stdout, reaped FROM execution_results WHERE result_id = ?",
+        )
+        .bind("res-late")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0, 0, "exit_code replaced with the real value");
+        assert_eq!(row.1, "real output", "stdout replaced");
+        assert_eq!(row.2, 0, "reaped flag cleared on overwrite");
+
+        // The row is now genuinely finished (reaped = 0); a JetStream
+        // redelivery of the same result must no-op, not re-bump.
+        let again = insert_result(&pool, &r, "res-late").await.unwrap();
+        assert!(
+            !again,
+            "redelivery after the real result must not re-update"
+        );
     }
 }
