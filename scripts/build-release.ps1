@@ -62,7 +62,12 @@
   .zip.
 
 .PARAMETER Roles
-  Which roles to stage. Default: agent, backend, nats.
+  Which roles to stage. Default: agent, backend, nats. `client` is
+  also supported but binary-only — it stages just kanade-client.exe
+  (no <role>.toml / deploy-<role>.ps1, since the Tauri app ships via
+  the install-kanade-client job rather than as a Windows service).
+  It's not in the default fleet-bootstrap set; pass `-Roles client`
+  (or include it explicitly) to stage it.
 
 .PARAMETER TargetDir
   Cargo `--target-dir` for cached build artifacts shared across runs.
@@ -91,6 +96,10 @@
 .EXAMPLE
   # Pull from crates.io instead of GitHub Releases:
   PS> .\scripts\build-release.ps1 -FromCrates
+
+.EXAMPLE
+  # Stage just the kanade-client app binary from the latest release:
+  PS> .\scripts\build-release.ps1 -Roles client
 #>
 
 [CmdletBinding()]
@@ -168,6 +177,18 @@ $roleSpec = @{
         DeployScript = 'deploy-backend.ps1'
         ServiceName = 'KanadeBackend'
     }
+    'client' = @{
+        # kanade-client is the Tauri end-user app. Unlike the service
+        # roles it has no <role>.toml or deploy-<role>.ps1 — it's
+        # rolled out via the `install-kanade-client` job, not a Windows
+        # service — so `BinaryOnly` stages just the .exe and skips the
+        # config / deploy-script resolve + copy. The GitHub-Releases
+        # download path keys off `Crate`, so the asset still resolves to
+        # `kanade-client-x86_64-pc-windows-msvc.exe` like the others.
+        Crate       = 'kanade-client'
+        ExeName     = 'kanade-client.exe'
+        BinaryOnly  = $true
+    }
     'nats' = @{
         # nats-server is shipped by NATS, not by kanade. The
         # -FromSource / -FromCrates paths are not supported for it;
@@ -191,16 +212,21 @@ foreach ($role in $Roles) {
     Write-Host ''
     Write-Host "=== $role ==="
 
-    $cfgSrc    = Join-Path $configsDir $cfgName
-    # `deploy-<role>.ps1` was reorganised to `scripts/deploy/<role>.ps1`
-    # — the source filename dropped the verb prefix once we had a
-    # dedicated subdir, but the dist staging keeps the verb-prefixed
-    # name so the artifact end-users extract still reads as
-    # "deploy-agent.ps1" / "deploy-backend.ps1" / "deploy-nats.ps1".
-    $deploySrcName = $deployPs.Replace('deploy-', '')
-    $deploySrc     = Join-Path $repoRoot "scripts\deploy\$deploySrcName"
-    if (-not (Test-Path $cfgSrc))    { throw "Missing $cfgName under configs/ ($cfgSrc)." }
-    if (-not (Test-Path $deploySrc)) { throw "Missing $deploySrcName under scripts\deploy\ ($deploySrc)." }
+    # BinaryOnly roles (the Tauri client) stage just the .exe — there's
+    # no <role>.toml / deploy-<role>.ps1 to resolve or copy, and
+    # $deployPs is null so the `.Replace` below would throw.
+    if (-not $spec.BinaryOnly) {
+        $cfgSrc    = Join-Path $configsDir $cfgName
+        # `deploy-<role>.ps1` was reorganised to `scripts/deploy/<role>.ps1`
+        # — the source filename dropped the verb prefix once we had a
+        # dedicated subdir, but the dist staging keeps the verb-prefixed
+        # name so the artifact end-users extract still reads as
+        # "deploy-agent.ps1" / "deploy-backend.ps1" / "deploy-nats.ps1".
+        $deploySrcName = $deployPs.Replace('deploy-', '')
+        $deploySrc     = Join-Path $repoRoot "scripts\deploy\$deploySrcName"
+        if (-not (Test-Path $cfgSrc))    { throw "Missing $cfgName under configs/ ($cfgSrc)." }
+        if (-not (Test-Path $deploySrc)) { throw "Missing $deploySrcName under scripts\deploy\ ($deploySrc)." }
+    }
 
     $exeDst = Join-Path $stage $exeName
 
@@ -208,9 +234,15 @@ foreach ($role in $Roles) {
     # reports the desired version. nats-server has no embedded
     # workspace metadata, so we still rely on its `--version` line
     # for the cache hit check.
+    #
+    # BinaryOnly roles (the Tauri client) are excluded from this
+    # exec-based cache probe: kanade-client is a GUI app and running
+    # it with `--version` here could pop a window / hang the ops
+    # script, so we just re-fetch it each run (an 11 MB download) and
+    # never invoke the staged exe.
     $wantVer = if ($spec.External) { $NatsVersion } else { $Version }
     $skipBuild = $false
-    if (-not $FromSource -and -not $Force -and (Test-Path $exeDst)) {
+    if (-not $FromSource -and -not $Force -and -not $spec.BinaryOnly -and (Test-Path $exeDst)) {
         try {
             $verLine = (& $exeDst --version 2>$null) | Select-Object -First 1
             if ($verLine) {
@@ -320,9 +352,12 @@ Original error: $($_.Exception.Message)
 
     # Always refresh the non-binary artefacts. They're tiny and may
     # have been edited (config tweaks, deploy-script bumps) since the
-    # last stage even when the exe didn't change.
-    Copy-Item $cfgSrc    (Join-Path $stage $cfgName)    -Force
-    Copy-Item $deploySrc (Join-Path $stage $deployPs)   -Force
+    # last stage even when the exe didn't change. BinaryOnly roles
+    # (client) have none — the .exe is the whole artifact.
+    if (-not $spec.BinaryOnly) {
+        Copy-Item $cfgSrc    (Join-Path $stage $cfgName)    -Force
+        Copy-Item $deploySrc (Join-Path $stage $deployPs)   -Force
+    }
 
     Write-Host "Staged $stage"
     Get-ChildItem -Path $stage | ForEach-Object { Write-Host ("  {0,-30}  {1,10:N0} bytes" -f $_.Name, $_.Length) }
