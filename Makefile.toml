@@ -87,9 +87,15 @@ end
 
 [tasks.web-build]
 description = "Build the React SPA into web/dist (consumed by rust-embed)"
-cwd = "${CARGO_MAKE_WORKING_DIRECTORY}/crates/kanade-backend/web"
-command = "bun"
-args = ["run", "build"]
+# Install deps first so this task is self-contained: CI / release run it in
+# a fresh checkout with no node_modules, so `bun run build` (tsc + vite)
+# would otherwise fail with "tsc: command not found".
+script_runner = "@shell"
+script = '''
+cd crates/kanade-backend/web
+bun install --frozen-lockfile
+bun run build
+'''
 
 [tasks.apm-install-update]
 description = "Refresh APM dependencies to upstream latest. Skipped when apm.yml/apm absent, or when apm.lock.yaml already records the current upstream renri HEAD (kicks in on every cargo make on-add after the first to keep worktree creation fast)."
