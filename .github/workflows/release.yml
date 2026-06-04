@@ -77,8 +77,9 @@ jobs:
             os: ubuntu-latest
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-          - target: x86_64-apple-darwin
-            os: macos-latest
+          # Intel Mac (x86_64-apple-darwin) dropped — Apple Silicon only.
+          # (Some crates' native deps, e.g. ort/ONNX Runtime, ship no
+          # x86_64-apple-darwin prebuilt and fail the build there.)
           - target: aarch64-apple-darwin
             os: macos-latest
     steps:
@@ -96,10 +97,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         if: ${{ !contains(matrix.target, 'windows') }}
 
-      # rust-embed bakes web/dist/ at compile time, so any workspace that
-      # embeds an SPA must build it (via its conventional `web-build`
-      # cargo-make task) before `cargo build`; workspaces without that
-      # task skip these steps.
+      # rust-embed bakes web/dist/ into the binary at compile time, so any
+      # workspace that embeds an SPA must build the frontend (via its
+      # conventional `web-build` cargo-make task) before `cargo build`;
+      # workspaces without a `[tasks.web-build]` in Makefile.toml skip these.
       - name: Detect embedded frontend
         id: frontend
         shell: bash
@@ -227,19 +228,31 @@ jobs:
             echo "::warning::no [[bin]] targets in this workspace; nothing to stage"
             exit 0
           fi
+          # Package each bin into a target-triple-named ARCHIVE rather
+          # than shipping the bare binary, so a self-updater that uses
+          # the `self_update` crate (e.g. via `kaishin`) can locate the
+          # asset by `<bin>` + the running target-triple substring
+          # (e.g. `<bin>-x86_64-pc-windows-msvc.zip`) and extract it.
+          # Windows ships a `.zip` (7-Zip); the rest ship a `.tar.gz`.
           for bin in $bins; do
+            stem="$bin-$TARGET"
             if [[ "$TARGET" == *windows* ]]; then
               src="target/$TARGET/release/$bin.exe"
-              dst="dist/$bin-$TARGET.exe"
             else
               src="target/$TARGET/release/$bin"
-              dst="dist/$bin-$TARGET"
             fi
-            if [ -f "$src" ]; then
-              cp "$src" "$dst"
-              echo "staged $dst"
-            else
+            if [ ! -f "$src" ]; then
               echo "::warning::missing $src (skipping)"
+              continue
+            fi
+            if [[ "$TARGET" == *windows* ]]; then
+              cp "$src" "$stem.exe"
+              7z a "dist/$stem.zip" "$stem.exe" >/dev/null
+              echo "staged dist/$stem.zip"
+            else
+              cp "$src" "$stem"
+              tar czf "dist/$stem.tar.gz" "$stem"
+              echo "staged dist/$stem.tar.gz"
             fi
           done
           ls -la dist/
@@ -274,10 +287,10 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
 
-      # rust-embed bakes web/dist/ at compile time, so any workspace that
-      # embeds an SPA must build it (via its conventional `web-build`
-      # cargo-make task) before `cargo publish`; workspaces without that
-      # task skip these steps.
+      # rust-embed bakes web/dist/ into the crate at compile time, so any
+      # workspace that embeds an SPA must build the frontend (via its
+      # conventional `web-build` cargo-make task) before `cargo publish`;
+      # workspaces without a `[tasks.web-build]` in Makefile.toml skip these.
       - name: Detect embedded frontend
         id: frontend
         shell: bash
