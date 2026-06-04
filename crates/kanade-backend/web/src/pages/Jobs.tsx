@@ -314,18 +314,15 @@ export function Jobs() {
               </TableCell>
               <TableCell><code className="text-xs">{j.execute.shell}</code></TableCell>
               <TableCell><code className="text-xs">{j.execute.run_as ?? 'system'}</code></TableCell>
-              <TableCell className="max-w-48">
-                {/* Backslash-separated Windows paths have no break
-                    opportunities, so an unconstrained cell claims the
-                    full path width and forces the whole table into
-                    horizontal scroll. Cap + truncate, full path in
-                    the tooltip. */}
+              {/* Backslash-separated Windows paths have no break
+                  opportunities, so an unconstrained cell claims the
+                  full path width and forces the whole table into
+                  horizontal scroll. Cap + truncate (same pattern as
+                  the description cell below), full path in the
+                  tooltip. */}
+              <TableCell className="max-w-48 truncate" title={j.execute.cwd || undefined}>
                 {j.execute.cwd
-                  ? (
-                    <code className="text-xs block truncate" title={j.execute.cwd}>
-                      {j.execute.cwd}
-                    </code>
-                  )
+                  ? <code className="text-xs">{j.execute.cwd}</code>
                   : <span className="text-muted text-xs">—</span>}
               </TableCell>
               <TableCell><code className="text-xs">{j.execute.timeout}</code></TableCell>
