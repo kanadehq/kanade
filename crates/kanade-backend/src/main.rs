@@ -90,7 +90,13 @@ pub(crate) async fn run_backend() -> Result<()> {
     // so this changes only their visibility, not the crash behaviour.
     let default_panic_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        error!(panic = %info, "panic");
+        // `force_capture` (not `capture`) so the backtrace is collected
+        // even without RUST_BACKTRACE set — a Windows service has no
+        // environment to flip, and the default hook prints the backtrace
+        // to the same discarded stderr. line-tables-only debug info (see
+        // [profile] in Cargo.toml) keeps the frames meaningful.
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        error!(panic = %info, %backtrace, "panic");
         default_panic_hook(info);
     }));
 
