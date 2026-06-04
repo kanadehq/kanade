@@ -66,7 +66,13 @@ rpassword          = "7.5.4"
 tokio-cron-scheduler = "0.15.1"
 rust-embed         = "8.11.0"
 mime_guess         = "2.0.5"
-jsonwebtoken       = "10.4.0"
+# jsonwebtoken 10.x routes HS256 through a rustls-style CryptoProvider and
+# panics at runtime ("Could not automatically determine the process-level
+# CryptoProvider") on the first encode/decode unless exactly one provider
+# feature is enabled. The default features don't pin one (and other deps
+# pull rustls providers, making auto-detection ambiguous), so pin the
+# pure-Rust provider explicitly — no C toolchain, clean cross-compile.
+jsonwebtoken       = { version = "10.4.0", default-features = false, features = ["rust_crypto"] }
 # argon2id password hashing for RBAC accounts (backend `users` table).
 # Pulls in `password-hash` (PHC string format, SaltString) transitively.
 argon2             = "0.5.3"

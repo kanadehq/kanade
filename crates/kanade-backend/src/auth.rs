@@ -357,6 +357,40 @@ mod tests {
     }
 
     #[test]
+    fn jwt_hs256_roundtrip_does_not_panic() {
+        // Regression: jsonwebtoken 10.x routes HS256 through a rustls-
+        // style CryptoProvider and *panics at runtime* on the first
+        // encode/decode unless a provider feature is pinned (see the dep
+        // note in the workspace Cargo.toml). No test minted a token
+        // before, so the panic shipped in v0.43.14 and only surfaced on
+        // the first SPA login. This exercises the exact crypto path so CI
+        // catches a missing / ambiguous provider feature instead of it
+        // blowing up at runtime.
+        use jsonwebtoken::{EncodingKey, Header, encode};
+
+        let claims = Claims {
+            sub: "alice".into(),
+            exp: 4_102_444_800,
+            aud: Some(EXPECTED_AUDIENCE.to_string()),
+            roles: vec![Role::Admin.as_str().to_string()],
+        };
+        let key = b"regression-secret";
+        let token = encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(key),
+        )
+        .expect("HS256 encode must not panic — pin a jsonwebtoken CryptoProvider feature");
+
+        let mut validation = Validation::new(Algorithm::HS256);
+        validation.set_audience(&[EXPECTED_AUDIENCE]);
+        let decoded = decode::<Claims>(&token, &DecodingKey::from_secret(key), &validation)
+            .expect("HS256 decode of our own token");
+        assert_eq!(decoded.claims.sub, "alice");
+        assert_eq!(decoded.claims.role(), Role::Admin);
+    }
+
+    #[test]
     fn claims_role_picks_highest() {
         let c = Claims {
             sub: "x".into(),

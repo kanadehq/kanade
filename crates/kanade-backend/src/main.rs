@@ -81,6 +81,19 @@ pub(crate) async fn run_backend() -> Result<()> {
     let _log_guard = init_tracing(&cfg.log)
         .with_context(|| format!("init tracing from [log] in {cfg_path:?}"))?;
 
+    // Route panics through tracing so they land in the log file. The
+    // default hook only writes to stderr, which a Windows service
+    // discards — a panic in a request handler (e.g. jsonwebtoken's
+    // CryptoProvider panic on the first JWT mint) would otherwise vanish
+    // without a trace, leaving an "endpoint stopped responding" report
+    // undiagnosable from the box. hyper still catches per-request panics,
+    // so this changes only their visibility, not the crash behaviour.
+    let default_panic_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        error!(panic = %info, "panic");
+        default_panic_hook(info);
+    }));
+
     info!(
         bind = %cfg.server.bind,
         nats = %cfg.nats.url,
