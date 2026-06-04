@@ -78,7 +78,7 @@ deployed client:
 
    ```bash
    kanade job create configs/jobs/installers/install-kanade-client.yaml
-   kanade exec install-kanade-client --target groups=canary
+   kanade exec install-kanade-client --groups canary
    ```
 
    The agent runs the script under `LocalSystem`, downloads the
@@ -140,8 +140,15 @@ Five steps per backend release:
 5. **Exec against the backend host.**
 
    ```bash
-   kanade exec install-kanade-backend --target pcs=<backend-host>
+   kanade exec install-kanade-backend --pcs <backend-host>
    ```
+
+   > **Target flag gotcha.** It's `--pcs <id>` / `--groups <grp>` —
+   > NOT `--target pcs=<id>`. And the agent registers its `pc_id`
+   > **lowercased**, so `$env:COMPUTERNAME` of `MINIPC` must be
+   > passed as `--pcs minipc`. Targeting the upper-cased name
+   > publishes to a subject no agent is subscribed to, so the exec
+   > sticks at `pending` with no error.
 
    The agent (running on the backend host as LocalSystem) fetches
    the deploy script from `OBJECT_SCRIPTS`, sha-verifies it,

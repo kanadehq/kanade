@@ -17,7 +17,7 @@ const TOKEN_KEY = 'kanade_token';
 export type Role = 'viewer' | 'operator' | 'admin';
 const RANK: Record<Role, number> = { viewer: 0, operator: 1, admin: 2 };
 
-type Me = { username: string; role: Role };
+type Me = { username: string; role: Role; must_change_pw: boolean };
 
 type AuthContextValue = {
   token: string;
@@ -26,6 +26,10 @@ type AuthContextValue = {
   setToken: (next: string) => void;
   logout: () => void;
   isAuthenticated: boolean;
+  /** True while the signed-in caller still owes a forced password change. */
+  mustChangePw: boolean;
+  /** Re-fetch `/api/auth/me` (e.g. after a password change clears the gate). */
+  refresh: () => Promise<void>;
   /** True when the signed-in caller's role is at least `min`. */
   hasRole: (min: Role) => boolean;
 };
@@ -54,6 +58,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setToken('');
     navigate('/login', { replace: true });
   }, [setToken, navigate]);
+
+  // Re-fetch identity from the backend. Exposed via context so callers
+  // (e.g. ChangePassword) can release the must_change_pw gate after a
+  // successful mutation without a full token round-trip.
+  const refresh = useCallback(async () => {
+    const current = localStorage.getItem(TOKEN_KEY) ?? '';
+    if (!current) {
+      setMe(null);
+      return;
+    }
+    try {
+      setMe(await apiFetch<Me>('/api/auth/me'));
+    } catch {
+      setMe(null);
+    }
+  }, []);
 
   // Resolve identity whenever the token changes. A failed lookup (e.g.
   // the 401 path below) just clears the role — the token-clear + redirect
@@ -103,9 +123,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setToken,
       logout,
       isAuthenticated: token.length > 0,
+      mustChangePw: me?.must_change_pw ?? false,
+      refresh,
       hasRole: (min: Role) => (me ? RANK[me.role] >= RANK[min] : false),
     }),
-    [token, me, setToken, logout],
+    [token, me, setToken, logout, refresh],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

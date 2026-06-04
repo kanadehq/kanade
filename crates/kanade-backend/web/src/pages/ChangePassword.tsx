@@ -9,9 +9,13 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { apiFetch, formatError } from '@/lib/api';
+import { useAuth } from '@/lib/auth';
+
+const MIN_PASSWORD_LEN = 8;
 
 export function ChangePassword() {
   const navigate = useNavigate();
+  const { refresh } = useAuth();
   const { t } = useTranslation('accounts');
   const [oldPw, setOldPw] = useState('');
   const [newPw, setNewPw] = useState('');
@@ -24,7 +28,7 @@ export function ChangePassword() {
       toast.error(t('changePw.mismatch'));
       return;
     }
-    if (newPw.length < 8) {
+    if (newPw.length < MIN_PASSWORD_LEN) {
       toast.error(t('changePw.tooShort'));
       return;
     }
@@ -35,6 +39,10 @@ export function ChangePassword() {
         body: JSON.stringify({ old_password: oldPw, new_password: newPw }),
       });
       toast.success(t('changePw.success'));
+      // Re-fetch identity so the must_change_pw gate in ProtectedLayout
+      // releases — otherwise navigating to /dashboard bounces straight
+      // back here off the stale flag.
+      await refresh();
       navigate('/dashboard', { replace: true });
     } catch (err) {
       toast.error(formatError(err));
@@ -71,6 +79,7 @@ export function ChangePassword() {
                 value={newPw}
                 onChange={(e) => setNewPw(e.target.value)}
               />
+              <p className="text-xs text-muted">{t('passwordHint')}</p>
             </div>
             <div className="space-y-1">
               <Label htmlFor="confirm-pw">{t('changePw.confirm')}</Label>
@@ -82,7 +91,11 @@ export function ChangePassword() {
                 onChange={(e) => setConfirmPw(e.target.value)}
               />
             </div>
-            <Button type="submit" disabled={busy || !oldPw || !newPw} className="w-full">
+            <Button
+              type="submit"
+              disabled={busy || !oldPw || newPw.length < MIN_PASSWORD_LEN || newPw !== confirmPw}
+              className="w-full"
+            >
               <KeyRound className="size-4 mr-2" />
               {t('changePw.submit')}
             </Button>

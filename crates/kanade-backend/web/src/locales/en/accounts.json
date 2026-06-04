@@ -4,6 +4,7 @@
   "forbidden": "Admin role required to manage accounts.",
   "createTitle": "Create account",
   "createHint": "Username required and password must be at least 8 characters.",
+  "passwordHint": "At least 8 characters.",
   "username": "Username",
   "password": "Password",
   "newPassword": "New password",
