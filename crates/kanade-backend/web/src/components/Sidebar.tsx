@@ -50,6 +50,9 @@ const groups: {
       { to: '/schedules', labelKey: 'nav.schedules' },
       { to: '/rollout', labelKey: 'nav.rollout' },
       { to: '/apps', labelKey: 'nav.apps' },
+      // `nav.agentGroups` (not `nav.groups`) — that key is already
+      // taken by the sidebar section labels above.
+      { to: '/groups', labelKey: 'nav.agentGroups' },
       { to: '/config', labelKey: 'nav.config' },
       { to: '/jetstream', labelKey: 'nav.jetstream' },
       { to: '/accounts', labelKey: 'nav.accounts', adminOnly: true },

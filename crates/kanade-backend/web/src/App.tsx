@@ -15,6 +15,7 @@ import { Config } from '@/pages/Config';
 import { Dashboard } from '@/pages/Dashboard';
 import { Events } from '@/pages/Events';
 import { Exec } from '@/pages/Exec';
+import { Groups } from '@/pages/Groups';
 import { Inventory } from '@/pages/Inventory';
 import { JetStream } from '@/pages/JetStream';
 import { Jobs } from '@/pages/Jobs';
@@ -90,6 +91,7 @@ export default function App() {
               <Route path="/exec" element={<Exec />} />
               <Route path="/rollout" element={<Rollout />} />
               <Route path="/apps" element={<Apps />} />
+              <Route path="/groups" element={<Groups />} />
               <Route path="/config" element={<Config />} />
               <Route path="/jetstream" element={<JetStream />} />
               <Route path="/settings" element={<Settings />} />

@@ -1,0 +1,27 @@
+{
+  "title": "グループ",
+  "subtitle": "エージェントのグループ所属をグループ起点で管理 — ターゲット実行とレイヤード設定の単位です。",
+  "addTitle": "PC をグループに追加",
+  "groupName": "グループ",
+  "groupNamePlaceholder": "wave1, canary, …",
+  "pc": "PC",
+  "add": "追加",
+  "members": "メンバー",
+  "noMembers": "（メンバーなし）",
+  "config": "設定",
+  "configured": "設定あり",
+  "configHint": "groups.<name> の設定オーバーライドがあります — 設定ページで管理できます。",
+  "actions": "操作",
+  "removeMember": "{{pcId}} を {{group}} から削除",
+  "confirmRemove": "{{pcId}} を「{{group}}」から削除しますか？",
+  "remove": "削除",
+  "removeAll": "全メンバーを削除",
+  "removeAllLabel": "全削除",
+  "confirmRemoveAll": "「{{group}}」から {{count}} 台すべてを削除しますか？メンバーと設定が両方なくなるとグループは一覧から消えます。",
+  "empty": "グループはまだありません — 上のフォームで PC をグループに追加するか、設定ページでグループ設定を作成してください。",
+  "toast": {
+    "added": "{{pcId}} を {{group}} に追加しました",
+    "removed": "{{pcId}} を {{group}} から削除しました",
+    "removedAll": "{{group}} の全メンバーを削除しました"
+  }
+}

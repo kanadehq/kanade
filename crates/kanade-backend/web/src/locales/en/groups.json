@@ -1,0 +1,27 @@
+{
+  "title": "Groups",
+  "subtitle": "Group-centric view of agent group membership — drives targeted exec and layered config.",
+  "addTitle": "Add a PC to a group",
+  "groupName": "Group",
+  "groupNamePlaceholder": "wave1, canary, …",
+  "pc": "PC",
+  "add": "Add",
+  "members": "Members",
+  "noMembers": "(no members)",
+  "config": "Config",
+  "configured": "configured",
+  "configHint": "A groups.<name> config override exists — manage it on the Config page.",
+  "actions": "Actions",
+  "removeMember": "Remove {{pcId}} from {{group}}",
+  "confirmRemove": "Remove {{pcId}} from \"{{group}}\"?",
+  "remove": "Remove",
+  "removeAll": "Remove all members",
+  "removeAllLabel": "Remove all",
+  "confirmRemoveAll": "Remove all {{count}} member(s) from \"{{group}}\"? The group disappears once it has no members and no config.",
+  "empty": "No groups yet — add a PC to a group above, or set a group config override on the Config page.",
+  "toast": {
+    "added": "Added {{pcId}} to {{group}}",
+    "removed": "Removed {{pcId}} from {{group}}",
+    "removedAll": "Removed all members from {{group}}"
+  }
+}
