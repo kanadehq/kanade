@@ -55,6 +55,31 @@
 .PARAMETER NoStart
   Install + register the service but don't start it.
 
+.PARAMETER WipeDb
+  Delete the backend's projector SQLite database — the file named by
+  backend.toml's `[db] sqlite_path` (default backend.db) plus its
+  -wal/-shm sidecars — so the backend recreates it from scratch on next
+  start. Targets that one DB explicitly, NOT a `data\*.db` glob: the
+  agent's `state.db` shares this data dir on combined installs and must
+  not be clobbered by a backend deploy.
+
+  Required when upgrading across a *squashed-migration baseline*: the
+  old `_sqlx_migrations` rows reference migration files that no longer
+  exist, so the backend's startup `migrate!()` aborts with a
+  missing-migration error until the stale DB is removed. New installs
+  don't need it (a fresh DB applies the baseline cleanly).
+
+  Most of the projector re-derives from the JetStream streams, but the
+  wipe is NOT fully lossless:
+    * `users` / accounts are NOT a projection — only the bootstrap admin
+      re-seeds (registry BootstrapAdminPassword / env); recreate any
+      other accounts by hand afterward.
+    * Re-projection is bounded by each stream's `max_age` (7-90 d):
+      execution history older than retention is gone, and `once_per_pc`
+      completions older than retention look un-done, so those schedules
+      can re-fire (the kitting jobs are idempotent, so this is fine at
+      PoC).
+
 .PARAMETER NatsToken
   If set, write the NATS bearer token to
   HKLM\SOFTWARE\kanade\agent\NatsToken (REG_SZ) and harden the ACL
@@ -98,6 +123,9 @@
 
 .EXAMPLE
   PS> .\deploy-backend.ps1 -Recreate                  # recover from a stuck / broken service
+
+.EXAMPLE
+  PS> .\deploy-backend.ps1 -WipeDb                     # upgrade across a squashed-migration baseline (drops the projector DB)
 #>
 
 [CmdletBinding()]
@@ -109,6 +137,7 @@ param(
     [switch]$NoFirewall,
     [switch]$Recreate,
     [switch]$NoStart,
+    [switch]$WipeDb,
     [string]$NatsToken    = '',
     [string]$StaticToken  = '',
     [string]$JwtSecret    = ''
@@ -345,6 +374,46 @@ if ($Recreate -and $svc) {
 foreach ($d in @($binDir, $configDir, $dataDir, $logsDir)) {
     if (-not (Test-Path $d)) {
         New-Item -ItemType Directory -Path $d -Force | Out-Null
+    }
+}
+
+# -WipeDb: drop the backend's projector SQLite DB so it recreates it on
+# next start. The service is already stopped above (file unlocked) and
+# the dirs are ensured.
+#
+# Target the *configured* projector DB explicitly — parsed from
+# backend.toml's `[db] sqlite_path` (default backend.db) + its -wal/-shm
+# — NOT a `data\*.db` glob. This data dir is the shared Kanade layout
+# and the agent's state.db lives here too on combined installs, so a
+# broad glob from a *backend* deploy would clobber agent state.
+if ($WipeDb) {
+    $dbPath = $null
+    if (Test-Path $configDst) {
+        $dbLine = Select-String -Path $configDst -Pattern "^\s*sqlite_path\s*=\s*['""]([^'""]+)['""]" |
+                  Select-Object -First 1
+        if ($dbLine) { $dbPath = $dbLine.Matches[0].Groups[1].Value }
+    }
+    if (-not $dbPath) { $dbPath = Join-Path $dataDir 'backend.db' }  # config default
+
+    $targets = @($dbPath, "$dbPath-wal", "$dbPath-shm") | Where-Object { Test-Path $_ }
+    if ($targets) {
+        foreach ($f in $targets) {
+            Write-Host "WipeDb: removing $f"
+            try {
+                Remove-Item -Force $f
+            } catch {
+                # A locked file (open SQLite client, a still-running
+                # backend, an antivirus scan) would otherwise abort the
+                # deploy with a raw terminating error ($ErrorActionPreference
+                # = 'Stop'). Fail with an actionable message instead — we
+                # must NOT proceed to start the service on a stale DB.
+                throw ("WipeDb: failed to delete '$f': $($_.Exception.Message). " +
+                    "Something is holding the projector DB open — stop the $ServiceName service " +
+                    "and close any SQLite client / kanade-backend process, then re-run.")
+            }
+        }
+    } else {
+        Write-Host "WipeDb: no projector DB at $dbPath (nothing to wipe)."
     }
 }
 
