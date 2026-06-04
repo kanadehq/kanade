@@ -314,7 +314,13 @@ export function Jobs() {
               </TableCell>
               <TableCell><code className="text-xs">{j.execute.shell}</code></TableCell>
               <TableCell><code className="text-xs">{j.execute.run_as ?? 'system'}</code></TableCell>
-              <TableCell>
+              {/* Backslash-separated Windows paths have no break
+                  opportunities, so an unconstrained cell claims the
+                  full path width and forces the whole table into
+                  horizontal scroll. Cap + truncate (same pattern as
+                  the description cell below), full path in the
+                  tooltip. */}
+              <TableCell className="max-w-48 truncate" title={j.execute.cwd || undefined}>
                 {j.execute.cwd
                   ? <code className="text-xs">{j.execute.cwd}</code>
                   : <span className="text-muted text-xs">—</span>}
@@ -325,8 +331,14 @@ export function Jobs() {
                   ? <Badge variant="violet"><ScrollText className="size-3" />{t('inventoryProbe')}</Badge>
                   : <span className="text-muted text-xs">—</span>}
               </TableCell>
+              {/* `truncate` implies nowrap, so the old `max-w-md`
+                  made every long description demand a hard 28rem of
+                  min-content — pushing the table past the viewport
+                  even maximized. `w-full max-w-0` instead lets this
+                  column soak up whatever space is left after the
+                  fixed-content columns, truncating to fit. */}
               <TableCell
-                className="text-xs text-muted max-w-md truncate"
+                className="text-xs text-muted w-full max-w-0 truncate"
                 title={j.description || undefined}
               >
                 {j.description || '—'}
