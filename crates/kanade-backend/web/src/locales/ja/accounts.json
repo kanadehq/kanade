@@ -4,6 +4,7 @@
   "forbidden": "アカウント管理には admin 権限が必要です。",
   "createTitle": "アカウント作成",
   "createHint": "ユーザー名は必須、 パスワードは8文字以上にしてください。",
+  "passwordHint": "8文字以上で入力してください。",
   "username": "ユーザー名",
   "password": "パスワード",
   "newPassword": "新しいパスワード",

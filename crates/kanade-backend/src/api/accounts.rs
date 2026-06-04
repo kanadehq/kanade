@@ -153,15 +153,31 @@ pub async fn login(
 pub struct MeResp {
     username: String,
     role: Role,
+    must_change_pw: bool,
 }
 
 /// `GET /api/auth/me` — the caller's own identity + effective role.
-/// Drives the SPA's UI gating (hide operator/admin actions).
-pub async fn me(claims: axum::Extension<Claims>) -> Json<MeResp> {
-    Json(MeResp {
+/// Drives the SPA's UI gating (hide operator/admin actions) and the
+/// forced password-change gate (`must_change_pw`). The flag is read live
+/// from the DB so it clears as soon as the user changes their password.
+pub async fn me(
+    State(state): State<AppState>,
+    claims: axum::Extension<Claims>,
+) -> Result<Json<MeResp>, Response> {
+    // Service tokens have no `users` row; treat them as never needing a
+    // password change.
+    let must_change_pw =
+        sqlx::query_scalar::<_, i64>("SELECT must_change_pw FROM users WHERE username = ?")
+            .bind(&claims.sub)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(db_err)?
+            .unwrap_or(0);
+    Ok(Json(MeResp {
         username: claims.sub.clone(),
         role: claims.role(),
-    })
+        must_change_pw: must_change_pw != 0,
+    }))
 }
 
 #[derive(Deserialize)]

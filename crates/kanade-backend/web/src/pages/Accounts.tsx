@@ -170,6 +170,7 @@ export function Accounts() {
               {t('submit')}
             </Button>
           </form>
+          <p className="mt-2 text-xs text-muted">{t('createHint')}</p>
         </CardContent>
       </Card>
 
@@ -279,6 +280,7 @@ export function Accounts() {
               value={resetPw}
               onChange={(e) => setResetPw(e.target.value)}
             />
+            <p className="text-xs text-muted">{t('passwordHint')}</p>
           </div>
           <DialogFooter>
             <Button variant="ghost" onClick={() => setResetFor(null)}>

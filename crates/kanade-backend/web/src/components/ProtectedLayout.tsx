@@ -9,11 +9,18 @@ import { useAuth } from '@/lib/auth';
 /// current location stashed in `state.from` so the post-login
 /// navigation can drop them back where they were.
 export function ProtectedLayout() {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, mustChangePw } = useAuth();
   const location = useLocation();
 
   if (!isAuthenticated) {
     return <Navigate to="/login" state={{ from: location }} replace />;
+  }
+
+  // Forced password change (initial / admin reset): trap the user on
+  // /change-password until `me.must_change_pw` clears. The backend also
+  // refuses writes for these accounts, but the SPA gate makes it explicit.
+  if (mustChangePw && location.pathname !== '/change-password') {
+    return <Navigate to="/change-password" replace />;
   }
 
   return (
