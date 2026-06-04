@@ -28,6 +28,43 @@ at the repo root (used for manual installs too). The manifest
 references it via `script_object:` after the operator publishes
 an edited copy to `OBJECT_SCRIPTS` (see the section below).
 
+## Quick path: `scripts/fleet-deploy.ps1`
+
+The per-role end-to-end flows below are the *manual* breakdown. For a
+**repeat deploy** (2nd onwards), `scripts/fleet-deploy.ps1` does the whole
+sequence in one command — it's the agent-route companion to
+`build-release.ps1` (which only *stages* the binary into `dist/<role>/`):
+
+```powershell
+# stage the binary first (downloads the release .zip + extracts):
+.\scripts\build-release.ps1 -Roles backend -Version 0.43.17
+# then publish + roll it out (version auto-read from the staged exe):
+.\scripts\fleet-deploy.ps1 -Role backend                 # -> --pcs minipc
+.\scripts\fleet-deploy.ps1 -Role backend -WipeDb -JwtSecret dev -BootstrapAdminPassword dev
+.\scripts\fleet-deploy.ps1 -Role client -Groups canary
+.\scripts\fleet-deploy.ps1 -Role agent -Stage            # publish + rollout (self-update)
+.\scripts\fleet-deploy.ps1 -Role backend -DryRun         # print every command, change nothing
+```
+
+What it automates per role:
+
+- **backend / client** — `kanade app publish` → inject the deploy script's
+  download knobs (`SourceUrl`/`Version`/`Sha256`/`AuthToken`, plus
+  backend-only `-WipeDb` / `-JwtSecret` / `-StaticToken` /
+  `-BootstrapAdminPassword`) into a **temp** copy → publish it
+  (backend `script_object`, client inlined `script_file`) → render a
+  version-pinned **temp** manifest → `kanade job create` → `kanade exec
+  --pcs <pc>` (lower-cased) / `--groups <g>` → poll the installed exe to
+  verify. Nothing under version control is mutated.
+- **agent** — `kanade agent publish` → `kanade agent rollout <ver>` →
+  verify via `kanade agent current` (the agent updates itself; there is no
+  install job for it).
+
+Tokens default to the `dev` literals (or `$env:KANADE_AUTH_TOKEN` /
+`KANADE_NATS_TOKEN`). Skip a step's wipe/secrets to leave the existing
+registry values untouched. Use the manual flows below when you need to
+deviate (custom knobs, partial steps, debugging).
+
 ## install-kanade-client — end-to-end flow
 
 Pulls the kanade-client Tauri app binary from `OBJECT_APP_PACKAGES`

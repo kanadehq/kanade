@@ -267,3 +267,27 @@ identical across yukimemi/* CLIs unless your `[[bin]] name` in
 `Cargo.toml` deliberately differs from the repo name — in that
 case override `BIN_NAME` in the workflow's `env:` block.
 <!-- kata:agents:rust-cli:end -->
+
+<!-- repo-specific guidance below this line is NOT kata-managed; edit freely -->
+## Deploying a built release to a host
+
+Releases (above) ship binaries to GitHub Releases + crates.io. Getting a
+release onto an actual machine (e.g. the co-located `minipc` running
+backend + agent + nats) is a separate, agent-driven step:
+
+1. **Stage** the binary locally — `scripts/build-release.ps1 -Roles
+   backend -Version X.Y.Z` downloads the release `.zip` (SPA embedded)
+   and extracts it into `dist/backend/`. First-time / staging only.
+2. **Publish + roll out** — `scripts/fleet-deploy.ps1 -Role
+   backend|agent|client` does the whole agent-route in one command (app
+   publish → deploy-script knob injection → script/manifest publish → job
+   create → `kanade exec --pcs <pc>` → verify; agent uses `agent publish`
+   + `agent rollout`). `-DryRun` prints every command without running it.
+   See `configs/jobs/installers/README.md` for the full breakdown and the
+   manual fallback.
+
+Gotchas (each has cost a session): the exec target is `--pcs <id>` /
+`--groups <g>` **not** `--target pcs=`, and pc_ids register **lower-cased**
+(`MINIPC` → `minipc`). Dev tokens are the literal `dev`. A
+squashed-migration upgrade needs `-WipeDb`; a plain upgrade does not (no
+new files under `crates/kanade-backend/migrations/`).
