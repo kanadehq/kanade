@@ -18,6 +18,7 @@
     "schedules": "Schedules",
     "rollout": "Rollout",
     "apps": "Apps",
+    "agentGroups": "Groups",
     "config": "Config",
     "jetstream": "JetStream",
     "accounts": "Accounts",

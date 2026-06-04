@@ -150,6 +150,8 @@ pub fn router(state: AppState) -> Router {
             get(process_perf::timeline),
         )
         .route("/api/agents/{pc_id}/groups", get(agent_groups::list_groups))
+        // Group-centric inverse view — drives the SPA Groups page.
+        .route("/api/groups", get(agent_groups::list_all_groups))
         .route(
             "/api/agents/{pc_id}/effective_config",
             get(agent_config::effective),

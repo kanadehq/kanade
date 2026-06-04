@@ -18,6 +18,7 @@
     "schedules": "スケジュール",
     "rollout": "ロールアウト",
     "apps": "アプリ配信",
+    "agentGroups": "グループ",
     "config": "設定",
     "jetstream": "JetStream",
     "accounts": "アカウント",
