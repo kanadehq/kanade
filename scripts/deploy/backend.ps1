@@ -100,6 +100,18 @@
   Backend resolves it ahead of $env:KANADE_JWT_SECRET. Operators
   sign tokens out-of-band with `aud=kanade` + a future `exp`.
 
+.PARAMETER BootstrapAdminPassword
+  If set, write the bootstrap admin password to
+  HKLM\SOFTWARE\kanade\backend\BootstrapAdminPassword (REG_SZ, hardened
+  ACL). On first start with an empty `users` table the backend seeds an
+  admin account from it (username from $KANADE_BOOTSTRAP_ADMIN_USER,
+  default `admin`), so an RBAC box is reachable via the SPA right after
+  a fresh install / -WipeDb. Pair with -JwtSecret.
+
+  The agent / job path has no CLI args; set the `$AgentWipeDb` /
+  `$AgentStaticToken` / `$AgentJwtSecret` / `$AgentBootstrapAdminPassword`
+  knobs in the published copy instead (they fold into these params).
+
 .EXAMPLE
   PS> .\deploy-backend.ps1                            # opens whatever backend.toml binds to
 
@@ -140,7 +152,8 @@ param(
     [switch]$WipeDb,
     [string]$NatsToken    = '',
     [string]$StaticToken  = '',
-    [string]$JwtSecret    = ''
+    [string]$JwtSecret    = '',
+    [string]$BootstrapAdminPassword = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -186,6 +199,23 @@ $AgentSourceAuthToken = ''
 # window doesn't abort half-way. The outer manifest `timeout:`
 # still bounds the total job, so a wedged backend surfaces there.
 $AgentDownloadRetryTimeoutSecs = 1800
+# Optional install-behaviour overrides for the agent / job path — there
+# are no CLI args there, so these knobs are the agent-mode equivalent of
+# the -WipeDb / -StaticToken / -JwtSecret / -BootstrapAdminPassword
+# params. Blank / $false = leave the param default (and keep any
+# existing registry value). Set them in the per-release published copy
+# when a release needs them: e.g. a squashed-migration upgrade needs the
+# projector DB wiped; a fresh RBAC box needs a JwtSecret + a seeded
+# bootstrap admin so the SPA is reachable. They fold into the matching
+# param variables just below.
+$AgentWipeDb                 = $false
+$AgentStaticToken            = ''
+$AgentJwtSecret              = ''
+$AgentBootstrapAdminPassword = ''
+if ($AgentWipeDb)                 { $WipeDb                 = $true }
+if ($AgentStaticToken)            { $StaticToken            = $AgentStaticToken }
+if ($AgentJwtSecret)              { $JwtSecret              = $AgentJwtSecret }
+if ($AgentBootstrapAdminPassword) { $BootstrapAdminPassword = $AgentBootstrapAdminPassword }
 # ===========================================================================
 
 # If the agent-mode knobs are set, download the binary into a temp
@@ -393,6 +423,16 @@ if ($WipeDb) {
                   Select-Object -First 1
         if ($dbLine) { $dbPath = $dbLine.Matches[0].Groups[1].Value }
     }
+    # The *installed* backend.toml may still carry the UNRENDERED teravars
+    # template (`sqlite_path = '{{ vars.base }}/backend.db'`) — the backend
+    # resolves it at runtime, but we can't here. A `{{`-containing value is
+    # unusable: Test-Path'ing it silently finds nothing and the stale DB
+    # survives a -WipeDb (then the squashed-baseline backend crash-loops at
+    # migrate). Treat it — and any relative path — as "use the default".
+    if ($dbPath -and ($dbPath -match '\{\{' -or -not [System.IO.Path]::IsPathRooted($dbPath))) {
+        Write-Host "WipeDb: sqlite_path '$dbPath' is unrendered/relative; using default."
+        $dbPath = $null
+    }
     if (-not $dbPath) { $dbPath = Join-Path $dataDir 'backend.db' }  # config default
 
     $targets = @($dbPath, "$dbPath-wal", "$dbPath-shm") | Where-Object { Test-Path $_ }
@@ -436,6 +476,9 @@ if ($StaticToken) {
 }
 if ($JwtSecret) {
     Set-KanadeRegistrySecret -Subkey 'backend' -ValueName 'JwtSecret'   -Value $JwtSecret
+}
+if ($BootstrapAdminPassword) {
+    Set-KanadeRegistrySecret -Subkey 'backend' -ValueName 'BootstrapAdminPassword' -Value $BootstrapAdminPassword
 }
 
 # Service binPath = quoted exe + --config flag pointing at the

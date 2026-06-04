@@ -19,7 +19,9 @@
 #   3. Edit `BackendBase` + `Version` in
 #      `scripts/install-kanade-client.ps1`.
 #   4. `kanade job create configs/jobs/installers/install-kanade-client.yaml`
-#   5. `kanade exec install-kanade-client --target ...`
+#   5. `kanade exec install-kanade-client --groups <grp>` / `--pcs <id>`
+#      (flags are `--groups`/`--pcs`/`--all`, NOT `--target ...`; pc_ids
+#      are LOWERCASED — MINIPC -> `minipc`)
 #
 # `require_approval: true` because client-app rollouts touch the
 # end-user-visible install path; gating behind an explicit ack

@@ -323,29 +323,68 @@ Original error: $($_.Exception.Message)
                 if (Test-Path $temp) { Remove-Item -Recurse -Force $temp }
             }
         } else {
-            # Default: download from GitHub Releases. release.yml stages
-            # bins as `<crate>-<target>.exe` (target-suffixed so a single
-            # release page can carry every platform without name clashes),
-            # so the asset name differs from the local deploy filename
-            # (`$exeName`, e.g. `kanade-agent.exe`) that deploy-<role>.ps1
-            # expects.
-            $assetName = "$($spec.Crate)-x86_64-pc-windows-msvc.exe"
-            $url = "https://github.com/$GitHubRepo/releases/download/v$Version/$assetName"
-            Write-Host "Downloading $url"
+            # Default: download from GitHub Releases. Since the kata
+            # template sync (v0.43.15+), release.yml packages each binary
+            # as a target-suffixed ARCHIVE (`<crate>-<target>.zip`, the SPA
+            # embedded) rather than a bare `.exe`. Download the zip, extract
+            # the exe into place. Fall back to the legacy bare-`.exe` asset
+            # for older tags published before the archive packaging landed.
+            $target = 'x86_64-pc-windows-msvc'
+            $zipAsset = "$($spec.Crate)-$target.zip"
+            $zipUrl = "https://github.com/$GitHubRepo/releases/download/v$Version/$zipAsset"
+            $exeAsset = "$($spec.Crate)-$target.exe"
+            $exeUrl = "https://github.com/$GitHubRepo/releases/download/v$Version/$exeAsset"
+
+            $dlTemp = Join-Path ([System.IO.Path]::GetTempPath()) ("kanade-dl-{0}-{1}" -f $role, [System.Guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Force -Path $dlTemp | Out-Null
             try {
-                Invoke-WebRequest -Uri $url -OutFile $exeDst -UseBasicParsing
-            } catch {
-                throw @"
-Failed to download $url
+                $zipPath = Join-Path $dlTemp $zipAsset
+                $gotZip = $false
+                Write-Host "Downloading $zipUrl"
+                try {
+                    Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing
+                    $gotZip = $true
+                } catch {
+                    # Older tag without the archive — try the bare exe.
+                    Write-Host "  zip asset not found; falling back to $exeUrl"
+                    try {
+                        Invoke-WebRequest -Uri $exeUrl -OutFile $exeDst -UseBasicParsing
+                    } catch {
+                        throw @"
+Failed to download release binary for $($spec.Crate) v$Version
+  Tried (archive): $zipUrl
+  Tried (legacy):  $exeUrl
   - Asset missing on the release? Check https://github.com/$GitHubRepo/releases/tag/v$Version
-  - release.yml's Windows matrix entry silently drops kanade-{agent,backend,CLI}.exe;
-    release-extras.yml's upload-windows-bins job backfills them on tag push. If you're
-    pulling an older tag from before that job landed, run
+  - release.yml's Windows matrix entry silently drops the bins; release-extras.yml's
+    upload-windows-bins job backfills them on tag push. If you're pulling an older tag
+    from before that job landed, run
     `gh workflow run release-extras.yml --ref v$Version` to backfill the missing assets.
-  - First v0.3.x tags published before the GitHub-Release-upload step landed won't have assets;
-    use -FromCrates for those, or -FromSource against a checkout.
+  - First v0.3.x tags published before the GitHub-Release-upload step landed won't have
+    assets; use -FromCrates for those, or -FromSource against a checkout.
 Original error: $($_.Exception.Message)
 "@
+                    }
+                }
+
+                if ($gotZip) {
+                    $extractDir = Join-Path $dlTemp 'unzipped'
+                    Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
+                    $exeSrc = Get-ChildItem -Path $extractDir -Recurse -Filter $exeName |
+                              Select-Object -First 1
+                    if (-not $exeSrc) {
+                        # Archive may name the bin differently than the deploy
+                        # filename; fall back to the sole .exe inside.
+                        $exeSrc = Get-ChildItem -Path $extractDir -Recurse -Filter '*.exe' |
+                                  Select-Object -First 1
+                    }
+                    if (-not $exeSrc) {
+                        throw "No .exe found inside $zipAsset after extraction (expected '$exeName')."
+                    }
+                    Copy-Item $exeSrc.FullName $exeDst -Force
+                }
+            }
+            finally {
+                if (Test-Path $dlTemp) { Remove-Item -Recurse -Force $dlTemp }
             }
         }
     }
