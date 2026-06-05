@@ -26,7 +26,7 @@
       "pcs": "pcs.<pc_id>"
     },
     "placeholders": {
-      "name": "canary or PC-01",
+      "name": "canary or pc-01",
       "body": "{\"target_version\":\"0.4.0\"}"
     },
     "buttons": {
@@ -58,7 +58,7 @@
       "warnings": "warnings"
     },
     "placeholders": {
-      "pcId": "PC-01"
+      "pcId": "pc-01"
     },
     "buttons": {
       "resolve": "resolve"

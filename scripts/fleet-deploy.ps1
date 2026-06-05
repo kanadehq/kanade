@@ -120,7 +120,7 @@
 
 .EXAMPLE
   # Fresh-RBAC backend box: wipe + seed an admin:
-  PS> .\scripts\fleet-deploy.ps1 -Role backend -WipeDb `
+  PS> .\scripts\fleet-deploy.ps1 -Role backend -Pc <pc-id> -WipeDb `
         -JwtSecret dev -BootstrapAdminPassword dev
 
 .EXAMPLE
