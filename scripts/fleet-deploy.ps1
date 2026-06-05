@@ -68,9 +68,24 @@
   Run `build-release.ps1 -Roles <role> -Version <ver>` first to (re)stage
   the binary before publishing.
 
+.PARAMETER Server
+  NATS broker the `kanade` CLI publishes/execs against (app publish, script
+  publish, job create, exec all go over NATS). Default
+  $env:KANADE_NATS_URL, else `nats://127.0.0.1:4222`. Set this when running
+  from an ops-management terminal rather than on the broker host.
+
+.PARAMETER BackendUrl
+  backend HTTP base the CLI uses for HTTP-path commands. Default
+  $env:KANADE_BACKEND_URL, else `http://127.0.0.1:8080`.
+
 .PARAMETER SourceUrl
-  Where the agent downloads the app package from (the backend's own
-  app-packages HTTP). Default `http://127.0.0.1:8080` (co-located box).
+  Where the *target host's* agent downloads the app package from — i.e. a
+  backend app-packages HTTP reachable FROM THE TARGET. Default
+  `http://127.0.0.1:8080`, which is correct when the agent is co-located
+  with the backend (the usual case), regardless of where you run this
+  script. Override only if the target's agent must pull from a different
+  backend. Distinct from -Server/-BackendUrl (which are this terminal ->
+  infra).
 
 .PARAMETER AuthToken
   Bearer for the backend HTTP app-packages endpoint. Default:
@@ -111,6 +126,11 @@
   PS> .\scripts\fleet-deploy.ps1 -Role backend -Version latest
 
 .EXAMPLE
+  # From an ops-management terminal (not the broker host):
+  PS> .\scripts\fleet-deploy.ps1 -Role backend -Version latest `
+        -Server nats://broker.corp:4222 -Pc some-host -NatsToken $tok
+
+.EXAMPLE
   # Roll a new agent out to the whole fleet:
   PS> .\scripts\fleet-deploy.ps1 -Role agent -Stage
 
@@ -134,6 +154,8 @@ param(
     [string]$ExePath = '',
     [switch]$Stage,
 
+    [string]$Server = '',
+    [string]$BackendUrl = '',
     [string]$SourceUrl = 'http://127.0.0.1:8080',
     [string]$AuthToken = '',
     [string]$NatsToken = '',
@@ -178,6 +200,14 @@ if (-not $PSBoundParameters.ContainsKey('AuthToken')) { $AuthToken = if ($env:KA
 if (-not $PSBoundParameters.ContainsKey('NatsToken')) { $NatsToken = if ($env:KANADE_NATS_TOKEN) { $env:KANADE_NATS_TOKEN } else { 'dev' } }
 $env:KANADE_AUTH_TOKEN = $AuthToken
 $env:KANADE_NATS_TOKEN = $NatsToken
+
+# Broker / backend endpoints the `kanade` CLI talks to. Default localhost
+# (co-located dev box); from an ops-management terminal point -Server at
+# the broker. An already-set env var flows through if the flag is omitted.
+if (-not $PSBoundParameters.ContainsKey('Server'))     { $Server     = if ($env:KANADE_NATS_URL)    { $env:KANADE_NATS_URL }    else { 'nats://127.0.0.1:4222' } }
+if (-not $PSBoundParameters.ContainsKey('BackendUrl')) { $BackendUrl = if ($env:KANADE_BACKEND_URL) { $env:KANADE_BACKEND_URL } else { 'http://127.0.0.1:8080' } }
+$env:KANADE_NATS_URL    = $Server
+$env:KANADE_BACKEND_URL = $BackendUrl
 
 # ---- helpers --------------------------------------------------------------
 
@@ -299,6 +329,7 @@ if ($Role -ne 'backend' -and ($WipeDb -or $JwtSecret -or $StaticToken -or $Boots
 Write-Host ''
 Write-Host "=== fleet-deploy: $Role v$Version ===" -ForegroundColor Cyan
 Write-Host "  exe    : $ExePath"
+Write-Host "  broker : $Server"
 Write-Host "  target : $(if ($Groups) { "groups=$($Groups -join ',')" } else { "pc=$($Pc.ToLower())" })"
 if ($DryRun) { Write-Host '  (dry-run: no NATS writes, no exec)' -ForegroundColor Yellow }
 Write-Host ''

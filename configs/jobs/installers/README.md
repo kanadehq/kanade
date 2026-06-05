@@ -53,6 +53,22 @@ version (PE VERSIONINFO of the staged exe, or `-Version latest`), the exe
 path (`dist/<role>/`), the tokens (`$env:KANADE_*_TOKEN` → `dev`), and the
 SourceUrl port (read from the staged `backend.toml`).
 
+**From an ops-management terminal** (not the broker host) point the CLI at
+the broker — `-Server` (or `$env:KANADE_NATS_URL`) carries the
+publish/job/exec traffic:
+
+```powershell
+.\scripts\fleet-deploy.ps1 -Role backend -Version latest `
+  -Server nats://broker.corp:4222 -NatsToken $tok -Pc some-host
+```
+
+Three endpoints, all localhost by default, all overridable: `-Server`
+(this terminal → NATS broker), `-BackendUrl` (this terminal → backend
+HTTP), and `-SourceUrl` (the *target host's* agent → its co-located
+backend — usually leave at `127.0.0.1`). The local-install verify step is
+auto-skipped when the target isn't this machine; confirm the rollout on
+the SPA Inventory page instead.
+
 What it automates per role:
 
 - **backend / client** — `kanade app publish` → inject the deploy script's
