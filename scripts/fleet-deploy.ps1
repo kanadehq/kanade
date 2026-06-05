@@ -138,9 +138,32 @@ param(
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 
+# Fail fast if the CLI we drive isn't on PATH — otherwise the script
+# dies halfway with a generic command-not-found after already staging
+# binaries / writing temp files.
+if (-not (Get-Command kanade -ErrorAction SilentlyContinue)) {
+    throw "kanade CLI not found on PATH — install it (or add it to PATH) before running this script."
+}
+
+# The job-install path writes a temp deploy-script copy + temp manifest
+# that can carry plaintext secrets (-JwtSecret / -StaticToken /
+# -BootstrapAdminPassword). Track them so the trap below + the success
+# path can shred them; -DryRun keeps them for inspection.
+$tmpScript = $null
+$tmpManifest = $null
+trap {
+    if (-not $DryRun) {
+        if ($tmpScript   -and (Test-Path $tmpScript))   { Remove-Item -Force -ErrorAction SilentlyContinue $tmpScript }
+        if ($tmpManifest -and (Test-Path $tmpManifest)) { Remove-Item -Force -ErrorAction SilentlyContinue $tmpManifest }
+    }
+    break
+}
+
 # Token defaults — dev literals unless the environment / args override.
-if (-not $AuthToken) { $AuthToken = if ($env:KANADE_AUTH_TOKEN) { $env:KANADE_AUTH_TOKEN } else { 'dev' } }
-if (-not $NatsToken) { $NatsToken = if ($env:KANADE_NATS_TOKEN) { $env:KANADE_NATS_TOKEN } else { 'dev' } }
+# ContainsKey (not `-not $AuthToken`) so an explicit `-AuthToken ''`
+# is honoured rather than silently replaced.
+if (-not $PSBoundParameters.ContainsKey('AuthToken')) { $AuthToken = if ($env:KANADE_AUTH_TOKEN) { $env:KANADE_AUTH_TOKEN } else { 'dev' } }
+if (-not $PSBoundParameters.ContainsKey('NatsToken')) { $NatsToken = if ($env:KANADE_NATS_TOKEN) { $env:KANADE_NATS_TOKEN } else { 'dev' } }
 $env:KANADE_AUTH_TOKEN = $AuthToken
 $env:KANADE_NATS_TOKEN = $NatsToken
 
@@ -164,7 +187,9 @@ function Set-PsAssignment {
     # Replace a top-level `$Name = ...` line in a .ps1's line array.
     # -Raw keeps the value verbatim (e.g. `$true`); else single-quoted.
     param([string[]]$Lines, [string]$Name, [string]$Value, [switch]$Raw)
-    $new = if ($Raw) { "`$$Name = $Value" } else { "`$$Name = '$Value'" }
+    # Double up single quotes so a secret/token containing `'` doesn't
+    # break the single-quoted literal in the generated script.
+    $new = if ($Raw) { "`$$Name = $Value" } else { "`$$Name = '$($Value -replace "'", "''")'" }
     $pat = '^\s*\$' + [regex]::Escape($Name) + '\s*='
     for ($i = 0; $i -lt $Lines.Count; $i++) {
         if ($Lines[$i] -match $pat) { $Lines[$i] = $new; return , $Lines }
@@ -203,6 +228,9 @@ if (-not (Test-Path $ExePath)) {
 }
 if (-not $Version) {
     $Version = Get-ExeVersion $ExePath
+    if (-not $Version) {
+        throw "Could not read a version from $ExePath's PE VERSIONINFO — pass -Version explicitly."
+    }
     Write-Host "Version (from PE VERSIONINFO): $Version"
 }
 
@@ -294,7 +322,7 @@ if ($Role -eq 'backend') {
 } else {
     Write-Host "    knobs: $($k.Url)/$($k.Ver)/$($k.Sha)/$($k.Tok)"
 }
-$tmpScript = Join-Path ([System.IO.Path]::GetTempPath()) ("kanade-deploy-{0}-{1}.ps1" -f $Role, $Version)
+$tmpScript = Join-Path ([System.IO.Path]::GetTempPath()) ("kanade-deploy-{0}-{1}-{2}.ps1" -f $Role, $Version, [System.Guid]::NewGuid().ToString('N'))
 Set-Content -LiteralPath $tmpScript -Value $lines -Encoding utf8
 Write-Host "    wrote $tmpScript"
 
@@ -311,7 +339,7 @@ if ($spec.Delivery -eq 'object') {
     # crates/kanade/src/cmd/job.rs resolve_script_file_path).
     $manifestLines = Set-YamlLine $manifestLines '^\s*script_file:' "  script_file: $tmpScript"
 }
-$tmpManifest = Join-Path ([System.IO.Path]::GetTempPath()) ("kanade-manifest-{0}-{1}.yaml" -f $Role, $Version)
+$tmpManifest = Join-Path ([System.IO.Path]::GetTempPath()) ("kanade-manifest-{0}-{1}-{2}.yaml" -f $Role, $Version, [System.Guid]::NewGuid().ToString('N'))
 Set-Content -LiteralPath $tmpManifest -Value $manifestLines -Encoding utf8
 Write-Host "    wrote $tmpManifest"
 
@@ -340,7 +368,10 @@ if ($NoVerify -or $DryRun) {
     $ok = $false
     while ((Get-Date) -lt $deadline) {
         if (Test-Path $spec.InstalledExe) {
-            $iv = Get-ExeVersion $spec.InstalledExe
+            # The exe may be briefly locked while the service swaps it —
+            # swallow transient access errors and retry rather than crash.
+            $iv = $null
+            try { $iv = Get-ExeVersion $spec.InstalledExe } catch { }
             if ($iv -eq $Version) { $ok = $true; break }
             Write-Host "    installed=$iv want=$Version ..."
         } else {
@@ -353,6 +384,13 @@ if ($NoVerify -or $DryRun) {
     } else {
         throw "Timed out: $($spec.InstalledExe) did not reach $Version within 120s — check the agent / job result."
     }
+}
+
+# Shred the temp deploy-script + manifest (they can hold plaintext
+# secrets). Kept under -DryRun so the rendered files can be inspected.
+if (-not $DryRun) {
+    if ($tmpScript   -and (Test-Path $tmpScript))   { Remove-Item -Force -ErrorAction SilentlyContinue $tmpScript }
+    if ($tmpManifest -and (Test-Path $tmpManifest)) { Remove-Item -Force -ErrorAction SilentlyContinue $tmpManifest }
 }
 
 Write-Host ''

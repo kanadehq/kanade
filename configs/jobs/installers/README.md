@@ -61,7 +61,7 @@ What it automates per role:
   install job for it).
 
 Tokens default to the `dev` literals (or `$env:KANADE_AUTH_TOKEN` /
-`KANADE_NATS_TOKEN`). Skip a step's wipe/secrets to leave the existing
+`$env:KANADE_NATS_TOKEN`). Skip a step's wipe/secrets to leave the existing
 registry values untouched. Use the manual flows below when you need to
 deviate (custom knobs, partial steps, debugging).
 
