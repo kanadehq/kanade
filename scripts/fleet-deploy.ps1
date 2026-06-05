@@ -221,7 +221,10 @@ $env:KANADE_BACKEND_URL = $BackendUrl
 # -Pc / -Groups so we never silently fan a deploy at a guessed machine.
 # (agent rollout is fleet-wide and ignores this.)
 if ($Role -ne 'agent') {
-    if ([string]::IsNullOrWhiteSpace($Pc) -and -not [string]::IsNullOrWhiteSpace($env:KANADE_TARGET_PC)) {
+    # Env fallback only when NO explicit target was given — otherwise a set
+    # $env:KANADE_TARGET_PC would fill $Pc even alongside an explicit
+    # -Groups and trip the mutual-exclusion check below.
+    if ([string]::IsNullOrWhiteSpace($Pc) -and -not $Groups -and -not [string]::IsNullOrWhiteSpace($env:KANADE_TARGET_PC)) {
         $Pc = $env:KANADE_TARGET_PC
     }
     $hasPc = -not [string]::IsNullOrWhiteSpace($Pc)
