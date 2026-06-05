@@ -36,15 +36,22 @@ sequence in one command — it's the agent-route companion to
 `build-release.ps1` (which only *stages* the binary into `dist/<role>/`):
 
 ```powershell
-# stage the binary first (downloads the release .zip + extracts):
+# fetch the newest release + deploy it in one shot (auto-stages):
+.\scripts\fleet-deploy.ps1 -Role backend -Version latest
+# or stage a specific version, then publish + roll it out
+# (version auto-read from the staged exe when omitted):
 .\scripts\build-release.ps1 -Roles backend -Version 0.43.17
-# then publish + roll it out (version auto-read from the staged exe):
 .\scripts\fleet-deploy.ps1 -Role backend                 # -> --pcs minipc
 .\scripts\fleet-deploy.ps1 -Role backend -WipeDb -JwtSecret dev -BootstrapAdminPassword dev
-.\scripts\fleet-deploy.ps1 -Role client -Groups canary
-.\scripts\fleet-deploy.ps1 -Role agent -Stage            # publish + rollout (self-update)
+.\scripts\fleet-deploy.ps1 -Role client -Groups canary -SourceUrl http://<backend-host>:8080
+.\scripts\fleet-deploy.ps1 -Role agent -Version latest   # publish + rollout (self-update)
 .\scripts\fleet-deploy.ps1 -Role backend -DryRun         # print every command, change nothing
 ```
+
+Auto-computed so you don't pass them: the SHA-256 (`Get-FileHash`), the
+version (PE VERSIONINFO of the staged exe, or `-Version latest`), the exe
+path (`dist/<role>/`), the tokens (`$env:KANADE_*_TOKEN` → `dev`), and the
+SourceUrl port (read from the staged `backend.toml`).
 
 What it automates per role:
 

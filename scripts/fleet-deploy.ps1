@@ -50,8 +50,15 @@
   exclusive with -Pc.
 
 .PARAMETER Version
-  Version to publish / roll out. Default: read from the staged exe's PE
-  VERSIONINFO so it can never drift from the binary.
+  Version to publish / roll out. Three forms:
+    - omitted   → read from the staged exe's PE VERSIONINFO (can't drift
+                  from the binary).
+    - `latest`  → resolve the newest GitHub release tag and fetch it
+                  (implies -Stage).
+    - `X.Y.Z`   → that exact version (must match the staged exe).
+
+.PARAMETER GitHubRepo
+  owner/repo to resolve `-Version latest` against. Default `yukimemi/kanade`.
 
 .PARAMETER ExePath
   Staged binary. Default `dist/<role>/kanade-<role>.exe` (where
@@ -100,6 +107,10 @@
         -JwtSecret dev -BootstrapAdminPassword dev
 
 .EXAMPLE
+  # Grab whatever the newest release is and deploy it (auto-stages):
+  PS> .\scripts\fleet-deploy.ps1 -Role backend -Version latest
+
+.EXAMPLE
   # Roll a new agent out to the whole fleet:
   PS> .\scripts\fleet-deploy.ps1 -Role agent -Stage
 
@@ -119,6 +130,7 @@ param(
     [string[]]$Groups,
 
     [string]$Version = '',
+    [string]$GitHubRepo = 'yukimemi/kanade',
     [string]$ExePath = '',
     [switch]$Stage,
 
@@ -210,10 +222,46 @@ function Get-ExeVersion {
     (Get-Item $Path).VersionInfo.ProductVersion
 }
 
+function Resolve-LatestVersion {
+    # Newest GitHub release tag (vX.Y.Z) -> X.Y.Z. Public repo, so the
+    # unauthenticated releases API is fine; no `gh` dependency.
+    param([string]$Repo)
+    $api = "https://api.github.com/repos/$Repo/releases/latest"
+    $tag = (Invoke-RestMethod -Uri $api -Headers @{ 'User-Agent' = 'kanade-fleet-deploy' }).tag_name
+    if (-not $tag) { throw "could not resolve 'latest' release from $api" }
+    return ($tag -replace '^v', '')
+}
+
+function Get-BackendHttpPort {
+    # Auto-read the backend HTTP port from the staged backend.toml so the
+    # default SourceUrl tracks config drift; fall back to 8080.
+    $toml = Join-Path $repoRoot 'dist\backend\backend.toml'
+    if (Test-Path $toml) {
+        $m = Select-String -Path $toml -Pattern "^\s*bind\s*=\s*'[^']*:(\d+)'" | Select-Object -First 1
+        if ($m) { return $m.Matches[0].Groups[1].Value }
+    }
+    return '8080'
+}
+
 # ---- resolve the staged binary + version ----------------------------------
+
+# Default SourceUrl: localhost on the backend's actual HTTP port (read
+# from the staged backend.toml). Override -SourceUrl for a remote target
+# (e.g. clients on other hosts can't reach 127.0.0.1).
+if (-not $PSBoundParameters.ContainsKey('SourceUrl')) {
+    $SourceUrl = "http://127.0.0.1:$(Get-BackendHttpPort)"
+}
 
 $exeName = "kanade-$Role.exe"
 if (-not $ExePath) { $ExePath = Join-Path $repoRoot "dist\$Role\$exeName" }
+
+# `-Version latest` -> resolve the newest release tag and force a stage so
+# the staged binary actually IS that version.
+if ($Version -eq 'latest') {
+    $Version = Resolve-LatestVersion $GitHubRepo
+    Write-Host "Version (latest release): $Version"
+    $Stage = $true
+}
 
 if ($Stage) {
     Write-Host "=== stage ($Role) ===" -ForegroundColor Cyan
@@ -226,12 +274,18 @@ if ($Stage) {
 if (-not (Test-Path $ExePath)) {
     throw "Staged binary not found: $ExePath. Run build-release.ps1 -Roles $Role first (or pass -Stage / -ExePath)."
 }
+# Reconcile the requested version against what's actually staged: default
+# to the exe's own version, else require an exact match so we never
+# publish a mislabelled binary.
+$exeVer = Get-ExeVersion $ExePath
 if (-not $Version) {
-    $Version = Get-ExeVersion $ExePath
-    if (-not $Version) {
+    if (-not $exeVer) {
         throw "Could not read a version from $ExePath's PE VERSIONINFO — pass -Version explicitly."
     }
+    $Version = $exeVer
     Write-Host "Version (from PE VERSIONINFO): $Version"
+} elseif ($Version -ne $exeVer) {
+    throw "Staged exe is '$exeVer' but requested version is '$Version' — re-run with -Stage to fetch it (or fix -ExePath)."
 }
 
 if ($Role -ne 'backend' -and ($WipeDb -or $JwtSecret -or $StaticToken -or $BootstrapAdminPassword)) {
