@@ -267,9 +267,11 @@ if ($Stage) {
     Write-Host "=== stage ($Role) ===" -ForegroundColor Cyan
     # Hashtable splat (NOT array) so the args bind by NAME — array
     # splatting is positional and would feed `-Roles` in as a value.
-    $brParams = @{ Roles = @($Role) }
+    # Propagate -GitHubRepo so a fork stages from the same repo `latest`
+    # resolved against.
+    $brParams = @{ Roles = @($Role); GitHubRepo = $GitHubRepo }
     if ($Version) { $brParams['Version'] = $Version }
-    Write-Host "  build-release.ps1 -Roles $Role$(if ($Version) { " -Version $Version" })" -ForegroundColor DarkCyan
+    Write-Host "  build-release.ps1 -Roles $Role -GitHubRepo $GitHubRepo$(if ($Version) { " -Version $Version" })" -ForegroundColor DarkCyan
     if (-not $DryRun) { & (Join-Path $PSScriptRoot 'build-release.ps1') @brParams }
 }
 
