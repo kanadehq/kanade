@@ -90,7 +90,7 @@ mod tests {
     #[test]
     fn host_perf_round_trips_through_json() {
         let s = HostPerf {
-            pc_id: "minipc".into(),
+            pc_id: "pc-01".into(),
             at: chrono::Utc.with_ymd_and_hms(2026, 5, 24, 0, 0, 0).unwrap(),
             cpu_pct: Some(12.5),
             cpu_count: Some(8),

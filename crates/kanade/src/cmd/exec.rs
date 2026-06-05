@@ -23,7 +23,7 @@ pub struct ExecArgs {
     #[arg(long, value_delimiter = ',')]
     pub groups: Vec<String>,
 
-    /// Comma-separated pc_ids (e.g. `--pcs minipc-01,minipc-02`).
+    /// Comma-separated pc_ids (e.g. `--pcs pc-01,pc-02`).
     #[arg(long, value_delimiter = ',')]
     pub pcs: Vec<String>,
 

@@ -20,7 +20,8 @@
 #   4. `kanade job create configs/jobs/installers/install-kanade-backend.yaml`
 #   5. `kanade exec install-kanade-backend --pcs <backend-host>`
 #      (flag is `--pcs <id>`, NOT `--target pcs=<id>`; pass the pc_id
-#      LOWERCASED — e.g. MINIPC -> `--pcs minipc` — or it sticks at pending)
+#      LOWERCASED — an upper-cased COMPUTERNAME must be lower-cased — or it
+#      sticks at pending)
 #
 # `require_approval: true` is the SPEC §2.4.1 marker for "operator
 # must explicitly ack before fan-out". Today the field parses but

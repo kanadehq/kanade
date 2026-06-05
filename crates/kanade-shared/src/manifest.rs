@@ -453,7 +453,7 @@ mod tests {
         assert!(with_groups.is_specified());
 
         let with_pcs = Target {
-            pcs: vec!["minipc".into()],
+            pcs: vec!["pc-01".into()],
             ..Target::default()
         };
         assert!(with_pcs.is_specified());

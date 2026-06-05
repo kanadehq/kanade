@@ -124,7 +124,7 @@ mod tests {
     fn obs_event_round_trips_through_json() {
         let t = Utc.with_ymd_and_hms(2026, 5, 28, 10, 41, 0).unwrap();
         let e = ObsEvent {
-            pc_id: "minipc".into(),
+            pc_id: "pc-01".into(),
             at: t,
             kind: "logon".into(),
             source: "winlog:Security".into(),
@@ -144,7 +144,7 @@ mod tests {
         // so the agent's PowerShell side can emit an explicit
         // `null` without backend deserialise rejecting.
         let e = ObsEvent {
-            pc_id: "minipc".into(),
+            pc_id: "pc-01".into(),
             at: Utc.with_ymd_and_hms(2026, 5, 28, 0, 0, 0).unwrap(),
             kind: "boot".into(),
             source: "winlog:System".into(),
@@ -166,7 +166,7 @@ mod tests {
         // without the explicit default, serde requires Option
         // fields to be present (allowed to be null, not absent).
         let s = r#"{
-            "pc_id": "minipc",
+            "pc_id": "pc-01",
             "at": "2026-05-28T10:00:00Z",
             "kind": "agent_started",
             "source": "agent:internal",
@@ -186,7 +186,7 @@ mod tests {
         // `INSERT` sees the same value as if the publisher had
         // written `"payload": null` explicitly.
         let s = r#"{
-            "pc_id": "minipc",
+            "pc_id": "pc-01",
             "at": "2026-05-28T10:00:00Z",
             "kind": "boot",
             "source": "winlog:System",

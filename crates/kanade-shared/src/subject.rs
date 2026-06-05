@@ -132,7 +132,7 @@ mod tests {
 
     #[test]
     fn commands_pc_formats_id() {
-        assert_eq!(commands_pc("minipc"), "commands.pc.minipc");
+        assert_eq!(commands_pc("pc-01"), "commands.pc.pc-01");
         assert_eq!(commands_pc("PC1234"), "commands.pc.PC1234");
     }
 
@@ -143,24 +143,24 @@ mod tests {
 
     #[test]
     fn heartbeat_formats_pc_id() {
-        assert_eq!(heartbeat("minipc"), "heartbeat.minipc");
+        assert_eq!(heartbeat("pc-01"), "heartbeat.pc-01");
     }
 
     #[test]
     fn host_perf_formats_pc_id() {
-        assert_eq!(host_perf("minipc"), "host_perf.minipc");
+        assert_eq!(host_perf("pc-01"), "host_perf.pc-01");
         assert_eq!(host_perf("PC1234"), "host_perf.PC1234");
     }
 
     #[test]
     fn process_perf_formats_pc_id() {
-        assert_eq!(process_perf("minipc"), "process_perf.minipc");
+        assert_eq!(process_perf("pc-01"), "process_perf.pc-01");
         assert_eq!(process_perf("PC1234"), "process_perf.PC1234");
     }
 
     #[test]
     fn obs_formats_pc_id() {
-        assert_eq!(obs("minipc"), "obs.minipc");
+        assert_eq!(obs("pc-01"), "obs.pc-01");
         assert_eq!(obs("PC1234"), "obs.PC1234");
     }
 
@@ -176,19 +176,19 @@ mod tests {
 
     #[test]
     fn logs_fetch_formats_pc_id() {
-        assert_eq!(logs_fetch("minipc"), "logs.fetch.minipc");
+        assert_eq!(logs_fetch("pc-01"), "logs.fetch.pc-01");
     }
 
     #[test]
     fn ping_formats_pc_id() {
-        assert_eq!(ping("minipc"), "agents.minipc.ping");
+        assert_eq!(ping("pc-01"), "agents.pc-01.ping");
     }
 
     #[test]
     fn events_started_formats_exec_id_and_pc_id() {
         assert_eq!(
-            events_started("exec-uuid-1", "minipc"),
-            "events.started.exec-uuid-1.minipc",
+            events_started("exec-uuid-1", "pc-01"),
+            "events.started.exec-uuid-1.pc-01",
         );
     }
 
@@ -199,9 +199,9 @@ mod tests {
 
     #[test]
     fn inventory_formats_pc_id_and_category() {
-        assert_eq!(inventory("minipc", "hw"), "inventory.minipc.hw");
-        assert_eq!(inventory("minipc", INVENTORY_HW), "inventory.minipc.hw");
-        assert_eq!(inventory("minipc", INVENTORY_SW), "inventory.minipc.sw");
-        assert_eq!(inventory("minipc", INVENTORY_NET), "inventory.minipc.net");
+        assert_eq!(inventory("pc-01", "hw"), "inventory.pc-01.hw");
+        assert_eq!(inventory("pc-01", INVENTORY_HW), "inventory.pc-01.hw");
+        assert_eq!(inventory("pc-01", INVENTORY_SW), "inventory.pc-01.sw");
+        assert_eq!(inventory("pc-01", INVENTORY_NET), "inventory.pc-01.net");
     }
 }

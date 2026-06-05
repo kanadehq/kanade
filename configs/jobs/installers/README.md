@@ -37,12 +37,12 @@ sequence in one command — it's the agent-route companion to
 
 ```powershell
 # fetch the newest release + deploy it in one shot (auto-stages):
-.\scripts\fleet-deploy.ps1 -Role backend -Version latest
+.\scripts\fleet-deploy.ps1 -Role backend -Version latest -Pc <pc-id>
 # or stage a specific version, then publish + roll it out
 # (version auto-read from the staged exe when omitted):
 .\scripts\build-release.ps1 -Roles backend -Version 0.43.17
-.\scripts\fleet-deploy.ps1 -Role backend                 # -> --pcs minipc
-.\scripts\fleet-deploy.ps1 -Role backend -WipeDb -JwtSecret dev -BootstrapAdminPassword dev
+.\scripts\fleet-deploy.ps1 -Role backend -Pc <pc-id>     # or set $env:KANADE_TARGET_PC
+.\scripts\fleet-deploy.ps1 -Role backend -Pc <pc-id> -WipeDb -JwtSecret dev -BootstrapAdminPassword dev
 .\scripts\fleet-deploy.ps1 -Role client -Groups canary -SourceUrl http://<backend-host>:8080
 .\scripts\fleet-deploy.ps1 -Role agent -Version latest   # publish + rollout (self-update)
 .\scripts\fleet-deploy.ps1 -Role backend -DryRun         # print every command, change nothing
@@ -205,8 +205,8 @@ Five steps per backend release:
 
    > **Target flag gotcha.** It's `--pcs <id>` / `--groups <grp>` —
    > NOT `--target pcs=<id>`. And the agent registers its `pc_id`
-   > **lowercased**, so `$env:COMPUTERNAME` of `MINIPC` must be
-   > passed as `--pcs minipc`. Targeting the upper-cased name
+   > **lowercased**, so an upper-cased `$env:COMPUTERNAME` must be
+   > passed in lower case. Targeting the upper-cased name
    > publishes to a subject no agent is subscribed to, so the exec
    > sticks at `pending` with no error.
 

@@ -17,7 +17,7 @@
     "since": "since",
     "limit": "limit",
     "placeholders": {
-      "pcId": "exact match — eg. minipc",
+      "pcId": "exact match — eg. pc-01",
       "source": "exact match — eg. winlog:Security"
     },
     "kindOptions": {

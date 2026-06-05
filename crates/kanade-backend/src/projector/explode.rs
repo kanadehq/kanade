@@ -484,7 +484,7 @@ mod tests {
                 {"source": "x64",      "name": "Firefox", "version": "122.0", "publisher": "Mozilla"},
             ]
         });
-        let n = replace_rows(&pool, &spec, "minipc-01", "inventory-sw", None, &payload)
+        let n = replace_rows(&pool, &spec, "pc-01", "inventory-sw", None, &payload)
             .await
             .unwrap();
         assert_eq!(n, 3);
@@ -502,7 +502,7 @@ mod tests {
                 {"source": "x64", "name": "Edge", "version": "121.0", "publisher": "Microsoft"},
             ]
         });
-        let n = replace_rows(&pool, &spec, "minipc-01", "inventory-sw", None, &payload2)
+        let n = replace_rows(&pool, &spec, "pc-01", "inventory-sw", None, &payload2)
             .await
             .unwrap();
         assert_eq!(n, 1);
@@ -518,16 +518,9 @@ mod tests {
                 {"source": "x64", "name": "Chrome", "version": "99.0.4844.51", "publisher": "Google"},
             ]
         });
-        replace_rows(
-            &pool,
-            &spec,
-            "minipc-02",
-            "inventory-sw",
-            None,
-            &pc2_payload,
-        )
-        .await
-        .unwrap();
+        replace_rows(&pool, &spec, "pc-02", "inventory-sw", None, &pc2_payload)
+            .await
+            .unwrap();
         let chrome_pcs: Vec<(String, String)> = sqlx::query_as(
             "SELECT pc_id, version FROM inventory_sw_apps WHERE name = ? ORDER BY pc_id",
         )
@@ -535,8 +528,8 @@ mod tests {
         .fetch_all(&pool)
         .await
         .unwrap();
-        assert_eq!(chrome_pcs.len(), 1, "minipc-01 no longer has Chrome");
-        assert_eq!(chrome_pcs[0].0, "minipc-02");
+        assert_eq!(chrome_pcs.len(), 1, "pc-01 no longer has Chrome");
+        assert_eq!(chrome_pcs[0].0, "pc-02");
         assert_eq!(chrome_pcs[0].1, "99.0.4844.51");
     }
 
@@ -559,7 +552,7 @@ mod tests {
         let prior = serde_json::json!({
             "apps": [{"source": "x64", "name": "Chrome", "version": "120", "publisher": "Google"}]
         });
-        replace_rows(&pool, &spec, "minipc", "inventory-sw", None, &prior)
+        replace_rows(&pool, &spec, "pc-01", "inventory-sw", None, &prior)
             .await
             .unwrap();
         let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM inventory_sw_apps")
@@ -568,8 +561,8 @@ mod tests {
             .unwrap();
         assert_eq!(count.0, 1);
 
-        let no_apps_field = serde_json::json!({ "hostname": "minipc" });
-        let n = replace_rows(&pool, &spec, "minipc", "inventory-sw", None, &no_apps_field)
+        let no_apps_field = serde_json::json!({ "hostname": "pc-01" });
+        let n = replace_rows(&pool, &spec, "pc-01", "inventory-sw", None, &no_apps_field)
             .await
             .unwrap();
         assert_eq!(n, 0);

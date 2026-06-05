@@ -77,10 +77,10 @@ mod tests {
     #[test]
     fn heartbeat_round_trips_through_json() {
         let hb = Heartbeat {
-            pc_id: "minipc".into(),
+            pc_id: "pc-01".into(),
             at: chrono::Utc.with_ymd_and_hms(2026, 5, 16, 0, 0, 0).unwrap(),
             agent_version: "0.12.0".into(),
-            hostname: Some("MINIPC".into()),
+            hostname: Some("PC-01".into()),
             os_family: Some("windows".into()),
             agent_cpu_pct: Some(0.3),
             agent_rss_bytes: Some(45_000_000),

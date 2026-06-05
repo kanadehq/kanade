@@ -41,9 +41,11 @@
 
 .PARAMETER Pc
   exec target pc_id for the job-install roles (lower-cased automatically —
-  the agent registers pc_ids lower-cased, so `MINIPC` must target
-  `minipc` or the exec sticks at pending). Default `minipc`. Ignored for
-  -Role agent (rollout is fleet-wide). Mutually exclusive with -Groups.
+  the agent registers pc_ids lower-cased, so an upper-cased COMPUTERNAME
+  must target its lower-cased form or the exec sticks at pending). No
+  baked-in default: falls back to $env:KANADE_TARGET_PC, else you must
+  pass -Pc or -Groups. Ignored for -Role agent (rollout is fleet-wide).
+  Mutually exclusive with -Groups.
 
 .PARAMETER Groups
   Alternative exec target: one or more group names (`--groups`). Mutually
@@ -113,22 +115,27 @@
   render still run against temp files so you can inspect them).
 
 .EXAMPLE
-  # Repeat backend deploy to the minipc, no wipe (the common case):
-  PS> .\scripts\fleet-deploy.ps1 -Role backend
+  # Repeat backend deploy, no wipe (the common case):
+  PS> .\scripts\fleet-deploy.ps1 -Role backend -Pc <pc-id>
 
 .EXAMPLE
   # Fresh-RBAC backend box: wipe + seed an admin:
-  PS> .\scripts\fleet-deploy.ps1 -Role backend -WipeDb `
+  PS> .\scripts\fleet-deploy.ps1 -Role backend -Pc <pc-id> -WipeDb `
         -JwtSecret dev -BootstrapAdminPassword dev
 
 .EXAMPLE
-  # Grab whatever the newest release is and deploy it (auto-stages):
-  PS> .\scripts\fleet-deploy.ps1 -Role backend -Version latest
+  # Grab whatever the newest release is and deploy it to a host:
+  PS> .\scripts\fleet-deploy.ps1 -Role backend -Version latest -Pc <pc-id>
 
 .EXAMPLE
   # From an ops-management terminal (not the broker host):
   PS> .\scripts\fleet-deploy.ps1 -Role backend -Version latest `
-        -Server nats://broker.corp:4222 -Pc some-host -NatsToken $tok
+        -Server nats://broker.corp:4222 -Pc <pc-id> -NatsToken $tok
+
+.EXAMPLE
+  # Set a default target for this terminal, then omit -Pc:
+  PS> $env:KANADE_TARGET_PC = '<pc-id>'
+  PS> .\scripts\fleet-deploy.ps1 -Role backend -Version latest
 
 .EXAMPLE
   # Roll a new agent out to the whole fleet:
@@ -138,15 +145,15 @@
   # See exactly what would run, change nothing:
   PS> .\scripts\fleet-deploy.ps1 -Role client -Groups canary -DryRun
 #>
-[CmdletBinding(DefaultParameterSetName = 'Pc')]
+[CmdletBinding()]
 param(
     [Parameter(Mandatory)][ValidateSet('backend', 'agent', 'client')]
     [string]$Role,
 
-    [Parameter(ParameterSetName = 'Pc')]
-    [string]$Pc = 'minipc',
-
-    [Parameter(ParameterSetName = 'Groups', Mandatory)]
+    # No baked-in default — resolved from $env:KANADE_TARGET_PC, else one
+    # of -Pc / -Groups is required (validated below). Kept out of a
+    # ParameterSet so the env fallback can fill it without prompting.
+    [string]$Pc = '',
     [string[]]$Groups,
 
     [string]$Version = '',
@@ -208,6 +215,26 @@ if (-not $PSBoundParameters.ContainsKey('Server'))     { $Server     = if (-not 
 if (-not $PSBoundParameters.ContainsKey('BackendUrl')) { $BackendUrl = if (-not [string]::IsNullOrWhiteSpace($env:KANADE_BACKEND_URL)) { $env:KANADE_BACKEND_URL } else { 'http://127.0.0.1:8080' } }
 $env:KANADE_NATS_URL    = $Server
 $env:KANADE_BACKEND_URL = $BackendUrl
+
+# Deploy target for the job-install roles (backend/client). No baked-in
+# host — fall back to $env:KANADE_TARGET_PC, then require exactly one of
+# -Pc / -Groups so we never silently fan a deploy at a guessed machine.
+# (agent rollout is fleet-wide and ignores this.)
+if ($Role -ne 'agent') {
+    # Env fallback only when NO explicit target was given — otherwise a set
+    # $env:KANADE_TARGET_PC would fill $Pc even alongside an explicit
+    # -Groups and trip the mutual-exclusion check below.
+    if ([string]::IsNullOrWhiteSpace($Pc) -and -not $Groups -and -not [string]::IsNullOrWhiteSpace($env:KANADE_TARGET_PC)) {
+        $Pc = $env:KANADE_TARGET_PC
+    }
+    $hasPc = -not [string]::IsNullOrWhiteSpace($Pc)
+    if ($hasPc -and $Groups) {
+        throw "-Pc and -Groups are mutually exclusive — pick one target."
+    }
+    if (-not $hasPc -and -not $Groups) {
+        throw "No deploy target. Pass -Pc <pc_id> or -Groups <group[,...]> (or set `$env:KANADE_TARGET_PC)."
+    }
+}
 
 # ---- helpers --------------------------------------------------------------
 
@@ -341,7 +368,7 @@ Write-Host ''
 Write-Host "=== fleet-deploy: $Role v$Version ===" -ForegroundColor Cyan
 Write-Host "  exe    : $ExePath"
 Write-Host "  broker : $Server"
-Write-Host "  target : $(if ($Groups) { "groups=$($Groups -join ',')" } else { "pc=$($Pc.ToLower())" })"
+Write-Host "  target : $(if ($Role -eq 'agent') { 'fleet (agent self-update)' } elseif ($Groups) { "groups=$($Groups -join ',')" } else { "pc=$($Pc.ToLower())" })"
 if ($DryRun) { Write-Host '  (dry-run: no NATS writes, no exec)' -ForegroundColor Yellow }
 Write-Host ''
 

@@ -988,19 +988,19 @@ mod tests {
             },
             RunsOn::Agent,
         );
-        assert!(target_includes(&s, "minipc", &[]));
+        assert!(target_includes(&s, "pc-01", &[]));
     }
 
     #[test]
     fn target_pcs_explicit_match() {
         let s = schedule(
             Target {
-                pcs: vec!["minipc".into()],
+                pcs: vec!["pc-01".into()],
                 ..Default::default()
             },
             RunsOn::Agent,
         );
-        assert!(target_includes(&s, "minipc", &[]));
+        assert!(target_includes(&s, "pc-01", &[]));
         assert!(!target_includes(&s, "other", &[]));
     }
 
@@ -1025,6 +1025,6 @@ mod tests {
     #[test]
     fn target_none_matches_none() {
         let s = schedule(Target::default(), RunsOn::Agent);
-        assert!(!target_includes(&s, "minipc", &["canary".into()]));
+        assert!(!target_includes(&s, "pc-01", &["canary".into()]));
     }
 }

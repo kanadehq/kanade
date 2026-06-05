@@ -235,32 +235,32 @@ mod tests {
 
     #[test]
     fn commands_all_matches_anyone() {
-        assert!(is_for_me("commands.all", "minipc-01"));
+        assert!(is_for_me("commands.all", "pc-01"));
         assert!(is_for_me("commands.all", "anything"));
     }
 
     #[test]
     fn commands_pc_matches_only_owner() {
-        assert!(is_for_me("commands.pc.minipc-01", "minipc-01"));
-        assert!(!is_for_me("commands.pc.minipc-02", "minipc-01"));
+        assert!(is_for_me("commands.pc.pc-01", "pc-01"));
+        assert!(!is_for_me("commands.pc.pc-02", "pc-01"));
     }
 
     #[test]
     fn commands_group_always_accepted() {
         // Group dedup is handled upstream (live core sub spawns its
         // own dedup'd flow). Replay just lets them through.
-        assert!(is_for_me("commands.group.canary", "minipc-01"));
+        assert!(is_for_me("commands.group.canary", "pc-01"));
     }
 
     #[test]
     fn unknown_subject_dropped() {
-        assert!(!is_for_me("commands.weird", "minipc-01"));
-        assert!(!is_for_me("results.x", "minipc-01"));
+        assert!(!is_for_me("commands.weird", "pc-01"));
+        assert!(!is_for_me("results.x", "pc-01"));
     }
 
     #[test]
     fn consumer_name_sanitises_pc_id() {
-        assert_eq!(consumer_name("MINIPC-01"), "agent_replay_MINIPC-01");
+        assert_eq!(consumer_name("PC-01"), "agent_replay_PC-01");
         assert_eq!(consumer_name("PC.001"), "agent_replay_PC_001");
         assert_eq!(
             consumer_name("host with space"),

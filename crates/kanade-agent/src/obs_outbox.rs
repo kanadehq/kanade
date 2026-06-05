@@ -193,7 +193,7 @@ mod tests {
     #[test]
     fn enqueue_creates_uuid_named_file() {
         let dir = tempfile::tempdir().unwrap();
-        let e = sample("minipc", "1");
+        let e = sample("pc-01", "1");
         let path = enqueue(dir.path(), &e).unwrap();
         let name = path.file_name().unwrap().to_string_lossy();
         // 32 hex chars + `.json` suffix
@@ -204,7 +204,7 @@ mod tests {
             "UUID simple form is 32 chars; got {name}"
         );
         let back: ObsEvent = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(back.pc_id, "minipc");
+        assert_eq!(back.pc_id, "pc-01");
         assert_eq!(back.event_record_id.as_deref(), Some("1"));
     }
 
@@ -216,7 +216,7 @@ mod tests {
         // (server-side UNIQUE constraint collapses them at insert
         // time).
         let dir = tempfile::tempdir().unwrap();
-        let e = sample("minipc", "1");
+        let e = sample("pc-01", "1");
         let p1 = enqueue(dir.path(), &e).unwrap();
         let p2 = enqueue(dir.path(), &e).unwrap();
         assert_ne!(p1, p2, "two enqueues should land on distinct paths");

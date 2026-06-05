@@ -5,7 +5,7 @@ use tokio::sync::watch;
 use tracing::{info, warn};
 
 /// `COMPUTERNAME` on Windows, `HOSTNAME` on Unix-likes. Best-effort —
-/// the heartbeat baseline is happier with `Some("MINIPC")` than with
+/// the heartbeat baseline is happier with `Some("PC-01")` than with
 /// a panic when the env var is missing, so we shrug it off as
 /// `None` and the backend backfills via inventory later.
 fn hostname() -> Option<String> {

@@ -250,9 +250,9 @@ mod tests {
 
     #[test]
     fn agent_config_pc_key_round_trips() {
-        let k = agent_config_pc_key("MINIPC-01");
-        assert_eq!(k, "pcs.MINIPC-01");
-        assert_eq!(parse_agent_config_pc_key(&k), Some("MINIPC-01"));
+        let k = agent_config_pc_key("PC-01");
+        assert_eq!(k, "pcs.PC-01");
+        assert_eq!(parse_agent_config_pc_key(&k), Some("PC-01"));
     }
 
     #[test]

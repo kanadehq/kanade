@@ -103,7 +103,7 @@ mod tests {
             result_id: "result-uuid-1".into(),
             request_id: "req-1".into(),
             exec_id: Some("exec-uuid-1".into()),
-            pc_id: "minipc".into(),
+            pc_id: "pc-01".into(),
             exit_code: 0,
             stdout: "hello\n".into(),
             stderr: String::new(),
