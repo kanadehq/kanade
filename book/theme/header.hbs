@@ -1,0 +1,65 @@
+<div id="language-toggle" class="language-toggle">
+  <a id="lang-en" href="#">EN</a>
+  <span class="separator">|</span>
+  <a id="lang-ja" href="#">JA</a>
+</div>
+
+<style>
+  .language-toggle {
+    position: fixed;
+    top: 10px;
+    right: 150px; /* 他のアイコンと被らないよう、さらに左側にずらす */
+    z-index: 1001;
+    font-family: sans-serif;
+    font-size: 0.85em;
+    padding: 2px 6px;
+    background: transparent;
+  }
+  .language-toggle a {
+    color: var(--icons);
+    text-decoration: none;
+    padding: 0 2px;
+  }
+  .language-toggle a:hover {
+    color: var(--icons-hover);
+  }
+  .language-toggle .active {
+    font-weight: bold;
+    color: var(--fg) !important;
+    pointer-events: none;
+  }
+  .language-toggle .separator {
+    color: var(--icons);
+    margin: 0 4px;
+    opacity: 0.5;
+  }
+</style>
+
+<script>
+  (function() {
+    var currentUrl = window.location.href;
+    var langEn = document.getElementById('lang-en');
+    var langJa = document.getElementById('lang-ja');
+
+    // 現在の言語が日本語かどうか判定
+    var isJa = currentUrl.indexOf('/ja/') !== -1 || currentUrl.indexOf(':3001') !== -1;
+
+    if (isJa) {
+      langJa.className = 'active';
+      if (currentUrl.indexOf('/ja/') !== -1) {
+        langEn.href = currentUrl.replace('/ja/', '/en/');
+      } else if (currentUrl.indexOf(':3001') !== -1) {
+        langEn.href = currentUrl.replace(':3001', ':3000');
+      }
+    } else {
+      langEn.className = 'active';
+      if (currentUrl.indexOf('/en/') !== -1) {
+        langJa.href = currentUrl.replace('/en/', '/ja/');
+      } else if (currentUrl.indexOf(':3000') !== -1) {
+        langJa.href = currentUrl.replace(':3000', ':3001');
+      } else if (window.location.port) {
+        langJa.href = currentUrl.replace(':' + window.location.port, ':3001');
+      }
+    }
+  })();
+</script>
