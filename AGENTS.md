@@ -272,8 +272,8 @@ case override `BIN_NAME` in the workflow's `env:` block.
 ## Deploying a built release to a host
 
 Releases (above) ship binaries to GitHub Releases + crates.io. Getting a
-release onto an actual machine (e.g. the co-located `minipc` running
-backend + agent + nats) is a separate, agent-driven step:
+release onto an actual machine (e.g. a co-located host running backend +
+agent + nats) is a separate, agent-driven step:
 
 1. **Stage** the binary locally — `scripts/build-release.ps1 -Roles
    backend -Version X.Y.Z` downloads the release `.zip` (SPA embedded)
@@ -288,6 +288,7 @@ backend + agent + nats) is a separate, agent-driven step:
 
 Gotchas (each has cost a session): the exec target is `--pcs <id>` /
 `--groups <g>` **not** `--target pcs=`, and pc_ids register **lower-cased**
-(`MINIPC` → `minipc`). Dev tokens are the literal `dev`. A
-squashed-migration upgrade needs `-WipeDb`; a plain upgrade does not (no
+(an upper-cased `$env:COMPUTERNAME` must be targeted in lower case). Dev
+tokens are the literal `dev`. A squashed-migration upgrade needs
+`-WipeDb`; a plain upgrade does not (no
 new files under `crates/kanade-backend/migrations/`).

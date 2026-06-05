@@ -30,8 +30,8 @@ mod tests {
     #[test]
     fn hw_inventory_round_trips_with_disks() {
         let inv = HwInventory {
-            pc_id: "minipc".into(),
-            hostname: "MINIPC".into(),
+            pc_id: "pc-01".into(),
+            hostname: "PC-01".into(),
             os_name: "Windows 11 Pro".into(),
             os_version: "10.0.26200".into(),
             os_build: Some("26200".into()),

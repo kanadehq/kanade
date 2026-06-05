@@ -191,7 +191,7 @@ mod tests {
     #[test]
     fn enqueue_creates_file_named_by_result_id() {
         let dir = tempfile::tempdir().unwrap();
-        let e = sample("res-1", "exec-1", "minipc");
+        let e = sample("res-1", "exec-1", "pc-01");
         let path = enqueue(dir.path(), &e).unwrap();
         assert_eq!(path.file_name().unwrap(), "res-1.json");
         let back: EventStarted = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();

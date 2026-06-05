@@ -154,7 +154,7 @@ mod tests {
     #[tokio::test]
     async fn insert_event_writes_one_row() {
         let pool = fresh_pool().await;
-        insert_event(&pool, &logon_event("minipc", "1234567"))
+        insert_event(&pool, &logon_event("pc-01", "1234567"))
             .await
             .unwrap();
         let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM obs_events")
@@ -171,7 +171,7 @@ mod tests {
         // Models JetStream redelivery / outbox replay / agent
         // watermark drift — all expected, all harmless.
         let pool = fresh_pool().await;
-        let e = logon_event("minipc", "1234567");
+        let e = logon_event("pc-01", "1234567");
         insert_event(&pool, &e).await.unwrap();
         insert_event(&pool, &e).await.unwrap();
         insert_event(&pool, &e).await.unwrap();
@@ -189,7 +189,7 @@ mod tests {
         // boot across the fleet). The UNIQUE includes pc_id, so
         // both rows persist.
         let pool = fresh_pool().await;
-        insert_event(&pool, &logon_event("minipc", "1234"))
+        insert_event(&pool, &logon_event("pc-01", "1234"))
             .await
             .unwrap();
         insert_event(&pool, &logon_event("laptop", "1234"))
@@ -208,7 +208,7 @@ mod tests {
         // via SQLite is byte-stable (no JSON re-formatting between
         // serde_json::Value::to_string() and what we read back).
         let pool = fresh_pool().await;
-        let e = logon_event("minipc", "rec-1");
+        let e = logon_event("pc-01", "rec-1");
         insert_event(&pool, &e).await.unwrap();
         let (raw,): (String,) =
             sqlx::query_as("SELECT payload FROM obs_events WHERE event_record_id = ?")
@@ -231,7 +231,7 @@ mod tests {
         // boot, you'd want each to be a separate row).
         let pool = fresh_pool().await;
         let e = ObsEvent {
-            pc_id: "minipc".into(),
+            pc_id: "pc-01".into(),
             at: Utc.with_ymd_and_hms(2026, 5, 28, 10, 0, 0).unwrap(),
             kind: "agent_started".into(),
             source: "agent:internal".into(),

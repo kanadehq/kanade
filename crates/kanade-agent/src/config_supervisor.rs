@@ -391,32 +391,29 @@ mod tests {
 
     #[test]
     fn classify_global() {
-        assert_eq!(classify_cfg_key("global", "MINIPC"), CfgKeyKind::Global);
+        assert_eq!(classify_cfg_key("global", "PC-01"), CfgKeyKind::Global);
     }
 
     #[test]
     fn classify_group() {
         assert_eq!(
-            classify_cfg_key("groups.canary", "MINIPC"),
+            classify_cfg_key("groups.canary", "PC-01"),
             CfgKeyKind::Group("canary"),
         );
     }
 
     #[test]
     fn classify_pc_self_vs_other() {
-        assert_eq!(classify_cfg_key("pcs.MINIPC", "MINIPC"), CfgKeyKind::PcSelf,);
+        assert_eq!(classify_cfg_key("pcs.PC-01", "PC-01"), CfgKeyKind::PcSelf,);
         assert_eq!(
-            classify_cfg_key("pcs.OTHERPC", "MINIPC"),
+            classify_cfg_key("pcs.OTHERPC", "PC-01"),
             CfgKeyKind::PcOther,
         );
     }
 
     #[test]
     fn classify_unknown_key() {
-        assert_eq!(
-            classify_cfg_key("random-key", "MINIPC"),
-            CfgKeyKind::Unknown
-        );
+        assert_eq!(classify_cfg_key("random-key", "PC-01"), CfgKeyKind::Unknown);
     }
 
     #[test]
@@ -428,7 +425,7 @@ mod tests {
         };
         let bytes = serde_json::to_vec(&scope).unwrap();
         assert_eq!(
-            s.apply_cfg_change("global", &bytes, false, "MINIPC"),
+            s.apply_cfg_change("global", &bytes, false, "PC-01"),
             ChangeOutcome::Touched,
         );
         assert_eq!(
@@ -447,7 +444,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            s.apply_cfg_change("global", b"", true, "MINIPC"),
+            s.apply_cfg_change("global", b"", true, "PC-01"),
             ChangeOutcome::Touched,
         );
         assert!(s.global.is_none());
@@ -457,7 +454,7 @@ mod tests {
     fn apply_global_delete_on_absent_is_ignored() {
         let mut s = State::default();
         assert_eq!(
-            s.apply_cfg_change("global", b"", true, "MINIPC"),
+            s.apply_cfg_change("global", b"", true, "PC-01"),
             ChangeOutcome::Ignored,
         );
     }
@@ -471,12 +468,12 @@ mod tests {
         };
         let bytes = serde_json::to_vec(&scope).unwrap();
         assert_eq!(
-            s.apply_cfg_change("groups.canary", &bytes, false, "MINIPC"),
+            s.apply_cfg_change("groups.canary", &bytes, false, "PC-01"),
             ChangeOutcome::Touched,
         );
         assert!(s.groups.contains_key("canary"));
         assert_eq!(
-            s.apply_cfg_change("groups.canary", b"", true, "MINIPC"),
+            s.apply_cfg_change("groups.canary", b"", true, "PC-01"),
             ChangeOutcome::Touched,
         );
         assert!(!s.groups.contains_key("canary"));
@@ -491,7 +488,7 @@ mod tests {
         };
         let bytes = serde_json::to_vec(&scope).unwrap();
         assert_eq!(
-            s.apply_cfg_change("pcs.MINIPC", &bytes, false, "MINIPC"),
+            s.apply_cfg_change("pcs.PC-01", &bytes, false, "PC-01"),
             ChangeOutcome::Touched,
         );
         assert!(s.pc.is_some());
@@ -506,7 +503,7 @@ mod tests {
         };
         let bytes = serde_json::to_vec(&scope).unwrap();
         assert_eq!(
-            s.apply_cfg_change("pcs.OTHERPC", &bytes, false, "MINIPC"),
+            s.apply_cfg_change("pcs.OTHERPC", &bytes, false, "PC-01"),
             ChangeOutcome::Ignored,
         );
         assert!(s.pc.is_none());
@@ -516,7 +513,7 @@ mod tests {
     fn apply_unknown_key_is_ignored() {
         let mut s = State::default();
         assert_eq!(
-            s.apply_cfg_change("garbage", b"{}", false, "MINIPC"),
+            s.apply_cfg_change("garbage", b"{}", false, "PC-01"),
             ChangeOutcome::Ignored,
         );
     }
@@ -525,7 +522,7 @@ mod tests {
     fn apply_malformed_json_is_ignored() {
         let mut s = State::default();
         assert_eq!(
-            s.apply_cfg_change("global", b"not-json", false, "MINIPC"),
+            s.apply_cfg_change("global", b"not-json", false, "PC-01"),
             ChangeOutcome::Ignored,
         );
         assert!(s.global.is_none());

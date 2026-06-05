@@ -17,7 +17,7 @@
     "since": "期間",
     "limit": "件数",
     "placeholders": {
-      "pcId": "完全一致 — 例: minipc",
+      "pcId": "完全一致 — 例: pc-01",
       "source": "完全一致 — 例: winlog:Security"
     },
     "kindOptions": {

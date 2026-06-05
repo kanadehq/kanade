@@ -22,7 +22,7 @@
   },
   "placeholders": {
     "groups": "canary,wave1",
-    "pcs": "minipc-01,minipc-02"
+    "pcs": "pc-01,pc-02"
   },
   "submit": "POST /api/exec/{{jobId}}",
   "submitFallback": "<job_id>",

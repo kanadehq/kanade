@@ -314,10 +314,10 @@ mod tests {
         assert_eq!(
             scope_key(&ScopeSel {
                 group: None,
-                pc: Some("MINIPC".into())
+                pc: Some("PC-01".into())
             })
             .unwrap(),
-            "pcs.MINIPC",
+            "pcs.PC-01",
         );
     }
 }

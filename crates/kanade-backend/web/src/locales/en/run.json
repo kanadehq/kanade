@@ -9,7 +9,7 @@
     "script": "script"
   },
   "placeholders": {
-    "pcId": "MINIPC-01",
+    "pcId": "PC-01",
     "jobId": "ad-hoc-…",
     "script": "echo hello from kanade web"
   },
