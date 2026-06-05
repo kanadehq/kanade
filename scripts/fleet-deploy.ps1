@@ -68,9 +68,24 @@
   Run `build-release.ps1 -Roles <role> -Version <ver>` first to (re)stage
   the binary before publishing.
 
+.PARAMETER Server
+  NATS broker the `kanade` CLI publishes/execs against (app publish, script
+  publish, job create, exec all go over NATS). Default
+  $env:KANADE_NATS_URL, else `nats://127.0.0.1:4222`. Set this when running
+  from an ops-management terminal rather than on the broker host.
+
+.PARAMETER BackendUrl
+  backend HTTP base the CLI uses for HTTP-path commands. Default
+  $env:KANADE_BACKEND_URL, else `http://127.0.0.1:8080`.
+
 .PARAMETER SourceUrl
-  Where the agent downloads the app package from (the backend's own
-  app-packages HTTP). Default `http://127.0.0.1:8080` (co-located box).
+  Where the *target host's* agent downloads the app package from — i.e. a
+  backend app-packages HTTP reachable FROM THE TARGET. Default
+  `http://127.0.0.1:8080`, which is correct when the agent is co-located
+  with the backend (the usual case), regardless of where you run this
+  script. Override only if the target's agent must pull from a different
+  backend. Distinct from -Server/-BackendUrl (which are this terminal ->
+  infra).
 
 .PARAMETER AuthToken
   Bearer for the backend HTTP app-packages endpoint. Default:
@@ -111,6 +126,11 @@
   PS> .\scripts\fleet-deploy.ps1 -Role backend -Version latest
 
 .EXAMPLE
+  # From an ops-management terminal (not the broker host):
+  PS> .\scripts\fleet-deploy.ps1 -Role backend -Version latest `
+        -Server nats://broker.corp:4222 -Pc some-host -NatsToken $tok
+
+.EXAMPLE
   # Roll a new agent out to the whole fleet:
   PS> .\scripts\fleet-deploy.ps1 -Role agent -Stage
 
@@ -134,6 +154,8 @@ param(
     [string]$ExePath = '',
     [switch]$Stage,
 
+    [string]$Server = '',
+    [string]$BackendUrl = '',
     [string]$SourceUrl = 'http://127.0.0.1:8080',
     [string]$AuthToken = '',
     [string]$NatsToken = '',
@@ -174,10 +196,18 @@ trap {
 # Token defaults — dev literals unless the environment / args override.
 # ContainsKey (not `-not $AuthToken`) so an explicit `-AuthToken ''`
 # is honoured rather than silently replaced.
-if (-not $PSBoundParameters.ContainsKey('AuthToken')) { $AuthToken = if ($env:KANADE_AUTH_TOKEN) { $env:KANADE_AUTH_TOKEN } else { 'dev' } }
-if (-not $PSBoundParameters.ContainsKey('NatsToken')) { $NatsToken = if ($env:KANADE_NATS_TOKEN) { $env:KANADE_NATS_TOKEN } else { 'dev' } }
+if (-not $PSBoundParameters.ContainsKey('AuthToken')) { $AuthToken = if (-not [string]::IsNullOrWhiteSpace($env:KANADE_AUTH_TOKEN)) { $env:KANADE_AUTH_TOKEN } else { 'dev' } }
+if (-not $PSBoundParameters.ContainsKey('NatsToken')) { $NatsToken = if (-not [string]::IsNullOrWhiteSpace($env:KANADE_NATS_TOKEN)) { $env:KANADE_NATS_TOKEN } else { 'dev' } }
 $env:KANADE_AUTH_TOKEN = $AuthToken
 $env:KANADE_NATS_TOKEN = $NatsToken
+
+# Broker / backend endpoints the `kanade` CLI talks to. Default localhost
+# (co-located dev box); from an ops-management terminal point -Server at
+# the broker. An already-set env var flows through if the flag is omitted.
+if (-not $PSBoundParameters.ContainsKey('Server'))     { $Server     = if (-not [string]::IsNullOrWhiteSpace($env:KANADE_NATS_URL))    { $env:KANADE_NATS_URL }    else { 'nats://127.0.0.1:4222' } }
+if (-not $PSBoundParameters.ContainsKey('BackendUrl')) { $BackendUrl = if (-not [string]::IsNullOrWhiteSpace($env:KANADE_BACKEND_URL)) { $env:KANADE_BACKEND_URL } else { 'http://127.0.0.1:8080' } }
+$env:KANADE_NATS_URL    = $Server
+$env:KANADE_BACKEND_URL = $BackendUrl
 
 # ---- helpers --------------------------------------------------------------
 
@@ -275,21 +305,32 @@ if ($Stage) {
     if (-not $DryRun) { & (Join-Path $PSScriptRoot 'build-release.ps1') @brParams }
 }
 
-if (-not (Test-Path $ExePath)) {
-    throw "Staged binary not found: $ExePath. Run build-release.ps1 -Roles $Role first (or pass -Stage / -ExePath)."
-}
-# Reconcile the requested version against what's actually staged: default
-# to the exe's own version, else require an exact match so we never
-# publish a mislabelled binary.
-$exeVer = Get-ExeVersion $ExePath
+# Reconcile the requested version against what's actually staged. Under
+# -DryRun staging is skipped (so a stale/absent exe is expected) — warn
+# and trust the requested version instead of hard-failing; a real run
+# stages first and the checks below bite. Outside dry-run we still refuse
+# to publish a mislabelled binary.
+$exeStaged = Test-Path $ExePath
+$exeVer = if ($exeStaged) { Get-ExeVersion $ExePath } else { $null }
+
 if (-not $Version) {
+    # No version given: it can only come from the staged exe.
+    if (-not $exeStaged) {
+        throw "Staged binary not found: $ExePath. Run build-release.ps1 -Roles $Role first (or pass -Stage / -Version / -ExePath)."
+    }
     if (-not $exeVer) {
         throw "Could not read a version from $ExePath's PE VERSIONINFO — pass -Version explicitly."
     }
     $Version = $exeVer
     Write-Host "Version (from PE VERSIONINFO): $Version"
+} elseif (-not $exeStaged) {
+    $msg = "Staged binary not found: $ExePath"
+    if ($DryRun) { Write-Warning "$msg — dry-run skips staging; a real run stages it first." }
+    else { throw "$msg. Run build-release.ps1 -Roles $Role first (or pass -Stage / -ExePath)." }
 } elseif ($Version -ne $exeVer) {
-    throw "Staged exe is '$exeVer' but requested version is '$Version' — re-run with -Stage to fetch it (or fix -ExePath)."
+    $msg = "Staged exe is '$exeVer' but requested version is '$Version'"
+    if ($DryRun) { Write-Warning "$msg — dry-run skips staging; a real run with -Stage fetches '$Version'." }
+    else { throw "$msg — re-run with -Stage to fetch it (or fix -ExePath)." }
 }
 
 if ($Role -ne 'backend' -and ($WipeDb -or $JwtSecret -or $StaticToken -or $BootstrapAdminPassword)) {
@@ -299,6 +340,7 @@ if ($Role -ne 'backend' -and ($WipeDb -or $JwtSecret -or $StaticToken -or $Boots
 Write-Host ''
 Write-Host "=== fleet-deploy: $Role v$Version ===" -ForegroundColor Cyan
 Write-Host "  exe    : $ExePath"
+Write-Host "  broker : $Server"
 Write-Host "  target : $(if ($Groups) { "groups=$($Groups -join ',')" } else { "pc=$($Pc.ToLower())" })"
 if ($DryRun) { Write-Host '  (dry-run: no NATS writes, no exec)' -ForegroundColor Yellow }
 Write-Host ''
@@ -355,7 +397,9 @@ $spec = @{
     }
 }[$Role]
 
-$sha256 = (Get-FileHash $ExePath -Algorithm SHA256).Hash.ToLower()
+# Under -DryRun the exe may not be staged (staging is skipped), so the
+# hash can't be computed — show a placeholder; a real run always has it.
+$sha256 = if (Test-Path $ExePath) { (Get-FileHash $ExePath -Algorithm SHA256).Hash.ToLower() } else { '<sha256-at-runtime>' }
 Write-Host "  sha256 : $sha256"
 Write-Host ''
 
