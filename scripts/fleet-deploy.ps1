@@ -425,7 +425,8 @@ if ($NoVerify -or $DryRun) {
             # The exe may be briefly locked while the service swaps it —
             # swallow transient access errors and retry rather than crash.
             $iv = $null
-            try { $iv = Get-ExeVersion $spec.InstalledExe } catch { }
+            try { $iv = Get-ExeVersion $spec.InstalledExe }
+            catch { $iv = $null }  # transient lock while the service swaps the exe — retry
             if ($iv -eq $Version) { $ok = $true; break }
             Write-Host "    installed=$iv want=$Version ..."
         } else {
