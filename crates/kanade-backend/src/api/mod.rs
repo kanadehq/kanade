@@ -105,6 +105,9 @@ pub fn router(state: AppState) -> Router {
     // with the read open to viewers and the write gated to operators.
     let base = Router::new()
         .route("/health", get(health))
+        // Public: backend build version (so the SPA can show it, even on
+        // the login screen). Allow-listed in `crate::auth::verify`.
+        .route("/api/version", get(version))
         // RBAC: credential login (public), self identity, self password.
         .route("/api/auth/login", post(accounts::login))
         .route("/api/auth/me", get(accounts::me))
@@ -314,4 +317,17 @@ pub fn router(state: AppState) -> Router {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+#[derive(serde::Serialize)]
+struct VersionResponse {
+    version: &'static str,
+}
+
+/// `GET /api/version` — the backend binary's build version. Public (no
+/// auth) so the SPA can render it in the sidebar before/after login.
+async fn version() -> axum::Json<VersionResponse> {
+    axum::Json(VersionResponse {
+        version: env!("CARGO_PKG_VERSION"),
+    })
 }
