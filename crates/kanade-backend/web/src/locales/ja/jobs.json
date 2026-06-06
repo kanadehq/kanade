@@ -9,7 +9,7 @@
     "body": "CLI で <code>kanade job create &lt;manifest.yaml&gt;</code> を実行するか、 上の <strong>新規ジョブ</strong> をクリックしてブラウザ内 YAML エディタを開いてください。 スケジュールはジョブを id で参照するため、 スケジュール発火前にジョブを作成しておく必要があります。"
   },
   "columns": {
-    "id": "id",
+    "job": "ジョブ",
     "version": "version",
     "status": "status",
     "live": "live",
@@ -18,8 +18,13 @@
     "cwd": "cwd",
     "timeout": "timeout",
     "inventory": "inventory",
-    "description": "説明",
     "actions": "操作"
+  },
+  "row": {
+    "openAria": "ジョブ {{id}} の詳細を開く"
+  },
+  "detail": {
+    "noDescription": "(説明なし)"
   },
   "status": {
     "active": "有効",

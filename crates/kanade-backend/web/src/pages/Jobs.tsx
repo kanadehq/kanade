@@ -21,6 +21,15 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { useConfirm } from '@/components/ui/confirm-dialog';
+import { DetailItem, DetailList } from '@/components/ui/detail-list';
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+} from '@/components/ui/sheet';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { apiFetch, formatError } from '@/lib/api';
 
@@ -60,12 +69,26 @@ export function Jobs() {
     queryFn: () => apiFetch<JobRow[]>('/api/jobs'),
   });
 
+  // Master-detail split (#374): the table used to carry all 11 job
+  // fields as columns, which forced IDs to wrap over three lines and
+  // truncated every Windows cwd. The list now keeps the four columns
+  // an operator scans for (id+description / status / live / actions)
+  // and the rest moved into a right-edge Sheet opened by clicking the
+  // row. `selectedId` stores the id, not the row object, so the
+  // drawer re-derives fresh data from the query cache on every
+  // refetch instead of pinning a stale snapshot.
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
   const del = useMutation({
     mutationFn: (id: string) =>
       apiFetch(`/api/jobs/${encodeURIComponent(id)}`, { method: 'DELETE' }),
     onSuccess: (_d, id) => {
       qc.invalidateQueries({ queryKey: ['jobs'] });
       qc.invalidateQueries({ queryKey: ['scripts-status'] });
+      // Deleting the job the drawer is showing leaves it pointing at
+      // a row that no longer exists — close it instead of rendering
+      // an empty shell after the refetch lands.
+      setSelectedId((prev) => (prev === id ? null : prev));
       toast.success(t('toast.deleteSuccess', { id }));
     },
     onError: (e) => toast.error(t('toast.deleteFailure', { error: formatError(e) })),
@@ -180,6 +203,153 @@ export function Jobs() {
     },
   });
 
+  function statusBadge(id: string) {
+    return isRevoked(id) ? (
+      <Badge variant="danger">{t('status.revoked')}</Badge>
+    ) : (
+      <Badge variant="success">{t('status.active')}</Badge>
+    );
+  }
+
+  // v0.30 follow-up: compact icon + count chips so both running +
+  // pending fit in a narrow column without wrapping to two lines.
+  // Tooltips carry the full semantics. Stale `pending` rows (= fire
+  // whose ExecResult never landed within 1 h) flip to `expired` via
+  // the backend cleanup task and drop out of this chip automatically.
+  function liveChips(j: JobRow) {
+    if (j.live.running === 0 && j.live.pending === 0) {
+      return <span className="text-muted text-xs">—</span>;
+    }
+    return (
+      <div className="flex gap-1.5 items-center">
+        {j.live.running > 0 && (
+          <Badge
+            variant="violet"
+            title={t('live.runningTitle')}
+            className="inline-flex items-center gap-1 px-1.5"
+          >
+            <Play className="size-3" />
+            {j.live.running}
+          </Badge>
+        )}
+        {j.live.pending > 0 && (
+          <Badge
+            variant="amber"
+            title={t('live.pendingTitle')}
+            className="inline-flex items-center gap-1 px-1.5"
+          >
+            <Hourglass className="size-3" />
+            {j.live.pending}
+          </Badge>
+        )}
+      </div>
+    );
+  }
+
+  // One action strip, two render sites: icon-only inside the table
+  // (rows stay one line tall) and icon+label inside the drawer
+  // footer where there's room to spell the verbs out. Each action
+  // renders ONLY when actionable for the current row state:
+  //   * kill: shown only when something is in flight
+  //   * revoke: shown only when active
+  //   * unrevoke: shown only when revoked
+  //   * delete: always (it's the last-resort op)
+  function renderActions(j: JobRow, withLabels = false) {
+    const inflight = j.live.running + j.live.pending;
+    return (
+      <>
+        {inflight > 0 && (
+          <Button
+            variant="danger"
+            size="sm"
+            disabled={pendingKill.has(j.id)}
+            onClick={async () => {
+              const ok = await confirm({
+                title: t('confirm.killTitle', { id: j.id }),
+                description: t('confirm.killDescription', {
+                  count: inflight,
+                  running: j.live.running,
+                  pending: j.live.pending,
+                }),
+                confirmLabel: t('confirm.killLabel'),
+                danger: true,
+              });
+              if (ok) kill.mutate(j.id);
+            }}
+            title={t('actions.killTitle', { count: inflight })}
+            aria-label={t('actions.killAria', { id: j.id })}
+          >
+            <Skull className="size-3.5" />
+            {withLabels && t('actions.kill')}
+          </Button>
+        )}
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={() => setEditor({ type: 'edit', id: j.id })}
+          title={t('actions.editTitle')}
+          aria-label={t('actions.editAria', { id: j.id })}
+        >
+          <Pencil className="size-3.5" />
+          {withLabels && t('actions.edit')}
+        </Button>
+        {!isRevoked(j.id) && (
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={pendingRevoke.has(j.id)}
+            onClick={async () => {
+              const ok = await confirm({
+                title: t('confirm.revokeTitle', { id: j.id }),
+                description: t('confirm.revokeDescription'),
+                confirmLabel: t('confirm.revokeLabel'),
+                danger: true,
+              });
+              if (ok) revoke.mutate(j.id);
+            }}
+            title={t('actions.revokeTitle')}
+            aria-label={t('actions.revokeAria', { id: j.id })}
+          >
+            <Ban className="size-3.5" />
+            {withLabels && t('actions.revoke')}
+          </Button>
+        )}
+        {isRevoked(j.id) && (
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={pendingUnrevoke.has(j.id)}
+            onClick={() => unrevoke.mutate(j.id)}
+            title={t('actions.unrevokeTitle')}
+            aria-label={t('actions.unrevokeAria', { id: j.id })}
+          >
+            <CircleCheck className="size-3.5" />
+            {withLabels && t('actions.unrevoke')}
+          </Button>
+        )}
+        <Button
+          variant="danger"
+          size="sm"
+          disabled={del.isPending}
+          onClick={async () => {
+            const ok = await confirm({
+              title: t('confirm.deleteTitle', { id: j.id }),
+              description: t('confirm.deleteDescription'),
+              confirmLabel: t('confirm.deleteLabel'),
+              danger: true,
+            });
+            if (ok) del.mutate(j.id);
+          }}
+          title={t('actions.deleteTitle')}
+          aria-label={t('actions.deleteAria', { id: j.id })}
+        >
+          <Trash2 className="size-3.5" />
+          {withLabels && t('actions.delete')}
+        </Button>
+      </>
+    );
+  }
+
   if (isLoading) {
     return (
       <div className="flex items-center gap-2 text-muted">
@@ -189,6 +359,16 @@ export function Jobs() {
   }
   if (error) return <ErrorCard title={t('errorTitle')} error={error} />;
   const rows = data ?? [];
+  const selected = rows.find((j) => j.id === selectedId) ?? null;
+  // Gemini review (#376): if a background refetch drops the selected
+  // row (deleted from another session), the drawer closes
+  // programmatically — onOpenChange never fires, so `selectedId`
+  // would stay stale and re-clicking the same row would bail out of
+  // the no-op setState without reopening the drawer. Adjust the
+  // state during render so the next click is a real transition.
+  if (selectedId !== null && selected === null) {
+    setSelectedId(null);
+  }
 
   if (rows.length === 0) {
     return (
@@ -252,199 +432,111 @@ export function Jobs() {
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead>{t('columns.id')}</TableHead>
-            <TableHead>{t('columns.version')}</TableHead>
+            <TableHead>{t('columns.job')}</TableHead>
             <TableHead>{t('columns.status')}</TableHead>
             <TableHead>{t('columns.live')}</TableHead>
-            <TableHead>{t('columns.shell')}</TableHead>
-            <TableHead>{t('columns.runAs')}</TableHead>
-            <TableHead>{t('columns.cwd')}</TableHead>
-            <TableHead>{t('columns.timeout')}</TableHead>
-            <TableHead>{t('columns.inventory')}</TableHead>
-            <TableHead>{t('columns.description')}</TableHead>
             <TableHead>{t('columns.actions')}</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {rows.map((j) => (
-            <TableRow key={j.id}>
-              <TableCell><code className="text-xs">{j.id}</code></TableCell>
-              <TableCell><code className="text-xs">{j.version}</code></TableCell>
-              <TableCell>
-                {isRevoked(j.id) ? (
-                  <Badge variant="danger">{t('status.revoked')}</Badge>
-                ) : (
-                  <Badge variant="success">{t('status.active')}</Badge>
-                )}
-              </TableCell>
-              <TableCell>
-                {/* v0.30 follow-up: compact icon + count chips so
-                    both running + pending fit in a narrow column
-                    without wrapping to two lines. Tooltips carry
-                    the full semantics. Stale `pending` rows (= fire
-                    whose ExecResult never landed within 1 h) flip
-                    to `expired` via the backend cleanup task and
-                    drop out of this chip automatically. */}
-                {j.live.running > 0 || j.live.pending > 0 ? (
-                  <div className="flex gap-1.5 items-center">
-                    {j.live.running > 0 && (
-                      <Badge
-                        variant="violet"
-                        title={t('live.runningTitle')}
-                        className="inline-flex items-center gap-1 px-1.5"
-                      >
-                        <Play className="size-3" />
-                        {j.live.running}
-                      </Badge>
-                    )}
-                    {j.live.pending > 0 && (
-                      <Badge
-                        variant="amber"
-                        title={t('live.pendingTitle')}
-                        className="inline-flex items-center gap-1 px-1.5"
-                      >
-                        <Hourglass className="size-3" />
-                        {j.live.pending}
-                      </Badge>
-                    )}
-                  </div>
-                ) : (
-                  <span className="text-muted text-xs">—</span>
-                )}
-              </TableCell>
-              <TableCell><code className="text-xs">{j.execute.shell}</code></TableCell>
-              <TableCell><code className="text-xs">{j.execute.run_as ?? 'system'}</code></TableCell>
-              {/* Backslash-separated Windows paths have no break
-                  opportunities, so an unconstrained cell claims the
-                  full path width and forces the whole table into
-                  horizontal scroll. Cap + truncate (same pattern as
-                  the description cell below), full path in the
-                  tooltip. */}
-              <TableCell className="max-w-48 truncate" title={j.execute.cwd || undefined}>
-                {j.execute.cwd
-                  ? <code className="text-xs">{j.execute.cwd}</code>
-                  : <span className="text-muted text-xs">—</span>}
-              </TableCell>
-              <TableCell><code className="text-xs">{j.execute.timeout}</code></TableCell>
-              <TableCell>
-                {j.inventory
-                  ? <Badge variant="violet"><ScrollText className="size-3" />{t('inventoryProbe')}</Badge>
-                  : <span className="text-muted text-xs">—</span>}
-              </TableCell>
-              {/* `truncate` implies nowrap, so the old `max-w-md`
-                  made every long description demand a hard 28rem of
-                  min-content — pushing the table past the viewport
-                  even maximized. `w-full max-w-0` instead lets this
-                  column soak up whatever space is left after the
-                  fixed-content columns, truncating to fit. */}
-              <TableCell
-                className="text-xs text-muted w-full max-w-0 truncate"
-                title={j.description || undefined}
-              >
-                {j.description || '—'}
-              </TableCell>
-              <TableCell className="flex flex-nowrap gap-2">
-                {/* v0.30 follow-up: render each action ONLY when
-                    actionable for the current row state. The old
-                    "always render, disable when N/A" layout left
-                    4 buttons stacked 2×2 for every row regardless
-                    of whether unrevoke or kill applied — visually
-                    busy and hard to scan. Now:
-                      * kill: shown only when something is in flight
-                      * revoke: shown only when active
-                      * unrevoke: shown only when revoked
-                      * delete: always (it's the last-resort op) */}
-                {(() => {
-                  const inflight = j.live.running + j.live.pending;
-                  return inflight > 0 ? (
-                    <Button
-                      variant="danger"
-                      size="sm"
-                      disabled={pendingKill.has(j.id)}
-                      onClick={async () => {
-                        const ok = await confirm({
-                          title: t('confirm.killTitle', { id: j.id }),
-                          description: t('confirm.killDescription', {
-                            count: inflight,
-                            running: j.live.running,
-                            pending: j.live.pending,
-                          }),
-                          confirmLabel: t('confirm.killLabel'),
-                          danger: true,
-                        });
-                        if (ok) kill.mutate(j.id);
-                      }}
-                      title={t('actions.killTitle', { count: inflight })}
-                      aria-label={t('actions.killAria', { id: j.id })}
-                    >
-                      <Skull className="size-3.5" />
-                    </Button>
-                  ) : null;
-                })()}
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => setEditor({ type: 'edit', id: j.id })}
-                  title={t('actions.editTitle')}
-                  aria-label={t('actions.editAria', { id: j.id })}
-                >
-                  <Pencil className="size-3.5" />
-                </Button>
-                {!isRevoked(j.id) && (
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    disabled={pendingRevoke.has(j.id)}
-                    onClick={async () => {
-                      const ok = await confirm({
-                        title: t('confirm.revokeTitle', { id: j.id }),
-                        description: t('confirm.revokeDescription'),
-                        confirmLabel: t('confirm.revokeLabel'),
-                        danger: true,
-                      });
-                      if (ok) revoke.mutate(j.id);
-                    }}
-                    title={t('actions.revokeTitle')}
-                    aria-label={t('actions.revokeAria', { id: j.id })}
+            <TableRow
+              key={j.id}
+              tabIndex={0}
+              className="cursor-pointer focus-visible:outline-none focus-visible:bg-muted/10"
+              onClick={() => setSelectedId(j.id)}
+              // Keyboard path for the clickable row. Guard on
+              // currentTarget so Enter/Space pressed on a focused
+              // action *button* (which bubbles its keydown up here)
+              // doesn't also pop the drawer open.
+              onKeyDown={(e) => {
+                if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) {
+                  e.preventDefault();
+                  setSelectedId(j.id);
+                }
+              }}
+              aria-label={t('row.openAria', { id: j.id })}
+            >
+              {/* `w-full max-w-0` — soak up whatever width is left
+                  after the fixed-content columns, truncating the
+                  description to fit (same trick the old 11-column
+                  layout used, now on the merged id+description
+                  cell). */}
+              <TableCell className="w-full max-w-0">
+                <div className="flex flex-col gap-0.5">
+                  <code className="text-xs font-medium">{j.id}</code>
+                  <span
+                    className="block truncate text-xs text-muted"
+                    title={j.description || undefined}
                   >
-                    <Ban className="size-3.5" />
-                  </Button>
-                )}
-                {isRevoked(j.id) && (
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  disabled={pendingUnrevoke.has(j.id)}
-                  onClick={() => unrevoke.mutate(j.id)}
-                  title={t('actions.unrevokeTitle')}
-                  aria-label={t('actions.unrevokeAria', { id: j.id })}
-                >
-                  <CircleCheck className="size-3.5" />
-                </Button>
-                )}
-                <Button
-                  variant="danger"
-                  size="sm"
-                  disabled={del.isPending}
-                  onClick={async () => {
-                    const ok = await confirm({
-                      title: t('confirm.deleteTitle', { id: j.id }),
-                      description: t('confirm.deleteDescription'),
-                      confirmLabel: t('confirm.deleteLabel'),
-                      danger: true,
-                    });
-                    if (ok) del.mutate(j.id);
-                  }}
-                  title={t('actions.deleteTitle')}
-                  aria-label={t('actions.deleteAria', { id: j.id })}
-                >
-                  <Trash2 className="size-3.5" />
-                </Button>
+                    {j.description || '—'}
+                  </span>
+                </div>
+              </TableCell>
+              <TableCell>{statusBadge(j.id)}</TableCell>
+              <TableCell>{liveChips(j)}</TableCell>
+              {/* stopPropagation so clicking an action (or the dead
+                  space between buttons) doesn't also open the
+                  drawer underneath the confirm dialog. */}
+              <TableCell onClick={(e) => e.stopPropagation()}>
+                <div className="flex flex-nowrap gap-2">{renderActions(j)}</div>
               </TableCell>
             </TableRow>
           ))}
         </TableBody>
       </Table>
+      <Sheet
+        open={selected !== null}
+        onOpenChange={(next) => {
+          if (!next) setSelectedId(null);
+        }}
+      >
+        {selected !== null && (
+          <SheetContent>
+            <SheetHeader>
+              <SheetTitle>
+                <code className="break-all">{selected.id}</code>
+              </SheetTitle>
+              <SheetDescription>
+                {selected.description || t('detail.noDescription')}
+              </SheetDescription>
+            </SheetHeader>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {statusBadge(selected.id)}
+              {(selected.live.running > 0 || selected.live.pending > 0) && liveChips(selected)}
+            </div>
+            <DetailList>
+              <DetailItem label={t('columns.version')}>
+                <code className="text-xs">{selected.version}</code>
+              </DetailItem>
+              <DetailItem label={t('columns.shell')}>
+                <code className="text-xs">{selected.execute.shell}</code>
+              </DetailItem>
+              <DetailItem label={t('columns.runAs')}>
+                <code className="text-xs">{selected.execute.run_as ?? 'system'}</code>
+              </DetailItem>
+              <DetailItem label={t('columns.cwd')}>
+                {selected.execute.cwd
+                  ? <code className="text-xs break-all">{selected.execute.cwd}</code>
+                  : <span className="text-muted text-xs">—</span>}
+              </DetailItem>
+              <DetailItem label={t('columns.timeout')}>
+                <code className="text-xs">{selected.execute.timeout}</code>
+              </DetailItem>
+              <DetailItem label={t('columns.inventory')}>
+                {selected.inventory
+                  ? <Badge variant="violet"><ScrollText className="size-3" />{t('inventoryProbe')}</Badge>
+                  : <span className="text-muted text-xs">—</span>}
+              </DetailItem>
+            </DetailList>
+            <SheetFooter>
+              <div className="flex flex-wrap justify-end gap-2">
+                {renderActions(selected, true)}
+              </div>
+            </SheetFooter>
+          </SheetContent>
+        )}
+      </Sheet>
       {del.error && <ErrorCard title={t('errors.deleteTitle')} error={del.error} />}
       {revoke.error && <ErrorCard title={t('errors.revokeTitle')} error={revoke.error} />}
       {unrevoke.error && <ErrorCard title={t('errors.unrevokeTitle')} error={unrevoke.error} />}

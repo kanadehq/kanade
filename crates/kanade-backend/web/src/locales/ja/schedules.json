@@ -9,7 +9,7 @@
   "newSchedule": "新規スケジュール",
   "newScheduleTitle": "YAML テンプレートから新しいスケジュールを作成します",
   "columns": {
-    "id": "id",
+    "schedule": "スケジュール",
     "cron": "cron",
     "jobId": "job_id",
     "target": "対象",
@@ -26,6 +26,12 @@
   "target": {
     "all": "全て"
   },
+  "row": {
+    "openAria": "スケジュール {{id}} の詳細を開く"
+  },
+  "detail": {
+    "jobRef": "対象ジョブ: {{jobId}}"
+  },
   "autoOff": {
     "yes": "あり"
   },
@@ -36,6 +42,10 @@
     "off": "OFF"
   },
   "actions": {
+    "edit": "編集",
+    "disable": "無効化",
+    "enable": "有効化",
+    "delete": "削除",
     "editTitle": "編集 — このスケジュールの YAML を開きます",
     "editAria": "スケジュール {{id}} を編集",
     "disableMenuTitle": "無効化 — ソフト / ハードのメニューを開きます",

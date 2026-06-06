@@ -44,6 +44,37 @@
   --radius: 0.5rem;
 }
 
+/* Static animation tokens live in a plain (non-inline) @theme block:
+   nothing here references a runtime CSS variable, and keyframes
+   declared inside @theme are only emitted into the bundle when a
+   utility actually uses them. Drives the Sheet drawer (sheet.tsx) —
+   Radix keeps the closing element mounted until its exit animation
+   finishes, so the -out halves animate the dismiss instead of the
+   panel vanishing in one frame. */
+@theme {
+  --animate-sheet-in: sheet-in 0.25s ease-out;
+  --animate-sheet-out: sheet-out 0.2s ease-in;
+  --animate-overlay-in: overlay-in 0.2s ease-out;
+  --animate-overlay-out: overlay-out 0.2s ease-in;
+
+  @keyframes sheet-in {
+    from { transform: translateX(100%); }
+    to { transform: translateX(0); }
+  }
+  @keyframes sheet-out {
+    from { transform: translateX(0); }
+    to { transform: translateX(100%); }
+  }
+  @keyframes overlay-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  @keyframes overlay-out {
+    from { opacity: 1; }
+    to { opacity: 0; }
+  }
+}
+
 :root {
   /* Light-mode values — the defaults. */
   --bg: #fafaf7;

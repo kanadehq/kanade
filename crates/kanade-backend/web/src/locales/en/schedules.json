@@ -9,7 +9,7 @@
   "newSchedule": "New schedule",
   "newScheduleTitle": "Create a new schedule from a YAML template",
   "columns": {
-    "id": "id",
+    "schedule": "schedule",
     "cron": "cron",
     "jobId": "job_id",
     "target": "target",
@@ -26,6 +26,12 @@
   "target": {
     "all": "all"
   },
+  "row": {
+    "openAria": "open details for schedule {{id}}"
+  },
+  "detail": {
+    "jobRef": "runs job {{jobId}}"
+  },
   "autoOff": {
     "yes": "yes"
   },
@@ -36,6 +42,10 @@
     "off": "off"
   },
   "actions": {
+    "edit": "edit",
+    "disable": "disable",
+    "enable": "enable",
+    "delete": "delete",
     "editTitle": "edit — open this schedule's YAML",
     "editAria": "edit schedule {{id}}",
     "disableMenuTitle": "disable — open soft / hard menu",
