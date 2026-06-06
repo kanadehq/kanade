@@ -1,7 +1,8 @@
 # Issue #246 — Windows Event Log → per-PC observability timeline.
 #
-# Pipes Security log (logon / logoff — HUMAN sessions only, see
-# Issue #366) and System log (boot / shutdown / sleep / resume /
+# Pipes real HUMAN session events (logon / logoff via Winlogon,
+# lock / unlock via Security auditing — see Issue #378) and System
+# log lifecycle events (boot / shutdown / sleep / resume /
 # unexpected_shutdown) into the `obs_events` stream via the
 # `emit:` manifest block:
 #
@@ -26,26 +27,28 @@
 # SPA Activity timeline before the user has finished booting their
 # IDE, long enough that a 1000-PC fleet doesn't hammer the broker.
 #
-# Required by Security log (4624 / 4634): `run_as: system` because
-# `Get-WinEvent -LogName Security` needs SeSecurityPrivilege. The
-# agent already runs as LocalSystem in prod so this is the default
-# anyway; spelt out so a future runas-default change can't silently
-# break event collection.
+# Required by Security log (4800 / 4801): `run_as: system` —
+# Security log reads need SeSecurityPrivilege. The agent already
+# runs as LocalSystem in prod so this is the default anyway; spelt
+# out so a future runas-default change can't silently break event
+# collection.
 #
-# Issue #366: Security 4624 / 4634 are filtered to interactive
-# logon types (2 console / 7 unlock / 10 RDP / 11 cached) and
-# noise principals are dropped (SYSTEM, service accounts, DWM-* /
-# UMFD-*, machine accounts) so the timeline tracks actual humans —
-# unfiltered, SYSTEM's service logons (the agent's own 15-min tick
-# included) drown the signal. For investigations that need every
-# logon, run the on-demand companion job
-# `collect-winlog-logons-all` (separate watermark; the backend's
-# UNIQUE constraint on (pc_id, source, event_record_id) de-dups
-# any overlap with this job).
+# Issue #378 (supersedes the #366 LogonType gate): logon / logoff
+# come from the Winlogon provider (System log, 7001 / 7002), which
+# fires exactly once per REAL interactive session — Security 4624
+# answers "a token was created" and even with LogonType filtering
+# still contains UAC split-token pairs and ms-lived
+# credential-validation sessions. Lock / unlock come from Security
+# 4800 / 4801 so "stepped away / came back" stays on the timeline
+# (Winlogon does not fire on unlock). For investigations that need
+# every token-level logon (service / network / batch / transients),
+# run the on-demand companion job `collect-winlog-logons-all`
+# (separate watermark; the backend's UNIQUE constraint on
+# (pc_id, source, event_record_id) de-dups any overlap).
 
 id: collect-winlog-events
-version: 0.2.0
-description: "Windows Event Log → ObsEvent timeline (human logon / logoff / boot / shutdown / sleep / resume)"
+version: 0.3.0
+description: "Windows Event Log → ObsEvent timeline (human logon / logoff / lock / unlock / boot / shutdown / sleep / resume)"
 
 execute:
   shell: powershell
@@ -94,17 +97,28 @@ execute:
         }
     }
 
-    # Source matrix: (log, event_id, kind). Hard-coded list rather
-    # than a config lookup so the agent script is self-contained;
-    # adding a new kind = one row + a redeploy.
+    # Source matrix: (log, [provider,] event_id, kind). Hard-coded
+    # list rather than a config lookup so the agent script is
+    # self-contained; adding a new kind = one row + a redeploy.
     #
-    # Security 4624 / 4634 — logon / logoff. Issue #366: this job
-    # keeps the timeline human-shaped — only interactive logon
-    # types pass and noise principals are dropped (see the gate
-    # constants below the matrix). Operators who need every logon
-    # (service / network / batch) run the on-demand
-    # `collect-winlog-logons-all` job instead.
-    #
+    # System 7001 / 7002 (provider Microsoft-Windows-Winlogon) —
+    #                logon / logoff. Issue #378: Winlogon fires
+    #                exactly once per REAL interactive session
+    #                (console and RDP alike), so the timeline gets
+    #                none of Security 4624's token-level noise.
+    #                Provider filter is REQUIRED — Service Control
+    #                Manager also writes Event ID 7001 into the
+    #                System log.
+    # Security 4800 / 4801 — workstation lock / unlock. These need
+    #                the "Other Logon/Logoff Events" audit
+    #                subcategory, which is DISABLED on stock
+    #                Windows. This collector stays read-only — the
+    #                enable lives in the companion
+    #                `enable-session-audit` job, fired once per PC
+    #                by its `once_per_pc` schedule (see
+    #                configs/schedules/enable-session-audit.yaml).
+    #                Until that job has run on a box, 4800/4801
+    #                simply return no rows here.
     # System 12 / 13 — kernel-general boot / shutdown.
     # System 41    — unexpected shutdown (kernel-power, "the system
     #                rebooted without cleanly shutting down").
@@ -113,8 +127,10 @@ execute:
     #                fallback signal for boot/shutdown when the
     #                kernel-general 12/13 are noisy.
     $sources = @(
-        @{ Log='Security'; Id=4624; Kind='logon' }
-        @{ Log='Security'; Id=4634; Kind='logoff' }
+        @{ Log='System';   Provider='Microsoft-Windows-Winlogon'; Id=7001; Kind='logon' }
+        @{ Log='System';   Provider='Microsoft-Windows-Winlogon'; Id=7002; Kind='logoff' }
+        @{ Log='Security'; Id=4800; Kind='lock' }
+        @{ Log='Security'; Id=4801; Kind='unlock' }
         @{ Log='System';   Id=12;   Kind='boot' }
         @{ Log='System';   Id=13;   Kind='shutdown' }
         @{ Log='System';   Id=41;   Kind='unexpected_shutdown' }
@@ -124,18 +140,58 @@ execute:
         @{ Log='System';   Id=6006; Kind='log_service_stopped' }
     )
 
-    # Human-session gate (Issue #366). LogonType allow-list:
-    #   2  = Interactive (console)
-    #   7  = Unlock
-    #   10 = RemoteInteractive (RDP)
-    #   11 = CachedInteractive (offline domain logon)
-    # Everything else (0/5 service, 3 network, 4 batch, ...) is
-    # machine noise on a "who is using this PC" timeline. Account
-    # deny-list: built-in service principals, window-manager
-    # (DWM-n) / font-driver (UMFD-n) sessions — which DO log on
-    # with type 2 — and machine accounts (trailing `$`).
-    $humanLogonTypes = @(2, 7, 10, 11)
-    $noiseUserPattern = '^(SYSTEM|LOCAL SERVICE|NETWORK SERVICE|ANONYMOUS LOGON)$|^(DWM|UMFD)-\d+$|\$$'
+    # Winlogon 7001/7002 carry the user as a SID, not a name.
+    # Translate where possible; an untranslatable SID stays raw in
+    # `payload.user`, which is still investigable. The leaf name
+    # (sans DOMAIN\) keeps `payload.user` shaped like the
+    # historical Security-sourced rows so SPA filters/searches
+    # keep working across the source switch.
+    #
+    # Gemini #379 high: `Translate()` on a DOMAIN SID can block
+    # 15-30 s per SID while LSA retries an unreachable DC (think
+    # off-network laptop). With the 60 s job timeout and the
+    # watermark only written at the end, a few domain logons would
+    # pin this script in a timeout-forever loop. Gate: well-known /
+    # built-in SIDs and this machine's own account SIDs always
+    # translate (purely local lookups); domain-style SIDs from
+    # other authorities only translate when a quick DNS probe of
+    # the machine's AD domain answers — otherwise keep the raw SID.
+    $cs = Get-CimInstance Win32_ComputerSystem
+    $domainReachable = $false
+    if ($cs.PartOfDomain) {
+        try {
+            $null = Resolve-DnsName -Name $cs.Domain -QuickTimeout -ErrorAction Stop
+            $domainReachable = $true
+        } catch {
+            Write-Warning "AD domain $($cs.Domain) not resolvable; domain SIDs stay raw this tick: $_"
+        }
+    }
+    $machineSidPrefix = $null
+    try {
+        $firstLocal = Get-LocalUser -ErrorAction Stop | Select-Object -First 1
+        if ($firstLocal) { $machineSidPrefix = $firstLocal.SID.AccountDomainSid.Value }
+    } catch {
+        Write-Warning "machine SID prefix lookup failed; local-account SIDs may stay raw: $_"
+    }
+
+    $sidNameCache = @{}
+    function Resolve-SidLeafName([string]$sidStr) {
+        if ($sidNameCache.ContainsKey($sidStr)) { return $sidNameCache[$sidStr] }
+        $name = $sidStr
+        $isDomainStyle = $sidStr -match '^S-1-5-21-'
+        $isThisMachine = $isDomainStyle -and $null -ne $machineSidPrefix -and $sidStr.StartsWith("$machineSidPrefix-")
+        if (-not $isDomainStyle -or $isThisMachine -or $domainReachable) {
+            try {
+                $sid  = New-Object System.Security.Principal.SecurityIdentifier($sidStr)
+                $full = $sid.Translate([System.Security.Principal.NTAccount]).Value
+                $name = ($full -split '\\')[-1]
+            } catch {
+                Write-Warning "SID translate failed for ${sidStr}: $_"
+            }
+        }
+        $sidNameCache[$sidStr] = $name
+        return $name
+    }
 
     # Bootstrap window for first run / new (log, kind) entries. 24h
     # keeps the seeded set bounded; the watermark immediately moves
@@ -162,6 +218,9 @@ execute:
             Id        = $s.Id
             StartTime = $bootstrapStart
         }
+        # Winlogon rows pin the provider — Event ID 7001 in the
+        # System log is also used by Service Control Manager.
+        if ($s.ContainsKey('Provider')) { $filter.ProviderName = $s.Provider }
         $events = Get-WinEvent -FilterHashtable $filter -ErrorAction SilentlyContinue
         if ($null -eq $events) { continue }
         # Sort ascending so the projector sees events in source order
@@ -172,41 +231,38 @@ execute:
         foreach ($e in $events) {
             if ($null -ne $cutoff -and $e.RecordId -le $cutoff) { continue }
             # Watermark advances over EVERY event walked — including
-            # the ones the human gate drops below — so the next tick
-            # never re-scans (and never re-classifies) skipped noise.
+            # rows skipped as unparsable below — so the next tick
+            # never re-scans them.
             if ($null -eq $maxSeen -or $e.RecordId -gt $maxSeen) { $maxSeen = $e.RecordId }
             $payload = $null
-            if ($s.Log -eq 'Security') {
-                # 4624 schema: TargetUserName (event[5]), LogonType (event[8]).
-                # 4634 schema: TargetUserName (event[1]), LogonType (event[4]).
-                # `Properties` ordering is stable across Win 10+/Server.
-                # Gemini #250 medium: null-check Properties before
-                # `.Count` — exotic event-source corruption can leave
-                # `$e.Properties` null even when the row itself exists.
-                # Explicit per-ID property map — a future Security
-                # ID added to the matrix (4625 failed logon, 4647
-                # user-initiated logoff, ...) must get its own row
-                # here instead of silently inheriting 4634's
-                # indices (Gemini #368 medium). NOT a `switch`:
-                # `continue` inside a PowerShell switch targets the
-                # switch, not the enclosing foreach.
-                $userIdx = $null
-                $typeIdx = $null
-                if ($s.Id -eq 4624)     { $userIdx = 5; $typeIdx = 8 }
-                elseif ($s.Id -eq 4634) { $userIdx = 1; $typeIdx = 4 }
-                if ($null -eq $typeIdx) { continue }
-                if ($null -eq $e.Properties -or $e.Properties.Count -le $typeIdx) {
-                    # Unclassifiable row (corrupt / truncated event):
-                    # skip rather than leak unknown noise onto the
-                    # human timeline. `collect-winlog-logons-all`
-                    # still captures it for forensics.
-                    continue
+            # Per-kind payload extraction. `Properties` ordering is
+            # stable across Win 10+/Server; null-check before
+            # `.Count` (Gemini #250 medium) — exotic event-source
+            # corruption can leave `$e.Properties` null even when
+            # the row itself exists. A row too short to parse emits
+            # with a null payload rather than vanishing — for these
+            # session kinds "it happened" beats "we could parse it".
+            if ($s.Id -eq 7001 -or $s.Id -eq 7002) {
+                # Winlogon schema: TSId (event[0]), UserSid (event[1]).
+                if ($null -ne $e.Properties -and $e.Properties.Count -ge 2) {
+                    $sidStr = [string]$e.Properties[1].Value
+                    $payload = @{
+                        user       = Resolve-SidLeafName $sidStr
+                        sid        = $sidStr
+                        session_id = [int]$e.Properties[0].Value
+                    }
                 }
-                $user      = [string]$e.Properties[$userIdx].Value
-                $logonType = [int]$e.Properties[$typeIdx].Value
-                if ($humanLogonTypes -notcontains $logonType) { continue }
-                if ($user -match $noiseUserPattern) { continue }
-                $payload = @{ user = $user; logon_type = $logonType }
+            } elseif ($s.Id -eq 4800 -or $s.Id -eq 4801) {
+                # 4800/4801 schema: TargetUserSid (event[0]),
+                # TargetUserName (event[1]), TargetDomainName
+                # (event[2]), TargetLogonId (event[3]),
+                # SessionId (event[4]).
+                if ($null -ne $e.Properties -and $e.Properties.Count -ge 5) {
+                    $payload = @{
+                        user       = [string]$e.Properties[1].Value
+                        session_id = [int]$e.Properties[4].Value
+                    }
+                }
             }
             # `ConvertTo-Json -Depth 5 -Compress` keeps one JSON
             # value per `Write-Output`; the agent splits stdout on

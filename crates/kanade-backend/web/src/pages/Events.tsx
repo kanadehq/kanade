@@ -81,11 +81,13 @@ function useDebouncedValue<T>(value: T, delay: number): T {
 function kindVariant(kind: string): 'success' | 'amber' | 'danger' | 'violet' | 'default' {
   switch (kind) {
     case 'logon':
+    case 'unlock':
     case 'boot':
     case 'resume':
     case 'agent_started':
       return 'success';
     case 'logoff':
+    case 'lock':
     case 'shutdown':
     case 'sleep':
       return 'default';
