@@ -1,9 +1,11 @@
+import { useQuery } from '@tanstack/react-query';
 import { Menu, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, NavLink, useLocation } from 'react-router-dom';
 
 import { AuthBar } from '@/components/AuthBar';
+import { apiFetch } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { cn } from '@/lib/utils';
 
@@ -60,6 +62,27 @@ const groups: {
     ],
   },
 ];
+
+// Backend build version, from the public `GET /api/version`. Shown dim in
+// the sidebar footer so operators can confirm what's actually deployed
+// (e.g. after a fleet-deploy) without leaving the SPA. Cached for the
+// session — the version only changes on a backend restart.
+function BackendVersion() {
+  const { t } = useTranslation('common');
+  const { data } = useQuery({
+    queryKey: ['backend-version'],
+    queryFn: () => apiFetch<{ version: string }>('/api/version'),
+    staleTime: Infinity,
+    // Cosmetic only — don't hammer the backend if it's mid-restart/offline.
+    retry: false,
+  });
+  if (!data?.version) return null;
+  return (
+    <p className="px-2 pt-2 text-[10px] text-muted/70" title={t('backendVersionTitle')}>
+      {t('backendVersion', { version: data.version })}
+    </p>
+  );
+}
 
 function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
   const { t } = useTranslation('common');
@@ -139,6 +162,7 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
 
       <div className="px-3 py-3 border-t border-border">
         <AuthBar />
+        <BackendVersion />
       </div>
     </>
   );

@@ -1,4 +1,6 @@
 {
+  "backendVersion": "backend v{{version}}",
+  "backendVersionTitle": "kanade-backend version",
   "nav": {
     "groups": {
       "execute": "Execute",

@@ -208,8 +208,9 @@ pub async fn verify(
         return Ok(next.run(req).await);
     }
 
-    // 2. The login endpoint must be reachable without a token.
-    if path == "/api/auth/login" {
+    // 2. Public endpoints reachable without a token: the login route and
+    //    the backend version probe (so the SPA can show it pre-login).
+    if path == "/api/auth/login" || path == "/api/version" {
         return Ok(next.run(req).await);
     }
 
