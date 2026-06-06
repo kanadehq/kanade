@@ -14,3 +14,4 @@ pub mod revoke;
 pub mod run;
 pub mod schedule;
 pub mod script;
+pub mod self_update;

@@ -1,6 +1,8 @@
 mod audit;
+mod cli_config;
 mod cmd;
 mod http_client;
+mod updater;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -63,6 +65,11 @@ enum SubCmd {
     Login(cmd::login::LoginArgs),
     /// Admin-only RBAC account management (create / role / disable / …).
     Account(cmd::account::AccountArgs),
+    /// Update the kanade CLI itself from GitHub Releases (kaishin).
+    /// Background behaviour on ordinary runs is configured in the
+    /// per-user config (`[update] mode = off|notify|install`, default
+    /// notify); `KANADE_NO_AUTOUPDATE` disables it entirely.
+    SelfUpdate(cmd::self_update::SelfUpdateArgs),
 }
 
 #[tokio::main]
@@ -81,6 +88,15 @@ async fn main() -> Result<()> {
         command,
     } = cli;
 
+    // Background update check (notify by default; see cli_config).
+    // Skipped for `self-update` itself — it IS the update path.
+    let update_handle = updater::maybe_spawn(matches!(command, SubCmd::SelfUpdate(_)));
+    let result = dispatch(server, backend_url, command).await;
+    updater::finalize(update_handle).await;
+    result
+}
+
+async fn dispatch(server: String, backend_url: String, command: SubCmd) -> Result<()> {
     // HTTP-only subcommands (no NATS connect required).
     if let SubCmd::Exec(args) = command {
         return cmd::exec::execute(&backend_url, args).await;
@@ -92,6 +108,8 @@ async fn main() -> Result<()> {
         return cmd::login::execute(&backend_url, args).await;
     } else if let SubCmd::Account(args) = command {
         return cmd::account::execute(&backend_url, args).await;
+    } else if let SubCmd::SelfUpdate(args) = command {
+        return cmd::self_update::execute(args).await;
     }
 
     // The remaining subcommands need NATS. Shared helper picks up
@@ -116,7 +134,8 @@ async fn main() -> Result<()> {
         | SubCmd::Job(_)
         | SubCmd::Schedule(_)
         | SubCmd::Login(_)
-        | SubCmd::Account(_) => {
+        | SubCmd::Account(_)
+        | SubCmd::SelfUpdate(_) => {
             unreachable!("handled above")
         }
     }
