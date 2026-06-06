@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { Loader2, ScrollText } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
 
@@ -183,20 +183,27 @@ function NestedTable({ value, columns }: { value: unknown; columns: DisplayField
 
 export function Inventory() {
   const { t } = useTranslation('inventory');
+  // `?pc=` is the single source of truth for the fleet → PC-detail
+  // drill-down. Unlike the filter mirrors on Logs/Events (where
+  // `replace: true` keeps keystrokes out of history), picking a PC
+  // here swaps the whole view, so it must PUSH a history entry —
+  // otherwise browser-back skips every in-page step and dumps the
+  // operator on whatever page they came from (e.g. /agents via the
+  // facts button). Deriving `pcId` from the URL (no local state)
+  // also makes back/forward actually move between fleet and detail.
   const [search, setSearch] = useSearchParams();
-  const initialPc = search.get('pc') ?? '';
-  const [pcId, setPcId] = useState(initialPc);
-
-  useEffect(() => {
-    if (pcId) {
-      setSearch({ pc: pcId }, { replace: true });
-    } else if (search.has('pc')) {
-      const next = new URLSearchParams(search);
-      next.delete('pc');
-      setSearch(next, { replace: true });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pcId]);
+  const pcId = search.get('pc') ?? '';
+  // Memoized: PcPicker re-registers its document-level mousedown
+  // listener whenever `onChange` changes identity (via commitClose's
+  // dependency chain), so a fresh closure per render would churn the
+  // listener on every parent re-render while the picker is open.
+  const setPcId = useCallback((pc: string) => {
+    if (pc === pcId) return; // no-op picks shouldn't stack entries
+    const next = new URLSearchParams(search);
+    if (pc) next.set('pc', pc);
+    else next.delete('pc');
+    setSearch(next);
+  }, [search, setSearch, pcId]);
 
   const jobsQ = useQuery({
     queryKey: ['inventory-jobs'],
