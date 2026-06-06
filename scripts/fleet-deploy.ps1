@@ -60,7 +60,9 @@
 .PARAMETER Jitter
   (agent only) `--jitter` for the rollout (humantime, e.g. `30m`) —
   recommended for -All so thousands of agents don't download at once.
-  Omit to leave the existing scope value alone.
+  Defaults: single-host `-Pc` rollouts send `0s` (a one-PC pin gains
+  nothing from de-sync — update immediately); -Groups / -All leave the
+  existing scope value alone unless set explicitly.
 
 .PARAMETER Version
   Version to publish / roll out. Three forms:
@@ -408,6 +410,13 @@ if ($Role -eq 'agent') {
     elseif ($Groups) { $rolloutArgs += @('--group', $Groups[0]) }
     else { $rolloutArgs += @('--pc', $Pc.ToLower()) }
     if ($Jitter) { $rolloutArgs += @('--jitter', $Jitter) }
+    elseif (-not $All -and -not $Groups) {
+        # Single-host pin: jitter exists to de-synchronise FLEET downloads,
+        # so a one-PC rollout gains nothing from waiting — update now. An
+        # inherited scope jitter (e.g. 5m from an earlier rollout) would
+        # otherwise sit between you and the verify. Explicit -Jitter wins.
+        $rolloutArgs += @('--jitter', '0s')
+    }
     Invoke-Kanade $rolloutArgs | ForEach-Object { Write-Host "    $_" }
 
     if (-not $NoVerify -and -not $DryRun) {

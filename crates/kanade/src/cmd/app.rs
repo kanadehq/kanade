@@ -154,7 +154,7 @@ async fn publish(
         .with_context(|| format!("open {binary:?}"))?;
     info!(name, version, "uploading app package");
 
-    let js = async_nats::jetstream::new(client);
+    let js = async_nats::jetstream::new(client.clone());
     let store = js
         .get_object_store(OBJECT_APP_PACKAGES)
         .await
@@ -186,6 +186,14 @@ async fn publish(
     if let Some(d) = meta.digest.as_deref() {
         println!("  digest       : {d}");
     }
+
+    crate::audit::record(
+        &client,
+        "app_package_publish",
+        Some(&key),
+        serde_json::json!({ "size": meta.size, "digest": meta.digest }),
+    )
+    .await;
     Ok(())
 }
 
@@ -236,7 +244,7 @@ struct Row {
 async fn delete(client: async_nats::Client, name: String, version: String) -> Result<()> {
     validate_segment("name", &name)?;
     validate_segment("version", &version)?;
-    let js = async_nats::jetstream::new(client);
+    let js = async_nats::jetstream::new(client.clone());
     let store = js
         .get_object_store(OBJECT_APP_PACKAGES)
         .await
@@ -248,6 +256,13 @@ async fn delete(client: async_nats::Client, name: String, version: String) -> Re
         Ok(()) => {
             info!(%key, "app package deleted");
             println!("deleted: {key}");
+            crate::audit::record(
+                &client,
+                "app_package_delete",
+                Some(&key),
+                serde_json::json!({}),
+            )
+            .await;
             Ok(())
         }
         Err(e) => {

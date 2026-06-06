@@ -19,6 +19,7 @@ pub async fn revoke(client: async_nats::Client, args: RevokeArgs) -> Result<()> 
     set_status(&client, &args.cmd_id, SCRIPT_STATUS_REVOKED).await?;
     info!(cmd_id = %args.cmd_id, "revoked");
     println!("revoked: {} → {}", args.cmd_id, SCRIPT_STATUS_REVOKED);
+    crate::audit::record(&client, "revoke", Some(&args.cmd_id), serde_json::json!({})).await;
     Ok(())
 }
 
@@ -26,6 +27,13 @@ pub async fn unrevoke(client: async_nats::Client, args: UnrevokeArgs) -> Result<
     set_status(&client, &args.cmd_id, SCRIPT_STATUS_ACTIVE).await?;
     info!(cmd_id = %args.cmd_id, "unrevoked");
     println!("unrevoked: {} → {}", args.cmd_id, SCRIPT_STATUS_ACTIVE);
+    crate::audit::record(
+        &client,
+        "unrevoke",
+        Some(&args.cmd_id),
+        serde_json::json!({}),
+    )
+    .await;
     Ok(())
 }
 

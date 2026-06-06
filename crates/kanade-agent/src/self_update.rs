@@ -50,6 +50,7 @@ struct LastSwap {
 
 pub async fn run(
     client: async_nats::Client,
+    pc_id: String,
     running_version: String,
     mut cfg_rx: watch::Receiver<EffectiveConfig>,
     tracker: crate::staleness::Tracker,
@@ -82,6 +83,21 @@ pub async fn run(
     let last_swap = read_last_swap();
     if let Some(prev) = &last_swap {
         info!(?prev, "recovered last_swap.json from prior cycle");
+        // We're the binary that prior cycle swapped IN — running_version
+        // matching the swap target is the definitive "self-update
+        // succeeded" signal (vs. is_loop below, where it did NOT change).
+        // Surface it on the SPA Events timeline so a rollout's progress
+        // is observable per-PC. Durable obs-outbox: spawn_drain ships it.
+        if prev.target == running_version && prev.running_before != running_version {
+            emit_update_event(&pc_id, &prev.running_before, &running_version);
+            // Clear the marker NOW: a crash/restart before the normal
+            // clearance further down would re-emit a duplicate timeline
+            // event on next boot (the jitter sleep ahead of an already-
+            // queued next rollout can hold that window open for minutes).
+            // The loop-detector doesn't need it anymore — success means
+            // running_version DID change.
+            clear_last_swap();
+        }
     }
 
     // Initial check against whatever the supervisor's first push
@@ -158,6 +174,31 @@ pub async fn run(
                 warn!(error = %e, target, "self-update fetch failed");
             }
         }
+    }
+}
+
+/// Best-effort "agent self-updated from→to" ObsEvent, enqueued to the
+/// durable obs-outbox (the drain task ships it to the OBS stream, the
+/// backend projects it, the SPA Events page shows it under the
+/// `agent_update` kind). Failures only warn — observability must never
+/// block the update path.
+fn emit_update_event(pc_id: &str, from: &str, to: &str) {
+    let event = kanade_shared::wire::ObsEvent {
+        pc_id: pc_id.to_string(),
+        at: chrono::Utc::now(),
+        kind: "agent_update".to_string(),
+        source: "agent:self_update".to_string(),
+        // UUID, not a from→to pair: the same upgrade path can legally
+        // repeat (downgrade + retry) and must show up again.
+        event_record_id: Some(format!("self_update_{}", uuid::Uuid::new_v4().as_simple())),
+        payload: serde_json::json!({ "from": from, "to": to }),
+    };
+    let dir = kanade_shared::default_paths::data_dir().join("obs-outbox");
+    let res = crate::obs_outbox::ensure_outbox_dir(&dir)
+        .and_then(|()| crate::obs_outbox::enqueue(&dir, &event).map(|_| ()));
+    match res {
+        Ok(()) => info!(from, to, "queued agent_update obs event"),
+        Err(e) => warn!(error = %e, from, to, "failed to queue agent_update obs event"),
     }
 }
 

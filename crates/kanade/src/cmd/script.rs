@@ -106,7 +106,7 @@ async fn publish(
         .with_context(|| format!("open {file:?}"))?;
     info!(name, version, "uploading script object");
 
-    let js = async_nats::jetstream::new(client);
+    let js = async_nats::jetstream::new(client.clone());
     let store = js.get_object_store(OBJECT_SCRIPTS).await.with_context(|| {
         format!("object store '{OBJECT_SCRIPTS}' missing — run `kanade jetstream setup`")
     })?;
@@ -129,6 +129,14 @@ async fn publish(
     println!("    shell: powershell");
     println!("    script_object: {key}");
     println!("    timeout: 600s");
+
+    crate::audit::record(
+        &client,
+        "script_object_publish",
+        Some(&key),
+        serde_json::json!({ "size": meta.size, "digest": meta.digest }),
+    )
+    .await;
     Ok(())
 }
 
@@ -174,7 +182,7 @@ struct Row {
 async fn delete(client: async_nats::Client, name: String, version: String) -> Result<()> {
     validate_segment("name", &name)?;
     validate_segment("version", &version)?;
-    let js = async_nats::jetstream::new(client);
+    let js = async_nats::jetstream::new(client.clone());
     let store = js.get_object_store(OBJECT_SCRIPTS).await.with_context(|| {
         format!("object store '{OBJECT_SCRIPTS}' missing — run `kanade jetstream setup`")
     })?;
@@ -183,6 +191,13 @@ async fn delete(client: async_nats::Client, name: String, version: String) -> Re
         Ok(()) => {
             info!(%key, "script object deleted");
             println!("deleted: {key}");
+            crate::audit::record(
+                &client,
+                "script_object_delete",
+                Some(&key),
+                serde_json::json!({}),
+            )
+            .await;
             Ok(())
         }
         Err(e) => {
