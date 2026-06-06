@@ -44,8 +44,9 @@ sequence in one command — it's the agent-route companion to
 .\scripts\fleet-deploy.ps1 -Role backend -Pc <pc-id>     # or set $env:KANADE_TARGET_PC
 .\scripts\fleet-deploy.ps1 -Role backend -Pc <pc-id> -WipeDb -JwtSecret dev -BootstrapAdminPassword dev
 .\scripts\fleet-deploy.ps1 -Role client -Groups canary -SourceUrl http://<backend-host>:8080
-.\scripts\fleet-deploy.ps1 -Role agent -Version latest   # publish + rollout (self-update)
-.\scripts\fleet-deploy.ps1 -Role backend -DryRun         # print every command, change nothing
+.\scripts\fleet-deploy.ps1 -Role agent -Version latest -Pc <pc-id>   # try on one box
+.\scripts\fleet-deploy.ps1 -Role agent -All -Jitter 30m              # then fleet-wide rollout
+.\scripts\fleet-deploy.ps1 -Role backend -Pc <pc-id> -DryRun         # print every command, change nothing
 ```
 
 Auto-computed so you don't pass them: the SHA-256 (`Get-FileHash`), the
@@ -79,9 +80,13 @@ What it automates per role:
   version-pinned **temp** manifest → `kanade job create` → `kanade exec
   --pcs <pc>` (lower-cased) / `--groups <g>` → poll the installed exe to
   verify. Nothing under version control is mutated.
-- **agent** — `kanade agent publish` → `kanade agent rollout <ver>` →
-  verify via `kanade agent current` (the agent updates itself; there is no
-  install job for it).
+- **agent** — `kanade agent publish` → `kanade agent rollout <ver>` with
+  the scope mapped from the same flags (`-Pc` → `--pc`, one `-Groups` →
+  `--group`, `-All` → `--global`, plus optional `-Jitter`). Verification:
+  `kanade agent current` reports the **global** target_version only, so
+  `-All` rollouts are verified there; pc/group rollouts are confirmed on
+  the SPA Agents page (agent version column). The agent updates itself —
+  there is no install job for it.
 
 Tokens default to the `dev` literals (or `$env:KANADE_AUTH_TOKEN` /
 `$env:KANADE_NATS_TOKEN`). Skip a step's wipe/secrets to leave the existing

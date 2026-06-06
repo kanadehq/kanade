@@ -26,7 +26,8 @@
 
     agent (self-update pattern — NOT a job)
       1. kanade agent publish <exe>                  (version auto-from-PE)
-      2. kanade agent rollout <version>              (flips target_version)
+      2. kanade agent rollout <version> --pc/--group/--global
+                                                     (flips target_version)
       3. verify (kanade agent current == version)
 
   Nothing under version control is mutated — the edited deploy script and
@@ -40,16 +41,26 @@
   agent goes through publish + rollout.
 
 .PARAMETER Pc
-  exec target pc_id for the job-install roles (lower-cased automatically —
-  the agent registers pc_ids lower-cased, so an upper-cased COMPUTERNAME
-  must target its lower-cased form or the exec sticks at pending). No
-  baked-in default: falls back to $env:KANADE_TARGET_PC, else you must
-  pass -Pc or -Groups. Ignored for -Role agent (rollout is fleet-wide).
-  Mutually exclusive with -Groups.
+  Target pc_id (lower-cased automatically — the agent registers pc_ids
+  lower-cased, so an upper-cased COMPUTERNAME must target its lower-cased
+  form or the exec sticks at pending). Maps to `--pcs` for the job-install
+  roles and `--pc` for the agent rollout. No baked-in default: falls back
+  to $env:KANADE_TARGET_PC, else one of -Pc / -Groups / -All is required.
+  Mutually exclusive with -Groups / -All.
 
 .PARAMETER Groups
-  Alternative exec target: one or more group names (`--groups`). Mutually
-  exclusive with -Pc.
+  Alternative target: group names (`--groups` for job-install; the agent
+  rollout takes exactly ONE `--group`). Mutually exclusive with -Pc / -All.
+
+.PARAMETER All
+  Whole-fleet target: `--all` for the job-install exec, `--global` for the
+  agent rollout. Pair with -Jitter for agent rollouts so the fleet doesn't
+  synchronise its downloads. Mutually exclusive with -Pc / -Groups.
+
+.PARAMETER Jitter
+  (agent only) `--jitter` for the rollout (humantime, e.g. `30m`) —
+  recommended for -All so thousands of agents don't download at once.
+  Omit to leave the existing scope value alone.
 
 .PARAMETER Version
   Version to publish / roll out. Three forms:
@@ -138,8 +149,9 @@
   PS> .\scripts\fleet-deploy.ps1 -Role backend -Version latest
 
 .EXAMPLE
-  # Roll a new agent out to the whole fleet:
-  PS> .\scripts\fleet-deploy.ps1 -Role agent -Stage
+  # Try a new agent on one box first, then roll it out fleet-wide:
+  PS> .\scripts\fleet-deploy.ps1 -Role agent -Stage -Pc <pc-id>
+  PS> .\scripts\fleet-deploy.ps1 -Role agent -All -Jitter 30m
 
 .EXAMPLE
   # See exactly what would run, change nothing:
@@ -155,6 +167,8 @@ param(
     # ParameterSet so the env fallback can fill it without prompting.
     [string]$Pc = '',
     [string[]]$Groups,
+    [switch]$All,
+    [string]$Jitter = '',
 
     [string]$Version = '',
     [string]$GitHubRepo = 'yukimemi/kanade',
@@ -216,24 +230,30 @@ if (-not $PSBoundParameters.ContainsKey('BackendUrl')) { $BackendUrl = if (-not 
 $env:KANADE_NATS_URL    = $Server
 $env:KANADE_BACKEND_URL = $BackendUrl
 
-# Deploy target for the job-install roles (backend/client). No baked-in
-# host — fall back to $env:KANADE_TARGET_PC, then require exactly one of
-# -Pc / -Groups so we never silently fan a deploy at a guessed machine.
-# (agent rollout is fleet-wide and ignores this.)
-if ($Role -ne 'agent') {
-    # Env fallback only when NO explicit target was given — otherwise a set
-    # $env:KANADE_TARGET_PC would fill $Pc even alongside an explicit
-    # -Groups and trip the mutual-exclusion check below.
-    if ([string]::IsNullOrWhiteSpace($Pc) -and -not $Groups -and -not [string]::IsNullOrWhiteSpace($env:KANADE_TARGET_PC)) {
-        $Pc = $env:KANADE_TARGET_PC
-    }
-    $hasPc = -not [string]::IsNullOrWhiteSpace($Pc)
-    if ($hasPc -and $Groups) {
-        throw "-Pc and -Groups are mutually exclusive — pick one target."
-    }
-    if (-not $hasPc -and -not $Groups) {
-        throw "No deploy target. Pass -Pc <pc_id> or -Groups <group[,...]> (or set `$env:KANADE_TARGET_PC)."
-    }
+# Deploy target — all roles. No baked-in host: fall back to
+# $env:KANADE_TARGET_PC, then require exactly one of -Pc / -Groups / -All
+# so we never silently fan a deploy at a guessed scope. The same flags map
+# per role: job-install exec takes --pcs/--groups/--all; agent rollout
+# takes --pc/--group/--global (and itself refuses an implicit scope).
+# Env fallback only when NO explicit target was given — otherwise a set
+# $env:KANADE_TARGET_PC would fill $Pc even alongside an explicit
+# -Groups/-All and trip the mutual-exclusion check below.
+if ([string]::IsNullOrWhiteSpace($Pc) -and -not $Groups -and -not $All -and -not [string]::IsNullOrWhiteSpace($env:KANADE_TARGET_PC)) {
+    $Pc = $env:KANADE_TARGET_PC
+}
+# `pwsh -File` passes `-Groups a,b` as ONE literal string (no comma array
+# binding) — normalise so both invocation styles see the same list, and
+# trim whitespace so `-Groups "canary, dev"` yields exact group names.
+if ($Groups) { $Groups = @($Groups | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+$hasPc = -not [string]::IsNullOrWhiteSpace($Pc)
+if (@($hasPc, [bool]$Groups, [bool]$All).Where({ $_ }).Count -gt 1) {
+    throw "-Pc / -Groups / -All are mutually exclusive — pick one target scope."
+}
+if (-not $hasPc -and -not $Groups -and -not $All) {
+    throw "No deploy target. Pass -Pc <pc_id>, -Groups <group[,...]>, or -All (or set `$env:KANADE_TARGET_PC)."
+}
+if ($Role -eq 'agent' -and $Groups -and $Groups.Count -gt 1) {
+    throw "agent rollout targets a single group — pass exactly one -Groups value."
 }
 
 # ---- helpers --------------------------------------------------------------
@@ -368,7 +388,7 @@ Write-Host ''
 Write-Host "=== fleet-deploy: $Role v$Version ===" -ForegroundColor Cyan
 Write-Host "  exe    : $ExePath"
 Write-Host "  broker : $Server"
-Write-Host "  target : $(if ($Role -eq 'agent') { 'fleet (agent self-update)' } elseif ($Groups) { "groups=$($Groups -join ',')" } else { "pc=$($Pc.ToLower())" })"
+Write-Host "  target : $(if ($All) { if ($Role -eq 'agent') { 'global (fleet-wide rollout)' } else { 'all agents' } } elseif ($Groups) { "groups=$($Groups -join ',')" } else { "pc=$($Pc.ToLower())" })"
 if ($DryRun) { Write-Host '  (dry-run: no NATS writes, no exec)' -ForegroundColor Yellow }
 Write-Host ''
 
@@ -380,16 +400,30 @@ if ($Role -eq 'agent') {
     Invoke-Kanade @('agent', 'publish', $ExePath) | ForEach-Object { Write-Host "    $_" }
 
     Write-Host '--- rollout ---'
-    Invoke-Kanade @('agent', 'rollout', $Version) | ForEach-Object { Write-Host "    $_" }
+    # `kanade agent rollout` refuses an implicit scope (a forgotten flag
+    # must not fan a release fleet-wide) — map our target flags onto its
+    # --global / --group / --pc.
+    $rolloutArgs = @('agent', 'rollout', $Version)
+    if ($All) { $rolloutArgs += '--global' }
+    elseif ($Groups) { $rolloutArgs += @('--group', $Groups[0]) }
+    else { $rolloutArgs += @('--pc', $Pc.ToLower()) }
+    if ($Jitter) { $rolloutArgs += @('--jitter', $Jitter) }
+    Invoke-Kanade $rolloutArgs | ForEach-Object { Write-Host "    $_" }
 
     if (-not $NoVerify -and -not $DryRun) {
-        Write-Host '--- verify (broadcast target_version) ---'
-        $cur = & kanade agent current 2>&1
-        $cur | ForEach-Object { Write-Host "    $_" }
-        if ($cur -match [regex]::Escape($Version)) {
-            Write-Host "OK: target_version = $Version" -ForegroundColor Green
+        if ($All) {
+            # `kanade agent current` reports the GLOBAL target_version, so
+            # this check is only meaningful for a --global rollout.
+            Write-Host '--- verify (global target_version) ---'
+            $cur = & kanade agent current 2>&1
+            $cur | ForEach-Object { Write-Host "    $_" }
+            if ($cur -match [regex]::Escape($Version)) {
+                Write-Host "OK: global target_version = $Version" -ForegroundColor Green
+            } else {
+                Write-Warning "global target_version does not yet show $Version — check 'kanade agent current'."
+            }
         } else {
-            Write-Warning "target_version does not yet show $Version — check 'kanade agent current'."
+            Write-Host "Dispatched. 'kanade agent current' only reflects the GLOBAL scope — confirm this pc/group rollout on the SPA Agents page (agent version column)." -ForegroundColor Yellow
         }
     }
     Write-Host ''
@@ -479,13 +513,14 @@ Invoke-Kanade @('job', 'create', $tmpManifest) | ForEach-Object { Write-Host "  
 # 6. exec at the target.
 Write-Host '--- exec ---'
 $execArgs = @('exec', $spec.JobId)
-if ($Groups) { $execArgs += @('--groups', ($Groups -join ',')) }
+if ($All) { $execArgs += '--all' }
+elseif ($Groups) { $execArgs += @('--groups', ($Groups -join ',')) }
 else { $execArgs += @('--pcs', $Pc.ToLower()) }
 Invoke-Kanade $execArgs | ForEach-Object { Write-Host "    $_" }
 
 # 7. verify — poll the locally-installed exe (only meaningful when this box
 #    is the target). Fleet-wide / remote targets: check the SPA Inventory.
-$targetIsLocal = (-not $Groups) -and ($Pc.ToLower() -eq $env:COMPUTERNAME.ToLower())
+$targetIsLocal = (-not $Groups) -and (-not $All) -and ($Pc.ToLower() -eq $env:COMPUTERNAME.ToLower())
 if ($NoVerify -or $DryRun) {
     # nothing
 } elseif (-not $targetIsLocal) {
