@@ -47,6 +47,13 @@ pub struct ListQuery {
     pub kind: Option<String>,
     /// Exact-match filter on `source` (e.g. `winlog:Security`).
     pub source: Option<String>,
+    /// Exact-match filter on `payload.logon_type` (Issue #366).
+    /// Windows LogonType numbers: 2 interactive, 3 network,
+    /// 4 batch, 5 service, 7 unlock, 10 RDP, 11 cached. Only
+    /// logon/logoff events carry the field, so combining this
+    /// with a non-logon `kind` filter returns nothing — which is
+    /// the honest answer.
+    pub logon_type: Option<i64>,
     pub limit: Option<i64>,
 }
 
@@ -88,6 +95,11 @@ pub async fn list(
     // — once for the NULL check, once for the equality — which is
     // a SQLite query-planner no-op (the `IS NULL` branch
     // short-circuits at parse time when the bind is non-NULL).
+    // `json_extract` on the `?6` gate: `payload` is stored as JSON
+    // text, so the logon_type filter digs into it at query time.
+    // No index on the expression — acceptable because the filter
+    // composes with the indexed gates above and the table is
+    // cleanup-bounded (see cleanup.rs).
     let rows = sqlx::query(
         "SELECT id, pc_id, at, kind, source, event_record_id, payload
          FROM obs_events
@@ -96,14 +108,16 @@ pub async fn list(
            AND (?3 IS NULL OR at    <  ?3)
            AND (?4 IS NULL OR kind   = ?4)
            AND (?5 IS NULL OR source = ?5)
+           AND (?6 IS NULL OR json_extract(payload, '$.logon_type') = ?6)
          ORDER BY at DESC, id DESC
-         LIMIT ?6",
+         LIMIT ?7",
     )
     .bind(q.pc_id.as_deref())
     .bind(q.from)
     .bind(q.to)
     .bind(q.kind.as_deref())
     .bind(q.source.as_deref())
+    .bind(q.logon_type)
     .bind(limit)
     .fetch_all(&pool)
     .await
