@@ -112,7 +112,7 @@ async fn publish(client: async_nats::Client, binary: PathBuf) -> Result<()> {
 
     info!(version, size = bytes.len(), "uploading new agent binary");
 
-    let js = async_nats::jetstream::new(client);
+    let js = async_nats::jetstream::new(client.clone());
     let store = js
         .get_object_store(OBJECT_AGENT_RELEASES)
         .await
@@ -147,6 +147,14 @@ async fn publish(client: async_nats::Client, binary: PathBuf) -> Result<()> {
     println!("Next: target a scope with `kanade agent rollout`:");
     println!("  kanade agent rollout {version} --group canary --jitter 5m   # try on canary first");
     println!("  kanade agent rollout {version} --global --jitter 30m        # fleet-wide");
+
+    crate::audit::record(
+        &client,
+        "agent_publish",
+        Some(version.as_str()),
+        serde_json::json!({ "size": meta.size, "digest": meta.digest }),
+    )
+    .await;
     Ok(())
 }
 
@@ -163,7 +171,7 @@ async fn rollout(client: async_nats::Client, args: RolloutArgs) -> Result<()> {
         _ => bail!("--global / --group / --pc are mutually exclusive"),
     };
 
-    let js = async_nats::jetstream::new(client);
+    let js = async_nats::jetstream::new(client.clone());
 
     // Fail-fast on a version that doesn't have a binary uploaded
     // yet — saves the operator from finding out at agent-side via a
@@ -223,6 +231,18 @@ async fn rollout(client: async_nats::Client, args: RolloutArgs) -> Result<()> {
             "  jitter       : (unchanged — explicit `--jitter <duration>` recommended for fleets ≥ 100)"
         );
     }
+
+    crate::audit::record(
+        &client,
+        "agent_rollout",
+        Some(&key),
+        serde_json::json!({
+            "version": args.version,
+            "scope_label": label,
+            "jitter": args.jitter,
+        }),
+    )
+    .await;
     Ok(())
 }
 

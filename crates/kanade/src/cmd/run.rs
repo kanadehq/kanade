@@ -80,6 +80,22 @@ pub async fn execute(client: async_nats::Client, args: RunArgs) -> Result<()> {
         "sent command, waiting for result",
     );
 
+    // Audit at dispatch (not on result): the code ran on the host
+    // regardless of whether we hang around for its output. Truncate the
+    // script — the audit row should show intent, not be a payload dump.
+    crate::audit::record(
+        &client,
+        "run",
+        Some(&args.pc_id),
+        serde_json::json!({
+            "request_id": request_id,
+            "exec_id": args.exec_id,
+            "shell": args.shell,
+            "script": cmd.script.chars().take(500).collect::<String>(),
+        }),
+    )
+    .await;
+
     let wait = Duration::from_secs(args.timeout + 10);
     let msg = tokio::time::timeout(wait, sub.next())
         .await

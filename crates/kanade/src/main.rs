@@ -1,3 +1,4 @@
+mod audit;
 mod cmd;
 mod http_client;
 

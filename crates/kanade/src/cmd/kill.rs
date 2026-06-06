@@ -19,5 +19,6 @@ pub async fn execute(client: async_nats::Client, args: KillArgs) -> Result<()> {
     client.flush().await?;
     info!(exec_id = %args.exec_id, "kill signal published");
     println!("kill signal published to kill.{}", args.exec_id);
+    crate::audit::record(&client, "kill", Some(&args.exec_id), serde_json::json!({})).await;
     Ok(())
 }

@@ -180,6 +180,7 @@ pub(crate) async fn run_agent() -> Result<()> {
     ));
     tokio::spawn(self_update::run(
         client.clone(),
+        pc_id.clone(),
         AGENT_VERSION.to_string(),
         cfg_rx.clone(),
         staleness_tracker.clone(),
