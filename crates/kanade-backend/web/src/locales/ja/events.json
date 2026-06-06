@@ -4,6 +4,8 @@
   "countBadge_other": "{{count}} 件表示",
   "countBadgeFetching_one": "{{count}} 件表示…",
   "countBadgeFetching_other": "{{count}} 件表示…",
+  "dedupeCollapsed_one": "{{count}} 件の重複を畳みました (UAC スプリットトークン)",
+  "dedupeCollapsed_other": "{{count}} 件の重複を畳みました (UAC スプリットトークン)",
   "loading": "イベントを読み込み中…",
   "errorTitle": "イベントを読み込めませんでした",
   "empty": {
@@ -14,6 +16,7 @@
     "pcId": "PC",
     "kind": "種別",
     "logonType": "ログオン種別",
+    "dedupe": "重複を畳む",
     "source": "ソース",
     "since": "期間",
     "limit": "件数",
