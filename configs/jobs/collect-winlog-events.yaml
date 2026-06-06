@@ -46,9 +46,19 @@
 # (separate watermark; the backend's UNIQUE constraint on
 # (pc_id, source, event_record_id) de-dups any overlap).
 
+# Issue #385: power-transition coverage. The fleet host (and
+# modern laptops generally) are Modern Standby (S0) machines where
+# classic S3 sleep does not exist, so Kernel-Power 42/107 never
+# fire there — 506/507 are the S0 equivalents and fold into the
+# same sleep/resume kinds. Resume from hibernation emits neither —
+# it surfaces as Kernel-Boot 27 with BootType=0x2 (emitted here as
+# a `resume`). Power-Troubleshooter Event 1 adds a `wake_detail`
+# row (sleep start / wake time / wake source) for "what woke this
+# machine at 3am?" forensics.
+
 id: collect-winlog-events
-version: 0.3.0
-description: "Windows Event Log → ObsEvent timeline (human logon / logoff / lock / unlock / boot / shutdown / sleep / resume)"
+version: 0.4.0
+description: "Windows Event Log → ObsEvent timeline (human logon / logoff / lock / unlock / boot / shutdown / sleep / resume / wake_detail)"
 
 execute:
   shell: powershell
@@ -61,11 +71,19 @@ execute:
   script: |
     $ErrorActionPreference = 'Stop'
 
-    # Watermark file: one line per (log, kind) — `<log>:<kind>\t<lastRecordId>`.
+    # Watermark file: one line per source row —
+    # `<log>:<eventId>:<kind>\t<lastRecordId>`. The event ID joined
+    # the key in 0.4.0 (#385): multiple IDs now share a kind (42
+    # and 506 are both `sleep`), and with the old `<log>:<kind>`
+    # key the first row's cutoff would silently skip the second
+    # row's interleaved RecordIds. Old-format lines linger in the
+    # file harmlessly (never read, never rewritten); the new keys
+    # bootstrap from the 24h window below and the backend's UNIQUE
+    # constraint absorbs the one-time overlap re-send.
     # Stored under %ProgramData%\Kanade\state\ so the agent's outbox /
     # logs / config dirs stay structurally separate. First run reads
-    # nothing → bootstrap from "last 24h" per (log, kind) so a fresh
-    # agent doesn't dump every event since the box was built.
+    # nothing → bootstrap from "last 24h" per key so a fresh agent
+    # doesn't dump every event since the box was built.
     $stateDir = Join-Path $env:ProgramData 'Kanade\state'
     if (-not (Test-Path $stateDir)) {
         New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
@@ -122,7 +140,30 @@ execute:
     # System 12 / 13 — kernel-general boot / shutdown.
     # System 41    — unexpected shutdown (kernel-power, "the system
     #                rebooted without cleanly shutting down").
-    # System 42 / 107 — kernel-power sleep / resume.
+    # System 42 / 107 (kernel-power) — classic S3 sleep / resume.
+    #                Provider pinned in 0.4.0 — System-log event
+    #                IDs collide across providers (same lesson as
+    #                Winlogon 7001 vs SCM, #378).
+    # System 506 / 507 (kernel-power) — Modern Standby (S0)
+    #                enter / exit. Issue #385: S0 machines (the
+    #                fleet host included — its firmware doesn't
+    #                even offer S3, per `powercfg /a`) never emit
+    #                42/107; these are the equivalents and fold
+    #                into the same sleep / resume kinds with
+    #                payload {standby: "modern"}.
+    # System 27 (kernel-boot) — boot-type record. Only
+    #                BootType=0x2 (resume from hibernation) is
+    #                emitted, as `resume` {from: "hibernate"} —
+    #                hibernate wake produces neither 107 nor 507
+    #                and would otherwise masquerade as a plain
+    #                boot. 0x0 cold boot / 0x1 fast startup are
+    #                skipped (kind `boot` already covers them).
+    # System 1 (power-troubleshooter) — `wake_detail`: sleep
+    #                start / wake time / wake source ("what woke
+    #                this machine at 3am?"). Deliberately its own
+    #                kind, NOT a second `resume`, so the per-wake
+    #                pairing with 107/507 doesn't read as
+    #                duplication and can be filtered out by kind.
     # System 6005 / 6006 — Event Log service start / stop, a stable
     #                fallback signal for boot/shutdown when the
     #                kernel-general 12/13 are noisy.
@@ -134,8 +175,12 @@ execute:
         @{ Log='System';   Id=12;   Kind='boot' }
         @{ Log='System';   Id=13;   Kind='shutdown' }
         @{ Log='System';   Id=41;   Kind='unexpected_shutdown' }
-        @{ Log='System';   Id=42;   Kind='sleep' }
-        @{ Log='System';   Id=107;  Kind='resume' }
+        @{ Log='System';   Provider='Microsoft-Windows-Kernel-Power'; Id=42;  Kind='sleep' }
+        @{ Log='System';   Provider='Microsoft-Windows-Kernel-Power'; Id=107; Kind='resume' }
+        @{ Log='System';   Provider='Microsoft-Windows-Kernel-Power'; Id=506; Kind='sleep' }
+        @{ Log='System';   Provider='Microsoft-Windows-Kernel-Power'; Id=507; Kind='resume' }
+        @{ Log='System';   Provider='Microsoft-Windows-Kernel-Boot';  Id=27;  Kind='resume' }
+        @{ Log='System';   Provider='Microsoft-Windows-Power-Troubleshooter'; Id=1; Kind='wake_detail' }
         @{ Log='System';   Id=6005; Kind='log_service_started' }
         @{ Log='System';   Id=6006; Kind='log_service_stopped' }
     )
@@ -211,7 +256,9 @@ execute:
     # since the timeline is "what's happening now" rather than a
     # forensic archive.
     foreach ($s in $sources) {
-        $key = "$($s.Log):$($s.Kind)"
+        # Event ID in the key — see the watermark-format comment up
+        # top (0.4.0: two IDs can share a kind).
+        $key = "$($s.Log):$($s.Id):$($s.Kind)"
         $cutoff = $watermarks[$key]
         $filter = @{
             LogName   = $s.Log
@@ -249,7 +296,7 @@ execute:
                     $payload = @{
                         user       = Resolve-SidLeafName $sidStr
                         sid        = $sidStr
-                        session_id = [int]$e.Properties[0].Value
+                        session_id = ($e.Properties[0].Value -as [int])
                     }
                 }
             } elseif ($s.Id -eq 4800 -or $s.Id -eq 4801) {
@@ -260,8 +307,61 @@ execute:
                 if ($null -ne $e.Properties -and $e.Properties.Count -ge 5) {
                     $payload = @{
                         user       = [string]$e.Properties[1].Value
-                        session_id = [int]$e.Properties[4].Value
+                        session_id = ($e.Properties[4].Value -as [int])
                     }
+                }
+            } elseif ($s.Id -eq 506 -or $s.Id -eq 507) {
+                # Modern Standby enter/exit — same kinds as 42/107,
+                # payload distinguishes the standby flavour.
+                $payload = @{ standby = 'modern' }
+            } elseif ($s.Id -eq 27) {
+                # Kernel-Boot 27: BootType (event[0]).
+                #   0x0 cold boot, 0x1 fast startup, 0x2 resume
+                #   from hibernation. Only 0x2 emits (as `resume`);
+                #   the rest are already covered by kind `boot`
+                #   and would double every power-on. Skipped rows
+                #   still advanced the watermark above.
+                if ($null -eq $e.Properties -or $e.Properties.Count -lt 1) { continue }
+                # `-as` instead of a cast: a malformed value yields
+                # $null (→ skip) rather than throwing under
+                # `$ErrorActionPreference = 'Stop'` and killing the
+                # whole collection tick (Gemini #386 medium).
+                $bootType = $e.Properties[0].Value -as [int]
+                if ($null -eq $bootType -or $bootType -ne 2) { continue }
+                $payload = @{ from = 'hibernate' }
+            } elseif ($s.Kind -eq 'wake_detail') {
+                # Power-Troubleshooter 1. Positional Properties
+                # ordering for this event is NOT verifiable on a
+                # box that never slept (the fleet host has zero
+                # such events), so extract by NAME from the event
+                # XML instead of by index — robust to layout
+                # differences across Windows builds. A parse
+                # failure emits with a null payload ("it happened"
+                # beats "we could parse it").
+                try {
+                    $x = [xml]$e.ToXml()
+                    $data = @{}
+                    # `GetAttribute('Name')` rather than `$d.Name`:
+                    # PowerShell's XML adapter does surface the
+                    # Name ATTRIBUTE through `.Name` (verified on
+                    # 5.1 and 7), but GetAttribute is immune to the
+                    # adapter's shadowing rules (e.g. a child
+                    # element literally named "Name") — zero
+                    # ambiguity for one extra call.
+                    foreach ($d in $x.Event.EventData.Data) {
+                        if ($d -isnot [System.Xml.XmlElement]) { continue }
+                        $n = $d.GetAttribute('Name')
+                        if (-not [string]::IsNullOrEmpty($n)) { $data[$n] = [string]$d.'#text' }
+                    }
+                    $src = $data['WakeSourceText']
+                    if ([string]::IsNullOrWhiteSpace($src)) { $src = $data['WakeSourceType'] }
+                    $payload = @{
+                        sleep_start = $data['SleepTime']
+                        wake_time   = $data['WakeTime']
+                        wake_source = $src
+                    }
+                } catch {
+                    Write-Warning "wake_detail parse failed for record $($e.RecordId): $_"
                 }
             }
             # `ConvertTo-Json -Depth 5 -Compress` keeps one JSON
