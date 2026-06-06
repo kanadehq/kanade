@@ -55,6 +55,14 @@ const SINCE_PRESETS: Array<{ value: string; ms: number | null }> = [
 // the filter spans both data sets.
 const LOGON_TYPES = ['2', '3', '4', '5', '7', '10', '11'] as const;
 
+// UAC split-token dedupe window (Issue #371). An interactive
+// sign-in by an Administrators-group user writes TWO 4624s (full
+// token + filtered token) microseconds apart, so a logon_type
+// filtered view shows every human logon doubled. 2 s sits far
+// above the observed pair distance (µs) and far below any genuine
+// re-logon interval.
+const DEDUPE_WINDOW_MS = 2_000;
+
 const FILTER_DEBOUNCE_MS = 300;
 
 function useDebouncedValue<T>(value: T, delay: number): T {
@@ -112,6 +120,8 @@ export function Events() {
   const [pcId, setPcId] = useState(search.get('pc') ?? '');
   const [kind, setKind] = useState(search.get('kind') ?? '');
   const [logonType, setLogonType] = useState(search.get('logon_type') ?? '');
+  // Dedupe defaults ON; only the opt-out lands in the URL.
+  const [dedupe, setDedupe] = useState(search.get('dedupe') !== '0');
   const [source, setSource] = useState(search.get('source') ?? '');
   const [since, setSince] = useState(search.get('since') ?? '24h');
   const [limit, setLimit] = useState(Number(search.get('limit')) || 200);
@@ -136,12 +146,13 @@ export function Events() {
     if (dPcId)   next.set('pc', dPcId);
     if (kind)    next.set('kind', kind);
     if (logonType) next.set('logon_type', logonType);
+    if (!dedupe) next.set('dedupe', '0');
     if (dSource) next.set('source', dSource);
     if (since && since !== '24h') next.set('since', since);
     if (limit && limit !== 200)   next.set('limit', String(limit));
     setSearch(next, { replace: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dPcId, kind, logonType, dSource, since, limit]);
+  }, [dPcId, kind, logonType, dedupe, dSource, since, limit]);
 
   const queryString = useMemo(() => {
     const sp = new URLSearchParams();
@@ -168,17 +179,64 @@ export function Events() {
     staleTime: 60_000,
   });
 
-  const rows = data?.events ?? [];
+  // UAC split-token dedupe (Issue #371): collapse rows with the
+  // same (pc, kind, payload.user) closer together than
+  // DEDUPE_WINDOW_MS into the newest row of the group. View-only —
+  // `obs_events` keeps both rows (faithful to the OS), and the
+  // checkbox under the logon-type select restores the raw view.
+  // Only active while a logon_type filter is selected: that's the
+  // only view where the split-token pairing reads as duplication
+  // rather than data.
+  const { visible, collapsed } = useMemo(() => {
+    // Fallback array lives inside the memo so the `data === undefined`
+    // render doesn't mint a fresh `[]` reference every pass, and the
+    // dependency list stays exhaustive-deps-clean (Gemini #372 medium).
+    const rows = data?.events ?? [];
+    if (!logonType || !dedupe) return { visible: rows, collapsed: 0 };
+    const lastKept = new Map<string, number>();
+    const visible: EventRow[] = [];
+    let collapsed = 0;
+    // Rows arrive `at DESC` from the API, so each group's newest
+    // row is seen first and becomes the anchor its split-token
+    // twin collapses into. The anchor only moves on a KEPT row, so
+    // a slow drip of events spaced just inside the window can't
+    // chain-collapse into one point.
+    for (const e of rows) {
+      const p = e.payload as { user?: unknown } | null;
+      const user = typeof p?.user === 'string' ? p.user : '';
+      const ts = Date.parse(e.at);
+      if (Number.isNaN(ts)) {
+        visible.push(e);
+        continue;
+      }
+      const key = `${e.pc_id}|${e.kind}|${user}`;
+      const anchor = lastKept.get(key);
+      if (anchor !== undefined && anchor - ts < DEDUPE_WINDOW_MS) {
+        collapsed++;
+        continue;
+      }
+      lastKept.set(key, ts);
+      visible.push(e);
+    }
+    return { visible, collapsed };
+  }, [data, logonType, dedupe]);
 
   return (
     <div className="space-y-4">
       <div className="flex items-baseline justify-between">
         <h2 className="text-xl">{t('title')}</h2>
-        <Badge variant="violet">
-          {isFetching && !isLoading
-            ? t('countBadgeFetching', { count: rows.length })
-            : t('countBadge', { count: rows.length })}
-        </Badge>
+        <div className="flex items-baseline gap-2">
+          {collapsed > 0 && (
+            <span className="text-xs text-muted">
+              {t('dedupeCollapsed', { count: collapsed })}
+            </span>
+          )}
+          <Badge variant="violet">
+            {isFetching && !isLoading
+              ? t('countBadgeFetching', { count: visible.length })
+              : t('countBadge', { count: visible.length })}
+          </Badge>
+        </div>
       </div>
 
       <Card>
@@ -215,6 +273,17 @@ export function Events() {
                 <option key={v} value={v}>{t(`filters.logonTypeOptions.${v}`)}</option>
               ))}
             </Select>
+            {logonType && (
+              <label className="flex items-center gap-1.5 pt-1 text-xs text-muted cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="accent-violet-500"
+                  checked={dedupe}
+                  onChange={(e) => setDedupe(e.target.checked)}
+                />
+                {t('filters.dedupe')}
+              </label>
+            )}
           </div>
           <div className="space-y-1">
             <Label htmlFor="ev-source">{t('filters.source')}</Label>
@@ -257,7 +326,7 @@ export function Events() {
         </div>
       ) : error ? (
         <ErrorCard title={t('errorTitle')} error={error} />
-      ) : rows.length === 0 ? (
+      ) : visible.length === 0 ? (
         <Card>
           <CardHeader><CardTitle>{t('empty.title')}</CardTitle></CardHeader>
           <CardContent className="text-muted">
@@ -266,8 +335,8 @@ export function Events() {
         </Card>
       ) : (
         <>
-          <EventsTimeline events={rows} />
-          <EventsHeatmap events={rows} />
+          <EventsTimeline events={visible} />
+          <EventsHeatmap events={visible} />
           <Table>
           <TableHeader>
             <TableRow>
@@ -280,7 +349,7 @@ export function Events() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {rows.map((e) => (
+            {visible.map((e) => (
               <TableRow key={e.id}>
                 <TableCell className="text-muted text-xs">{fmtIsoLocal(e.at)}</TableCell>
                 <TableCell><code className="text-xs">{e.pc_id}</code></TableCell>

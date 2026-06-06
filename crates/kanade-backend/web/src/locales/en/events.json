@@ -4,6 +4,8 @@
   "countBadge_other": "{{count}} shown",
   "countBadgeFetching_one": "{{count}} shown…",
   "countBadgeFetching_other": "{{count}} shown…",
+  "dedupeCollapsed_one": "{{count}} duplicate collapsed (UAC split-token)",
+  "dedupeCollapsed_other": "{{count}} duplicates collapsed (UAC split-token)",
   "loading": "loading events…",
   "errorTitle": "Couldn't load events",
   "empty": {
@@ -14,6 +16,7 @@
     "pcId": "pc",
     "kind": "kind",
     "logonType": "logon type",
+    "dedupe": "collapse duplicates",
     "source": "source",
     "since": "since",
     "limit": "limit",
