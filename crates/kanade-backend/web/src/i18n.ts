@@ -69,6 +69,17 @@ const initOpts: InitOptions = {
     // double-encode things like `&` inside translation strings.
     escapeValue: false,
   },
+  react: {
+    // Locale strings spell literal angle brackets as `&lt;`/`&gt;`
+    // (e.g. `kanade exec &lt;job-id&gt;`) so <Trans>'s HTML parser
+    // doesn't mistake them for tags. <Trans> renders entities
+    // verbatim unless `shouldUnescape` is set; defaulting it here
+    // decodes them everywhere instead of sprinkling the prop on
+    // every call site.
+    transDefaultProps: {
+      shouldUnescape: true,
+    },
+  },
   detection: {
     // Read the operator's preference from localStorage first; fall
     // back to the navigator language; persist explicit picks to
