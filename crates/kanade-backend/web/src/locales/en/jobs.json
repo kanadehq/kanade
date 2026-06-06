@@ -9,7 +9,7 @@
     "body": "Use <code>kanade job create &lt;manifest.yaml&gt;</code> on the CLI, or click <strong>New job</strong> above to open the in-browser YAML editor. Schedules reference jobs by id, so the job must exist before the schedule fires."
   },
   "columns": {
-    "id": "id",
+    "job": "job",
     "version": "version",
     "status": "status",
     "live": "live",
@@ -18,8 +18,13 @@
     "cwd": "cwd",
     "timeout": "timeout",
     "inventory": "inventory",
-    "description": "description",
     "actions": "actions"
+  },
+  "row": {
+    "openAria": "open details for job {{id}}"
+  },
+  "detail": {
+    "noDescription": "(no description)"
   },
   "status": {
     "active": "active",
