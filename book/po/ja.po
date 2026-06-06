@@ -1,15 +1,14 @@
-
 msgid ""
 msgstr ""
 "Project-Id-Version: kanade — 奏\n"
-"POT-Creation-Date: 2026-05-26T23:34:48+09:00\n"
+"POT-Creation-Date: 2026-05-28T19:49:23+09:00\n"
 "PO-Revision-Date: \n"
 "Last-Translator: \n"
 "Language-Team: \n"
+"Language: ja\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Language: ja\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
 
 #: src\SUMMARY.md:1
@@ -21,60 +20,93 @@ msgid "Introduction"
 msgstr "はじめに"
 
 #: src\SUMMARY.md:5
-msgid "Operations"
-msgstr "運用"
+msgid "1. Getting Started"
+msgstr "1. 導入ガイド"
 
 #: src\SUMMARY.md:7
+msgid "Quickstart"
+msgstr "クイックスタート"
+
+#: src\SUMMARY.md:8 src\getting-started/architecture.md:1
+msgid "System Architecture"
+msgstr "システムアーキテクチャ"
+
+#: src\SUMMARY.md:10
+msgid "2. Operations"
+msgstr "2. 運用ガイド"
+
+#: src\SUMMARY.md:12
 msgid "Overview"
 msgstr "概要"
 
-#: src\SUMMARY.md:8 src\operations/agent-mediated-updates/index.md:1
-msgid "Agent-mediated updates"
-msgstr "agent 経由のアップデート"
+#: src\SUMMARY.md:13 src\operations/deploy.md:1
+msgid "Installation and Deployment"
+msgstr "インストールとデプロイ"
 
-#: src\SUMMARY.md:9 src\operations/agent-mediated-updates/backend.md:1
+#: src\SUMMARY.md:14
+msgid "Agent-Mediated Updates"
+msgstr "エージェント経由の更新"
+
+#: src\SUMMARY.md:15 src\operations/agent-mediated-updates/backend.md:1
 msgid "Updating kanade-backend"
 msgstr "kanade-backend のアップデート"
 
-#: src\SUMMARY.md:10 src\operations/agent-mediated-updates/client.md:1
+#: src\SUMMARY.md:16 src\operations/agent-mediated-updates/client.md:1
 msgid "Updating kanade-client"
 msgstr "kanade-client のアップデート"
 
-#: src\SUMMARY.md:11 src\operations/agent-mediated-updates/nats.md:1
+#: src\SUMMARY.md:17 src\operations/agent-mediated-updates/nats.md:1
 msgid "Updating NATS server"
 msgstr "NATS サーバーのアップデート"
 
-#: src\SUMMARY.md:12 src\operations/agent-mediated-updates/agent-self.md:1
+#: src\SUMMARY.md:18 src\operations/agent-mediated-updates/agent-self.md:1
 msgid "Updating kanade-agent itself"
 msgstr "kanade-agent 自身のアップデート"
 
-#: src\SUMMARY.md:14
-msgid "For developers"
-msgstr "開発者向け"
+#: src\SUMMARY.md:19
+msgid "Removing kanade (undeploy)"
+msgstr "kanade を取り除く (undeploy)"
 
-#: src\SUMMARY.md:16 src\developing/writing-agent-scripts.md:1
+#: src\SUMMARY.md:21
+msgid "3. Developer Guide"
+msgstr "3. 開発者ガイド"
+
+#: src\SUMMARY.md:23 src\developing/writing-agent-scripts.md:1
 msgid "Writing scripts for the agent"
 msgstr "agent 向けスクリプトを書く"
 
-#: src\SUMMARY.md:20 src\reference/spec.md:1
+#: src\SUMMARY.md:24
+msgid "Workflow and Contribution"
+msgstr "開発フローとコントリビューション"
+
+#: src\SUMMARY.md:26
+msgid "4. Reference"
+msgstr "4. リファレンス"
+
+#: src\SUMMARY.md:28 src\reference/spec.md:1
 msgid "Spec (legacy single-page)"
 msgstr "仕様 (旧 single-page)"
 
+#: src\SUMMARY.md:29 src\reference/config.md:1
+msgid "Configuration Reference"
+msgstr "設定リファレンス"
+
 #: src\introduction.md:3
 msgid ""
-"**kanade — 奏** is an endpoint management system for Windows fleets. It gives "
-"an operator a single CLI / SPA to run scripts, install software, gather "
-"inventory, and stream live perf data from hundreds of PCs at once. The "
-"pieces:"
+"**kanade — 奏** is an endpoint management system for Windows fleets. It "
+"gives an operator a single CLI / SPA to run scripts, install software, "
+"gather inventory, and stream live perf data from hundreds of PCs at once. "
+"The pieces:"
 msgstr ""
-"**kanade — 奏** は Windows 端末群の管理システムです。operator はひとつの "
-"CLI / SPA から、数百台規模の PC に対してスクリプト実行・ソフトウェア配布・"
-"インベントリ収集・ライブのパフォーマンスデータ取得を一気にこなせます。"
+"**kanade — 奏** は多数の Windows 端末を一元管理するシステムです。operator は"
+"ひとつの CLI / SPA から、数百台規模の PC に対してスクリプト実行・ソフトウェア"
+"配布・インベントリ収集・ライブのパフォーマンスデータ取得を一気にこなせます。"
 "構成要素:"
 
-#: src\introduction.md:8
+#: src\introduction.md:8 src\operations/undeploy.md:9
+#: src\operations/undeploy.md:54
 msgid "Component"
-msgstr "コンポーネント"
+msgstr "構成要素"
 
 #: src\introduction.md:8
 msgid "What it is"
@@ -121,8 +153,8 @@ msgid ""
 "Message broker for command fan-out + result aggregation. The agent talks "
 "NATS-only; the backend reads NATS too."
 msgstr ""
-"コマンドのファンアウトと結果集約を担うメッセージブローカー。agent は NATS "
-"だけと話し、backend も NATS から読みます。"
+"コマンドのファンアウトと結果集約を担うメッセージブローカー。agent は NATS と"
+"のみ通信し、backend も NATS から読みます。"
 
 #: src\introduction.md:14
 msgid "**kanade CLI**"
@@ -131,8 +163,8 @@ msgstr "**kanade CLI**"
 #: src\introduction.md:14
 msgid "Operator-facing command line: publish binaries, fire jobs, query state."
 msgstr ""
-"operator が使うコマンドライン。バイナリの publish、ジョブの起動、状態の照会"
-"を行います。"
+"operator が使うコマンドライン。バイナリの publish、ジョブの起動、状態の照会を"
+"行います。"
 
 #: src\introduction.md:16
 msgid "This site covers two audiences:"
@@ -141,11 +173,12 @@ msgstr "このサイトは 2 種類の読者を想定しています:"
 #: src\introduction.md:18
 msgid ""
 "**Operators** running a kanade fleet — how to update each component without "
-"ssh-ing into endpoints (see [Agent-mediated "
-"updates](./operations/agent-mediated-updates/index.md))."
+"ssh-ing into endpoints (see [Agent-mediated updates](./operations/agent-"
+"mediated-updates/index.md))."
 msgstr ""
-"**operator** (kanade fleet の運用者) — 各端末に ssh せずに各コンポーネントを"
-"アップデートする方法 ([agent 経由のアップデート](./operations/agent-mediated-updates/index.md) 参照)。"
+"**運用者** (kanade fleet の運用者) 向け — 各端末に ssh せずに各コンポーネント"
+"をアップデートする方法について解説しています（[agent 経由のアップデート](./"
+"operations/agent-mediated-updates/index.md) 参照）。"
 
 #: src\introduction.md:21
 msgid ""
@@ -153,8 +186,10 @@ msgid ""
 "what doesn't, what changed in recent agent versions (see [Writing scripts "
 "for the agent](./developing/writing-agent-scripts.md))."
 msgstr ""
-"**開発者** (agent が実行する PowerShell ジョブを書く人) — 何が動いて何が動か"
-"ないか、最近の agent バージョンで何が変わったか ([agent 向けスクリプトを書く](./developing/writing-agent-scripts.md) 参照)。"
+"**開発者** (agent が実行する PowerShell ジョブを作成する人) 向け — スクリプト"
+"が動作する仕組みや制限事項、最近の agent バージョンにおける変更点について解説"
+"しています（[agent 向けスクリプトを書く](./developing/writing-agent-"
+"scripts.md) 参照）。"
 
 #: src\introduction.md:25
 msgid ""
@@ -162,8 +197,355 @@ msgid ""
 "(the legacy single-page document; will be split into chapters as the docs "
 "site fills out)."
 msgstr ""
-"詳細なプロトコル / on-wire 仕様は [Spec](./reference/spec.md) にあります "
-"(旧 single-page ドキュメント。docs サイトが整うにつれて章別に分割予定)。"
+"詳細なプロトコル / on-wire 仕様は [Spec](./reference/spec.md) にあります (旧 "
+"single-page ドキュメント。docs サイトが整うにつれて章別に分割予定)。"
+
+#: src\getting-started/quickstart.md:1
+msgid "Developer Quickstart"
+msgstr "開発者クイックスタート"
+
+#: src\getting-started/quickstart.md:3
+msgid ""
+"This guide gets you up and running with a local `kanade` development "
+"environment."
+msgstr ""
+"このガイドでは、ローカルの `kanade` 開発環境をセットアップして起動する手順を"
+"説明します。"
+
+#: src\getting-started/quickstart.md:5 src\operations/deploy.md:17
+msgid "1. Prerequisites"
+msgstr "1. 前提条件"
+
+#: src\getting-started/quickstart.md:7
+msgid ""
+"Before starting, ensure you have the following installed on your Windows "
+"machine:"
+msgstr ""
+"開始する前に、Windows マシンに以下がインストールされていることを確認してくだ"
+"さい。"
+
+#: src\getting-started/quickstart.md:8
+msgid "[Rust toolchain](https://rustup.rs/) (stable channel)"
+msgstr "[Rust ツールチェーン](https://rustup.rs/) (stable チャンネル)"
+
+#: src\getting-started/quickstart.md:9
+msgid ""
+"[cargo-make](https://sagiegurari.github.io/cargo-make/) (run `cargo install "
+"--force cargo-make`)"
+msgstr "[cargo-make](https://sagiegurari.github.io/cargo-make/) (`cargo install --force cargo-make` でインストール)"
+
+#: src\getting-started/quickstart.md:10
+msgid ""
+"[bun](https://bun.sh/) (for SPA dependency management and build execution)"
+msgstr "[bun](https://bun.sh/) (SPA の依存関係管理とビルド実行用)"
+
+#: src\getting-started/quickstart.md:11
+msgid ""
+"[gsudo](https://github.com/gerardog/gsudo) (for local service deployment "
+"tests)"
+msgstr "[gsudo](https://github.com/gerardog/gsudo) (ローカルのサービスデプロイテスト用)"
+
+#: src\getting-started/quickstart.md:12
+msgid ""
+"[nats-server](https://github.com/nats-io/nats-server) (runnable from PATH)"
+msgstr "[nats-server](https://github.com/nats-io/nats-server) (PATH から実行可能であること)"
+
+#: src\getting-started/quickstart.md:14
+msgid "2. One-Time Setup"
+msgstr "2. 初回セットアップ"
+
+#: src\getting-started/quickstart.md:16
+msgid ""
+"Run the following command at the workspace root to register the git pre-push "
+"hooks and install agent skills defined in `apm.yml`:"
+msgstr ""
+"ワークスペースのルートで以下のコマンドを実行し、git の pre-push フックを登録"
+"し、`apm.yml` で定義されたエージェントスキルをインストールします。"
+
+#: src\getting-started/quickstart.md:22
+msgid "3. Launching the Dev Sandbox"
+msgstr "3. 開発サンドボックスの起動"
+
+#: src\getting-started/quickstart.md:24
+msgid ""
+"You can spin up a fully isolated, multi-component development stack on your "
+"local host using a single command:"
+msgstr ""
+"単一のコマンドを使用するだけで、ローカルホスト上に完全に分離されたマルチコン"
+"ポーネント開発スタックを起動できます。"
+
+#: src\getting-started/quickstart.md:30
+msgid ""
+"This task runs the following services concurrently in a loopback sandbox:"
+msgstr ""
+"このタスクは、ループバックサンドボックス内で以下のサービスを並行して実行しま"
+"す。"
+
+#: src\getting-started/quickstart.md:31
+msgid "**nats-dev**: Unauthenticated NATS broker listening on port `4223`."
+msgstr "**nats-dev**: ポート `4223` で待機する、認証なしの NATS ブローカー。"
+
+#: src\getting-started/quickstart.md:32
+msgid ""
+"**backend-dev**: Dev API server listening on port `8081` with auth disabled."
+msgstr "**backend-dev**: 認証が無効化された、ポート `8081` で待機する開発用 API サーバー。"
+
+#: src\getting-started/quickstart.md:33
+msgid ""
+"**agent-dev**: Local dev agent talking to the dev NATS broker on `4223`."
+msgstr "**agent-dev**: ポート `4223` の開発用 NATS ブローカーと通信する、ローカルの開発用エージェント。"
+
+#: src\getting-started/quickstart.md:34
+msgid ""
+"**web-dev**: Vite dev server for the React SPA listening on `http://"
+"localhost:5173`."
+msgstr "**web-dev**: `http://localhost:5173` で待機する、React SPA 用の Vite 開発サーバー。"
+
+#: src\getting-started/quickstart.md:36
+msgid "Press `Ctrl+C` to tear down all components cleanly."
+msgstr ""
+"`Ctrl+C` を押すことで、すべてのコンポーネントをクリーンに終了できます。"
+
+#: src\getting-started/quickstart.md:38
+msgid "4. Multi-Agent Fleet Simulation"
+msgstr "4. 複数エージェントフリートのシミュレーション"
+
+#: src\getting-started/quickstart.md:40
+msgid ""
+"To debug behavior that only shows up when managing multiple machines (e.g. "
+"concurrent execution result projection or ID collisions), you can launch a "
+"multi-agent sandbox:"
+msgstr ""
+"複数のマシンを管理しているときにのみ発生する動作（並行実行結果のプロジェク"
+"ションや ID 衝突など）をデバッグするために、マルチエージェントサンドボックス"
+"を起動できます。"
+
+#: src\getting-started/quickstart.md:46
+msgid ""
+"This spawns the NATS broker, backend, and SPA, plus three separate dev "
+"agents with independent IDs (`dev-pc-1`, `dev-pc-2`, `dev-pc-3`) and "
+"isolated state databases."
+msgstr ""
+"これにより、NATS ブローカー、バックエンド、SPA に加えて、独立した ID（`dev-"
+"pc-1`、`dev-pc-2`、`dev-pc-3`）と隔離された状態データベースを持つ 3 つの個別"
+"開発用エージェントが起動します。"
+
+#: src\getting-started/quickstart.md:48
+msgid "5. Local Deploy Testing"
+msgstr "5. ローカルデプロイのテスト"
+
+#: src\getting-started/quickstart.md:50
+msgid ""
+"If you want to test the full lifecycle of installing components as Windows "
+"services (mirroring production environments), use the local deployment "
+"scripts:"
+msgstr ""
+"Windows サービスとしてコンポーネントをインストールする全ライフサイクル（本番"
+"環境の模倣）をテストしたい場合は、ローカルデプロイスクリプトを使用します。"
+
+#: src\getting-started/quickstart.md:57
+msgid ""
+"After deployment, you can verify and interact with the real Windows "
+"services. Use the following task to stop and cleanly delete the services "
+"when finished:"
+msgstr ""
+"デプロイ後、実際の Windows サービスを確認して対話できます。完了したら、以下の"
+"タスクを使用してサービスを停止し、きれいに削除します。"
+
+#: src\getting-started/architecture.md:3
+msgid ""
+"`kanade` is designed to manage hundreds of Windows endpoints concurrently, "
+"safely, and asynchronously."
+msgstr ""
+"`kanade` は、数百台の Windows エンドポイントを並行して、安全に、そして非同期"
+"で管理するように設計されています。"
+
+#: src\getting-started/architecture.md:5
+msgid "Component Topology"
+msgstr "コンポーネントトポロジー"
+
+#: src\getting-started/architecture.md:7
+msgid ""
+"The system consists of five main components, coordinated through an event-"
+"driven pub/sub structure:"
+msgstr ""
+"システムは 5 つの主要コンポーネントで構成されており、イベント駆動型の pub/"
+"sub 構造を介して調整されます。"
+
+#: src\getting-started/architecture.md:35
+msgid "1. kanade-agent"
+msgstr "1. kanade-agent"
+
+#: src\getting-started/architecture.md:36
+msgid "A high-performance Windows service running on each managed host."
+msgstr "各管理対象ホスト上で動作する高性能な Windows サービスです。"
+
+#: src\getting-started/architecture.md:37
+msgid "**Role**: Core executor."
+msgstr "**役割**: コア実行エンジン。"
+
+#: src\getting-started/architecture.md:38
+msgid ""
+"**Communication**: Establishes an outbound-only NATS connection. It does not "
+"open any inbound ports, making it firewall-friendly."
+msgstr ""
+"**通信**: アウトバウンド専用の NATS 接続を確立します。インバウンドポートを"
+"開かないため、ファイアウォールに優しい設計です。"
+
+#: src\getting-started/architecture.md:39
+msgid ""
+"**Capabilities**: Launches secure, isolated PowerShell subprocesses, "
+"inventories hardware/software specs, streams live performance data (CPU, RSS "
+"memory, disk I/O), and manages local packages."
+msgstr ""
+"**機能**: 安全に隔離された PowerShell サブプロセスを起動し、ハードウェア/ソ"
+"フトウェアのスペック情報の収集、ライブパフォーマンスデータ（CPU、RSSメモリ、"
+"ディスクI/O）のストリーミング、およびローカルパッケージの管理を行います。"
+
+#: src\getting-started/architecture.md:41
+msgid "2. kanade-backend"
+msgstr "2. kanade-backend"
+
+#: src\getting-started/architecture.md:42
+msgid "The central HTTP API and projection server."
+msgstr "中央の HTTP API およびプロジェクションサーバーです。"
+
+#: src\getting-started/architecture.md:43
+msgid ""
+"**Role**: Coordinates commands, processes incoming telemetry, and hosts the "
+"operator Web interface."
+msgstr ""
+"**役割**: コマンドの調整、受信テレメトリの処理、およびオペレーター用 Web イ"
+"ンターフェースの提供。"
+
+#: src\getting-started/architecture.md:44
+msgid ""
+"**State management**: Persists events, activity logs, and status records in "
+"a localized SQLite database."
+msgstr ""
+"**状態管理**: イベント、アクティビティログ、およびステータスレコードをロー"
+"カルの SQLite データベースに永続化します。"
+
+#: src\getting-started/architecture.md:45
+msgid ""
+"**Projector pattern**: Subscribes to the NATS command-response stream, "
+"parses incoming payloads, and projects them into state tables in real-time."
+msgstr ""
+"**プロジェクターパターン**: NATS コマンドレスポンスストリームを購読し、受信"
+"したペイロードを解析して、リアルタイムで状態テーブルに反映（投影）します。"
+
+#: src\getting-started/architecture.md:47
+msgid "3. NATS Broker (with JetStream)"
+msgstr "3. NATS ブローカー (with JetStream)"
+
+#: src\getting-started/architecture.md:48
+msgid "The message transport layer of the entire fleet."
+msgstr "フリート全体のメッセージ転送レイヤーです。"
+
+#: src\getting-started/architecture.md:49
+msgid "**Role**: Lightweight, high-throughput message broker."
+msgstr "**役割**: 軽量かつ高スループットなメッセージブローカー。"
+
+#: src\getting-started/architecture.md:50
+msgid ""
+"**JetStream**: Retains command streams, job registrations, and file storage "
+"(using NATS Object Store buckets for distributing packages and agent "
+"scripts)."
+msgstr ""
+"**JetStream**: コマンドストリーム、ジョブ登録、およびファイルストレージ"
+"（パッケージやエージェントスクリプトを配信するための NATS オブジェクトストア"
+"バケットを使用）を保持します。"
+
+#: src\getting-started/architecture.md:51
+msgid ""
+"**Isolation**: Decouples the backend from the agents. If the backend is "
+"offline or restarting, agents continue execution and cache outbox records, "
+"pushing them once connection resumes."
+msgstr ""
+"**疎結合**: バックエンドとエージェントを切り離します。バックエンドがオフラ"
+"インまたは再起動中であっても、エージェントは実行を継続して送信トレイにレコー"
+"ドをキャッシュし、接続が再開されたらそれらをプッシュします。"
+
+#: src\getting-started/architecture.md:53
+msgid "4. kanade-client"
+msgstr "4. kanade-client"
+
+#: src\getting-started/architecture.md:54
+msgid ""
+"An optional Tauri desktop application running in the logged-in user's "
+"desktop session on endpoints."
+msgstr ""
+"エンドポイント上のログインユーザーのデスクトップセッションで動作する、オプ"
+"ションの Tauri デスクトップアプリケーションです。"
+
+#: src\getting-started/architecture.md:55
+msgid ""
+"**Role**: Provides end-user interaction (e.g., prompt dialogs, "
+"notifications, or a user-facing dashboard)."
+msgstr ""
+"**役割**: エンドユーザーとの対話（プロンプトダイアログ、通知、ユーザー向けダッシュボードなど）を提供します。"
+
+#: src\getting-started/architecture.md:56
+msgid ""
+"**Communication**: Shares state with the local `kanade-agent` via secured "
+"local IPC mechanisms."
+msgstr ""
+"**通信**: セキュリティで保護されたローカル IPC メカニズムを介して、ローカル"
+"の `kanade-agent` と状態を共有します。"
+
+#: src\getting-started/architecture.md:58
+msgid "5. kanade CLI"
+msgstr "5. kanade CLI"
+
+#: src\getting-started/architecture.md:59
+msgid "The primary command-line tool for operators."
+msgstr "オペレーター向けの主要なコマンドラインツールです。"
+
+#: src\getting-started/architecture.md:60
+msgid ""
+"**Role**: Packages and publishes software updates, submits and executes job "
+"manifests, and queries live fleet inventory from the command-line."
+msgstr ""
+"**役割**: ソフトウェアアップデートのパッケージングと公開、ジョブマニフェス"
+"トの送信と実行、およびコマンドラインからのライブフリートインベントリの照会。"
+
+#: src\getting-started/architecture.md:64
+msgid "Security & Reliability Design"
+msgstr "セキュリティと信頼性の設計"
+
+#: src\getting-started/architecture.md:66
+msgid "Outbound-only Connections"
+msgstr "アウトバウンド専用接続"
+
+#: src\getting-started/architecture.md:67
+msgid ""
+"Agents strictly communicate with the NATS broker by initiating outbound TCP "
+"connections. No firewall ports need to be opened on endpoints, neutralizing "
+"the risk of lateral traversal or external port scanning."
+msgstr ""
+"エージェントは、アウトバウンド TCP 接続を開始することによってのみ NATS ブロー"
+"カーと通信します。エンドポイント側でファイアウォールポートを開く必要がないた"
+"め、横移動や外部からのポートスキャンのリスクを排除できます。"
+
+#: src\getting-started/architecture.md:69
+msgid "Agent Job Sandboxing"
+msgstr "エージェントジョブのサンドボックス化"
+
+#: src\getting-started/architecture.md:70
+msgid ""
+"When executing scripts, the agent stages commands in `%ProgramData%"
+"\\Kanade\\agent-scripts` and executes them using customized launcher "
+"templates. Administrators can enforce identity configurations via job "
+"manifests, specifying `run_as: system` (for elevated system management) or "
+"`run_as: user` (to run safely under the active user's credentials with "
+"restricted directory ACLs)."
+msgstr ""
+"スクリプトを実行する際、エージェントは `%ProgramData%\\Kanade\\agent-scripts` 内に"
+"コマンドを配置（ステージング）し、カスタマイズされたランチャテンプレートを"
+"使用して実行します。管理者はジョブマニフェストを介して実行アイデンティティの"
+"設定を強制でき、`run_as: system`（昇格したシステム管理用）または `run_as: user`"
+"（制限されたディレクトリ ACL を使用して、アクティブなユーザーの資格情報の下で"
+"安全に実行する用）を指定できます。"
 
 #: src\operations/overview.md:1
 msgid "Operations overview"
@@ -177,15 +559,14 @@ msgstr "kanade の day-2 運用は 2 つのフローに分かれます:"
 msgid ""
 "**Direct install** — drop binaries + config on a fresh host and register the "
 "Windows service. Used to bootstrap the first agent, the initial backend, and "
-"the NATS server. Scripts: `scripts/deploy/agent.ps1`, "
-"`scripts/deploy/backend.ps1`, `scripts/deploy/nats.ps1`. Run **manually** on "
-"the target host."
+"the NATS server. Scripts: `scripts/deploy/agent.ps1`, `scripts/deploy/"
+"backend.ps1`, `scripts/deploy/nats.ps1`. Run **manually** on the target host."
 msgstr ""
 "**直接インストール** — まっさらなホストにバイナリと config を置いて Windows "
-"サービスを登録します。最初の agent、最初の backend、NATS サーバーをブート"
-"ストラップするときに使います。スクリプト: `scripts/deploy/agent.ps1`、"
-"`scripts/deploy/backend.ps1`、`scripts/deploy/nats.ps1`。対象ホスト上で"
-"**手動で**実行します。"
+"サービスを登録します。最初の agent、最初の backend、NATS サーバーをブートスト"
+"ラップするときに使います。スクリプト: `scripts/deploy/agent.ps1`、`scripts/"
+"deploy/backend.ps1`、`scripts/deploy/nats.ps1`。対象ホスト上で**手動で**実行"
+"します。"
 
 #: src\operations/overview.md:11
 msgid ""
@@ -198,14 +579,14 @@ msgstr ""
 "**agent 経由のアップデート** — agent がいったん動き出せば、その agent 自身が "
 "ssh / RDP なしで同じホスト上の他コンポーネントをインストール・更新できます。"
 "operator はバイナリとスクリプト本体をブローカーに publish し、ジョブを起動。"
-"agent が fetch・検証・swap・サービス再起動を行います。day-2 運用の大半はこれ。"
+"agent が fetch・検証・swap・サービス再起動を行います。day-2 運用の大半はこ"
+"れ。"
 
 #: src\operations/overview.md:18
 msgid ""
 "The agent-mediated flow has the same shape regardless of what you're "
 "updating:"
-msgstr ""
-"agent 経由フローの形は、何をアップデートする場合でも同じです:"
+msgstr "agent 経由フローの形は、何をアップデートする場合でも同じです:"
 
 #: src\operations/overview.md:34
 msgid "Component-specific guides:"
@@ -216,23 +597,23 @@ msgid ""
 "[kanade-backend](./agent-mediated-updates/backend.md) — the HTTP / projector "
 "binary"
 msgstr ""
-"[kanade-backend](./agent-mediated-updates/backend.md) — HTTP / projector "
-"バイナリ"
+"[kanade-backend](./agent-mediated-updates/backend.md) — HTTP / projector バイ"
+"ナリ"
 
 #: src\operations/overview.md:38
 msgid ""
 "[kanade-client](./agent-mediated-updates/client.md) — the Tauri end-user app"
 msgstr ""
-"[kanade-client](./agent-mediated-updates/client.md) — Tauri 製の"
-"エンドユーザーアプリ"
+"[kanade-client](./agent-mediated-updates/client.md) — Tauri 製のエンドユー"
+"ザーアプリ"
 
 #: src\operations/overview.md:40
 msgid ""
 "[NATS server](./agent-mediated-updates/nats.md) — the broker itself (yes, "
 "you can update the broker over the broker)"
 msgstr ""
-"[NATS サーバー](./agent-mediated-updates/nats.md) — ブローカー本体 (はい、"
-"ブローカー越しにブローカーをアップデートできます)"
+"[NATS サーバー](./agent-mediated-updates/nats.md) — ブローカー本体 (はい、ブ"
+"ローカー越しにブローカーをアップデートできます)"
 
 #: src\operations/overview.md:42
 msgid ""
@@ -240,9 +621,255 @@ msgid ""
 "self-update path (different from the other three; it uses a dedicated "
 "rollout bucket, not the generic OBJECT_APP_PACKAGES + script pair)"
 msgstr ""
-"[kanade-agent 自身](./agent-mediated-updates/agent-self.md) — agent の "
-"self-update 経路 (他 3 つと違い、汎用の OBJECT_APP_PACKAGES + script ペア"
-"ではなく専用の rollout バケットを使います)"
+"[kanade-agent 自身](./agent-mediated-updates/agent-self.md) — agent の self-"
+"update 経路 (他 3 つと違い、汎用の OBJECT_APP_PACKAGES + script ペアではなく"
+"専用の rollout バケットを使います)"
+
+#: src\operations/deploy.md:3
+msgid ""
+"This section details how to bootstrap `kanade` components as native Windows "
+"services in production or staging environments."
+msgstr ""
+"このセクションでは、本番環境またはステージング環境で `kanade` コンポーネント"
+"をネイティブの Windows サービスとしてブートストラップする方法を詳しく説明しま"
+"す。"
+
+#: src\operations/deploy.md:5
+msgid "Deployment Model"
+msgstr "デプロイモデル"
+
+#: src\operations/deploy.md:7
+msgid ""
+"Production hosts and target endpoints run `kanade` components as background "
+"Windows services. This ensures high availability and automatic startup."
+msgstr ""
+"本番ホストと管理対象エンドポイントは、`kanade` コンポーネントをバックグラウン"
+"ドの Windows サービスとして実行します。これにより、高可用性と自動起動が保証さ"
+"れます。"
+
+#: src\operations/deploy.md:9
+msgid "Service Name"
+msgstr "サービス名"
+
+#: src\operations/deploy.md:9
+msgid "Triple / Binary"
+msgstr "トリプル / バイナリ"
+
+#: src\operations/deploy.md:9
+msgid "Config Source"
+msgstr "設定ソース"
+
+#: src\operations/deploy.md:9
+msgid "Typical Target"
+msgstr "典型的なターゲット"
+
+#: src\operations/deploy.md:11
+msgid "**KanadeNats**"
+msgstr "**KanadeNats**"
+
+#: src\operations/deploy.md:11
+msgid "`nats-server.exe`"
+msgstr "`nats-server.exe`"
+
+#: src\operations/deploy.md:11
+msgid "Hardened Registry / Registry-baked CLI flags"
+msgstr "保護されたレジストリ / レジストリ保存の CLI フラグ"
+
+#: src\operations/deploy.md:11 src\operations/deploy.md:12
+msgid "Central server"
+msgstr "中央サーバー"
+
+#: src\operations/deploy.md:12
+msgid "**KanadeBackend**"
+msgstr "**KanadeBackend**"
+
+#: src\operations/deploy.md:12
+msgid "`kanade-backend.exe`"
+msgstr "`kanade-backend.exe`"
+
+#: src\operations/deploy.md:12
+msgid "Hardened Registry / Config file"
+msgstr "保護されたレジストリ / 設定ファイル"
+
+#: src\operations/deploy.md:13
+msgid "**KanadeAgent**"
+msgstr "**KanadeAgent**"
+
+#: src\operations/deploy.md:13
+msgid "`kanade-agent.exe`"
+msgstr "`kanade-agent.exe`"
+
+#: src\operations/deploy.md:13
+msgid "Hardened Registry / Local state DB"
+msgstr "保護されたレジストリ / ローカル状態 DB"
+
+#: src\operations/deploy.md:13
+msgid "Managed endpoints"
+msgstr "管理対象エンドポイント"
+
+#: src\operations/deploy.md:19
+msgid "**Host OS**: Windows 10/11 or Windows Server 2016+."
+msgstr "**ホスト OS**: Windows 10/11 または Windows Server 2016+。"
+
+#: src\operations/deploy.md:20
+msgid ""
+"**gsudo**: Required to perform elevated installations from standard user "
+"shells (or run commands from an Administrator-level PowerShell prompt)."
+msgstr "**gsudo**: 標準のユーザシェルから管理者権限でインストールを実行する（または管理者権限の PowerShell プロンプトからコマンドを実行する）ために必要です。"
+
+#: src\operations/deploy.md:21
+msgid ""
+"**Network Routing**: Managed endpoints must be able to reach the NATS server "
+"port (default `4222`) over TCP."
+msgstr "**ネットワークルーティング**: 管理対象エンドポイントが TCP 経由で NATS サーバーポート（デフォルト `4222`）に到達できる必要があります。"
+
+#: src\operations/deploy.md:25
+msgid "2. Setting Up the NATS Server (Broker)"
+msgstr "2. NATS サーバー (ブローカー) のセットアップ"
+
+#: src\operations/deploy.md:27
+msgid "The NATS server acts as the messaging core."
+msgstr "NATS サーバーはメッセージングのコアとして機能します。"
+
+#: src\operations/deploy.md:29
+msgid ""
+"Stage the deployment bundle using `scripts/build-release.ps1 -Roles nats`."
+msgstr "`scripts/build-release.ps1 -Roles nats` を使用して、デプロイメントバンドルをステージングします。"
+
+#: src\operations/deploy.md:30
+msgid "Deploy the service with elevation:"
+msgstr "管理者権限でサービスをデプロイします:"
+
+#: src\operations/deploy.md:31
+msgid ""
+"```powershell\n"
+"# Elevated PowerShell prompt\n"
+"& \"dist\\nats\\deploy-nats.ps1\" -NatsToken \"your-secure-nats-token\" "
+"-Recreate\n"
+"```"
+msgstr ""
+
+#: src\operations/deploy.md:35
+msgid ""
+"This installs the **KanadeNats** service, configures it to run under the "
+"local system account, sets up JetStream data directories, and locks down the "
+"secure authorization token in the Windows registry."
+msgstr ""
+"これにより、**KanadeNats** サービスがインストールされ、ローカルシステムアカウ"
+"ントで実行されるよう構成され、JetStream データディレクトリがセットアップさ"
+"れ、安全な認証トークンが Windows レジストリ内にロックダウンされます。"
+
+#: src\operations/deploy.md:39
+msgid "3. Deploying the Backend API & SPA"
+msgstr "3. バックエンド API & SPA のデプロイ"
+
+#: src\operations/deploy.md:41
+msgid "The backend manages operator connections and processes event logs."
+msgstr "バックエンドは、オペレーター接続を管理し、イベントログを処理します。"
+
+#: src\operations/deploy.md:43
+msgid ""
+"Stage the backend binaries and React SPA bundle using `scripts/build-"
+"release.ps1 -Roles backend`."
+msgstr "`scripts/build-release.ps1 -Roles backend` を使用して、バックエンドバイナリと React SPA バンドルをステージングします。"
+
+#: src\operations/deploy.md:44
+msgid "Deploy the service:"
+msgstr "サービスをデプロイします:"
+
+#: src\operations/deploy.md:45
+msgid ""
+"```powershell\n"
+"# Elevated PowerShell prompt\n"
+"& \"dist\\backend\\deploy-backend.ps1\" `\n"
+"    -NatsToken \"your-secure-nats-token\" `\n"
+"    -StaticToken \"your-operator-spa-bearer-token\" `\n"
+"    -ForceConfig -Recreate\n"
+"```"
+msgstr ""
+
+#: src\operations/deploy.md:52
+msgid "`-NatsToken`: Connects the backend to the local NATS server securely."
+msgstr ""
+"`-NatsToken`: バックエンドをローカルの NATS サーバーに安全に接続します。"
+
+#: src\operations/deploy.md:53
+msgid ""
+"`-StaticToken`: Defines the API bearer token required for operator CLI/SPA "
+"logins."
+msgstr ""
+"`-StaticToken`: オペレーターの CLI/SPA ログインに必要な API ベアラートークン"
+"を定義します。"
+
+#: src\operations/deploy.md:55
+msgid ""
+"The deployment script registers the **KanadeBackend** Windows service, sets "
+"the appropriate ACLs, and verifies the endpoint."
+msgstr ""
+"デプロイスクリプトは、**KanadeBackend** Windows サービスを登録し、適切な ACL "
+"を設定して、エンドポイントを検証します。"
+
+#: src\operations/deploy.md:59
+msgid "4. Installing the Agent on Target Endpoints"
+msgstr "4. 対象エンドポイントへのエージェントのインストール"
+
+#: src\operations/deploy.md:61
+msgid "Install the agent on every endpoint PC that you want to manage."
+msgstr ""
+"管理対象のすべてのエンドポイント PC にエージェントをインストールします。"
+
+#: src\operations/deploy.md:63
+msgid "Stage the agent bundle using `scripts/build-release.ps1 -Roles agent`."
+msgstr "`scripts/build-release.ps1 -Roles agent` を使用して、エージェントバンドルをステージングします。"
+
+#: src\operations/deploy.md:64
+msgid "Copy the contents of the `dist/agent` folder to the target PC."
+msgstr "`dist/agent` フォルダの内容を対象 PC にコピーします。"
+
+#: src\operations/deploy.md:65
+msgid "On the target PC, run the installer:"
+msgstr "対象 PC 上で、インストーラーを実行します:"
+
+#: src\operations/deploy.md:66
+msgid ""
+"```powershell\n"
+"# Elevated PowerShell prompt\n"
+"& \".\\deploy-agent.ps1\" -NatsToken \"your-secure-nats-token\" -ForceConfig "
+"-Recreate\n"
+"```"
+msgstr ""
+
+#: src\operations/deploy.md:70
+msgid "The script:"
+msgstr "スクリプトの動作:"
+
+#: src\operations/deploy.md:71
+msgid "Places `kanade-agent.exe` into its destination directory."
+msgstr "`kanade-agent.exe` をインストール先ディレクトリに配置します。"
+
+#: src\operations/deploy.md:72
+msgid ""
+"Secures the configuration and NATS token in the Windows registry path (`HKLM:"
+"\\SOFTWARE\\Kanade\\agent`)."
+msgstr "Windows レジストリパス (`HKLM:\\SOFTWARE\\Kanade\\agent`) 内の設定と NATS トークンを保護します。"
+
+#: src\operations/deploy.md:73
+msgid "Registers and starts the **KanadeAgent** service."
+msgstr "**KanadeAgent** サービスを登録して起動します。"
+
+#: src\operations/deploy.md:75
+msgid ""
+"Once the service is active, the agent establishes an outbound NATS "
+"connection, subscribes to command streams, and reports its online heartbeat "
+"back to the fleet backend."
+msgstr ""
+"サービスが起動すると、エージェントはアウトバウンド NATS 接続を確立し、コマン"
+"ドストリームを購読し、オンラインのハートビートをフリートバックエンドに報告し"
+"ます。"
+
+#: src\operations/agent-mediated-updates/index.md:1
+msgid "Agent-mediated updates"
+msgstr "agent 経由のアップデート"
 
 #: src\operations/agent-mediated-updates/index.md:3
 msgid ""
@@ -251,10 +878,10 @@ msgid ""
 "component — including the backend it talks to, the broker that carries its "
 "messages, and the agent itself."
 msgstr ""
-"agent は万能インストーラーです。対象ホストで動き出してしまえば、他のどの"
-"コンポーネントをアップデートするときも operator がホストに直接触る必要は"
-"ありません — agent が話している backend も、メッセージを運ぶブローカーも、"
-"agent 自身も対象です。"
+"agent は万能インストーラーです。対象ホストで動き出してしまえば、他のどのコン"
+"ポーネントをアップデートするときも operator がホストに直接触る必要はありませ"
+"ん — agent が話している backend も、メッセージを運ぶブローカーも、agent 自身"
+"も対象です。"
 
 #: src\operations/agent-mediated-updates/index.md:8
 msgid "This chapter has one page per component:"
@@ -295,11 +922,11 @@ msgstr "`OBJECT_APP_PACKAGES`"
 
 #: src\operations/agent-mediated-updates/index.md:19
 msgid ""
-"Generic binary storage (backend, client, NATS server, …). Keyed by "
-"`<name>/<version>`."
+"Generic binary storage (backend, client, NATS server, …). Keyed by `<name>/"
+"<version>`."
 msgstr ""
-"汎用バイナリストレージ (backend、client、NATS サーバーなど)。キーは "
-"`<name>/<version>`。"
+"汎用バイナリストレージ (backend、client、NATS サーバーなど)。キーは `<name>/"
+"<version>`。"
 
 #: src\operations/agent-mediated-updates/index.md:20
 msgid "`OBJECT_SCRIPTS`"
@@ -310,8 +937,8 @@ msgid ""
 "PowerShell script bodies referenced by manifests via `script_object`. Keyed "
 "by `<name>/<version>`."
 msgstr ""
-"マニフェストが `script_object` で参照する PowerShell スクリプト本体。"
-"キーは `<name>/<version>`。"
+"マニフェストが `script_object` で参照する PowerShell スクリプト本体。キーは "
+"`<name>/<version>`。"
 
 #: src\operations/agent-mediated-updates/index.md:21
 #: src\operations/agent-mediated-updates/agent-self.md:12
@@ -323,8 +950,8 @@ msgid ""
 "Agent binaries only. Separate from `APP_PACKAGES` because agent rollout has "
 "its own watcher / target_version flow."
 msgstr ""
-"agent バイナリ専用。agent の rollout 専用の watcher / target_version "
-"フローを持つので `APP_PACKAGES` とは別バケットになっています。"
+"agent バイナリ専用。agent の rollout 専用の watcher / target_version フローを"
+"持つので `APP_PACKAGES` とは別バケットになっています。"
 
 #: src\operations/agent-mediated-updates/index.md:22
 msgid "`agent_config` (KV)"
@@ -334,8 +961,8 @@ msgstr "`agent_config` (KV)"
 msgid ""
 "Layered config — global / per-group / per-PC. `target_version` lives here."
 msgstr ""
-"レイヤード config — global / グループ別 / PC 別。`target_version` はここ"
-"に置かれます。"
+"レイヤード config — global / グループ別 / PC 別。`target_version` はここに置"
+"かれます。"
 
 #: src\operations/agent-mediated-updates/index.md:23
 msgid "`jobs` (KV)"
@@ -405,11 +1032,11 @@ msgstr "`kanade agent rollout <version> --pc \\| --group \\| --global`"
 
 #: src\operations/agent-mediated-updates/index.md:34
 msgid ""
-"Flip `target_version` on the chosen scope; agents pick it up via their "
-"self-update watcher."
+"Flip `target_version` on the chosen scope; agents pick it up via their self-"
+"update watcher."
 msgstr ""
-"指定スコープの `target_version` を切り替え。各 agent は self-update "
-"watcher 経由でこれを拾います。"
+"指定スコープの `target_version` を切り替え。各 agent は self-update watcher "
+"経由でこれを拾います。"
 
 #: src\operations/agent-mediated-updates/backend.md:3
 msgid ""
@@ -418,10 +1045,10 @@ msgid ""
 "the service, swaps the binary, starts it back up — while the operator never "
 "logs into the host."
 msgstr ""
-"backend は管理対象ホスト 1 台 (またはそれ以上) で Windows サービスとして"
-"動いています。agent 経由のアップデートとはつまり、そのホスト上で動いている "
-"agent がサービスを止め、バイナリを差し替え、再起動するという話 — operator は"
-"そのホストに一度もログインしません。"
+"backend は管理対象ホスト 1 台 (またはそれ以上) で Windows サービスとして動い"
+"ています。agent 経由のアップデートとは、そのホスト上で稼働する agent がサービ"
+"スを停止し、バイナリを差し替えて再起動することを指します。これにより、"
+"operator は対象ホストに一度もログインする必要がありません。"
 
 #: src\operations/agent-mediated-updates/backend.md:8
 msgid "End-to-end flow"
@@ -434,9 +1061,9 @@ msgid ""
 "by the script before the swap (binary integrity, defined by the operator in "
 "`$AgentSourceSha256`)."
 msgstr ""
-"sha チェックが 2 段ある理由は意図的: スクリプト本体のハッシュは agent が"
-"実行前に検証 (スクリプトの完全性)、バイナリのハッシュはスクリプトが swap "
-"前に検証 (バイナリの完全性、operator が `$AgentSourceSha256` で指定)。"
+"sha チェックが 2 段ある理由は意図的: スクリプト本体のハッシュは agent が実行"
+"前に検証 (スクリプトの完全性)、バイナリのハッシュはスクリプトが swap 前に検"
+"証 (バイナリの完全性、operator が `$AgentSourceSha256` で指定)。"
 
 #: src\operations/agent-mediated-updates/backend.md:47
 #: src\operations/agent-mediated-updates/client.md:28
@@ -461,12 +1088,12 @@ msgstr "2. バイナリを publish"
 #: src\operations/agent-mediated-updates/backend.md:63
 msgid ""
 "This uploads the binary to `OBJECT_APP_PACKAGES/kanade-backend/0.43.0` and "
-"prints the sha-256 digest. **Copy the digest** — you'll need its "
-"lowercase-hex form for the script."
+"prints the sha-256 digest. **Copy the digest** — you'll need its lowercase-"
+"hex form for the script."
 msgstr ""
-"これでバイナリが `OBJECT_APP_PACKAGES/kanade-backend/0.43.0` にアップ"
-"ロードされ、sha-256 digest が表示されます。**digest を控えておきましょう** — "
-"後でスクリプトに lowercase-hex 形式で書き込みます。"
+"これでバイナリが `OBJECT_APP_PACKAGES/kanade-backend/0.43.0` にアップロードさ"
+"れ、sha-256 digest が表示されます。**digest を控えておきましょう** — 後でスク"
+"リプトに lowercase-hex 形式で書き込みます。"
 
 #: src\operations/agent-mediated-updates/backend.md:67
 msgid "3. Edit `scripts/deploy/backend.ps1`"
@@ -474,8 +1101,7 @@ msgstr "3. `scripts/deploy/backend.ps1` を編集"
 
 #: src\operations/agent-mediated-updates/backend.md:69
 msgid "Make a local copy. Set the four `$Agent*` knobs at the top:"
-msgstr ""
-"ローカルコピーを作って、先頭の 4 つの `$Agent*` ノブをセットします:"
+msgstr "ローカルコピーを作って、先頭の 4 つの `$Agent*` ノブをセットします:"
 
 #: src\operations/agent-mediated-updates/backend.md:71
 msgid ""
@@ -496,12 +1122,12 @@ msgstr ""
 #: src\operations/agent-mediated-updates/backend.md:78
 msgid ""
 "Leave the rest of the script alone — those knobs are how the script knows "
-"it's running in \"agent mode\" (downloading from the backend) vs the "
-"manual-install mode (local folder of files)."
+"it's running in \"agent mode\" (downloading from the backend) vs the manual-"
+"install mode (local folder of files)."
 msgstr ""
-"スクリプトの他の部分は触らないでください — このノブが「agent モード」"
-"(backend からダウンロード) と「手動インストールモード」(ローカルフォルダから "
-"読み込み) を切り替えるトリガになっています。"
+"スクリプトの他の部分は触らないでください。このノブによって「agent モード」"
+"(backend からダウンロード) と「手動インストールモード」(ローカルフォルダから"
+"の読み込み) が切り替わります。"
 
 #: src\operations/agent-mediated-updates/backend.md:82
 msgid ""
@@ -535,9 +1161,9 @@ msgid ""
 "the backend's `/api/app-packages/<name>/<ver>` endpoint returns HTTP 401 "
 "without it. Leave empty only for no-auth lab setups."
 msgstr ""
-"`$AgentSourceAuthToken` は 2026-05-26 の live test 以降必須です — backend "
-"の `/api/app-packages/<name>/<ver>` エンドポイントは token なしだと HTTP 401 "
-"を返します。auth なしの lab 環境のときだけ空のままで OK。"
+"`$AgentSourceAuthToken` は 2026-05-26 の live test 以降必須です。backend の "
+"`/api/app-packages/<name>/<ver>` エンドポイントは token なしだと HTTP 401 を"
+"返します。auth なしの lab 環境のときだけ空のままで問題ありません。"
 
 #: src\operations/agent-mediated-updates/backend.md:105
 msgid "4. Publish the edited script"
@@ -558,8 +1184,8 @@ msgid ""
 "just published, then upsert:"
 msgstr ""
 "リポジトリの `configs/jobs/installers/install-kanade-backend.yaml` がテンプ"
-"レートです。`version:` と `script_object:` をいま publish したバージョンに"
-"合わせて編集してから upsert:"
+"レートです。`version:` と `script_object:` をいま publish したバージョンに合"
+"わせて編集してから upsert:"
 
 #: src\operations/agent-mediated-updates/backend.md:120
 #: src\operations/agent-mediated-updates/client.md:69
@@ -639,9 +1265,9 @@ msgid ""
 "`run_as: system` is required: `Stop-Service` / `Start-Service` / `sc.exe` "
 "all need admin. The agent already runs as LocalSystem in production."
 msgstr ""
-"`run_as: system` は必須です: `Stop-Service` / `Start-Service` / `sc.exe` は"
-"いずれも admin が必要です。本番環境では agent は LocalSystem で動いている"
-"ので問題ありません。"
+"`run_as: system` は必須です: `Stop-Service` / `Start-Service` / `sc.exe` はい"
+"ずれも admin が必要です。本番環境では agent は LocalSystem で動いているので問"
+"題ありません。"
 
 #: src\operations/agent-mediated-updates/backend.md:138
 msgid "6. Fire it"
@@ -652,8 +1278,8 @@ msgid ""
 "The CLI returns an `exec_id` immediately. The actual install happens "
 "asynchronously on the target."
 msgstr ""
-"CLI はすぐに `exec_id` を返します。実際のインストールは対象ホスト上で非同期"
-"に走ります。"
+"CLI はすぐに `exec_id` を返します。実際のインストールは対象ホスト上で非同期に"
+"走ります。"
 
 #: src\operations/agent-mediated-updates/backend.md:147
 msgid "7. Verify"
@@ -662,8 +1288,8 @@ msgstr "7. 確認"
 #: src\operations/agent-mediated-updates/backend.md:149
 msgid "Query the backend's results endpoint (or watch the SPA Activity view):"
 msgstr ""
-"backend の results エンドポイントを叩く (もしくは SPA の Activity ビューを"
-"見る):"
+"backend の results エンドポイントを叩く (もしくは SPA の Activity ビューを見"
+"る):"
 
 #: src\operations/agent-mediated-updates/backend.md:152
 msgid ""
@@ -682,8 +1308,8 @@ msgid ""
 "Look for your `exec_id` with `exit_code: 0` and a `stdout` that ends with "
 "`kanade-backend <new-version>`."
 msgstr ""
-"自分の `exec_id` が `exit_code: 0` で、`stdout` が `kanade-backend "
-"<new-version>` で終わっていれば成功です。"
+"自分の `exec_id` が `exit_code: 0` で、`stdout` が `kanade-backend <new-"
+"version>` で終わっていれば成功です。"
 
 #: src\operations/agent-mediated-updates/backend.md:160
 #: src\operations/agent-mediated-updates/agent-self.md:90
@@ -715,11 +1341,11 @@ msgstr "agent が 0.42.2 より古い (`-Command` モードで動いている)"
 
 #: src\operations/agent-mediated-updates/backend.md:164
 msgid ""
-"Upgrade the agent first via `kanade agent rollout` (see [agent "
-"self-update](./agent-self.md))."
+"Upgrade the agent first via `kanade agent rollout` (see [agent self-update]"
+"(./agent-self.md))."
 msgstr ""
-"まず `kanade agent rollout` で agent をアップグレード ([agent "
-"self-update](./agent-self.md) 参照)。"
+"まず `kanade agent rollout` で agent をアップグレード ([agent self-update](./"
+"agent-self.md) 参照)。"
 
 #: src\operations/agent-mediated-updates/backend.md:165
 msgid "`Invoke-WebRequest : missing bearer token`"
@@ -746,8 +1372,8 @@ msgid ""
 "Re-publish or recompute the hash. The script aborts BEFORE the swap, so the "
 "existing install is intact."
 msgstr ""
-"再 publish するか hash を計算し直す。スクリプトは swap の **前** に abort "
-"するので、既存のインストールは無事です。"
+"再 publish するか hash を計算し直す。スクリプトは swap の **前** に abort す"
+"るので、既存のインストールは無事です。"
 
 #: src\operations/agent-mediated-updates/backend.md:167
 msgid "Job runs but kanade-backend doesn't come back up"
@@ -763,8 +1389,8 @@ msgid ""
 "can fetch it via `kanade logs <pc>` (when implemented) or you can pull the "
 "file directly."
 msgstr ""
-"対象ホストの `C:\\ProgramData\\Kanade\\log\\backend.*.log` を読む。"
-"agent 経由で `kanade logs <pc>` で取れる (実装後) か、直接ファイルを引き上げる。"
+"対象ホストの `C:\\ProgramData\\Kanade\\log\\backend.*.log` を読む。agent 経由"
+"で `kanade logs <pc>` で取れる (実装後) か、直接ファイルを引き上げる。"
 
 #: src\operations/agent-mediated-updates/client.md:3
 msgid ""
@@ -773,10 +1399,10 @@ msgid ""
 "`jobs` KV. The shape mirrors [backend updates](./backend.md) — only the "
 "script content and package name differ."
 msgstr ""
-"Tauri デスクトップクライアントは backend と同じやり方で端末に配布します: "
-"バイナリは `OBJECT_APP_PACKAGES`、スクリプトは `OBJECT_SCRIPTS`、ジョブは "
-"`jobs` KV。形は [backend のアップデート](./backend.md) と同じで、スクリプト"
-"内容とパッケージ名だけが違います。"
+"Tauri デスクトップクライアントは backend と同じやり方で端末に配布します: バイ"
+"ナリは `OBJECT_APP_PACKAGES`、スクリプトは `OBJECT_SCRIPTS`、ジョブは `jobs` "
+"KV。形は [backend のアップデート](./backend.md) と同じで、スクリプト内容と"
+"パッケージ名だけが違います。"
 
 #: src\operations/agent-mediated-updates/client.md:9
 msgid "What's different from backend updates"
@@ -823,6 +1449,7 @@ msgid "Script in repo"
 msgstr "リポジトリ内のスクリプト"
 
 #: src\operations/agent-mediated-updates/client.md:15
+#: src\operations/undeploy.md:12
 msgid "`scripts/deploy/backend.ps1`"
 msgstr "`scripts/deploy/backend.ps1`"
 
@@ -874,8 +1501,8 @@ msgstr "なし (backend は自分自身でバージョンを報告)"
 msgid ""
 "`inventory:` block emits per-PC client version into the SPA Inventory page"
 msgstr ""
-"`inventory:` ブロックが PC ごとのクライアントバージョンを SPA Inventory "
-"ページに出す"
+"`inventory:` ブロックが PC ごとのクライアントバージョンを SPA Inventory ペー"
+"ジに出す"
 
 #: src\operations/agent-mediated-updates/client.md:20
 msgid ""
@@ -885,11 +1512,14 @@ msgid ""
 "`script_file` for historical reasons; the backend manifest uses "
 "`script_object` because it was rewritten to test the Object Store path."
 msgstr ""
-"両方の形が使えます — `script_object` (OBJECT_SCRIPTS から hash で参照、"
-"agent が必要時に fetch) と `script_file` (`kanade job create` 時にスクリプト"
-"本体をマニフェストに inline 展開)。client マニフェストは歴史的経緯で "
-"`script_file`、backend マニフェストは Object Store パスをテストするために "
-"`script_object` に書き換えられました。"
+"両方の形が使えます — `script_object` (OBJECT_SCRIPTS から hash で参照、agent "
+"が必要時に fetch) と `script_file` (`kanade job create` 時にスクリプト本体を"
+"マニフェストに inline 展開)。client マニフェストは歴史的経緯で どちらの形式も"
+"サポートされています — `script_object` (OBJECT_SCRIPTS からハッシュで参照、"
+"agent が必要に応じて取得) と `script_file` (`kanade job create` 時にスクリプ"
+"ト本体をマニフェストにインライン展開)。クライアントマニフェストは歴史的経緯"
+"で `script_file` を使用し、backend マニフェストは Object Store パスのテストの"
+"ために `script_object` へ書き換えられました。"
 
 #: src\operations/agent-mediated-updates/client.md:30
 msgid "1. Build kanade-client"
@@ -929,12 +1559,11 @@ msgid ""
 "route is unauthenticated. Mirrors the `$AgentSourceAuthToken` knob in "
 "[scripts/deploy/backend.ps1](./backend.md#3-edit-scriptsdeploybackendps1)."
 msgstr ""
-"backend auth が有効なら `$ClientSourceAuthToken` を backend の bearer に"
-"セットしてください — agent が `/api/*` に使うのと同じトークンです。"
-"`/api/app-packages/kanade-client/<v>` ルートが認証なしの dev / smoke-test "
-"環境では空のままで OK。"
-"[scripts/deploy/backend.ps1](./backend.md#3-edit-scriptsdeploybackendps1) "
-"の `$AgentSourceAuthToken` ノブと同じ形です。"
+"backend auth が有効なら `$ClientSourceAuthToken` を backend の bearer にセッ"
+"トしてください（agent が `/api/*` に使うのと同じトークンです）。`/api/app-"
+"packages/kanade-client/<v>` ルートが認証なしの開発環境やスモークテスト環境で"
+"は空のままで問題ありません。[scripts/deploy/backend.ps1](./backend.md#3-edit-"
+"scriptsdeploybackendps1) の `$AgentSourceAuthToken` ノブと同じ構成です。"
 
 #: src\operations/agent-mediated-updates/client.md:64
 msgid "4. Register / update the job"
@@ -958,8 +1587,8 @@ msgid ""
 "to the manifest YAML)\n"
 "  timeout"
 msgstr ""
-"scripts/install-kanade-client.ps1   # `job create` 時に inline 展開 (マニ"
-"フェスト YAML からの相対パス)\n"
+"scripts/install-kanade-client.ps1   # `job create` 時に inline 展開 (マニフェ"
+"スト YAML からの相対パス)\n"
 "  timeout"
 
 #: src\operations/agent-mediated-updates/client.md:74
@@ -1013,10 +1642,10 @@ msgid ""
 "Inventory page. Operators can spot stragglers from a fleet-wide table — no "
 "ssh needed."
 msgstr ""
-"`inventory:` ブロックは projector に「スクリプトの stdout は単一の JSON "
-"blob で、`version` / `path` フィールドが SPA の Inventory ページに反映される」"
-"と伝えます。operator は fleet 全体のテーブルから取り残し端末を見つけられ、"
-"ssh は不要です。"
+"`inventory:` ブロックは projector に「スクリプトの stdout は単一の JSON blob "
+"で、`version` / `path` フィールドが SPA の Inventory ページに反映される」と伝"
+"えます。operator は fleet 全体のテーブルから取り残し端末を見つけられ、ssh は"
+"不要です。"
 
 #: src\operations/agent-mediated-updates/client.md:96
 msgid "5. Fire it"
@@ -1045,18 +1674,18 @@ msgid ""
 "losing the agent's connection mid-job. The machinery handles this with two "
 "mechanisms working together:"
 msgstr ""
-"管理対象ホスト上のブローカーをアップデートするのは一番面白いケースです。"
-"なぜなら agent は **ブローカー越しにブローカーと話す** から — NATS を止めると "
-"ジョブの途中で agent との接続が切れます。これに対しては 2 つの仕組みが"
-"組み合わさって対処しています:"
+"管理対象ホスト上のブローカーをアップデートするのは最も特徴的なケースです。な"
+"ぜなら agent は **ブローカー越しにブローカーと話す** ためです。NATS を停止す"
+"るとジョブの途中で agent との接続が切断されます。これに対しては、2 つの仕組み"
+"が組み合わさって対処しています:"
 
 #: src\operations/agent-mediated-updates/nats.md:8
 msgid ""
 "**Reconnect.** The agent's NATS client reconnects automatically on broker "
 "restart. No human intervention needed."
 msgstr ""
-"**再接続。** agent の NATS クライアントはブローカー再起動時に自動再接続します。"
-"人の介入は不要。"
+"**再接続。** agent の NATS クライアントはブローカー再起動時に自動再接続しま"
+"す。人の介入は不要。"
 
 #: src\operations/agent-mediated-updates/nats.md:10
 msgid ""
@@ -1065,9 +1694,9 @@ msgid ""
 "back. The result row reaches the backend as soon as the new NATS server is "
 "up."
 msgstr ""
-"**outbox。** ブローカーが落ちている間に発生したジョブ結果は "
-"`%ProgramData%\\Kanade\\outbox\\` に貯められ、接続が戻り次第再送されます。"
-"新しい NATS サーバーが立ち上がるとすぐに result row が backend に届きます。"
+"**outbox。** ブローカーが落ちている間に発生したジョブ結果は `%ProgramData%"
+"\\Kanade\\outbox\\` に貯められ、接続が戻り次第再送されます。新しい NATS サー"
+"バーが立ち上がるとすぐに result row が backend に届きます。"
 
 #: src\operations/agent-mediated-updates/nats.md:15
 msgid ""
@@ -1075,9 +1704,9 @@ msgid ""
 "Stops the service, swaps the binary, Starts it — and the agent transparently "
 "rides out the broker gap."
 msgstr ""
-"したがってフローは [backend のアップデート](./backend.md) と同じ — スクリプト"
-"はサービスを止めてバイナリを差し替え再起動し、agent はブローカーの空白期間を"
-"透過的にやり過ごします。"
+"したがってフローは [backend のアップデート](./backend.md) と同じです。スクリ"
+"プトはサービスを停止してバイナリを差し替え再起動し、agent はブローカーの切断"
+"期間を透過的に許容します。"
 
 #: src\operations/agent-mediated-updates/nats.md:20
 msgid "Caveats specific to NATS updates"
@@ -1096,7 +1725,8 @@ msgid "Will the result row be lost?"
 msgstr "result row はロストする？"
 
 #: src\operations/agent-mediated-updates/nats.md:24
-msgid "No — outbox persists it across the broker outage and drains on reconnect."
+msgid ""
+"No — outbox persists it across the broker outage and drains on reconnect."
 msgstr ""
 "いいえ — outbox がブローカー停止中を跨いで保持し、再接続時に drain します。"
 
@@ -1108,8 +1738,8 @@ msgstr "SPA からアップデートできる？"
 msgid ""
 "Yes, same as any job — `kanade exec install-kanade-nats --pcs <broker-host>`."
 msgstr ""
-"はい、他のジョブと同じです — `kanade exec install-kanade-nats --pcs "
-"<broker-host>`。"
+"はい、他のジョブと同じです — `kanade exec install-kanade-nats --pcs <broker-"
+"host>`。"
 
 #: src\operations/agent-mediated-updates/nats.md:26
 msgid "What if NATS doesn't come back up?"
@@ -1121,11 +1751,12 @@ msgid ""
 "`outbox/` on the broker host as a leading indicator."
 msgstr ""
 "result は outbox にずっと残ります。operator はブローカーホストの `outbox/` を"
-"復帰失敗の早期サインとして監視するべき。"
+"復帰失敗の早期サインとして監視することが推奨されます。"
 
 #: src\operations/agent-mediated-updates/nats.md:27
 msgid "What if the new NATS version is incompatible (JetStream upgrade etc.)?"
-msgstr "新しい NATS バージョンに互換性がなかったら (JetStream のアップグレードなど)？"
+msgstr ""
+"新しい NATS バージョンに互換性がなかったら (JetStream のアップグレードなど)？"
 
 #: src\operations/agent-mediated-updates/nats.md:27
 msgid ""
@@ -1133,9 +1764,9 @@ msgid ""
 "health, then roll out fleet-wide. The 5-min cache TTL for SPA queries means "
 "you'll see the canary's state within a few minutes."
 msgstr ""
-"まず canary 1 台に rollout (`--pcs <one-broker>`)、outbox と backend "
-"の健全性を見てから fleet 全体に展開。SPA クエリには 5 分の cache TTL がある"
-"ので canary の状態は数分以内に反映されます。"
+"まず canary 1 台に rollout (`--pcs <one-broker>`)、outbox と backend の健全性"
+"を見てから fleet 全体に展開。SPA クエリには 5 分の cache TTL があるので "
+"canary の状態は数分以内に反映されます。"
 
 #: src\operations/agent-mediated-updates/nats.md:29
 msgid "Manual install (bootstrap)"
@@ -1146,22 +1777,22 @@ msgid ""
 "For the very first install — when there's no agent on the broker host yet — "
 "use the direct workflow:"
 msgstr ""
-"初回インストール (ブローカーホストにまだ agent がない状態) では直接ワーク"
-"フローを使います:"
+"初回インストール (ブローカーホストにまだ agent がない状態) では直接ワークフ"
+"ローを使います:"
 
 #: src\operations/agent-mediated-updates/nats.md:40
 msgid ""
-"This installs `nats-server.exe` to `%ProgramFiles%\\Kanade\\` and "
-"`nats-server.conf` to `%ProgramData%\\Kanade\\config\\` (with ACL hardened "
-"to SYSTEM + Administrators because the bearer token lives in plaintext), "
+"This installs `nats-server.exe` to `%ProgramFiles%\\Kanade\\` and `nats-"
+"server.conf` to `%ProgramData%\\Kanade\\config\\` (with ACL hardened to "
+"SYSTEM + Administrators because the bearer token lives in plaintext), "
 "registers the `KanadeNats` Windows service, opens TCP 4222 (broker) + 8222 "
 "(monitoring HTTP), and starts the service."
 msgstr ""
-"これで `nats-server.exe` を `%ProgramFiles%\\Kanade\\` に、"
-"`nats-server.conf` を `%ProgramData%\\Kanade\\config\\` にインストール "
-"(bearer token を平文で保存するので ACL を SYSTEM + Administrators のみに"
-"絞ります)、`KanadeNats` Windows サービスを登録、TCP 4222 (broker) と 8222 "
-"(monitoring HTTP) を開放、サービスを起動します。"
+"これで `nats-server.exe` を `%ProgramFiles%\\Kanade\\` に、`nats-"
+"server.conf` を `%ProgramData%\\Kanade\\config\\` にインストール (bearer "
+"token を平文で保存するので ACL を SYSTEM + Administrators のみに絞ります)、"
+"`KanadeNats` Windows サービスを登録、TCP 4222 (broker) と 8222 (monitoring "
+"HTTP) を開放、サービスを起動します。"
 
 #: src\operations/agent-mediated-updates/nats.md:47
 msgid "Agent-mediated update (steady state)"
@@ -1173,9 +1804,9 @@ msgid ""
 "`$AgentSource*` knobs yet — agent-mode is on the backlog. The shape below is "
 "what it WILL look like once the knobs land."
 msgstr ""
-"**ステータス:** template のみ。`scripts/deploy/nats.ps1` はまだ "
-"`$AgentSource*` ノブを持っていません — agent モードは backlog 行きです。"
-"下記はノブが入った後の想定形です。"
+"**ステータス:** テンプレートのみ。`scripts/deploy/nats.ps1` はまだ "
+"`$AgentSource*` ノブを持っていません。agent モードはバックログ（今後の実装予"
+"定）となっています。下記はノブが入った後の想定形です。"
 
 #: src\operations/agent-mediated-updates/nats.md:53
 msgid "1. Build / fetch nats-server.exe"
@@ -1187,11 +1818,11 @@ msgstr "どちらか:"
 
 #: src\operations/agent-mediated-updates/nats.md:61
 msgid ""
-"…or download it directly from "
-"[github.com/nats-io/nats-server/releases](https://github.com/nats-io/nats-server/releases)."
+"…or download it directly from [github.com/nats-io/nats-server/releases]"
+"(https://github.com/nats-io/nats-server/releases)."
 msgstr ""
-"…もしくは [github.com/nats-io/nats-server/releases](https://github.com/nats-io/nats-server/releases) "
-"から直接ダウンロード。"
+"…もしくは [github.com/nats-io/nats-server/releases](https://github.com/nats-"
+"io/nats-server/releases) から直接ダウンロード。"
 
 #: src\operations/agent-mediated-updates/nats.md:70
 msgid "3. Edit deploy-nats.ps1"
@@ -1199,11 +1830,11 @@ msgstr "3. deploy-nats.ps1 を編集"
 
 #: src\operations/agent-mediated-updates/nats.md:72
 msgid ""
-"Once the agent-mode knobs ship, the pattern matches "
-"[deploy/backend.ps1](./backend.md#3-edit-scriptsdeploybackendps1):"
+"Once the agent-mode knobs ship, the pattern matches [deploy/backend.ps1](./"
+"backend.md#3-edit-scriptsdeploybackendps1):"
 msgstr ""
-"agent モードノブが入ったあとは、パターンは "
-"[deploy/backend.ps1](./backend.md#3-edit-scriptsdeploybackendps1) と同じ:"
+"agent モードノブが入ったあとは、パターンは [deploy/backend.ps1](./"
+"backend.md#3-edit-scriptsdeploybackendps1) と同じ:"
 
 #: src\operations/agent-mediated-updates/nats.md:75
 msgid ""
@@ -1272,11 +1903,11 @@ msgid ""
 "chicken-and-egg. The outbox + reconnect pair makes that unnecessary: the "
 "result is \"merely delayed\", not \"lost\". One transport, one mental model."
 msgstr ""
-"初期の設計では「ブローカー越しにブローカーを更新する鶏卵問題」を避けるため"
-"に専用のブートストラップチャネル (agent が broker update 専用に使う並列 NATS "
-"接続) を検討していました。outbox + 再接続のペアによってこれは不要に: "
-"結果は「失われる」のではなく「遅延するだけ」。トランスポートはひとつ、"
-"メンタルモデルもひとつで済みます。"
+"初期の設計では「ブローカー越しにブローカーを更新する鶏卵問題」を避けるために"
+"専用のブートストラップチャネル (agent が broker update 専用に使う並列 NATS 接"
+"続) を検討していました。outbox + 再接続のペアによってこれは不要に: 結果は「失"
+"われる」のではなく「遅延するだけ」。トランスポートはひとつ、メンタルモデルも"
+"ひとつで済みます。"
 
 #: src\operations/agent-mediated-updates/agent-self.md:3
 msgid ""
@@ -1285,10 +1916,10 @@ msgid ""
 "because the agent has to swap its own running binary without ssh — a tighter "
 "loop than the generic install jobs."
 msgstr ""
-"agent の self-update は唯一 `OBJECT_APP_PACKAGES` + `script_object` ジョブ"
-"を **使わない** コンポーネントです。agent は ssh なしで現在実行中の自分自身"
-"のバイナリを差し替える必要があり、汎用 install ジョブよりタイトなループのため"
-"専用の仕組みを持っています。"
+"agent の self-update は唯一 `OBJECT_APP_PACKAGES` + `script_object` ジョブを "
+"**使わない** コンポーネントです。agent は ssh なしで現在実行中の自分自身のバ"
+"イナリを差し替える必要があり、汎用 install ジョブよりタイトなループのため専用"
+"の仕組みを持っています。"
 
 #: src\operations/agent-mediated-updates/agent-self.md:8
 msgid "Mechanism"
@@ -1303,8 +1934,8 @@ msgid ""
 "Agent binaries, keyed by `<version>`. Separate from `OBJECT_APP_PACKAGES` so "
 "the rollout watcher only fires on agent updates."
 msgstr ""
-"agent バイナリ。キーは `<version>`。rollout watcher が agent アップデート"
-"だけに反応するように、`OBJECT_APP_PACKAGES` とは別バケット。"
+"agent バイナリ。キーは `<version>`。rollout watcher が agent アップデートだけ"
+"に反応するように、`OBJECT_APP_PACKAGES` とは別バケット。"
 
 #: src\operations/agent-mediated-updates/agent-self.md:13
 msgid "`agent_config.<scope>.target_version`"
@@ -1330,12 +1961,11 @@ msgid ""
 "the agent would never self-update on that boot. Post-#226 the watcher "
 "retries with backoff until the broker is reachable."
 msgstr ""
-"rollout watcher は cold broker (ホスト再起動後に agent と broker が同時に"
-"立ち上がる、など) に耐えなければなりません。#226 以前は最初の "
-"`get_object_store` 呼び出しで `Err(_) => return;` してしまうと watcher が"
-"恒久的に死んでいて、その起動セッション中は agent が二度と self-update しません"
-"でした。#226 以降は watcher が backoff で再試行し、broker に到達できるまで"
-"あきらめません。"
+"rollout watcher は cold broker (ホスト再起動後に agent と broker が同時に立ち"
+"上がる、など) に耐えなければなりません。#226 以前は最初の `get_object_store` "
+"呼び出しで `Err(_) => return;` してしまうと watcher が恒久的に死んでいて、そ"
+"の起動セッション中は agent が二度と self-update しませんでした。#226 以降は "
+"watcher が backoff で再試行し、broker に到達できるまであきらめません。"
 
 #: src\operations/agent-mediated-updates/agent-self.md:35
 msgid "1. Build the agent"
@@ -1351,11 +1981,11 @@ msgstr "2. publish"
 
 #: src\operations/agent-mediated-updates/agent-self.md:49
 msgid ""
-"The CLI extracts the version from the PE VERSIONINFO resource — no "
-"`--version` flag, no chance of a label / binary mismatch."
+"The CLI extracts the version from the PE VERSIONINFO resource — no `--"
+"version` flag, no chance of a label / binary mismatch."
 msgstr ""
-"CLI は PE VERSIONINFO リソースからバージョンを自動抽出します — `--version` "
-"フラグ不要、ラベルとバイナリの不一致もあり得ません。"
+"CLI は PE VERSIONINFO リソースからバージョンを自動抽出します — `--version` フ"
+"ラグ不要、ラベルとバイナリの不一致もあり得ません。"
 
 #: src\operations/agent-mediated-updates/agent-self.md:52
 msgid "3. Roll out"
@@ -1379,8 +2009,8 @@ msgid ""
 "doesn't hammer the OS service manager on every host at once. Recommended for "
 "fleets ≥ 100 hosts."
 msgstr ""
-"`--jitter` は実際の swap タイミングをある幅で分散させ、大きな fan-out 時に"
-"全ホストの OS サービスマネージャを同時に叩かないようにします。100 台以上の "
+"`--jitter` は実際の swap タイミングをある幅で分散させ、大きな fan-out 時に全"
+"ホストの OS サービスマネージャを同時に叩かないようにします。100 台以上の "
 "fleet では推奨。"
 
 #: src\operations/agent-mediated-updates/agent-self.md:79
@@ -1393,13 +2023,14 @@ msgid ""
 "`agent_version` column should converge to the new version within `jitter` + "
 "~30s heartbeat cadence."
 msgstr ""
-"あとは SPA の Agents ページ (もしくは `/api/agents`) で fleet 全体を"
-"スポットチェック: `agent_version` 列は `jitter` + 約 30 秒の heartbeat "
-"間隔以内に新バージョンに収束するはず。"
+"あとは SPA の Agents ページ (もしくは `/api/agents`) で fleet 全体をスポット"
+"チェック: `agent_version` 列は `jitter` + 約 30 秒の heartbeat 間隔以内に新"
+"バージョンに収束するはず。"
 
 #: src\operations/agent-mediated-updates/agent-self.md:94
 msgid "`kanade agent rollout` says \"version not in OBJECT_AGENT_RELEASES\""
-msgstr "`kanade agent rollout` が \"version not in OBJECT_AGENT_RELEASES\" と言う"
+msgstr ""
+"`kanade agent rollout` が \"version not in OBJECT_AGENT_RELEASES\" と言う"
 
 #: src\operations/agent-mediated-updates/agent-self.md:94
 msgid "Typo or wrong scope"
@@ -1410,8 +2041,8 @@ msgid ""
 "Re-check with `kanade agent current` and `kanade jetstream object list "
 "agent_releases`."
 msgstr ""
-"`kanade agent current` と `kanade jetstream object list agent_releases` で"
-"再確認。"
+"`kanade agent current` と `kanade jetstream object list agent_releases` で再"
+"確認。"
 
 #: src\operations/agent-mediated-updates/agent-self.md:95
 msgid "`kanade ping <host>` still shows the old version after several minutes"
@@ -1432,8 +2063,8 @@ msgid ""
 "is too old; bootstrap manually with `deploy-agent.ps1`."
 msgstr ""
 "対象ホストの `%ProgramData%\\Kanade\\log\\agent.*.log` をチェック。"
-"self_update が無言なら (「checking target_version」ログがない)、agent が"
-"古すぎる; `deploy-agent.ps1` で手動ブートストラップ。"
+"self_update が無言なら (「checking target_version」ログがない)、agent が古す"
+"ぎる; `deploy-agent.ps1` で手動ブートストラップ。"
 
 #: src\operations/agent-mediated-updates/agent-self.md:96
 msgid "Agent flaps: starts, immediately exits with `exit_code: 1`"
@@ -1454,8 +2085,8 @@ msgid ""
 "Roll back: `kanade agent rollout <prev-version> --pcs <host>`. The host will "
 "swap back at the next watcher tick."
 msgstr ""
-"ロールバック: `kanade agent rollout <prev-version> --pcs <host>`。"
-"次の watcher tick でホストは元のバージョンに戻ります。"
+"ロールバック: `kanade agent rollout <prev-version> --pcs <host>`。次の "
+"watcher tick でホストは元のバージョンに戻ります。"
 
 #: src\operations/agent-mediated-updates/agent-self.md:98
 msgid "Why a separate bucket / scope?"
@@ -1466,16 +2097,16 @@ msgid ""
 "`OBJECT_APP_PACKAGES` is a generic blob store keyed by `<name>/<version>`. "
 "The agent rollout pattern needs:"
 msgstr ""
-"`OBJECT_APP_PACKAGES` は `<name>/<version>` をキーにした汎用 blob ストア"
-"です。agent rollout パターンに必要なのは:"
+"`OBJECT_APP_PACKAGES` は `<name>/<version>` をキーにした汎用 blob ストアで"
+"す。agent rollout パターンに必要なのは:"
 
 #: src\operations/agent-mediated-updates/agent-self.md:103
 msgid ""
 "A watcher that fires _only_ on agent changes (cheap KV watch on one specific "
 "key, not a poll over a bucket of many names)."
 msgstr ""
-"agent の変更**だけ**に反応する watcher (たくさんの名前が入ったバケットを poll "
-"するのではなく、特定の 1 つの KV キーを安価に watch)。"
+"agent の変更**だけ**に反応する watcher (たくさんの名前が入ったバケットを "
+"poll するのではなく、特定の 1 つの KV キーを安価に watch)。"
 
 #: src\operations/agent-mediated-updates/agent-self.md:105
 msgid ""
@@ -1484,8 +2115,8 @@ msgid ""
 "running\" without the agent enumerating."
 msgstr ""
 "「既知の全バージョン」ではなくスコープごとの「現在の target」セマンティクス "
-"— `agent_config.<scope>.target_version` こそが「自分は何を動かすべきか」の"
-"答えで、agent 側で列挙する必要がない。"
+"— `agent_config.<scope>.target_version` こそが「自分は何を動かすべきか」の答"
+"えで、agent 側で列挙する必要がない。"
 
 #: src\operations/agent-mediated-updates/agent-self.md:108
 msgid ""
@@ -1500,14 +2131,289 @@ msgid ""
 "So agents get `OBJECT_AGENT_RELEASES` + a layered config KV; the other "
 "components share `OBJECT_APP_PACKAGES` + per-app jobs."
 msgstr ""
-"というわけで agent は `OBJECT_AGENT_RELEASES` + レイヤード config KV を、"
-"他のコンポーネントは `OBJECT_APP_PACKAGES` + アプリ別ジョブを共有します。"
+"というわけで agent は `OBJECT_AGENT_RELEASES` + レイヤード config KV を、他の"
+"コンポーネントは `OBJECT_APP_PACKAGES` + アプリ別ジョブを共有します。"
+
+#: src\operations/undeploy.md:1
+msgid "Removing kanade from a host (undeploy)"
+msgstr "kanade をホストから取り除く (undeploy)"
+
+#: src\operations/undeploy.md:3
+msgid ""
+"Production rollback path. When a host needs to come off kanade — because a "
+"rollout broke something, the host is being decommissioned, or you just want "
+"a clean slate to re-install from — there's one undeploy script per "
+"component, mirroring the deploy script that put it there."
+msgstr ""
+"本番でのロールバック経路。rollout で何かが壊れた、ホストを廃止する、再インス"
+"トール用にまっさらな状態に戻したい — そんなときホストから kanade を剥がすため"
+"に、deploy と対になる undeploy スクリプトをコンポーネントごとに 1 本ずつ用意"
+"しています。"
+
+#: src\operations/undeploy.md:9
+msgid "Deploy"
+msgstr "Deploy"
+
+#: src\operations/undeploy.md:9
+msgid "Undeploy"
+msgstr "Undeploy"
+
+#: src\operations/undeploy.md:11 src\operations/undeploy.md:56
+msgid "Agent"
+msgstr "Agent"
+
+#: src\operations/undeploy.md:11
+msgid "`scripts/deploy/agent.ps1`"
+msgstr ""
+
+#: src\operations/undeploy.md:11
+msgid "`scripts/undeploy/agent.ps1`"
+msgstr ""
+
+#: src\operations/undeploy.md:12 src\operations/undeploy.md:57
+msgid "Backend"
+msgstr "Backend"
+
+#: src\operations/undeploy.md:12
+msgid "`scripts/undeploy/backend.ps1`"
+msgstr ""
+
+#: src\operations/undeploy.md:13
+msgid "NATS server"
+msgstr "NATS server"
+
+#: src\operations/undeploy.md:13
+msgid "`scripts/deploy/nats.ps1`"
+msgstr ""
+
+#: src\operations/undeploy.md:13
+msgid "`scripts/undeploy/nats.ps1`"
+msgstr ""
+
+#: src\operations/undeploy.md:14
+msgid "Client (Tauri)"
+msgstr "Client (Tauri)"
+
+#: src\operations/undeploy.md:14
+msgid ""
+"`configs/jobs/installers/scripts/install-kanade-client.ps1` (agent-driven)"
+msgstr ""
+
+#: src\operations/undeploy.md:14
+msgid "`scripts/undeploy/client.ps1`"
+msgstr ""
+
+#: src\operations/undeploy.md:16
+msgid ""
+"All four are admin-only and idempotent — safe to re-run after a partial "
+"uninstall, safe to run when the component is already gone (each step logs "
+"\"not present, skipping\" and moves on)."
+msgstr ""
+
+#: src\operations/undeploy.md:20
+msgid "Default posture: safe"
+msgstr "デフォルトの姿勢: 安全側"
+
+#: src\operations/undeploy.md:22
+msgid "Run with no flags and the script:"
+msgstr "フラグなしで実行するとスクリプトは:"
+
+#: src\operations/undeploy.md:24
+msgid "Stops the Windows service."
+msgstr "Windows サービスを停止します。"
+
+#: src\operations/undeploy.md:25
+msgid ""
+"Unregisters it from SCM (waits for the entry to actually disappear, so a re-"
+"deploy doesn't race a pending removal)."
+msgstr ""
+"SCM からサービスを unregister します (エントリが実際に消えるまで待つので、後"
+"続の再 deploy が pending な削除と race しません)。"
+
+#: src\operations/undeploy.md:27
+msgid ""
+"Removes the installed binary from `%ProgramFiles%\\Kanade\\`, including any "
+"half-completed `<exe>.new` / `<exe>.old` swap artefacts."
+msgstr ""
+"`%ProgramFiles%\\Kanade\\` からインストール済みバイナリを削除します。中途半端"
+"な `<exe>.new` / `<exe>.old` の swap 残骸もまとめて削除。"
+
+#: src\operations/undeploy.md:30
+msgid ""
+"Removes any inbound firewall rule the deploy script created (pass `-"
+"KeepFirewall` to skip this — useful when an external WAF / Group Policy owns "
+"the rule)."
+msgstr ""
+"deploy スクリプトが作成した inbound のファイアウォールルールを削除します (`-"
+"KeepFirewall` で skip 可 — 外部の WAF / グループポリシーがルールを管理してい"
+"る場合に有用)。"
+
+#: src\operations/undeploy.md:33
+msgid ""
+"**Keeps** everything under `%ProgramData%\\Kanade\\` (config, logs, "
+"JetStream data, SQLite DB, …) so forensics / rollback / re-deploy can "
+"proceed without losing state."
+msgstr ""
+"`%ProgramData%\\Kanade\\` 配下 (config、log、JetStream データ、SQLite DB、…) "
+"は **残します**。フォレンジック / rollback / 再 deploy が state を失わずに進"
+"められるように。"
+
+#: src\operations/undeploy.md:36
+msgid ""
+"**Keeps** registry-stored secrets at `HKLM:\\SOFTWARE\\kanade\\<role>\\*`."
+msgstr ""
+"`HKLM:\\SOFTWARE\\kanade\\<role>\\*` のレジストリ secret も **残します**。"
+
+#: src\operations/undeploy.md:39
+msgid ""
+"That's enough for the common case: \"this host's kanade is misbehaving, get "
+"it off without destroying state\"."
+msgstr ""
+
+#: src\operations/undeploy.md:42
+msgid "`-Purge`: destructive cleanup"
+msgstr "`-Purge`: 破壊的クリーンアップ"
+
+#: src\operations/undeploy.md:44
+msgid "Adds:"
+msgstr "追加で:"
+
+#: src\operations/undeploy.md:46
+msgid ""
+"Removes the component's exclusive entries under `%ProgramData%\\Kanade\\`. "
+"Crucially, **only the component's own files** — agent / backend / NATS share "
+"the same root and each script avoids touching the others' files."
+msgstr ""
+"そのコンポーネント固有の `%ProgramData%\\Kanade\\` 配下エントリを削除します。"
+"重要なのは **そのコンポーネント自身のファイルだけ** — agent / backend / NATS "
+"は同じ root を共有しているので、各スクリプトは他のコンポーネントのファイルに"
+"は触れません。"
+
+#: src\operations/undeploy.md:50
+msgid ""
+"Removes the matching `HKLM:\\SOFTWARE\\kanade\\<role>\\*` key (unless `-"
+"KeepSecrets` is also passed — useful when multiple components share the same "
+"bearer)."
+msgstr ""
+"対応する `HKLM:\\SOFTWARE\\kanade\\<role>\\*` キーを削除します (`-"
+"KeepSecrets` を併せて渡すとスキップ — 複数コンポーネントで同じ bearer を共有"
+"しているときに有用)。"
+
+#: src\operations/undeploy.md:54
+msgid "What `-Purge` removes"
+msgstr "`-Purge` が削除するもの"
+
+#: src\operations/undeploy.md:56
+msgid ""
+"`config\\agent.toml`, `logs\\agent.*.log`, `outbox\\`, `HKLM:"
+"\\SOFTWARE\\kanade\\agent\\`"
+msgstr ""
+"`config\\agent.toml`、`logs\\agent.*.log`、`outbox\\`、`HKLM:"
+"\\SOFTWARE\\kanade\\agent\\`"
+
+#: src\operations/undeploy.md:57
+msgid ""
+"`config\\backend.toml`, `data\\*.db*` (**SQLite — historical results / "
+"inventory wiped**), `logs\\backend.*.log`, `HKLM:"
+"\\SOFTWARE\\kanade\\backend\\`"
+msgstr ""
+"`config\\backend.toml`、`data\\*.db*` (**SQLite — 過去の results / inventory "
+"が消える**)、`logs\\backend.*.log`、`HKLM:\\SOFTWARE\\kanade\\backend\\`"
+
+#: src\operations/undeploy.md:58
+msgid "NATS"
+msgstr "NATS"
+
+#: src\operations/undeploy.md:58
+msgid ""
+"`config\\nats-server.conf`, `nats\\` (**JetStream — all KV / Object Store / "
+"streams wiped**), `logs\\nats*.log`"
+msgstr ""
+"`config\\nats-server.conf`、`nats\\` (**JetStream — KV / Object Store / "
+"streams すべて消える**)、`logs\\nats*.log`"
+
+#: src\operations/undeploy.md:59
+msgid "Client"
+msgstr "Client"
+
+#: src\operations/undeploy.md:59
+msgid "Nothing extra (no per-user state yet)"
+msgstr "追加なし (per-user な state はまだ存在しない)"
+
+#: src\operations/undeploy.md:61
+msgid ""
+"⚠️  `undeploy-nats.ps1 -Purge` and `undeploy-backend.ps1 -Purge` are the "
+"dangerous ones. The first wipes the fleet's entire JetStream state "
+"(agent_releases, app_packages, scripts, jobs, agent_config, results stream); "
+"the second wipes the projector's historical SQLite. **Both are unrecoverable "
+"without out-of-band backups.** The scripts print a loud banner before "
+"running."
+msgstr ""
+"⚠️  危険なのは `undeploy-nats.ps1 -Purge` と `undeploy-backend.ps1 -Purge`。前"
+"者は fleet 全体の JetStream state (agent_releases、app_packages、scripts、"
+"jobs、agent_config、results stream) を消し、後者は projector の過去の SQLite "
+"を消します。**どちらも out-of-band バックアップ無しではリカバリ不能**。スクリ"
+"プトは実行前に目立つバナーを出します。"
+
+#: src\operations/undeploy.md:69
+msgid "Rollback recipes"
+msgstr "ロールバックの定石"
+
+#: src\operations/undeploy.md:71
+msgid "Bad rollout on one canary host"
+msgstr "canary 1 台で rollout が壊れたとき"
+
+#: src\operations/undeploy.md:80
+msgid "Decommission a host permanently"
+msgstr "ホストを恒久的に廃止する"
+
+#: src\operations/undeploy.md:86
+msgid "Wipe a dev box for a clean re-install"
+msgstr "dev box を再インストール用にまっさらにする"
+
+#: src\operations/undeploy.md:96
+msgid "Rebuild a single bad service without touching state"
+msgstr "state は触らず壊れたサービスだけ作り直す"
+
+#: src\operations/undeploy.md:103
+msgid "What undeploy does NOT do"
+msgstr "undeploy が**やらない**こと"
+
+#: src\operations/undeploy.md:105
+msgid ""
+"It doesn't notify the rest of the fleet that this host has gone away — the "
+"backend will keep listing it under \"agents\" until its heartbeat ages out "
+"(`/api/agents` staleness threshold). If you want it removed from the SPA "
+"immediately, delete the row via the backend API after undeploy."
+msgstr ""
+
+#: src\operations/undeploy.md:110
+msgid ""
+"It doesn't roll back the deployed binary to a previous version. \"Roll "
+"back\" in this script's vocabulary means \"remove entirely\"; if you want to "
+"swap to an older version, re-run the matching `deploy-*.ps1` against a "
+"folder containing the older binary."
+msgstr ""
+
+#: src\operations/undeploy.md:115
+msgid ""
+"It doesn't touch NATS-side state when you remove the agent — the agent's "
+"`target_version` entry under `agent_config.pcs.<pc>` stays in the KV. Clean "
+"those up server-side with `kanade jetstream kv del agent_config pcs."
+"<pc>.target_version` if needed."
+msgstr ""
+"agent を取り除いても NATS 側の state には触れません — agent の "
+"`target_version` エントリは `agent_config.pcs.<pc>` 配下の KV に残ります。必"
+"要なら server 側で `kanade jetstream kv del agent_config pcs."
+"<pc>.target_version` で掃除してください。"
 
 #: src\developing/writing-agent-scripts.md:3
 msgid ""
 "PowerShell scripts the agent will run are _almost_ normal `.ps1` files. This "
 "page collects the gotchas that aren't obvious from the script source alone."
-msgstr "agent が実行する PowerShell スクリプトは _ほぼ_ 通常の `.ps1` ファイルです。このページは、スクリプトのソースを見るだけでは分からない罠をまとめます。"
+msgstr ""
+"agent が実行する PowerShell スクリプトは _ほぼ_ 通常の `.ps1` ファイルです。"
+"このページは、スクリプトのソースを見るだけでは分からない罠をまとめます。"
 
 #: src\developing/writing-agent-scripts.md:7
 msgid "The agent stages scripts on disk and runs them via `-File`"
@@ -1517,26 +2423,35 @@ msgstr "agent はスクリプトをディスクに staging してから `-File` 
 msgid ""
 "As of [PR #230](https://github.com/yukimemi/kanade/pull/230) (agent version "
 "0.42.0+), the agent:"
-msgstr "[PR #230](https://github.com/yukimemi/kanade/pull/230) (agent version 0.42.0+) 以降、agent は次の動作をします:"
+msgstr ""
+"[PR #230](https://github.com/yukimemi/kanade/pull/230) (agent version "
+"0.42.0+) 以降、agent は次の動作をします:"
 
 #: src\developing/writing-agent-scripts.md:12
 msgid ""
-"Writes your script body to a temp `.ps1` under "
-"`%ProgramData%\\Kanade\\agent-scripts\\<UUID>\\kanade-<UUID>.ps1` (Windows) "
-"or `$TMPDIR/kanade-agent-<UUID>/kanade-<UUID>.ps1` (non-Windows dev only)."
-msgstr "スクリプト本体を temp の `.ps1` に書き出します。Windows なら `%ProgramData%\\Kanade\\agent-scripts\\<UUID>\\kanade-<UUID>.ps1`、それ以外 (dev のみ) なら `$TMPDIR/kanade-agent-<UUID>/kanade-<UUID>.ps1`。"
+"Writes your script body to a temp `.ps1` under `%ProgramData%\\Kanade\\agent-"
+"scripts\\<UUID>\\kanade-<UUID>.ps1` (Windows) or `$TMPDIR/kanade-agent-"
+"<UUID>/kanade-<UUID>.ps1` (non-Windows dev only)."
+msgstr ""
+"スクリプト本体を temp の `.ps1` に書き出します。Windows なら `%ProgramData%"
+"\\Kanade\\agent-scripts\\<UUID>\\kanade-<UUID>.ps1`、それ以外 (dev のみ) な"
+"ら `$TMPDIR/kanade-agent-<UUID>/kanade-<UUID>.ps1`。"
 
 #: src\developing/writing-agent-scripts.md:16
 msgid ""
 "Writes a _launcher_ `.ps1` next to it that sets UTF-8 console encoding then "
 "`& '<your-script>' @args`."
-msgstr "その隣に _launcher_ `.ps1` を書き、UTF-8 コンソールエンコーディングを設定してから `& '<your-script>' @args` でユーザースクリプトを呼びます。"
+msgstr ""
+"その隣に _launcher_ `.ps1` を書き、UTF-8 コンソールエンコーディングを設定して"
+"から `& '<your-script>' @args` でユーザースクリプトを呼びます。"
 
 #: src\developing/writing-agent-scripts.md:18
 msgid ""
 "Spawns `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "
 "<launcher>`."
-msgstr "`powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File <launcher>` を spawn します。"
+msgstr ""
+"`powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "
+"<launcher>` を spawn します。"
 
 #: src\developing/writing-agent-scripts.md:21
 msgid "This means your script:"
@@ -1544,16 +2459,20 @@ msgstr "結果として、あなたのスクリプトでは:"
 
 #: src\developing/writing-agent-scripts.md:23
 msgid ""
-"**Can** have `[CmdletBinding()]` and `param(...)` at the top. The "
-"call-operator boundary in the launcher gives your script its own scope where "
+"**Can** have `[CmdletBinding()]` and `param(...)` at the top. The call-"
+"operator boundary in the launcher gives your script its own scope where "
 "those headers are valid."
-msgstr "先頭に `[CmdletBinding()]` や `param(...)` を **書けます**。launcher の call-operator 境界が独自スコープを生み、その中ではヘッダーが有効です。"
+msgstr ""
+"先頭に `[CmdletBinding()]` や `param(...)` を **書けます**。launcher の call-"
+"operator 境界が独自スコープを生み、その中ではヘッダーが有効です。"
 
 #: src\developing/writing-agent-scripts.md:26
 msgid ""
 "**Should not** rely on `$PSCommandPath` matching the operator's source path "
 "— it'll be the staged temp file."
-msgstr "`$PSCommandPath` が operator のソースパスと一致することを **期待しないで**ください — staged 後の temp ファイルパスになります。"
+msgstr ""
+"`$PSCommandPath` が operator のソースパスと一致することを **期待しないで**く"
+"ださい — staged 後の temp ファイルパスになります。"
 
 #: src\developing/writing-agent-scripts.md:28
 msgid "**Should not** write to `$PSScriptRoot` (see next section)."
@@ -1564,8 +2483,8 @@ msgid ""
 "Pre-0.42.0 agents used `powershell -Command \"<body>\"`, which parses the "
 "body as a command-line expression and rejects `[CmdletBinding()]` as a "
 "syntax error. If you see \"Unexpected token '\\[CmdletBinding()\\]'\" in "
-"stderr, the host's agent is too old — upgrade it (see [agent "
-"self-update](../operations/agent-mediated-updates/agent-self.md))."
+"stderr, the host's agent is too old — upgrade it (see [agent self-update](../"
+"operations/agent-mediated-updates/agent-self.md))."
 msgstr ""
 
 #: src\developing/writing-agent-scripts.md:37
@@ -1574,11 +2493,15 @@ msgstr "`run_as: user` のとき `$PSScriptRoot` は読み取り専用"
 
 #: src\developing/writing-agent-scripts.md:39
 msgid ""
-"When `run_as: user` (or `system_gui`), the child process runs as the "
-"logged-in user — not as the LocalSystem agent that wrote the staged file. "
-"The staging directory inherits its ACL from `%ProgramData%`, which grants "
-"users **Read & Execute but not Modify**."
-msgstr "`run_as: user` (または `system_gui`) のとき、子プロセスはログオン中のユーザーとして動きます — staged ファイルを書いた LocalSystem の agent ではありません。staging ディレクトリは `%ProgramData%` から ACL を継承していて、Users には **Read & Execute は許可されるが Modify は許可されません**。"
+"When `run_as: user` (or `system_gui`), the child process runs as the logged-"
+"in user — not as the LocalSystem agent that wrote the staged file. The "
+"staging directory inherits its ACL from `%ProgramData%`, which grants users "
+"**Read & Execute but not Modify**."
+msgstr ""
+"`run_as: user` (または `system_gui`) のとき、子プロセスはログオン中のユーザー"
+"として動きます — staged ファイルを書いた LocalSystem の agent ではありませ"
+"ん。staging ディレクトリは `%ProgramData%` から ACL を継承していて、Users に"
+"は **Read & Execute は許可されるが Modify は許可されません**。"
 
 #: src\developing/writing-agent-scripts.md:45
 msgid "That means:"
@@ -1590,7 +2513,11 @@ msgid ""
 "user's profile instead. Even for `run_as: system` (where SYSTEM can write to "
 "its own staged dir), the directory is cleaned up when the script exits, so "
 "writing siblings is fragile either way."
-msgstr "代わりに `$env:TEMP`、`$env:LOCALAPPDATA`、ユーザープロファイル配下の絶対パスのいずれかに書いてください。`run_as: system` (SYSTEM が自分の staged dir に書ける) であっても、スクリプト終了時にディレクトリは掃除されるので、隣接ファイル書き込みはいずれにせよ壊れやすいです。"
+msgstr ""
+"代わりに `$env:TEMP`、`$env:LOCALAPPDATA`、ユーザープロファイル配下の絶対パス"
+"のいずれかに書いてください。`run_as: system` (SYSTEM が自分の staged dir に書"
+"ける) であっても、スクリプト終了時にディレクトリは掃除されるので、隣接ファイ"
+"ル書き込みはいずれにせよ壊れやすいです。"
 
 #: src\developing/writing-agent-scripts.md:63
 msgid "Identity table"
@@ -1680,13 +2607,18 @@ msgid ""
 "The backend's result projector reads **stdout** as the script's output. If "
 "your manifest has an `inventory:` block, stdout is parsed as a single JSON "
 "blob."
-msgstr "backend の result projector はスクリプト出力として **stdout** を読みます。マニフェストに `inventory:` ブロックがあると、stdout は単一の JSON blob としてパースされます。"
+msgstr ""
+"backend の result projector はスクリプト出力として **stdout** を読みます。マ"
+"ニフェストに `inventory:` ブロックがあると、stdout は単一の JSON blob として"
+"パースされます。"
 
 #: src\developing/writing-agent-scripts.md:81
 msgid ""
 "Use `Write-Host` for progress chatter — it goes to the host stream, NOT "
 "stdout, so it doesn't pollute the JSON parse."
-msgstr "進捗メッセージには `Write-Host` を使ってください — host ストリームに行き、stdout には行かないので JSON パースを汚しません。"
+msgstr ""
+"進捗メッセージには `Write-Host` を使ってください — host ストリームに行き、"
+"stdout には行かないので JSON パースを汚しません。"
 
 #: src\developing/writing-agent-scripts.md:84
 msgid ""
@@ -1701,7 +2633,9 @@ msgstr ""
 msgid ""
 "Avoid `Write-Output` for chatter — anything on stdout that isn't the "
 "expected JSON will fail the inventory parse."
-msgstr "メッセージ出力に `Write-Output` は使わないこと — stdout に期待される JSON 以外が混ざると inventory パースが失敗します。"
+msgstr ""
+"メッセージ出力に `Write-Output` は使わないこと — stdout に期待される JSON 以"
+"外が混ざると inventory パースが失敗します。"
 
 #: src\developing/writing-agent-scripts.md:92
 msgid "UTF-8 by default"
@@ -1714,14 +2648,22 @@ msgid ""
 "UTF-8 regardless of the host's system codepage. Operator-shipped scripts "
 "with Japanese / DE / KR / CN strings show up correctly in the SPA Activity "
 "view without per-host workarounds."
-msgstr "launcher はスクリプト起動前に `[Console]::OutputEncoding = UTF-8` と `$OutputEncoding = UTF-8` を設定するので、ホストのシステムコードページに関係なくあなたの stdout / stderr は UTF-8 になります。日本語 / DE / KR / CN を含む operator スクリプトも、ホスト個別の workaround なしに SPA Activity ビューで正しく表示されます。"
+msgstr ""
+"launcher はスクリプト起動前に `[Console]::OutputEncoding = UTF-8` と "
+"`$OutputEncoding = UTF-8` を設定するので、ホストのシステムコードページに関係"
+"なくあなたの stdout / stderr は UTF-8 になります。日本語 / DE / KR / CN を含"
+"む operator スクリプトも、ホスト個別の workaround なしに SPA Activity ビュー"
+"で正しく表示されます。"
 
 #: src\developing/writing-agent-scripts.md:101
 msgid ""
 "If you explicitly need OEM / CP932 / Shift-JIS output (e.g. calling a legacy "
 "CLI that ignores `$OutputEncoding`), set it yourself in the script after the "
 "launcher prelude has run — your assignment takes precedence."
-msgstr "明示的に OEM / CP932 / Shift-JIS 出力が必要なら (`$OutputEncoding` を無視する legacy CLI を呼ぶケースなど)、launcher の prelude が走ったあとにスクリプト内で自分で設定してください — あなたの代入が優先されます。"
+msgstr ""
+"明示的に OEM / CP932 / Shift-JIS 出力が必要なら (`$OutputEncoding` を無視す"
+"る legacy CLI を呼ぶケースなど)、launcher の prelude が走ったあとにスクリプト"
+"内で自分で設定してください — あなたの代入が優先されます。"
 
 #: src\developing/writing-agent-scripts.md:106
 msgid "Native command exit codes"
@@ -1733,7 +2675,11 @@ msgid ""
 "is 0 — that's PowerShell's default. If a native command fails "
 "(`$LASTEXITCODE -ne 0`) and you DON'T handle it, PowerShell still exits 0 — "
 "`$ErrorActionPreference = 'Stop'` does **not** save you here."
-msgstr "スクリプトが成功した native コマンドで終わると全体の exit は 0 — これは PowerShell のデフォルトです。native コマンドが失敗 (`$LASTEXITCODE -ne 0`) してハンドリングしないと、PowerShell は依然として 0 で終了します — `$ErrorActionPreference = 'Stop'` は **救ってくれません**。"
+msgstr ""
+"スクリプトが成功した native コマンドで終わると全体の exit は 0 — これは "
+"PowerShell のデフォルトです。native コマンドが失敗 (`$LASTEXITCODE -ne 0`) し"
+"てハンドリングしないと、PowerShell は依然として 0 で終了します — "
+"`$ErrorActionPreference = 'Stop'` は **救ってくれません**。"
 
 #: src\developing/writing-agent-scripts.md:114
 msgid ""
@@ -1743,7 +2689,13 @@ msgid ""
 "adds `$PSNativeCommandUseErrorActionPreference = $true` which makes them "
 "terminating, but that's not available in the deployment target. **Always "
 "check `$LASTEXITCODE` explicitly.**"
-msgstr "Windows PowerShell 5.1 (Windows エンドポイントのデフォルト、agent の `powershell.exe` が解決する先) は `$ErrorActionPreference` に関わらず native コマンドの非ゼロ exit を non-terminating として扱います。PowerShell 7.3+ で `$PSNativeCommandUseErrorActionPreference = $true` が追加されてこれを terminating にできますが、デプロイターゲットでは使えません。**必ず `$LASTEXITCODE` を明示的にチェックしてください。**"
+msgstr ""
+"Windows PowerShell 5.1 (Windows エンドポイントのデフォルト、agent の "
+"`powershell.exe` が解決する先) は `$ErrorActionPreference` に関わらず native "
+"コマンドの非ゼロ exit を non-terminating として扱います。PowerShell 7.3+ で "
+"`$PSNativeCommandUseErrorActionPreference = $true` が追加されてこれを "
+"terminating にできますが、デプロイターゲットでは使えません。**必ず "
+"`$LASTEXITCODE` を明示的にチェックしてください。**"
 
 #: src\developing/writing-agent-scripts.md:122
 msgid ""
@@ -1751,7 +2703,11 @@ msgid ""
 "nonzero even when your script handled the native error gracefully. If you "
 "want the script's exit code to reflect a specific native call, propagate it "
 "yourself:"
-msgstr "agent も `$LASTEXITCODE` を自動 propagate しません — そうしてしまうと、スクリプトが native エラーを正しく処理した場合でも非ゼロで終わってしまうからです。特定の native 呼び出しの exit code をスクリプトの exit に反映させたい場合は自分で propagate してください:"
+msgstr ""
+"agent も `$LASTEXITCODE` を自動 propagate しません — そうしてしまうと、スクリ"
+"プトが native エラーを正しく処理した場合でも非ゼロで終わってしまうからです。"
+"特定の native 呼び出しの exit code をスクリプトの exit に反映させたい場合は自"
+"分で propagate してください:"
 
 #: src\developing/writing-agent-scripts.md:127
 msgid ""
@@ -1770,7 +2726,11 @@ msgid ""
 "record (which the `trap { … break }` cleanup pattern can intercept) and "
 "exits non-zero. `exit $LASTEXITCODE` is right when the caller cares about "
 "the exact code."
-msgstr "通常は `throw` のほうが望ましい — クリーンな PowerShell エラーレコードを生成し (`trap { … break }` クリーンアップパターンが捕まえられる) かつ非ゼロで終わるからです。`exit $LASTEXITCODE` は呼び出し側が正確な exit code を気にする場合に向きます。"
+msgstr ""
+"通常は `throw` のほうが望ましい — クリーンな PowerShell エラーレコードを生成"
+"し (`trap { … break }` クリーンアップパターンが捕まえられる) かつ非ゼロで終わ"
+"るからです。`exit $LASTEXITCODE` は呼び出し側が正確な exit code を気にする場"
+"合に向きます。"
 
 #: src\developing/writing-agent-scripts.md:139
 msgid "Timeouts"
@@ -1781,18 +2741,25 @@ msgid ""
 "The manifest's `timeout:` is enforced by the agent. When it fires, the agent "
 "calls `child.kill()` on the PowerShell process — no graceful shutdown, no "
 "trap, no finally. Plan for it:"
-msgstr "マニフェストの `timeout:` は agent によって適用されます。発火すると agent は PowerShell プロセスに `child.kill()` を呼びます — graceful な shutdown も trap も finally もありません。それを前提に設計してください:"
+msgstr ""
+"マニフェストの `timeout:` は agent によって適用されます。発火すると agent は "
+"PowerShell プロセスに `child.kill()` を呼びます — graceful な shutdown も "
+"trap も finally もありません。それを前提に設計してください:"
 
 #: src\developing/writing-agent-scripts.md:145
 msgid "Budget the script to finish in `timeout * 0.6` and leave headroom."
-msgstr "スクリプトが `timeout * 0.6` で終わるように実行時間を見積もり、余裕を残す。"
+msgstr ""
+"スクリプトが `timeout * 0.6` で終わるように実行時間を見積もり、余裕を残す。"
 
 #: src\developing/writing-agent-scripts.md:147
 msgid ""
 "Use `trap { ... ; break }` for cleanup of resources that need explicit "
 "release (staging dirs, lock files) — `trap` fires on terminating errors, NOT "
 "on the agent's kill. Don't rely on it for the timeout case."
-msgstr "明示的解放が要るリソース (staging dir、lock ファイル) のクリーンアップには `trap { ... ; break }` を使う — `trap` は terminating エラーで発火し、agent の kill では発火しません。timeout ケースには頼らないこと。"
+msgstr ""
+"明示的解放が要るリソース (staging dir、lock ファイル) のクリーンアップには "
+"`trap { ... ; break }` を使う — `trap` は terminating エラーで発火し、agent "
+"の kill では発火しません。timeout ケースには頼らないこと。"
 
 #: src\developing/writing-agent-scripts.md:151
 msgid ""
@@ -1811,731 +2778,133 @@ msgid ""
 "receipt, the agent calls `child.kill()` — same hard-kill as the timeout "
 "path. Operators get an immediate result row marked `Killed` with whatever "
 "stdout / stderr the agent managed to capture before termination."
-msgstr "`kanade kill <exec_id>` は agent が購読する kill メッセージを publish します。受信すると agent は `child.kill()` を呼びます — timeout 経路と同じ hard-kill。operator にはただちに `Killed` マークの result row が届き、終了前に agent がキャプチャできた stdout / stderr が付きます。"
-
-#: src\reference/spec.md:3
-msgid ""
-"The full protocol / on-wire spec hasn't been migrated into the book yet. The "
-"authoritative source is the single-file version in the repo:"
 msgstr ""
-"フルのプロトコル / on-wire 仕様はまだ book に取り込まれていません。"
-"オーソリティはリポジトリの single-file 版です:"
-
-#: src\reference/spec.md:7
-msgid ""
-"[**docs/SPEC.md** on "
-"GitHub](https://github.com/yukimemi/kanade/blob/main/docs/SPEC.md)"
-msgstr ""
-"[**docs/SPEC.md** on "
-"GitHub](https://github.com/yukimemi/kanade/blob/main/docs/SPEC.md)"
-
-#: src\reference/spec.md:9
-msgid ""
-"Splitting it into chapters under this section is a follow-up once the rest "
-"of the operator / developer guides settle."
-msgstr ""
-"このセクション配下に章分割するのは、operator / 開発者ガイドが落ち着いてから"
-"の follow-up とします。"
-
-#: src\SUMMARY.md:13
-msgid "Removing kanade (undeploy)"
-msgstr "kanade を取り除く (undeploy)"
-
-#: src\operations/undeploy.md:1
-msgid "Removing kanade from a host (undeploy)"
-msgstr "kanade をホストから取り除く (undeploy)"
-
-#: src\operations/undeploy.md:3
-msgid "Production rollback path. When a host needs to come off kanade — because a rollout broke something, the host is being decommissioned, or you just want a clean slate to re-install from — there's one undeploy script per component, mirroring the deploy script that put it there."
-msgstr "本番でのロールバック経路。rollout で何かが壊れた、ホストを廃止する、再インストール用にまっさらな状態に戻したい — そんなときホストから kanade を剥がすために、deploy と対になる undeploy スクリプトをコンポーネントごとに 1 本ずつ用意しています。"
-
-#: src\operations/undeploy.md:9
-msgid "Deploy"
-msgstr "Deploy"
-
-#: src\operations/undeploy.md:9
-msgid "Undeploy"
-msgstr "Undeploy"
-
-#: src\operations/undeploy.md:11 src\operations/undeploy.md:56
-msgid "Agent"
-msgstr "Agent"
-
-#: src\operations/undeploy.md:11
-msgid "`scripts/deploy/agent.ps1`"
-msgstr ""
-
-#: src\operations/undeploy.md:11
-msgid "`scripts/undeploy/agent.ps1`"
-msgstr ""
-
-#: src\operations/undeploy.md:12 src\operations/undeploy.md:57
-msgid "Backend"
-msgstr "Backend"
-
-#: src\operations/undeploy.md:12
-msgid "`scripts/undeploy/backend.ps1`"
-msgstr ""
-
-#: src\operations/undeploy.md:13
-msgid "NATS server"
-msgstr "NATS server"
-
-#: src\operations/undeploy.md:13
-msgid "`scripts/deploy/nats.ps1`"
-msgstr ""
-
-#: src\operations/undeploy.md:13
-msgid "`scripts/undeploy/nats.ps1`"
-msgstr ""
-
-#: src\operations/undeploy.md:14
-msgid "Client (Tauri)"
-msgstr "Client (Tauri)"
-
-#: src\operations/undeploy.md:14
-msgid "`configs/jobs/installers/scripts/install-kanade-client.ps1` (agent-driven)"
-msgstr ""
-
-#: src\operations/undeploy.md:14
-msgid "`scripts/undeploy/client.ps1`"
-msgstr ""
-
-#: src\operations/undeploy.md:20
-msgid "Default posture: safe"
-msgstr "デフォルトの姿勢: 安全側"
-
-#: src\operations/undeploy.md:22
-msgid "Run with no flags and the script:"
-msgstr "フラグなしで実行するとスクリプトは:"
-
-#: src\operations/undeploy.md:24
-msgid "Stops the Windows service."
-msgstr "Windows サービスを停止します。"
-
-#: src\operations/undeploy.md:25
-msgid "Unregisters it from SCM (waits for the entry to actually disappear, so a re-deploy doesn't race a pending removal)."
-msgstr "SCM からサービスを unregister します (エントリが実際に消えるまで待つので、後続の再 deploy が pending な削除と race しません)。"
-
-#: src\operations/undeploy.md:27
-msgid "Removes the installed binary from `%ProgramFiles%\\Kanade\\`, including any half-completed `<exe>.new` / `<exe>.old` swap artefacts."
-msgstr "`%ProgramFiles%\\Kanade\\` からインストール済みバイナリを削除します。中途半端な `<exe>.new` / `<exe>.old` の swap 残骸もまとめて削除。"
-
-#: src\operations/undeploy.md:30
-msgid "Removes any inbound firewall rule the deploy script created (pass `-KeepFirewall` to skip this — useful when an external WAF / Group Policy owns the rule)."
-msgstr "deploy スクリプトが作成した inbound のファイアウォールルールを削除します (`-KeepFirewall` で skip 可 — 外部の WAF / グループポリシーがルールを管理している場合に有用)。"
-
-#: src\operations/undeploy.md:33
-msgid "**Keeps** everything under `%ProgramData%\\Kanade\\` (config, logs, JetStream data, SQLite DB, …) so forensics / rollback / re-deploy can proceed without losing state."
-msgstr "`%ProgramData%\\Kanade\\` 配下 (config、log、JetStream データ、SQLite DB、…) は **残します**。フォレンジック / rollback / 再 deploy が state を失わずに進められるように。"
-
-#: src\operations/undeploy.md:36
-msgid "**Keeps** registry-stored secrets at `HKLM:\\SOFTWARE\\kanade\\<role>\\*`."
-msgstr "`HKLM:\\SOFTWARE\\kanade\\<role>\\*` のレジストリ secret も **残します**。"
-
-#: src\operations/undeploy.md:42
-msgid "`-Purge`: destructive cleanup"
-msgstr "`-Purge`: 破壊的クリーンアップ"
-
-#: src\operations/undeploy.md:44
-msgid "Adds:"
-msgstr "追加で:"
-
-#: src\operations/undeploy.md:46
-msgid "Removes the component's exclusive entries under `%ProgramData%\\Kanade\\`. Crucially, **only the component's own files** — agent / backend / NATS share the same root and each script avoids touching the others' files."
-msgstr "そのコンポーネント固有の `%ProgramData%\\Kanade\\` 配下エントリを削除します。重要なのは **そのコンポーネント自身のファイルだけ** — agent / backend / NATS は同じ root を共有しているので、各スクリプトは他のコンポーネントのファイルには触れません。"
-
-#: src\operations/undeploy.md:50
-msgid "Removes the matching `HKLM:\\SOFTWARE\\kanade\\<role>\\*` key (unless `-KeepSecrets` is also passed — useful when multiple components share the same bearer)."
-msgstr "対応する `HKLM:\\SOFTWARE\\kanade\\<role>\\*` キーを削除します (`-KeepSecrets` を併せて渡すとスキップ — 複数コンポーネントで同じ bearer を共有しているときに有用)。"
-
-#: src\operations/undeploy.md:54
-msgid "What `-Purge` removes"
-msgstr "`-Purge` が削除するもの"
-
-#: src\operations/undeploy.md:56
-msgid "`config\\agent.toml`, `logs\\agent.*.log`, `outbox\\`, `HKLM:\\SOFTWARE\\kanade\\agent\\`"
-msgstr "`config\\agent.toml`、`logs\\agent.*.log`、`outbox\\`、`HKLM:\\SOFTWARE\\kanade\\agent\\`"
-
-#: src\operations/undeploy.md:57
-msgid "`config\\backend.toml`, `data\\*.db*` (**SQLite — historical results / inventory wiped**), `logs\\backend.*.log`, `HKLM:\\SOFTWARE\\kanade\\backend\\`"
-msgstr "`config\\backend.toml`、`data\\*.db*` (**SQLite — 過去の results / inventory が消える**)、`logs\\backend.*.log`、`HKLM:\\SOFTWARE\\kanade\\backend\\`"
-
-#: src\operations/undeploy.md:58
-msgid "NATS"
-msgstr "NATS"
-
-#: src\operations/undeploy.md:58
-msgid "`config\\nats-server.conf`, `nats\\` (**JetStream — all KV / Object Store / streams wiped**), `logs\\nats*.log`"
-msgstr "`config\\nats-server.conf`、`nats\\` (**JetStream — KV / Object Store / streams すべて消える**)、`logs\\nats*.log`"
-
-#: src\operations/undeploy.md:59
-msgid "Client"
-msgstr "Client"
-
-#: src\operations/undeploy.md:59
-msgid "Nothing extra (no per-user state yet)"
-msgstr "追加なし (per-user な state はまだ存在しない)"
-
-#: src\operations/undeploy.md:61
-msgid "⚠️  `undeploy-nats.ps1 -Purge` and `undeploy-backend.ps1 -Purge` are the dangerous ones. The first wipes the fleet's entire JetStream state (agent_releases, app_packages, scripts, jobs, agent_config, results stream); the second wipes the projector's historical SQLite. **Both are unrecoverable without out-of-band backups.** The scripts print a loud banner before running."
-msgstr "⚠️  危険なのは `undeploy-nats.ps1 -Purge` と `undeploy-backend.ps1 -Purge`。前者は fleet 全体の JetStream state (agent_releases、app_packages、scripts、jobs、agent_config、results stream) を消し、後者は projector の過去の SQLite を消します。**どちらも out-of-band バックアップ無しではリカバリ不能**。スクリプトは実行前に目立つバナーを出します。"
-
-#: src\operations/undeploy.md:69
-msgid "Rollback recipes"
-msgstr "ロールバックの定石"
-
-#: src\operations/undeploy.md:71
-msgid "Bad rollout on one canary host"
-msgstr "canary 1 台で rollout が壊れたとき"
-
-#: src\operations/undeploy.md:80
-msgid "Decommission a host permanently"
-msgstr "ホストを恒久的に廃止する"
-
-#: src\operations/undeploy.md:86
-msgid "Wipe a dev box for a clean re-install"
-msgstr "dev box を再インストール用にまっさらにする"
-
-#: src\operations/undeploy.md:96
-msgid "Rebuild a single bad service without touching state"
-msgstr "state は触らず壊れたサービスだけ作り直す"
-
-#: src\operations/undeploy.md:103
-msgid "What undeploy does NOT do"
-msgstr "undeploy が**やらない**こと"
-
-#: src\operations/undeploy.md:115
-msgid "It doesn't touch NATS-side state when you remove the agent — the agent's `target_version` entry under `agent_config.pcs.<pc>` stays in the KV. Clean those up server-side with `kanade jetstream kv del agent_config pcs.<pc>.target_version` if needed."
-msgstr "agent を取り除いても NATS 側の state には触れません — agent の `target_version` エントリは `agent_config.pcs.<pc>` 配下の KV に残ります。必要なら server 側で `kanade jetstream kv del agent_config pcs.<pc>.target_version` で掃除してください。"
-
-#: src\SUMMARY.md:6
-msgid "1. Getting Started"
-msgstr "1. 導入ガイド"
-
-#: src\SUMMARY.md:8
-msgid "Quickstart"
-msgstr "クイックスタート"
-
-#: src\SUMMARY.md:9
-msgid "System Architecture"
-msgstr "システムアーキテクチャ"
-
-#: src\SUMMARY.md:12
-msgid "2. Operations"
-msgstr "2. 運用ガイド"
-
-#: src\SUMMARY.md:15
-msgid "Installation and Deployment"
-msgstr "インストールとデプロイ"
-
-#: src\SUMMARY.md:16
-msgid "Agent-Mediated Updates"
-msgstr "エージェント経由の更新"
-
-#: src\SUMMARY.md:23
-msgid "3. Developer Guide"
-msgstr "3. 開発者ガイド"
-
-#: src\SUMMARY.md:26
-msgid "Workflow and Contribution"
-msgstr "開発フローとコントリビューション"
-
-#: src\SUMMARY.md:29
-msgid "4. Reference"
-msgstr "4. リファレンス"
-
-#: src\SUMMARY.md:32
-msgid "Configuration Reference"
-msgstr "設定リファレンス"
-
-#: src\getting-started/quickstart.md:1
-msgid "Developer Quickstart"
-msgstr "開発者クイックスタート"
-
-#: src\getting-started/architecture.md:1
-msgid "System Architecture"
-msgstr "システムアーキテクチャ"
-
-#: src\operations/deploy.md:1
-msgid "Installation and Deployment"
-msgstr "インストールとデプロイ"
+"`kanade kill <exec_id>` は agent が購読する kill メッセージを publish しま"
+"す。受信すると agent は `child.kill()` を呼びます — timeout 経路と同じ hard-"
+"kill。operator にはただちに `Killed` マークの result row が届き、終了前に "
+"agent がキャプチャできた stdout / stderr が付きます。"
 
 #: src\developing/workflow.md:1
 msgid "Developer Workflow and Contribution"
 msgstr "開発者ワークフローとコントリビューション"
 
-#: src\reference/config.md:1
-msgid "Configuration Reference"
-msgstr "設定リファレンス"
-
-#: src\getting-started/quickstart.md:3
-msgid "This guide gets you up and running with a local `kanade` development environment."
-msgstr "このガイドでは、ローカルの `kanade` 開発環境をセットアップして起動する手順を説明します。"
-
-#: src\getting-started/quickstart.md:5 src\operations/deploy.md:17
-msgid "## 1. Prerequisites"
-msgstr "## 1. 前提条件"
-
-#: src\getting-started/quickstart.md:7
-msgid "Before starting, ensure you have the following installed on your Windows machine:"
-msgstr "開始する前に、Windows マシンに以下がインストールされていることを確認してください。"
-
-#: src\getting-started/quickstart.md:8
-msgid "- [Rust toolchain](https://rustup.rs/) (stable channel)"
-msgstr "- [Rust ツールチェーン](https://rustup.rs/) (stable チャンネル)"
-
-#: src\getting-started/quickstart.md:9
-msgid "- [cargo-make](https://sagiegurari.github.io/cargo-make/) (run `cargo install --force cargo-make`)"
-msgstr "- [cargo-make](https://sagiegurari.github.io/cargo-make/) (`cargo install --force cargo-make` でインストール)"
-
-#: src\getting-started/quickstart.md:10
-msgid "- [bun](https://bun.sh/) (for SPA dependency management and build execution)"
-msgstr "- [bun](https://bun.sh/) (SPA の依存関係管理とビルド実行用)"
-
-#: src\getting-started/quickstart.md:11
-msgid "- [gsudo](https://github.com/gerardog/gsudo) (for local service deployment tests)"
-msgstr "- [gsudo](https://github.com/gerardog/gsudo) (ローカルのサービスデプロイテスト用)"
-
-#: src\getting-started/quickstart.md:12
-msgid "- [nats-server](https://github.com/nats-io/nats-server) (runnable from PATH)"
-msgstr "- [nats-server](https://github.com/nats-io/nats-server) (PATH から実行可能であること)"
-
-#: src\getting-started/quickstart.md:14
-msgid "## 2. One-Time Setup"
-msgstr "## 2. 初回セットアップ"
-
-#: src\getting-started/quickstart.md:16
-msgid "Run the following command at the workspace root to register the git pre-push hooks and install agent skills defined in `apm.yml`:"
-msgstr "ワークスペースのルートで以下のコマンドを実行し、git の pre-push フックを登録し、`apm.yml` で定義されたエージェントスキルをインストールします。"
-
-#: src\getting-started/quickstart.md:22
-msgid "## 3. Launching the Dev Sandbox"
-msgstr "## 3. 開発サンドボックス of 起動"
-
-#: src\getting-started/quickstart.md:24
-msgid "You can spin up a fully isolated, multi-component development stack on your local host using a single command:"
-msgstr "単一のコマンドを使用するだけで、ローカルホスト上に完全に分離されたマルチコンポーネント開発スタックを起動できます。"
-
-#: src\getting-started/quickstart.md:30
-msgid "This task runs the following services concurrently in a loopback sandbox:"
-msgstr "このタスクは、ループバックサンドボックス内で以下のサービスを並行して実行します。"
-
-#: src\getting-started/quickstart.md:31
-msgid "1. **nats-dev**: Unauthenticated NATS broker listening on port `4223`."
-msgstr "1. **nats-dev**: ポート `4223` で待機する、認証なしの NATS ブローカー。"
-
-#: src\getting-started/quickstart.md:32
-msgid "2. **backend-dev**: Dev API server listening on port `8081` with auth disabled."
-msgstr "2. **backend-dev**: 認証が無効化された、ポート `8081` で待機する開発用 API サーバー。"
-
-#: src\getting-started/quickstart.md:33
-msgid "3. **agent-dev**: Local dev agent talking to the dev NATS broker on `4223`."
-msgstr "3. **agent-dev**: ポート `4223` の開発用 NATS ブローカーと通信する、ローカルの開発用エージェント。"
-
-#: src\getting-started/quickstart.md:34
-msgid "4. **web-dev**: Vite dev server for the React SPA listening on `http://localhost:5173`."
-msgstr "4. **web-dev**: `http://localhost:5173` で待機する、React SPA 用の Vite 開発サーバー。"
-
-#: src\getting-started/quickstart.md:36
-msgid "Press `Ctrl+C` to tear down all components cleanly."
-msgstr "`Ctrl+C` を押すことで、すべてのコンポーネントをクリーンに終了できます。"
-
-#: src\getting-started/quickstart.md:38
-msgid "## 4. Multi-Agent Fleet Simulation"
-msgstr "## 4. 複数エージェントフリートのシミュレーション"
-
-#: src\getting-started/quickstart.md:40
-msgid "To debug behavior that only shows up when managing multiple machines (e.g. concurrent execution result projection or ID collisions), you can launch a multi-agent sandbox:"
-msgstr "複数のマシンを管理しているときにのみ発生する動作（並行実行結果のプロジェクションや ID 衝突など）をデバッグするために、マルチエージェントサンドボックスを起動できます。"
-
-#: src\getting-started/quickstart.md:46
-msgid "This spawns the NATS broker, backend, and SPA, plus three separate dev agents with independent IDs (`dev-pc-1`, `dev-pc-2`, `dev-pc-3`) and isolated state databases."
-msgstr "これにより、NATS ブローカー、バックエンド、SPA に加えて、独立した ID（`dev-pc-1`、`dev-pc-2`、`dev-pc-3`）と隔離された状態データベースを持つ 3 つの個別開発用エージェントが起動します。"
-
-#: src\getting-started/quickstart.md:48
-msgid "## 5. Local Deploy Testing"
-msgstr "## 5. ローカルデプロイのテスト"
-
-#: src\getting-started/quickstart.md:50
-msgid "If you want to test the full lifecycle of installing components as Windows services (mirroring production environments), use the local deployment scripts:"
-msgstr "Windows サービスとしてコンポーネントをインストールする全ライフサイクル（本番環境の模倣）をテストしたい場合は、ローカルデプロイスクリプトを使用します。"
-
-#: src\getting-started/quickstart.md:57
-msgid "# Installs CLI, agent, backend, and NATS services locally via gsudo elevation"
-msgstr "# gsudo 権限昇格を介して、CLI、エージェント、バックエンド、および NATS サービスをローカルにインストールします"
-
-#: src\getting-started/quickstart.md:60
-msgid "After deployment, you can verify and interact with the real Windows services. Use the following task to stop and cleanly delete the services when finished:"
-msgstr "デプロイ後、実際の Windows サービスを確認して対話できます。完了したら、以下のタスクを使用してサービスを停止し、きれいに削除します。"
-
-#: src\getting-started/architecture.md:3
-msgid "`kanade` is designed to manage hundreds of Windows endpoints concurrently, safely, and asynchronously."
-msgstr "`kanade` は、数百台の Windows エンドポイントを並行して、安全に、そして非同期で管理するように設計されています。"
-
-#: src\getting-started/architecture.md:5
-msgid "## Component Topology"
-msgstr "## コンポーネントトポロジー"
-
-#: src\getting-started/architecture.md:7
-msgid "The system consists of five main components, coordinated through an event-driven pub/sub structure:"
-msgstr "システムは 5 つの主要コンポーネントで構成されており、イベント駆動型の pub/sub 構造を介して調整されます。"
-
-#: src\getting-started/architecture.md:35
-msgid "### 1. kanade-agent"
-msgstr "### 1. kanade-agent"
-
-#: src\getting-started/architecture.md:36
-msgid "A high-performance Windows service running on each managed host."
-msgstr "各管理対象ホスト上で動作する高性能な Windows サービスです。"
-
-#: src\getting-started/architecture.md:37 src\getting-started/architecture.md:43 src\getting-started/architecture.md:48 src\getting-started/architecture.md:53 src\getting-started/architecture.md:59
-msgid "- **Role**: Core executor."
-msgstr "- **役割**: コア実行エンジン。"
-
-#: src\getting-started/architecture.md:38
-msgid "- **Communication**: Establishes an outbound-only NATS connection. It does not open any inbound ports, making it firewall-friendly."
-msgstr "- **通信**: アウトバウンド専用の NATS 接続を確立します。インバウンドポートを開かないため、ファイアウォールに優しい設計です。"
-
-#: src\getting-started/architecture.md:39
-msgid "- **Capabilities**: Launches secure, isolated PowerShell subprocesses, inventories hardware/software specs, streams live performance data (CPU, RSS memory, disk I/O), and manages local packages."
-msgstr "- **機能**: 安全に隔離された PowerShell サブプロセスを起動し、ハードウェア/ソフトウェアのスペック情報の収集、ライブパフォーマンスデータ（CPU、RSSメモリ、ディスクI/O）のストリーミング、およびローカルパッケージの管理を行います。"
-
-#: src\getting-started/architecture.md:41
-msgid "### 2. kanade-backend"
-msgstr "### 2. kanade-backend"
-
-#: src\getting-started/architecture.md:42
-msgid "The central HTTP API and projection server."
-msgstr "中央の HTTP API およびプロジェクションサーバーです。"
-
-#: src\getting-started/architecture.md:43
-msgid "- **Role**: Coordinates commands, processes incoming telemetry, and hosts the operator Web interface."
-msgstr "- **役割**: コマンドの調整、受信テレメトリの処理、およびオペレーター用 Web インターフェースの提供。"
-
-#: src\getting-started/architecture.md:44
-msgid "- **State management**: Persists events, activity logs, and status records in a localized SQLite database."
-msgstr "- **状態管理**: イベント、アクティビティログ、およびステータスレコードをローカルの SQLite データベースに永続化します。"
-
-#: src\getting-started/architecture.md:45
-msgid "- **Projector pattern**: Subscribes to the NATS command-response stream, parses incoming payloads, and projects them into state tables in real-time."
-msgstr "- **プロジェクターパターン**: NATS コマンドレスポンスストリームを購読し、受信したペイロードを解析して、リアルタイムで状態テーブルに反映（投影）します。"
-
-#: src\getting-started/architecture.md:47
-msgid "### 3. NATS Broker (with JetStream)"
-msgstr "### 3. NATS ブローカー (with JetStream)"
-
-#: src\getting-started/architecture.md:48
-msgid "The message transport layer of the entire fleet."
-msgstr "フリート全体のメッセージ転送レイヤーです。"
-
-#: src\getting-started/architecture.md:48
-msgid "- **Role**: Lightweight, high-throughput message broker."
-msgstr "- **役割**: 軽量かつ高スループットなメッセージブローカー。"
-
-#: src\getting-started/architecture.md:49
-msgid "- **JetStream**: Retains command streams, job registrations, and file storage (using NATS Object Store buckets for distributing packages and agent scripts)."
-msgstr "- **JetStream**: コマンドストリーム、ジョブ登録、およびファイルストレージ（パッケージやエージェントスクリプトを配信するための NATS オブジェクトストアバケットを使用）を保持します。"
-
-#: src\getting-started/architecture.md:50
-msgid "- **Isolation**: Decouples the backend from the agents. If the backend is offline or restarting, agents continue execution and cache outbox records, pushing them once connection resumes."
-msgstr "- **疎結合**: バックエンドとエージェントを切り離します。バックエンドがオフラインまたは再起動中であっても、エージェントは実行を継続して送信トレイにレコードをキャッシュし、接続が再開されたらそれらをプッシュします。"
-
-#: src\getting-started/architecture.md:52
-msgid "### 4. kanade-client"
-msgstr "### 4. kanade-client"
-
-#: src\getting-started/architecture.md:53
-msgid "An optional Tauri desktop application running in the logged-in user's desktop session on endpoints."
-msgstr "エンドポイント上のログインユーザーのデスクトップセッションで動作する、オプションの Tauri デスクトップアプリケーションです。"
-
-#: src\getting-started/architecture.md:54
-msgid "- **Communication**: Shares state with the local `kanade-agent` via secured local IPC mechanisms."
-msgstr "- **通信**: セキュリティで保護されたローカル IPC メカニズムを介して、ローカルの `kanade-agent` と状態を共有します。"
-
-#: src\getting-started/architecture.md:58
-msgid "### 5. kanade CLI"
-msgstr "### 5. kanade CLI"
-
-#: src\getting-started/architecture.md:59
-msgid "The primary command-line tool for operators."
-msgstr "オペレーター向けの主要なコマンドラインツールです。"
-
-#: src\getting-started/architecture.md:59
-msgid "- **Role**: Packages and publishes software updates, submits and executes job manifests, and queries live fleet inventory from the command-line."
-msgstr "- **役割**: ソフトウェアアップデートのパッケージングと公開、ジョブマニフェストの送信と実行、およびコマンドラインからのライブフリートインベントリの照会。"
-
-#: src\getting-started/architecture.md:61
-msgid "## Security & Reliability Design"
-msgstr "## セキュリティと信頼性の設計"
-
-#: src\getting-started/architecture.md:63
-msgid "### Outbound-only Connections"
-msgstr "### アウトバウンド専用接続"
-
-#: src\getting-started/architecture.md:65
-msgid "Agents strictly communicate with the NATS broker by initiating outbound TCP connections. No firewall ports need to be opened on endpoints, neutralizing the risk of lateral traversal or external port scanning."
-msgstr "エージェントは、アウトバウンド TCP 接続を開始することによってのみ NATS ブローカーと通信します。エンドポイント側でファイアウォールポートを開く必要がないため、横移動や外部からのポートスキャンのリスクを排除できます。"
-
-#: src\getting-started/architecture.md:67
-msgid "### Agent Job Sandboxing"
-msgstr "### エージェントジョブのサンドボックス化"
-
-#: src\getting-started/architecture.md:69
-msgid "When executing scripts, the agent stages commands in `%ProgramData%\\Kanade\\agent-scripts` and executes them using customized launcher templates."
-msgstr "スクリプトを実行する際、エージェントは `%ProgramData%\\Kanade\\agent-scripts` 内にコマンドを配置（ステージング）し、カスタマイズされたランチャテンプレートを使用して実行します。"
-
-#: src\getting-started/architecture.md:70
-msgid "Administrators can enforce identity configurations via job manifests, specifying `run_as: system` (for elevated system management) or `run_as: user` (to run safely under the active user's credentials with restricted directory ACLs)."
-msgstr "管理者はジョブマニフェストを介して実行アイデンティティの設定を強制でき、`run_as: system`（昇格したシステム管理用）または `run_as: user`（制限されたディレクトリ ACL を使用して、アクティブなユーザーの資格情報の下で安全に実行する用）を指定できます。"
-
-#: src\operations/deploy.md:3
-msgid "This section details how to bootstrap `kanade` components as native Windows services in production or staging environments."
-msgstr "このセクションでは、本番環境またはステージング環境で `kanade` コンポーネントをネイティブの Windows サービスとしてブートストラップする方法を詳しく説明します。"
-
-#: src\operations/deploy.md:5
-msgid "## Deployment Model"
-msgstr "## デプロイモデル"
-
-#: src\operations/deploy.md:7
-msgid "Production hosts and target endpoints run `kanade` components as background Windows services. This ensures high availability and automatic startup."
-msgstr "本番ホストと管理対象エンドポイントは、`kanade` コンポーネントをバックグラウンドの Windows サービスとして実行します。これにより、高可用性と自動起動が保証されます。"
-
-#: src\operations/deploy.md:9
-msgid "Service Name"
-msgstr "サービス名"
-
-#: src\operations/deploy.md:9
-msgid "Triple / Binary"
-msgstr "トリプル / バイナリ"
-
-#: src\operations/deploy.md:9
-msgid "Config Source"
-msgstr "設定ソース"
-
-#: src\operations/deploy.md:9
-msgid "Typical Target"
-msgstr "典型的なターゲット"
-
-#: src\operations/deploy.md:11
-msgid "**KanadeNats**"
-msgstr "**KanadeNats**"
-
-#: src\operations/deploy.md:11
-msgid "`nats-server.exe`"
-msgstr "`nats-server.exe`"
-
-#: src\operations/deploy.md:11
-msgid "Hardened Registry / Registry-baked CLI flags"
-msgstr "保護されたレジストリ / レジストリ保存の CLI フラグ"
-
-#: src\operations/deploy.md:11 src\operations/deploy.md:12
-msgid "Central server"
-msgstr "中央サーバー"
-
-#: src\operations/deploy.md:12
-msgid "**KanadeBackend**"
-msgstr "**KanadeBackend**"
-
-#: src\operations/deploy.md:12
-msgid "`kanade-backend.exe`"
-msgstr "`kanade-backend.exe`"
-
-#: src\operations/deploy.md:12
-msgid "Hardened Registry / Config file"
-msgstr "保護されたレジストリ / 設定ファイル"
-
-#: src\operations/deploy.md:13
-msgid "**KanadeAgent**"
-msgstr "**KanadeAgent**"
-
-#: src\operations/deploy.md:13
-msgid "`kanade-agent.exe`"
-msgstr "`kanade-agent.exe`"
-
-#: src\operations/deploy.md:13
-msgid "Hardened Registry / Local state DB"
-msgstr "保護されたレジストリ / ローカル状態 DB"
-
-#: src\operations/deploy.md:13
-msgid "Managed endpoints"
-msgstr "管理対象エンドポイント"
-
-#: src\operations/deploy.md:19
-msgid "- **Host OS**: Windows 10/11 or Windows Server 2016+."
-msgstr "- **ホスト OS**: Windows 10/11 または Windows Server 2016+。"
-
-#: src\operations/deploy.md:20
-msgid "- **gsudo**: Required to perform elevated installations from standard user shells (or run commands from an Administrator-level PowerShell prompt)."
-msgstr "- **gsudo**: 標準のユーザシェルから管理者権限でインストールを実行する（または管理者権限の PowerShell プロンプトからコマンドを実行する）ために必要です。"
-
-#: src\operations/deploy.md:21
-msgid "- **Network Routing**: Managed endpoints must be able to reach the NATS server port (default `4222`) over TCP."
-msgstr "- **ネットワークルーティング**: 管理対象エンドポイントが TCP 経由で NATS サーバーポート（デフォルト `4222`）に到達できる必要があります。"
-
-#: src\operations/deploy.md:23
-msgid "## 2. Setting Up the NATS Server (Broker)"
-msgstr "## 2. NATS サーバー (ブローカー) のセットアップ"
-
-#: src\operations/deploy.md:25
-msgid "The NATS server acts as the messaging core."
-msgstr "NATS サーバーはメッセージングのコアとして機能します。"
-
-#: src\operations/deploy.md:27
-msgid "1. Stage the deployment bundle using `scripts/build-release.ps1 -Roles nats`."
-msgstr "1. `scripts/build-release.ps1 -Roles nats` を使用して、デプロイメントバンドルをステージングします。"
-
-#: src\operations/deploy.md:28
-msgid "2. Deploy the service with elevation:"
-msgstr "2. 管理者権限でサービスをデプロイします:"
-
-#: src\operations/deploy.md:30
-msgid "# Elevated PowerShell prompt"
-msgstr "# 管理者権限の PowerShell プロンプト"
-
-#: src\operations/deploy.md:34
-msgid "This installs the **KanadeNats** service, configures it to run under the local system account, sets up JetStream data directories, and locks down the secure authorization token in the Windows registry."
-msgstr "これにより、**KanadeNats** サービスがインストールされ、ローカルシステムアカウントで実行されるよう構成され、JetStream データディレクトリがセットアップされ、安全な認証トークンが Windows レジストリ内にロックダウンされます。"
-
-#: src\operations/deploy.md:36
-msgid "## 3. Deploying the Backend API & SPA"
-msgstr "## 3. バックエンド API & SPA のデプロイ"
-
-#: src\operations/deploy.md:38
-msgid "The backend manages operator connections and processes event logs."
-msgstr "バックエンドは、オペレーター接続を管理し、イベントログを処理します。"
-
-#: src\operations/deploy.md:40
-msgid "1. Stage the backend binaries and React SPA bundle using `scripts/build-release.ps1 -Roles backend`."
-msgstr "1. `scripts/build-release.ps1 -Roles backend` を使用して、バックエンドバイナリと React SPA バンドルをステージングします。"
-
-#: src\operations/deploy.md:41
-msgid "2. Deploy the service:"
-msgstr "2. サービスをデプロイします:"
-
-#: src\operations/deploy.md:48
-msgid "`-NatsToken`: Connects the backend to the local NATS server securely."
-msgstr "`-NatsToken`: バックエンドをローカルの NATS サーバーに安全に接続します。"
-
-#: src\operations/deploy.md:49
-msgid "`-StaticToken`: Defines the API bearer token required for operator CLI/SPA logins."
-msgstr "`-StaticToken`: オペレーターの CLI/SPA ログインに必要な API ベアラートークンを定義します。"
-
-#: src\operations/deploy.md:51
-msgid "The deployment script registers the **KanadeBackend** Windows service, sets the appropriate ACLs, and verifies the endpoint."
-msgstr "デプロイスクリプトは、**KanadeBackend** Windows サービスを登録し、適切な ACL を設定して、エンドポイントを検証します。"
-
-#: src\operations/deploy.md:53
-msgid "## 4. Installing the Agent on Target Endpoints"
-msgstr "## 4. 対象エンドポイントへのエージェントのインストール"
-
-#: src\operations/deploy.md:55
-msgid "Install the agent on every endpoint PC that you want to manage."
-msgstr "管理対象のすべてのエンドポイント PC にエージェントをインストールします。"
-
-#: src\operations/deploy.md:57
-msgid "1. Stage the agent bundle using `scripts/build-release.ps1 -Roles agent`."
-msgstr "1. `scripts/build-release.ps1 -Roles agent` を使用して、エージェントバンドルをステージングします。"
-
-#: src\operations/deploy.md:58
-msgid "2. Copy the contents of the `dist/agent` folder to the target PC."
-msgstr "2. `dist/agent` フォルダの内容を対象 PC にコピーします。"
-
-#: src\operations/deploy.md:59
-msgid "3. On the target PC, run the installer:"
-msgstr "3. 対象 PC 上で、インストーラーを実行します:"
-
-#: src\operations/deploy.md:65
-msgid "The script:"
-msgstr "スクリプトの動作:"
-
-#: src\operations/deploy.md:67
-msgid "- Places `kanade-agent.exe` into its destination directory."
-msgstr "- `kanade-agent.exe` をインストール先ディレクトリに配置します。"
-
-#: src\operations/deploy.md:68
-msgid "- Secures the configuration and NATS token in the Windows registry path (`HKLM:\\SOFTWARE\\Kanade\\agent`)."
-msgstr "- Windows レジストリパス (`HKLM:\\SOFTWARE\\Kanade\\agent`) 内の設定と NATS トークンを保護します。"
-
-#: src\operations/deploy.md:69
-msgid "- Registers and starts the **KanadeAgent** service."
-msgstr "- **KanadeAgent** サービスを登録して起動します。"
-
-#: src\operations/deploy.md:71
-msgid "Once the service is active, the agent establishes an outbound NATS connection, subscribes to command streams, and reports its online heartbeat back to the fleet backend."
-msgstr "サービスが起動すると、エージェントはアウトバウンド NATS 接続を確立し、コマンドストリームを購読し、オンラインのハートビートをフリートバックエンドに報告します。"
-
 #: src\developing/workflow.md:3
-msgid "This document outlines the standard workflows, lint/test requirements, and VCS branching guidelines for contributors working on the `kanade` codebase."
-msgstr "このドキュメントでは、`kanade` コードベースで作業するコントリビューター向けの標準的な開発ワークフロー、lint/テストの要件、および VCS ブランチのガイドラインについて説明します。"
+msgid ""
+"This document outlines the standard workflows, lint/test requirements, and "
+"VCS branching guidelines for contributors working on the `kanade` codebase."
+msgstr ""
+"このドキュメントでは、`kanade` コードベースで作業するコントリビューター向けの"
+"標準的な開発ワークフロー、lint/テストの要件、および VCS ブランチのガイドライ"
+"ンについて説明します。"
 
 #: src\developing/workflow.md:7
 msgid "1. Quality Gates (Pre-Push & CI)"
 msgstr "1. クオリティゲート (Pre-Push & CI)"
 
 #: src\developing/workflow.md:9
-msgid "The local test suite must be green before you push or submit PRs. This matches the automated checks running on GitHub Actions."
-msgstr "プッシュや PR の送信を行う前に、ローカルのテストスイートがすべてグリーンである必要があります。これは GitHub Actions で実行される自動チェックと同じものです。"
+msgid ""
+"The local test suite must be green before you push or submit PRs. This "
+"matches the automated checks running on GitHub Actions."
+msgstr ""
+"プッシュや PR の送信を行う前に、ローカルのテストスイートがすべてグリーンであ"
+"る必要があります。これは GitHub Actions で実行される自動チェックと同じもので"
+"す。"
 
 #: src\developing/workflow.md:12
-msgid "# Run formatting check, clippy checks, target tests, and cargo lock checks"
+msgid ""
+"# Run formatting check, clippy checks, target tests, and cargo lock checks\n"
 msgstr "# フォーマットチェック、clippy チェック、ターゲットテスト、および cargo ロックチェックを実行します"
 
 #: src\developing/workflow.md:16
-msgid "**FMT & Clippy**: We maintain a strict zero-warning policy. Do not sprinkle `#[allow(clippy::...)]` unless there is a strong architectural justification."
-msgstr "**FMT & Clippy**: 私たちは厳格なゼロワーニングポリシーを維持しています。強力な設計上の正当な理由がない限り、`#[allow(clippy::...)]` を散布しないでください。"
+msgid ""
+"**FMT & Clippy**: We maintain a strict zero-warning policy. Do not sprinkle "
+"`#[allow(clippy::...)]` unless there is a strong architectural justification."
+msgstr ""
+"**FMT & Clippy**: 私たちは厳格なゼロワーニングポリシーを維持しています。強力"
+"な設計上の正当な理由がない限り、`#[allow(clippy::...)]` を散布しないでくださ"
+"い。"
 
 #: src\developing/workflow.md:17
-msgid "**TDD (Test-Driven Development)**: Follow Kent Beck's TDD methodology. Write failing tests first to define the _what_, then implement the code to satisfy them."
-msgstr "**TDD (テスト駆動開発)**: Kent Beck の TDD 手法に従ってください。最初に失敗するテストを書いて「何を」行うかを定義し、次にそれを満たすコードを実装します。"
+msgid ""
+"**TDD (Test-Driven Development)**: Follow Kent Beck's TDD methodology. Write "
+"failing tests first to define the _what_, then implement the code to satisfy "
+"them."
+msgstr ""
+"**TDD (テスト駆動開発)**: Kent Beck の TDD 手法に従ってください。最初に失敗す"
+"るテストを書いて「何を」行うかを定義し、次にそれを満たすコードを実装します。"
 
 #: src\developing/workflow.md:21
 msgid "2. Worktree Management with `renri`"
 msgstr "2. `renri` によるワークツリー管理"
 
 #: src\developing/workflow.md:23
-msgid "For isolated feature development, we use [`renri`](https://github.com/yukimemi/renri) to manage lightweight repository worktrees. This prevents staging pollution, keeps your main checkout clean, and allows you to switch tasks instantly."
-msgstr "隔離された機能開発のために、私たちは [`renri`](https://github.com/yukimemi/renri) を使用して軽量なリポジトリワークツリーを管理します。これにより、ステージの汚染を防ぎ、メインチェックアウトをクリーンに保ち、瞬時にタスクを切り替えることができます。"
+msgid ""
+"For isolated feature development, we use [`renri`](https://github.com/"
+"yukimemi/renri) to manage lightweight repository worktrees. This prevents "
+"staging pollution, keeps your main checkout clean, and allows you to switch "
+"tasks instantly."
+msgstr ""
+"隔離された機能開発のために、私たちは [`renri`](https://github.com/yukimemi/"
+"renri) を使用して軽量なリポジトリワークツリーを管理します。これにより、ステー"
+"ジの汚染を防ぎ、メインチェックアウトをクリーンに保ち、瞬時にタスクを切り替え"
+"ることができます。"
 
 #: src\developing/workflow.md:25
 msgid "Why `renri`?"
 msgstr "なぜ `renri` なのか？"
 
 #: src\developing/workflow.md:26
-msgid "In co-located Git and Jujutsu (jj) environments, managing worktrees manually can get complex. `renri` simplifies this by automatically wrapping VCS-specific worktree creation (favoring `jj` when configured) and cleanups."
-msgstr "Git と Jujutsu (jj) がコロケーションされた環境では、ワークツリーを手動で管理するのは複雑になります。`renri` は、VCS 固有のワークツリー作成（設定されている場合は `jj` を優先）とクリーンアップを自動的にラッピングすることで、これを簡素化します。"
+msgid ""
+"In co-located Git and Jujutsu (jj) environments, managing worktrees manually "
+"can get complex. `renri` simplifies this by automatically wrapping VCS-"
+"specific worktree creation (favoring `jj` when configured) and cleanups."
+msgstr ""
+"Git と Jujutsu (jj) がコロケーションされた環境では、ワークツリーを手動で管理"
+"するのは複雑になります。`renri` は、VCS 固有のワークツリー作成（設定されてい"
+"る場合は `jj` を優先）とクリーンアップを自動的にラッピングすることで、これを"
+"簡素化します。"
 
 #: src\developing/workflow.md:28
 msgid "Common Commands"
 msgstr "よく使うコマンド"
 
 #: src\developing/workflow.md:31
-msgid "# Create an isolated worktree (uses Jujutsu by default if present)"
+msgid "# Create an isolated worktree (uses Jujutsu by default if present)\n"
 msgstr "# 隔離されたワークツリーを作成します (存在するならデフォルトで Jujutsu を使用)"
 
 #: src\developing/workflow.md:33
-msgid "# Force a Git-native worktree (bypassing jj)"
+msgid "# Force a Git-native worktree (bypassing jj)\n"
 msgstr "# Git ネイティブのワークツリーを強制的に作成します (jj をバイパス)"
 
 #: src\developing/workflow.md:36
-msgid "# Clean up and delete a worktree after merging"
+msgid "# Clean up and delete a worktree after merging\n"
 msgstr "# マージ後にワークツリーをクリーンアップして削除します"
 
 #: src\developing/workflow.md:39
-msgid "# Garbage-collect and prune stale or broken worktrees"
+msgid "# Garbage-collect and prune stale or broken worktrees\n"
 msgstr "# 古くなった、または破損したワークツリーをガベージコレクションしてクリーンアップします"
 
 #: src\developing/workflow.md:44
-msgid "_Note: Worktree creation automatically invokes the cargo-make `on-add` hook to fetch remote refs and bootstrap APM configurations immediately._"
-msgstr "_注意: ワークツリー作成時に自動的に cargo-make の `on-add` フックが呼び出され、リモートの参照を取得して APM 設定を直ちにセットアップします。_"
+msgid ""
+"_Note: Worktree creation automatically invokes the cargo-make `on-add` hook "
+"to fetch remote refs and bootstrap APM configurations immediately._"
+msgstr ""
+"_注意: ワークツリー作成時に自動的に cargo-make の `on-add` フックが呼び出さ"
+"れ、リモートの参照を取得して APM 設定を直ちにセットアップします。_"
 
 #: src\developing/workflow.md:48
 msgid "3. Co-located Jujutsu (jj) & Git Workflow"
 msgstr "3. コロケーションされた Jujutsu (jj) & Git ワークフロー"
 
 #: src\developing/workflow.md:50
-msgid "Our development environment is configured with co-located Git and Jujutsu. We prefer `jj` for local version control due to its safe, conflict-free commit model."
-msgstr "開発環境は、Git と Jujutsu がコロケーションされるよう設定されています。ローカルのバージョン管理には、安全で競合のないコミットモデルを持つ `jj` を好んで使用します。"
+msgid ""
+"Our development environment is configured with co-located Git and Jujutsu. "
+"We prefer `jj` for local version control due to its safe, conflict-free "
+"commit model."
+msgstr ""
+"開発環境は、Git と Jujutsu がコロケーションされるよう設定されています。ローカ"
+"ルのバージョン管理には、安全で競合のないコミットモデルを持つ `jj` を好んで使"
+"用します。"
 
 #: src\developing/workflow.md:52
 msgid "Guidelines"
@@ -2543,7 +2912,9 @@ msgstr "ガイドライン"
 
 #: src\developing/workflow.md:53
 msgid "**No Direct Push to `main`**: All changes must land via a Pull Request."
-msgstr "**`main` への直接プッシュ禁止**: すべての変更は Pull Request 経由でマージされる必要があります。"
+msgstr ""
+"**`main` への直接プッシュ禁止**: すべての変更は Pull Request 経由でマージされ"
+"る必要があります。"
 
 #: src\developing/workflow.md:54
 msgid "**Branch/Bookmark Naming**:"
@@ -2562,52 +2933,127 @@ msgid "`chore/...` for infrastructure, dependency bumps, or releases."
 msgstr "`chore/...` はインフラ、依存関係の更新、またはリリース用。"
 
 #: src\developing/workflow.md:58
-msgid "**Commit Messages**: Write commit messages, PR titles, and bodies in **English**."
-msgstr "**コミットメッセージ**: コミットメッセージ、PR タイトル、本文は**英語**で記述してください。"
+msgid ""
+"**Commit Messages**: Write commit messages, PR titles, and bodies in "
+"**English**."
+msgstr ""
+"**コミットメッセージ**: コミットメッセージ、PR タイトル、本文は**英語**で記述"
+"してください。"
 
 #: src\developing/workflow.md:59
-msgid "**Version Bumps**: Release version bumps are managed exclusively via PRs on `main` and automated tagging pipelines. Never run `git tag` manually."
-msgstr "**バージョン更新**: リリースのバージョン更新は、`main` への PR と自動タグ付けパイプラインを介してのみ管理されます。手動で `git tag` を実行しないでください。"
+msgid ""
+"**Version Bumps**: Release version bumps are managed exclusively via PRs on "
+"`main` and automated tagging pipelines. Never run `git tag` manually."
+msgstr ""
+"**バージョン更新**: リリースのバージョン更新は、`main` への PR と自動タグ付け"
+"パイプラインを介してのみ管理されます。手動で `git tag` を実行しないでくださ"
+"い。"
 
 #: src\developing/workflow.md:63
 msgid "4. Documentation Policy"
 msgstr "4. ドキュメントポリシー"
 
 #: src\developing/workflow.md:65
-msgid "Documentation must stay in lock-step with code changes. Whenever you add or modify features:"
-msgstr "ドキュメントは、コードの変更と常に完全に同期している必要があります。機能を追加または変更した場合は常に、以下を実行してください:"
+msgid ""
+"Documentation must stay in lock-step with code changes. Whenever you add or "
+"modify features:"
+msgstr ""
+"ドキュメントは、コードの変更と常に完全に同期している必要があります。機能を追"
+"加または変更した場合は常に、以下を実行してください:"
 
 #: src\developing/workflow.md:67
-msgid "Update docstrings and comments explaining the _why_ (avoid comments restating _how_)."
-msgstr "コード内のコメントや docstring を更新し、「なぜ」そのようにしたのかを説明します（「どのように」やっているかを単に再記述するコメントは避けてください）。"
+msgid ""
+"Update docstrings and comments explaining the _why_ (avoid comments "
+"restating _how_)."
+msgstr ""
+"コード内のコメントや docstring を更新し、「なぜ」そのようにしたのかを説明しま"
+"す（「どのように」やっているかを単に再記述するコメントは避けてください）。"
 
 #: src\developing/workflow.md:68
 msgid "Update the relevant book pages (written in English under `book/src/`)."
 msgstr "関連する book ページ（`book/src/` 配下に英語で記述）を更新します。"
 
 #: src\developing/workflow.md:69
-msgid "Synchronize localization catalogs by running the translation template generator."
-msgstr "翻訳テンプレートジェネレーターを実行して、ローカライズカタログ（ポファイル）を同期します。"
+msgid ""
+"Synchronize localization catalogs by running the translation template "
+"generator."
+msgstr ""
+"翻訳テンプレートジェネレーターを実行して、ローカライズカタログ（ポファイル）"
+"を同期します。"
+
+#: src\reference/spec.md:3
+msgid ""
+"The full protocol / on-wire spec hasn't been migrated into the book yet. The "
+"authoritative source is the single-file version in the repo:"
+msgstr ""
+"フルのプロトコル / on-wire 仕様はまだ book に取り込まれていません。オーソリ"
+"ティはリポジトリの single-file 版です:"
+
+#: src\reference/spec.md:7
+msgid ""
+"[**docs/SPEC.md** on GitHub](https://github.com/yukimemi/kanade/blob/main/"
+"docs/SPEC.md)"
+msgstr ""
+"[**docs/SPEC.md** on GitHub](https://github.com/yukimemi/kanade/blob/main/"
+"docs/SPEC.md)"
+
+#: src\reference/spec.md:9
+msgid ""
+"Splitting it into chapters under this section is a follow-up once the rest "
+"of the operator / developer guides settle."
+msgstr ""
+"このセクション配下に章分割するのは、operator / 開発者ガイドが落ち着いてから"
+"の follow-up とします。"
 
 #: src\reference/config.md:3
-msgid "`kanade` services rely on structured configurations loaded from TOML files, environment variables, or registry paths."
-msgstr "`kanade` サービスは、TOML ファイル、環境変数、またはレジストリパスから読み込まれる構造化された設定に依存しています。"
+msgid ""
+"`kanade` services rely on structured configurations loaded from TOML files, "
+"environment variables, or registry paths."
+msgstr ""
+"`kanade` サービスは、TOML ファイル、環境変数、またはレジストリパスから読み込"
+"まれる構造化された設定に依存しています。"
 
 #: src\reference/config.md:7
 msgid "1. Agent Configuration"
 msgstr "1. エージェント設定"
 
 #: src\reference/config.md:9
-msgid "The agent searches for its configuration via the `KANADE_AGENT_CONFIG` environment variable or falls back to native paths."
-msgstr "エージェントは `KANADE_AGENT_CONFIG` 環境変数を介して設定を検索し、存在しない場合はネイティブパスにフォールバックします。"
+msgid ""
+"The agent searches for its configuration via the `KANADE_AGENT_CONFIG` "
+"environment variable or falls back to native paths."
+msgstr ""
+"エージェントは `KANADE_AGENT_CONFIG` 環境変数を介して設定を検索し、存在しない"
+"場合はネイティブパスにフォールバックします。"
 
 #: src\reference/config.md:11
 msgid "Dev Configuration (`configs/agent.dev.toml`)"
 msgstr "開発用設定 (`configs/agent.dev.toml`)"
 
 #: src\reference/config.md:13
-msgid "```toml\n# Dev configuration schema\n[agent]\nid = \"dev-pc\"\nnats_url = \"nats://localhost:4223\"\ndata_dir = \"target/dev-data/agent\"\n\n[log]\nlevel = \"debug\"\nfile = \"target/dev-data/agent/logs/agent.log\"\n```"
-msgstr "```toml\n# 開発用設定スキーマ\n[agent]\nid = \"dev-pc\"\nnats_url = \"nats://localhost:4223\"\ndata_dir = \"target/dev-data/agent\"\n\n[log]\nlevel = \"debug\"\nfile = \"target/dev-data/agent/logs/agent.log\"\n```"
+msgid ""
+"```toml\n"
+"# Dev configuration schema\n"
+"[agent]\n"
+"id = \"dev-pc\"\n"
+"nats_url = \"nats://localhost:4223\"\n"
+"data_dir = \"target/dev-data/agent\"\n"
+"\n"
+"[log]\n"
+"level = \"debug\"\n"
+"file = \"target/dev-data/agent/logs/agent.log\"\n"
+"```"
+msgstr ""
+"```toml\n"
+"# 開発用設定スキーマ\n"
+"[agent]\n"
+"id = \"dev-pc\"\n"
+"nats_url = \"nats://localhost:4223\"\n"
+"data_dir = \"target/dev-data/agent\"\n"
+"\n"
+"[log]\n"
+"level = \"debug\"\n"
+"file = \"target/dev-data/agent/logs/agent.log\"\n"
+"```"
 
 #: src\reference/config.md:25 src\reference/config.md:53
 msgid "Configuration Parameters"
@@ -2668,8 +3114,11 @@ msgid "Path"
 msgstr "Path"
 
 #: src\reference/config.md:31
-msgid "Root path to cache outbox scripts, state database, and local completions."
-msgstr "送信トレイのスクリプト、状態データベース、およびローカルの補完データをキャッシュするルートパス。"
+msgid ""
+"Root path to cache outbox scripts, state database, and local completions."
+msgstr ""
+"送信トレイのスクリプト、状態データベース、およびローカルの補完データをキャッ"
+"シュするルートパス。"
 
 #: src\reference/config.md:31
 msgid "`KANADE_AGENT_DATA_DIR`"
@@ -2704,16 +3153,38 @@ msgid "2. Backend Configuration"
 msgstr "2. バックエンド設定"
 
 #: src\reference/config.md:39
-msgid "The backend coordination layer retrieves its configurations from the file specified by `KANADE_BACKEND_CONFIG` or registers default structures."
-msgstr "バックエンドの調整レイヤーは `KANADE_BACKEND_CONFIG` で指定されたファイルから設定を取得し、指定がない場合はデフォルトの構造体を登録します。"
+msgid ""
+"The backend coordination layer retrieves its configurations from the file "
+"specified by `KANADE_BACKEND_CONFIG` or registers default structures."
+msgstr ""
+"バックエンドの調整レイヤーは `KANADE_BACKEND_CONFIG` で指定されたファイルから"
+"設定を取得し、指定がない場合はデフォルトの構造体を登録します。"
 
 #: src\reference/config.md:41
 msgid "Dev Configuration (`configs/backend.dev.toml`)"
 msgstr "開発用設定 (`configs/backend.dev.toml`)"
 
 #: src\reference/config.md:43
-msgid "```toml\n[backend]\nlisten_addr = \"127.0.0.1:8081\"\nnats_url = \"nats://localhost:4223\"\ndatabase_url = \"sqlite://target/dev-data/backend/state.db\"\n\n[auth]\n# Auth settings\n```"
-msgstr "```toml\n[backend]\nlisten_addr = \"127.0.0.1:8081\"\nnats_url = \"nats://localhost:4223\"\ndatabase_url = \"sqlite://target/dev-data/backend/state.db\"\n\n[auth]\n# 認証設定\n```"
+msgid ""
+"```toml\n"
+"[backend]\n"
+"listen_addr = \"127.0.0.1:8081\"\n"
+"nats_url = \"nats://localhost:4223\"\n"
+"database_url = \"sqlite://target/dev-data/backend/state.db\"\n"
+"\n"
+"[auth]\n"
+"# Auth settings\n"
+"```"
+msgstr ""
+"```toml\n"
+"[backend]\n"
+"listen_addr = \"127.0.0.1:8081\"\n"
+"nats_url = \"nats://localhost:4223\"\n"
+"database_url = \"sqlite://target/dev-data/backend/state.db\"\n"
+"\n"
+"[auth]\n"
+"# 認証設定\n"
+"```"
 
 #: src\reference/config.md:57
 msgid "`backend.listen_addr`"
@@ -2756,8 +3227,11 @@ msgid "Boolean"
 msgstr "Boolean"
 
 #: src\reference/config.md:60
-msgid "Set to true to disable operator token validation (dev environment only)."
-msgstr "オペレーターのトークン検証を無効にするには true を設定します (開発環境でのみ有効)。"
+msgid ""
+"Set to true to disable operator token validation (dev environment only)."
+msgstr ""
+"オペレーターのトークン検証を無効にするには true を設定します (開発環境でのみ"
+"有効)。"
 
 #: src\reference/config.md:60
 msgid "`KANADE_AUTH_DISABLE`"
@@ -2768,8 +3242,14 @@ msgid "3. Windows Registry Integration"
 msgstr "3. Windows レジストリ統合"
 
 #: src\reference/config.md:66
-msgid "In production environments, security-sensitive tokens (like NATS client tokens and administrative API bearer tokens) are stored in the secure Windows Registry rather than plaintext files."
-msgstr "本番環境では、セキュリティに敏感なトークン（NATS クライアントトークンや管理用 API ベアラートークンなど）は、プレーンテキストファイルではなく、保護された Windows レジストリに保存されます。"
+msgid ""
+"In production environments, security-sensitive tokens (like NATS client "
+"tokens and administrative API bearer tokens) are stored in the secure "
+"Windows Registry rather than plaintext files."
+msgstr ""
+"本番環境では、セキュリティに敏感なトークン（NATS クライアントトークンや管理"
+"用 API ベアラートークンなど）は、プレーンテキストファイルではなく、保護され"
+"た Windows レジストリに保存されます。"
 
 #: src\reference/config.md:68
 msgid "Key Paths"
@@ -2784,5 +3264,41 @@ msgid "**Backend Settings**: `HKLM:\\SOFTWARE\\Kanade\\backend`"
 msgstr "**バックエンド設定**: `HKLM:\\SOFTWARE\\Kanade\\backend`"
 
 #: src\reference/config.md:72
-msgid "These registry paths are protected with local ACL configurations, allowing read permissions strictly to `SYSTEM` and designated operators."
-msgstr "これらのレジストリパスはローカルの ACL 設定で保護されており、`SYSTEM` および指定されたオペレーターにのみ読み取り権限が厳密に制限されます。"
+msgid ""
+"These registry paths are protected with local ACL configurations, allowing "
+"read permissions strictly to `SYSTEM` and designated operators."
+msgstr ""
+"これらのレジストリパスはローカルの ACL 設定で保護されており、`SYSTEM` および"
+"指定されたオペレーターにのみ読み取り権限が厳密に制限されます。"
+
+#~ msgid "Operations"
+#~ msgstr "運用"
+
+#~ msgid "For developers"
+#~ msgstr "開発者向け"
+
+#~ msgid ""
+#~ "# Installs CLI, agent, backend, and NATS services locally via gsudo "
+#~ "elevation"
+#~ msgstr ""
+#~ "# gsudo 権限昇格を介して、CLI、エージェント、バックエンド、および NATS "
+#~ "サービスをローカルにインストールします"
+
+#~ msgid "### 2. kanade-backend"
+#~ msgstr "### 2. kanade-backend"
+
+#~ msgid "### 4. kanade-client"
+#~ msgstr "### 4. kanade-client"
+
+#~ msgid ""
+#~ "When executing scripts, the agent stages commands in `%ProgramData%"
+#~ "\\Kanade\\agent-scripts` and executes them using customized launcher "
+#~ "templates."
+#~ msgstr ""
+#~ "スクリプトを実行する際、エージェントは `%ProgramData%\\Kanade\\agent-"
+#~ "scripts` 内にコマンドを配置（ステージング）し、カスタマイズされたランチャ"
+#~ "テンプレートを使用して実行します。"
+
+#~ msgid "# Elevated PowerShell prompt"
+#~ msgstr "# 管理者権限の PowerShell プロンプト"
+

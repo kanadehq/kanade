@@ -37,7 +37,7 @@
 ## 1.1 システム概要
 
 数千台規模の Windows PC を、AD 非依存で一元管理する自前基盤。
-インベントリ採取・全体配信・緊急コマンド実行の 3 用途を、単一の pub/sub 基盤で吸収する。
+インベントリ採取・全体配信・緊急コマンド実行の 3 用途を、単一の pub/sub 基盤でカバーする。
 
 商用 (Intune, Tanium 等) を導入せず自作する場合の参照アーキテクチャ。
 
@@ -52,7 +52,7 @@
 ## 1.3 設計方針
 
 1. **pub/sub + 永続化ストリーミング**
-   ファイルベースやクラサバ (Server→Client push) ではなく、エージェント発の outbound 接続 + メッセージブローカー方式を採用。FW/NAT フレンドリーかつ、ファンアウト・ファンインがネイティブ。
+   ファイルベースやクラサバ (Server→Client push) ではなく、エージェント発の outbound 接続 + メッセージブローカー方式を採用。FW/NAT フレンドリーであり、ファンアウト・ファンインを標準機能としてサポートします。
 
 2. **AD 非依存 (mTLS で認証完結)**
    AD 参加環境でも動くが、AD を前提条件にしない。クライアント証明書で認証する。
@@ -123,7 +123,7 @@
 | ロギング | `tracing` + `tracing-subscriber` | Windows ではイベントログ併用 |
 
 **OS 選定の指針**:
-- 既存運用が Windows Server 中心なら **Windows Server** で問題なし。NATS / Rust / SQLite すべて Windows で完全動作
+- 既存運用が Windows Server 中心なら、**Windows Server** で問題ありません。NATS、Rust、SQLite のすべてが Windows 上で完全に動作します。
 - Linux のほうが NATS / Rust エコシステムの運用情報が豊富
 - 両 OS で同一バイナリが動くよう、Rust コードはパス区切り・パーミッション周りを抽象化 (`std::path::PathBuf`, `dirs` crate 等)
 
@@ -149,7 +149,7 @@
 | **Phase 2** | Phase 1 + Backend (axum + SPA + SQLite + Projector) | チーム運用、〜数千台 |
 | **Phase 3** | NATS 3 ノードクラスタ + Backend 冗長化 + Postgres + 外部 LB | 商用品質、HA 必須 |
 
-PoC を Phase 1 で立ち上げ、運用が乗ってから Backend を生やすのが現実解。NATS のメッセージ契約 (Subject 設計) を最初から後方互換に保つことで、後段の追加で破壊変更を避ける。
+PoC を Phase 1 で立ち上げ、運用が軌道に乗ってから Backend を追加するのが現実的です。NATS のメッセージ契約 (Subject 設計) を最初から後方互換に保つことで、後からの追加による破壊的変更を避けます。
 
 ---
 
@@ -264,10 +264,10 @@ mgmtctl logs <deploy_id>        # 結果ログ取得
 
 **役割**: エンドユーザー (Windows PC 利用者、**管理者権限なし**) が自分の端末状態を把握し、管理者からの通知を受け、許可された範囲のソフトウェア更新・トラブルシューティングを自分で実行するための GUI フロントエンド。
 
-特権操作 (Office 修復、サービス再起動、レジストリ書き換え等) はすべて `LocalSystem` で動く Agent 側で実行され、Client App は UI 入力と進捗表示のみを担当する。これにより「**管理者権限を持たないエンドユーザーが自力で復旧操作を完結できる**」 を実現する。
+特権操作 (Office 修復、サービス再起動、レジストリ書き換え等) はすべて `LocalSystem` で動く Agent 側で実行され、Client App は UI 入力と進捗表示のみを担当する。これにより、「**管理者権限を持たないエンドユーザーが自力で復旧操作を完結できる仕組み**」を実現します。
 
 **起動形態**: ユーザーセッション上の常駐プロセス。
-- タスクトレイ常駐 + 必要時にウィンドウを開く
+- タスクトレイに常駐し、必要なときにウィンドウを開く
 - ログオン時自動起動 (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 経由)
 - MSI でのマシン全体インストール時に **ActiveSetup** で全ユーザー初回ログオン時に自動展開
 
@@ -288,20 +288,20 @@ mgmtctl logs <deploy_id>        # 結果ログ取得
    - インストール済ソフトウェアのバージョン (最新? 更新待ち?)
    - 「**コンプライアンスチェック**」 として 5〜10 項目を ✅/⚠️/❌ 表示:
      BitLocker 有効、AV 最新、OS パッチ最新、証明書期限 30 日超、ディスク空き 10% 超、Agent self-update 完了、等
-   - NG 項目には「修復する」 ボタン (該当する troubleshoot job をキック)
+   - NG 項目には「修復する」 ボタン (該当するトラブルシューティングジョブを起動)
 
 3. **ソフトウェアアップデート (セルフサービス)**
-   - Manifest で `user_invokable: true` + `category: software_update` な job を「アップデート」 タブに表示
-   - ユーザーがクリック → KLP `jobs.execute` → Agent IPC 経由で `commands.pc.{pc_id}` publish → 実行は `LocalSystem` の Agent が行う (**権限昇格不要**)
+   - Manifest で `user_invokable: true` かつ `category: software_update` であるジョブを「アップデート」 タブに表示
+   - ユーザーがクリック → KLP `jobs.execute` → Agent IPC 経由で `commands.pc.{pc_id}` publish → 実行は `LocalSystem` の Agent が行う
    - 進捗バー + 完了通知 + SPA への結果反映 (既存 `results.>` 経路)
 
 4. **トラブルシューティング**
-   - `category: troubleshoot` な job を「困ったとき」 タブに表示 (Teams キャッシュクリア、Office 修復、ネットワークアダプタ再起動 等)
+   - `category: troubleshoot` であるジョブを「困ったとき」 タブに表示 (Teams キャッシュクリア、Office 修復、ネットワークアダプタ再起動 等)
    - 同上の KLP 経由実行。`run_as: user` の項目はユーザーセッション側で、`run_as: system` の項目は LocalSystem で実行
 
 5. **サポート連絡 + 診断ログ収集**
    - 「サポートに問い合わせる」 ボタン → KLP `support.upload_diagnostics` → Agent が `{pc_id, recent_inventory, last_N_events, agent_log_tail}` を Object Store にアップロード + チケット起票
-   - ヘルプデスクの初動が劇的に短縮
+   - ヘルプデスクの初動が迅速化
 
 6. **メンテナンス予約・延期申請**
    - 自分の端末に予定された job 一覧 (今後 N 日)
@@ -319,7 +319,7 @@ mgmtctl logs <deploy_id>        # 結果ログ取得
 - **NATS には直接繋がない**。NATS 認証情報 (mTLS 証明書) は LocalSystem Agent が独占管理し、Client は **KLP (§2.12)** 経由でのみ Agent と話す。
 - **特権操作は全て Agent 側**。Client は UI とユーザー入力検証のみ。
 - **OS 認証を信用する**。Client が payload に user_id を埋めても Agent は無視し、IPC 接続元 token から取った SID を使う。
-- **マルチユーザー対応**。Fast User Switching / RDP で複数ユーザーが同時にログオンしている場合、Agent は session 別に Client 接続を識別し、通知は session 単位で fan-out。
+- **マルチユーザー対応**。Fast User Switching / RDP で複数ユーザーが同時にログオンしている場合、Agent はセッションごとにクライアントの接続を識別し、通知はセッション単位でファンアウト（配信）されます。
 
 **設定ファイル**: `%APPDATA%\Kanade\client.toml` (ユーザー別)
 **ログ出力先**: `%LOCALAPPDATA%\Kanade\logs\client.log`
@@ -479,7 +479,7 @@ agent_config:global                          ← Fleet 全体の default
 agent_config:groups.<name>                   ← 当該 PC が属する全グループの override が
                                               アルファベット順に重ね合わせ (last wins)
         ↓
-agent_config:pcs.<pc_id>                     ← この PC 専用の override (最強)
+agent_config:pcs.<pc_id>                     ← この PC 専用の override (最優先)
         ↓
 = EffectiveConfig (Agent が実際に走る値)
 ```
@@ -528,7 +528,7 @@ execute:
   run_as: system                # system / user
 
 # --- エンドユーザー Client App からのキック許可 (Sprint 8) ---
-user_invokable: false           # true なら Client App の「アップデート / トラブルシュート」 タブに出現
+user_invokable: false           # true なら Client App の「アップデート / トラブルシュート」 タブに表示されます
 category: troubleshoot          # software_update / troubleshoot / catalog (user_invokable=true 時のみ意味あり)
 display_name: "Temp フォルダのクリーンアップ"  # Client App での表示名 (省略時は id)
 display_description: "..."      # Client App でのツールチップ
@@ -619,9 +619,7 @@ enabled: true
 
 ### 2.4.4 Agent / Backend 設定ファイル (TOML + teravars 変数展開)
 
-Agent / Backend 自体の起動設定は **TOML + Tera テンプレート構文** で記述し、`yukimemi/teravars` crate (v0.1.5+) で読み込む。teravars は `[vars]` セクションの自己参照解決 + `system.*` context + クロスプラットフォーム判定 (`is_windows()` / `is_linux()`) + multi-file merge を一気通貫で提供する。
-
-(teravars は `shun` / `rvpm` / `todoke` / `yui` / `spyrun` の重複パターンを切り出した crate)
+Agent / Backend 自体の起動設定は **TOML + Tera テンプレート構文** で記述し、`yukimemi/teravars` crate (v0.1.5+) で読み込む。teravars は `[vars]` セクションの自己参照解決 + `system.*` context + クロスプラットフォーム判定 (`is_windows()` / `is_linux()`) + multi-file merge を一気通貫で提供します。
 
 #### Cargo.toml 依存
 
@@ -778,7 +776,7 @@ hostname = '{{ system.host }}'
 | `{{ vars.x \| hash }}` | 文字列ハッシュ (Agent ID 生成等に) |
 | `{{ vars.x \| port_offset(start=4222, range=10) }}` | ポート割当 (NATS クラスタ各ノードのポート計算等) |
 
-特に `is_windows()` / `system.host` / `env(default=...)` の 3 つで、Win/Linux 両対応の単一 agent.toml が現実的に書ける。これが teravars 採用の最大のメリット。
+特に `is_windows()` / `system.host` / `env(default=...)` の 3 つで、Win/Linux 両対応の単一 agent.toml が現実的に書ける。これが teravars 採用の最大の利点です。
 
 ## 2.5 配信戦略
 
@@ -827,7 +825,7 @@ while let Some(entry) = watcher.next().await {
 
 ## 2.6 バージョン管理と緊急停止 (3層防御 + オフライン補強)
 
-「古い版が実行される」「revoke 済が実行される」「実行中を止めたい」の 3 つを、それぞれ独立した層で防ぐ。Sprint 6.x までで全層実装済。v0.23.0 で agent 側 local_scheduler が入って **オフライン端末からも fire が起こる** ようになったため、Layer 2 に *staleness policy* を足してオフライン時の挙動を Manifest 側から制御できるようにした (詳細は §2.6.2)。
+「古い版が実行される」「revoke 済が実行される」「実行中を止めたい」の 3 つを、それぞれ独立した層で防ぐ。Sprint 6.x までで全層実装済。v0.23.0 で agent 側 local_scheduler が入って **オフライン端末からも実行が起こる** ようになったため、Layer 2 に *staleness policy* を追加してオフライン時の挙動を Manifest 側から制御できるようにしました (詳細は §2.6.2)。
 
 ### 2.6.1 第1層: Broker 滞留メッセージの置換
 
@@ -873,7 +871,7 @@ if let Some(sta) = &script_status
 
 #### オフライン時の課題
 
-`runs_on: agent` schedule (v0.23.0) は agent の **キャッシュされた `BUCKET_JOBS` 値** から直接 fire する。Agent が broker から切れた状態でも fire できる代わりに、`script_current` / `script_status` のリアルタイム照合が出来ない。素の `if let Ok(Some(_))` 判定だと `get` 失敗が "skipped check" として **silently 素通り** してしまい、revoke 済の命令でも走ってしまう。
+`runs_on: agent` schedule (v0.23.0) は agent の **キャッシュされた `BUCKET_JOBS` 値** から直接 fire する。Agent が broker から切れた状態でも fire できる代わりに、`script_current` / `script_status` のリアルタイム照合が出来ない。素の `if let Ok(Some(_))` 判定だと get 失敗が "skipped check" として**暗黙的にスキップ（素通り）**されてしまい、revoke 済の命令でも走ってしまう。
 
 これは Manifest によって許容度が違う:
 - **緊急パッチ・コンプライアンス系**: 必ず最新が確認できない端末では走らせたくない (= 安全側に倒して skip)
@@ -925,7 +923,7 @@ exec:
 
 `strict` mode のみで意味を持つ。「最後に **broker と同期できていた瞬間** から、どれだけ経過しても cache を信用していいか」 のタイムアウト。
 
-KV watch は push 型なので、agent が broker に接続している限り cache は常に「同期済」と見なせる (broker 側で更新があれば push されてくる契約)。disconnect した瞬間にこの時計が動き出し、再接続で 0 にリセットされる。
+KV watch は push 型なので、agent が broker に接続している限り cache は常に「同期済」と見なせる (broker 側で更新があれば push されてくる契約)。切断された瞬間にタイマーのカウントが開始され、再接続で 0 にリセットされます。
 
 ```rust
 // 概念実装
@@ -1004,9 +1002,9 @@ SPA の Schedule ページに「無効化」 (default = soft) と「無効化 + 
 
 ### 2.6.5 イベント永続化 (revoke の遅延配送)
 
-`BUCKET_SCRIPT_STATUS` の KV watch は agent が online な瞬間しか push を受け取れない。長期オフライン端末が再接続したとき、最新状態 (= REVOKED) は KV watch の初期スナップショットで拾えるが、**「いつ revoke されたか」「途中 unrevoke を経由したか」 は KV だけだと再構成できない**。これは Layer 2 が「最新状態だけ知っていれば十分」 設計だから、原則問題ない。
+`BUCKET_SCRIPT_STATUS` の KV watch は agent が online な瞬間しか push を受け取れない。長期オフライン端末が再接続したとき、最新状態 (= REVOKED) は KV watch の初期スナップショットで取得できるが、**「いつ revoke されたか」「途中 unrevoke を経由したか」 は KV だけだと再構成できない**。これは Layer 2 が「最新状態だけ知っていれば十分」という設計であるため、原則として問題ありません。
 
-ただし、運用上の AUDIT のため、revoke / unrevoke / job delete / schedule disable は同時に EVENTS stream にも publish する (`events.scripts.revoked.{cmd_id}` 等)。AUDIT projector が SQLite に taking で残し、SPA の Audit ページに表示する。
+ただし、運用上の AUDIT のため、revoke / unrevoke / job delete / schedule disable は同時に EVENTS stream にも publish する (`events.scripts.revoked.{cmd_id}` 等)。AUDIT projector が SQLite に監査ログとして記録し、SPA の Audit ページに表示します。
 
 ### 2.6.6 オフライン端末からの fire を考慮した実装責務分担
 
@@ -1258,7 +1256,7 @@ nssm start MgmtBackend
   New-NetFirewallRule -DisplayName "NATS" -Direction Inbound -Protocol TCP -LocalPort 4222 -Action Allow
   New-NetFirewallRule -DisplayName "Mgmt API" -Direction Inbound -Protocol TCP -LocalPort 8080 -Action Allow
   ```
-- **イベントログ**: backend / agent から `tracing-windows-eventlog` で Windows イベントログにも出力すると、運用チームが普段の Win 監視ツールで気付ける
+- **イベントログ**: backend / agent から `tracing-windows-eventlog` で Windows イベントログにも出力すると、運用チームが普段使用している Windows 監視ツールで検知できます
 - **長いパスのサポート**: `LongPathsEnabled` レジストリを有効化しておく (JetStream の data ディレクトリが深くなりがち)
   ```powershell
   Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name LongPathsEnabled -Value 1
@@ -1429,7 +1427,7 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\Run
 
 ## 2.12 KLP (Kanade Local Protocol)
 
-Client App ⇄ Agent の IPC プロトコル。OS の認証機構をそのまま使い、追加の鍵管理を不要にする。「**エンドユーザーに NATS credentials を渡さない**」 をハードに守るための層。
+Client App ⇄ Agent の IPC プロトコル。OS の認証機構をそのまま使い、追加の鍵管理を不要にする。「**エンドユーザーに NATS credentials を渡さない**」 を確実に守るための層。
 
 ### 2.12.1 Transport
 
