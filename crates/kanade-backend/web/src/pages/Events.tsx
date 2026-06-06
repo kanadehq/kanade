@@ -46,6 +46,15 @@ const SINCE_PRESETS: Array<{ value: string; ms: number | null }> = [
   { value: 'all', ms: null },
 ];
 
+// Windows LogonType values offered by the logon_type filter
+// (Issue #366). String-typed because they live in a <select> /
+// URLSearchParams round-trip; the backend parses to i64. Labels
+// resolve via i18n (`filters.logonTypeOptions.*`). The scheduled
+// collector only emits 2/7/10/11 (human sessions), but the
+// on-demand `collect-winlog-logons-all` job backfills the rest —
+// the filter spans both data sets.
+const LOGON_TYPES = ['2', '3', '4', '5', '7', '10', '11'] as const;
+
 const FILTER_DEBOUNCE_MS = 300;
 
 function useDebouncedValue<T>(value: T, delay: number): T {
@@ -102,6 +111,7 @@ export function Events() {
   const [search, setSearch] = useSearchParams();
   const [pcId, setPcId] = useState(search.get('pc') ?? '');
   const [kind, setKind] = useState(search.get('kind') ?? '');
+  const [logonType, setLogonType] = useState(search.get('logon_type') ?? '');
   const [source, setSource] = useState(search.get('source') ?? '');
   const [since, setSince] = useState(search.get('since') ?? '24h');
   const [limit, setLimit] = useState(Number(search.get('limit')) || 200);
@@ -125,22 +135,24 @@ export function Events() {
     const next = new URLSearchParams();
     if (dPcId)   next.set('pc', dPcId);
     if (kind)    next.set('kind', kind);
+    if (logonType) next.set('logon_type', logonType);
     if (dSource) next.set('source', dSource);
     if (since && since !== '24h') next.set('since', since);
     if (limit && limit !== 200)   next.set('limit', String(limit));
     setSearch(next, { replace: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dPcId, kind, dSource, since, limit]);
+  }, [dPcId, kind, logonType, dSource, since, limit]);
 
   const queryString = useMemo(() => {
     const sp = new URLSearchParams();
     sp.set('limit', String(limit));
     if (dPcId)   sp.set('pc_id', dPcId);
     if (kind)    sp.set('kind', kind);
+    if (logonType) sp.set('logon_type', logonType);
     if (dSource) sp.set('source', dSource);
     if (sinceIso) sp.set('from', sinceIso);
     return sp.toString();
-  }, [dPcId, kind, dSource, sinceIso, limit]);
+  }, [dPcId, kind, logonType, dSource, sinceIso, limit]);
 
   const { data, error, isLoading, isFetching } = useQuery({
     queryKey: ['obs_events', queryString],
@@ -188,6 +200,19 @@ export function Events() {
               <option value="">{t('filters.kindOptions.any')}</option>
               {(kindsQ.data?.kinds ?? []).map((k) => (
                 <option key={k} value={k}>{k}</option>
+              ))}
+            </Select>
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="ev-logon-type">{t('filters.logonType')}</Label>
+            <Select
+              id="ev-logon-type"
+              value={logonType}
+              onChange={(e) => setLogonType(e.target.value)}
+            >
+              <option value="">{t('filters.logonTypeOptions.any')}</option>
+              {LOGON_TYPES.map((v) => (
+                <option key={v} value={v}>{t(`filters.logonTypeOptions.${v}`)}</option>
               ))}
             </Select>
           </div>

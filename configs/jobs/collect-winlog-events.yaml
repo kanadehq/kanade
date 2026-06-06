@@ -1,8 +1,9 @@
 # Issue #246 — Windows Event Log → per-PC observability timeline.
 #
-# Pipes Security log (logon / logoff) and System log (boot /
-# shutdown / sleep / resume / unexpected_shutdown) into the
-# `obs_events` stream via the `emit:` manifest block:
+# Pipes Security log (logon / logoff — HUMAN sessions only, see
+# Issue #366) and System log (boot / shutdown / sleep / resume /
+# unexpected_shutdown) into the `obs_events` stream via the
+# `emit:` manifest block:
 #
 #   1. PowerShell script reads its watermark file (one TEXT line
 #      per `(source, kind)` row: `<RecordId>\n`). On first run the
@@ -30,10 +31,21 @@
 # agent already runs as LocalSystem in prod so this is the default
 # anyway; spelt out so a future runas-default change can't silently
 # break event collection.
+#
+# Issue #366: Security 4624 / 4634 are filtered to interactive
+# logon types (2 console / 7 unlock / 10 RDP / 11 cached) and
+# noise principals are dropped (SYSTEM, service accounts, DWM-* /
+# UMFD-*, machine accounts) so the timeline tracks actual humans —
+# unfiltered, SYSTEM's service logons (the agent's own 15-min tick
+# included) drown the signal. For investigations that need every
+# logon, run the on-demand companion job
+# `collect-winlog-logons-all` (separate watermark; the backend's
+# UNIQUE constraint on (pc_id, source, event_record_id) de-dups
+# any overlap with this job).
 
 id: collect-winlog-events
-version: 0.1.0
-description: "Windows Event Log → ObsEvent timeline (logon / logoff / boot / shutdown / sleep / resume)"
+version: 0.2.0
+description: "Windows Event Log → ObsEvent timeline (human logon / logoff / boot / shutdown / sleep / resume)"
 
 execute:
   shell: powershell
@@ -86,11 +98,12 @@ execute:
     # than a config lookup so the agent script is self-contained;
     # adding a new kind = one row + a redeploy.
     #
-    # Security 4624 / 4634 — logon / logoff. We don't filter on
-    # LogonType here (interactive vs network vs batch); the SPA can
-    # filter on `payload.logon_type` if an operator only wants
-    # interactive logons. Capturing all of them keeps the data set
-    # rich for fleet investigations.
+    # Security 4624 / 4634 — logon / logoff. Issue #366: this job
+    # keeps the timeline human-shaped — only interactive logon
+    # types pass and noise principals are dropped (see the gate
+    # constants below the matrix). Operators who need every logon
+    # (service / network / batch) run the on-demand
+    # `collect-winlog-logons-all` job instead.
     #
     # System 12 / 13 — kernel-general boot / shutdown.
     # System 41    — unexpected shutdown (kernel-power, "the system
@@ -110,6 +123,19 @@ execute:
         @{ Log='System';   Id=6005; Kind='log_service_started' }
         @{ Log='System';   Id=6006; Kind='log_service_stopped' }
     )
+
+    # Human-session gate (Issue #366). LogonType allow-list:
+    #   2  = Interactive (console)
+    #   7  = Unlock
+    #   10 = RemoteInteractive (RDP)
+    #   11 = CachedInteractive (offline domain logon)
+    # Everything else (0/5 service, 3 network, 4 batch, ...) is
+    # machine noise on a "who is using this PC" timeline. Account
+    # deny-list: built-in service principals, window-manager
+    # (DWM-n) / font-driver (UMFD-n) sessions — which DO log on
+    # with type 2 — and machine accounts (trailing `$`).
+    $humanLogonTypes = @(2, 7, 10, 11)
+    $noiseUserPattern = '^(SYSTEM|LOCAL SERVICE|NETWORK SERVICE|ANONYMOUS LOGON)$|^(DWM|UMFD)-\d+$|\$$'
 
     # Bootstrap window for first run / new (log, kind) entries. 24h
     # keeps the seeded set bounded; the watermark immediately moves
@@ -145,26 +171,42 @@ execute:
         $maxSeen = $cutoff
         foreach ($e in $events) {
             if ($null -ne $cutoff -and $e.RecordId -le $cutoff) { continue }
+            # Watermark advances over EVERY event walked — including
+            # the ones the human gate drops below — so the next tick
+            # never re-scans (and never re-classifies) skipped noise.
+            if ($null -eq $maxSeen -or $e.RecordId -gt $maxSeen) { $maxSeen = $e.RecordId }
             $payload = $null
-            if ($s.Log -eq 'Security' -and $s.Id -eq 4624) {
+            if ($s.Log -eq 'Security') {
                 # 4624 schema: TargetUserName (event[5]), LogonType (event[8]).
+                # 4634 schema: TargetUserName (event[1]), LogonType (event[4]).
                 # `Properties` ordering is stable across Win 10+/Server.
                 # Gemini #250 medium: null-check Properties before
                 # `.Count` — exotic event-source corruption can leave
                 # `$e.Properties` null even when the row itself exists.
-                if ($null -ne $e.Properties -and $e.Properties.Count -ge 9) {
-                    $payload = @{
-                        user       = [string]$e.Properties[5].Value
-                        logon_type = [int]$e.Properties[8].Value
-                    }
+                # Explicit per-ID property map — a future Security
+                # ID added to the matrix (4625 failed logon, 4647
+                # user-initiated logoff, ...) must get its own row
+                # here instead of silently inheriting 4634's
+                # indices (Gemini #368 medium). NOT a `switch`:
+                # `continue` inside a PowerShell switch targets the
+                # switch, not the enclosing foreach.
+                $userIdx = $null
+                $typeIdx = $null
+                if ($s.Id -eq 4624)     { $userIdx = 5; $typeIdx = 8 }
+                elseif ($s.Id -eq 4634) { $userIdx = 1; $typeIdx = 4 }
+                if ($null -eq $typeIdx) { continue }
+                if ($null -eq $e.Properties -or $e.Properties.Count -le $typeIdx) {
+                    # Unclassifiable row (corrupt / truncated event):
+                    # skip rather than leak unknown noise onto the
+                    # human timeline. `collect-winlog-logons-all`
+                    # still captures it for forensics.
+                    continue
                 }
-            } elseif ($s.Log -eq 'Security' -and $s.Id -eq 4634) {
-                if ($null -ne $e.Properties -and $e.Properties.Count -ge 5) {
-                    $payload = @{
-                        user       = [string]$e.Properties[1].Value
-                        logon_type = [int]$e.Properties[4].Value
-                    }
-                }
+                $user      = [string]$e.Properties[$userIdx].Value
+                $logonType = [int]$e.Properties[$typeIdx].Value
+                if ($humanLogonTypes -notcontains $logonType) { continue }
+                if ($user -match $noiseUserPattern) { continue }
+                $payload = @{ user = $user; logon_type = $logonType }
             }
             # `ConvertTo-Json -Depth 5 -Compress` keeps one JSON
             # value per `Write-Output`; the agent splits stdout on
@@ -178,7 +220,6 @@ execute:
                 payload         = $payload
             }
             Write-Output ($obj | ConvertTo-Json -Depth 5 -Compress)
-            if ($null -eq $maxSeen -or $e.RecordId -gt $maxSeen) { $maxSeen = $e.RecordId }
         }
         if ($null -ne $maxSeen -and $maxSeen -ne $cutoff) { $watermarks[$key] = $maxSeen }
     }
