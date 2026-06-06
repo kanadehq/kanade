@@ -80,5 +80,14 @@ pub async fn record(
     };
     if let Err(e) = client.publish(subject.clone(), body.into()).await {
         warn!(error = %e, subject = %subject, "audit publish failed");
+        return;
+    }
+    // publish() only buffers — the CLI process exits right after most
+    // commands, racing the background flusher, and a lost race silently
+    // drops the event (live test: 3 of 4 deploy-flow audits landed, the
+    // one straight after a 42 MB upload didn't). Flush so the event is
+    // on the wire before the command returns.
+    if let Err(e) = client.flush().await {
+        warn!(error = %e, subject = %subject, "audit flush failed");
     }
 }
