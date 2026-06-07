@@ -19,7 +19,9 @@ use crate::audit::Caller;
 #[derive(Serialize)]
 pub struct ScheduleSummary {
     pub id: String,
-    pub cron: String,
+    /// Operator-facing one-liner (`When`'s Display): `per_pc once`,
+    /// `per_pc every 6h`, `cron: 0 0 9 * * mon-fri`, …
+    pub when: String,
     pub enabled: bool,
     pub job_id: String,
 }
@@ -66,6 +68,33 @@ pub async fn create(
         value: schedule,
         raw_yaml,
     } = body;
+
+    // #418 decision F: reject broken schedules at create time
+    // instead of letting them sit in KV and warn-skip every tick.
+    // validate() covers the pure cross-field rules; the job_id
+    // existence check needs the JOBS KV, so it lives here.
+    if let Err(e) = schedule.validate() {
+        return Err((StatusCode::BAD_REQUEST, format!("invalid schedule: {e}")));
+    }
+    match crate::api::jobs::fetch(&s.jetstream, &schedule.job_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "unknown job_id '{}' — register the job first (kanade job create)",
+                    schedule.job_id
+                ),
+            ));
+        }
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("job catalog lookup: {e}"),
+            ));
+        }
+    }
+
     // Make sure the KV bucket exists (idempotent).
     let kv = s
         .jetstream
@@ -100,7 +129,7 @@ pub async fn create(
 
     info!(
         schedule_id = %schedule.id,
-        cron = %schedule.cron,
+        when = %schedule.when,
         job_id = %schedule.job_id,
         "schedule upserted",
     );
@@ -111,7 +140,7 @@ pub async fn create(
         Some(&schedule.id),
         Some(&caller),
         serde_json::json!({
-            "cron": schedule.cron,
+            "when": schedule.when.to_string(),
             "job_id": schedule.job_id,
             "enabled": schedule.enabled,
         }),
@@ -119,7 +148,7 @@ pub async fn create(
     .await;
     Ok(Json(ScheduleSummary {
         id: schedule.id.clone(),
-        cron: schedule.cron.clone(),
+        when: schedule.when.to_string(),
         enabled: schedule.enabled,
         job_id: schedule.job_id.clone(),
     }))
