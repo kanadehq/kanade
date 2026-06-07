@@ -8,6 +8,8 @@
 //!   omitting them all returns the most recent events fleet-wide.
 //! - `GET /api/obs_events/kinds` — distinct `kind` strings the
 //!   SPA's filter chip needs to populate without a separate query.
+//! - `GET /api/obs_events/sources` — distinct `source` strings for
+//!   the include/exclude chips (Issue #391).
 //! - `GET /api/obs_events/recent?limit=` — convenience alias for
 //!   "newest N events fleet-wide" (same as `obs_events` with no
 //!   `pc_id` and `limit` default 50).
@@ -52,9 +54,49 @@ pub struct ListQuery {
     /// 4 batch, 5 service, 7 unlock, 10 RDP, 11 cached. Only
     /// logon/logoff events carry the field, so combining this
     /// with a non-logon `kind` filter returns nothing — which is
-    /// the honest answer.
+    /// the honest answer. Kept for URL compatibility; the SPA now
+    /// sends the generic `payload_key`/`payload_value` pair
+    /// (Issue #391) instead.
     pub logon_type: Option<i64>,
+    /// Issue #391: comma-separated include / exclude lists for
+    /// `kind` and `source`. Both compose with the single-value
+    /// `kind` / `source` gates above (which stay for URL
+    /// compatibility); an empty include list (after splitting)
+    /// means "no constraint", same as absent.
+    pub kinds: Option<String>,
+    pub kinds_ex: Option<String>,
+    pub sources: Option<String>,
+    pub sources_ex: Option<String>,
+    /// Issue #391: generic payload filter — `payload_key=user` +
+    /// `payload_value=yukimemi` matches rows whose
+    /// `payload.<key> == <value>`. The key is restricted to
+    /// `[A-Za-z0-9_]+` (400 otherwise) so the `'$.' || ?` path
+    /// concat below can't be steered into other JSONPath syntax.
+    /// The value is matched as text AND, when it parses as a
+    /// number, numerically — so `payload_value=2` matches the
+    /// JSON number 2 that the collectors emit.
+    pub payload_key: Option<String>,
+    pub payload_value: Option<String>,
     pub limit: Option<i64>,
+}
+
+/// Turn a comma-separated filter list into the JSON-array string
+/// the `json_each(?)` binds expect. Blank segments are dropped;
+/// an empty result collapses to `None` ("no constraint") so a
+/// trailing comma can't accidentally filter everything out.
+fn csv_to_json_array(csv: &Option<String>) -> Option<String> {
+    let vals: Vec<&str> = csv
+        .as_deref()?
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if vals.is_empty() {
+        return None;
+    }
+    // Values are data, not SQL — serde_json escaping keeps the
+    // array well-formed whatever the kind/source strings contain.
+    serde_json::to_string(&vals).ok()
 }
 
 #[derive(Serialize)]
@@ -86,6 +128,34 @@ pub async fn list(
         _ => return Err(StatusCode::BAD_REQUEST),
     };
 
+    // Issue #391: payload key allow-list — the key is interpolated
+    // into a JSONPath via `'$.' || ?`, so anything beyond
+    // identifier characters (quotes, brackets, dots) is rejected
+    // up front rather than left to SQLite's path parser.
+    let payload_key = match q.payload_key.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(k) if k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') => Some(k),
+        Some(_) => return Err(StatusCode::BAD_REQUEST),
+    };
+    // The pair only constrains when BOTH halves are present —
+    // otherwise neutralise it entirely. A key without a value
+    // would otherwise bind `?12` to NULL and the
+    // `json_extract(...) = NULL` comparison blanks the whole
+    // result set for direct API callers (Gemini #394 medium; the
+    // SPA always sends both).
+    let payload_value = payload_key.and(q.payload_value.as_deref());
+    let payload_key = payload_value.and(payload_key);
+    // Numeric twin: collectors emit numbers as JSON numbers
+    // (logon_type: 2), and SQLite's `json_extract` returns them
+    // typed — a text-only bind would never match. f64 covers i64
+    // payload values under SQLite's numeric comparison rules.
+    let payload_value_num: Option<f64> = payload_value.and_then(|v| v.parse().ok());
+
+    let kinds_json = csv_to_json_array(&q.kinds);
+    let kinds_ex_json = csv_to_json_array(&q.kinds_ex);
+    let sources_json = csv_to_json_array(&q.sources);
+    let sources_ex_json = csv_to_json_array(&q.sources_ex);
+
     // Static SQL with "param IS NULL OR column = param" gates per
     // optional filter. Equivalent to building a dynamic WHERE on
     // the fly but keeps the SQL string a `&'static str`, which is
@@ -100,6 +170,13 @@ pub async fn list(
     // No index on the expression — acceptable because the filter
     // composes with the indexed gates above and the table is
     // cleanup-bounded (see cleanup.rs).
+    // Issue #391 additions keep the same static-SQL discipline:
+    // the include/exclude lists arrive as JSON-array strings and
+    // unpack inside SQLite via `json_each(?)` — one bind per list,
+    // no dynamic IN-clause assembly. The generic payload gate
+    // builds its JSONPath from a validated identifier (`'$.' || ?`)
+    // and compares against the text bind plus, when the value is
+    // numeric, the f64 twin.
     let rows = sqlx::query(
         "SELECT id, pc_id, at, kind, source, event_record_id, payload
          FROM obs_events
@@ -109,8 +186,15 @@ pub async fn list(
            AND (?4 IS NULL OR kind   = ?4)
            AND (?5 IS NULL OR source = ?5)
            AND (?6 IS NULL OR json_extract(payload, '$.logon_type') = ?6)
+           AND (?7 IS NULL OR kind   IN     (SELECT value FROM json_each(?7)))
+           AND (?8 IS NULL OR kind   NOT IN (SELECT value FROM json_each(?8)))
+           AND (?9 IS NULL OR source IN     (SELECT value FROM json_each(?9)))
+           AND (?10 IS NULL OR source NOT IN (SELECT value FROM json_each(?10)))
+           AND (?11 IS NULL
+                OR json_extract(payload, '$.' || ?11) = ?12
+                OR (?13 IS NOT NULL AND json_extract(payload, '$.' || ?11) = ?13))
          ORDER BY at DESC, id DESC
-         LIMIT ?7",
+         LIMIT ?14",
     )
     .bind(q.pc_id.as_deref())
     .bind(q.from)
@@ -118,6 +202,13 @@ pub async fn list(
     .bind(q.kind.as_deref())
     .bind(q.source.as_deref())
     .bind(q.logon_type)
+    .bind(kinds_json)
+    .bind(kinds_ex_json)
+    .bind(sources_json)
+    .bind(sources_ex_json)
+    .bind(payload_key)
+    .bind(payload_value)
+    .bind(payload_value_num)
     .bind(limit)
     .fetch_all(&pool)
     .await
@@ -199,6 +290,34 @@ pub async fn kinds(State(pool): State<SqlitePool>) -> Result<Json<KindsResponse>
         })
         .collect();
     Ok(Json(KindsResponse { kinds }))
+}
+
+#[derive(Serialize)]
+pub struct SourcesResponse {
+    pub sources: Vec<String>,
+}
+
+/// `GET /api/obs_events/sources` (Issue #391) — distinct `source`
+/// strings for the SPA's include/exclude chips, mirroring `kinds`.
+pub async fn sources(State(pool): State<SqlitePool>) -> Result<Json<SourcesResponse>, StatusCode> {
+    let rows = sqlx::query("SELECT DISTINCT source FROM obs_events ORDER BY source")
+        .fetch_all(&pool)
+        .await
+        .map_err(|e| {
+            warn!(error = %e, "obs_events sources query");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    let sources = rows
+        .into_iter()
+        .filter_map(|r| match r.try_get::<String, _>("source") {
+            Ok(s) => Some(s),
+            Err(e) => {
+                warn!(error = %e, "obs_events sources: drop row that failed to decode source");
+                None
+            }
+        })
+        .collect();
+    Ok(Json(SourcesResponse { sources }))
 }
 
 #[derive(Deserialize)]

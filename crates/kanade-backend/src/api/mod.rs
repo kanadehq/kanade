@@ -130,6 +130,8 @@ pub fn router(state: AppState) -> Router {
         // `recent` is the dashboard "latest activity" feed.
         .route("/api/obs_events", get(obs_events::list))
         .route("/api/obs_events/kinds", get(obs_events::kinds))
+        // Issue #391: distinct sources for the include/exclude chips.
+        .route("/api/obs_events/sources", get(obs_events::sources))
         .route("/api/obs_events/recent", get(obs_events::recent))
         .route(
             "/api/perf/active-investigations",

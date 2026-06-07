@@ -14,28 +14,23 @@
   },
   "filters": {
     "pcId": "pc",
-    "kind": "kind",
-    "logonType": "logon type",
+    "kinds": "kind",
+    "sources": "source",
+    "chipHint": "(click: include → exclude → off)",
+    "chipStates": {
+      "off": "not filtered",
+      "include": "included",
+      "exclude": "excluded"
+    },
+    "payload": "payload (key = value)",
     "dedupe": "collapse duplicates",
-    "source": "source",
+    "forensicNote": "logon_type only exists on collect-winlog-logons-all data and pre-#378 rows (before the Winlogon source switch); duplicates there are UAC split-token pairs.",
     "since": "since",
     "limit": "limit",
     "placeholders": {
       "pcId": "exact match — eg. pc-01",
-      "source": "exact match — eg. winlog:Security"
-    },
-    "kindOptions": {
-      "any": "(any)"
-    },
-    "logonTypeOptions": {
-      "any": "(any)",
-      "2": "2 — interactive (console)",
-      "3": "3 — network",
-      "4": "4 — batch (scheduled task)",
-      "5": "5 — service",
-      "7": "7 — unlock",
-      "10": "10 — remote (RDP)",
-      "11": "11 — cached interactive"
+      "payloadKey": "key — eg. user",
+      "payloadValue": "value — eg. yukimemi"
     },
     "sincePresets": {
       "1h": "last 1h",

@@ -14,28 +14,23 @@
   },
   "filters": {
     "pcId": "PC",
-    "kind": "種別",
-    "logonType": "ログオン種別",
+    "kinds": "種別",
+    "sources": "ソース",
+    "chipHint": "(クリック: 含む → 除外 → 解除)",
+    "chipStates": {
+      "off": "未選択",
+      "include": "含む",
+      "exclude": "除外"
+    },
+    "payload": "payload (キー = 値)",
     "dedupe": "重複を畳む",
-    "source": "ソース",
+    "forensicNote": "logon_type は collect-winlog-logons-all のデータと #378 以前の行 (Winlogon ソース移行前) にのみ存在します。そこでの重複は UAC スプリットトークンのペアです。",
     "since": "期間",
     "limit": "件数",
     "placeholders": {
       "pcId": "完全一致 — 例: pc-01",
-      "source": "完全一致 — 例: winlog:Security"
-    },
-    "kindOptions": {
-      "any": "(すべて)"
-    },
-    "logonTypeOptions": {
-      "any": "(すべて)",
-      "2": "2 — 対話 (コンソール)",
-      "3": "3 — ネットワーク",
-      "4": "4 — バッチ (タスクスケジューラ)",
-      "5": "5 — サービス",
-      "7": "7 — ロック解除",
-      "10": "10 — リモート (RDP)",
-      "11": "11 — キャッシュ対話"
+      "payloadKey": "キー — 例: user",
+      "payloadValue": "値 — 例: yukimemi"
     },
     "sincePresets": {
       "1h": "直近 1 時間",
