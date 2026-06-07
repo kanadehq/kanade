@@ -619,7 +619,8 @@ execute:
     fn schedule_carries_target_and_rollout() {
         let yaml = r#"
 id: hourly-cleanup-canary
-cron: "0 0 * * * *"
+when:
+  per_pc: { every: 1h }
 job_id: cleanup
 enabled: true
 target:
@@ -646,27 +647,30 @@ rollout:
     #[test]
     fn schedule_minimal_target_all() {
         let yaml = r#"
-id: every-10s
-cron: "*/10 * * * * *"
+id: kitting
+when:
+  per_pc: once
 enabled: true
 job_id: scheduled-echo
 target: { all: true }
 "#;
         let s: Schedule = serde_yaml::from_str(yaml).expect("parse");
-        assert_eq!(s.id, "every-10s");
-        assert_eq!(s.cron, "*/10 * * * * *");
+        assert_eq!(s.id, "kitting");
+        assert_eq!(s.when, When::PerPc(PerPolicy::Once(OnceLiteral::Once)));
         assert!(s.enabled);
         assert_eq!(s.job_id, "scheduled-echo");
         assert!(s.plan.target.all);
         assert!(s.plan.rollout.is_none());
         assert!(s.plan.jitter.is_none());
+        assert!(s.active.is_empty());
     }
 
     #[test]
     fn schedule_enabled_defaults_to_true() {
         let yaml = r#"
 id: x
-cron: "* * * * * *"
+when:
+  per_pc: once
 job_id: y
 target: { all: true }
 "#;
@@ -674,22 +678,394 @@ target: { all: true }
         assert!(s.enabled);
     }
 
+    // ---- `when` parsing (#418 Phase 1) ----
+
+    fn schedule_yaml_with(when_block: &str) -> String {
+        format!(
+            r#"
+id: x
+when:
+{when_block}
+job_id: y
+target: {{ all: true }}
+"#
+        )
+    }
+
     #[test]
-    fn schedule_mode_defaults_to_every_tick() {
+    fn when_per_pc_every_parses_unquoted_humantime() {
+        // `6h` is digit-led but non-numeric → YAML string, same as
+        // the old `cooldown: 6h` convention. No quotes needed.
+        let s: Schedule =
+            serde_yaml::from_str(&schedule_yaml_with("  per_pc: { every: 6h }")).expect("parse");
+        assert_eq!(
+            s.when,
+            When::PerPc(PerPolicy::Every(EverySpec { every: "6h".into() }))
+        );
+    }
+
+    #[test]
+    fn when_per_target_every_parses() {
+        let s: Schedule = serde_yaml::from_str(&schedule_yaml_with("  per_target: { every: 24h }"))
+            .expect("parse");
+        assert_eq!(
+            s.when,
+            When::PerTarget(PerPolicy::Every(EverySpec {
+                every: "24h".into()
+            }))
+        );
+    }
+
+    #[test]
+    fn when_per_target_once_parses() {
+        // Falls out of the shared PerPolicy shape and decide_fire
+        // already implements it ("any one pc succeeds → skip the
+        // target forever"), so it is allowed, not rejected.
+        let s: Schedule =
+            serde_yaml::from_str(&schedule_yaml_with("  per_target: once")).expect("parse");
+        assert_eq!(s.when, When::PerTarget(PerPolicy::Once(OnceLiteral::Once)));
+    }
+
+    #[test]
+    fn when_cron_escape_hatch_parses() {
+        let s: Schedule =
+            serde_yaml::from_str(&schedule_yaml_with("  cron: \"0 0 9 * * mon-fri\""))
+                .expect("parse");
+        assert_eq!(s.when, When::Cron("0 0 9 * * mon-fri".into()));
+    }
+
+    #[test]
+    fn when_rejects_bad_once_keyword() {
+        // `onec` must be a parse error, not a silently-absorbed
+        // string (OnceLiteral is a single-variant enum for exactly
+        // this reason).
+        let r: Result<Schedule, _> = serde_yaml::from_str(&schedule_yaml_with("  per_pc: onec"));
+        assert!(r.is_err(), "expected parse error, got {r:?}");
+    }
+
+    #[test]
+    fn when_rejects_unknown_key_in_every() {
+        // EverySpec is deny_unknown_fields so `evry:` typos fail
+        // even under the untagged PerPolicy.
+        let r: Result<Schedule, _> =
+            serde_yaml::from_str(&schedule_yaml_with("  per_pc: { evry: 6h }"));
+        assert!(r.is_err(), "expected parse error, got {r:?}");
+    }
+
+    #[test]
+    fn when_rejects_unknown_variant() {
+        let r: Result<Schedule, _> =
+            serde_yaml::from_str(&schedule_yaml_with("  per_galaxy: once"));
+        assert!(r.is_err(), "expected parse error, got {r:?}");
+    }
+
+    #[test]
+    fn when_rejects_old_top_level_cron_field() {
+        // Pre-#418 shape: top-level `cron:` + no `when:`. Must fail
+        // loudly (missing `when`), which is what turns stale KV
+        // blobs into warn-skips after the upgrade.
         let yaml = r#"
 id: x
 cron: "* * * * * *"
 job_id: y
 target: { all: true }
 "#;
-        let s: Schedule = serde_yaml::from_str(yaml).expect("parse");
-        assert_eq!(s.mode, ExecMode::EveryTick);
-        assert!(s.cooldown.is_none());
-        assert!(!s.auto_disable_when_done);
+        let r: Result<Schedule, _> = serde_yaml::from_str(yaml);
+        assert!(r.is_err(), "expected parse error, got {r:?}");
     }
 
     #[test]
-    fn schedule_mode_serialises_snake_case() {
+    fn when_round_trips_json_and_yaml() {
+        // Round-trip through the full Schedule: that is the wire
+        // unit for both stores (JSON catalog KV + YAML mirror), and
+        // it exercises the singleton_map field attribute that keeps
+        // serde_yaml on the map shape instead of `!per_pc` tags.
+        for when in [
+            When::PerPc(PerPolicy::Once(OnceLiteral::Once)),
+            When::PerPc(PerPolicy::Every(EverySpec { every: "6h".into() })),
+            When::PerTarget(PerPolicy::Once(OnceLiteral::Once)),
+            When::PerTarget(PerPolicy::Every(EverySpec {
+                every: "24h".into(),
+            })),
+            When::Cron("0 0 9 * * mon-fri".into()),
+        ] {
+            let s = schedule_with(when.clone(), RunsOn::Backend);
+
+            let json = serde_json::to_string(&s).expect("json serialise");
+            let back: Schedule = serde_json::from_str(&json).expect("json deserialise");
+            assert_eq!(back.when, when, "json round-trip for {when}");
+
+            let yaml = serde_yaml::to_string(&s).expect("yaml serialise");
+            assert!(
+                !yaml.contains('!'),
+                "yaml must use the map shape, not tags: {yaml}"
+            );
+            let back: Schedule = serde_yaml::from_str(&yaml).expect("yaml deserialise");
+            assert_eq!(back.when, when, "yaml round-trip for {when}");
+        }
+    }
+
+    #[test]
+    fn when_once_serialises_as_bare_keyword() {
+        // The wire shape operators see in the YAML mirror must stay
+        // the ergonomic `per_pc: once`, not a one-variant map.
+        let json = serde_json::to_value(When::PerPc(PerPolicy::Once(OnceLiteral::Once)))
+            .expect("serialise");
+        assert_eq!(json, serde_json::json!({ "per_pc": "once" }));
+    }
+
+    #[test]
+    fn when_displays_operator_summary() {
+        for (when, expected) in [
+            (
+                When::PerPc(PerPolicy::Once(OnceLiteral::Once)),
+                "per_pc once",
+            ),
+            (
+                When::PerPc(PerPolicy::Every(EverySpec { every: "6h".into() })),
+                "per_pc every 6h",
+            ),
+            (
+                When::PerTarget(PerPolicy::Every(EverySpec {
+                    every: "24h".into(),
+                })),
+                "per_target every 24h",
+            ),
+            (
+                When::Cron("0 0 9 * * mon-fri".into()),
+                "cron: 0 0 9 * * mon-fri",
+            ),
+        ] {
+            assert_eq!(when.to_string(), expected);
+        }
+    }
+
+    // ---- lowering (#418: when → engine vocabulary) ----
+
+    fn schedule_with(when: When, runs_on: RunsOn) -> Schedule {
+        Schedule {
+            id: "x".into(),
+            when,
+            job_id: "y".into(),
+            plan: FanoutPlan::default(),
+            active: Active::default(),
+            starting_deadline: None,
+            runs_on,
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn lowering_matches_the_418_table() {
+        let cases = [
+            (
+                When::PerPc(PerPolicy::Once(OnceLiteral::Once)),
+                (POLL_CRON, ExecMode::OncePerPc, None),
+            ),
+            (
+                When::PerPc(PerPolicy::Every(EverySpec { every: "6h".into() })),
+                (POLL_CRON, ExecMode::OncePerPc, Some("6h")),
+            ),
+            (
+                When::PerTarget(PerPolicy::Once(OnceLiteral::Once)),
+                (POLL_CRON, ExecMode::OncePerTarget, None),
+            ),
+            (
+                When::PerTarget(PerPolicy::Every(EverySpec {
+                    every: "24h".into(),
+                })),
+                (POLL_CRON, ExecMode::OncePerTarget, Some("24h")),
+            ),
+            (
+                When::Cron("0 0 9 * * mon-fri".into()),
+                ("0 0 9 * * mon-fri", ExecMode::EveryTick, None),
+            ),
+        ];
+        for (when, (cron, mode, cooldown)) in cases {
+            let l = schedule_with(when.clone(), RunsOn::Backend).lowered();
+            assert_eq!(l.cron, cron, "cron for {when}");
+            assert_eq!(l.mode, mode, "mode for {when}");
+            assert_eq!(l.cooldown.as_deref(), cooldown, "cooldown for {when}");
+        }
+    }
+
+    #[test]
+    fn poll_cron_is_accepted_by_the_engine_parser() {
+        // POLL_CRON is system-generated — if the engine's parser
+        // ever rejected it every reconcile schedule would die at
+        // register time. Validate it with the same croner config.
+        let s = schedule_with(When::Cron(POLL_CRON.into()), RunsOn::Backend);
+        s.validate().expect("POLL_CRON must be valid");
+    }
+
+    // ---- Schedule::validate() (#418 decision F) ----
+
+    #[test]
+    fn validate_accepts_reconcile_shapes() {
+        for when in [
+            When::PerPc(PerPolicy::Once(OnceLiteral::Once)),
+            When::PerPc(PerPolicy::Every(EverySpec { every: "6h".into() })),
+            When::PerTarget(PerPolicy::Every(EverySpec {
+                every: "24h".into(),
+            })),
+        ] {
+            schedule_with(when.clone(), RunsOn::Backend)
+                .validate()
+                .unwrap_or_else(|e| panic!("{when} should validate: {e}"));
+        }
+    }
+
+    #[test]
+    fn validate_accepts_per_pc_on_agent() {
+        schedule_with(
+            When::PerPc(PerPolicy::Every(EverySpec { every: "1h".into() })),
+            RunsOn::Agent,
+        )
+        .validate()
+        .expect("per_pc + agent is the offline-inventory shape");
+    }
+
+    #[test]
+    fn validate_rejects_per_target_on_agent() {
+        let err = schedule_with(
+            When::PerTarget(PerPolicy::Every(EverySpec {
+                every: "24h".into(),
+            })),
+            RunsOn::Agent,
+        )
+        .validate()
+        .unwrap_err();
+        assert!(err.contains("per_target"), "got: {err}");
+        assert!(err.contains("runs_on: agent"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_bad_every_duration() {
+        let err = schedule_with(
+            When::PerPc(PerPolicy::Every(EverySpec { every: "6x".into() })),
+            RunsOn::Backend,
+        )
+        .validate()
+        .unwrap_err();
+        assert!(err.contains("when.every"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_bad_cron() {
+        for bad in ["not a cron", "* * * * *", "99 * * * * *"] {
+            let err = schedule_with(When::Cron(bad.into()), RunsOn::Backend)
+                .validate()
+                .unwrap_err();
+            assert!(err.contains("when.cron"), "for '{bad}', got: {err}");
+        }
+    }
+
+    #[test]
+    fn validate_accepts_engine_cron() {
+        // The morning-greeting expression — the escape hatch's
+        // raison d'être — must pass.
+        schedule_with(When::Cron("0 0 9 * * mon-fri".into()), RunsOn::Backend)
+            .validate()
+            .expect("week-day cron should validate");
+    }
+
+    fn schedule_with_active(from: Option<&str>, until: Option<&str>) -> Schedule {
+        let mut s = schedule_with(
+            When::PerPc(PerPolicy::Once(OnceLiteral::Once)),
+            RunsOn::Backend,
+        );
+        s.active = Active {
+            from: from.map(str::to_owned),
+            until: until.map(str::to_owned),
+        };
+        s
+    }
+
+    #[test]
+    fn validate_accepts_active_window() {
+        schedule_with_active(Some("2026-07-01"), Some("2026-08-01T12:00:00+09:00"))
+            .validate()
+            .expect("date + rfc3339 bounds should validate");
+    }
+
+    #[test]
+    fn validate_rejects_unparseable_active_bound() {
+        let err = schedule_with_active(Some("July 1st"), None)
+            .validate()
+            .unwrap_err();
+        assert!(err.contains("active"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_from_not_before_until() {
+        let err = schedule_with_active(Some("2026-08-01"), Some("2026-07-01"))
+            .validate()
+            .unwrap_err();
+        assert!(err.contains("strictly before"), "got: {err}");
+
+        let err = schedule_with_active(Some("2026-07-01"), Some("2026-07-01"))
+            .validate()
+            .unwrap_err();
+        assert!(err.contains("strictly before"), "got: {err}");
+    }
+
+    // ---- Active window semantics ----
+
+    #[test]
+    fn active_window_is_half_open() {
+        use chrono::TimeZone;
+        let active = Active {
+            from: Some("2026-07-01".into()),
+            until: Some("2026-08-01".into()),
+        };
+        let at = |y, m, d, h| chrono::Utc.with_ymd_and_hms(y, m, d, h, 0, 0).unwrap();
+        assert!(!active.contains(at(2026, 6, 30, 23)), "before from");
+        assert!(active.contains(at(2026, 7, 1, 0)), "at from (inclusive)");
+        assert!(active.contains(at(2026, 7, 15, 12)), "inside");
+        assert!(!active.contains(at(2026, 8, 1, 0)), "at until (exclusive)");
+        assert!(!active.contains(at(2026, 8, 2, 0)), "after until");
+    }
+
+    #[test]
+    fn active_empty_window_is_always_active() {
+        assert!(Active::default().contains(chrono::Utc::now()));
+    }
+
+    #[test]
+    fn active_rfc3339_bound_honours_offset() {
+        use chrono::TimeZone;
+        let active = Active {
+            from: Some("2026-07-01T09:00:00+09:00".into()),
+            until: None,
+        };
+        // 09:00 JST = 00:00 UTC.
+        assert!(
+            !active.contains(
+                chrono::Utc
+                    .with_ymd_and_hms(2026, 6, 30, 23, 59, 0)
+                    .unwrap()
+            )
+        );
+        assert!(active.contains(chrono::Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap()));
+    }
+
+    #[test]
+    fn active_empty_is_skipped_when_serialising() {
+        let s = schedule_with(
+            When::PerPc(PerPolicy::Once(OnceLiteral::Once)),
+            RunsOn::Backend,
+        );
+        let json = serde_json::to_value(&s).expect("serialise");
+        assert!(
+            json.get("active").is_none(),
+            "empty active must not appear on the wire: {json}"
+        );
+    }
+
+    // ---- pre-existing enum wire formats (unchanged by #418) ----
+
+    #[test]
+    fn exec_mode_serialises_snake_case() {
         for (mode, expected) in [
             (ExecMode::EveryTick, "every_tick"),
             (ExecMode::OncePerPc, "once_per_pc"),
@@ -704,58 +1080,11 @@ target: { all: true }
     }
 
     #[test]
-    fn schedule_kitting_yaml_parses() {
-        let yaml = r#"
-id: kitting-setup
-cron: "*/30 * * * * *"
-job_id: install-baseline
-target: { all: true }
-mode: once_per_pc
-"#;
-        let s: Schedule = serde_yaml::from_str(yaml).expect("parse");
-        assert_eq!(s.mode, ExecMode::OncePerPc);
-        assert!(s.cooldown.is_none());
-        assert!(!s.auto_disable_when_done);
-    }
-
-    #[test]
-    fn schedule_batch_campaign_yaml_parses() {
-        let yaml = r#"
-id: q3-patch-batch
-cron: "*/5 * * * * *"
-job_id: install-patch
-target:
-  pcs: [pc-001, pc-002, pc-003]
-mode: once_per_pc
-auto_disable_when_done: true
-"#;
-        let s: Schedule = serde_yaml::from_str(yaml).expect("parse");
-        assert_eq!(s.mode, ExecMode::OncePerPc);
-        assert!(s.cooldown.is_none());
-        assert!(s.auto_disable_when_done);
-        assert_eq!(s.plan.target.pcs.len(), 3);
-    }
-
-    #[test]
-    fn schedule_throttled_yaml_parses() {
-        let yaml = r#"
-id: daily-compliance
-cron: "*/5 * * * * *"
-job_id: check-av-status
-target: { all: true }
-mode: once_per_pc
-cooldown: 1d
-"#;
-        let s: Schedule = serde_yaml::from_str(yaml).expect("parse");
-        assert_eq!(s.mode, ExecMode::OncePerPc);
-        assert_eq!(s.cooldown.as_deref(), Some("1d"));
-    }
-
-    #[test]
     fn schedule_runs_on_defaults_to_backend() {
         let yaml = r#"
 id: x
-cron: "* * * * * *"
+when:
+  per_pc: once
 job_id: y
 target: { all: true }
 "#;
@@ -767,15 +1096,15 @@ target: { all: true }
     fn schedule_runs_on_agent_parses() {
         let yaml = r#"
 id: offline-inv
-cron: "0 0 * * * *"
+when:
+  per_pc: { every: 1h }
 job_id: inventory-hw
 target: { all: true }
 runs_on: agent
-mode: once_per_pc
 "#;
         let s: Schedule = serde_yaml::from_str(yaml).expect("parse");
         assert_eq!(s.runs_on, RunsOn::Agent);
-        assert_eq!(s.mode, ExecMode::OncePerPc);
+        assert_eq!(s.lowered().mode, ExecMode::OncePerPc);
     }
 
     #[test]
@@ -787,21 +1116,6 @@ mode: once_per_pc
                 .expect("deserialise");
             assert_eq!(back, mode);
         }
-    }
-
-    #[test]
-    fn schedule_once_per_target_yaml_parses() {
-        let yaml = r#"
-id: license-checkin
-cron: "*/10 * * * * *"
-job_id: hit-license-server
-target: { all: true }
-mode: once_per_target
-cooldown: 24h
-"#;
-        let s: Schedule = serde_yaml::from_str(yaml).expect("parse");
-        assert_eq!(s.mode, ExecMode::OncePerTarget);
-        assert_eq!(s.cooldown.as_deref(), Some("24h"));
     }
 
     #[test]
@@ -950,12 +1264,29 @@ inventory:
 /// referenced job (`job_id` → [`BUCKET_JOBS`]) supplies only the
 /// script body. Two schedules of the same job can target different
 /// groups on different cadences without copying the manifest.
+///
+/// #418 Phase 1: the cadence is the single [`When`] field. The old
+/// `cron` × `mode` × `cooldown` × `auto_disable_when_done` quartet
+/// is gone (no back-compat — pre-Phase-1 KV blobs fail to parse and
+/// are warn-skipped; re-`schedule create` to upgrade them). The
+/// engine underneath is unchanged: [`Schedule::lowered`] maps `when`
+/// onto the same (cron, ExecMode, cooldown) trio the scheduler and
+/// `decide_fire` always ran on.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
 pub struct Schedule {
     pub id: String,
-    /// 6-field cron expression (`sec min hour day month day-of-week`),
-    /// matching `tokio-cron-scheduler` syntax.
-    pub cron: String,
+    /// When to fire — a reconcile cadence (`per_pc` / `per_target`)
+    /// or the temporary raw-`cron` escape hatch. See [`When`].
+    ///
+    /// `singleton_map`: serde_yaml 0.9 renders externally-tagged
+    /// enums as `!per_pc` YAML tags by default; this keeps the
+    /// operator-facing map shape (`when: { per_pc: once }`). JSON
+    /// output is identical either way, and the schemars schema
+    /// (external tagging = oneOf of single-key objects) already
+    /// matches the singleton-map wire shape.
+    #[serde(with = "serde_yaml::with::singleton_map")]
+    #[schemars(with = "When")]
+    pub when: When,
     /// Key into [`crate::kv::BUCKET_JOBS`]. Must equal a registered
     /// Manifest's `id`.
     pub job_id: String,
@@ -964,24 +1295,14 @@ pub struct Schedule {
     /// schedule.
     #[serde(flatten)]
     pub plan: FanoutPlan,
-    /// Per-pc/per-target dedup semantics (v0.19). Default
-    /// `EveryTick` keeps the historical "fire every cron tick at the
-    /// whole target" behavior.
-    #[serde(default)]
-    pub mode: ExecMode,
-    /// Humantime cooldown for `OncePerPc` / `OncePerTarget`. Once a
-    /// pc/target has succeeded, the scheduler waits this long before
-    /// considering it eligible again. Omit for "succeed once, then
-    /// permanently skip" — i.e. cooldown = infinity.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cooldown: Option<String>,
-    /// When true AND the schedule's lifecycle is permanently
-    /// terminated (`cooldown = None` + dedup says nothing more to
-    /// do), the scheduler flips `enabled = false` and emits an
-    /// audit event. No-op when `cooldown` is set (re-arming
-    /// schedules never finish).
-    #[serde(default)]
-    pub auto_disable_when_done: bool,
+    /// Optional validity window. Outside `[from, until)` the
+    /// schedule is dormant — still registered, still visible, but
+    /// every tick is skipped (deleted ≠ dormant: a campaign that
+    /// ended stays inspectable and can be re-armed by editing the
+    /// window). Checked at tick time on both the backend scheduler
+    /// and the agent's local scheduler.
+    #[serde(default, skip_serializing_if = "Active::is_empty")]
+    pub active: Active,
     /// v0.22: optional humantime window after a cron tick during
     /// which the Command is still considered "live". The scheduler
     /// computes `tick_at + starting_deadline` and stamps it onto
@@ -1049,6 +1370,266 @@ pub enum ExecMode {
     /// (or forever if no cooldown). Use for "one delegate is
     /// enough" tasks like license check-in.
     OncePerTarget,
+}
+
+/// #418 Phase 1 — the single "when does this fire" axis.
+///
+/// Replaces the old `cron` + `mode` + `cooldown` trio whose
+/// interactions were implicit (cron doubled as both a real
+/// time-of-day trigger and a reconcile poll period; contradictory
+/// combinations silently no-opped). Two shapes:
+///
+/// * **reconcile** (`per_pc` / `per_target`) — desired-state: "each
+///   pc (or one delegate) should have run this within `every`".
+///   The poll period is system-generated ([`POLL_CRON`], every
+///   minute) and no longer the operator's concern.
+/// * **escape hatch** (`cron`) — verbatim 6-field cron, fires at
+///   the whole target on every tick with no dedup (the old
+///   `every_tick`). Temporary: exists only to keep time-of-day
+///   schedules (morning-greeting) alive until the Phase 2
+///   calendar form (`at` / `days` / `tz`) lands. New reconcile
+///   work must NOT use it.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum When {
+    /// Fire at each targeted pc: `once` (kitting — succeed once,
+    /// skip forever, forever catching brand-new / re-imaged pcs)
+    /// or `{ every: <humantime> }` (patrol — re-arm per pc after
+    /// the interval).
+    PerPc(PerPolicy),
+    /// Fire until **any** one pc of the target succeeds, then skip
+    /// the whole target (`once`) or re-arm after `every`. Needs
+    /// fleet-wide completion data, so it is backend-only —
+    /// `runs_on: agent` + `per_target` is rejected by
+    /// [`Schedule::validate`].
+    PerTarget(PerPolicy),
+    /// Escape hatch: verbatim 6-field cron expression
+    /// (`sec min hour day month day-of-week`), validated with the
+    /// same parser `tokio-cron-scheduler` uses. Every tick fires
+    /// the whole target — no dedup, no cooldown.
+    Cron(String),
+}
+
+/// `once` vs `{ every: <humantime> }` — shared by `per_pc` /
+/// `per_target`. Untagged so the YAML stays the bare keyword or a
+/// one-key map, nothing more ceremonial.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum PerPolicy {
+    /// The bare string `once`: succeed once, then skip permanently
+    /// (cooldown = infinity).
+    Once(OnceLiteral),
+    /// Re-arm after the humantime interval, e.g. `{ every: 6h }`.
+    Every(EverySpec),
+}
+
+/// Single-variant enum so serde accepts exactly the string `once`
+/// (a free-form `String` would swallow typos like `onec`).
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OnceLiteral {
+    Once,
+}
+
+/// `{ every: <humantime> }`. Standalone struct (not an inline
+/// struct variant) so `deny_unknown_fields` still bites under the
+/// untagged [`PerPolicy`] — `{ evry: 6h }` is a parse error, not a
+/// silently-ignored key.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EverySpec {
+    /// Humantime interval (`10m`, `6h`, `1d`...). Parsed lazily —
+    /// [`Schedule::validate`] rejects garbage at create time.
+    pub every: String,
+}
+
+impl PerPolicy {
+    /// The cooldown this policy lowers to: `once` = `None`
+    /// (permanent skip), `every` = the interval.
+    fn cooldown(&self) -> Option<String> {
+        match self {
+            PerPolicy::Once(_) => None,
+            PerPolicy::Every(EverySpec { every }) => Some(every.clone()),
+        }
+    }
+}
+
+impl std::fmt::Display for When {
+    /// Operator-facing one-liner (`per_pc once` / `per_pc every 6h`
+    /// / `cron: 0 0 9 * * mon-fri`) for log lines, audit payloads
+    /// and the API's `ScheduleSummary`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let policy = |p: &PerPolicy| match p {
+            PerPolicy::Once(_) => "once".to_string(),
+            PerPolicy::Every(EverySpec { every }) => format!("every {every}"),
+        };
+        match self {
+            When::PerPc(p) => write!(f, "per_pc {}", policy(p)),
+            When::PerTarget(p) => write!(f, "per_target {}", policy(p)),
+            When::Cron(expr) => write!(f, "cron: {expr}"),
+        }
+    }
+}
+
+/// Optional validity window for a [`Schedule`] (#418 decision G).
+/// Half-open `[from, until)`; either bound may be omitted. Bounds
+/// are `YYYY-MM-DD` (= that day's 00:00 **UTC**) or full RFC3339
+/// (use an offset for local-time precision). Kept as strings so the
+/// JSON Schema the SPA editor consumes stays two plain string
+/// fields, mirroring how `jitter` / `starting_deadline` are stored.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Active {
+    /// Dormant before this instant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// Dormant from this instant on (exclusive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<String>,
+}
+
+impl Active {
+    /// `skip_serializing_if` helper — an empty window means "always
+    /// active" and is omitted from the wire format entirely.
+    pub fn is_empty(&self) -> bool {
+        self.from.is_none() && self.until.is_none()
+    }
+
+    /// Parse one bound: RFC3339 first, then bare `YYYY-MM-DD`
+    /// (midnight UTC).
+    pub fn parse_bound(s: &str) -> Result<chrono::DateTime<chrono::Utc>, String> {
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+            return Ok(dt.with_timezone(&chrono::Utc));
+        }
+        if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+            let midnight = d.and_hms_opt(0, 0, 0).expect("00:00:00 is always valid");
+            return Ok(chrono::DateTime::from_naive_utc_and_offset(
+                midnight,
+                chrono::Utc,
+            ));
+        }
+        Err(format!(
+            "active: unparseable bound '{s}' (want YYYY-MM-DD or RFC3339)"
+        ))
+    }
+
+    /// Is `now` inside the window? Unparseable bounds are treated
+    /// as absent here (fail-open) — [`Schedule::validate`] is the
+    /// place that rejects them loudly; this runs on every tick and
+    /// must never panic on a stale KV blob.
+    pub fn contains(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
+        let bound = |s: &Option<String>| s.as_deref().and_then(|s| Self::parse_bound(s).ok());
+        if bound(&self.from).is_some_and(|from| now < from) {
+            return false;
+        }
+        if bound(&self.until).is_some_and(|until| now >= until) {
+            return false;
+        }
+        true
+    }
+}
+
+/// The system-generated poll cadence every reconcile-shaped `when`
+/// lowers to. Operators never write this: the real inter-run
+/// spacing is the `every` cooldown; this only bounds "how soon do
+/// we notice somebody is due" (#418 decision B took the poll
+/// period away from the operator).
+pub const POLL_CRON: &str = "0 * * * * *";
+
+/// What a [`When`] lowers to — the exact (cron, mode, cooldown)
+/// trio the pre-#418 engine ran on. Keeping the engine vocabulary
+/// unchanged is what lets Phase 1 swap the operator surface without
+/// touching the tick / dedup machinery.
+pub struct Lowered {
+    /// 6-field cron handed to `tokio-cron-scheduler` — [`POLL_CRON`]
+    /// for reconcile shapes, verbatim for the escape hatch.
+    pub cron: String,
+    /// Dedup semantics for `decide_fire`.
+    pub mode: ExecMode,
+    /// Humantime re-arm interval (`None` = succeed once, skip
+    /// forever).
+    pub cooldown: Option<String>,
+}
+
+impl Schedule {
+    /// Lower the operator-facing `when` onto the engine vocabulary.
+    /// Single seam shared by the backend scheduler and the agent's
+    /// local scheduler so the two can never drift.
+    pub fn lowered(&self) -> Lowered {
+        match &self.when {
+            When::PerPc(p) => Lowered {
+                cron: POLL_CRON.into(),
+                mode: ExecMode::OncePerPc,
+                cooldown: p.cooldown(),
+            },
+            When::PerTarget(p) => Lowered {
+                cron: POLL_CRON.into(),
+                mode: ExecMode::OncePerTarget,
+                cooldown: p.cooldown(),
+            },
+            When::Cron(expr) => Lowered {
+                cron: expr.clone(),
+                mode: ExecMode::EveryTick,
+                cooldown: None,
+            },
+        }
+    }
+
+    /// Cross-field semantic checks that don't fit pure serde derive
+    /// — the [`Manifest::validate`] counterpart (#418 decision F;
+    /// pre-Phase-1 a broken schedule was accepted at create time
+    /// and silently warn-skipped at tick time). Run at every create
+    /// site: `kanade schedule create` (client-side) and
+    /// `POST /api/schedules`. The job_id-exists check lives in the
+    /// API handler instead — it needs the JOBS KV.
+    pub fn validate(&self) -> Result<(), String> {
+        if matches!(self.runs_on, RunsOn::Agent) && matches!(self.when, When::PerTarget(_)) {
+            return Err(
+                "when.per_target needs fleet-wide completion data and is backend-only; \
+                 it cannot be combined with runs_on: agent (each agent self-schedules, \
+                 so per-target dedup would be deduping across a target of 1)"
+                    .into(),
+            );
+        }
+        if let Some(cd) = self.lowered().cooldown.as_deref() {
+            humantime::parse_duration(cd)
+                .map_err(|e| format!("when.every: invalid duration '{cd}': {e}"))?;
+        }
+        if let When::Cron(expr) = &self.when {
+            // Same parser configuration tokio-cron-scheduler 0.15
+            // uses internally (croner, seconds required, DOM-and-DOW
+            // both honored) — create-time validation can never
+            // accept what register() would reject.
+            croner::parser::CronParser::builder()
+                .seconds(croner::parser::Seconds::Required)
+                .dom_and_dow(true)
+                .build()
+                .parse(expr)
+                .map_err(|e| format!("when.cron: invalid 6-field cron '{expr}': {e}"))?;
+        }
+        let from = self
+            .active
+            .from
+            .as_deref()
+            .map(Active::parse_bound)
+            .transpose()?;
+        let until = self
+            .active
+            .until
+            .as_deref()
+            .map(Active::parse_bound)
+            .transpose()?;
+        if let (Some(f), Some(u)) = (from, until) {
+            if f >= u {
+                return Err(format!(
+                    "active.from ({}) must be strictly before active.until ({})",
+                    self.active.from.as_deref().unwrap_or_default(),
+                    self.active.until.as_deref().unwrap_or_default(),
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 fn default_true() -> bool {

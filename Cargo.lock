@@ -2883,6 +2883,7 @@ dependencies = [
  "anyhow",
  "async-nats",
  "chrono",
+ "croner",
  "humantime",
  "pelite",
  "schemars 1.2.1",
