@@ -813,11 +813,29 @@ async fn local_tick(
     // 2) Mode-based dedup against local_completions.
     let now = Utc::now();
     let lowered = schedule.lowered();
-    let cooldown = lowered
-        .cooldown
-        .as_deref()
-        .and_then(|s| humantime::parse_duration(s).ok())
-        .and_then(|d| ChronoDuration::from_std(d).ok());
+    // Defensive parse (gemini #419 review): validate() rejects a bad
+    // `every` at create time, but a hand-edited KV blob bypasses
+    // that. Silently mapping a parse failure to `None` would turn
+    // the schedule into "permanent skip after first success" under
+    // OncePerPc — warn + skip the tick instead, mirroring the
+    // backend scheduler's parse_cooldown error path.
+    let cooldown = match lowered.cooldown.as_deref() {
+        None => None,
+        Some(raw) => match humantime::parse_duration(raw)
+            .ok()
+            .and_then(|d| ChronoDuration::from_std(d).ok())
+        {
+            Some(cd) => Some(cd),
+            None => {
+                warn!(
+                    schedule_id = %schedule.id,
+                    every = %raw,
+                    "local_scheduler: invalid when.every duration; skipping tick",
+                );
+                return;
+            }
+        },
+    };
     let should_fire = match lowered.mode {
         ExecMode::EveryTick => true,
         ExecMode::OncePerTarget => {
