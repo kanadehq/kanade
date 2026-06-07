@@ -28,7 +28,9 @@ use kanade_shared::wire::ObsEvent;
 use sqlx::SqlitePool;
 use tracing::{info, warn};
 
-const CONSUMER_NAME: &str = "backend_obs_events_projector";
+// pub(crate): consumer_reset::reset_if_wiped names this durable when
+// deciding what to drop after a projection-DB wipe (#389).
+pub(crate) const CONSUMER_NAME: &str = "backend_obs_events_projector";
 
 pub async fn run(js: jetstream::Context, pool: SqlitePool) -> Result<()> {
     let stream = js

@@ -8,7 +8,9 @@ use sqlx::SqlitePool;
 use tokio::io::AsyncReadExt;
 use tracing::{info, warn};
 
-const CONSUMER_NAME: &str = "backend_results_projector";
+// pub(crate): consumer_reset::reset_if_wiped names this durable when
+// deciding what to drop after a projection-DB wipe (#389).
+pub(crate) const CONSUMER_NAME: &str = "backend_results_projector";
 
 /// Consume the RESULTS stream and:
 ///   1. Insert each `ExecResult` into `execution_results`. The PK is
