@@ -37,6 +37,7 @@ type EventRow = {
 
 type ListResponse = { events: EventRow[] };
 type KindsResponse = { kinds: string[] };
+type SourcesResponse = { sources: string[] };
 
 const SINCE_PRESETS: Array<{ value: string; ms: number | null }> = [
   { value: '1h',  ms: 60 * 60 * 1000 },
@@ -46,14 +47,76 @@ const SINCE_PRESETS: Array<{ value: string; ms: number | null }> = [
   { value: 'all', ms: null },
 ];
 
-// Windows LogonType values offered by the logon_type filter
-// (Issue #366). String-typed because they live in a <select> /
-// URLSearchParams round-trip; the backend parses to i64. Labels
-// resolve via i18n (`filters.logonTypeOptions.*`). The scheduled
-// collector only emits 2/7/10/11 (human sessions), but the
-// on-demand `collect-winlog-logons-all` job backfills the rest —
-// the filter spans both data sets.
-const LOGON_TYPES = ['2', '3', '4', '5', '7', '10', '11'] as const;
+// Issue #391: payload keys the collectors are known to emit,
+// offered as <datalist> suggestions for the generic payload
+// filter. Free text stays allowed — the suggestions are a memory
+// aid, not a schema.
+const PAYLOAD_KEY_SUGGESTIONS = [
+  'user', 'logon_type', 'session_id', 'sid', 'standby', 'from', 'wake_source',
+] as const;
+
+// Issue #391: tri-state chip cycle — off → include → exclude → off.
+type ChipState = 'off' | 'include' | 'exclude';
+
+function chipState(value: string, inc: string[], exc: string[]): ChipState {
+  if (inc.includes(value)) return 'include';
+  if (exc.includes(value)) return 'exclude';
+  return 'off';
+}
+
+function cycleChip(
+  value: string,
+  inc: string[],
+  exc: string[],
+  setInc: (v: string[]) => void,
+  setExc: (v: string[]) => void,
+) {
+  if (inc.includes(value)) {
+    setInc(inc.filter((v) => v !== value));
+    setExc([...exc, value]);
+  } else if (exc.includes(value)) {
+    setExc(exc.filter((v) => v !== value));
+  } else {
+    setInc([...inc, value]);
+  }
+}
+
+function splitCsv(s: string | null): string[] {
+  // Mirror the backend's CSV hygiene (trim, drop blanks) and
+  // dedupe, so a hand-edited / shared URL like `?kinds=logon,
+  // logon , ,boot` hydrates the same chip state the server
+  // filters by (CodeRabbit #394 minor).
+  return s
+    ? Array.from(new Set(s.split(',').map((v) => v.trim()).filter(Boolean)))
+    : [];
+}
+
+function FilterChip({ label, state, onClick }: {
+  label: string;
+  state: ChipState;
+  onClick: () => void;
+}) {
+  // State is conveyed by colour for sighted users; the aria-label
+  // narrates it for screen readers (Gemini #394 medium). i18n keys
+  // under `filters.chipStates.*`.
+  const { t } = useTranslation('events');
+  const cls =
+    state === 'include'
+      ? 'border-emerald-500/60 bg-emerald-500/15 text-emerald-300'
+      : state === 'exclude'
+        ? 'border-red-500/60 bg-red-500/10 text-red-400 line-through'
+        : 'border-border text-muted hover:border-muted-foreground/50';
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={`${label}: ${t(`filters.chipStates.${state}`)}`}
+      className={`rounded-full border px-2.5 py-0.5 text-xs cursor-pointer transition-colors ${cls}`}
+    >
+      {label}
+    </button>
+  );
+}
 
 // UAC split-token dedupe window (Issue #371). An interactive
 // sign-in by an Administrators-group user writes TWO 4624s (full
@@ -121,11 +184,30 @@ export function Events() {
   const { t } = useTranslation('events');
   const [search, setSearch] = useSearchParams();
   const [pcId, setPcId] = useState(search.get('pc') ?? '');
-  const [kind, setKind] = useState(search.get('kind') ?? '');
-  const [logonType, setLogonType] = useState(search.get('logon_type') ?? '');
+  // Issue #391: include/exclude chip selections. Legacy single-value
+  // params (`kind`, `source`, `logon_type`) from pre-#391 shared
+  // URLs migrate into the new shape on first render so old links
+  // keep meaning the same thing.
+  const [kindsInc, setKindsInc] = useState<string[]>(() => {
+    const v = splitCsv(search.get('kinds'));
+    const legacy = search.get('kind');
+    return v.length === 0 && legacy ? [legacy] : v;
+  });
+  const [kindsExc, setKindsExc] = useState<string[]>(() => splitCsv(search.get('kinds_ex')));
+  const [sourcesInc, setSourcesInc] = useState<string[]>(() => {
+    const v = splitCsv(search.get('sources'));
+    const legacy = search.get('source');
+    return v.length === 0 && legacy ? [legacy] : v;
+  });
+  const [sourcesExc, setSourcesExc] = useState<string[]>(() => splitCsv(search.get('sources_ex')));
+  // Issue #391: generic payload key=value filter (subsumes the old
+  // logon_type select — `logon_type` URLs map onto it).
+  const [payloadKey, setPayloadKey] = useState(() =>
+    search.get('pkey') ?? (search.get('logon_type') ? 'logon_type' : ''));
+  const [payloadValue, setPayloadValue] = useState(() =>
+    search.get('pval') ?? search.get('logon_type') ?? '');
   // Dedupe defaults ON; only the opt-out lands in the URL.
   const [dedupe, setDedupe] = useState(search.get('dedupe') !== '0');
-  const [source, setSource] = useState(search.get('source') ?? '');
   const [since, setSince] = useState(search.get('since') ?? '24h');
   const [limit, setLimit] = useState(Number(search.get('limit')) || 200);
 
@@ -135,8 +217,9 @@ export function Events() {
     return new Date(Date.now() - preset.ms).toISOString();
   }, [since]);
 
-  const dPcId   = useDebouncedValue(pcId,   FILTER_DEBOUNCE_MS);
-  const dSource = useDebouncedValue(source, FILTER_DEBOUNCE_MS);
+  const dPcId         = useDebouncedValue(pcId,         FILTER_DEBOUNCE_MS);
+  const dPayloadKey   = useDebouncedValue(payloadKey,   FILTER_DEBOUNCE_MS);
+  const dPayloadValue = useDebouncedValue(payloadValue, FILTER_DEBOUNCE_MS);
 
   // Mirror filters into the URL so a timeline drill-down link is
   // shareable / reload-safe (same shape as Logs). Uses the debounced
@@ -147,38 +230,53 @@ export function Events() {
   useEffect(() => {
     const next = new URLSearchParams();
     if (dPcId)   next.set('pc', dPcId);
-    if (kind)    next.set('kind', kind);
-    if (logonType) next.set('logon_type', logonType);
+    if (kindsInc.length)   next.set('kinds', kindsInc.join(','));
+    if (kindsExc.length)   next.set('kinds_ex', kindsExc.join(','));
+    if (sourcesInc.length) next.set('sources', sourcesInc.join(','));
+    if (sourcesExc.length) next.set('sources_ex', sourcesExc.join(','));
+    if (dPayloadKey)   next.set('pkey', dPayloadKey);
+    if (dPayloadValue) next.set('pval', dPayloadValue);
     if (!dedupe) next.set('dedupe', '0');
-    if (dSource) next.set('source', dSource);
     if (since && since !== '24h') next.set('since', since);
     if (limit && limit !== 200)   next.set('limit', String(limit));
     setSearch(next, { replace: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dPcId, kind, logonType, dedupe, dSource, since, limit]);
+  }, [dPcId, kindsInc, kindsExc, sourcesInc, sourcesExc, dPayloadKey, dPayloadValue, dedupe, since, limit]);
 
   const queryString = useMemo(() => {
     const sp = new URLSearchParams();
     sp.set('limit', String(limit));
     if (dPcId)   sp.set('pc_id', dPcId);
-    if (kind)    sp.set('kind', kind);
-    if (logonType) sp.set('logon_type', logonType);
-    if (dSource) sp.set('source', dSource);
+    if (kindsInc.length)   sp.set('kinds', kindsInc.join(','));
+    if (kindsExc.length)   sp.set('kinds_ex', kindsExc.join(','));
+    if (sourcesInc.length) sp.set('sources', sourcesInc.join(','));
+    if (sourcesExc.length) sp.set('sources_ex', sourcesExc.join(','));
+    // Both halves of the payload pair must be present — a key with
+    // no value (or vice versa) constrains nothing server-side.
+    if (dPayloadKey && dPayloadValue) {
+      sp.set('payload_key', dPayloadKey);
+      sp.set('payload_value', dPayloadValue);
+    }
     if (sinceIso) sp.set('from', sinceIso);
     return sp.toString();
-  }, [dPcId, kind, logonType, dSource, sinceIso, limit]);
+  }, [dPcId, kindsInc, kindsExc, sourcesInc, sourcesExc, dPayloadKey, dPayloadValue, sinceIso, limit]);
 
   const { data, error, isLoading, isFetching } = useQuery({
     queryKey: ['obs_events', queryString],
     queryFn: () => apiFetch<ListResponse>(`/api/obs_events?${queryString}`),
   });
 
-  // Populate the kind <select> from the backend's distinct list so the
-  // operator can pick what's actually in the table instead of guessing
-  // strings from the spec. Falls back to "(any)" when empty.
+  // Chip vocabularies come from the backend's DISTINCT lists so the
+  // operator picks from what actually exists in the data — no
+  // hard-coded kind/source catalogue to maintain (Issue #391).
   const kindsQ = useQuery({
     queryKey: ['obs_events-kinds'],
     queryFn: () => apiFetch<KindsResponse>('/api/obs_events/kinds'),
+    staleTime: 60_000,
+  });
+  const sourcesQ = useQuery({
+    queryKey: ['obs_events-sources'],
+    queryFn: () => apiFetch<SourcesResponse>('/api/obs_events/sources'),
     staleTime: 60_000,
   });
 
@@ -186,16 +284,18 @@ export function Events() {
   // same (pc, kind, payload.user) closer together than
   // DEDUPE_WINDOW_MS into the newest row of the group. View-only —
   // `obs_events` keeps both rows (faithful to the OS), and the
-  // checkbox under the logon-type select restores the raw view.
-  // Only active while a logon_type filter is selected: that's the
-  // only view where the split-token pairing reads as duplication
-  // rather than data.
+  // checkbox restores the raw view. Only active while the payload
+  // filter targets logon_type (the forensic 4624 data set from
+  // collect-winlog-logons-all / pre-#378 rows): that's the only
+  // view where the split-token pairing reads as duplication rather
+  // than data — Winlogon-sourced rows are 1:1 by construction.
+  const dedupeApplicable = dPayloadKey === 'logon_type' && dPayloadValue !== '';
   const { visible, collapsed } = useMemo(() => {
     // Fallback array lives inside the memo so the `data === undefined`
     // render doesn't mint a fresh `[]` reference every pass, and the
     // dependency list stays exhaustive-deps-clean (Gemini #372 medium).
     const rows = data?.events ?? [];
-    if (!logonType || !dedupe) return { visible: rows, collapsed: 0 };
+    if (!dedupeApplicable || !dedupe) return { visible: rows, collapsed: 0 };
     const lastKept = new Map<string, number>();
     const visible: EventRow[] = [];
     let collapsed = 0;
@@ -222,7 +322,7 @@ export function Events() {
       visible.push(e);
     }
     return { visible, collapsed };
-  }, [data, logonType, dedupe]);
+  }, [data, dedupeApplicable, dedupe]);
 
   return (
     <div className="space-y-4">
@@ -243,82 +343,109 @@ export function Events() {
       </div>
 
       <Card>
-        <CardContent className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 p-4">
-          <div className="space-y-1">
-            <Label htmlFor="ev-pc">{t('filters.pcId')}</Label>
-            {/* filter mode keeps free text so the regex/substring backend filter still works */}
-            <PcPicker
-              mode="filter"
-              id="ev-pc"
-              placeholder={t('filters.placeholders.pcId')}
-              value={pcId}
-              onChange={setPcId}
-            />
-          </div>
-          <div className="space-y-1">
-            <Label htmlFor="ev-kind">{t('filters.kind')}</Label>
-            <Select id="ev-kind" value={kind} onChange={(e) => setKind(e.target.value)}>
-              <option value="">{t('filters.kindOptions.any')}</option>
-              {(kindsQ.data?.kinds ?? []).map((k) => (
-                <option key={k} value={k}>{k}</option>
-              ))}
-            </Select>
-          </div>
-          <div className="space-y-1">
-            <Label htmlFor="ev-logon-type">{t('filters.logonType')}</Label>
-            <Select
-              id="ev-logon-type"
-              value={logonType}
-              onChange={(e) => setLogonType(e.target.value)}
-            >
-              <option value="">{t('filters.logonTypeOptions.any')}</option>
-              {LOGON_TYPES.map((v) => (
-                <option key={v} value={v}>{t(`filters.logonTypeOptions.${v}`)}</option>
-              ))}
-            </Select>
-            {logonType && (
-              <label className="flex items-center gap-1.5 pt-1 text-xs text-muted cursor-pointer">
-                <input
-                  type="checkbox"
-                  className="accent-violet-500"
-                  checked={dedupe}
-                  onChange={(e) => setDedupe(e.target.checked)}
+        <CardContent className="space-y-3 p-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className="space-y-1">
+              <Label htmlFor="ev-pc">{t('filters.pcId')}</Label>
+              {/* filter mode keeps free text so the regex/substring backend filter still works */}
+              <PcPicker
+                mode="filter"
+                id="ev-pc"
+                placeholder={t('filters.placeholders.pcId')}
+                value={pcId}
+                onChange={setPcId}
+              />
+            </div>
+            <div className="space-y-1">
+              <Label>{t('filters.payload')}</Label>
+              <div className="flex gap-1.5">
+                <Input
+                  id="ev-payload-key"
+                  className="w-2/5"
+                  list="ev-payload-keys"
+                  placeholder={t('filters.placeholders.payloadKey')}
+                  value={payloadKey}
+                  onChange={(e) => setPayloadKey(e.target.value)}
                 />
-                {t('filters.dedupe')}
-              </label>
-            )}
+                <datalist id="ev-payload-keys">
+                  {PAYLOAD_KEY_SUGGESTIONS.map((k) => <option key={k} value={k} />)}
+                </datalist>
+                <Input
+                  id="ev-payload-value"
+                  className="flex-1"
+                  placeholder={t('filters.placeholders.payloadValue')}
+                  value={payloadValue}
+                  onChange={(e) => setPayloadValue(e.target.value)}
+                />
+              </div>
+              {dedupeApplicable && (
+                <div className="space-y-0.5 pt-1">
+                  <label className="flex items-center gap-1.5 text-xs text-muted cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="accent-violet-500"
+                      checked={dedupe}
+                      onChange={(e) => setDedupe(e.target.checked)}
+                    />
+                    {t('filters.dedupe')}
+                  </label>
+                  <p className="text-[11px] text-muted">{t('filters.forensicNote')}</p>
+                </div>
+              )}
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="ev-since">{t('filters.since')}</Label>
+              <Select id="ev-since" value={since} onChange={(e) => setSince(e.target.value)}>
+                {SINCE_PRESETS.map((p) => (
+                  <option key={p.value} value={p.value}>
+                    {t(`filters.sincePresets.${p.value}`)}
+                  </option>
+                ))}
+              </Select>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="ev-limit">{t('filters.limit')}</Label>
+              <Select
+                id="ev-limit"
+                value={String(limit)}
+                onChange={(e) => setLimit(Number(e.target.value))}
+              >
+                <option value="50">50</option>
+                <option value="200">200</option>
+                <option value="1000">1000</option>
+                <option value="5000">5000</option>
+              </Select>
+            </div>
           </div>
+          {/* Issue #391: tri-state chips — click cycles include
+              (green) → exclude (red, struck) → off. Vocabulary is
+              the backend's DISTINCT list, so new kinds/sources show
+              up here without SPA changes. */}
           <div className="space-y-1">
-            <Label htmlFor="ev-source">{t('filters.source')}</Label>
-            <Input
-              id="ev-source"
-              placeholder={t('filters.placeholders.source')}
-              value={source}
-              onChange={(e) => setSource(e.target.value)}
-            />
-          </div>
-          <div className="space-y-1">
-            <Label htmlFor="ev-since">{t('filters.since')}</Label>
-            <Select id="ev-since" value={since} onChange={(e) => setSince(e.target.value)}>
-              {SINCE_PRESETS.map((p) => (
-                <option key={p.value} value={p.value}>
-                  {t(`filters.sincePresets.${p.value}`)}
-                </option>
+            <Label>{t('filters.kinds')} <span className="font-normal text-muted">{t('filters.chipHint')}</span></Label>
+            <div className="flex flex-wrap gap-1.5">
+              {(kindsQ.data?.kinds ?? []).map((k) => (
+                <FilterChip
+                  key={k}
+                  label={k}
+                  state={chipState(k, kindsInc, kindsExc)}
+                  onClick={() => cycleChip(k, kindsInc, kindsExc, setKindsInc, setKindsExc)}
+                />
               ))}
-            </Select>
+            </div>
           </div>
           <div className="space-y-1">
-            <Label htmlFor="ev-limit">{t('filters.limit')}</Label>
-            <Select
-              id="ev-limit"
-              value={String(limit)}
-              onChange={(e) => setLimit(Number(e.target.value))}
-            >
-              <option value="50">50</option>
-              <option value="200">200</option>
-              <option value="1000">1000</option>
-              <option value="5000">5000</option>
-            </Select>
+            <Label>{t('filters.sources')} <span className="font-normal text-muted">{t('filters.chipHint')}</span></Label>
+            <div className="flex flex-wrap gap-1.5">
+              {(sourcesQ.data?.sources ?? []).map((s) => (
+                <FilterChip
+                  key={s}
+                  label={s}
+                  state={chipState(s, sourcesInc, sourcesExc)}
+                  onClick={() => cycleChip(s, sourcesInc, sourcesExc, setSourcesInc, setSourcesExc)}
+                />
+              ))}
+            </div>
           </div>
         </CardContent>
       </Card>
