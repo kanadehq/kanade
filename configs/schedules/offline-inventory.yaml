@@ -2,16 +2,22 @@
 #
 # Use case: a fleet of laptops that roam off the corporate WAN.
 # Want hourly hardware inventory regardless of connectivity. Backend
-# isn't aware of the cron tick at all — each agent runs the cron
-# locally, snapshots its hardware, and either publishes the result
-# right away (online) or queues it in the async-nats client buffer
-# (briefly offline) until the broker reappears.
+# isn't aware of the tick at all — each agent runs the poll locally,
+# snapshots its hardware, and either publishes the result right away
+# (online) or queues it in the async-nats client buffer (briefly
+# offline) until the broker reappears.
+#
+# `per_pc: { every: 1h }` (#418): fire at most once per hour per PC
+# (the agent polls every minute internally; the 1h interval gates
+# each fire). `per_target` would be rejected here — fleet-wide
+# dedup needs the backend, so `kanade schedule create` errors on
+# the combination with `runs_on: agent`.
 #
 # Persistence:
 #   * Schedule + Manifest are read from BUCKET_SCHEDULES /
 #     BUCKET_JOBS once at agent startup, then watched for live
 #     edits. The agent caches the current snapshot in memory.
-#   * `once_per_pc` dedup state lives in
+#   * per-pc dedup state lives in
 #     `%ProgramData%\Kanade\data\local_completions.json` — survives
 #     agent restarts so the script doesn't fire twice if the PC
 #     reboots between ticks.
@@ -22,12 +28,11 @@
 #   kanade schedule create configs/schedules/offline-inventory.yaml
 
 id: offline-inventory
-cron: "0 0 * * * *"           # top of every hour
+when:
+  per_pc: { every: 1h }       # fire at most once per hour per PC
 enabled: true
 job_id: inventory-hw
 target:
   all: true
 runs_on: agent                # ← key v0.23 field
-mode: once_per_pc
-cooldown: 1h                  # fire at most once per hour per PC
 # starting_deadline: 30m       # optional: skip if delivery was that late

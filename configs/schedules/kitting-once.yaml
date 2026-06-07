@@ -6,26 +6,24 @@
 #   kanade job create configs/jobs/kitting-setup.yaml
 #   kanade schedule create configs/schedules/kitting-once.yaml
 #
-# Lifecycle (mode: once_per_pc):
-#   * tick 毎に alive 全 agent を列挙
+# Lifecycle (when: per_pc: once):
+#   * 内部 poll (毎分) 毎に alive 全 agent を列挙
 #   * 既に exit_code=0 で完了した pc は次回からスキップ
 #   * 失敗した pc は次の tick で再試行 (= 成功するまで)
 #   * 新 PC が後で heartbeat してきたら次の tick で拾う
 #
-# auto_disable_when_done を ON にしてないので forever 動作 ——
-# 故障交換などで後から新 PC が来ても catch する。
+# `once` は「成功 → 永久にスキップ」—— 故障交換などで後から新 PC が
+# 来ても forever catch する (本来のキッティング用途)。
+# 「完了から X 経つと再 fire」(daily compliance に転用するパターン)
+# なら `per_pc: { every: 1d }` に変える。
 # 「特定の N 台でセットアップしたら schedule 自体は終わらせたい」
 # (バッチキャンペーン) 用途なら、target を pcs: [...] に固定 +
-# auto_disable_when_done: true を立てるのが筋。
+# active.until で期限を切るのが筋 (#418)。
 
 id: kitting-once
-cron: "*/30 * * * * *"   # check every 30 sec
+when:
+  per_pc: once
 enabled: true
 job_id: kitting-setup
 target:
   all: true
-mode: once_per_pc
-# cooldown を書くと「完了から X 経つと再 fire」(daily compliance に
-# 転用するパターン)。書かなければ「成功 → 永久にスキップ」(本来の
-# キッティング用途)。
-# cooldown: 1d

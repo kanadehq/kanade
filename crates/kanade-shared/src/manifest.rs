@@ -1062,6 +1062,29 @@ target: { all: true }
         );
     }
 
+    #[test]
+    fn shipped_schedule_configs_parse_and_validate() {
+        // Every YAML under configs/schedules/ must parse with the
+        // current Schedule serde AND pass validate() — keeps the
+        // shipped examples from drifting out of sync with the model
+        // (#418 removed back-compat, so drift = broken at create).
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../configs/schedules");
+        let mut seen = 0;
+        for entry in std::fs::read_dir(&dir).expect("read configs/schedules") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
+                continue;
+            }
+            let body = std::fs::read_to_string(&path).expect("read yaml");
+            let s: Schedule = serde_yaml::from_str(&body)
+                .unwrap_or_else(|e| panic!("{} failed to parse: {e}", path.display()));
+            s.validate()
+                .unwrap_or_else(|e| panic!("{} failed validate(): {e}", path.display()));
+            seen += 1;
+        }
+        assert!(seen > 0, "no schedule YAMLs found in {}", dir.display());
+    }
+
     // ---- pre-existing enum wire formats (unchanged by #418) ----
 
     #[test]
