@@ -71,6 +71,10 @@ pub async fn run(js: jetstream::Context, pool: SqlitePool) -> Result<()> {
                 continue;
             }
         };
+        // #398: recorded_at = the message's JetStream publish time,
+        // so a -WipeDb re-projection (#389) reproduces the original
+        // arrival times instead of stamping everything "now".
+        let recorded_at = super::publish_time(&msg);
         match serde_json::from_slice::<ExecResult>(&msg.payload) {
             Ok(mut r) => {
                 // #227: deref overflow pointers BEFORE projection.
@@ -99,7 +103,7 @@ pub async fn run(js: jetstream::Context, pool: SqlitePool) -> Result<()> {
                 // payloads this is the deterministic UUIDv5 derived
                 // from (request_id, pc_id).
                 let resolved_id = r.stable_result_id();
-                match insert_result(&pool, &r, &resolved_id).await {
+                match insert_result(&pool, &r, &resolved_id, recorded_at).await {
                     Ok(true) => {
                         info!(
                             result_id = %resolved_id,
@@ -135,7 +139,8 @@ pub async fn run(js: jetstream::Context, pool: SqlitePool) -> Result<()> {
                     }
                 }
                 if r.exit_code == 0 {
-                    if let Err(e) = maybe_project_inventory(&pool, &jobs_kv, &r).await {
+                    if let Err(e) = maybe_project_inventory(&pool, &jobs_kv, &r, recorded_at).await
+                    {
                         warn!(error = ?e, result_id = %resolved_id, "inventory fact projection failed");
                     }
                 }
@@ -179,7 +184,12 @@ pub async fn run(js: jetstream::Context, pool: SqlitePool) -> Result<()> {
 ///      replaces the "[backend: reaped …]" note instead of being
 ///      silently dropped (gemini review, PR #332). A subsequent
 ///      redelivery then hits state 3 (finished, reaped = 0) and no-ops.
-async fn insert_result(pool: &SqlitePool, r: &ExecResult, result_id: &str) -> Result<bool> {
+async fn insert_result(
+    pool: &SqlitePool,
+    r: &ExecResult,
+    result_id: &str,
+    recorded_at: chrono::DateTime<chrono::Utc>,
+) -> Result<bool> {
     // `result_id` is pre-resolved by the caller via
     // `r.stable_result_id()`: agent-supplied for v0.29+ payloads,
     // deterministic UUIDv5 from (request_id, pc_id) for legacy.
@@ -191,6 +201,8 @@ async fn insert_result(pool: &SqlitePool, r: &ExecResult, result_id: &str) -> Re
     // instead of falling back to the column's DEFAULT
     // CURRENT_TIMESTAMP — the DEFAULT's space-separated text breaks
     // lexicographic `recorded_at >= ?` filters against chrono binds.
+    // #398: the value is the message's JetStream publish time (see
+    // `projector::publish_time`), re-projection-stable by design.
     // The conflict path intentionally leaves recorded_at at its
     // first-insert value, same as before.
     let rows = sqlx::query(
@@ -220,7 +232,7 @@ async fn insert_result(pool: &SqlitePool, r: &ExecResult, result_id: &str) -> Re
     .bind(r.started_at)
     .bind(r.finished_at)
     .bind(&r.manifest_id)
-    .bind(chrono::Utc::now())
+    .bind(recorded_at)
     .execute(pool)
     .await?;
     Ok(rows.rows_affected() > 0)
@@ -328,6 +340,7 @@ async fn maybe_project_inventory(
     pool: &SqlitePool,
     jobs_kv: &async_nats::jetstream::kv::Store,
     r: &ExecResult,
+    recorded_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<()> {
     let Some(manifest_id) = r.manifest_id.as_deref() else {
         return Ok(());
@@ -341,7 +354,7 @@ async fn maybe_project_inventory(
         Err(_) => return Ok(()),
     };
     if let Some(hint) = job.inventory.as_ref() {
-        return upsert_inventory(pool, r, manifest_id, hint).await;
+        return upsert_inventory(pool, r, manifest_id, hint, recorded_at).await;
     }
     Ok(())
 }
@@ -351,6 +364,7 @@ async fn upsert_inventory(
     r: &ExecResult,
     manifest_id: &str,
     hint: &InventoryHint,
+    recorded_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<()> {
     // Validate the stdout is JSON before we store it — saves the
     // SPA from parsing garbage later.
@@ -384,7 +398,9 @@ async fn upsert_inventory(
         };
 
     // #390: bind recorded_at (RFC 3339) instead of CURRENT_TIMESTAMP
-    // so the table keeps one uniform timestamp text format.
+    // so the table keeps one uniform timestamp text format. #398: the
+    // value is the message's JetStream publish time, so re-projection
+    // reproduces the original arrival stamp.
     sqlx::query(
         "INSERT INTO inventory_facts (
              pc_id, job_id, facts_json, display_json, summary_json,
@@ -403,7 +419,7 @@ async fn upsert_inventory(
     .bind(display_json)
     .bind(summary_json)
     .bind(r.finished_at)
-    .bind(chrono::Utc::now())
+    .bind(recorded_at)
     .execute(pool)
     .await?;
     info!(
@@ -545,12 +561,12 @@ mod tests {
         let a = sample("res-a", "req-shared", "pc-1", Some("exec-1"));
         let b = sample("res-b", "req-shared", "pc-2", Some("exec-1"));
         assert!(
-            insert_result(&pool, &a, &a.stable_result_id())
+            insert_result(&pool, &a, &a.stable_result_id(), chrono::Utc::now())
                 .await
                 .unwrap()
         );
         assert!(
-            insert_result(&pool, &b, &b.stable_result_id())
+            insert_result(&pool, &b, &b.stable_result_id(), chrono::Utc::now())
                 .await
                 .unwrap()
         );
@@ -574,9 +590,15 @@ mod tests {
         let pool = fresh_pool().await;
         let a = sample("res-dup", "req-1", "pc-1", Some("exec-1"));
         let rid = a.stable_result_id();
-        assert!(insert_result(&pool, &a, &rid).await.unwrap());
         assert!(
-            !insert_result(&pool, &a, &rid).await.unwrap(),
+            insert_result(&pool, &a, &rid, chrono::Utc::now())
+                .await
+                .unwrap()
+        );
+        assert!(
+            !insert_result(&pool, &a, &rid, chrono::Utc::now())
+                .await
+                .unwrap(),
             "second insert of same result_id must return false",
         );
     }
@@ -593,9 +615,15 @@ mod tests {
         let id1 = r.stable_result_id();
         let id2 = r.stable_result_id();
         assert_eq!(id1, id2, "stable id must be deterministic across calls");
-        assert!(insert_result(&pool, &r, &id1).await.unwrap());
         assert!(
-            !insert_result(&pool, &r, &id2).await.unwrap(),
+            insert_result(&pool, &r, &id1, chrono::Utc::now())
+                .await
+                .unwrap()
+        );
+        assert!(
+            !insert_result(&pool, &r, &id2, chrono::Utc::now())
+                .await
+                .unwrap(),
             "legacy redelivery should be deduped, not double-counted",
         );
     }
@@ -675,7 +703,9 @@ mod tests {
         let mut r = sample("res-late", "req-1", "pc-1", Some("exec-1"));
         r.exit_code = 0;
         r.stdout = "real output".into();
-        let affected = insert_result(&pool, &r, "res-late").await.unwrap();
+        let affected = insert_result(&pool, &r, "res-late", chrono::Utc::now())
+            .await
+            .unwrap();
         assert!(
             affected,
             "late real result must overwrite the reaped placeholder",
@@ -694,10 +724,34 @@ mod tests {
 
         // The row is now genuinely finished (reaped = 0); a JetStream
         // redelivery of the same result must no-op, not re-bump.
-        let again = insert_result(&pool, &r, "res-late").await.unwrap();
+        let again = insert_result(&pool, &r, "res-late", chrono::Utc::now())
+            .await
+            .unwrap();
         assert!(
             !again,
             "redelivery after the real result must not re-update"
+        );
+    }
+
+    /// #398: the caller-supplied `recorded_at` (the message's JetStream
+    /// publish time in production) is what lands in the row — NOT some
+    /// internal `Utc::now()`. This is what makes a -WipeDb
+    /// re-projection reproduce the original arrival times.
+    #[tokio::test]
+    async fn recorded_at_is_the_supplied_publish_time() {
+        let pool = fresh_pool().await;
+        let r = sample("res-pub", "req-1", "pc-1", Some("exec-1"));
+        let publish = chrono::Utc.with_ymd_and_hms(2026, 5, 20, 0, 0, 2).unwrap();
+        assert!(insert_result(&pool, &r, "res-pub", publish).await.unwrap());
+        let stored: (chrono::DateTime<chrono::Utc>,) =
+            sqlx::query_as("SELECT recorded_at FROM execution_results WHERE result_id = ?")
+                .bind("res-pub")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            stored.0, publish,
+            "recorded_at must be the supplied publish time, byte-stable across re-projection",
         );
     }
 }
