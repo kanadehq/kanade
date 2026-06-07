@@ -1,4 +1,5 @@
 pub mod audit;
+pub mod consumer_reset;
 pub mod events;
 pub mod explode;
 pub mod heartbeat;

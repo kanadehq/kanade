@@ -162,6 +162,18 @@ pub(crate) async fn run_backend() -> Result<()> {
         .context("ensure_jetstream_resources")?;
     info!("jetstream resources ready");
 
+    // #389: a wiped projection DB (deploy -WipeDb, manual recovery)
+    // leaves the projectors' durable consumers parked at the end of
+    // their streams, so the spawn block below would silently resume
+    // from there and never re-derive history. Detect the wipe (empty
+    // projection tables) and drop the stale durables first; the
+    // projectors then recreate them with deliver-all. Must run before
+    // any projector spawns. Failures are non-fatal — worst case is
+    // the pre-#389 behaviour.
+    if let Err(e) = projector::consumer_reset::reset_if_wiped(&jetstream, &pool).await {
+        warn!(error = %e, "projector consumer reset check failed");
+    }
+
     // v0.31 / #40: walk every registered inventory manifest and
     // CREATE TABLE IF NOT EXISTS for any `explode` specs. Idempotent
     // — re-running is a no-op. Done at startup (vs lazily in the

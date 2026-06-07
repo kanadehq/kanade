@@ -69,8 +69,12 @@
   missing-migration error until the stale DB is removed. New installs
   don't need it (a fresh DB applies the baseline cleanly).
 
-  Most of the projector re-derives from the JetStream streams, but the
-  wipe is NOT fully lossless:
+  Most of the projector re-derives from the JetStream streams: on
+  first start against the wiped DB the backend detects the empty
+  projection tables, drops its stale durable consumers, and replays
+  each stream from the beginning (#389; backends older than that fix
+  resume from the old consumer position and re-derive nothing). The
+  wipe is still NOT fully lossless:
     * `users` / accounts are NOT a projection — only the bootstrap admin
       re-seeds (registry BootstrapAdminPassword / env); recreate any
       other accounts by hand afterward.
