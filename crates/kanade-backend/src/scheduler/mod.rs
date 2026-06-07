@@ -26,8 +26,7 @@ use uuid::Uuid;
 
 use crate::api::AppState;
 use crate::api::exec::exec_manifest;
-use crate::audit;
-use policy::{Completion, Decision, FireAction, decide_fire};
+use policy::{Completion, FireAction, decide_fire};
 
 /// `last_heartbeat` slack used to define "alive" for target
 /// resolution. Matches the dashboard/health rollup cutoff so a
@@ -160,7 +159,10 @@ async fn register(
         return Ok(());
     }
 
-    let cron = schedule.cron.clone();
+    // #418: operators write `when:`; the engine still runs on a
+    // cron string — POLL_CRON (every minute) for reconcile shapes,
+    // verbatim for the escape hatch.
+    let cron = schedule.lowered().cron;
     let schedule_snapshot = schedule.clone();
     let job = Job::new_async(cron.as_str(), move |_uuid, _l| {
         let state = state.clone();
@@ -174,18 +176,27 @@ async fn register(
     registered.lock().await.insert(schedule.id.clone(), uuid);
     info!(
         schedule_id = %schedule.id,
-        cron = %schedule.cron,
-        mode = ?schedule.mode,
+        when = %schedule.when,
+        poll_cron = %cron,
         "scheduled",
     );
     Ok(())
 }
 
-/// One cron-tick body: catalog lookup → target resolution →
-/// policy decision → publish or skip → optional auto-disable.
+/// One cron-tick body: active-window gate → catalog lookup →
+/// target resolution → policy decision → publish or skip.
 async fn tick(state: &AppState, schedule: Schedule) {
     let schedule_id = schedule.id.clone();
     let job_id = schedule.job_id.clone();
+    let lowered = schedule.lowered();
+
+    // 0) Dormant outside the optional `active.{from,until}` window
+    //    (#418 decision G). Cheapest check first — a finished
+    //    campaign costs one comparison per tick, nothing else.
+    if !schedule.active.contains(Utc::now()) {
+        tracing::debug!(%schedule_id, "scheduler tick: outside active window (dormant)");
+        return;
+    }
 
     // 1) Resolve the registered Manifest at fire time so edits to
     //    the job catalog take effect on the next tick.
@@ -226,9 +237,10 @@ async fn tick(state: &AppState, schedule: Schedule) {
         p
     };
 
-    // 2) For EveryTick we don't need to resolve anything — fire and
-    //    forget. Skip the more expensive policy path entirely.
-    if matches!(schedule.mode, ExecMode::EveryTick) {
+    // 2) For EveryTick (the `when: cron` escape hatch) we don't
+    //    need to resolve anything — fire and forget. Skip the more
+    //    expensive policy path entirely.
+    if matches!(lowered.mode, ExecMode::EveryTick) {
         dispatch(
             state,
             &schedule_id,
@@ -257,27 +269,20 @@ async fn tick(state: &AppState, schedule: Schedule) {
             return;
         }
     };
-    let cooldown = match parse_cooldown(schedule.cooldown.as_deref()) {
+    let cooldown = match parse_cooldown(lowered.cooldown.as_deref()) {
         Ok(v) => v,
         Err(e) => {
-            warn!(%schedule_id, error = %e, "scheduler fire failed: invalid cooldown");
+            warn!(%schedule_id, error = %e, "scheduler fire failed: invalid when.every");
             return;
         }
     };
 
-    let decision: Decision = decide_fire(
-        schedule.mode,
-        cooldown,
-        schedule.auto_disable_when_done,
-        &expected,
-        &completions,
-        Utc::now(),
-    );
+    let action = decide_fire(lowered.mode, cooldown, &expected, &completions, Utc::now());
 
-    match decision.action {
+    match action {
         FireAction::Skip => {
             tracing::debug!(
-                %schedule_id, mode = ?schedule.mode,
+                %schedule_id, when = %schedule.when,
                 expected = expected.len(),
                 completions = completions.len(),
                 "scheduler tick: dedup says skip",
@@ -308,12 +313,6 @@ async fn tick(state: &AppState, schedule: Schedule) {
                 "OncePerPc: firing at remaining pcs",
             );
             dispatch(state, &schedule_id, manifest, plan, "OncePerPc subset").await;
-        }
-    }
-
-    if decision.auto_disable {
-        if let Err(e) = disable_schedule(state, &schedule).await {
-            warn!(%schedule_id, error = ?e, "auto-disable persist failed");
         }
     }
 }
@@ -466,34 +465,6 @@ async fn resolve_expected_pcs(state: &AppState, target: &Target) -> Result<Vec<S
     let mut v: Vec<String> = out.into_iter().collect();
     v.sort();
     Ok(v)
-}
-
-async fn disable_schedule(state: &AppState, schedule: &Schedule) -> Result<()> {
-    let kv = state
-        .jetstream
-        .get_key_value(BUCKET_SCHEDULES)
-        .await
-        .context("get schedules KV for auto-disable")?;
-    let mut updated = schedule.clone();
-    updated.enabled = false;
-    let body = serde_json::to_vec(&updated).context("serialize schedule")?;
-    kv.put(&updated.id, body.into())
-        .await
-        .context("KV put (auto-disable)")?;
-    info!(schedule_id = %updated.id, "schedule auto-disabled (lifecycle complete)");
-    audit::record(
-        &state.nats,
-        "scheduler",
-        "schedule_completed",
-        Some(&updated.id),
-        None,
-        serde_json::json!({
-            "mode": format!("{:?}", schedule.mode),
-            "job_id": schedule.job_id,
-        }),
-    )
-    .await;
-    Ok(())
 }
 
 async fn unregister(sched: &JobScheduler, registered: &Registered, schedule_id: &str) {
