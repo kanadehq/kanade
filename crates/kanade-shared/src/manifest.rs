@@ -905,6 +905,7 @@ target: { all: true }
         for when in [
             When::PerPc(PerPolicy::Once(OnceLiteral::Once)),
             When::PerPc(PerPolicy::Every(EverySpec { every: "6h".into() })),
+            When::PerTarget(PerPolicy::Once(OnceLiteral::Once)),
             When::PerTarget(PerPolicy::Every(EverySpec {
                 every: "24h".into(),
             })),
@@ -948,6 +949,25 @@ target: { all: true }
         .validate()
         .unwrap_err();
         assert!(err.contains("when.every"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_bad_jitter_and_starting_deadline() {
+        let mut s = schedule_with(
+            When::PerPc(PerPolicy::Once(OnceLiteral::Once)),
+            RunsOn::Backend,
+        );
+        s.plan.jitter = Some("5x".into());
+        let err = s.validate().unwrap_err();
+        assert!(err.contains("jitter"), "got: {err}");
+
+        let mut s = schedule_with(
+            When::PerPc(PerPolicy::Once(OnceLiteral::Once)),
+            RunsOn::Backend,
+        );
+        s.starting_deadline = Some("soon".into());
+        let err = s.validate().unwrap_err();
+        assert!(err.contains("starting_deadline"), "got: {err}");
     }
 
     #[test]
@@ -1629,6 +1649,19 @@ impl Schedule {
                 .build()
                 .parse(expr)
                 .map_err(|e| format!("when.cron: invalid 6-field cron '{expr}': {e}"))?;
+        }
+        // The other humantime strings on the schedule (claude #419
+        // review): runtime degrades gracefully on both (bad jitter →
+        // silent no-op, bad starting_deadline → warn + skipped tick),
+        // but "rejected at create time" should cover every field the
+        // operator can typo, not just `when`.
+        if let Some(j) = &self.plan.jitter {
+            humantime::parse_duration(j)
+                .map_err(|e| format!("jitter: invalid duration '{j}': {e}"))?;
+        }
+        if let Some(sd) = &self.starting_deadline {
+            humantime::parse_duration(sd)
+                .map_err(|e| format!("starting_deadline: invalid duration '{sd}': {e}"))?;
         }
         let from = self
             .active
