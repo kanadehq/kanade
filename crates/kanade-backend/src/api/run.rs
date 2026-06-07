@@ -10,7 +10,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use futures::StreamExt;
 use kanade_shared::subject;
-use kanade_shared::wire::{Command, ExecResult, Heartbeat, Shell};
+use kanade_shared::wire::{Command, ExecResult, Heartbeat, RunAs, Shell};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -46,6 +46,13 @@ pub struct RunRequest {
     pub exec_id: Option<String>,
     #[serde(default)]
     pub jitter_secs: Option<u64>,
+    /// Execution identity: `system` (default), `user`, or
+    /// `system_gui` — same enum (and same agent dispatch path) as
+    /// the manifest's `execute.run_as`. `#[serde(default)]` keeps
+    /// pre-existing POST bodies decoding to the historical
+    /// LocalSystem behaviour.
+    #[serde(default)]
+    pub run_as: RunAs,
 }
 
 fn default_shell_str() -> String {
@@ -85,11 +92,11 @@ pub async fn run(
         script_object_sha256: None,
         timeout_secs: req.timeout_secs,
         jitter_secs: req.jitter_secs,
-        // `kanade run` is inherently inline / one-PC / synchronous,
-        // so the inherited agent identity (= LocalSystem in prod) is
-        // always the right default. Use a Job + `kanade exec` if you
-        // need run_as: user / system_gui.
-        run_as: kanade_shared::wire::RunAs::System,
+        // Operator-selectable since the SPA Run page grew a run_as
+        // picker; defaults to System (the inherited agent identity,
+        // = LocalSystem in prod) so pre-existing callers keep the
+        // historical behaviour.
+        run_as: req.run_as,
         // Same rationale: cwd customisation belongs on a registered
         // Job, not on inline ad-hoc runs.
         cwd: None,
@@ -145,6 +152,7 @@ pub async fn run(
         request_id = %request_id,
         exec_id = ?req.exec_id,
         timeout_secs = req.timeout_secs,
+        run_as = ?req.run_as,
         "sent command, waiting for result",
     );
 
