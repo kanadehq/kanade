@@ -269,6 +269,36 @@ case override `BIN_NAME` in the workflow's `env:` block.
 <!-- kata:agents:rust-cli:end -->
 
 <!-- repo-specific guidance below this line is NOT kata-managed; edit freely -->
+## Release bump checklist (repo-specific)
+
+The generic flow above bumps `[workspace.package].version` +
+`Cargo.lock` — **this repo has one more synced file**:
+
+- `crates/kanade-client/tauri.conf.json` — its `version` field is
+  rewritten from `CARGO_PKG_VERSION` by `kanade-client/build.rs`
+  (#260), but **only when a build actually runs on Windows**.
+  `cargo update --workspace` alone does NOT touch it, which is how
+  v0.43.28 shipped with the file still at 0.43.27.
+
+So a release PR should contain exactly three files:
+
+```sh
+# in the release worktree, after editing Cargo.toml:
+cargo update --workspace        # Cargo.lock follows
+cargo build -p kanade-client    # build.rs syncs tauri.conf.json (Windows host only)
+git add Cargo.toml Cargo.lock crates/kanade-client/tauri.conf.json
+```
+
+The build.rs sync is `#[cfg(target_os = "windows")]`-gated — on a
+macOS/Linux host `cargo build -p kanade-client` compiles the
+exit-fast shim and does NOT touch the file; edit the `version`
+field in `tauri.conf.json` by hand there instead.
+
+If a previous release missed the sync (file lags by one version),
+the catch-up diff will appear as churn in unrelated worktrees after
+any build — `jj restore` it there and fold it into the **next**
+release PR instead.
+
 ## Deploying a built release to a host
 
 Releases (above) ship binaries to GitHub Releases + crates.io. Getting a
