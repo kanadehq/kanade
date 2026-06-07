@@ -95,6 +95,7 @@ function kindVariant(kind: string): 'success' | 'amber' | 'danger' | 'violet' | 
       return 'danger';
     case 'diagnostic':
     case 'agent_self_update':
+    case 'wake_detail':
       return 'violet';
     default:
       return 'amber';
