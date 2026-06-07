@@ -16,11 +16,14 @@ import { apiFetch } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import type { ExecResult } from '@/lib/types';
 
+type RunAsValue = 'system' | 'user' | 'system_gui';
+
 type RunBody = {
   pc_id: string;
   shell: string;
   script: string;
   timeout_secs: number;
+  run_as: RunAsValue;
   job_id?: string;
 };
 
@@ -30,6 +33,7 @@ export function Run() {
   const canOperate = hasRole('operator');
   const [pcId, setPcId] = useState('');
   const [shell, setShell] = useState('powershell');
+  const [runAs, setRunAs] = useState<RunAsValue>('system');
   const [timeout, setTimeout] = useState(60);
   const [jobId, setJobId] = useState('');
   const [script, setScript] = useState('');
@@ -49,6 +53,7 @@ export function Run() {
       shell,
       script,
       timeout_secs: timeout,
+      run_as: runAs,
     };
     if (jobId.trim()) body.job_id = jobId.trim();
     mut.mutate(body);
@@ -64,7 +69,7 @@ export function Run() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+          <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
             <div>
               <Label>{t('fields.pcId')}</Label>
               <PcPicker value={pcId} onChange={setPcId} placeholder={t('placeholders.pcId')} />
@@ -74,6 +79,14 @@ export function Run() {
               <Select value={shell} onChange={(e) => setShell(e.target.value)}>
                 <option value="powershell">powershell</option>
                 <option value="cmd">cmd</option>
+              </Select>
+            </div>
+            <div>
+              <Label>{t('fields.runAs')}</Label>
+              <Select value={runAs} onChange={(e) => setRunAs(e.target.value as RunAsValue)}>
+                <option value="system">system</option>
+                <option value="user">user</option>
+                <option value="system_gui">system_gui</option>
               </Select>
             </div>
             <div>

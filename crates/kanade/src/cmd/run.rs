@@ -3,7 +3,7 @@ use std::time::Duration;
 use anyhow::Result;
 use clap::Args;
 use futures::StreamExt;
-use kanade_shared::wire::{Command, Shell};
+use kanade_shared::wire::{Command, RunAs, Shell};
 use kanade_shared::{ExecResult, subject};
 use tracing::info;
 use uuid::Uuid;
@@ -23,6 +23,11 @@ pub struct RunArgs {
     /// existing scripts keep working.
     #[arg(long, alias = "job-id")]
     pub exec_id: Option<String>,
+    /// Execution identity: `system` (default), `user`, or
+    /// `system_gui` — same values as the manifest's
+    /// `execute.run_as`.
+    #[arg(long, default_value = "system", value_parser = ["system", "user", "system_gui", "system-gui"])]
+    pub run_as: String,
     /// Script body (use `--` before the script to bypass clap flag parsing).
     pub script: Vec<String>,
 }
@@ -38,6 +43,16 @@ pub async fn execute(client: async_nats::Client, args: RunArgs) -> Result<()> {
         "cmd" => Shell::Cmd,
         other => anyhow::bail!("unknown shell {other:?} (use powershell or cmd)"),
     };
+    // Keep in sync with `kanade_shared::wire::RunAs` (and the
+    // `value_parser` list on the arg above) if the enum grows a
+    // variant — clap already rejects anything outside that list,
+    // so the bail! arm is unreachable today.
+    let run_as = match args.run_as.as_str() {
+        "system" => RunAs::System,
+        "user" => RunAs::User,
+        "system_gui" | "system-gui" => RunAs::SystemGui,
+        other => anyhow::bail!("unknown run_as {other:?} (use system, user, or system_gui)"),
+    };
     let cmd = Command {
         id: "adhoc-run".to_string(),
         version: "0.0.0".to_string(),
@@ -51,9 +66,10 @@ pub async fn execute(client: async_nats::Client, args: RunArgs) -> Result<()> {
         script_object_sha256: None,
         timeout_secs: args.timeout,
         jitter_secs: None,
-        // `kanade run` is one-shot / inline; use Job + `kanade exec`
-        // for the run_as: user / system_gui / cwd flows.
-        run_as: kanade_shared::wire::RunAs::System,
+        // Operator-selectable via `--run-as` (defaults to system,
+        // the historical behaviour). cwd customisation still
+        // belongs on a registered Job + `kanade exec`.
+        run_as,
         cwd: None,
         // Ad-hoc inline run; no scheduled tick → no deadline.
         deadline_at: None,
@@ -91,6 +107,10 @@ pub async fn execute(client: async_nats::Client, args: RunArgs) -> Result<()> {
             "request_id": request_id,
             "exec_id": args.exec_id,
             "shell": args.shell,
+            // The parsed enum (not the raw flag string) so the audit
+            // row records the normalized snake_case form even when
+            // the operator typed the hyphenated `system-gui` alias.
+            "run_as": run_as,
             "script": cmd.script.chars().take(500).collect::<String>(),
         }),
     )

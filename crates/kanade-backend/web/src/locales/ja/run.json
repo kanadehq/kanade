@@ -4,6 +4,7 @@
   "fields": {
     "pcId": "pc_id",
     "shell": "shell",
+    "runAs": "run_as",
     "timeout": "タイムアウト (秒)",
     "jobId": "job_id (任意)",
     "script": "スクリプト"
