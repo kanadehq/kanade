@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use kanade_shared::config::{LogSection, load_backend_config};
 use kanade_shared::default_paths;
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn};
@@ -121,9 +121,30 @@ pub(crate) async fn run_backend() -> Result<()> {
             .await
             .with_context(|| format!("create sqlite parent {parent:?}"))?;
     }
+    // #411: concurrency pragmas. sqlx leaves journal_mode untouched
+    // (so a fresh DB runs in `delete` mode — every write takes an
+    // exclusive lock that blocks all readers) and defaults to
+    // synchronous=FULL + a 5 s busy_timeout. Measured on minipc with a
+    // single PC: multi-second single-row INSERTs (up to 7.2 s — past
+    // the 5 s busy_timeout, surfacing as `database is locked` to the
+    // projectors, which skip the ack and trigger JetStream redelivery
+    // storms).
+    //   * WAL — readers and the writer no longer block each other,
+    //     which is the actual shape of this workload (8-conn pool:
+    //     projectors writing while the API/scheduler read).
+    //   * synchronous=NORMAL — safe with WAL (power loss can drop the
+    //     last commit(s) but never corrupts), and this DB is a
+    //     projection that re-derives from JetStream anyway (#389
+    //     WipeDb replay), so FULL's per-commit fsync tax buys nothing.
+    //   * busy_timeout 30 s — headroom over the worst observed stall
+    //     so residual writer-writer contention waits instead of
+    //     erroring into the redelivery path.
     let sqlite_opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", cfg.db.sqlite_path))
         .with_context(|| format!("parse sqlite path {}", cfg.db.sqlite_path))?
-        .create_if_missing(true);
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
+        .busy_timeout(std::time::Duration::from_secs(30));
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
         .connect_with(sqlite_opts)
