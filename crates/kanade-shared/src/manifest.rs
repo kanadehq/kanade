@@ -938,6 +938,16 @@ target: { all: true }
         .unwrap_err();
         assert!(err.contains("per_target"), "got: {err}");
         assert!(err.contains("runs_on: agent"), "got: {err}");
+
+        // per_target: once is also backend-only.
+        let err = schedule_with(
+            When::PerTarget(PerPolicy::Once(OnceLiteral::Once)),
+            RunsOn::Agent,
+        )
+        .validate()
+        .unwrap_err();
+        assert!(err.contains("per_target"), "got (once): {err}");
+        assert!(err.contains("runs_on: agent"), "got (once): {err}");
     }
 
     #[test]
