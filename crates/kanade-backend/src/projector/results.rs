@@ -185,11 +185,18 @@ async fn insert_result(pool: &SqlitePool, r: &ExecResult, result_id: &str) -> Re
     // legacy payload must hash to the same id so the ON CONFLICT
     // path triggers the WHERE-guard rather than inserting a second
     // row.
+    // #390: `recorded_at` is bound explicitly (RFC 3339 via chrono)
+    // instead of falling back to the column's DEFAULT
+    // CURRENT_TIMESTAMP — the DEFAULT's space-separated text breaks
+    // lexicographic `recorded_at >= ?` filters against chrono binds.
+    // The conflict path intentionally leaves recorded_at at its
+    // first-insert value, same as before.
     let rows = sqlx::query(
         "INSERT INTO execution_results (
              result_id, request_id, exec_id, pc_id, exit_code,
-             stdout, stderr, started_at, finished_at, job_id
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             stdout, stderr, started_at, finished_at, job_id,
+             recorded_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(result_id) DO UPDATE SET
              exit_code   = excluded.exit_code,
              stdout      = excluded.stdout,
@@ -211,6 +218,7 @@ async fn insert_result(pool: &SqlitePool, r: &ExecResult, result_id: &str) -> Re
     .bind(r.started_at)
     .bind(r.finished_at)
     .bind(&r.manifest_id)
+    .bind(chrono::Utc::now())
     .execute(pool)
     .await?;
     Ok(rows.rows_affected() > 0)
@@ -373,17 +381,19 @@ async fn upsert_inventory(
             None
         };
 
+    // #390: bind recorded_at (RFC 3339) instead of CURRENT_TIMESTAMP
+    // so the table keeps one uniform timestamp text format.
     sqlx::query(
         "INSERT INTO inventory_facts (
              pc_id, job_id, facts_json, display_json, summary_json,
              collected_at, recorded_at
-         ) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(pc_id, job_id) DO UPDATE SET
              facts_json   = excluded.facts_json,
              display_json = excluded.display_json,
              summary_json = excluded.summary_json,
              collected_at = excluded.collected_at,
-             recorded_at  = CURRENT_TIMESTAMP",
+             recorded_at  = excluded.recorded_at",
     )
     .bind(&r.pc_id)
     .bind(manifest_id)
@@ -391,6 +401,7 @@ async fn upsert_inventory(
     .bind(display_json)
     .bind(summary_json)
     .bind(r.finished_at)
+    .bind(chrono::Utc::now())
     .execute(pool)
     .await?;
     info!(

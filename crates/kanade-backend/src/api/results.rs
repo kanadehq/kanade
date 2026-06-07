@@ -259,3 +259,90 @@ fn row_to_result(r: sqlx::sqlite::SqliteRow) -> ResultRow {
         version: r.try_get("version").ok(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration, Utc};
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn fresh_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    fn params(since: Option<chrono::DateTime<chrono::Utc>>) -> ListParams {
+        ListParams {
+            limit: default_limit(),
+            pc_id: None,
+            job_id: None,
+            exec_id: None,
+            stdout: None,
+            stderr: None,
+            status: None,
+            since,
+        }
+    }
+
+    /// Insert a finished row the way the results projector does:
+    /// every timestamp — including `recorded_at` — bound through
+    /// chrono (RFC 3339), never left to the column DEFAULT.
+    async fn insert_row(pool: &SqlitePool, result_id: &str) {
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO execution_results
+                (result_id, request_id, pc_id, exit_code, stdout, stderr,
+                 started_at, finished_at, recorded_at)
+             VALUES (?, 'req', 'pc-1', 0, '', '', ?, ?, ?)",
+        )
+        .bind(result_id)
+        .bind(now - Duration::minutes(10))
+        .bind(now - Duration::minutes(9))
+        .bind(now - Duration::minutes(9))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// #390 regression: a row recorded minutes ago must match a
+    /// rolling `since` bound from the same UTC day. Pre-fix,
+    /// `recorded_at` came from DEFAULT CURRENT_TIMESTAMP
+    /// ('YYYY-MM-DD HH:MM:SS', space-separated) while `since` binds
+    /// RFC 3339 ('...T...'); lexicographic TEXT comparison with
+    /// ' ' < 'T' pushed every same-UTC-date row below the bound, so
+    /// the Activity page's "last 24h" showed nothing until the next
+    /// UTC midnight (= 09:00 JST).
+    #[tokio::test]
+    async fn since_filter_matches_same_utc_day_rows() {
+        let pool = fresh_pool().await;
+        insert_row(&pool, "r-1").await;
+
+        let rows = list(
+            State(pool.clone()),
+            Query(params(Some(Utc::now() - Duration::hours(24)))),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(
+            rows.len(),
+            1,
+            "row recorded minutes ago must be inside the rolling 24h window",
+        );
+
+        // Sanity: a bound minutes in the future excludes it.
+        let rows = list(
+            State(pool),
+            Query(params(Some(Utc::now() + Duration::minutes(5)))),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(rows.is_empty(), "future bound must exclude the row");
+    }
+}

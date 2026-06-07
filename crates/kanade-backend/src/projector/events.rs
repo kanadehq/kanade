@@ -114,11 +114,14 @@ async fn insert_inflight_row(pool: &SqlitePool, e: &EventStarted) -> Result<()> 
     // the deploy UUID. We bind EventStarted.manifest_id to it so
     // the dedup index (job_id, pc_id, finished_at DESC) keeps
     // working unchanged.
+    // #390: recorded_at is bound explicitly (RFC 3339) — the column's
+    // DEFAULT CURRENT_TIMESTAMP writes space-separated text that
+    // breaks lexicographic `recorded_at >= ?` filters.
     sqlx::query(
         "INSERT INTO execution_results (
              result_id, request_id, exec_id, pc_id, started_at,
-             version, job_id
-         ) VALUES (?, ?, ?, ?, ?, ?, ?)
+             version, job_id, recorded_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(result_id) DO NOTHING",
     )
     .bind(&e.result_id)
@@ -128,6 +131,7 @@ async fn insert_inflight_row(pool: &SqlitePool, e: &EventStarted) -> Result<()> 
     .bind(e.started_at)
     .bind(&e.version)
     .bind(&e.manifest_id)
+    .bind(chrono::Utc::now())
     .execute(pool)
     .await?;
     Ok(())

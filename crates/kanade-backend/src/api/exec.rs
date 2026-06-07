@@ -234,15 +234,19 @@ pub async fn exec_manifest(
     }
     let _ = s.nats.flush().await;
 
+    // #390: initiated_at is bound explicitly (RFC 3339) — the
+    // column's DEFAULT CURRENT_TIMESTAMP writes space-separated text,
+    // which would mix formats with the chrono-bound cleanup cutoff.
     sqlx::query(
-        "INSERT INTO executions (exec_id, job_id, version, initiated_by, target_count, status)
-         VALUES (?, ?, ?, ?, ?, 'pending')",
+        "INSERT INTO executions (exec_id, job_id, version, initiated_by, target_count, status, initiated_at)
+         VALUES (?, ?, ?, ?, ?, 'pending', ?)",
     )
     .bind(&exec_id)
     .bind(&manifest.id)
     .bind(&manifest.version)
     .bind(actor)
     .bind(target_count as i64)
+    .bind(chrono::Utc::now())
     .execute(&s.pool)
     .await
     .map_err(|e| {

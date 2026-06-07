@@ -27,8 +27,20 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;
 use tracing::{info, warn};
+
+// #390 note on cutoff style: every sweep below takes a chrono-bound
+// `cutoff` computed in the tick loop instead of SQLite-side
+// `datetime('now', '-N hours')`. The columns being compared store
+// RFC 3339 text ('2026-06-07T00:00:33.123+00:00'); `datetime()`
+// renders space-separated 'YYYY-MM-DD HH:MM:SS', and since TEXT
+// comparison is lexicographic with ' ' < 'T', mixing the two shapes
+// degrades every cutoff to UTC-date granularity. Binding a chrono
+// value makes both sides the same shape (sqlx encodes
+// DateTime<Utc> as RFC 3339) — exact comparisons, and the injectable
+// cutoff also makes boundary semantics unit-testable.
 
 /// How often the cleanup task scans for stale rows. 5 minutes is
 /// short enough that the operator-observable chip lag is bounded,
@@ -37,9 +49,8 @@ use tracing::{info, warn};
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// How long a `pending` row may sit before the cleanup considers
-/// it expired. SQLite-side as a relative-time string passed
-/// directly to `datetime('now', '-1 hour')`.
-const PENDING_TIMEOUT: &str = "-1 hour";
+/// it expired.
+const PENDING_TIMEOUT_HOURS: i64 = 1;
 
 /// How long an in-flight `execution_results` row (`finished_at IS
 /// NULL` — `events.started` landed but no `ExecResult` ever did) may
@@ -61,7 +72,7 @@ const PENDING_TIMEOUT: &str = "-1 hour";
 /// force-killed at its `timeout_secs` and returns a result, so a row
 /// still NULL after 24 h is genuinely abandoned, not slow. Tunable
 /// here; deliberately generous to avoid demoting a live run.
-const INFLIGHT_TIMEOUT: &str = "-24 hours";
+const INFLIGHT_TIMEOUT_HOURS: i64 = 24;
 
 /// Sentinel `exit_code` stamped on a reaped in-flight row. `-1`
 /// matches the agent's own convention for Killed / Timeout outcomes
@@ -79,14 +90,14 @@ const REAPED_STDERR_NOTE: &str = "[backend: reaped — no ExecResult within 24h;
 /// The change-only design already bounds row volume to actual
 /// fleet churn; this just bounds the tail. Operator-tunable via
 /// config in a follow-up.
-const HISTORY_RETENTION: &str = "-90 days";
+const HISTORY_RETENTION_DAYS: i64 = 90;
 
 /// v0.40 Part 1: `host_perf_samples` retention. 30 d is the SPA's
 /// longest range selector and covers month-over-month investigations
 /// (rare). At 60 s sample cadence × 30 d × 1000 PCs ≈ 43 M rows,
 /// which SQLite handles fine. Beyond 30 d a rollup pass is more
 /// appropriate than a raw retention bump — TBD when fleets grow.
-const PERF_RETENTION: &str = "-30 days";
+const PERF_RETENTION_DAYS: i64 = 30;
 
 /// v0.41 / Phase 2: `process_perf_samples` retention. 7 d is much
 /// tighter than host_perf because process-perf is N rows per tick
@@ -95,14 +106,14 @@ const PERF_RETENTION: &str = "-30 days";
 /// populates while an operator has flipped a PC into investigation
 /// mode, so the absolute row count is bounded by active windows
 /// regardless of fleet size.
-const PROCESS_PERF_RETENTION: &str = "-7 days";
+const PROCESS_PERF_RETENTION_DAYS: i64 = 7;
 
 /// Issue #246: `obs_events` retention. 90 d matches the
 /// `inventory_history` window so operators have one mental "how
 /// far back can I look" answer across timeline surfaces. Cadence
 /// is low (~50/day/PC), so 90 d × 1000 PCs ≈ 4.5 M rows — easily
 /// within SQLite limits.
-const OBS_EVENTS_RETENTION: &str = "-90 days";
+const OBS_EVENTS_RETENTION_DAYS: i64 = 90;
 
 /// Spawn the long-running cleanup task. Runs forever; logs a warn
 /// on transient SQLite errors and continues to the next tick. The
@@ -113,7 +124,7 @@ pub fn spawn(pool: SqlitePool) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         info!(
             interval_secs = CLEANUP_INTERVAL.as_secs(),
-            pending_timeout = PENDING_TIMEOUT,
+            pending_timeout_hours = PENDING_TIMEOUT_HOURS,
             "executions cleanup task started",
         );
         // Gemini #77 medium fix: `tokio::time::interval` keeps a
@@ -125,7 +136,12 @@ pub fn spawn(pool: SqlitePool) -> tokio::task::JoinHandle<()> {
         let mut interval = tokio::time::interval(CLEANUP_INTERVAL);
         loop {
             interval.tick().await;
-            match expire_stale_pending(&pool).await {
+            // One `now` per tick: every sweep's cutoff derives from
+            // the same instant, so a tick is internally consistent.
+            let now = Utc::now();
+            match expire_stale_pending(&pool, now - chrono::Duration::hours(PENDING_TIMEOUT_HOURS))
+                .await
+            {
                 Ok(n) if n > 0 => info!(
                     expired = n,
                     "executions cleanup: marked {n} stale pending rows as expired",
@@ -137,53 +153,75 @@ pub fn spawn(pool: SqlitePool) -> tokio::task::JoinHandle<()> {
             // rows whose `ExecResult` never arrived (agent died /
             // pre-#330 kill-hang). Without this they show "実行中"
             // forever on the Activity page. Shares the 5 min timer.
-            match reap_orphaned_results(&pool).await {
+            match reap_orphaned_results(
+                &pool,
+                now - chrono::Duration::hours(INFLIGHT_TIMEOUT_HOURS),
+            )
+            .await
+            {
                 Ok(n) if n > 0 => info!(
                     reaped = n,
-                    "execution_results cleanup: reaped {n} orphaned in-flight rows (no result within {INFLIGHT_TIMEOUT})",
+                    "execution_results cleanup: reaped {n} orphaned in-flight rows (no result within {INFLIGHT_TIMEOUT_HOURS}h)",
                 ),
                 Ok(_) => {}
                 Err(e) => warn!(error = %e, "execution_results reap failed"),
             }
             // v0.31 / #41: prune inventory_history rows older than
-            // HISTORY_RETENTION. Same 5 min cadence as executions
+            // HISTORY_RETENTION_DAYS. Same 5 min cadence as executions
             // cleanup so both tasks share the timer rather than
             // running parallel sweepers.
-            match prune_inventory_history(&pool).await {
+            match prune_inventory_history(
+                &pool,
+                now - chrono::Duration::days(HISTORY_RETENTION_DAYS),
+            )
+            .await
+            {
                 Ok(n) if n > 0 => info!(
                     deleted = n,
-                    "inventory_history cleanup: pruned {n} rows older than {HISTORY_RETENTION}",
+                    "inventory_history cleanup: pruned {n} rows older than {HISTORY_RETENTION_DAYS}d",
                 ),
                 Ok(_) => {}
                 Err(e) => warn!(error = %e, "inventory_history cleanup failed"),
             }
             // v0.40 Part 1: prune host_perf_samples rows older than
-            // PERF_RETENTION. Same shared-timer pattern.
-            match prune_host_perf_samples(&pool).await {
+            // PERF_RETENTION_DAYS. Same shared-timer pattern.
+            match prune_host_perf_samples(&pool, now - chrono::Duration::days(PERF_RETENTION_DAYS))
+                .await
+            {
                 Ok(n) if n > 0 => info!(
                     deleted = n,
-                    "host_perf_samples cleanup: pruned {n} rows older than {PERF_RETENTION}",
+                    "host_perf_samples cleanup: pruned {n} rows older than {PERF_RETENTION_DAYS}d",
                 ),
                 Ok(_) => {}
                 Err(e) => warn!(error = %e, "host_perf_samples cleanup failed"),
             }
             // v0.41 / Phase 2: prune process_perf_samples rows older
-            // than PROCESS_PERF_RETENTION. Tighter retention than
+            // than PROCESS_PERF_RETENTION_DAYS. Tighter retention than
             // host_perf because the table is N rows per tick.
-            match prune_process_perf_samples(&pool).await {
+            match prune_process_perf_samples(
+                &pool,
+                now - chrono::Duration::days(PROCESS_PERF_RETENTION_DAYS),
+            )
+            .await
+            {
                 Ok(n) if n > 0 => info!(
                     deleted = n,
-                    "process_perf_samples cleanup: pruned {n} rows older than {PROCESS_PERF_RETENTION}",
+                    "process_perf_samples cleanup: pruned {n} rows older than {PROCESS_PERF_RETENTION_DAYS}d",
                 ),
                 Ok(_) => {}
                 Err(e) => warn!(error = %e, "process_perf_samples cleanup failed"),
             }
             // Issue #246: prune obs_events rows older than
-            // OBS_EVENTS_RETENTION. Same shared-timer pattern.
-            match prune_obs_events(&pool).await {
+            // OBS_EVENTS_RETENTION_DAYS. Same shared-timer pattern.
+            match prune_obs_events(
+                &pool,
+                now - chrono::Duration::days(OBS_EVENTS_RETENTION_DAYS),
+            )
+            .await
+            {
                 Ok(n) if n > 0 => info!(
                     deleted = n,
-                    "obs_events cleanup: pruned {n} rows older than {OBS_EVENTS_RETENTION}",
+                    "obs_events cleanup: pruned {n} rows older than {OBS_EVENTS_RETENTION_DAYS}d",
                 ),
                 Ok(_) => {}
                 Err(e) => warn!(error = %e, "obs_events cleanup failed"),
@@ -192,16 +230,16 @@ pub fn spawn(pool: SqlitePool) -> tokio::task::JoinHandle<()> {
     })
 }
 
-/// Delete `obs_events` rows older than [`OBS_EVENTS_RETENTION`].
+/// Delete `obs_events` rows older than [`OBS_EVENTS_RETENTION_DAYS`].
 /// `idx_obs_events_pc_at` covers `at DESC` range scans cheaply, so
 /// the DELETE walks the natural index order even at a few million
 /// rows.
-async fn prune_obs_events(pool: &SqlitePool) -> Result<u64> {
+async fn prune_obs_events(pool: &SqlitePool, cutoff: DateTime<Utc>) -> Result<u64> {
     let rows = sqlx::query(
         "DELETE FROM obs_events
-          WHERE at < datetime('now', ?)",
+          WHERE at < ?",
     )
-    .bind(OBS_EVENTS_RETENTION)
+    .bind(cutoff)
     .execute(pool)
     .await
     .context("DELETE obs_events retention sweep")?;
@@ -209,44 +247,44 @@ async fn prune_obs_events(pool: &SqlitePool) -> Result<u64> {
 }
 
 /// Delete `process_perf_samples` rows older than
-/// [`PROCESS_PERF_RETENTION`]. The `at` column is indexed
+/// [`PROCESS_PERF_RETENTION_DAYS`]. The `at` column is indexed
 /// (`idx_process_perf_samples_at`) so the scan stays cheap.
-async fn prune_process_perf_samples(pool: &SqlitePool) -> Result<u64> {
+async fn prune_process_perf_samples(pool: &SqlitePool, cutoff: DateTime<Utc>) -> Result<u64> {
     let rows = sqlx::query(
         "DELETE FROM process_perf_samples
-          WHERE at < datetime('now', ?)",
+          WHERE at < ?",
     )
-    .bind(PROCESS_PERF_RETENTION)
+    .bind(cutoff)
     .execute(pool)
     .await
     .context("DELETE process_perf_samples retention sweep")?;
     Ok(rows.rows_affected())
 }
 
-/// Delete `host_perf_samples` rows older than [`PERF_RETENTION`].
+/// Delete `host_perf_samples` rows older than [`PERF_RETENTION_DAYS`].
 /// Returns the number of rows affected. The `at` column is indexed
 /// (`idx_host_perf_samples_at`) so this scans efficiently even with
 /// tens of millions of rows.
-async fn prune_host_perf_samples(pool: &SqlitePool) -> Result<u64> {
+async fn prune_host_perf_samples(pool: &SqlitePool, cutoff: DateTime<Utc>) -> Result<u64> {
     let rows = sqlx::query(
         "DELETE FROM host_perf_samples
-          WHERE at < datetime('now', ?)",
+          WHERE at < ?",
     )
-    .bind(PERF_RETENTION)
+    .bind(cutoff)
     .execute(pool)
     .await
     .context("DELETE host_perf_samples retention sweep")?;
     Ok(rows.rows_affected())
 }
 
-/// Delete `inventory_history` rows older than [`HISTORY_RETENTION`].
-/// Returns the number of rows affected.
-async fn prune_inventory_history(pool: &SqlitePool) -> Result<u64> {
+/// Delete `inventory_history` rows older than
+/// [`HISTORY_RETENTION_DAYS`]. Returns the number of rows affected.
+async fn prune_inventory_history(pool: &SqlitePool, cutoff: DateTime<Utc>) -> Result<u64> {
     let rows = sqlx::query(
         "DELETE FROM inventory_history
-          WHERE observed_at < datetime('now', ?)",
+          WHERE observed_at < ?",
     )
-    .bind(HISTORY_RETENTION)
+    .bind(cutoff)
     .execute(pool)
     .await
     .context("DELETE inventory_history retention sweep")?;
@@ -254,25 +292,25 @@ async fn prune_inventory_history(pool: &SqlitePool) -> Result<u64> {
 }
 
 /// Flip every `executions.status = 'pending'` row older than
-/// `PENDING_TIMEOUT` to `'expired'`. Returns the number of rows
+/// the cutoff to `'expired'`. Returns the number of rows
 /// affected so the caller can log a one-line summary. Idempotent —
 /// rows already in `'expired'` (or any non-pending state) are
 /// untouched.
 ///
-/// Gemini #77 medium fix: the SQL string is now static; the
-/// `PENDING_TIMEOUT` constant is `.bind()`'d as a parameter instead
-/// of being `format!`'d into the literal. `PENDING_TIMEOUT` is a
-/// compile-time constant so injection risk is zero either way, but
-/// parameterised queries are the SQL-idiomatic style + let the
-/// driver reuse prepared statements.
-async fn expire_stale_pending(pool: &SqlitePool) -> Result<u64> {
+/// Gemini #77 medium fix: the SQL string is static and the cutoff is
+/// `.bind()`'d as a parameter instead of being `format!`'d into the
+/// literal — parameterised queries are the SQL-idiomatic style + let
+/// the driver reuse prepared statements. #390 moved the cutoff
+/// computation Rust-side (chrono) so both comparison operands share
+/// the RFC 3339 text shape.
+async fn expire_stale_pending(pool: &SqlitePool, cutoff: DateTime<Utc>) -> Result<u64> {
     let rows = sqlx::query(
         "UPDATE executions
             SET status = 'expired'
           WHERE status = 'pending'
-            AND initiated_at < datetime('now', ?)",
+            AND initiated_at < ?",
     )
-    .bind(PENDING_TIMEOUT)
+    .bind(cutoff)
     .execute(pool)
     .await
     .context("UPDATE executions expire stale pending")?;
@@ -280,7 +318,7 @@ async fn expire_stale_pending(pool: &SqlitePool) -> Result<u64> {
 }
 
 /// Reap in-flight `execution_results` rows (`finished_at IS NULL`)
-/// whose `started_at` predates [`INFLIGHT_TIMEOUT`]: stamp
+/// whose `started_at` predates [`INFLIGHT_TIMEOUT_HOURS`]: stamp
 /// `finished_at = now`, set [`REAPED_EXIT_CODE`], mark `reaped = 1`,
 /// and append [`REAPED_STDERR_NOTE`] to `stderr`. Returns the number
 /// of rows affected. Idempotent — the `finished_at IS NULL` guard
@@ -301,10 +339,13 @@ async fn expire_stale_pending(pool: &SqlitePool) -> Result<u64> {
 /// `CASE` keeps the note flush against the top when `stderr` was
 /// empty (the common in-flight case, since the row was created by
 /// `events.started` with the default empty string).
-async fn reap_orphaned_results(pool: &SqlitePool) -> Result<u64> {
+async fn reap_orphaned_results(pool: &SqlitePool, cutoff: DateTime<Utc>) -> Result<u64> {
+    // #390: finished_at is stamped from a chrono bind (RFC 3339), not
+    // CURRENT_TIMESTAMP — the latter's space-separated text was the
+    // one writer leaking a second format into a chrono-bound column.
     let rows = sqlx::query(
         "UPDATE execution_results
-            SET finished_at = CURRENT_TIMESTAMP,
+            SET finished_at = ?,
                 exit_code   = ?,
                 reaped      = 1,
                 stderr      = CASE
@@ -312,12 +353,13 @@ async fn reap_orphaned_results(pool: &SqlitePool) -> Result<u64> {
                     ELSE stderr || char(10) || ?
                 END
           WHERE finished_at IS NULL
-            AND started_at < datetime('now', ?)",
+            AND started_at < ?",
     )
+    .bind(Utc::now())
     .bind(REAPED_EXIT_CODE)
     .bind(REAPED_STDERR_NOTE)
     .bind(REAPED_STDERR_NOTE)
-    .bind(INFLIGHT_TIMEOUT)
+    .bind(cutoff)
     .execute(pool)
     .await
     .context("UPDATE execution_results reap orphaned in-flight")?;
@@ -339,27 +381,46 @@ mod tests {
         pool
     }
 
+    /// Cutoff matching the tick loop's computation, evaluated at
+    /// call time.
+    fn pending_cutoff() -> DateTime<Utc> {
+        Utc::now() - chrono::Duration::hours(PENDING_TIMEOUT_HOURS)
+    }
+
+    fn inflight_cutoff() -> DateTime<Utc> {
+        Utc::now() - chrono::Duration::hours(INFLIGHT_TIMEOUT_HOURS)
+    }
+
     /// Insert an executions row at a chosen `initiated_at` offset
-    /// from now. `offset_minutes` negative = in the past.
-    async fn insert_exec(pool: &SqlitePool, exec_id: &str, status: &str, offset_minutes: i64) {
-        let sql = format!(
+    /// from now, bound through chrono (RFC 3339) like the production
+    /// writer in `api::exec`. `offset_minutes` negative = in the
+    /// past. Returns the exact stamp for boundary assertions.
+    async fn insert_exec(
+        pool: &SqlitePool,
+        exec_id: &str,
+        status: &str,
+        offset_minutes: i64,
+    ) -> DateTime<Utc> {
+        let initiated_at = Utc::now() + chrono::Duration::minutes(offset_minutes);
+        sqlx::query(
             "INSERT INTO executions
                 (exec_id, job_id, version, initiated_by, target_count, status, initiated_at)
-             VALUES (?, 'j', '1.0', 'tester', 1, ?, datetime('now', '{offset_minutes} minutes'))"
-        );
-        sqlx::query(sqlx::AssertSqlSafe(sql))
-            .bind(exec_id)
-            .bind(status)
-            .execute(pool)
-            .await
-            .unwrap();
+             VALUES (?, 'j', '1.0', 'tester', 1, ?, ?)",
+        )
+        .bind(exec_id)
+        .bind(status)
+        .bind(initiated_at)
+        .execute(pool)
+        .await
+        .unwrap();
+        initiated_at
     }
 
     #[tokio::test]
     async fn pending_older_than_1h_becomes_expired() {
         let pool = fresh_pool().await;
         insert_exec(&pool, "e-stale", "pending", -120).await; // 2h ago
-        let affected = expire_stale_pending(&pool).await.unwrap();
+        let affected = expire_stale_pending(&pool, pending_cutoff()).await.unwrap();
         assert_eq!(affected, 1);
         let status: (String,) = sqlx::query_as("SELECT status FROM executions WHERE exec_id = ?")
             .bind("e-stale")
@@ -373,7 +434,7 @@ mod tests {
     async fn pending_within_1h_is_left_alone() {
         let pool = fresh_pool().await;
         insert_exec(&pool, "e-fresh", "pending", -30).await; // 30 min ago
-        let affected = expire_stale_pending(&pool).await.unwrap();
+        let affected = expire_stale_pending(&pool, pending_cutoff()).await.unwrap();
         assert_eq!(affected, 0, "fresh pending must not be touched");
         let status: (String,) = sqlx::query_as("SELECT status FROM executions WHERE exec_id = ?")
             .bind("e-fresh")
@@ -393,7 +454,7 @@ mod tests {
         insert_exec(&pool, "e-run", "running", -180).await;
         insert_exec(&pool, "e-done", "completed", -180).await;
         insert_exec(&pool, "e-exp", "expired", -180).await;
-        let affected = expire_stale_pending(&pool).await.unwrap();
+        let affected = expire_stale_pending(&pool, pending_cutoff()).await.unwrap();
         assert_eq!(affected, 0);
         for (id, expected) in [
             ("e-run", "running"),
@@ -411,19 +472,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_exactly_1h_is_left_alone() {
+    async fn pending_exactly_at_cutoff_is_left_alone() {
         // CodeRabbit #77 boundary test: lock in the `<` (strict)
-        // semantic on the cutoff. A row at exactly the timeout
-        // boundary must NOT be expired — the SQL uses
-        // `initiated_at < datetime('now', '-1 hour')`, so a row
-        // inserted exactly -60 min ago has `initiated_at ==
-        // (now - 1h)` and the strict inequality leaves it pending.
-        // If anyone ever swaps the comparison to `<=`, this test
-        // fails loudly.
+        // semantic on the cutoff. A row whose `initiated_at` equals
+        // the cutoff exactly must NOT be expired. The injectable
+        // cutoff (#390) makes the equality exact — we pass the row's
+        // own stamp as the cutoff. If anyone ever swaps the
+        // comparison to `<=`, this test fails loudly.
         let pool = fresh_pool().await;
-        insert_exec(&pool, "e-boundary", "pending", -60).await;
-        let affected = expire_stale_pending(&pool).await.unwrap();
-        assert_eq!(affected, 0, "exactly-1h-old pending is at the boundary");
+        let stamp = insert_exec(&pool, "e-boundary", "pending", -60).await;
+        let affected = expire_stale_pending(&pool, stamp).await.unwrap();
+        assert_eq!(affected, 0, "row exactly at the cutoff is at the boundary");
         let status: (String,) = sqlx::query_as("SELECT status FROM executions WHERE exec_id = ?")
             .bind("e-boundary")
             .fetch_one(&pool)
@@ -436,41 +495,43 @@ mod tests {
     async fn cleanup_is_idempotent() {
         let pool = fresh_pool().await;
         insert_exec(&pool, "e-old", "pending", -120).await;
-        let first = expire_stale_pending(&pool).await.unwrap();
-        let second = expire_stale_pending(&pool).await.unwrap();
+        let first = expire_stale_pending(&pool, pending_cutoff()).await.unwrap();
+        let second = expire_stale_pending(&pool, pending_cutoff()).await.unwrap();
         assert_eq!(first, 1);
         assert_eq!(second, 0, "second run finds nothing to expire");
     }
 
     /// Insert an in-flight `execution_results` row (`finished_at
     /// IS NULL`, `exit_code IS NULL`) at a chosen `started_at`
-    /// offset. `offset_minutes` negative = in the past.
+    /// offset, bound through chrono (RFC 3339) like the production
+    /// writers. `offset_minutes` negative = in the past.
     async fn insert_inflight_result(
         pool: &SqlitePool,
         result_id: &str,
         offset_minutes: i64,
         stderr: &str,
     ) {
-        let sql = format!(
+        sqlx::query(
             "INSERT INTO execution_results
                 (result_id, request_id, pc_id, exit_code, stdout, stderr,
                  started_at, finished_at)
-             VALUES (?, 'req', 'pc-1', NULL, '', ?,
-                     datetime('now', '{offset_minutes} minutes'), NULL)"
-        );
-        sqlx::query(sqlx::AssertSqlSafe(sql))
-            .bind(result_id)
-            .bind(stderr)
-            .execute(pool)
-            .await
-            .unwrap();
+             VALUES (?, 'req', 'pc-1', NULL, '', ?, ?, NULL)",
+        )
+        .bind(result_id)
+        .bind(stderr)
+        .bind(Utc::now() + chrono::Duration::minutes(offset_minutes))
+        .execute(pool)
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
     async fn inflight_older_than_24h_is_reaped() {
         let pool = fresh_pool().await;
         insert_inflight_result(&pool, "r-stale", -25 * 60, "").await; // 25h ago
-        let n = reap_orphaned_results(&pool).await.unwrap();
+        let n = reap_orphaned_results(&pool, inflight_cutoff())
+            .await
+            .unwrap();
         assert_eq!(n, 1);
         let row: (Option<String>, Option<i64>, String, i64) = sqlx::query_as(
             "SELECT finished_at, exit_code, stderr, reaped \
@@ -492,7 +553,9 @@ mod tests {
         // legitimately long job — must NOT be reaped.
         let pool = fresh_pool().await;
         insert_inflight_result(&pool, "r-fresh", -60, "").await; // 1h ago
-        let n = reap_orphaned_results(&pool).await.unwrap();
+        let n = reap_orphaned_results(&pool, inflight_cutoff())
+            .await
+            .unwrap();
         assert_eq!(n, 0, "fresh in-flight row must not be touched");
         let fin: (Option<String>,) =
             sqlx::query_as("SELECT finished_at FROM execution_results WHERE result_id = ?")
@@ -513,13 +576,16 @@ mod tests {
             "INSERT INTO execution_results
                 (result_id, request_id, pc_id, exit_code, stdout, stderr,
                  started_at, finished_at)
-             VALUES ('r-done', 'req', 'pc-1', 0, '', '',
-                     datetime('now', '-48 hours'), datetime('now', '-47 hours'))",
+             VALUES ('r-done', 'req', 'pc-1', 0, '', '', ?, ?)",
         )
+        .bind(Utc::now() - chrono::Duration::hours(48))
+        .bind(Utc::now() - chrono::Duration::hours(47))
         .execute(&pool)
         .await
         .unwrap();
-        let n = reap_orphaned_results(&pool).await.unwrap();
+        let n = reap_orphaned_results(&pool, inflight_cutoff())
+            .await
+            .unwrap();
         assert_eq!(n, 0);
         let row: (Option<i64>, String) =
             sqlx::query_as("SELECT exit_code, stderr FROM execution_results WHERE result_id = ?")
@@ -537,7 +603,9 @@ mod tests {
         // survive; the note is appended, not overwritten.
         let pool = fresh_pool().await;
         insert_inflight_result(&pool, "r-partial", -25 * 60, "partial output").await;
-        reap_orphaned_results(&pool).await.unwrap();
+        reap_orphaned_results(&pool, inflight_cutoff())
+            .await
+            .unwrap();
         let s: (String,) =
             sqlx::query_as("SELECT stderr FROM execution_results WHERE result_id = ?")
                 .bind("r-partial")
@@ -558,8 +626,12 @@ mod tests {
     async fn reap_is_idempotent() {
         let pool = fresh_pool().await;
         insert_inflight_result(&pool, "r-old", -30 * 60, "").await; // 30h ago
-        let first = reap_orphaned_results(&pool).await.unwrap();
-        let second = reap_orphaned_results(&pool).await.unwrap();
+        let first = reap_orphaned_results(&pool, inflight_cutoff())
+            .await
+            .unwrap();
+        let second = reap_orphaned_results(&pool, inflight_cutoff())
+            .await
+            .unwrap();
         assert_eq!(first, 1);
         assert_eq!(second, 0, "reaped row is no longer in-flight");
     }
