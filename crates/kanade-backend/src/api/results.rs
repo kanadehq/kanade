@@ -82,7 +82,14 @@ pub struct ListParams {
     /// Regex on `stderr` content — same shape as `stdout`.
     pub stderr: Option<String>,
     pub status: Option<StatusFilter>,
-    /// ISO-8601 lower bound on `recorded_at`. Anything strictly older is filtered out.
+    /// ISO-8601 lower bound on `started_at`. Anything strictly older is
+    /// filtered out. #399: was `recorded_at` (backend projection time),
+    /// which answered "what did the backend record recently" instead of
+    /// the operator's actual question "what *ran* recently" — and after
+    /// a -WipeDb re-projection (#389) every replayed row's recorded_at
+    /// collapses onto the replay instant, flooding the default 24h
+    /// window with weeks-old runs. `started_at` matches the column the
+    /// table displays and is immune to re-projection.
     pub since: Option<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -92,7 +99,7 @@ fn default_limit() -> u32 {
 
 // Upper bound on the prefilter window when at least one regex filter
 // is active. SQL narrows by `status` + `since` first; then we ORDER BY
-// recorded_at DESC and scan up to MAX_FETCH rows in Rust, applying the
+// started_at DESC and scan up to MAX_FETCH rows in Rust, applying the
 // compiled regexes and stopping once `limit` matches are collected.
 // Pulling the prefilter into Rust is the same trick used by
 // `api::audit::list` — sqlx 0.8 doesn't expose `create_scalar_function`
@@ -144,12 +151,17 @@ pub async fn list(
         sep = " AND ";
     }
     if let Some(since) = params.since {
-        qb.push(sep).push("recorded_at >= ").push_bind(since);
+        qb.push(sep).push("started_at >= ").push_bind(since);
         sep = " AND ";
     }
     let _ = sep;
 
-    qb.push(" ORDER BY recorded_at DESC LIMIT ");
+    // #399: order by started_at (the displayed column) so the listing
+    // is a run-time timeline, not a projection-time feed. result_id
+    // breaks ties (broadcast fan-outs can share a start instant) so
+    // pagination across refetches is deterministic. Served by
+    // idx_execution_results_started_at.
+    qb.push(" ORDER BY started_at DESC, result_id DESC LIMIT ");
     let sql_limit = if has_regex {
         MAX_FETCH
     } else {
@@ -309,14 +321,14 @@ mod tests {
         .unwrap();
     }
 
-    /// #390 regression: a row recorded minutes ago must match a
-    /// rolling `since` bound from the same UTC day. Pre-fix,
-    /// `recorded_at` came from DEFAULT CURRENT_TIMESTAMP
-    /// ('YYYY-MM-DD HH:MM:SS', space-separated) while `since` binds
-    /// RFC 3339 ('...T...'); lexicographic TEXT comparison with
-    /// ' ' < 'T' pushed every same-UTC-date row below the bound, so
-    /// the Activity page's "last 24h" showed nothing until the next
-    /// UTC midnight (= 09:00 JST).
+    /// #390 regression (filter axis updated to `started_at` by #399):
+    /// a row that ran minutes ago must match a rolling `since` bound
+    /// from the same UTC day. The #390 failure mode was a timestamp
+    /// TEXT-format mismatch (DEFAULT CURRENT_TIMESTAMP's space
+    /// separator vs RFC 3339's 'T'; ' ' < 'T' lexicographically)
+    /// that pushed every same-UTC-date row below the bound, so the
+    /// Activity page's "last 24h" showed nothing until the next UTC
+    /// midnight (= 09:00 JST).
     #[tokio::test]
     async fn since_filter_matches_same_utc_day_rows() {
         let pool = fresh_pool().await;
@@ -332,7 +344,7 @@ mod tests {
         assert_eq!(
             rows.len(),
             1,
-            "row recorded minutes ago must be inside the rolling 24h window",
+            "row that ran minutes ago must be inside the rolling 24h window",
         );
 
         // Sanity: a bound minutes in the future excludes it.
@@ -344,5 +356,46 @@ mod tests {
         .unwrap()
         .0;
         assert!(rows.is_empty(), "future bound must exclude the row");
+    }
+
+    /// #399: the filter axis is `started_at` (what the table shows),
+    /// NOT `recorded_at` (projection time). A row projected just now
+    /// but started three weeks ago — exactly what a -WipeDb
+    /// re-projection (#389) produces — must NOT pass a 24h `since`.
+    #[tokio::test]
+    async fn since_filters_on_started_at_not_recorded_at() {
+        let pool = fresh_pool().await;
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO execution_results
+                (result_id, request_id, pc_id, exit_code, stdout, stderr,
+                 started_at, finished_at, recorded_at)
+             VALUES ('r-replayed', 'req', 'pc-1', 0, '', '', ?, ?, ?)",
+        )
+        .bind(now - Duration::days(21)) // ran three weeks ago...
+        .bind(now - Duration::days(21))
+        .bind(now) // ...but (re-)projected just now
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let rows = list(
+            State(pool.clone()),
+            Query(params(Some(now - Duration::hours(24)))),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(
+            rows.is_empty(),
+            "a re-projected three-week-old run must not flood the 24h window",
+        );
+
+        // It still shows up once the window actually covers its run time.
+        let rows = list(State(pool), Query(params(Some(now - Duration::days(30)))))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(rows.len(), 1);
     }
 }
