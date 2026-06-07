@@ -161,6 +161,65 @@ pub async fn get_yaml(
     Ok((StatusCode::OK, yaml_headers(), yaml))
 }
 
+/// Patch the top-level `enabled:` line in an operator's YAML source,
+/// preserving every other line — comments and block-scalar formatting
+/// are the reason the YAML mirror exists, so a full
+/// `serde_yaml::to_string` re-render is not an option here. Column-0
+/// match only, so an indented `enabled:` inside a nested map is left
+/// alone. Appends the line when missing (legacy YAML that relied on
+/// the serde default).
+fn patch_yaml_enabled(yaml: &str, enabled: bool) -> String {
+    let mut out = String::with_capacity(yaml.len() + 16);
+    let mut found = false;
+    for line in yaml.lines() {
+        if !found && line.starts_with("enabled:") {
+            // Replace the whole line. An inline comment here (e.g.
+            // "# stopped during incident") describes the old value,
+            // so dropping it alongside the flip is the lesser evil.
+            out.push_str(&format!("enabled: {enabled}\n"));
+            found = true;
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if !found {
+        out.push_str(&format!("enabled: {enabled}\n"));
+    }
+    out
+}
+
+/// Best-effort sync of the YAML mirror after an enable/disable flip.
+/// Without this, the SPA editor (which prefers `BUCKET_SCHEDULES_YAML`
+/// over the JSON catalog, see [`get_yaml`]) would load the stale
+/// `enabled` state and silently clobber the flip back on the next
+/// save (gemini #400 review). Missing bucket / missing entry are
+/// fine — `get_yaml` then falls back to rendering the (correct) JSON
+/// catalog row. Write failures are warn-logged, same contract as
+/// `mirror_yaml`: the JSON catalog the scheduler reads is already
+/// current.
+async fn sync_yaml_mirror_enabled(s: &AppState, id: &str, enabled: bool) {
+    let Ok(kv) = s.jetstream.get_key_value(BUCKET_SCHEDULES_YAML).await else {
+        return;
+    };
+    let Ok(Some(bytes)) = kv.get(id).await else {
+        return;
+    };
+    let Ok(text) = String::from_utf8(bytes.to_vec()) else {
+        warn!(schedule_id = %id, "YAML mirror is not UTF-8; skipping enabled sync");
+        return;
+    };
+    let patched = patch_yaml_enabled(&text, enabled);
+    if let Err(e) = kv.put(id, patched.into_bytes().into()).await {
+        warn!(
+            error = %e,
+            schedule_id = %id,
+            enabled,
+            "YAML mirror enabled-flag sync failed; JSON catalog is current",
+        );
+    }
+}
+
 /// v0.27 — query params for [`disable`].
 #[derive(Deserialize, Debug, Default)]
 pub struct DisableQuery {
@@ -248,6 +307,7 @@ pub async fn disable(
             .update(&id, body.into(), entry.revision)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("KV update: {e}")))?;
+        sync_yaml_mirror_enabled(&s, &id, false).await;
     } else {
         info!(schedule_id = %id, "schedule already disabled; revoke-only path");
     }
@@ -307,6 +367,83 @@ pub async fn disable(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// POST /api/schedules/{id}/enable
+///
+/// Symmetrical to [`disable`]'s soft path: flip `enabled = true` on
+/// the schedule in `BUCKET_SCHEDULES` so the cron loops (backend
+/// `scheduler.rs` + agent `local_scheduler.rs`) pick it back up on
+/// the next watch tick. Uses the same `kv.entry().revision` +
+/// `update()` optimistic-concurrency pattern as `disable` so an
+/// enable click can't clobber a concurrent cron/target edit.
+///
+/// Note: this only re-arms the cron. It does NOT touch
+/// `script_status` — a job revoked by a hard disable stays REVOKED
+/// until the operator runs `kanade unrevoke <job_id>` explicitly.
+/// Silently un-revoking here would defeat the point of the Layer 2
+/// brake.
+///
+/// History: the SPA has called this endpoint since PR #38, but the
+/// backend handler was lost in that PR's squash merge — every Enable
+/// click 404'd. Restored here with a `schedule_enable` audit record.
+pub async fn enable(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    caller: Caller,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let kv = s
+        .jetstream
+        .get_key_value(BUCKET_SCHEDULES)
+        .await
+        .map_err(|e| {
+            warn!(error = %e, "schedules KV missing on enable");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("schedules bucket missing: {e}"),
+            )
+        })?;
+    let entry = kv
+        .entry(&id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("KV entry: {e}")))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("schedule '{id}' not found")))?;
+    let mut schedule: Schedule = serde_json::from_slice(&entry.value).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("deserialize stored schedule: {e}"),
+        )
+    })?;
+
+    if schedule.enabled {
+        info!(schedule_id = %id, "schedule already enabled; no-op");
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    schedule.enabled = true;
+    let body = serde_json::to_vec(&schedule).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("serialize schedule: {e}"),
+        )
+    })?;
+    kv.update(&id, body.into(), entry.revision)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("KV update: {e}")))?;
+    sync_yaml_mirror_enabled(&s, &id, true).await;
+
+    info!(schedule_id = %id, "schedule enabled");
+    audit::record(
+        &s.nats,
+        "operator",
+        "schedule_enable",
+        Some(&id),
+        Some(&caller),
+        serde_json::json!({
+            "job_id": schedule.job_id,
+        }),
+    )
+    .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// DELETE /api/schedules/{id}
 pub async fn delete(
     State(s): State<AppState>,
@@ -334,4 +471,55 @@ pub async fn delete(
     )
     .await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::patch_yaml_enabled;
+
+    #[test]
+    fn flips_existing_flag_and_preserves_comments() {
+        let yaml = "# nightly inventory sweep\nid: inv-hw\ncron: \"0 3 * * *\"\nenabled: false\njob_id: inventory-hw\n";
+        let out = patch_yaml_enabled(yaml, true);
+        assert!(out.contains("enabled: true\n"));
+        assert!(!out.contains("enabled: false"));
+        // Comments and the other keys survive untouched.
+        assert!(out.starts_with("# nightly inventory sweep\n"));
+        assert!(out.contains("cron: \"0 3 * * *\"\n"));
+    }
+
+    #[test]
+    fn drops_inline_comment_on_the_flipped_line_only() {
+        let yaml = "id: s1\nenabled: true # stopped during incident\ncron: \"* * * * *\"\n";
+        let out = patch_yaml_enabled(yaml, false);
+        assert!(out.contains("enabled: false\n"));
+        assert!(!out.contains("stopped during incident"));
+        assert!(out.contains("cron: \"* * * * *\"\n"));
+    }
+
+    #[test]
+    fn ignores_indented_enabled_in_nested_maps() {
+        let yaml = "id: s1\ntarget:\n  enabled: false\nenabled: false\n";
+        let out = patch_yaml_enabled(yaml, true);
+        // Top-level flipped, nested left alone.
+        assert!(out.contains("\nenabled: true\n"));
+        assert!(out.contains("  enabled: false\n"));
+    }
+
+    #[test]
+    fn appends_when_missing() {
+        let yaml = "id: s1\ncron: \"* * * * *\"\n";
+        let out = patch_yaml_enabled(yaml, false);
+        assert!(out.ends_with("enabled: false\n"));
+        assert!(out.starts_with("id: s1\n"));
+    }
+
+    #[test]
+    fn only_first_top_level_occurrence_is_patched() {
+        // Duplicate top-level keys are invalid YAML, but the patcher
+        // shouldn't multiply writes if one sneaks in.
+        let yaml = "enabled: false\nenabled: false\n";
+        let out = patch_yaml_enabled(yaml, true);
+        assert_eq!(out.matches("enabled: true").count(), 1);
+    }
 }

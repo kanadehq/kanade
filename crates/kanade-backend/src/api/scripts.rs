@@ -14,6 +14,8 @@ use kanade_shared::kv::{BUCKET_SCRIPT_STATUS, SCRIPT_STATUS_ACTIVE, SCRIPT_STATU
 use tracing::{info, warn};
 
 use super::AppState;
+use crate::audit;
+use crate::audit::Caller;
 
 /// GET /api/scripts/status — snapshot of the `script_status` KV
 /// bucket: `{ cmd_id: "ACTIVE" | "REVOKED" }`. The SPA's Jobs page
@@ -70,18 +72,38 @@ pub async fn list_status(
 pub async fn revoke(
     State(state): State<AppState>,
     Path(cmd_id): Path<String>,
+    caller: Caller,
 ) -> Result<StatusCode, (StatusCode, String)> {
     set_status(&state, &cmd_id, SCRIPT_STATUS_REVOKED).await?;
     info!(cmd_id = %cmd_id, "marked REVOKED");
+    audit::record(
+        &state.nats,
+        "operator",
+        "script_revoke",
+        Some(&cmd_id),
+        Some(&caller),
+        serde_json::json!({}),
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn unrevoke(
     State(state): State<AppState>,
     Path(cmd_id): Path<String>,
+    caller: Caller,
 ) -> Result<StatusCode, (StatusCode, String)> {
     set_status(&state, &cmd_id, SCRIPT_STATUS_ACTIVE).await?;
     info!(cmd_id = %cmd_id, "marked ACTIVE");
+    audit::record(
+        &state.nats,
+        "operator",
+        "script_unrevoke",
+        Some(&cmd_id),
+        Some(&caller),
+        serde_json::json!({}),
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
