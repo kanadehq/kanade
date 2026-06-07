@@ -66,9 +66,13 @@ pub async fn run(js: jetstream::Context, pool: SqlitePool) -> Result<()> {
                 continue;
             }
         };
+        // #398: recorded_at = the message's JetStream publish time,
+        // so a -WipeDb re-projection (#389) reproduces the original
+        // arrival times instead of stamping everything "now".
+        let recorded_at = super::publish_time(&msg);
         match serde_json::from_slice::<EventStarted>(&msg.payload) {
             Ok(e) => {
-                if let Err(err) = insert_inflight_row(&pool, &e).await {
+                if let Err(err) = insert_inflight_row(&pool, &e, recorded_at).await {
                     warn!(
                         error = %err,
                         result_id = %e.result_id,
@@ -109,7 +113,11 @@ pub async fn run(js: jetstream::Context, pool: SqlitePool) -> Result<()> {
 /// event arriving twice) and out-of-order (ExecResult already
 /// landed and inserted/updated the row, started's redelivery now
 /// no-ops). Either way: one row, no ghost.
-async fn insert_inflight_row(pool: &SqlitePool, e: &EventStarted) -> Result<()> {
+async fn insert_inflight_row(
+    pool: &SqlitePool,
+    e: &EventStarted,
+    recorded_at: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
     // `execution_results.job_id` (added in migration 0002) holds
     // the manifest id (= cmd id), NOT exec_id — naming legacy from
     // pre-v0.29 when Command.job_id was misnamed and conflated with
@@ -118,7 +126,9 @@ async fn insert_inflight_row(pool: &SqlitePool, e: &EventStarted) -> Result<()> 
     // working unchanged.
     // #390: recorded_at is bound explicitly (RFC 3339) — the column's
     // DEFAULT CURRENT_TIMESTAMP writes space-separated text that
-    // breaks lexicographic `recorded_at >= ?` filters.
+    // breaks lexicographic `recorded_at >= ?` filters. #398: the value
+    // is the message's JetStream publish time (see
+    // `projector::publish_time`), re-projection-stable by design.
     sqlx::query(
         "INSERT INTO execution_results (
              result_id, request_id, exec_id, pc_id, started_at,
@@ -133,7 +143,7 @@ async fn insert_inflight_row(pool: &SqlitePool, e: &EventStarted) -> Result<()> 
     .bind(e.started_at)
     .bind(&e.version)
     .bind(&e.manifest_id)
-    .bind(chrono::Utc::now())
+    .bind(recorded_at)
     .execute(pool)
     .await?;
     Ok(())
@@ -170,7 +180,7 @@ mod tests {
     #[tokio::test]
     async fn events_started_creates_inflight_row() {
         let pool = fresh_pool().await;
-        insert_inflight_row(&pool, &sample("r1", "e1", "pc1"))
+        insert_inflight_row(&pool, &sample("r1", "e1", "pc1"), Utc::now())
             .await
             .unwrap();
         let row: (Option<i64>, Option<chrono::DateTime<chrono::Utc>>) = sqlx::query_as(
@@ -191,8 +201,8 @@ mod tests {
         // NOTHING` makes the second insert a no-op.
         let pool = fresh_pool().await;
         let e = sample("r1", "e1", "pc1");
-        insert_inflight_row(&pool, &e).await.unwrap();
-        insert_inflight_row(&pool, &e).await.unwrap();
+        insert_inflight_row(&pool, &e, Utc::now()).await.unwrap();
+        insert_inflight_row(&pool, &e, Utc::now()).await.unwrap();
         let count: (i64,) =
             sqlx::query_as("SELECT COUNT(*) FROM execution_results WHERE result_id = ?")
                 .bind("r1")
@@ -227,7 +237,7 @@ mod tests {
         .await
         .unwrap();
         // Out-of-order start arrives.
-        insert_inflight_row(&pool, &sample("r1", "e1", "pc1"))
+        insert_inflight_row(&pool, &sample("r1", "e1", "pc1"), Utc::now())
             .await
             .unwrap();
         // Row count still 1, finished_at still set.
@@ -250,13 +260,13 @@ mod tests {
         // Broadcast Command → N PCs each emit events.started with
         // distinct result_id (= per-PC UUID). All N rows persist.
         let pool = fresh_pool().await;
-        insert_inflight_row(&pool, &sample("r1", "e1", "pc1"))
+        insert_inflight_row(&pool, &sample("r1", "e1", "pc1"), Utc::now())
             .await
             .unwrap();
-        insert_inflight_row(&pool, &sample("r2", "e1", "pc2"))
+        insert_inflight_row(&pool, &sample("r2", "e1", "pc2"), Utc::now())
             .await
             .unwrap();
-        insert_inflight_row(&pool, &sample("r3", "e1", "pc3"))
+        insert_inflight_row(&pool, &sample("r3", "e1", "pc3"), Utc::now())
             .await
             .unwrap();
         let count: (i64,) =
