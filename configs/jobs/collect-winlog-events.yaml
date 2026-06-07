@@ -133,7 +133,7 @@ execute:
     #                Windows. This collector stays read-only — the
     #                enable lives in the companion
     #                `enable-session-audit` job, fired once per PC
-    #                by its `once_per_pc` schedule (see
+    #                by its `per_pc: once` schedule (see
     #                configs/schedules/enable-session-audit.yaml).
     #                Until that job has run on a box, 4800/4801
     #                simply return no rows here.

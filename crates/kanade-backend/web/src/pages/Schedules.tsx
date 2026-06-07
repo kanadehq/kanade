@@ -29,16 +29,26 @@ import {
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { apiFetch, formatError } from '@/lib/api';
 
+// #418 Phase 1: the cadence is the single `when` field — a
+// reconcile shape (`per_pc` / `per_target`, either the bare keyword
+// `once` or `{ every: <humantime> }`) or the temporary raw-cron
+// escape hatch. Mirrors the externally-tagged Rust enum's JSON.
+type WhenPolicy = 'once' | { every: string };
+type WhenSpec =
+  | { per_pc: WhenPolicy }
+  | { per_target: WhenPolicy }
+  | { cron: string };
+
 type ScheduleRow = {
   id: string;
-  cron: string;
+  when: WhenSpec;
   job_id: string;
   target: { all: boolean; groups: string[]; pcs: string[] };
   rollout: { waves: { group: string; delay: string }[] } | null;
   jitter: string | null;
-  mode: 'every_tick' | 'once_per_pc' | 'once_per_target';
-  cooldown: string | null;
-  auto_disable_when_done: boolean;
+  // Optional validity window; the key is absent when the schedule
+  // has no window (Rust skips serialising the empty struct).
+  active?: { from?: string; until?: string };
   starting_deadline: string | null;
   runs_on: 'backend' | 'agent';
   enabled: boolean;
@@ -52,6 +62,21 @@ function summariseTarget(target: ScheduleRow['target'], allLabel: string): strin
   return parts.join(' · ') || '—';
 }
 
+// Same one-liner the backend's `When` Display impl produces
+// (`per_pc once` / `per_pc every 6h` / `cron: 0 0 9 * * mon-fri`)
+// so logs, audit payloads and the SPA all read identically.
+function summariseWhen(when: WhenSpec): string {
+  const policy = (p: WhenPolicy) => (p === 'once' ? 'once' : `every ${p.every}`);
+  if ('per_pc' in when) return `per_pc ${policy(when.per_pc)}`;
+  if ('per_target' in when) return `per_target ${policy(when.per_target)}`;
+  return `cron: ${when.cron}`;
+}
+
+function summariseActive(active: ScheduleRow['active']): string | null {
+  if (!active || (!active.from && !active.until)) return null;
+  return `${active.from ?? '…'} → ${active.until ?? '…'}`;
+}
+
 export function Schedules() {
   const { t } = useTranslation('schedules');
   const qc = useQueryClient();
@@ -62,8 +87,8 @@ export function Schedules() {
   });
 
   // Master-detail split (#374) — same shape as the Jobs page. The
-  // table used to spread all 13 schedule fields across columns;
-  // now it keeps the scannable five (id+job_id / cron / target /
+  // table used to spread all schedule fields across columns;
+  // now it keeps the scannable five (id+job_id / when / target /
   // enabled / actions) and the long tail lives in a right-edge
   // Sheet opened by clicking the row. Stores the id (not the row)
   // so the drawer follows query refetches.
@@ -330,7 +355,7 @@ export function Schedules() {
         <TableHeader>
           <TableRow>
             <TableHead>{t('columns.schedule')}</TableHead>
-            <TableHead>{t('columns.cron')}</TableHead>
+            <TableHead>{t('columns.when')}</TableHead>
             <TableHead>{t('columns.target')}</TableHead>
             <TableHead>{t('columns.enabled')}</TableHead>
             <TableHead>{t('columns.actions')}</TableHead>
@@ -365,7 +390,7 @@ export function Schedules() {
                   </span>
                 </div>
               </TableCell>
-              <TableCell><code className="text-xs whitespace-nowrap">{s.cron}</code></TableCell>
+              <TableCell><code className="text-xs whitespace-nowrap">{summariseWhen(s.when)}</code></TableCell>
               <TableCell className="text-xs max-w-48 truncate" title={summariseTarget(s.target, t('target.all'))}>
                 {summariseTarget(s.target, t('target.all'))}
               </TableCell>
@@ -399,8 +424,8 @@ export function Schedules() {
               {enabledBadge(selected)}
             </div>
             <DetailList>
-              <DetailItem label={t('columns.cron')}>
-                <code className="text-xs">{selected.cron}</code>
+              <DetailItem label={t('columns.when')}>
+                <code className="text-xs">{summariseWhen(selected.when)}</code>
               </DetailItem>
               <DetailItem label={t('columns.jobId')}>
                 <code className="text-xs break-all">{selected.job_id}</code>
@@ -411,17 +436,13 @@ export function Schedules() {
               <DetailItem label={t('columns.runsOn')}>
                 <code className="text-xs">{selected.runs_on}</code>
               </DetailItem>
-              <DetailItem label={t('columns.mode')}>
-                <code className="text-xs">{selected.mode}</code>
-              </DetailItem>
-              <DetailItem label={t('columns.cooldown')}>
-                <code className="text-xs">{selected.cooldown ?? '—'}</code>
+              <DetailItem label={t('columns.active')}>
+                {summariseActive(selected.active)
+                  ? <code className="text-xs">{summariseActive(selected.active)}</code>
+                  : <span className="text-muted text-xs">—</span>}
               </DetailItem>
               <DetailItem label={t('columns.deadline')}>
                 <code className="text-xs">{selected.starting_deadline ?? '—'}</code>
-              </DetailItem>
-              <DetailItem label={t('columns.autoOff')} className="text-xs">
-                {selected.auto_disable_when_done ? t('autoOff.yes') : <span className="text-muted">—</span>}
               </DetailItem>
               <DetailItem label={t('columns.jitter')}>
                 <code className="text-xs">{selected.jitter ?? '—'}</code>

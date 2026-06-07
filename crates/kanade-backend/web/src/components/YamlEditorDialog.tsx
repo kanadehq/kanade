@@ -56,10 +56,18 @@ execute:
   timeout: 30s
 `;
 
-const SCHEDULE_TEMPLATE = `# A new cron schedule. id + cron + job_id are required.
+const SCHEDULE_TEMPLATE = `# A new schedule. id + when + job_id are required.
+# when shapes (#418):
+#   per_pc: once               — run once on every pc, forever catching new ones
+#   per_pc: { every: 6h }      — re-run per pc after the interval
+#   per_target: { every: 24h } — one delegate pc per interval (backend only)
+#   cron: "0 0 9 * * mon-fri"  — raw 6-field escape hatch (no dedup)
 id: my-schedule
-cron: "0 0 * * * *"  # every hour on the minute
+when:
+  per_pc: { every: 1h }
 job_id: my-job
+target:
+  all: true
 enabled: true
 `;
 

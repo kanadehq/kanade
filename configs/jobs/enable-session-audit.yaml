@@ -8,8 +8,8 @@
 # (collectors collect; they don't reconfigure the box), so the
 # enable lives here as its own job, fired exactly once per PC by
 # the `enable-session-audit` schedule
-# (configs/schedules/enable-session-audit.yaml, `mode:
-# once_per_pc` — exit 0 marks the PC done forever, a failure
+# (configs/schedules/enable-session-audit.yaml, `when:
+# per_pc: once` — exit 0 marks the PC done forever, a failure
 # retries on the next tick, and a PC that joins the fleet later is
 # picked up automatically).
 #
@@ -25,7 +25,7 @@
 #
 # Note: an operator who deliberately disables this subcategory
 # later will NOT be fought — once a PC has succeeded, the
-# `once_per_pc` schedule never re-fires there. Re-enable by
+# `per_pc: once` schedule never re-fires there. Re-enable by
 # clearing that PC's completion (or `kanade exec
 # enable-session-audit --pcs <pc>` ad hoc).
 
@@ -52,7 +52,7 @@ execute:
     $out = & auditpol /set /subcategory:"{0CCE921C-69AE-11D9-BED3-505054503030}" /success:enable 2>&1
     $ErrorActionPreference = $prevEap
     if ($LASTEXITCODE -ne 0) {
-        # Non-zero exit → the once_per_pc schedule retries this PC
+        # Non-zero exit → the per_pc schedule retries this PC
         # on its next tick.
         Write-Output "auditpol enable failed (exit ${LASTEXITCODE}): $out"
         exit 1

@@ -10,14 +10,12 @@
   "newScheduleTitle": "Create a new schedule from a YAML template",
   "columns": {
     "schedule": "schedule",
-    "cron": "cron",
+    "when": "when",
     "jobId": "job_id",
     "target": "target",
     "runsOn": "runs_on",
-    "mode": "mode",
-    "cooldown": "cooldown",
+    "active": "active",
     "deadline": "deadline",
-    "autoOff": "auto-off",
     "jitter": "jitter",
     "rollout": "rollout",
     "enabled": "enabled",
@@ -31,9 +29,6 @@
   },
   "detail": {
     "jobRef": "runs job {{jobId}}"
-  },
-  "autoOff": {
-    "yes": "yes"
   },
   "rollout_one": "{{count}} wave",
   "rollout_other": "{{count}} waves",
@@ -51,9 +46,9 @@
     "disableMenuTitle": "disable — open soft / hard menu",
     "disableMenuAria": "disable menu for schedule {{id}}",
     "softDisable": "Soft disable",
-    "softDisableHint": "cron stops on next tick; in-flight runs continue",
+    "softDisableHint": "stops firing on the next tick; in-flight runs continue",
     "hardDisable": "Hard disable (cascade revoke)",
-    "hardDisableHint": "stops cron AND blocks pending / in-flight runs",
+    "hardDisableHint": "stops firing AND blocks pending / in-flight runs",
     "enableTitle": "enable — re-enable this schedule",
     "enableAria": "enable schedule {{id}}",
     "deleteTitle": "delete — remove this schedule",
@@ -61,7 +56,7 @@
   },
   "confirm": {
     "hardDisableTitle": "Hard-disable schedule {{id}}?",
-    "hardDisableDescription": "Stops the cron from firing AND blocks any pending or in-flight run from this schedule's job. Use this when an active rollout needs to stop immediately.\n\nThe referenced job ({{jobId}}) will be marked revoked — you can unrevoke it from the Jobs page later if needed.",
+    "hardDisableDescription": "Stops the schedule from firing AND blocks any pending or in-flight run from this schedule's job. Use this when an active rollout needs to stop immediately.\n\nThe referenced job ({{jobId}}) will be marked revoked — you can unrevoke it from the Jobs page later if needed.",
     "hardDisableLabel": "Hard disable",
     "deleteTitle": "Delete schedule {{id}}?",
     "deleteDescription": "The schedule is removed from the catalog. In-flight runs are unaffected.",
