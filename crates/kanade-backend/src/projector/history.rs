@@ -226,10 +226,15 @@ pub async fn write_events(
     // transaction overhead per statement is non-trivial when a PC
     // turns over a hundred installed apps. Still inside the caller's
     // transaction for atomicity vs the DELETE-INSERT replace.
+    // #390: observed_at is bound explicitly (RFC 3339, one shared
+    // stamp per batch) — the column's DEFAULT CURRENT_TIMESTAMP
+    // writes space-separated text that breaks lexicographic
+    // `observed_at >= ?` filters on the timeline / first-seen APIs.
+    let observed_at = chrono::Utc::now();
     let mut qb = sqlx::QueryBuilder::<Sqlite>::new(
         "INSERT INTO inventory_history (
              pc_id, job_id, field_path, identity_json,
-             change_kind, before_json, after_json
+             change_kind, before_json, after_json, observed_at
          ) ",
     );
     qb.push_values(events, |mut b, ev| {
@@ -239,7 +244,8 @@ pub async fn write_events(
             .push_bind(&ev.identity_json)
             .push_bind(ev.change_kind)
             .push_bind(&ev.before_json)
-            .push_bind(&ev.after_json);
+            .push_bind(&ev.after_json)
+            .push_bind(observed_at);
     });
     qb.build().execute(&mut **tx).await?;
     Ok(())
