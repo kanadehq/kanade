@@ -3,18 +3,15 @@
 # `collect-winlog-events` timeline. Same lifecycle pattern as
 # `kitting-once`:
 #
-#   * each tick enumerates alive agents
+#   * each internal poll (every minute) enumerates alive agents
 #   * a PC that completed with exit 0 is skipped forever
 #   * a failed PC retries on the next tick (until it succeeds)
 #   * a PC that joins the fleet later is picked up automatically
 #
-# No `cooldown` on purpose — "success → never again" is exactly
-# the semantics for a one-shot policy enable. No
-# `auto_disable_when_done` either, so replacement / newly imaged
-# PCs keep getting caught forever.
-#
-# 15-min cadence (vs kitting-once's 30 s): a new PC missing
-# lock/unlock events for up to ~15 min after first heartbeat is
+# `per_pc: once` (#418) — "success → never again" is exactly the
+# semantics for a one-shot policy enable, while replacement / newly
+# imaged PCs keep getting caught forever. A new PC missing
+# lock/unlock events for a minute or two after first heartbeat is
 # fine — the collect-winlog-events bootstrap window (24 h) will
 # backfill the gap on its next tick anyway.
 #
@@ -24,9 +21,9 @@
 #   kanade schedule create configs/schedules/enable-session-audit.yaml
 
 id: enable-session-audit
-cron: "0 */15 * * * *"   # every 15 min (sec min hour day month dow)
+when:
+  per_pc: once
 enabled: true
 job_id: enable-session-audit
 target:
   all: true
-mode: once_per_pc

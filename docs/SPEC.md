@@ -118,7 +118,7 @@
 | DB | SQLite (`sqlx`) | 投影ストア。スケール時 Postgres へ |
 | フロントエンド | React/Vue/Svelte + TypeScript | `rust-embed` でバイナリに焼き込み |
 | 型共有 | `ts-rs` または `specta` | Rust → TS 自動生成 |
-| スケジューラ | `tokio-cron-scheduler` | cron 形式 |
+| スケジューラ | `tokio-cron-scheduler` | operator 表面は `when`（§2.4.3）、内部で cron に lower |
 | 設定読み込み | **TOML + `yukimemi/teravars`** | `[vars]` 自己参照 + `is_windows()` で OS 分岐 |
 | ロギング | `tracing` + `tracing-subscriber` | Windows ではイベントログ併用 |
 
@@ -393,7 +393,7 @@ heartbeat.>     # 全死活
 | `agent_config` | `global` / `groups.<name>` / `pcs.<pc_id>` (Sprint 6) | JSON (`ConfigScope`、partial) | Fleet 全体 / グループ / PC 単位の重ね合わせ設定。詳細は §2.3.5 |
 | `script_current` | `{cmd_id}` | バージョン文字列 | 現行有効バージョン |
 | `script_status` | `{cmd_id}` | `"ACTIVE"` / `"REVOKED"` | 緊急停止フラグ |
-| `schedules` | `{schedule_id}` | JSON (cron, target) | スケジュール定義 (`kanade schedule create` → backend HTTP → このバケット) |
+| `schedules` | `{schedule_id}` | JSON (when, target, active) | スケジュール定義 (`kanade schedule create` → backend HTTP → このバケット) |
 | `notifications_read` | `{pc_id}.{user_sid}.{notification_id}` | JSON (`{"acked_at": ..., "acked_by": "<sid>"}`) | エンドユーザー既読状態 (per-user)。Agent が KLP `notifications.ack` を受けて接続元 SID 付きで書き込み、SPA から確認状況を参照。`{pc_id}.{user_sid}.` プレフィクスで該当ユーザーの既読一覧を効率取得 |
 
 NATS KV のバケット名は domain-safe ASCII (英数 + `_-`) のみで `.` 不可。仕様初期に書いた `script.current` 等は実装では underscore form (`script_current`) に正規化されている。配送ジョブ進捗 (`deployments`) は SQLite に projection するので KV ではなく Stream + projector 経由 (§2.3.4)。
@@ -608,14 +608,69 @@ KV 値の wire format:
 
 ### 2.4.3 スケジュール定義 (schedules/*.yaml)
 
+#418 Phase 1 で「いつ」は単一の `when` フィールドに統合された（旧
+`cron` × `mode` × `cooldown` × `auto_disable_when_done` は廃止・
+互換層なし）。`when` は 2 形のどちらか:
+
+**(1) reconcile 型（desired-state）** — poll 周期はシステム生成
+（毎分・operator は書かない）。`every` が実効間隔をゲートする。
+
 ```yaml
-id: daily-inventory
-cron: "0 0 2 * * *"             # 毎日 2:00
-job: inventory-full
-target:
-  groups: [all]
+# キッティング: 各 PC 一度きり、新規/再イメージ PC を永久に拾う
+id: kitting-once
+when:
+  per_pc: once
+job_id: kitting-setup
+target: { all: true }
 enabled: true
 ```
+
+```yaml
+# 巡回/棚卸し: 各 PC 6 時間ごと
+id: inventory-hw
+when:
+  per_pc: { every: 6h }
+job_id: inventory-hw
+target: { all: true }
+jitter: 5m
+enabled: true
+```
+
+```yaml
+# 点呼: 代表 1 台が 24h ごと（fleet 横断 dedup = backend 専用。
+# runs_on: agent との併用は create 時にエラー）
+when:
+  per_target: { every: 24h }
+```
+
+**(2) cron エスケープハッチ（暫定）** — 生の 6 フィールド cron で
+全 target に毎 tick 発火（dedup なし）。Phase 2 の calendar 型
+（`at` / `days` / `tz`）が入ったら撤去予定。
+
+```yaml
+id: morning-greeting
+when:
+  cron: "0 0 9 * * mon-fri"     # 平日 9:00
+job_id: show-toast
+target: { all: true }
+starting_deadline: 30m
+enabled: true
+```
+
+任意の `active.{from,until}`（半開区間 `[from, until)`）で有効期間を
+区切れる。期間外は dormant（削除ではなく休眠）— batch campaign の
+footgun-free な終了手段:
+
+```yaml
+active:
+  from: 2026-07-01              # YYYY-MM-DD (UTC 0時) or RFC3339
+  until: 2026-08-01
+```
+
+`Schedule::validate()`（`Manifest::validate()` と対称）が create 時
+（CLI / `POST /api/schedules` の両方）に検査する: `runs_on: agent`
++ `per_target` / 不正な `every` (humantime) / 不正な cron / 未登録
+`job_id`（API のみ・JOBS KV 照会）/ `active.from >= until`。
 
 ### 2.4.4 Agent / Backend 設定ファイル (TOML + teravars 変数展開)
 
@@ -806,7 +861,7 @@ T+90m  ──> commands.group.wave3   (1450台)
 
 ### 2.5.3 スケジュール
 
-Backend 内の `tokio-cron-scheduler` が、`schedules` KV の定義に基づき定刻 publish。
+Backend 内の `tokio-cron-scheduler` が、`schedules` KV の定義（`when` を内部で poll cron + dedup ポリシーに lower、§2.4.3）に基づき publish。
 
 Agent 内の定期タスク (1 時間ごと HW チェック等) は Agent 内 `tokio::time::interval` で完結 (中央スケジューラ不要)。
 

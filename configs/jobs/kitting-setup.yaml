@@ -17,7 +17,7 @@
 # safely without admin and gives the SPA Results page something
 # visible to inspect. Replace the body with your real bootstrap
 # pipeline — exit 0 = "this PC is kitted, never run me on it
-# again" (per the `mode: once_per_pc` dedup in the schedule).
+# again" (per the `when: per_pc: once` dedup in the schedule).
 #
 # Failure handling:
 #   * exit != 0 → scheduler picks the PC up again on the next tick

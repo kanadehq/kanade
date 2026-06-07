@@ -694,7 +694,9 @@ async fn reconcile_schedule(
         return;
     }
 
-    let cron = schedule.cron.clone();
+    // #418: lower `when` onto the engine cron — POLL_CRON for
+    // reconcile shapes, verbatim for the escape hatch.
+    let cron = schedule.lowered().cron;
     let schedule_id = schedule.id.clone();
     let client_for_job = client.clone();
     let pc_id_for_job = pc_id.to_string();
@@ -746,8 +748,8 @@ async fn reconcile_schedule(
     st.registered.insert(schedule.id.clone(), job_uuid);
     info!(
         schedule_id = %schedule_id,
-        cron = %cron,
-        mode = ?schedule.mode,
+        when = %schedule.when,
+        poll_cron = %cron,
         "local_scheduler: registered",
     );
 }
@@ -775,6 +777,17 @@ async fn local_tick(
     staleness: &crate::staleness::Tracker,
     script_cache: &ScriptCache,
 ) {
+    // 0) Dormant outside the optional `active.{from,until}` window
+    //    (#418 decision G) — mirrors the backend scheduler's gate so
+    //    runs_on: agent campaigns end on the same instant.
+    if !schedule.active.contains(Utc::now()) {
+        debug!(
+            schedule_id = %schedule.id,
+            "local_scheduler: outside active window (dormant)",
+        );
+        return;
+    }
+
     // 1) Manifest + (optional) pre-resolved script_object digest
     //    must be cached. If not, skip and try again next tick (the
     //    jobs_watch loop may pick it up).
@@ -799,18 +812,46 @@ async fn local_tick(
 
     // 2) Mode-based dedup against local_completions.
     let now = Utc::now();
-    let cooldown = schedule
-        .cooldown
-        .as_deref()
-        .and_then(|s| humantime::parse_duration(s).ok())
-        .and_then(|d| ChronoDuration::from_std(d).ok());
-    let should_fire = match schedule.mode {
+    let lowered = schedule.lowered();
+    // Defensive parse (gemini #419 review): validate() rejects a bad
+    // `every` at create time, but a hand-edited KV blob bypasses
+    // that. Silently mapping a parse failure to `None` would turn
+    // the schedule into "permanent skip after first success" under
+    // OncePerPc — warn + skip the tick instead, mirroring the
+    // backend scheduler's parse_cooldown error path.
+    let cooldown = match lowered.cooldown.as_deref() {
+        None => None,
+        Some(raw) => match humantime::parse_duration(raw)
+            .ok()
+            .and_then(|d| ChronoDuration::from_std(d).ok())
+        {
+            Some(cd) => Some(cd),
+            None => {
+                warn!(
+                    schedule_id = %schedule.id,
+                    every = %raw,
+                    "local_scheduler: invalid when.every duration; skipping tick",
+                );
+                return;
+            }
+        },
+    };
+    let should_fire = match lowered.mode {
         ExecMode::EveryTick => true,
-        ExecMode::OncePerPc | ExecMode::OncePerTarget => {
-            // OncePerTarget is meaningless when each agent is
-            // self-scheduled (we'd be deduping across a target of 1).
-            // Treat as OncePerPc and warn once at register time would
-            // be cleaner; for now just behave-as-OncePerPc silently.
+        ExecMode::OncePerTarget => {
+            // per_target needs fleet-wide completion data and is
+            // rejected by Schedule::validate() for runs_on: agent —
+            // this branch is only reachable through a hand-edited
+            // KV blob, so skip loudly instead of silently degrading
+            // to per_pc like pre-#418 code did.
+            warn!(
+                schedule_id = %schedule.id,
+                "local_scheduler: when.per_target is backend-only \
+                 (validate() rejects it for runs_on: agent); skipping tick",
+            );
+            return;
+        }
+        ExecMode::OncePerPc => {
             let st = state.lock().await;
             let key = State::key(&schedule.id, &schedule.job_id);
             match st.completions.get(&key) {
@@ -959,20 +1000,18 @@ async fn local_tick(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kanade_shared::manifest::{FanoutPlan, Target};
+    use kanade_shared::manifest::{Active, FanoutPlan, OnceLiteral, PerPolicy, Target, When};
 
     fn schedule(target: Target, runs_on: RunsOn) -> Schedule {
         Schedule {
             id: "s".into(),
-            cron: "* * * * * *".into(),
+            when: When::PerPc(PerPolicy::Once(OnceLiteral::Once)),
             job_id: "j".into(),
             plan: FanoutPlan {
                 target,
                 ..Default::default()
             },
-            mode: ExecMode::EveryTick,
-            cooldown: None,
-            auto_disable_when_done: false,
+            active: Active::default(),
             starting_deadline: None,
             runs_on,
             enabled: true,

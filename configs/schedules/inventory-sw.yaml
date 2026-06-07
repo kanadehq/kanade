@@ -1,13 +1,12 @@
 # Schedule wrapper that fires the registered job `inventory-sw` (see
-# `configs/jobs/inventory-sw.yaml`) on a 30-minute tick with a per-PC
-# 6-hour cooldown.
+# `configs/jobs/inventory-sw.yaml`) with a per-PC 6-hour cadence.
 #
-# Matches `inventory-hw.yaml`'s cadence (30-min tick + 6h once_per_pc
-# cooldown) so the two probes share the same scan rhythm and an
-# operator only has to think about one cadence instead of two.
-# Software inventory changes (installs, uninstalls, version bumps)
-# also rarely happen at sub-6h granularity in practice, so the same
-# bucket fits both probes well.
+# Matches `inventory-hw.yaml`'s cadence (`per_pc: { every: 6h }`) so
+# the two probes share the same scan rhythm and an operator only has
+# to think about one cadence instead of two. Software inventory
+# changes (installs, uninstalls, version bumps) also rarely happen
+# at sub-6h granularity in practice, so the same bucket fits both
+# probes well.
 #
 # Order of operations:
 #
@@ -17,13 +16,12 @@
 #         kanade schedule create configs/schedules/inventory-sw.yaml
 
 id: inventory-sw
-cron: "0 */30 * * * *"   # every 30 min (sec min hour day month dow)
+when:
+  per_pc: { every: 6h }
 enabled: true
 job_id: inventory-sw
 target:
   all: true
-mode: once_per_pc
-cooldown: 6h
 # Stagger agent start times by up to 5 min so 3000 PCs don't all
 # walk Uninstall hives + Get-AppxPackage at the same wall-clock
 # instant — the AppX repository is shared per-machine and contended

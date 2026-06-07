@@ -16,11 +16,18 @@ categories.workspace   = true
 anyhow     = { workspace = true }
 async-nats = { workspace = true }
 chrono     = { workspace = true }
+croner     = { workspace = true }
 humantime  = { workspace = true }
 pelite     = { workspace = true }
 schemars   = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
+# `Schedule.when` is an externally-tagged enum; serde_yaml 0.9 maps
+# those to `!tag` YAML syntax by default, so the field rides
+# `serde_yaml::with::singleton_map` to keep the operator-facing
+# `when: { per_pc: once }` map shape (JSON output is unchanged —
+# the same singleton map external tagging produces).
+serde_yaml = { workspace = true }
 teravars   = { workspace = true }
 thiserror  = { workspace = true }
 tokio      = { workspace = true }
@@ -32,5 +39,3 @@ uuid       = { workspace = true }
 winreg = { workspace = true }
 
 [dev-dependencies]
-# Tests deserialise sample YAML manifests + schedules.
-serde_yaml = { workspace = true }

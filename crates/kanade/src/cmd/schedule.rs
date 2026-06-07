@@ -15,7 +15,7 @@ pub struct ScheduleArgs {
 pub enum ScheduleSub {
     /// Upsert a schedule from a YAML file.
     Create {
-        /// Path to the schedule YAML (`id` / `cron` / `job_id` / `enabled`).
+        /// Path to the schedule YAML (`id` / `when` / `job_id` / `enabled`).
         /// The referenced job must already be registered via `kanade job create`.
         yaml: PathBuf,
     },
@@ -65,9 +65,16 @@ async fn create(base: &str, yaml: &PathBuf) -> Result<()> {
     // formatting across SPA edits.
     let schedule: Schedule =
         serde_yaml::from_str(&body).with_context(|| format!("parse {yaml:?}"))?;
+    // Same client-side-first rationale for the semantic checks
+    // (#418 decision F): a per_target+agent combo or a bad `every`
+    // fails right here instead of as the backend's 400. The backend
+    // re-validates anyway (and owns the job_id-exists check).
+    schedule
+        .validate()
+        .map_err(|e| anyhow::anyhow!("invalid schedule {yaml:?}: {e}"))?;
     info!(
         schedule_id = %schedule.id,
-        cron = %schedule.cron,
+        when = %schedule.when,
         job_id = %schedule.job_id,
         "upserting schedule",
     );

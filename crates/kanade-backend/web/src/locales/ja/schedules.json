@@ -10,14 +10,12 @@
   "newScheduleTitle": "YAML テンプレートから新しいスケジュールを作成します",
   "columns": {
     "schedule": "スケジュール",
-    "cron": "cron",
+    "when": "when",
     "jobId": "job_id",
     "target": "対象",
     "runsOn": "runs_on",
-    "mode": "mode",
-    "cooldown": "クールダウン",
+    "active": "有効期間",
     "deadline": "期限",
-    "autoOff": "自動オフ",
     "jitter": "ジッター",
     "rollout": "ロールアウト",
     "enabled": "有効",
@@ -31,9 +29,6 @@
   },
   "detail": {
     "jobRef": "対象ジョブ: {{jobId}}"
-  },
-  "autoOff": {
-    "yes": "あり"
   },
   "rollout_one": "{{count}} 波",
   "rollout_other": "{{count}} 波",
@@ -51,9 +46,9 @@
     "disableMenuTitle": "無効化 — ソフト / ハードのメニューを開きます",
     "disableMenuAria": "スケジュール {{id}} の無効化メニュー",
     "softDisable": "ソフト無効化",
-    "softDisableHint": "次の tick で cron が停止します。実行中のジョブは継続します",
+    "softDisableHint": "次の tick で発火が停止します。実行中のジョブは継続します",
     "hardDisable": "ハード無効化 (連鎖 revoke)",
-    "hardDisableHint": "cron を停止し、保留中・実行中のジョブもブロックします",
+    "hardDisableHint": "発火を停止し、保留中・実行中のジョブもブロックします",
     "enableTitle": "有効化 — このスケジュールを再度有効にします",
     "enableAria": "スケジュール {{id}} を有効化",
     "deleteTitle": "削除 — このスケジュールを削除します",
@@ -61,7 +56,7 @@
   },
   "confirm": {
     "hardDisableTitle": "スケジュール {{id}} をハード無効化しますか?",
-    "hardDisableDescription": "cron の起動を停止し、このスケジュールのジョブに対する保留中・実行中の実行をブロックします。 進行中のロールアウトを即座に止めたいときに使用してください。\n\n参照先のジョブ ({{jobId}}) は revoked としてマークされます。 必要に応じて後から Jobs ページで unrevoke できます。",
+    "hardDisableDescription": "スケジュールの発火を停止し、このスケジュールのジョブに対する保留中・実行中の実行をブロックします。 進行中のロールアウトを即座に止めたいときに使用してください。\n\n参照先のジョブ ({{jobId}}) は revoked としてマークされます。 必要に応じて後から Jobs ページで unrevoke できます。",
     "hardDisableLabel": "ハード無効化",
     "deleteTitle": "スケジュール {{id}} を削除しますか?",
     "deleteDescription": "スケジュールをカタログから削除します。 実行中のジョブには影響しません。",
