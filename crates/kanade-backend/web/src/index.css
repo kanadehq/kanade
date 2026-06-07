@@ -95,7 +95,7 @@
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not(.light) {
     --bg: #16181c;
     --fg: #f5f0e6;
     --card: #1d2026;
@@ -112,6 +112,25 @@
     --amber-light: #fcd34d;
     --teal-light: #5eead4;
   }
+}
+
+:root.dark {
+  /* Keep in sync with the @media (prefers-color-scheme: dark) block above. */
+  --bg: #16181c;
+  --fg: #f5f0e6;
+  --card: #1d2026;
+  --border: #2c2f36;
+  --muted: #b8b2a4;
+  --muted-fg: #8a8478;
+  --accent: #9a73d9;
+  --accent-fg: #ffffff;
+  --success: #4dc4b5;
+  --danger: #ed6b80;
+
+  /* Lighter pastels — legible against the dark card. */
+  --violet-light: #a78bfa;
+  --amber-light: #fcd34d;
+  --teal-light: #5eead4;
 }
 
 @layer base {

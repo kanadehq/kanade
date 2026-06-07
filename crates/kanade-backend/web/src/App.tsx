@@ -29,6 +29,7 @@ import { Run } from '@/pages/Run';
 import { Schedules } from '@/pages/Schedules';
 import { InventorySearch } from '@/pages/Search';
 import { Settings } from '@/pages/Settings';
+import { ThemeProvider, useTheme } from '@/lib/theme';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -47,20 +48,33 @@ const queryClient = new QueryClient({
 export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <AuthProvider>
-          <ConfirmDialogProvider>
-            <Toaster
-              position="bottom-right"
-              // Honour the operator's OS preference instead of pinning
-              // dark — paired with the matching prefers-color-scheme
-              // override in index.css so toasts blend into either
-              // theme rather than punching out as a dark island.
-              theme="system"
-              richColors
-              closeButton
-              toastOptions={{ duration: 4000 }}
-            />
+      <ThemeProvider>
+        <AppContent />
+      </ThemeProvider>
+    </QueryClientProvider>
+  );
+}
+
+function ThemedToaster() {
+  const { theme } = useTheme();
+  return (
+    <Toaster
+      position="bottom-right"
+      // Honour the operator's theme selection (light, dark, system).
+      theme={theme}
+      richColors
+      closeButton
+      toastOptions={{ duration: 4000 }}
+    />
+  );
+}
+
+function AppContent() {
+  return (
+    <BrowserRouter>
+      <AuthProvider>
+        <ConfirmDialogProvider>
+          <ThemedToaster />
           <Routes>
             {/* Public route — the only thing reachable when not signed in. */}
             <Route path="/login" element={<Login />} />
@@ -102,9 +116,8 @@ export default function App() {
               <Route path="*" element={<Placeholder name="Not Found" />} />
             </Route>
           </Routes>
-          </ConfirmDialogProvider>
-        </AuthProvider>
-      </BrowserRouter>
-    </QueryClientProvider>
+        </ConfirmDialogProvider>
+      </AuthProvider>
+    </BrowserRouter>
   );
 }

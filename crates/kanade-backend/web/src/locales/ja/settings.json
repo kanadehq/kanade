@@ -5,5 +5,15 @@
     "title": "言語",
     "label": "UI 言語",
     "persistedHint": "localStorage に保存され、 即座に反映されます。"
+  },
+  "theme": {
+    "title": "テーマ",
+    "label": "カラーテーマ",
+    "options": {
+      "system": "システム (OS設定に従う)",
+      "light": "ライト",
+      "dark": "ダーク"
+    },
+    "persistedHint": "localStorage に保存され、 即座に反映されます。"
   }
 }

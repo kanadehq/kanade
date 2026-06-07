@@ -5,6 +5,13 @@
     <link rel="icon" type="image/svg+xml" href="/icon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>kanade — 奏</title>
+    <script>
+      (function () {
+        var t = localStorage.getItem('kanade-theme');
+        if (t === 'dark') document.documentElement.classList.add('dark');
+        else if (t === 'light') document.documentElement.classList.add('light');
+      })();
+    </script>
   </head>
   <body class="bg-bg text-fg antialiased">
     <div id="root"></div>
