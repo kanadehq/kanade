@@ -442,7 +442,16 @@ fn init_tracing(log: &LogSection) -> Result<Option<tracing_appender::non_blockin
     let _ = tracing_subscriber::registry()
         .with(env_filter)
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stdout))
-        .with(tracing_subscriber::fmt::layer().with_writer(non_blocking))
+        // #413: `fmt::layer()` defaults to ansi(true) regardless of
+        // whether the writer is a terminal, so without this the file
+        // log fills with color escapes (~22k ESC bytes/day measured).
+        // The agent's file layer has carried `.with_ansi(false)` since
+        // v0.7.1; this mirrors it. Stdout keeps its colors.
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(non_blocking)
+                .with_ansi(false),
+        )
         .try_init();
 
     Ok(Some(guard))
