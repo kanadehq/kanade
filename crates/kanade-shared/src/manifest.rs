@@ -727,11 +727,46 @@ target: {{ all: true }}
     }
 
     #[test]
-    fn when_cron_escape_hatch_parses() {
+    fn when_calendar_time_parses() {
+        let s: Schedule = serde_yaml::from_str(&schedule_yaml_with(
+            "  calendar:\n    at: \"09:00\"\n    days: [mon-fri]",
+        ))
+        .expect("parse");
+        match &s.when {
+            When::Calendar(c) => {
+                assert_eq!(c.at, "09:00");
+                assert_eq!(c.days, vec!["mon-fri"]);
+            }
+            other => panic!("expected calendar, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn when_calendar_days_default_empty() {
         let s: Schedule =
-            serde_yaml::from_str(&schedule_yaml_with("  cron: \"0 0 9 * * mon-fri\""))
+            serde_yaml::from_str(&schedule_yaml_with("  calendar:\n    at: \"09:00\""))
                 .expect("parse");
-        assert_eq!(s.when, When::Cron("0 0 9 * * mon-fri".into()));
+        match &s.when {
+            When::Calendar(c) => assert!(c.days.is_empty(), "days defaults to empty (= daily)"),
+            other => panic!("expected calendar, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn when_calendar_datetime_parses_all_separators() {
+        // one-shot: date+time in hyphen / ISO-T / slash forms
+        for at in ["2026-06-10 09:00", "2026-06-10T09:00", "2026/06/10 09:00"] {
+            let block = format!("  calendar:\n    at: \"{at}\"");
+            let s: Schedule = serde_yaml::from_str(&schedule_yaml_with(&block))
+                .unwrap_or_else(|e| panic!("parse '{at}': {e}"));
+            match &s.when {
+                When::Calendar(c) => {
+                    let (_, _, date) = c.parse_at().expect("parse_at");
+                    assert_eq!(date, Some((2026, 6, 10)), "for '{at}'");
+                }
+                other => panic!("expected calendar, got {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -775,6 +810,16 @@ target: { all: true }
     }
 
     #[test]
+    fn when_rejects_retired_cron_escape_hatch() {
+        // #418 Phase 2 retired `when: { cron: "..." }`. A raw cron
+        // is now an unknown variant → parse error (operators use the
+        // calendar form instead).
+        let r: Result<Schedule, _> =
+            serde_yaml::from_str(&schedule_yaml_with("  cron: \"0 0 9 * * mon-fri\""));
+        assert!(r.is_err(), "expected parse error for retired cron, got {r:?}");
+    }
+
+    #[test]
     fn when_round_trips_json_and_yaml() {
         // Round-trip through the full Schedule: that is the wire
         // unit for both stores (JSON catalog KV + YAML mirror), and
@@ -787,7 +832,8 @@ target: { all: true }
             When::PerTarget(PerPolicy::Every(EverySpec {
                 every: "24h".into(),
             })),
-            When::Cron("0 0 9 * * mon-fri".into()),
+            calendar("09:00", &["mon-fri"]),
+            calendar("2026-06-10 09:00", &[]),
         ] {
             let s = schedule_with(when.clone(), RunsOn::Backend);
 
@@ -831,10 +877,8 @@ target: { all: true }
                 })),
                 "per_target every 24h",
             ),
-            (
-                When::Cron("0 0 9 * * mon-fri".into()),
-                "cron: 0 0 9 * * mon-fri",
-            ),
+            (calendar("09:00", &["mon-fri"]), "at 09:00 [mon-fri]"),
+            (calendar("2026-06-10 09:00", &[]), "at 2026-06-10 09:00"),
         ] {
             assert_eq!(when.to_string(), expected);
         }
@@ -849,10 +893,18 @@ target: { all: true }
             job_id: "y".into(),
             plan: FanoutPlan::default(),
             active: Active::default(),
+            tz: ScheduleTz::default(),
             starting_deadline: None,
             runs_on,
             enabled: true,
         }
+    }
+
+    fn calendar(at: &str, days: &[&str]) -> When {
+        When::Calendar(CalendarSpec {
+            at: at.into(),
+            days: days.iter().map(|d| (*d).to_string()).collect(),
+        })
     }
 
     #[test]
@@ -876,9 +928,20 @@ target: { all: true }
                 })),
                 (POLL_CRON, ExecMode::OncePerTarget, Some("24h")),
             ),
+            // calendar repeating → 6-field cron
             (
-                When::Cron("0 0 9 * * mon-fri".into()),
+                calendar("09:00", &["mon-fri"]),
                 ("0 0 9 * * mon-fri", ExecMode::EveryTick, None),
+            ),
+            // calendar daily (no days) → DOW *
+            (
+                calendar("18:30", &[]),
+                ("0 30 18 * * *", ExecMode::EveryTick, None),
+            ),
+            // calendar one-shot → 7-field year cron
+            (
+                calendar("2026-06-10 09:00", &[]),
+                ("0 0 9 10 6 * 2026", ExecMode::EveryTick, None),
             ),
         ];
         for (when, (cron, mode, cooldown)) in cases {
@@ -890,12 +953,30 @@ target: { all: true }
     }
 
     #[test]
+    fn lowered_carries_schedule_tz() {
+        for (tz, want) in [(ScheduleTz::Local, ScheduleTz::Local), (ScheduleTz::Utc, ScheduleTz::Utc)] {
+            let mut s = schedule_with(calendar("09:00", &["mon-fri"]), RunsOn::Backend);
+            s.tz = tz;
+            assert_eq!(s.lowered().tz, want, "calendar carries tz");
+            // reconcile shapes carry tz too (for the active-window check)
+            let mut s = schedule_with(When::PerPc(PerPolicy::Once(OnceLiteral::Once)), RunsOn::Backend);
+            s.tz = tz;
+            assert_eq!(s.lowered().tz, want, "reconcile carries tz");
+        }
+    }
+
+    #[test]
     fn poll_cron_is_accepted_by_the_engine_parser() {
         // POLL_CRON is system-generated — if the engine's parser
         // ever rejected it every reconcile schedule would die at
-        // register time. Validate it with the same croner config.
-        let s = schedule_with(When::Cron(POLL_CRON.into()), RunsOn::Backend);
-        s.validate().expect("POLL_CRON must be valid");
+        // register time. Validate it with the same croner config
+        // (Seconds::Required, dom_and_dow, year optional).
+        croner::parser::CronParser::builder()
+            .seconds(croner::parser::Seconds::Required)
+            .dom_and_dow(true)
+            .build()
+            .parse(POLL_CRON)
+            .expect("POLL_CRON must parse");
     }
 
     // ---- Schedule::validate() (#418 decision F) ----
@@ -981,22 +1062,48 @@ target: { all: true }
     }
 
     #[test]
-    fn validate_rejects_bad_cron() {
-        for bad in ["not a cron", "* * * * *", "99 * * * * *"] {
-            let err = schedule_with(When::Cron(bad.into()), RunsOn::Backend)
+    fn validate_accepts_calendar_shapes() {
+        for when in [
+            calendar("09:00", &["mon-fri"]),       // weekday morning
+            calendar("00:00", &["sun"]),           // weekly
+            calendar("18:30", &[]),                // daily
+            calendar("2026-06-10 09:00", &[]),     // one-shot
+            calendar("2026/12/25 00:00", &[]),     // one-shot, slash form
+        ] {
+            schedule_with(when.clone(), RunsOn::Backend)
                 .validate()
-                .unwrap_err();
-            assert!(err.contains("when.cron"), "for '{bad}', got: {err}");
+                .unwrap_or_else(|e| panic!("{when} should validate: {e}"));
         }
     }
 
     #[test]
-    fn validate_accepts_engine_cron() {
-        // The morning-greeting expression — the escape hatch's
-        // raison d'être — must pass.
-        schedule_with(When::Cron("0 0 9 * * mon-fri".into()), RunsOn::Backend)
+    fn validate_rejects_bad_at() {
+        for bad in ["25:00", "09:60", "9", "noon", "2026-13-01 09:00"] {
+            let err = schedule_with(calendar(bad, &[]), RunsOn::Backend)
+                .validate()
+                .unwrap_err();
+            assert!(err.contains("when.at"), "for '{bad}', got: {err}");
+        }
+    }
+
+    #[test]
+    fn validate_rejects_datetime_at_with_days() {
+        // A dated `at` is a one-shot — pairing it with days is a
+        // contradiction (the date already pins the day).
+        let err = schedule_with(calendar("2026-06-10 09:00", &["mon"]), RunsOn::Backend)
             .validate()
-            .expect("week-day cron should validate");
+            .unwrap_err();
+        assert!(err.contains("one-shot") && err.contains("days"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_bad_day_name() {
+        // A garbage DOW token is caught when the lowered cron hits
+        // the croner validator.
+        let err = schedule_with(calendar("09:00", &["funday"]), RunsOn::Backend)
+            .validate()
+            .unwrap_err();
+        assert!(err.contains("when.at"), "got: {err}");
     }
 
     fn schedule_with_active(from: Option<&str>, until: Option<&str>) -> Schedule {
@@ -1048,35 +1155,60 @@ target: { all: true }
             from: Some("2026-07-01".into()),
             until: Some("2026-08-01".into()),
         };
+        // UTC tz so the date bounds are UTC midnight.
         let at = |y, m, d, h| chrono::Utc.with_ymd_and_hms(y, m, d, h, 0, 0).unwrap();
-        assert!(!active.contains(at(2026, 6, 30, 23)), "before from");
-        assert!(active.contains(at(2026, 7, 1, 0)), "at from (inclusive)");
-        assert!(active.contains(at(2026, 7, 15, 12)), "inside");
-        assert!(!active.contains(at(2026, 8, 1, 0)), "at until (exclusive)");
-        assert!(!active.contains(at(2026, 8, 2, 0)), "after until");
+        let c = |t| active.contains(t, ScheduleTz::Utc);
+        assert!(!c(at(2026, 6, 30, 23)), "before from");
+        assert!(c(at(2026, 7, 1, 0)), "at from (inclusive)");
+        assert!(c(at(2026, 7, 15, 12)), "inside");
+        assert!(!c(at(2026, 8, 1, 0)), "at until (exclusive)");
+        assert!(!c(at(2026, 8, 2, 0)), "after until");
     }
 
     #[test]
     fn active_empty_window_is_always_active() {
-        assert!(Active::default().contains(chrono::Utc::now()));
+        assert!(Active::default().contains(chrono::Utc::now(), ScheduleTz::Local));
     }
 
     #[test]
-    fn active_rfc3339_bound_honours_offset() {
+    fn active_rfc3339_bound_honours_offset_regardless_of_tz() {
         use chrono::TimeZone;
         let active = Active {
             from: Some("2026-07-01T09:00:00+09:00".into()),
             until: None,
         };
+        // RFC3339 carries its own offset → tz arg is ignored.
         // 09:00 JST = 00:00 UTC.
-        assert!(
-            !active.contains(
-                chrono::Utc
-                    .with_ymd_and_hms(2026, 6, 30, 23, 59, 0)
-                    .unwrap()
-            )
-        );
-        assert!(active.contains(chrono::Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap()));
+        for tz in [ScheduleTz::Utc, ScheduleTz::Local] {
+            assert!(
+                !active.contains(chrono::Utc.with_ymd_and_hms(2026, 6, 30, 23, 59, 0).unwrap(), tz)
+            );
+            assert!(active.contains(chrono::Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap(), tz));
+        }
+    }
+
+    #[test]
+    fn active_date_bound_respects_tz() {
+        // A bare `YYYY-MM-DD` bound is midnight *in the schedule's
+        // tz* (#418 Phase 2). The UTC interpretation is exact and
+        // host-independent; assert that precisely.
+        use chrono::TimeZone;
+        let utc = Active::parse_bound("2026-07-01", ScheduleTz::Utc).expect("utc");
+        assert_eq!(utc, chrono::Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap());
+
+        // The local interpretation must equal what chrono::Local
+        // computes for the same wall-clock midnight — proves the tz
+        // path is wired to the host zone (the magnitude vs UTC is
+        // host-dependent, so we compare against Local directly rather
+        // than hard-coding the JST offset, keeping CI green on UTC
+        // runners).
+        let local = Active::parse_bound("2026-07-01", ScheduleTz::Local).expect("local");
+        let want = chrono::Local
+            .with_ymd_and_hms(2026, 7, 1, 0, 0, 0)
+            .single()
+            .expect("local midnight is unambiguous")
+            .with_timezone(&chrono::Utc);
+        assert_eq!(local, want, "date bound resolved in host-local tz");
     }
 
     #[test]
@@ -1329,7 +1461,7 @@ inventory:
 pub struct Schedule {
     pub id: String,
     /// When to fire — a reconcile cadence (`per_pc` / `per_target`)
-    /// or the temporary raw-`cron` escape hatch. See [`When`].
+    /// or a calendar time trigger (`at` / `days`). See [`When`].
     ///
     /// `singleton_map`: serde_yaml 0.9 renders externally-tagged
     /// enums as `!per_pc` YAML tags by default; this keeps the
@@ -1356,6 +1488,16 @@ pub struct Schedule {
     /// and the agent's local scheduler.
     #[serde(default, skip_serializing_if = "Active::is_empty")]
     pub active: Active,
+    /// #418 Phase 2: the timezone this schedule's wall-clock fields
+    /// are evaluated in — both the calendar `at` firing time AND the
+    /// `active.{from,until}` window bounds. `local` (default) = the
+    /// running host's TZ (the agent's for `runs_on: agent`, the
+    /// backend server's otherwise); `utc` for TZ-independent
+    /// schedules. Reconcile shapes (`per_pc`/`per_target`) ignore it
+    /// for firing (poll cron runs every minute regardless) but still
+    /// honor it for the `active` window.
+    #[serde(default)]
+    pub tz: ScheduleTz,
     /// v0.22: optional humantime window after a cron tick during
     /// which the Command is still considered "live". The scheduler
     /// computes `tick_at + starting_deadline` and stamps it onto
@@ -1436,12 +1578,11 @@ pub enum ExecMode {
 ///   pc (or one delegate) should have run this within `every`".
 ///   The poll period is system-generated ([`POLL_CRON`], every
 ///   minute) and no longer the operator's concern.
-/// * **escape hatch** (`cron`) — verbatim 6-field cron, fires at
-///   the whole target on every tick with no dedup (the old
-///   `every_tick`). Temporary: exists only to keep time-of-day
-///   schedules (morning-greeting) alive until the Phase 2
-///   calendar form (`at` / `days` / `tz`) lands. New reconcile
-///   work must NOT use it.
+/// * **calendar** (`{ at, days }`) — a wall-clock time trigger
+///   (#418 Phase 2, replacing the old raw-cron escape hatch). Fires
+///   the whole target at the given time, no dedup. `at: "09:00"`
+///   + `days` repeats; `at: "2026-06-10 09:00"` (a date+time) fires
+///   exactly once. Evaluated in the schedule's top-level `tz`.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum When {
@@ -1456,11 +1597,114 @@ pub enum When {
     /// `runs_on: agent` + `per_target` is rejected by
     /// [`Schedule::validate`].
     PerTarget(PerPolicy),
-    /// Escape hatch: verbatim 6-field cron expression
-    /// (`sec min hour day month day-of-week`), validated with the
-    /// same parser `tokio-cron-scheduler` uses. Every tick fires
-    /// the whole target — no dedup, no cooldown.
-    Cron(String),
+    /// Calendar time trigger: `{ at: "09:00", days: [mon-fri] }`
+    /// (repeating) or `{ at: "2026-06-10 09:00" }` (one-shot). Fires
+    /// the whole target at that wall-clock time in the schedule's
+    /// `tz` — no dedup, no cooldown.
+    Calendar(CalendarSpec),
+}
+
+/// Calendar time trigger (#418 Phase 2). `at` is either a time of
+/// day (`"HH:MM"`, repeating — combine with `days`) or a full
+/// date+time (`"YYYY-MM-DD HH:MM"`, a one-shot that fires once and
+/// never again). Evaluated in the schedule's top-level `tz`.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CalendarSpec {
+    /// `"HH:MM"` (24h) for a repeating trigger, or
+    /// `"YYYY-MM-DD HH:MM"` (hyphen / slash / `T` separators all
+    /// accepted) for a one-shot. Parsed lazily —
+    /// [`Schedule::validate`] rejects garbage at create time.
+    pub at: String,
+    /// Day-of-week filter for a time-of-day `at`: `["mon-fri"]`,
+    /// `["mon","wed","fri"]`, … (passed verbatim to the cron DOW
+    /// field, so ranges and names both work). Empty = every day.
+    /// Must be empty when `at` carries a date (the date already
+    /// pins the day).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub days: Vec<String>,
+}
+
+impl CalendarSpec {
+    /// Parse `at` into `(minute, hour, Option<(year, month, day)>)`.
+    /// A `Some` date means a one-shot.
+    fn parse_at(&self) -> Result<(u32, u32, Option<(i32, u32, u32)>), String> {
+        use chrono::{Datelike, Timelike};
+        let s = self.at.trim();
+        for fmt in ["%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y/%m/%d %H:%M"] {
+            if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, fmt) {
+                return Ok((dt.minute(), dt.hour(), Some((dt.year(), dt.month(), dt.day()))));
+            }
+        }
+        if let Ok(t) = chrono::NaiveTime::parse_from_str(s, "%H:%M") {
+            return Ok((t.minute(), t.hour(), None));
+        }
+        Err(format!(
+            "when.at: unparseable '{}' (want HH:MM or YYYY-MM-DD HH:MM)",
+            self.at
+        ))
+    }
+
+    /// Lower to the cron string the scheduler engine runs. Repeating
+    /// → 6-field `0 {min} {hour} * * {dow}`; one-shot → 7-field
+    /// `0 {min} {hour} {day} {month} * {year}` (a past year never
+    /// fires — that's what makes it one-shot).
+    fn to_cron(&self) -> Result<String, String> {
+        let (min, hour, date) = self.parse_at()?;
+        match date {
+            Some((year, month, day)) => {
+                if !self.days.is_empty() {
+                    return Err(
+                        "when.at with a date is a one-shot and cannot be combined with days"
+                            .into(),
+                    );
+                }
+                Ok(format!("0 {min} {hour} {day} {month} * {year}"))
+            }
+            None => {
+                let dow = if self.days.is_empty() {
+                    "*".to_string()
+                } else {
+                    self.days.join(",")
+                };
+                Ok(format!("0 {min} {hour} * * {dow}"))
+            }
+        }
+    }
+}
+
+/// The timezone a schedule's wall-clock fields (`when.at`,
+/// `active.{from,until}`) are evaluated in (#418 Phase 2).
+#[derive(
+    Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleTz {
+    /// The running host's local timezone — the agent's for
+    /// `runs_on: agent`, the backend server's otherwise. Default.
+    #[default]
+    Local,
+    /// UTC — for timezone-independent schedules.
+    Utc,
+}
+
+impl ScheduleTz {
+    /// Interpret a naive (zoneless) datetime as being in this tz and
+    /// convert to UTC. `None` only on a DST gap/fold (impossible for
+    /// the fixed-offset zones we support: UTC and JST).
+    fn naive_to_utc(self, naive: chrono::NaiveDateTime) -> Option<chrono::DateTime<chrono::Utc>> {
+        use chrono::TimeZone;
+        match self {
+            ScheduleTz::Utc => Some(chrono::DateTime::from_naive_utc_and_offset(
+                naive,
+                chrono::Utc,
+            )),
+            ScheduleTz::Local => chrono::Local
+                .from_local_datetime(&naive)
+                .single()
+                .map(|dt| dt.with_timezone(&chrono::Utc)),
+        }
+    }
 }
 
 /// `once` vs `{ every: <humantime> }` — shared by `per_pc` /
@@ -1509,8 +1753,8 @@ impl PerPolicy {
 
 impl std::fmt::Display for When {
     /// Operator-facing one-liner (`per_pc once` / `per_pc every 6h`
-    /// / `cron: 0 0 9 * * mon-fri`) for log lines, audit payloads
-    /// and the API's `ScheduleSummary`.
+    /// / `at 09:00 [mon-fri]` / `at 2026-06-10 09:00`) for log
+    /// lines, audit payloads and the API's `ScheduleSummary`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let policy = |p: &PerPolicy| match p {
             PerPolicy::Once(_) => "once".to_string(),
@@ -1519,17 +1763,23 @@ impl std::fmt::Display for When {
         match self {
             When::PerPc(p) => write!(f, "per_pc {}", policy(p)),
             When::PerTarget(p) => write!(f, "per_target {}", policy(p)),
-            When::Cron(expr) => write!(f, "cron: {expr}"),
+            When::Calendar(c) if c.days.is_empty() => write!(f, "at {}", c.at),
+            When::Calendar(c) => write!(f, "at {} [{}]", c.at, c.days.join(",")),
         }
     }
 }
 
 /// Optional validity window for a [`Schedule`] (#418 decision G).
 /// Half-open `[from, until)`; either bound may be omitted. Bounds
-/// are `YYYY-MM-DD` (= that day's 00:00 **UTC**) or full RFC3339
-/// (use an offset for local-time precision). Kept as strings so the
-/// JSON Schema the SPA editor consumes stays two plain string
-/// fields, mirroring how `jitter` / `starting_deadline` are stored.
+/// are `YYYY-MM-DD` (= that day's 00:00 in the schedule's `tz`) or
+/// full RFC3339 (offset is honored as-is, `tz` ignored). Kept as
+/// strings so the JSON Schema the SPA editor consumes stays two
+/// plain string fields, mirroring `jitter` / `starting_deadline`.
+///
+/// #418 Phase 2: bounds are evaluated in the schedule's top-level
+/// `tz` (was UTC-only in Phase 1) so `tz: local` makes both the
+/// calendar `at` AND the `active` window local — one consistent
+/// timezone per schedule.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Active {
@@ -1548,18 +1798,17 @@ impl Active {
         self.from.is_none() && self.until.is_none()
     }
 
-    /// Parse one bound: RFC3339 first, then bare `YYYY-MM-DD`
-    /// (midnight UTC).
-    pub fn parse_bound(s: &str) -> Result<chrono::DateTime<chrono::Utc>, String> {
+    /// Parse one bound: RFC3339 first (offset honored, `tz`
+    /// ignored), then bare `YYYY-MM-DD` (00:00 in `tz`).
+    pub fn parse_bound(s: &str, tz: ScheduleTz) -> Result<chrono::DateTime<chrono::Utc>, String> {
         if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
             return Ok(dt.with_timezone(&chrono::Utc));
         }
         if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
             let midnight = d.and_hms_opt(0, 0, 0).expect("00:00:00 is always valid");
-            return Ok(chrono::DateTime::from_naive_utc_and_offset(
-                midnight,
-                chrono::Utc,
-            ));
+            return tz.naive_to_utc(midnight).ok_or_else(|| {
+                format!("active: bound '{s}' falls in a DST gap for the schedule's tz")
+            });
         }
         Err(format!(
             "active: unparseable bound '{s}' (want YYYY-MM-DD or RFC3339)"
@@ -1570,8 +1819,8 @@ impl Active {
     /// as absent here (fail-open) — [`Schedule::validate`] is the
     /// place that rejects them loudly; this runs on every tick and
     /// must never panic on a stale KV blob.
-    pub fn contains(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
-        let bound = |s: &Option<String>| s.as_deref().and_then(|s| Self::parse_bound(s).ok());
+    pub fn contains(&self, now: chrono::DateTime<chrono::Utc>, tz: ScheduleTz) -> bool {
+        let bound = |s: &Option<String>| s.as_deref().and_then(|s| Self::parse_bound(s, tz).ok());
         if bound(&self.from).is_some_and(|from| now < from) {
             return false;
         }
@@ -1594,14 +1843,19 @@ pub const POLL_CRON: &str = "0 * * * * *";
 /// unchanged is what lets Phase 1 swap the operator surface without
 /// touching the tick / dedup machinery.
 pub struct Lowered {
-    /// 6-field cron handed to `tokio-cron-scheduler` — [`POLL_CRON`]
-    /// for reconcile shapes, verbatim for the escape hatch.
+    /// Cron handed to `tokio-cron-scheduler` — [`POLL_CRON`] for
+    /// reconcile shapes, a 6/7-field cron for calendar shapes.
     pub cron: String,
     /// Dedup semantics for `decide_fire`.
     pub mode: ExecMode,
     /// Humantime re-arm interval (`None` = succeed once, skip
     /// forever).
     pub cooldown: Option<String>,
+    /// Timezone to evaluate `cron` in (#418 Phase 2). The scheduler
+    /// passes this to `Job::new_async_tz`. Reconcile shapes carry
+    /// the schedule's tz too even though POLL_CRON is tz-agnostic,
+    /// so the same value drives the `active`-window check.
+    pub tz: ScheduleTz,
 }
 
 impl Schedule {
@@ -1609,21 +1863,32 @@ impl Schedule {
     /// Single seam shared by the backend scheduler and the agent's
     /// local scheduler so the two can never drift.
     pub fn lowered(&self) -> Lowered {
+        let tz = self.tz;
         match &self.when {
             When::PerPc(p) => Lowered {
                 cron: POLL_CRON.into(),
                 mode: ExecMode::OncePerPc,
                 cooldown: p.cooldown(),
+                tz,
             },
             When::PerTarget(p) => Lowered {
                 cron: POLL_CRON.into(),
                 mode: ExecMode::OncePerTarget,
                 cooldown: p.cooldown(),
+                tz,
             },
-            When::Cron(expr) => Lowered {
-                cron: expr.clone(),
+            // `to_cron` only fails on a malformed `at` (rejected by
+            // validate() at create time). For a hand-edited KV blob
+            // that slipped past, emit a deliberately-invalid cron so
+            // register()'s Job::new_async_tz fails → warn+skip,
+            // rather than firing at the wrong time.
+            When::Calendar(c) => Lowered {
+                cron: c
+                    .to_cron()
+                    .unwrap_or_else(|_| "# invalid calendar at".into()),
                 mode: ExecMode::EveryTick,
                 cooldown: None,
+                tz,
             },
         }
     }
@@ -1648,17 +1913,20 @@ impl Schedule {
             humantime::parse_duration(cd)
                 .map_err(|e| format!("when.every: invalid duration '{cd}': {e}"))?;
         }
-        if let When::Cron(expr) = &self.when {
-            // Same parser configuration tokio-cron-scheduler 0.15
-            // uses internally (croner, seconds required, DOM-and-DOW
-            // both honored) — create-time validation can never
-            // accept what register() would reject.
+        if let When::Calendar(c) = &self.when {
+            // Lower the calendar form to its cron (catches a bad `at`
+            // and the date+days conflict), then validate that cron
+            // with the same parser configuration tokio-cron-scheduler
+            // 0.15 uses internally (croner, seconds required,
+            // DOM-and-DOW both honored, year optional) — create-time
+            // validation can never accept what register() rejects.
+            let cron = c.to_cron()?;
             croner::parser::CronParser::builder()
                 .seconds(croner::parser::Seconds::Required)
                 .dom_and_dow(true)
                 .build()
-                .parse(expr)
-                .map_err(|e| format!("when.cron: invalid 6-field cron '{expr}': {e}"))?;
+                .parse(&cron)
+                .map_err(|e| format!("when.at lowered to invalid cron '{cron}': {e}"))?;
         }
         // The other humantime strings on the schedule (claude #419
         // review): runtime degrades gracefully on both (bad jitter →
@@ -1677,13 +1945,13 @@ impl Schedule {
             .active
             .from
             .as_deref()
-            .map(Active::parse_bound)
+            .map(|s| Active::parse_bound(s, self.tz))
             .transpose()?;
         let until = self
             .active
             .until
             .as_deref()
-            .map(Active::parse_bound)
+            .map(|s| Active::parse_bound(s, self.tz))
             .transpose()?;
         if let (Some(f), Some(u)) = (from, until) {
             if f >= u {
