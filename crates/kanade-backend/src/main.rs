@@ -33,8 +33,24 @@ struct Cli {
     /// Path to backend.toml. When unset, the backend looks at
     /// $KANADE_BACKEND_CONFIG, then `<config_dir>/backend.toml` (see
     /// kanade_shared::default_paths::config_dir).
-    #[arg(long)]
+    #[arg(long, global = true)]
     config: Option<PathBuf>,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+/// Operator subcommands. Absent = run the backend service (the default,
+/// and what the Windows SCM invokes via the installed binPath).
+#[derive(clap::Subcommand, Debug)]
+enum Command {
+    /// Print the fully-resolved `[db] sqlite_path` (after teravars
+    /// rendering — `env()`, `is_windows()`, `vars.*` self-reference) to
+    /// stdout and exit. `deploy-backend.ps1 -WipeDb` calls this so the
+    /// wipe targets the exact file the backend opens, instead of
+    /// re-deriving the path with a divergent default that silently
+    /// misses a templated / non-default (e.g. `E:\…`) location.
+    ResolveDbPath,
 }
 
 /// Top-level entry point.
@@ -44,6 +60,17 @@ struct Cli {
 /// driving us; otherwise we fall through to console mode. Non-
 /// Windows targets always run in console mode.
 fn main() -> Result<()> {
+    // Operator subcommands short-circuit BEFORE the Windows service
+    // probe — they're console-invoked (e.g. by deploy-backend.ps1) and
+    // must print + exit, not try to dispatch as a service. SCM starts
+    // the service with no subcommand, so the default path is unchanged.
+    let cli = Cli::parse();
+    if let Some(cmd) = &cli.command {
+        return match cmd {
+            Command::ResolveDbPath => print_resolved_db_path(cli.config.as_deref()),
+        };
+    }
+
     #[cfg(target_os = "windows")]
     {
         match service::try_run_as_service() {
@@ -60,6 +87,20 @@ fn main() -> Result<()> {
         .build()
         .context("build tokio runtime")?;
     runtime.block_on(run_backend())
+}
+
+/// `resolve-db-path` subcommand: load the config exactly as the running
+/// backend does and print the rendered `[db] sqlite_path` to stdout.
+/// Synchronous + deliberately NO tracing init — stdout must carry only
+/// the path so callers (deploy-backend.ps1 -WipeDb) can consume it
+/// verbatim; any failure returns `Err`, which Rust prints to stderr and
+/// exits non-zero, and the caller refuses to wipe rather than guessing.
+fn print_resolved_db_path(config: Option<&Path>) -> Result<()> {
+    let cfg_path = default_paths::find_config(config, "KANADE_BACKEND_CONFIG", "backend.toml")?;
+    let cfg =
+        load_backend_config(&cfg_path).with_context(|| format!("load config from {cfg_path:?}"))?;
+    println!("{}", cfg.db.sqlite_path);
+    Ok(())
 }
 
 pub(crate) async fn run_backend() -> Result<()> {
