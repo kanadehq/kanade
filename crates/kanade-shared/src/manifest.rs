@@ -1736,8 +1736,13 @@ pub enum ScheduleTz {
 
 impl ScheduleTz {
     /// Interpret a naive (zoneless) datetime as being in this tz and
-    /// convert to UTC. `None` only on a DST gap/fold (impossible for
-    /// the fixed-offset zones we support: UTC and JST).
+    /// convert to UTC. On a DST *fold* (the local time occurs twice
+    /// when clocks go back) we pick `.earliest()` rather than
+    /// rejecting it; `None` is reserved for a true DST *gap* (a local
+    /// time that never exists). Both are impossible for the
+    /// fixed-offset zones we support today (UTC, JST), but a host
+    /// running `chrono::Local` in a DST zone shouldn't drop a valid
+    /// folded time (gemini #432 review).
     fn naive_to_utc(self, naive: chrono::NaiveDateTime) -> Option<chrono::DateTime<chrono::Utc>> {
         use chrono::TimeZone;
         match self {
@@ -1747,7 +1752,7 @@ impl ScheduleTz {
             )),
             ScheduleTz::Local => chrono::Local
                 .from_local_datetime(&naive)
-                .single()
+                .earliest()
                 .map(|dt| dt.with_timezone(&chrono::Utc)),
         }
     }
