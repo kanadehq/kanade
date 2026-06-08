@@ -19,6 +19,7 @@
 
 use std::time::Duration;
 
+use async_nats::connection::State;
 use kanade_shared::ipc::state::{Check, CheckStatus, StateSnapshot};
 use kanade_shared::wire::EffectiveConfig;
 use tokio::sync::watch;
@@ -31,10 +32,31 @@ use tracing::debug;
 /// take 100-500 ms.
 const EVAL_INTERVAL: Duration = Duration::from_secs(30);
 
+/// Whether the agent currently holds a live broker connection —
+/// the value behind `StateSnapshot.online` (#288). Mirrors the
+/// `connection_state() == Connected` check already used by
+/// [`crate::nats_retry`] / [`crate::staleness`]; reading it is a
+/// cheap atomic load, so the evaluator re-samples it every tick and
+/// a dropped broker flips the Health tab to offline within one
+/// [`EVAL_INTERVAL`].
+pub fn client_online(client: &async_nats::Client) -> bool {
+    client.connection_state() == State::Connected
+}
+
 /// Build a fresh snapshot synchronously. Called by `main.rs` once
 /// at startup to seed the watch channel, then by `eval_loop`
 /// every tick.
-pub fn eval_once(pc_id: &str, agent_version: &str, cfg: &EffectiveConfig) -> StateSnapshot {
+///
+/// `online` is the agent's live broker-connection status, sampled
+/// by the caller via [`client_online`] — kept as a parameter (not
+/// read in here) so this stays a pure, runtime-free function the
+/// unit tests can pin both ways.
+pub fn eval_once(
+    pc_id: &str,
+    agent_version: &str,
+    cfg: &EffectiveConfig,
+    online: bool,
+) -> StateSnapshot {
     let checks = vec![
         agent_self_update_check(agent_version, cfg.target_version.as_deref()),
         disk_free_check(),
@@ -44,13 +66,9 @@ pub fn eval_once(pc_id: &str, agent_version: &str, cfg: &EffectiveConfig) -> Sta
     ];
     StateSnapshot {
         pc_id: pc_id.to_string(),
-        // `online` is the agent's NATS connection status. The
-        // listener doesn't have a live handle to the broker
-        // client here; a future PR will plumb the connection
-        // state through. For now we say `true` (the agent
-        // wouldn't be answering KLP if it had crashed entirely,
-        // which is the only state the SPA actually cares about).
-        online: true,
+        // Real broker-connection state, sampled by the caller (see
+        // `client_online`) so this stays unit-testable (#288).
+        online,
         // VPN posture is site-specific and needs a custom
         // integration per organisation. Default to "unknown"
         // until the check is implemented — SPEC §2.12.5 explicitly
@@ -77,6 +95,7 @@ pub async fn eval_loop(
     cfg_rx: watch::Receiver<EffectiveConfig>,
     pc_id: String,
     agent_version: String,
+    client: async_nats::Client,
 ) {
     let mut tick = tokio::time::interval(EVAL_INTERVAL);
     // Skip the immediate first fire; main.rs already seeded the
@@ -85,7 +104,12 @@ pub async fn eval_loop(
     tick.tick().await;
     loop {
         tick.tick().await;
-        let snapshot = eval_once(&pc_id, &agent_version, &cfg_rx.borrow());
+        let snapshot = eval_once(
+            &pc_id,
+            &agent_version,
+            &cfg_rx.borrow(),
+            client_online(&client),
+        );
         // TODO(perf): use `send_if_modified` once StateSnapshot
         // derives PartialEq in `kanade-shared`. For now we send
         // unconditionally and every forwarder wakes every 30 s
@@ -255,7 +279,7 @@ mod tests {
 
     #[test]
     fn eval_once_produces_well_formed_snapshot() {
-        let snap = eval_once("PC1234", "0.41.0", &cfg_with(None));
+        let snap = eval_once("PC1234", "0.41.0", &cfg_with(None), true);
         assert_eq!(snap.pc_id, "PC1234");
         assert!(snap.online);
         assert_eq!(snap.vpn, "unknown");
@@ -274,6 +298,17 @@ mod tests {
                 "cert_expiry"
             ]
         );
+    }
+
+    #[test]
+    fn eval_once_online_reflects_the_passed_flag() {
+        // #288: `online` must mirror the broker-connection bool the
+        // caller samples, not a hardcoded `true` — a disconnected
+        // agent has to surface as offline on the Health tab.
+        let offline = eval_once("PC1234", "0.41.0", &cfg_with(None), false);
+        assert!(!offline.online, "online must follow the passed flag");
+        let online = eval_once("PC1234", "0.41.0", &cfg_with(None), true);
+        assert!(online.online);
     }
 
     #[test]
@@ -329,13 +364,13 @@ mod tests {
 
     #[test]
     fn snapshot_target_version_falls_back_when_cfg_target_empty() {
-        let snap = eval_once("PC1234", "0.41.0", &cfg_with(Some("")));
+        let snap = eval_once("PC1234", "0.41.0", &cfg_with(Some("")), true);
         assert_eq!(snap.target_version, "0.41.0");
     }
 
     #[test]
     fn snapshot_target_version_surfaces_when_cfg_target_set() {
-        let snap = eval_once("PC1234", "0.41.0", &cfg_with(Some("0.42.0")));
+        let snap = eval_once("PC1234", "0.41.0", &cfg_with(Some("0.42.0")), true);
         assert_eq!(snap.target_version, "0.42.0");
     }
 }
