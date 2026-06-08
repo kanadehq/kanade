@@ -20,6 +20,16 @@
     "groups": "specific group(s)",
     "pcs": "specific pc(s)"
   },
+  "allWarningInline": "This targets EVERY registered agent. Double-check before firing.",
+  "confirm": {
+    "title": "Exec {{jobId}}?",
+    "allWarning": "This runs on ALL registered agents. There is no undo once the job fans out.",
+    "targetGroups": "Target group(s): {{groups}}",
+    "targetPcs": "Target pc(s): {{pcs}}",
+    "confirmLabel": "Exec",
+    "confirmLabelAll": "Exec on all agents",
+    "cancelLabel": "Cancel"
+  },
   "placeholders": {
     "groups": "canary,wave1",
     "pcs": "pc-01,pc-02"

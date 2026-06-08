@@ -20,6 +20,16 @@
     "groups": "特定のグループ",
     "pcs": "特定の PC"
   },
+  "allWarningInline": "登録済みの全エージェントが対象です。実行前に必ず確認してください。",
+  "confirm": {
+    "title": "{{jobId}} を実行しますか？",
+    "allWarning": "登録済みの全エージェントで実行されます。ジョブが配信されると取り消せません。",
+    "targetGroups": "対象グループ: {{groups}}",
+    "targetPcs": "対象 PC: {{pcs}}",
+    "confirmLabel": "実行",
+    "confirmLabelAll": "全エージェントで実行",
+    "cancelLabel": "キャンセル"
+  },
   "placeholders": {
     "groups": "canary,wave1",
     "pcs": "pc-01,pc-02"

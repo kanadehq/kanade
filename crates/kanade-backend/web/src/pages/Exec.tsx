@@ -1,5 +1,5 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { Loader2, Send } from 'lucide-react';
+import { AlertTriangle, Loader2, Send } from 'lucide-react';
 import { useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 
@@ -7,6 +7,7 @@ import { ErrorCard } from '@/components/ErrorCard';
 import { PcPicker } from '@/components/PcPicker';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { useConfirm } from '@/components/ui/confirm-dialog';
 import { Input } from '@/components/ui/input';
 import { JsonOutput } from '@/components/ui/json-output';
 import { Label } from '@/components/ui/label';
@@ -41,9 +42,15 @@ function splitCsv(s: string): string[] {
 export function Exec() {
   const { t } = useTranslation('exec');
   const { hasRole } = useAuth();
+  const confirm = useConfirm();
   const canOperate = hasRole('operator');
   const [jobId, setJobId] = useState('');
-  const [mode, setMode] = useState<TargetMode>('all');
+  // Default to 'pcs' (not 'all'): firing a job at every registered
+  // agent should be a deliberate, explicit choice — never the state
+  // the form lands in. With 'pcs' selected and no PCs picked,
+  // `targetReady` stays false so the submit button is disabled until
+  // the operator names targets.
+  const [mode, setMode] = useState<TargetMode>('pcs');
   const [groups, setGroups] = useState('');
   const [pcs, setPcs] = useState<string[]>([]);
   const [jitter, setJitter] = useState('');
@@ -63,15 +70,37 @@ export function Exec() {
 
   const jobs = jobsQ.data ?? [];
 
-  const onFire = () => {
+  const onFire = async () => {
+    const targetGroups = mode === 'groups' ? splitCsv(groups) : [];
+    const targetPcs = mode === 'pcs' ? pcs : [];
     const plan: FanoutPlan = {
       target: {
         all: mode === 'all',
-        groups: mode === 'groups' ? splitCsv(groups) : [],
-        pcs: mode === 'pcs' ? pcs : [],
+        groups: targetGroups,
+        pcs: targetPcs,
       },
     };
     if (jitter.trim()) plan.jitter = jitter.trim();
+
+    // Exec is fire-and-forget — once a job fans out there's no undo,
+    // so confirm the blast radius first. The 'all' case gets the
+    // danger styling (red confirm, Cancel auto-focused) since it hits
+    // every registered agent.
+    const description =
+      mode === 'all'
+        ? t('confirm.allWarning')
+        : mode === 'groups'
+          ? t('confirm.targetGroups', { groups: targetGroups.join(', ') })
+          : t('confirm.targetPcs', { pcs: targetPcs.join(', ') });
+    const ok = await confirm({
+      title: t('confirm.title', { jobId }),
+      description,
+      confirmLabel: mode === 'all' ? t('confirm.confirmLabelAll') : t('confirm.confirmLabel'),
+      cancelLabel: t('confirm.cancelLabel'),
+      danger: mode === 'all',
+    });
+    if (!ok) return;
+
     mut.mutate({ id: jobId, plan });
   };
 
@@ -139,6 +168,16 @@ export function Exec() {
                   <option value="pcs">{t('options.pcs')}</option>
                 </Select>
               </div>
+
+              {mode === 'all' && (
+                <div
+                  role="alert"
+                  className="flex items-start gap-2 rounded-md border border-danger/40 bg-danger/10 p-2 text-sm text-danger"
+                >
+                  <AlertTriangle className="size-4 mt-0.5 shrink-0" />
+                  <span>{t('allWarningInline')}</span>
+                </div>
+              )}
 
               {mode === 'groups' && (
                 <div className="space-y-1">
