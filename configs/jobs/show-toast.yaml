@@ -44,9 +44,12 @@ execute:
       # Borrow PowerShell's registered AppUserModelID so the toast
       # has a valid identity to attribute itself to.
       $aumid = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
-      # Single-line XML on purpose: a PowerShell here-string can't
-      # close at column 0 inside this indented YAML block scalar.
-      $xml = "<toast><visual><binding template='ToastGeneric'><text>$Title</text><text>$Body</text></binding></visual></toast>"
+      # XML-escape the operator-supplied text so & < > don't break
+      # LoadXml (gemini #440 review). Single-line XML on purpose: a
+      # here-string can't close at column 0 in this YAML block scalar.
+      $t = [System.Security.SecurityElement]::Escape($Title)
+      $b = [System.Security.SecurityElement]::Escape($Body)
+      $xml = "<toast><visual><binding template='ToastGeneric'><text>$t</text><text>$b</text></binding></visual></toast>"
       $doc = [Windows.Data.Xml.Dom.XmlDocument]::new()
       $doc.LoadXml($xml)
       $toast = [Windows.UI.Notifications.ToastNotification]::new($doc)
