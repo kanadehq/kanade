@@ -36,3 +36,26 @@ export function fmtIsoLocal(iso: string | null): string {
     `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
   );
 }
+
+/**
+ * Heartbeat freshness window. An agent whose `last_heartbeat` falls
+ * within this window counts as **online**; anything older (or never
+ * heard from) is **offline / stale**.
+ *
+ * Mirrors the backend `STALE_THRESHOLD` (`api/health.rs`, 2 min) and
+ * the Dashboard fleet-health rollup, so the "active / known" tile on
+ * the Dashboard and the per-row online/offline badge on the Agents
+ * page always agree on which hosts are connected. Heartbeats cadence
+ * at ~30 s, so 2 min absorbs a few missed ticks without flapping.
+ */
+export const AGENT_ACTIVE_THRESHOLD_MS = 2 * 60 * 1000;
+
+/** True when `last_heartbeat` is fresh enough to call the agent
+ *  online. Single source of truth shared by the Dashboard and the
+ *  Agents list — see {@link AGENT_ACTIVE_THRESHOLD_MS}. */
+export function isAgentOnline(lastHeartbeat: string | null | undefined): boolean {
+  if (!lastHeartbeat) return false;
+  const ts = new Date(lastHeartbeat).getTime();
+  if (isNaN(ts)) return false;
+  return Date.now() - ts < AGENT_ACTIVE_THRESHOLD_MS;
+}

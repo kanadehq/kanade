@@ -33,7 +33,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { ApiError, apiFetch } from '@/lib/api';
-import { cn } from '@/lib/utils';
+import { cn, isAgentOnline } from '@/lib/utils';
 import type {
   ActiveInvestigationsResponse,
   AgentRow,
@@ -135,12 +135,6 @@ function tooltipPct(value: unknown): string {
 function tooltipBytes(value: unknown): string {
   return typeof value === 'number' ? fmtBytes(value) : '—';
 }
-
-// 2 min — covers the default 30s heartbeat cadence with several
-// missed ticks of slack. Heartbeat is the cheaper / faster liveness
-// signal than the 24h inventory cycle, so the dashboard reacts to
-// an agent dropping offline within ~2 min instead of ~25h.
-const ACTIVE_THRESHOLD_MS = 2 * 60 * 1000;
 
 // React Query refetch cadence shared by every panel on this page,
 // and the same value the i18n strings interpolate as `{{seconds}}` —
@@ -267,11 +261,10 @@ export function Dashboard() {
   });
 
   const agents = agentsQ.data ?? [];
-  const active = agents.filter(
-    (a) =>
-      a.last_heartbeat &&
-      Date.now() - new Date(a.last_heartbeat).getTime() < ACTIVE_THRESHOLD_MS,
-  ).length;
+  // Same 2-min heartbeat threshold the Agents page uses for its
+  // online/offline badge — keeps "active / known" here in lockstep
+  // with the per-row status there, and the tile deep-links across.
+  const active = agents.filter((a) => isAgentOnline(a.last_heartbeat)).length;
 
   const js = jsQ.data;
   const jsRows = js ? [...js.streams, ...js.kv_buckets, ...js.object_stores] : [];
@@ -334,18 +327,33 @@ export function Dashboard() {
             </CardDescription>
           </CardHeader>
           <CardContent className="grid grid-cols-2 md:grid-cols-4 gap-6">
-            <StatBlock
-              label={t('fleetHealth.stats.agents.label')}
-              value={`${health.agents.active} / ${health.agents.known}`}
-              hint={t('fleetHealth.stats.agents.hint')}
-              tone={health.agents.stale > 0 ? 'danger' : 'default'}
-            />
-            <StatBlock
-              label={t('fleetHealth.stats.staleAgents.label')}
-              value={health.agents.stale}
-              tone={health.agents.stale > 0 ? 'danger' : 'success'}
-              hint={t('fleetHealth.stats.staleAgents.hint')}
-            />
+            {/* Deep-link to the Agents list, pre-filtered to the
+                offline hosts when any are stale — answers "the N that
+                aren't connected, which are they?" in one click. */}
+            <Link
+              to={health.agents.stale > 0 ? '/agents?status=offline' : '/agents'}
+              className="rounded-md -m-1 p-1 transition-colors hover:bg-muted/10"
+              title={t('fleetHealth.stats.agents.linkTitle')}
+            >
+              <StatBlock
+                label={t('fleetHealth.stats.agents.label')}
+                value={`${health.agents.active} / ${health.agents.known}`}
+                hint={t('fleetHealth.stats.agents.hint')}
+                tone={health.agents.stale > 0 ? 'danger' : 'default'}
+              />
+            </Link>
+            <Link
+              to={health.agents.stale > 0 ? '/agents?status=offline' : '/agents'}
+              className="rounded-md -m-1 p-1 transition-colors hover:bg-muted/10"
+              title={t('fleetHealth.stats.staleAgents.linkTitle')}
+            >
+              <StatBlock
+                label={t('fleetHealth.stats.staleAgents.label')}
+                value={health.agents.stale}
+                tone={health.agents.stale > 0 ? 'danger' : 'success'}
+                hint={t('fleetHealth.stats.staleAgents.hint')}
+              />
+            </Link>
             <StatBlock
               label={t('fleetHealth.stats.jetstream.label')}
               value={`${health.jetstream.healthy} / ${health.jetstream.total}`}
@@ -386,13 +394,25 @@ export function Dashboard() {
             </CardDescription>
           </CardHeader>
           <CardContent className="flex gap-8 items-end">
-            <StatBlock label={t('fleet.stats.known')} value={agents.length} />
-            <StatBlock
-              label={t('fleet.stats.activeLabel')}
-              value={active}
-              tone={active === agents.length && agents.length > 0 ? 'success' : 'default'}
-              hint={t('fleet.stats.activeHint')}
-            />
+            <Link
+              to="/agents"
+              className="rounded-md -m-1 p-1 transition-colors hover:bg-muted/10"
+              title={t('fleet.stats.linkTitle')}
+            >
+              <StatBlock label={t('fleet.stats.known')} value={agents.length} />
+            </Link>
+            <Link
+              to={active < agents.length ? '/agents?status=offline' : '/agents'}
+              className="rounded-md -m-1 p-1 transition-colors hover:bg-muted/10"
+              title={t('fleet.stats.linkTitle')}
+            >
+              <StatBlock
+                label={t('fleet.stats.activeLabel')}
+                value={active}
+                tone={active === agents.length && agents.length > 0 ? 'success' : 'default'}
+                hint={t('fleet.stats.activeHint')}
+              />
+            </Link>
           </CardContent>
         </Card>
 

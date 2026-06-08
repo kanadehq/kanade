@@ -2,7 +2,7 @@ import { useMutation, useQuery } from '@tanstack/react-query';
 import { Activity, Loader2, ScrollText, Server, Settings2, Users } from 'lucide-react';
 import { useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 
 import { ErrorCard } from '@/components/ErrorCard';
 import { Badge } from '@/components/ui/badge';
@@ -12,7 +12,17 @@ import { JsonOutput } from '@/components/ui/json-output';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { apiFetch } from '@/lib/api';
 import type { AgentGroups, AgentRow, EffectiveConfigResponse, Heartbeat } from '@/lib/types';
-import { fmtIsoLocal } from '@/lib/utils';
+import { cn, fmtIsoLocal, isAgentOnline } from '@/lib/utils';
+
+// Liveness filter for the list, shared with the URL `?status=` param
+// so the Dashboard's fleet-health tiles can deep-link straight to the
+// offline hosts ("2 / 4 — which 2?"). `all` is the default / no-param
+// state.
+type StatusFilter = 'all' | 'online' | 'offline';
+
+function parseStatusFilter(raw: string | null): StatusFilter {
+  return raw === 'online' || raw === 'offline' ? raw : 'all';
+}
 
 type ActionResult = {
   pc_id: string;
@@ -44,9 +54,26 @@ export function Agents() {
   const { t } = useTranslation('agents');
   const { data, error, isLoading } = useQuery({
     queryKey: ['agents'],
+    // Match the Dashboard cadence so the per-row online/offline badge
+    // ages out a dropped agent within ~30s of the fleet-health tile.
     queryFn: () => apiFetch<AgentRow[]>('/api/agents'),
+    refetchInterval: 30_000,
   });
   const [result, setResult] = useState<ActionResult | null>(null);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const statusFilter = parseStatusFilter(searchParams.get('status'));
+
+  const setStatusFilter = (next: StatusFilter) => {
+    setSearchParams(
+      (prev) => {
+        const p = new URLSearchParams(prev);
+        if (next === 'all') p.delete('status');
+        else p.set('status', next);
+        return p;
+      },
+      { replace: true },
+    );
+  };
 
   const ping = useMutation({
     mutationFn: (pcId: string) =>
@@ -121,6 +148,13 @@ export function Agents() {
   }
   if (error) return <ErrorCard title={t('errorTitle')} error={error} />;
   const agents = data ?? [];
+  const onlineCount = agents.filter((a) => isAgentOnline(a.last_heartbeat)).length;
+  const offlineCount = agents.length - onlineCount;
+  const visible = agents.filter((a) => {
+    if (statusFilter === 'all') return true;
+    const online = isAgentOnline(a.last_heartbeat);
+    return statusFilter === 'online' ? online : !online;
+  });
 
   if (agents.length === 0) {
     return (
@@ -152,9 +186,41 @@ export function Agents() {
           }}
         />
       </p>
+
+      {/* Liveness filter — the bridge to the Dashboard's "active /
+          known" tile. Counts come from the same `isAgentOnline`
+          threshold, so toggling "offline" answers "which hosts are
+          the N that aren't connected?" directly. */}
+      <div className="flex flex-wrap items-center gap-2">
+        {(['all', 'online', 'offline'] as const).map((s) => {
+          const count = s === 'online' ? onlineCount : s === 'offline' ? offlineCount : agents.length;
+          const selected = statusFilter === s;
+          return (
+            <button
+              key={s}
+              type="button"
+              onClick={() => setStatusFilter(s)}
+              aria-pressed={selected}
+              className={cn(
+                'rounded-full border px-3 py-1 text-xs font-medium transition-colors',
+                selected
+                  ? s === 'offline'
+                    ? 'border-transparent bg-danger/15 text-danger'
+                    : s === 'online'
+                      ? 'border-transparent bg-success/15 text-success'
+                      : 'border-transparent bg-violet/15 text-violet'
+                  : 'border-border text-muted hover:bg-muted/10',
+              )}
+            >
+              {t(`filter.${s}`, { count })}
+            </button>
+          );
+        })}
+      </div>
       <Table>
         <TableHeader>
           <TableRow>
+            <TableHead>{t('columns.status')}</TableHead>
             <TableHead>{t('columns.pcId')}</TableHead>
             <TableHead>{t('columns.hostname')}</TableHead>
             <TableHead>{t('columns.os')}</TableHead>
@@ -175,8 +241,24 @@ export function Agents() {
           </TableRow>
         </TableHeader>
         <TableBody>
-          {agents.map((a) => (
+          {visible.map((a) => {
+            const online = isAgentOnline(a.last_heartbeat);
+            return (
             <TableRow key={a.pc_id}>
+              <TableCell>
+                <Badge
+                  variant={online ? 'success' : 'danger'}
+                  title={t(online ? 'status.onlineTitle' : 'status.offlineTitle')}
+                >
+                  <span
+                    className={cn(
+                      'mr-1.5 inline-block size-1.5 rounded-full',
+                      online ? 'bg-success' : 'bg-danger',
+                    )}
+                  />
+                  {t(online ? 'status.online' : 'status.offline')}
+                </Badge>
+              </TableCell>
               <TableCell>
                 <Link
                   to={`/agents/${encodeURIComponent(a.pc_id)}`}
@@ -211,7 +293,15 @@ export function Agents() {
                 </div>
               </TableCell>
             </TableRow>
-          ))}
+            );
+          })}
+          {visible.length === 0 && (
+            <TableRow>
+              <TableCell colSpan={9} className="text-center text-muted text-sm py-6">
+                {t('filterEmpty')}
+              </TableCell>
+            </TableRow>
+          )}
         </TableBody>
       </Table>
 
