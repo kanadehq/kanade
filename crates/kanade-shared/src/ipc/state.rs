@@ -210,6 +210,24 @@ mod tests {
     }
 
     #[test]
+    fn check_status_parses_from_a_free_form_object_field() {
+        // The unified model: a check's stdout is an inventory-style
+        // object; the agent reads the `status_field` value (default
+        // "status") and parses it into a CheckStatus. Pin that the
+        // wire encoding the operator writes round-trips.
+        let obj: serde_json::Value = serde_json::from_str(
+            r#"{"status":"warn","detail":"D: unprotected","volumes":[{"drive":"C:","on":true}]}"#,
+        )
+        .expect("decode");
+        let status: CheckStatus =
+            serde_json::from_value(obj.get("status").unwrap().clone()).expect("status parses");
+        assert_eq!(status, CheckStatus::Warn);
+        assert_eq!(obj.get("detail").unwrap().as_str(), Some("D: unprotected"));
+        // The rest of the object is free-form (inventory projects it).
+        assert!(obj.get("volumes").unwrap().is_array());
+    }
+
+    #[test]
     fn state_changed_push_round_trips() {
         let p = StateChangedParams {
             snapshot: StateSnapshot {
