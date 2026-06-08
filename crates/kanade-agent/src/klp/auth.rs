@@ -9,14 +9,16 @@
 //! user-supplied identity fields in the payload, even on a
 //! single-user PC.
 //!
-//! Unix (Linux/macOS): not implemented in this PR. SPEC §2.12.1
-//! puts the Linux socket at `/run/kanade/agent.sock` and
-//! §2.12.4 specifies `SO_PEERCRED`; the full implementation
-//! lands with the UDS listener in a follow-up PR.
+//! Unix (Linux/macOS): not implemented. SPEC §2.12.1 puts the
+//! Linux socket at `/run/kanade/agent.sock` and §2.12.4 specifies
+//! `SO_PEERCRED`; the full implementation lands with the UDS
+//! listener in a follow-up PR. Until then the parent module
+//! ([`crate::klp`]) carries a `compile_error!` guard for
+//! non-Windows targets, so this file is only ever compiled on
+//! Windows and needs no non-Windows fallback.
 
 use anyhow::Result;
 
-#[cfg(target_os = "windows")]
 use tokio::net::windows::named_pipe::NamedPipeServer;
 
 /// What the auth shim derives from the OS at connect time. The
@@ -39,21 +41,10 @@ pub struct PeerCredentials {
 /// Resolve the peer's identity for a freshly-accepted KLP
 /// connection. Synchronous Win32 calls; small enough to inline at
 /// connect time rather than `spawn_blocking`.
-#[cfg(target_os = "windows")]
 pub fn resolve_peer(pipe: &NamedPipeServer) -> Result<PeerCredentials> {
     windows_impl::resolve(pipe)
 }
 
-/// Non-Windows placeholder so the rest of the crate compiles on
-/// CI's Linux/macOS runners. Returns [`anyhow::Error`] — the
-/// listener itself is `#[cfg(target_os = "windows")]` gated, so
-/// this function is never actually called on those targets today.
-#[cfg(not(target_os = "windows"))]
-pub fn resolve_peer<T>(_pipe: &T) -> Result<PeerCredentials> {
-    anyhow::bail!("KLP peer auth on non-Windows targets is not yet implemented");
-}
-
-#[cfg(target_os = "windows")]
 mod windows_impl {
     use super::PeerCredentials;
     use anyhow::{Context, Result, bail};
