@@ -228,12 +228,13 @@ export function Inventory() {
         </Badge>
       </div>
 
-      {/* Overview ↔ fleet-search tab strip. Both are route links so
-          browser back/forward and deep links Just Work; the
-          segmented-control styling matches the per-card tabs further
-          down (FactCard / HistoryPane). */}
-      <div
-        role="tablist"
+      {/* Overview ↔ fleet-search switch. These are route links, not
+          stateful tab buttons, so it's a nav landmark with
+          aria-current on the active link — not the ARIA tab pattern,
+          which for <a> elements would also demand roving-tabindex +
+          arrow-key handling. Segmented-control styling matches the
+          per-card tabs further down (FactCard / HistoryPane). */}
+      <nav
         aria-label={t('tabs.ariaLabel')}
         className="inline-flex rounded-md border border-border overflow-hidden text-sm"
       >
@@ -244,8 +245,7 @@ export function Inventory() {
           <Link
             key={tabDef.key}
             to={tabDef.to}
-            role="tab"
-            aria-selected={tab === tabDef.key}
+            aria-current={tab === tabDef.key ? 'page' : undefined}
             className={cn(
               'px-3 py-1.5 transition-colors',
               tab === tabDef.key
@@ -256,7 +256,7 @@ export function Inventory() {
             {t(`tabs.${tabDef.key}` as const)}
           </Link>
         ))}
-      </div>
+      </nav>
 
       {tab === 'search' ? (
         <InventorySearch />
