@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Loader2, ScrollText } from 'lucide-react';
 import { useCallback, useMemo, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
-import { Link, useLocation, useSearchParams } from 'react-router-dom';
+import { Link, useMatch, useSearchParams } from 'react-router-dom';
 
 import { ErrorCard } from '@/components/ErrorCard';
 import { PcPicker } from '@/components/PcPicker';
@@ -212,14 +212,12 @@ export function Inventory() {
     refetchInterval: 60_000,
   });
 
-  const location = useLocation();
-  // Active tab is derived from the path so `/inventory/search` stays a
-  // real deep link (bookmarks + the fleet-search result rows that
-  // point back at `/inventory?pc=…`). Anything that isn't the search
-  // path is the overview tab.
-  const tab: 'overview' | 'search' = location.pathname.endsWith('/inventory/search')
-    ? 'search'
-    : 'overview';
+  // `useMatch` is the idiomatic React Router check — robust against
+  // trailing slashes where a manual `pathname.endsWith` is not. A match
+  // means we're on the fleet-search deep link (/inventory/search —
+  // bookmarks + the result rows that point back at /inventory?pc=…);
+  // anything else is the overview tab.
+  const tab: 'overview' | 'search' = useMatch('/inventory/search') ? 'search' : 'overview';
 
   return (
     <div className="space-y-4">
