@@ -2,10 +2,11 @@ import { useQuery } from '@tanstack/react-query';
 import { Loader2, ScrollText } from 'lucide-react';
 import { useCallback, useMemo, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useMatch, useSearchParams } from 'react-router-dom';
 
 import { ErrorCard } from '@/components/ErrorCard';
 import { PcPicker } from '@/components/PcPicker';
+import { InventorySearch } from '@/pages/Search';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Label } from '@/components/ui/label';
@@ -211,6 +212,13 @@ export function Inventory() {
     refetchInterval: 60_000,
   });
 
+  // `useMatch` is the idiomatic React Router check — robust against
+  // trailing slashes where a manual `pathname.endsWith` is not. A match
+  // means we're on the fleet-search deep link (/inventory/search —
+  // bookmarks + the result rows that point back at /inventory?pc=…);
+  // anything else is the overview tab.
+  const tab: 'overview' | 'search' = useMatch('/inventory/search') ? 'search' : 'overview';
+
   return (
     <div className="space-y-4">
       <div className="flex items-baseline justify-between">
@@ -220,46 +228,82 @@ export function Inventory() {
         </Badge>
       </div>
 
-      <Card>
-        <CardContent className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-4">
-          <div className="space-y-1">
-            <Label htmlFor="inv-pc">{t('viewLabel')}</Label>
-            {/* single-select; clearing the box returns to the fleet view */}
-            <PcPicker id="inv-pc" value={pcId} onChange={setPcId} placeholder={t('fleetOption')} />
-          </div>
-          <div className="space-y-1 text-xs text-muted self-end pb-2">
-            <Trans
-              ns="inventory"
-              i18nKey="intro"
-              components={{ code: <code /> }}
-            />
-          </div>
-        </CardContent>
-      </Card>
+      {/* Overview ↔ fleet-search switch. These are route links, not
+          stateful tab buttons, so it's a nav landmark with
+          aria-current on the active link — not the ARIA tab pattern,
+          which for <a> elements would also demand roving-tabindex +
+          arrow-key handling. Segmented-control styling matches the
+          per-card tabs further down (FactCard / HistoryPane). */}
+      <nav
+        aria-label={t('tabs.ariaLabel')}
+        className="inline-flex rounded-md border border-border overflow-hidden text-sm"
+      >
+        {([
+          { key: 'overview', to: '/inventory' },
+          { key: 'search', to: '/inventory/search' },
+        ] as const).map((tabDef) => (
+          <Link
+            key={tabDef.key}
+            to={tabDef.to}
+            aria-current={tab === tabDef.key ? 'page' : undefined}
+            className={cn(
+              'px-3 py-1.5 transition-colors',
+              tab === tabDef.key
+                ? 'bg-fg/10 text-fg font-medium'
+                : 'text-muted hover:bg-fg/5 hover:text-fg',
+            )}
+          >
+            {t(`tabs.${tabDef.key}` as const)}
+          </Link>
+        ))}
+      </nav>
 
-      {jobsQ.isLoading ? (
-        <div className="flex items-center gap-2 text-muted">
-          <Loader2 className="size-4 animate-spin" />{t('loadingProbes')}
-        </div>
-      ) : jobsQ.error ? (
-        <ErrorCard title={t('errorJobsTitle')} error={jobsQ.error} />
-      ) : (jobsQ.data ?? []).length === 0 ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>{t('noProbes.title')}</CardTitle>
-            <CardDescription>
-              <Trans
-                ns="inventory"
-                i18nKey="noProbes.body"
-                components={{ code: <code /> }}
-              />
-            </CardDescription>
-          </CardHeader>
-        </Card>
-      ) : pcId ? (
-        <PcDetail pcId={pcId} clear={() => setPcId('')} />
+      {tab === 'search' ? (
+        <InventorySearch />
       ) : (
-        <FleetView jobs={jobsQ.data ?? []} pickPc={setPcId} />
+        <>
+          <Card>
+            <CardContent className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-4">
+              <div className="space-y-1">
+                <Label htmlFor="inv-pc">{t('viewLabel')}</Label>
+                {/* single-select; clearing the box returns to the fleet view */}
+                <PcPicker id="inv-pc" value={pcId} onChange={setPcId} placeholder={t('fleetOption')} />
+              </div>
+              <div className="space-y-1 text-xs text-muted self-end pb-2">
+                <Trans
+                  ns="inventory"
+                  i18nKey="intro"
+                  components={{ code: <code /> }}
+                />
+              </div>
+            </CardContent>
+          </Card>
+
+          {jobsQ.isLoading ? (
+            <div className="flex items-center gap-2 text-muted">
+              <Loader2 className="size-4 animate-spin" />{t('loadingProbes')}
+            </div>
+          ) : jobsQ.error ? (
+            <ErrorCard title={t('errorJobsTitle')} error={jobsQ.error} />
+          ) : (jobsQ.data ?? []).length === 0 ? (
+            <Card>
+              <CardHeader>
+                <CardTitle>{t('noProbes.title')}</CardTitle>
+                <CardDescription>
+                  <Trans
+                    ns="inventory"
+                    i18nKey="noProbes.body"
+                    components={{ code: <code /> }}
+                  />
+                </CardDescription>
+              </CardHeader>
+            </Card>
+          ) : pcId ? (
+            <PcDetail pcId={pcId} clear={() => setPcId('')} />
+          ) : (
+            <FleetView jobs={jobsQ.data ?? []} pickPc={setPcId} />
+          )}
+        </>
       )}
     </div>
   );

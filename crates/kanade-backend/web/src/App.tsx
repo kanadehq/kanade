@@ -27,7 +27,6 @@ import { ResultDetail } from '@/pages/ResultDetail';
 import { Rollout } from '@/pages/Rollout';
 import { Run } from '@/pages/Run';
 import { Schedules } from '@/pages/Schedules';
-import { InventorySearch } from '@/pages/Search';
 import { Settings } from '@/pages/Settings';
 import { ThemeProvider, useTheme } from '@/lib/theme';
 
@@ -98,8 +97,13 @@ function AppContent() {
               <Route path="/results/*" element={<Navigate to="/activity" replace />} />
               <Route path="/audit" element={<Audit />} />
               <Route path="/logs" element={<Logs />} />
+              {/* Both paths render the Inventory page; it reads the
+                  pathname to pick the active tab (overview vs the
+                  embedded fleet-search panel). /inventory/search stays
+                  a real deep link so bookmarks and the search-result
+                  row links keep working. */}
               <Route path="/inventory" element={<Inventory />} />
-              <Route path="/inventory/search" element={<InventorySearch />} />
+              <Route path="/inventory/search" element={<Inventory />} />
               <Route path="/jobs" element={<Jobs />} />
               <Route path="/schedules" element={<Schedules />} />
               <Route path="/exec" element={<Exec />} />
