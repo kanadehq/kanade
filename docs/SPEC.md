@@ -608,7 +608,7 @@ KV 値の wire format:
 
 ### 2.4.3 スケジュール定義 (schedules/*.yaml)
 
-#418 Phase 1 で「いつ」は単一の `when` フィールドに統合された（旧
+#418 で「いつ」は単一の `when` フィールドに統合された（旧
 `cron` × `mode` × `cooldown` × `auto_disable_when_done` は廃止・
 互換層なし）。`when` は 2 形のどちらか:
 
@@ -643,19 +643,38 @@ when:
   per_target: { every: 24h }
 ```
 
-**(2) cron エスケープハッチ（暫定）** — 生の 6 フィールド cron で
-全 target に毎 tick 発火（dedup なし）。Phase 2 の calendar 型
-（`at` / `days` / `tz`）が入ったら撤去予定。
+**(2) calendar 型（時刻トリガ・Phase 2）** — 壁時計時刻で全 target に
+発火（dedup なし）。`at` が時刻 (`HH:MM`) なら `days`（曜日）と組んで
+繰り返し、日時 (`YYYY-MM-DD HH:MM`、ハイフン/スラッシュ/ISO `T` 可) なら
+**その日時に 1 回だけ**（year 付き cron に lower、過去 year は二度と
+発火しない＝one-shot）。発火時刻はスケジュールの `tz` で評価。
 
 ```yaml
+# 平日 9:00 繰り返し
 id: morning-greeting
 when:
-  cron: "0 0 9 * * mon-fri"     # 平日 9:00
+  calendar:
+    at: "09:00"
+    days: [mon-fri]            # cron DOW（名前・範囲可）。省略 = 毎日
+tz: local                      # 実行ホストの TZ で 9:00（minipc = JST）
 job_id: show-toast
 target: { all: true }
 starting_deadline: 30m
 enabled: true
 ```
+
+```yaml
+# 2026/06/10 09:00 に 1 回だけ（one-shot）
+when:
+  calendar:
+    at: "2026-06-10 09:00"     # 日時 → one-shot（days と排他）
+tz: local
+```
+
+**`tz`（Phase 2）** — `local`（既定・実行ホストの TZ。`runs_on: agent`
+なら agent、それ以外は backend サーバー）/ `utc`。calendar の `at` も
+下記 `active` の境界も**同じ `tz` で評価**する（スケジュール単位で
+タイムゾーンが一貫）。
 
 任意の `active.{from,until}`（半開区間 `[from, until)`）で有効期間を
 区切れる。期間外は dormant（削除ではなく休眠）— batch campaign の
@@ -663,14 +682,19 @@ footgun-free な終了手段:
 
 ```yaml
 active:
-  from: 2026-07-01              # YYYY-MM-DD (UTC 0時) or RFC3339
+  from: 2026-07-01     # YYYY-MM-DD は tz の 0 時。RFC3339 ならオフセット優先
   until: 2026-08-01
 ```
 
+> 補足: `YYYY-MM-DD` のみの境界はスケジュールの `tz` の 0 時起点で解釈
+> される（Phase 1 は UTC 固定だった）。秒単位まで厳密に切りたい時は
+> RFC3339（`2026-07-01T00:00:00+09:00`）で書く。
+
 `Schedule::validate()`（`Manifest::validate()` と対称）が create 時
 （CLI / `POST /api/schedules` の両方）に検査する: `runs_on: agent`
-+ `per_target` / 不正な `every` (humantime) / 不正な cron / 未登録
-`job_id`（API のみ・JOBS KV 照会）/ `active.from >= until`。
++ `per_target` / 不正な `every` (humantime) / 不正な calendar `at`
+（範囲外・日時 at と days の併用） / 未登録 `job_id`（API のみ・
+JOBS KV 照会）/ `active.from >= until`。
 
 ### 2.4.4 Agent / Backend 設定ファイル (TOML + teravars 変数展開)
 

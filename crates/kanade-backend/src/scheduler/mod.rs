@@ -14,10 +14,10 @@ use std::time::Duration as StdDuration;
 
 use anyhow::{Context, Result};
 use async_nats::jetstream::kv::Operation;
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::{Duration as ChronoDuration, Local, Utc};
 use futures::{StreamExt, TryStreamExt};
 use kanade_shared::kv::{BUCKET_AGENT_GROUPS, BUCKET_SCHEDULES};
-use kanade_shared::manifest::{ExecMode, FanoutPlan, RunsOn, Schedule, Target};
+use kanade_shared::manifest::{ExecMode, FanoutPlan, RunsOn, Schedule, ScheduleTz, Target, When};
 use sqlx::Row;
 use tokio::sync::Mutex;
 use tokio_cron_scheduler::{Job, JobScheduler};
@@ -161,25 +161,47 @@ async fn register(
 
     // #418: operators write `when:`; the engine still runs on a
     // cron string — POLL_CRON (every minute) for reconcile shapes,
-    // verbatim for the escape hatch.
-    let cron = schedule.lowered().cron;
+    // a 6/7-field cron for calendar shapes. #418 Phase 2: the cron
+    // is evaluated in the schedule's tz via `new_async_tz`.
+    let lowered = schedule.lowered();
+    let cron = lowered.cron;
     let schedule_snapshot = schedule.clone();
-    let job = Job::new_async(cron.as_str(), move |_uuid, _l| {
+    let cb = move |_uuid, _l| {
         let state = state.clone();
         let schedule = schedule_snapshot.clone();
         Box::pin(async move {
             tick(&state, schedule).await;
-        })
-    })
-    .with_context(|| format!("Job::new_async (cron={cron})"))?;
+        }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+    };
+    let job = match lowered.tz {
+        ScheduleTz::Utc => Job::new_async_tz(cron.as_str(), Utc, cb),
+        ScheduleTz::Local => Job::new_async_tz(cron.as_str(), Local, cb),
+    }
+    .with_context(|| format!("Job::new_async_tz (cron={cron}, tz={:?})", lowered.tz))?;
     let uuid = sched.add(job).await.context("scheduler.add")?;
     registered.lock().await.insert(schedule.id.clone(), uuid);
     info!(
         schedule_id = %schedule.id,
         when = %schedule.when,
         poll_cron = %cron,
+        tz = ?lowered.tz,
         "scheduled",
     );
+    // A calendar one-shot whose date is already past lowers to a
+    // year-stamped cron that never fires — surface that at register
+    // time so "why didn't my one-shot run?" is diagnosable from the
+    // log instead of silent (claude #432 review).
+    if let When::Calendar(c) = &schedule.when {
+        if let Some(fires_at) = c.oneshot_instant(schedule.tz) {
+            if fires_at < Utc::now() {
+                warn!(
+                    schedule_id = %schedule.id,
+                    %fires_at,
+                    "calendar one-shot date is in the past — it will never fire",
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -193,7 +215,7 @@ async fn tick(state: &AppState, schedule: Schedule) {
     // 0) Dormant outside the optional `active.{from,until}` window
     //    (#418 decision G). Cheapest check first — a finished
     //    campaign costs one comparison per tick, nothing else.
-    if !schedule.active.contains(Utc::now()) {
+    if !schedule.active.contains(Utc::now(), schedule.tz) {
         tracing::debug!(%schedule_id, "scheduler tick: outside active window (dormant)");
         return;
     }
@@ -237,9 +259,9 @@ async fn tick(state: &AppState, schedule: Schedule) {
         p
     };
 
-    // 2) For EveryTick (the `when: cron` escape hatch) we don't
-    //    need to resolve anything — fire and forget. Skip the more
-    //    expensive policy path entirely.
+    // 2) For EveryTick (a calendar time trigger) we don't need to
+    //    resolve anything — fire and forget. Skip the more expensive
+    //    policy path entirely.
     if matches!(lowered.mode, ExecMode::EveryTick) {
         dispatch(
             state,

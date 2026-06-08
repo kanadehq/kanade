@@ -14,6 +14,7 @@
     "jobId": "job_id",
     "target": "target",
     "runsOn": "runs_on",
+    "tz": "tz",
     "active": "active",
     "deadline": "deadline",
     "jitter": "jitter",

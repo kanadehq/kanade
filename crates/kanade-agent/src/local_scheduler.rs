@@ -38,7 +38,7 @@ use futures::{StreamExt, TryStreamExt};
 use kanade_shared::kv::{
     BUCKET_JOBS, BUCKET_SCHEDULES, BUCKET_SCRIPT_CURRENT, BUCKET_SCRIPT_STATUS,
 };
-use kanade_shared::manifest::{ExecMode, Manifest, RunsOn, Schedule};
+use kanade_shared::manifest::{ExecMode, Manifest, RunsOn, Schedule, ScheduleTz, When};
 use kanade_shared::wire::Command;
 use tokio::sync::Mutex;
 use tokio_cron_scheduler::{Job, JobScheduler};
@@ -695,8 +695,11 @@ async fn reconcile_schedule(
     }
 
     // #418: lower `when` onto the engine cron — POLL_CRON for
-    // reconcile shapes, verbatim for the escape hatch.
-    let cron = schedule.lowered().cron;
+    // reconcile shapes, a 6/7-field cron for calendar shapes.
+    // Phase 2: evaluated in the schedule's tz via new_async_tz
+    // (Local = this agent's TZ, the natural "tz: local" meaning).
+    let lowered = schedule.lowered();
+    let cron = lowered.cron;
     let schedule_id = schedule.id.clone();
     let client_for_job = client.clone();
     let pc_id_for_job = pc_id.to_string();
@@ -704,7 +707,7 @@ async fn reconcile_schedule(
     let schedule_for_job = schedule.clone();
     let staleness_for_job = staleness.clone();
     let script_cache_for_job = script_cache.clone();
-    let job = match Job::new_async(cron.as_str(), move |_uuid, _l| {
+    let cb = move |_uuid, _l| {
         let client = client_for_job.clone();
         let pc_id = pc_id_for_job.clone();
         let state = state_for_job.clone();
@@ -721,14 +724,19 @@ async fn reconcile_schedule(
                 &script_cache,
             )
             .await;
-        })
-    }) {
+        }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+    };
+    let built = match lowered.tz {
+        ScheduleTz::Utc => Job::new_async_tz(cron.as_str(), chrono::Utc, cb),
+        ScheduleTz::Local => Job::new_async_tz(cron.as_str(), chrono::Local, cb),
+    };
+    let job = match built {
         Ok(j) => j,
         Err(e) => {
             warn!(
                 schedule_id = %schedule.id,
                 error = %e,
-                "local_scheduler: Job::new_async failed",
+                "local_scheduler: Job::new_async_tz failed",
             );
             return;
         }
@@ -750,8 +758,23 @@ async fn reconcile_schedule(
         schedule_id = %schedule_id,
         when = %schedule.when,
         poll_cron = %cron,
+        tz = ?lowered.tz,
         "local_scheduler: registered",
     );
+    // A past-dated calendar one-shot never fires — warn so it's
+    // diagnosable from the agent log (claude #432 review). Mirrors
+    // the backend scheduler's register() check.
+    if let When::Calendar(c) = &schedule.when {
+        if let Some(fires_at) = c.oneshot_instant(schedule.tz) {
+            if fires_at < Utc::now() {
+                warn!(
+                    schedule_id = %schedule_id,
+                    %fires_at,
+                    "local_scheduler: calendar one-shot date is in the past — it will never fire",
+                );
+            }
+        }
+    }
 }
 
 async fn unregister_locally(internal: &JobScheduler, state: &Arc<Mutex<State>>, schedule_id: &str) {
@@ -780,7 +803,7 @@ async fn local_tick(
     // 0) Dormant outside the optional `active.{from,until}` window
     //    (#418 decision G) — mirrors the backend scheduler's gate so
     //    runs_on: agent campaigns end on the same instant.
-    if !schedule.active.contains(Utc::now()) {
+    if !schedule.active.contains(Utc::now(), schedule.tz) {
         debug!(
             schedule_id = %schedule.id,
             "local_scheduler: outside active window (dormant)",
@@ -1000,7 +1023,9 @@ async fn local_tick(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kanade_shared::manifest::{Active, FanoutPlan, OnceLiteral, PerPolicy, Target, When};
+    use kanade_shared::manifest::{
+        Active, FanoutPlan, OnceLiteral, PerPolicy, ScheduleTz, Target, When,
+    };
 
     fn schedule(target: Target, runs_on: RunsOn) -> Schedule {
         Schedule {
@@ -1012,6 +1037,7 @@ mod tests {
                 ..Default::default()
             },
             active: Active::default(),
+            tz: ScheduleTz::default(),
             starting_deadline: None,
             runs_on,
             enabled: true,
