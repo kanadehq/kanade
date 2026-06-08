@@ -1,0 +1,72 @@
+# Sample notification job — shows a Windows toast to the
+# logged-in user. Paired with the calendar schedule
+# `configs/schedules/morning-greeting.yaml` (#418 Phase 2), which
+# fires it at 09:00 on weekdays.
+#
+# Install:
+#
+#   kanade job create      configs/jobs/show-toast.yaml
+#   kanade schedule create configs/schedules/morning-greeting.yaml
+#
+# Why `run_as: user`: a toast has to be raised inside the
+# logged-in user's session to be visible. The default
+# `run_as: system` runs in Session 0 (no desktop), so the toast
+# would be created but never shown. `user` puts the script in the
+# console user's session with their identity.
+#
+# The body uses the built-in WinRT toast APIs (no BurntToast / no
+# external module). If toasts are unavailable (Server Core, no
+# interactive session, locked-down policy) it falls back to
+# `msg.exe` and, failing that, still exits 0 with a stdout note so
+# the Results page shows the run — a greeting is best-effort, not
+# something to retry forever.
+#
+# Replace the text / add an image or actions for your real
+# notification. This is intentionally dependency-free and harmless.
+
+id: show-toast
+version: 0.1.0
+description: Show a good-morning toast to the logged-in user (sample)
+execute:
+  shell: powershell
+  timeout: 1m
+  run_as: user
+  script: |
+    $ErrorActionPreference = 'Stop'
+    $title = 'おはようございます'
+    $body  = '今日も一日がんばりましょう (kanade morning-greeting)'
+
+    function Show-Toast {
+      param([string]$Title, [string]$Body)
+      [void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
+      [void][Windows.UI.Notifications.ToastNotification,        Windows.UI.Notifications, ContentType = WindowsRuntime]
+      [void][Windows.Data.Xml.Dom.XmlDocument,                 Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime]
+      # Borrow PowerShell's registered AppUserModelID so the toast
+      # has a valid identity to attribute itself to.
+      $aumid = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
+      # Single-line XML on purpose: a PowerShell here-string can't
+      # close at column 0 inside this indented YAML block scalar.
+      $xml = "<toast><visual><binding template='ToastGeneric'><text>$Title</text><text>$Body</text></binding></visual></toast>"
+      $doc = [Windows.Data.Xml.Dom.XmlDocument]::new()
+      $doc.LoadXml($xml)
+      $toast = [Windows.UI.Notifications.ToastNotification]::new($doc)
+      [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($aumid).Show($toast)
+    }
+
+    try {
+      Show-Toast -Title $title -Body $body
+      Write-Output "toast shown to $env:USERNAME (session $((Get-Process -Id $pid).SessionId)) at $(Get-Date -Format 'o')"
+    }
+    catch {
+      # Progress / diagnostics go to stderr so stdout stays a clean
+      # status line (this job has no `inventory:` block, but keeping
+      # the convention costs nothing).
+      [Console]::Error.WriteLine("toast API unavailable: $($_.Exception.Message); trying msg.exe")
+      try {
+        & msg.exe '*' /TIME:30 ($title + "`n" + $body) 2>$null
+        Write-Output "fell back to msg.exe for $env:USERNAME at $(Get-Date -Format 'o')"
+      }
+      catch {
+        Write-Output "no toast channel available on $env:COMPUTERNAME — greeting skipped (best-effort)"
+      }
+    }
