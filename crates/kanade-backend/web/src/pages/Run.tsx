@@ -62,11 +62,15 @@ export function Run() {
     // Ad-hoc run executes arbitrary script on the target with no undo —
     // confirm the pc / shell / run_as before sending. run_as=system runs
     // as SYSTEM, so the summary spells out which privilege level it lands on.
+    // The high-privilege levels (system / system_gui) get danger styling
+    // (red confirm, Cancel auto-focused) so an accidental Enter doesn't
+    // fire a SYSTEM script.
     const ok = await confirm({
       title: t('confirm.title', { pcId: body.pc_id }),
       description: t('confirm.summary', { shell, runAs }),
       confirmLabel: t('confirm.confirmLabel'),
       cancelLabel: t('confirm.cancelLabel'),
+      danger: runAs.startsWith('system'),
     });
     if (!ok) return;
 
