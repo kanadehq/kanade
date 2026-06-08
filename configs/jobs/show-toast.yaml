@@ -40,7 +40,7 @@ execute:
       param([string]$Title, [string]$Body)
       [void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
       [void][Windows.UI.Notifications.ToastNotification,        Windows.UI.Notifications, ContentType = WindowsRuntime]
-      [void][Windows.Data.Xml.Dom.XmlDocument,                 Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime]
+      [void][Windows.Data.Xml.Dom.XmlDocument,                 Windows.Data.Xml.Dom, ContentType = WindowsRuntime]
       # Borrow PowerShell's registered AppUserModelID so the toast
       # has a valid identity to attribute itself to.
       $aumid = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
@@ -65,11 +65,18 @@ execute:
       # status line (this job has no `inventory:` block, but keeping
       # the convention costs nothing).
       [Console]::Error.WriteLine("toast API unavailable: $($_.Exception.Message); trying msg.exe")
+      # msg.exe doesn't throw on a non-zero exit (e.g. Session 0 with
+      # no logged-on user) — only a missing binary throws. Check
+      # $LASTEXITCODE so the success line isn't misleading (claude
+      # #440 review).
       try {
         & msg.exe '*' /TIME:30 ($title + "`n" + $body) 2>$null
-        Write-Output "fell back to msg.exe for $env:USERNAME at $(Get-Date -Format 'o')"
+        $sent = ($LASTEXITCODE -eq 0)
       }
-      catch {
+      catch { $sent = $false }
+      if ($sent) {
+        Write-Output "fell back to msg.exe for $env:USERNAME at $(Get-Date -Format 'o')"
+      } else {
         Write-Output "no toast channel available on $env:COMPUTERNAME — greeting skipped (best-effort)"
       }
     }
