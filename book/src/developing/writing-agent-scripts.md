@@ -78,16 +78,30 @@ The backend's result projector reads **stdout** as the script's
 output. If your manifest has an `inventory:` block, stdout is
 parsed as a single JSON blob.
 
-Use `Write-Host` for progress chatter — it goes to the host
-stream, NOT stdout, so it doesn't pollute the JSON parse.
+**Do NOT use `Write-Host` for progress chatter in an inventory
+script.** Contrary to a common assumption, `Write-Host` does NOT
+stay on a separate host stream once the agent runs your script with
+stdout redirected — its output bleeds INTO the captured stdout. That
+extra text breaks the projector's single-JSON-blob parse
+(`serde_json::from_str` over the whole stdout, in
+`crates/kanade-backend/src/projector/results.rs::upsert_inventory`),
+and your inventory fact is silently dropped (the backend logs
+`stdout was not JSON`).
+
+Send progress chatter to **stderr** via `[Console]::Error.WriteLine(...)`.
+stderr is captured into the result's separate `stderr` field, which the
+projector ignores, so stdout stays a single clean JSON line.
 
 ```powershell
-Write-Host "Downloading..."         # → host stream (logged but ignored by projector)
-Write-Output ($obj | ConvertTo-Json) # → stdout (parsed)
+[Console]::Error.WriteLine("Downloading...")  # → stderr (logged, ignored by projector)
+Write-Output ($obj | ConvertTo-Json)          # → stdout (the ONE JSON line, parsed)
 ```
 
-Avoid `Write-Output` for chatter — anything on stdout that isn't
-the expected JSON will fail the inventory parse.
+Keep stdout to exactly one `Write-Output` — anything else on stdout
+(a stray `Write-Host`, `Write-Output`, or a cmdlet's pipeline output)
+that isn't the expected JSON will fail the inventory parse.
+See `configs/jobs/installers/scripts/install-kanade-client.ps1` for a
+worked example.
 
 ## UTF-8 by default
 

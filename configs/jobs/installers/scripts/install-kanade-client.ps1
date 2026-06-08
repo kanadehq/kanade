@@ -11,13 +11,19 @@ HTTP endpoint the backend serves at:
 kanade-backend::api::app_packages — Sprint 8 / yukimemi/kanade#210).
 
 The script's contract with the inventory projector is "emit a single
-JSON object on stdout" — `Write-Host` for progress chatter (which
-goes to the host stream, NOT stdout, so the projector's JSON parse
-stays clean — see backend `projector::results` for the
-single-JSON-blob expectation). The `inventory:` block in the parent
-manifest renders the JSON into the SPA's Inventory page so operators
-can see "what version of kanade-client is on each PC" without
-ssh-ing in.
+JSON object on stdout" — progress chatter therefore goes to STDERR via
+`[Console]::Error.WriteLine(...)`, NOT `Write-Host`. The agent captures
+the powershell process's stdout, and `Write-Host` output bleeds INTO
+that captured stdout (it does NOT stay on a separate host stream once
+stdout is redirected). That extra text breaks the projector's
+`serde_json::from_str(stdout)` parse — it expects a single clean JSON
+blob — and the inventory fact is silently dropped (backend logs
+"stdout was not JSON"; see `projector::results::upsert_inventory`).
+stderr is captured into the result's separate `stderr` field, which the
+projector ignores, so routing progress there keeps stdout pure JSON. The
+`inventory:` block in the parent manifest renders the JSON into the
+SPA's Inventory page so operators can see "what version of
+kanade-client is on each PC" without ssh-ing in.
 #>
 
 $ErrorActionPreference = 'Stop'
@@ -83,7 +89,7 @@ New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 # it's our rollback artifact if a prior swap aborted mid-way.
 Remove-Item -Force -ErrorAction SilentlyContinue $NewPath
 
-Write-Host "Downloading kanade-client $Version from $Url (BITS)"
+[Console]::Error.WriteLine("Downloading kanade-client $Version from $Url (BITS)")
 # Use BITS (Background Intelligent Transfer Service) so multi-GB
 # downloads survive transient network drops — BITS resumes from
 # the last received byte instead of restarting from zero, which
@@ -120,7 +126,7 @@ if ($actualSha -ne $expectedSha) {
     Remove-Item -Force -ErrorAction SilentlyContinue $NewPath
     throw "install-kanade-client: downloaded binary sha256 mismatch: expected=$expectedSha actual=$actualSha — refusing to install (possible MITM / corrupted upload)"
 }
-Write-Host "sha256 verified: $actualSha"
+[Console]::Error.WriteLine("sha256 verified: $actualSha")
 
 # --- Atomic-replace with rollback ----------------------------------------
 # Two-step swap (`<exe>` → `.old`, `.new` → `<exe>`). If the
@@ -136,7 +142,7 @@ try {
 } catch {
     if ($hadPrevious -and (Test-Path $OldPath)) {
         Move-Item -Force $OldPath $ExePath
-        Write-Host 'install-kanade-client: rolled back to previous binary after promotion failure'
+        [Console]::Error.WriteLine('install-kanade-client: rolled back to previous binary after promotion failure')
     }
     throw
 }
@@ -154,7 +160,7 @@ $installed = $null
 try {
     $installed = (Get-Item $ExePath).VersionInfo.ProductVersion
 } catch {
-    Write-Host "install-kanade-client: VersionInfo read failed: $_"
+    [Console]::Error.WriteLine("install-kanade-client: VersionInfo read failed: $_")
 }
 if ([string]::IsNullOrWhiteSpace($installed)) {
     $installed = 'unknown'
