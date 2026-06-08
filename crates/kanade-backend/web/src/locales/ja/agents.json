@@ -8,7 +8,20 @@
     "body": "kanade-agent サービスを起動すると、最初のハートビートでここに表示されます。"
   },
   "intro": "ここでは死活状況のみ表示します。 ホストごとの詳細は <inventoryLink>インベントリ</inventoryLink> (または <strong>facts</strong> ボタン) から、 オペレーター定義のプローブで収集した情報を確認してください。",
+  "filter": {
+    "all": "すべて ({{count}})",
+    "online": "オンライン ({{count}})",
+    "offline": "オフライン ({{count}})"
+  },
+  "filterEmpty": "この条件に一致するエージェントはありません。",
+  "status": {
+    "online": "オンライン",
+    "offline": "オフライン",
+    "onlineTitle": "直近 2 分以内にハートビートあり",
+    "offlineTitle": "2 分以上ハートビートなし — ダッシュボードでは stale として数えられます"
+  },
   "columns": {
+    "status": "状態",
     "pcId": "pc_id",
     "hostname": "ホスト名",
     "os": "OS",

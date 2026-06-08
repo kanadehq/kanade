@@ -21,11 +21,13 @@
     "stats": {
       "agents": {
         "label": "agents",
-        "hint": "active / known"
+        "hint": "active / known",
+        "linkTitle": "View the agent list"
       },
       "staleAgents": {
         "label": "stale agents",
-        "hint": "last inventory ≥ 25h"
+        "hint": "no heartbeat ≥ 2m",
+        "linkTitle": "View the offline agents"
       },
       "jetstream": {
         "label": "JetStream",
@@ -44,7 +46,8 @@
     "stats": {
       "known": "known",
       "activeLabel": "active (heartbeat < 2m)",
-      "activeHint": "based on last heartbeat (~30s cadence)"
+      "activeHint": "based on last heartbeat (~30s cadence)",
+      "linkTitle": "View the agent list"
     }
   },
   "jetstream": {

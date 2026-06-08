@@ -21,11 +21,13 @@
     "stats": {
       "agents": {
         "label": "エージェント",
-        "hint": "アクティブ / 登録済"
+        "hint": "アクティブ / 登録済",
+        "linkTitle": "エージェント一覧を開く"
       },
       "staleAgents": {
         "label": "未応答エージェント",
-        "hint": "最終インベントリ 25時間以上前"
+        "hint": "ハートビート 2分以上なし",
+        "linkTitle": "オフラインのエージェントを表示"
       },
       "jetstream": {
         "label": "JetStream",
@@ -44,7 +46,8 @@
     "stats": {
       "known": "登録済",
       "activeLabel": "アクティブ (ハートビート < 2分)",
-      "activeHint": "直近ハートビート基準 (約30秒間隔)"
+      "activeHint": "直近ハートビート基準 (約30秒間隔)",
+      "linkTitle": "エージェント一覧を開く"
     }
   },
   "jetstream": {

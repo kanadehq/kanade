@@ -8,7 +8,20 @@
     "body": "Boot a kanade-agent service and it'll show up here within one heartbeat."
   },
   "intro": "Baseline liveness only — open <inventoryLink>Inventory</inventoryLink> (or click <strong>facts</strong>) for richer per-host details collected by operator-defined probes.",
+  "filter": {
+    "all": "All ({{count}})",
+    "online": "Online ({{count}})",
+    "offline": "Offline ({{count}})"
+  },
+  "filterEmpty": "No agents match this filter.",
+  "status": {
+    "online": "online",
+    "offline": "offline",
+    "onlineTitle": "Heartbeat within the last 2 minutes",
+    "offlineTitle": "No heartbeat for ≥ 2 minutes — counts as stale on the Dashboard"
+  },
   "columns": {
+    "status": "status",
     "pcId": "pc_id",
     "hostname": "hostname",
     "os": "os",
