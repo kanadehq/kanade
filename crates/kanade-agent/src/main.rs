@@ -219,12 +219,17 @@ pub(crate) async fn run_agent() -> Result<()> {
     // a tick.
     #[cfg(target_os = "windows")]
     {
+        // Clone the config out of the watch guard before the
+        // `eval_once` await — a `watch::Ref` can't be held across the
+        // health checks' WMI shell-outs.
+        let initial_cfg = cfg_rx.borrow().clone();
         let initial_snapshot = klp::state::eval_once(
             &pc_id,
             AGENT_VERSION,
-            &cfg_rx.borrow(),
+            &initial_cfg,
             klp::state::client_online(&client),
-        );
+        )
+        .await;
         let (state_tx, state_rx) = tokio::sync::watch::channel(initial_snapshot);
         tokio::spawn(klp::state::eval_loop(
             state_tx,
