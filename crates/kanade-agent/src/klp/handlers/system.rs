@@ -40,6 +40,28 @@ const SUPPORTED_FEATURES: &[&str] = &[];
 /// more pull the full file via `support.upload_diagnostics`.
 const LOG_TAIL_HARD_CAP: u32 = 1000;
 
+/// Files at or below this size take the simple whole-file read
+/// path. Past it, [`read_tail_lines`] seeks near the end and reads
+/// forward so a chatty long-uptime endpoint with a hundreds-of-MB
+/// log doesn't balloon agent RSS just to serve a few hundred tail
+/// lines (issue #289). Daily-rotated logs are normally well under
+/// this, so the common case never pays the extra complexity.
+const TAIL_WHOLE_FILE_THRESHOLD: u64 = 4 * 1024 * 1024;
+
+/// Per-line byte budget for the reverse-read seek heuristic. The
+/// agent's `tracing` lines run comfortably under this; over-
+/// estimating only costs a slightly larger initial read, never
+/// correctness — the window grows and retries if it held too few
+/// lines.
+const TAIL_AVG_LINE_BYTES: u64 = 2 * 1024;
+
+/// Hard cap on how far back [`read_tail_lines`] will seek while
+/// hunting for enough lines. Bounds worst-case memory for
+/// pathological logs (one giant line, or no newlines at all). On
+/// hitting it we return whatever the window held rather than walk
+/// the whole file.
+const TAIL_MAX_WINDOW_BYTES: u64 = 32 * 1024 * 1024;
+
 /// `system.handshake` — protocol negotiation + session info.
 ///
 /// SPEC §2.12.6:
@@ -156,12 +178,11 @@ pub fn handle_version(
 ///   agent's logger may not have written anything yet on a fresh
 ///   boot.
 ///
-/// TODO(performance): currently slurps the whole resolved file
-/// into a `String` before taking the tail slice. Fine for daily-
-/// rotated files (typically ≤ a few MB), but a chatty long-uptime
-/// endpoint could hit hundreds of MB. A follow-up should switch
-/// to a bounded reverse-read (`File::seek` to `len - K`, read
-/// forward) for files past a size threshold.
+/// Reading is delegated to [`read_tail_lines`], which keeps the
+/// simple whole-file path for small (daily-rotated) logs and falls
+/// back to a bounded reverse-read for files past
+/// [`TAIL_WHOLE_FILE_THRESHOLD`] so a hundreds-of-MB log can't spike
+/// agent RSS (issue #289).
 pub async fn handle_log_tail(
     conn: &ConnectionState,
     params: LogTailParams,
@@ -188,8 +209,8 @@ pub async fn handle_log_tail(
         }
     };
 
-    let body = match tokio::fs::read_to_string(&active_path).await {
-        Ok(s) => s,
+    let lines = match read_tail_lines(&active_path, requested as usize).await {
+        Ok(lines) => lines,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             warn!(
                 path = %active_path.display(),
@@ -208,15 +229,96 @@ pub async fn handle_log_tail(
         }
     };
 
-    // `str::lines` strips trailing `\r\n` / `\n` per line. Walk to
-    // the end first so we know how many lines exist, then take the
-    // tail without buffering the full split.
-    let all: Vec<&str> = body.lines().collect();
-    let take = (requested as usize).min(all.len());
-    let tail_start = all.len() - take;
-    let lines = all[tail_start..].iter().map(|s| s.to_string()).collect();
-
     Ok(LogTailResult { lines, truncated })
+}
+
+/// Read the last `requested` lines of `path`, oldest-first (the
+/// order `str::lines` yields), without slurping the whole file when
+/// it's large.
+///
+/// Small files (≤ [`TAIL_WHOLE_FILE_THRESHOLD`]) take the plain
+/// whole-file read — the added seek/retry machinery isn't worth it
+/// for the daily-rotated common case. Larger files seek to roughly
+/// `len - requested × avg_line` and read forward, doubling the
+/// window (capped at [`TAIL_MAX_WINDOW_BYTES`]) until it holds
+/// enough lines or reaches the start of the file.
+///
+/// Propagates `io::Error` (the caller maps `NotFound` to an empty
+/// result).
+async fn read_tail_lines(path: &std::path::Path, requested: usize) -> io::Result<Vec<String>> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
+
+    if requested == 0 {
+        return Ok(vec![]);
+    }
+
+    let mut file = tokio::fs::File::open(path).await?;
+    let len = file.metadata().await?.len();
+
+    if len <= TAIL_WHOLE_FILE_THRESHOLD {
+        let mut body = String::new();
+        file.read_to_string(&mut body).await?;
+        return Ok(tail_of(&body, requested));
+    }
+
+    // Large file: seek near the end and read forward, growing the
+    // window until it holds enough lines (or we reach offset 0 /
+    // the cap). Start from a line-count-based estimate.
+    let mut window = (requested as u64)
+        .saturating_mul(TAIL_AVG_LINE_BYTES)
+        .clamp(TAIL_AVG_LINE_BYTES, TAIL_MAX_WINDOW_BYTES);
+
+    loop {
+        let start = len.saturating_sub(window);
+        file.seek(SeekFrom::Start(start)).await?;
+        let mut buf = Vec::with_capacity(window.min(len) as usize);
+        // `take(window)` makes the window a *hard* byte bound. The
+        // agent's own log is appended to continuously, so the file
+        // can grow between `metadata()` above and this read; a plain
+        // `read_to_end` would chase the moving EOF and could blow
+        // past `window` (and `TAIL_MAX_WINDOW_BYTES` on the capped
+        // iteration), defeating the whole point of the bounded read.
+        (&mut file).take(window).read_to_end(&mut buf).await?;
+
+        // When we seeked past offset 0 the first line is almost
+        // certainly a mid-line fragment — drop everything up to and
+        // including the first `\n`. `\n` (0x0A) never appears inside
+        // a multibyte UTF-8 sequence, so the remainder sits on a
+        // clean UTF-8 boundary even though the seek itself wasn't
+        // char-aligned. No newline in the whole window means a
+        // single line longer than `window`: drop it all and grow.
+        let usable: &[u8] = if start > 0 {
+            match buf.iter().position(|&b| b == b'\n') {
+                Some(nl) => &buf[nl + 1..],
+                None => &[],
+            }
+        } else {
+            &buf
+        };
+
+        let text = String::from_utf8_lossy(usable);
+        let lines = tail_of(&text, requested);
+
+        // Done when we have enough, can't go back further, or hit
+        // the cap (return whatever the bounded window held).
+        if lines.len() >= requested || start == 0 || window >= TAIL_MAX_WINDOW_BYTES {
+            return Ok(lines);
+        }
+        window = window.saturating_mul(2).min(TAIL_MAX_WINDOW_BYTES);
+    }
+}
+
+/// Last `n` lines of `body`, trailing `\r\n` / `\n` stripped, in
+/// file order. Shared by both read paths in [`read_tail_lines`].
+///
+/// `str::Lines` is a `DoubleEndedIterator`, so we walk backward and
+/// `take(n)` instead of collecting every line: O(n) lines scanned
+/// and allocated rather than O(buffer) — matters on the large-file
+/// path where the window can hold far more lines than requested.
+fn tail_of(body: &str, n: usize) -> Vec<String> {
+    let mut lines: Vec<String> = body.lines().rev().take(n).map(str::to_string).collect();
+    lines.reverse();
+    lines
 }
 
 #[cfg(test)]
@@ -529,5 +631,136 @@ mod tests {
             .unwrap();
         assert_eq!(result.lines.len(), 200);
         assert!(!result.truncated);
+    }
+
+    // ---- system.log_tail: bounded reverse-read (issue #289) ----
+
+    /// Build a file comfortably past `TAIL_WHOLE_FILE_THRESHOLD` so
+    /// the large-file seek path is exercised, with line content that
+    /// uniquely identifies each line so we can prove the tail is
+    /// correct (and that the mid-line fragment at the seek boundary
+    /// was dropped). Each line is padded to ~80 bytes; `count` lines
+    /// of that easily clears the 4 MiB threshold by count ≥ 60k.
+    fn write_big_log(path: &std::path::Path, count: usize) {
+        let pad = "x".repeat(64);
+        let body = (1..=count)
+            .map(|i| format!("line-{i:08}-{pad}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            body.len() as u64 > TAIL_WHOLE_FILE_THRESHOLD,
+            "fixture must exceed the whole-file threshold to hit the seek path; \
+             got {} bytes",
+            body.len(),
+        );
+        std::fs::write(path, body).unwrap();
+    }
+
+    #[tokio::test]
+    async fn log_tail_large_file_returns_correct_tail_via_seek() {
+        // The whole point of #289: a multi-MB log must still yield
+        // the exact last N lines, and the partial leading line at
+        // the seek boundary must be dropped (otherwise the first
+        // returned line would be a fragment, not "line-00099901-…").
+        let f = NamedTempFile::new().unwrap();
+        let count = 100_000usize;
+        write_big_log(f.path(), count);
+        let conn = fresh_conn_with(EffectiveConfig::builtin_defaults(), f.path().to_path_buf());
+
+        let result = handle_log_tail(&conn, LogTailParams { lines: 100 })
+            .await
+            .unwrap();
+
+        assert_eq!(result.lines.len(), 100);
+        let pad = "x".repeat(64);
+        // First and last returned lines are intact (no fragment) and
+        // are exactly the last 100 lines of the file.
+        assert_eq!(result.lines[0], format!("line-{:08}-{pad}", count - 99));
+        assert_eq!(
+            result.lines.last().unwrap(),
+            &format!("line-{count:08}-{pad}")
+        );
+        assert!(!result.truncated);
+    }
+
+    #[tokio::test]
+    async fn log_tail_large_file_grows_window_when_initial_estimate_too_small() {
+        // Force the grow loop: with ~3 KiB lines, the initial
+        // `requested × TAIL_AVG_LINE_BYTES` (= 2 KiB/line) window
+        // holds fewer lines than requested, so the first read falls
+        // short and the window must double before we have enough.
+        // The result must still be the exact tail.
+        let f = NamedTempFile::new().unwrap();
+        let line_pad = "z".repeat(3 * 1024); // ~3 KiB per line, > 2 KiB estimate
+        let count = 2_000usize; // ~6 MiB total, past the threshold
+        let body = (1..=count)
+            .map(|i| format!("line-{i:06}-{line_pad}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(body.len() as u64 > TAIL_WHOLE_FILE_THRESHOLD);
+        std::fs::write(f.path(), &body).unwrap();
+        let conn = fresh_conn_with(EffectiveConfig::builtin_defaults(), f.path().to_path_buf());
+
+        let result = handle_log_tail(&conn, LogTailParams { lines: 50 })
+            .await
+            .unwrap();
+
+        assert_eq!(result.lines.len(), 50);
+        assert_eq!(
+            result.lines[0],
+            format!("line-{:06}-{line_pad}", count - 49)
+        );
+        assert_eq!(
+            result.lines.last().unwrap(),
+            &format!("line-{count:06}-{line_pad}")
+        );
+    }
+
+    #[tokio::test]
+    async fn log_tail_large_file_request_exceeds_line_count() {
+        // Large file but fewer lines than requested: must return all
+        // of them (exiting the grow loop at start == 0), not loop
+        // forever or drop the genuine first line of the file.
+        let f = NamedTempFile::new().unwrap();
+        // Few but very long lines to clear the threshold without a
+        // huge line count.
+        let huge = "y".repeat(2 * 1024 * 1024); // 2 MiB per line
+        let body = format!("first-{huge}\nsecond-{huge}\nthird-{huge}");
+        assert!(body.len() as u64 > TAIL_WHOLE_FILE_THRESHOLD);
+        std::fs::write(f.path(), &body).unwrap();
+        let conn = fresh_conn_with(EffectiveConfig::builtin_defaults(), f.path().to_path_buf());
+
+        let result = handle_log_tail(&conn, LogTailParams { lines: 100 })
+            .await
+            .unwrap();
+
+        assert_eq!(result.lines.len(), 3);
+        assert!(result.lines[0].starts_with("first-"));
+        assert!(result.lines[2].starts_with("third-"));
+    }
+
+    #[tokio::test]
+    async fn log_tail_large_file_window_with_no_newline_grows_until_it_finds_one() {
+        // Exercises the `None => &[]` branch in read_tail_lines:
+        // the file's last line is longer than the initial window, so
+        // the first seek (start > 0) lands inside it and finds zero
+        // newlines. The window must keep doubling — discarding each
+        // newline-less read — until it reaches the `head\n` boundary
+        // and returns the (single) requested last line intact.
+        let f = NamedTempFile::new().unwrap();
+        let huge = "B".repeat(5 * 1024 * 1024); // 5 MiB single last line
+        let body = format!("head\n{huge}");
+        assert!(body.len() as u64 > TAIL_WHOLE_FILE_THRESHOLD);
+        // The last line must dwarf the initial 1-line window estimate
+        // so the first read genuinely contains no `\n`.
+        assert!(huge.len() as u64 > TAIL_AVG_LINE_BYTES);
+        std::fs::write(f.path(), &body).unwrap();
+        let conn = fresh_conn_with(EffectiveConfig::builtin_defaults(), f.path().to_path_buf());
+
+        let result = handle_log_tail(&conn, LogTailParams { lines: 1 })
+            .await
+            .unwrap();
+
+        assert_eq!(result.lines, vec![huge]);
     }
 }
