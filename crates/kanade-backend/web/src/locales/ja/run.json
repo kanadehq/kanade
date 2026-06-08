@@ -15,6 +15,12 @@
     "script": "echo hello from kanade web"
   },
   "submit": "POST /api/run",
+  "confirm": {
+    "title": "{{pcId}} で実行しますか？",
+    "summary": "shell={{shell}}, run_as={{runAs}} でスクリプトを実行します。取り消せません。",
+    "confirmLabel": "実行",
+    "cancelLabel": "キャンセル"
+  },
   "errorTitle": "実行に失敗しました",
   "result": {
     "exitCode": "exit_code:",

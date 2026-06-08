@@ -7,6 +7,7 @@ import { ErrorCard } from '@/components/ErrorCard';
 import { PcPicker } from '@/components/PcPicker';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { useConfirm } from '@/components/ui/confirm-dialog';
 import { Input } from '@/components/ui/input';
 import { JsonOutput } from '@/components/ui/json-output';
 import { Label } from '@/components/ui/label';
@@ -30,6 +31,7 @@ type RunBody = {
 export function Run() {
   const { t } = useTranslation('run');
   const { hasRole } = useAuth();
+  const confirm = useConfirm();
   const canOperate = hasRole('operator');
   const [pcId, setPcId] = useState('');
   const [shell, setShell] = useState('powershell');
@@ -46,7 +48,7 @@ export function Run() {
       }),
   });
 
-  const onSubmit = () => {
+  const onSubmit = async () => {
     if (!pcId.trim() || !script.trim()) return;
     const body: RunBody = {
       pc_id: pcId.trim(),
@@ -56,6 +58,22 @@ export function Run() {
       run_as: runAs,
     };
     if (jobId.trim()) body.job_id = jobId.trim();
+
+    // Ad-hoc run executes arbitrary script on the target with no undo —
+    // confirm the pc / shell / run_as before sending. run_as=system runs
+    // as SYSTEM, so the summary spells out which privilege level it lands on.
+    // The high-privilege levels (system / system_gui) get danger styling
+    // (red confirm, Cancel auto-focused) so an accidental Enter doesn't
+    // fire a SYSTEM script.
+    const ok = await confirm({
+      title: t('confirm.title', { pcId: body.pc_id }),
+      description: t('confirm.summary', { shell, runAs }),
+      confirmLabel: t('confirm.confirmLabel'),
+      cancelLabel: t('confirm.cancelLabel'),
+      danger: runAs.startsWith('system'),
+    });
+    if (!ok) return;
+
     mut.mutate(body);
   };
 

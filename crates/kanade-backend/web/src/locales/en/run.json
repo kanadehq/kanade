@@ -15,6 +15,12 @@
     "script": "echo hello from kanade web"
   },
   "submit": "POST /api/run",
+  "confirm": {
+    "title": "Run on {{pcId}}?",
+    "summary": "Executes the script with shell={{shell}}, run_as={{runAs}}. There is no undo.",
+    "confirmLabel": "Run",
+    "cancelLabel": "Cancel"
+  },
   "errorTitle": "Run failed",
   "result": {
     "exitCode": "exit_code:",
