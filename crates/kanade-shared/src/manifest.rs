@@ -1120,6 +1120,12 @@ target: { all: true }
             .unwrap_err();
         assert!(err.contains("when.days"), "got: {err}");
         assert!(err.contains("funday"), "names the bad token: {err}");
+        // a degenerate range like `mon-` reports the whole token, not
+        // a cryptic empty part (claude #432 follow-up)
+        let err = schedule_with(calendar("09:00", &["mon-"]), RunsOn::Backend)
+            .validate()
+            .unwrap_err();
+        assert!(err.contains("'mon-'"), "names the whole token: {err}");
         // valid names / ranges / numeric / * all pass
         for ok in [
             calendar("09:00", &["mon-fri"]),
@@ -1730,16 +1736,25 @@ impl CalendarSpec {
     fn validate_days(&self) -> Result<(), String> {
         const NAMES: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
         for tok in &self.days {
+            // Report the whole token on a malformed range like `mon-`
+            // (which would otherwise split to a cryptic empty part —
+            // claude #432 follow-up).
+            let invalid = |reason: &str| {
+                Err(format!(
+                    "when.days: invalid day token '{tok}' ({reason}; \
+                     want mon..sun, 0-7, a range like mon-fri, or *)"
+                ))
+            };
             for part in tok.split('-') {
                 let p = part.trim().to_ascii_lowercase();
+                if p.is_empty() {
+                    return invalid("empty range bound");
+                }
                 let ok = p == "*"
                     || NAMES.contains(&p.as_str())
                     || p.parse::<u8>().map(|n| n <= 7).unwrap_or(false);
                 if !ok {
-                    return Err(format!(
-                        "when.days: invalid day token '{part}' \
-                         (want mon..sun, 0-7, a range like mon-fri, or *)"
-                    ));
+                    return invalid(&format!("'{part}' is not a day"));
                 }
             }
         }
