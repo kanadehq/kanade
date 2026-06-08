@@ -58,16 +58,18 @@ execute:
 
 const SCHEDULE_TEMPLATE = `# A new schedule. id + when + job_id are required.
 # when shapes (#418):
-#   per_pc: once               — run once on every pc, forever catching new ones
-#   per_pc: { every: 6h }      — re-run per pc after the interval
-#   per_target: { every: 24h } — one delegate pc per interval (backend only)
-#   cron: "0 0 9 * * mon-fri"  — raw 6-field escape hatch (no dedup)
+#   per_pc: once                         — run once on every pc, forever catching new ones
+#   per_pc: { every: 6h }                — re-run per pc after the interval
+#   per_target: { every: 24h }           — one delegate pc per interval (backend only)
+#   calendar: { at: "09:00", days: [mon-fri] }  — fire at a wall-clock time (tz below)
+#   calendar: { at: "2026-06-10 09:00" }        — one-shot: fire once on that date
 id: my-schedule
 when:
   per_pc: { every: 1h }
 job_id: my-job
 target:
   all: true
+# tz: local   # local (default) | utc — applies to calendar at + active window
 enabled: true
 `;
 

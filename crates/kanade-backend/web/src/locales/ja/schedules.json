@@ -14,6 +14,7 @@
     "jobId": "job_id",
     "target": "対象",
     "runsOn": "runs_on",
+    "tz": "tz",
     "active": "有効期間",
     "deadline": "期限",
     "jitter": "ジッター",

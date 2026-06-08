@@ -29,15 +29,17 @@ import {
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { apiFetch, formatError } from '@/lib/api';
 
-// #418 Phase 1: the cadence is the single `when` field — a
-// reconcile shape (`per_pc` / `per_target`, either the bare keyword
-// `once` or `{ every: <humantime> }`) or the temporary raw-cron
-// escape hatch. Mirrors the externally-tagged Rust enum's JSON.
+// #418: the cadence is the single `when` field — a reconcile shape
+// (`per_pc` / `per_target`, either the bare keyword `once` or
+// `{ every: <humantime> }`) or a calendar time trigger (Phase 2:
+// `{ at, days }`, repeating or one-shot). Mirrors the
+// externally-tagged Rust enum's JSON.
 type WhenPolicy = 'once' | { every: string };
+type CalendarSpec = { at: string; days?: string[] };
 type WhenSpec =
   | { per_pc: WhenPolicy }
   | { per_target: WhenPolicy }
-  | { cron: string };
+  | { calendar: CalendarSpec };
 
 type ScheduleRow = {
   id: string;
@@ -49,6 +51,8 @@ type ScheduleRow = {
   // Optional validity window; the key is absent when the schedule
   // has no window (Rust skips serialising the empty struct).
   active?: { from?: string; until?: string };
+  // #418 Phase 2: timezone for `when.at` + `active` bounds.
+  tz: 'local' | 'utc';
   starting_deadline: string | null;
   runs_on: 'backend' | 'agent';
   enabled: boolean;
@@ -63,13 +67,15 @@ function summariseTarget(target: ScheduleRow['target'], allLabel: string): strin
 }
 
 // Same one-liner the backend's `When` Display impl produces
-// (`per_pc once` / `per_pc every 6h` / `cron: 0 0 9 * * mon-fri`)
-// so logs, audit payloads and the SPA all read identically.
+// (`per_pc once` / `per_pc every 6h` / `at 09:00 [mon-fri]` /
+// `at 2026-06-10 09:00`) so logs, audit payloads and the SPA all
+// read identically.
 function summariseWhen(when: WhenSpec): string {
   const policy = (p: WhenPolicy) => (p === 'once' ? 'once' : `every ${p.every}`);
   if ('per_pc' in when) return `per_pc ${policy(when.per_pc)}`;
   if ('per_target' in when) return `per_target ${policy(when.per_target)}`;
-  return `cron: ${when.cron}`;
+  const c = when.calendar;
+  return c.days?.length ? `at ${c.at} [${c.days.join(',')}]` : `at ${c.at}`;
 }
 
 function summariseActive(active: ScheduleRow['active']): string | null {
@@ -435,6 +441,9 @@ export function Schedules() {
               </DetailItem>
               <DetailItem label={t('columns.runsOn')}>
                 <code className="text-xs">{selected.runs_on}</code>
+              </DetailItem>
+              <DetailItem label={t('columns.tz')}>
+                <code className="text-xs">{selected.tz}</code>
               </DetailItem>
               <DetailItem label={t('columns.active')}>
                 {summariseActive(selected.active)

@@ -761,8 +761,10 @@ target: {{ all: true }}
                 .unwrap_or_else(|e| panic!("parse '{at}': {e}"));
             match &s.when {
                 When::Calendar(c) => {
-                    let (_, _, date) = c.parse_at().expect("parse_at");
-                    assert_eq!(date, Some((2026, 6, 10)), "for '{at}'");
+                    use chrono::Datelike;
+                    let p = c.parse_at().expect("parse_at");
+                    let d = p.date.expect("datetime at carries a date");
+                    assert_eq!((d.year(), d.month(), d.day()), (2026, 6, 10), "for '{at}'");
                 }
                 other => panic!("expected calendar, got {other:?}"),
             }
@@ -816,7 +818,10 @@ target: { all: true }
         // calendar form instead).
         let r: Result<Schedule, _> =
             serde_yaml::from_str(&schedule_yaml_with("  cron: \"0 0 9 * * mon-fri\""));
-        assert!(r.is_err(), "expected parse error for retired cron, got {r:?}");
+        assert!(
+            r.is_err(),
+            "expected parse error for retired cron, got {r:?}"
+        );
     }
 
     #[test]
@@ -954,12 +959,18 @@ target: { all: true }
 
     #[test]
     fn lowered_carries_schedule_tz() {
-        for (tz, want) in [(ScheduleTz::Local, ScheduleTz::Local), (ScheduleTz::Utc, ScheduleTz::Utc)] {
+        for (tz, want) in [
+            (ScheduleTz::Local, ScheduleTz::Local),
+            (ScheduleTz::Utc, ScheduleTz::Utc),
+        ] {
             let mut s = schedule_with(calendar("09:00", &["mon-fri"]), RunsOn::Backend);
             s.tz = tz;
             assert_eq!(s.lowered().tz, want, "calendar carries tz");
             // reconcile shapes carry tz too (for the active-window check)
-            let mut s = schedule_with(When::PerPc(PerPolicy::Once(OnceLiteral::Once)), RunsOn::Backend);
+            let mut s = schedule_with(
+                When::PerPc(PerPolicy::Once(OnceLiteral::Once)),
+                RunsOn::Backend,
+            );
             s.tz = tz;
             assert_eq!(s.lowered().tz, want, "reconcile carries tz");
         }
@@ -1064,11 +1075,11 @@ target: { all: true }
     #[test]
     fn validate_accepts_calendar_shapes() {
         for when in [
-            calendar("09:00", &["mon-fri"]),       // weekday morning
-            calendar("00:00", &["sun"]),           // weekly
-            calendar("18:30", &[]),                // daily
-            calendar("2026-06-10 09:00", &[]),     // one-shot
-            calendar("2026/12/25 00:00", &[]),     // one-shot, slash form
+            calendar("09:00", &["mon-fri"]),   // weekday morning
+            calendar("00:00", &["sun"]),       // weekly
+            calendar("18:30", &[]),            // daily
+            calendar("2026-06-10 09:00", &[]), // one-shot
+            calendar("2026/12/25 00:00", &[]), // one-shot, slash form
         ] {
             schedule_with(when.clone(), RunsOn::Backend)
                 .validate()
@@ -1093,7 +1104,10 @@ target: { all: true }
         let err = schedule_with(calendar("2026-06-10 09:00", &["mon"]), RunsOn::Backend)
             .validate()
             .unwrap_err();
-        assert!(err.contains("one-shot") && err.contains("days"), "got: {err}");
+        assert!(
+            err.contains("one-shot") && err.contains("days"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -1181,9 +1195,17 @@ target: { all: true }
         // 09:00 JST = 00:00 UTC.
         for tz in [ScheduleTz::Utc, ScheduleTz::Local] {
             assert!(
-                !active.contains(chrono::Utc.with_ymd_and_hms(2026, 6, 30, 23, 59, 0).unwrap(), tz)
+                !active.contains(
+                    chrono::Utc
+                        .with_ymd_and_hms(2026, 6, 30, 23, 59, 0)
+                        .unwrap(),
+                    tz
+                )
             );
-            assert!(active.contains(chrono::Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap(), tz));
+            assert!(active.contains(
+                chrono::Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap(),
+                tz
+            ));
         }
     }
 
@@ -1194,7 +1216,10 @@ target: { all: true }
         // host-independent; assert that precisely.
         use chrono::TimeZone;
         let utc = Active::parse_bound("2026-07-01", ScheduleTz::Utc).expect("utc");
-        assert_eq!(utc, chrono::Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap());
+        assert_eq!(
+            utc,
+            chrono::Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap()
+        );
 
         // The local interpretation must equal what chrono::Local
         // computes for the same wall-clock midnight — proves the tz
@@ -1580,8 +1605,8 @@ pub enum ExecMode {
 ///   minute) and no longer the operator's concern.
 /// * **calendar** (`{ at, days }`) — a wall-clock time trigger
 ///   (#418 Phase 2, replacing the old raw-cron escape hatch). Fires
-///   the whole target at the given time, no dedup. `at: "09:00"`
-///   + `days` repeats; `at: "2026-06-10 09:00"` (a date+time) fires
+///   the whole target at the given time, no dedup. `at: "09:00"` +
+///   `days` repeats; `at: "2026-06-10 09:00"` (a date+time) fires
 ///   exactly once. Evaluated in the schedule's top-level `tz`.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -1625,19 +1650,35 @@ pub struct CalendarSpec {
     pub days: Vec<String>,
 }
 
+/// Parsed `CalendarSpec.at`: the wall-clock minute/hour, plus the
+/// date for a one-shot (`None` = repeating time-of-day).
+struct ParsedAt {
+    minute: u32,
+    hour: u32,
+    date: Option<chrono::NaiveDate>,
+}
+
 impl CalendarSpec {
-    /// Parse `at` into `(minute, hour, Option<(year, month, day)>)`.
-    /// A `Some` date means a one-shot.
-    fn parse_at(&self) -> Result<(u32, u32, Option<(i32, u32, u32)>), String> {
-        use chrono::{Datelike, Timelike};
+    /// Parse `at`: a date+time (`YYYY-MM-DD HH:MM`, hyphen / slash /
+    /// `T` separators) is a one-shot; a bare `HH:MM` is repeating.
+    fn parse_at(&self) -> Result<ParsedAt, String> {
+        use chrono::Timelike;
         let s = self.at.trim();
         for fmt in ["%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y/%m/%d %H:%M"] {
             if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, fmt) {
-                return Ok((dt.minute(), dt.hour(), Some((dt.year(), dt.month(), dt.day()))));
+                return Ok(ParsedAt {
+                    minute: dt.minute(),
+                    hour: dt.hour(),
+                    date: Some(dt.date()),
+                });
             }
         }
         if let Ok(t) = chrono::NaiveTime::parse_from_str(s, "%H:%M") {
-            return Ok((t.minute(), t.hour(), None));
+            return Ok(ParsedAt {
+                minute: t.minute(),
+                hour: t.hour(),
+                date: None,
+            });
         }
         Err(format!(
             "when.at: unparseable '{}' (want HH:MM or YYYY-MM-DD HH:MM)",
@@ -1650,16 +1691,21 @@ impl CalendarSpec {
     /// `0 {min} {hour} {day} {month} * {year}` (a past year never
     /// fires — that's what makes it one-shot).
     fn to_cron(&self) -> Result<String, String> {
-        let (min, hour, date) = self.parse_at()?;
+        use chrono::Datelike;
+        let ParsedAt { minute, hour, date } = self.parse_at()?;
         match date {
-            Some((year, month, day)) => {
+            Some(d) => {
                 if !self.days.is_empty() {
                     return Err(
-                        "when.at with a date is a one-shot and cannot be combined with days"
-                            .into(),
+                        "when.at with a date is a one-shot and cannot be combined with days".into(),
                     );
                 }
-                Ok(format!("0 {min} {hour} {day} {month} * {year}"))
+                Ok(format!(
+                    "0 {minute} {hour} {} {} * {}",
+                    d.day(),
+                    d.month(),
+                    d.year()
+                ))
             }
             None => {
                 let dow = if self.days.is_empty() {
@@ -1667,7 +1713,7 @@ impl CalendarSpec {
                 } else {
                     self.days.join(",")
                 };
-                Ok(format!("0 {min} {hour} * * {dow}"))
+                Ok(format!("0 {minute} {hour} * * {dow}"))
             }
         }
     }
