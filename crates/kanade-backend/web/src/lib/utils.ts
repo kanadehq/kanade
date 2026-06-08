@@ -52,10 +52,19 @@ export const AGENT_ACTIVE_THRESHOLD_MS = 2 * 60 * 1000;
 
 /** True when `last_heartbeat` is fresh enough to call the agent
  *  online. Single source of truth shared by the Dashboard and the
- *  Agents list — see {@link AGENT_ACTIVE_THRESHOLD_MS}. */
-export function isAgentOnline(lastHeartbeat: string | null | undefined): boolean {
+ *  Agents list — see {@link AGENT_ACTIVE_THRESHOLD_MS}.
+ *
+ *  Pass `referenceTime` (a `Date.now()` snapshot captured once at the
+ *  top of a render) when calling this repeatedly in one pass — e.g.
+ *  the Agents list computes counts, filters, and renders per-row
+ *  badges off the same predicate, and a shared `now` keeps all three
+ *  in agreement for an agent sitting exactly on the threshold. */
+export function isAgentOnline(
+  lastHeartbeat: string | null | undefined,
+  referenceTime: number = Date.now(),
+): boolean {
   if (!lastHeartbeat) return false;
   const ts = new Date(lastHeartbeat).getTime();
   if (isNaN(ts)) return false;
-  return Date.now() - ts < AGENT_ACTIVE_THRESHOLD_MS;
+  return referenceTime - ts < AGENT_ACTIVE_THRESHOLD_MS;
 }

@@ -148,11 +148,15 @@ export function Agents() {
   }
   if (error) return <ErrorCard title={t('errorTitle')} error={error} />;
   const agents = data ?? [];
-  const onlineCount = agents.filter((a) => isAgentOnline(a.last_heartbeat)).length;
+  // One `now` snapshot for the whole render so the counts, the filter,
+  // and the per-row badges below all agree on liveness for an agent
+  // sitting right on the 2-min threshold.
+  const now = Date.now();
+  const onlineCount = agents.filter((a) => isAgentOnline(a.last_heartbeat, now)).length;
   const offlineCount = agents.length - onlineCount;
   const visible = agents.filter((a) => {
     if (statusFilter === 'all') return true;
-    const online = isAgentOnline(a.last_heartbeat);
+    const online = isAgentOnline(a.last_heartbeat, now);
     return statusFilter === 'online' ? online : !online;
   });
 
@@ -242,7 +246,7 @@ export function Agents() {
         </TableHeader>
         <TableBody>
           {visible.map((a) => {
-            const online = isAgentOnline(a.last_heartbeat);
+            const online = isAgentOnline(a.last_heartbeat, now);
             return (
             <TableRow key={a.pc_id}>
               <TableCell>
