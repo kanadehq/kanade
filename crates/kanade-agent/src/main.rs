@@ -219,13 +219,19 @@ pub(crate) async fn run_agent() -> Result<()> {
     // a tick.
     #[cfg(target_os = "windows")]
     {
-        let initial_snapshot = klp::state::eval_once(&pc_id, AGENT_VERSION, &cfg_rx.borrow());
+        let initial_snapshot = klp::state::eval_once(
+            &pc_id,
+            AGENT_VERSION,
+            &cfg_rx.borrow(),
+            klp::state::client_online(&client),
+        );
         let (state_tx, state_rx) = tokio::sync::watch::channel(initial_snapshot);
         tokio::spawn(klp::state::eval_loop(
             state_tx,
             cfg_rx.clone(),
             pc_id.clone(),
             AGENT_VERSION.to_string(),
+            client.clone(),
         ));
         let _klp_handle = klp::server::spawn(klp::server::ListenerContext {
             pc_id: std::sync::Arc::from(pc_id.as_str()),
