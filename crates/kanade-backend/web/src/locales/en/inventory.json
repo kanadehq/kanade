@@ -3,7 +3,7 @@
   "tabs": {
     "ariaLabel": "Inventory view",
     "overview": "Overview",
-    "search": "Fleet search"
+    "search": "Search"
   },
   "probeBadge_one": "{{count}} probe configured",
   "probeBadge_other": "{{count}} probes configured",
