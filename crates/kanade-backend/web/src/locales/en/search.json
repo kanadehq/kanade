@@ -1,5 +1,5 @@
 {
-  "title": "Inventory search",
+  "title": "Fleet search",
   "description": "Cross-PC search across any inventory manifest's <code>explode</code> field (#40). Filter by column, page through up to {{max}} rows at a time. Click a row to jump to that PC's inventory detail.",
   "loadingManifests": "loading manifests…",
   "loadError": "Couldn't load manifest list",

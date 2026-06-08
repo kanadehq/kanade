@@ -1,5 +1,10 @@
 {
   "title": "Inventory",
+  "tabs": {
+    "ariaLabel": "Inventory view",
+    "overview": "Overview",
+    "search": "Fleet search"
+  },
   "probeBadge_one": "{{count}} probe configured",
   "probeBadge_other": "{{count}} probes configured",
   "viewLabel": "view",

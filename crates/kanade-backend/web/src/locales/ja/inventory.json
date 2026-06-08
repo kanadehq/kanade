@@ -1,5 +1,10 @@
 {
   "title": "インベントリ",
+  "tabs": {
+    "ariaLabel": "インベントリの表示",
+    "overview": "一覧",
+    "search": "フリート検索"
+  },
   "probeBadge_one": "プローブ {{count}} 件",
   "probeBadge_other": "プローブ {{count}} 件",
   "viewLabel": "表示",

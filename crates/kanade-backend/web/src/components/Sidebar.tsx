@@ -36,8 +36,12 @@ const groups: {
     accent: 'text-amber-light',
     links: [
       { to: '/agents', labelKey: 'nav.agents' },
+      // Fleet search lives as a tab *inside* the Inventory page
+      // (/inventory/search), not a sibling nav row — it's a sub-view
+      // of inventory, not a peer of it. Keeping it off the sidebar
+      // avoids a lone nested entry that would read as inconsistent
+      // next to the otherwise-flat list.
       { to: '/inventory', labelKey: 'nav.inventory' },
-      { to: '/inventory/search', labelKey: 'nav.search' },
       { to: '/activity', labelKey: 'nav.activity' },
       { to: '/events', labelKey: 'nav.events' },
       { to: '/audit', labelKey: 'nav.audit' },
