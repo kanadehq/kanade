@@ -5,5 +5,15 @@
     "title": "Language",
     "label": "UI language",
     "persistedHint": "Saved to localStorage; takes effect immediately."
+  },
+  "theme": {
+    "title": "Theme",
+    "label": "Color theme",
+    "options": {
+      "system": "System (OS default)",
+      "light": "Light",
+      "dark": "Dark"
+    },
+    "persistedHint": "Saved to localStorage; takes effect immediately."
   }
 }
