@@ -38,7 +38,7 @@ use futures::{StreamExt, TryStreamExt};
 use kanade_shared::kv::{
     BUCKET_JOBS, BUCKET_SCHEDULES, BUCKET_SCRIPT_CURRENT, BUCKET_SCRIPT_STATUS,
 };
-use kanade_shared::manifest::{ExecMode, Manifest, RunsOn, Schedule, ScheduleTz};
+use kanade_shared::manifest::{ExecMode, Manifest, RunsOn, Schedule, ScheduleTz, When};
 use kanade_shared::wire::Command;
 use tokio::sync::Mutex;
 use tokio_cron_scheduler::{Job, JobScheduler};
@@ -761,6 +761,20 @@ async fn reconcile_schedule(
         tz = ?lowered.tz,
         "local_scheduler: registered",
     );
+    // A past-dated calendar one-shot never fires — warn so it's
+    // diagnosable from the agent log (claude #432 review). Mirrors
+    // the backend scheduler's register() check.
+    if let When::Calendar(c) = &schedule.when {
+        if let Some(fires_at) = c.oneshot_instant(schedule.tz) {
+            if fires_at < Utc::now() {
+                warn!(
+                    schedule_id = %schedule_id,
+                    %fires_at,
+                    "local_scheduler: calendar one-shot date is in the past — it will never fire",
+                );
+            }
+        }
+    }
 }
 
 async fn unregister_locally(internal: &JobScheduler, state: &Arc<Mutex<State>>, schedule_id: &str) {

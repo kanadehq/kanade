@@ -1112,12 +1112,48 @@ target: { all: true }
 
     #[test]
     fn validate_rejects_bad_day_name() {
-        // A garbage DOW token is caught when the lowered cron hits
-        // the croner validator.
+        // A garbage DOW token is caught by the days pre-flight and
+        // reported against `when.days`, not the confusing
+        // "when.at lowered to invalid cron" (claude #432 review).
         let err = schedule_with(calendar("09:00", &["funday"]), RunsOn::Backend)
             .validate()
             .unwrap_err();
-        assert!(err.contains("when.at"), "got: {err}");
+        assert!(err.contains("when.days"), "got: {err}");
+        assert!(err.contains("funday"), "names the bad token: {err}");
+        // valid names / ranges / numeric / * all pass
+        for ok in [
+            calendar("09:00", &["mon-fri"]),
+            calendar("09:00", &["mon", "wed", "sun"]),
+            calendar("09:00", &["1-5"]),
+        ] {
+            schedule_with(ok.clone(), RunsOn::Backend)
+                .validate()
+                .unwrap_or_else(|e| panic!("{ok} should validate: {e}"));
+        }
+    }
+
+    #[test]
+    fn calendar_oneshot_instant_detects_past() {
+        use chrono::TimeZone;
+        // a dated `at` resolves to an absolute instant…
+        let c = CalendarSpec {
+            at: "2024-01-01 09:00".into(),
+            days: vec![],
+        };
+        let t = c
+            .oneshot_instant(ScheduleTz::Utc)
+            .expect("one-shot instant");
+        assert_eq!(
+            t,
+            chrono::Utc.with_ymd_and_hms(2024, 1, 1, 9, 0, 0).unwrap()
+        );
+        assert!(t < chrono::Utc::now(), "2024 is in the past");
+        // …while a repeating (time-only) calendar has no instant
+        let rep = CalendarSpec {
+            at: "09:00".into(),
+            days: vec!["mon-fri".into()],
+        };
+        assert!(rep.oneshot_instant(ScheduleTz::Utc).is_none());
     }
 
     fn schedule_with_active(from: Option<&str>, until: Option<&str>) -> Schedule {
@@ -1686,6 +1722,41 @@ impl CalendarSpec {
         ))
     }
 
+    /// Pre-flight check on the `days` tokens so a bad day name gives
+    /// a `when.days:`-scoped error instead of croner's confusing
+    /// "when.at lowered to invalid cron" (claude #432 review). Each
+    /// token is a day name (`mon`..`sun`), a numeric DOW (`0`..`7`),
+    /// `*`, or a `-` range of those.
+    fn validate_days(&self) -> Result<(), String> {
+        const NAMES: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+        for tok in &self.days {
+            for part in tok.split('-') {
+                let p = part.trim().to_ascii_lowercase();
+                let ok = p == "*"
+                    || NAMES.contains(&p.as_str())
+                    || p.parse::<u8>().map(|n| n <= 7).unwrap_or(false);
+                if !ok {
+                    return Err(format!(
+                        "when.days: invalid day token '{part}' \
+                         (want mon..sun, 0-7, a range like mon-fri, or *)"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// For a one-shot (`at` carries a date), the absolute instant it
+    /// fires in `tz`. `None` for a repeating calendar. Used to warn
+    /// about a one-shot whose date is already in the past (it would
+    /// never fire).
+    pub fn oneshot_instant(&self, tz: ScheduleTz) -> Option<chrono::DateTime<chrono::Utc>> {
+        let p = self.parse_at().ok()?;
+        let date = p.date?;
+        let naive = date.and_hms_opt(p.hour, p.minute, 0)?;
+        tz.naive_to_utc(naive)
+    }
+
     /// Lower to the cron string the scheduler engine runs. Repeating
     /// → 6-field `0 {min} {hour} * * {dow}`; one-shot → 7-field
     /// `0 {min} {hour} {day} {month} * {year}` (a past year never
@@ -1711,6 +1782,7 @@ impl CalendarSpec {
                 let dow = if self.days.is_empty() {
                     "*".to_string()
                 } else {
+                    self.validate_days()?;
                     self.days.join(",")
                 };
                 Ok(format!("0 {minute} {hour} * * {dow}"))
@@ -1739,10 +1811,10 @@ impl ScheduleTz {
     /// convert to UTC. On a DST *fold* (the local time occurs twice
     /// when clocks go back) we pick `.earliest()` rather than
     /// rejecting it; `None` is reserved for a true DST *gap* (a local
-    /// time that never exists). Both are impossible for the
-    /// fixed-offset zones we support today (UTC, JST), but a host
-    /// running `chrono::Local` in a DST zone shouldn't drop a valid
-    /// folded time (gemini #432 review).
+    /// time that never exists). `Utc` is fixed-offset so neither ever
+    /// happens; `Local` is whatever timezone the running host is set
+    /// to and *can* hit a gap/fold on any DST-observing host — not
+    /// just the JST we run today (gemini + claude #432 review).
     fn naive_to_utc(self, naive: chrono::NaiveDateTime) -> Option<chrono::DateTime<chrono::Utc>> {
         use chrono::TimeZone;
         match self {
