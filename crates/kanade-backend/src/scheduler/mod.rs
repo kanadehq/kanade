@@ -220,6 +220,15 @@ async fn tick(state: &AppState, schedule: Schedule) {
         return;
     }
 
+    // 0b) Maintenance window (#418 Phase 3): if a constraints.window
+    //     is set, only fire when the current wall-clock time (in the
+    //     schedule's tz) is inside it. Reconcile cadences resume the
+    //     next minute the window reopens.
+    if !schedule.constraints.allows(Utc::now(), schedule.tz) {
+        tracing::debug!(%schedule_id, "scheduler tick: outside maintenance window — skip");
+        return;
+    }
+
     // 1) Resolve the registered Manifest at fire time so edits to
     //    the job catalog take effect on the next tick.
     let manifest = match crate::api::jobs::fetch(&state.jetstream, &job_id).await {

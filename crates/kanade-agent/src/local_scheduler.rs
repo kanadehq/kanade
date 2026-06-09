@@ -811,6 +811,16 @@ async fn local_tick(
         return;
     }
 
+    // 0b) Maintenance window (#418 Phase 3) — same gate as the
+    //     backend scheduler, evaluated in this agent's tz.
+    if !schedule.constraints.allows(Utc::now(), schedule.tz) {
+        debug!(
+            schedule_id = %schedule.id,
+            "local_scheduler: outside maintenance window — skip",
+        );
+        return;
+    }
+
     // 1) Manifest + (optional) pre-resolved script_object digest
     //    must be cached. If not, skip and try again next tick (the
     //    jobs_watch loop may pick it up).
@@ -1024,7 +1034,7 @@ async fn local_tick(
 mod tests {
     use super::*;
     use kanade_shared::manifest::{
-        Active, FanoutPlan, OnceLiteral, PerPolicy, ScheduleTz, Target, When,
+        Active, Constraints, FanoutPlan, OnceLiteral, PerPolicy, ScheduleTz, Target, When,
     };
 
     fn schedule(target: Target, runs_on: RunsOn) -> Schedule {
@@ -1037,6 +1047,7 @@ mod tests {
                 ..Default::default()
             },
             active: Active::default(),
+            constraints: Constraints::default(),
             tz: ScheduleTz::default(),
             starting_deadline: None,
             runs_on,
