@@ -436,7 +436,11 @@ const MAX_PROGRESS_CHUNK_BYTES: usize = 256 * 1024;
 /// real child. Empty stdout/stderr are omitted (`None`) per the wire
 /// contract — strict JS clients reject `null` chunk strings.
 pub fn outcome_to_progress(run_id: String, outcome: &ExecOutcome) -> JobProgress {
-    let (status, exit_code, stdout, stderr) = match outcome {
+    use std::borrow::Cow;
+    // Borrow the captured strings (they can be hundreds of KiB) — only
+    // the Timeout arm needs an owned stderr to append its note, so it's
+    // the only `Cow::Owned`.
+    let (status, exit_code, stdout, stderr): (RunStatus, i32, Cow<str>, Cow<str>) = match outcome {
         ExecOutcome::Completed {
             exit_code,
             stdout,
@@ -447,22 +451,48 @@ pub fn outcome_to_progress(run_id: String, outcome: &ExecOutcome) -> JobProgress
             } else {
                 RunStatus::Failed
             };
-            (status, *exit_code, stdout.as_str(), stderr.as_str())
+            (
+                status,
+                *exit_code,
+                Cow::Borrowed(stdout),
+                Cow::Borrowed(stderr),
+            )
         }
         // Synthetic outcomes carry exit_code -1; the `status` field is
         // what distinguishes "you stopped it" from "it errored".
-        ExecOutcome::Killed { stdout, stderr } => {
-            (RunStatus::Killed, -1, stdout.as_str(), stderr.as_str())
-        }
+        ExecOutcome::Killed { stdout, stderr } => (
+            RunStatus::Killed,
+            -1,
+            Cow::Borrowed(stdout),
+            Cow::Borrowed(stderr),
+        ),
+        // Timeout folds into `Failed` — the wire `RunStatus` has no
+        // Timeout variant — so a bare client would render it
+        // indistinguishably from a non-zero exit. Stamp a note onto
+        // stderr so the Client App can show WHY it failed ("timed out"
+        // vs "errored"), since the script's own stderr usually says
+        // nothing about being killed at the deadline.
         ExecOutcome::Timeout { stdout, stderr } => {
-            (RunStatus::Failed, -1, stdout.as_str(), stderr.as_str())
+            const NOTE: &str =
+                "⏱ ジョブがタイムアウトしました（manifest の timeout で打ち切られました）";
+            let stderr = if stderr.trim().is_empty() {
+                NOTE.to_string()
+            } else {
+                format!("{stderr}\n{NOTE}")
+            };
+            (
+                RunStatus::Failed,
+                -1,
+                Cow::Borrowed(stdout),
+                Cow::Owned(stderr),
+            )
         }
     };
     JobProgress {
         run_id,
         status,
-        stdout_chunk: (!stdout.is_empty()).then(|| cap_chunk(stdout)),
-        stderr_chunk: (!stderr.is_empty()).then(|| cap_chunk(stderr)),
+        stdout_chunk: (!stdout.is_empty()).then(|| cap_chunk(&stdout)),
+        stderr_chunk: (!stderr.is_empty()).then(|| cap_chunk(&stderr)),
         exit_code: Some(exit_code),
     }
 }
@@ -795,7 +825,9 @@ mod tests {
     }
 
     #[test]
-    fn outcome_timeout_maps_to_failed_minus_one() {
+    fn outcome_timeout_maps_to_failed_with_note() {
+        // Timeout → Failed, but a note is stamped onto stderr so the
+        // client can show "timed out" rather than a bare "failed".
         let p = outcome_to_progress(
             "r1".into(),
             &ExecOutcome::Timeout {
@@ -805,6 +837,27 @@ mod tests {
         );
         assert_eq!(p.status, RunStatus::Failed);
         assert_eq!(p.exit_code, Some(-1));
+        assert!(
+            p.stderr_chunk
+                .as_deref()
+                .is_some_and(|s| s.contains("タイムアウト")),
+            "stderr_chunk should carry the timeout note: {:?}",
+            p.stderr_chunk
+        );
+    }
+
+    #[test]
+    fn outcome_timeout_appends_note_after_existing_stderr() {
+        let p = outcome_to_progress(
+            "r1".into(),
+            &ExecOutcome::Timeout {
+                stdout: String::new(),
+                stderr: "partial output before kill".into(),
+            },
+        );
+        let chunk = p.stderr_chunk.expect("stderr present");
+        assert!(chunk.contains("partial output before kill"), "{chunk}");
+        assert!(chunk.contains("タイムアウト"), "{chunk}");
     }
 
     // ---------- jobs.kill authorization ----------
