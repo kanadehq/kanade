@@ -5,6 +5,8 @@ mod groups;
 mod heartbeat;
 mod host_perf;
 mod job_object;
+mod job_tail;
+mod live_tail;
 mod logs;
 mod ping;
 mod process;
@@ -190,6 +192,15 @@ pub(crate) async fn run_agent() -> Result<()> {
         client.clone(),
         pc_id.clone(),
         std::path::PathBuf::from(&cfg.log.path),
+        staleness_tracker.clone(),
+    ));
+    // Live job-tail responder: serves `job.tail.<pc_id>` from the
+    // in-memory live registry so the SPA can poll a running job's
+    // stdout/stderr (same UX as the agent-log auto-refresh, scoped
+    // to one job). No persistence — purely the in-flight ring buffer.
+    tokio::spawn(job_tail::serve(
+        client.clone(),
+        pc_id.clone(),
         staleness_tracker.clone(),
     ));
     // v0.38 / #133: active ping responder. Independent of the

@@ -1,5 +1,5 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { ChevronsDown, ChevronsUp, ExternalLink, Loader2, Skull } from 'lucide-react';
+import { ChevronsDown, ChevronsUp, ExternalLink, Loader2, Radio, Skull } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useSearchParams } from 'react-router-dom';
@@ -356,7 +356,12 @@ export function Activity() {
                   {r.finished_at ? fmtIsoLocal(r.finished_at) : t('status.runningEllipsis')}
                 </TableCell>
                 <TableCell className="max-w-md">
-                  <StdioPreview resultId={r.result_id} stdout={r.stdout} stderr={r.stderr} />
+                  <StdioPreview
+                    resultId={r.result_id}
+                    stdout={r.stdout}
+                    stderr={r.stderr}
+                    running={r.finished_at === null}
+                  />
                 </TableCell>
                 <TableCell>
                   {/* v0.30 / PR α' unified: Activity now lists
@@ -419,10 +424,15 @@ function StdioPreview({
   resultId,
   stdout,
   stderr,
+  running,
 }: {
   resultId: string;
   stdout: string;
   stderr: string;
+  /** v0.4x: in-flight row (finished_at === null). Surfaces a "live"
+   *  link to the detail page, where the live tail console auto-polls
+   *  the agent for this job's running output. */
+  running: boolean;
 }) {
   const { t } = useTranslation('activity');
   const [expanded, setExpanded] = useState(false);
@@ -460,6 +470,16 @@ function StdioPreview({
         >
           {stderrBody}
         </pre>
+      )}
+      {running && (
+        <Link
+          to={`/activity/${encodeURIComponent(resultId)}`}
+          className="text-xs text-accent hover:underline inline-flex items-center gap-1 mt-1 mr-3"
+          title={t('actions.liveViewTitle')}
+        >
+          <Radio className="size-3 animate-pulse" />
+          {t('actions.liveView')}
+        </Link>
       )}
       {couldExpand && (
         <button

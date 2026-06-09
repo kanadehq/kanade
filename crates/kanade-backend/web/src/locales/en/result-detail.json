@@ -38,5 +38,20 @@
     "copied": "copied",
     "copyTitle": "Copy full body to clipboard",
     "nothingToCopy": "Nothing to copy"
+  },
+  "live": {
+    "toggleLabel": "live tail",
+    "on": "on (auto 5s)",
+    "off": "off",
+    "running": "running",
+    "offHint": "Live tailing is off — nothing is polled. Turn it on to stream this job's output (refreshes every 5s).",
+    "stdout": "stdout (live)",
+    "stderr": "stderr (live)",
+    "empty": "(no output yet)",
+    "waiting": "Waiting for output from the agent…",
+    "waitingHint": "The job is running but the agent hasn't returned any live output yet — it may be offline, or running an agent that predates live tailing. Output appears here once it streams.",
+    "finishing": "Finished — fetching the complete result…",
+    "truncated": "(start trimmed — showing the last {{kb}} KB)",
+    "error": "Couldn't fetch live output (will retry): {{error}}"
   }
 }

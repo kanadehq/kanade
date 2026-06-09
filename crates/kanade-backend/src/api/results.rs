@@ -1,10 +1,14 @@
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use kanade_shared::subject;
+use kanade_shared::wire::{JobTailReply, JobTailRequest};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
 use tracing::warn;
+
+use super::AppState;
 
 #[derive(Serialize)]
 pub struct ResultRow {
@@ -248,6 +252,143 @@ pub async fn detail(
         Some(r) => Ok(Json(row_to_result(r))),
         None => Err(StatusCode::NOT_FOUND),
     }
+}
+
+/// Live-tail response for `GET /api/results/{result_id}/tail`.
+///
+/// Three shapes, distinguished by `live` / `running`:
+/// - **finished** (`running = false`, `live = false`): the row has a
+///   `finished_at`, so the persisted stdout/stderr is the whole truth.
+///   The SPA stops polling and shows the final output + exit code.
+/// - **live** (`live = true`): the addressed agent answered with a
+///   ring-buffer snapshot of the still-(or just-)running job. `stdout`
+///   / `stderr` are the tail (a suffix when `*_truncated`).
+/// - **waiting** (`running = true`, `live = false`): the row is
+///   in-flight but the agent has no live buffer to serve (offline, or
+///   the run is on an agent that pre-dates this feature, or it timed
+///   out). The SPA keeps polling and shows a "waiting for output" hint.
+#[derive(Serialize)]
+pub struct TailResponse {
+    pub running: bool,
+    pub live: bool,
+    pub stdout: String,
+    pub stderr: String,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+    pub exit_code: Option<i64>,
+}
+
+/// `GET /api/results/{result_id}/tail` — live stdout/stderr for the
+/// SPA's "live" toggle. Mirrors the `agent_logs::tail` request/reply
+/// pattern: a finished row is served straight from the DB; an in-flight
+/// row triggers a `job.tail.<pc_id>` round-trip to the live agent.
+pub async fn tail(
+    State(state): State<AppState>,
+    Path(result_id): Path<String>,
+) -> Result<Json<TailResponse>, StatusCode> {
+    let row = sqlx::query(
+        "SELECT pc_id, finished_at, exit_code, stdout, stderr \
+         FROM execution_results WHERE result_id = ?",
+    )
+    .bind(&result_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| {
+        warn!(error = %e, "tail: lookup result row");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?
+    .ok_or(StatusCode::NOT_FOUND)?;
+
+    let pc_id: String = row.try_get("pc_id").unwrap_or_default();
+    let finished_at: Option<chrono::DateTime<chrono::Utc>> = row.try_get("finished_at").ok();
+    let exit_code: Option<i64> = row.try_get("exit_code").ok();
+
+    // Finished + projected: the DB row is authoritative. No NATS hop.
+    if finished_at.is_some() {
+        return Ok(Json(TailResponse {
+            running: false,
+            live: false,
+            stdout: row.try_get("stdout").unwrap_or_default(),
+            stderr: row.try_get("stderr").unwrap_or_default(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+            exit_code,
+        }));
+    }
+
+    // In-flight: ask the agent for its live ring buffer. A timeout or
+    // a `found = false` reply both degrade to the "waiting" shape — the
+    // SPA keeps polling rather than erroring out.
+    let waiting = || {
+        Ok(Json(TailResponse {
+            running: true,
+            live: false,
+            stdout: String::new(),
+            stderr: String::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+            exit_code: None,
+        }))
+    };
+
+    let req = JobTailRequest {
+        result_id: result_id.clone(),
+    };
+    let payload = match serde_json::to_vec(&req) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(error = %e, "tail: encode JobTailRequest");
+            return waiting();
+        }
+    };
+    let subject = subject::job_tail(&pc_id);
+    // 3s, deliberately under the SPA's 5s poll interval: the agent
+    // answers a live-tail request in single-digit ms when online, so a
+    // longer wait only matters when it's unreachable. Failing fast
+    // returns the `waiting` shape before the next poll fires, so slow /
+    // offline agents can't pile up overlapping in-flight requests on
+    // the backend.
+    let reply = match tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        state.nats.request(subject, payload.into()),
+    )
+    .await
+    {
+        Ok(Ok(msg)) => msg,
+        Ok(Err(e)) => {
+            warn!(error = %e, %pc_id, "tail: job.tail request failed");
+            return waiting();
+        }
+        Err(_) => {
+            // Agent didn't reply in time — keep the SPA polling.
+            return waiting();
+        }
+    };
+
+    let parsed: JobTailReply = match serde_json::from_slice(&reply.payload) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(error = %e, "tail: decode JobTailReply");
+            return waiting();
+        }
+    };
+
+    if !parsed.found {
+        // Agent has no live buffer for this id (evicted past grace, or
+        // never ran here). Fall back to "waiting"; the next poll will
+        // likely find a finished row once the ExecResult projects.
+        return waiting();
+    }
+
+    Ok(Json(TailResponse {
+        running: parsed.running,
+        live: true,
+        stdout: parsed.stdout,
+        stderr: parsed.stderr,
+        stdout_truncated: parsed.stdout_truncated,
+        stderr_truncated: parsed.stderr_truncated,
+        exit_code: None,
+    }))
 }
 
 fn row_to_result(r: sqlx::sqlite::SqliteRow) -> ResultRow {

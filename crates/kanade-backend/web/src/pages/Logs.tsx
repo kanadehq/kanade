@@ -47,11 +47,28 @@ export function Logs() {
       return res.text();
     },
     refetchInterval: autoRefresh ? 5_000 : false,
+    // Don't refetch just because the browser tab regained focus.
+    // Investigating logs means tabbing away to look at other things;
+    // a silent refetch on return reloads the buffer and (via the
+    // auto-scroll below) yanks the reader to the bottom, losing their
+    // place. Refreshes are explicit only: the Refresh button or the
+    // auto-refresh toggle.
+    refetchOnWindowFocus: false,
   });
 
-  // Auto-scroll to bottom on new log content.
+  // Follow-mode auto-scroll: only snap to the bottom when the operator
+  // is already pinned there (tailing). If they've scrolled up to read
+  // something, a new fetch must NOT drag them back down. `pinnedRef`
+  // is updated from the pre's scroll handler.
+  const pinnedRef = useRef(true);
+  const onScroll = () => {
+    const el = preRef.current;
+    if (!el) return;
+    // Within 40px of the bottom counts as "following".
+    pinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+  };
   useEffect(() => {
-    if (logsQ.data && preRef.current) {
+    if (logsQ.data && preRef.current && pinnedRef.current) {
       preRef.current.scrollTop = preRef.current.scrollHeight;
     }
   }, [logsQ.data]);
@@ -130,6 +147,7 @@ export function Logs() {
       ) : (
         <pre
           ref={preRef}
+          onScroll={onScroll}
           className="text-xs whitespace-pre-wrap break-words bg-muted/5 border border-border rounded p-3 max-h-[70vh] overflow-auto font-mono"
         >
           {logsQ.data || t('empty.pre')}

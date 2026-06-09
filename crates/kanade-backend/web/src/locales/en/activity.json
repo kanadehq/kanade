@@ -60,7 +60,9 @@
     "killTitle": "Tell the agent to terminate this job's child process",
     "showMore": "show more",
     "collapse": "collapse",
-    "openDetail": "Open detail page (Ctrl/⌘+click for new tab)"
+    "openDetail": "Open detail page (Ctrl/⌘+click for new tab)",
+    "liveView": "live",
+    "liveViewTitle": "Open the detail page to watch this running job's output live"
   },
   "confirm": {
     "killTitle": "Kill this run ({{jobId}})?",

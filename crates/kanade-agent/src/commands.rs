@@ -289,6 +289,16 @@ pub async fn handle_command(
     // coalesces both into a single row regardless of arrival order.
     let result_id = Uuid::new_v4().to_string();
 
+    // Register an in-memory live-tail buffer so the
+    // `job.tail.<pc_id>` handler can serve this job's stdout/stderr to
+    // the SPA while it runs (same UX as the agent-log auto-refresh,
+    // scoped to one job). The RAII handle marks the job finished
+    // (`running` → false) when dropped right after the run; the buffer
+    // lingers through a short grace window so the SPA's final poll
+    // still catches the tail before the persisted row has projected.
+    // See `crate::live_tail`.
+    let live_handle = crate::live_tail::register(&result_id);
+
     // Emit `events.started.<exec_id>.<pc_id>` BEFORE child spawn
     // when the Command carries an exec_id (= deployment from
     // `kanade exec` or scheduler tick, not ad-hoc `kanade run`).
@@ -322,8 +332,12 @@ pub async fn handle_command(
         }
     }
 
-    let outcome = run_command_with_kill(&client, &cmd).await?;
+    let outcome = run_command_with_kill(&client, &cmd, Some(live_handle.tail())).await?;
     let finished_at = chrono::Utc::now();
+    // Flip the live buffer to "finished" promptly so the SPA's next
+    // poll sees `running = false`. Grace retention (in `live_tail`)
+    // keeps the final tail serveable until the persisted row lands.
+    drop(live_handle);
 
     let (exit_code, stdout, stderr, status_note) = match outcome {
         ExecOutcome::Completed {

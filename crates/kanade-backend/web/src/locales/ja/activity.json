@@ -60,7 +60,9 @@
     "killTitle": "エージェントにこのジョブの子プロセスを終了させます",
     "showMore": "もっと見る",
     "collapse": "折りたたむ",
-    "openDetail": "詳細ページを開く (Ctrl/⌘+クリックで新規タブ)"
+    "openDetail": "詳細ページを開く (Ctrl/⌘+クリックで新規タブ)",
+    "liveView": "ライブ",
+    "liveViewTitle": "詳細ページを開いて実行中ジョブの出力をライブ表示します"
   },
   "confirm": {
     "killTitle": "この実行を強制終了しますか? ({{jobId}})",
