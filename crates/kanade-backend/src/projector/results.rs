@@ -3,7 +3,7 @@ use async_nats::jetstream::{self, consumer::pull::Config as PullConfig};
 use futures::StreamExt;
 use kanade_shared::ExecResult;
 use kanade_shared::kv::{BUCKET_JOBS, OBJECT_RESULT_OUTPUT, STREAM_RESULTS};
-use kanade_shared::manifest::{InventoryHint, Manifest};
+use kanade_shared::manifest::{CheckHint, InventoryHint, Manifest};
 use sqlx::SqlitePool;
 use tokio::io::AsyncReadExt;
 use tracing::{info, warn};
@@ -143,6 +143,15 @@ pub async fn run(js: jetstream::Context, pool: SqlitePool) -> Result<()> {
                     {
                         warn!(error = ?e, result_id = %resolved_id, "inventory fact projection failed");
                     }
+                }
+                // #290 PR-E: a `check:` job (fleet != false) projects a
+                // fleet-wide compliance row on EVERY exit — a clean run
+                // carries the reported status, a crash projects
+                // `unknown` (mirrors the agent's Health-tab behaviour),
+                // so the SPA never shows a stale green for a check that
+                // has started failing.
+                if let Err(e) = maybe_project_check_status(&pool, &jobs_kv, &r, recorded_at).await {
+                    warn!(error = ?e, result_id = %resolved_id, "check status projection failed");
                 }
             }
             Err(e) => warn!(error = %e, subject = %msg.subject, "deserialize ExecResult"),
@@ -357,6 +366,107 @@ async fn maybe_project_inventory(
         return upsert_inventory(pool, r, manifest_id, hint, recorded_at).await;
     }
     Ok(())
+}
+
+/// #290 PR-E: look up `r.manifest_id`; if its manifest declares a
+/// `check:` hint with `fleet` enabled, read the `status` / `detail`
+/// fields out of `r.stdout` and upsert a row into `check_status` for
+/// the operator SPA's fleet-wide compliance view. Same "no hint =
+/// nothing to do" non-error contract as inventory.
+async fn maybe_project_check_status(
+    pool: &SqlitePool,
+    jobs_kv: &async_nats::jetstream::kv::Store,
+    r: &ExecResult,
+    recorded_at: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    let Some(manifest_id) = r.manifest_id.as_deref() else {
+        return Ok(());
+    };
+    let entry = match jobs_kv.get(manifest_id).await? {
+        Some(b) => b,
+        None => return Ok(()),
+    };
+    let job: Manifest = match serde_json::from_slice(&entry) {
+        Ok(j) => j,
+        Err(_) => return Ok(()),
+    };
+    match job.check.as_ref() {
+        // `fleet: false` opts a check out of the SPA projection (it
+        // still drives the end-user Client App's Health tab).
+        Some(hint) if hint.fleet => upsert_check_status(pool, r, hint, recorded_at).await,
+        _ => Ok(()),
+    }
+}
+
+async fn upsert_check_status(
+    pool: &SqlitePool,
+    r: &ExecResult,
+    hint: &CheckHint,
+    recorded_at: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    // Derive (status, detail) the same way the agent's `build_check` /
+    // `build_check_failed` do, so the SPA compliance view and the
+    // Client App's Health tab never disagree. (A future refactor can
+    // hoist this into `kanade-shared` and share it with the agent.)
+    let (status, detail): (&str, Option<String>) = if r.exit_code == 0 {
+        let facts: serde_json::Value = serde_json::from_str(&r.stdout)
+            .with_context(|| format!("check '{}' stdout was not JSON", hint.name))?;
+        // Return the `'static` literal (not the slice borrowed from
+        // `facts`) so `status` outlives the parsed value; anything
+        // outside the four known states normalises to `unknown`.
+        let status = match facts.get(&hint.status_field).and_then(|v| v.as_str()) {
+            Some("ok") => "ok",
+            Some("warn") => "warn",
+            Some("fail") => "fail",
+            _ => "unknown",
+        };
+        let detail = facts.get(&hint.detail_field).and_then(json_to_detail);
+        (status, detail)
+    } else {
+        // Crashed before it could report — `unknown`, with the exit
+        // code + a stderr snippet (mirrors `build_check_failed`).
+        let snippet: String = r.stderr.trim().chars().take(200).collect();
+        let detail = if snippet.is_empty() {
+            format!("check script exited {}", r.exit_code)
+        } else {
+            format!("check script exited {}: {snippet}", r.exit_code)
+        };
+        ("unknown", Some(detail))
+    };
+
+    sqlx::query(
+        "INSERT INTO check_status (pc_id, check_name, status, detail, recorded_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(pc_id, check_name) DO UPDATE SET
+             status      = excluded.status,
+             detail      = excluded.detail,
+             recorded_at = excluded.recorded_at",
+    )
+    .bind(&r.pc_id)
+    .bind(&hint.name)
+    .bind(status)
+    .bind(&detail)
+    .bind(recorded_at)
+    .execute(pool)
+    .await
+    .with_context(|| format!("upsert check_status for {}/{}", r.pc_id, hint.name))?;
+
+    info!(pc_id = %r.pc_id, check = %hint.name, status, "projected check status");
+    Ok(())
+}
+
+/// Render a check `detail` field value as a string, mirroring the
+/// agent's `check_cache::json_to_detail`: pass non-empty strings,
+/// stringify scalars, compact-JSON arrays/objects, drop null/empty.
+fn json_to_detail(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(s) if s.is_empty() => None,
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        other => Some(other.to_string()),
+    }
 }
 
 async fn upsert_inventory(
@@ -753,5 +863,117 @@ mod tests {
             stored.0, publish,
             "recorded_at must be the supplied publish time, byte-stable across re-projection",
         );
+    }
+
+    // ---- #290 PR-E: check_status compliance projection ----
+
+    fn check_hint(name: &str, status_field: &str) -> CheckHint {
+        CheckHint {
+            name: name.into(),
+            status_field: status_field.into(),
+            detail_field: "detail".into(),
+            troubleshoot: None,
+            fleet: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn check_status_upsert_projects_then_overwrites_in_place() {
+        let pool = fresh_pool().await;
+        let hint = check_hint("bitlocker", "status");
+        let mut r = sample("res-c", "req-c", "pc-1", None);
+        r.stdout = r#"{"status":"warn","detail":"D: off"}"#.into();
+        let at = chrono::Utc.with_ymd_and_hms(2026, 5, 21, 0, 0, 0).unwrap();
+        upsert_check_status(&pool, &r, &hint, at).await.unwrap();
+
+        let row: (String, String, Option<String>) =
+            sqlx::query_as("SELECT pc_id, status, detail FROM check_status WHERE check_name = ?")
+                .bind("bitlocker")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(row, ("pc-1".into(), "warn".into(), Some("D: off".into())));
+
+        // A later run for the same (pc, check) replaces the row, not
+        // appends — the table holds the latest status, not a series.
+        r.stdout = r#"{"status":"ok","detail":"all protected"}"#.into();
+        upsert_check_status(&pool, &r, &hint, at).await.unwrap();
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM check_status")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count.0, 1);
+        let status: (String,) = sqlx::query_as(
+            "SELECT status FROM check_status WHERE pc_id = 'pc-1' AND check_name = 'bitlocker'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status.0, "ok");
+    }
+
+    #[tokio::test]
+    async fn check_status_normalises_unknown_status_and_honours_custom_fields() {
+        let pool = fresh_pool().await;
+        let hint = check_hint("patch", "compliance");
+        let mut r = sample("res-c2", "req-c2", "pc-2", None);
+        // Unrecognised status value → stored as `unknown`; the operator's
+        // custom status/detail field names are honoured.
+        r.stdout = r#"{"compliance":"green","summary":"12 patched"}"#.into();
+        let hint = CheckHint {
+            detail_field: "summary".into(),
+            ..hint
+        };
+        upsert_check_status(&pool, &r, &hint, chrono::Utc::now())
+            .await
+            .unwrap();
+        let row: (String, Option<String>) =
+            sqlx::query_as("SELECT status, detail FROM check_status WHERE pc_id = 'pc-2'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(row, ("unknown".into(), Some("12 patched".into())));
+    }
+
+    #[tokio::test]
+    async fn check_status_crash_projects_unknown_with_stderr() {
+        let pool = fresh_pool().await;
+        let hint = check_hint("bitlocker", "status");
+        let mut r = sample("res-c3", "req-c3", "pc-3", None);
+        // Script crashed before printing JSON.
+        r.exit_code = 1;
+        r.stderr = "Get-CimInstance: access denied".into();
+        r.stdout = String::new();
+        upsert_check_status(&pool, &r, &hint, chrono::Utc::now())
+            .await
+            .unwrap();
+        let row: (String, Option<String>) =
+            sqlx::query_as("SELECT status, detail FROM check_status WHERE pc_id = 'pc-3'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(row.0, "unknown");
+        let detail = row.1.unwrap();
+        assert!(detail.contains("exited 1"), "detail: {detail}");
+        assert!(detail.contains("access denied"), "detail: {detail}");
+    }
+
+    #[tokio::test]
+    async fn check_status_renders_non_string_detail_as_compact_json() {
+        let pool = fresh_pool().await;
+        let hint = check_hint("vols", "status");
+        let mut r = sample("res-c4", "req-c4", "pc-4", None);
+        // A non-string `detail` (array) is rendered as compact JSON,
+        // matching the agent's `json_to_detail`, not dropped to NULL.
+        r.stdout = r#"{"status":"warn","detail":["C:","D:"]}"#.into();
+        upsert_check_status(&pool, &r, &hint, chrono::Utc::now())
+            .await
+            .unwrap();
+        let row: (String, Option<String>) =
+            sqlx::query_as("SELECT status, detail FROM check_status WHERE pc_id = 'pc-4'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(row, ("warn".into(), Some(r#"["C:","D:"]"#.into())));
     }
 }

@@ -276,6 +276,7 @@ mod tests {
             status_field: "status".into(),
             detail_field: "detail".into(),
             troubleshoot: None,
+            fleet: true,
         }
     }
 
@@ -297,6 +298,7 @@ mod tests {
             status_field: "compliance".into(),
             detail_field: "summary".into(),
             troubleshoot: Some("fix-patch".into()),
+            fleet: true,
         };
         let c = build_check(
             &h,

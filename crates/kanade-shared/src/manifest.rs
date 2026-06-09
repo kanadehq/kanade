@@ -198,6 +198,13 @@ pub struct CheckHint {
     /// `user_invokable`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub troubleshoot: Option<String>,
+    /// #290 PR-E: when `true` (default), the backend also projects this
+    /// check's `status` / `detail` into the `check_status` table so the
+    /// operator SPA gets a fleet-wide compliance view for free — no
+    /// `inventory:` block needed. Set `fleet: false` for a client-only
+    /// check the operator doesn't want surfaced across the fleet.
+    #[serde(default = "default_fleet")]
+    pub fleet: bool,
 }
 
 fn default_status_field() -> String {
@@ -206,6 +213,10 @@ fn default_status_field() -> String {
 
 fn default_detail_field() -> String {
     "detail".to_string()
+}
+
+fn default_fleet() -> bool {
+    true
 }
 
 /// Issue #246 — `emit:` manifest block for jobs whose stdout is
