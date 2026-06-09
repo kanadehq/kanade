@@ -415,36 +415,63 @@ foreach ($d in @($binDir, $configDir, $dataDir, $logsDir)) {
 # next start. The service is already stopped above (file unlocked) and
 # the dirs are ensured.
 #
-# Target the *configured* projector DB explicitly — parsed from
-# backend.toml's `[db] sqlite_path` (default backend.db) + its -wal/-shm
-# — NOT a `data\*.db` glob. This data dir is the shared Kanade layout
-# and the agent's state.db lives here too on combined installs, so a
-# broad glob from a *backend* deploy would clobber agent state.
+# Resolve the DB path the SAME way the backend does, by asking the binary
+# itself: `kanade-backend resolve-db-path --config <toml>` renders the
+# teravars template (`{{ vars.base }}`, `env()`, `is_windows()`) and
+# prints the exact path the service will open. We query $exeSrc — the NEW
+# exe, BEFORE the swap — against the config that will ACTUALLY be installed
+# (the seeded $configSrc under -ForceConfig / fresh box, else the existing
+# $configDst), so the wiped file matches what the just-installed backend
+# mounts. Resolving the about-to-be-overwritten $configDst would wipe the
+# OLD sqlite_path and still boot the service on the NEW, un-wiped DB.
+#
+# Why not parse the toml here: a hand-rolled regex can't expand
+# `{{ vars.base }}`, so a templated / non-default `sqlite_path` (e.g. base
+# on E:\) used to fall back to the C:\ProgramData default and leave the
+# REAL DB un-wiped — the squashed-baseline backend then crash-looped at
+# migrate!(). If resolution fails we now ABORT (no silent default): better
+# to stop the deploy than to start the service on a stale DB.
+#
+# Targets that one resolved DB + its -wal/-shm sidecars explicitly — NOT a
+# `data\*.db` glob: the agent's state.db shares this data dir on combined
+# installs and must not be clobbered by a backend deploy.
 if ($WipeDb) {
-    $dbPath = $null
-    if (Test-Path $configDst) {
-        $dbLine = Select-String -Path $configDst -Pattern "^\s*sqlite_path\s*=\s*['""]([^'""]+)['""]" |
-                  Select-Object -First 1
-        if ($dbLine) { $dbPath = $dbLine.Matches[0].Groups[1].Value }
-    }
-    # The *installed* backend.toml may still carry the UNRENDERED teravars
-    # template (`sqlite_path = '{{ vars.base }}/backend.db'`) — the backend
-    # resolves it at runtime, but we can't here. A `{{`-containing value is
-    # unusable: Test-Path'ing it silently finds nothing and the stale DB
-    # survives a -WipeDb (then the squashed-baseline backend crash-loops at
-    # migrate). Treat it — and any relative path — as "use the default".
-    if ($dbPath -and ($dbPath -match '\{\{' -or -not [System.IO.Path]::IsPathRooted($dbPath))) {
-        Write-Host "WipeDb: sqlite_path '$dbPath' is unrendered/relative; using default."
-        $dbPath = $null
-    }
-    if (-not $dbPath) { $dbPath = Join-Path $dataDir 'backend.db' }  # config default
+    # Resolve from the config that will ACTUALLY be installed (see comment
+    # above): -ForceConfig (or a fresh box with no $configDst) means the
+    # seeded $configSrc wins, else the existing $configDst stays. $configSrc
+    # is validated to exist near the top, and the $configDst branch is only
+    # taken when it exists, so $configForWipe always points to a real file.
+    $configForWipe = if ($ForceConfig -or -not (Test-Path $configDst)) { $configSrc } else { $configDst }
 
-    $targets = @($dbPath, "$dbPath-wal", "$dbPath-shm") | Where-Object { Test-Path $_ }
+    # NOTE: no 2>&1 here. Under $ErrorActionPreference='Stop', merging native
+    # stderr into the success stream wraps each line in an ErrorRecord that can
+    # terminate the script, and a stray warning would also shadow the path
+    # below. Let stderr fall through to the console; $resolved stays pure stdout.
+    $resolved = & $exeSrc resolve-db-path --config $configForWipe
+    if ($LASTEXITCODE -ne 0 -or -not $resolved) {
+        throw ("WipeDb: could not resolve sqlite_path via '$exeName resolve-db-path' " +
+            "(exit $LASTEXITCODE) from '$configForWipe'. Refusing to proceed — starting on " +
+            "a stale DB would crash-loop at migrate. Fix the config / binary, then re-run.")
+    }
+    # resolve-db-path prints only the path to stdout; take the last
+    # line so any incidental warning ahead of it is ignored.
+    $dbPath = ($resolved | Select-Object -Last 1).ToString().Trim()
+    if ([string]::IsNullOrWhiteSpace($dbPath)) {
+        # Exit 0 but an empty/whitespace path: never let Test-Path "" (false)
+        # silently no-op the wipe and boot the service on a stale DB.
+        throw ("WipeDb: '$exeName resolve-db-path' exited 0 but returned no path " +
+            "(from '$configForWipe'). Refusing to proceed — fix the config / binary, then re-run.")
+    }
+    Write-Host "WipeDb: resolved projector DB = $dbPath"
+
+    # -LiteralPath: a sqlite_path containing wildcard metacharacters ([ ] ? *)
+    # must match itself, never glob onto sibling files in the data dir.
+    $targets = @($dbPath, "$dbPath-wal", "$dbPath-shm") | Where-Object { Test-Path -LiteralPath $_ }
     if ($targets) {
         foreach ($f in $targets) {
             Write-Host "WipeDb: removing $f"
             try {
-                Remove-Item -Force $f
+                Remove-Item -Force -LiteralPath $f
             } catch {
                 # A locked file (open SQLite client, a still-running
                 # backend, an antivirus scan) would otherwise abort the
