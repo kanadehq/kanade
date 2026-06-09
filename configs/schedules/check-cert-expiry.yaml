@@ -1,0 +1,14 @@
+# Fires the registered `check-cert-expiry` job per-PC once a day.
+# Certificate expiry is a slow-moving signal — a daily tick is plenty
+# to give operators weeks of warning before a cert lapses.
+#
+# Install (after `kanade job create configs/jobs/check-cert-expiry.yaml`):
+#   kanade schedule create configs/schedules/check-cert-expiry.yaml
+id: check-cert-expiry
+when:
+  per_pc: { every: 24h }
+enabled: true
+job_id: check-cert-expiry
+target:
+  all: true
+jitter: 15m

@@ -1,0 +1,16 @@
+# Fires the registered `check-bitlocker` job per-PC every 4 hours.
+# A health check's cadence is just a Schedule — same machinery as
+# inventory: tune `every`, swap to `per_pc: once`, add a `rollout`,
+# or run `runs_on: agent` for offline ticking, all without touching
+# the job. 4h keeps the Health tab fresh without hammering WMI.
+#
+# Install (after `kanade job create configs/jobs/check-bitlocker.yaml`):
+#   kanade schedule create configs/schedules/check-bitlocker.yaml
+id: check-bitlocker
+when:
+  per_pc: { every: 4h }
+enabled: true
+job_id: check-bitlocker
+target:
+  all: true
+jitter: 5m

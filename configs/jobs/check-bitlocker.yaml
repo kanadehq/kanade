@@ -1,0 +1,66 @@
+# Example operator-defined HEALTH CHECK (#290).
+#
+# A check job is a normal Manifest with a `check:` hint: its
+# PowerShell prints ONE JSON object on stdout, and the agent reads
+# `status` (ok / warn / fail / unknown) into the Client App's Health
+# tab (KLP `StateSnapshot.checks`). Everything in the object is also
+# projectable like any inventory job — this example adds an
+# `inventory:` block with `explode` so the per-volume rows land in a
+# `bitlocker_volumes` sub-table operators can SQL-filter on the SPA.
+#
+# `run_as: system` matters: the BitLocker WMI namespace is admin-only,
+# and the agent runs as LocalSystem — so the query succeeds in
+# production even though a non-elevated `kanade exec` would not.
+#
+# Install:
+#   kanade job create      configs/jobs/check-bitlocker.yaml
+#   kanade schedule create configs/schedules/check-bitlocker.yaml
+id: check-bitlocker
+version: 0.1.0
+description: BitLocker protection status per volume (Health tab + per-volume sub-table)
+execute:
+  shell: powershell
+  run_as: system
+  timeout: 30s
+  script: |
+    $ErrorActionPreference = 'Stop'
+    try {
+      $vols = @(Get-CimInstance -Namespace 'root/CIMV2/Security/MicrosoftVolumeEncryption' -ClassName Win32_EncryptableVolume |
+        ForEach-Object {
+          [pscustomobject]@{
+            drive      = $_.DriveLetter
+            protection = [int]$_.ProtectionStatus   # 1=On, 0=Off, 2=Unknown
+          }
+        })
+      $off = @($vols | Where-Object { $_.protection -eq 0 })
+      $on  = @($vols | Where-Object { $_.protection -eq 1 })
+      $unk = @($vols | Where-Object { $_.protection -ne 0 -and $_.protection -ne 1 })   # ProtectionStatus 2
+      if ($vols.Count -eq 0)    { $status = 'unknown'; $detail = 'no encryptable volumes reported' }
+      elseif ($off.Count -gt 0) { $status = 'warn';    $detail = "$($off.Count) volume(s) unprotected: $((($off.drive) | Where-Object { $_ }) -join ', ')" }
+      elseif ($unk.Count -gt 0) { $status = 'warn';    $detail = "$($on.Count)/$($vols.Count) protected; $($unk.Count) with indeterminate status" }
+      elseif ($on.Count -eq 0)  { $status = 'unknown'; $detail = 'protection status indeterminate' }
+      else                      { $status = 'ok';      $detail = "$($on.Count)/$($vols.Count) volume(s) protected" }
+    } catch {
+      $status = 'unknown'; $detail = $_.Exception.Message; $vols = @()
+    }
+    [pscustomobject]@{ status = $status; detail = $detail; volumes = $vols } | ConvertTo-Json -Compress -Depth 4
+check:
+  name: bitlocker
+  # troubleshoot: enable-bitlocker   # optional remediation job id (user_invokable)
+inventory:
+  display:
+    - { field: status, label: BitLocker }
+    - { field: detail, label: Detail }
+    - field: volumes
+      label: Volumes
+      type: table
+      columns:
+        - { field: drive, label: Drive }
+        - { field: protection, label: Protection, type: number }
+  explode:
+    - field: volumes
+      table: bitlocker_volumes
+      primary_key: [drive]
+      columns:
+        - { field: drive }
+        - { field: protection, type: integer }

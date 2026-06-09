@@ -1,0 +1,14 @@
+# Fires the registered `check-av-signature` job per-PC every 2 hours.
+# AV signature freshness moves faster than BitLocker state, so a
+# tighter cadence keeps the Health tab honest.
+#
+# Install (after `kanade job create configs/jobs/check-av-signature.yaml`):
+#   kanade schedule create configs/schedules/check-av-signature.yaml
+id: check-av-signature
+when:
+  per_pc: { every: 2h }
+enabled: true
+job_id: check-av-signature
+target:
+  all: true
+jitter: 5m
