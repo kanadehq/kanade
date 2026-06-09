@@ -1,0 +1,21 @@
+{
+  "title": "Compliance",
+  "description": "Fleet-wide status for operator-defined health checks. A check job (a Manifest with a `check:` hint) appears here automatically unless it sets `fleet: false`.",
+  "checkBadge_one": "{{count}} check",
+  "checkBadge_other": "{{count}} checks",
+  "loading": "Loading compliance…",
+  "errorTitle": "Failed to load compliance",
+  "empty": "No check results yet. Register a check: job and a schedule, then results land here as agents report in.",
+  "status": {
+    "ok": "OK",
+    "warn": "Warn",
+    "fail": "Fail",
+    "unknown": "Unknown"
+  },
+  "col": {
+    "pc": "PC",
+    "status": "Status",
+    "detail": "Detail",
+    "updated": "Updated"
+  }
+}
