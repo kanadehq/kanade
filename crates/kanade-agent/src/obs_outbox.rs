@@ -32,7 +32,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use kanade_shared::subject;
 use kanade_shared::wire::ObsEvent;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 use uuid::Uuid;
 
 const DRAIN_INTERVAL: Duration = Duration::from_secs(1);
@@ -163,7 +163,7 @@ async fn publish_one(js: &async_nats::jetstream::Context, path: &Path) -> Result
         .with_context(|| format!("ack timeout {subj} after {}s", ACK_TIMEOUT.as_secs()))?
         .with_context(|| format!("ack {subj}"))?;
     std::fs::remove_file(path).with_context(|| format!("remove {path:?}"))?;
-    info!(
+    debug!(
         pc_id = %event.pc_id,
         kind = %event.kind,
         source = %event.source,

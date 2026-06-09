@@ -431,7 +431,7 @@ pub async fn handle_command(
     };
     let outbox_dir = default_paths::data_dir().join("outbox");
     let path = outbox::enqueue(&outbox_dir, &result)?;
-    info!(
+    debug!(
         request_id = %cmd.request_id,
         exit_code,
         outbox = %path.display(),

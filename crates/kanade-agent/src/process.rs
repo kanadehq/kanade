@@ -11,7 +11,7 @@ use kanade_shared::wire::{Command, RunAs, Shell};
 use rand::RngExt;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command as ProcessCommand;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 /// #43: PowerShell console-encoding prelude. Lives in the
@@ -458,11 +458,11 @@ pub async fn run_command_with_kill(
             // Flush so the server has registered our SUB before any publish
             // can race past us.
             client.flush().await.ok();
-            info!(exec_id = %eid, subject = %kill_subject, "kill listener armed");
+            debug!(exec_id = %eid, subject = %kill_subject, "kill listener armed");
 
             tokio::select! {
                 status = child.wait() => {
-                    info!(exec_id = %eid, "child exited (wait arm fired)");
+                    debug!(exec_id = %eid, "child exited (wait arm fired)");
                     let s = status?;
                     OutcomeInner::Completed(s.code().unwrap_or(-1))
                 }
@@ -599,7 +599,7 @@ async fn run_in_user_session_dispatch(
                     Ok(mut sub) => {
                         // flush before await so the broker has SUB
                         nats.flush().await.ok();
-                        info!(exec_id = %eid, subject = %subject, "kill listener armed (user-session path)");
+                        debug!(exec_id = %eid, subject = %subject, "kill listener armed (user-session path)");
                         if sub.next().await.is_some() {
                             info!(exec_id = %eid, "kill received → forwarding to user-session waiter");
                             let _ = kill_tx.send(());

@@ -176,7 +176,7 @@ async fn publish_one(js: &async_nats::jetstream::Context, path: &Path) -> Result
         .with_context(|| format!("ack timeout {subj} after {}s", ACK_TIMEOUT.as_secs()))?
         .with_context(|| format!("ack {subj}"))?;
     std::fs::remove_file(path).with_context(|| format!("remove {path:?}"))?;
-    info!(
+    debug!(
         request_id = %result.request_id,
         subject = %subj,
         "outbox: result delivered + file removed",
