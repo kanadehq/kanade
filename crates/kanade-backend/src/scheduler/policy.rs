@@ -136,6 +136,60 @@ fn decide_once_per_target(
     FireAction::Skip
 }
 
+/// Bounded in-flight suppression layered on top of [`decide_fire`].
+///
+/// `decide_fire` arms purely on *completed* runs, so between dispatch
+/// and the completion landing in `execution_results` (agent-side
+/// `jitter` + run + outbox drain) the every-minute poll keeps seeing
+/// the PC/target as due and re-fires it each tick. This filter drops
+/// any PC (or the whole target) whose last *dispatch* is younger than
+/// `window` — long enough to cover that round-trip, short enough that a
+/// dispatch that never produced a completion (agent offline, command
+/// lost, `starting_deadline` skip) re-arms on its own once the window
+/// lapses. It deliberately suppresses *less* than the completion-based
+/// cooldown: the real cooldown takes back over the moment a completion
+/// is recorded.
+///
+/// Inputs are caller-resolved KV snapshots so this stays pure (and unit
+/// tested) like [`decide_fire`]:
+/// * `dispatched_pcs` — `pc_id → last dispatch instant` (OncePerPc).
+/// * `target_dispatched` — last whole-target dispatch (OncePerTarget).
+///
+/// Boundary mirrors the cooldown rule: elapsed `>= window` re-arms.
+pub fn suppress_dispatched(
+    action: FireAction,
+    dispatched_pcs: &HashMap<String, DateTime<Utc>>,
+    target_dispatched: Option<DateTime<Utc>>,
+    window: ChronoDuration,
+    now: DateTime<Utc>,
+) -> FireAction {
+    match action {
+        FireAction::Skip => FireAction::Skip,
+        FireAction::FireWholeTarget => match target_dispatched {
+            // Dispatched recently and the completion hasn't had time to
+            // land — hold off so the whole target isn't re-fired.
+            Some(t) if now.signed_duration_since(t) < window => FireAction::Skip,
+            _ => FireAction::FireWholeTarget,
+        },
+        FireAction::FirePcs(pcs) => {
+            let kept: Vec<String> = pcs
+                .into_iter()
+                .filter(|pc| match dispatched_pcs.get(pc) {
+                    // No recent dispatch (or it's older than the window)
+                    // ⇒ keep firing this pc.
+                    None => true,
+                    Some(t) => now.signed_duration_since(*t) >= window,
+                })
+                .collect();
+            if kept.is_empty() {
+                FireAction::Skip
+            } else {
+                FireAction::FirePcs(kept)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,5 +458,101 @@ mod tests {
             t(259),                          // 59s elapsed since b — still locked
         );
         assert_eq!(action, FireAction::Skip);
+    }
+
+    // ── suppress_dispatched: in-flight gate ──────────────────
+
+    fn marks(entries: &[(&str, i64)]) -> HashMap<String, DateTime<Utc>> {
+        entries
+            .iter()
+            .map(|(pc, secs)| ((*pc).into(), t(*secs)))
+            .collect()
+    }
+
+    #[test]
+    fn suppress_passes_skip_through() {
+        let action = suppress_dispatched(
+            FireAction::Skip,
+            &marks(&[("a", 0)]),
+            Some(t(0)),
+            ChronoDuration::seconds(60),
+            t(10),
+        );
+        assert_eq!(action, FireAction::Skip);
+    }
+
+    #[test]
+    fn suppress_drops_recently_dispatched_pcs() {
+        // a dispatched 10s ago (< 60s window) → suppressed; b never
+        // dispatched → kept.
+        let action = suppress_dispatched(
+            FireAction::FirePcs(pcs(&["a", "b"])),
+            &marks(&[("a", 100)]),
+            None,
+            ChronoDuration::seconds(60),
+            t(110),
+        );
+        assert_eq!(action, FireAction::FirePcs(pcs(&["b"])));
+    }
+
+    #[test]
+    fn suppress_all_pcs_in_flight_becomes_skip() {
+        let action = suppress_dispatched(
+            FireAction::FirePcs(pcs(&["a", "b"])),
+            &marks(&[("a", 100), ("b", 105)]),
+            None,
+            ChronoDuration::seconds(60),
+            t(110),
+        );
+        assert_eq!(action, FireAction::Skip);
+    }
+
+    #[test]
+    fn suppress_pc_window_boundary_rearms() {
+        // Dispatched at 100, now 160 → exactly 60s elapsed → re-armed.
+        let action = suppress_dispatched(
+            FireAction::FirePcs(pcs(&["a"])),
+            &marks(&[("a", 100)]),
+            None,
+            ChronoDuration::seconds(60),
+            t(160),
+        );
+        assert_eq!(action, FireAction::FirePcs(pcs(&["a"])));
+    }
+
+    #[test]
+    fn suppress_whole_target_recent_dispatch_skips() {
+        let action = suppress_dispatched(
+            FireAction::FireWholeTarget,
+            &HashMap::new(),
+            Some(t(100)),
+            ChronoDuration::seconds(60),
+            t(110), // 10s elapsed < 60s
+        );
+        assert_eq!(action, FireAction::Skip);
+    }
+
+    #[test]
+    fn suppress_whole_target_window_boundary_rearms() {
+        let action = suppress_dispatched(
+            FireAction::FireWholeTarget,
+            &HashMap::new(),
+            Some(t(100)),
+            ChronoDuration::seconds(60),
+            t(160), // exactly 60s
+        );
+        assert_eq!(action, FireAction::FireWholeTarget);
+    }
+
+    #[test]
+    fn suppress_whole_target_no_prior_dispatch_fires() {
+        let action = suppress_dispatched(
+            FireAction::FireWholeTarget,
+            &HashMap::new(),
+            None,
+            ChronoDuration::seconds(60),
+            t(0),
+        );
+        assert_eq!(action, FireAction::FireWholeTarget);
     }
 }

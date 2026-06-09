@@ -14,10 +14,15 @@ use std::time::Duration as StdDuration;
 
 use anyhow::{Context, Result};
 use async_nats::jetstream::kv::Operation;
-use chrono::{Duration as ChronoDuration, Local, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Local, Utc};
 use futures::{StreamExt, TryStreamExt};
-use kanade_shared::kv::{BUCKET_AGENT_GROUPS, BUCKET_SCHEDULES};
-use kanade_shared::manifest::{ExecMode, FanoutPlan, RunsOn, Schedule, ScheduleTz, Target, When};
+use kanade_shared::kv::{
+    BUCKET_AGENT_GROUPS, BUCKET_SCHEDULER_DISPATCH, BUCKET_SCHEDULES, dispatch_mark_pc_key,
+    dispatch_mark_target_key,
+};
+use kanade_shared::manifest::{
+    ExecMode, FanoutPlan, Manifest, RunsOn, Schedule, ScheduleTz, Target, When,
+};
 use sqlx::Row;
 use tokio::sync::Mutex;
 use tokio_cron_scheduler::{Job, JobScheduler};
@@ -26,13 +31,35 @@ use uuid::Uuid;
 
 use crate::api::AppState;
 use crate::api::exec::exec_manifest;
-use policy::{Completion, FireAction, decide_fire};
+use policy::{Completion, FireAction, decide_fire, suppress_dispatched};
 
 /// `last_heartbeat` slack used to define "alive" for target
 /// resolution. Matches the dashboard/health rollup cutoff so a
 /// schedule's view of "all" lines up with what operators see in
 /// the SPA.
 const ALIVE_THRESHOLD: ChronoDuration = ChronoDuration::minutes(2);
+
+/// Drain margin folded into the in-flight suppression window — slack
+/// for a finished run's `ExecResult` to travel agent outbox → backend
+/// projector → `execution_results` after the script itself returns.
+const DISPATCH_DRAIN_MARGIN: ChronoDuration = ChronoDuration::seconds(90);
+/// Floor for the suppression window so a zero-jitter, sub-second job
+/// still gets one poll tick of cover before it can re-fire.
+const DISPATCH_WINDOW_MIN: ChronoDuration = ChronoDuration::seconds(90);
+/// Ceiling for the suppression window. Past this the completion-based
+/// dedup is the backstop, so an outsized jitter/timeout can't mute a
+/// schedule indefinitely on the strength of a dispatch that may have
+/// gone nowhere.
+const DISPATCH_WINDOW_MAX: ChronoDuration = ChronoDuration::minutes(30);
+/// Bucket-wide TTL on dispatch marks. Comfortably larger than
+/// [`DISPATCH_WINDOW_MAX`] so a mark is never GC'd while still inside
+/// its suppression window, but small enough that the bucket self-trims.
+const DISPATCH_MARK_TTL: StdDuration = StdDuration::from_secs(60 * 60);
+/// Concurrency cap for the per-pc dispatch-mark KV reads/writes. A
+/// `target: all` OncePerPc fire can touch the whole fleet's worth of
+/// pcs; doing those NATS round-trips serially would stall the tick, so
+/// they run `buffer_unordered` up to this many at once (gemini #444).
+const DISPATCH_KV_CONCURRENCY: usize = 16;
 
 type Registered = Arc<Mutex<HashMap<String, Uuid>>>;
 
@@ -50,6 +77,33 @@ pub async fn run(state: AppState) -> Result<()> {
         })
         .await
         .context("ensure schedules KV")?;
+
+    // In-flight dispatch marks for bounded re-fire suppression. Best
+    // effort: if the bucket can't be provisioned, suppression simply
+    // degrades to the pre-existing completion-only dedup (which over-
+    // fires during the jitter/drain gap but is never wrong), so a KV
+    // hiccup must not take the scheduler down.
+    if let Err(e) = state
+        .jetstream
+        .create_key_value(async_nats::jetstream::kv::Config {
+            bucket: BUCKET_SCHEDULER_DISPATCH.into(),
+            history: 1,
+            max_age: DISPATCH_MARK_TTL,
+            ..Default::default()
+        })
+        .await
+    {
+        // `create_key_value` only errors when the bucket already exists
+        // with a *different* config (matching config is idempotent), or
+        // on a genuine provisioning failure. The former is benign — e.g.
+        // a future DISPATCH_MARK_TTL bump on an existing bucket: the
+        // bucket is still there, so the per-tick get/put below keep
+        // working (with the prior config) and suppression is unaffected.
+        // Only a true failure leaves the bucket absent, in which case the
+        // get_key_value calls fail open to the completion-only dedup.
+        // Either way, never take the scheduler down — just note it.
+        warn!(error = %e, "ensure scheduler_dispatch KV failed (benign if the bucket already exists with a prior config; a genuine failure falls back to completion-only dedup)");
+    }
 
     let sched = JobScheduler::new().await.context("init JobScheduler")?;
     sched.start().await.context("start JobScheduler")?;
@@ -299,7 +353,34 @@ async fn tick(state: &AppState, schedule: Schedule) {
         }
     };
 
-    let action = decide_fire(lowered.mode, cooldown, &expected, &completions, Utc::now());
+    let action = decide_fire(lowered.mode, cooldown, &expected, &completions, now);
+
+    // Layer bounded in-flight suppression on top of the completion-
+    // based decision: a PC (or the whole target) we already dispatched
+    // within `window` — but whose completion hasn't reached
+    // `execution_results` yet — stays muted, so the 1-minute POLL_CRON
+    // doesn't re-fire it every tick across the jitter + run + drain
+    // gap. Only the surviving subset reads its marks (cheap), and the
+    // window self-expires so a dispatch that produced no completion
+    // re-arms on its own.
+    let window = suppress_window(&schedule, &manifest);
+    let action = match action {
+        FireAction::Skip => FireAction::Skip,
+        FireAction::FireWholeTarget => {
+            let target_mark = read_target_dispatch_mark(state, &schedule_id).await;
+            suppress_dispatched(
+                FireAction::FireWholeTarget,
+                &HashMap::new(),
+                target_mark,
+                window,
+                now,
+            )
+        }
+        FireAction::FirePcs(pcs) => {
+            let marks = read_pc_dispatch_marks(state, &schedule_id, &pcs).await;
+            suppress_dispatched(FireAction::FirePcs(pcs), &marks, None, window, now)
+        }
+    };
 
     match action {
         FireAction::Skip => {
@@ -307,18 +388,21 @@ async fn tick(state: &AppState, schedule: Schedule) {
                 %schedule_id, when = %schedule.when,
                 expected = expected.len(),
                 completions = completions.len(),
-                "scheduler tick: dedup says skip",
+                "scheduler tick: dedup/in-flight says skip",
             );
         }
         FireAction::FireWholeTarget => {
-            dispatch(
+            if dispatch(
                 state,
                 &schedule_id,
                 manifest,
                 plan_for_dispatch(),
                 "OncePerTarget armed",
             )
-            .await;
+            .await
+            {
+                record_target_dispatch_mark(state, &schedule_id, now).await;
+            }
         }
         FireAction::FirePcs(pc_ids) => {
             let mut plan = plan_for_dispatch();
@@ -334,27 +418,189 @@ async fn tick(state: &AppState, schedule: Schedule) {
                 %schedule_id, pcs = pc_ids.len(),
                 "OncePerPc: firing at remaining pcs",
             );
-            dispatch(state, &schedule_id, manifest, plan, "OncePerPc subset").await;
+            if dispatch(state, &schedule_id, manifest, plan, "OncePerPc subset").await {
+                record_pc_dispatch_marks(state, &schedule_id, &pc_ids, now).await;
+            }
         }
     }
 }
 
+/// Returns `true` when the exec was accepted, so the caller can record
+/// the dispatch mark only for fires that actually went out — a rejected
+/// exec leaves the PC/target armed for the next tick.
 async fn dispatch(
     state: &AppState,
     schedule_id: &str,
-    manifest: kanade_shared::manifest::Manifest,
+    manifest: Manifest,
     plan: FanoutPlan,
     why: &str,
-) {
+) -> bool {
     match exec_manifest(state, manifest, plan, "scheduler", None).await {
-        Ok(resp) => info!(
-            %schedule_id, exec_id = %resp.exec_id, why,
-            "scheduler exec ok",
-        ),
-        Err((status, msg)) => warn!(
-            %schedule_id, status = %status, error = %msg, why,
-            "scheduler exec failed",
-        ),
+        Ok(resp) => {
+            info!(
+                %schedule_id, exec_id = %resp.exec_id, why,
+                "scheduler exec ok",
+            );
+            true
+        }
+        Err((status, msg)) => {
+            warn!(
+                %schedule_id, status = %status, error = %msg, why,
+                "scheduler exec failed",
+            );
+            false
+        }
+    }
+}
+
+/// In-flight suppression window for one schedule's dispatch marks —
+/// see [`policy::suppress_dispatched`]. Sized to cover the worst-case
+/// time from dispatch to a completion landing: agent-side `jitter` +
+/// the script's own `timeout` + [`DISPATCH_DRAIN_MARGIN`]. Clamped to
+/// `[DISPATCH_WINDOW_MIN, DISPATCH_WINDOW_MAX]` so a malformed or
+/// outsized humantime can't push it to either extreme.
+fn suppress_window(schedule: &Schedule, manifest: &Manifest) -> ChronoDuration {
+    let parse = |s: &str| {
+        humantime::parse_duration(s)
+            .ok()
+            .and_then(|d| ChronoDuration::from_std(d).ok())
+    };
+    let jitter = schedule
+        .plan
+        .jitter
+        .as_deref()
+        .and_then(parse)
+        .unwrap_or_else(ChronoDuration::zero);
+    let timeout = parse(&manifest.execute.timeout).unwrap_or_else(|| {
+        // `execute.timeout` is validated at job-create time, so this is
+        // effectively unreachable — but a malformed value silently
+        // collapsing the window to `jitter + margin` could let a
+        // long-running job re-fire mid-run, so make it detectable
+        // instead of failing quietly (claude #444).
+        warn!(
+            job_id = %manifest.id,
+            raw = %manifest.execute.timeout,
+            "suppress_window: unparseable timeout; treating as zero",
+        );
+        ChronoDuration::zero()
+    });
+    // checked_add: `from_std` already rejects out-of-range humantime, so
+    // overflow is unreachable in practice — but fall back to the ceiling
+    // rather than panic if some future input ever does overflow (gemini #444).
+    jitter
+        .checked_add(&timeout)
+        .and_then(|d| d.checked_add(&DISPATCH_DRAIN_MARGIN))
+        .map(|d| d.clamp(DISPATCH_WINDOW_MIN, DISPATCH_WINDOW_MAX))
+        .unwrap_or(DISPATCH_WINDOW_MAX)
+}
+
+/// Decode a dispatch mark (RFC3339 bytes). A missing / unparsable value
+/// is treated as "no mark" by the callers, which fails open to firing —
+/// the completion-based dedup stays the correctness backstop.
+fn parse_dispatch_mark(bytes: &[u8]) -> Option<DateTime<Utc>> {
+    let s = std::str::from_utf8(bytes).ok()?;
+    DateTime::parse_from_rfc3339(s.trim())
+        .ok()
+        .map(|dt| dt.with_timezone(&Utc))
+}
+
+/// Best-effort read of the per-pc dispatch marks for `pcs`. A missing
+/// bucket / key just yields no entry for that pc (→ not suppressed).
+async fn read_pc_dispatch_marks(
+    state: &AppState,
+    schedule_id: &str,
+    pcs: &[String],
+) -> HashMap<String, DateTime<Utc>> {
+    let Ok(kv) = state
+        .jetstream
+        .get_key_value(BUCKET_SCHEDULER_DISPATCH)
+        .await
+    else {
+        return HashMap::new();
+    };
+    // Run the per-pc gets concurrently — a `target: all` fleet can be
+    // thousands of pcs and serial round-trips would stall the tick
+    // (gemini #444).
+    futures::stream::iter(pcs.iter().cloned())
+        .map(|pc| {
+            let kv = kv.clone();
+            let key = dispatch_mark_pc_key(schedule_id, &pc);
+            async move {
+                let ts = match kv.get(&key).await {
+                    Ok(Some(bytes)) => parse_dispatch_mark(&bytes),
+                    _ => None,
+                };
+                (pc, ts)
+            }
+        })
+        .buffer_unordered(DISPATCH_KV_CONCURRENCY)
+        .filter_map(|(pc, ts)| async move { ts.map(|t| (pc, t)) })
+        .collect()
+        .await
+}
+
+/// Best-effort read of the whole-target dispatch mark.
+async fn read_target_dispatch_mark(state: &AppState, schedule_id: &str) -> Option<DateTime<Utc>> {
+    let kv = state
+        .jetstream
+        .get_key_value(BUCKET_SCHEDULER_DISPATCH)
+        .await
+        .ok()?;
+    let bytes = kv
+        .get(&dispatch_mark_target_key(schedule_id))
+        .await
+        .ok()??;
+    parse_dispatch_mark(&bytes)
+}
+
+/// Record per-pc dispatch marks after a OncePerPc fire actually went
+/// out. Best-effort: a failed write just means the next tick may
+/// re-fire (the prior, over-firing behavior) for that pc — never wrong,
+/// only chattier.
+async fn record_pc_dispatch_marks(
+    state: &AppState,
+    schedule_id: &str,
+    pcs: &[String],
+    at: DateTime<Utc>,
+) {
+    let Ok(kv) = state
+        .jetstream
+        .get_key_value(BUCKET_SCHEDULER_DISPATCH)
+        .await
+    else {
+        warn!(%schedule_id, "record dispatch marks: scheduler_dispatch KV unavailable");
+        return;
+    };
+    let val = at.to_rfc3339();
+    // Concurrent writes, same rationale as read_pc_dispatch_marks
+    // (gemini #444).
+    futures::stream::iter(pcs.iter().cloned())
+        .for_each_concurrent(DISPATCH_KV_CONCURRENCY, |pc| {
+            let kv = kv.clone();
+            let key = dispatch_mark_pc_key(schedule_id, &pc);
+            let val = val.clone();
+            async move {
+                if let Err(e) = kv.put(&key, val.into_bytes().into()).await {
+                    warn!(%schedule_id, pc, error = %e, "record dispatch mark failed");
+                }
+            }
+        })
+        .await;
+}
+
+/// Record the whole-target dispatch mark after a OncePerTarget fire.
+async fn record_target_dispatch_mark(state: &AppState, schedule_id: &str, at: DateTime<Utc>) {
+    let Ok(kv) = state
+        .jetstream
+        .get_key_value(BUCKET_SCHEDULER_DISPATCH)
+        .await
+    else {
+        warn!(%schedule_id, "record target dispatch mark: scheduler_dispatch KV unavailable");
+        return;
+    };
+    let key = dispatch_mark_target_key(schedule_id);
+    if let Err(e) = kv.put(&key, at.to_rfc3339().into_bytes().into()).await {
+        warn!(%schedule_id, error = %e, "record target dispatch mark failed");
     }
 }
 

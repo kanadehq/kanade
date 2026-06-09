@@ -32,6 +32,54 @@ pub const BUCKET_JOBS: &str = "jobs";
 pub const BUCKET_JOBS_YAML: &str = "jobs_yaml";
 pub const BUCKET_SCHEDULES_YAML: &str = "schedules_yaml";
 
+/// KV bucket holding **per-(schedule, pc) last-dispatch marks** for the
+/// backend scheduler's in-flight suppression.
+///
+/// The per-pc / per-target dedup ([`crate::manifest::ExecMode`]) only
+/// sees *completed* runs (`execution_results`, exit_code = 0). Since
+/// #418 the reconcile poll runs every minute ([`crate::manifest::POLL_CRON`]),
+/// but a dispatched Command doesn't land a completion until
+/// `jitter (agent-side) + run + outbox drain` later — frequently
+/// several minutes with a 3–5 min jitter. Without a dispatch record the
+/// poll re-fires the same PC (or whole target) every tick across that
+/// gap. This bucket records "I dispatched (schedule, pc) at T" so the
+/// scheduler can suppress re-fire for a bounded window without waiting
+/// on the completion round-trip.
+///
+/// Values are the dispatch instant as an RFC3339 string. A bucket-wide
+/// `max_age` GCs marks once they're well past any suppression window,
+/// so the bucket can't grow unbounded; the suppression-window check
+/// itself lives in `scheduler::policy::suppress_dispatched`.
+pub const BUCKET_SCHEDULER_DISPATCH: &str = "scheduler_dispatch";
+
+/// Per-pc dispatch-mark key (OncePerPc).
+///
+/// The `pc.` / `target.` kind prefix keeps the two namespaces apart,
+/// and each component is **length-prefixed** (`<len>.<value>`) so no two
+/// distinct `(schedule_id, pc_id)` pairs can ever collide — even when an
+/// id contains the `.` separator: `("a.b", "c")` → `pc.3.a.b.1.c`,
+/// `("a", "b.c")` → `pc.1.a.3.b.c`. (Percent-/base64-encoding isn't an
+/// option: NATS KV keys only allow `[-/_=.a-zA-Z0-9]`, so the
+/// self-delimiting length prefix is the cheapest injective encoding that
+/// stays in-charset.)
+pub fn dispatch_mark_pc_key(schedule_id: &str, pc_id: &str) -> String {
+    format!(
+        "pc.{}.{}.{}.{}",
+        schedule_id.len(),
+        schedule_id,
+        pc_id.len(),
+        pc_id
+    )
+}
+
+/// Whole-target dispatch-mark key (OncePerTarget). One key per
+/// schedule — a per-target fire dispatches the whole target at once, so
+/// there's nothing per-pc to record. Length-prefixed for symmetry with
+/// [`dispatch_mark_pc_key`].
+pub fn dispatch_mark_target_key(schedule_id: &str) -> String {
+    format!("target.{}.{}", schedule_id.len(), schedule_id)
+}
+
 /// Object Store bucket holding raw agent binaries (one object per
 /// version, e.g. `0.2.0` → file bytes).
 pub const OBJECT_AGENT_RELEASES: &str = "agent_releases";
@@ -192,6 +240,7 @@ mod tests {
             BUCKET_JOBS,
             BUCKET_JOBS_YAML,
             BUCKET_SCHEDULES_YAML,
+            BUCKET_SCHEDULER_DISPATCH,
             OBJECT_AGENT_RELEASES,
             OBJECT_APP_PACKAGES,
             OBJECT_SCRIPTS,
@@ -253,6 +302,44 @@ mod tests {
         let k = agent_config_pc_key("PC-01");
         assert_eq!(k, "pcs.PC-01");
         assert_eq!(parse_agent_config_pc_key(&k), Some("PC-01"));
+    }
+
+    #[test]
+    fn dispatch_mark_keys_are_distinct_by_kind() {
+        // The whole-target key for one schedule must never equal the
+        // per-pc key for another — the `pc.` / `target.` prefixes keep
+        // the two namespaces apart even when ids look alike.
+        let per_pc = dispatch_mark_pc_key("collect-winlog-events", "PC-01");
+        let target = dispatch_mark_target_key("collect-winlog-events");
+        assert_eq!(per_pc, "pc.21.collect-winlog-events.5.PC-01");
+        assert_eq!(target, "target.21.collect-winlog-events");
+        assert_ne!(per_pc, target);
+        // A schedule literally named "collect-winlog-events.PC-01"
+        // still can't collide with the per-pc key above.
+        assert_ne!(
+            dispatch_mark_target_key("collect-winlog-events.PC-01"),
+            per_pc,
+        );
+    }
+
+    #[test]
+    fn dispatch_mark_pc_key_has_no_dot_collision() {
+        // Length-prefixing makes the encoding injective: a dotted
+        // schedule_id can't borrow a leading segment from the pc_id (or
+        // vice versa) to forge a colliding key. (CodeRabbit / claude #444.)
+        assert_ne!(
+            dispatch_mark_pc_key("a.b", "c"),
+            dispatch_mark_pc_key("a", "b.c"),
+        );
+        assert_ne!(
+            dispatch_mark_pc_key("x", "y.z"),
+            dispatch_mark_pc_key("x.y", "z"),
+        );
+        // Same components, swapped roles — also distinct.
+        assert_ne!(
+            dispatch_mark_pc_key("foo", "bar"),
+            dispatch_mark_pc_key("bar", "foo"),
+        );
     }
 
     #[test]
