@@ -51,6 +51,9 @@ type ScheduleRow = {
   // Optional validity window; the key is absent when the schedule
   // has no window (Rust skips serialising the empty struct).
   active?: { from?: string; until?: string };
+  // #418 Phase 3: optional maintenance window "HH:MM-HH:MM"; key
+  // absent when no constraints are set.
+  constraints?: { window?: string };
   // #418 Phase 2: timezone for `when.at` + `active` bounds.
   tz: 'local' | 'utc';
   starting_deadline: string | null;
@@ -448,6 +451,11 @@ export function Schedules() {
               <DetailItem label={t('columns.active')}>
                 {summariseActive(selected.active)
                   ? <code className="text-xs">{summariseActive(selected.active)}</code>
+                  : <span className="text-muted text-xs">—</span>}
+              </DetailItem>
+              <DetailItem label={t('columns.window')}>
+                {selected.constraints?.window
+                  ? <code className="text-xs">{selected.constraints.window}</code>
                   : <span className="text-muted text-xs">—</span>}
               </DetailItem>
               <DetailItem label={t('columns.deadline')}>

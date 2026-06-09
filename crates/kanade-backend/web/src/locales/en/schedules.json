@@ -16,6 +16,7 @@
     "runsOn": "runs_on",
     "tz": "tz",
     "active": "active",
+    "window": "window",
     "deadline": "deadline",
     "jitter": "jitter",
     "rollout": "rollout",

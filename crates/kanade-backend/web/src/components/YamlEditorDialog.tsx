@@ -69,7 +69,9 @@ when:
 job_id: my-job
 target:
   all: true
-# tz: local   # local (default) | utc — applies to calendar at + active window
+# tz: local   # local (default) | utc — applies to calendar at + active + window
+# constraints:
+#   window: "22:00-05:00"   # only fire within this wall-clock window (in tz)
 enabled: true
 `;
 

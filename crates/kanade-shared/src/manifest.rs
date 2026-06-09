@@ -1399,7 +1399,10 @@ constraints:
     fn validate_rejects_bad_window() {
         for bad in ["9-5", "22:00", "22:00-22:00", "25:00-05:00", "09:00_17:00"] {
             let err = with_window(bad).validate().unwrap_err();
-            assert!(err.contains("constraints.window"), "for '{bad}', got: {err}");
+            assert!(
+                err.contains("constraints.window"),
+                "for '{bad}', got: {err}"
+            );
         }
     }
 
@@ -2130,9 +2133,9 @@ impl Constraints {
     /// error (a zero-width or all-day window is ambiguous — write no
     /// window for "always").
     pub fn parse_window(s: &str) -> Result<(chrono::NaiveTime, chrono::NaiveTime), String> {
-        let (a, b) = s.split_once('-').ok_or_else(|| {
-            format!("constraints.window: '{s}' must be 'HH:MM-HH:MM'")
-        })?;
+        let (a, b) = s
+            .split_once('-')
+            .ok_or_else(|| format!("constraints.window: '{s}' must be 'HH:MM-HH:MM'"))?;
         let parse = |part: &str| {
             chrono::NaiveTime::parse_from_str(part.trim(), "%H:%M")
                 .map_err(|e| format!("constraints.window: invalid time '{}': {e}", part.trim()))

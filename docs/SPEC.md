@@ -690,11 +690,29 @@ active:
 > される（Phase 1 は UTC 固定だった）。秒単位まで厳密に切りたい時は
 > RFC3339（`2026-07-01T00:00:00+09:00`）で書く。
 
+**`constraints.window`（メンテナンス窓・Phase 3）** — `active`（いつまで
+有効か）とは別軸で、**毎日のどの時間帯に発火を許すか**を `"HH:MM-HH:MM"`
+で指定。窓外の tick はスキップ。`tz` で評価（`active`/calendar `at` と
+同じ）。`start > end` は日跨ぎ（`"22:00-05:00"` = 22 時〜翌 5 時）。主に
+reconcile 巡回（「6h ごとだが発火は夜間だけ」）や日中の変更凍結向け:
+
+```yaml
+when:
+  per_pc: { every: 6h }
+tz: local
+constraints:
+  window: "22:00-05:00"   # 夜間のみ発火（agent ローカル時刻）
+```
+
+> `constraints:` は将来の `require`（端末状態ゲート idle/AC/network）や
+> `max_concurrent`（同時実行上限）も入る名前空間。現状は `window` のみ。
+
 `Schedule::validate()`（`Manifest::validate()` と対称）が create 時
 （CLI / `POST /api/schedules` の両方）に検査する: `runs_on: agent`
 + `per_target` / 不正な `every` (humantime) / 不正な calendar `at`
-（範囲外・日時 at と days の併用） / 未登録 `job_id`（API のみ・
-JOBS KV 照会）/ `active.from >= until`。
+（範囲外・日時 at と days の併用） / 不正な `constraints.window`
+（書式・始端=終端）/ 未登録 `job_id`（API のみ・JOBS KV 照会）/
+`active.from >= until`。
 
 ### 2.4.4 Agent / Backend 設定ファイル (TOML + teravars 変数展開)
 
