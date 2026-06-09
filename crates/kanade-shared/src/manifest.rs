@@ -1407,6 +1407,24 @@ constraints:
     }
 
     #[test]
+    fn window_fail_closed_on_corrupt_blob() {
+        // A malformed window (only reachable via a hand-edited KV
+        // blob — validate() rejects it at create) must BLOCK, not
+        // silently allow fires during a change-freeze (gemini #452).
+        let s = with_window("22:00_05:00");
+        assert!(
+            !s.constraints.allows(chrono::Utc::now(), ScheduleTz::Utc),
+            "corrupt window fails closed"
+        );
+        // …and the scheduler can surface why it's stuck.
+        assert!(
+            s.bad_window().is_some(),
+            "bad_window reports the parse error"
+        );
+        assert!(with_window("22:00-05:00").bad_window().is_none());
+    }
+
+    #[test]
     fn shipped_schedule_configs_parse_and_validate() {
         // Every YAML under configs/schedules/ must parse with the
         // current Schedule serde AND pass validate() — keeps the
@@ -2151,15 +2169,23 @@ impl Constraints {
 
     /// Is a fire allowed at `now` (evaluated in `tz`)? No window =
     /// always allowed. Half-open `[start, end)`; `start > end`
-    /// crosses midnight. Fail-open on an unparseable window — the
-    /// tick path must never panic on a stale KV blob;
-    /// [`Schedule::validate`] is where bad windows are rejected.
+    /// crosses midnight.
+    ///
+    /// **Fail-closed** on an unparseable window (returns `false`,
+    /// gemini #452 review): a window is a *restrictive* constraint
+    /// (change-freeze / overnight-only), so a corrupt one must NOT
+    /// silently allow fires during the restricted hours. Bad windows
+    /// are rejected at create time by [`Schedule::validate`]; this
+    /// only bites a hand-edited KV blob, where blocking is the safe
+    /// direction. The scheduler warns at register time
+    /// ([`Schedule::bad_window`]) so a stuck schedule is diagnosable.
+    /// The tick path never panics regardless.
     pub fn allows(&self, now: chrono::DateTime<chrono::Utc>, tz: ScheduleTz) -> bool {
         let Some(w) = self.window.as_deref() else {
             return true;
         };
         let Ok((start, end)) = Self::parse_window(w) else {
-            return true;
+            return false;
         };
         let t = tz.wall_time(now);
         if start <= end {
@@ -2199,6 +2225,15 @@ pub struct Lowered {
 }
 
 impl Schedule {
+    /// The error message if this schedule's `constraints.window` is
+    /// set but unparseable, else `None`. The scheduler logs this at
+    /// register time so a fail-closed (never-firing) schedule from a
+    /// hand-edited KV blob is diagnosable (gemini #452 review).
+    pub fn bad_window(&self) -> Option<String> {
+        let w = self.constraints.window.as_deref()?;
+        Constraints::parse_window(w).err()
+    }
+
     /// Lower the operator-facing `when` onto the engine vocabulary.
     /// Single seam shared by the backend scheduler and the agent's
     /// local scheduler so the two can never drift.

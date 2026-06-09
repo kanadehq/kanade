@@ -775,6 +775,15 @@ async fn reconcile_schedule(
             }
         }
     }
+    // A corrupt constraints.window fails closed — warn so the stuck
+    // schedule is diagnosable (gemini #452 review).
+    if let Some(err) = schedule.bad_window() {
+        warn!(
+            schedule_id = %schedule_id,
+            %err,
+            "local_scheduler: constraints.window unparseable — blocked (fail-closed) until fixed",
+        );
+    }
 }
 
 async fn unregister_locally(internal: &JobScheduler, state: &Arc<Mutex<State>>, schedule_id: &str) {

@@ -202,6 +202,15 @@ async fn register(
             }
         }
     }
+    // A corrupt constraints.window fails closed (never fires) — warn
+    // so the stuck schedule is diagnosable (gemini #452 review).
+    if let Some(err) = schedule.bad_window() {
+        warn!(
+            schedule_id = %schedule.id,
+            %err,
+            "constraints.window is unparseable — schedule blocked (fail-closed) until fixed",
+        );
+    }
     Ok(())
 }
 
