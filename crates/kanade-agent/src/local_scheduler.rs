@@ -168,6 +168,7 @@ pub fn spawn(
     groups_rx: tokio::sync::watch::Receiver<Vec<String>>,
     staleness: crate::staleness::Tracker,
     script_cache: ScriptCache,
+    check_sink: crate::check_cache::CheckSink,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         run(
@@ -177,6 +178,7 @@ pub fn spawn(
             groups_rx,
             staleness,
             script_cache,
+            check_sink,
         )
         .await;
     })
@@ -189,6 +191,7 @@ async fn run(
     groups_rx: tokio::sync::watch::Receiver<Vec<String>>,
     staleness: crate::staleness::Tracker,
     script_cache: ScriptCache,
+    check_sink: crate::check_cache::CheckSink,
 ) {
     let js = async_nats::jetstream::new(client.clone());
 
@@ -233,6 +236,7 @@ async fn run(
         internal.clone(),
         state.clone(),
         script_cache.clone(),
+        check_sink.clone(),
     );
 
     // Outer reconnect loop. Owns schedules_kv + jobs_kv handles and
@@ -291,6 +295,7 @@ async fn run(
             &my_groups,
             &staleness,
             &script_cache,
+            &check_sink,
             new_jobs,
             new_schedules,
         )
@@ -330,7 +335,7 @@ async fn run(
                         Operation::Put => {
                             if let Ok(s) = serde_json::from_slice::<Schedule>(&entry.value) {
                                 reconcile_schedule(
-                                    &internal, &state, &client, &pc_id, &groups_snapshot, &s, &staleness, &script_cache,
+                                    &internal, &state, &client, &pc_id, &groups_snapshot, &s, &staleness, &script_cache, &check_sink,
                                 )
                                 .await;
                             } else {
@@ -460,6 +465,7 @@ async fn apply_resync(
     my_groups: &[String],
     staleness: &crate::staleness::Tracker,
     script_cache: &ScriptCache,
+    check_sink: &crate::check_cache::CheckSink,
     new_jobs: HashMap<String, Manifest>,
     new_schedules: Vec<Schedule>,
 ) {
@@ -549,6 +555,7 @@ async fn apply_resync(
             s,
             staleness,
             script_cache,
+            check_sink,
         )
         .await;
     }
@@ -576,6 +583,7 @@ fn spawn_groups_change_task(
     internal: JobScheduler,
     state: Arc<Mutex<State>>,
     script_cache: ScriptCache,
+    check_sink: crate::check_cache::CheckSink,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let js = async_nats::jetstream::new(client.clone());
@@ -635,6 +643,7 @@ fn spawn_groups_change_task(
                     s,
                     &staleness,
                     &script_cache,
+                    &check_sink,
                 )
                 .await;
             }
@@ -675,6 +684,7 @@ async fn reconcile_schedule(
     schedule: &Schedule,
     staleness: &crate::staleness::Tracker,
     script_cache: &ScriptCache,
+    check_sink: &crate::check_cache::CheckSink,
 ) {
     let mut st = state.lock().await;
     let mine = st.matching(schedule, pc_id, my_groups);
@@ -707,6 +717,7 @@ async fn reconcile_schedule(
     let schedule_for_job = schedule.clone();
     let staleness_for_job = staleness.clone();
     let script_cache_for_job = script_cache.clone();
+    let check_sink_for_job = check_sink.clone();
     let cb = move |_uuid, _l| {
         let client = client_for_job.clone();
         let pc_id = pc_id_for_job.clone();
@@ -714,6 +725,7 @@ async fn reconcile_schedule(
         let schedule = schedule_for_job.clone();
         let staleness = staleness_for_job.clone();
         let script_cache = script_cache_for_job.clone();
+        let check_sink = check_sink_for_job.clone();
         Box::pin(async move {
             local_tick(
                 &client,
@@ -722,6 +734,7 @@ async fn reconcile_schedule(
                 &schedule,
                 &staleness,
                 &script_cache,
+                &check_sink,
             )
             .await;
         }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
@@ -799,6 +812,7 @@ async fn local_tick(
     schedule: &Schedule,
     staleness: &crate::staleness::Tracker,
     script_cache: &ScriptCache,
+    check_sink: &crate::check_cache::CheckSink,
 ) {
     // 0) Dormant outside the optional `active.{from,until}` window
     //    (#418 decision G) — mirrors the backend scheduler's gate so
@@ -965,6 +979,9 @@ async fn local_tick(
         // so the agent routes stdout NDJSON to obs-outbox on fire.
         // Same forward rationale as `staleness` — no manifest re-fetch.
         emit: manifest.emit.clone(),
+        // #290: forward the check hint so an agent-scheduled
+        // (`runs_on: agent`) check job still feeds the Health tab.
+        check: manifest.check.clone(),
     };
 
     let js = async_nats::jetstream::new(client.clone());
@@ -989,6 +1006,7 @@ async fn local_tick(
         script_status,
         staleness.clone(),
         script_cache.clone(),
+        check_sink.clone(),
     )
     .await
     {

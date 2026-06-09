@@ -66,6 +66,7 @@ pub async fn command_loop(
     staleness: Tracker,
     mut sub: async_nats::Subscriber,
     script_cache: ScriptCache,
+    check_sink: crate::check_cache::CheckSink,
 ) {
     let jetstream = async_nats::jetstream::new(client.clone());
     let script_current = jetstream.get_key_value(BUCKET_SCRIPT_CURRENT).await.ok();
@@ -107,9 +108,19 @@ pub async fn command_loop(
         let sta = script_status.clone();
         let staleness = staleness.clone();
         let script_cache = script_cache.clone();
+        let check_sink = check_sink.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                handle_command(client, pc_id, cmd, cur, sta, staleness, script_cache).await
+            if let Err(e) = handle_command(
+                client,
+                pc_id,
+                cmd,
+                cur,
+                sta,
+                staleness,
+                script_cache,
+                check_sink,
+            )
+            .await
             {
                 error!(error = %e, "command handler failed");
             }
@@ -117,6 +128,7 @@ pub async fn command_loop(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_command(
     client: async_nats::Client,
     pc_id: String,
@@ -125,6 +137,7 @@ pub async fn handle_command(
     script_status: Option<Store>,
     staleness: Tracker,
     script_cache: ScriptCache,
+    check_sink: crate::check_cache::CheckSink,
 ) -> Result<()> {
     // Spec §2.6 Layer 2: version-pinning + revoke check + v0.26
     // staleness policy. The order matters:
@@ -339,6 +352,24 @@ pub async fn handle_command(
         Some(note) => format!("{stderr}\n{note}"),
         None => stderr,
     };
+
+    // #290: if this job is an operator-defined health check, map its
+    // result into the KLP `StateSnapshot.checks` for the Client App's
+    // Health tab. Done HERE — before the `emit` branch below can blank
+    // `stdout` — so a check always reads the real script output even
+    // if a (validation-prevented) `emit:` somehow rode along. On a
+    // clean exit the status comes from the stdout object; a non-zero
+    // exit records `Unknown` (with the exit code + stderr) rather than
+    // leaving a stale `Ok`, so a persistently-crashing check can't read
+    // as healthy.
+    if let Some(check_hint) = &cmd.check {
+        let check = if exit_code == 0 {
+            crate::check_cache::build_check(check_hint, &stdout)
+        } else {
+            crate::check_cache::build_check_failed(check_hint, exit_code, &stderr)
+        };
+        check_sink.record(check);
+    }
 
     // Issue #246: if the manifest is an event emitter, parse stdout
     // as NDJSON `ObsEvent` and route each line to obs_outbox.

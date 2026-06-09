@@ -79,6 +79,8 @@ pub async fn execute(client: async_nats::Client, args: RunArgs) -> Result<()> {
         // Issue #246: no Manifest → no emit hint. Stdout flows
         // back via ExecResult unchanged.
         emit: None,
+        // #290: ad-hoc inline run is never a check.
+        check: None,
     };
 
     let result_subj = subject::results(&request_id);
