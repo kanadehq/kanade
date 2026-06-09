@@ -60,7 +60,7 @@ rand               = "0.10"
 # reject. Pinned `=` to the version tokio-cron-scheduler 0.15.1
 # already pulls transitively — one copy in the tree, no skew.
 croner             = "=3.0.1"
-regex              = "1.12.3"
+regex              = "1.12.4"
 axum               = { version = "0.8.9", features = ["multipart"] }
 sqlx               = { version = "0.9.0", features = ["runtime-tokio", "sqlite", "macros", "chrono", "migrate"] }
 tower              = "0.5.3"
