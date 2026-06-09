@@ -88,6 +88,61 @@ ul.checks {
   color: #777;
 }
 
+/* Remediation run rows (#291): one per jobs.execute, updated live by
+   jobs.progress pushes. */
+.run-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  padding: 8px 0;
+  border-top: 1px solid #eee;
+}
+
+.run-row:first-child {
+  border-top: 0;
+}
+
+.run-icon {
+  flex: 0 0 auto;
+}
+
+.run-name {
+  font-weight: 500;
+}
+
+.run-status {
+  flex: 1 1 auto;
+}
+
+.kill-btn {
+  margin-left: auto;
+  padding: 4px 10px;
+  font-size: 13px;
+}
+
+.run-output {
+  flex: 1 0 100%;
+  margin: 4px 0 0;
+  padding: 8px;
+  max-height: 160px;
+  overflow: auto;
+  background: #f4f4f4;
+  border-radius: 4px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.run-row.status-completed .run-status {
+  color: #2e7d32;
+}
+
+.run-row.status-failed .run-status,
+.run-row.status-killed .run-status {
+  color: #b00020;
+}
+
 section {
   padding: 16px;
   margin-bottom: 12px;
@@ -159,5 +214,18 @@ button:hover {
   }
   .status-unknown .check-name {
     color: #aaa;
+  }
+  .run-row {
+    border-color: #3a3a3a;
+  }
+  .run-output {
+    background: #1e1e1e;
+  }
+  .run-row.status-completed .run-status {
+    color: #7cc47f;
+  }
+  .run-row.status-failed .run-status,
+  .run-row.status-killed .run-status {
+    color: #ff6b6b;
   }
 }
