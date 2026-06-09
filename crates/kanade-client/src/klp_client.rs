@@ -1,36 +1,52 @@
 //! Client-side KLP transport — Named Pipe client + framed JSON-RPC.
 //!
-//! Owned by the Tauri runtime (one [`KlpClient`] per app
-//! instance, shared via `tauri::State`). On startup, [`connect`]
-//! opens the agent's Named Pipe (`\\.\pipe\kanade-agent`), runs
-//! the SPEC §2.12.6 handshake, and stashes the
-//! [`HandshakeResult`] for the UI to read. Subsequent
-//! request/response calls (e.g. `system.ping`) go through
-//! [`KlpClient::request`], which generates a UUID v7 id,
-//! correlates the response, and decodes the result into the
-//! caller's typed struct.
+//! Owned by the Tauri runtime (one [`KlpClient`] per app instance,
+//! shared via `tauri::State`). On startup, [`KlpClient::connect`]
+//! opens the agent's Named Pipe (`\\.\pipe\kanade-agent`), runs the
+//! SPEC §2.12.6 handshake, then **splits the pipe** into a write half
+//! (guarded by a mutex for serialised sends) and a read half owned by
+//! a permanent reader task.
 //!
-//! Push notifications (`state.changed` etc.) land in a follow-up
-//! PR — this skeleton only does the request/response side. The
-//! reader half is consumed inline on each `request` call; a
-//! future split into a permanent reader task will demultiplex
-//! responses + notifications.
+//! # Reader-task demultiplex
+//!
+//! The agent interleaves two kinds of agent→client frames on one pipe
+//! (SPEC §2.12.3): correlated `Response`s and unsolicited push
+//! `Notification`s (`jobs.progress`, `state.changed`, …). The reader
+//! task reads every frame and routes it:
+//!
+//! - `Response` → the matching in-flight [`KlpClient::request`] call,
+//!   looked up by id in the `pending` map and delivered over a
+//!   oneshot.
+//! - `Notification` → the `notifications` broadcast, which the Tauri
+//!   layer forwards to the WebView as an event (see
+//!   [`KlpClient::subscribe`]).
+//!
+//! This split is what lets pushes arrive while the app is idle (the
+//! old inline-read model only read the pipe during a request, so a
+//! `jobs.progress` between requests was invisible) and lets concurrent
+//! requests multiplex over the one pipe (each correlates its own id
+//! instead of assuming the next frame is its reply).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use kanade_shared::ipc::envelope::{
-    JSONRPC_VERSION, RpcMessage, RpcRequest, RpcResponse, RpcResponsePayload,
+    JSONRPC_VERSION, RpcMessage, RpcNotification, RpcRequest, RpcResponse, RpcResponsePayload,
 };
 use kanade_shared::ipc::handshake::{HandshakeParams, HandshakeResult, PROTOCOL_V1};
+use kanade_shared::ipc::jobs::{
+    JobsExecuteParams, JobsExecuteResult, JobsKillParams, JobsKillResult, JobsListParams,
+    JobsListResult,
+};
 use kanade_shared::ipc::method;
 use kanade_shared::ipc::state::{StateSnapshot, StateSnapshotParams};
 use kanade_shared::ipc::system::{PingParams, PingResult};
 use serde::{Serialize, de::DeserializeOwned};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, WriteHalf, split};
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
-use tokio::sync::Mutex;
-use tracing::{debug, info};
+use tokio::sync::{Mutex, broadcast, oneshot};
+use tracing::{debug, info, warn};
 
 /// SPEC §2.12.1 — the well-known Named Pipe the agent listens on.
 const PIPE_NAME: &str = r"\\.\pipe\kanade-agent";
@@ -38,35 +54,78 @@ const PIPE_NAME: &str = r"\\.\pipe\kanade-agent";
 /// SPEC §2.12.2 — 4-byte LE length prefix; 1 MiB cap.
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
+/// Bounded capacity of the push-notification broadcast. A slow
+/// WebView subscriber that falls this far behind drops the oldest
+/// notifications (broadcast lag) rather than stalling the reader task
+/// — progress UX, not a transactional stream.
+const NOTIFICATION_CAPACITY: usize = 256;
+
 /// Client-side product identifier sent in the handshake. Surfaced
 /// in the agent's audit log + tracing spans (SPEC §2.12.12).
 const CLIENT_NAME: &str = "kanade-client";
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Shared KLP connection. Wraps the raw pipe in an `Arc<Mutex<…>>`
-/// so the Tauri commands invoked concurrently by the WebView each
-/// serialise their request/response round-trip — the request side
-/// generates a unique id and reads back the single matching
-/// frame; multiplexing concurrent requests requires the reader-
-/// task split that lands with push subscriptions later.
+/// In-flight request registry: request id → the oneshot the reader
+/// task fulfils when the matching `Response` arrives.
+///
+/// `std::sync::Mutex` (not the tokio one used for `write`): it only
+/// ever guards fast in-memory `HashMap` ops — never held across an
+/// await — so a sync mutex is both correct and lets [`PendingGuard`]
+/// clean up a cancelled request from inside `Drop` (a tokio mutex
+/// can't be locked synchronously there).
+type Pending = Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<RpcResponse>>>>;
+
+/// RAII cleanup for one in-flight request's `pending` entry. Removes
+/// the id on drop — whether the request completed, errored, or its
+/// future was cancelled (dropped before the response arrived) — so a
+/// cancelled or write-failed request can't leak its `oneshot::Sender`
+/// in the map until the connection closes. A successful response was
+/// already removed by the reader, so the drop-time removal is then a
+/// harmless no-op.
+struct PendingGuard {
+    pending: Pending,
+    id: String,
+}
+
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        self.pending.lock().unwrap().remove(&self.id);
+    }
+}
+
+/// Shared KLP connection. Cheap to clone (everything behind `Arc`),
+/// so each Tauri command clones it out of `AppState` and runs its
+/// round-trip without holding the app-state mutex across the await.
 #[derive(Clone)]
 pub struct KlpClient {
-    inner: Arc<Mutex<NamedPipeClient>>,
+    /// Write half of the split pipe. Mutex-guarded so concurrent
+    /// requests serialise their frame writes (a half-written frame
+    /// would desync the agent's reader).
+    write: Arc<Mutex<WriteHalf<NamedPipeClient>>>,
+    /// In-flight requests awaiting a correlated response.
+    pending: Pending,
+    /// Cached handshake result (one-shot per connection).
     handshake: Arc<HandshakeResult>,
+    /// Push-notification fan-out. The reader task is the sole sender;
+    /// the Tauri layer subscribes and forwards to the WebView.
+    notifications: broadcast::Sender<RpcNotification>,
 }
 
 impl KlpClient {
-    /// Open the pipe, run the SPEC §2.12.6 handshake, and return a
-    /// ready client. Bubbles up the underlying error so the Tauri
-    /// `setup` callback can surface a clear "agent not running"
-    /// banner if the pipe isn't there yet.
+    /// Open the pipe, run the SPEC §2.12.6 handshake, split the pipe,
+    /// and spawn the reader task. Bubbles up the underlying error so
+    /// the Tauri `setup` callback can surface a clear "agent not
+    /// running" banner if the pipe isn't there yet.
     pub async fn connect() -> Result<Self> {
-        let pipe = ClientOptions::new()
+        let mut pipe = ClientOptions::new()
             .open(PIPE_NAME)
             .with_context(|| format!("open Named Pipe {PIPE_NAME}"))?;
         info!(pipe = PIPE_NAME, "KLP client: pipe connected");
 
-        let mut pipe = pipe;
+        // Handshake inline on the un-split pipe — it's the one
+        // strictly-ordered request/response exchange (must complete
+        // before any push can arrive), so the reader task only takes
+        // over afterwards.
         let handshake = handshake(&mut pipe).await.context("KLP handshake")?;
         info!(
             agent_version = %handshake.agent_version,
@@ -76,9 +135,16 @@ impl KlpClient {
             "KLP client: handshake complete",
         );
 
+        let (read, write) = split(pipe);
+        let pending: Pending = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let (notifications, _) = broadcast::channel(NOTIFICATION_CAPACITY);
+        tokio::spawn(reader_loop(read, pending.clone(), notifications.clone()));
+
         Ok(Self {
-            inner: Arc::new(Mutex::new(pipe)),
+            write: Arc::new(Mutex::new(write)),
+            pending,
             handshake: Arc::new(handshake),
+            notifications,
         })
     }
 
@@ -89,67 +155,81 @@ impl KlpClient {
         self.handshake.clone()
     }
 
-    /// Round-trip one request through the pipe. Mints a UUID v7
-    /// id, writes the frame, reads back the response, validates
-    /// the id correlates, and decodes the result.
+    /// Subscribe to agent→client push notifications (`jobs.progress`,
+    /// `state.changed`, …). The Tauri layer drains this and re-emits
+    /// each notification to the WebView as a `klp://notification`
+    /// event. A subscriber only receives notifications sent *after*
+    /// it subscribes (broadcast semantics) — subscribe right after
+    /// `connect` so no early progress is missed.
+    pub fn subscribe(&self) -> broadcast::Receiver<RpcNotification> {
+        self.notifications.subscribe()
+    }
+
+    /// Round-trip one request through the pipe. Mints a UUID id,
+    /// registers a pending waiter, writes the frame, and awaits the
+    /// reader task's correlated response.
     ///
-    /// `params` is the typed request payload; `R` is the
-    /// per-method result struct (e.g. [`PingResult`]).
+    /// `params` is the typed request payload; `R` is the per-method
+    /// result struct (e.g. [`PingResult`]).
     pub async fn request<P: Serialize, R: DeserializeOwned>(
         &self,
         method: &str,
         params: &P,
     ) -> Result<R> {
-        // SPEC §2.12.3 prefers UUID v7 (time-sortable, easier
-        // log correlation); the workspace's `uuid` feature set
-        // doesn't enable v7 today so we use v4. Switch when the
-        // workspace pin grows the `v7` feature.
+        // SPEC §2.12.3 prefers UUID v7 (time-sortable, easier log
+        // correlation); the workspace's `uuid` feature set doesn't
+        // enable v7 today so we use v4. Switch when the workspace pin
+        // grows the `v7` feature.
         let id = uuid::Uuid::new_v4().to_string();
         let req = RpcRequest::new(&id, method, params).context("encode KLP request")?;
         let body = serde_json::to_vec(&req).context("serialise KLP request")?;
 
-        let mut pipe = self.inner.lock().await;
-        write_frame(&mut *pipe, &body)
-            .await
-            .context("write frame")?;
-
-        // Read until we get a Response. An interleaved push
-        // notification (state.changed once that handler is
-        // active, etc.) would otherwise desync the pipe — we'd
-        // bail with the response still in the buffer, and every
-        // subsequent request would correlate the wrong frame.
-        // Per-Response unsolicited messages from the agent are
-        // spec-legal (SPEC §2.12.3); skip them and keep reading.
-        let resp = loop {
-            let resp_bytes = read_frame(&mut *pipe).await.context("read frame")?;
-            let msg: RpcMessage =
-                serde_json::from_slice(&resp_bytes).context("decode KLP response envelope")?;
-            match msg {
-                RpcMessage::Response(resp) => break resp,
-                RpcMessage::Notification(notif) => {
-                    debug!(method = %notif.method, "klp_client: skipping unsolicited notification");
-                    continue;
-                }
-                RpcMessage::Request(_) => bail!("agent sent a Request, expected Response"),
-            }
+        // Register the waiter BEFORE writing so a fast reply can't
+        // arrive before we're listening for it.
+        let rx = {
+            let (tx, rx) = oneshot::channel();
+            self.pending.lock().unwrap().insert(id.clone(), tx);
+            rx
         };
-        drop(pipe);
+        // From here on, any early return / cancellation removes the
+        // pending entry (no leaked sender). The reader removes it on a
+        // successful delivery, making this drop a no-op then.
+        let _guard = PendingGuard {
+            pending: self.pending.clone(),
+            id: id.clone(),
+        };
 
-        if resp.id.as_deref() != Some(id.as_str()) {
-            bail!("response id mismatch: expected {id:?}, got {:?}", resp.id);
-        }
+        // Write under the (async) write lock, then release it before
+        // awaiting the response so the next request can write while
+        // this one waits.
+        let write_result = {
+            let mut writer = self.write.lock().await;
+            write_frame(&mut *writer, &body).await
+        };
+        write_result.context("write frame")?;
+
+        // The reader task delivers the id-matched response (or drops
+        // the sender on disconnect, which surfaces as RecvError).
+        //
+        // TODO(#469): no per-request deadline — if the agent keeps the
+        // connection alive but never replies to THIS id (an agent bug),
+        // this awaits forever. A `tokio::time::timeout` wrapper would
+        // bound it; deferred since every v1 handler replies promptly
+        // and a disconnect already unblocks via RecvError.
+        let resp = rx
+            .await
+            .map_err(|_| anyhow::anyhow!("KLP connection closed before response (id {id})"))?;
         decode_response::<R>(resp)
     }
 
-    /// Convenience wrapper for `system.ping`. Returned to the
-    /// Tauri `ping_agent` command verbatim.
+    /// Convenience wrapper for `system.ping`.
     pub async fn ping(&self) -> Result<PingResult> {
         self.request::<PingParams, PingResult>(method::SYSTEM_PING, &PingParams::default())
             .await
     }
 
-    /// Convenience wrapper for `state.snapshot` — the full endpoint
-    /// health bundle the Client App's Health tab renders (#290).
+    /// `state.snapshot` — the full endpoint health bundle the Health
+    /// tab renders (#290).
     pub async fn snapshot(&self) -> Result<StateSnapshot> {
         self.request::<StateSnapshotParams, StateSnapshot>(
             method::STATE_SNAPSHOT,
@@ -157,6 +237,94 @@ impl KlpClient {
         )
         .await
     }
+
+    /// `jobs.list` — the user-invokable job catalog for the three job
+    /// tabs (#291). `params.category` narrows to one tab.
+    pub async fn jobs_list(&self, params: &JobsListParams) -> Result<JobsListResult> {
+        self.request::<JobsListParams, JobsListResult>(method::JOBS_LIST, params)
+            .await
+    }
+
+    /// `jobs.execute` — run a user-invokable job by id; returns the
+    /// `run_id` whose `jobs.progress` pushes arrive via
+    /// [`KlpClient::subscribe`] (#291).
+    pub async fn jobs_execute(&self, id: &str) -> Result<JobsExecuteResult> {
+        self.request::<JobsExecuteParams, JobsExecuteResult>(
+            method::JOBS_EXECUTE,
+            &JobsExecuteParams { id: id.to_string() },
+        )
+        .await
+    }
+
+    /// `jobs.kill` — request termination of a run this connection
+    /// started (#291).
+    pub async fn jobs_kill(&self, run_id: &str) -> Result<JobsKillResult> {
+        self.request::<JobsKillParams, JobsKillResult>(
+            method::JOBS_KILL,
+            &JobsKillParams {
+                run_id: run_id.to_string(),
+            },
+        )
+        .await
+    }
+}
+
+/// Permanent reader task: demultiplex every agent→client frame.
+/// Generic over the read half so it's unit-testable with an in-memory
+/// duplex pipe. Exits when the pipe closes / errors; on exit it drops
+/// every pending sender so in-flight `request` calls fail fast instead
+/// of hanging forever.
+async fn reader_loop<R: AsyncRead + Unpin>(
+    mut read: R,
+    pending: Pending,
+    notifications: broadcast::Sender<RpcNotification>,
+) {
+    loop {
+        let bytes = match read_frame(&mut read).await {
+            Ok(b) => b,
+            Err(e) => {
+                debug!(error = %e, "klp reader: pipe closed, exiting");
+                break;
+            }
+        };
+        let msg: RpcMessage = match serde_json::from_slice(&bytes) {
+            Ok(m) => m,
+            Err(e) => {
+                warn!(error = %e, "klp reader: undecodable frame, skipping");
+                continue;
+            }
+        };
+        match msg {
+            RpcMessage::Response(resp) => match resp.id.as_deref() {
+                Some(id) => {
+                    // Remove (releasing the lock) BEFORE sending so the
+                    // sync mutex isn't held across the oneshot send.
+                    let waiter = pending.lock().unwrap().remove(id);
+                    match waiter {
+                        // Receiver dropped (request cancelled) → ignore.
+                        Some(tx) => {
+                            let _ = tx.send(resp);
+                        }
+                        None => {
+                            debug!(id, "klp reader: response for unknown/expired request")
+                        }
+                    }
+                }
+                None => debug!("klp reader: response without id, ignoring"),
+            },
+            RpcMessage::Notification(notif) => {
+                // Err only when there are no live subscribers — fine,
+                // a push with nobody listening is just dropped.
+                let _ = notifications.send(notif);
+            }
+            RpcMessage::Request(_) => {
+                debug!("klp reader: agent sent a Request (unexpected), ignoring");
+            }
+        }
+    }
+    // Connection gone: fail every in-flight request rather than leave
+    // it awaiting a oneshot that will never resolve.
+    pending.lock().unwrap().clear();
 }
 
 /// Pull the typed result out of an [`RpcResponse`]; map error
@@ -240,4 +408,93 @@ async fn write_frame<W: AsyncWrite + Unpin>(writer: &mut W, body: &[u8]) -> std:
     writer.write_all(body).await?;
     writer.flush().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kanade_shared::ipc::jobs::{JobProgress, RunStatus};
+
+    /// Encode a JSON value as a length-prefixed frame (mirror of the
+    /// agent writer, for tests).
+    async fn push_frame<W: AsyncWrite + Unpin>(w: &mut W, value: &serde_json::Value) {
+        let body = serde_json::to_vec(value).unwrap();
+        write_frame(w, &body).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reader_routes_response_to_pending_request() {
+        // A duplex pipe stands in for the Named Pipe: we write agent
+        // frames into `agent_side`, the reader reads `client_side`.
+        let (client_side, mut agent_side) = tokio::io::duplex(64 * 1024);
+        let pending: Pending = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let (notifications, _rx) = broadcast::channel(16);
+
+        // Pre-register a waiter for id "req-1", as `request` would.
+        let (tx, rx) = oneshot::channel();
+        pending.lock().unwrap().insert("req-1".into(), tx);
+
+        tokio::spawn(reader_loop(client_side, pending.clone(), notifications));
+
+        push_frame(
+            &mut agent_side,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": "req-1",
+                "result": { "run_id": "run-xyz" }
+            }),
+        )
+        .await;
+
+        let resp = rx.await.expect("reader should deliver the response");
+        assert_eq!(resp.id.as_deref(), Some("req-1"));
+        assert!(pending.lock().unwrap().is_empty(), "pending entry consumed");
+    }
+
+    #[tokio::test]
+    async fn reader_forwards_notification_to_subscribers() {
+        let (client_side, mut agent_side) = tokio::io::duplex(64 * 1024);
+        let pending: Pending = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let (notifications, mut sub) = broadcast::channel(16);
+
+        tokio::spawn(reader_loop(client_side, pending, notifications));
+
+        let progress = JobProgress {
+            run_id: "run-1".into(),
+            status: RunStatus::Running,
+            stdout_chunk: None,
+            stderr_chunk: None,
+            exit_code: None,
+        };
+        let notif = RpcNotification::new(method::JOBS_PROGRESS, &progress).unwrap();
+        push_frame(&mut agent_side, &serde_json::to_value(&notif).unwrap()).await;
+
+        let got = sub.recv().await.expect("notification forwarded");
+        assert_eq!(got.method, method::JOBS_PROGRESS);
+        assert_eq!(got.params["run_id"], "run-1");
+        assert_eq!(got.params["status"], "running");
+    }
+
+    #[tokio::test]
+    async fn reader_exit_fails_pending_requests() {
+        // When the pipe closes, in-flight requests must error out
+        // (oneshot sender dropped) rather than hang forever.
+        let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
+        let pending: Pending = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let (notifications, _rx) = broadcast::channel(16);
+
+        let (tx, rx) = oneshot::channel::<RpcResponse>();
+        pending.lock().unwrap().insert("req-orphan".into(), tx);
+
+        let handle = tokio::spawn(reader_loop(client_side, pending, notifications));
+
+        // Drop the agent side → EOF → reader exits → clears pending.
+        drop(agent_side);
+        handle.await.unwrap();
+
+        assert!(
+            rx.await.is_err(),
+            "pending request should be failed, not hung"
+        );
+    }
 }
