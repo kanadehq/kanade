@@ -6,7 +6,7 @@ use kanade_shared::kv::{BUCKET_JOBS, OBJECT_RESULT_OUTPUT, STREAM_RESULTS};
 use kanade_shared::manifest::{CheckHint, InventoryHint, Manifest};
 use sqlx::SqlitePool;
 use tokio::io::AsyncReadExt;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 // pub(crate): consumer_reset::reset_if_wiped names this durable when
 // deciding what to drop after a projection-DB wipe (#389).
@@ -105,7 +105,7 @@ pub async fn run(js: jetstream::Context, pool: SqlitePool) -> Result<()> {
                 let resolved_id = r.stable_result_id();
                 match insert_result(&pool, &r, &resolved_id, recorded_at).await {
                     Ok(true) => {
-                        info!(
+                        debug!(
                             result_id = %resolved_id,
                             request_id = %r.request_id,
                             exec_id = ?r.exec_id,
@@ -129,7 +129,7 @@ pub async fn run(js: jetstream::Context, pool: SqlitePool) -> Result<()> {
                         }
                     }
                     Ok(false) => {
-                        info!(
+                        debug!(
                             result_id = %resolved_id,
                             "duplicate result (ON CONFLICT) — skipping counter bump",
                         );
@@ -451,7 +451,7 @@ async fn upsert_check_status(
     .await
     .with_context(|| format!("upsert check_status for {}/{}", r.pc_id, hint.name))?;
 
-    info!(pc_id = %r.pc_id, check = %hint.name, status, "projected check status");
+    debug!(pc_id = %r.pc_id, check = %hint.name, status, "projected check status");
     Ok(())
 }
 
@@ -532,7 +532,7 @@ async fn upsert_inventory(
     .bind(recorded_at)
     .execute(pool)
     .await?;
-    info!(
+    debug!(
         pc_id = %r.pc_id,
         manifest_id,
         "projected inventory fact",
@@ -604,7 +604,7 @@ async fn upsert_inventory(
             )
             .await
             {
-                Ok(n) => info!(
+                Ok(n) => debug!(
                     pc_id = %r.pc_id,
                     manifest_id,
                     table = %spec.table,

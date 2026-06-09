@@ -24,7 +24,7 @@ use kanade_shared::kv::STREAM_EVENTS;
 use kanade_shared::subject::EVENTS_STARTED_FILTER;
 use kanade_shared::wire::EventStarted;
 use sqlx::SqlitePool;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 // pub(crate): consumer_reset::reset_if_wiped names this durable when
 // deciding what to drop after a projection-DB wipe (#389).
@@ -86,7 +86,7 @@ pub async fn run(js: jetstream::Context, pool: SqlitePool) -> Result<()> {
                     // warn-logs and are operator-visible.
                     continue;
                 }
-                info!(
+                debug!(
                     result_id = %e.result_id,
                     exec_id = %e.exec_id,
                     pc_id = %e.pc_id,

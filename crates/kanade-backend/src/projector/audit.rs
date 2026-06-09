@@ -4,7 +4,7 @@ use futures::StreamExt;
 use kanade_shared::kv::STREAM_AUDIT;
 use serde::Deserialize;
 use sqlx::SqlitePool;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 // pub(crate): consumer_reset::reset_if_wiped names this durable when
 // deciding what to drop after a projection-DB wipe (#389).
@@ -59,7 +59,7 @@ pub async fn run(js: jetstream::Context, pool: SqlitePool) -> Result<()> {
                 if let Err(e) = insert_audit(&pool, &row).await {
                     warn!(error = %e, action = %row.action, "insert audit_log failed");
                 } else {
-                    info!(actor = %row.actor, action = %row.action, target = ?row.target, "projected audit");
+                    debug!(actor = %row.actor, action = %row.action, target = ?row.target, "projected audit");
                 }
             }
             Err(e) => warn!(error = %e, subject = %msg.subject, "deserialize audit event"),
