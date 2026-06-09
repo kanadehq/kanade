@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::ipc::jobs::JobCategory;
 use crate::wire::{RunAs, Shell, Staleness};
 
 /// YAML job manifest (= registered "what to run", v0.18.0+).
@@ -69,6 +70,24 @@ pub struct Manifest {
     /// matches every pre-v0.26 Manifest.
     #[serde(default)]
     pub staleness: Staleness,
+    /// #291: opt-in marker that this job is offered to **end users**
+    /// in the Client App's job tabs over KLP (`jobs.list` →
+    /// `jobs.execute`). Parallel to [`inventory`] / [`check`] /
+    /// [`emit`]: the block's mere presence is the opt-in, and it
+    /// groups the end-user presentation fields (name / category /
+    /// icon) that only make sense for a user-facing job. `None`
+    /// (the default) ⇒ an operator-only job — inventory, checks,
+    /// scheduled maintenance — that never surfaces in the catalog.
+    ///
+    /// The agent re-reads this at every `jobs.list` / `jobs.execute`
+    /// (SPEC §2.1), so removing the block takes a job out of a
+    /// running client on its next action.
+    ///
+    /// [`inventory`]: Manifest::inventory
+    /// [`check`]: Manifest::check
+    /// [`emit`]: Manifest::emit
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<ClientHint>,
 }
 
 /// "Who + how + when-to-stagger" — the fanout-plan side of an exec.
@@ -217,6 +236,45 @@ fn default_detail_field() -> String {
 
 fn default_fleet() -> bool {
     true
+}
+
+/// Manifest sub-section (#291): marks a job as **user-invokable**
+/// from the Client App and carries how it presents to the end user.
+/// Parallel to [`InventoryHint`] / [`CheckHint`] / `EmitConfig` —
+/// the block's presence is the opt-in (no separate boolean), and its
+/// required fields (`name`, `category`) are enforced by serde at
+/// parse time, so a half-filled catalog entry fails
+/// `kanade job create` instead of rendering a nameless / tab-less row.
+///
+/// The agent maps this 1:1 into the KLP
+/// [`UserInvokableJob`](crate::ipc::jobs::UserInvokableJob) wire shape
+/// that `jobs.list` returns; the Client App renders one row per job in
+/// the tab named by `category`.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct ClientHint {
+    /// End-user-facing title for the job row. The operator-internal
+    /// `Manifest::id` slug is rarely what an end user should read, so
+    /// this is required (and validated non-empty by
+    /// [`Manifest::validate`]). Maps to `UserInvokableJob::display_name`.
+    pub name: String,
+    /// Optional one-line subtitle under `name` in the Client App.
+    /// Distinct from the operator-facing top-level
+    /// [`Manifest::description`] — this one is written for the end
+    /// user. Maps to `UserInvokableJob::display_description`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Which Client App tab the job lives in (`software_update` →
+    /// アップデート, `troubleshoot` → 困ったとき, `catalog` → software
+    /// catalog). Required — without it the agent can't place the job
+    /// in a tab.
+    pub category: JobCategory,
+    /// Optional icon hint for the job row — a lucide-react icon name
+    /// or a `data:` URL. `None` ⇒ the Client App falls back to the
+    /// category's default icon. Surfaced verbatim in
+    /// `jobs.list[].icon`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 /// Issue #246 — `emit:` manifest block for jobs whose stdout is
@@ -531,6 +589,31 @@ impl Manifest {
                 }
             }
         }
+        // #291: a `client:` job is rendered in the Client App's
+        // catalog (`jobs.list` → `jobs.execute`). serde already makes
+        // `name` + `category` required at parse time; the only gap is
+        // a present-but-blank `name`, which would render an empty row
+        // title — reject it like the other display-id fields.
+        if let Some(client) = &self.client {
+            if client.name.trim().is_empty() {
+                return Err("client.name must not be empty".to_string());
+            }
+            // Optional display fields, when present, must be
+            // meaningful: a blank `description` renders an empty
+            // subtitle and a blank `icon` is a dangling lucide name.
+            // Same present-but-blank guard the `check:` block applies
+            // to its optional `troubleshoot` id.
+            for (label, value) in [
+                ("client.description", &client.description),
+                ("client.icon", &client.icon),
+            ] {
+                if let Some(v) = value {
+                    if v.trim().is_empty() {
+                        return Err(format!("{label} must not be empty when set"));
+                    }
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -594,6 +677,44 @@ mod tests {
                 RunAs::System,
                 "{name} should run_as system"
             );
+        }
+    }
+
+    /// The example user-invokable job YAMLs (#291) shipped under
+    /// `configs/jobs/` must stay valid as the `client:` schema
+    /// evolves. `include_str!` pins them at compile time so a breaking
+    /// edit fails `cargo test`, not `kanade job create` at deploy.
+    #[test]
+    fn example_client_job_yamls_parse_and_validate() {
+        let jobs = [
+            (
+                "fix-teams-cache",
+                JobCategory::Troubleshoot,
+                include_str!("../../../configs/jobs/fix-teams-cache.yaml"),
+            ),
+            (
+                "chrome-update",
+                JobCategory::SoftwareUpdate,
+                include_str!("../../../configs/jobs/chrome-update.yaml"),
+            ),
+            (
+                "install-slack",
+                JobCategory::Catalog,
+                include_str!("../../../configs/jobs/install-slack.yaml"),
+            ),
+        ];
+        for (id, category, yaml) in jobs {
+            let m: Manifest =
+                serde_yaml::from_str(yaml).unwrap_or_else(|e| panic!("{id} parse: {e}"));
+            m.validate()
+                .unwrap_or_else(|e| panic!("{id} validate: {e}"));
+            assert_eq!(m.id, id, "{id} id mismatch");
+            let client = m
+                .client
+                .as_ref()
+                .unwrap_or_else(|| panic!("{id} must carry a client: block"));
+            assert!(!client.name.trim().is_empty(), "{id} client.name empty");
+            assert_eq!(client.category, category, "{id} category");
         }
     }
 
@@ -834,6 +955,158 @@ inventory:
             let err = m.validate().expect_err("empty field must fail");
             assert!(err.contains("must not be empty"), "err: {err}");
         }
+    }
+
+    #[test]
+    fn manifest_client_absent_by_default() {
+        // A plain operator job (the overwhelming majority) carries no
+        // `client:` block, so it never surfaces in the end-user
+        // catalog.
+        let yaml = r#"
+id: echo-test
+version: 0.0.1
+execute:
+  shell: powershell
+  script: "echo 'kanade'"
+  timeout: 30s
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        assert!(m.client.is_none());
+        m.validate().expect("operator-only job validates");
+    }
+
+    #[test]
+    fn manifest_client_parses_and_validates() {
+        // The Client App "困ったとき" remediation job shape: a
+        // user-invokable troubleshoot job with the end-user fields the
+        // KLP `jobs.list` wire needs, grouped under `client:`.
+        let yaml = r#"
+id: fix-teams-cache
+version: 1.0.0
+execute:
+  shell: powershell
+  script: "echo clearing"
+  timeout: 60s
+client:
+  name: "Teams のキャッシュをクリア"
+  description: "Teams が重いときに試してください"
+  category: troubleshoot
+  icon: brush-cleaning
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        let c = m.client.as_ref().expect("client block present");
+        assert_eq!(c.name, "Teams のキャッシュをクリア");
+        assert_eq!(
+            c.description.as_deref(),
+            Some("Teams が重いときに試してください")
+        );
+        assert_eq!(c.category, JobCategory::Troubleshoot);
+        assert_eq!(c.icon.as_deref(), Some("brush-cleaning"));
+        m.validate().expect("user-invokable job validates");
+    }
+
+    #[test]
+    fn manifest_client_minimal_only_name_and_category() {
+        // description + icon are optional; name + category are the
+        // serde-required minimum.
+        let yaml = r#"
+id: install-slack
+version: 1.0.0
+execute:
+  shell: powershell
+  script: "echo install"
+  timeout: 600s
+client:
+  name: Slack
+  category: catalog
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        let c = m.client.as_ref().expect("client present");
+        assert_eq!(c.category, JobCategory::Catalog);
+        assert!(c.description.is_none() && c.icon.is_none());
+        m.validate().expect("minimal client validates");
+    }
+
+    #[test]
+    fn manifest_client_rejects_blank_name() {
+        // serde guarantees `name`/`category` are present; the one gap
+        // is a present-but-blank name → empty catalog row title.
+        let yaml = r#"
+id: j
+version: 1.0.0
+execute:
+  shell: powershell
+  script: "echo x"
+  timeout: 30s
+client:
+  name: "   "
+  category: catalog
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        let err = m.validate().expect_err("blank name must fail");
+        assert!(err.contains("client.name"), "err: {err}");
+    }
+
+    #[test]
+    fn manifest_client_rejects_blank_optional_fields() {
+        // description / icon are optional, but a present-but-blank
+        // value is a bug (empty subtitle / dangling icon name) — reject
+        // it, mirroring the check: block's troubleshoot guard.
+        for (field, line) in [
+            ("client.description", "  description: \"  \"\n"),
+            ("client.icon", "  icon: \"\"\n"),
+        ] {
+            let yaml = format!(
+                "id: j\nversion: 1.0.0\nexecute:\n  shell: powershell\n  script: \"echo x\"\n  timeout: 30s\nclient:\n  name: A\n  category: catalog\n{line}"
+            );
+            let m: Manifest = serde_yaml::from_str(&yaml).expect("parse");
+            let err = m.validate().expect_err("blank optional field must fail");
+            assert!(err.contains(field), "expected {field} in err: {err}");
+        }
+    }
+
+    #[test]
+    fn manifest_client_requires_category_at_parse() {
+        // A `client:` block missing `category` is a hard parse error
+        // (serde required field) — no manual validate() needed.
+        let yaml = r#"
+id: j
+version: 1.0.0
+execute:
+  shell: powershell
+  script: "echo x"
+  timeout: 30s
+client:
+  name: "A job"
+"#;
+        let r: Result<Manifest, _> = serde_yaml::from_str(yaml);
+        assert!(
+            r.is_err(),
+            "missing category must be a parse error, got {r:?}"
+        );
+    }
+
+    #[test]
+    fn manifest_client_rejects_unknown_field() {
+        // `deny_unknown_fields` on ClientHint catches a fat-fingered
+        // `displayname:` instead of silently dropping it.
+        let yaml = r#"
+id: j
+version: 1.0.0
+execute:
+  shell: powershell
+  script: "echo x"
+  timeout: 30s
+client:
+  name: "A job"
+  category: catalog
+  displayname: oops
+"#;
+        let r: Result<Manifest, _> = serde_yaml::from_str(yaml);
+        assert!(
+            r.is_err(),
+            "unknown client field must be a parse error, got {r:?}"
+        );
     }
 
     fn execute_with(

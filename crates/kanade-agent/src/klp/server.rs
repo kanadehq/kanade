@@ -79,6 +79,12 @@ pub struct ListenerContext {
     /// reads it to bundle recent log lines into a support
     /// response.
     pub log_path: PathBuf,
+    /// NATS client handed to each connection so cold-path KV
+    /// handlers (`jobs.list`) can re-read the `BUCKET_JOBS` catalog
+    /// at fire time. Cheap to clone (`async_nats::Client` is
+    /// Arc-backed) and reconnect-resilient, so the listener never
+    /// holds a stale KV handle.
+    pub nats: async_nats::Client,
 }
 
 /// Spawn the KLP listener. Returns immediately with a detached
@@ -217,7 +223,8 @@ async fn handle_connection(pipe: NamedPipeServer, ctx: ListenerContext) -> Resul
         ctx.state_rx.clone(),
         ctx.log_path.clone(),
         push_tx.clone(),
-    );
+    )
+    .with_nats(ctx.nats.clone());
 
     let read_loop_result = run_read_loop(reader, &mut conn, &push_tx).await;
 

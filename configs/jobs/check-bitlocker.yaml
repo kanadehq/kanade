@@ -46,7 +46,7 @@ execute:
     [pscustomobject]@{ status = $status; detail = $detail; volumes = $vols } | ConvertTo-Json -Compress -Depth 4
 check:
   name: bitlocker
-  # troubleshoot: enable-bitlocker   # optional remediation job id (user_invokable)
+  # troubleshoot: enable-bitlocker   # optional remediation job id (job must carry a client: block)
 inventory:
   display:
     - { field: status, label: BitLocker }

@@ -1,0 +1,32 @@
+# Example USER-INVOKABLE job (#291) — the software catalog (Catalog) tab.
+#
+# A `client:` block with `category: catalog` lists this job in the
+# Client App's self-service software catalog so an end user can install
+# Slack themselves. See fix-teams-cache.yaml for the full `client:`
+# contract.
+#
+# `run_as: system`: winget installs machine-wide via the MSI, which
+# needs elevation — the agent is LocalSystem.
+#
+# Register (no schedule needed — user-fired):
+#   kanade job create configs/jobs/install-slack.yaml
+id: install-slack
+version: 1.0.0
+description: Install the Slack desktop app via winget (operator note)
+execute:
+  shell: powershell
+  run_as: system
+  timeout: 600s
+  script: |
+    $ErrorActionPreference = 'Stop'
+    winget install --id SlackTechnologies.Slack --silent --accept-source-agreements --accept-package-agreements
+    # $ErrorActionPreference doesn't catch a native exe's non-zero
+    # exit — check winget's $LASTEXITCODE explicitly so a failed
+    # install is reported as a failed job, not a silent success.
+    if ($LASTEXITCODE -ne 0) { throw "winget install failed with exit code $LASTEXITCODE" }
+    Write-Output 'Slack installed.'
+client:
+  name: "Slack をインストール"
+  description: "チャットツール Slack のデスクトップ版"
+  category: catalog
+  icon: slack

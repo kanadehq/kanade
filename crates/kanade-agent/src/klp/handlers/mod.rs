@@ -2,10 +2,12 @@
 //!
 //! Shipping today: [`system`] (handshake / ping / version /
 //! log_tail) + [`state`] (snapshot / subscribe / unsubscribe +
-//! `state.changed` push). Remaining namespaces (notifications,
-//! jobs, support, maintenance) land in follow-up PRs; each
-//! follow-up adds one sibling module and routes for it in
+//! `state.changed` push) + [`jobs`] (`jobs.list` read-only catalog;
+//! the execute/progress/kill run half lands in a follow-up PR).
+//! Remaining namespaces (notifications, support, maintenance) land in
+//! follow-up PRs; each adds one sibling module and routes for it in
 //! [`super::dispatcher`].
 
+pub mod jobs;
 pub mod state;
 pub mod system;

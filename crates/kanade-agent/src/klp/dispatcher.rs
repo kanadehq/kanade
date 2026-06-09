@@ -32,6 +32,7 @@
 use kanade_shared::ipc::envelope::{RpcRequest, RpcResponse, decode_params};
 use kanade_shared::ipc::error::{ErrorKind, RpcError};
 use kanade_shared::ipc::handshake::HandshakeParams;
+use kanade_shared::ipc::jobs::JobsListParams;
 use kanade_shared::ipc::method;
 use kanade_shared::ipc::state::{
     StateSnapshotParams, StateSubscribeParams, StateUnsubscribeParams,
@@ -127,6 +128,12 @@ async fn dispatch_inner(
             handlers::state::handle_state_unsubscribe(conn, params)?;
             // SPEC §2.12.7's unsubscribe response is `{"result":null}`.
             Ok(serde_json::Value::Null)
+        }
+        method::JOBS_LIST => {
+            let params: JobsListParams =
+                decode_params(req.params.clone()).map_err(invalid_params)?;
+            let result = handlers::jobs::handle_jobs_list(conn, params).await?;
+            serde_json::to_value(&result).map_err(internal)
         }
         // Every other v1 method is reserved but not implemented
         // in this PR — answer MethodNotFound so client code can
@@ -268,7 +275,10 @@ mod tests {
         let req = RpcRequest {
             jsonrpc: kanade_shared::ipc::envelope::JSONRPC_VERSION.to_string(),
             id: "u1".into(),
-            method: "jobs.list".to_string(),
+            // A still-unimplemented method: jobs.list now routes to a
+            // real handler, so pick one whose family hasn't landed yet
+            // (support.* / maintenance.* / jobs.execute are next).
+            method: "support.upload_diagnostics".to_string(),
             params: serde_json::Value::Null,
         };
         let resp = dispatch_request(&mut conn, req).await;
