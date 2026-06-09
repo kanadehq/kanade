@@ -2,7 +2,7 @@ import { useMutation, useQuery } from '@tanstack/react-query';
 import { ChevronsDown, ChevronsUp, ExternalLink, Loader2, Skull } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 
 import { ErrorCard } from '@/components/ErrorCard';
@@ -81,15 +81,39 @@ const SINCE_PRESETS: Array<{ value: string; ms: number | null }> = [
   { value: 'all', ms: null },
 ];
 
+type StatusFilter = '' | 'running' | 'success' | 'failure';
+
+function parseStatusFilter(raw: string | null): StatusFilter {
+  return raw === 'running' || raw === 'success' || raw === 'failure' ? raw : '';
+}
+
 export function Activity() {
   const { t } = useTranslation('activity');
   const confirm = useConfirm();
+  // The status filter is URL-backed (`?status=`) so the URL is the
+  // single source of truth: the Dashboard's "failures / 24h" tile
+  // deep-links to `/activity?status=failure` (the same bridge the
+  // fleet-health agent tiles use into the Agents list), and a dropdown
+  // change writes back so the link stays shareable / bookmarkable and
+  // browser back/forward stays in sync. Mirrors Agents.tsx.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const status = parseStatusFilter(searchParams.get('status'));
+  const setStatus = (next: StatusFilter) => {
+    setSearchParams(
+      (prev) => {
+        const p = new URLSearchParams(prev);
+        if (next === '') p.delete('status');
+        else p.set('status', next);
+        return p;
+      },
+      { replace: true },
+    );
+  };
   const [pcId, setPcId] = useState('');
   const [jobId, setJobId] = useState('');
   const [execId, setExecId] = useState('');
   const [stdoutFilter, setStdoutFilter] = useState('');
   const [stderrFilter, setStderrFilter] = useState('');
-  const [status, setStatus] = useState<'' | 'running' | 'success' | 'failure'>('');
   const [since, setSince] = useState('24h');
   const [limit, setLimit] = useState(50);
 
@@ -219,9 +243,7 @@ export function Activity() {
             <Select
               id="res-status"
               value={status}
-              onChange={(e) =>
-                setStatus(e.target.value as '' | 'running' | 'success' | 'failure')
-              }
+              onChange={(e) => setStatus(e.target.value as StatusFilter)}
             >
               <option value="">{t('filters.statusOptions.any')}</option>
               <option value="running">{t('filters.statusOptions.running')}</option>

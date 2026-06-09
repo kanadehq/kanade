@@ -36,7 +36,8 @@
       },
       "failures": {
         "label": "失敗 / {{hours}}時間",
-        "hint": "exit_code ≠ 0 / 実行数"
+        "hint": "exit_code ≠ 0 / 実行数",
+        "linkTitle": "失敗した実行を表示"
       }
     }
   },
