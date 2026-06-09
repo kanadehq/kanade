@@ -81,6 +81,8 @@ pub async fn execute(client: async_nats::Client, args: RunArgs) -> Result<()> {
         emit: None,
         // #290: ad-hoc inline run is never a check.
         check: None,
+        // #418 Phase 4: ad-hoc run has no schedule → no retry policy.
+        retry: None,
     };
 
     let result_subj = subject::results(&request_id);

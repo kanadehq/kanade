@@ -340,6 +340,10 @@ async fn tick(state: &AppState, schedule: Schedule) {
         p.deadline_at = deadline_at;
         p
     };
+    // #418 Phase 4: lower the schedule's on_failure.retry once — it's
+    // Copy, so each dispatch below stamps the same spec onto its
+    // Commands without re-borrowing `schedule` after `manifest` moves.
+    let retry = schedule.on_failure.lowered_retry();
 
     // 2) For EveryTick (a calendar time trigger) we don't need to
     //    resolve anything — fire and forget. Skip the more expensive
@@ -350,6 +354,7 @@ async fn tick(state: &AppState, schedule: Schedule) {
             &schedule_id,
             manifest,
             plan_for_dispatch(),
+            retry,
             "EveryTick",
         )
         .await;
@@ -425,6 +430,7 @@ async fn tick(state: &AppState, schedule: Schedule) {
                 &schedule_id,
                 manifest,
                 plan_for_dispatch(),
+                retry,
                 "OncePerTarget armed",
             )
             .await
@@ -446,7 +452,16 @@ async fn tick(state: &AppState, schedule: Schedule) {
                 %schedule_id, pcs = pc_ids.len(),
                 "OncePerPc: firing at remaining pcs",
             );
-            if dispatch(state, &schedule_id, manifest, plan, "OncePerPc subset").await {
+            if dispatch(
+                state,
+                &schedule_id,
+                manifest,
+                plan,
+                retry,
+                "OncePerPc subset",
+            )
+            .await
+            {
                 record_pc_dispatch_marks(state, &schedule_id, &pc_ids, now).await;
             }
         }
@@ -461,9 +476,10 @@ async fn dispatch(
     schedule_id: &str,
     manifest: Manifest,
     plan: FanoutPlan,
+    retry: Option<kanade_shared::wire::RetrySpec>,
     why: &str,
 ) -> bool {
-    match exec_manifest(state, manifest, plan, "scheduler", None).await {
+    match exec_manifest(state, manifest, plan, "scheduler", None, retry).await {
         Ok(resp) => {
             info!(
                 %schedule_id, exec_id = %resp.exec_id, why,
@@ -512,14 +528,38 @@ fn suppress_window(schedule: &Schedule, manifest: &Manifest) -> ChronoDuration {
         );
         ChronoDuration::zero()
     });
+    // #418 Phase 4: on_failure.retry lets a single fire re-run the
+    // script up to `max` extra times with `backoff` between, so the
+    // worst-case legitimate run grows by `max * (timeout + backoff)`.
+    // Without this the suppression window would expire mid-retry and
+    // the next poll tick would re-dispatch the still-running schedule
+    // (gemini CRITICAL / coderabbit MAJOR #466). `max` is bounded
+    // (1..=10 via validate), so the budget is finite and operator-
+    // chosen.
+    let retry_budget = schedule
+        .on_failure
+        .lowered_retry()
+        .and_then(|r| {
+            let per_attempt =
+                timeout.checked_add(&ChronoDuration::seconds(r.backoff_secs as i64))?;
+            per_attempt.checked_mul(r.max as i32)
+        })
+        .unwrap_or_else(ChronoDuration::zero);
     // checked_add: `from_std` already rejects out-of-range humantime, so
     // overflow is unreachable in practice — but fall back to the ceiling
     // rather than panic if some future input ever does overflow (gemini #444).
-    jitter
+    // The jitter+timeout+margin part keeps its historical [MIN, MAX]
+    // clamp (a runaway jitter/timeout must not mute a schedule forever
+    // on a dispatch that may have gone nowhere). The retry budget is
+    // then added on top: it's an operator-bounded, legitimate run
+    // duration, so it extends the window past the default ceiling
+    // rather than being clamped away mid-retry (#466).
+    let plain = jitter
         .checked_add(&timeout)
         .and_then(|d| d.checked_add(&DISPATCH_DRAIN_MARGIN))
         .map(|d| d.clamp(DISPATCH_WINDOW_MIN, DISPATCH_WINDOW_MAX))
-        .unwrap_or(DISPATCH_WINDOW_MAX)
+        .unwrap_or(DISPATCH_WINDOW_MAX);
+    plain.checked_add(&retry_budget).unwrap_or(plain)
 }
 
 /// Decode a dispatch mark (RFC3339 bytes). A missing / unparsable value
@@ -771,5 +811,67 @@ async fn unregister(sched: &JobScheduler, registered: &Registered, schedule_id: 
         } else {
             info!(schedule_id, "scheduler unregistered");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manifest_with_timeout(timeout: &str) -> Manifest {
+        serde_yaml::from_str(&format!(
+            "id: j\nversion: 1.0.0\nexecute:\n  shell: powershell\n  script: \"echo hi\"\n  timeout: {timeout}\n"
+        ))
+        .expect("manifest parse")
+    }
+
+    fn schedule_with(extra: &str) -> Schedule {
+        serde_yaml::from_str(&format!(
+            "id: s\nwhen:\n  per_pc: {{ every: 6h }}\njob_id: j\ntarget: {{ all: true }}\n{extra}"
+        ))
+        .expect("schedule parse")
+    }
+
+    #[test]
+    fn suppress_window_includes_retry_budget() {
+        // #418 Phase 4: the in-flight suppression window must budget for
+        // retry time so a retrying fire isn't re-dispatched mid-run
+        // (gemini CRITICAL / coderabbit MAJOR #466).
+        let manifest = manifest_with_timeout("30s");
+        let plain = suppress_window(&schedule_with(""), &manifest);
+        let with_retry = suppress_window(
+            &schedule_with("on_failure:\n  retry: { max: 3, backoff: 1m }\n"),
+            &manifest,
+        );
+        // budget = 3 * (30s + 60s) = 270s on top of the plain window.
+        assert!(
+            with_retry >= plain + ChronoDuration::seconds(270),
+            "retry window {with_retry:?} must exceed plain {plain:?} by the budget",
+        );
+    }
+
+    #[test]
+    fn suppress_window_lifts_ceiling_for_long_retry() {
+        // max:10 backoff:10m timeout:5m → 10*(15m) = 150m, far past the
+        // 30-min default ceiling; the cap must lift, else a legitimately
+        // long retry sequence gets re-fired mid-run.
+        let manifest = manifest_with_timeout("5m");
+        let w = suppress_window(
+            &schedule_with("on_failure:\n  retry: { max: 10, backoff: 10m }\n"),
+            &manifest,
+        );
+        assert!(
+            w > DISPATCH_WINDOW_MAX,
+            "window {w:?} must exceed the default cap"
+        );
+    }
+
+    #[test]
+    fn suppress_window_without_retry_keeps_default_clamp() {
+        // No retry → the historical jitter+timeout+margin window,
+        // clamped to the 30-min ceiling (regression guard).
+        let manifest = manifest_with_timeout("1h");
+        let w = suppress_window(&schedule_with(""), &manifest);
+        assert_eq!(w, DISPATCH_WINDOW_MAX);
     }
 }

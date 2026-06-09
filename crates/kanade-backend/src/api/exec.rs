@@ -44,6 +44,11 @@ pub async fn exec_manifest(
     plan: FanoutPlan,
     actor: &str,
     caller: Option<&Caller>,
+    // #418 Phase 4: the schedule's lowered on_failure.retry, stamped
+    // onto every Command this exec produces. `None` for ad-hoc
+    // operator exec (no schedule = no retry policy); the scheduler
+    // passes `schedule.on_failure.lowered_retry()`.
+    retry: Option<kanade_shared::wire::RetrySpec>,
 ) -> Result<ExecResponse, (StatusCode, String)> {
     let has_rollout = plan
         .rollout
@@ -124,6 +129,9 @@ pub async fn exec_manifest(
         // #290: forward the manifest's check hint so the agent builds
         // a KLP Health-tab Check from the job's stdout (no re-fetch).
         check: manifest.check.clone(),
+        // #418 Phase 4: the schedule's retry policy (None for ad-hoc
+        // exec). Copy is cheap — RetrySpec is Copy.
+        retry,
     };
 
     let mut subjects: Vec<String> = Vec::new();
@@ -324,7 +332,8 @@ pub async fn create(
             ));
         }
     };
-    exec_manifest(&s, manifest, plan, "operator", Some(&caller))
+    // Ad-hoc operator exec has no schedule, hence no on_failure.retry.
+    exec_manifest(&s, manifest, plan, "operator", Some(&caller), None)
         .await
         .map(Json)
 }

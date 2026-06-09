@@ -1133,6 +1133,10 @@ async fn local_tick(
         // #290: forward the check hint so an agent-scheduled
         // (`runs_on: agent`) check job still feeds the Health tab.
         check: manifest.check.clone(),
+        // #418 Phase 4: lower this schedule's on_failure.retry onto
+        // the Command so handle_command re-runs a failed script
+        // in-process even on the offline (`runs_on: agent`) path.
+        retry: schedule.on_failure.lowered_retry(),
     };
 
     let js = async_nats::jetstream::new(client.clone());
@@ -1149,8 +1153,21 @@ async fn local_tick(
     // would leak the slot. `claim_ttl` = the longest a legitimate run
     // can take (jitter + script timeout + handle_command overhead).
     const IN_FLIGHT_SLACK_SECS: i64 = 60;
+    // #418 Phase 4: on_failure.retry lets a single fire run the script
+    // up to `max` extra times with `backoff` between, so the worst-case
+    // legitimate duration grows by `max * (timeout + backoff)`. Fold
+    // that into the claim TTL or a retrying run would overrun its own
+    // deadline and the next tick would wrongly reclaim it as stale and
+    // double-fire (gemini/coderabbit #466).
+    let retry_budget_secs = cmd
+        .retry
+        .map(|r| r.max as i64 * (timeout_secs as i64 + r.backoff_secs as i64))
+        .unwrap_or(0);
     let claim_ttl = ChronoDuration::seconds(
-        jitter_secs.unwrap_or(0) as i64 + timeout_secs as i64 + IN_FLIGHT_SLACK_SECS,
+        jitter_secs.unwrap_or(0) as i64
+            + timeout_secs as i64
+            + retry_budget_secs
+            + IN_FLIGHT_SLACK_SECS,
     );
     // Reuse the single tick `now` (captured above) so the early
     // pre-check, this claim, and the deadline token are all consistent
@@ -1247,7 +1264,8 @@ async fn local_tick(
 mod tests {
     use super::*;
     use kanade_shared::manifest::{
-        Active, Constraints, FanoutPlan, OnceLiteral, PerPolicy, ScheduleTz, Target, When,
+        Active, Constraints, FanoutPlan, OnFailure, OnceLiteral, PerPolicy, ScheduleTz, Target,
+        When,
     };
 
     fn schedule(target: Target, runs_on: RunsOn) -> Schedule {
@@ -1261,6 +1279,7 @@ mod tests {
             },
             active: Active::default(),
             constraints: Constraints::default(),
+            on_failure: OnFailure::default(),
             tz: ScheduleTz::default(),
             starting_deadline: None,
             runs_on,

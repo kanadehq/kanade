@@ -376,6 +376,9 @@ pub fn build_command(
         // hints (the run path would otherwise try to project them).
         emit: None,
         check: None,
+        // #418 Phase 4: a KLP-fired one-shot has no schedule behind it,
+        // so no on_failure.retry policy — the user re-runs from the app.
+        retry: None,
     })
 }
 

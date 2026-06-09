@@ -97,6 +97,30 @@ pub struct Command {
     /// `#[serde(default)]` → `None` preserves prior behaviour.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check: Option<CheckHint>,
+    /// #418 Phase 4: lowered from `Schedule.on_failure.retry` by the
+    /// command builders (backend `exec_manifest` + the agent's local
+    /// scheduler). When `Some`, the agent re-runs the script
+    /// in-process on a non-zero exit / timeout, up to `max` extra
+    /// attempts with `backoff_secs` between them, before publishing
+    /// the final outcome. `None` (default) ⇒ no retry, the historical
+    /// behaviour and what ad-hoc `kanade run` / `kanade exec` use.
+    /// Pre-Phase-4 wire omits this; `#[serde(default)]` → `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<RetrySpec>,
+}
+
+/// Lowered, engine-vocabulary form of [`crate::manifest::Retry`] — a
+/// fixed-backoff retry policy stamped onto a [`Command`]. The
+/// operator-facing humantime `backoff` is reduced to whole seconds at
+/// build time (mirrors how `jitter_secs` / `timeout_secs` are
+/// pre-lowered) so the agent's fire path does no humantime parsing.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetrySpec {
+    /// Max additional attempts after the first failure (1..=10,
+    /// enforced by `Schedule::validate`).
+    pub max: u32,
+    /// Seconds slept between attempts.
+    pub backoff_secs: u64,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,6 +187,7 @@ mod tests {
             staleness: Staleness::Cached,
             emit: None,
             check: None,
+            retry: None,
         }
     }
 
@@ -306,5 +331,40 @@ mod tests {
         let json = serde_json::to_string(&cmd).unwrap();
         let back: Command = serde_json::from_str(&json).unwrap();
         assert_eq!(back.deadline_at, Some(deadline));
+    }
+
+    #[test]
+    fn command_retry_round_trips() {
+        // #418 Phase 4: a stamped retry policy must survive the wire
+        // so the agent can apply it on a live publish or a STREAM_EXEC
+        // replay.
+        let cmd = Command {
+            retry: Some(RetrySpec {
+                max: 3,
+                backoff_secs: 600,
+            }),
+            ..sample_command()
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        let back: Command = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.retry,
+            Some(RetrySpec {
+                max: 3,
+                backoff_secs: 600
+            })
+        );
+    }
+
+    #[test]
+    fn command_omits_retry_when_absent() {
+        // skip_serializing_if keeps the field off the wire for the
+        // common (no-retry) case, and pre-Phase-4 payloads that never
+        // had it still decode (serde default → None).
+        let json = serde_json::to_string(&sample_command()).unwrap();
+        assert!(
+            !json.contains("retry"),
+            "retry must not appear when None: {json}"
+        );
     }
 }
