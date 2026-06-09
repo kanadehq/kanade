@@ -1,3 +1,4 @@
+mod check_cache;
 mod commands;
 mod config_supervisor;
 mod groups;
@@ -217,6 +218,11 @@ pub(crate) async fn run_agent() -> Result<()> {
     // Seed the watch with `eval_once` synchronously so the first
     // `state.snapshot` call returns real data without waiting for
     // a tick.
+    // #290: operator-defined health-check results flow from the
+    // command path into this sink and out via the KLP StateSnapshot.
+    // Constructed unconditionally (the command-path writer is
+    // cross-platform); only the Windows KLP evaluator reads it.
+    let check_sink = check_cache::CheckSink::new();
     #[cfg(target_os = "windows")]
     {
         let initial_snapshot = klp::state::eval_once(
@@ -224,6 +230,7 @@ pub(crate) async fn run_agent() -> Result<()> {
             AGENT_VERSION,
             &cfg_rx.borrow(),
             klp::state::client_online(&client),
+            &check_sink.checks(),
         );
         let (state_tx, state_rx) = tokio::sync::watch::channel(initial_snapshot);
         tokio::spawn(klp::state::eval_loop(
@@ -232,6 +239,7 @@ pub(crate) async fn run_agent() -> Result<()> {
             pc_id.clone(),
             AGENT_VERSION.to_string(),
             client.clone(),
+            check_sink.clone(),
         ));
         let _klp_handle = klp::server::spawn(klp::server::ListenerContext {
             pc_id: std::sync::Arc::from(pc_id.as_str()),
@@ -280,6 +288,7 @@ pub(crate) async fn run_agent() -> Result<()> {
         dedup.clone(),
         staleness_tracker.clone(),
         script_cache.clone(),
+        check_sink.clone(),
     );
 
     // Reconnect catch-up: durable consumer on STREAM_EXEC that
@@ -291,6 +300,7 @@ pub(crate) async fn run_agent() -> Result<()> {
         dedup.clone(),
         staleness_tracker.clone(),
         script_cache.clone(),
+        check_sink.clone(),
     );
     // v0.24: file-based outbox for ExecResult publishes. Every
     // result the agent produces is persisted under `outbox/<rid>.json`
@@ -324,6 +334,7 @@ pub(crate) async fn run_agent() -> Result<()> {
         groups_rx,
         staleness_tracker.clone(),
         script_cache.clone(),
+        check_sink.clone(),
     );
 
     let _ = tokio::join!(
@@ -334,6 +345,7 @@ pub(crate) async fn run_agent() -> Result<()> {
             staleness_tracker.clone(),
             cmd_all,
             script_cache.clone(),
+            check_sink.clone(),
         ),
         commands::command_loop(
             client.clone(),
@@ -342,6 +354,7 @@ pub(crate) async fn run_agent() -> Result<()> {
             staleness_tracker.clone(),
             cmd_self,
             script_cache.clone(),
+            check_sink.clone(),
         ),
     );
 

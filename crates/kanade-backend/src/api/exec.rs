@@ -121,6 +121,9 @@ pub async fn exec_manifest(
         // so the agent can route stdout NDJSON to obs-outbox without
         // a manifest re-fetch.
         emit: manifest.emit.clone(),
+        // #290: forward the manifest's check hint so the agent builds
+        // a KLP Health-tab Check from the job's stdout (no re-fetch).
+        check: manifest.check.clone(),
     };
 
     let mut subjects: Vec<String> = Vec::new();

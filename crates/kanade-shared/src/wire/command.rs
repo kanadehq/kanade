@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::Staleness;
-use crate::manifest::EmitConfig;
+use crate::manifest::{CheckHint, EmitConfig};
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
 pub struct Command {
@@ -88,6 +88,15 @@ pub struct Command {
     /// to `ExecResult` unchanged).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emit: Option<EmitConfig>,
+    /// #290: forwarded from `Manifest.check` so the agent can build a
+    /// KLP Health-tab [`Check`](crate::ipc::state::Check) from the
+    /// job's stdout without re-fetching the Manifest. When `Some`, the
+    /// agent reads the `status_field` / `detail_field` values out of
+    /// the stdout JSON object after a successful run and caches the
+    /// result into `StateSnapshot.checks`. Pre-#290 wire omits this;
+    /// `#[serde(default)]` → `None` preserves prior behaviour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<CheckHint>,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,6 +162,7 @@ mod tests {
             deadline_at: None,
             staleness: Staleness::Cached,
             emit: None,
+            check: None,
         }
     }
 

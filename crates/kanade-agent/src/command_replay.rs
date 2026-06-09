@@ -58,9 +58,10 @@ pub fn spawn(
     dedup: Arc<Mutex<DedupCache>>,
     staleness: crate::staleness::Tracker,
     script_cache: ScriptCache,
+    check_sink: crate::check_cache::CheckSink,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        run(client, pc_id, dedup, staleness, script_cache).await;
+        run(client, pc_id, dedup, staleness, script_cache, check_sink).await;
     })
 }
 
@@ -70,6 +71,7 @@ async fn run(
     dedup: Arc<Mutex<DedupCache>>,
     staleness: crate::staleness::Tracker,
     script_cache: ScriptCache,
+    check_sink: crate::check_cache::CheckSink,
 ) {
     let jetstream = async_nats::jetstream::new(client.clone());
     let name = consumer_name(&pc_id);
@@ -184,6 +186,7 @@ async fn run(
             let sta = script_status.clone();
             let stl = staleness.clone();
             let sc = script_cache.clone();
+            let cs = check_sink.clone();
             info!(
                 cmd_id = %cmd.id,
                 request_id = %cmd.request_id,
@@ -192,7 +195,7 @@ async fn run(
             );
             tokio::spawn(async move {
                 if let Err(e) =
-                    handle_command(client_for_task, pc_for_task, cmd, cur, sta, stl, sc).await
+                    handle_command(client_for_task, pc_for_task, cmd, cur, sta, stl, sc, cs).await
                 {
                     error!(error = %e, "replay command handler failed");
                 }

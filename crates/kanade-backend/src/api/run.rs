@@ -110,6 +110,8 @@ pub async fn run(
         // Issue #246: ad-hoc runs have no manifest, so no emit
         // hint either. Treat stdout as plain text.
         emit: None,
+        // #290: ad-hoc runs aren't checks.
+        check: None,
     };
 
     let result_subj = subject::results(&request_id);

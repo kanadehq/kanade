@@ -51,19 +51,27 @@ pub fn client_online(client: &async_nats::Client) -> bool {
 /// by the caller via [`client_online`] — kept as a parameter (not
 /// read in here) so this stays a pure, runtime-free function the
 /// unit tests can pin both ways.
+///
+/// `extra_checks` are operator-defined health checks (#290) the
+/// command path has run and cached (see [`crate::check_cache`]). They
+/// are merged onto the agent's two intrinsic checks; an operator
+/// check overrides a built-in of the same name.
 pub fn eval_once(
     pc_id: &str,
     agent_version: &str,
     cfg: &EffectiveConfig,
     online: bool,
+    extra_checks: &[Check],
 ) -> StateSnapshot {
-    let checks = vec![
+    // Intrinsic, agent-internal checks (not operator-scriptable):
+    // version-target compare + local disk headroom. Everything else
+    // (bitlocker / av / cert / …) is now an operator-defined `check:`
+    // job merged in from the cache.
+    let intrinsic = vec![
         agent_self_update_check(agent_version, cfg.target_version.as_deref()),
         disk_free_check(),
-        bitlocker_check_stub(),
-        av_signature_check_stub(),
-        cert_expiry_check_stub(),
     ];
+    let checks = crate::check_cache::merge_checks(intrinsic, extra_checks);
     StateSnapshot {
         pc_id: pc_id.to_string(),
         // Real broker-connection state, sampled by the caller (see
@@ -96,6 +104,7 @@ pub async fn eval_loop(
     pc_id: String,
     agent_version: String,
     client: async_nats::Client,
+    check_sink: crate::check_cache::CheckSink,
 ) {
     let mut tick = tokio::time::interval(EVAL_INTERVAL);
     // Skip the immediate first fire; main.rs already seeded the
@@ -103,12 +112,19 @@ pub async fn eval_loop(
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     tick.tick().await;
     loop {
-        tick.tick().await;
+        // Re-publish on the regular cadence OR as soon as a `check:`
+        // job records a fresh result (#290), so the Health tab updates
+        // promptly instead of waiting up to EVAL_INTERVAL.
+        tokio::select! {
+            _ = tick.tick() => {}
+            _ = check_sink.wait() => {}
+        }
         let snapshot = eval_once(
             &pc_id,
             &agent_version,
             &cfg_rx.borrow(),
             client_online(&client),
+            &check_sink.checks(),
         );
         // TODO(perf): use `send_if_modified` once StateSnapshot
         // derives PartialEq in `kanade-shared`. For now we send
@@ -224,48 +240,11 @@ fn disk_free_check() -> Check {
     }
 }
 
-/// `bitlocker` — TODO: query `Win32_EncryptableVolume` via WMI for
-/// each fixed drive and report whether all are
-/// `ProtectionStatus = 1` (Protection On). The check needs the
-/// agent's existing WMI plumbing (currently shell-out to
-/// powershell.exe per the `wmi` crate's drop, see Cargo.toml
-/// comment).
-fn bitlocker_check_stub() -> Check {
-    Check {
-        name: "bitlocker".into(),
-        status: CheckStatus::Unknown,
-        detail: Some("TODO: implement via Win32_EncryptableVolume WMI query".into()),
-        troubleshoot: None,
-    }
-}
-
-/// `av_signature` — TODO: query Windows Security Center's
-/// `MSFT_MpComputerStatus` (PowerShell `Get-MpComputerStatus`)
-/// for `AntivirusSignatureLastUpdated`; map (now - last_updated)
-/// to ok/warn/fail thresholds (24 h / 7 d / older).
-fn av_signature_check_stub() -> Check {
-    Check {
-        name: "av_signature".into(),
-        status: CheckStatus::Unknown,
-        detail: Some("TODO: implement via MSFT_MpComputerStatus".into()),
-        troubleshoot: None,
-    }
-}
-
-/// `cert_expiry` — TODO: enumerate the device's
-/// machine certificate store (LocalMachine\My) via
-/// `wincrypt::CertEnumCertificatesInStore` and flag any
-/// cert with `NotAfter < now + 30 days`. Site-specific filtering
-/// (which template / subject pattern to watch) gets added when a
-/// real fleet wires this in.
-fn cert_expiry_check_stub() -> Check {
-    Check {
-        name: "cert_expiry".into(),
-        status: CheckStatus::Unknown,
-        detail: Some("TODO: implement via wincrypt cert-store enumeration".into()),
-        troubleshoot: None,
-    }
-}
+// bitlocker / av_signature / cert_expiry are no longer hardcoded
+// stubs here (#290) — they are operator-defined `check:` jobs merged
+// in from `crate::check_cache`, shipped as example YAMLs under
+// `configs/jobs/`. The agent keeps only intrinsic, non-scriptable
+// checks (`agent_self_update`, `disk_free`) built in.
 
 #[cfg(test)]
 mod tests {
@@ -279,25 +258,44 @@ mod tests {
 
     #[test]
     fn eval_once_produces_well_formed_snapshot() {
-        let snap = eval_once("PC1234", "0.41.0", &cfg_with(None), true);
+        let snap = eval_once("PC1234", "0.41.0", &cfg_with(None), true, &[]);
         assert_eq!(snap.pc_id, "PC1234");
         assert!(snap.online);
         assert_eq!(snap.vpn, "unknown");
         assert_eq!(snap.agent_version, "0.41.0");
         assert_eq!(snap.target_version, "0.41.0"); // target unset → falls back
-        // 5 checks: agent_self_update + disk_free + 3 stubs.
-        assert_eq!(snap.checks.len(), 5);
+        // With no operator checks, only the two intrinsic ones (#290).
         let names: Vec<&str> = snap.checks.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(
-            names,
-            vec![
-                "agent_self_update",
-                "disk_free",
-                "bitlocker",
-                "av_signature",
-                "cert_expiry"
-            ]
-        );
+        assert_eq!(names, vec!["agent_self_update", "disk_free"]);
+    }
+
+    #[test]
+    fn eval_once_merges_operator_checks() {
+        // #290: cached operator-defined checks appear alongside the
+        // intrinsic ones, and one named like a built-in overrides it.
+        let extra = vec![
+            Check {
+                name: "bitlocker".into(),
+                status: CheckStatus::Warn,
+                detail: Some("D: unprotected".into()),
+                troubleshoot: Some("fix-bitlocker".into()),
+            },
+            Check {
+                name: "disk_free".into(),
+                status: CheckStatus::Fail,
+                detail: Some("operator override".into()),
+                troubleshoot: None,
+            },
+        ];
+        let snap = eval_once("PC1234", "0.41.0", &cfg_with(None), true, &extra);
+        let names: Vec<&str> = snap.checks.iter().map(|c| c.name.as_str()).collect();
+        // agent_self_update kept; disk_free overridden (not duplicated);
+        // bitlocker appended.
+        assert!(names.contains(&"agent_self_update"));
+        assert!(names.contains(&"bitlocker"));
+        assert_eq!(names.iter().filter(|n| **n == "disk_free").count(), 1);
+        let disk = snap.checks.iter().find(|c| c.name == "disk_free").unwrap();
+        assert_eq!(disk.status, CheckStatus::Fail);
     }
 
     #[test]
@@ -305,9 +303,9 @@ mod tests {
         // #288: `online` must mirror the broker-connection bool the
         // caller samples, not a hardcoded `true` — a disconnected
         // agent has to surface as offline on the Health tab.
-        let offline = eval_once("PC1234", "0.41.0", &cfg_with(None), false);
+        let offline = eval_once("PC1234", "0.41.0", &cfg_with(None), false, &[]);
         assert!(!offline.online, "online must follow the passed flag");
-        let online = eval_once("PC1234", "0.41.0", &cfg_with(None), true);
+        let online = eval_once("PC1234", "0.41.0", &cfg_with(None), true, &[]);
         assert!(online.online);
     }
 
@@ -364,13 +362,13 @@ mod tests {
 
     #[test]
     fn snapshot_target_version_falls_back_when_cfg_target_empty() {
-        let snap = eval_once("PC1234", "0.41.0", &cfg_with(Some("")), true);
+        let snap = eval_once("PC1234", "0.41.0", &cfg_with(Some("")), true, &[]);
         assert_eq!(snap.target_version, "0.41.0");
     }
 
     #[test]
     fn snapshot_target_version_surfaces_when_cfg_target_set() {
-        let snap = eval_once("PC1234", "0.41.0", &cfg_with(Some("0.42.0")), true);
+        let snap = eval_once("PC1234", "0.41.0", &cfg_with(Some("0.42.0")), true, &[]);
         assert_eq!(snap.target_version, "0.42.0");
     }
 }

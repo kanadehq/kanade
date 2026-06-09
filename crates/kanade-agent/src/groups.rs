@@ -58,13 +58,23 @@ pub fn spawn(
     dedup: std::sync::Arc<tokio::sync::Mutex<crate::commands::DedupCache>>,
     staleness: crate::staleness::Tracker,
     script_cache: crate::script_cache::ScriptCache,
+    check_sink: crate::check_cache::CheckSink,
 ) -> (
     tokio::sync::watch::Receiver<Vec<String>>,
     tokio::task::JoinHandle<()>,
 ) {
     let (tx, rx) = tokio::sync::watch::channel(Vec::<String>::new());
     let handle = tokio::spawn(async move {
-        manage(client, pc_id, dedup, staleness, script_cache, tx).await;
+        manage(
+            client,
+            pc_id,
+            dedup,
+            staleness,
+            script_cache,
+            check_sink,
+            tx,
+        )
+        .await;
     });
     (rx, handle)
 }
@@ -75,6 +85,7 @@ async fn manage(
     dedup: std::sync::Arc<tokio::sync::Mutex<crate::commands::DedupCache>>,
     staleness: crate::staleness::Tracker,
     script_cache: crate::script_cache::ScriptCache,
+    check_sink: crate::check_cache::CheckSink,
     groups_tx: tokio::sync::watch::Sender<Vec<String>>,
 ) {
     let js = jetstream::new(client.clone());
@@ -135,6 +146,7 @@ async fn manage(
                 &dedup,
                 &staleness,
                 &script_cache,
+                &check_sink,
             )
             .await;
         }
@@ -173,6 +185,7 @@ async fn manage(
                     &dedup,
                     &staleness,
                     &script_cache,
+                    &check_sink,
                 )
                 .await;
             }
@@ -196,6 +209,7 @@ async fn apply_delta(
     dedup: &std::sync::Arc<tokio::sync::Mutex<crate::commands::DedupCache>>,
     staleness: &crate::staleness::Tracker,
     script_cache: &crate::script_cache::ScriptCache,
+    check_sink: &crate::check_cache::CheckSink,
 ) {
     for g in &delta.to_unsubscribe {
         if let Some(handle) = subs.remove(g) {
@@ -219,6 +233,7 @@ async fn apply_delta(
                     staleness.clone(),
                     sub,
                     script_cache.clone(),
+                    check_sink.clone(),
                 ));
                 subs.insert(g.clone(), handle);
                 info!(group = %g, "subscribed to group");
