@@ -78,6 +78,16 @@ pub struct ConnectionState {
     /// `None` only in unit tests that don't drive a KV-backed handler;
     /// production wires it via [`ConnectionState::with_nats`].
     pub nats: Option<async_nats::Client>,
+    /// `run_id`s started by `jobs.execute` ON THIS CONNECTION. The
+    /// `jobs.kill` handler consults it to enforce SPEC §2.12.4's
+    /// same-connection rule — a client can only kill a run it
+    /// launched itself (cross-connection kill → `Unauthorized`).
+    /// `run_id` doubles as the run's `exec_id`, so a kill publishes
+    /// `subject::kill(run_id)`. Entries are not removed on completion
+    /// (a kill on a finished run is a harmless no-op publish); the set
+    /// is bounded by runs-per-connection and dropped with the
+    /// connection.
+    runs: std::collections::HashSet<String>,
     /// `Some(v)` once `system.handshake` succeeded; `None`
     /// otherwise. The dispatcher uses this as the gate for
     /// non-handshake methods.
@@ -110,8 +120,22 @@ impl ConnectionState {
             subscriptions: SubscriptionRegistry::new(),
             push_tx,
             nats: None,
+            runs: std::collections::HashSet::new(),
             agreed_protocol: None,
         }
+    }
+
+    /// Record a `run_id` minted by `jobs.execute` so a later
+    /// `jobs.kill` on this connection can authorise killing it.
+    pub fn register_run(&mut self, run_id: String) {
+        self.runs.insert(run_id);
+    }
+
+    /// `true` if `run_id` was started by `jobs.execute` on THIS
+    /// connection — the SPEC §2.12.4 authorisation gate for
+    /// `jobs.kill`.
+    pub fn owns_run(&self, run_id: &str) -> bool {
+        self.runs.contains(run_id)
     }
 
     /// Attach the NATS client used by cold-path KV handlers
