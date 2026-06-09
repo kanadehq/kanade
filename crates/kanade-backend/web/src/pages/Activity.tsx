@@ -90,28 +90,30 @@ function parseStatusFilter(raw: string | null): StatusFilter {
 export function Activity() {
   const { t } = useTranslation('activity');
   const confirm = useConfirm();
-  // Seed the status filter from the URL so the Dashboard's
-  // "failures / 24h" tile can deep-link straight to the failed runs
-  // (`/activity?status=failure`) — the same bridge the fleet-health
-  // agent tiles use into the Agents list.
-  const [searchParams] = useSearchParams();
+  // The status filter is URL-backed (`?status=`) so the URL is the
+  // single source of truth: the Dashboard's "failures / 24h" tile
+  // deep-links to `/activity?status=failure` (the same bridge the
+  // fleet-health agent tiles use into the Agents list), and a dropdown
+  // change writes back so the link stays shareable / bookmarkable and
+  // browser back/forward stays in sync. Mirrors Agents.tsx.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const status = parseStatusFilter(searchParams.get('status'));
+  const setStatus = (next: StatusFilter) => {
+    setSearchParams(
+      (prev) => {
+        const p = new URLSearchParams(prev);
+        if (next === '') p.delete('status');
+        else p.set('status', next);
+        return p;
+      },
+      { replace: true },
+    );
+  };
   const [pcId, setPcId] = useState('');
   const [jobId, setJobId] = useState('');
   const [execId, setExecId] = useState('');
   const [stdoutFilter, setStdoutFilter] = useState('');
   const [stderrFilter, setStderrFilter] = useState('');
-  const [status, setStatus] = useState<StatusFilter>(() =>
-    parseStatusFilter(searchParams.get('status')),
-  );
-  // The lazy initializer only runs on mount, so a same-route
-  // navigation that changes `?status=` (sidebar "Activity" link
-  // clearing the filter, browser back/forward between deep links)
-  // would leave the dropdown stale while the component stays mounted.
-  // Re-sync from the URL whenever it changes. Manual dropdown edits
-  // don't touch the URL, so this only fires on real navigation.
-  useEffect(() => {
-    setStatus(parseStatusFilter(searchParams.get('status')));
-  }, [searchParams]);
   const [since, setSince] = useState('24h');
   const [limit, setLimit] = useState(50);
 
