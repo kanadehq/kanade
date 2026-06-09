@@ -36,7 +36,8 @@
       },
       "failures": {
         "label": "failures / {{hours}}h",
-        "hint": "exit_code ≠ 0 / runs"
+        "hint": "exit_code ≠ 0 / runs",
+        "linkTitle": "View the failed runs"
       }
     }
   },

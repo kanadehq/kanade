@@ -366,14 +366,29 @@ export function Dashboard() {
                   : t('fleetHealth.stats.jetstream.hintHealthy')
               }
             />
-            <StatBlock
-              label={t('fleetHealth.stats.failures.label', {
-                hours: health.recent_results.window_hours,
-              })}
-              value={`${health.recent_results.failed} / ${health.recent_results.total}`}
-              tone={health.recent_results.failed > 0 ? 'danger' : 'default'}
-              hint={t('fleetHealth.stats.failures.hint')}
-            />
+            {/* Deep-link into the Activity list, pre-filtered to the
+                failed runs when any failed — one click from "3 / 40"
+                to the three that didn't exit clean. The 24h failures
+                window matches Activity's default `since`, so the
+                filtered list mirrors this count. */}
+            <Link
+              to={
+                health.recent_results.failed > 0
+                  ? '/activity?status=failure'
+                  : '/activity'
+              }
+              className="rounded-md -m-1 p-1 transition-colors hover:bg-muted/10"
+              title={t('fleetHealth.stats.failures.linkTitle')}
+            >
+              <StatBlock
+                label={t('fleetHealth.stats.failures.label', {
+                  hours: health.recent_results.window_hours,
+                })}
+                value={`${health.recent_results.failed} / ${health.recent_results.total}`}
+                tone={health.recent_results.failed > 0 ? 'danger' : 'default'}
+                hint={t('fleetHealth.stats.failures.hint')}
+              />
+            </Link>
           </CardContent>
         </Card>
       )}

@@ -2,7 +2,7 @@ import { useMutation, useQuery } from '@tanstack/react-query';
 import { ChevronsDown, ChevronsUp, ExternalLink, Loader2, Skull } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 
 import { ErrorCard } from '@/components/ErrorCard';
@@ -81,15 +81,28 @@ const SINCE_PRESETS: Array<{ value: string; ms: number | null }> = [
   { value: 'all', ms: null },
 ];
 
+type StatusFilter = '' | 'running' | 'success' | 'failure';
+
+function parseStatusFilter(raw: string | null): StatusFilter {
+  return raw === 'running' || raw === 'success' || raw === 'failure' ? raw : '';
+}
+
 export function Activity() {
   const { t } = useTranslation('activity');
   const confirm = useConfirm();
+  // Seed the status filter from the URL so the Dashboard's
+  // "failures / 24h" tile can deep-link straight to the failed runs
+  // (`/activity?status=failure`) — the same bridge the fleet-health
+  // agent tiles use into the Agents list.
+  const [searchParams] = useSearchParams();
   const [pcId, setPcId] = useState('');
   const [jobId, setJobId] = useState('');
   const [execId, setExecId] = useState('');
   const [stdoutFilter, setStdoutFilter] = useState('');
   const [stderrFilter, setStderrFilter] = useState('');
-  const [status, setStatus] = useState<'' | 'running' | 'success' | 'failure'>('');
+  const [status, setStatus] = useState<StatusFilter>(() =>
+    parseStatusFilter(searchParams.get('status')),
+  );
   const [since, setSince] = useState('24h');
   const [limit, setLimit] = useState(50);
 
@@ -219,9 +232,7 @@ export function Activity() {
             <Select
               id="res-status"
               value={status}
-              onChange={(e) =>
-                setStatus(e.target.value as '' | 'running' | 'success' | 'failure')
-              }
+              onChange={(e) => setStatus(e.target.value as StatusFilter)}
             >
               <option value="">{t('filters.statusOptions.any')}</option>
               <option value="running">{t('filters.statusOptions.running')}</option>
