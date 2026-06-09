@@ -531,7 +531,7 @@ async fn forward_obs_events(stdout: String, pc_id: String) {
         warn!(error = %e, "obs: forwarder task panicked / cancelled");
         (0, 0)
     });
-    info!(ok, bad, pc_id = %pc_id_log, "obs: forwarded NDJSON stdout to obs-outbox");
+    debug!(ok, bad, pc_id = %pc_id_log, "obs: forwarded NDJSON stdout to obs-outbox");
 }
 
 /// Pure deadline check — boundary policy: `now > deadline` skips,

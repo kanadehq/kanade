@@ -1049,7 +1049,7 @@ async fn local_tick(
                 .lock()
                 .await
                 .record_completion(&schedule.id, &job_id_for_completion, Utc::now());
-            info!(
+            debug!(
                 schedule_id = %schedule.id,
                 %request_id,
                 "local_scheduler: completion recorded",
