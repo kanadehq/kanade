@@ -7,11 +7,16 @@
 // and shows the agent's wall-clock.
 //
 // The Health tab (#290) renders the agent's state.snapshot below;
-// Notifications / Jobs / Support tabs land in future PRs. The page
-// is intentionally one-screen and dependency-light (no framework)
-// so a later UI redesign isn't fighting any priors.
+// each check's 「修復する」 button runs its `troubleshoot` job via
+// `jobs.execute` (#291) and a live "修復ジョブ" section tracks the run
+// from `jobs.progress` pushes (forwarded as `klp-notification` events,
+// #467). The full job catalog (アップデート / 困ったとき tabs via
+// `jobs.list`) lands in a follow-up. The page is intentionally
+// one-screen and dependency-light (no framework) so a later UI redesign
+// isn't fighting any priors.
 
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 type HandshakeSession = {
   user: string;
@@ -57,6 +62,194 @@ const STATUS_ICON: Record<CheckStatus, string> = {
   fail: "❌",
   unknown: "❔",
 };
+
+// ---- Jobs / remediation (#291) ----
+
+// Mirrors `kanade_shared::ipc::jobs` — hand-written like the other
+// IPC types until TS bindings are generated.
+type RunStatus = "queued" | "running" | "completed" | "failed" | "killed";
+
+type JobProgress = {
+  run_id: string;
+  status: RunStatus;
+  stdout_chunk?: string | null;
+  stderr_chunk?: string | null;
+  exit_code?: number | null;
+};
+
+type JobsExecuteResult = { run_id: string };
+
+// The raw `RpcNotification` the backend re-emits as a `klp-notification`
+// Tauri event; we switch on `method`.
+type RpcNotification = { jsonrpc: string; method: string; params: unknown };
+
+const RUN_STATUS_ICON: Record<RunStatus, string> = {
+  queued: "⏳",
+  running: "⏳",
+  completed: "✅",
+  failed: "❌",
+  killed: "⏹️",
+};
+
+const RUN_STATUS_LABEL: Record<RunStatus, string> = {
+  queued: "待機中",
+  running: "実行中…",
+  completed: "完了しました",
+  failed: "失敗しました",
+  killed: "中止しました",
+};
+
+type Run = {
+  runId: string;
+  // The check name (or job id) — a human label for the run row.
+  label: string;
+  status: RunStatus;
+  // Accumulated stdout/stderr tail shown under the row.
+  output: string;
+};
+
+// Active + recently-finished runs, keyed by run_id. Insertion order
+// drives the render (newest shown first). Bounded by MAX_RUNS so a
+// long-lived WebView (auto-launched, left open for days) doesn't
+// accumulate stale terminal rows forever.
+const runs = new Map<string, Run>();
+const MAX_RUNS = 30;
+
+function isTerminal(status: RunStatus): boolean {
+  return (
+    status === "completed" || status === "failed" || status === "killed"
+  );
+}
+
+// Evict the oldest *terminal* runs once over the cap. In-flight runs
+// (queued / running) are never evicted — they still have progress to
+// receive. Insertion order means the iterator yields oldest first.
+function evictOldRuns(): void {
+  if (runs.size <= MAX_RUNS) return;
+  for (const [id, r] of runs) {
+    if (runs.size <= MAX_RUNS) break;
+    if (isTerminal(r.status)) runs.delete(id);
+  }
+}
+
+// Execute a remediation job (the check's `troubleshoot` id) and track
+// its run; progress arrives asynchronously via `klp-notification`.
+async function executeJob(jobId: string, label: string): Promise<void> {
+  try {
+    const r = await invoke<JobsExecuteResult>("jobs_execute", { id: jobId });
+    // Race: a `jobs.progress` push for this run can arrive (via the
+    // notification listener) BEFORE this invoke promise resolves. If it
+    // did, `handleProgress` already created the row — keep its
+    // status/output and just attach the human label, don't clobber it
+    // back to "running" with empty output.
+    const existing = runs.get(r.run_id);
+    if (existing) {
+      existing.label = label;
+    } else {
+      runs.set(r.run_id, { runId: r.run_id, label, status: "running", output: "" });
+    }
+    renderRuns();
+  } catch (err) {
+    // The execute call itself was rejected (e.g. Unauthorized / not
+    // found) — surface it as a synthetic failed row so the user sees
+    // why, instead of a click that silently does nothing.
+    const pseudoId = `error-${jobId}-${runs.size}`;
+    runs.set(pseudoId, {
+      runId: pseudoId,
+      label,
+      status: "failed",
+      output: `実行できませんでした: ${String(err)}`,
+    });
+    renderRuns();
+  }
+}
+
+// Best-effort kill of a running job. The terminal `jobs.progress`
+// (status = killed) still arrives and updates the row. If the RPC
+// itself fails (e.g. the run already finished), surface a note on the
+// row so the lingering 中止 button doesn't look broken.
+async function killRun(runId: string): Promise<void> {
+  try {
+    await invoke("jobs_kill", { runId });
+  } catch (err) {
+    console.error("jobs_kill failed", err);
+    const r = runs.get(runId);
+    if (r) {
+      r.output += `\n中止リクエストに失敗しました（既に終了している可能性があります）: ${String(err)}`;
+      renderRuns();
+    }
+  }
+}
+
+// Apply one `jobs.progress` push to the matching run row.
+function handleProgress(p: JobProgress): void {
+  const existing = runs.get(p.run_id);
+  const run: Run = existing ?? {
+    runId: p.run_id,
+    label: p.run_id,
+    status: p.status,
+    output: "",
+  };
+  run.status = p.status;
+  if (p.stdout_chunk) run.output += p.stdout_chunk;
+  if (p.stderr_chunk) run.output += p.stderr_chunk;
+  runs.set(p.run_id, run);
+  renderRuns();
+}
+
+function renderRuns(): void {
+  evictOldRuns();
+  const section = $("runs-section");
+  if (runs.size === 0) {
+    section.hidden = true;
+    return;
+  }
+  section.hidden = false;
+  // Newest first.
+  const list = [...runs.values()].reverse();
+  const container = $("runs");
+  // Structural change (a run added / evicted) → full render. Otherwise
+  // update each row IN PLACE so a status/output tick doesn't blow away
+  // the user's scroll position or text selection in another run's
+  // output (progress can tick several times a second for a chatty job).
+  if (container.children.length !== list.length) {
+    container.innerHTML = list.map(renderRun).join("");
+    return;
+  }
+  for (const r of list) {
+    const el = document.getElementById(`run-${r.runId}`);
+    if (!el) continue;
+    const tmp = document.createElement("div");
+    tmp.innerHTML = renderRun(r);
+    const fresh = tmp.firstElementChild;
+    if (fresh) el.replaceWith(fresh);
+  }
+}
+
+function renderRun(r: Run): string {
+  const icon = RUN_STATUS_ICON[r.status] ?? "⏳";
+  const label = RUN_STATUS_LABEL[r.status] ?? r.status;
+  const kill =
+    r.status === "running" || r.status === "queued"
+      ? `<button class="kill-btn" data-run-id="${escapeHtml(r.runId)}">中止</button>`
+      : "";
+  // Cap the shown output so a chatty job can't blow up the DOM; the
+  // tail is what matters for "did it work".
+  const output = r.output.trim()
+    ? `<pre class="run-output">${escapeHtml(r.output.slice(-4000))}</pre>`
+    : "";
+  // `id` lets renderRuns update this row in place (see above). runIds
+  // are agent-minted UUIDs / internal slugs, so escapeHtml is a no-op
+  // here, but keep it escaped for the same XSS-hygiene reason as below.
+  return `
+    <div class="run-row status-${escapeHtml(r.status)}" id="run-${escapeHtml(r.runId)}">
+      <span class="run-icon">${icon}</span>
+      <span class="run-name">${escapeHtml(r.label)}</span>
+      <span class="run-status muted">${escapeHtml(label)}</span>
+      ${kill}
+      ${output}
+    </div>`;
+}
 
 const $ = (id: string): HTMLElement => {
   const el = document.getElementById(id);
@@ -149,11 +342,12 @@ function renderCheck(c: Check): string {
   const detail = c.detail
     ? `<span class="check-detail">${escapeHtml(c.detail)}</span>`
     : "";
-  // The remediation action needs `jobs.execute`, which isn't wired on
-  // the agent yet (#291) — show the button so the intent is visible,
-  // disabled until that lands.
+  // Remediation (#291): the button runs the check's `troubleshoot`
+  // job via `jobs.execute`. Clicks are caught by the delegated handler
+  // (the Health list is re-rendered on a poll, so per-button listeners
+  // wouldn't survive). The job id + a human label ride on data-attrs.
   const fix = c.troubleshoot
-    ? `<button class="fix-btn" disabled title="修復ジョブの実行は jobs.execute 実装後（#291）">修復する</button>`
+    ? `<button class="fix-btn" data-job-id="${escapeHtml(c.troubleshoot)}" data-check="${escapeHtml(c.name)}">修復する</button>`
     : "";
   return `
     <li class="check-row status-${escapeHtml(c.status)}">
@@ -194,5 +388,43 @@ function escapeHtml(s: string): string {
 
 window.addEventListener("DOMContentLoaded", () => {
   $("ping-btn").addEventListener("click", onPingClick);
+
+  // Delegated click handling: both the Health list (fix buttons) and
+  // the runs list (kill buttons) are re-rendered via innerHTML, so a
+  // single document-level listener survives the churn that per-element
+  // listeners wouldn't.
+  document.addEventListener("click", (e) => {
+    const t = e.target as HTMLElement;
+    const fixBtn = t.closest<HTMLButtonElement>(".fix-btn");
+    if (fixBtn?.dataset.jobId) {
+      // Disable on click so a rapid double-click can't spawn the job
+      // twice before the first invoke resolves. The next Health
+      // re-render (poll) restores a fresh, enabled button.
+      fixBtn.disabled = true;
+      void executeJob(
+        fixBtn.dataset.jobId,
+        fixBtn.dataset.check ?? fixBtn.dataset.jobId,
+      );
+      return;
+    }
+    const killBtn = t.closest<HTMLElement>(".kill-btn");
+    if (killBtn?.dataset.runId) {
+      void killRun(killBtn.dataset.runId);
+    }
+  });
+
+  // Agent→client pushes the backend forwards as `klp-notification`
+  // events (#467). `jobs.progress` drives the remediation run rows
+  // live; other methods (e.g. `state.changed`) can hook in here later.
+  void listen<RpcNotification>("klp-notification", (event) => {
+    if (event.payload.method !== "jobs.progress") return;
+    // Guard the cast: a malformed / null payload (shouldn't happen on
+    // typed IPC, but a single bad frame must not break the listener
+    // for every future push) is dropped rather than throwing.
+    const p = event.payload.params as Partial<JobProgress> | null;
+    if (!p?.run_id) return;
+    handleProgress(p as JobProgress);
+  });
+
   renderStatus();
 });
