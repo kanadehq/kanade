@@ -103,6 +103,15 @@ export function Activity() {
   const [status, setStatus] = useState<StatusFilter>(() =>
     parseStatusFilter(searchParams.get('status')),
   );
+  // The lazy initializer only runs on mount, so a same-route
+  // navigation that changes `?status=` (sidebar "Activity" link
+  // clearing the filter, browser back/forward between deep links)
+  // would leave the dropdown stale while the component stays mounted.
+  // Re-sync from the URL whenever it changes. Manual dropdown edits
+  // don't touch the URL, so this only fires on real navigation.
+  useEffect(() => {
+    setStatus(parseStatusFilter(searchParams.get('status')));
+  }, [searchParams]);
   const [since, setSince] = useState('24h');
   const [limit, setLimit] = useState(50);
 
