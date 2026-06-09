@@ -6,6 +6,7 @@ pub mod agent_releases;
 pub mod agents;
 pub mod app_packages;
 pub mod audit;
+pub mod checks;
 pub mod exec;
 pub mod executions;
 pub mod fleet_perf;
@@ -222,6 +223,8 @@ pub fn router(state: AppState) -> Router {
             get(inventory::first_seen),
         )
         .route("/api/inventory/{pc_id}", get(inventory::list_for_pc))
+        // #290 PR-E: fleet-wide compliance (operator-defined checks).
+        .route("/api/checks", get(checks::list_all))
         .route("/api/agents/{pc_id}/logs", get(agent_logs::tail))
         .route("/api/agents/releases", get(agent_releases::list_releases))
         .route("/api/app-packages", get(app_packages::list_packages))
