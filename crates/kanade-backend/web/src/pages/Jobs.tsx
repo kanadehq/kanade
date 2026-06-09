@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
+import { Link } from 'react-router-dom';
 import { toast } from 'sonner';
 
 import { ErrorCard } from '@/components/ErrorCard';
@@ -223,14 +224,23 @@ export function Jobs() {
     return (
       <div className="flex gap-1.5 items-center">
         {j.live.running > 0 && (
-          <Badge
-            variant="violet"
+          // Deep-link into Activity pre-filtered to THIS job's in-flight
+          // runs — the same status=running bridge the Dashboard failures
+          // tile uses for status=failure, scoped to job_id so one click
+          // goes from "3 running" to those three rows still executing.
+          <Link
+            to={`/activity?status=running&job_id=${encodeURIComponent(j.id)}`}
             title={t('live.runningTitle')}
-            className="inline-flex items-center gap-1 px-1.5"
+            className="inline-flex"
           >
-            <Play className="size-3" />
-            {j.live.running}
-          </Badge>
+            <Badge
+              variant="violet"
+              className="inline-flex items-center gap-1 px-1.5 cursor-pointer transition-opacity hover:opacity-80"
+            >
+              <Play className="size-3" />
+              {j.live.running}
+            </Badge>
+          </Link>
         )}
         {j.live.pending > 0 && (
           <Badge

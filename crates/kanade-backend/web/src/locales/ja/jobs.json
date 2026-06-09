@@ -31,7 +31,7 @@
     "revoked": "無効化"
   },
   "live": {
-    "runningTitle": "実行中: 少なくとも 1 台の PC から応答あり、 残りは進行中",
+    "runningTitle": "実行中: 少なくとも 1 台の PC から応答あり、 残りは進行中 — クリックでこのジョブの実行中一覧をアクティビティで表示",
     "pendingTitle": "保留中: 配信済み、 結果未着 (1 時間で自動失効)"
   },
   "inventoryProbe": "probe",

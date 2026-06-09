@@ -90,27 +90,30 @@ function parseStatusFilter(raw: string | null): StatusFilter {
 export function Activity() {
   const { t } = useTranslation('activity');
   const confirm = useConfirm();
-  // The status filter is URL-backed (`?status=`) so the URL is the
-  // single source of truth: the Dashboard's "failures / 24h" tile
-  // deep-links to `/activity?status=failure` (the same bridge the
-  // fleet-health agent tiles use into the Agents list), and a dropdown
-  // change writes back so the link stays shareable / bookmarkable and
-  // browser back/forward stays in sync. Mirrors Agents.tsx.
+  // The status + job_id filters are URL-backed so the URL is the single
+  // source of truth: the Dashboard "failures / 24h" tile deep-links to
+  // `/activity?status=failure`, and the Jobs live "running" chip
+  // deep-links to `/activity?status=running&job_id=<job>` (the same
+  // bridge the fleet-health agent tiles use into the Agents list). A
+  // filter change writes back so the link stays shareable / bookmarkable
+  // and browser back/forward stays in sync. Mirrors Agents.tsx.
   const [searchParams, setSearchParams] = useSearchParams();
-  const status = parseStatusFilter(searchParams.get('status'));
-  const setStatus = (next: StatusFilter) => {
+  const setUrlParam = (key: string, next: string) => {
     setSearchParams(
       (prev) => {
         const p = new URLSearchParams(prev);
-        if (next === '') p.delete('status');
-        else p.set('status', next);
+        if (next === '') p.delete(key);
+        else p.set(key, next);
         return p;
       },
       { replace: true },
     );
   };
+  const status = parseStatusFilter(searchParams.get('status'));
+  const setStatus = (next: StatusFilter) => setUrlParam('status', next);
+  const jobId = searchParams.get('job_id') ?? '';
+  const setJobId = (next: string) => setUrlParam('job_id', next);
   const [pcId, setPcId] = useState('');
-  const [jobId, setJobId] = useState('');
   const [execId, setExecId] = useState('');
   const [stdoutFilter, setStdoutFilter] = useState('');
   const [stderrFilter, setStderrFilter] = useState('');

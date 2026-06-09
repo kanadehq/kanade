@@ -31,7 +31,7 @@
     "revoked": "revoked"
   },
   "live": {
-    "runningTitle": "Running: at least one PC has reported back, more still in flight",
+    "runningTitle": "Running: at least one PC has reported back, more still in flight — click to view this job's running executions in Activity",
     "pendingTitle": "Pending: fan-out published, no results back yet (auto-expires after 1 h)"
   },
   "inventoryProbe": "probe",
