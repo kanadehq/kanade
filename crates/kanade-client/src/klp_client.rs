@@ -24,6 +24,7 @@ use kanade_shared::ipc::envelope::{
 };
 use kanade_shared::ipc::handshake::{HandshakeParams, HandshakeResult, PROTOCOL_V1};
 use kanade_shared::ipc::method;
+use kanade_shared::ipc::state::{StateSnapshot, StateSnapshotParams};
 use kanade_shared::ipc::system::{PingParams, PingResult};
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -145,6 +146,16 @@ impl KlpClient {
     pub async fn ping(&self) -> Result<PingResult> {
         self.request::<PingParams, PingResult>(method::SYSTEM_PING, &PingParams::default())
             .await
+    }
+
+    /// Convenience wrapper for `state.snapshot` — the full endpoint
+    /// health bundle the Client App's Health tab renders (#290).
+    pub async fn snapshot(&self) -> Result<StateSnapshot> {
+        self.request::<StateSnapshotParams, StateSnapshot>(
+            method::STATE_SNAPSHOT,
+            &StateSnapshotParams::default(),
+        )
+        .await
     }
 }
 

@@ -27,6 +27,67 @@ h1 {
   margin: 0 0 16px;
 }
 
+h2 {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0 0 12px;
+}
+
+/* Health tab (#290): one row per compliance check. */
+ul.checks {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+}
+
+.check-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 8px 0;
+  border-top: 1px solid #eee;
+}
+
+.check-row:first-child {
+  border-top: 0;
+}
+
+.check-icon {
+  flex: 0 0 auto;
+}
+
+.check-name {
+  font-weight: 500;
+}
+
+.check-detail {
+  flex: 1 1 auto;
+  color: #666;
+}
+
+.fix-btn {
+  margin-left: auto;
+  padding: 4px 10px;
+  font-size: 13px;
+}
+
+.fix-btn[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.status-warn .check-name {
+  color: #8a6d00;
+}
+
+.status-fail .check-name {
+  color: #b00020;
+}
+
+.status-unknown .check-name {
+  color: #777;
+}
+
 section {
   padding: 16px;
   margin-bottom: 12px;
@@ -83,5 +144,20 @@ button:hover {
   }
   button:hover {
     background: #d0d0d0;
+  }
+  .check-row {
+    border-color: #3a3a3a;
+  }
+  .check-detail {
+    color: #aaa;
+  }
+  .status-warn .check-name {
+    color: #e0b341;
+  }
+  .status-fail .check-name {
+    color: #ff6b6b;
+  }
+  .status-unknown .check-name {
+    color: #aaa;
   }
 }
