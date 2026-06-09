@@ -1,8 +1,10 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
+
+use crate::live_tail::LiveTail;
 
 use anyhow::{Context, Result};
 use futures::StreamExt;
@@ -266,15 +268,22 @@ pub async fn apply_jitter(cmd: &Command) {
 /// in parallel; a kill message causes `child.kill().await` and the outcome
 /// is reported as `Killed`. A command without an `exec_id` (e.g. ad-hoc CLI
 /// runs) still respects `timeout_secs`.
+/// `live` (when `Some`) is the in-flight job's live-tail ring buffer:
+/// every stdout/stderr chunk we read is appended to it as we go, so the
+/// `job.tail.<pc_id>` handler can serve a running job's output to the
+/// SPA. `None` for paths that don't want live capture (e.g. ad-hoc
+/// `kanade run` from the CLI). It never affects the final captured
+/// strings — those are still the complete byte stream.
 pub async fn run_command_with_kill(
     client: &async_nats::Client,
     cmd: &Command,
+    live: Option<Arc<LiveTail>>,
 ) -> Result<ExecOutcome> {
     // v0.21: run_as: user / system_gui take a separate Win32 path
     // (CreateProcessAsUserW). System (default) stays on tokio::process
     // — backward-compatible for every pre-v0.21 manifest in the wild.
     if !matches!(cmd.run_as, RunAs::System) {
-        return run_in_user_session_dispatch(client, cmd).await;
+        return run_in_user_session_dispatch(client, cmd, live).await;
     }
 
     // #43: belt-and-braces. The tolerant decoder (below, around the
@@ -425,26 +434,21 @@ pub async fn run_command_with_kill(
     // every byte we DID manage to read instead of throwing the
     // partial buffer away with `?`. The caller logs the error +
     // annotates stderr with a marker but keeps the partial capture.
-    let stdout_task = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        let mut err: Option<anyhow::Error> = None;
-        if let Some(mut s) = stdout_handle
-            && let Err(e) = s.read_to_end(&mut buf).await
-        {
-            err = Some(anyhow::Error::new(e));
-        }
-        (String::from_utf8_lossy(&buf).into_owned(), err)
-    });
-    let stderr_task = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        let mut err: Option<anyhow::Error> = None;
-        if let Some(mut s) = stderr_handle
-            && let Err(e) = s.read_to_end(&mut buf).await
-        {
-            err = Some(anyhow::Error::new(e));
-        }
-        (String::from_utf8_lossy(&buf).into_owned(), err)
-    });
+    // v0.4x: chunked drain instead of `read_to_end`. We still keep
+    // every byte and decode the COMPLETE buffer with `from_utf8_lossy`
+    // at the end (identical final output to the old path — the #43 /
+    // Gemini #83 partial-capture + error-preserving semantics are
+    // unchanged). The only difference: each chunk is *also* appended
+    // to the live-tail ring as it arrives, so the `job.tail` handler
+    // can serve a running job's output. The ring stores raw bytes and
+    // lossy-decodes the whole buffer on snapshot, so a multi-byte char
+    // split across two `read` calls doesn't produce a spurious U+FFFD.
+    let live_out = live.clone();
+    let stdout_task =
+        tokio::spawn(async move { drain_to_string(stdout_handle, live_out, Stream::Stdout).await });
+    let live_err = live.clone();
+    let stderr_task =
+        tokio::spawn(async move { drain_to_string(stderr_handle, live_err, Stream::Stderr).await });
 
     let timeout_dur = Duration::from_secs(cmd.timeout_secs.max(1));
 
@@ -555,6 +559,60 @@ enum OutcomeInner {
     Timeout,
 }
 
+/// Which captured stream a chunk belongs to — selects the live-tail
+/// ring it gets mirrored into.
+#[derive(Clone, Copy)]
+enum Stream {
+    Stdout,
+    Stderr,
+}
+
+/// Drain a child pipe to a `String` in chunks, mirroring each chunk to
+/// the live-tail ring as it arrives.
+///
+/// Returns `(decoded, partial_error)` with the SAME contract as the
+/// old `read_to_end` path: on a mid-stream I/O error we keep every
+/// byte read so far (`from_utf8_lossy` applied to the whole buffer)
+/// and surface the error so the caller can log + annotate. The live
+/// ring sees only the bytes that actually arrived before the error.
+async fn drain_to_string<R>(
+    reader: Option<R>,
+    live: Option<Arc<LiveTail>>,
+    stream: Stream,
+) -> (String, Option<anyhow::Error>)
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut buf = Vec::new();
+    let mut err: Option<anyhow::Error> = None;
+    if let Some(mut s) = reader {
+        // 8 KiB chunks: large enough that a chatty job doesn't thrash
+        // the read loop, small enough that the live tail updates
+        // promptly (a 5 s SPA poll sees output within one chunk).
+        let mut chunk = [0u8; 8 * 1024];
+        loop {
+            match s.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    let slice = &chunk[..n];
+                    buf.extend_from_slice(slice);
+                    if let Some(lt) = &live {
+                        match stream {
+                            Stream::Stdout => lt.push_stdout(slice),
+                            Stream::Stderr => lt.push_stderr(slice),
+                        }
+                    }
+                }
+                Err(e) => {
+                    err = Some(anyhow::Error::new(e));
+                    break;
+                }
+            }
+        }
+    }
+    (String::from_utf8_lossy(&buf).into_owned(), err)
+}
+
 /// Glue between the main `run_command_with_kill` (which expects a
 /// NATS subscriber-based kill signal) and `process_as_user`'s
 /// `oneshot::Receiver<()>` kill channel. We subscribe to `kill.{exec_id}`
@@ -564,10 +622,12 @@ enum OutcomeInner {
 async fn run_in_user_session_dispatch(
     client: &async_nats::Client,
     cmd: &Command,
+    live: Option<Arc<LiveTail>>,
 ) -> Result<ExecOutcome> {
     #[cfg(not(target_os = "windows"))]
     {
         let _ = client;
+        let _ = live;
         warn!(
             run_as = ?cmd.run_as,
             "run_as: user / system_gui is Windows-only — falling back to inherited identity",
@@ -615,9 +675,10 @@ async fn run_in_user_session_dispatch(
         };
 
         let timeout = Duration::from_secs(cmd.timeout_secs.max(1));
-        let outcome =
-            crate::process_as_user::run_command_in_user_session(cmd, cmd.run_as, timeout, kill_rx)
-                .await;
+        let outcome = crate::process_as_user::run_command_in_user_session(
+            cmd, cmd.run_as, timeout, kill_rx, live,
+        )
+        .await;
 
         if let Some(b) = bridge {
             b.abort();

@@ -169,6 +169,10 @@ pub fn router(state: AppState) -> Router {
         // `request_id`); pre-v0.29 rows backfilled `result_id = request_id`
         // so existing browser-cached deep links still resolve.
         .route("/api/results/{result_id}", get(results::detail))
+        // Live stdout/stderr tail for an in-flight job — the SPA's
+        // "live" toggle polls this (job.tail.<pc_id> round-trip to the
+        // agent; falls back to the persisted row once finished).
+        .route("/api/results/{result_id}/tail", get(results::tail))
         .route("/api/executions", get(executions::list))
         .route("/api/executions/{exec_id}", get(executions::detail))
         .route("/api/audit", get(audit::list))

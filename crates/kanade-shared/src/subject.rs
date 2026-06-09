@@ -99,6 +99,19 @@ pub fn logs_fetch(pc_id: &str) -> String {
     format!("logs.fetch.{pc_id}")
 }
 
+/// `job.tail.<pc_id>` — request/reply for the live tail of a
+/// still-running job's stdout/stderr. The operator (or backend, on
+/// the SPA's behalf) sends a [`crate::wire::JobTailRequest`] carrying
+/// the `result_id`; the addressed agent replies with the current
+/// ring-buffer tail from its in-memory live registry. On-demand only,
+/// no stream — the SPA polls this every few seconds (same shape as
+/// `logs.fetch.<pc_id>`) while a job is in flight. Distinct subject
+/// from `logs.fetch.<pc_id>` (whole-agent log file) because this is
+/// scoped to a single job's captured output, not the agent's log.
+pub fn job_tail(pc_id: &str) -> String {
+    format!("job.tail.{pc_id}")
+}
+
 /// `agents.<pc_id>.ping` — v0.38 / #133 request/reply for the
 /// active "ping" round-trip. The agent answers with a fresh
 /// `Heartbeat` on demand instead of the backend waiting up to ~30 s
@@ -182,6 +195,12 @@ mod tests {
     #[test]
     fn ping_formats_pc_id() {
         assert_eq!(ping("pc-01"), "agents.pc-01.ping");
+    }
+
+    #[test]
+    fn job_tail_formats_pc_id() {
+        assert_eq!(job_tail("pc-01"), "job.tail.pc-01");
+        assert_eq!(job_tail("PC1234"), "job.tail.PC1234");
     }
 
     #[test]

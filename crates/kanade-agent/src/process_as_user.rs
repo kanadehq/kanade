@@ -43,7 +43,7 @@ use kanade_shared::wire::{Command, RunAs, Shell};
 use tokio::sync::oneshot;
 use tracing::{info, warn};
 use windows::Win32::Foundation::{
-    CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+    CloseHandle, ERROR_BROKEN_PIPE, GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
 };
 use windows::Win32::Security::{
     DuplicateTokenEx, SECURITY_ATTRIBUTES, SecurityImpersonation, SetTokenInformation,
@@ -62,6 +62,7 @@ use windows::Win32::System::Threading::{
 use windows::core::PWSTR;
 
 use crate::job_object::JobObject;
+use crate::live_tail::LiveTail;
 use crate::process::ExecOutcome;
 
 pub async fn run_command_in_user_session(
@@ -69,6 +70,7 @@ pub async fn run_command_in_user_session(
     run_as: RunAs,
     timeout: Duration,
     mut kill: oneshot::Receiver<()>,
+    live: Option<Arc<LiveTail>>,
 ) -> Result<ExecOutcome> {
     debug_assert!(matches!(run_as, RunAs::User | RunAs::SystemGui));
 
@@ -89,9 +91,16 @@ pub async fn run_command_in_user_session(
     let process = Arc::new(process);
 
     // 2) Pipe drain on dedicated threads (anonymous pipes are
-    //    blocking-only on Windows).
-    let stdout_task = tokio::task::spawn_blocking(move || read_to_string(stdout_read));
-    let stderr_task = tokio::task::spawn_blocking(move || read_to_string(stderr_read));
+    //    blocking-only on Windows). Each chunk is mirrored to the
+    //    live-tail ring (when present) as it's read, so the
+    //    `job.tail.<pc_id>` handler can serve a running user-session
+    //    job's output just like the default `system` path.
+    let live_out = live.clone();
+    let stdout_task =
+        tokio::task::spawn_blocking(move || read_to_string(stdout_read, live_out, Stream::Stdout));
+    let live_err = live.clone();
+    let stderr_task =
+        tokio::task::spawn_blocking(move || read_to_string(stderr_read, live_err, Stream::Stderr));
 
     // 3) Wait for completion. Block on WaitForSingleObject in a
     //    dedicated thread; the outer select! races it against kill
@@ -119,14 +128,18 @@ pub async fn run_command_in_user_session(
         }
     };
 
-    let stdout = stdout_task
-        .await
-        .map_err(|e| anyhow!("stdout join: {e}"))?
-        .unwrap_or_default();
-    let stderr = stderr_task
-        .await
-        .map_err(|e| anyhow!("stderr join: {e}"))?
-        .unwrap_or_default();
+    // Mirror the System path (`process.rs`): keep whatever bytes we
+    // read and surface a non-EOF capture failure via warn + a stderr
+    // marker, instead of dropping it silently.
+    let (stdout, stdout_err) = stdout_task.await.map_err(|e| anyhow!("stdout join: {e}"))?;
+    if let Some(e) = stdout_err {
+        warn!(error = %e, "stdout capture failed (kept partial)");
+    }
+    let (mut stderr, stderr_err) = stderr_task.await.map_err(|e| anyhow!("stderr join: {e}"))?;
+    if let Some(e) = stderr_err {
+        warn!(error = %e, "stderr capture failed (kept partial)");
+        stderr.push_str(&format!("\n[agent: stderr capture failed: {e}]\n"));
+    }
 
     Ok(match wait_outcome {
         WaitOutcome::Completed(code) => ExecOutcome::Completed {
@@ -419,23 +432,58 @@ impl HandleAsRaw for OwnedHandle {
     }
 }
 
-fn read_to_string(handle: OwnedHandle) -> Option<String> {
+/// Which captured stream a chunk belongs to — selects the live-tail
+/// ring it gets mirrored into.
+#[derive(Clone, Copy)]
+enum Stream {
+    Stdout,
+    Stderr,
+}
+
+/// Drain a child pipe to a `String`, mirroring each chunk to the live
+/// ring as it arrives. Returns `(decoded, partial_error)` with the same
+/// contract as `process.rs::drain_to_string`: a non-EOF `ReadFile`
+/// failure (broken child, partial read) keeps the bytes read so far and
+/// surfaces the error so the caller can warn + annotate stderr, instead
+/// of dropping it silently.
+fn read_to_string(
+    handle: OwnedHandle,
+    live: Option<Arc<LiveTail>>,
+    stream: Stream,
+) -> (String, Option<anyhow::Error>) {
     let mut buf = Vec::<u8>::with_capacity(4096);
     let mut chunk = [0u8; 4096];
+    let mut err: Option<anyhow::Error> = None;
     let raw = handle.as_raw_handle_value();
     loop {
         let mut read: u32 = 0;
         let ok = unsafe { ReadFile(HANDLE(raw), Some(&mut chunk), Some(&mut read), None) };
-        if ok.is_err() {
-            // ERROR_BROKEN_PIPE on EOF is normal; anything else, stop.
+        if let Err(e) = ok {
+            // ERROR_BROKEN_PIPE is the normal EOF once the child closes
+            // its write end of the anonymous pipe — not a failure.
+            // Anything else (e.g. a partial read on a crashed child) is
+            // real: keep the partial capture and report it.
+            let code = unsafe { GetLastError() };
+            if code != ERROR_BROKEN_PIPE {
+                err = Some(anyhow!("ReadFile failed: {e} (Win32 {code:?})"));
+            }
             break;
         }
         if read == 0 {
             break;
         }
-        buf.extend_from_slice(&chunk[..read as usize]);
+        let slice = &chunk[..read as usize];
+        buf.extend_from_slice(slice);
+        // Mirror to the live ring as the bytes arrive (the final
+        // `from_utf8_lossy` of the whole buffer below is unchanged).
+        if let Some(lt) = &live {
+            match stream {
+                Stream::Stdout => lt.push_stdout(slice),
+                Stream::Stderr => lt.push_stderr(slice),
+            }
+        }
     }
-    Some(String::from_utf8_lossy(&buf).into_owned())
+    (String::from_utf8_lossy(&buf).into_owned(), err)
 }
 
 fn wait_native(process: HANDLE) -> Result<WaitOutcome> {
