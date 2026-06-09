@@ -91,6 +91,19 @@ struct State {
     completions: HashMap<String, DateTime<Utc>>,
     /// Path to the completions file (under agent's data dir).
     completions_path: PathBuf,
+    /// schedule_id → deadline. While a fire's `handle_command` runs,
+    /// the schedule is marked here so a concurrent tick doesn't
+    /// double-fire before the first run records its completion
+    /// (#445). `tokio-cron-scheduler` spawns each tick's callback
+    /// (`cron_job.rs` `tokio::task::spawn`) rather than awaiting the
+    /// previous one, so a `jitter` longer than the 1-minute poll lets
+    /// later ticks start while the first is still sleeping in jitter —
+    /// all seeing the same stale `completions`. The value is a
+    /// self-healing deadline (`claim time + jitter + timeout + slack`):
+    /// if a run dies/hangs past it (e.g. the agent was killed
+    /// mid-run), the next tick reclaims instead of staying stuck until
+    /// agent restart. Not persisted — a fresh process starts empty.
+    in_flight: HashMap<String, DateTime<Utc>>,
 }
 
 impl State {
@@ -113,6 +126,95 @@ impl State {
                 "local_completions.json flush failed; in-memory state still consistent",
             );
         }
+    }
+
+    /// Atomically decide whether THIS tick should fire AND mark the
+    /// schedule in-flight (#445). Returns `(claimed, reclaimed_stale)`:
+    /// `claimed` is true iff the caller owns the fire and must later
+    /// call [`finish_fire`](Self::finish_fire); `reclaimed_stale` is
+    /// true when an overdue previous claim was taken over (the caller
+    /// warns). Doing the dedup re-check and the in-flight mark under
+    /// one `&mut self` borrow is what makes it atomic — two concurrent
+    /// ticks can't both pass, since the second one observes the
+    /// first's `in_flight` entry.
+    ///
+    /// `claim_ttl` is the longest a legitimate run can take
+    /// (`jitter + timeout + slack`); past it the previous claim is
+    /// presumed dead and reclaimed so the schedule self-heals without
+    /// an agent restart.
+    fn try_claim_fire(
+        &mut self,
+        schedule_id: &str,
+        job_id: &str,
+        mode: ExecMode,
+        cooldown: Option<ChronoDuration>,
+        now: DateTime<Utc>,
+        claim_ttl: ChronoDuration,
+    ) -> (bool, bool) {
+        let should = match mode {
+            ExecMode::EveryTick => true,
+            ExecMode::OncePerPc => match self.completions.get(&Self::key(schedule_id, job_id)) {
+                None => true,
+                Some(last) => cooldown.is_some_and(|cd| (now - *last) >= cd),
+            },
+            // Unreachable: the caller warns + returns on OncePerTarget
+            // for runs_on: agent (validate() rejects it). Defensive.
+            ExecMode::OncePerTarget => false,
+        };
+        if !should {
+            return (false, false);
+        }
+        let reclaimed_stale = match self.in_flight.get(schedule_id) {
+            // A previous run is still within its own deadline — block
+            // this concurrent tick.
+            Some(&deadline) if now < deadline => return (false, false),
+            // Overdue: the previous run overran jitter+timeout or died
+            // — take it over.
+            Some(_) => true,
+            None => false,
+        };
+        self.in_flight
+            .insert(schedule_id.to_string(), now + claim_ttl);
+        (true, reclaimed_stale)
+    }
+
+    /// Release the in-flight mark (#445); on success also record the
+    /// completion so subsequent ticks dedup against it.
+    ///
+    /// `deadline` is the token this run claimed (its `in_flight`
+    /// value). The slot is released **only if it still holds that
+    /// deadline** (gemini #463 review): if this run overran and a
+    /// later tick already reclaimed the slot (a fresh deadline), a
+    /// late `finish_fire` from the dead/overrun run must NOT clear the
+    /// new owner's mark — otherwise a third tick could double-fire
+    /// alongside the reclaimer. The completion is still recorded on
+    /// success regardless (it's a real success; the latest wins).
+    fn finish_fire(
+        &mut self,
+        schedule_id: &str,
+        job_id: &str,
+        deadline: DateTime<Utc>,
+        success_at: Option<DateTime<Utc>>,
+    ) {
+        if self.in_flight.get(schedule_id) == Some(&deadline) {
+            self.in_flight.remove(schedule_id);
+        }
+        if let Some(when) = success_at {
+            self.record_completion(schedule_id, job_id, when);
+        }
+    }
+
+    /// Is there a *live* (non-expired) in-flight claim for this
+    /// schedule? A cheap early short-circuit (claude #463 review) so a
+    /// concurrent tick blocked by an in-flight run skips before
+    /// building the Command and hitting KV. TTL-aware on purpose: a
+    /// *stale* (past-deadline) entry returns false so the tick falls
+    /// through to `try_claim_fire`, which reclaims it (self-heal). A
+    /// plain `contains_key` would defeat that.
+    fn is_live_in_flight(&self, schedule_id: &str, now: DateTime<Utc>) -> bool {
+        self.in_flight
+            .get(schedule_id)
+            .is_some_and(|&deadline| now < deadline)
     }
 
     fn flush_completions(&self) -> Result<()> {
@@ -222,6 +324,7 @@ async fn run(
         schedules: HashMap::new(),
         completions,
         completions_path,
+        in_flight: HashMap::new(),
     }));
 
     // Long-lived auxiliary task: react to group-membership flips even
@@ -812,6 +915,13 @@ async fn unregister_locally(internal: &JobScheduler, state: &Arc<Mutex<State>>, 
     let uuid_opt = {
         let mut st = state.lock().await;
         st.schedules.remove(schedule_id);
+        // A KV delete is a clean teardown — drop any in-flight mark so
+        // a delete+recreate with the same id isn't spuriously blocked
+        // by the old run's deadline (claude #463 review). (Deliberately
+        // NOT done in reconcile_schedule's unregister: an in-flight run
+        // from before an *edit* should still guard the re-registered
+        // schedule's first tick.)
+        st.in_flight.remove(schedule_id);
         st.registered.remove(schedule_id)
     };
     if let Some(uuid) = uuid_opt {
@@ -877,6 +987,19 @@ async fn local_tick(
 
     // 2) Mode-based dedup against local_completions.
     let now = Utc::now();
+    // Cheap short-circuit (claude #463): if a run is still live in
+    // flight, skip before building the Command + the KV round-trips
+    // below. `try_claim_fire` is still the authoritative gate; this
+    // only saves the busy work for the extra ticks tokio-cron spawns
+    // during a long jitter sleep. Same `now` is threaded through to
+    // the claim so the pre-check and the gate stay consistent.
+    if state.lock().await.is_live_in_flight(&schedule.id, now) {
+        debug!(
+            schedule_id = %schedule.id,
+            "local_scheduler: live run in flight — skip early (#445)",
+        );
+        return;
+    }
     let lowered = schedule.lowered();
     // Defensive parse (gemini #419 review): validate() rejects a bad
     // `every` at create time, but a hand-edited KV blob bypasses
@@ -1016,6 +1139,52 @@ async fn local_tick(
     let script_current = js.get_key_value(BUCKET_SCRIPT_CURRENT).await.ok();
     let script_status = js.get_key_value(BUCKET_SCRIPT_STATUS).await.ok();
 
+    // #445: claim the in-flight slot atomically right before firing.
+    // `tokio-cron-scheduler` spawns each tick's callback, so a `jitter`
+    // longer than the 1-minute poll lets later ticks start while this
+    // one is still sleeping in jitter inside handle_command — all
+    // seeing stale `completions`. The claim (dedup re-check + mark in
+    // one lock) ensures only one wins; the rest skip. Placed here so
+    // there is no early `return` between the claim and the await that
+    // would leak the slot. `claim_ttl` = the longest a legitimate run
+    // can take (jitter + script timeout + handle_command overhead).
+    const IN_FLIGHT_SLACK_SECS: i64 = 60;
+    let claim_ttl = ChronoDuration::seconds(
+        jitter_secs.unwrap_or(0) as i64 + timeout_secs as i64 + IN_FLIGHT_SLACK_SECS,
+    );
+    // Reuse the single tick `now` (captured above) so the early
+    // pre-check, this claim, and the deadline token are all consistent
+    // and we avoid a second `Utc::now()` syscall (claude #463 review).
+    // `deadline` matches exactly what `try_claim_fire` inserts
+    // (`now + claim_ttl`); `finish_fire` only releases the slot if it
+    // still holds this token, so a late finish from an overrun run
+    // can't clear a reclaimer's mark (gemini #463 review).
+    let deadline = now + claim_ttl;
+    let (claimed, reclaimed_stale) = {
+        let mut st = state.lock().await;
+        st.try_claim_fire(
+            &schedule.id,
+            &manifest.id,
+            lowered.mode,
+            cooldown,
+            now,
+            claim_ttl,
+        )
+    };
+    if !claimed {
+        debug!(
+            schedule_id = %schedule.id,
+            "local_scheduler: already in flight or deduped — skip (#445)",
+        );
+        return;
+    }
+    if reclaimed_stale {
+        warn!(
+            schedule_id = %schedule.id,
+            "local_scheduler: previous run overran its jitter+timeout deadline — reclaiming (#445)",
+        );
+    }
+
     info!(
         schedule_id = %schedule.id,
         job_id = %manifest.id,
@@ -1039,16 +1208,18 @@ async fn local_tick(
     .await
     {
         Ok(()) => {
-            // 5) Record the completion. handle_command publishes a
-            //    result to NATS, but we don't know its exit_code
-            //    here — accept "no error = the run finished, take
-            //    that as a successful tick" for v0.23 MVP. The
-            //    operator's source of truth for actual exit codes
-            //    remains the Results page once results flush.
-            state
-                .lock()
-                .await
-                .record_completion(&schedule.id, &job_id_for_completion, Utc::now());
+            // 5) Release the in-flight slot AND record the completion
+            //    (#445). handle_command publishes a result to NATS, but
+            //    we don't know its exit_code here — accept "no error =
+            //    the run finished, take that as a successful tick" for
+            //    v0.23 MVP. The operator's source of truth for actual
+            //    exit codes remains the Results page once results flush.
+            state.lock().await.finish_fire(
+                &schedule.id,
+                &job_id_for_completion,
+                deadline,
+                Some(Utc::now()),
+            );
             debug!(
                 schedule_id = %schedule.id,
                 %request_id,
@@ -1056,6 +1227,12 @@ async fn local_tick(
             );
         }
         Err(e) => {
+            // Release the in-flight slot without recording a completion
+            // so the next tick retries (#445).
+            state
+                .lock()
+                .await
+                .finish_fire(&schedule.id, &job_id_for_completion, deadline, None);
             warn!(
                 schedule_id = %schedule.id,
                 %request_id,
@@ -1089,6 +1266,162 @@ mod tests {
             runs_on,
             enabled: true,
         }
+    }
+
+    // ---- in-flight guard (#445) ----
+
+    fn test_state() -> State {
+        // A unique temp completions path so finish_fire's flush is a
+        // harmless real write (and parallel tests don't collide).
+        let mut p = std::env::temp_dir();
+        p.push(format!("kanade-test-completions-{}.json", Uuid::new_v4()));
+        State {
+            jobs: HashMap::new(),
+            registered: HashMap::new(),
+            schedules: HashMap::new(),
+            completions: HashMap::new(),
+            completions_path: p,
+            in_flight: HashMap::new(),
+        }
+    }
+
+    fn t(secs: i64) -> DateTime<Utc> {
+        DateTime::from_timestamp(1_700_000_000 + secs, 0).unwrap()
+    }
+
+    #[test]
+    fn try_claim_fire_blocks_concurrent_once_per_pc() {
+        let mut st = test_state();
+        let ttl = ChronoDuration::seconds(60);
+        let cd = Some(ChronoDuration::seconds(3600)); // every 1h
+        // First tick (no completion yet) claims.
+        assert_eq!(
+            st.try_claim_fire("s", "j", ExecMode::OncePerPc, cd, t(0), ttl),
+            (true, false)
+        );
+        // A concurrent tick at the same instant is blocked (in flight).
+        assert_eq!(
+            st.try_claim_fire("s", "j", ExecMode::OncePerPc, cd, t(0), ttl),
+            (false, false)
+        );
+        // Finish + record success.
+        st.finish_fire("s", "j", t(60), Some(t(0))); // claimed at t(0), deadline t(60)
+        // Within cooldown → deduped (not in flight, but recent).
+        assert_eq!(
+            st.try_claim_fire("s", "j", ExecMode::OncePerPc, cd, t(1800), ttl),
+            (false, false)
+        );
+        // After cooldown → claims again.
+        assert_eq!(
+            st.try_claim_fire("s", "j", ExecMode::OncePerPc, cd, t(3600), ttl),
+            (true, false)
+        );
+    }
+
+    #[test]
+    fn try_claim_fire_blocks_concurrent_every_tick() {
+        let mut st = test_state();
+        let ttl = ChronoDuration::seconds(60);
+        assert_eq!(
+            st.try_claim_fire("s", "j", ExecMode::EveryTick, None, t(0), ttl),
+            (true, false)
+        );
+        // Concurrent EveryTick tick blocked while in flight.
+        assert_eq!(
+            st.try_claim_fire("s", "j", ExecMode::EveryTick, None, t(10), ttl),
+            (false, false)
+        );
+        st.finish_fire("s", "j", t(60), Some(t(10))); // claimed at t(0), deadline t(60)
+        // Next EveryTick fires again (EveryTick ignores completions).
+        assert_eq!(
+            st.try_claim_fire("s", "j", ExecMode::EveryTick, None, t(20), ttl),
+            (true, false)
+        );
+    }
+
+    #[test]
+    fn try_claim_fire_reclaims_stale_past_deadline() {
+        let mut st = test_state();
+        let ttl = ChronoDuration::seconds(60);
+        // Claim at T=0; deadline = T+60. finish_fire is NOT called
+        // (simulates a dead/aborted run).
+        assert_eq!(
+            st.try_claim_fire("s", "j", ExecMode::EveryTick, None, t(0), ttl),
+            (true, false)
+        );
+        // Still within the deadline → blocked.
+        assert_eq!(
+            st.try_claim_fire("s", "j", ExecMode::EveryTick, None, t(30), ttl),
+            (false, false)
+        );
+        // Past the deadline → reclaimed (self-heal, no agent restart).
+        assert_eq!(
+            st.try_claim_fire("s", "j", ExecMode::EveryTick, None, t(61), ttl),
+            (true, true)
+        );
+    }
+
+    #[test]
+    fn is_live_in_flight_is_ttl_aware() {
+        let mut st = test_state();
+        let ttl = ChronoDuration::seconds(60);
+        assert!(!st.is_live_in_flight("s", t(0)), "no entry");
+        st.try_claim_fire("s", "j", ExecMode::EveryTick, None, t(0), ttl); // deadline t(60)
+        assert!(st.is_live_in_flight("s", t(30)), "within deadline → live");
+        assert!(
+            !st.is_live_in_flight("s", t(60)),
+            "at deadline → not live (lets reclaim fall through)"
+        );
+        assert!(!st.is_live_in_flight("s", t(61)), "past deadline → stale");
+    }
+
+    #[test]
+    fn finish_fire_ignores_stale_deadline_after_reclaim() {
+        // A late finish from an overrun run must not clear the slot a
+        // newer tick already reclaimed (gemini #463 review).
+        let mut st = test_state();
+        let ttl = ChronoDuration::seconds(60);
+        // Task A claims at T=0 (deadline T+60).
+        st.try_claim_fire("s", "j", ExecMode::EveryTick, None, t(0), ttl);
+        // Task B reclaims at T=61 (deadline T+121) after A overran.
+        st.try_claim_fire("s", "j", ExecMode::EveryTick, None, t(61), ttl);
+        // Task A finally finishes and tries to release ITS slot (T+60).
+        st.finish_fire("s", "j", t(60), Some(t(70)));
+        // B's mark (T+121) must survive — else a third tick double-fires.
+        assert_eq!(
+            st.in_flight.get("s"),
+            Some(&t(121)),
+            "reclaimer's in_flight token preserved"
+        );
+        // B finishing with its own deadline clears it.
+        st.finish_fire("s", "j", t(121), Some(t(130)));
+        assert!(!st.in_flight.contains_key("s"), "owner releases its slot");
+    }
+
+    #[test]
+    fn finish_fire_records_on_success_only_and_clears_in_flight() {
+        let mut st = test_state();
+        let ttl = ChronoDuration::seconds(60);
+        let key = State::key("s", "j");
+
+        // Success path: records completion + clears in_flight.
+        st.try_claim_fire("s", "j", ExecMode::EveryTick, None, t(0), ttl);
+        st.finish_fire("s", "j", t(60), Some(t(5))); // claimed at t(0), deadline t(60)
+        assert!(!st.in_flight.contains_key("s"), "in_flight cleared");
+        assert_eq!(st.completions.get(&key), Some(&t(5)), "completion recorded");
+
+        // Failure path: clears in_flight, no completion change.
+        st.try_claim_fire("s", "j", ExecMode::EveryTick, None, t(100), ttl);
+        st.finish_fire("s", "j", t(160), None); // claimed at t(100), deadline t(160)
+        assert!(
+            !st.in_flight.contains_key("s"),
+            "in_flight cleared on failure"
+        );
+        assert_eq!(
+            st.completions.get(&key),
+            Some(&t(5)),
+            "failure leaves the last success untouched"
+        );
     }
 
     #[test]
