@@ -15,6 +15,7 @@
 //! read — harmless.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use kanade_shared::ipc::state::{Check, CheckStatus};
@@ -31,28 +32,102 @@ pub struct CheckSink {
 struct Inner {
     results: Mutex<HashMap<String, Check>>,
     updated: Notify,
+    /// Where the cache is persisted as JSON (`None` = in-memory only,
+    /// used by tests / non-Windows). Operator-defined check results
+    /// are written here on every `record` and re-loaded on boot so the
+    /// Client App's Health tab survives an agent restart and shows the
+    /// last-known status even while offline (#290). It's a bounded
+    /// snapshot — one entry per check name, a few KB — so a single
+    /// atomically-replaced JSON file is the right store (no SQLite;
+    /// same pattern as `local_completions.json` / the outboxes).
+    path: Option<PathBuf>,
 }
 
 impl CheckSink {
+    /// In-memory only (no persistence). For tests and the non-Windows
+    /// build where the KLP reader isn't compiled.
     pub fn new() -> Self {
+        Self::with_inner(HashMap::new(), None)
+    }
+
+    /// Load the cache from `path` (an empty cache if the file is
+    /// missing or unreadable — a corrupt/old file must not stop the
+    /// agent booting) and persist every subsequent `record` back to it.
+    pub fn load(path: PathBuf) -> Self {
+        let results = match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice::<HashMap<String, Check>>(&bytes)
+                .unwrap_or_else(|e| {
+                    tracing::warn!(error = %e, path = %path.display(), "check_cache: ignoring unreadable persisted cache");
+                    HashMap::new()
+                }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+            Err(e) => {
+                tracing::warn!(error = %e, path = %path.display(), "check_cache: failed to read persisted cache");
+                HashMap::new()
+            }
+        };
+        Self::with_inner(results, Some(path))
+    }
+
+    fn with_inner(results: HashMap<String, Check>, path: Option<PathBuf>) -> Self {
         Self {
             inner: Arc::new(Inner {
-                results: Mutex::new(HashMap::new()),
+                results: Mutex::new(results),
                 updated: Notify::new(),
+                path,
             }),
         }
     }
 
-    /// Store a freshly-built [`Check`] under its `name` and wake the
-    /// state evaluator. The caller builds the `Check` — [`build_check`]
-    /// on a clean exit, [`build_check_failed`] when the script crashed
-    /// — so this stays a dumb sink.
+    /// Store a freshly-built [`Check`] under its `name`, persist the
+    /// cache, and wake the state evaluator. The caller builds the
+    /// `Check` — [`build_check`] on a clean exit, [`build_check_failed`]
+    /// when the script crashed — so this stays a dumb sink.
     pub fn record(&self, check: Check) {
         self.guarded(|map| {
             map.insert(check.name.clone(), check);
+            // Persist UNDER the lock: two concurrent records can't
+            // interleave and write an older snapshot over a newer one
+            // (the previous out-of-lock version had that race). The
+            // file is a few KB — sub-ms write — so holding the lock
+            // briefly doesn't meaningfully delay a reader's `checks()`.
+            self.persist(map);
         });
         // Re-publish the snapshot now instead of on the next 30 s tick.
         self.inner.updated.notify_one();
+    }
+
+    /// Atomically write the cache to its JSON file (temp + rename), if
+    /// persistence is configured. Best-effort: a write failure is
+    /// logged, not fatal — the in-memory cache is still authoritative
+    /// for this run. Call while holding the results lock so writes are
+    /// serialised.
+    fn persist(&self, results: &HashMap<String, Check>) {
+        let Some(path) = &self.inner.path else { return };
+        let json = match serde_json::to_vec_pretty(results) {
+            Ok(j) => j,
+            Err(e) => {
+                tracing::warn!(error = %e, "check_cache: serialize failed");
+                return;
+            }
+        };
+        // The data dir may not exist yet on a fresh install.
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                tracing::warn!(error = %e, path = %parent.display(), "check_cache: create data dir failed");
+                return;
+            }
+        }
+        let tmp = path.with_extension("json.tmp");
+        if let Err(e) = std::fs::write(&tmp, &json) {
+            tracing::warn!(error = %e, path = %tmp.display(), "check_cache: temp write failed");
+            return;
+        }
+        // rename replaces the destination atomically (MoveFileEx with
+        // REPLACE_EXISTING on Windows, rename(2) on Unix).
+        if let Err(e) = std::fs::rename(&tmp, path) {
+            tracing::warn!(error = %e, path = %path.display(), "check_cache: atomic rename failed");
+        }
     }
 
     /// Current cached checks. Cheap clone of the small map's values;
@@ -338,5 +413,61 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(1), sink.wait())
             .await
             .expect("wait() must observe the stored notify permit");
+    }
+
+    // ---- persistence (#290: survive restart / offline) ----
+
+    #[test]
+    fn load_missing_file_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = CheckSink::load(dir.path().join("check_results.json"));
+        assert!(sink.checks().is_empty());
+    }
+
+    #[test]
+    fn record_persists_and_reloads_across_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("check_results.json");
+
+        // First "boot": record two checks.
+        let sink = CheckSink::load(path.clone());
+        sink.record(build_check(
+            &hint("bitlocker"),
+            r#"{"status":"warn","detail":"D: off"}"#,
+        ));
+        sink.record(build_check(&hint("av_signature"), r#"{"status":"ok"}"#));
+        drop(sink);
+        assert!(path.exists(), "record must persist the cache file");
+
+        // Second "boot": a fresh sink loads the persisted results, so
+        // the Health tab is populated before any check re-runs.
+        let reloaded = CheckSink::load(path);
+        let mut checks = reloaded.checks();
+        checks.sort_by(|a, b| a.name.cmp(&b.name));
+        assert_eq!(checks.len(), 2);
+        assert_eq!(checks[0].name, "av_signature");
+        assert_eq!(checks[1].name, "bitlocker");
+        assert_eq!(checks[1].status, CheckStatus::Warn);
+        assert_eq!(checks[1].detail.as_deref(), Some("D: off"));
+    }
+
+    #[test]
+    fn load_corrupt_file_is_empty_not_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("check_results.json");
+        std::fs::write(&path, b"{ this is not valid json").unwrap();
+        // Must boot with an empty cache rather than panicking.
+        let sink = CheckSink::load(path);
+        assert!(sink.checks().is_empty());
+    }
+
+    #[test]
+    fn new_does_not_persist() {
+        // The in-memory constructor writes nothing to disk.
+        let sink = CheckSink::new();
+        sink.record(build_check(&hint("x"), r#"{"status":"ok"}"#));
+        assert_eq!(sink.checks().len(), 1);
+        // (no path → persist() is a no-op; nothing to assert beyond
+        // not panicking and the value still being in memory)
     }
 }

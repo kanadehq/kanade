@@ -222,7 +222,10 @@ pub(crate) async fn run_agent() -> Result<()> {
     // command path into this sink and out via the KLP StateSnapshot.
     // Constructed unconditionally (the command-path writer is
     // cross-platform); only the Windows KLP evaluator reads it.
-    let check_sink = check_cache::CheckSink::new();
+    // Persisted to data_dir so the Health tab survives an agent
+    // restart and shows last-known status while offline.
+    let check_sink =
+        check_cache::CheckSink::load(default_paths::data_dir().join("check_results.json"));
     #[cfg(target_os = "windows")]
     {
         let initial_snapshot = klp::state::eval_once(
