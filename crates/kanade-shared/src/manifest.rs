@@ -2176,6 +2176,95 @@ on_failure:
         assert!(s.on_failure.lowered_retry().is_none());
     }
 
+    // ---- global change-freeze (#418 Phase 5) ----
+
+    #[test]
+    fn freeze_empty_window_is_always_active() {
+        // The big-red-button shape: no bounds = frozen until cleared.
+        let f = Freeze::default();
+        assert!(f.is_active(chrono::Utc::now()));
+    }
+
+    #[test]
+    fn freeze_window_is_half_open() {
+        use chrono::TimeZone;
+        let f = Freeze {
+            from: Some("2026-12-20T00:00:00+00:00".into()),
+            until: Some("2027-01-05T00:00:00+00:00".into()),
+            reason: Some("year-end".into()),
+            tz: ScheduleTz::Utc,
+        };
+        let at = |y, mo, d| chrono::Utc.with_ymd_and_hms(y, mo, d, 0, 0, 0).unwrap();
+        assert!(!f.is_active(at(2026, 12, 19)), "before from = not frozen");
+        assert!(f.is_active(at(2026, 12, 20)), "from is inclusive");
+        assert!(f.is_active(at(2026, 12, 31)), "inside window");
+        assert!(!f.is_active(at(2027, 1, 5)), "until is exclusive");
+        assert!(!f.is_active(at(2027, 1, 6)), "after until = not frozen");
+    }
+
+    #[test]
+    fn freeze_fails_closed_on_corrupt_bound() {
+        // A freeze is a safety switch: an unparseable bound (only
+        // reachable via a hand-edited KV blob) must read as FROZEN, not
+        // "fire normally" (coderabbit #472) — the opposite of `active`,
+        // which fail-opens.
+        let f = Freeze {
+            from: Some("not-a-date".into()),
+            until: None,
+            reason: None,
+            tz: ScheduleTz::Utc,
+        };
+        assert!(f.is_active(chrono::Utc::now()), "corrupt bound → frozen");
+    }
+
+    #[test]
+    fn freeze_validate_accepts_good_bounds() {
+        Freeze {
+            from: Some("2026-12-20".into()),
+            until: Some("2027-01-05T12:00:00+09:00".into()),
+            reason: None,
+            tz: ScheduleTz::Local,
+        }
+        .validate()
+        .expect("date + rfc3339 bounds should validate");
+        // Empty (indefinite) freeze is valid.
+        Freeze::default().validate().expect("empty freeze is valid");
+    }
+
+    #[test]
+    fn freeze_validate_rejects_bad_bound_and_inverted_window() {
+        let err = Freeze {
+            from: Some("never".into()),
+            ..Default::default()
+        }
+        .validate()
+        .unwrap_err();
+        assert!(err.contains("freeze:"), "got: {err}");
+
+        let inverted = Freeze {
+            from: Some("2027-01-05".into()),
+            until: Some("2026-12-20".into()),
+            ..Default::default()
+        }
+        .validate()
+        .unwrap_err();
+        assert!(inverted.contains("freeze.from"), "got: {inverted}");
+    }
+
+    #[test]
+    fn freeze_round_trips_and_skips_empty_fields() {
+        let f = Freeze {
+            from: None,
+            until: Some("2027-01-05".into()),
+            reason: Some("INC-1234".into()),
+            tz: ScheduleTz::Utc,
+        };
+        let json = serde_json::to_value(&f).expect("serialise");
+        assert!(json.get("from").is_none(), "empty from omitted: {json}");
+        let back: Freeze = serde_json::from_value(json).expect("round-trip");
+        assert_eq!(back, f);
+    }
+
     #[test]
     fn shipped_schedule_configs_parse_and_validate() {
         // Every YAML under configs/schedules/ must parse with the
@@ -3032,6 +3121,108 @@ pub struct Retry {
     pub max: u32,
     /// Humantime delay slept between attempts (`"10m"`, `"30s"`).
     pub backoff: String,
+}
+
+/// Fleet-wide change-freeze (#418 Phase 5 — the "メンテナンス窓 /
+/// 変更凍結" gap's global half). Where [`Constraints::window`] is a
+/// *per-schedule* time-of-day gate, a `Freeze` is a *single, fleet-
+/// global* "stop all automated change" switch the operator flips
+/// during an incident or a year-end change-freeze. It lives in its
+/// own KV singleton ([`crate::kv::KEY_FREEZE`]); when present and
+/// active, both the backend scheduler and every agent's local
+/// scheduler skip *every* fire.
+///
+/// Shapes:
+/// * `{}` (no bounds) — frozen indefinitely until the operator
+///   clears it (incident "big red button").
+/// * `{ from, until }` — frozen only within `[from, until)`,
+///   evaluated in `tz` (planned change-freeze; auto-thaws).
+///
+/// The KV key being *absent* means "not frozen" — so clearing the
+/// freeze is a KV delete, and `is_active` only ever runs on a freeze
+/// the operator actually set.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Freeze {
+    /// Frozen from this instant (RFC3339 or bare `YYYY-MM-DD` in
+    /// `tz`). `None` ⇒ frozen from the beginning of time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// Thawed from this instant on, exclusive. `None` ⇒ frozen with
+    /// no scheduled end (manual clear required).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<String>,
+    /// Operator-supplied note surfaced on the freeze-skip log and the
+    /// SPA banner ("year-end change freeze", "INC-1234"). Advisory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Timezone the bare-date bounds are evaluated in (RFC3339 bounds
+    /// carry their own offset). Defaults to host-local like a
+    /// schedule's `tz`.
+    #[serde(default)]
+    pub tz: ScheduleTz,
+}
+
+impl Freeze {
+    /// Is the fleet frozen at `now`? An empty window (`from`/`until`
+    /// both absent) is frozen unconditionally; otherwise membership of
+    /// `[from, until)` in `tz`. Half-open like [`Active::contains`],
+    /// but **fails CLOSED** on an unparseable bound — a freeze is a
+    /// safety switch, so a corrupt window (only reachable via a
+    /// hand-edited KV blob; `validate` rejects it at set time) must
+    /// mean "frozen", not "fire normally" (coderabbit #472). This is
+    /// the one deliberate divergence from `active`'s fail-OPEN
+    /// behaviour, where an unparseable bound dormant-skips a schedule.
+    pub fn is_active(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
+        // Parse a bound; an unparseable one short-circuits the whole
+        // check to `true` (frozen) via the closure's `None` sentinel
+        // handled below.
+        let bound = |s: &Option<String>| -> Result<Option<chrono::DateTime<chrono::Utc>>, ()> {
+            match s.as_deref() {
+                None => Ok(None),
+                Some(raw) => Active::parse_bound(raw, self.tz).map(Some).map_err(|_| ()),
+            }
+        };
+        let (from, until) = match (bound(&self.from), bound(&self.until)) {
+            (Ok(f), Ok(u)) => (f, u),
+            // Any corrupt bound → fail closed (frozen).
+            _ => return true,
+        };
+        if from.is_some_and(|f| now < f) {
+            return false;
+        }
+        if until.is_some_and(|u| now >= u) {
+            return false;
+        }
+        true
+    }
+
+    /// Reject unparseable bounds / `from >= until` at set time (the
+    /// API + CLI counterpart to [`Schedule::validate`]).
+    pub fn validate(&self) -> Result<(), String> {
+        let from = self
+            .from
+            .as_deref()
+            .map(|s| Active::parse_bound(s, self.tz))
+            .transpose()
+            .map_err(|e| e.replace("active:", "freeze:"))?;
+        let until = self
+            .until
+            .as_deref()
+            .map(|s| Active::parse_bound(s, self.tz))
+            .transpose()
+            .map_err(|e| e.replace("active:", "freeze:"))?;
+        if let (Some(f), Some(u)) = (from, until) {
+            if f >= u {
+                return Err(format!(
+                    "freeze.from ({}) must be strictly before freeze.until ({})",
+                    self.from.as_deref().unwrap_or_default(),
+                    self.until.as_deref().unwrap_or_default(),
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The system-generated poll cadence every reconcile-shaped `when`

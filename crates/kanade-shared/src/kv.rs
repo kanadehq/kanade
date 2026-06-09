@@ -32,6 +32,19 @@ pub const BUCKET_JOBS: &str = "jobs";
 pub const BUCKET_JOBS_YAML: &str = "jobs_yaml";
 pub const BUCKET_SCHEDULES_YAML: &str = "schedules_yaml";
 
+/// Fleet-wide singleton settings that aren't per-agent (so they don't
+/// belong in `agent_config`'s layered scopes) and aren't per-schedule
+/// (so they don't belong in `schedules`). First and only key so far is
+/// [`KEY_FREEZE`] (#418 Phase 5 global change-freeze). One small bucket
+/// both the backend scheduler and every agent's local scheduler watch.
+pub const BUCKET_FLEET_CONFIG: &str = "fleet_config";
+
+/// Singleton key in [`BUCKET_FLEET_CONFIG`] holding the JSON-encoded
+/// [`crate::manifest::Freeze`]. **Key absent ⇒ not frozen** (clearing
+/// the freeze is a KV delete), so readers treat a missing key as "fire
+/// normally" and only evaluate `Freeze::is_active` when the key exists.
+pub const KEY_FREEZE: &str = "freeze";
+
 /// KV bucket holding **per-(schedule, pc) last-dispatch marks** for the
 /// backend scheduler's in-flight suppression.
 ///
@@ -240,6 +253,7 @@ mod tests {
             BUCKET_JOBS,
             BUCKET_JOBS_YAML,
             BUCKET_SCHEDULES_YAML,
+            BUCKET_FLEET_CONFIG,
             BUCKET_SCHEDULER_DISPATCH,
             OBJECT_AGENT_RELEASES,
             OBJECT_APP_PACKAGES,

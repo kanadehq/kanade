@@ -3,6 +3,7 @@ pub mod agent;
 pub mod app;
 pub mod config;
 pub mod exec;
+pub mod freeze;
 pub mod group;
 pub mod jetstream;
 pub mod job;

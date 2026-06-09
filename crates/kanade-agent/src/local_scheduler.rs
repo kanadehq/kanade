@@ -36,9 +36,10 @@ use async_nats::jetstream::kv::Operation;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures::{StreamExt, TryStreamExt};
 use kanade_shared::kv::{
-    BUCKET_JOBS, BUCKET_SCHEDULES, BUCKET_SCRIPT_CURRENT, BUCKET_SCRIPT_STATUS,
+    BUCKET_FLEET_CONFIG, BUCKET_JOBS, BUCKET_SCHEDULES, BUCKET_SCRIPT_CURRENT,
+    BUCKET_SCRIPT_STATUS, KEY_FREEZE,
 };
-use kanade_shared::manifest::{ExecMode, Manifest, RunsOn, Schedule, ScheduleTz, When};
+use kanade_shared::manifest::{ExecMode, Freeze, Manifest, RunsOn, Schedule, ScheduleTz, When};
 use kanade_shared::wire::Command;
 use tokio::sync::Mutex;
 use tokio_cron_scheduler::{Job, JobScheduler};
@@ -104,6 +105,13 @@ struct State {
     /// mid-run), the next tick reclaims instead of staying stuck until
     /// agent restart. Not persisted — a fresh process starts empty.
     in_flight: HashMap<String, DateTime<Utc>>,
+    /// Last-known fleet change-freeze (#418 Phase 5), kept fresh by
+    /// [`spawn_freeze_watch_task`] (a `fleet_config` KV watcher) — NOT
+    /// re-read per tick (gemini #472). Cached here so a freeze set
+    /// before the agent went offline still holds while the broker is
+    /// unreachable (the whole point of `runs_on: agent`). `None` ⇒ not
+    /// frozen (key absent on the last successful read / watch event).
+    freeze: Option<kanade_shared::manifest::Freeze>,
 }
 
 impl State {
@@ -325,6 +333,7 @@ async fn run(
         completions,
         completions_path,
         in_flight: HashMap::new(),
+        freeze: None,
     }));
 
     // Long-lived auxiliary task: react to group-membership flips even
@@ -341,6 +350,26 @@ async fn run(
         script_cache.clone(),
         check_sink.clone(),
     );
+
+    // #418 Phase 5: mirror the fleet change-freeze into `State` so
+    // local_tick gates on it without a per-tick KV get (gemini #472).
+    let _freeze_task = spawn_freeze_watch_task(client.clone(), staleness.clone(), state.clone());
+
+    // Prime the freeze mirror SYNCHRONOUSLY before the reconcile loop
+    // below registers any schedule — otherwise the first tick of a
+    // schedule could fire in the gap before the async watch task seeds,
+    // punching through a freeze that was set before this boot
+    // (coderabbit #472 CRITICAL). Best-effort: offline at boot → stays
+    // `None` until the watch seeds on connect (an offline agent can't
+    // know the freeze state anyway).
+    match js.get_key_value(BUCKET_FLEET_CONFIG).await {
+        Ok(kv) => match kv.get(KEY_FREEZE).await {
+            Ok(Some(bytes)) => state.lock().await.freeze = Some(parse_freeze_or_safe(&bytes)),
+            Ok(None) => {} // not frozen — State.freeze is already None
+            Err(e) => warn!(error = %e, "freeze boot-prime get failed; watch task will seed"),
+        },
+        Err(e) => warn!(error = %e, "freeze boot-prime KV unavailable; watch task will seed"),
+    }
 
     // Outer reconnect loop. Owns schedules_kv + jobs_kv handles and
     // both `watch_all` streams; re-syncs caches + reconciles on
@@ -933,6 +962,84 @@ async fn unregister_locally(internal: &JobScheduler, state: &Arc<Mutex<State>>, 
     }
 }
 
+/// Decode a fleet-freeze blob, failing *safe* on corruption: a
+/// mangled value becomes a default (always-active) [`Freeze`] so the
+/// agent skips rather than punch through a freeze the operator set
+/// (#418 Phase 5).
+fn parse_freeze_or_safe(bytes: &[u8]) -> Freeze {
+    serde_json::from_slice::<Freeze>(bytes).unwrap_or_else(|e| {
+        warn!(error = %e, "fleet freeze blob corrupt — failing safe (frozen)");
+        Freeze::default()
+    })
+}
+
+/// Long-lived task: mirror the fleet change-freeze (#418 Phase 5) into
+/// [`State::freeze`] so `local_tick` reads it without a per-tick KV get
+/// (gemini #472). Uses `wait_for_kv` so a freeze set during a broker
+/// outage is picked up on reconnect; while disconnected the last-known
+/// freeze stays in `State` (so an offline `runs_on: agent` still honors
+/// a freeze that was active before it went dark). On reconnect it
+/// re-seeds (catches a freeze set / cleared while away) then tails puts
+/// and deletes.
+fn spawn_freeze_watch_task(
+    client: async_nats::Client,
+    staleness: crate::staleness::Tracker,
+    state: Arc<Mutex<State>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let js = async_nats::jetstream::new(client.clone());
+        loop {
+            let kv = nats_retry::wait_for_kv(
+                &js,
+                &client,
+                &staleness,
+                BUCKET_FLEET_CONFIG,
+                "local_scheduler:freeze",
+            )
+            .await;
+            // Re-seed on every (re-)connect. A get error leaves the
+            // cached value untouched (keep last-known); Ok(None) is an
+            // authoritative "not frozen".
+            match kv.get(KEY_FREEZE).await {
+                Ok(Some(bytes)) => state.lock().await.freeze = Some(parse_freeze_or_safe(&bytes)),
+                Ok(None) => state.lock().await.freeze = None,
+                Err(e) => warn!(error = %e, "freeze watch: re-seed get failed; keeping last-known"),
+            }
+            let mut watch = match kv.watch_all().await {
+                Ok(w) => w,
+                Err(e) => {
+                    warn!(error = %e, "freeze watch: watch_all failed; reopening");
+                    nats_retry::reopen_pause().await;
+                    continue;
+                }
+            };
+            while let Some(entry) = watch.next().await {
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(e) => {
+                        warn!(error = %e, "freeze watch: entry error; reopening");
+                        break;
+                    }
+                };
+                if entry.key != KEY_FREEZE {
+                    continue;
+                }
+                let next = match entry.operation {
+                    Operation::Put => Some(parse_freeze_or_safe(&entry.value)),
+                    Operation::Delete | Operation::Purge => None,
+                };
+                let frozen = next.is_some();
+                state.lock().await.freeze = next;
+                debug!(
+                    frozen,
+                    "local_scheduler: fleet change-freeze mirror updated"
+                );
+            }
+            nats_retry::reopen_pause().await;
+        }
+    })
+}
+
 async fn local_tick(
     client: &async_nats::Client,
     pc_id: &str,
@@ -942,6 +1049,28 @@ async fn local_tick(
     script_cache: &ScriptCache,
     check_sink: &crate::check_cache::CheckSink,
 ) {
+    // 0-) Fleet-wide change-freeze (#418 Phase 5) — same global gate
+    //     as the backend scheduler so runs_on: agent fires stop too.
+    //     Read the cached mirror (kept fresh by the freeze-watch task),
+    //     so the hot path never blocks on a KV get and an offline agent
+    //     still honors a freeze that was set before it went dark
+    //     (gemini #472). Clone the reason under the lock, then release.
+    let frozen_reason = {
+        let st = state.lock().await;
+        st.freeze
+            .as_ref()
+            .filter(|f| f.is_active(Utc::now()))
+            .map(|f| f.reason.clone())
+    };
+    if let Some(reason) = frozen_reason {
+        debug!(
+            schedule_id = %schedule.id,
+            reason = reason.as_deref().unwrap_or(""),
+            "local_scheduler: fleet change-freeze active — skip",
+        );
+        return;
+    }
+
     // 0) Dormant outside the optional `active.{from,until}` window
     //    (#418 decision G) — mirrors the backend scheduler's gate so
     //    runs_on: agent campaigns end on the same instant.
@@ -1301,6 +1430,7 @@ mod tests {
             completions: HashMap::new(),
             completions_path: p,
             in_flight: HashMap::new(),
+            freeze: None,
         }
     }
 
