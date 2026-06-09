@@ -788,6 +788,24 @@ async fn reconcile_schedule(
             }
         }
     }
+    // A corrupt constraints.window fails closed — warn so the stuck
+    // schedule is diagnosable (gemini #452 review).
+    if let Some(err) = schedule.bad_window() {
+        warn!(
+            schedule_id = %schedule_id,
+            %err,
+            "local_scheduler: constraints.window unparseable — blocked (fail-closed) until fixed",
+        );
+    }
+    // A calendar whose `at` can never fall in its window never fires
+    // (claude #452 review).
+    if schedule.calendar_outside_window() {
+        warn!(
+            schedule_id = %schedule_id,
+            when = %schedule.when,
+            "local_scheduler: calendar fire time is outside constraints.window — it will never fire",
+        );
+    }
 }
 
 async fn unregister_locally(internal: &JobScheduler, state: &Arc<Mutex<State>>, schedule_id: &str) {
@@ -821,6 +839,16 @@ async fn local_tick(
         debug!(
             schedule_id = %schedule.id,
             "local_scheduler: outside active window (dormant)",
+        );
+        return;
+    }
+
+    // 0b) Maintenance window (#418 Phase 3) — same gate as the
+    //     backend scheduler, evaluated in this agent's tz.
+    if !schedule.constraints.allows(Utc::now(), schedule.tz) {
+        debug!(
+            schedule_id = %schedule.id,
+            "local_scheduler: outside maintenance window — skip",
         );
         return;
     }
@@ -1042,7 +1070,7 @@ async fn local_tick(
 mod tests {
     use super::*;
     use kanade_shared::manifest::{
-        Active, FanoutPlan, OnceLiteral, PerPolicy, ScheduleTz, Target, When,
+        Active, Constraints, FanoutPlan, OnceLiteral, PerPolicy, ScheduleTz, Target, When,
     };
 
     fn schedule(target: Target, runs_on: RunsOn) -> Schedule {
@@ -1055,6 +1083,7 @@ mod tests {
                 ..Default::default()
             },
             active: Active::default(),
+            constraints: Constraints::default(),
             tz: ScheduleTz::default(),
             starting_deadline: None,
             runs_on,

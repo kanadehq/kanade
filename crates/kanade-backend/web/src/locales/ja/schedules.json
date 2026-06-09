@@ -16,6 +16,7 @@
     "runsOn": "runs_on",
     "tz": "tz",
     "active": "有効期間",
+    "window": "実行窓",
     "deadline": "期限",
     "jitter": "ジッター",
     "rollout": "ロールアウト",

@@ -1236,6 +1236,7 @@ target: { all: true }
             job_id: "y".into(),
             plan: FanoutPlan::default(),
             active: Active::default(),
+            constraints: Constraints::default(),
             tz: ScheduleTz::default(),
             starting_deadline: None,
             runs_on,
@@ -1629,6 +1630,163 @@ target: { all: true }
         );
     }
 
+    // ---- constraints.window (#418 Phase 3) ----
+
+    fn with_window(win: &str) -> Schedule {
+        let mut s = schedule_with(
+            When::PerPc(PerPolicy::Every(EverySpec { every: "6h".into() })),
+            RunsOn::Backend,
+        );
+        s.constraints.window = Some(win.into());
+        s
+    }
+
+    #[test]
+    fn constraints_window_parses_and_round_trips() {
+        let yaml = r#"
+id: x
+when:
+  per_pc: { every: 6h }
+job_id: y
+target: { all: true }
+constraints:
+  window: "22:00-05:00"
+"#;
+        let s: Schedule = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(s.constraints.window.as_deref(), Some("22:00-05:00"));
+        let back: Schedule =
+            serde_json::from_str(&serde_json::to_string(&s).expect("ser")).expect("de");
+        assert_eq!(back.constraints.window.as_deref(), Some("22:00-05:00"));
+    }
+
+    #[test]
+    fn constraints_empty_is_skipped_when_serialising() {
+        let s = schedule_with(
+            When::PerPc(PerPolicy::Once(OnceLiteral::Once)),
+            RunsOn::Backend,
+        );
+        let json = serde_json::to_value(&s).expect("serialise");
+        assert!(
+            json.get("constraints").is_none(),
+            "empty constraints must not appear on the wire: {json}"
+        );
+    }
+
+    #[test]
+    fn window_no_constraint_always_allows() {
+        let c = Constraints::default();
+        assert!(c.allows(chrono::Utc::now(), ScheduleTz::Local));
+    }
+
+    #[test]
+    fn window_same_day_is_half_open() {
+        use chrono::TimeZone;
+        let s = with_window("09:00-17:00");
+        let at = |h, m| chrono::Utc.with_ymd_and_hms(2026, 6, 9, h, m, 0).unwrap();
+        let a = |t| s.constraints.allows(t, ScheduleTz::Utc);
+        assert!(!a(at(8, 59)), "before start");
+        assert!(a(at(9, 0)), "at start (inclusive)");
+        assert!(a(at(16, 59)), "inside");
+        assert!(!a(at(17, 0)), "at end (exclusive)");
+        assert!(!a(at(23, 0)), "after end");
+    }
+
+    #[test]
+    fn window_crossing_midnight() {
+        use chrono::TimeZone;
+        let s = with_window("22:00-05:00");
+        let at = |h, m| chrono::Utc.with_ymd_and_hms(2026, 6, 9, h, m, 0).unwrap();
+        let a = |t| s.constraints.allows(t, ScheduleTz::Utc);
+        assert!(a(at(22, 0)), "at start tonight");
+        assert!(a(at(23, 30)), "late tonight");
+        assert!(a(at(3, 0)), "early tomorrow");
+        assert!(!a(at(5, 0)), "at end (exclusive)");
+        assert!(!a(at(12, 0)), "midday outside");
+        assert!(!a(at(21, 59)), "just before start");
+    }
+
+    #[test]
+    fn window_respects_tz() {
+        // The same instant is inside the window under one tz and may
+        // be outside under another. Compare UTC vs Local via the
+        // host's own offset (kept CI-green on UTC runners like the
+        // active tz test does).
+        use chrono::TimeZone;
+        let s = with_window("09:00-17:00");
+        let noon_utc = chrono::Utc.with_ymd_and_hms(2026, 6, 9, 12, 0, 0).unwrap();
+        // Under UTC, 12:00 is inside 09:00-17:00.
+        assert!(s.constraints.allows(noon_utc, ScheduleTz::Utc));
+        // Under Local, the verdict tracks the host wall-clock time;
+        // assert it matches a direct wall_time membership check.
+        let local_t = noon_utc.with_timezone(&chrono::Local).time();
+        let in_local = local_t >= chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap()
+            && local_t < chrono::NaiveTime::from_hms_opt(17, 0, 0).unwrap();
+        assert_eq!(s.constraints.allows(noon_utc, ScheduleTz::Local), in_local);
+    }
+
+    #[test]
+    fn validate_accepts_good_window() {
+        for w in ["09:00-17:00", "22:00-05:00", "00:00-23:59"] {
+            with_window(w)
+                .validate()
+                .unwrap_or_else(|e| panic!("'{w}' should validate: {e}"));
+        }
+    }
+
+    #[test]
+    fn validate_rejects_bad_window() {
+        for bad in ["9-5", "22:00", "22:00-22:00", "25:00-05:00", "09:00_17:00"] {
+            let err = with_window(bad).validate().unwrap_err();
+            assert!(
+                err.contains("constraints.window"),
+                "for '{bad}', got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn window_fail_closed_on_corrupt_blob() {
+        // A malformed window (only reachable via a hand-edited KV
+        // blob — validate() rejects it at create) must BLOCK, not
+        // silently allow fires during a change-freeze (gemini #452).
+        let s = with_window("22:00_05:00");
+        assert!(
+            !s.constraints.allows(chrono::Utc::now(), ScheduleTz::Utc),
+            "corrupt window fails closed"
+        );
+        // …and the scheduler can surface why it's stuck.
+        assert!(
+            s.bad_window().is_some(),
+            "bad_window reports the parse error"
+        );
+        assert!(with_window("22:00-05:00").bad_window().is_none());
+    }
+
+    #[test]
+    fn calendar_outside_window_is_flagged() {
+        // at 09:00 can never fall in 22:00-05:00 → never fires.
+        let mut s = schedule_with(calendar("09:00", &["mon-fri"]), RunsOn::Backend);
+        s.constraints.window = Some("22:00-05:00".into());
+        assert!(s.calendar_outside_window(), "09:00 is not in 22:00-05:00");
+
+        // at 23:00 IS inside the overnight window → fine.
+        let mut s = schedule_with(calendar("23:00", &[]), RunsOn::Backend);
+        s.constraints.window = Some("22:00-05:00".into());
+        assert!(!s.calendar_outside_window(), "23:00 is in 22:00-05:00");
+
+        // reconcile shapes are never flagged (they poll every minute).
+        let mut s = schedule_with(
+            When::PerPc(PerPolicy::Every(EverySpec { every: "6h".into() })),
+            RunsOn::Backend,
+        );
+        s.constraints.window = Some("22:00-05:00".into());
+        assert!(!s.calendar_outside_window(), "reconcile is unaffected");
+
+        // no window → never flagged.
+        let s = schedule_with(calendar("09:00", &[]), RunsOn::Backend);
+        assert!(!s.calendar_outside_window());
+    }
+
     #[test]
     fn shipped_schedule_configs_parse_and_validate() {
         // Every YAML under configs/schedules/ must parse with the
@@ -1893,6 +2051,14 @@ pub struct Schedule {
     /// and the agent's local scheduler.
     #[serde(default, skip_serializing_if = "Active::is_empty")]
     pub active: Active,
+    /// #418 Phase 3: operational constraints gating *when within an
+    /// active period* a fire may happen. Currently just `window`
+    /// (a maintenance time-of-day window); future `require`
+    /// (env gates) and `max_concurrent` land in the same namespace.
+    /// Evaluated in the schedule's `tz` like the other wall-clock
+    /// fields. Checked at tick time on both schedulers.
+    #[serde(default, skip_serializing_if = "Constraints::is_empty")]
+    pub constraints: Constraints,
     /// #418 Phase 2: the timezone this schedule's wall-clock fields
     /// are evaluated in — both the calendar `at` firing time AND the
     /// `active.{from,until}` window bounds. `local` (default) = the
@@ -2110,6 +2276,15 @@ impl CalendarSpec {
         tz.naive_to_utc(naive)
     }
 
+    /// The wall-clock time-of-day this calendar fires at (`None` if
+    /// `at` is unparseable — validate() guards that). Used to detect
+    /// a calendar whose fire time can never fall inside its
+    /// `constraints.window` (claude #452 review).
+    pub fn fire_time(&self) -> Option<chrono::NaiveTime> {
+        let p = self.parse_at().ok()?;
+        chrono::NaiveTime::from_hms_opt(p.hour, p.minute, 0)
+    }
+
     /// Lower to the cron string the scheduler engine runs. Repeating
     /// → 6-field `0 {min} {hour} * * {dow}`; one-shot → 7-field
     /// `0 {min} {hour} {day} {month} * {year}` (a past year never
@@ -2179,6 +2354,17 @@ impl ScheduleTz {
                 .from_local_datetime(&naive)
                 .earliest()
                 .map(|dt| dt.with_timezone(&chrono::Utc)),
+        }
+    }
+
+    /// The wall-clock time-of-day `now` reads as in this tz — used by
+    /// [`Constraints::allows`] to test a maintenance window
+    /// (#418 Phase 3). `Utc` is the naive UTC time; `Local` is the
+    /// running host's local time.
+    fn wall_time(self, now: chrono::DateTime<chrono::Utc>) -> chrono::NaiveTime {
+        match self {
+            ScheduleTz::Utc => now.time(),
+            ScheduleTz::Local => now.with_timezone(&chrono::Local).time(),
         }
     }
 }
@@ -2307,6 +2493,88 @@ impl Active {
     }
 }
 
+/// Operational constraints on a [`Schedule`] (#418 Phase 3). Where
+/// [`Active`] decides *over what date range* a schedule is live,
+/// `Constraints` decides *when, within an active period,* a fire is
+/// allowed. Only `window` (a maintenance time-of-day window) so far;
+/// `require` (env gates) and `max_concurrent` will join this struct
+/// in later phases.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Constraints {
+    /// `"HH:MM-HH:MM"` wall-clock window (evaluated in the schedule's
+    /// `tz`). Fires outside it are skipped — mainly for reconcile
+    /// cadences ("patrol every 6h, but only fire overnight") and
+    /// daytime change-freezes. `start > end` crosses midnight
+    /// (`"22:00-05:00"` = 22:00 through 05:00 next morning). Parsed
+    /// lazily; [`Schedule::validate`] rejects garbage at create time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<String>,
+}
+
+impl Constraints {
+    /// `skip_serializing_if` helper — empty constraints are omitted
+    /// from the wire format entirely.
+    pub fn is_empty(&self) -> bool {
+        self.window.is_none()
+    }
+
+    /// Parse `"HH:MM-HH:MM"` into `(start, end)`. Equal bounds are an
+    /// error (a zero-width or all-day window is ambiguous — write no
+    /// window for "always").
+    pub fn parse_window(s: &str) -> Result<(chrono::NaiveTime, chrono::NaiveTime), String> {
+        let (a, b) = s
+            .split_once('-')
+            .ok_or_else(|| format!("constraints.window: '{s}' must be 'HH:MM-HH:MM'"))?;
+        let parse = |part: &str| {
+            chrono::NaiveTime::parse_from_str(part.trim(), "%H:%M")
+                .map_err(|e| format!("constraints.window: invalid time '{}': {e}", part.trim()))
+        };
+        let (start, end) = (parse(a)?, parse(b)?);
+        if start == end {
+            return Err(format!(
+                "constraints.window: start and end are equal ('{s}'); omit window for 'always'"
+            ));
+        }
+        Ok((start, end))
+    }
+
+    /// Is a fire allowed at `now` (evaluated in `tz`)? No window =
+    /// always allowed. Half-open `[start, end)`; `start > end`
+    /// crosses midnight.
+    ///
+    /// **Fail-closed** on an unparseable window (returns `false`,
+    /// gemini #452 review): a window is a *restrictive* constraint
+    /// (change-freeze / overnight-only), so a corrupt one must NOT
+    /// silently allow fires during the restricted hours. Bad windows
+    /// are rejected at create time by [`Schedule::validate`]; this
+    /// only bites a hand-edited KV blob, where blocking is the safe
+    /// direction. The scheduler warns at register time
+    /// ([`Schedule::bad_window`]) so a stuck schedule is diagnosable.
+    /// The tick path never panics regardless.
+    pub fn allows(&self, now: chrono::DateTime<chrono::Utc>, tz: ScheduleTz) -> bool {
+        match self.window.as_deref() {
+            // No window → always allowed.
+            None => true,
+            // Window set: membership, or fail-closed if unparseable
+            // (`window_contains` returns None for a corrupt window).
+            Some(_) => self.window_contains(tz.wall_time(now)).unwrap_or(false),
+        }
+    }
+
+    /// Membership of a wall-clock time-of-day in the window. `None`
+    /// when there is no window or it's unparseable (callers decide
+    /// the failure direction). `start > end` crosses midnight.
+    fn window_contains(&self, t: chrono::NaiveTime) -> Option<bool> {
+        let (start, end) = Self::parse_window(self.window.as_deref()?).ok()?;
+        Some(if start <= end {
+            start <= t && t < end
+        } else {
+            t >= start || t < end
+        })
+    }
+}
+
 /// The system-generated poll cadence every reconcile-shaped `when`
 /// lowers to. Operators never write this: the real inter-run
 /// spacing is the `every` cooldown; this only bounds "how soon do
@@ -2335,6 +2603,32 @@ pub struct Lowered {
 }
 
 impl Schedule {
+    /// The error message if this schedule's `constraints.window` is
+    /// set but unparseable, else `None`. The scheduler logs this at
+    /// register time so a fail-closed (never-firing) schedule from a
+    /// hand-edited KV blob is diagnosable (gemini #452 review).
+    pub fn bad_window(&self) -> Option<String> {
+        let w = self.constraints.window.as_deref()?;
+        Constraints::parse_window(w).err()
+    }
+
+    /// True when this is a `calendar` schedule whose fire time can
+    /// never fall inside its `constraints.window` — the cron fires,
+    /// the window check rejects it, and (firing only at that
+    /// time-of-day) it effectively never runs. An easy misconfig to
+    /// set up by accident; the scheduler warns at register time
+    /// (claude #452 review). Reconcile shapes poll every minute, so
+    /// they always catch the window opening and aren't affected.
+    pub fn calendar_outside_window(&self) -> bool {
+        let When::Calendar(c) = &self.when else {
+            return false;
+        };
+        let Some(t) = c.fire_time() else {
+            return false;
+        };
+        matches!(self.constraints.window_contains(t), Some(false))
+    }
+
     /// Lower the operator-facing `when` onto the engine vocabulary.
     /// Single seam shared by the backend scheduler and the agent's
     /// local scheduler so the two can never drift.
@@ -2437,6 +2731,11 @@ impl Schedule {
                     self.active.until.as_deref().unwrap_or_default(),
                 ));
             }
+        }
+        // #418 Phase 3: a bad maintenance window is rejected at create
+        // time (parse_window also catches equal bounds).
+        if let Some(w) = self.constraints.window.as_deref() {
+            Constraints::parse_window(w)?;
         }
         Ok(())
     }

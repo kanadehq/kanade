@@ -256,6 +256,25 @@ async fn register(
             }
         }
     }
+    // A corrupt constraints.window fails closed (never fires) — warn
+    // so the stuck schedule is diagnosable (gemini #452 review).
+    if let Some(err) = schedule.bad_window() {
+        warn!(
+            schedule_id = %schedule.id,
+            %err,
+            "constraints.window is unparseable — schedule blocked (fail-closed) until fixed",
+        );
+    }
+    // A calendar whose `at` time can never fall in its window also
+    // never fires — warn instead of leaving a debug-only trail
+    // (claude #452 review).
+    if schedule.calendar_outside_window() {
+        warn!(
+            schedule_id = %schedule.id,
+            when = %schedule.when,
+            "calendar fire time is outside constraints.window — it will never fire",
+        );
+    }
     Ok(())
 }
 
@@ -271,6 +290,15 @@ async fn tick(state: &AppState, schedule: Schedule) {
     //    campaign costs one comparison per tick, nothing else.
     if !schedule.active.contains(Utc::now(), schedule.tz) {
         tracing::debug!(%schedule_id, "scheduler tick: outside active window (dormant)");
+        return;
+    }
+
+    // 0b) Maintenance window (#418 Phase 3): if a constraints.window
+    //     is set, only fire when the current wall-clock time (in the
+    //     schedule's tz) is inside it. Reconcile cadences resume the
+    //     next minute the window reopens.
+    if !schedule.constraints.allows(Utc::now(), schedule.tz) {
+        tracing::debug!(%schedule_id, "scheduler tick: outside maintenance window — skip");
         return;
     }
 
