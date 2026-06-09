@@ -42,6 +42,7 @@ const groups: {
       // avoids a lone nested entry that would read as inconsistent
       // next to the otherwise-flat list.
       { to: '/inventory', labelKey: 'nav.inventory' },
+      { to: '/compliance', labelKey: 'nav.compliance' },
       { to: '/activity', labelKey: 'nav.activity' },
       { to: '/events', labelKey: 'nav.events' },
       { to: '/audit', labelKey: 'nav.audit' },

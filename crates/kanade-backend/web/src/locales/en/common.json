@@ -11,6 +11,7 @@
     "exec": "Exec",
     "agents": "Agents",
     "inventory": "Inventory",
+    "compliance": "Compliance",
     "activity": "Activity",
     "events": "Events",
     "audit": "Audit",

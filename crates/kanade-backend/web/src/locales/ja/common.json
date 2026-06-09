@@ -11,6 +11,7 @@
     "exec": "コマンド",
     "agents": "エージェント",
     "inventory": "インベントリ",
+    "compliance": "コンプライアンス",
     "activity": "アクティビティ",
     "events": "イベント",
     "audit": "監査ログ",
