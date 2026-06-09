@@ -45,6 +45,21 @@ pub struct Manifest {
     /// by the dedicated `obs_events` table.
     #[serde(default)]
     pub emit: Option<EmitConfig>,
+    /// #290: opt-in marker that this job is an operator-defined
+    /// **health check** whose result feeds the Client App's Health
+    /// tab over KLP (`StateSnapshot.checks`). The script prints a
+    /// free-form JSON object on stdout (like any inventory job); the
+    /// agent reads the [`CheckHint::status_field`] value dynamically
+    /// into a [`crate::ipc::state::Check`] named `check.name`.
+    /// Cadence / windows / conditions come from
+    /// the job's Schedule (exactly like inventory) — there is
+    /// deliberately no interval here. **Composes with `inventory:`**:
+    /// the script's stdout is one JSON object, so a check can also
+    /// carry an `inventory:` block to project the rest of that object
+    /// (incl. `explode` sub-tables) for SPA fleet-querying. Only
+    /// `emit:` (NDJSON stdout) is incompatible.
+    #[serde(default)]
+    pub check: Option<CheckHint>,
     /// v0.26: Layer 2 staleness policy (SPEC.md §2.6.2). Controls
     /// what the agent does at fire time when it can't verify the
     /// `script_current` / `script_status` KV values are fresh —
@@ -135,6 +150,62 @@ pub struct InventoryHint {
     /// the `before_json` of the most recent change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history_scalars: Option<Vec<String>>,
+}
+
+/// Manifest sub-section (#290): marks a job as an operator-defined
+/// **health check**. Parallel to [`InventoryHint`] / `EmitConfig`.
+/// The stdout contract is a free-form JSON object (same as any
+/// inventory job) from which the agent reads `status_field` /
+/// `detail_field` to build the KLP [`crate::ipc::state::Check`] shown
+/// on the Client App's Health tab.
+///
+/// There is deliberately **no timing field** — when / how often /
+/// in which window a check runs is driven by the job's Schedule,
+/// exactly like inventory jobs, so operators get the full `when:` /
+/// rollout / `runs_on` expressiveness for free.
+///
+/// A check's stdout is a **free-form inventory object** (arbitrary
+/// key/value pairs + arrays) — same as any inventory job — that also
+/// carries a status field. `check:` adds only the health semantics on
+/// top: which field is the ok/warn/fail/unknown status, an optional
+/// one-line summary field, and a remediation job. Everything else
+/// (rich per-PC detail, `explode` sub-tables like a software list) is
+/// driven by a co-present [`InventoryHint`] and rendered with the
+/// SAME display logic the SPA Inventory page uses — on the Client App
+/// too. This keeps checks maximally expressive without a bespoke
+/// payload type.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct CheckHint {
+    /// Stable check id → [`Check.name`](crate::ipc::state::Check),
+    /// the SPA/Client React key + analytics label. Unique within the
+    /// fleet's check set.
+    pub name: String,
+    /// Top-level stdout field whose string value
+    /// (`ok`/`warn`/`fail`/`unknown`) becomes the Health-tab light
+    /// ([`CheckStatus`](crate::ipc::state::CheckStatus)). Defaults to
+    /// `"status"`; a missing / unparseable value → `unknown`.
+    #[serde(default = "default_status_field")]
+    pub status_field: String,
+    /// Top-level stdout field used as the Health-tab row's one-line
+    /// summary. Defaults to `"detail"`; absent in the payload → no
+    /// detail line (the rich breakdown lives in the inventory view).
+    #[serde(default = "default_detail_field")]
+    pub detail_field: String,
+    /// Optional remediation job id →
+    /// [`Check.troubleshoot`](crate::ipc::state::Check). The Client
+    /// App shows a "修復する" button when present; that job must be
+    /// `user_invokable`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub troubleshoot: Option<String>,
+}
+
+fn default_status_field() -> String {
+    "status".to_string()
+}
+
+fn default_detail_field() -> String {
+    "detail".to_string()
 }
 
 /// Issue #246 — `emit:` manifest block for jobs whose stdout is
@@ -411,6 +482,44 @@ impl Manifest {
     /// docs for the rationale on which call sites should run this.
     pub fn validate(&self) -> Result<(), String> {
         self.execute.validate_script_source()?;
+        // Stdout-format compatibility. `inventory:` and `check:` both
+        // consume the SAME single JSON object — they COMPOSE: a check
+        // can extract `status`/`detail` for the Health tab while the
+        // projector explodes the rest into SPA sub-tables. `emit:` is
+        // different — its stdout is NDJSON and the agent omits it from
+        // the result entirely — so it can't be paired with either.
+        if self.emit.is_some() && (self.inventory.is_some() || self.check.is_some()) {
+            return Err(
+                "`emit:` is incompatible with `inventory:` / `check:` — emit's stdout is NDJSON \
+                 timeline events (and omitted from the result), while inventory/check read a \
+                 single JSON object from stdout"
+                    .to_string(),
+            );
+        }
+        // A check's `name` is the Health-tab row id (React key); the
+        // field names tell the agent where to read status/detail.
+        // An empty value is an invisible runtime bug, and the serde
+        // defaults don't guard an operator who writes `status_field:
+        // ""` explicitly — reject all three here.
+        if let Some(check) = &self.check {
+            for (label, value) in [
+                ("check.name", &check.name),
+                ("check.status_field", &check.status_field),
+                ("check.detail_field", &check.detail_field),
+            ] {
+                if value.trim().is_empty() {
+                    return Err(format!("{label} must not be empty"));
+                }
+            }
+            // A present-but-blank `troubleshoot` is a broken
+            // remediation job id (the "修復する" button would target
+            // an empty manifest id) — reject it too.
+            if let Some(troubleshoot) = &check.troubleshoot {
+                if troubleshoot.trim().is_empty() {
+                    return Err("check.troubleshoot must not be empty when set".to_string());
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -485,6 +594,168 @@ execute:
         assert!(!m.require_approval);
         m.validate()
             .expect("inline-script manifest passes validation");
+    }
+
+    #[test]
+    fn manifest_parses_check_job_and_validates() {
+        // An operator-defined health check (#290): a `check:` hint +
+        // a PowerShell script that prints {status, detail}.
+        let yaml = r#"
+id: check-bitlocker
+version: 0.1.0
+execute:
+  shell: powershell
+  run_as: system
+  timeout: 15s
+  script: |
+    [pscustomobject]@{ status = 'ok'; detail = 'all volumes protected' } | ConvertTo-Json -Compress
+check:
+  name: bitlocker
+  troubleshoot: fix-bitlocker
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        let check = m.check.as_ref().expect("check hint present");
+        assert_eq!(check.name, "bitlocker");
+        assert_eq!(check.troubleshoot.as_deref(), Some("fix-bitlocker"));
+        // Field names default to the conventional "status" / "detail".
+        assert_eq!(check.status_field, "status");
+        assert_eq!(check.detail_field, "detail");
+        assert!(m.inventory.is_none() && m.emit.is_none());
+        m.validate().expect("check-only manifest passes validation");
+    }
+
+    #[test]
+    fn manifest_check_defaults_and_custom_fields() {
+        // Minimal: only `name`; status/detail fields default.
+        let m: Manifest = serde_yaml::from_str(
+            r#"
+id: check-disk
+version: 0.1.0
+execute:
+  shell: powershell
+  script: "[pscustomobject]@{ status = 'ok' } | ConvertTo-Json -Compress"
+  timeout: 10s
+check:
+  name: disk_free
+"#,
+        )
+        .expect("parse");
+        let c = m.check.as_ref().unwrap();
+        assert_eq!(c.name, "disk_free");
+        assert_eq!(c.status_field, "status");
+        assert_eq!(c.detail_field, "detail");
+        assert!(c.troubleshoot.is_none());
+        m.validate().expect("validates");
+
+        // The operator can point status/detail at any field of their
+        // free-form inventory object.
+        let m2: Manifest = serde_yaml::from_str(
+            r#"
+id: check-custom
+version: 0.1.0
+execute:
+  shell: powershell
+  script: "echo x"
+  timeout: 10s
+check:
+  name: patch_level
+  status_field: compliance
+  detail_field: summary
+"#,
+        )
+        .expect("parse");
+        let c2 = m2.check.as_ref().unwrap();
+        assert_eq!(c2.status_field, "compliance");
+        assert_eq!(c2.detail_field, "summary");
+    }
+
+    #[test]
+    fn manifest_allows_check_composed_with_inventory() {
+        // `check:` + `inventory:` COMPOSE on the same stdout object:
+        // status/detail → Health tab, the rest → SPA projection +
+        // explode sub-tables. Must pass validation.
+        let yaml = r#"
+id: check-bitlocker-detailed
+version: 0.1.0
+execute:
+  shell: powershell
+  script: "echo x"
+  timeout: 10s
+check:
+  name: bitlocker
+inventory:
+  display:
+    - { field: status, label: Status }
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        assert!(m.check.is_some() && m.inventory.is_some());
+        m.validate().expect("check + inventory compose");
+    }
+
+    #[test]
+    fn manifest_rejects_check_combined_with_emit() {
+        // `emit:` stdout is NDJSON (and omitted from the result), so
+        // it can't pair with `check:` (which needs a single JSON
+        // object on stdout).
+        let yaml = r#"
+id: bad-mix
+version: 0.1.0
+execute:
+  shell: powershell
+  script: "echo x"
+  timeout: 10s
+check:
+  name: bitlocker
+emit:
+  type: events
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        let err = m.validate().expect_err("emit + check must fail");
+        assert!(err.contains("incompatible"), "err: {err}");
+    }
+
+    #[test]
+    fn manifest_rejects_emit_combined_with_inventory() {
+        // The other half of the emit-incompatibility condition.
+        let yaml = r#"
+id: bad-mix-2
+version: 0.1.0
+execute:
+  shell: powershell
+  script: "echo x"
+  timeout: 10s
+emit:
+  type: events
+inventory:
+  display:
+    - { field: status, label: Status }
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        let err = m.validate().expect_err("emit + inventory must fail");
+        assert!(err.contains("incompatible"), "err: {err}");
+    }
+
+    #[test]
+    fn manifest_rejects_empty_check_field_names() {
+        // Empty name / status_field / detail_field are invisible
+        // runtime bugs (empty React key, agent reads the wrong field)
+        // — reject them even though serde supplies non-empty defaults.
+        let base = |inner: &str| {
+            format!(
+                "id: c\nversion: 0.1.0\nexecute:\n  shell: powershell\n  script: \"echo x\"\n  timeout: 10s\ncheck:\n{inner}"
+            )
+        };
+        for inner in [
+            "  name: \"\"\n",
+            "  name: ok\n  status_field: \"\"\n",
+            "  name: ok\n  detail_field: \"   \"\n",
+            // present-but-blank troubleshoot → broken remediation id.
+            "  name: ok\n  troubleshoot: \"  \"\n",
+        ] {
+            let m: Manifest = serde_yaml::from_str(&base(inner)).expect("parse");
+            let err = m.validate().expect_err("empty field must fail");
+            assert!(err.contains("must not be empty"), "err: {err}");
+        }
     }
 
     fn execute_with(
