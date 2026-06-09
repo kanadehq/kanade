@@ -1,0 +1,39 @@
+# Example operator-defined HEALTH CHECK (#290) — soonest machine
+# certificate expiry. See `check-bitlocker.yaml` for the full `check:`
+# contract explanation.
+#
+# Emits {status, detail}: the soonest `NotAfter` across
+# `Cert:\LocalMachine\My`. >30 days out (or an empty store) → ok,
+# within 30 days → warn, already expired → fail. Site-specific
+# filtering (watch only certs matching a subject/template) is an
+# operator edit to the script below.
+#
+# Install:
+#   kanade job create      configs/jobs/check-cert-expiry.yaml
+#   kanade schedule create configs/schedules/check-cert-expiry.yaml
+id: check-cert-expiry
+version: 0.1.0
+description: Soonest-expiring machine certificate (LocalMachine\My)
+execute:
+  shell: powershell
+  run_as: system
+  timeout: 20s
+  script: |
+    $ErrorActionPreference = 'Stop'
+    try {
+      $certs = @(Get-ChildItem Cert:\LocalMachine\My)
+      if ($certs.Count -eq 0) {
+        $status = 'ok'; $detail = 'no certificates in LocalMachine\My'
+      } else {
+        $soonest = $certs | Sort-Object NotAfter | Select-Object -First 1
+        $days = [int][math]::Floor((New-TimeSpan -Start (Get-Date) -End $soonest.NotAfter).TotalDays)
+        if     ($days -lt 0)  { $status = 'fail'; $detail = "expired $([math]::Abs($days)) day(s) ago: $($soonest.Subject)" }
+        elseif ($days -le 30) { $status = 'warn'; $detail = "expires in $days day(s): $($soonest.Subject)" }
+        else                  { $status = 'ok';   $detail = "soonest expiry in $days day(s): $($soonest.Subject)" }
+      }
+    } catch {
+      $status = 'unknown'; $detail = $_.Exception.Message
+    }
+    [pscustomobject]@{ status = $status; detail = $detail } | ConvertTo-Json -Compress
+check:
+  name: cert_expiry

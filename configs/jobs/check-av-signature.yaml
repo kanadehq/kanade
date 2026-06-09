@@ -1,0 +1,42 @@
+# Example operator-defined HEALTH CHECK (#290) — Defender antivirus
+# signature freshness. See `check-bitlocker.yaml` for the full
+# explanation of the `check:` contract.
+#
+# Emits {status, detail}; the agent surfaces `status` on the Client
+# App's Health tab. Thresholds (operator-tunable below): signatures
+# updated within 24 h → ok, within 7 days → warn, older → fail.
+# `MSFT_MpComputerStatus` is readable without elevation, but
+# `run_as: system` keeps every check on the same footing.
+#
+# Install:
+#   kanade job create      configs/jobs/check-av-signature.yaml
+#   kanade schedule create configs/schedules/check-av-signature.yaml
+id: check-av-signature
+version: 0.1.0
+description: Windows Defender antivirus signature age
+execute:
+  shell: powershell
+  run_as: system
+  timeout: 20s
+  script: |
+    $ErrorActionPreference = 'Stop'
+    try {
+      $s    = Get-CimInstance -Namespace 'root/Microsoft/Windows/Defender' -ClassName MSFT_MpComputerStatus
+      $last = $s.AntivirusSignatureLastUpdated
+      if ($null -eq $last) {
+        # Defender disabled / not running / never updated.
+        $status = 'unknown'; $detail = 'AntivirusSignatureLastUpdated unavailable (Defender disabled or never updated?)'
+      } else {
+        $hours = (New-TimeSpan -Start $last -End (Get-Date)).TotalHours
+        if     ($hours -le 24)  { $status = 'ok' }
+        elseif ($hours -le 168) { $status = 'warn' }   # 7 days
+        else                    { $status = 'fail' }
+        # `{1:0}` (not N0): culture-neutral, no thousands separator.
+        $detail = "signatures updated {0:yyyy-MM-dd HH:mm} ({1:0} h ago)" -f $last, [math]::Max([int]$hours, 0)
+      }
+    } catch {
+      $status = 'unknown'; $detail = $_.Exception.Message
+    }
+    [pscustomobject]@{ status = $status; detail = $detail } | ConvertTo-Json -Compress
+check:
+  name: av_signature

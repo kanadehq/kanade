@@ -544,6 +544,73 @@ impl From<ExecuteShell> for Shell {
 mod tests {
     use super::*;
 
+    /// The example check-job + schedule YAMLs shipped under `configs/`
+    /// must stay valid as the schema evolves (#290 PR-C). `include_str!`
+    /// pins them at compile time so a breaking edit fails `cargo test`
+    /// rather than only `kanade job create` at deploy time.
+    #[test]
+    fn example_check_job_yamls_parse_and_validate() {
+        let jobs = [
+            (
+                "check-bitlocker",
+                include_str!("../../../configs/jobs/check-bitlocker.yaml"),
+            ),
+            (
+                "check-av-signature",
+                include_str!("../../../configs/jobs/check-av-signature.yaml"),
+            ),
+            (
+                "check-cert-expiry",
+                include_str!("../../../configs/jobs/check-cert-expiry.yaml"),
+            ),
+        ];
+        for (name, yaml) in jobs {
+            let m: Manifest =
+                serde_yaml::from_str(yaml).unwrap_or_else(|e| panic!("{name} parse: {e}"));
+            m.validate()
+                .unwrap_or_else(|e| panic!("{name} validate: {e}"));
+            let check = m
+                .check
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} must carry a check: hint"));
+            assert!(!check.name.trim().is_empty(), "{name} check.name empty");
+            // These three examples all read admin-only WMI namespaces,
+            // so they run_as system. NOTE: that's a property of these
+            // particular checks, NOT of the `check:` contract — a check
+            // probing user-session state could legitimately run_as user.
+            assert_eq!(
+                m.execute.run_as,
+                RunAs::System,
+                "{name} should run_as system"
+            );
+        }
+    }
+
+    #[test]
+    fn example_check_schedule_yamls_parse_and_validate() {
+        let schedules = [
+            (
+                "check-bitlocker",
+                include_str!("../../../configs/schedules/check-bitlocker.yaml"),
+            ),
+            (
+                "check-av-signature",
+                include_str!("../../../configs/schedules/check-av-signature.yaml"),
+            ),
+            (
+                "check-cert-expiry",
+                include_str!("../../../configs/schedules/check-cert-expiry.yaml"),
+            ),
+        ];
+        for (name, yaml) in schedules {
+            let s: Schedule =
+                serde_yaml::from_str(yaml).unwrap_or_else(|e| panic!("{name} schedule parse: {e}"));
+            s.validate()
+                .unwrap_or_else(|e| panic!("{name} schedule validate: {e}"));
+            assert_eq!(s.job_id, name, "{name} schedule must reference its job");
+        }
+    }
+
     #[test]
     fn target_is_specified_requires_at_least_one_field() {
         let empty = Target::default();
