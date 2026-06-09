@@ -72,6 +72,12 @@ pub struct ConnectionState {
     /// pipe. Bounded so a misbehaving forwarder can't OOM the
     /// agent.
     pub push_tx: mpsc::Sender<Vec<u8>>,
+    /// NATS client for cold-path KV reads. `jobs.list` opens
+    /// `BUCKET_JOBS` on demand to re-read the manifest catalog at
+    /// fire time (SPEC §2.1) rather than caching a stale snapshot.
+    /// `None` only in unit tests that don't drive a KV-backed handler;
+    /// production wires it via [`ConnectionState::with_nats`].
+    pub nats: Option<async_nats::Client>,
     /// `Some(v)` once `system.handshake` succeeded; `None`
     /// otherwise. The dispatcher uses this as the gate for
     /// non-handshake methods.
@@ -103,8 +109,18 @@ impl ConnectionState {
             log_path,
             subscriptions: SubscriptionRegistry::new(),
             push_tx,
+            nats: None,
             agreed_protocol: None,
         }
+    }
+
+    /// Attach the NATS client used by cold-path KV handlers
+    /// (`jobs.list`). The listener calls this on every accepted
+    /// connection; unit tests that don't exercise a KV handler skip
+    /// it and leave `nats` as `None`.
+    pub fn with_nats(mut self, nats: async_nats::Client) -> Self {
+        self.nats = Some(nats);
+        self
     }
 
     /// `true` once `system.handshake` has been processed

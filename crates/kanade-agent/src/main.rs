@@ -261,6 +261,7 @@ pub(crate) async fn run_agent() -> Result<()> {
             config_rx: cfg_rx.clone(),
             state_rx,
             log_path: std::path::PathBuf::from(&cfg.log.path),
+            nats: client.clone(),
         });
     }
 

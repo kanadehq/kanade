@@ -1,0 +1,49 @@
+# Example USER-INVOKABLE job (#291) — the "困ったとき" (Troubleshoot) tab.
+#
+# A user-invokable job is a normal Manifest with a `client:` block.
+# The block's mere presence opts the job into the Client App catalog
+# over KLP (`jobs.list` → `jobs.execute`); `name` + `category` are
+# required (serde enforces them), `description` + `icon` are optional.
+# Operator-only jobs (inventory / checks / scheduled maintenance) just
+# omit `client:` and never surface to end users.
+#
+# `run_as: user` matters here: this clears the *interactive user's*
+# Teams cache under %APPDATA%, so it must run in their session — not as
+# LocalSystem (which has a different, empty profile).
+#
+# Unlike a check, a user-invokable job needs NO schedule — the end user
+# fires it on demand from the Client App. Just register the job:
+#   kanade job create configs/jobs/fix-teams-cache.yaml
+#
+# This is also the shape a check's `troubleshoot:` remediation job
+# takes — the "修復する" button on the Health tab runs a job exactly
+# like this one.
+id: fix-teams-cache
+version: 1.0.0
+description: Clear the Microsoft Teams cache for the current user (operator note)
+execute:
+  shell: powershell
+  run_as: user
+  timeout: 60s
+  script: |
+    # Stop globally so a Remove-Item failure (locked file, denied ACL)
+    # surfaces as a failed job instead of a false success. Only the
+    # process-stop is allowed to be best-effort (Teams may not be
+    # running), via a targeted -ErrorAction SilentlyContinue.
+    $ErrorActionPreference = 'Stop'
+    Get-Process -Name Teams, ms-teams -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+    $paths = @(
+      "$env:APPDATA\Microsoft\Teams\Cache",
+      "$env:APPDATA\Microsoft\Teams\GPUCache",
+      "$env:LOCALAPPDATA\Packages\MSTeams_8wekyb3d8bbwe\LocalCache"
+    )
+    foreach ($p in $paths) {
+      if (Test-Path $p) { Remove-Item $p -Recurse -Force }
+    }
+    Write-Output 'Teams cache cleared. Please relaunch Teams.'
+client:
+  name: "Teams のキャッシュをクリア"
+  description: "Teams が重い・固まるときに試してください(再起動が必要です)"
+  category: troubleshoot
+  icon: brush-cleaning

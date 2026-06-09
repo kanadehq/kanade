@@ -1,0 +1,33 @@
+# Example USER-INVOKABLE job (#291) — the "アップデート" (SoftwareUpdate) tab.
+#
+# A `client:` block with `category: software_update` makes this job
+# appear in the Client App's update tab so an end user can pull a
+# Chrome update on demand. See fix-teams-cache.yaml for the full
+# `client:` contract.
+#
+# `run_as: system`: winget runs the MSI installer, which needs
+# elevation — the agent is LocalSystem, so it succeeds without a UAC
+# prompt in the user's face.
+#
+# Register (no schedule needed — user-fired):
+#   kanade job create configs/jobs/chrome-update.yaml
+id: chrome-update
+version: 1.2.0
+description: Update Google Chrome to the latest stable via winget (operator note)
+execute:
+  shell: powershell
+  run_as: system
+  timeout: 600s
+  script: |
+    $ErrorActionPreference = 'Stop'
+    winget upgrade --id Google.Chrome --silent --accept-source-agreements --accept-package-agreements
+    # $ErrorActionPreference doesn't catch a native exe's non-zero
+    # exit — check winget's $LASTEXITCODE explicitly so a failed
+    # update is reported as a failed job, not a silent success.
+    if ($LASTEXITCODE -ne 0) { throw "winget upgrade failed with exit code $LASTEXITCODE" }
+    Write-Output 'Chrome is up to date.'
+client:
+  name: "Google Chrome を更新"
+  description: "最新の安定版へ更新します(数分かかることがあります)"
+  category: software_update
+  icon: chrome
