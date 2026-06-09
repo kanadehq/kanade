@@ -1521,6 +1521,7 @@ target: { all: true }
             plan: FanoutPlan::default(),
             active: Active::default(),
             constraints: Constraints::default(),
+            on_failure: OnFailure::default(),
             tz: ScheduleTz::default(),
             starting_deadline: None,
             runs_on,
@@ -2071,6 +2072,110 @@ constraints:
         assert!(!s.calendar_outside_window());
     }
 
+    // ---- on_failure.retry (#418 Phase 4) ----
+
+    fn with_retry(max: u32, backoff: &str) -> Schedule {
+        let mut s = schedule_with(
+            When::PerPc(PerPolicy::Every(EverySpec { every: "6h".into() })),
+            RunsOn::Backend,
+        );
+        s.on_failure.retry = Some(Retry {
+            max,
+            backoff: backoff.into(),
+        });
+        s
+    }
+
+    #[test]
+    fn on_failure_parses_and_round_trips() {
+        let yaml = r#"
+id: x
+when:
+  per_pc: { every: 6h }
+job_id: y
+target: { all: true }
+on_failure:
+  retry: { max: 3, backoff: 10m }
+"#;
+        let s: Schedule = serde_yaml::from_str(yaml).expect("parse");
+        let r = s.on_failure.retry.as_ref().expect("retry present");
+        assert_eq!(r.max, 3);
+        assert_eq!(r.backoff, "10m");
+        let back: Schedule =
+            serde_json::from_str(&serde_json::to_string(&s).expect("ser")).expect("de");
+        assert_eq!(back.on_failure, s.on_failure);
+    }
+
+    #[test]
+    fn on_failure_empty_is_skipped_when_serialising() {
+        let s = schedule_with(
+            When::PerPc(PerPolicy::Once(OnceLiteral::Once)),
+            RunsOn::Backend,
+        );
+        let json = serde_json::to_value(&s).expect("serialise");
+        assert!(
+            json.get("on_failure").is_none(),
+            "empty on_failure must not appear on the wire: {json}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_good_retry() {
+        for (max, backoff) in [(1, "30s"), (3, "10m"), (10, "1h")] {
+            with_retry(max, backoff)
+                .validate()
+                .unwrap_or_else(|e| panic!("retry {{max:{max}, backoff:{backoff}}}: {e}"));
+        }
+    }
+
+    #[test]
+    fn validate_rejects_bad_backoff() {
+        let err = with_retry(3, "soon").validate().unwrap_err();
+        assert!(err.contains("on_failure.retry.backoff"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_sub_second_backoff() {
+        // "500ms" parses as humantime but lowers to 0s on the wire —
+        // reject it so the operator doesn't get a silent no-wait
+        // (coderabbit #466).
+        for bad in ["500ms", "0s", "999ms"] {
+            let err = with_retry(3, bad).validate().unwrap_err();
+            assert!(
+                err.contains("on_failure.retry.backoff must be >= 1s"),
+                "for '{bad}', got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_rejects_out_of_range_max() {
+        for bad in [0u32, 11, 1000] {
+            let err = with_retry(bad, "10m").validate().unwrap_err();
+            assert!(
+                err.contains("on_failure.retry.max"),
+                "for max={bad}, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn lowered_retry_reduces_backoff_to_seconds() {
+        let s = with_retry(3, "10m");
+        let spec = s.on_failure.lowered_retry().expect("a retry policy");
+        assert_eq!(spec.max, 3);
+        assert_eq!(spec.backoff_secs, 600);
+    }
+
+    #[test]
+    fn lowered_retry_is_none_without_policy() {
+        let s = schedule_with(
+            When::PerPc(PerPolicy::Once(OnceLiteral::Once)),
+            RunsOn::Backend,
+        );
+        assert!(s.on_failure.lowered_retry().is_none());
+    }
+
     #[test]
     fn shipped_schedule_configs_parse_and_validate() {
         // Every YAML under configs/schedules/ must parse with the
@@ -2343,6 +2448,14 @@ pub struct Schedule {
     /// fields. Checked at tick time on both schedulers.
     #[serde(default, skip_serializing_if = "Constraints::is_empty")]
     pub constraints: Constraints,
+    /// #418 Phase 4: what to do after a fire's script comes back
+    /// failed. Currently just `retry` (fixed-backoff in-process
+    /// re-run); future `notify` / `disable` join the same namespace.
+    /// Applied fire-side in `handle_command` (the retry policy is
+    /// lowered onto every Command this schedule produces), so it
+    /// covers both `runs_on` locations.
+    #[serde(default, skip_serializing_if = "OnFailure::is_empty")]
+    pub on_failure: OnFailure,
     /// #418 Phase 2: the timezone this schedule's wall-clock fields
     /// are evaluated in — both the calendar `at` firing time AND the
     /// `active.{from,until}` window bounds. `local` (default) = the
@@ -2859,6 +2972,68 @@ impl Constraints {
     }
 }
 
+/// What to do when a fire's script fails (#418 Phase 4 — the "高"
+/// retry/backoff gap). Where [`Constraints`] gates *whether* a fire
+/// happens, `OnFailure` decides what happens *after* one ran and
+/// came back bad. Only `retry` so far; future `notify` / `disable`
+/// would join the same namespace.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OnFailure {
+    /// Re-run the script in-process when it exits non-zero (or times
+    /// out), up to a cap, with a fixed backoff between attempts.
+    /// `None` (default) = no retry: a failed run is published as-is
+    /// and (for reconcile cadences) simply re-fires on the next poll
+    /// tick. See [`Retry`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<Retry>,
+}
+
+impl OnFailure {
+    /// `skip_serializing_if` helper — an empty policy is omitted from
+    /// the wire format entirely.
+    pub fn is_empty(&self) -> bool {
+        self.retry.is_none()
+    }
+
+    /// Lower the operator-facing `retry` (humantime backoff) onto the
+    /// engine vocabulary the agent's executor runs on (backoff in
+    /// whole seconds). Single seam shared by the backend command
+    /// builder and the agent's local scheduler so the two stamp the
+    /// same [`crate::wire::RetrySpec`] onto every Command. Returns
+    /// `None` when there is no retry policy or the backoff is
+    /// unparseable (validate() rejects the latter at create time;
+    /// this stays fail-safe = "no retry" for a hand-edited KV blob
+    /// rather than panicking on the fire path).
+    pub fn lowered_retry(&self) -> Option<crate::wire::RetrySpec> {
+        let r = self.retry.as_ref()?;
+        let backoff_secs = humantime::parse_duration(&r.backoff).ok()?.as_secs();
+        Some(crate::wire::RetrySpec {
+            max: r.max,
+            backoff_secs,
+        })
+    }
+}
+
+/// Fixed-backoff retry policy (#418 Phase 4). `max` is the number of
+/// *additional* attempts after the first run (so `max: 3` = up to 4
+/// total executions); `backoff` is the humantime delay slept between
+/// attempts. The retry happens fire-side (inside `kanade fire` /
+/// `handle_command`) on every OS for the PoC — the Windows-native
+/// "restart on failure" Task Scheduler path is deferred to the
+/// native-delegation phase (#418 decision H).
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Retry {
+    /// Max additional attempts after the first failure. Bounded
+    /// `1..=10` by [`Schedule::validate`] — a typo'd `max: 1000`
+    /// with a short backoff would otherwise pin a flapping script in
+    /// a tight loop for the whole window.
+    pub max: u32,
+    /// Humantime delay slept between attempts (`"10m"`, `"30s"`).
+    pub backoff: String,
+}
+
 /// The system-generated poll cadence every reconcile-shaped `when`
 /// lowers to. Operators never write this: the real inter-run
 /// spacing is the `every` cooldown; this only bounds "how soon do
@@ -3020,6 +3195,35 @@ impl Schedule {
         // time (parse_window also catches equal bounds).
         if let Some(w) = self.constraints.window.as_deref() {
             Constraints::parse_window(w)?;
+        }
+        // #418 Phase 4: a bad on_failure.retry is rejected at create
+        // time — backoff must be valid humantime, and max is bounded
+        // so a typo can't pin a flapping script in a tight loop.
+        if let Some(r) = &self.on_failure.retry {
+            let backoff = humantime::parse_duration(&r.backoff).map_err(|e| {
+                format!(
+                    "on_failure.retry.backoff: invalid duration '{}': {e}",
+                    r.backoff
+                )
+            })?;
+            // The wire form lowers backoff to whole seconds, so a
+            // sub-second value would silently become a 0s no-wait
+            // (coderabbit #466). Reject it rather than honour a backoff
+            // the operator can't actually get.
+            if backoff.as_secs() < 1 {
+                return Err(format!(
+                    "on_failure.retry.backoff must be >= 1s (got '{}'); sub-second backoffs \
+                     round to 0 on the wire",
+                    r.backoff
+                ));
+            }
+            if !(1..=10).contains(&r.max) {
+                return Err(format!(
+                    "on_failure.retry.max must be 1..=10 (got {}); it counts additional \
+                     attempts after the first run",
+                    r.max
+                ));
+            }
         }
         Ok(())
     }

@@ -128,6 +128,79 @@ pub async fn command_loop(
     }
 }
 
+/// #418 Phase 4: should a finished run be retried (vs. published
+/// as-is)? A non-zero exit or a timeout is a transient failure worth
+/// re-running; a remote kill is the operator deliberately stopping
+/// the job, so it is **never** retried — retrying would fight the
+/// signal. Pure so the retry decision is unit-tested without a broker.
+fn outcome_is_retryable(outcome: &ExecOutcome) -> bool {
+    match outcome {
+        ExecOutcome::Completed { exit_code, .. } => *exit_code != 0,
+        ExecOutcome::Timeout { .. } => true,
+        ExecOutcome::Killed { .. } => false,
+    }
+}
+
+/// #418 Phase 4: a human-readable note folded into the published
+/// `stderr` when a fire took at least one retry — "succeeded after N"
+/// on an eventual clean exit, "failed after N exhausted" when the
+/// budget ran out, or "stopped by remote kill after N" when the
+/// operator killed a later attempt (or the backoff wait). Keying off
+/// `exit_code` alone would mislabel a kill as "exhausted" (claude /
+/// coderabbit #466), so a `killed` final outcome takes precedence.
+/// `None` when no retry happened (the common case).
+fn retry_note(attempt: u32, exit_code: i32, killed: bool) -> Option<String> {
+    (attempt > 0).then(|| {
+        let plural = if attempt == 1 { "retry" } else { "retries" };
+        if killed {
+            format!("stopped by remote kill after {attempt} {plural} (#418 on_failure.retry)")
+        } else if exit_code == 0 {
+            format!("succeeded after {attempt} {plural} (#418 on_failure.retry)")
+        } else {
+            format!("failed after {attempt} {plural} exhausted (#418 on_failure.retry)")
+        }
+    })
+}
+
+/// #418 Phase 4: sleep for `backoff` between retry attempts, but
+/// return `true` early if a remote kill for `exec_id` arrives first.
+/// Between attempts the run's own kill listener (inside
+/// `run_command_with_kill`) is gone, so without this the backoff wait
+/// would be deaf to an operator stop and fire another attempt anyway
+/// (gemini HIGH / claude #466). An ad-hoc run with no `exec_id` has no
+/// kill subject → plain sleep, always `false`. A failed subscribe
+/// degrades to a plain sleep (best-effort, matching how the main kill
+/// listener treats a subscribe failure).
+async fn wait_or_killed(
+    client: &async_nats::Client,
+    exec_id: Option<&str>,
+    backoff: std::time::Duration,
+) -> bool {
+    let Some(eid) = exec_id else {
+        tokio::time::sleep(backoff).await;
+        return false;
+    };
+    let kill_subject = kanade_shared::subject::kill(eid);
+    match client.subscribe(kill_subject.clone()).await {
+        Ok(mut kill_sub) => {
+            tokio::select! {
+                _ = tokio::time::sleep(backoff) => false,
+                _ = kill_sub.next() => true,
+            }
+        }
+        Err(e) => {
+            warn!(
+                error = %e,
+                exec_id = %eid,
+                subject = %kill_subject,
+                "kill subscribe failed during retry backoff; sleeping deaf to kill",
+            );
+            tokio::time::sleep(backoff).await;
+            false
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_command(
     client: async_nats::Client,
@@ -332,8 +405,60 @@ pub async fn handle_command(
         }
     }
 
-    let outcome = run_command_with_kill(&client, &cmd, Some(live_handle.tail())).await?;
+    // #418 Phase 4: fire-side retry. Re-run the script on a non-zero
+    // exit or a timeout, up to `cmd.retry.max` extra attempts with a
+    // fixed backoff between them. A remote kill is honored immediately
+    // — the operator meant "stop", not "try harder" — so it never
+    // retries. Only the final attempt's outcome is published (one
+    // ExecResult row, the started event above fired once for the whole
+    // sequence); a `status_note` records how many retries it took or
+    // that they were exhausted. `attempt` ends as the retry count.
+    let max_retries = cmd.retry.map(|r| r.max).unwrap_or(0);
+    let backoff = cmd
+        .retry
+        .map(|r| std::time::Duration::from_secs(r.backoff_secs));
+    let mut attempt: u32 = 0;
+    let outcome = loop {
+        let outcome = run_command_with_kill(&client, &cmd, Some(live_handle.tail())).await?;
+        if !outcome_is_retryable(&outcome) || attempt >= max_retries {
+            break outcome;
+        }
+        attempt += 1;
+        warn!(
+            cmd_id = %cmd.id,
+            request_id = %cmd.request_id,
+            attempt,
+            max_retries,
+            backoff_secs = backoff.map(|b| b.as_secs()).unwrap_or(0),
+            "fire failed; retrying after backoff (#418 on_failure.retry)",
+        );
+        // Stay responsive to a remote kill during the backoff wait.
+        // `run_command_with_kill` only listens to `kill.{exec_id}`
+        // while the child runs, so between attempts the agent is deaf
+        // to a stop signal — a plain sleep here would fire another
+        // attempt after the operator already killed the job (gemini
+        // HIGH / claude #466). Race the wait against a kill: if one
+        // arrives, abandon the retry sequence as Killed.
+        if let Some(b) = backoff
+            && wait_or_killed(&client, cmd.exec_id.as_deref(), b).await
+        {
+            info!(
+                cmd_id = %cmd.id,
+                request_id = %cmd.request_id,
+                attempt,
+                "remote kill during retry backoff — aborting retries (#418 on_failure.retry)",
+            );
+            break ExecOutcome::Killed {
+                stdout: String::new(),
+                stderr: String::new(),
+            };
+        }
+    };
     let finished_at = chrono::Utc::now();
+    // Capture before the match below moves `outcome`: a final Killed
+    // (mid-attempt or during a backoff abort) must not be mislabelled
+    // "retries exhausted" by the retry note (claude / coderabbit #466).
+    let final_killed = matches!(outcome, ExecOutcome::Killed { .. });
     // Flip the live buffer to "finished" promptly so the SPA's next
     // poll sees `running = false`. Grace retention (in `live_tail`)
     // keeps the final tail serveable until the persisted row lands.
@@ -361,11 +486,19 @@ pub async fn handle_command(
             Some(format!("timeout after {}s", cmd.timeout_secs)),
         ),
     };
-    let stderr = match status_note {
-        Some(note) if stderr.is_empty() => note,
-        Some(note) => format!("{stderr}\n{note}"),
-        None => stderr,
-    };
+    // #418 Phase 4: append a retry summary so the Results page shows
+    // the script eventually succeeded (or that the budget ran out)
+    // rather than silently swallowing the earlier failures.
+    let stderr = [status_note, retry_note(attempt, exit_code, final_killed)]
+        .into_iter()
+        .flatten()
+        .fold(stderr, |acc, note| {
+            if acc.is_empty() {
+                note
+            } else {
+                format!("{acc}\n{note}")
+            }
+        });
 
     // #290: if this job is an operator-defined health check, map its
     // result into the KLP `StateSnapshot.checks` for the Client App's
@@ -769,5 +902,84 @@ mod tests {
     #[test]
     fn now_long_past_deadline_skips() {
         assert!(should_skip_for_deadline(at(100), at(86400)));
+    }
+
+    // ---- #418 Phase 4: on_failure.retry ----
+
+    fn completed(exit_code: i32) -> ExecOutcome {
+        ExecOutcome::Completed {
+            exit_code,
+            stdout: String::new(),
+            stderr: String::new(),
+        }
+    }
+
+    #[test]
+    fn clean_exit_is_not_retryable() {
+        assert!(!outcome_is_retryable(&completed(0)));
+    }
+
+    #[test]
+    fn nonzero_exit_is_retryable() {
+        assert!(outcome_is_retryable(&completed(1)));
+        assert!(outcome_is_retryable(&completed(-1)));
+    }
+
+    #[test]
+    fn timeout_is_retryable() {
+        assert!(outcome_is_retryable(&ExecOutcome::Timeout {
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+    }
+
+    #[test]
+    fn remote_kill_is_never_retried() {
+        // The operator pressed stop — retrying would fight the signal.
+        assert!(!outcome_is_retryable(&ExecOutcome::Killed {
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+    }
+
+    #[test]
+    fn no_retry_emits_no_note() {
+        assert_eq!(retry_note(0, 0, false), None);
+        assert_eq!(retry_note(0, 1, false), None);
+    }
+
+    #[test]
+    fn retry_note_reports_eventual_success() {
+        let note = retry_note(2, 0, false).expect("a retry happened");
+        assert!(note.contains("succeeded after 2 retries"), "got: {note}");
+    }
+
+    #[test]
+    fn retry_note_reports_exhaustion() {
+        let note = retry_note(3, 1, false).expect("a retry happened");
+        assert!(
+            note.contains("failed after 3 retries exhausted"),
+            "got: {note}"
+        );
+    }
+
+    #[test]
+    fn retry_note_killed_is_not_exhausted() {
+        // A kill on a later attempt sets exit_code = -1, but the run was
+        // stopped, not exhausted — the note must say so (claude /
+        // coderabbit #466). `killed` wins over the exit_code branch.
+        let note = retry_note(2, -1, true).expect("a retry happened");
+        assert!(
+            note.contains("stopped by remote kill after 2 retries"),
+            "got: {note}"
+        );
+        assert!(!note.contains("exhausted"), "got: {note}");
+    }
+
+    #[test]
+    fn retry_note_singular_for_one_retry() {
+        let note = retry_note(1, 0, false).expect("a retry happened");
+        assert!(note.contains("after 1 retry"), "got: {note}");
+        assert!(!note.contains("retries"), "got: {note}");
     }
 }
