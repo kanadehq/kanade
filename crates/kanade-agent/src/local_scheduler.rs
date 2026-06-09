@@ -784,6 +784,15 @@ async fn reconcile_schedule(
             "local_scheduler: constraints.window unparseable — blocked (fail-closed) until fixed",
         );
     }
+    // A calendar whose `at` can never fall in its window never fires
+    // (claude #452 review).
+    if schedule.calendar_outside_window() {
+        warn!(
+            schedule_id = %schedule_id,
+            when = %schedule.when,
+            "local_scheduler: calendar fire time is outside constraints.window — it will never fire",
+        );
+    }
 }
 
 async fn unregister_locally(internal: &JobScheduler, state: &Arc<Mutex<State>>, schedule_id: &str) {

@@ -211,6 +211,16 @@ async fn register(
             "constraints.window is unparseable — schedule blocked (fail-closed) until fixed",
         );
     }
+    // A calendar whose `at` time can never fall in its window also
+    // never fires — warn instead of leaving a debug-only trail
+    // (claude #452 review).
+    if schedule.calendar_outside_window() {
+        warn!(
+            schedule_id = %schedule.id,
+            when = %schedule.when,
+            "calendar fire time is outside constraints.window — it will never fire",
+        );
+    }
     Ok(())
 }
 

@@ -1425,6 +1425,31 @@ constraints:
     }
 
     #[test]
+    fn calendar_outside_window_is_flagged() {
+        // at 09:00 can never fall in 22:00-05:00 → never fires.
+        let mut s = schedule_with(calendar("09:00", &["mon-fri"]), RunsOn::Backend);
+        s.constraints.window = Some("22:00-05:00".into());
+        assert!(s.calendar_outside_window(), "09:00 is not in 22:00-05:00");
+
+        // at 23:00 IS inside the overnight window → fine.
+        let mut s = schedule_with(calendar("23:00", &[]), RunsOn::Backend);
+        s.constraints.window = Some("22:00-05:00".into());
+        assert!(!s.calendar_outside_window(), "23:00 is in 22:00-05:00");
+
+        // reconcile shapes are never flagged (they poll every minute).
+        let mut s = schedule_with(
+            When::PerPc(PerPolicy::Every(EverySpec { every: "6h".into() })),
+            RunsOn::Backend,
+        );
+        s.constraints.window = Some("22:00-05:00".into());
+        assert!(!s.calendar_outside_window(), "reconcile is unaffected");
+
+        // no window → never flagged.
+        let s = schedule_with(calendar("09:00", &[]), RunsOn::Backend);
+        assert!(!s.calendar_outside_window());
+    }
+
+    #[test]
     fn shipped_schedule_configs_parse_and_validate() {
         // Every YAML under configs/schedules/ must parse with the
         // current Schedule serde AND pass validate() — keeps the
@@ -1913,6 +1938,15 @@ impl CalendarSpec {
         tz.naive_to_utc(naive)
     }
 
+    /// The wall-clock time-of-day this calendar fires at (`None` if
+    /// `at` is unparseable — validate() guards that). Used to detect
+    /// a calendar whose fire time can never fall inside its
+    /// `constraints.window` (claude #452 review).
+    pub fn fire_time(&self) -> Option<chrono::NaiveTime> {
+        let p = self.parse_at().ok()?;
+        chrono::NaiveTime::from_hms_opt(p.hour, p.minute, 0)
+    }
+
     /// Lower to the cron string the scheduler engine runs. Repeating
     /// → 6-field `0 {min} {hour} * * {dow}`; one-shot → 7-field
     /// `0 {min} {hour} {day} {month} * {year}` (a past year never
@@ -2181,19 +2215,25 @@ impl Constraints {
     /// ([`Schedule::bad_window`]) so a stuck schedule is diagnosable.
     /// The tick path never panics regardless.
     pub fn allows(&self, now: chrono::DateTime<chrono::Utc>, tz: ScheduleTz) -> bool {
-        let Some(w) = self.window.as_deref() else {
-            return true;
-        };
-        let Ok((start, end)) = Self::parse_window(w) else {
-            return false;
-        };
-        let t = tz.wall_time(now);
-        if start <= end {
+        match self.window.as_deref() {
+            // No window → always allowed.
+            None => true,
+            // Window set: membership, or fail-closed if unparseable
+            // (`window_contains` returns None for a corrupt window).
+            Some(_) => self.window_contains(tz.wall_time(now)).unwrap_or(false),
+        }
+    }
+
+    /// Membership of a wall-clock time-of-day in the window. `None`
+    /// when there is no window or it's unparseable (callers decide
+    /// the failure direction). `start > end` crosses midnight.
+    fn window_contains(&self, t: chrono::NaiveTime) -> Option<bool> {
+        let (start, end) = Self::parse_window(self.window.as_deref()?).ok()?;
+        Some(if start <= end {
             start <= t && t < end
         } else {
-            // crosses midnight: in-window late tonight OR early tomorrow
             t >= start || t < end
-        }
+        })
     }
 }
 
@@ -2232,6 +2272,23 @@ impl Schedule {
     pub fn bad_window(&self) -> Option<String> {
         let w = self.constraints.window.as_deref()?;
         Constraints::parse_window(w).err()
+    }
+
+    /// True when this is a `calendar` schedule whose fire time can
+    /// never fall inside its `constraints.window` — the cron fires,
+    /// the window check rejects it, and (firing only at that
+    /// time-of-day) it effectively never runs. An easy misconfig to
+    /// set up by accident; the scheduler warns at register time
+    /// (claude #452 review). Reconcile shapes poll every minute, so
+    /// they always catch the window opening and aren't affected.
+    pub fn calendar_outside_window(&self) -> bool {
+        let When::Calendar(c) = &self.when else {
+            return false;
+        };
+        let Some(t) = c.fire_time() else {
+            return false;
+        };
+        matches!(self.constraints.window_contains(t), Some(false))
     }
 
     /// Lower the operator-facing `when` onto the engine vocabulary.
