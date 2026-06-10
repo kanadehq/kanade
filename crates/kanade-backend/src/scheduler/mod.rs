@@ -499,6 +499,31 @@ async fn tick(state: &AppState, schedule: Schedule, freeze: &FreezeMirror) {
             }
         }
         FireAction::FirePcs(pc_ids) => {
+            // #418 constraints.max_concurrent: cap how many instances of
+            // this job run at once. Count the job's still-in-flight runs
+            // and only fire at as many of the remaining pcs as there are
+            // free slots; the rest wait for a later tick, which refills
+            // slots as runs complete (rolling window). Known limit
+            // (#418 (ii)): a just-dispatched run hasn't landed an
+            // `events.started` row yet, so with `jitter` longer than the
+            // 1-min poll the count can briefly lag and over-shoot the
+            // cap; with no/short jitter (the common case) the run lands
+            // before the next tick and the cap holds.
+            let pc_ids = if let Some(max) = schedule.constraints.max_concurrent {
+                let in_flight = count_in_flight(state, &job_id).await;
+                let capped = cap_pcs_to_slots(pc_ids, in_flight, max);
+                if capped.is_empty() {
+                    tracing::debug!(
+                        %schedule_id, %max, in_flight,
+                        "max_concurrent: all slots busy — deferring this tick",
+                    );
+                    return;
+                }
+                capped
+            } else {
+                pc_ids
+            };
+
             let mut plan = plan_for_dispatch();
             // Per-pc dedup overrides the original target shape:
             // pcs only, drop rollout (rollout's group-wave model
@@ -633,6 +658,47 @@ fn spawn_freeze_watcher(js: async_nats::jetstream::Context, freeze: FreezeMirror
             // watch ended (None) — reopen.
         }
     });
+}
+
+/// Count the still-in-flight runs of a job (#418 constraints
+/// .max_concurrent) — `execution_results` rows for `job_id` whose
+/// `finished_at` is still NULL (started, not yet returned; the reaper
+/// stamps `finished_at` when it gives up on an orphan, so reaped rows
+/// are excluded). Only called on a capped schedule's fire path (not
+/// every tick), and `COUNT … WHERE finished_at IS NULL` is served by
+/// the partial in-flight index, scanning only the small running set.
+/// Best-effort: a DB error reads as 0 in-flight (warn), which fails
+/// *open* — better to over-dispatch a capped job than to wedge it
+/// shut on a transient query error.
+async fn count_in_flight(state: &AppState, job_id: &str) -> u32 {
+    match sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM execution_results WHERE job_id = ? AND finished_at IS NULL",
+    )
+    .bind(job_id)
+    .fetch_one(&state.pool)
+    .await
+    {
+        // `try_from` instead of `as`: a fleet large enough to overflow
+        // u32 in-flight runs is impossible, but the saturating convert
+        // avoids the silent-truncation footgun (gemini #542).
+        Ok(n) => u32::try_from(n).unwrap_or(u32::MAX),
+        Err(e) => {
+            warn!(error = %e, %job_id, "max_concurrent: in-flight count query failed; treating as 0");
+            0
+        }
+    }
+}
+
+/// Truncate a per-pc fire list to the free slots left under a
+/// `max_concurrent` cap: `slots = max - in_flight`, clamped at 0.
+/// Pure so the rolling-window arithmetic is unit-tested without a DB.
+/// The pcs kept are an arbitrary prefix — fairness across ticks comes
+/// from the dispatched ones being suppressed next tick, so the
+/// remainder gets its turn as slots free up.
+fn cap_pcs_to_slots(mut pcs: Vec<String>, in_flight: u32, max_concurrent: u32) -> Vec<String> {
+    let slots = max_concurrent.saturating_sub(in_flight) as usize;
+    pcs.truncate(slots);
+    pcs
 }
 
 /// In-flight suppression window for one schedule's dispatch marks —
@@ -1011,5 +1077,34 @@ mod tests {
         let manifest = manifest_with_timeout("1h");
         let w = suppress_window(&schedule_with(""), &manifest);
         assert_eq!(w, DISPATCH_WINDOW_MAX);
+    }
+
+    // ---- constraints.max_concurrent (#418) ----
+
+    fn pcs(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("pc-{i}")).collect()
+    }
+
+    #[test]
+    fn cap_truncates_to_free_slots() {
+        // max 5, 2 already running → 3 free slots.
+        let out = cap_pcs_to_slots(pcs(10), 2, 5);
+        assert_eq!(out.len(), 3);
+        assert_eq!(out, vec!["pc-0", "pc-1", "pc-2"]);
+    }
+
+    #[test]
+    fn cap_at_capacity_defers_all() {
+        // in-flight == cap → 0 slots → empty (caller skips the tick).
+        assert!(cap_pcs_to_slots(pcs(4), 5, 5).is_empty());
+        // over capacity (a transient over-shoot) → saturating to 0.
+        assert!(cap_pcs_to_slots(pcs(4), 9, 5).is_empty());
+    }
+
+    #[test]
+    fn cap_under_slots_keeps_all() {
+        // Fewer eligible pcs than free slots → fire all of them.
+        let out = cap_pcs_to_slots(pcs(2), 0, 5);
+        assert_eq!(out.len(), 2);
     }
 }

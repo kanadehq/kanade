@@ -2029,6 +2029,56 @@ constraints:
         }
     }
 
+    // ---- constraints.max_concurrent (#418) ----
+
+    fn with_max_concurrent(max: u32, runs_on: RunsOn) -> Schedule {
+        let mut s = schedule_with(
+            When::PerPc(PerPolicy::Every(EverySpec { every: "6h".into() })),
+            runs_on,
+        );
+        s.constraints.max_concurrent = Some(max);
+        s
+    }
+
+    #[test]
+    fn validate_accepts_backend_max_concurrent() {
+        with_max_concurrent(5, RunsOn::Backend)
+            .validate()
+            .expect("backend max_concurrent should validate");
+    }
+
+    #[test]
+    fn validate_rejects_max_concurrent_on_agent() {
+        // Decision E: a central running-instance cap needs a central
+        // counter, which agents don't have.
+        let err = with_max_concurrent(5, RunsOn::Agent)
+            .validate()
+            .unwrap_err();
+        assert!(err.contains("constraints.max_concurrent"), "got: {err}");
+        assert!(err.contains("runs_on: agent"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_zero_max_concurrent() {
+        let err = with_max_concurrent(0, RunsOn::Backend)
+            .validate()
+            .unwrap_err();
+        assert!(err.contains("max_concurrent must be >= 1"), "got: {err}");
+    }
+
+    #[test]
+    fn max_concurrent_round_trips_and_skips_when_absent() {
+        let s = with_max_concurrent(3, RunsOn::Backend);
+        let json = serde_json::to_value(&s.constraints).expect("ser");
+        assert_eq!(json.get("max_concurrent").and_then(|v| v.as_u64()), Some(3));
+        // A schedule with no constraints omits the whole block.
+        let bare = schedule_with(
+            When::PerPc(PerPolicy::Once(OnceLiteral::Once)),
+            RunsOn::Backend,
+        );
+        assert!(bare.constraints.is_empty());
+    }
+
     #[test]
     fn window_fail_closed_on_corrupt_blob() {
         // A malformed window (only reachable via a hand-edited KV
@@ -2982,9 +3032,9 @@ impl Active {
 /// Operational constraints on a [`Schedule`] (#418 Phase 3). Where
 /// [`Active`] decides *over what date range* a schedule is live,
 /// `Constraints` decides *when, within an active period,* a fire is
-/// allowed. Only `window` (a maintenance time-of-day window) so far;
-/// `require` (env gates) and `max_concurrent` will join this struct
-/// in later phases.
+/// allowed. `window` (a maintenance time-of-day window) and
+/// `max_concurrent` (a fleet-wide running-instance cap) so far;
+/// `require` (env gates) joins this struct in a later phase.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Constraints {
@@ -2996,13 +3046,29 @@ pub struct Constraints {
     /// lazily; [`Schedule::validate`] rejects garbage at create time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window: Option<String>,
+    /// Fleet-wide cap on how many instances of this schedule's job may
+    /// run **at the same time** (#418 "同時実行ハード上限"). The
+    /// backend scheduler counts the job's still-in-flight runs
+    /// (`execution_results.finished_at IS NULL`) each tick and only
+    /// dispatches to as many remaining pcs as there are free slots —
+    /// a rolling window that refills as runs complete. Useful for
+    /// disk/CPU/network-heavy jobs you don't want hammering the whole
+    /// fleet at once.
+    ///
+    /// **Backend-only** (it needs a central counter): combining it
+    /// with `runs_on: agent` is rejected by [`Schedule::validate`]
+    /// (#418 decision E — "中央上限には中央が要る"). Most meaningful
+    /// for `per_pc` reconcile cadences, where the poll re-ticks and
+    /// refills slots. `None` (default) = no cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent: Option<u32>,
 }
 
 impl Constraints {
     /// `skip_serializing_if` helper — empty constraints are omitted
     /// from the wire format entirely.
     pub fn is_empty(&self) -> bool {
-        self.window.is_none()
+        self.window.is_none() && self.max_concurrent.is_none()
     }
 
     /// Parse `"HH:MM-HH:MM"` into `(start, end)`. Equal bounds are an
@@ -3386,6 +3452,30 @@ impl Schedule {
         // time (parse_window also catches equal bounds).
         if let Some(w) = self.constraints.window.as_deref() {
             Constraints::parse_window(w)?;
+        }
+        // #418: constraints.max_concurrent is a central running-instance
+        // cap, so it needs the backend's counter — reject it on
+        // runs_on: agent (decision E), and reject a meaningless 0.
+        if let Some(mc) = self.constraints.max_concurrent {
+            // Check the structural incompatibility (agent has no central
+            // counter) before the value range, so a `max_concurrent: 0`
+            // + `runs_on: agent` combo reports the more fundamental
+            // problem first (claude #542).
+            if matches!(self.runs_on, RunsOn::Agent) {
+                return Err(
+                    "constraints.max_concurrent needs a central counter and is backend-only; \
+                     it cannot be combined with runs_on: agent (each agent self-schedules, \
+                     so there is no fleet-wide count to cap against)"
+                        .into(),
+                );
+            }
+            if mc == 0 {
+                return Err(
+                    "constraints.max_concurrent must be >= 1 (0 would never fire; \
+                     omit it for no cap)"
+                        .into(),
+                );
+            }
         }
         // #418 Phase 4: a bad on_failure.retry is rejected at create
         // time — backoff must be valid humantime, and max is bounded
