@@ -45,7 +45,7 @@ use kanade_shared::ipc::system::{PingParams, PingResult};
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, WriteHalf, split};
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
-use tokio::sync::{Mutex, broadcast, oneshot};
+use tokio::sync::{Mutex, broadcast, oneshot, watch};
 use tracing::{debug, info, warn};
 
 /// SPEC §2.12.1 — the well-known Named Pipe the agent listens on.
@@ -109,6 +109,10 @@ pub struct KlpClient {
     /// Push-notification fan-out. The reader task is the sole sender;
     /// the Tauri layer subscribes and forwards to the WebView.
     notifications: broadcast::Sender<RpcNotification>,
+    /// Flips to `true` when the reader task exits (pipe closed — agent
+    /// restart / crash). The Tauri supervisor awaits this via
+    /// [`KlpClient::wait_closed`] to drive reconnection (#468).
+    closed: watch::Receiver<bool>,
 }
 
 impl KlpClient {
@@ -138,14 +142,33 @@ impl KlpClient {
         let (read, write) = split(pipe);
         let pending: Pending = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let (notifications, _) = broadcast::channel(NOTIFICATION_CAPACITY);
-        tokio::spawn(reader_loop(read, pending.clone(), notifications.clone()));
+        // `closed` flips true when the reader task exits, so the
+        // supervisor can reconnect (#468).
+        let (closed_tx, closed_rx) = watch::channel(false);
+        tokio::spawn(reader_loop(
+            read,
+            pending.clone(),
+            notifications.clone(),
+            closed_tx,
+        ));
 
         Ok(Self {
             write: Arc::new(Mutex::new(write)),
             pending,
             handshake: Arc::new(handshake),
             notifications,
+            closed: closed_rx,
         })
+    }
+
+    /// Resolve once the connection has closed (the reader task exited —
+    /// the agent's pipe went away). The Tauri supervisor awaits this to
+    /// trigger reconnection. Returns immediately if already closed.
+    pub async fn wait_closed(&self) {
+        let mut rx = self.closed.clone();
+        // `wait_for` returns Ok when the predicate holds; Err means the
+        // sender dropped (reader gone) — both mean "closed".
+        let _ = rx.wait_for(|&closed| closed).await;
     }
 
     /// Cached handshake result. Returned to the UI on every
@@ -278,6 +301,7 @@ async fn reader_loop<R: AsyncRead + Unpin>(
     mut read: R,
     pending: Pending,
     notifications: broadcast::Sender<RpcNotification>,
+    closed_tx: watch::Sender<bool>,
 ) {
     loop {
         let bytes = match read_frame(&mut read).await {
@@ -325,6 +349,9 @@ async fn reader_loop<R: AsyncRead + Unpin>(
     // Connection gone: fail every in-flight request rather than leave
     // it awaiting a oneshot that will never resolve.
     pending.lock().unwrap().clear();
+    // Signal the supervisor to reconnect (#468). Ignore the error —
+    // a dropped receiver just means the KlpClient is already gone.
+    let _ = closed_tx.send(true);
 }
 
 /// Pull the typed result out of an [`RpcResponse`]; map error
@@ -434,7 +461,13 @@ mod tests {
         let (tx, rx) = oneshot::channel();
         pending.lock().unwrap().insert("req-1".into(), tx);
 
-        tokio::spawn(reader_loop(client_side, pending.clone(), notifications));
+        let (closed_tx, _closed_rx) = watch::channel(false);
+        tokio::spawn(reader_loop(
+            client_side,
+            pending.clone(),
+            notifications,
+            closed_tx,
+        ));
 
         push_frame(
             &mut agent_side,
@@ -457,7 +490,8 @@ mod tests {
         let pending: Pending = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let (notifications, mut sub) = broadcast::channel(16);
 
-        tokio::spawn(reader_loop(client_side, pending, notifications));
+        let (closed_tx, _closed_rx) = watch::channel(false);
+        tokio::spawn(reader_loop(client_side, pending, notifications, closed_tx));
 
         let progress = JobProgress {
             run_id: "run-1".into(),
@@ -486,15 +520,22 @@ mod tests {
         let (tx, rx) = oneshot::channel::<RpcResponse>();
         pending.lock().unwrap().insert("req-orphan".into(), tx);
 
-        let handle = tokio::spawn(reader_loop(client_side, pending, notifications));
+        let (closed_tx, mut closed_rx) = watch::channel(false);
+        let handle = tokio::spawn(reader_loop(client_side, pending, notifications, closed_tx));
 
-        // Drop the agent side → EOF → reader exits → clears pending.
+        // Drop the agent side → EOF → reader exits → clears pending +
+        // signals closed.
         drop(agent_side);
         handle.await.unwrap();
 
         assert!(
             rx.await.is_err(),
             "pending request should be failed, not hung"
+        );
+        // The reader signalled the supervisor that the connection died.
+        assert!(
+            closed_rx.wait_for(|&c| c).await.is_ok(),
+            "reader must signal closed on exit (#468 reconnect trigger)"
         );
     }
 }
