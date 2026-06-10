@@ -362,6 +362,15 @@ pub async fn rollout(
     };
     scope.target_version = Some(body.version.clone());
     if let Some(j) = body.jitter.as_deref() {
+        // #491: reject malformed jitter at the write boundary — the
+        // agent's parse failure silently falls back, so a typo here
+        // would otherwise disable the rollout stagger fleet-wide.
+        humantime::parse_duration(j).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("jitter: expected a humantime duration (e.g. 30s, 10m, 1h): {e}"),
+            )
+        })?;
         scope.target_version_jitter = Some(j.to_owned());
     }
     let payload = serde_json::to_vec(&scope).map_err(|e| {

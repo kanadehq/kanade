@@ -52,7 +52,9 @@ pub struct ConfigScope {
     /// Random sleep window applied at each agent before it starts
     /// downloading a new target_version, so a fleet-wide rollout
     /// doesn't slam the Object Store / broker all at once
-    /// (humantime, e.g. `"30m"`). `"0s"` (or unset) = no jitter.
+    /// (humantime, e.g. `"30m"`). `"0s"` = no jitter (explicit
+    /// opt-in for canary / single-PC deploys); unset falls back to
+    /// the safe built-in default (10m — #491).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_version_jitter: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -126,13 +128,18 @@ impl EffectiveConfig {
     pub fn builtin_defaults() -> Self {
         Self {
             target_version: None,
-            // 0s = "no jitter" = pre-Sprint-11 behaviour. Operators
-            // running ≥ 100-host fleets are expected to bump this
-            // (via `kanade agent rollout … --jitter 30m` or
-            // `kanade config set target_version_jitter=30m`) so the
-            // Object Store fan-out doesn't synchronise. See issue
-            // #26 for the broader "safe-by-default" debate.
-            target_version_jitter: "0s".to_string(),
+            // #491: safe-by-default. The pre-Sprint-11 "0s" default
+            // meant a fleet-wide target_version flip made every
+            // agent pull the multi-MB binary from the Object Store
+            // at the same instant (3,000 hosts ≈ tens of GB through
+            // one broker NIC) unless the operator remembered
+            // `--jitter` on every rollout. 10m amortises a
+            // 3,000-host fleet to ~5 downloads/s while staying
+            // tolerable for mid-size rollouts. Canary / dev flows
+            // that want the immediate swap opt in explicitly with
+            // `--jitter 0s` (fleet-deploy.ps1 does this for
+            // single-PC deploys).
+            target_version_jitter: "10m".to_string(),
             heartbeat_interval: "30s".to_string(),
             // 60 s default: 2× the heartbeat cadence so the chart has
             // a roughly aligned point every other heartbeat, while
@@ -177,12 +184,17 @@ impl EffectiveConfig {
         humantime::parse_duration(&self.host_perf_interval).unwrap_or(Duration::from_secs(60))
     }
 
-    /// Parsed `target_version_jitter`, falling back to zero (= no
-    /// jitter) on a malformed string. Zero means "start downloading
-    /// immediately when target_version drifts" — fine for small
-    /// fleets / canary smoke tests, bad for 3000 hosts.
+    /// Parsed `target_version_jitter`. #491: a malformed string
+    /// falls back to the safe built-in default (10 m), not zero —
+    /// the old ZERO fallback silently turned a `--jitter 30minutes`
+    /// typo into the exact fleet-wide download herd the flag exists
+    /// to prevent. The write boundaries (CLI `config set` /
+    /// `agent rollout`, backend rollout API) now reject malformed
+    /// strings outright, so this fallback only covers values that
+    /// predate that validation.
     pub fn target_version_jitter_duration(&self) -> Duration {
-        humantime::parse_duration(&self.target_version_jitter).unwrap_or(Duration::ZERO)
+        humantime::parse_duration(&self.target_version_jitter)
+            .unwrap_or(Duration::from_secs(10 * 60))
     }
 }
 
@@ -359,8 +371,9 @@ mod tests {
         };
         let (eff, _) = resolve(Some(&g), &BTreeMap::new(), None, &[]);
         assert_eq!(eff.heartbeat_interval, "60s");
-        // Unset fields stay at builtin defaults.
-        assert_eq!(eff.target_version_jitter, "0s");
+        // Unset fields stay at builtin defaults (#491: jitter's
+        // builtin default is the safe 10m, not 0s).
+        assert_eq!(eff.target_version_jitter, "10m");
         assert!(eff.target_version.is_none());
     }
 
@@ -602,5 +615,27 @@ mod tests {
         };
         let (eff, _) = resolve(None, &groups, Some(&pc), &["wave1".into()]);
         assert_eq!(eff.heartbeat_interval, "5s");
+    }
+
+    #[test]
+    fn malformed_jitter_falls_back_to_safe_default_not_zero() {
+        // #491: pre-fix this fell back to ZERO, silently turning a
+        // typo'd jitter into a fleet-wide simultaneous download.
+        // (Note "30minutes" is VALID humantime — full unit names
+        // parse — so the malformed sample must be genuinely broken.)
+        let eff = EffectiveConfig {
+            target_version_jitter: "not-a-duration".into(),
+            ..EffectiveConfig::builtin_defaults()
+        };
+        assert_eq!(
+            eff.target_version_jitter_duration(),
+            Duration::from_secs(10 * 60),
+        );
+        // Explicit 0s remains an honoured opt-in.
+        let zero = EffectiveConfig {
+            target_version_jitter: "0s".into(),
+            ..EffectiveConfig::builtin_defaults()
+        };
+        assert_eq!(zero.target_version_jitter_duration(), Duration::ZERO);
     }
 }
