@@ -106,6 +106,9 @@ type Run = {
   status: RunStatus;
   // Accumulated stdout/stderr tail shown under the row.
   output: string;
+  // Date.now() of creation or last progress. Drives the stuck-run
+  // watchdog (a non-terminal run with no progress for too long).
+  updatedAt: number;
 };
 
 // Active + recently-finished runs, keyed by run_id. Insertion order
@@ -132,6 +135,31 @@ function evictOldRuns(): void {
   }
 }
 
+// Stuck-run watchdog. `jobs.execute` streams no intermediate progress
+// between the Running push and the terminal one (#465), so the client
+// can't tell a long-running job from a dead agent by silence alone. Use
+// a deadline safely above any realistic user-invokable job (the winget
+// examples cap at ~10 min) and only THEN flag a still-non-terminal run
+// as unresponsive — otherwise a legitimately slow install would be
+// false-flagged. A finer signal needs agent-side heartbeat / incremental
+// progress (#469).
+const WATCHDOG_MS = 15 * 60 * 1000;
+
+function checkStuckRuns(): void {
+  const now = Date.now();
+  let changed = false;
+  for (const r of runs.values()) {
+    if (!isTerminal(r.status) && now - r.updatedAt > WATCHDOG_MS) {
+      r.status = "failed";
+      r.output +=
+        (r.output ? "\n" : "") +
+        "⏱ 応答がありません（エージェントが停止しているか、想定より長くかかっています）";
+      changed = true;
+    }
+  }
+  if (changed) renderRuns();
+}
+
 // Execute a remediation job (the check's `troubleshoot` id) and track
 // its run; progress arrives asynchronously via `klp-notification`.
 async function executeJob(jobId: string, label: string): Promise<void> {
@@ -145,8 +173,15 @@ async function executeJob(jobId: string, label: string): Promise<void> {
     const existing = runs.get(r.run_id);
     if (existing) {
       existing.label = label;
+      existing.updatedAt = Date.now();
     } else {
-      runs.set(r.run_id, { runId: r.run_id, label, status: "running", output: "" });
+      runs.set(r.run_id, {
+        runId: r.run_id,
+        label,
+        status: "running",
+        output: "",
+        updatedAt: Date.now(),
+      });
     }
     renderRuns();
   } catch (err) {
@@ -159,6 +194,7 @@ async function executeJob(jobId: string, label: string): Promise<void> {
       label,
       status: "failed",
       output: `実行できませんでした: ${String(err)}`,
+      updatedAt: Date.now(),
     });
     renderRuns();
   }
@@ -189,8 +225,10 @@ function handleProgress(p: JobProgress): void {
     label: p.run_id,
     status: p.status,
     output: "",
+    updatedAt: Date.now(),
   };
   run.status = p.status;
+  run.updatedAt = Date.now();
   if (p.stdout_chunk) run.output += p.stdout_chunk;
   if (p.stderr_chunk) run.output += p.stderr_chunk;
   runs.set(p.run_id, run);
@@ -425,6 +463,10 @@ window.addEventListener("DOMContentLoaded", () => {
     if (!p?.run_id) return;
     handleProgress(p as JobProgress);
   });
+
+  // Stuck-run watchdog tick (see checkStuckRuns). Once a minute is
+  // plenty for a 15-minute deadline.
+  window.setInterval(checkStuckRuns, 60_000);
 
   renderStatus();
 });
