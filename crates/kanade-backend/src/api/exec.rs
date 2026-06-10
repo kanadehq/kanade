@@ -135,7 +135,36 @@ pub async fn exec_manifest(
     };
 
     let mut subjects: Vec<String> = Vec::new();
-    let mut target_count: u32 = 0;
+
+    // #485: `target_count` = PCs expected to reply (alive-snapshot
+    // via the scheduler's resolver), not subjects published — the
+    // old per-subject count completed a fleet broadcast on its first
+    // reply. Late replayers may still push counters past the
+    // snapshot; the projector tolerates that. Floor at 1 so an
+    // empty-alive resolve can't mark an exec completed-by-vacuity,
+    // and fall back to the per-subject count if the resolve fails.
+    let expected_target = expected_target_for(&plan);
+    let target_count: u32 = match crate::scheduler::resolve_expected_pcs(s, &expected_target).await
+    {
+        Ok(pcs) => {
+            if pcs.is_empty() {
+                warn!(
+                    job_id = %manifest.id,
+                    "target resolved to zero alive PCs; flooring target_count at 1",
+                );
+            }
+            (pcs.len() as u32).max(1)
+        }
+        Err(e) => {
+            let fallback = fallback_subject_count(&plan);
+            warn!(
+                error = ?e,
+                fallback,
+                "target resolve failed; falling back to per-subject target_count",
+            );
+            fallback
+        }
+    };
 
     // #258: pin script_current BEFORE any publish (both rollout-wave
     // and plain target paths below). The agent's Layer 2 staleness
@@ -179,7 +208,6 @@ pub async fn exec_manifest(
         for ((idx, wave), delay) in rollout.waves.iter().enumerate().zip(delays) {
             let subj = subject::commands_group(&wave.group);
             subjects.push(subj.clone());
-            target_count = target_count.saturating_add(1);
 
             let cmd = make_cmd();
             let payload = serde_json::to_vec(&cmd)
@@ -222,15 +250,12 @@ pub async fn exec_manifest(
         // Plain target-based fan-out (no rollout block).
         if plan.target.all {
             subjects.push(subject::COMMANDS_ALL.to_string());
-            target_count = target_count.saturating_add(1);
         }
         for g in &plan.target.groups {
             subjects.push(subject::commands_group(g));
-            target_count = target_count.saturating_add(1);
         }
         for pc in &plan.target.pcs {
             subjects.push(subject::commands_pc(pc));
-            target_count = target_count.saturating_add(1);
         }
 
         for subj in &subjects {
@@ -446,4 +471,107 @@ fn hex_lower(bytes: &[u8]) -> String {
         let _ = write!(out, "{b:02x}");
     }
     out
+}
+
+/// #485: the Target whose alive members `target_count` counts.
+/// Mirrors the publish branch condition (`plan.rollout.is_some()`,
+/// NOT waves-non-empty — review PR #543): a `rollout: {waves: []}`
+/// plan publishes nothing, so it must also count nothing.
+fn expected_target_for(plan: &FanoutPlan) -> kanade_shared::manifest::Target {
+    if let Some(rollout) = plan.rollout.as_ref() {
+        kanade_shared::manifest::Target {
+            groups: rollout.waves.iter().map(|w| w.group.clone()).collect(),
+            pcs: Vec::new(),
+            all: false,
+        }
+    } else {
+        plan.target.clone()
+    }
+}
+
+/// #485: pre-fix per-subject count, kept as the resolve-failure
+/// fallback. Same `is_some()` branch condition as
+/// [`expected_target_for`] so success and failure paths agree.
+fn fallback_subject_count(plan: &FanoutPlan) -> u32 {
+    (if let Some(rollout) = plan.rollout.as_ref() {
+        rollout.waves.len()
+    } else {
+        plan.target.all as usize + plan.target.groups.len() + plan.target.pcs.len()
+    }) as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kanade_shared::manifest::{FanoutPlan, Rollout, Target, Wave};
+
+    fn plan(target: Target, rollout: Option<Rollout>) -> FanoutPlan {
+        FanoutPlan {
+            target,
+            rollout,
+            ..FanoutPlan::default()
+        }
+    }
+
+    #[test]
+    fn expected_target_plain_passes_through() {
+        let t = Target {
+            all: true,
+            groups: vec!["g1".into()],
+            pcs: vec!["pc-1".into()],
+        };
+        let p = plan(t.clone(), None);
+        let resolved = expected_target_for(&p);
+        assert!(resolved.all);
+        assert_eq!(resolved.groups, t.groups);
+        assert_eq!(resolved.pcs, t.pcs);
+        assert_eq!(fallback_subject_count(&p), 3);
+    }
+
+    #[test]
+    fn expected_target_rollout_unions_wave_groups() {
+        let p = plan(
+            Target::default(),
+            Some(Rollout {
+                strategy: Default::default(),
+                waves: vec![
+                    Wave {
+                        group: "canary".into(),
+                        delay: "0s".into(),
+                    },
+                    Wave {
+                        group: "wave1".into(),
+                        delay: "10m".into(),
+                    },
+                ],
+            }),
+        );
+        let resolved = expected_target_for(&p);
+        assert!(!resolved.all);
+        assert_eq!(resolved.groups, vec!["canary", "wave1"]);
+        assert!(resolved.pcs.is_empty());
+        assert_eq!(fallback_subject_count(&p), 2);
+    }
+
+    #[test]
+    fn empty_waves_rollout_counts_nothing_on_both_paths() {
+        // Review PR #543 (gemini): `rollout: Some` with empty waves
+        // publishes nothing, so expected target AND fallback must
+        // both be zero — previously the fallback keyed off
+        // waves-non-empty and would have counted the plain target.
+        let p = plan(
+            Target {
+                all: true,
+                groups: vec![],
+                pcs: vec![],
+            },
+            Some(Rollout {
+                strategy: Default::default(),
+                waves: vec![],
+            }),
+        );
+        let resolved = expected_target_for(&p);
+        assert!(!resolved.all && resolved.groups.is_empty() && resolved.pcs.is_empty());
+        assert_eq!(fallback_subject_count(&p), 0);
+    }
 }

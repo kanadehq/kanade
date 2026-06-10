@@ -946,7 +946,13 @@ async fn recent_completions(state: &AppState, job_id: &str) -> Result<Vec<Comple
 ///   operator wrote the names themselves)
 ///
 /// The three are unioned and deduped.
-async fn resolve_expected_pcs(state: &AppState, target: &Target) -> Result<Vec<String>> {
+///
+/// `pub(crate)` since #485: `exec_manifest` uses the same resolution
+/// to stamp `executions.target_count` with the number of PCs
+/// expected to reply, instead of the number of NATS subjects
+/// published (which flipped broadcast execs to 'completed' after the
+/// first reply).
+pub(crate) async fn resolve_expected_pcs(state: &AppState, target: &Target) -> Result<Vec<String>> {
     let mut out: HashSet<String> = HashSet::new();
 
     if target.all {
