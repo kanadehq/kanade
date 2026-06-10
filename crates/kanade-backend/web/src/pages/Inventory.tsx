@@ -8,6 +8,7 @@ import { ErrorCard } from '@/components/ErrorCard';
 import { PcPicker } from '@/components/PcPicker';
 import { InventorySearch } from '@/pages/Search';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
@@ -55,7 +56,16 @@ type InventoryByJob = {
   display: DisplayField[];
   summary: DisplayField[] | null;
   rows: InventoryRow[];
+  // #494: server-side paging — total matching PCs (pre-LIMIT).
+  total: number;
+  limit: number;
+  offset: number;
 };
+
+// #494: page size for the per-probe fleet table. The endpoint caps
+// at 1000; 50 keeps the polled payload and the rendered DOM bounded
+// regardless of fleet size.
+const FLEET_PAGE_SIZE = 50;
 
 /** v0.34 / #92: one row from `inventory_history` — populated by the
  *  projector's diff step (#41 / #86) and served by
@@ -335,12 +345,19 @@ function FleetProbeTable({
   pickPc: (pc: string) => void;
 }) {
   const { t } = useTranslation('inventory');
+  // #494: server-side paging — pre-fix this fetched every PC's full
+  // facts_json per probe, every 30 s poll. At fleet scale that's an
+  // unbounded payload and an unbounded table.
+  const [offset, setOffset] = useState(0);
   const byJob = useQuery({
-    queryKey: ['inventory-by-job', job.manifest_id],
+    queryKey: ['inventory-by-job', job.manifest_id, offset],
     queryFn: () =>
-      apiFetch<InventoryByJob>(`/api/inventory/by-job/${encodeURIComponent(job.manifest_id)}`),
+      apiFetch<InventoryByJob>(
+        `/api/inventory/by-job/${encodeURIComponent(job.manifest_id)}?limit=${FLEET_PAGE_SIZE}&offset=${offset}`,
+      ),
     refetchInterval: 30_000,
   });
+  const total = byJob.data?.total ?? 0;
 
   const columns = job.summary ?? job.display;
 
@@ -355,7 +372,15 @@ function FleetProbeTable({
           )}
         </CardTitle>
         <CardDescription>
-          {t('fleet.rowsReported', { count: (byJob.data?.rows ?? []).length })}
+          {t('fleet.rowsReported', { count: total })}
+          {(offset > 0 || total > FLEET_PAGE_SIZE) && (
+            <span className="ml-2 text-xs">
+              {t('fleet.pageRange', {
+                from: offset + 1,
+                to: Math.min(offset + FLEET_PAGE_SIZE, total),
+              })}
+            </span>
+          )}
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -425,6 +450,29 @@ function FleetProbeTable({
               ))}
             </TableBody>
           </Table>
+        )}
+        {/* offset > 0 keeps the controls visible when the fleet
+            shrinks under the current page, so "prev" remains the
+            escape hatch (review PR #552, both bots). */}
+        {(offset > 0 || total > FLEET_PAGE_SIZE) && (
+          <div className="mt-2 flex items-center gap-2">
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setOffset(Math.max(0, offset - FLEET_PAGE_SIZE))}
+              disabled={offset === 0}
+            >
+              {t('fleet.prev')}
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setOffset(offset + FLEET_PAGE_SIZE)}
+              disabled={offset + FLEET_PAGE_SIZE >= total}
+            >
+              {t('fleet.next')}
+            </Button>
+          </div>
         )}
       </CardContent>
     </Card>

@@ -73,19 +73,75 @@ pub struct InventoryByJob {
     pub display: Vec<DisplayField>,
     pub summary: Option<Vec<DisplayField>>,
     pub rows: Vec<InventoryRow>,
+    /// #494: total matching PCs (pre-LIMIT) so the SPA can paginate.
+    pub total: i64,
+    pub limit: i64,
+    pub offset: i64,
 }
+
+/// #494: paging knobs for the by-job fleet list. Pre-fix the handler
+/// returned the complete `facts_json` for every PC that ever
+/// reported the probe — at fleet scale that materialises the whole
+/// fleet's facts in memory and ships a response that can run to
+/// hundreds of MB, per SPA poll, per probe.
+#[derive(serde::Deserialize)]
+pub struct ByJobParams {
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+    /// Optional pc_id substring filter (case-insensitive LIKE).
+    pub q: Option<String>,
+}
+
+const BY_JOB_DEFAULT_LIMIT: i64 = 100;
+const BY_JOB_MAX_LIMIT: i64 = 1000;
 
 pub async fn list_for_job(
     State(state): State<AppState>,
     Path(manifest_id): Path<String>,
+    Query(params): Query<ByJobParams>,
 ) -> Result<Json<InventoryByJob>, (StatusCode, String)> {
+    let limit = params
+        .limit
+        .unwrap_or(BY_JOB_DEFAULT_LIMIT)
+        .clamp(1, BY_JOB_MAX_LIMIT);
+    let offset = params.offset.unwrap_or(0).max(0);
+    // Escape LIKE wildcards so a literal `%`/`_` in the filter
+    // matches itself (same escaping discipline as api/results.rs).
+    let like = params.q.as_deref().filter(|q| !q.is_empty()).map(|q| {
+        format!(
+            "%{}%",
+            q.replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        )
+    });
+
+    let total: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM inventory_facts
+          WHERE job_id = ?
+            AND (?2 IS NULL OR pc_id LIKE ?2 ESCAPE '\\')",
+    )
+    .bind(&manifest_id)
+    .bind(&like)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(|e| {
+        warn!(error = %e, %manifest_id, "inventory_facts by-job count");
+        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    })?;
+
     let rows = sqlx::query(
         "SELECT pc_id, facts_json, display_json, summary_json, collected_at
          FROM inventory_facts
          WHERE job_id = ?
-         ORDER BY pc_id",
+           AND (?2 IS NULL OR pc_id LIKE ?2 ESCAPE '\\')
+         ORDER BY pc_id
+         LIMIT ?3 OFFSET ?4",
     )
     .bind(&manifest_id)
+    .bind(&like)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(&state.pool)
     .await
     .map_err(|e| {
@@ -93,10 +149,13 @@ pub async fn list_for_job(
         (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
     })?;
 
-    // Pull display + summary from the first row that has them;
+    // Pull display + summary from the first page row that has them;
     // every row for one manifest_id has the same snapshot, since
-    // the projector writes them together at upsert.
-    let display = rows
+    // the projector writes them together at upsert. #494: with
+    // paging/filtering the page can be empty while rows exist — fall
+    // back to a one-row unfiltered probe so the column config
+    // survives an empty page.
+    let mut display = rows
         .iter()
         .find_map(|r| {
             r.try_get::<Option<String>, _>("display_json")
@@ -105,12 +164,44 @@ pub async fn list_for_job(
                 .and_then(|s| serde_json::from_str::<Vec<DisplayField>>(&s).ok())
         })
         .unwrap_or_default();
-    let summary = rows.iter().find_map(|r| {
+    let mut summary = rows.iter().find_map(|r| {
         r.try_get::<Option<String>, _>("summary_json")
             .ok()
             .flatten()
             .and_then(|s| serde_json::from_str::<Vec<DisplayField>>(&s).ok())
     });
+    // `display.is_empty()` (not `rows.is_empty() && total > 0`):
+    // a filtered-empty page has total == 0 yet still needs the
+    // headers, and probing once for any existing row covers every
+    // empty-page shape (review PR #552, gemini).
+    if display.is_empty() {
+        match sqlx::query(
+            "SELECT display_json, summary_json FROM inventory_facts
+              WHERE job_id = ? LIMIT 1",
+        )
+        .bind(&manifest_id)
+        .fetch_optional(&state.pool)
+        .await
+        {
+            Ok(Some(r)) => {
+                display = r
+                    .try_get::<Option<String>, _>("display_json")
+                    .ok()
+                    .flatten()
+                    .and_then(|s| serde_json::from_str::<Vec<DisplayField>>(&s).ok())
+                    .unwrap_or_default();
+                summary = r
+                    .try_get::<Option<String>, _>("summary_json")
+                    .ok()
+                    .flatten()
+                    .and_then(|s| serde_json::from_str::<Vec<DisplayField>>(&s).ok());
+            }
+            Ok(None) => {} // job never reported — genuinely no config
+            Err(e) => {
+                warn!(error = %e, %manifest_id, "inventory_facts fallback config probe failed");
+            }
+        }
+    }
 
     let inv_rows: Vec<InventoryRow> = rows
         .into_iter()
@@ -130,6 +221,9 @@ pub async fn list_for_job(
         display,
         summary,
         rows: inv_rows,
+        total,
+        limit,
+        offset,
     }))
 }
 

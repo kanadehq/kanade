@@ -27,7 +27,10 @@
       "collected": "collected"
     },
     "nestedRowCount_one": "{{count}} row",
-    "nestedRowCount_other": "{{count}} rows"
+    "nestedRowCount_other": "{{count}} rows",
+    "prev": "← prev",
+    "next": "next →",
+    "pageRange": "showing {{from}}–{{to}}"
   },
   "detail": {
     "backToFleet": "← back to fleet view",
