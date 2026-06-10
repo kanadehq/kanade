@@ -65,6 +65,16 @@ const NOTIFICATION_CAPACITY: usize = 256;
 const CLIENT_NAME: &str = "kanade-client";
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Per-request deadline for [`KlpClient::request`] (#469). A dropped
+/// connection already unblocks a waiter (the reader clears `pending`,
+/// so the oneshot sender drops and the await errors), so this only
+/// bounds the "connection alive, agent silent on this id" case — a
+/// wedged agent-side handler. Generous on purpose: every v1 handler
+/// replies promptly (`jobs.execute` returns a `run_id` immediately and
+/// streams progress as async pushes), so no legitimate request blocks
+/// on long work; 30 s is far past any real reply latency.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// In-flight request registry: request id → the oneshot the reader
 /// task fulfils when the matching `Response` arrives.
 ///
@@ -234,14 +244,12 @@ impl KlpClient {
         // The reader task delivers the id-matched response (or drops
         // the sender on disconnect, which surfaces as RecvError).
         //
-        // TODO(#469): no per-request deadline — if the agent keeps the
-        // connection alive but never replies to THIS id (an agent bug),
-        // this awaits forever. A `tokio::time::timeout` wrapper would
-        // bound it; deferred since every v1 handler replies promptly
-        // and a disconnect already unblocks via RecvError.
-        let resp = rx
-            .await
-            .map_err(|_| anyhow::anyhow!("KLP connection closed before response (id {id})"))?;
+        // Bounded by REQUEST_TIMEOUT (#469): a live-but-silent agent
+        // (wedged handler that never replies to THIS id) would otherwise
+        // await forever. On timeout, `_guard` drops the pending entry so
+        // a late reply is discarded rather than delivered to a gone
+        // waiter. A disconnect still unblocks faster via RecvError.
+        let resp = await_response(rx, method, &id).await?;
         decode_response::<R>(resp)
     }
 
@@ -370,6 +378,32 @@ fn decode_response<R: DeserializeOwned>(resp: RpcResponse) -> Result<R> {
                 .unwrap_or_default();
             bail!("KLP error {} ({}): {detail}", error.code, error.message);
         }
+    }
+}
+
+/// Await the reader task's correlated response under the
+/// [`REQUEST_TIMEOUT`] deadline (#469). Three outcomes:
+///
+/// - reply delivered → `Ok(resp)`;
+/// - oneshot sender dropped (connection closed, reader cleared
+///   `pending`) → a "closed before response" error;
+/// - deadline elapsed (connection alive, agent silent on this id) →
+///   a "did not respond within Ns" error.
+///
+/// Split out of [`KlpClient::request`] so the timeout/closed branches
+/// are unit-testable without a live pipe.
+async fn await_response(
+    rx: oneshot::Receiver<RpcResponse>,
+    method: &str,
+    id: &str,
+) -> Result<RpcResponse> {
+    match tokio::time::timeout(REQUEST_TIMEOUT, rx).await {
+        Ok(Ok(resp)) => Ok(resp),
+        Ok(Err(_)) => bail!("KLP connection closed before response (id {id})"),
+        Err(_) => bail!(
+            "KLP agent did not respond to {method} within {}s (id {id})",
+            REQUEST_TIMEOUT.as_secs(),
+        ),
     }
 }
 
@@ -537,5 +571,55 @@ mod tests {
             closed_rx.wait_for(|&c| c).await.is_ok(),
             "reader must signal closed on exit (#468 reconnect trigger)"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn await_response_times_out_when_agent_silent() {
+        // Hold the sender so the oneshot never resolves: the agent is
+        // alive but never replies to this id (#469). Under
+        // `start_paused = true` the runtime auto-advances the paused
+        // clock to the next pending deadline once this task is the only
+        // thing blocking, so `timeout`'s `Sleep` fires deterministically
+        // and instantly — no explicit `tokio::time::advance` needed.
+        let (_tx, rx) = oneshot::channel::<RpcResponse>();
+
+        let err = await_response(rx, method::JOBS_EXECUTE, "req-wedged")
+            .await
+            .expect_err("silent agent must time out");
+        let msg = err.to_string();
+        assert!(msg.contains("did not respond"), "got: {msg}");
+        assert!(msg.contains(method::JOBS_EXECUTE), "names method: {msg}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn await_response_reports_closed_connection() {
+        // Sender dropped before any reply → the reader cleared `pending`
+        // on disconnect. This must surface as "closed", distinct from a
+        // timeout, and resolve immediately (no waiting out the deadline).
+        let (tx, rx) = oneshot::channel::<RpcResponse>();
+        drop(tx);
+
+        let err = await_response(rx, method::SYSTEM_PING, "req-gone")
+            .await
+            .expect_err("dropped sender must error");
+        assert!(err.to_string().contains("closed"), "got: {err}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn await_response_delivers_reply() {
+        let (tx, rx) = oneshot::channel::<RpcResponse>();
+        let resp = RpcResponse {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id: Some("req-ok".into()),
+            payload: RpcResponsePayload::Ok {
+                result: serde_json::json!({ "ok": true }),
+            },
+        };
+        tx.send(resp).unwrap();
+
+        let got = await_response(rx, method::SYSTEM_PING, "req-ok")
+            .await
+            .expect("delivered reply");
+        assert_eq!(got.id.as_deref(), Some("req-ok"));
     }
 }
