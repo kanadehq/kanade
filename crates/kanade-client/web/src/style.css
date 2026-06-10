@@ -88,6 +88,62 @@ ul.checks {
   color: #777;
 }
 
+/* Job catalog (#291): tab bar + one row per user-invokable job. */
+.tab-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.jobs-tab {
+  padding: 4px 12px;
+  font-size: 13px;
+  background: transparent;
+  color: inherit;
+  border: 1px solid #ccc;
+  border-radius: 999px;
+}
+
+.jobs-tab:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.jobs-tab.active {
+  background: #1a1a1a;
+  color: #fff;
+  border-color: #1a1a1a;
+}
+
+.job-row {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 0;
+  border-top: 1px solid #eee;
+}
+
+.job-row:first-child {
+  border-top: 0;
+}
+
+.job-name {
+  font-weight: 500;
+}
+
+.job-desc {
+  flex: 1 1 100%;
+  color: #666;
+  font-size: 13px;
+}
+
+.job-run-btn {
+  margin-left: auto;
+  padding: 4px 14px;
+  font-size: 13px;
+}
+
 /* Remediation run rows (#291): one per jobs.execute, updated live by
    jobs.progress pushes. */
 .run-row {
@@ -227,5 +283,22 @@ button:hover {
   .run-row.status-failed .run-status,
   .run-row.status-killed .run-status {
     color: #ff6b6b;
+  }
+  .jobs-tab {
+    border-color: #4a4a4a;
+  }
+  .jobs-tab:hover {
+    background: rgba(255, 255, 255, 0.08);
+  }
+  .jobs-tab.active {
+    background: #f0f0f0;
+    color: #1a1a1a;
+    border-color: #f0f0f0;
+  }
+  .job-row {
+    border-color: #3a3a3a;
+  }
+  .job-desc {
+    color: #aaa;
   }
 }

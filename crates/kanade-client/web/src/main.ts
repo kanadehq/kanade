@@ -8,12 +8,12 @@
 //
 // The Health tab (#290) renders the agent's state.snapshot below;
 // each check's 「修復する」 button runs its `troubleshoot` job via
-// `jobs.execute` (#291) and a live "修復ジョブ" section tracks the run
-// from `jobs.progress` pushes (forwarded as `klp-notification` events,
-// #467). The full job catalog (アップデート / 困ったとき tabs via
-// `jobs.list`) lands in a follow-up. The page is intentionally
-// one-screen and dependency-light (no framework) so a later UI redesign
-// isn't fighting any priors.
+// `jobs.execute` (#291). A job catalog (アップデート / 困ったとき /
+// カタログ tabs via `jobs.list`) lets the user run any user-invokable
+// job; a live run section tracks every execute from `jobs.progress`
+// pushes (forwarded as `klp-notification` events, #467). The page is
+// intentionally one-screen and dependency-light (no framework) so a
+// later UI redesign isn't fighting any priors.
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -79,9 +79,31 @@ type JobProgress = {
 
 type JobsExecuteResult = { run_id: string };
 
+type JobCategory = "software_update" | "troubleshoot" | "catalog";
+
+type UserInvokableJob = {
+  id: string;
+  display_name: string;
+  display_description?: string | null;
+  icon?: string | null;
+  category: JobCategory;
+  version: string;
+  // `last_run` is in the wire shape but unused by the catalog view yet.
+};
+
+type JobsListResult = { items: UserInvokableJob[] };
+
 // The raw `RpcNotification` the backend re-emits as a `klp-notification`
 // Tauri event; we switch on `method`.
 type RpcNotification = { jsonrpc: string; method: string; params: unknown };
+
+// The three Client App job tabs (SPEC §2.1), in display order. The
+// `category` matches `kanade_shared::ipc::jobs::JobCategory`.
+const CATEGORY_TABS: { category: JobCategory; label: string }[] = [
+  { category: "software_update", label: "アップデート" },
+  { category: "troubleshoot", label: "困ったとき" },
+  { category: "catalog", label: "カタログ" },
+];
 
 const RUN_STATUS_ICON: Record<RunStatus, string> = {
   queued: "⏳",
@@ -289,6 +311,95 @@ function renderRun(r: Run): string {
     </div>`;
 }
 
+// ---- Job catalog (#291): the three user-invokable job tabs ----
+
+// Jobs grouped by category, loaded once on connect via `jobs.list`.
+const jobsByCategory = new Map<JobCategory, UserInvokableJob[]>();
+let activeJobsTab: JobCategory = CATEGORY_TABS[0].category;
+// Re-entry guard: loadJobs is fired once per connect today, but
+// reconnect (#468) will call it again — the flag stops two overlapping
+// loads racing the `clear()` + refill against a tab-click read. Reset
+// on failure so the next connect retries.
+let jobsLoaded = false;
+
+// Fetch the user-invokable job catalog and render the tabs. Called
+// once the agent is connected. The catalog changes rarely, so this is
+// a one-shot load (not polled) — re-run on reconnect when that lands.
+async function loadJobs(): Promise<void> {
+  if (jobsLoaded) return;
+  jobsLoaded = true;
+  const section = $("jobs-section");
+  try {
+    // `category: null` → the agent returns every tab's jobs; we group
+    // client-side so a single round-trip fills all three tabs.
+    const res = await invoke<JobsListResult>("jobs_list", { category: null });
+    jobsByCategory.clear();
+    for (const job of res.items) {
+      const list = jobsByCategory.get(job.category) ?? [];
+      list.push(job);
+      jobsByCategory.set(job.category, list);
+    }
+    if (res.items.length === 0) {
+      // No user-invokable jobs registered → nothing to show.
+      section.hidden = true;
+      return;
+    }
+    section.hidden = false;
+    // If the default tab is empty, jump to the first tab that has jobs.
+    if ((jobsByCategory.get(activeJobsTab)?.length ?? 0) === 0) {
+      const firstNonEmpty = CATEGORY_TABS.find(
+        (t) => (jobsByCategory.get(t.category)?.length ?? 0) > 0,
+      );
+      if (firstNonEmpty) activeJobsTab = firstNonEmpty.category;
+    }
+    renderJobsTabs();
+    renderJobsList();
+  } catch (err) {
+    // Let a later (re)connect retry, and don't show a bare empty tab
+    // bar next to the error.
+    jobsLoaded = false;
+    section.hidden = false;
+    $("jobs-tabs").hidden = true;
+    $("jobs-list").innerHTML =
+      `<p class="error">ジョブ一覧を取得できません: ${escapeHtml(String(err))}</p>`;
+  }
+}
+
+function renderJobsTabs(): void {
+  $("jobs-tabs").hidden = false;
+  $("jobs-tabs").innerHTML = CATEGORY_TABS.map((t) => {
+    const count = jobsByCategory.get(t.category)?.length ?? 0;
+    const active = t.category === activeJobsTab ? " active" : "";
+    return `<button class="jobs-tab${active}" data-category="${t.category}">${escapeHtml(t.label)} (${count})</button>`;
+  }).join("");
+}
+
+function renderJobsList(): void {
+  const jobs = jobsByCategory.get(activeJobsTab) ?? [];
+  if (jobs.length === 0) {
+    $("jobs-list").innerHTML =
+      `<p class="muted">このカテゴリのジョブはありません</p>`;
+    return;
+  }
+  $("jobs-list").innerHTML = jobs.map(renderJobRow).join("");
+}
+
+function renderJobRow(j: UserInvokableJob): string {
+  const desc = j.display_description
+    ? `<span class="job-desc">${escapeHtml(j.display_description)}</span>`
+    : "";
+  // Button BEFORE the description: `.job-desc` is `flex: 1 1 100%` (it
+  // wraps to its own row), so the button must precede it to sit on the
+  // name's row (pushed right via margin-left:auto) rather than being
+  // bumped to a third line.
+  return `
+    <div class="job-row">
+      <span class="job-name">${escapeHtml(j.display_name)}</span>
+      <button class="job-run-btn" data-job-id="${escapeHtml(j.id)}" data-label="${escapeHtml(j.display_name)}">実行</button>
+      ${desc}
+    </div>`;
+}
+
 const $ = (id: string): HTMLElement => {
   const el = document.getElementById(id);
   if (!el) {
@@ -317,6 +428,9 @@ async function renderStatus() {
     if (healthTimer === undefined) {
       healthTimer = window.setInterval(renderHealth, 10000);
     }
+    // Load the user-invokable job catalog (アップデート / 困ったとき /
+    // カタログ). One-shot — the catalog changes rarely.
+    void loadJobs();
   } catch (err) {
     status.innerHTML = `<p class="error">Agent unavailable: ${escapeHtml(String(err))}</p>
       <p class="muted">Retrying in 5 s…</p>`;
@@ -448,6 +562,29 @@ window.addEventListener("DOMContentLoaded", () => {
     const killBtn = t.closest<HTMLElement>(".kill-btn");
     if (killBtn?.dataset.runId) {
       void killRun(killBtn.dataset.runId);
+      return;
+    }
+    // Job catalog: a tab switches the visible category…
+    const tab = t.closest<HTMLElement>(".jobs-tab");
+    if (tab?.dataset.category) {
+      activeJobsTab = tab.dataset.category as JobCategory;
+      renderJobsTabs();
+      renderJobsList();
+      return;
+    }
+    // …and a run button executes the job. Unlike the catalog (loaded
+    // once, not polled), nothing re-renders this button, so disable it
+    // only for the in-flight invoke and re-enable after, allowing reruns.
+    const runBtn = t.closest<HTMLButtonElement>(".job-run-btn");
+    if (runBtn?.dataset.jobId) {
+      runBtn.disabled = true;
+      void executeJob(
+        runBtn.dataset.jobId,
+        runBtn.dataset.label ?? runBtn.dataset.jobId,
+      ).finally(() => {
+        runBtn.disabled = false;
+      });
+      return;
     }
   });
 
