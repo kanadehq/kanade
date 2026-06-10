@@ -34,15 +34,26 @@ pub enum ScheduleSub {
     /// `schedule.job_id` gets skipped by the agent's `handle_command`
     /// KV check. Useful when an active rollout needs to stop NOW and
     /// you don't want stragglers running on offline agents reconnecting
-    /// after the cron edit. Kill of currently-running children is a
-    /// separate op (`kanade kill <exec_job_id>`) for v0.27; full
-    /// Layer 3 cascade lands in a later release.
+    /// after the cron edit.
+    ///
+    /// `--cascade-kill` additionally publishes `kill.{exec_id}` for
+    /// every still-running exec of the job (Layer 3), terminating
+    /// currently-executing children. Orthogonal to `--cascade`: kill
+    /// stops *running* work, revoke stops *queued/future* work — pass
+    /// both for a full hard-disable. Kill is online-only (can't reach
+    /// an offline agent's child) and destructive, so it's a separate
+    /// explicit opt-in.
     Disable {
         id: String,
         /// Also revoke the schedule's referenced Job so in-flight
-        /// Commands skip on receipt.
+        /// Commands skip on receipt (Layer 2).
         #[arg(long)]
         cascade: bool,
+        /// Also kill currently-running children of the job (Layer 3).
+        /// Online-only + destructive — combine with `--cascade` to also
+        /// stop queued/future runs.
+        #[arg(long)]
+        cascade_kill: bool,
     },
 }
 
@@ -52,7 +63,11 @@ pub async fn execute(backend_url: &str, args: ScheduleArgs) -> Result<()> {
         ScheduleSub::Create { yaml } => create(base, &yaml).await,
         ScheduleSub::List => list(base).await,
         ScheduleSub::Delete { id } => delete(base, &id).await,
-        ScheduleSub::Disable { id, cascade } => disable(base, &id, cascade).await,
+        ScheduleSub::Disable {
+            id,
+            cascade,
+            cascade_kill,
+        } => disable(base, &id, cascade, cascade_kill).await,
     }
 }
 
@@ -112,8 +127,9 @@ async fn list(base: &str) -> Result<()> {
     Ok(())
 }
 
-async fn disable(base: &str, id: &str, cascade: bool) -> Result<()> {
-    let url = format!("{base}/api/schedules/{id}/disable?cascade={cascade}");
+async fn disable(base: &str, id: &str, cascade: bool, cascade_kill: bool) -> Result<()> {
+    let url =
+        format!("{base}/api/schedules/{id}/disable?cascade={cascade}&cascade_kill={cascade_kill}");
     let resp = crate::http_client::authed_client()?
         .post(&url)
         .send()
@@ -124,10 +140,11 @@ async fn disable(base: &str, id: &str, cascade: bool) -> Result<()> {
         let body = resp.text().await.unwrap_or_default();
         anyhow::bail!("disable failed: {status} — {body}");
     }
-    if cascade {
-        println!("disabled (with cascade revoke): {id}");
-    } else {
-        println!("disabled: {id}");
+    match (cascade, cascade_kill) {
+        (true, true) => println!("disabled (cascade revoke + kill in-flight): {id}"),
+        (true, false) => println!("disabled (with cascade revoke): {id}"),
+        (false, true) => println!("disabled (kill in-flight only): {id}"),
+        (false, false) => println!("disabled: {id}"),
     }
     Ok(())
 }
