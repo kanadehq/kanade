@@ -41,19 +41,62 @@ use kanade_shared::manifest::{ExplodeSpec, Manifest};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
-/// Thread-safe `manifest_id → Vec<ExplodeSpec>` cache. Constructed
-/// once in `main.rs`, cloned (cheaply — it's an `Arc`) into
-/// [`AppState`] and the watcher task.
+/// Thread-safe `manifest_id → {Manifest, Vec<ExplodeSpec>}` cache.
+/// Constructed once in `main.rs`, cloned (cheaply — it's an `Arc`)
+/// into [`AppState`], the watcher task, and (#488) the results
+/// projector, whose per-message inventory/check hint lookups used to
+/// cost two `jobs_kv.get` broker round-trips per ExecResult — the
+/// dominant per-message latency during a fleet-wide result burst.
 ///
 /// [`AppState`]: crate::api::AppState
 #[derive(Clone, Default)]
 pub struct ExplodeSpecCache {
-    inner: Arc<RwLock<HashMap<String, Vec<ExplodeSpec>>>>,
+    inner: Arc<RwLock<HashMap<String, CachedJob>>>,
+}
+
+/// One cached job. `manifest` is `None` only for entries seeded via
+/// the spec-only [`ExplodeSpecCache::insert`] path (tests); the
+/// prewarm / watcher / miss paths always store the full manifest.
+struct CachedJob {
+    manifest: Option<Arc<Manifest>>,
+    specs: Vec<ExplodeSpec>,
 }
 
 impl ExplodeSpecCache {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// #488: full-manifest read path for the results projector's
+    /// inventory/check hint lookups. `None` = miss (caller falls
+    /// back to the KV fetch and warms the cache via
+    /// [`ExplodeSpecCache::insert_manifest`]).
+    pub async fn manifest(&self, manifest_id: &str) -> Option<Arc<Manifest>> {
+        let guard = self.inner.read().await;
+        guard.get(manifest_id)?.manifest.clone()
+    }
+
+    /// Store a full manifest (deriving its explode specs). The
+    /// prewarm walk, the KV watcher, and both cold-miss fallbacks
+    /// route through here so every entry carries the manifest.
+    /// Returns the stored `Arc` so the cold-miss caller can hand it
+    /// straight out without a second allocation (review PR #553).
+    pub async fn insert_manifest(&self, manifest: Manifest) -> Arc<Manifest> {
+        let specs = manifest
+            .inventory
+            .as_ref()
+            .and_then(|h| h.explode.clone())
+            .unwrap_or_default();
+        let arc = Arc::new(manifest);
+        let mut guard = self.inner.write().await;
+        guard.insert(
+            arc.id.clone(),
+            CachedJob {
+                manifest: Some(arc.clone()),
+                specs,
+            },
+        );
+        arc
     }
 
     /// Read path. Returns `Some(spec)` if `manifest_id` is cached
@@ -65,18 +108,24 @@ impl ExplodeSpecCache {
         let guard = self.inner.read().await;
         guard
             .get(manifest_id)?
+            .specs
             .iter()
             .find(|s| s.field == field)
             .cloned()
     }
 
-    /// Replace the entry for `manifest_id` with `specs`. Used both
-    /// by the cold-cache fallback in `load_explode_spec` (after a
-    /// successful KV fetch) and by the KV watcher on every
-    /// `Operation::Put`.
+    /// Spec-only insert. Kept for tests; production writers use
+    /// [`ExplodeSpecCache::insert_manifest`] so the entry also
+    /// serves [`ExplodeSpecCache::manifest`] lookups.
     pub async fn insert(&self, manifest_id: String, specs: Vec<ExplodeSpec>) {
         let mut guard = self.inner.write().await;
-        guard.insert(manifest_id, specs);
+        guard.insert(
+            manifest_id,
+            CachedJob {
+                manifest: None,
+                specs,
+            },
+        );
     }
 
     /// Drop the entry for `manifest_id`. Used by the KV watcher
@@ -135,12 +184,7 @@ pub async fn prewarm(cache: &ExplodeSpecCache, jetstream: &jetstream::Context) -
                 continue;
             }
         };
-        let specs = manifest
-            .inventory
-            .as_ref()
-            .and_then(|h| h.explode.clone())
-            .unwrap_or_default();
-        cache.insert(manifest.id, specs).await;
+        cache.insert_manifest(manifest).await;
         count += 1;
     }
     Ok(count)
@@ -182,17 +226,11 @@ pub async fn run(cache: ExplodeSpecCache, jetstream: jetstream::Context) -> Resu
                         continue;
                     }
                 };
-                let specs = manifest
-                    .inventory
-                    .as_ref()
-                    .and_then(|h| h.explode.clone())
-                    .unwrap_or_default();
                 debug!(
                     manifest_id = %manifest.id,
-                    n_specs = specs.len(),
                     "spec_cache watch: refresh",
                 );
-                cache.insert(manifest.id, specs).await;
+                cache.insert_manifest(manifest).await;
             }
             Operation::Delete | Operation::Purge => {
                 debug!(manifest_id = %entry.key, "spec_cache watch: drop");
@@ -285,5 +323,59 @@ mod tests {
             .insert("inventory-sw".into(), vec![sample_spec("apps")])
             .await;
         assert!(cache.get("inventory-sw", "services").await.is_none());
+    }
+
+    fn sample_manifest() -> Manifest {
+        serde_json::from_value(serde_json::json!({
+            "id": "inventory-sw",
+            "version": "0.0.1",
+            "execute": {
+                "shell": "powershell",
+                "script": "echo '{}'",
+                "timeout": "30s",
+            },
+            "inventory": {
+                "display": [{ "field": "apps", "label": "Apps" }],
+                "explode": [{
+                    "field": "apps",
+                    "table": "inventory_test_apps",
+                    "primary_key": ["name"],
+                    "columns": [{ "field": "name" }],
+                }],
+            },
+        }))
+        .expect("sample manifest parses")
+    }
+
+    #[tokio::test]
+    async fn insert_manifest_serves_both_manifest_and_spec_lookups() {
+        // #488: one insert_manifest entry must answer the results
+        // projector's manifest() lookup AND the API's get() spec
+        // lookup, and the returned Arc is the stored one.
+        let cache = ExplodeSpecCache::new();
+        let stored = cache.insert_manifest(sample_manifest()).await;
+        let hit = cache.manifest("inventory-sw").await.expect("manifest hit");
+        assert!(Arc::ptr_eq(&stored, &hit), "no duplicate allocation");
+        assert_eq!(hit.id, "inventory-sw");
+        assert!(cache.get("inventory-sw", "apps").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn spec_only_insert_yields_no_manifest() {
+        // Legacy/test path: spec-only entries answer get() but not
+        // manifest() — the projector then falls back to the KV path.
+        let cache = ExplodeSpecCache::new();
+        cache
+            .insert("inventory-sw".into(), vec![sample_spec("apps")])
+            .await;
+        assert!(cache.manifest("inventory-sw").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn drop_manifest_also_clears_manifest_lookup() {
+        let cache = ExplodeSpecCache::new();
+        cache.insert_manifest(sample_manifest()).await;
+        cache.drop_manifest("inventory-sw").await;
+        assert!(cache.manifest("inventory-sw").await.is_none());
     }
 }

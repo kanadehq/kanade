@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use async_nats::jetstream::{self, consumer::pull::Config as PullConfig};
 use futures::StreamExt;
@@ -7,6 +9,8 @@ use kanade_shared::manifest::{CheckHint, InventoryHint, Manifest};
 use sqlx::SqlitePool;
 use tokio::io::AsyncReadExt;
 use tracing::{debug, info, warn};
+
+use super::spec_cache::ExplodeSpecCache;
 
 // pub(crate): consumer_reset::reset_if_wiped names this durable when
 // deciding what to drop after a projection-DB wipe (#389).
@@ -29,7 +33,11 @@ pub(crate) const CONSUMER_NAME: &str = "backend_results_projector";
 ///      with that id exists in the catalog AND the job carries an
 ///      `inventory:` hint AND `exit_code == 0`, parse stdout as JSON
 ///      and upsert into `inventory_facts`.
-pub async fn run(js: jetstream::Context, pool: SqlitePool) -> Result<()> {
+pub async fn run(
+    js: jetstream::Context,
+    pool: SqlitePool,
+    jobs_cache: ExplodeSpecCache,
+) -> Result<()> {
     let stream = js
         .get_stream(STREAM_RESULTS)
         .await
@@ -141,7 +149,8 @@ pub async fn run(js: jetstream::Context, pool: SqlitePool) -> Result<()> {
                     }
                 }
                 if r.exit_code == 0 {
-                    if let Err(e) = maybe_project_inventory(&pool, &jobs_kv, &r, recorded_at).await
+                    if let Err(e) =
+                        maybe_project_inventory(&pool, &jobs_cache, &jobs_kv, &r, recorded_at).await
                     {
                         warn!(error = ?e, result_id = %resolved_id, "inventory fact projection failed");
                     }
@@ -152,7 +161,9 @@ pub async fn run(js: jetstream::Context, pool: SqlitePool) -> Result<()> {
                 // `unknown` (mirrors the agent's Health-tab behaviour),
                 // so the SPA never shows a stale green for a check that
                 // has started failing.
-                if let Err(e) = maybe_project_check_status(&pool, &jobs_kv, &r, recorded_at).await {
+                if let Err(e) =
+                    maybe_project_check_status(&pool, &jobs_cache, &jobs_kv, &r, recorded_at).await
+                {
                     warn!(error = ?e, result_id = %resolved_id, "check status projection failed");
                 }
             }
@@ -381,12 +392,45 @@ async fn read_object(
     Ok(buf)
 }
 
+/// #488: manifest lookup for the per-result hint projections. Cache
+/// hit = zero broker round-trips (the BUCKET_JOBS watcher keeps the
+/// cache fresh within ~1 s of any `kanade job create`); a miss falls
+/// back to one `jobs_kv.get` and warms the cache for the rest of the
+/// burst. Pre-fix every ExecResult paid TWO `jobs_kv.get` round
+/// trips (one per hint), which capped the strictly-serial projector
+/// at ~250–500 results/s during fleet-wide bursts.
+async fn lookup_manifest(
+    cache: &ExplodeSpecCache,
+    jobs_kv: &async_nats::jetstream::kv::Store,
+    manifest_id: &str,
+) -> Result<Option<Arc<Manifest>>> {
+    if let Some(m) = cache.manifest(manifest_id).await {
+        return Ok(Some(m));
+    }
+    let entry = match jobs_kv.get(manifest_id).await? {
+        Some(b) => b,
+        None => return Ok(None), // ad-hoc exec of an unregistered manifest
+    };
+    let job: Manifest = match serde_json::from_slice(&entry) {
+        Ok(j) => j,
+        Err(e) => {
+            // Don't swallow silently — a corrupted catalog entry
+            // would otherwise be indistinguishable from "no such
+            // job" (review PR #553).
+            warn!(error = %e, manifest_id, "lookup_manifest: KV entry failed to decode");
+            return Ok(None);
+        }
+    };
+    Ok(Some(cache.insert_manifest(job).await))
+}
+
 /// Look up the registered job for `r.manifest_id`; if its manifest
 /// declares an `inventory:` hint, parse `r.stdout` as JSON and upsert
 /// a row into `inventory_facts`. Returns Ok(()) on the "not an
 /// inventory job" path (no hint = nothing to do, not an error).
 async fn maybe_project_inventory(
     pool: &SqlitePool,
+    cache: &ExplodeSpecCache,
     jobs_kv: &async_nats::jetstream::kv::Store,
     r: &ExecResult,
     recorded_at: chrono::DateTime<chrono::Utc>,
@@ -394,13 +438,8 @@ async fn maybe_project_inventory(
     let Some(manifest_id) = r.manifest_id.as_deref() else {
         return Ok(());
     };
-    let entry = match jobs_kv.get(manifest_id).await? {
-        Some(b) => b,
-        None => return Ok(()), // ad-hoc exec of an unregistered manifest
-    };
-    let job: Manifest = match serde_json::from_slice(&entry) {
-        Ok(j) => j,
-        Err(_) => return Ok(()),
+    let Some(job) = lookup_manifest(cache, jobs_kv, manifest_id).await? else {
+        return Ok(());
     };
     if let Some(hint) = job.inventory.as_ref() {
         return upsert_inventory(pool, r, manifest_id, hint, recorded_at).await;
@@ -415,6 +454,7 @@ async fn maybe_project_inventory(
 /// nothing to do" non-error contract as inventory.
 async fn maybe_project_check_status(
     pool: &SqlitePool,
+    cache: &ExplodeSpecCache,
     jobs_kv: &async_nats::jetstream::kv::Store,
     r: &ExecResult,
     recorded_at: chrono::DateTime<chrono::Utc>,
@@ -422,13 +462,8 @@ async fn maybe_project_check_status(
     let Some(manifest_id) = r.manifest_id.as_deref() else {
         return Ok(());
     };
-    let entry = match jobs_kv.get(manifest_id).await? {
-        Some(b) => b,
-        None => return Ok(()),
-    };
-    let job: Manifest = match serde_json::from_slice(&entry) {
-        Ok(j) => j,
-        Err(_) => return Ok(()),
+    let Some(job) = lookup_manifest(cache, jobs_kv, manifest_id).await? else {
+        return Ok(());
     };
     match job.check.as_ref() {
         // `fleet: false` opts a check out of the SPA projection (it

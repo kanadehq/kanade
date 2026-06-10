@@ -305,6 +305,13 @@ pub(crate) async fn run_backend() -> Result<()> {
         ),
     }
 
+    // v0.35 / #88 + #488: explode-spec / manifest lookup cache.
+    // Constructed BEFORE the projector spawns so the results
+    // projector resolves inventory/check hints from memory instead
+    // of two jobs_kv round-trips per ExecResult; prewarm + the
+    // BUCKET_JOBS watcher are wired up further down.
+    let explode_spec_cache = projector::spec_cache::ExplodeSpecCache::new();
+
     // Projectors run in the background; if either exits the backend keeps
     // serving HTTP (read-only API stays useful even if a stream is missing).
     //
@@ -314,8 +321,9 @@ pub(crate) async fn run_backend() -> Result<()> {
     {
         let pool = pool.clone();
         let js = jetstream.clone();
+        let cache = explode_spec_cache.clone();
         tokio::spawn(async move {
-            if let Err(e) = projector::results::run(js, pool).await {
+            if let Err(e) = projector::results::run(js, pool, cache).await {
                 error!(error = %e, "results projector exited");
             }
         });
@@ -400,13 +408,10 @@ pub(crate) async fn run_backend() -> Result<()> {
     // body details the policy.
     let _cleanup_handle = cleanup::spawn(pool.clone());
 
-    // v0.35 / #88: explode-spec lookup cache. Built once, cloned
-    // (cheap — Arc) into AppState for the search hot path and into
-    // a watcher task that keeps it in sync with BUCKET_JOBS writes.
-    // Prewarm walks every registered manifest at startup so the
-    // first batch of search requests doesn't pay the cold-miss
-    // latency.
-    let explode_spec_cache = projector::spec_cache::ExplodeSpecCache::new();
+    // v0.35 / #88: prewarm + watcher for the explode-spec / manifest
+    // cache constructed above (before the projector spawns). Prewarm
+    // walks every registered manifest at startup so the first batch
+    // of search requests doesn't pay the cold-miss latency.
     match projector::spec_cache::prewarm(&explode_spec_cache, &jetstream).await {
         Ok(n) => info!(cached = n, "explode spec cache prewarm done"),
         Err(e) => warn!(
