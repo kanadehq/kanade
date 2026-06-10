@@ -49,11 +49,14 @@ export function Audit() {
   const [since, setSince] = useState('24h');
   const [limit, setLimit] = useState(50);
 
-  const sinceIso = useMemo(() => {
-    const preset = SINCE_PRESETS.find((p) => p.value === since);
-    if (!preset?.ms) return null;
-    return new Date(Date.now() - preset.ms).toISOString();
-  }, [since]);
+  // #519: only the preset's window LENGTH lives in render — the
+  // `since` lower bound is computed inside queryFn (the HistoryPane
+  // pattern) so each refetch re-anchors to Date.now() instead of the
+  // moment the preset was picked.
+  const sinceMs = useMemo(
+    () => SINCE_PRESETS.find((p) => p.value === since)?.ms ?? null,
+    [since],
+  );
 
   const queryString = useMemo(() => {
     const sp = new URLSearchParams();
@@ -62,13 +65,18 @@ export function Audit() {
     if (action)   sp.set('action', action);
     if (target)   sp.set('target', target);
     if (payload)  sp.set('payload', payload);
-    if (sinceIso) sp.set('since', sinceIso);
     return sp.toString();
-  }, [actor, action, target, payload, sinceIso, limit]);
+  }, [actor, action, target, payload, limit]);
 
   const { data, error, isLoading, isFetching } = useQuery({
-    queryKey: ['audit', queryString],
-    queryFn: () => apiFetch<AuditRow[]>(`/api/audit?${queryString}`),
+    // Preset key (not a computed ISO) keeps the cache partitioned
+    // per window without millisecond-tick invalidation (#519).
+    queryKey: ['audit', queryString, since],
+    queryFn: () => {
+      const sp = new URLSearchParams(queryString);
+      if (sinceMs) sp.set('since', new Date(Date.now() - sinceMs).toISOString());
+      return apiFetch<AuditRow[]>(`/api/audit?${sp.toString()}`);
+    },
   });
 
   const rows = data ?? [];
