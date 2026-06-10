@@ -27,7 +27,10 @@
       "collected": "収集日時"
     },
     "nestedRowCount_one": "{{count}} 行",
-    "nestedRowCount_other": "{{count}} 行"
+    "nestedRowCount_other": "{{count}} 行",
+    "prev": "← 前へ",
+    "next": "次へ →",
+    "pageRange": "{{from}}–{{to}} 件目を表示中"
   },
   "detail": {
     "backToFleet": "← フリートビューに戻る",
