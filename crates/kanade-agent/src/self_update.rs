@@ -23,13 +23,14 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_nats::jetstream;
+use base64::Engine as _;
 use kanade_shared::kv::OBJECT_AGENT_RELEASES;
 use kanade_shared::wire::EffectiveConfig;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::watch;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 /// Persisted across the exit(64) / SCM restart cycle so we can spot a
 /// self-update loop: if the agent boots, sees the same `target_version`
@@ -246,17 +247,50 @@ fn clear_last_swap() {
     }
 }
 
-/// Wrap `maybe_download` with the loop-detection bookkeeping. Records
-/// the (target, running_before) tuple before the swap-and-exit so the
-/// next boot can check whether the swap actually changed
-/// `AGENT_VERSION`.
+/// #489: bounded download retry. `last_swap.json` is no longer
+/// written here — it used to be recorded BEFORE the download, so a
+/// transient fetch failure (broker blip mid-rollout, exactly when
+/// thousands of agents pull at once) left a marker claiming a swap
+/// happened when none did. Two consequences: the in-process watch
+/// loop never retried (same `target` ⇒ skipped), and the next boot's
+/// `is_loop()` saw `prev.target == target && running unchanged` and
+/// permanently refused the target — a one-off network error stranded
+/// the agent on the old version until an operator changed
+/// target_version. The marker now gets written inside
+/// `swap_and_restart`, after the renames succeed (the only point
+/// where "we swapped to this target" is actually true).
+///
+/// The retry is deliberately small (3 attempts, 15 s / 45 s gaps):
+/// it self-heals blips, while a long outage is left to the next
+/// config push or agent restart (whose initial check re-attempts).
 async fn attempt_swap(
     store: &jetstream::object_store::ObjectStore,
     target: &str,
     running: &str,
 ) -> Result<()> {
-    write_last_swap(target, running);
-    maybe_download(store, target, running).await
+    const ATTEMPTS: u32 = 3;
+    let mut delay = Duration::from_secs(15);
+    let mut last_err = None;
+    for attempt in 1..=ATTEMPTS {
+        match maybe_download(store, target, running).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                warn!(
+                    attempt,
+                    max_attempts = ATTEMPTS,
+                    target,
+                    error = ?e,
+                    "self-update download attempt failed",
+                );
+                last_err = Some(e);
+                if attempt < ATTEMPTS {
+                    tokio::time::sleep(delay).await;
+                    delay *= 3;
+                }
+            }
+        }
+    }
+    Err(last_err.expect("at least one attempt ran"))
 }
 
 /// Random pause in `0..=max` before the download fires. The point is
@@ -326,17 +360,55 @@ async fn maybe_download(
         hasher.update(&buf[..n]);
         total += n as u64;
     }
-    file.flush().await.ok();
+    // The staged bytes are about to become the service binary —
+    // fsync before the digest gate / swap so a power-cut can't leave
+    // a torn file that the rename then promotes (review PR #546:
+    // flush() is a no-op on the unbuffered tokio File and its error
+    // was swallowed anyway).
+    file.sync_all().await.context("sync staged exe")?;
+    drop(file);
     let digest = hasher.finalize();
+
+    // #490: verify the staged bytes against the Object Store's own
+    // recorded digest (`SHA-256=<base64url-nopad>` per the NATS object
+    // spec) before swapping it into the service binary path. This
+    // catches transfer truncation/corruption — the previous code
+    // computed the hash but only logged it. (Authenticity — a
+    // publisher-signed expected hash — is a separate concern and out
+    // of scope here; the store digest is still integrity, not trust.)
+    if let Some(expected) = object.info.digest.as_deref() {
+        let actual = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
+        // The algorithm prefix is matched case-insensitively, but
+        // the base64 payload exactly — base64 is case-sensitive, so
+        // an `eq_ignore_ascii_case` over the whole string would
+        // accept hashes that differ only in letter case (review PR
+        // #546).
+        let matches = expected
+            .strip_prefix("SHA-256=")
+            .or_else(|| expected.strip_prefix("sha-256="))
+            .is_some_and(|b64| b64 == actual);
+        if !matches {
+            let _ = tokio::fs::remove_file(&staging).await;
+            anyhow::bail!(
+                "staged binary digest mismatch for '{target}': object store records {expected}, downloaded bytes hash to SHA-256={actual} — discarding staged file"
+            );
+        }
+    } else {
+        warn!(
+            target,
+            "object store entry carries no digest; proceeding without verification"
+        );
+    }
+
     info!(
         target,
         path = ?staging,
         bytes = total,
         sha256 = %hex(&digest),
-        "staged new agent binary — beginning atomic swap",
+        "staged new agent binary (digest verified) — beginning atomic swap",
     );
 
-    swap_and_restart(&staging, target).await?;
+    swap_and_restart(&staging, target, running).await?;
     // Unreachable: swap_and_restart calls std::process::exit on success.
     Ok(())
 }
@@ -356,7 +428,7 @@ async fn maybe_download(
 ///
 /// Startup-time cleanup of `<exe>.old` lives in `main.rs` so the
 /// stale binary doesn't accumulate.
-async fn swap_and_restart(staged: &Path, target_version: &str) -> Result<()> {
+async fn swap_and_restart(staged: &Path, target_version: &str, running: &str) -> Result<()> {
     let current = std::env::current_exe().context("current_exe")?;
     let exe_dir = current
         .parent()
@@ -381,9 +453,38 @@ async fn swap_and_restart(staged: &Path, target_version: &str) -> Result<()> {
     tokio::fs::rename(&current, &old_path)
         .await
         .with_context(|| format!("rename {current:?} -> {old_path:?}"))?;
-    tokio::fs::rename(&new_path, &current)
-        .await
-        .with_context(|| format!("rename {new_path:?} -> {current:?}"))?;
+    if let Err(e) = tokio::fs::rename(&new_path, &current).await {
+        // #490: compensating rollback. At this point the service
+        // binary path is EMPTY — if we bail here without restoring,
+        // the next service start (reboot, SCM failure action,
+        // operator stop/start) finds no exe and the endpoint is
+        // permanently agent-less until manual repair. Put the
+        // original back; a transient lock on `.new` (AV scan) then
+        // degrades to "this update attempt failed", not a brick.
+        match tokio::fs::rename(&old_path, &current).await {
+            Ok(()) => warn!(
+                error = %e,
+                "second rename failed; rolled the original exe back into place",
+            ),
+            Err(restore_err) => error!(
+                error = %e,
+                restore_error = %restore_err,
+                exe = ?current,
+                backup = ?old_path,
+                "second rename failed AND rollback failed — service binary path is empty; \
+                 manual repair required (rename the .old file back)",
+            ),
+        }
+        return Err(e).with_context(|| format!("rename {new_path:?} -> {current:?}"));
+    }
+
+    // #489: record the loop-detection marker only now — after both
+    // renames succeeded — so it can never claim a swap that didn't
+    // happen. (A crash in the microseconds before this write loses
+    // only the success obs-event / loop marker, which is safe; the
+    // old placement before the download falsely loop-blocked targets
+    // on transient fetch failures.)
+    write_last_swap(target_version, running);
 
     info!(
         target = target_version,
