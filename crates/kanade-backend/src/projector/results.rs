@@ -103,7 +103,7 @@ pub async fn run(js: jetstream::Context, pool: SqlitePool) -> Result<()> {
                 // payloads this is the deterministic UUIDv5 derived
                 // from (request_id, pc_id).
                 let resolved_id = r.stable_result_id();
-                match insert_result(&pool, &r, &resolved_id, recorded_at).await {
+                match project_result(&pool, &r, &resolved_id, recorded_at).await {
                     Ok(true) => {
                         debug!(
                             result_id = %resolved_id,
@@ -113,20 +113,6 @@ pub async fn run(js: jetstream::Context, pool: SqlitePool) -> Result<()> {
                             exit_code = r.exit_code,
                             "projected result",
                         );
-                        // Only bump exec counters on a fresh insert.
-                        // Redeliveries (`Ok(false)` below) must not
-                        // double-count — JetStream redelivers on ack
-                        // timeout, and `executions.success_count` is
-                        // an unconditional `+= 1`.
-                        if let Some(exec_id) = r.exec_id.as_deref() {
-                            if let Err(e) = bump_exec_counters(&pool, exec_id, r.exit_code).await {
-                                warn!(
-                                    error = %e,
-                                    exec_id,
-                                    "executions counter update failed",
-                                );
-                            }
-                        }
                     }
                     Ok(false) => {
                         debug!(
@@ -135,7 +121,23 @@ pub async fn run(js: jetstream::Context, pool: SqlitePool) -> Result<()> {
                         );
                     }
                     Err(e) => {
-                        warn!(error = %e, result_id = %resolved_id, "insert result failed");
+                        warn!(
+                            error = %e,
+                            result_id = %resolved_id,
+                            "result projection failed — skipping ack so JetStream redelivers",
+                        );
+                        // #484: skip the ack so JetStream redelivers.
+                        // A transient failure (SQLite busy past the
+                        // 30 s busy_timeout under fleet write
+                        // contention, #411) would otherwise ack the
+                        // message and permanently lose the ExecResult
+                        // — the in-flight row stays 'running' until
+                        // the 24 h reaper stamps it dead. Redelivery
+                        // is safe: insert_result dedups via ON
+                        // CONFLICT, and the events / obs_events
+                        // projectors already use this exact
+                        // skip-ack-on-failure discipline.
+                        continue;
                     }
                 }
                 if r.exit_code == 0 {
@@ -161,6 +163,38 @@ pub async fn run(js: jetstream::Context, pool: SqlitePool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Project one ExecResult: the `execution_results` row write and the
+/// `executions` counter bump commit in a single transaction, and the
+/// caller acks only on `Ok`. Without the transaction (PR #537 review,
+/// CodeRabbit): if `insert_result` succeeds but `bump_exec_counters`
+/// fails transiently, the redelivery hits the ON CONFLICT dedup
+/// (`Ok(false)`) and skips the bump — leaving `executions.status` /
+/// `success_count` permanently out of sync with the projected row.
+/// Atomicity makes the redelivery repair both or neither.
+///
+/// Returns `insert_result`'s freshness bool (true = this call
+/// projected the result, false = redelivery no-op).
+async fn project_result(
+    pool: &SqlitePool,
+    r: &ExecResult,
+    result_id: &str,
+    recorded_at: chrono::DateTime<chrono::Utc>,
+) -> Result<bool> {
+    let mut tx = pool.begin().await.context("begin result projection tx")?;
+    let fresh = insert_result(&mut *tx, r, result_id, recorded_at).await?;
+    // Only bump exec counters on a fresh insert. Redeliveries
+    // (`false`) must not double-count — JetStream redelivers on ack
+    // timeout, and `executions.success_count` is an unconditional
+    // `+= 1`.
+    if fresh {
+        if let Some(exec_id) = r.exec_id.as_deref() {
+            bump_exec_counters(&mut *tx, exec_id, r.exit_code).await?;
+        }
+    }
+    tx.commit().await.context("commit result projection tx")?;
+    Ok(fresh)
 }
 
 /// v0.30 / PR α' UPSERT one ExecResult. Returns `Ok(true)` when the
@@ -193,12 +227,15 @@ pub async fn run(js: jetstream::Context, pool: SqlitePool) -> Result<()> {
 ///      replaces the "[backend: reaped …]" note instead of being
 ///      silently dropped (gemini review, PR #332). A subsequent
 ///      redelivery then hits state 3 (finished, reaped = 0) and no-ops.
-async fn insert_result(
-    pool: &SqlitePool,
+async fn insert_result<'e, E>(
+    executor: E,
     r: &ExecResult,
     result_id: &str,
     recorded_at: chrono::DateTime<chrono::Utc>,
-) -> Result<bool> {
+) -> Result<bool>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     // `result_id` is pre-resolved by the caller via
     // `r.stable_result_id()`: agent-supplied for v0.29+ payloads,
     // deterministic UUIDv5 from (request_id, pc_id) for legacy.
@@ -242,7 +279,7 @@ async fn insert_result(
     .bind(r.finished_at)
     .bind(&r.manifest_id)
     .bind(recorded_at)
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(rows.rows_affected() > 0)
 }
@@ -255,7 +292,10 @@ async fn insert_result(
 /// success/failure/status all change atomically without a follow-up
 /// query — important because the projector is concurrent with
 /// redeliveries.
-async fn bump_exec_counters(pool: &SqlitePool, exec_id: &str, exit_code: i32) -> Result<()> {
+async fn bump_exec_counters<'e, E>(executor: E, exec_id: &str, exit_code: i32) -> Result<()>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     let is_success = if exit_code == 0 { 1i64 } else { 0i64 };
     let is_failure = 1 - is_success;
     sqlx::query(
@@ -274,7 +314,7 @@ async fn bump_exec_counters(pool: &SqlitePool, exec_id: &str, exit_code: i32) ->
     .bind(is_success)
     .bind(is_failure)
     .bind(exec_id)
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(())
 }
