@@ -232,6 +232,9 @@ export function Jobs() {
             to={`/activity?status=running&job_id=${encodeURIComponent(j.id)}`}
             title={t('live.runningTitle')}
             className="inline-flex"
+            // The row's onClick opens the detail drawer — stop the chip
+            // click from bubbling so it only navigates to Activity.
+            onClick={(e) => e.stopPropagation()}
           >
             <Badge
               variant="violet"
