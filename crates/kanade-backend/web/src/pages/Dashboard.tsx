@@ -115,6 +115,24 @@ function fmtBytes(v: number | null | undefined): string {
   return `${n < 10 ? n.toFixed(1) : Math.round(n)} ${units[i]}`;
 }
 
+// #493: the sliding-window `from` is computed at fetch time (inside
+// queryFn — the HistoryPane pattern) so the queryKey stays stable.
+// The previous inline `new Date(Date.now() - 24h)` in the component
+// body minted a new ms-precision key on every render — each fetch
+// completion re-rendered, which minted another key, which fetched
+// again: a self-sustaining loop against /api/perf/fleet (a
+// whole-fleet aggregate), with refetchInterval never applying
+// because no key lived long enough. Refetches are driven by
+// refetchInterval and re-anchor to "now" each time. Module-level so
+// the helper isn't re-created per render.
+const FLEET_PERF_WINDOW_HOURS = 24;
+function fleetPerfUrl(metric: string): string {
+  const from = new Date(
+    Date.now() - FLEET_PERF_WINDOW_HOURS * 60 * 60 * 1000,
+  ).toISOString();
+  return `/api/perf/fleet?metric=${metric}&agg=avg&from=${encodeURIComponent(from)}&step=15m`;
+}
+
 function fmtAxisTime(iso: string): string {
   const d = new Date(iso);
   if (isNaN(d.getTime())) return iso;
@@ -219,24 +237,16 @@ export function Dashboard() {
   // sparkline shares a single query that fetches each metric
   // separately (sparkline cards each hit `/api/perf/fleet` with a
   // different metric, both 15 min bucket → 96 points over 24h).
-  const FLEET_PERF_WINDOW_HOURS = 24;
-  const fleetPerfFrom = new Date(
-    Date.now() - FLEET_PERF_WINDOW_HOURS * 60 * 60 * 1000,
-  ).toISOString();
+  // The sliding-window `from` is computed inside queryFn via the
+  // module-level fleetPerfUrl helper — see its doc comment (#493).
   const fleetCpuQ = useQuery({
-    queryKey: ['fleet-perf', 'cpu', fleetPerfFrom],
-    queryFn: () =>
-      apiFetch<FleetPerfResponse>(
-        `/api/perf/fleet?metric=cpu_pct&agg=avg&from=${encodeURIComponent(fleetPerfFrom)}&step=15m`,
-      ),
+    queryKey: ['fleet-perf', 'cpu'],
+    queryFn: () => apiFetch<FleetPerfResponse>(fleetPerfUrl('cpu_pct')),
     refetchInterval: REFRESH_INTERVAL_MS,
   });
   const fleetMemQ = useQuery({
-    queryKey: ['fleet-perf', 'mem', fleetPerfFrom],
-    queryFn: () =>
-      apiFetch<FleetPerfResponse>(
-        `/api/perf/fleet?metric=mem_used_bytes&agg=avg&from=${encodeURIComponent(fleetPerfFrom)}&step=15m`,
-      ),
+    queryKey: ['fleet-perf', 'mem'],
+    queryFn: () => apiFetch<FleetPerfResponse>(fleetPerfUrl('mem_used_bytes')),
     refetchInterval: REFRESH_INTERVAL_MS,
   });
   const topCpuQ = useQuery({
