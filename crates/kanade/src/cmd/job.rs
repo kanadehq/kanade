@@ -48,9 +48,12 @@ async fn create(base: &str, yaml: &PathBuf) -> Result<()> {
     let raw = std::fs::read_to_string(yaml).with_context(|| format!("read {yaml:?}"))?;
     // Parse client-side so a malformed YAML errors before any HTTP
     // round-trip — keeps the original error site obvious in operator
-    // shells.
-    let mut job: Manifest =
-        serde_yaml::from_str(&raw).with_context(|| format!("parse {yaml:?}"))?;
+    // shells. #492: strict parse — unknown keys are typos at this
+    // boundary and are rejected with their paths (the deny_unknown_
+    // fields attribute moved off the types so fleet reads stay
+    // tolerant).
+    let mut job: Manifest = kanade_shared::strict::from_yaml_str(&raw)
+        .map_err(|e| anyhow::anyhow!("parse {yaml:?}: {e}"))?;
 
     // SPEC §2.4.1: exactly-one-of script / script_file / script_object.
     // Validate BEFORE inlining script_file (Gemini #215 HIGH) so a

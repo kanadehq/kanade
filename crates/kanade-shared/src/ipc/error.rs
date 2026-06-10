@@ -77,6 +77,12 @@ pub enum ErrorKind {
     /// (SPEC §2.12.2). `stdout_chunk` payloads must be split before
     /// hitting this.
     PayloadTooLarge,
+    /// #492: serde-level forward-compat catch-all — a newer peer's
+    /// new error kind decodes here instead of making the older side
+    /// fail to decode the whole RpcError. Maps to the JSON-RPC
+    /// generic server-error code.
+    #[serde(other)]
+    Unknown,
 }
 
 impl ErrorKind {
@@ -96,6 +102,9 @@ impl ErrorKind {
             Self::RateLimit => -32003,
             Self::StaleProtocol => -32004,
             Self::PayloadTooLarge => -32005,
+            // JSON-RPC reserves -32099..-32000 for server errors;
+            // -32099 marks "kind unknown to this build".
+            Self::Unknown => -32099,
         }
     }
 
@@ -115,6 +124,7 @@ impl ErrorKind {
             Self::RateLimit => "Rate limit exceeded",
             Self::StaleProtocol => "Stale protocol version",
             Self::PayloadTooLarge => "Payload too large",
+            Self::Unknown => "Unknown error kind (newer peer)",
         }
     }
 }

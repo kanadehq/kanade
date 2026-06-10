@@ -89,14 +89,19 @@ where
                     format!("YAML body must be UTF-8: {e}"),
                 )
             })?;
-            let value: T = serde_yaml::from_str(&raw)
+            // #492: strict parse — this extractor IS the create
+            // boundary (POST /api/jobs, /api/schedules), so unknown
+            // keys are operator/SPA typos and get rejected with
+            // their paths. The same types are read tolerantly
+            // fleet-wide (deny_unknown_fields moved off them).
+            let value: T = kanade_shared::strict::from_yaml_str(&raw)
                 .map_err(|e| (StatusCode::BAD_REQUEST, format!("parse YAML body: {e}")))?;
             Ok(Self {
                 value,
                 raw_yaml: Some(raw),
             })
         } else {
-            let value: T = serde_json::from_slice(&bytes)
+            let value: T = kanade_shared::strict::from_json_slice(&bytes)
                 .map_err(|e| (StatusCode::BAD_REQUEST, format!("parse JSON body: {e}")))?;
             Ok(Self {
                 value,
