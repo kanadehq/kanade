@@ -6,6 +6,7 @@ import { useSearchParams } from 'react-router-dom';
 
 import { ErrorCard } from '@/components/ErrorCard';
 import { PcPicker } from '@/components/PcPicker';
+import { apiFetchText } from '@/lib/api';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -37,15 +38,14 @@ export function Logs() {
   const logsQ = useQuery({
     enabled: !!pcId,
     queryKey: ['agent-logs', pcId, tail],
-    queryFn: async () => {
-      const res = await fetch(`/api/agents/${encodeURIComponent(pcId)}/logs?tail=${tail}`, {
-        headers: authHeaders(),
-      });
-      if (!res.ok) {
-        throw new Error(`${res.status} ${res.statusText} — ${await res.text()}`);
-      }
-      return res.text();
-    },
+    // #521: route through the central wrapper instead of a raw fetch
+    // with a private authHeaders copy — the raw path skipped the
+    // 401 → AUTH_EXPIRED_EVENT → redirect-to-login flow, the 403
+    // toast, and the X-Kanade-Source audit tag, so an expired token
+    // showed a stuck "401 Unauthorized" card instead of routing to
+    // login.
+    queryFn: () =>
+      apiFetchText(`/api/agents/${encodeURIComponent(pcId)}/logs?tail=${tail}`),
     refetchInterval: autoRefresh ? 5_000 : false,
     // Don't refetch just because the browser tab regained focus.
     // Investigating logs means tabbing away to look at other things;
@@ -157,7 +157,3 @@ export function Logs() {
   );
 }
 
-function authHeaders(): HeadersInit {
-  const token = localStorage.getItem('kanade_token') ?? '';
-  return token ? { Authorization: `Bearer ${token}` } : {};
-}

@@ -11,6 +11,7 @@ import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { apiFetch } from '@/lib/api';
+import { useDebouncedValue } from '@/lib/hooks';
 import { fmtIsoLocal } from '@/lib/utils';
 
 type AuditRow = {
@@ -21,6 +22,9 @@ type AuditRow = {
   payload: unknown;
   occurred_at: string;
 };
+
+// #523: same debounce the Activity / Events filter inputs use.
+const FILTER_DEBOUNCE_MS = 300;
 
 const SINCE_PRESETS: Array<{ value: string; ms: number | null }> = [
   { value: '1h',  ms: 60 * 60 * 1000 },
@@ -58,15 +62,24 @@ export function Audit() {
     [since],
   );
 
+  // #523: debounce the typed filters before they hit the queryKey —
+  // the payload filter especially routes into the backend's
+  // expensive regex prefilter path, and previously every keystroke
+  // fired a fresh query. Same 300 ms the Activity / Events inputs use.
+  const dActor   = useDebouncedValue(actor, FILTER_DEBOUNCE_MS);
+  const dAction  = useDebouncedValue(action, FILTER_DEBOUNCE_MS);
+  const dTarget  = useDebouncedValue(target, FILTER_DEBOUNCE_MS);
+  const dPayload = useDebouncedValue(payload, FILTER_DEBOUNCE_MS);
+
   const queryString = useMemo(() => {
     const sp = new URLSearchParams();
     sp.set('limit', String(limit));
-    if (actor)    sp.set('actor', actor);
-    if (action)   sp.set('action', action);
-    if (target)   sp.set('target', target);
-    if (payload)  sp.set('payload', payload);
+    if (dActor)   sp.set('actor', dActor);
+    if (dAction)  sp.set('action', dAction);
+    if (dTarget)  sp.set('target', dTarget);
+    if (dPayload) sp.set('payload', dPayload);
     return sp.toString();
-  }, [actor, action, target, payload, limit]);
+  }, [dActor, dAction, dTarget, dPayload, limit]);
 
   const { data, error, isLoading, isFetching } = useQuery({
     // Preset key (not a computed ISO) keeps the cache partitioned
