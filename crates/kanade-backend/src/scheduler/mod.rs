@@ -186,49 +186,146 @@ pub async fn run(state: AppState) -> Result<()> {
         "scheduler registered initial schedules"
     );
 
-    // 2. Watch — react to KV puts/deletes for the lifetime of the process.
-    let mut watcher = kv.watch_all().await.context("kv watch_all")?;
-    while let Some(entry) = watcher.next().await {
-        let entry = match entry {
-            Ok(e) => e,
+    // 2. Watch — react to KV puts/deletes for the lifetime of the
+    //    process. #502: wrapped in a reopen loop (the freeze-watcher
+    //    pattern below) — the old single watch fell through to
+    //    `pending()` when the stream ended, after which every POST /
+    //    DELETE /api/schedules was accepted into KV but never
+    //    (un)registered in the running scheduler until a backend
+    //    restart, with no operator-visible error. On each reopen the
+    //    registrations are reconciled against the bucket so edits
+    //    that landed while the watch was down are caught up.
+    let mut first_attach = true;
+    loop {
+        let mut watcher = match kv.watch_all().await {
+            Ok(w) => w,
             Err(e) => {
-                warn!(error = %e, "watch entry error");
+                warn!(error = %e, "schedules watch_all failed; retrying");
+                tokio::time::sleep(StdDuration::from_secs(5)).await;
                 continue;
             }
         };
-        match entry.operation {
-            Operation::Put => {
-                let sched_data: Schedule = match serde_json::from_slice(&entry.value) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        warn!(error = %e, key = %entry.key, "deserialize Schedule on watch");
-                        continue;
+        // Reconcile AFTER the watch is armed, so an edit landing in
+        // the gap is seen by at least one of the two (re-applying a
+        // registration is an idempotent replace). The first attach
+        // skips it — step 1 above just did the initial load.
+        if first_attach {
+            first_attach = false;
+        } else if let Err(e) =
+            reconcile_registrations(&kv, &sched, &state, &registered, &freeze).await
+        {
+            warn!(error = %e, "schedules reconcile after watch reopen failed");
+        }
+        while let Some(entry) = watcher.next().await {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    warn!(error = %e, "watch entry error");
+                    continue;
+                }
+            };
+            match entry.operation {
+                Operation::Put => {
+                    let sched_data: Schedule = match serde_json::from_slice(&entry.value) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            warn!(error = %e, key = %entry.key, "deserialize Schedule on watch");
+                            continue;
+                        }
+                    };
+                    // Replace any existing registration so cron/manifest edits stick.
+                    unregister(&sched, &registered, &sched_data.id).await;
+                    if sched_data.enabled
+                        && let Err(e) = register(
+                            &sched,
+                            state.clone(),
+                            &registered,
+                            sched_data.clone(),
+                            freeze.clone(),
+                        )
+                        .await
+                    {
+                        warn!(error = %e, schedule_id = %sched_data.id, "watch register failed");
                     }
-                };
-                // Replace any existing registration so cron/manifest edits stick.
-                unregister(&sched, &registered, &sched_data.id).await;
-                if sched_data.enabled
-                    && let Err(e) = register(
-                        &sched,
-                        state.clone(),
-                        &registered,
-                        sched_data.clone(),
-                        freeze.clone(),
-                    )
-                    .await
-                {
-                    warn!(error = %e, schedule_id = %sched_data.id, "watch register failed");
+                }
+                Operation::Delete | Operation::Purge => {
+                    unregister(&sched, &registered, &entry.key).await;
                 }
             }
-            Operation::Delete | Operation::Purge => {
-                unregister(&sched, &registered, &entry.key).await;
+        }
+        warn!("schedules watch ended; reopening");
+        tokio::time::sleep(StdDuration::from_secs(5)).await;
+    }
+}
+
+/// #502: re-sync the in-memory registrations with the bucket after a
+/// watch reopen. Every schedule currently in KV is re-applied
+/// (unregister + register — the same idempotent replace the Put arm
+/// does), and any registration whose KV entry disappeared while the
+/// watch was down is dropped, so deletes can't survive a watch gap.
+async fn reconcile_registrations(
+    kv: &async_nats::jetstream::kv::Store,
+    sched: &JobScheduler,
+    state: &AppState,
+    registered: &Registered,
+    freeze: &FreezeMirror,
+) -> Result<()> {
+    // async-nats 0.48 gotcha (same as the initial load above):
+    // `kv.keys()` errors on a bucket whose stream has zero messages.
+    // Gate on the stream's message count so a genuinely empty bucket
+    // reconciles to "drop everything" instead of erroring out — while
+    // a broker-down `status()` failure still propagates as Err, which
+    // keeps the existing registrations (review PR #549, gemini). A
+    // bucket whose keys were all deleted carries tombstones
+    // (messages > 0), so it takes the normal keys() path and yields
+    // an empty live set, which is equally correct.
+    let status = kv.status().await.context("schedules kv status")?;
+    let keys: Vec<String> = if status.values() == 0 {
+        Vec::new()
+    } else {
+        kv.keys()
+            .await
+            .context("list schedules keys")?
+            .try_collect()
+            .await
+            .context("collect schedules keys")?
+    };
+    let mut seen: HashSet<String> = HashSet::new();
+    for k in &keys {
+        let bytes = match kv.get(k).await {
+            Ok(Some(b)) => b,
+            Ok(None) => continue,
+            Err(e) => {
+                warn!(error = %e, key = %k, "reconcile kv get");
+                continue;
             }
+        };
+        match serde_json::from_slice::<Schedule>(&bytes) {
+            Ok(s) => {
+                seen.insert(s.id.clone());
+                unregister(sched, registered, &s.id).await;
+                if s.enabled
+                    && let Err(e) =
+                        register(sched, state.clone(), registered, s.clone(), freeze.clone()).await
+                {
+                    warn!(error = %e, schedule_id = %s.id, "reconcile register failed");
+                }
+            }
+            Err(e) => warn!(error = %e, key = %k, "deserialize Schedule on reconcile"),
         }
     }
-
-    // watch_all is theoretically infinite; if it ever yields None keep the
-    // scheduler alive anyway so existing jobs keep firing.
-    std::future::pending::<Result<()>>().await
+    let stale: Vec<String> = registered
+        .lock()
+        .await
+        .keys()
+        .filter(|id| !seen.contains(*id))
+        .cloned()
+        .collect();
+    for id in stale {
+        info!(schedule_id = %id, "reconcile: dropping registration deleted while watch was down");
+        unregister(sched, registered, &id).await;
+    }
+    Ok(())
 }
 
 async fn register(
