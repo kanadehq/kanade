@@ -453,23 +453,16 @@ async function renderHealth() {
     const s = await invoke<StateSnapshot>("state_snapshot");
     el.innerHTML = renderSnapshot(s);
   } catch (err) {
-    // The agent went away (service restart / crash) — a live request
-    // is the only thing that detects it (`get_handshake` reads the
-    // cached result, so it can't). Stop the poll so we don't hammer a
-    // dead pipe, and correct the top status header, which would
-    // otherwise still misleadingly read "Connected".
-    //
-    // We deliberately do NOT re-enter `renderStatus` here: its
-    // `get_handshake` would succeed from cache and loop straight back
-    // into a failing `renderHealth`. Auto-reconnect (re-establish the
-    // pipe + a `klp-ready` event) lands with the push/reader-task
-    // follow-up; until then the user relaunches the app.
+    // Show the error only in the health section; do not touch the top
+    // status banner or stop the poll here. `klp-disconnected` now owns
+    // both (it fires once when the supervisor's reader task exits, #468).
+    // Duplicating that here is a race: a stale in-flight `state_snapshot`
+    // can reject *after* `klp-connected` has already restored the
+    // "Connected" banner and restarted the timer — clobbering the banner
+    // back to "reconnecting…" and killing the just-restarted poll. So a
+    // transient per-request failure stays local; connection-state
+    // transitions are event-driven (#468).
     el.innerHTML = `<p class="error">ヘルス情報を取得できません: ${escapeHtml(String(err))}</p>`;
-    $("status").innerHTML = `<p class="error">Agent connection lost: ${escapeHtml(String(err))}</p>`;
-    if (healthTimer !== undefined) {
-      window.clearInterval(healthTimer);
-      healthTimer = undefined;
-    }
   }
 }
 
@@ -599,6 +592,27 @@ window.addEventListener("DOMContentLoaded", () => {
     const p = event.payload.params as Partial<JobProgress> | null;
     if (!p?.run_id) return;
     handleProgress(p as JobProgress);
+  });
+
+  // Reconnect lifecycle (#468). The Tauri supervisor reconnects when
+  // the agent's pipe drops (e.g. the agent self-updated); these events
+  // let the UI react instead of looking frozen.
+  void listen("klp-connected", () => {
+    // Fresh connection (initial or reconnect) — re-pull everything.
+    // `jobsLoaded` is reset so the catalog reloads against the new
+    // connection.
+    jobsLoaded = false;
+    void renderStatus();
+  });
+  void listen("klp-disconnected", () => {
+    // Connection dropped; the supervisor is reconnecting. Stop the
+    // health poll and show a banner instead of silently-failing calls.
+    if (healthTimer !== undefined) {
+      window.clearInterval(healthTimer);
+      healthTimer = undefined;
+    }
+    $("status").innerHTML =
+      `<p class="error">エージェントとの接続が切れました。再接続しています…</p>`;
   });
 
   // Stuck-run watchdog tick (see checkStuckRuns). Once a minute is

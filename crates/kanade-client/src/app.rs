@@ -43,6 +43,16 @@ use crate::klp_client::KlpClient;
 /// WebView switches on `method` (`jobs.progress`, `state.changed`, …).
 const NOTIFICATION_EVENT: &str = "klp-notification";
 
+/// Emitted to the WebView each time a KLP connection is (re)established
+/// (#468) so it can clear any "agent unavailable" banner and re-pull
+/// its state. No payload.
+const CONNECTED_EVENT: &str = "klp-connected";
+
+/// Emitted when the live connection drops (agent restart / crash) before
+/// the supervisor reconnects (#468), so the WebView can show a
+/// "reconnecting…" banner instead of silently-failing commands.
+const DISCONNECTED_EVENT: &str = "klp-disconnected";
+
 /// Tauri-managed shared state. `Arc<Mutex<…>>` instead of plain
 /// `Mutex<…>` so the spawned setup task can hold its own clone
 /// while the `invoke` commands hold theirs.
@@ -145,6 +155,52 @@ fn spawn_notification_forwarder(client: &KlpClient, handle: tauri::AppHandle) {
     });
 }
 
+/// Keep a live KLP connection in `slot`, reconnecting whenever the
+/// agent's pipe goes away (#468 — the agent self-updates, so service
+/// restarts are routine). Loops forever:
+///   connect (retrying while the agent is down) → publish the client +
+///   a `klp-connected` event → forward notifications → block on
+///   `wait_closed` → on close, clear the slot + emit `klp-disconnected`
+///   → reconnect.
+async fn supervise_connection(slot: Arc<Mutex<Option<KlpClient>>>, handle: tauri::AppHandle) {
+    loop {
+        // Connect, retrying — the user may launch the client before the
+        // agent service is up, or it may be mid-restart. A one-shot
+        // attempt would leave the slot `None` forever (the WebView's
+        // `get_handshake` retry only reads the cache).
+        let client = loop {
+            match KlpClient::connect().await {
+                Ok(c) => break c,
+                Err(e) => {
+                    warn!(error = %e, "KLP connect failed; retrying in 5s");
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+            }
+        };
+        info!(
+            agent_version = %client.handshake().agent_version,
+            "KLP client ready",
+        );
+        // Subscribe BEFORE publishing the client so no push between
+        // connect and store is lost.
+        spawn_notification_forwarder(&client, handle.clone());
+        *slot.lock().await = Some(client.clone());
+        if let Err(e) = handle.emit(CONNECTED_EVENT, ()) {
+            warn!(error = %e, "klp-connected emit failed");
+        }
+
+        // Block until the reader task exits — the agent's pipe went
+        // away (service restart / crash).
+        client.wait_closed().await;
+        warn!("KLP connection lost; reconnecting");
+        *slot.lock().await = None;
+        if let Err(e) = handle.emit(DISCONNECTED_EVENT, ()) {
+            warn!(error = %e, "klp-disconnected emit failed");
+        }
+        // Loop back → reconnect.
+    }
+}
+
 pub fn run() {
     let state = AppState {
         klp: Arc::new(Mutex::new(None)),
@@ -162,48 +218,13 @@ pub fn run() {
             jobs_kill
         ])
         .setup(move |app| {
-            // The connect retries because the user might launch the
-            // client before the agent service has finished starting,
-            // and a one-shot attempt would leave `AppState::klp` `None`
-            // forever (the WebView's `get_handshake` retry only reads
-            // the cache, it doesn't trigger a fresh connect). Once
-            // connected we also spawn the notification forwarder so the
-            // WebView gets `jobs.progress` / `state.changed` pushes.
-            let slot = klp_slot.clone();
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                loop {
-                    match KlpClient::connect().await {
-                        Ok(client) => {
-                            info!(
-                                agent_version = %client.handshake().agent_version,
-                                "KLP client ready",
-                            );
-                            // Subscribe BEFORE publishing the client so
-                            // no push between connect and store is lost.
-                            spawn_notification_forwarder(&client, handle.clone());
-                            *slot.lock().await = Some(client);
-                            // KNOWN LIMITATION (#468): this task returns
-                            // after the first success, so if the agent
-                            // service later restarts, the stored client's
-                            // reader task exits and every command fails on
-                            // write until the app is relaunched.
-                            // Reconnection (watch the reader task's exit,
-                            // re-connect, swap the slot) is tracked in
-                            // #468 — pre-existing behaviour, just more
-                            // visible now the reader is split out.
-                            return;
-                        }
-                        Err(e) => {
-                            warn!(
-                                error = %e,
-                                "KLP client connect failed; retrying in 5s",
-                            );
-                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                        }
-                    }
-                }
-            });
+            // Supervise the KLP connection for the app's lifetime:
+            // connect, and reconnect whenever the agent's pipe drops
+            // (the agent self-updates, so restarts are routine) — #468.
+            tauri::async_runtime::spawn(supervise_connection(
+                klp_slot.clone(),
+                app.handle().clone(),
+            ));
             Ok(())
         })
         .run(tauri::generate_context!())
