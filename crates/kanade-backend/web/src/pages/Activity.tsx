@@ -1,6 +1,6 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { ChevronsDown, ChevronsUp, ExternalLink, Loader2, Radio, Skull } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -90,27 +90,43 @@ function parseStatusFilter(raw: string | null): StatusFilter {
 export function Activity() {
   const { t } = useTranslation('activity');
   const confirm = useConfirm();
-  // The status filter is URL-backed (`?status=`) so the URL is the
-  // single source of truth: the Dashboard's "failures / 24h" tile
-  // deep-links to `/activity?status=failure` (the same bridge the
-  // fleet-health agent tiles use into the Agents list), and a dropdown
-  // change writes back so the link stays shareable / bookmarkable and
+  // `status` is URL-backed (the source of truth): the Dashboard
+  // "failures / 24h" tile deep-links to `/activity?status=failure` and
+  // the Jobs live "running" chip to `/activity?status=running&job_id=…`.
+  // A change writes back so the link stays shareable / bookmarkable and
   // browser back/forward stays in sync. Mirrors Agents.tsx.
   const [searchParams, setSearchParams] = useSearchParams();
+  // Guarded so a redundant write is a no-op — this both skips a pointless
+  // re-navigation on an unchanged Select and breaks the
+  // URL→local→debounced→URL ping-pong the job_id sync below could form.
+  const setUrlParam = useCallback(
+    (key: string, next: string) => {
+      if ((searchParams.get(key) ?? '') === next) return;
+      setSearchParams(
+        (prev) => {
+          const p = new URLSearchParams(prev);
+          if (next === '') p.delete(key);
+          else p.set(key, next);
+          return p;
+        },
+        { replace: true },
+      );
+    },
+    [searchParams, setSearchParams],
+  );
   const status = parseStatusFilter(searchParams.get('status'));
-  const setStatus = (next: StatusFilter) => {
-    setSearchParams(
-      (prev) => {
-        const p = new URLSearchParams(prev);
-        if (next === '') p.delete('status');
-        else p.set('status', next);
-        return p;
-      },
-      { replace: true },
-    );
-  };
+  const setStatus = (next: StatusFilter) => setUrlParam('status', next);
+  // job_id is a free-text input *and* a deep-link target (the Jobs
+  // "running" chip). Keep the live value in local state so typing stays
+  // snappy — writing setSearchParams on every keystroke lags the input
+  // and can jump the cursor. Seed + re-sync from the URL on navigation,
+  // and mirror the *debounced* value back so the filter stays shareable.
+  const urlJobId = searchParams.get('job_id') ?? '';
+  const [jobId, setJobId] = useState(urlJobId);
+  useEffect(() => {
+    setJobId(urlJobId);
+  }, [urlJobId]);
   const [pcId, setPcId] = useState('');
-  const [jobId, setJobId] = useState('');
   const [execId, setExecId] = useState('');
   const [stdoutFilter, setStdoutFilter] = useState('');
   const [stderrFilter, setStderrFilter] = useState('');
@@ -128,6 +144,14 @@ export function Activity() {
   const dExecId       = useDebouncedValue(execId,       FILTER_DEBOUNCE_MS);
   const dStdoutFilter = useDebouncedValue(stdoutFilter, FILTER_DEBOUNCE_MS);
   const dStderrFilter = useDebouncedValue(stderrFilter, FILTER_DEBOUNCE_MS);
+
+  // Mirror the debounced job_id into the URL (not every keystroke) so
+  // the deep link stays shareable without lagging the input. setUrlParam
+  // guards against the redundant write when this matches the URL already
+  // (e.g. right after a deep-link seed), so there's no navigation churn.
+  useEffect(() => {
+    setUrlParam('job_id', dJobId);
+  }, [dJobId, setUrlParam]);
 
   const queryString = useMemo(() => {
     const sp = new URLSearchParams();
