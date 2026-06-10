@@ -1097,7 +1097,7 @@ job を消すと「以後の `kanade exec` は失敗する」 (manifest 不在) 
 
 SPA の Schedule ページに「無効化」 (default = soft) と「無効化 + 進行中も停止」 (hard) の 2 ボタンを置く。CLI は `kanade schedule disable <name>` / `kanade schedule disable <name> --cascade`。
 
-> **実装状況 (v0.43)**: 現状の `--cascade` は **Layer 2 の revoke のみ** (`script_status.{job_id} = REVOKED`)。**Layer 3 の in-flight kill はまだ束ねていない** (`crates/kanade-backend/src/api/schedules.rs` の `disable` ハンドラ参照)。理由は (1) kill が `kill.{exec_id}` キーに進化したため (§2.6.3 — 旧 `kill.{job_id}` ブロードキャストは廃止)、`schedule`(= `job_id`) から実行中の子を全部撃つには in-flight な exec_id の列挙 (`execution_results.finished_at IS NULL`) が要る、(2) 実行中スクリプトの強制終了は部分適用リスク (インストール途中等) があり、`revoke` (未来を止めるだけ) と違って **deliberate な明示操作にしておきたい**、(3) kill は online 限定なので hard-disable に混ぜると「全部止まった」錯覚を生む。**将来 `--cascade-kill` を別フラグ**として足す (revoke と混ぜない) のが設計方針。
+> **実装状況**: `--cascade` = **Layer 2 revoke** (`script_status.{job_id} = REVOKED`)、`--cascade-kill` = **Layer 3 kill** (ともに `crates/kanade-backend/src/api/schedules.rs` の `disable` ハンドラ)。2 つは **直交フラグ**で、kill は *実行中* を、revoke は *queued/未来* を止める — full hard-disable は両方渡す。`--cascade-kill` は `execution_results` の in-flight 行 (`job_id = ? AND finished_at IS NULL`) から exec_id を列挙し、各 `kill.{exec_id}` を publish する (kill が `kill.{job_id}` → `kill.{exec_id}` に進化したため §2.6.3 — 列挙が必要)。kill を**別フラグ・明示 opt-in** にした理由: (1) 実行中スクリプトの強制終了は部分適用リスク (インストール途中等) があり `revoke` (未来を止めるだけ) より破壊的、(2) online 限定なので revoke と混ぜると「全部止まった」錯覚を生む。best-effort (DB エラーは「kill 0 件」に degrade、disable 自体は成功)。
 
 #### (d) fleet 全体を凍結する (`kanade freeze` — #418 Phase 5)
 

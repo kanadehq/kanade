@@ -259,6 +259,16 @@ pub struct DisableQuery {
     /// in-flight runs to completion).
     #[serde(default)]
     pub cascade: bool,
+    /// When `true`, also Layer 3 cascade-KILL — publish `kill.{exec_id}`
+    /// for every still-running exec of `schedule.job_id` so currently-
+    /// executing child processes are terminated now (SPEC §2.6.4 (c)).
+    /// Orthogonal to `cascade`: kill stops *running* work, revoke stops
+    /// *queued/future* work — combine both for a full hard-disable.
+    /// Online-only (a kill can't reach an offline agent's child).
+    /// Default `false` — killing in-flight work is a deliberate,
+    /// destructive opt-in.
+    #[serde(default)]
+    pub cascade_kill: bool,
 }
 
 /// POST /api/schedules/{id}/disable
@@ -381,6 +391,66 @@ pub async fn disable(
         false
     };
 
+    // Cascade Layer 3: kill currently-running children of this
+    // schedule's job (SPEC §2.6.4 (c)). Enumerate the still-in-flight
+    // execs (a `finished_at IS NULL` row in `execution_results` for
+    // this `job_id`) and publish `kill.{exec_id}` for each — the agent
+    // that's running it terminates the child via
+    // `run_command_with_kill`. Orthogonal to the revoke above: this
+    // stops *running* work, revoke stops *queued/future* work. Best-
+    // effort + online-only: a kill can't reach an offline agent's
+    // child, and a DB hiccup degrades to "no kills" (warn) rather than
+    // failing the disable, which already took effect on the KV above.
+    let killed_execs = if q.cascade_kill {
+        match sqlx::query_scalar::<_, String>(
+            "SELECT DISTINCT exec_id FROM execution_results \
+             WHERE job_id = ? AND finished_at IS NULL AND exec_id IS NOT NULL",
+        )
+        .bind(&schedule.job_id)
+        .fetch_all(&s.pool)
+        .await
+        {
+            Ok(exec_ids) => {
+                // Publish the kills concurrently rather than awaiting
+                // each in series (gemini #480) — with many in-flight
+                // execs the per-publish round-trips would otherwise add
+                // up. Each publish is independent; failures are logged,
+                // never abort the others.
+                futures::future::join_all(exec_ids.iter().map(|eid| {
+                    let nats = s.nats.clone();
+                    let eid = eid.clone();
+                    async move {
+                        if let Err(e) = nats
+                            .publish(kanade_shared::subject::kill(&eid), bytes::Bytes::new())
+                            .await
+                        {
+                            warn!(error = %e, exec_id = %eid, "schedule_disable cascade-kill: publish failed");
+                        }
+                    }
+                }))
+                .await;
+                // Flush so the kills actually leave before we return —
+                // otherwise a fast caller could disconnect first.
+                if let Err(e) = s.nats.flush().await {
+                    warn!(error = %e, "schedule_disable cascade-kill: flush failed");
+                }
+                info!(
+                    schedule_id = %id,
+                    job_id = %schedule.job_id,
+                    count = exec_ids.len(),
+                    "schedule disabled with cascade kill (in-flight execs signalled)",
+                );
+                exec_ids.len()
+            }
+            Err(e) => {
+                warn!(error = %e, job_id = %schedule.job_id, "schedule_disable cascade-kill: in-flight exec query failed; no kills sent");
+                0
+            }
+        }
+    } else {
+        0
+    };
+
     audit::record(
         &s.nats,
         "operator",
@@ -389,6 +459,8 @@ pub async fn disable(
         Some(&caller),
         serde_json::json!({
             "cascade": cascade_applied,
+            "cascade_kill": q.cascade_kill,
+            "killed_execs": killed_execs,
             "job_id": schedule.job_id,
         }),
     )
