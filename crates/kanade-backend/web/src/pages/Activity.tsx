@@ -1,6 +1,6 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { ChevronsDown, ChevronsUp, ExternalLink, Loader2, Radio, Skull } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -99,18 +99,21 @@ export function Activity() {
   // Guarded so a redundant write is a no-op — this both skips a pointless
   // re-navigation on an unchanged Select and breaks the
   // URL→local→debounced→URL ping-pong the job_id sync below could form.
-  const setUrlParam = (key: string, next: string) => {
-    if ((searchParams.get(key) ?? '') === next) return;
-    setSearchParams(
-      (prev) => {
-        const p = new URLSearchParams(prev);
-        if (next === '') p.delete(key);
-        else p.set(key, next);
-        return p;
-      },
-      { replace: true },
-    );
-  };
+  const setUrlParam = useCallback(
+    (key: string, next: string) => {
+      if ((searchParams.get(key) ?? '') === next) return;
+      setSearchParams(
+        (prev) => {
+          const p = new URLSearchParams(prev);
+          if (next === '') p.delete(key);
+          else p.set(key, next);
+          return p;
+        },
+        { replace: true },
+      );
+    },
+    [searchParams, setSearchParams],
+  );
   const status = parseStatusFilter(searchParams.get('status'));
   const setStatus = (next: StatusFilter) => setUrlParam('status', next);
   // job_id is a free-text input *and* a deep-link target (the Jobs
@@ -148,8 +151,7 @@ export function Activity() {
   // (e.g. right after a deep-link seed), so there's no navigation churn.
   useEffect(() => {
     setUrlParam('job_id', dJobId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dJobId]);
+  }, [dJobId, setUrlParam]);
 
   const queryString = useMemo(() => {
     const sp = new URLSearchParams();
