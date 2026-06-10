@@ -50,14 +50,15 @@ use kanade_shared::ipc::jobs::{
 use kanade_shared::ipc::method;
 use kanade_shared::kv::BUCKET_JOBS;
 use kanade_shared::manifest::Manifest;
-use kanade_shared::subject;
 use kanade_shared::wire::Command;
+use kanade_shared::{ExecResult, default_paths, subject};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
 use super::super::connection::ConnectionState;
 use super::system::HandlerResult;
+use crate::outbox;
 use crate::process::{ExecOutcome, run_command_with_kill};
 
 /// `jobs.list` — list the user-invokable job catalog for the Client
@@ -383,8 +384,9 @@ pub fn build_command(
 }
 
 /// Spawned per-run task: push `Running`, run the child, push the
-/// terminal `jobs.progress`. Best-effort — every push tolerates a
-/// closed channel (client gone) and the run still completes.
+/// terminal `jobs.progress`, and publish the `ExecResult` to the
+/// backend. Best-effort — every push tolerates a closed channel
+/// (client gone) and the run still completes.
 async fn run_job(
     client: async_nats::Client,
     cmd: Command,
@@ -404,21 +406,154 @@ async fn run_job(
     )
     .await;
 
-    let terminal = match run_command_with_kill(&client, &cmd, None).await {
-        Ok(outcome) => outcome_to_progress(run_id.clone(), &outcome),
+    let started_at = Utc::now();
+    let outcome = run_command_with_kill(&client, &cmd, None).await;
+    let finished_at = Utc::now();
+
+    // Derive both the client progress AND the (exit_code, stdout,
+    // stderr) the ExecResult records — for the ran case AND the
+    // never-spawned case, so EVERY jobs.execute attempt lands on the
+    // operator Activity page (#478), including a spawn failure.
+    let (terminal, exit_code, stdout, stderr) = match &outcome {
+        Ok(o) => {
+            let (code, out, err) = outcome_to_result_parts(&cmd, o);
+            (outcome_to_progress(run_id.clone(), o), code, out, err)
+        }
         Err(e) => {
             warn!(run_id = %run_id, pc_id = %pc_id, error = %e, "jobs.execute: run failed to start");
-            JobProgress {
-                run_id: run_id.clone(),
-                status: RunStatus::Failed,
-                stdout_chunk: None,
-                stderr_chunk: Some(format!("agent failed to run job: {e}")),
-                exit_code: Some(-1),
-            }
+            let msg = with_note("", &format!("agent failed to start the job: {e}"));
+            (
+                JobProgress {
+                    run_id: run_id.clone(),
+                    status: RunStatus::Failed,
+                    stdout_chunk: None,
+                    stderr_chunk: Some(msg.clone()),
+                    exit_code: Some(-1),
+                },
+                -1,
+                String::new(),
+                msg,
+            )
         }
     };
     debug!(run_id = %run_id, pc_id = %pc_id, status = ?terminal.status, "jobs.execute: run finished");
     push_progress(&push_tx, terminal).await;
+
+    // #478: record the run on the backend so operators see
+    // user-initiated jobs on the Activity page (audit trail), via the
+    // same outbox → JetStream path a normal NATS-driven run uses.
+    let result = build_exec_result(
+        &cmd,
+        &pc_id,
+        exit_code,
+        stdout,
+        stderr,
+        started_at,
+        finished_at,
+    );
+    enqueue_exec_result(result);
+}
+
+/// Map a finished outcome to the `(exit_code, stdout, stderr)` the
+/// ExecResult records. Pure / unit-testable. Synthetic outcomes (kill /
+/// timeout) carry exit `-1`; annotate stderr so an operator reading
+/// `-1` on the Activity page knows which it was.
+fn outcome_to_result_parts(cmd: &Command, outcome: &ExecOutcome) -> (i32, String, String) {
+    match outcome {
+        ExecOutcome::Completed {
+            exit_code,
+            stdout,
+            stderr,
+        } => (*exit_code, stdout.clone(), stderr.clone()),
+        ExecOutcome::Killed { stdout, stderr } => (
+            -1,
+            stdout.clone(),
+            with_note(stderr, "killed by the user via KLP jobs.kill"),
+        ),
+        ExecOutcome::Timeout { stdout, stderr } => (
+            -1,
+            stdout.clone(),
+            with_note(stderr, &format!("timed out after {}s", cmd.timeout_secs)),
+        ),
+    }
+}
+
+/// Assemble the [`ExecResult`] for a KLP run. Pure / unit-testable.
+///
+/// `exec_id` is `None`: a KLP run has no parent deployment, so this is
+/// an ad-hoc result (like `kanade run`) and must NOT carry the
+/// `run_id` as an `exec_id` — that would point the backend's
+/// `executions`-aggregate projector at a row that doesn't exist
+/// (#478). `cmd.exec_id` stays `Some(run_id)` for `jobs.kill`; only the
+/// RESULT decouples. (`result_id` is a fresh per-result UUID — the only
+/// non-deterministic field, and not asserted in tests.)
+fn build_exec_result(
+    cmd: &Command,
+    pc_id: &str,
+    exit_code: i32,
+    stdout: String,
+    stderr: String,
+    started_at: chrono::DateTime<Utc>,
+    finished_at: chrono::DateTime<Utc>,
+) -> ExecResult {
+    ExecResult {
+        result_id: Uuid::new_v4().to_string(),
+        request_id: cmd.request_id.clone(),
+        exec_id: None,
+        pc_id: pc_id.to_string(),
+        exit_code,
+        stdout,
+        stderr,
+        started_at,
+        finished_at,
+        // The outbox drain offloads oversized output to the object
+        // store on its own; None at enqueue keeps the full bytes on disk.
+        stdout_object: None,
+        stderr_object: None,
+        manifest_id: Some(cmd.id.clone()),
+    }
+}
+
+/// Enqueue a finished run's [`ExecResult`] onto the outbox. Offloaded
+/// to the blocking pool because `outbox::enqueue` does synchronous file
+/// I/O (`create_dir_all` / `write` / `rename`) that would otherwise
+/// block an async runtime thread. Fire-and-forget + best-effort: an
+/// enqueue failure is logged, never fails the run (the client already
+/// got its terminal progress).
+fn enqueue_exec_result(result: ExecResult) {
+    let manifest_id = result.manifest_id.clone().unwrap_or_default();
+    let pc_id = result.pc_id.clone();
+    tokio::task::spawn_blocking(move || {
+        let outbox_dir = default_paths::data_dir().join("outbox");
+        match outbox::enqueue(&outbox_dir, &result) {
+            Ok(path) => debug!(
+                manifest_id = %manifest_id,
+                pc_id = %pc_id,
+                outbox = %path.display(),
+                "jobs.execute: ExecResult enqueued (operator visibility, #478)",
+            ),
+            Err(e) => warn!(
+                manifest_id = %manifest_id,
+                pc_id = %pc_id,
+                error = %e,
+                "jobs.execute: ExecResult outbox enqueue failed (run still completed)",
+            ),
+        }
+    });
+}
+
+/// Append a `[KLP] <note>` line to a captured stderr (or use it alone
+/// when stderr is blank), so an operator seeing exit `-1` knows whether
+/// the run was killed or timed out. Trailing whitespace is trimmed
+/// first so a process's trailing newline doesn't produce a blank line
+/// before the note.
+fn with_note(stderr: &str, note: &str) -> String {
+    let trimmed = stderr.trim_end();
+    if trimmed.is_empty() {
+        format!("[KLP] {note}")
+    } else {
+        format!("{trimmed}\n[KLP] {note}")
+    }
 }
 
 /// Per-chunk cap on a terminal progress push's stdout/stderr. The KLP
@@ -926,5 +1061,81 @@ mod tests {
         .await
         .expect_err("no nats wired → InternalError after auth passes");
         assert_eq!(err.data.unwrap().kind, ErrorKind::InternalError);
+    }
+
+    // ---------- build_exec_result (#478 operator visibility) ----------
+
+    fn cmd_fixture(id: &str) -> Command {
+        let m = manifest(id, Some(("Job", JobCategory::Catalog)));
+        build_command(&m, "run-1", "req-1").expect("build_command")
+    }
+
+    #[test]
+    fn exec_result_is_ad_hoc_with_manifest_id() {
+        // The KLP run must record as an ad-hoc result (exec_id None) so
+        // the backend doesn't try to increment a non-existent
+        // `executions` aggregate row keyed by exec_id (#478).
+        let cmd = cmd_fixture("fix-teams");
+        let now = Utc::now();
+        let r = build_exec_result(&cmd, "PC1", 0, "ok".into(), String::new(), now, now);
+        assert!(r.exec_id.is_none(), "KLP run must be ad-hoc (exec_id None)");
+        assert_eq!(r.manifest_id.as_deref(), Some("fix-teams"));
+        assert_eq!(r.pc_id, "PC1");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "ok");
+        assert!(!r.result_id.is_empty(), "result_id minted");
+    }
+
+    #[test]
+    fn result_parts_completed_passes_through() {
+        let cmd = cmd_fixture("j");
+        let (code, out, err) = outcome_to_result_parts(
+            &cmd,
+            &ExecOutcome::Completed {
+                exit_code: 2,
+                stdout: "o".into(),
+                stderr: "e".into(),
+            },
+        );
+        assert_eq!((code, out.as_str(), err.as_str()), (2, "o", "e"));
+    }
+
+    #[test]
+    fn result_parts_killed_and_timeout_annotate_stderr() {
+        let cmd = cmd_fixture("j");
+
+        let (code, _out, err) = outcome_to_result_parts(
+            &cmd,
+            &ExecOutcome::Killed {
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+        assert_eq!(code, -1);
+        assert!(err.contains("killed"), "{err}");
+
+        let (code, _out, err) = outcome_to_result_parts(
+            &cmd,
+            &ExecOutcome::Timeout {
+                stdout: String::new(),
+                stderr: "partial".into(),
+            },
+        );
+        assert_eq!(code, -1);
+        // Existing partial output is kept AND the note is appended.
+        assert!(
+            err.contains("partial") && err.contains("timed out"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn with_note_appends_or_stands_alone() {
+        assert_eq!(with_note("", "x"), "[KLP] x");
+        assert_eq!(with_note("   ", "x"), "[KLP] x");
+        assert_eq!(with_note("out", "x"), "out\n[KLP] x");
+        // Trailing newline is trimmed so there's no blank line before
+        // the note.
+        assert_eq!(with_note("out\n", "x"), "out\n[KLP] x");
     }
 }
