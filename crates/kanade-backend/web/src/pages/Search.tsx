@@ -12,6 +12,7 @@ import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { apiFetch } from '@/lib/api';
+import { useDebouncedValue } from '@/lib/hooks';
 import { cn, fmtIsoLocal } from '@/lib/utils';
 
 /** v0.35 / #87: per-explode-column descriptor returned by
@@ -51,6 +52,9 @@ const NUMERIC_OPS: Op[] = ['eq', 'lt', 'le', 'gt', 'ge', 'ne'];
 
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 5000;
+// #523: same debounce the Activity / Events filter inputs use, so a
+// keystroke doesn't fire a fleet-sized exploded-table scan.
+const FILTER_DEBOUNCE_MS = 300;
 
 type Filter = {
   /** Stable client-side id so React's keyed list stays sane across
@@ -151,18 +155,30 @@ export function InventorySearch() {
     }
   }, [currentJob, field]);
 
+  // #523: debounce the filter values before they reach the queryKey —
+  // each keystroke in a filter input previously issued a fresh
+  // GET /api/inventory/{id}/search/{field} (a scan over fleet-sized
+  // exploded tables). Same 300 ms the Activity / Events filters use.
+  const dFilters = useDebouncedValue(filters, FILTER_DEBOUNCE_MS);
+
   // Build the search query URL. `null` when not enough state to fire.
   const searchUrl = useMemo(() => {
     if (!manifestId || !field) return null;
     const sp = new URLSearchParams();
-    for (const f of filters) {
+    // Empty live filters bypass the debounce: a manifest/field switch
+    // calls setFilters([]) synchronously, but dFilters would keep the
+    // OLD manifest's filters for 300 ms — pairing them with the new
+    // manifest fired one bogus request (and a flash of wrong data)
+    // before the debounce settled (review PR #551, gemini).
+    const activeFilters = filters.length === 0 ? filters : dFilters;
+    for (const f of activeFilters) {
       const param = filterToParam(f);
       if (param) sp.append(param[0], param[1]);
     }
     sp.set('limit', String(limit));
     if (offset > 0) sp.set('offset', String(offset));
     return `/api/inventory/${encodeURIComponent(manifestId)}/search/${encodeURIComponent(field)}?${sp.toString()}`;
-  }, [manifestId, field, filters, limit, offset]);
+  }, [manifestId, field, filters, dFilters, limit, offset]);
 
   const searchQ = useQuery({
     queryKey: ['inventory-search', searchUrl],
