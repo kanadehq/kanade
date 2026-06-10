@@ -115,6 +115,44 @@ const PROCESS_PERF_RETENTION_DAYS: i64 = 7;
 /// within SQLite limits.
 const OBS_EVENTS_RETENTION_DAYS: i64 = 90;
 
+/// #486: `execution_results` retention. The hottest table in the
+/// projection had NO retention at all — at fleet scale the stock
+/// schedules produce O(10⁵) rows/day, each carrying up to 256 KB of
+/// inline stdout/stderr, so the DB grew without bound and every
+/// query touching the table (scheduler dedup, /api/results, health
+/// rollups) degraded monotonically. 90 d matches the
+/// inventory_history / obs_events "how far back can I look" answer
+/// and comfortably exceeds STREAM_RESULTS's 30 d max_age, so the
+/// projection always retains strictly more history than the stream
+/// can replay (a retention-emptied table therefore implies an empty
+/// stream, keeping consumer_reset's empty-table heuristic benign —
+/// see #529).
+const RESULTS_RETENTION_DAYS: i64 = 90;
+
+/// #486: `executions` retention, matched to
+/// [`RESULTS_RETENTION_DAYS`] so an executions row never outlives
+/// the per-PC results it summarises. All statuses qualify: pending
+/// flips to expired after 1 h (above), and a row still `running` 90
+/// days after initiation is definitively abandoned, not slow.
+const EXECUTIONS_RETENTION_DAYS: i64 = 90;
+
+/// #486: `audit_log` retention. Generous (one year) because the
+/// audit trail is the compliance record, but bounded: the scheduler
+/// writes one row per dispatch, so an unbounded table eventually
+/// dominates the DB and the unindexed-newest-50 listing (#516).
+/// Operators needing longer horizons should archive externally —
+/// STREAM_AUDIT retains the authoritative event log.
+const AUDIT_RETENTION_DAYS: i64 = 365;
+
+/// #486: retention DELETEs run in bounded batches so a large
+/// backlog (first sweep after the upgrade, or after downtime) can't
+/// hold SQLite's single writer lock for one giant transaction. Each
+/// batch is its own implicit transaction; the per-tick cap bounds a
+/// tick to `BATCH × MAX_BATCHES` rows, and any remainder simply
+/// drains on subsequent 5-minute ticks.
+const RETENTION_DELETE_BATCH: i64 = 10_000;
+const RETENTION_MAX_BATCHES_PER_TICK: u32 = 10;
+
 /// Spawn the long-running cleanup task. Runs forever; logs a warn
 /// on transient SQLite errors and continues to the next tick. The
 /// task is fire-and-forget — the returned handle is for the
@@ -226,8 +264,150 @@ pub fn spawn(pool: SqlitePool) -> tokio::task::JoinHandle<()> {
                 Ok(_) => {}
                 Err(e) => warn!(error = %e, "obs_events cleanup failed"),
             }
+            // #486: prune execution_results / executions / audit_log —
+            // the three previously-unbounded tables. Batched DELETEs
+            // (see RETENTION_DELETE_BATCH) so the first post-upgrade
+            // sweep over months of backlog can't monopolise the
+            // writer lock.
+            match prune_execution_results(
+                &pool,
+                now - chrono::Duration::days(RESULTS_RETENTION_DAYS),
+            )
+            .await
+            {
+                Ok(n) if n > 0 => info!(
+                    deleted = n,
+                    "execution_results cleanup: pruned {n} rows older than {RESULTS_RETENTION_DAYS}d",
+                ),
+                Ok(_) => {}
+                Err(e) => warn!(error = %e, "execution_results retention failed"),
+            }
+            match prune_executions(
+                &pool,
+                now - chrono::Duration::days(EXECUTIONS_RETENTION_DAYS),
+            )
+            .await
+            {
+                Ok(n) if n > 0 => info!(
+                    deleted = n,
+                    "executions cleanup: pruned {n} rows older than {EXECUTIONS_RETENTION_DAYS}d",
+                ),
+                Ok(_) => {}
+                Err(e) => warn!(error = %e, "executions retention failed"),
+            }
+            match prune_audit_log(&pool, now - chrono::Duration::days(AUDIT_RETENTION_DAYS)).await {
+                Ok(n) if n > 0 => info!(
+                    deleted = n,
+                    "audit_log cleanup: pruned {n} rows older than {AUDIT_RETENTION_DAYS}d",
+                ),
+                Ok(_) => {}
+                Err(e) => warn!(error = %e, "audit_log retention failed"),
+            }
         }
     })
+}
+
+/// #486: delete `execution_results` rows whose `recorded_at`
+/// predates the cutoff, in batches (see
+/// [`RETENTION_DELETE_BATCH`]). `recorded_at` is the JetStream
+/// publish time stamped by the projector — the right axis for "how
+/// old is this history", and indexed by
+/// `idx_execution_results_recorded_at` (added alongside this sweep)
+/// so the no-op common case is an index probe, not a table scan.
+async fn prune_execution_results(pool: &SqlitePool, cutoff: DateTime<Utc>) -> Result<u64> {
+    // ORDER BY makes the capped batch deterministic (oldest first)
+    // and is free: it matches the index's natural scan order.
+    prune_batched(
+        pool,
+        "DELETE FROM execution_results
+          WHERE rowid IN (
+              SELECT rowid FROM execution_results
+               WHERE recorded_at < ?
+               ORDER BY recorded_at
+               LIMIT ?)",
+        cutoff,
+        "execution_results",
+    )
+    .await
+}
+
+/// #486: delete `executions` rows whose `initiated_at` predates the
+/// cutoff — all statuses (see [`EXECUTIONS_RETENTION_DAYS`]).
+///
+/// Axis mismatch note (PR #541 review): results prune on
+/// `recorded_at`, executions on `initiated_at`, so in principle a
+/// parent could be deleted while results recorded inside the window
+/// survive (reachable only via pc/job, not the executions join). In
+/// practice the gap between initiation and the last recorded result
+/// is bounded by job timeout + outbox drain — minutes-to-hours, not
+/// the 90-day window — so the windows are effectively aligned; the
+/// stragglers age out on their own axis shortly after.
+async fn prune_executions(pool: &SqlitePool, cutoff: DateTime<Utc>) -> Result<u64> {
+    prune_batched(
+        pool,
+        "DELETE FROM executions
+          WHERE rowid IN (
+              SELECT rowid FROM executions
+               WHERE initiated_at < ?
+               ORDER BY initiated_at
+               LIMIT ?)",
+        cutoff,
+        "executions",
+    )
+    .await
+}
+
+/// #486: delete `audit_log` rows whose `occurred_at` predates the
+/// cutoff. Indexed by `idx_audit_log_occurred_at` (added alongside
+/// this sweep, which also fixes the unindexed `ORDER BY occurred_at`
+/// listing — #516).
+async fn prune_audit_log(pool: &SqlitePool, cutoff: DateTime<Utc>) -> Result<u64> {
+    prune_batched(
+        pool,
+        "DELETE FROM audit_log
+          WHERE rowid IN (
+              SELECT rowid FROM audit_log
+               WHERE occurred_at < ?
+               ORDER BY occurred_at
+               LIMIT ?)",
+        cutoff,
+        "audit_log",
+    )
+    .await
+}
+
+/// Run a batched retention DELETE: execute `sql` (a DELETE whose
+/// subquery binds `cutoff` then [`RETENTION_DELETE_BATCH`]) until a
+/// batch comes back short or the per-tick cap is hit. Each batch is
+/// its own implicit transaction, so the writer lock is released
+/// between batches and concurrent projector writes interleave.
+async fn prune_batched(
+    pool: &SqlitePool,
+    sql: &'static str,
+    cutoff: DateTime<Utc>,
+    table: &'static str,
+) -> Result<u64> {
+    let mut total: u64 = 0;
+    for _ in 0..RETENTION_MAX_BATCHES_PER_TICK {
+        let rows = sqlx::query(sql)
+            .bind(cutoff)
+            .bind(RETENTION_DELETE_BATCH)
+            .execute(pool)
+            .await
+            .with_context(|| format!("DELETE {table} retention batch"))?;
+        let n = rows.rows_affected();
+        total += n;
+        if n < RETENTION_DELETE_BATCH as u64 {
+            return Ok(total);
+        }
+    }
+    // Cap hit — backlog remains; the next 5-minute tick continues.
+    info!(
+        table,
+        deleted = total,
+        "retention sweep hit per-tick batch cap; remainder drains next tick",
+    );
+    Ok(total)
 }
 
 /// Delete `obs_events` rows older than [`OBS_EVENTS_RETENTION_DAYS`].
@@ -634,5 +814,153 @@ mod tests {
             .unwrap();
         assert_eq!(first, 1);
         assert_eq!(second, 0, "reaped row is no longer in-flight");
+    }
+
+    /// Insert a finished `execution_results` row with a chosen
+    /// `recorded_at` offset (days, negative = past).
+    async fn insert_finished_result(pool: &SqlitePool, result_id: &str, offset_days: i64) {
+        let at = Utc::now() + chrono::Duration::days(offset_days);
+        sqlx::query(
+            "INSERT INTO execution_results
+                (result_id, request_id, pc_id, exit_code, stdout, stderr,
+                 started_at, finished_at, recorded_at)
+             VALUES (?, 'req', 'pc-1', 0, '', '', ?, ?, ?)",
+        )
+        .bind(result_id)
+        .bind(at)
+        .bind(at)
+        .bind(at)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    fn results_cutoff() -> DateTime<Utc> {
+        Utc::now() - chrono::Duration::days(RESULTS_RETENTION_DAYS)
+    }
+
+    #[tokio::test]
+    async fn old_execution_results_are_pruned_fresh_kept() {
+        let pool = fresh_pool().await;
+        insert_finished_result(&pool, "r-ancient", -120).await; // 120d ago
+        insert_finished_result(&pool, "r-recent", -30).await; // 30d ago
+        let n = prune_execution_results(&pool, results_cutoff())
+            .await
+            .unwrap();
+        assert_eq!(n, 1, "only the >90d row is pruned");
+        let left: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM execution_results")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left.0, 1);
+        let id: (String,) = sqlx::query_as("SELECT result_id FROM execution_results")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(id.0, "r-recent");
+    }
+
+    #[tokio::test]
+    async fn old_executions_all_statuses_are_pruned() {
+        let pool = fresh_pool().await;
+        for (id, status) in [("e-c", "completed"), ("e-r", "running"), ("e-x", "expired")] {
+            insert_exec(&pool, id, status, -120 * 24 * 60).await; // 120d ago
+        }
+        insert_exec(&pool, "e-new", "completed", -24 * 60).await; // 1d ago
+        let cutoff = Utc::now() - chrono::Duration::days(EXECUTIONS_RETENTION_DAYS);
+        let n = prune_executions(&pool, cutoff).await.unwrap();
+        assert_eq!(n, 3, "all >90d rows pruned regardless of status");
+        let left: (String,) = sqlx::query_as("SELECT exec_id FROM executions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left.0, "e-new");
+    }
+
+    #[tokio::test]
+    async fn old_audit_rows_are_pruned_fresh_kept() {
+        let pool = fresh_pool().await;
+        for (id, days) in [("old", -400i64), ("new", -10)] {
+            sqlx::query(
+                "INSERT INTO audit_log (actor, action, target, occurred_at)
+                 VALUES ('tester', ?, NULL, ?)",
+            )
+            .bind(id)
+            .bind(Utc::now() + chrono::Duration::days(days))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let cutoff = Utc::now() - chrono::Duration::days(AUDIT_RETENTION_DAYS);
+        let n = prune_audit_log(&pool, cutoff).await.unwrap();
+        assert_eq!(n, 1);
+        let left: (String,) = sqlx::query_as("SELECT action FROM audit_log")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left.0, "new");
+    }
+
+    #[tokio::test]
+    async fn results_row_exactly_at_cutoff_is_kept() {
+        // Lock in the strict `<` boundary semantic, mirroring
+        // pending_exactly_at_cutoff_is_left_alone.
+        let pool = fresh_pool().await;
+        let at = Utc::now() - chrono::Duration::days(RESULTS_RETENTION_DAYS);
+        sqlx::query(
+            "INSERT INTO execution_results
+                (result_id, request_id, pc_id, exit_code, stdout, stderr,
+                 started_at, finished_at, recorded_at)
+             VALUES ('r-edge', 'req', 'pc-1', 0, '', '', ?, ?, ?)",
+        )
+        .bind(at)
+        .bind(at)
+        .bind(at)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let n = prune_execution_results(&pool, at).await.unwrap();
+        assert_eq!(n, 0, "row exactly at the cutoff must survive");
+    }
+
+    #[tokio::test]
+    async fn executions_row_exactly_at_cutoff_is_kept() {
+        // Same strict `<` boundary lock-in as
+        // results_row_exactly_at_cutoff_is_kept, for prune_executions.
+        let pool = fresh_pool().await;
+        let stamp = insert_exec(&pool, "e-edge", "completed", 0).await;
+        let n = prune_executions(&pool, stamp).await.unwrap();
+        assert_eq!(n, 0, "row exactly at the cutoff must survive");
+    }
+
+    #[tokio::test]
+    async fn audit_row_exactly_at_cutoff_is_kept() {
+        // Same strict `<` boundary lock-in for prune_audit_log.
+        let pool = fresh_pool().await;
+        let at = Utc::now() - chrono::Duration::days(AUDIT_RETENTION_DAYS);
+        sqlx::query(
+            "INSERT INTO audit_log (actor, action, target, occurred_at)
+             VALUES ('tester', 'edge', NULL, ?)",
+        )
+        .bind(at)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let n = prune_audit_log(&pool, at).await.unwrap();
+        assert_eq!(n, 0, "row exactly at the cutoff must survive");
+    }
+
+    #[tokio::test]
+    async fn retention_prune_is_idempotent() {
+        let pool = fresh_pool().await;
+        insert_finished_result(&pool, "r-ancient", -120).await;
+        let first = prune_execution_results(&pool, results_cutoff())
+            .await
+            .unwrap();
+        let second = prune_execution_results(&pool, results_cutoff())
+            .await
+            .unwrap();
+        assert_eq!(first, 1);
+        assert_eq!(second, 0);
     }
 }
