@@ -23,6 +23,7 @@ use kanade_shared::kv::{
 use kanade_shared::manifest::{
     ExecMode, FanoutPlan, Freeze, Manifest, RunsOn, Schedule, ScheduleTz, Target, When,
 };
+use kanade_shared::wire::AgentGroups;
 use sqlx::Row;
 use tokio::sync::Mutex;
 use tokio_cron_scheduler::{Job, JobScheduler};
@@ -528,17 +529,27 @@ async fn tick(state: &AppState, schedule: Schedule, freeze: &FreezeMirror) {
             return;
         }
     };
-    let completions = match recent_completions(state, &job_id).await {
-        Ok(v) => v,
-        Err(e) => {
-            warn!(%schedule_id, error = ?e, "scheduler fire failed: completion lookup");
-            return;
-        }
-    };
     let cooldown = match parse_cooldown(lowered.cooldown.as_deref()) {
         Ok(v) => v,
         Err(e) => {
             warn!(%schedule_id, error = %e, "scheduler fire failed: invalid when.every");
+            return;
+        }
+    };
+    // #487: bound the completion scan by the cooldown window — a
+    // completion older than `now - cooldown` is re-armed by
+    // definition and can never suppress, so reading it is wasted
+    // I/O. This query runs every POLL_CRON minute per schedule, so
+    // without the bound it walked the job's entire completion
+    // history each tick. Cooldown-less schedules (`per_pc: once`
+    // kitting semantics — "succeeded ever ⇒ permanently skip") keep
+    // the unbounded scan: any historical completion matters there,
+    // and the #486 retention now caps the table at 90 d anyway.
+    let completion_cutoff = cooldown.map(|cd| now - cd);
+    let completions = match recent_completions(state, &job_id, completion_cutoff).await {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(%schedule_id, error = ?e, "scheduler fire failed: completion lookup");
             return;
         }
     };
@@ -1008,17 +1019,47 @@ fn parse_starting_deadline(
 /// Recent (exit_code = 0) completions for this job, one row per pc
 /// (keeps `MAX(finished_at)` so the policy doesn't see stale
 /// duplicates).
-async fn recent_completions(state: &AppState, job_id: &str) -> Result<Vec<Completion>> {
-    let rows = sqlx::query(
-        "SELECT pc_id, MAX(finished_at) AS finished_at
-         FROM execution_results
-         WHERE job_id = ? AND exit_code = 0
-         GROUP BY pc_id",
-    )
-    .bind(job_id)
-    .fetch_all(&state.pool)
-    .await
-    .context("execution_results dedup query")?;
+///
+/// #487: `cutoff` bounds the scan to completions that can still
+/// suppress a fire. `Some(now - cooldown)` for cooldown-ful
+/// schedules (older completions are re-armed by definition);
+/// `None` for cooldown-less `once` semantics, where any historical
+/// completion permanently suppresses. Note the #486/#541 retention
+/// interaction: completions older than the 90 d sweep are deleted,
+/// so a cooldown-less `once` schedule re-fires a PC whose only
+/// completion aged out — acceptable for the idempotent
+/// kitting-once jobs that mode exists for.
+async fn recent_completions(
+    state: &AppState,
+    job_id: &str,
+    cutoff: Option<DateTime<Utc>>,
+) -> Result<Vec<Completion>> {
+    // Branched queries instead of `(? IS NULL OR ...)` — the OR form
+    // can stop SQLite driving an index from the bound column, and
+    // this runs every poll minute per schedule (PR #557 review,
+    // gemini).
+    let query = if let Some(cutoff) = cutoff {
+        sqlx::query(
+            "SELECT pc_id, MAX(finished_at) AS finished_at
+             FROM execution_results
+             WHERE job_id = ? AND exit_code = 0 AND finished_at >= ?
+             GROUP BY pc_id",
+        )
+        .bind(job_id)
+        .bind(cutoff)
+    } else {
+        sqlx::query(
+            "SELECT pc_id, MAX(finished_at) AS finished_at
+             FROM execution_results
+             WHERE job_id = ? AND exit_code = 0
+             GROUP BY pc_id",
+        )
+        .bind(job_id)
+    };
+    let rows = query
+        .fetch_all(&state.pool)
+        .await
+        .context("execution_results dedup query")?;
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
         let pc_id: String = r.try_get("pc_id").unwrap_or_default();
@@ -1081,23 +1122,39 @@ pub(crate) async fn resolve_expected_pcs(state: &AppState, target: &Target) -> R
                 .collect();
 
         if let Ok(kv) = state.jetstream.get_key_value(BUCKET_AGENT_GROUPS).await {
-            if let Ok(keys) = kv.keys().await {
-                let keys: Vec<String> = keys.try_collect().await.unwrap_or_default();
-                for k in keys {
-                    if !alive.contains(&k) {
-                        continue;
+            // #487: bounded-concurrency membership reads over the
+            // ALIVE set directly — kv.keys() was an expensive
+            // stream-wide ordered-consumer scan, and alive PCs are
+            // the only ones we ever admit anyway (PR #557 review,
+            // gemini). Concurrency matches the dispatch-mark reads
+            // (gemini #444).
+            let members: Vec<String> = futures::stream::iter(alive)
+                .map(|k| {
+                    let kv = kv.clone();
+                    async move {
+                        let Ok(Some(bytes)) = kv.get(&k).await else {
+                            return None;
+                        };
+                        // The bucket stores the AgentGroups wrapper,
+                        // not a bare Vec<String> — the old bare parse
+                        // failed on every entry, so OncePerPc group
+                        // targets silently resolved no members via
+                        // this path (PR #557 review, CodeRabbit).
+                        let Ok(value) = serde_json::from_slice::<AgentGroups>(&bytes) else {
+                            return None;
+                        };
+                        Some((k, value.groups))
                     }
-                    let Ok(Some(bytes)) = kv.get(&k).await else {
-                        continue;
-                    };
-                    let Ok(groups) = serde_json::from_slice::<Vec<String>>(&bytes) else {
-                        continue;
-                    };
-                    if groups.iter().any(|g| want.contains(g.as_str())) {
-                        out.insert(k);
-                    }
-                }
-            }
+                })
+                .buffer_unordered(DISPATCH_KV_CONCURRENCY)
+                .filter_map(|res| async move { res })
+                .filter_map(|(k, groups)| {
+                    let is_member = groups.iter().any(|g| want.contains(g.as_str()));
+                    async move { is_member.then_some(k) }
+                })
+                .collect()
+                .await;
+            out.extend(members);
         }
     }
 
