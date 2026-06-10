@@ -429,22 +429,24 @@ async fn load_explode_spec(
             format!("parse manifest: {e}"),
         )
     })?;
-    let hint = manifest.inventory.ok_or((
-        StatusCode::NOT_FOUND,
-        format!("manifest {manifest_id:?} has no inventory hint"),
-    ))?;
-    let specs = hint.explode.ok_or((
-        StatusCode::NOT_FOUND,
-        format!("manifest {manifest_id:?} has no explode specs"),
-    ))?;
+    let specs = manifest
+        .inventory
+        .as_ref()
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            format!("manifest {manifest_id:?} has no inventory hint"),
+        ))?
+        .explode
+        .clone()
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            format!("manifest {manifest_id:?} has no explode specs"),
+        ))?;
     // Populate the cache before answering — subsequent requests
-    // for any field on this manifest go straight through. Empty
-    // hint.explode would have errored above; here `specs` always
-    // has at least one entry.
-    state
-        .explode_spec_cache
-        .insert(manifest_id.to_string(), specs.clone())
-        .await;
+    // for any field on this manifest go straight through. #488:
+    // store the whole manifest so the results projector's hint
+    // lookups share the warm entry.
+    state.explode_spec_cache.insert_manifest(manifest).await;
     specs.into_iter().find(|s| s.field == field).ok_or((
         StatusCode::NOT_FOUND,
         format!("manifest {manifest_id:?} has no explode field {field:?}"),
