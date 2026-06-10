@@ -137,8 +137,25 @@ const ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
 async fn publish_one(js: &async_nats::jetstream::Context, path: &Path) -> Result<()> {
     let bytes = std::fs::read(path).with_context(|| format!("read {path:?}"))?;
-    let mut result: ExecResult =
-        serde_json::from_slice(&bytes).with_context(|| format!("parse {path:?}"))?;
+    // #499: treat parse failure as "drop the corrupted file and
+    // continue" rather than propagating Err — mirroring
+    // events_outbox / obs_outbox. Propagating keeps the file on
+    // disk, so a single undecodable file (disk corruption, or an
+    // ExecResult schema change across an agent downgrade) would be
+    // re-read and re-logged every drain tick (1 Hz) for the life
+    // of the agent and never drain.
+    let mut result: ExecResult = match serde_json::from_slice(&bytes) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(
+                error = %e,
+                path = %path.display(),
+                "outbox: corrupted file — removing so drain can proceed",
+            );
+            let _ = std::fs::remove_file(path);
+            return Ok(());
+        }
+    };
 
     // #227: offload stdout / stderr > 256 KB to OBJECT_RESULT_OUTPUT
     // BEFORE the NATS publish — the inline ExecResult would otherwise
