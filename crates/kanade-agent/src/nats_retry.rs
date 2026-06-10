@@ -11,7 +11,7 @@
 //!
 //! This module centralises the retry behaviour:
 //!
-//! - [`wait_for_kv`] / [`wait_for_stream`] / [`wait_for_consumer`] —
+//! - [`wait_for_kv`] / [`wait_for_stream`] / [`wait_for_consumer_updating`] —
 //!   try, fail, back off, retry. Backoff is exponential with jitter
 //!   and caps at 5 minutes; that's gentle enough not to hammer a
 //!   slow-starting broker yet fast enough that recovery feels
@@ -169,14 +169,21 @@ pub async fn wait_for_stream(
     }
 }
 
-/// Wait until
-/// [`jetstream::stream::Stream::get_or_create_consumer`] succeeds for
-/// `name` with `config`. Same retry contract as [`wait_for_kv`].
+/// Wait until [`jetstream::stream::Stream::create_consumer`] succeeds
+/// for `config`. Same retry contract as [`wait_for_kv`].
 ///
-/// The consumer config is `Clone`d on every retry because
-/// `get_or_create_consumer` takes it by value. That's fine — pull
-/// consumer configs are tiny.
-pub async fn wait_for_consumer<C>(
+/// Deliberately wraps `create_consumer` — NATS create-or-update
+/// semantics — rather than `get_or_create_consumer`, which returns
+/// an existing durable **without applying the new config**.
+/// command_replay (#483) relies on this: its `filter_subjects` list
+/// follows group membership, and a membership flip must update the
+/// server-side filters of the already-existing durable, not silently
+/// keep the old ones. (A get-or-create variant used to live here;
+/// it was removed when its last caller migrated — re-add it only
+/// for a consumer whose config is genuinely immutable.) The consumer
+/// name comes from `config.durable_name`; `name` is only for
+/// logging.
+pub async fn wait_for_consumer_updating<C>(
     stream: &jetstream::stream::Stream,
     client: &async_nats::Client,
     tracker: &Tracker,
@@ -191,7 +198,7 @@ where
     let mut consecutive_failures: u32 = 0;
     loop {
         gate_on_connection(client, tracker, label, "consumer").await;
-        match stream.get_or_create_consumer(name, config.clone()).await {
+        match stream.create_consumer(config.clone()).await {
             Ok(c) => {
                 if consecutive_failures > 0 {
                     info!(
@@ -218,7 +225,7 @@ where
 /// Wait until [`jetstream::Context::get_object_store`] succeeds for
 /// `bucket`. Same retry contract as [`wait_for_kv`].
 ///
-/// Sibling of [`wait_for_kv`] / [`wait_for_stream`] / [`wait_for_consumer`]
+/// Sibling of [`wait_for_kv`] / [`wait_for_stream`] / [`wait_for_consumer_updating`]
 /// added to cover [`self_update::run`](crate::self_update) — which
 /// previously returned permanently when the agent booted before
 /// the broker had `OBJECT_AGENT_RELEASES` provisioned. Live test

@@ -309,6 +309,9 @@ pub(crate) async fn run_agent() -> Result<()> {
     // Reconnect catch-up: durable consumer on STREAM_EXEC that
     // replays the latest retained Command per subject. See
     // `crates/kanade-agent/src/command_replay.rs` for the flow.
+    // #483: it follows `groups_rx` so the durable's server-side
+    // filter_subjects track group membership (and group Commands
+    // never reach non-members).
     command_replay::spawn(
         client.clone(),
         pc_id.clone(),
@@ -316,6 +319,7 @@ pub(crate) async fn run_agent() -> Result<()> {
         staleness_tracker.clone(),
         script_cache.clone(),
         check_sink.clone(),
+        groups_rx.clone(),
     );
     // v0.24: file-based outbox for ExecResult publishes. Every
     // result the agent produces is persisted under `outbox/<rid>.json`
