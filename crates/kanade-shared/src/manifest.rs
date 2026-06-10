@@ -1763,6 +1763,38 @@ target: { all: true }
     }
 
     #[test]
+    fn validate_accepts_nth_weekday() {
+        // #418: nth-weekday (Patch Tuesday). validate() also lowers to
+        // a cron and parses it with croner, so passing here proves the
+        // whole chain — token → DOW field → engine-acceptable cron.
+        for ok in [
+            calendar("09:00", &["tue#2"]),          // 2nd Tuesday
+            calendar("09:00", &["fri#1"]),          // 1st Friday
+            calendar("03:00", &["sun#5"]),          // 5th Sunday
+            calendar("09:00", &["tue#2", "thu#2"]), // a list of nths
+            calendar("09:00", &["2#2"]),            // numeric DOW + ordinal
+            // Case-insensitive both sides: validate lowercases, croner
+            // upper-cases the whole pattern before aliasing (claude #547).
+            calendar("09:00", &["TUE#2"]),
+        ] {
+            schedule_with(ok.clone(), RunsOn::Backend)
+                .validate()
+                .unwrap_or_else(|e| panic!("{ok} should validate: {e}"));
+        }
+    }
+
+    #[test]
+    fn validate_rejects_bad_nth_weekday() {
+        // ordinal out of 1..5, a range with #, and a bad day before #.
+        for bad in ["tue#0", "tue#6", "tue#x", "mon-fri#2", "funday#2"] {
+            let err = schedule_with(calendar("09:00", &[bad]), RunsOn::Backend)
+                .validate()
+                .unwrap_err();
+            assert!(err.contains("when.days"), "for '{bad}', got: {err}");
+        }
+    }
+
+    #[test]
     fn calendar_oneshot_instant_detects_past() {
         use chrono::TimeZone;
         // a dated `at` resolves to an absolute instant…
@@ -2725,7 +2757,9 @@ pub struct CalendarSpec {
     pub at: String,
     /// Day-of-week filter for a time-of-day `at`: `["mon-fri"]`,
     /// `["mon","wed","fri"]`, … (passed verbatim to the cron DOW
-    /// field, so ranges and names both work). Empty = every day.
+    /// field, so ranges and names both work). An **nth-weekday**
+    /// `["tue#2"]` fires only on the 2nd Tuesday of each month
+    /// ("Patch Tuesday"); the ordinal is `1..5`. Empty = every day.
     /// Must be empty when `at` carries a date (the date already
     /// pins the day).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2772,9 +2806,11 @@ impl CalendarSpec {
     /// a `when.days:`-scoped error instead of croner's confusing
     /// "when.at lowered to invalid cron" (claude #432 review). Each
     /// token is a day name (`mon`..`sun`), a numeric DOW (`0`..`7`),
-    /// `*`, or a `-` range of those.
+    /// `*`, a `-` range of those, or an **nth-weekday** like `tue#2`
+    /// (2nd Tuesday of the month — "Patch Tuesday").
     fn validate_days(&self) -> Result<(), String> {
         const NAMES: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+        let is_day = |p: &str| NAMES.contains(&p) || p.parse::<u8>().is_ok_and(|n| n <= 7);
         for tok in &self.days {
             // Report the whole token on a malformed range like `mon-`
             // (which would otherwise split to a cryptic empty part —
@@ -2782,18 +2818,34 @@ impl CalendarSpec {
             let invalid = |reason: &str| {
                 Err(format!(
                     "when.days: invalid day token '{tok}' ({reason}; \
-                     want mon..sun, 0-7, a range like mon-fri, or *)"
+                     want mon..sun, 0-7, a range like mon-fri, an nth-weekday \
+                     like tue#2, or *)"
                 ))
             };
+            // #418: nth-weekday suffix (`tue#2` = 2nd Tuesday). Croner
+            // accepts `<dow>#<n>` (n = 1..5) in the DOW field, and
+            // `to_cron` passes the token through verbatim, so the
+            // engine fires only on that occurrence. It's a single
+            // weekday + ordinal — not combinable with a range.
+            if let Some((day_part, nth_part)) = tok.split_once('#') {
+                // Normalize once and use `d` consistently (gemini #547);
+                // the outer `invalid` already echoes the raw `tok`.
+                let d = day_part.trim().to_ascii_lowercase();
+                if d.contains('-') || !is_day(&d) {
+                    return invalid("the part before # must be a single weekday");
+                }
+                match nth_part.trim().parse::<u8>() {
+                    Ok(n) if (1..=5).contains(&n) => {}
+                    _ => return invalid("the # ordinal must be 1..5 (e.g. tue#2 = 2nd Tuesday)"),
+                }
+                continue;
+            }
             for part in tok.split('-') {
                 let p = part.trim().to_ascii_lowercase();
                 if p.is_empty() {
                     return invalid("empty range bound");
                 }
-                let ok = p == "*"
-                    || NAMES.contains(&p.as_str())
-                    || p.parse::<u8>().map(|n| n <= 7).unwrap_or(false);
-                if !ok {
+                if p != "*" && !is_day(&p) {
                     return invalid(&format!("'{part}' is not a day"));
                 }
             }
