@@ -52,6 +52,36 @@ fn consumer_name(pc_id: &str) -> String {
     format!("agent_replay_{safe}")
 }
 
+/// The server-side subject filters this agent's replay consumer
+/// should carry: `commands.all`, its own `commands.pc.<id>`, and one
+/// `commands.group.<g>` per current group membership (#483).
+///
+/// Narrow filters are load-bearing at fleet scale: a `commands.>`
+/// filter would deliver every other PC's Commands to every agent
+/// (O(N²) broker fan-out — 3,000 per-PC Commands × 3,000 consumers),
+/// and — worse — would deliver *other groups'* Commands, which the
+/// old client-side `is_for_me` then accepted and executed because a
+/// non-member has no live group sub priming the dedup cache.
+fn filter_subjects(pc_id: &str, groups: &[String]) -> Vec<String> {
+    // Group subjects are sorted + deduped so the list is a
+    // deterministic function of the membership *set* — equal sets
+    // compare equal regardless of KV ordering, which both keeps the
+    // unchanged-membership comparison below honest and avoids
+    // pointless create-or-update churn on the durable.
+    let mut group_subjects: Vec<String> = groups
+        .iter()
+        .map(|g| kanade_shared::subject::commands_group(g))
+        .collect();
+    group_subjects.sort();
+    group_subjects.dedup();
+
+    let mut subjects = Vec::with_capacity(2 + group_subjects.len());
+    subjects.push(kanade_shared::subject::COMMANDS_ALL.to_string());
+    subjects.push(kanade_shared::subject::commands_pc(pc_id));
+    subjects.extend(group_subjects);
+    subjects
+}
+
 pub fn spawn(
     client: async_nats::Client,
     pc_id: String,
@@ -59,9 +89,19 @@ pub fn spawn(
     staleness: crate::staleness::Tracker,
     script_cache: ScriptCache,
     check_sink: crate::check_cache::CheckSink,
+    groups_rx: tokio::sync::watch::Receiver<Vec<String>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        run(client, pc_id, dedup, staleness, script_cache, check_sink).await;
+        run(
+            client,
+            pc_id,
+            dedup,
+            staleness,
+            script_cache,
+            check_sink,
+            groups_rx,
+        )
+        .await;
     })
 }
 
@@ -72,11 +112,26 @@ async fn run(
     staleness: crate::staleness::Tracker,
     script_cache: ScriptCache,
     check_sink: crate::check_cache::CheckSink,
+    mut groups_rx: tokio::sync::watch::Receiver<Vec<String>>,
 ) {
     let jetstream = async_nats::jetstream::new(client.clone());
     let name = consumer_name(&pc_id);
+    // Set false once the groups task drops its sender so the select
+    // arm stops polling a closed channel (a closed `changed()`
+    // resolves immediately and would busy-loop the select).
+    // Deliberately declared OUTSIDE the outer loop: a dropped sender
+    // is permanent (the groups task never restarts within a process),
+    // so the flag must survive consumer-reopen iterations.
+    let mut groups_watch_alive = true;
 
     loop {
+        // Snapshot membership BEFORE creating the consumer and mark
+        // it seen — `changed()` then wakes only on a *later* flip,
+        // so a flip racing the consumer setup still triggers a
+        // recreate rather than being lost.
+        let groups: Vec<String> = groups_rx.borrow_and_update().clone();
+        let current_filters = filter_subjects(&pc_id, &groups);
+
         let stream = nats_retry::wait_for_stream(
             &jetstream,
             &client,
@@ -85,14 +140,17 @@ async fn run(
             "command_replay",
         )
         .await;
-        let consumer = nats_retry::wait_for_consumer(
+        let consumer = nats_retry::wait_for_consumer_updating(
             &stream,
             &client,
             &staleness,
             // Stable per-agent consumer name so JetStream resumes
             // at the previous ack position across agent / broker
-            // restarts. `wait_for_consumer` clones the config each
-            // retry — pull configs are tiny so the cost is fine.
+            // restarts. `wait_for_consumer_updating` (create-or-
+            // update, not get-or-create) applies the current
+            // filter_subjects to an existing durable — required
+            // both for membership flips and for the one-time
+            // upgrade away from the old `commands.>` filter.
             &name,
             "command_replay",
             PullConfig {
@@ -104,14 +162,11 @@ async fn run(
                 // ever seen". On reconnect, the agent catches up to
                 // the freshest state without replaying old fires.
                 deliver_policy: DeliverPolicy::LastPerSubject,
-                // Stream filter is `commands.>`. We could narrow
-                // with filter_subjects to (`commands.all`,
-                // `commands.pc.<me>`, `commands.group.<g>`) but
-                // groups are dynamic and recreating the consumer on
-                // every membership flip is more complex than
-                // client-side filtering. Bandwidth at fleet sizes
-                // we care about is fine.
-                filter_subject: "commands.>".into(),
+                // #483: server-side narrowing to exactly the
+                // subjects this agent is addressed by. Membership
+                // flips break the message loop below and re-enter
+                // this setup with the fresh list.
+                filter_subjects: current_filters.clone(),
                 ..Default::default()
             },
         )
@@ -120,6 +175,7 @@ async fn run(
             stream = STREAM_EXEC,
             consumer = %name,
             pc_id = %pc_id,
+            groups = ?groups,
             "command-replay consumer ready",
         );
 
@@ -143,13 +199,55 @@ async fn run(
                 continue;
             }
         };
-        while let Some(msg) = messages.next().await {
-            let msg = match msg {
-                Ok(m) => m,
-                Err(e) => {
-                    warn!(error = %e, "replay consumer error");
-                    continue;
+        // Drain messages until either the stream ends (reopen with a
+        // pause) or group membership changes (re-enter setup
+        // immediately so the durable's filter_subjects follow the
+        // membership).
+        let mut membership_changed = false;
+        loop {
+            let msg = tokio::select! {
+                changed = groups_rx.changed(), if groups_watch_alive => {
+                    match changed {
+                        Ok(()) => {
+                            // Only recreate when the *resolved*
+                            // filters actually differ — a watch tick
+                            // that doesn't change the set (same
+                            // membership re-published, ordering
+                            // shuffle) shouldn't tear down a healthy
+                            // consumer.
+                            let next =
+                                filter_subjects(&pc_id, &groups_rx.borrow_and_update());
+                            if next == current_filters {
+                                debug!(
+                                    consumer = %name,
+                                    "group watch tick without effective membership change; keeping consumer",
+                                );
+                                continue;
+                            }
+                            info!(
+                                consumer = %name,
+                                "group membership changed; recreating replay consumer with updated filters",
+                            );
+                            membership_changed = true;
+                            break;
+                        }
+                        Err(_) => {
+                            // groups task is gone (agent shutdown in
+                            // practice); stop polling the closed
+                            // channel and keep draining messages.
+                            groups_watch_alive = false;
+                            continue;
+                        }
+                    }
                 }
+                maybe_msg = messages.next() => match maybe_msg {
+                    Some(Ok(m)) => m,
+                    Some(Err(e)) => {
+                        warn!(error = %e, "replay consumer error");
+                        continue;
+                    }
+                    None => break,
+                },
             };
             // Ack early — even if we decide to skip below (not for
             // me, duplicate, etc.), we don't want broker
@@ -164,8 +262,17 @@ async fn run(
                 }
             };
 
-            if !is_for_me(&msg.subject, &pc_id) {
-                debug!(subject = %msg.subject, "replay msg not for this pc; dropping");
+            if !is_for_me(&msg.subject, &pc_id, &groups) {
+                // warn, not debug: with server-side filter_subjects
+                // narrowing delivery, anything landing here is the
+                // rare race window (group command in flight while a
+                // membership removal propagates) — and the early ack
+                // above has already consumed it permanently, so the
+                // drop should be operator-visible (PR #540 review).
+                warn!(
+                    subject = %msg.subject,
+                    "replay msg not addressed to this agent; dropping (already acked)",
+                );
                 continue;
             }
 
@@ -201,33 +308,40 @@ async fn run(
                 }
             });
         }
+        if membership_changed {
+            // Re-enter setup immediately — the broker is healthy;
+            // we only need new filter_subjects on the durable.
+            continue;
+        }
         warn!(consumer = %name, "command-replay messages stream ended; reopening");
         nats_retry::reopen_pause().await;
     }
 }
 
 /// True when `subject` addresses this agent — `commands.all` always
-/// applies, `commands.pc.<my-id>` matches our pc_id, `commands.group.*`
-/// is left to the group sub (which has its own dedup'd flow).
-/// Conservative: when the subject doesn't fit any known pattern, drop
-/// it (broker shouldn't be sending such messages anyway).
-fn is_for_me(subject: &str, my_pc_id: &str) -> bool {
+/// applies, `commands.pc.<my-id>` matches our pc_id, and
+/// `commands.group.<g>` matches only when this agent currently
+/// belongs to `g`. Conservative: when the subject doesn't fit any
+/// known pattern, drop it.
+///
+/// The server-side `filter_subjects` already narrows delivery to
+/// exactly these subjects, so this is a belt-and-braces guard for
+/// the windows where the consumer's filters lag reality: a
+/// membership *removal* that races messages already in flight, or a
+/// pre-#483 durable that briefly still carries the old `commands.>`
+/// filter until the first create-or-update applies. The old
+/// accept-all-groups behaviour executed other groups' Commands on
+/// every non-member (#483) — the dedup cache never saw them because
+/// non-members have no live group sub.
+fn is_for_me(subject: &str, my_pc_id: &str, my_groups: &[String]) -> bool {
     if subject == kanade_shared::subject::COMMANDS_ALL {
         return true;
     }
     if let Some(pc) = subject.strip_prefix("commands.pc.") {
         return pc == my_pc_id;
     }
-    if subject.starts_with("commands.group.") {
-        // Group commands are also delivered to the live core sub
-        // (groups::manage spins one per membership). The replay
-        // path mirrors them so an agent that's offline through a
-        // group rollout catches up on reconnect. Membership is
-        // dynamic, so we'd have to consult the agent_groups KV to
-        // confirm — but the broker side caps storage and the dedup
-        // cache caps double-fire, so it's safe to just accept and
-        // let the dedup cache handle redundancy.
-        return true;
+    if let Some(group) = subject.strip_prefix("commands.group.") {
+        return my_groups.iter().any(|g| g == group);
     }
     false
 }
@@ -236,29 +350,57 @@ fn is_for_me(subject: &str, my_pc_id: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn groups(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
     #[test]
     fn commands_all_matches_anyone() {
-        assert!(is_for_me("commands.all", "pc-01"));
-        assert!(is_for_me("commands.all", "anything"));
+        assert!(is_for_me("commands.all", "pc-01", &[]));
+        assert!(is_for_me("commands.all", "anything", &groups(&["g1"])));
     }
 
     #[test]
     fn commands_pc_matches_only_owner() {
-        assert!(is_for_me("commands.pc.pc-01", "pc-01"));
-        assert!(!is_for_me("commands.pc.pc-02", "pc-01"));
+        assert!(is_for_me("commands.pc.pc-01", "pc-01", &[]));
+        assert!(!is_for_me("commands.pc.pc-02", "pc-01", &[]));
     }
 
     #[test]
-    fn commands_group_always_accepted() {
-        // Group dedup is handled upstream (live core sub spawns its
-        // own dedup'd flow). Replay just lets them through.
-        assert!(is_for_me("commands.group.canary", "pc-01"));
+    fn commands_group_matches_only_members() {
+        // #483: a non-member must NOT execute another group's
+        // replayed Command — the old accept-all behaviour ran canary
+        // scripts fleet-wide after a reboot wave.
+        let mine = groups(&["canary", "wave1"]);
+        assert!(is_for_me("commands.group.canary", "pc-01", &mine));
+        assert!(is_for_me("commands.group.wave1", "pc-01", &mine));
+        assert!(!is_for_me("commands.group.prod", "pc-01", &mine));
+        assert!(!is_for_me("commands.group.canary", "pc-01", &[]));
+        // Prefix of a real membership is still a different group.
+        assert!(!is_for_me("commands.group.can", "pc-01", &mine));
     }
 
     #[test]
     fn unknown_subject_dropped() {
-        assert!(!is_for_me("commands.weird", "pc-01"));
-        assert!(!is_for_me("results.x", "pc-01"));
+        assert!(!is_for_me("commands.weird", "pc-01", &[]));
+        assert!(!is_for_me("results.x", "pc-01", &[]));
+    }
+
+    #[test]
+    fn filter_subjects_cover_all_pc_and_groups() {
+        assert_eq!(
+            filter_subjects("pc-01", &groups(&["canary", "wave1"])),
+            vec![
+                "commands.all".to_string(),
+                "commands.pc.pc-01".to_string(),
+                "commands.group.canary".to_string(),
+                "commands.group.wave1".to_string(),
+            ],
+        );
+        assert_eq!(
+            filter_subjects("pc-01", &[]),
+            vec!["commands.all".to_string(), "commands.pc.pc-01".to_string()],
+        );
     }
 
     #[test]
