@@ -223,11 +223,30 @@ async fn write_scope(
 /// field names + types are stable enough that an open-coded match
 /// is the most readable form.
 fn apply_field(scope: &mut ConfigScope, field: &str, value: Option<&str>) -> Result<()> {
+    // #491: duration fields are humantime-validated BEFORE the KV
+    // put. The agent maps an unparseable value to a silent fallback
+    // (jitter especially used to fall back to ZERO — turning a
+    // `30minutes`-style typo into a fleet-wide simultaneous-download
+    // herd on the next rollout), so the only safe place to catch the
+    // typo is the write boundary, where the operator gets an error.
+    let parsed_duration = |field: &str, v: Option<&str>| -> Result<Option<String>> {
+        match v {
+            None => Ok(None),
+            Some(v) => {
+                humantime::parse_duration(v).with_context(|| {
+                    format!("{field}: expected a humantime duration (e.g. 30s, 10m, 1h), got {v:?}")
+                })?;
+                Ok(Some(v.to_string()))
+            }
+        }
+    };
     match field {
         "target_version" => scope.target_version = value.map(String::from),
-        "target_version_jitter" => scope.target_version_jitter = value.map(String::from),
-        "heartbeat_interval" => scope.heartbeat_interval = value.map(String::from),
-        "host_perf_interval" => scope.host_perf_interval = value.map(String::from),
+        "target_version_jitter" => {
+            scope.target_version_jitter = parsed_duration(field, value)?;
+        }
+        "heartbeat_interval" => scope.heartbeat_interval = parsed_duration(field, value)?,
+        "host_perf_interval" => scope.host_perf_interval = parsed_duration(field, value)?,
         "process_perf_enabled" => {
             scope.process_perf_enabled = match value {
                 None => None,
@@ -291,6 +310,26 @@ mod tests {
         let mut s = ConfigScope::default();
         let err = apply_field(&mut s, "nope", Some("x")).unwrap_err();
         assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn apply_field_rejects_malformed_durations() {
+        // #491: a typo'd duration must be rejected at the write
+        // boundary, never stored (the agent's parse failure falls
+        // back silently — jitter especially used to fall back to
+        // ZERO, defeating the rollout stagger fleet-wide).
+        let mut s = ConfigScope::default();
+        for field in [
+            "target_version_jitter",
+            "heartbeat_interval",
+            "host_perf_interval",
+        ] {
+            let err = apply_field(&mut s, field, Some("not-a-duration")).unwrap_err();
+            assert!(err.to_string().contains("humantime"), "{field}: {err:#}",);
+        }
+        // Unset still works for validated fields.
+        apply_field(&mut s, "target_version_jitter", None).unwrap();
+        assert!(s.target_version_jitter.is_none());
     }
 
     #[test]

@@ -205,6 +205,13 @@ async fn rollout(client: async_nats::Client, args: RolloutArgs) -> Result<()> {
     };
     scope.target_version = Some(args.version.clone());
     if let Some(j) = args.jitter.as_deref() {
+        // #491: validate BEFORE the KV put — the agent's parse
+        // failure used to silently fall back, so a typo'd jitter
+        // produced exactly the fleet-wide download herd the flag
+        // exists to prevent.
+        humantime::parse_duration(j).with_context(|| {
+            format!("--jitter: expected a humantime duration (e.g. 30s, 10m, 1h), got {j:?}")
+        })?;
         scope.target_version_jitter = Some(j.to_owned());
     }
     let payload = serde_json::to_vec(&scope).context("encode ConfigScope")?;
@@ -228,7 +235,7 @@ async fn rollout(client: async_nats::Client, args: RolloutArgs) -> Result<()> {
         println!("  kv           : {BUCKET_AGENT_CONFIG}.{key}.target_version_jitter = {j}");
     } else {
         println!(
-            "  jitter       : (unchanged — explicit `--jitter <duration>` recommended for fleets ≥ 100)"
+            "  jitter       : (unchanged; built-in default is 10m — pass `--jitter 0s` to disable the stagger)"
         );
     }
 
