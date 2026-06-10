@@ -26,10 +26,11 @@ use async_nats::jetstream::{
 use tracing::info;
 
 use crate::kv::{
-    BUCKET_AGENT_CONFIG, BUCKET_AGENT_GROUPS, BUCKET_AGENTS_STATE, BUCKET_JOBS, BUCKET_JOBS_YAML,
-    BUCKET_SCHEDULES, BUCKET_SCHEDULES_YAML, BUCKET_SCRIPT_CURRENT, BUCKET_SCRIPT_STATUS,
-    OBJECT_AGENT_RELEASES, OBJECT_APP_PACKAGES, OBJECT_RESULT_OUTPUT, OBJECT_SCRIPTS, STREAM_AUDIT,
-    STREAM_EVENTS, STREAM_EXEC, STREAM_INVENTORY, STREAM_OBS_EVENTS, STREAM_RESULTS,
+    BUCKET_AGENT_CONFIG, BUCKET_AGENT_GROUPS, BUCKET_AGENTS_STATE, BUCKET_FLEET_CONFIG,
+    BUCKET_JOBS, BUCKET_JOBS_YAML, BUCKET_SCHEDULES, BUCKET_SCHEDULES_YAML, BUCKET_SCRIPT_CURRENT,
+    BUCKET_SCRIPT_STATUS, OBJECT_AGENT_RELEASES, OBJECT_APP_PACKAGES, OBJECT_RESULT_OUTPUT,
+    OBJECT_SCRIPTS, STREAM_AUDIT, STREAM_EVENTS, STREAM_EXEC, STREAM_INVENTORY, STREAM_OBS_EVENTS,
+    STREAM_RESULTS,
 };
 
 /// Idempotently create every NATS JetStream resource the kanade
@@ -204,6 +205,18 @@ pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
     .await
     .with_context(|| format!("create_or_update_key_value {BUCKET_JOBS}"))?;
     info!(bucket = BUCKET_JOBS, "ready");
+
+    // fleet_config — #418 Phase 5 fleet-wide singletons (the global
+    // change-freeze under KEY_FREEZE). history: 1 — only the current
+    // state matters; both schedulers watch it.
+    js.create_or_update_key_value(KvConfig {
+        bucket: BUCKET_FLEET_CONFIG.into(),
+        history: 1,
+        ..Default::default()
+    })
+    .await
+    .with_context(|| format!("create_or_update_key_value {BUCKET_FLEET_CONFIG}"))?;
+    info!(bucket = BUCKET_FLEET_CONFIG, "ready");
 
     // jobs_yaml / schedules_yaml — operator source-of-truth YAML
     // alongside the JSON catalogs above. Same key shape (manifest id

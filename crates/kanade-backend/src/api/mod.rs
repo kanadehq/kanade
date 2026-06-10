@@ -10,6 +10,7 @@ pub mod checks;
 pub mod exec;
 pub mod executions;
 pub mod fleet_perf;
+pub mod freeze;
 pub mod health;
 pub mod host_perf;
 pub mod inventory;
@@ -178,6 +179,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/executions/{exec_id}", get(executions::detail))
         .route("/api/audit", get(audit::list))
         .route("/api/schedules", get(schedules::list))
+        .route("/api/freeze", get(freeze::get))
         .route("/api/scripts/status", get(scripts::list_status))
         .route("/api/jobs", get(jobs::list))
         .route("/api/jobs/{id}/yaml", get(jobs::get_yaml))
@@ -266,6 +268,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/schedules/{id}", delete(schedules::delete))
         .route("/api/schedules/{id}/disable", post(schedules::disable))
         .route("/api/schedules/{id}/enable", post(schedules::enable))
+        .route("/api/freeze", put(freeze::set).delete(freeze::clear))
         .route("/api/run", post(run::run))
         .route("/api/agents/{pc_id}/ping", post(run::ping))
         .route("/api/scripts/{cmd_id}/revoke", post(scripts::revoke))

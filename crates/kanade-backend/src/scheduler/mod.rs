@@ -17,11 +17,11 @@ use async_nats::jetstream::kv::Operation;
 use chrono::{DateTime, Duration as ChronoDuration, Local, Utc};
 use futures::{StreamExt, TryStreamExt};
 use kanade_shared::kv::{
-    BUCKET_AGENT_GROUPS, BUCKET_SCHEDULER_DISPATCH, BUCKET_SCHEDULES, dispatch_mark_pc_key,
-    dispatch_mark_target_key,
+    BUCKET_AGENT_GROUPS, BUCKET_FLEET_CONFIG, BUCKET_SCHEDULER_DISPATCH, BUCKET_SCHEDULES,
+    KEY_FREEZE, dispatch_mark_pc_key, dispatch_mark_target_key,
 };
 use kanade_shared::manifest::{
-    ExecMode, FanoutPlan, Manifest, RunsOn, Schedule, ScheduleTz, Target, When,
+    ExecMode, FanoutPlan, Freeze, Manifest, RunsOn, Schedule, ScheduleTz, Target, When,
 };
 use sqlx::Row;
 use tokio::sync::Mutex;
@@ -62,6 +62,12 @@ const DISPATCH_MARK_TTL: StdDuration = StdDuration::from_secs(60 * 60);
 const DISPATCH_KV_CONCURRENCY: usize = 16;
 
 type Registered = Arc<Mutex<HashMap<String, Uuid>>>;
+
+/// In-memory mirror of the fleet change-freeze (#418 Phase 5), kept
+/// fresh by [`spawn_freeze_watcher`]. `tick` reads this instead of a
+/// per-fire KV round-trip — the watch keeps it current without making
+/// every cron tick block on a `get_key_value` (gemini #472).
+type FreezeMirror = Arc<tokio::sync::RwLock<Option<Freeze>>>;
 
 pub async fn run(state: AppState) -> Result<()> {
     // Always create-or-attach to the schedules KV at boot so the watch
@@ -109,6 +115,22 @@ pub async fn run(state: AppState) -> Result<()> {
     sched.start().await.context("start JobScheduler")?;
     let registered: Registered = Arc::new(Mutex::new(HashMap::new()));
 
+    // #418 Phase 5: seed the fleet change-freeze mirror once, then keep
+    // it fresh with a watch task. Every `tick` reads this Arc — no
+    // per-fire KV get (gemini #472). The seed is synchronous so the
+    // first ticks already see a freeze set before this boot. A seed-
+    // read failure is logged (NOT silently treated as "not frozen" —
+    // coderabbit #472); the watch re-seeds from its initial delivery.
+    let initial_freeze = match load_freeze(&state.jetstream).await {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(error = %e, "freeze boot-seed read failed; mirror starts empty, watch will seed on connect");
+            None
+        }
+    };
+    let freeze: FreezeMirror = Arc::new(tokio::sync::RwLock::new(initial_freeze));
+    spawn_freeze_watcher(state.jetstream.clone(), freeze.clone());
+
     // 1. Initial load — register every enabled Schedule already in KV.
     //
     // Best-effort: kv.keys() against an empty bucket fails on
@@ -140,7 +162,15 @@ pub async fn run(state: AppState) -> Result<()> {
         };
         match serde_json::from_slice::<Schedule>(&entry) {
             Ok(s) if s.enabled => {
-                if let Err(e) = register(&sched, state.clone(), &registered, s.clone()).await {
+                if let Err(e) = register(
+                    &sched,
+                    state.clone(),
+                    &registered,
+                    s.clone(),
+                    freeze.clone(),
+                )
+                .await
+                {
                     warn!(error = %e, schedule_id = %s.id, "initial register failed");
                 }
             }
@@ -178,8 +208,14 @@ pub async fn run(state: AppState) -> Result<()> {
                 // Replace any existing registration so cron/manifest edits stick.
                 unregister(&sched, &registered, &sched_data.id).await;
                 if sched_data.enabled
-                    && let Err(e) =
-                        register(&sched, state.clone(), &registered, sched_data.clone()).await
+                    && let Err(e) = register(
+                        &sched,
+                        state.clone(),
+                        &registered,
+                        sched_data.clone(),
+                        freeze.clone(),
+                    )
+                    .await
                 {
                     warn!(error = %e, schedule_id = %sched_data.id, "watch register failed");
                 }
@@ -200,6 +236,7 @@ async fn register(
     state: AppState,
     registered: &Registered,
     schedule: Schedule,
+    freeze: FreezeMirror,
 ) -> Result<()> {
     // v0.23: `runs_on: agent` schedules tick on the targeted
     // agents themselves; the backend's role is just to hold the
@@ -223,8 +260,9 @@ async fn register(
     let cb = move |_uuid, _l| {
         let state = state.clone();
         let schedule = schedule_snapshot.clone();
+        let freeze = freeze.clone();
         Box::pin(async move {
-            tick(&state, schedule).await;
+            tick(&state, schedule, &freeze).await;
         }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
     };
     let job = match lowered.tz {
@@ -280,10 +318,32 @@ async fn register(
 
 /// One cron-tick body: active-window gate → catalog lookup →
 /// target resolution → policy decision → publish or skip.
-async fn tick(state: &AppState, schedule: Schedule) {
+async fn tick(state: &AppState, schedule: Schedule, freeze: &FreezeMirror) {
     let schedule_id = schedule.id.clone();
     let job_id = schedule.job_id.clone();
     let lowered = schedule.lowered();
+
+    // 0-) Fleet-wide change-freeze (#418 Phase 5). The most global
+    //     gate, so it runs first — a frozen fleet shouldn't even
+    //     resolve catalogs or targets. Read from the in-memory mirror
+    //     (kept fresh by `spawn_freeze_watcher`) so the hot path never
+    //     blocks on a KV get (gemini #472). Clone the reason out under
+    //     the read lock, then release before logging/returning.
+    let frozen_reason = {
+        let guard = freeze.read().await;
+        guard
+            .as_ref()
+            .filter(|f| f.is_active(Utc::now()))
+            .map(|f| f.reason.clone())
+    };
+    if let Some(reason) = frozen_reason {
+        tracing::info!(
+            %schedule_id,
+            reason = reason.as_deref().unwrap_or(""),
+            "scheduler tick: fleet change-freeze active — skip",
+        );
+        return;
+    }
 
     // 0) Dormant outside the optional `active.{from,until}` window
     //    (#418 decision G). Cheapest check first — a finished
@@ -495,6 +555,84 @@ async fn dispatch(
             false
         }
     }
+}
+
+/// Decode a fleet-freeze blob, failing *safe* on corruption: a
+/// mangled value becomes a default (empty-window = always-active)
+/// [`Freeze`] so the schedulers skip rather than punch through a
+/// freeze the operator clearly set (mirrors the constraints.window
+/// fail-closed direction).
+fn parse_freeze_or_safe(bytes: &[u8]) -> Freeze {
+    serde_json::from_slice::<Freeze>(bytes).unwrap_or_else(|e| {
+        warn!(error = %e, "fleet freeze blob is corrupt — failing safe (treating fleet as frozen)");
+        Freeze::default()
+    })
+}
+
+/// One-shot read of the current fleet change-freeze (#418 Phase 5)
+/// from the `fleet_config`/`freeze` KV singleton. `Ok(None)` ⇒ not
+/// frozen (key absent); `Err` ⇒ the read itself failed (broker
+/// trouble) — the caller must NOT conflate that with "not frozen"
+/// (coderabbit #472). Used to seed the mirror at boot; thereafter
+/// [`spawn_freeze_watcher`] keeps it fresh.
+async fn load_freeze(js: &async_nats::jetstream::Context) -> Result<Option<Freeze>> {
+    let kv = js
+        .get_key_value(BUCKET_FLEET_CONFIG)
+        .await
+        .context("open fleet_config KV")?;
+    match kv.get(KEY_FREEZE).await.context("get freeze key")? {
+        Some(bytes) => Ok(Some(parse_freeze_or_safe(&bytes))),
+        None => Ok(None),
+    }
+}
+
+/// Keep the [`FreezeMirror`] current by tailing the `fleet_config` KV
+/// (#418 Phase 5). A `put` on `KEY_FREEZE` refreshes it; a `delete`
+/// clears it (= thawed). Reopens the watch on any stream error so a
+/// transient broker hiccup doesn't leave the mirror permanently stale.
+/// This replaces a per-tick `get_key_value` on the hot path (gemini
+/// #472) — `tick` only reads the in-memory Arc.
+fn spawn_freeze_watcher(js: async_nats::jetstream::Context, freeze: FreezeMirror) {
+    tokio::spawn(async move {
+        loop {
+            let kv = match js.get_key_value(BUCKET_FLEET_CONFIG).await {
+                Ok(kv) => kv,
+                Err(e) => {
+                    warn!(error = %e, "freeze watcher: fleet_config KV unavailable; retrying");
+                    tokio::time::sleep(StdDuration::from_secs(5)).await;
+                    continue;
+                }
+            };
+            let mut watch = match kv.watch_all().await {
+                Ok(w) => w,
+                Err(e) => {
+                    warn!(error = %e, "freeze watcher: watch_all failed; retrying");
+                    tokio::time::sleep(StdDuration::from_secs(5)).await;
+                    continue;
+                }
+            };
+            while let Some(entry) = watch.next().await {
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(e) => {
+                        warn!(error = %e, "freeze watcher: watch entry error; reopening");
+                        break;
+                    }
+                };
+                if entry.key != KEY_FREEZE {
+                    continue;
+                }
+                let next = match entry.operation {
+                    Operation::Put => Some(parse_freeze_or_safe(&entry.value)),
+                    Operation::Delete | Operation::Purge => None,
+                };
+                let frozen = next.is_some();
+                *freeze.write().await = next;
+                info!(frozen, "fleet change-freeze mirror updated");
+            }
+            // watch ended (None) — reopen.
+        }
+    });
 }
 
 /// In-flight suppression window for one schedule's dispatch marks —

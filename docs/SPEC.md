@@ -354,7 +354,7 @@ mgmtctl logs <deploy_id>        # 結果ログ取得
 
 | Subject | 用途 |
 |---|---|
-| `kill.{job_id}` | 特定ジョブの即時停止 |
+| `kill.{exec_id}` | 特定 exec (1 発火/デプロイ) の実行中プロセス即時停止 |
 | `kill.all` | 全ジョブ即時停止 (緊急時) |
 | `config.update` | 設定変更通知 |
 
@@ -1045,7 +1045,7 @@ if matches!(policy.mode, Mode::Strict) && staleness > policy.max_cache_age {
 
 ### 2.6.3 第3層: 実行中の緊急停止
 
-Agent は子プロセス起動と同時に `kill.{job_id}` を subscribe し、`tokio::select!` で `child.wait()` / `kill_sub.next()` / timeout を競争させる。kill 受信で `child.kill()` を呼び、結果は `ExecOutcome::Killed` として publish される (`run_as: user / system_gui` の Win32 path も oneshot bridge 経由で同じ経路に集約)。
+Agent は子プロセス起動と同時に `kill.{exec_id}` を subscribe し、`tokio::select!` で `child.wait()` / `kill_sub.next()` / timeout を競争させる。kill 受信で `child.kill()` を呼び、結果は `ExecOutcome::Killed` として publish される (`run_as: user / system_gui` の Win32 path も oneshot bridge 経由で同じ経路に集約)。
 
 ```rust
 // crates/kanade-agent/src/process.rs::run_command_with_kill (抜粋)
@@ -1073,7 +1073,7 @@ SPA / CLI から見える "止める" 操作は以下の 3 種類。それぞれ
 
 | 起点 | in-flight 子プロセス | publish 済 / 未実行 | 未来の fire |
 |---|---|---|---|
-| **(a) exec を発行したやつを止める** (`kanade kill <jid>` / SPA) | `kill.{job_id}` publish (Layer 3) | `kanade revoke <cmd_id>` (Layer 2) | n/a (単発 exec) |
+| **(a) exec を発行したやつを止める** (`kanade kill <exec_id>` / SPA) | `kill.{exec_id}` publish (Layer 3) | `kanade revoke <cmd_id>` (Layer 2) | n/a (単発 exec) |
 | **(b) job (Manifest) を delete** (`kanade job delete <id>` / SPA) | (a) と同じ kill cascade | **delete 操作が同時に `script_status: REVOKED` を書く** (cascade 必須) | `BUCKET_JOBS` から消えるので backend `kanade exec` 経路 + agent local_scheduler 経路ともに自然停止 |
 | **(c) schedule を無効化** (`enabled: false` / SPA) | オプション (`--cascade-kill`) | オプション (`--cascade-revoke`) | `BUCKET_SCHEDULES` の `enabled: false` で backend scheduler + agent local_scheduler ともに次 tick で停止 |
 
@@ -1097,6 +1097,30 @@ job を消すと「以後の `kanade exec` は失敗する」 (manifest 不在) 
 
 SPA の Schedule ページに「無効化」 (default = soft) と「無効化 + 進行中も停止」 (hard) の 2 ボタンを置く。CLI は `kanade schedule disable <name>` / `kanade schedule disable <name> --cascade`。
 
+> **実装状況 (v0.43)**: 現状の `--cascade` は **Layer 2 の revoke のみ** (`script_status.{job_id} = REVOKED`)。**Layer 3 の in-flight kill はまだ束ねていない** (`crates/kanade-backend/src/api/schedules.rs` の `disable` ハンドラ参照)。理由は (1) kill が `kill.{exec_id}` キーに進化したため (§2.6.3 — 旧 `kill.{job_id}` ブロードキャストは廃止)、`schedule`(= `job_id`) から実行中の子を全部撃つには in-flight な exec_id の列挙 (`execution_results.finished_at IS NULL`) が要る、(2) 実行中スクリプトの強制終了は部分適用リスク (インストール途中等) があり、`revoke` (未来を止めるだけ) と違って **deliberate な明示操作にしておきたい**、(3) kill は online 限定なので hard-disable に混ぜると「全部止まった」錯覚を生む。**将来 `--cascade-kill` を別フラグ**として足す (revoke と混ぜない) のが設計方針。
+
+#### (d) fleet 全体を凍結する (`kanade freeze` — #418 Phase 5)
+
+(a)〜(c) は **job / schedule / exec 単位**の停止。これに対し **fleet 全体の「変更凍結」**を一発でかける緊急スイッチが `kanade freeze`。`fleet_config`/`freeze` KV シングルトンに [`Freeze`](`kanade-shared/src/manifest.rs`) を書き、backend scheduler と全 agent の local_scheduler が **tick 冒頭でゲート**して全スケジュールの発火を止める。
+
+- **粒度**: fleet 全体 (job/schedule を問わない)。空窓 = 無期限凍結 (インシデントの非常停止)、`{from, until}` = 計画凍結 (年末変更凍結など、自動 thaw)。
+- **どの層か**: **3 層の手前・上流**。freeze は「未来の fire を tick で止める」だけで、**Layer 1/2/3 のどれにも触らない** — publish 済みの Command も実行中の子プロセスも止めない。「絶対走らせたくない」「今すぐ全部殺す」は引き続き revoke(L2) / kill(L3) の領分。
+- **`handle_command` には入れない** (意図的): 入れると operator の手動 `kanade exec/run` まで凍結され、インシデント中の復旧オペが止まる。freeze は **スケジュール自動化を止め、手動オペは通す**。
+- **オフライン**: agent は `fleet_config` を **watch するバックグラウンドタスク**で freeze を `State` にミラーし、`local_tick` はそのキャッシュを読む (per-tick KV get なし)。online 中にかかった freeze は last-known として**オフラインでも効く**が、agent が**既にオフラインの間**に新規にかけた freeze は再接続して watch が再 seed するまで届かない (KV を読めないため)。起動時はリコンサイル前に同期 prime して、boot 直後の tick が起動前 freeze を素通りしないようにする。
+- **fail-safe**: 壊れた freeze blob は frozen 扱い (constraints.window の fail-closed と同方向) — 雑な手編集で凍結を素通りさせない。
+
+#### 「止める」操作の粒度マップ (まとめ)
+
+| 操作 | 粒度 | コマンド | 止める対象 | オフライン |
+|---|---|---|---|---|
+| **freeze** | 🌐 fleet 全体 | `kanade freeze set` | 全 schedule の**未来の発火** (tick ゲート) | キャッシュ済みなら効く / 凍結中の新規設定は届かない |
+| schedule 無効化 (soft) | 📋 schedule | `kanade schedule disable <id>` | その schedule の未来 tick (`enabled:false`) | — (次 tick で停止) |
+| schedule 無効化 (hard) | 📋 schedule + L2 | `kanade schedule disable <id> --cascade` | 上 ＋ **L2 revoke** (job 単位) | ✅ 再接続時 skip |
+| **L2 revoke** | 📦 job | `kanade revoke <job_id>` | その job 由来の**未実行 Command を skip** | ✅ 再接続時も skip |
+| **L3 kill** | ⚡ exec (1 発火) | `kanade kill <exec_id>` | **実行中の子プロセス**を kill | ❌ online のみ |
+
+粒度は **fleet 全体 → schedule → job → exec** と細かくなり、時間軸では **未来を止める** (freeze / disable / `enabled:false`) → **未実行を止める** (L2 revoke) → **実行中を止める** (L3 kill) と下りていく。freeze は最も粗い「fleet 全体の未来」を埋めるピース。
+
 ### 2.6.5 イベント永続化 (revoke の遅延配送)
 
 `BUCKET_SCRIPT_STATUS` の KV watch は agent が online な瞬間しか push を受け取れない。長期オフライン端末が再接続したとき、最新状態 (= REVOKED) は KV watch の初期スナップショットで取得できるが、**「いつ revoke されたか」「途中 unrevoke を経由したか」 は KV だけだと再構成できない**。これは Layer 2 が「最新状態だけ知っていれば十分」という設計であるため、原則として問題ありません。
@@ -1110,7 +1134,7 @@ SPA の Schedule ページに「無効化」 (default = soft) と「無効化 + 
 | Layer 1 stream config (`max_messages_per_subject: 1`) | backend bootstrap (`kanade-shared/src/bootstrap.rs`) |
 | Layer 2 KV watch + cache + staleness check | agent (`commands::handle_command` + 新規 `staleness::Tracker`) |
 | Layer 2 cascade on job delete / schedule hard-disable | backend HTTP API + CLI |
-| Layer 3 `kill.{job_id}` subscribe + child kill | agent (`process::run_command_with_kill`) |
+| Layer 3 `kill.{exec_id}` subscribe + child kill | agent (`process::run_command_with_kill`) |
 | 最終 connectivity timestamp 追跡 | agent (`async_nats::Client::state()` watcher) |
 | Exit code 規約 (`125 = deadline missed`, `127 = staleness check failed`) | shared (`kanade-shared/src/exec_result.rs`) |
 | SPA UI (revoke / kill / cascade ボタン + 進行中 job 一覧) | `kanade-backend/web/src/pages/` (Jobs / Schedules / Results) |
@@ -1121,7 +1145,7 @@ SPA の Schedule ページに「無効化」 (default = soft) と「無効化 + 
 |---|---|---|---|
 | 古い版が agent に届く | broker | `STREAM_EXEC` + LastPerSubject replay | ✅ 再接続時に最新だけ受信 |
 | 受信したけど古い / revoked を実行する | agent | KV `script_current` / `script_status` 照合 + staleness policy | `strict` で skip / `cached` で実行 (Manifest 側で選択) |
-| 既に走っているプロセスを止める | agent | `kill.{job_id}` subscribe + `child.kill()` | ❌ 不可 (online のみ) |
+| 既に走っているプロセスを止める | agent | `kill.{exec_id}` subscribe + `child.kill()` | ❌ 不可 (online のみ) |
 | job 削除 = 派生する exec / schedule fire も止める | backend + agent | delete 操作が `script_status: REVOKED` cascade | Layer 2 経由で次回 fire 時に skip |
 | schedule 無効化 = soft / hard 選択 | backend + SPA | enabled: false (soft) / + revoke + kill cascade (hard) | Layer 2 経由で次回 fire 時に skip |
 
