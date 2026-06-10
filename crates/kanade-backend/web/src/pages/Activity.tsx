@@ -133,11 +133,14 @@ export function Activity() {
   const [since, setSince] = useState('24h');
   const [limit, setLimit] = useState(50);
 
-  const sinceIso = useMemo(() => {
-    const preset = SINCE_PRESETS.find((p) => p.value === since);
-    if (!preset?.ms) return null;
-    return new Date(Date.now() - preset.ms).toISOString();
-  }, [since]);
+  // #519: only the preset's window LENGTH lives in render — the
+  // `since` lower bound is computed inside queryFn (the HistoryPane
+  // pattern) so each refetch re-anchors to Date.now() instead of the
+  // moment the preset was picked.
+  const sinceMs = useMemo(
+    () => SINCE_PRESETS.find((p) => p.value === since)?.ms ?? null,
+    [since],
+  );
 
   const dPcId         = useDebouncedValue(pcId,         FILTER_DEBOUNCE_MS);
   const dJobId        = useDebouncedValue(jobId,        FILTER_DEBOUNCE_MS);
@@ -162,13 +165,18 @@ export function Activity() {
     if (dStdoutFilter) sp.set('stdout', dStdoutFilter);
     if (dStderrFilter) sp.set('stderr', dStderrFilter);
     if (status)        sp.set('status', status);
-    if (sinceIso)      sp.set('since', sinceIso);
     return sp.toString();
-  }, [dPcId, dJobId, dExecId, dStdoutFilter, dStderrFilter, status, sinceIso, limit]);
+  }, [dPcId, dJobId, dExecId, dStdoutFilter, dStderrFilter, status, limit]);
 
   const { data, error, isLoading, isFetching } = useQuery({
-    queryKey: ['results', queryString],
-    queryFn: () => apiFetch<ResultRow[]>(`/api/results?${queryString}`),
+    // Preset key (not a computed ISO) keeps the cache partitioned
+    // per window without millisecond-tick invalidation (#519).
+    queryKey: ['results', queryString, since],
+    queryFn: () => {
+      const sp = new URLSearchParams(queryString);
+      if (sinceMs) sp.set('since', new Date(Date.now() - sinceMs).toISOString());
+      return apiFetch<ResultRow[]>(`/api/results?${sp.toString()}`);
+    },
   });
 
   // v0.27: Layer 3 kill — POST /api/jobs/{job_id}/kill. v0.29 / Issue

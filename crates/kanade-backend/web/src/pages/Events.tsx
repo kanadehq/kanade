@@ -211,11 +211,16 @@ export function Events() {
   const [since, setSince] = useState(search.get('since') ?? '24h');
   const [limit, setLimit] = useState(Number(search.get('limit')) || 200);
 
-  const sinceIso = useMemo(() => {
-    const preset = SINCE_PRESETS.find((p) => p.value === since);
-    if (!preset?.ms) return null;
-    return new Date(Date.now() - preset.ms).toISOString();
-  }, [since]);
+  // #519: only the preset's window LENGTH is derived in render — the
+  // actual `from` lower bound is computed inside queryFn (the
+  // HistoryPane pattern) so every refetch re-anchors to Date.now().
+  // The previous render-time ISO froze the window at preset-pick
+  // time: an operator leaving the tab open saw "Last 1h" silently
+  // grow into "since whenever I opened this page".
+  const sinceMs = useMemo(
+    () => SINCE_PRESETS.find((p) => p.value === since)?.ms ?? null,
+    [since],
+  );
 
   const dPcId         = useDebouncedValue(pcId,         FILTER_DEBOUNCE_MS);
   const dPayloadKey   = useDebouncedValue(payloadKey,   FILTER_DEBOUNCE_MS);
@@ -257,13 +262,18 @@ export function Events() {
       sp.set('payload_key', dPayloadKey);
       sp.set('payload_value', dPayloadValue);
     }
-    if (sinceIso) sp.set('from', sinceIso);
     return sp.toString();
-  }, [dPcId, kindsInc, kindsExc, sourcesInc, sourcesExc, dPayloadKey, dPayloadValue, sinceIso, limit]);
+  }, [dPcId, kindsInc, kindsExc, sourcesInc, sourcesExc, dPayloadKey, dPayloadValue, limit]);
 
   const { data, error, isLoading, isFetching } = useQuery({
-    queryKey: ['obs_events', queryString],
-    queryFn: () => apiFetch<ListResponse>(`/api/obs_events?${queryString}`),
+    // The preset key (not a computed ISO) partitions the cache per
+    // window without invalidating on every millisecond tick (#519).
+    queryKey: ['obs_events', queryString, since],
+    queryFn: () => {
+      const sp = new URLSearchParams(queryString);
+      if (sinceMs) sp.set('from', new Date(Date.now() - sinceMs).toISOString());
+      return apiFetch<ListResponse>(`/api/obs_events?${sp.toString()}`);
+    },
   });
 
   // Chip vocabularies come from the backend's DISTINCT lists so the
