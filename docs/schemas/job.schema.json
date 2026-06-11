@@ -1,0 +1,484 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Manifest",
+  "description": "YAML job manifest (= registered \"what to run\", v0.18.0+).\n\nOwns only script-intrinsic fields. **Who** (`target`), **how to\nphase fanout** (`rollout`), and **when to stagger start**\n(`jitter`) all moved to the Schedule / exec request side — same\nscript can now be fired against different targets / rollouts\nwithout copying the script body.\n\n#492: these types are READ fleet-wide (agents decode them from\nBUCKET_JOBS / BUCKET_SCHEDULES and inside live Commands), so they\nmust tolerate unknown fields — `deny_unknown_fields` here made a\ngradually-upgrading fleet's OLD agents reject the whole object\nthe moment a newer backend added any field. Operator typo\nprotection (the old reason for the attribute) lives at the WRITE\nboundaries instead: `kanade job/schedule create` and the backend\nPOST extractor parse via [`crate::strict`], which rejects unknown\nkeys with their full paths. The wire rule: new fields always get\n`#[serde(default)]` (+ `skip_serializing_if` while old readers\nmay still be strict).",
+  "type": "object",
+  "properties": {
+    "check": {
+      "title": "290: opt-in marker that this job is an operator-defined",
+      "description": "**health check** whose result feeds the Client App's Health\ntab over KLP (`StateSnapshot.checks`). The script prints a\nfree-form JSON object on stdout (like any inventory job); the\nagent reads the [`CheckHint::status_field`] value dynamically\ninto a [`crate::ipc::state::Check`] named `check.name`.\nCadence / windows / conditions come from\nthe job's Schedule (exactly like inventory) — there is\ndeliberately no interval here. **Composes with `inventory:`**:\nthe script's stdout is one JSON object, so a check can also\ncarry an `inventory:` block to project the rest of that object\n(incl. `explode` sub-tables) for SPA fleet-querying. Only\n`emit:` (NDJSON stdout) is incompatible.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CheckHint"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "client": {
+      "title": "291: opt-in marker that this job is offered to **end users**",
+      "description": "in the Client App's job tabs over KLP (`jobs.list` →\n`jobs.execute`). Parallel to [`inventory`] / [`check`] /\n[`emit`]: the block's mere presence is the opt-in, and it\ngroups the end-user presentation fields (name / category /\nicon) that only make sense for a user-facing job. `None`\n(the default) ⇒ an operator-only job — inventory, checks,\nscheduled maintenance — that never surfaces in the catalog.\n\nThe agent re-reads this at every `jobs.list` / `jobs.execute`\n(SPEC §2.1), so removing the block takes a job out of a\nrunning client on its next action.\n\n[`inventory`]: Manifest::inventory\n[`check`]: Manifest::check\n[`emit`]: Manifest::emit",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ClientHint"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "description": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "emit": {
+      "description": "Issue #246: opt-in marker that this job emits per-line\nobservability events on stdout (one JSON `ObsEvent` per\nnewline). When present, the agent — after the script exits\nsuccessfully — parses each non-empty stdout line as an\n`ObsEvent`, publishes it on `obs.<pc_id>` via the\n`obs_outbox`, and (intentionally) **omits the stdout from\nthe `ExecResult`** so the timeline data doesn't double up\nin `execution_results.stdout` (which would multiply rows\nby ~50/day/PC of noise).\n\nDistinct from `inventory:` (single JSON object → projector\nupsert) — events are append-only timeline points consumed\nby the dedicated `obs_events` table.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EmitConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "execute": {
+      "$ref": "#/$defs/Execute"
+    },
+    "id": {
+      "type": "string"
+    },
+    "inventory": {
+      "description": "Opt-in marker that this job produces a JSON inventory fact\npayload on stdout. When present, the backend's results\nprojector parses `ExecResult.stdout` as JSON and upserts an\n`inventory_facts` row keyed by `(pc_id, manifest.id)`. The\n`display` sub-config drives the SPA's Inventory page render.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/InventoryHint"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "require_approval": {
+      "type": "boolean",
+      "default": false
+    },
+    "staleness": {
+      "description": "v0.26: Layer 2 staleness policy (SPEC.md §2.6.2). Controls\nwhat the agent does at fire time when it can't verify the\n`script_current` / `script_status` KV values are fresh —\nespecially relevant for `runs_on: agent` schedules where\nthe agent may fire from cache while offline. Defaults to\n`Staleness::Cached` (silently use cached values), which\nmatches every pre-v0.26 Manifest.",
+      "$ref": "#/$defs/Staleness",
+      "default": {
+        "mode": "cached"
+      }
+    },
+    "version": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "version",
+    "execute"
+  ],
+  "$defs": {
+    "CheckHint": {
+      "description": "Manifest sub-section (#290): marks a job as an operator-defined\n**health check**. Parallel to [`InventoryHint`] / `EmitConfig`.\nThe stdout contract is a free-form JSON object (same as any\ninventory job) from which the agent reads `status_field` /\n`detail_field` to build the KLP [`crate::ipc::state::Check`] shown\non the Client App's Health tab.\n\nThere is deliberately **no timing field** — when / how often /\nin which window a check runs is driven by the job's Schedule,\nexactly like inventory jobs, so operators get the full `when:` /\nrollout / `runs_on` expressiveness for free.\n\nA check's stdout is a **free-form inventory object** (arbitrary\nkey/value pairs + arrays) — same as any inventory job — that also\ncarries a status field. `check:` adds only the health semantics on\ntop: which field is the ok/warn/fail/unknown status, an optional\none-line summary field, and a remediation job. Everything else\n(rich per-PC detail, `explode` sub-tables like a software list) is\ndriven by a co-present [`InventoryHint`] and rendered with the\nSAME display logic the SPA Inventory page uses — on the Client App\ntoo. This keeps checks maximally expressive without a bespoke\npayload type.",
+      "type": "object",
+      "properties": {
+        "detail_field": {
+          "description": "Top-level stdout field used as the Health-tab row's one-line\nsummary. Defaults to `\"detail\"`; absent in the payload → no\ndetail line (the rich breakdown lives in the inventory view).",
+          "type": "string",
+          "default": "detail"
+        },
+        "fleet": {
+          "title": "290 PR-E: when `true` (default), the backend also projects this",
+          "description": "check's `status` / `detail` into the `check_status` table so the\noperator SPA gets a fleet-wide compliance view for free — no\n`inventory:` block needed. Set `fleet: false` for a client-only\ncheck the operator doesn't want surfaced across the fleet.",
+          "type": "boolean",
+          "default": true
+        },
+        "name": {
+          "description": "Stable check id → [`Check.name`](crate::ipc::state::Check),\nthe SPA/Client React key + analytics label. Unique within the\nfleet's check set.",
+          "type": "string"
+        },
+        "status_field": {
+          "description": "Top-level stdout field whose string value\n(`ok`/`warn`/`fail`/`unknown`) becomes the Health-tab light\n([`CheckStatus`](crate::ipc::state::CheckStatus)). Defaults to\n`\"status\"`; a missing / unparseable value → `unknown`.",
+          "type": "string",
+          "default": "status"
+        },
+        "troubleshoot": {
+          "description": "Optional remediation job id →\n[`Check.troubleshoot`](crate::ipc::state::Check). The Client\nApp shows a \"修復する\" button when present; that job must be\n`user_invokable`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    "ClientHint": {
+      "description": "Manifest sub-section (#291): marks a job as **user-invokable**\nfrom the Client App and carries how it presents to the end user.\nParallel to [`InventoryHint`] / [`CheckHint`] / `EmitConfig` —\nthe block's presence is the opt-in (no separate boolean), and its\nrequired fields (`name`, `category`) are enforced by serde at\nparse time, so a half-filled catalog entry fails\n`kanade job create` instead of rendering a nameless / tab-less row.\n\nThe agent maps this 1:1 into the KLP\n[`UserInvokableJob`](crate::ipc::jobs::UserInvokableJob) wire shape\nthat `jobs.list` returns; the Client App renders one row per job in\nthe tab named by `category`.",
+      "type": "object",
+      "properties": {
+        "category": {
+          "description": "Which Client App tab the job lives in (`software_update` →\nアップデート, `troubleshoot` → 困ったとき, `catalog` → software\ncatalog). Required — without it the agent can't place the job\nin a tab.",
+          "$ref": "#/$defs/JobCategory"
+        },
+        "description": {
+          "description": "Optional one-line subtitle under `name` in the Client App.\nDistinct from the operator-facing top-level\n[`Manifest::description`] — this one is written for the end\nuser. Maps to `UserInvokableJob::display_description`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "icon": {
+          "description": "Optional icon hint for the job row — a lucide-react icon name\nor a `data:` URL. `None` ⇒ the Client App falls back to the\ncategory's default icon. Surfaced verbatim in\n`jobs.list[].icon`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "End-user-facing title for the job row. The operator-internal\n`Manifest::id` slug is rarely what an end user should read, so\nthis is required (and validated non-empty by\n[`Manifest::validate`]). Maps to `UserInvokableJob::display_name`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "category"
+      ]
+    },
+    "DisplayField": {
+      "type": "object",
+      "properties": {
+        "columns": {
+          "description": "v0.30 / #39: when `kind == \"table\"`, the SPA renders the\nfield's value (an array of objects like\n`disks: [{ device_id, size_bytes, ... }]`) as a nested\nsub-table using these columns. Each column is itself a\n`DisplayField`, so the nested cells reuse the same render\nhints (`bytes`, `number`, `timestamp`) — no parallel format\npipeline. Ignored for any other `kind`.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/DisplayField"
+          }
+        },
+        "field": {
+          "description": "Top-level key in the stdout JSON.",
+          "type": "string"
+        },
+        "label": {
+          "description": "Human-readable column header.",
+          "type": "string"
+        },
+        "type": {
+          "description": "Optional render hint — `\"number\"`, `\"bytes\"`, `\"timestamp\"`,\nor `\"table\"` (#39). Defaults to plain text rendering on the\nSPA side. `\"table\"` expects the field's value to be a JSON\narray of objects and renders a nested sub-table on the\nper-PC detail page using `columns` as the schema; the fleet\nsummary view falls back to showing the row count for\n`\"table\"` cells so the wide list stays compact.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "field",
+        "label"
+      ]
+    },
+    "EmitConfig": {
+      "description": "Issue #246 — `emit:` manifest block for jobs whose stdout is\nNDJSON observability events (one `ObsEvent` per line). Parallel\nto `inventory:` but for the append-only timeline pipeline; see\n`Manifest::emit` for the full contract.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "description": "What kind of payload the agent should expect on stdout. Only\n`events` is defined today (parses each non-empty line as\n`ObsEvent` and publishes on `obs.<pc_id>`); future variants\n(e.g. metrics streams, structured trace events) plug in here.",
+          "$ref": "#/$defs/EmitKind"
+        },
+        "watermark_path": {
+          "description": "Operator hint for where the script keeps its own state — the\nwatermark file the PowerShell / sh body reads + writes\nbetween runs so it only emits NEW events since the last\npoll. The agent doesn't read this; it's documentation that\nthe SPA (and `kanade job edit`) can surface to operators\nreviewing the manifest. Optional; the script is allowed to\nkeep state anywhere (registry, env, etc.) — the field's\npresence makes the convention discoverable.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    "EmitKind": {
+      "description": "`emit.type` enum. Lowercase serde so manifests read\n`type: events` rather than `Events`.",
+      "oneOf": [
+        {
+          "description": "Per-line `ObsEvent` JSON. Agent parses + publishes on\n`obs.<pc_id>`, drops the stdout from the resulting\n`ExecResult`.",
+          "type": "string",
+          "const": "events"
+        }
+      ]
+    },
+    "Execute": {
+      "type": "object",
+      "properties": {
+        "cwd": {
+          "description": "Working directory for the spawned child (v0.21.1). When\nunset, the child inherits the agent's cwd — on Windows that\nmeans `%SystemRoot%\\System32` for the prod service, which is\nalmost never what operators actually want. Use an absolute\npath; relative paths are passed through to the OS verbatim.\n`%PROGRAMDATA%` works for `run_as: system`; for `run_as: user`\nyou'd want `%USERPROFILE%` (but expansion happens in the\nshell, so write `$env:USERPROFILE` for PowerShell, or set\nit via teravars before `kanade job create`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "run_as": {
+          "description": "Token + session combination the agent uses to launch the\nscript (v0.21). Default = [`RunAs::System`] (Session 0,\nLocalSystem privileges, no GUI) — matches pre-v0.21 behavior.",
+          "$ref": "#/$defs/RunAs",
+          "default": "system"
+        },
+        "script": {
+          "description": "Inline script body. Mutually exclusive with [`script_file`]\nand [`script_object`]; exactly one of the three must be set\n(enforced by [`Execute::validate_script_source`] at the\nwrite-side parse boundaries — `kanade job create` and\n`POST /api/jobs`).\n\nEmpty string is treated as **unset** so operators can swap\nto a `script_file:` / `script_object:` alternative just by\ncommenting out the body, without having to also drop the\n`script:` key entirely.\n\n[`script_file`]: Self::script_file\n[`script_object`]: Self::script_object",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "script_file": {
+          "description": "Repo-local file path resolved by the operator-side CLI at\n`kanade job create` time. The CLI reads the file, slots its\ncontents into `script`, and clears this field before\nPOSTing — so the backend / agents never see `script_file`\nin stored manifests. SPEC §2.4.1.\n\nResolver lands in a follow-up PR\n(yukimemi/kanade#210); today this field passes parse-time\nvalidation but the operator-side CLI bails with \"not yet\nimplemented\" until the resolver ships, so manifests that\nreach the backend with `script_file` set are treated as a\nschema-bug.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "script_object": {
+          "description": "Object Store reference (`<name>/<version>`) into the\n`scripts` bucket (`OBJECT_SCRIPTS`). Agents fetch the body\nat Execute time via `/api/script-objects/{name}/{version}`\nand cache it locally. SPEC §2.4.1.\n\nResolver lands in the same follow-up PR as `script_file`;\ntoday this field passes parse-time validation but the\nbackend / agent exec paths bail with \"not yet implemented\"\nwhen they see it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "shell": {
+          "$ref": "#/$defs/ExecuteShell"
+        },
+        "timeout": {
+          "description": "humantime duration string (e.g. \"30s\", \"10m\"). Script-intrinsic\n— represents how long this script reasonably takes to run.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "shell",
+        "timeout"
+      ]
+    },
+    "ExecuteShell": {
+      "type": "string",
+      "enum": [
+        "powershell",
+        "cmd"
+      ]
+    },
+    "ExplodeColumn": {
+      "description": "One column in an [`ExplodeSpec`]'s derived table.",
+      "type": "object",
+      "properties": {
+        "field": {
+          "description": "JSON key under each array element. Becomes the column name\nin the derived SQLite table — we don't rename.",
+          "type": "string"
+        },
+        "index": {
+          "description": "When true, the projector creates a `CREATE INDEX` on this\ncolumn at table-creation time. Boost for the common-filter\ncolumns (`name`, `version`) — operators mark them\nexplicitly, the projector won't guess.",
+          "type": "boolean",
+          "default": false
+        },
+        "type": {
+          "description": "SQLite affinity: `\"text\"` (default), `\"integer\"`, `\"real\"`.\nStorage maps directly via `sqlx::query.bind(...)`; type\nmismatches at INSERT-time fail loudly rather than silently\ndropping the row.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "field"
+      ]
+    },
+    "ExplodeSpec": {
+      "description": "v0.31 / #40: declarative \"flatten this JSON array into a real\nSQLite table\" spec on an inventory manifest. The projector\ncreates the table on first registration (CREATE TABLE IF NOT\nEXISTS + indexes) and writes a row per element of\n`payload[field]` on every result, scoped by (pc_id, job_id) so\neach PC's rows replace cleanly without a per-PC schema.",
+      "type": "object",
+      "properties": {
+        "columns": {
+          "description": "Per-element fields that become columns in the derived table.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExplodeColumn"
+          }
+        },
+        "field": {
+          "description": "JSON array key under the payload to explode. E.g. `\"apps\"`\nfor `payload: { apps: [{...}, {...}] }`.",
+          "type": "string"
+        },
+        "primary_key": {
+          "description": "Element-level fields that uniquely identify a row inside one\nPC's payload. The full PK is `(pc_id, job_id) + these\ncolumns`. Required — operators must think about uniqueness\n(e.g. `[\"name\", \"source\"]` for installed apps because the\nsame name appears in multiple uninstall hives).\n\nv0.31 / #41: same tuple drives history identity. When\n`track_history` is on, the projector serialises these\nfields' values into `inventory_history.identity_json` for\nevery change event, so queries like \"every PC that ever\ninstalled Chrome (any source)\" filter on identity_json\ncontent without a per-manifest schema.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "table": {
+          "description": "Derived SQLite table name. Operators choose this — pick\nsomething namespaced + stable (`inventory_sw_apps`, not\n`apps`) so multiple inventory manifests don't collide on a\ngeneric name.",
+          "type": "string"
+        },
+        "track_history": {
+          "description": "v0.31 / #41: when true (default false), the projector\ndiffs each PC's incoming payload against the prior rows\nfor the same (pc_id, job_id) BEFORE the DELETE-then-INSERT\nreplace, and writes added / removed / changed events into\n`inventory_history`. Lets operators answer time-dimension\nquestions (\"when did Chrome 120 first appear on PC X?\",\n\"what's the Win 11 23H2 rollout curve\") without storing\nper-scan snapshots. Off by default so operators opt in\nper-spec — history has a real storage cost on long-lived\ndeployments (mitigated by the 90-day default retention\nsweeper, see `cleanup` module).",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "field",
+        "table",
+        "primary_key",
+        "columns"
+      ]
+    },
+    "InventoryHint": {
+      "description": "Manifest sub-section: how the SPA should render the inventory\nfacts this job produces. Each field name (`field`) is a top-level\nkey in the stdout JSON, e.g. `hostname`, `ram_gb`.\n\nTwo render modes:\n  * `display` — vertical \"field / value\" per PC, used by the\n    `/inventory?pc=<id>` detail view. ALL columns the operator\n    wants visible on the detail page.\n  * `summary` — horizontal table across the fleet (row = PC,\n    column = field) on `/inventory`. Optional; when omitted the\n    SPA falls back to `display`, but operators usually want a\n    trimmer \"hostname / OS / CPU / RAM\" set for the fleet view.",
+      "type": "object",
+      "properties": {
+        "display": {
+          "description": "Detail-view columns, in order.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DisplayField"
+          }
+        },
+        "explode": {
+          "description": "v0.31 / #40: payload arrays that should be exploded into\nper-element rows of a derived SQLite table. Lets operators\nanswer cross-PC questions (\"which PCs still have Chrome <\n120?\", \"C: >90% full\") with normal SQL filters + indexes\ninstead of grepping JSON. The projector creates the derived\ntable on register and replaces this PC's rows on each result\n(DELETE WHERE pc_id=? AND job_id=? + bulk INSERT). See\n[`ExplodeSpec`] for the per-spec schema.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/ExplodeSpec"
+          }
+        },
+        "history_scalars": {
+          "description": "v0.35 / #93: top-level scalar fields whose changes the\nprojector logs to `inventory_history` (one event per\nchanged field per scan). Pairs with `explode[].track_history`\n— that covers array elements; this covers single-valued\nfields like `ram_bytes` / `os_version` / `cpu_model` /\n`os_build` that operators want to track for \"did the RAM\nget upgraded?\" / \"when did Win 11 land on this PC?\" /\n\"BIOS / firmware bumped?\" questions. Field name = `field_path`\nin the history row, `identity_json` is NULL, `before_json`\n/ `after_json` each carry `{\"value\": <prior or new value>}`.\nFirst-ever observation of a scalar (no prior facts row)\nemits `added`; subsequent value changes emit `changed`. No\n`removed` events — a scalar disappearing from the payload\nis rare and the operator can still see the last value via\nthe `before_json` of the most recent change.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "summary": {
+          "description": "Optional fleet-list columns (row = PC). Defaults to `display`\nwhen omitted, but operators usually pick a 3-5 column subset.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/DisplayField"
+          }
+        }
+      },
+      "required": [
+        "display"
+      ]
+    },
+    "JobCategory": {
+      "description": "Job category from the manifest's `category:` field. Drives which\nClient App tab the job appears in. `#[non_exhaustive]` leaves\nroom for SPEC additions (new tabs) without a wire bump.",
+      "oneOf": [
+        {
+          "description": "Chrome / Edge / Office / runtime updaters. Appears in the\n\"アップデート\" tab.",
+          "type": "string",
+          "const": "software_update"
+        },
+        {
+          "description": "Teams cache clear, Office repair, network reset, … Appears\nin the \"困ったとき\" tab.",
+          "type": "string",
+          "const": "troubleshoot"
+        },
+        {
+          "description": "Self-service install catalog. Appears in the software\ncatalog tab.",
+          "type": "string",
+          "const": "catalog"
+        },
+        {
+          "title": "492: serde-level forward-compat catch-all. `#[non_exhaustive]`",
+          "description": "only affects Rust match exhaustiveness — serde still hard-fails\non an unknown variant STRING, so a newer peer's new variant\nused to make older readers reject the whole containing message.\nUnknown decodes any unrecognised value; UIs render it neutrally.",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
+    },
+    "RunAs": {
+      "description": "**Token + session combination** the agent uses to spawn a job's\nchild process. Two orthogonal axes — *whose privileges* and *which\nsession* — collapse into three meaningful combinations:\n\n| variant            | session                | privileges  | GUI |\n|--------------------|------------------------|-------------|-----|\n| `System` (default) | Session 0 (services)   | LocalSystem | ❌  |\n| `User`             | active console session | logged-in user (UAC-filtered when admin) | ✅ |\n| `SystemGui`        | active console session | LocalSystem | ✅  |\n\n`SystemGui` is the \"PsExec `-i -s`\" pattern: the agent duplicates\nits own SYSTEM token and rewrites `TokenSessionId` to the user's\nconsole session, then launches with that hybrid token — useful\nwhen an installer needs admin power *and* needs the user to see\nits UI.",
+      "oneOf": [
+        {
+          "description": "LocalSystem privileges in Session 0. No GUI. Historical\ndefault — every pre-v0.21 job ran this way.",
+          "type": "string",
+          "const": "system"
+        },
+        {
+          "description": "The currently-logged-in console user's identity, in their\nsession. Can write HKCU / %APPDATA% / show GUI to the user.\nPrivileges are whatever the user has (admin users get the\nUAC-filtered limited token, not the elevated one).",
+          "type": "string",
+          "const": "user"
+        },
+        {
+          "description": "LocalSystem privileges in the user's session — admin power\nwith GUI visibility. Niche but real (force-restart dialogs,\nadmin installers with progress UI).",
+          "type": "string",
+          "const": "system_gui"
+        }
+      ]
+    },
+    "Staleness": {
+      "description": "Staleness policy declared on a Manifest, forwarded onto each\nemitted Command. Internally tagged via `mode` so YAML reads\nnaturally:\n\n```yaml\nstaleness:\n  mode: strict\n  max_cache_age: 5m\n```\n\n`Cached` and `Unchecked` carry no payload, so they collapse to\njust `staleness: { mode: cached }` / `staleness: { mode: unchecked }`.",
+      "oneOf": [
+        {
+          "description": "Use whatever the agent has cached for `script_current` /\n`script_status`, no age limit. Silently proceed if the entries\nare missing. Historical default — every pre-v0.26 Manifest\nreads as this on deserialize, so introducing the field is\nfully back-compatible.",
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "const": "cached"
+            }
+          },
+          "required": [
+            "mode"
+          ]
+        },
+        {
+          "description": "Only run when the agent can verify reasonably-fresh KV state.\n\"Reasonably fresh\" = the last confirmed connection to the\nbroker happened within `max_cache_age` (NATS KV watch is\npush-based, so while connected the cache is provably up to\ndate; the timer only starts when the agent disconnects). When\nthe window expires the agent attempts a live `kv.get()`; if\n*that* also fails the agent publishes a synthetic skipped\nresult with `exit_code = 127`.",
+          "type": "object",
+          "properties": {
+            "max_cache_age": {
+              "description": "Humantime duration (e.g. `\"0s\"`, `\"5m\"`, `\"1h\"`). Required\nfor `strict` mode — there's no implicit default because\nthe right answer is workload-specific.\n\n`0s` is the conservative choice — agent must be online\nright now. Larger values trade urgency for tolerance to\nbrief network blips.",
+              "type": "string"
+            },
+            "mode": {
+              "type": "string",
+              "const": "strict"
+            }
+          },
+          "required": [
+            "mode",
+            "max_cache_age"
+          ]
+        },
+        {
+          "description": "Skip Layer 2 entirely — don't look at `script_current` or\n`script_status`. Use only for fully idempotent local scripts\nwhere revoke semantics don't make sense.",
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "const": "unchecked"
+            }
+          },
+          "required": [
+            "mode"
+          ]
+        }
+      ]
+    }
+  }
+}

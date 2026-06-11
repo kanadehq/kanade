@@ -1,0 +1,373 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Schedule",
+  "description": "Periodic schedule (spec §2.4.3). v0.18.0 carries the fanout plan\n(target + optional rollout + optional jitter) inline; the\nreferenced job (`job_id` → [`BUCKET_JOBS`]) supplies only the\nscript body. Two schedules of the same job can target different\ngroups on different cadences without copying the manifest.\n\n#418 Phase 1: the cadence is the single [`When`] field. The old\n`cron` × `mode` × `cooldown` × `auto_disable_when_done` quartet\nis gone (no back-compat — pre-Phase-1 KV blobs fail to parse and\nare warn-skipped; re-`schedule create` to upgrade them). The\nengine underneath is unchanged: [`Schedule::lowered`] maps `when`\nonto the same (cron, ExecMode, cooldown) trio the scheduler and\n`decide_fire` always ran on.",
+  "type": "object",
+  "properties": {
+    "active": {
+      "description": "Optional validity window. Outside `[from, until)` the\nschedule is dormant — still registered, still visible, but\nevery tick is skipped (deleted ≠ dormant: a campaign that\nended stays inspectable and can be re-armed by editing the\nwindow). Checked at tick time on both the backend scheduler\nand the agent's local scheduler.",
+      "$ref": "#/$defs/Active"
+    },
+    "constraints": {
+      "title": "418 operational constraints gating *when within an active",
+      "description": "period* a fire may happen: a maintenance `window`, a fleet\n`max_concurrent` cap, and `skip_dates` (holiday exclusion). The\nwall-clock ones are evaluated in the schedule's `tz`; future\n`require` (env gates) lands in the same namespace. Checked at\ntick time on both schedulers (and surfaced by `preview`).",
+      "$ref": "#/$defs/Constraints"
+    },
+    "deadline_at": {
+      "description": "Absolute time the scheduler stamps on each emitted Command\nwhen this exec was driven by a [`Schedule`] with\n`starting_deadline`. Agents receiving a Command after this\ninstant publish a synthetic skipped-result instead of\nrunning the script. `None` (default) = no deadline / catch\nup whenever delivered. Operators don't usually set this\ndirectly — the scheduler computes it from `tick_at +\nstarting_deadline`.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "enabled": {
+      "type": "boolean",
+      "default": true
+    },
+    "id": {
+      "type": "string"
+    },
+    "jitter": {
+      "description": "Optional humantime jitter; agent uses it to randomise\nexecution start. Lives here (not on the script) so different\nschedules / ad-hoc fires of the same job can pick different\nstagger windows.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "job_id": {
+      "description": "Key into [`crate::kv::BUCKET_JOBS`]. Must equal a registered\nManifest's `id`.",
+      "type": "string"
+    },
+    "on_failure": {
+      "title": "418 Phase 4: what to do after a fire's script comes back",
+      "description": "failed. Currently just `retry` (fixed-backoff in-process\nre-run); future `notify` / `disable` join the same namespace.\nApplied fire-side in `handle_command` (the retry policy is\nlowered onto every Command this schedule produces), so it\ncovers both `runs_on` locations.",
+      "$ref": "#/$defs/OnFailure"
+    },
+    "rollout": {
+      "description": "Optional wave rollout — when present, the backend publishes\neach wave's group subject on its own delay schedule instead\nof fanning out the `target` block in one go. `target` then\nonly labels the deploy for the audit log.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Rollout"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "runs_on": {
+      "description": "v0.23: where does the cron tick happen? `Backend` (default,\nhistorical) = backend's scheduler fires Commands via NATS;\nagents passively receive. `Agent` = each targeted agent runs\nits own internal cron and fires locally, so the schedule\nkeeps ticking even when the broker is unreachable (laptop on\nthe train, broker maintenance window, full WAN outage). The\ntwo locations are mutually exclusive — when `Agent`, the\nbackend scheduler stays out and just keeps the definition in\nKV for agents to read.",
+      "$ref": "#/$defs/RunsOn",
+      "default": "backend"
+    },
+    "starting_deadline": {
+      "description": "v0.22: optional humantime window after a cron tick during\nwhich the Command is still considered \"live\". The scheduler\ncomputes `tick_at + starting_deadline` and stamps it onto\neach Command as `deadline_at`; agents skip Commands they\nreceive after that absolute time. `None` (default) = no\ndeadline, meaning a Command queued in the broker / stream\nduring agent downtime runs whenever the agent reconnects —\ngood for kitting / inventory / cleanup. Set this for\ntime-of-day notifications, lunch reminders, etc., where\n\"fire 3 hours late\" would be wrong.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "target": {
+      "$ref": "#/$defs/Target",
+      "default": {
+        "all": false,
+        "groups": [],
+        "pcs": []
+      }
+    },
+    "tz": {
+      "title": "418 Phase 2: the timezone this schedule's wall-clock fields",
+      "description": "are evaluated in — both the calendar `at` firing time AND the\n`active.{from,until}` window bounds. `local` (default) = the\nrunning host's TZ (the agent's for `runs_on: agent`, the\nbackend server's otherwise); `utc` for TZ-independent\nschedules. Reconcile shapes (`per_pc`/`per_target`) ignore it\nfor firing (poll cron runs every minute regardless) but still\nhonor it for the `active` window.",
+      "$ref": "#/$defs/ScheduleTz",
+      "default": "local"
+    },
+    "when": {
+      "description": "When to fire — a reconcile cadence (`per_pc` / `per_target`)\nor a calendar time trigger (`at` / `days`). See [`When`].\n\n`singleton_map`: serde_yaml 0.9 renders externally-tagged\nenums as `!per_pc` YAML tags by default; this keeps the\noperator-facing map shape (`when: { per_pc: once }`). JSON\noutput is identical either way, and the schemars schema\n(external tagging = oneOf of single-key objects) already\nmatches the singleton-map wire shape.",
+      "$ref": "#/$defs/When"
+    }
+  },
+  "required": [
+    "id",
+    "when",
+    "job_id"
+  ],
+  "$defs": {
+    "Active": {
+      "description": "Optional validity window for a [`Schedule`] (#418 decision G).\nHalf-open `[from, until)`; either bound may be omitted. Bounds\nare `YYYY-MM-DD` (= that day's 00:00 in the schedule's `tz`) or\nfull RFC3339 (offset is honored as-is, `tz` ignored). Kept as\nstrings so the JSON Schema the SPA editor consumes stays two\nplain string fields, mirroring `jitter` / `starting_deadline`.\n\n#418 Phase 2: bounds are evaluated in the schedule's top-level\n`tz` (was UTC-only in Phase 1) so `tz: local` makes both the\ncalendar `at` AND the `active` window local — one consistent\ntimezone per schedule.",
+      "type": "object",
+      "properties": {
+        "from": {
+          "description": "Dormant before this instant.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "until": {
+          "description": "Dormant from this instant on (exclusive).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "CalendarSpec": {
+      "description": "Calendar time trigger (#418 Phase 2). `at` is either a time of\nday (`\"HH:MM\"`, repeating — combine with `days`) or a full\ndate+time (`\"YYYY-MM-DD HH:MM\"`, a one-shot that fires once and\nnever again). Evaluated in the schedule's top-level `tz`.",
+      "type": "object",
+      "properties": {
+        "at": {
+          "description": "`\"HH:MM\"` (24h) for a repeating trigger, or\n`\"YYYY-MM-DD HH:MM\"` (hyphen / slash / `T` separators all\naccepted) for a one-shot. Parsed lazily —\n[`Schedule::validate`] rejects garbage at create time.",
+          "type": "string"
+        },
+        "days": {
+          "description": "Day-of-week filter for a time-of-day `at`: `[\"mon-fri\"]`,\n`[\"mon\",\"wed\",\"fri\"]`, … (passed verbatim to the cron DOW\nfield, so ranges and names both work). An **nth-weekday**\n`[\"tue#2\"]` fires only on the 2nd Tuesday of each month\n(\"Patch Tuesday\"); the ordinal is `1..5`. A **last-weekday**\n`[\"friL\"]` fires only on the last Friday of each month (handy\nfor monthly maintenance). Empty = every day. Must be empty\nwhen `at` carries a date (the date already pins the day).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "at"
+      ]
+    },
+    "Constraints": {
+      "description": "Operational constraints on a [`Schedule`] (#418 Phase 3). Where\n[`Active`] decides *over what date range* a schedule is live,\n`Constraints` decides *when, within an active period,* a fire is\nallowed. `window` (a maintenance time-of-day window) and\n`max_concurrent` (a fleet-wide running-instance cap) so far;\n`require` (env gates) joins this struct in a later phase.",
+      "type": "object",
+      "properties": {
+        "max_concurrent": {
+          "description": "Fleet-wide cap on how many instances of this schedule's job may\nrun **at the same time** (#418 \"同時実行ハード上限\"). The\nbackend scheduler counts the job's still-in-flight runs\n(`execution_results.finished_at IS NULL`) each tick and only\ndispatches to as many remaining pcs as there are free slots —\na rolling window that refills as runs complete. Useful for\ndisk/CPU/network-heavy jobs you don't want hammering the whole\nfleet at once.\n\n**Backend-only** (it needs a central counter): combining it\nwith `runs_on: agent` is rejected by [`Schedule::validate`]\n(#418 decision E — \"中央上限には中央が要る\"). Most meaningful\nfor `per_pc` reconcile cadences, where the poll re-ticks and\nrefills slots. `None` (default) = no cap.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "skip_dates": {
+          "description": "Calendar dates the schedule must **not** fire on — holidays,\nblackout days, one-off freeze dates (#418 \"祝日除外\"). Each is\n`YYYY-MM-DD`, evaluated as a wall-clock date in the schedule's\n`tz`. Applies to every `when` shape (a reconcile cadence skips\nthe whole day; a calendar fire landing on the date is\nsuppressed) and is honored by both the live scheduler and\n`preview`, since both gate on [`Constraints::allows`]. Empty\n(default) = no skips. Operator-supplied: there is no built-in\nholiday calendar — list the dates you care about. Parsed lazily;\n[`Schedule::validate`] rejects a malformed date at create time.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "window": {
+          "description": "`\"HH:MM-HH:MM\"` wall-clock window (evaluated in the schedule's\n`tz`). Fires outside it are skipped — mainly for reconcile\ncadences (\"patrol every 6h, but only fire overnight\") and\ndaytime change-freezes. `start > end` crosses midnight\n(`\"22:00-05:00\"` = 22:00 through 05:00 next morning). Parsed\nlazily; [`Schedule::validate`] rejects garbage at create time.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "EverySpec": {
+      "description": "`{ every: <humantime> }`. Standalone struct (not an inline\nstruct variant). `{ evry: 6h }` still fails to parse (the\nrequired `every` key is missing), and the create boundaries\nreject the unknown `evry` via [`crate::strict`] with its path —\nwhile agents reading a future writer's extra fields tolerate\nthem (#492).",
+      "type": "object",
+      "properties": {
+        "every": {
+          "description": "Humantime interval (`10m`, `6h`, `1d`...). Parsed lazily —\n[`Schedule::validate`] rejects garbage at create time.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "every"
+      ]
+    },
+    "OnFailure": {
+      "description": "What to do when a fire's script fails (#418 Phase 4 — the \"高\"\nretry/backoff gap). Where [`Constraints`] gates *whether* a fire\nhappens, `OnFailure` decides what happens *after* one ran and\ncame back bad. Only `retry` so far; future `notify` / `disable`\nwould join the same namespace.",
+      "type": "object",
+      "properties": {
+        "retry": {
+          "description": "Re-run the script in-process when it exits non-zero (or times\nout), up to a cap, with a fixed backoff between attempts.\n`None` (default) = no retry: a failed run is published as-is\nand (for reconcile cadences) simply re-fires on the next poll\ntick. See [`Retry`].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Retry"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "OnceLiteral": {
+      "description": "Single-variant enum so serde accepts exactly the string `once`\n(a free-form `String` would swallow typos like `onec`).",
+      "type": "string",
+      "enum": [
+        "once"
+      ]
+    },
+    "PerPolicy": {
+      "description": "`once` vs `{ every: <humantime> }` — shared by `per_pc` /\n`per_target`. Untagged so the YAML stays the bare keyword or a\none-key map, nothing more ceremonial.",
+      "anyOf": [
+        {
+          "description": "The bare string `once`: succeed once, then skip permanently\n(cooldown = infinity).",
+          "$ref": "#/$defs/OnceLiteral"
+        },
+        {
+          "description": "Re-arm after the humantime interval, e.g. `{ every: 6h }`.",
+          "$ref": "#/$defs/EverySpec"
+        }
+      ]
+    },
+    "Retry": {
+      "description": "Fixed-backoff retry policy (#418 Phase 4). `max` is the number of\n*additional* attempts after the first run (so `max: 3` = up to 4\ntotal executions); `backoff` is the humantime delay slept between\nattempts. The retry happens fire-side (inside `kanade fire` /\n`handle_command`) on every OS for the PoC — the Windows-native\n\"restart on failure\" Task Scheduler path is deferred to the\nnative-delegation phase (#418 decision H).",
+      "type": "object",
+      "properties": {
+        "backoff": {
+          "description": "Humantime delay slept between attempts (`\"10m\"`, `\"30s\"`).",
+          "type": "string"
+        },
+        "max": {
+          "description": "Max additional attempts after the first failure. Bounded\n`1..=10` by [`Schedule::validate`] — a typo'd `max: 1000`\nwith a short backoff would otherwise pin a flapping script in\na tight loop for the whole window.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "max",
+        "backoff"
+      ]
+    },
+    "Rollout": {
+      "type": "object",
+      "properties": {
+        "strategy": {
+          "$ref": "#/$defs/RolloutStrategy",
+          "default": "wave"
+        },
+        "waves": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Wave"
+          }
+        }
+      },
+      "required": [
+        "waves"
+      ]
+    },
+    "RolloutStrategy": {
+      "type": "string",
+      "enum": [
+        "wave"
+      ]
+    },
+    "RunsOn": {
+      "description": "v0.23 — where the cron tick fires from.",
+      "oneOf": [
+        {
+          "description": "Backend's central scheduler ticks and publishes Commands to\nNATS. Historical default, what every pre-v0.23 schedule\nuses. Agent offline ⇒ Command queued in STREAM_EXEC; agent\nreconnects ⇒ catch-up via [`command_replay`](crate)\n(see kanade-agent's command_replay module).",
+          "type": "string",
+          "const": "backend"
+        },
+        {
+          "description": "Each targeted agent runs the cron tick locally. Survives\nbroker / WAN outages. Best for laptops / mobile devices that\nroam off the corporate network. Agent must be online for the\ninitial schedule + job-catalog pull, but once cached the\nagent fires the script standalone.",
+          "type": "string",
+          "const": "agent"
+        }
+      ]
+    },
+    "ScheduleTz": {
+      "description": "The timezone a schedule's wall-clock fields (`when.at`,\n`active.{from,until}`) are evaluated in (#418 Phase 2).",
+      "oneOf": [
+        {
+          "description": "The running host's local timezone — the agent's for\n`runs_on: agent`, the backend server's otherwise. Default.",
+          "type": "string",
+          "const": "local"
+        },
+        {
+          "description": "UTC — for timezone-independent schedules.",
+          "type": "string",
+          "const": "utc"
+        }
+      ]
+    },
+    "Target": {
+      "type": "object",
+      "properties": {
+        "all": {
+          "type": "boolean",
+          "default": false
+        },
+        "groups": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "pcs": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "Wave": {
+      "type": "object",
+      "properties": {
+        "delay": {
+          "description": "humantime delay measured from the deploy's publish time. wave[0]\ntypically has \"0s\"; subsequent waves use minutes / hours.",
+          "type": "string"
+        },
+        "group": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "group",
+        "delay"
+      ]
+    },
+    "When": {
+      "title": "418 Phase 1 — the single \"when does this fire\" axis.",
+      "description": "Replaces the old `cron` + `mode` + `cooldown` trio whose\ninteractions were implicit (cron doubled as both a real\ntime-of-day trigger and a reconcile poll period; contradictory\ncombinations silently no-opped). Two shapes:\n\n* **reconcile** (`per_pc` / `per_target`) — desired-state: \"each\n  pc (or one delegate) should have run this within `every`\".\n  The poll period is system-generated ([`POLL_CRON`], every\n  minute) and no longer the operator's concern.\n* **calendar** (`{ at, days }`) — a wall-clock time trigger\n  (#418 Phase 2, replacing the old raw-cron escape hatch). Fires\n  the whole target at the given time, no dedup. `at: \"09:00\"` +\n  `days` repeats; `at: \"2026-06-10 09:00\"` (a date+time) fires\n  exactly once. Evaluated in the schedule's top-level `tz`.",
+      "oneOf": [
+        {
+          "description": "Fire at each targeted pc: `once` (kitting — succeed once,\nskip forever, forever catching brand-new / re-imaged pcs)\nor `{ every: <humantime> }` (patrol — re-arm per pc after\nthe interval).",
+          "type": "object",
+          "properties": {
+            "per_pc": {
+              "$ref": "#/$defs/PerPolicy"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "per_pc"
+          ]
+        },
+        {
+          "description": "Fire until **any** one pc of the target succeeds, then skip\nthe whole target (`once`) or re-arm after `every`. Needs\nfleet-wide completion data, so it is backend-only —\n`runs_on: agent` + `per_target` is rejected by\n[`Schedule::validate`].",
+          "type": "object",
+          "properties": {
+            "per_target": {
+              "$ref": "#/$defs/PerPolicy"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "per_target"
+          ]
+        },
+        {
+          "description": "Calendar time trigger: `{ at: \"09:00\", days: [mon-fri] }`\n(repeating) or `{ at: \"2026-06-10 09:00\" }` (one-shot). Fires\nthe whole target at that wall-clock time in the schedule's\n`tz` — no dedup, no cooldown.",
+          "type": "object",
+          "properties": {
+            "calendar": {
+              "$ref": "#/$defs/CalendarSpec"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "calendar"
+          ]
+        }
+      ]
+    }
+  }
+}
