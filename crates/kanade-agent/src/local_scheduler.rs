@@ -256,8 +256,10 @@ impl State {
 }
 
 /// Does this schedule target the given agent? Pure function for
-/// testability — `pc_id` and `my_groups` are the agent's own.
-fn target_includes(schedule: &Schedule, pc_id: &str, my_groups: &[String]) -> bool {
+/// testability — `pc_id` and `my_groups` are the agent's own. Shared
+/// with the KLP `maintenance.list` handler so its upcoming-fire
+/// preview applies exactly the same targeting the live tick does.
+pub(crate) fn target_includes(schedule: &Schedule, pc_id: &str, my_groups: &[String]) -> bool {
     let t = &schedule.plan.target;
     if t.all {
         return true;

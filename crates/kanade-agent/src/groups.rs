@@ -243,7 +243,11 @@ async fn apply_delta(
     }
 }
 
-fn parse_groups(bytes: &[u8]) -> Vec<String> {
+/// Deserialize an `agent_groups.{pc_id}` KV value into the membership
+/// list, treating a malformed blob as empty (logged). Shared with the
+/// KLP `maintenance.list` handler so the preview resolves group
+/// targeting exactly the way the live subscriber does.
+pub(crate) fn parse_groups(bytes: &[u8]) -> Vec<String> {
     match serde_json::from_slice::<AgentGroups>(bytes) {
         Ok(g) => g.groups,
         Err(e) => {
