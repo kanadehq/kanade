@@ -1,6 +1,6 @@
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use tracing::warn;
@@ -48,12 +48,18 @@ pub struct ListParams {
     pub q: Option<String>,
     /// Cap on rows returned. Absent → unbounded (the full list).
     pub limit: Option<u32>,
+    /// #495: rows to skip — server-side paging for the Agents table.
+    /// Absent → 0. The pre-LIMIT match count rides back in the
+    /// `X-Total-Count` response header so the body stays a plain
+    /// `Vec<AgentRow>` and existing consumers (PcPicker, Dashboard)
+    /// are untouched.
+    pub offset: Option<u32>,
 }
 
 pub async fn list(
     State(pool): State<SqlitePool>,
     Query(params): Query<ListParams>,
-) -> Result<Json<Vec<AgentRow>>, StatusCode> {
+) -> Result<(HeaderMap, Json<Vec<AgentRow>>), StatusCode> {
     // Turn `q` into a bound LIKE pattern, escaping the LIKE
     // metacharacters so a host literally named `pc_1` or `web%` is
     // matched verbatim rather than as a wildcard. `\` is the escape
@@ -76,22 +82,56 @@ pub async fn list(
     // SQL a single static string (sqlx 0.9 rejects dynamically-built
     // query strings).
     let limit = params.limit.map(i64::from).unwrap_or(-1);
+    let offset = params.offset.map(i64::from).unwrap_or(0);
+
+    // #495: pre-LIMIT match count for the paging header. The agents
+    // table is one row per PC (bounded by fleet size), so the COUNT
+    // is cheap — and skipped entirely for unbounded callers
+    // (PcPicker / Dashboard pass no limit, so the row count IS the
+    // total; PR #559 review, gemini).
+    let needs_count = params.limit.is_some();
+    let counted: i64 = if !needs_count {
+        0
+    } else {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM agents \
+         WHERE (?1 IS NULL OR pc_id LIKE ?1 ESCAPE '\\' OR hostname LIKE ?1 ESCAPE '\\')",
+        )
+        .bind(&like)
+        .fetch_one(&pool)
+        .await
+        .map_err(|e| {
+            warn!(error = %e, "count agents");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+    };
 
     let rows = sqlx::query(
         "SELECT * FROM agents \
          WHERE (?1 IS NULL OR pc_id LIKE ?1 ESCAPE '\\' OR hostname LIKE ?1 ESCAPE '\\') \
          ORDER BY updated_at DESC \
-         LIMIT ?2",
+         LIMIT ?2 OFFSET ?3",
     )
-    .bind(like)
+    .bind(&like)
     .bind(limit)
+    .bind(offset)
     .fetch_all(&pool)
     .await
     .map_err(|e| {
         warn!(error = %e, "list agents");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    Ok(Json(rows.into_iter().map(row_to_agent).collect()))
+
+    let total: i64 = if needs_count {
+        counted
+    } else {
+        offset + rows.len() as i64
+    };
+    let mut headers = HeaderMap::new();
+    if let Ok(v) = total.to_string().parse() {
+        headers.insert("X-Total-Count", v);
+    }
+    Ok((headers, Json(rows.into_iter().map(row_to_agent).collect())))
 }
 
 pub async fn detail(
@@ -156,16 +196,41 @@ mod tests {
     }
 
     async fn ids(pool: SqlitePool, q: Option<&str>, limit: Option<u32>) -> Vec<String> {
-        let Json(rows) = list(
+        let (_headers, Json(rows)) = list(
             State(pool),
             Query(ListParams {
                 q: q.map(Into::into),
                 limit,
+                offset: None,
             }),
         )
         .await
         .unwrap();
         rows.into_iter().map(|r| r.pc_id).collect()
+    }
+
+    #[tokio::test]
+    async fn offset_pages_and_total_header_reports_match_count() {
+        // #495: server-side paging — page 2 skips page 1's rows, and
+        // X-Total-Count carries the pre-LIMIT match count.
+        let pool = seeded_pool().await;
+        let (headers, Json(page2)) = list(
+            State(pool),
+            Query(ListParams {
+                q: None,
+                limit: Some(1),
+                offset: Some(1),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(page2.len(), 1);
+        let total: i64 = headers
+            .get("X-Total-Count")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse().ok())
+            .expect("total header present");
+        assert_eq!(total, 4, "seeded fleet has exactly four agents");
     }
 
     #[tokio::test]

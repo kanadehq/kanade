@@ -8,11 +8,21 @@ import { ErrorCard } from '@/components/ErrorCard';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
 import { JsonOutput } from '@/components/ui/json-output';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { apiFetch } from '@/lib/api';
+import { apiFetch, apiFetchPaged } from '@/lib/api';
+import { useDebouncedValue } from '@/lib/hooks';
 import type { AgentGroups, AgentRow, EffectiveConfigResponse, Heartbeat } from '@/lib/types';
 import { cn, fmtIsoLocal, isAgentOnline } from '@/lib/utils';
+
+// #495: server-side page size. The endpoint supports q/limit/offset;
+// 50 rows keeps the polled payload and the rendered DOM bounded
+// regardless of fleet size (the page previously rendered the whole
+// fleet every 30 s tick).
+const PAGE_SIZE = 50;
+// Same debounce the other list pages use for typed filters.
+const FILTER_DEBOUNCE_MS = 300;
 
 // Liveness filter for the list, shared with the URL `?status=` param
 // so the Dashboard's fleet-health tiles can deep-link straight to the
@@ -52,16 +62,45 @@ function fmtBytes(v: number | null): string {
 
 export function Agents() {
   const { t } = useTranslation('agents');
+  const [q, setQ] = useState('');
+  const [offset, setOffset] = useState(0);
+  const dQ = useDebouncedValue(q, FILTER_DEBOUNCE_MS);
   const { data, error, isLoading } = useQuery({
-    queryKey: ['agents'],
+    queryKey: ['agents', dQ, offset],
     // Match the Dashboard cadence so the per-row online/offline badge
     // ages out a dropped agent within ~30s of the fleet-health tile.
-    queryFn: () => apiFetch<AgentRow[]>('/api/agents'),
+    queryFn: () =>
+      apiFetchPaged<AgentRow[]>(
+        `/api/agents?limit=${PAGE_SIZE}&offset=${offset}${dQ ? `&q=${encodeURIComponent(dQ)}` : ''}`,
+      ),
     refetchInterval: 30_000,
   });
+  const total = data?.total ?? 0;
   const [result, setResult] = useState<ActionResult | null>(null);
+  // #495 (was: one shared mutation.isPending greyed out the action
+  // buttons on every row): track pending pc_ids in a Set so only the
+  // row actually in flight disables — the pattern Jobs/Activity use.
+  const [pendingPcs, setPendingPcs] = useState<Set<string>>(new Set());
+  const markPending = (pcId: string, on: boolean) =>
+    setPendingPcs((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(pcId);
+      else next.delete(pcId);
+      return next;
+    });
   const [searchParams, setSearchParams] = useSearchParams();
   const statusFilter = parseStatusFilter(searchParams.get('status'));
+
+  // A new search (or status-chip change) resets to page 1 — a stale
+  // offset against a narrower result set would show an empty page.
+  // Adjusted during render (not useEffect) so the reset lands BEFORE
+  // the query fires, avoiding one wasted fetch at the old offset
+  // (PR #559 review, gemini + claude).
+  const [prevFilterKey, setPrevFilterKey] = useState({ dQ, statusFilter });
+  if (prevFilterKey.dQ !== dQ || prevFilterKey.statusFilter !== statusFilter) {
+    setPrevFilterKey({ dQ, statusFilter });
+    setOffset(0);
+  }
 
   const setStatusFilter = (next: StatusFilter) => {
     setSearchParams(
@@ -99,24 +138,31 @@ export function Agents() {
 
   const doPing = async (pcId: string) => {
     setResult({ pc_id: pcId, action: 'ping', value: '…' });
+    markPending(pcId, true);
     try {
       const r = await ping.mutateAsync(pcId);
       setResult({ pc_id: pcId, action: 'ping', value: r });
     } catch (e) {
       setResult({ pc_id: pcId, action: 'ping', value: (e as Error).message });
+    } finally {
+      markPending(pcId, false);
     }
   };
   const doEffective = async (pcId: string) => {
     setResult({ pc_id: pcId, action: 'effective', value: '…' });
+    markPending(pcId, true);
     try {
       const r = await effective.mutateAsync(pcId);
       setResult({ pc_id: pcId, action: 'effective', value: r });
     } catch (e) {
       setResult({ pc_id: pcId, action: 'effective', value: (e as Error).message });
+    } finally {
+      markPending(pcId, false);
     }
   };
   const doGroups = async (pcId: string) => {
     setResult({ pc_id: pcId, action: 'groups', value: t('groupsLoading') });
+    markPending(pcId, true);
     try {
       const current = await groupsGet.mutateAsync(pcId);
       const next = window.prompt(
@@ -135,6 +181,8 @@ export function Agents() {
       setResult({ pc_id: pcId, action: 'groups', value: updated });
     } catch (e) {
       setResult({ pc_id: pcId, action: 'groups', value: (e as Error).message });
+    } finally {
+      markPending(pcId, false);
     }
   };
 
@@ -147,7 +195,7 @@ export function Agents() {
     );
   }
   if (error) return <ErrorCard title={t('errorTitle')} error={error} />;
-  const agents = data ?? [];
+  const agents = data?.rows ?? [];
   // One `now` snapshot for the whole render so the counts, the filter,
   // and the per-row badges below all agree on liveness for an agent
   // sitting right on the 2-min threshold.
@@ -160,7 +208,10 @@ export function Agents() {
     return statusFilter === 'online' ? online : !online;
   });
 
-  if (agents.length === 0) {
+  // Only the genuinely-empty fleet gets the onboarding card — a
+  // filtered-empty page (or an out-of-range offset) keeps the table
+  // chrome so the operator can clear the search / page back.
+  if (total === 0 && !dQ) {
     return (
       <Card>
         <CardHeader className="items-center text-center">
@@ -178,7 +229,7 @@ export function Agents() {
     <div className="space-y-4">
       <div className="flex items-baseline justify-between">
         <h2 className="text-xl">{t('title')}</h2>
-        <Badge variant="violet">{t('countBadge', { count: agents.length })}</Badge>
+        <Badge variant="violet">{t('countBadge', { count: total })}</Badge>
       </div>
       <p className="text-xs text-muted">
         <Trans
@@ -196,8 +247,18 @@ export function Agents() {
           threshold, so toggling "offline" answers "which hosts are
           the N that aren't connected?" directly. */}
       <div className="flex flex-wrap items-center gap-2">
+        <Input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder={t('searchPlaceholder')}
+          className="h-8 w-64"
+        />
         {(['all', 'online', 'offline'] as const).map((s) => {
-          const count = s === 'online' ? onlineCount : s === 'offline' ? offlineCount : agents.length;
+          // 'All' shows the fleet-wide match count (the same number
+          // as the badge above); online/offline stay page-local —
+          // the acknowledged trade-off until a server-side status
+          // filter lands (PR #559 review, claude).
+          const count = s === 'online' ? onlineCount : s === 'offline' ? offlineCount : total;
           const selected = statusFilter === s;
           return (
             <button
@@ -285,13 +346,13 @@ export function Agents() {
                       <ScrollText className="size-3.5" />{t('actions.facts')}
                     </Link>
                   </Button>
-                  <Button variant="secondary" size="sm" onClick={() => doPing(a.pc_id)} disabled={ping.isPending}>
+                  <Button variant="secondary" size="sm" onClick={() => doPing(a.pc_id)} disabled={pendingPcs.has(a.pc_id)}>
                     <Activity className="size-3.5" />{t('actions.ping')}
                   </Button>
-                  <Button variant="secondary" size="sm" onClick={() => doGroups(a.pc_id)} disabled={groupsGet.isPending || groupsPut.isPending}>
+                  <Button variant="secondary" size="sm" onClick={() => doGroups(a.pc_id)} disabled={pendingPcs.has(a.pc_id)}>
                     <Users className="size-3.5" />{t('actions.groups')}
                   </Button>
-                  <Button variant="secondary" size="sm" onClick={() => doEffective(a.pc_id)} disabled={effective.isPending}>
+                  <Button variant="secondary" size="sm" onClick={() => doEffective(a.pc_id)} disabled={pendingPcs.has(a.pc_id)}>
                     <Settings2 className="size-3.5" />{t('actions.effective')}
                   </Button>
                 </div>
@@ -308,6 +369,34 @@ export function Agents() {
           )}
         </TableBody>
       </Table>
+
+      {(offset > 0 || total > PAGE_SIZE) && (
+        <div className="flex items-center gap-2">
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+            disabled={offset === 0}
+          >
+            {t('prev')}
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => setOffset(offset + PAGE_SIZE)}
+            disabled={offset + PAGE_SIZE >= total}
+          >
+            {t('next')}
+          </Button>
+          <span className="text-xs text-muted">
+            {t('pageRange', {
+              from: Math.min(offset + 1, total),
+              to: Math.min(offset + PAGE_SIZE, total),
+              total,
+            })}
+          </span>
+        </div>
+      )}
 
       {result && (
         <Card>
