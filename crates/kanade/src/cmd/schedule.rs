@@ -71,6 +71,13 @@ pub enum ScheduleSub {
         #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u8).range(1..=50))]
         count: u8,
     },
+    /// Coverage view for a schedule (#418): enabled, next fire, last
+    /// run, and a 24h ok/fail tally.
+    ///
+    /// `next_run` comes from the same engine as `preview`; the run
+    /// figures come from `execution_results` keyed by the schedule's
+    /// `job_id` (so two schedules sharing a job share these numbers).
+    Status { id: String },
 }
 
 pub async fn execute(backend_url: &str, args: ScheduleArgs) -> Result<()> {
@@ -85,6 +92,7 @@ pub async fn execute(backend_url: &str, args: ScheduleArgs) -> Result<()> {
             cascade_kill,
         } => disable(base, &id, cascade, cascade_kill).await,
         ScheduleSub::Preview { id, count } => preview(base, &id, count).await,
+        ScheduleSub::Status { id } => status(base, &id).await,
     }
 }
 
@@ -122,6 +130,62 @@ async fn preview(base: &str, id: &str, count: u8) -> Result<()> {
                 .unwrap_or("no upcoming fires");
             println!("  (none) {note}");
         }
+    }
+    Ok(())
+}
+
+async fn status(base: &str, id: &str) -> Result<()> {
+    let url = format!("{base}/api/schedules/{id}/status");
+    let resp = crate::http_client::authed_client()?
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    if !resp.status().is_success() {
+        let s = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("status failed: {s} — {body}");
+    }
+    let p: serde_json::Value = resp.json().await?;
+    let when = p.get("when").and_then(|v| v.as_str()).unwrap_or("?");
+    let tz = p.get("tz").and_then(|v| v.as_str()).unwrap_or("?");
+    let disabled = if p.get("enabled").and_then(|v| v.as_bool()) == Some(false) {
+        "  [DISABLED]"
+    } else {
+        ""
+    };
+    println!("{id}  —  {when}  (tz: {tz}){disabled}");
+    println!(
+        "  next run : {}",
+        p.get("next_run").and_then(|v| v.as_str()).unwrap_or("—")
+    );
+    match p.get("last_run") {
+        Some(lr) if !lr.is_null() => {
+            let pc = lr.get("pc_id").and_then(|v| v.as_str()).unwrap_or("?");
+            let fin = lr.get("finished_at").and_then(|v| v.as_str());
+            let outcome = match (fin, lr.get("exit_code").and_then(|v| v.as_i64())) {
+                (None, _) => "running".to_string(),
+                (Some(_), Some(0)) => "ok".to_string(),
+                (Some(_), Some(code)) => format!("exit {code}"),
+                (Some(_), None) => "done".to_string(),
+            };
+            let at = lr
+                .get("finished_at")
+                .and_then(|v| v.as_str())
+                .or_else(|| lr.get("started_at").and_then(|v| v.as_str()))
+                .unwrap_or("?");
+            println!("  last run : {at}  on {pc}  ({outcome})");
+        }
+        _ => println!("  last run : (never)"),
+    }
+    if let Some(rec) = p.get("recent") {
+        let h = rec
+            .get("window_hours")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(24);
+        let ok = rec.get("ok").and_then(|v| v.as_i64()).unwrap_or(0);
+        let fail = rec.get("fail").and_then(|v| v.as_i64()).unwrap_or(0);
+        println!("  last {h}h : {ok} ok / {fail} fail");
     }
     Ok(())
 }
