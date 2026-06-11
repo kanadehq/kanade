@@ -239,11 +239,12 @@ pub struct ScanDurationParams {
     /// Lower bound on `finished_at`. ISO-8601 / RFC 3339. Defaults
     /// to "24h ago" when omitted so the panel has a sensible
     /// default without the operator having to think. We filter on
-    /// `finished_at` (not `started_at`) because (a) it uses the
-    /// existing `(job_id, pc_id, finished_at DESC)` index, and
-    /// (b) the natural question is "what finished in this window",
-    /// so a long-running scan that started before the window but
-    /// finished inside it still belongs in the percentile bucket.
+    /// `finished_at` (not `started_at`) because (a) it is served by
+    /// the single-column `idx_execution_results_finished_at` index
+    /// (#516), and (b) the natural question is "what finished in
+    /// this window", so a long-running scan that started before the
+    /// window but finished inside it still belongs in the
+    /// percentile bucket.
     pub since: Option<DateTime<Utc>>,
 }
 
@@ -260,16 +261,15 @@ pub async fn scan_durations(
         .since
         .unwrap_or_else(|| Utc::now() - Duration::hours(24));
 
-    // Gemini #128 fix: filter on `finished_at >= ?` instead of
-    // `started_at >= ?`. Two wins:
-    //   1. The existing idx_execution_results_job_pc index covers
-    //      (job_id, pc_id, finished_at DESC) — `started_at` has no
-    //      index of its own, so the prior form triggered a full
-    //      table scan once the row count got large.
-    //   2. Semantically more correct for a "what completed in this
-    //      window" rollup: a 25-h scan that started 25 h ago and
-    //      finished inside the window belongs in the percentile
-    //      bucket; the `started_at` predicate would exclude it.
+    // Filter on `finished_at >= ?` — semantically correct for a
+    // "what completed in this window" rollup: a 25-h scan that
+    // started 25 h ago and finished inside the window belongs in
+    // the percentile bucket; a `started_at` predicate would exclude
+    // it. The bare range is served by the single-column
+    // idx_execution_results_finished_at index (#516) — the
+    // composite (job_id, pc_id, finished_at DESC) index CANNOT
+    // serve it (finished_at is the third column; leading-column
+    // rule), which is why this query used to full-scan.
     let rows = sqlx::query(
         "SELECT job_id, \
                 CAST((julianday(finished_at) - julianday(started_at)) * 86400000.0 AS INTEGER) AS dur_ms \
