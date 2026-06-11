@@ -114,7 +114,15 @@ pub async fn run(
     if let Some(target) = current_target.as_deref()
         && target != running_version
     {
-        if is_loop(&last_swap, target, &running_version) {
+        if is_quarantined(target) {
+            warn!(
+                target,
+                "self-update: target is quarantined (it crash-looped on a prior boot and was \
+                 rolled back). Refusing to re-deploy it — this is what stops a bad rollout from \
+                 looping rollout↔rollback. Republish a fixed binary under a new version, or clear \
+                 the quarantine.",
+            );
+        } else if is_loop(&last_swap, target, &running_version) {
             loop_blocked_target = Some(target.to_string());
             warn!(
                 target,
@@ -170,6 +178,14 @@ pub async fn run(
                 warn!(target, "still loop-blocked on this target; ignoring");
                 continue;
             }
+            if is_quarantined(target) {
+                warn!(
+                    target,
+                    "self-update: target is quarantined (crash-looped on a prior boot); refusing \
+                     to re-deploy. Republish a fixed version or clear the quarantine.",
+                );
+                continue;
+            }
             sleep_jitter(jitter).await;
             if let Err(e) = attempt_swap(&store, target, &running_version).await {
                 warn!(error = %e, target, "self-update fetch failed");
@@ -207,6 +223,27 @@ fn is_loop(last: &Option<LastSwap>, target: &str, running: &str) -> bool {
     last.as_ref()
         .map(|p| p.target == target && p.running_before == running)
         .unwrap_or(false)
+}
+
+/// #582: true if `target` was rolled back after a failed boot (it
+/// crash-looped). The boot sentinel quarantines such versions; the
+/// self-update path must refuse to re-deploy them, otherwise a bad
+/// rollout target loops rollout → crash → rollback → rollout forever.
+/// Cleared automatically when the operator pushes a different (fixed)
+/// version, or explicitly via `clear_quarantine`.
+fn is_quarantined(target: &str) -> bool {
+    use kanade_shared::boot_sentinel::BootSentinel;
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    // The sentinel's version field is irrelevant here (is_quarantined
+    // only reads the quarantine list), so the package version suffices.
+    BootSentinel::new(
+        &kanade_shared::default_paths::data_dir(),
+        exe,
+        env!("CARGO_PKG_VERSION"),
+    )
+    .is_quarantined(target)
 }
 
 fn last_swap_path() -> Option<PathBuf> {
@@ -476,6 +513,27 @@ async fn swap_and_restart(staged: &Path, target_version: &str, running: &str) ->
     // old placement before the download falsely loop-blocked targets
     // on transient fetch failures.)
     write_last_swap(target_version, running);
+
+    // #582: arm the boot sentinel. `old_path` is the outgoing binary
+    // that just booted fine — it's the rollback target if `target_version`
+    // crash-loops. Writes the sentinel so the next boot is gated.
+    {
+        use kanade_shared::boot_sentinel::BootSentinel;
+        // The `version` arg here is irrelevant: `arm_for_swap` writes a
+        // sentinel for `target_version` and never reads `self.version`.
+        // Pass `running` (the outgoing version) for honesty.
+        let sentinel = BootSentinel::new(
+            &kanade_shared::default_paths::data_dir(),
+            current.clone(),
+            running,
+        );
+        if let Err(e) = sentinel.arm_for_swap(&old_path, target_version) {
+            warn!(
+                error = %e, target = target_version,
+                "boot sentinel: arm_for_swap failed — crash-loop rollback disabled for this swap",
+            );
+        }
+    }
 
     info!(
         target = target_version,

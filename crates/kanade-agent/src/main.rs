@@ -77,6 +77,26 @@ struct Cli {
 ///
 /// On non-Windows targets we always run in console mode.
 fn main() -> Result<()> {
+    // #582: boot sentinel is the VERY first thing — before the service
+    // dispatcher, config, tracing, or NATS — so a binary that
+    // crash-loops on boot (the failure mode that took the backend down
+    // via #573) is rolled back to last-good instead of looping forever.
+    // It's sync and needs only the data dir + current exe + version.
+    // On rollback we exit(64); whether under the SCM (a start failure
+    // the failure-action recovers) or console, that relaunches into the
+    // restored binary.
+    if let Ok(exe) = std::env::current_exe() {
+        use kanade_shared::boot_sentinel::{BootDecision, BootSentinel, DEFAULT_MAX_ATTEMPTS};
+        let sentinel = BootSentinel::new(&default_paths::data_dir(), exe, AGENT_VERSION);
+        if let BootDecision::RolledBack { from } = sentinel.check_on_boot(DEFAULT_MAX_ATTEMPTS) {
+            eprintln!(
+                "boot sentinel: {from} crash-looped on boot — rolled back to last-good; \
+                 exiting (64) for restart"
+            );
+            std::process::exit(64);
+        }
+    }
+
     #[cfg(target_os = "windows")]
     {
         match service::try_run_as_service() {
@@ -99,6 +119,9 @@ fn main() -> Result<()> {
 /// mode (directly from `main`) or from inside the Windows service
 /// entry point (see [`service::run_service`]).
 pub(crate) async fn run_agent() -> Result<()> {
+    // (boot sentinel check runs in `main()` before the service
+    // dispatcher — see there.)
+
     // Load config first so the tracing init can honor [log] path / level
     // / keep_days. Early errors from this load fall back to stderr.
     let cli = Cli::parse();
@@ -189,6 +212,25 @@ pub(crate) async fn run_agent() -> Result<()> {
         cfg_rx.clone(),
         staleness_tracker.clone(),
     ));
+    // #582: we're past early boot (config, tracing, NATS connect,
+    // subscriptions, every loop spawn). After a short healthy-uptime
+    // grace, confirm to the boot sentinel so this version is promoted
+    // to last-good and any pending swap sentinel clears. A crash before
+    // the grace elapses leaves the sentinel armed, so the next boot
+    // re-counts toward rollback.
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        if let Ok(exe) = std::env::current_exe() {
+            let sentinel = kanade_shared::boot_sentinel::BootSentinel::new(
+                &default_paths::data_dir(),
+                exe,
+                AGENT_VERSION,
+            );
+            if let Err(e) = sentinel.confirm_healthy() {
+                tracing::warn!(error = %e, "boot sentinel: confirm_healthy failed");
+            }
+        }
+    });
     tokio::spawn(logs::serve(
         client.clone(),
         pc_id.clone(),
