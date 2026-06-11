@@ -656,6 +656,8 @@ when:
   calendar:
     at: "09:00"
     days: [mon-fri]            # cron DOW（名前・範囲可）。省略 = 毎日
+                               # nth-weekday: tue#2 = 第2火曜（Patch Tuesday、序数 1..5）
+                               # last-weekday: friL = 月末最終金曜（月次メンテ向け）
 tz: local                      # 実行ホストの TZ で 9:00（minipc = JST）
 job_id: show-toast
 target: { all: true }

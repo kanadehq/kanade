@@ -1795,6 +1795,44 @@ target: { all: true }
     }
 
     #[test]
+    fn validate_accepts_last_weekday() {
+        // #418: last-weekday (`friL` = last Friday). Like the nth case,
+        // validate() lowers to a cron and round-trips it through croner,
+        // so passing proves token → DOW field → engine-acceptable cron
+        // with the verified last-<dow>-of-month semantics.
+        for ok in [
+            calendar("09:00", &["friL"]),         // last Friday
+            calendar("03:00", &["sunL"]),         // last Sunday
+            calendar("22:00", &["5L"]),           // numeric DOW + last
+            calendar("00:00", &["0L"]),           // numeric Sunday (0…
+            calendar("00:00", &["7L"]),           // …and its 7 alias)
+            calendar("09:00", &["monL", "friL"]), // a list of last-weekdays
+            // Case-insensitive both the weekday and the `L` suffix:
+            // validate lowercases the day, croner upper-cases the whole
+            // pattern before aliasing (claude #547).
+            calendar("09:00", &["FRIL"]),
+            calendar("09:00", &["fril"]),
+        ] {
+            schedule_with(ok.clone(), RunsOn::Backend)
+                .validate()
+                .unwrap_or_else(|e| panic!("{ok} should validate: {e}"));
+        }
+    }
+
+    #[test]
+    fn validate_rejects_bad_last_weekday() {
+        // bare `L` (no weekday — a footgun croner reads as Saturday), a
+        // range with L, a bad day before L, and an internal space that
+        // would otherwise leak a malformed cron downstream (gemini #560).
+        for bad in ["L", "l", "mon-friL", "fundayL", "8L", "*L", "fri L"] {
+            let err = schedule_with(calendar("09:00", &[bad]), RunsOn::Backend)
+                .validate()
+                .unwrap_err();
+            assert!(err.contains("when.days"), "for '{bad}', got: {err}");
+        }
+    }
+
+    #[test]
     fn calendar_oneshot_instant_detects_past() {
         use chrono::TimeZone;
         // a dated `at` resolves to an absolute instant…
@@ -2759,9 +2797,10 @@ pub struct CalendarSpec {
     /// `["mon","wed","fri"]`, … (passed verbatim to the cron DOW
     /// field, so ranges and names both work). An **nth-weekday**
     /// `["tue#2"]` fires only on the 2nd Tuesday of each month
-    /// ("Patch Tuesday"); the ordinal is `1..5`. Empty = every day.
-    /// Must be empty when `at` carries a date (the date already
-    /// pins the day).
+    /// ("Patch Tuesday"); the ordinal is `1..5`. A **last-weekday**
+    /// `["friL"]` fires only on the last Friday of each month (handy
+    /// for monthly maintenance). Empty = every day. Must be empty
+    /// when `at` carries a date (the date already pins the day).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub days: Vec<String>,
 }
@@ -2806,8 +2845,9 @@ impl CalendarSpec {
     /// a `when.days:`-scoped error instead of croner's confusing
     /// "when.at lowered to invalid cron" (claude #432 review). Each
     /// token is a day name (`mon`..`sun`), a numeric DOW (`0`..`7`),
-    /// `*`, a `-` range of those, or an **nth-weekday** like `tue#2`
-    /// (2nd Tuesday of the month — "Patch Tuesday").
+    /// `*`, a `-` range of those, an **nth-weekday** like `tue#2`
+    /// (2nd Tuesday of the month — "Patch Tuesday"), or a
+    /// **last-weekday** like `friL` (last Friday of the month).
     fn validate_days(&self) -> Result<(), String> {
         const NAMES: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
         let is_day = |p: &str| NAMES.contains(&p) || p.parse::<u8>().is_ok_and(|n| n <= 7);
@@ -2819,7 +2859,7 @@ impl CalendarSpec {
                 Err(format!(
                     "when.days: invalid day token '{tok}' ({reason}; \
                      want mon..sun, 0-7, a range like mon-fri, an nth-weekday \
-                     like tue#2, or *)"
+                     like tue#2, a last-weekday like friL, or *)"
                 ))
             };
             // #418: nth-weekday suffix (`tue#2` = 2nd Tuesday). Croner
@@ -2837,6 +2877,31 @@ impl CalendarSpec {
                 match nth_part.trim().parse::<u8>() {
                     Ok(n) if (1..=5).contains(&n) => {}
                     _ => return invalid("the # ordinal must be 1..5 (e.g. tue#2 = 2nd Tuesday)"),
+                }
+                continue;
+            }
+            // #418: last-weekday suffix (`friL` = last Friday of the
+            // month — the monthly-maintenance sibling of Patch Tuesday).
+            // Croner accepts `<dow>L` in the DOW field with verified
+            // last-<dow>-of-month semantics, and `to_cron` passes it
+            // through verbatim. A single weekday + `L` — bare `L` and
+            // ranges are rejected (croner would read bare `L` as
+            // Saturday, which is a confusing footgun).
+            if let Some(day_part) = tok.strip_suffix(['L', 'l']) {
+                // No `.trim()`: a cron DOW token can't carry internal
+                // whitespace, so `"fri L"` must be *rejected* here (its
+                // strip leaves `"fri "`, and `is_day` catches the space)
+                // rather than trimmed into a clean `"fri"` that then
+                // produces a malformed `fri L` cron downstream and a
+                // confusing croner error (gemini #560).
+                let d = day_part.to_ascii_lowercase();
+                if d.is_empty() {
+                    return invalid("`L` (last-weekday) needs a weekday before it, e.g. friL");
+                }
+                if d.contains('-') || !is_day(&d) {
+                    return invalid(
+                        "the part before L must be a single weekday (e.g. friL = last Friday)",
+                    );
                 }
                 continue;
             }
