@@ -51,6 +51,16 @@ enum Command {
     /// re-deriving the path with a divergent default that silently
     /// misses a templated / non-default (e.g. `E:\…`) location.
     ResolveDbPath,
+    /// #582 Phase 4: exit non-zero if `version` is quarantined by the
+    /// boot sentinel (it crash-looped on a prior boot and was rolled
+    /// back). The backend deploy script calls this BEFORE swapping a
+    /// new binary in, so a known-bad version is refused at deploy time
+    /// instead of crash-looping the service again. Exit 0 = safe to
+    /// deploy, exit 3 = quarantined.
+    CheckQuarantine {
+        /// The version about to be deployed.
+        version: String,
+    },
 }
 
 /// Top-level entry point.
@@ -68,7 +78,35 @@ fn main() -> Result<()> {
     if let Some(cmd) = &cli.command {
         return match cmd {
             Command::ResolveDbPath => print_resolved_db_path(cli.config.as_deref()),
+            Command::CheckQuarantine { version } => check_quarantine(version),
         };
+    }
+
+    // #582 Phase 4: boot sentinel on the SERVICE path only (subcommands
+    // short-circuited above) — before the service dispatcher, config,
+    // DB, or JetStream bootstrap, so a binary that crash-loops on boot
+    // (exactly the #573 regression that caused the 2026-06-11 outage)
+    // is rolled back to last-good instead of looping forever.
+    //
+    // CAVEAT: the backend, unlike the agent, has a SQLite DB. If the
+    // failed release also ran forward migrations, rolling back to an
+    // older binary can hit "migration applied but missing in source"
+    // (the 0.43.48 rollback block during the incident) — last-good then
+    // also fails to boot. The sentinel is still strictly better than a
+    // crash loop (it tries, quarantines, and logs CRITICAL for the
+    // operator); pairing it with a deploy-time DB snapshot is tracked
+    // as a follow-up in #582.
+    if let Ok(exe) = std::env::current_exe() {
+        use kanade_shared::boot_sentinel::{BootDecision, BootSentinel, DEFAULT_MAX_ATTEMPTS};
+        let sentinel =
+            BootSentinel::new(&default_paths::data_dir(), exe, env!("CARGO_PKG_VERSION"));
+        if let BootDecision::RolledBack { from } = sentinel.check_on_boot(DEFAULT_MAX_ATTEMPTS) {
+            eprintln!(
+                "boot sentinel: {from} crash-looped on boot — rolled back to last-good; \
+                 exiting (1) for restart"
+            );
+            std::process::exit(1);
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -100,6 +138,31 @@ fn print_resolved_db_path(config: Option<&Path>) -> Result<()> {
     let cfg =
         load_backend_config(&cfg_path).with_context(|| format!("load config from {cfg_path:?}"))?;
     println!("{}", cfg.db.sqlite_path);
+    Ok(())
+}
+
+/// `check-quarantine <version>` subcommand (#582 Phase 4): the deploy
+/// script calls this before swapping a new binary in. Exit 3 if the
+/// version is quarantined (crash-looped on a prior boot and was rolled
+/// back) so the deploy aborts instead of re-deploying a known-bad
+/// binary; exit 0 (safe) otherwise. No config / tracing — the result
+/// is the exit code, and a one-line note goes to stderr.
+fn check_quarantine(version: &str) -> Result<()> {
+    let exe = std::env::current_exe().context("current_exe")?;
+    let sentinel = kanade_shared::boot_sentinel::BootSentinel::new(
+        &default_paths::data_dir(),
+        exe,
+        env!("CARGO_PKG_VERSION"),
+    );
+    if sentinel.is_quarantined(version) {
+        eprintln!(
+            "check-quarantine: {version} is QUARANTINED (it crash-looped on a prior boot and was \
+             rolled back). Refusing — republish a fixed binary under a new version, or clear the \
+             quarantine."
+        );
+        std::process::exit(3);
+    }
+    eprintln!("check-quarantine: {version} is not quarantined (safe to deploy)");
     Ok(())
 }
 
@@ -473,6 +536,27 @@ pub(crate) async fn run_backend() -> Result<()> {
         .await
         .with_context(|| format!("bind {}", cfg.server.bind))?;
     info!(bind = %cfg.server.bind, "axum serving");
+
+    // #582 Phase 4: we've bound the port and are about to serve — past
+    // config, DB migrations, and JetStream bootstrap (where #573
+    // crashed). After a short healthy-uptime grace, confirm to the boot
+    // sentinel so this version is promoted to last-good and any pending
+    // swap sentinel clears. A crash before the grace leaves the sentinel
+    // armed, so the next boot re-counts toward rollback.
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        if let Ok(exe) = std::env::current_exe() {
+            let sentinel = kanade_shared::boot_sentinel::BootSentinel::new(
+                &default_paths::data_dir(),
+                exe,
+                env!("CARGO_PKG_VERSION"),
+            );
+            if let Err(e) = sentinel.confirm_healthy() {
+                tracing::warn!(error = %e, "boot sentinel: confirm_healthy failed");
+            }
+        }
+    });
+
     axum::serve(listener, app).await.context("axum serve")?;
     Ok(())
 }

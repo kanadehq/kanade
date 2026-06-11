@@ -380,6 +380,27 @@ if (-not (Test-Path $configSrc)) {
     throw "Missing '$configName' in '$SourceDir'. Place the sample config next to this script or pass -SourceDir."
 }
 
+# #582 Phase 4: refuse to deploy a version the boot sentinel quarantined
+# (it crash-looped on a prior boot and was rolled back) — otherwise we'd
+# re-install a known-bad binary and crash-loop the service again. Run
+# this FIRST, before the service stop and the destructive -WipeDb, so a
+# refused deploy does no damage (fail fast). Use the STAGED binary (it
+# has the subcommand; an older installed one may not) against the shared
+# quarantine file. Exit 3 = quarantined; anything else (incl. an older
+# staged binary lacking the subcommand) is treated as "not quarantined"
+# so the check never blocks a legitimate deploy. stderr is left visible
+# so the operator sees the confirmation / any quarantine-file I/O error.
+$stagedVersion = ''
+try { $stagedVersion = ((& $exeSrc --version 2>$null) -split '\s+')[-1] } catch {}
+if ($stagedVersion) {
+    & $exeSrc check-quarantine $stagedVersion
+    if ($LASTEXITCODE -eq 3) {
+        throw ("deploy-backend: version $stagedVersion is QUARANTINED by the boot sentinel " +
+            "(it crash-looped on a prior boot). Refusing to deploy. Republish a fixed binary " +
+            "under a new version, or clear the quarantine (.boot-quarantine.json in the data dir).")
+    }
+}
+
 $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($svc -and $svc.Status -ne 'Stopped') {
     Write-Host "Stopping $ServiceName..."
