@@ -32,6 +32,13 @@ pub struct AgentRow {
     pub agent_rss_bytes: Option<i64>,
     pub agent_disk_read_bytes: Option<i64>,
     pub agent_disk_written_bytes: Option<i64>,
+    /// #582 Phase 2: versions this agent's boot sentinel rolled back
+    /// after a crash-loop on boot (and now refuses to re-deploy).
+    /// Drives the Rollout page's "failed to adopt target" view.
+    /// Omitted (not `[]`) for the common clean case — most agents —
+    /// matching the optional `quarantined_versions?` SPA type.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quarantined_versions: Vec<String>,
 }
 
 /// Query params for `GET /api/agents`.
@@ -219,6 +226,15 @@ fn row_to_agent(r: sqlx::sqlite::SqliteRow) -> AgentRow {
         agent_rss_bytes: r.try_get("agent_rss_bytes").ok(),
         agent_disk_read_bytes: r.try_get("agent_disk_read_bytes").ok(),
         agent_disk_written_bytes: r.try_get("agent_disk_written_bytes").ok(),
+        // #582 Phase 2: stored as a JSON array TEXT column (NULL =
+        // none). A malformed value degrades to empty rather than
+        // failing the whole row.
+        quarantined_versions: r
+            .try_get::<Option<String>, _>("quarantined_versions")
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default(),
     }
 }
 
@@ -263,6 +279,51 @@ mod tests {
         .await
         .unwrap();
         rows.into_iter().map(|r| r.pc_id).collect()
+    }
+
+    /// #582 Phase 2: a populated quarantine JSON blob (what the
+    /// heartbeat projector writes) round-trips through SQLite and
+    /// `row_to_agent`; an absent value and a malformed blob both
+    /// degrade to an empty list instead of failing the row.
+    #[tokio::test]
+    async fn quarantined_versions_decode_through_the_api() {
+        let pool = seeded_pool().await;
+        sqlx::query("UPDATE agents SET quarantined_versions = ? WHERE pc_id = 'PC001'")
+            .bind(r#"["0.43.51","0.43.52"]"#)
+            .execute(&pool)
+            .await
+            .unwrap();
+        // A malformed blob must not break the row.
+        sqlx::query("UPDATE agents SET quarantined_versions = ? WHERE pc_id = 'PC002'")
+            .bind("not json")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let (_h, Json(rows)) = list(
+            State(pool),
+            Query(ListParams {
+                q: None,
+                limit: None,
+                offset: None,
+                status: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let by_id = |id: &str| {
+            rows.iter()
+                .find(|r| r.pc_id == id)
+                .unwrap()
+                .quarantined_versions
+                .clone()
+        };
+        assert_eq!(by_id("PC001"), vec!["0.43.51", "0.43.52"]);
+        assert!(
+            by_id("PC002").is_empty(),
+            "malformed JSON → empty, not error"
+        );
+        assert!(by_id("WS-9").is_empty(), "NULL column → empty");
     }
 
     /// #563: mark a seeded agent online (heartbeat = now) or

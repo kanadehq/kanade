@@ -67,6 +67,15 @@ pub struct Heartbeat {
     /// it started. Same shape as `agent_disk_read_bytes`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_disk_written_bytes: Option<i64>,
+    /// #582 Phase 2: versions this agent's boot sentinel rolled back
+    /// after they crash-looped on boot. The self-update path refuses
+    /// to (re-)deploy any version listed here, so the SPA's rollout
+    /// view can flag "PC-X failed to adopt target 0.43.51" — the
+    /// fleet-wide signal that a rollout is bad. Empty (the common
+    /// case) is skipped on the wire; older agents simply omit it and
+    /// `#[serde(default)]` leaves it empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quarantined_versions: Vec<String>,
 }
 
 #[cfg(test)]
@@ -86,6 +95,7 @@ mod tests {
             agent_rss_bytes: Some(45_000_000),
             agent_disk_read_bytes: Some(1024 * 1024),
             agent_disk_written_bytes: Some(512 * 1024),
+            quarantined_versions: vec!["0.43.51".into()],
         };
         let json = serde_json::to_string(&hb).unwrap();
         let back: Heartbeat = serde_json::from_str(&json).unwrap();
@@ -98,6 +108,31 @@ mod tests {
         assert_eq!(back.agent_rss_bytes, hb.agent_rss_bytes);
         assert_eq!(back.agent_disk_read_bytes, hb.agent_disk_read_bytes);
         assert_eq!(back.agent_disk_written_bytes, hb.agent_disk_written_bytes);
+        assert_eq!(back.quarantined_versions, hb.quarantined_versions);
+    }
+
+    #[test]
+    fn heartbeat_empty_quarantine_is_omitted_on_the_wire() {
+        let hb = Heartbeat {
+            pc_id: "x".into(),
+            at: chrono::Utc.with_ymd_and_hms(2026, 5, 16, 0, 0, 0).unwrap(),
+            agent_version: "0.43.50".into(),
+            hostname: None,
+            os_family: None,
+            agent_cpu_pct: None,
+            agent_rss_bytes: None,
+            agent_disk_read_bytes: None,
+            agent_disk_written_bytes: None,
+            quarantined_versions: Vec::new(),
+        };
+        let json = serde_json::to_string(&hb).unwrap();
+        assert!(
+            !json.contains("quarantined_versions"),
+            "empty quarantine must be skipped on the wire: {json}",
+        );
+        // And a payload without the field still decodes to empty.
+        let back: Heartbeat = serde_json::from_str(&json).unwrap();
+        assert!(back.quarantined_versions.is_empty());
     }
 
     #[test]

@@ -67,6 +67,9 @@ pub async fn serve(
                 agent_rss_bytes: None,
                 agent_disk_read_bytes: None,
                 agent_disk_written_bytes: None,
+                // Ping is a liveness probe; the quarantine list rides
+                // the regular 30 s heartbeat. Keep ping replies cheap.
+                quarantined_versions: Vec::new(),
             };
             let payload = match serde_json::to_vec(&hb) {
                 Ok(b) => b,

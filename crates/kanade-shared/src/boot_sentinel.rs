@@ -238,6 +238,13 @@ impl BootSentinel {
         self.read_quarantine().versions.iter().any(|v| v == version)
     }
 
+    /// Every quarantined version (#582 Phase 2). The agent reports
+    /// these in its heartbeat so the SPA rollout view can flag which
+    /// PCs failed to adopt a target.
+    pub fn quarantined_versions(&self) -> Vec<String> {
+        self.read_quarantine().versions
+    }
+
     /// Drop `version` from quarantine (operator re-published a fixed
     /// binary under the same version string).
     pub fn clear_quarantine(&self, version: &str) -> io::Result<()> {

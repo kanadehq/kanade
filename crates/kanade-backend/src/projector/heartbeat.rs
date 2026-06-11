@@ -123,14 +123,30 @@ where
     // SPA renders that as blank, matching the "metric isn't being
     // reported" state. We DO replace rather than COALESCE here:
     // perf is intentionally a live signal, not a sticky one.
+    // #582 Phase 2: store the agent's boot-sentinel quarantine list as
+    // a JSON array (NULL when empty). Replaced (not COALESCE'd) like
+    // the perf fields — it's a live signal: a version leaving quarantine
+    // must clear from the row.
+    let quarantined_json = if hb.quarantined_versions.is_empty() {
+        None
+    } else {
+        // Serialising a `Vec<String>` is infallible; a previous `"[]"`
+        // fallback would have silently CLEARED the agent's quarantine
+        // from the DB (REPLACE semantics) on an impossible error.
+        Some(
+            serde_json::to_string(&hb.quarantined_versions)
+                .expect("serialising Vec<String> is infallible"),
+        )
+    };
     sqlx::query(
         "INSERT INTO agents (
              pc_id, hostname, os_family, agent_version,
              last_heartbeat,
              agent_cpu_pct, agent_rss_bytes,
              agent_disk_read_bytes, agent_disk_written_bytes,
+             quarantined_versions,
              updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
          ON CONFLICT(pc_id) DO UPDATE SET
              hostname                  = COALESCE(agents.hostname, excluded.hostname),
              os_family                 = COALESCE(agents.os_family, excluded.os_family),
@@ -140,6 +156,7 @@ where
              agent_rss_bytes           = excluded.agent_rss_bytes,
              agent_disk_read_bytes     = excluded.agent_disk_read_bytes,
              agent_disk_written_bytes  = excluded.agent_disk_written_bytes,
+             quarantined_versions      = excluded.quarantined_versions,
              updated_at                = CURRENT_TIMESTAMP",
     )
     .bind(&hb.pc_id)
@@ -151,6 +168,7 @@ where
     .bind(hb.agent_rss_bytes)
     .bind(hb.agent_disk_read_bytes)
     .bind(hb.agent_disk_written_bytes)
+    .bind(quarantined_json)
     .execute(executor)
     .await?;
     Ok(())
