@@ -101,10 +101,27 @@ pub async fn heartbeat_loop(
     // heartbeat 30 s later.
     let mut sys = System::new();
     let mut is_first_tick = true;
+    // #582 Phase 2: read this PC's boot-sentinel quarantine once.
+    // It's static over a healthy agent's lifetime — a rollback that
+    // adds to it is performed by a DIFFERENT (crashing) binary that
+    // isn't the one sending heartbeats — so a single startup read is
+    // enough; any change lands on the next agent restart's first beat.
+    let quarantined_versions = std::env::current_exe()
+        .ok()
+        .map(|exe| {
+            kanade_shared::boot_sentinel::BootSentinel::new(
+                &kanade_shared::default_paths::data_dir(),
+                exe,
+                agent_version.clone(),
+            )
+            .quarantined_versions()
+        })
+        .unwrap_or_default();
     info!(
         ?current_dur,
         ?hostname,
         ?os_family,
+        ?quarantined_versions,
         "heartbeat loop scheduled",
     );
 
@@ -123,6 +140,7 @@ pub async fn heartbeat_loop(
                     agent_rss_bytes: perf.rss_bytes,
                     agent_disk_read_bytes: perf.disk_read_bytes,
                     agent_disk_written_bytes: perf.disk_written_bytes,
+                    quarantined_versions: quarantined_versions.clone(),
                 };
                 let payload = match serde_json::to_vec(&hb) {
                     Ok(b) => b,

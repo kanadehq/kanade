@@ -21,6 +21,12 @@ export type AgentRow = {
   agent_rss_bytes: number | null;
   agent_disk_read_bytes: number | null;
   agent_disk_written_bytes: number | null;
+  // #582 Phase 2: versions this agent's boot sentinel rolled back
+  // after a crash-loop on boot (and now refuses to re-deploy). Drives
+  // the Rollout page's "failed to adopt target" view. Empty / omitted
+  // for agents that never reported any (pre-#582). Defaulted in case
+  // an older backend response omits the key.
+  quarantined_versions?: string[];
 };
 
 export type Heartbeat = {
