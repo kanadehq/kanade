@@ -386,18 +386,38 @@ if (-not (Test-Path $configSrc)) {
 # this FIRST, before the service stop and the destructive -WipeDb, so a
 # refused deploy does no damage (fail fast). Use the STAGED binary (it
 # has the subcommand; an older installed one may not) against the shared
-# quarantine file. Exit 3 = quarantined; anything else (incl. an older
-# staged binary lacking the subcommand) is treated as "not quarantined"
-# so the check never blocks a legitimate deploy. stderr is left visible
-# so the operator sees the confirmation / any quarantine-file I/O error.
+# quarantine file. stderr is left visible so the operator sees the
+# confirmation / any quarantine-file I/O error.
+#
+# Exit-code handling (a SAFETY guard must not fail open on the unexpected):
+#   0       safe — proceed.
+#   3       quarantined — abort the deploy.
+#   2       clap "unknown subcommand" — an OLDER staged binary that
+#           predates check-quarantine. The only legitimate fail-open:
+#           warn and proceed (the guard can't run, but the binary is too
+#           old to have been quarantined by this mechanism anyway).
+#   other   an unexpected failure of the guard itself — abort rather than
+#           silently treat a broken probe as "safe to deploy".
 $stagedVersion = ''
 try { $stagedVersion = ((& $exeSrc --version 2>$null) -split '\s+')[-1] } catch {}
 if ($stagedVersion) {
     & $exeSrc check-quarantine $stagedVersion
-    if ($LASTEXITCODE -eq 3) {
-        throw ("deploy-backend: version $stagedVersion is QUARANTINED by the boot sentinel " +
-            "(it crash-looped on a prior boot). Refusing to deploy. Republish a fixed binary " +
-            "under a new version, or clear the quarantine (.boot-quarantine.json in the data dir).")
+    switch ($LASTEXITCODE) {
+        0 { }  # safe to deploy
+        3 {
+            throw ("deploy-backend: version $stagedVersion is QUARANTINED by the boot sentinel " +
+                "(it crash-looped on a prior boot). Refusing to deploy. Republish a fixed binary " +
+                "under a new version, or clear the quarantine (.boot-quarantine.json in the data dir).")
+        }
+        2 {
+            Write-Warning ("check-quarantine: staged binary lacks the subcommand (clap exit 2 = " +
+                "older release) — skipping the quarantine guard for this deploy.")
+        }
+        default {
+            throw ("deploy-backend: 'check-quarantine $stagedVersion' exited $LASTEXITCODE " +
+                "(neither 0/safe, 3/quarantined, nor 2/unknown-subcommand). Refusing to deploy — a " +
+                "safety guard must not fail open on an unexpected error. Investigate, then re-run.")
+        }
     }
 }
 
@@ -507,6 +527,28 @@ if ($WipeDb) {
     } else {
         Write-Host "WipeDb: no projector DB at $dbPath (nothing to wipe)."
     }
+}
+
+# #582 Phase 4: arm the boot sentinel immediately before the swap, while
+# $exeDst still holds the OUTGOING (known-good) binary. arm-for-swap
+# snapshots it to "$exeDst.last-good" and writes a sentinel for the new
+# version, so if the new binary crash-loops on boot, check_on_boot rolls
+# back to the snapshot and quarantines the bad version. Run the STAGED
+# binary (it always carries the subcommand) and point it at $exeDst.
+#
+# Skip on a fresh box (no installed binary to snapshot) and when the
+# version probe came up empty (an empty sentinel version would never
+# match the running binary, so the gate would never engage). Best-effort:
+# a failure only disables rollback for THIS one swap — warn and proceed,
+# mirroring the agent self-update path ("rollback disabled for this swap").
+if ($stagedVersion -and (Test-Path $exeDst)) {
+    & $exeSrc arm-for-swap $stagedVersion $exeDst
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning ("arm-for-swap exited $LASTEXITCODE — boot-sentinel crash-loop rollback is " +
+            "DISABLED for this deploy (the new binary will boot unguarded). Proceeding with install.")
+    }
+} elseif (-not (Test-Path $exeDst)) {
+    Write-Host "arm-for-swap: no installed binary at $exeDst (fresh install) — nothing to snapshot."
 }
 
 Write-Host "Installing $exeName -> $exeDst"
