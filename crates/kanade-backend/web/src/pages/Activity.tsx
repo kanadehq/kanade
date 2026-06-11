@@ -18,17 +18,23 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { apiFetch, formatError } from '@/lib/api';
 import { fmtIsoLocal } from '@/lib/utils';
 
-/// v0.27.x: how many chars of stdout / stderr to show in the table
-/// row's collapsed preview. The full body is fetched on demand when
-/// the operator clicks "show more" (inline expand) or opens the
-/// /activity/{result_id} detail page in a new tab.
-const PREVIEW_CHARS = 200;
-
 /// First N characters of a UUID-shaped identifier (result_id /
 /// exec_id) shown in table cells; the full value is on the detail
 /// page. 8 chars × base16 = 32 bits of selectivity — plenty for
 /// disambiguating siblings in a single Activity window.
 const ID_PREVIEW_LENGTH = 8;
+
+/** A regex-match excerpt from the backend (`stdout_match` /
+ *  `stderr_match`). The matched run is split from its context so the
+ *  table can wrap it in `<mark>`; `clipped_*` say where the backend
+ *  trimmed the surrounding context (render an ellipsis). */
+type MatchSnippet = {
+  before: string;
+  matched: string;
+  after: string;
+  clipped_start: boolean;
+  clipped_end: boolean;
+};
 
 type ResultRow = {
   /** v0.29 / Issue #19: agent-minted per-PC UUID and the detail-route
@@ -45,8 +51,19 @@ type ResultRow = {
    *  "running…" placeholder rather than `0` to avoid confusion with
    *  successful exit code 0. */
   exit_code: number | null;
+  /** Server-clipped preview (first 200 chars); the full body is one
+   *  detail fetch away via the "show more" toggle. */
   stdout: string;
   stderr: string;
+  /** True when the preview above was clipped — drives the "show more"
+   *  affordance now that the listing no longer ships the full buffer. */
+  stdout_truncated?: boolean;
+  stderr_truncated?: boolean;
+  /** First regex-match excerpt when a stdout/stderr filter is active
+   *  and hit this row, so the table can highlight *where* it matched
+   *  even past the preview cutoff. */
+  stdout_match?: MatchSnippet | null;
+  stderr_match?: MatchSnippet | null;
   started_at: string | null;
   /** v0.30 / PR α' unified: null while in-flight. */
   finished_at: string | null;
@@ -392,6 +409,10 @@ export function Activity() {
                     resultId={r.result_id}
                     stdout={r.stdout}
                     stderr={r.stderr}
+                    stdoutTruncated={r.stdout_truncated}
+                    stderrTruncated={r.stderr_truncated}
+                    stdoutMatch={r.stdout_match}
+                    stderrMatch={r.stderr_match}
                     running={r.finished_at === null}
                   />
                 </TableCell>
@@ -437,16 +458,38 @@ export function Activity() {
 }
 
 /**
+ * Renders a regex-match excerpt with the matched run wrapped in
+ * `<mark>` so operators can see *where* a stdout/stderr filter hit —
+ * even when the match sits past the collapsed preview cutoff. Leading /
+ * trailing ellipses mark where the backend clipped the surrounding
+ * context.
+ */
+function MatchedText({ m }: { m: MatchSnippet }) {
+  return (
+    <>
+      {m.clipped_start && '…'}
+      {m.before}
+      <mark className="bg-accent/30 text-fg rounded-sm px-0.5">{m.matched}</mark>
+      {m.after}
+      {m.clipped_end && '…'}
+    </>
+  );
+}
+
+/**
  * Stdout / stderr preview cell with on-demand inline expansion.
  *
- * Default state: shows the first PREVIEW_CHARS chars of each stream,
- * matching the historical table render. When either stream is
- * actually longer than the preview cutoff, a "show more" button
- * appears that toggles to a full-body view fetched lazily via
+ * Collapsed state: shows the backend's clipped preview of each stream
+ * (the listing no longer ships the full buffer — see results.rs). When
+ * a stdout/stderr regex filter matched this row, the matched excerpt is
+ * shown with the hit highlighted instead of the plain head-of-buffer
+ * preview, so operators see where the pattern landed even if it's past
+ * the cutoff. When the backend flags the preview as truncated, a "show
+ * more" button toggles a full-body view fetched lazily via
  * GET /api/results/{result_id} (v0.29 — was /api/results/{request_id}
- * pre-v0.29). The detail page (linked via the result_id column on
- * the same row) is the heavier alternative — dedicated tab, copy
- * buttons, header chrome.
+ * pre-v0.29). The detail page (linked via the result_id column on the
+ * same row) is the heavier alternative — dedicated tab, copy buttons,
+ * header chrome.
  *
  * The expanded body is bounded by max-h-96 + overflow-y-auto so an
  * enormous payload doesn't push every other row off-screen; the
@@ -456,11 +499,21 @@ function StdioPreview({
   resultId,
   stdout,
   stderr,
+  stdoutTruncated,
+  stderrTruncated,
+  stdoutMatch,
+  stderrMatch,
   running,
 }: {
   resultId: string;
   stdout: string;
   stderr: string;
+  /** Backend says the preview was clipped — drives "show more". */
+  stdoutTruncated?: boolean;
+  stderrTruncated?: boolean;
+  /** Regex-match excerpts (highlighted instead of the plain preview). */
+  stdoutMatch?: MatchSnippet | null;
+  stderrMatch?: MatchSnippet | null;
   /** v0.4x: in-flight row (finished_at === null). Surfaces a "live"
    *  link to the detail page, where the live tail console auto-polls
    *  the agent for this job's running output. */
@@ -468,7 +521,10 @@ function StdioPreview({
 }) {
   const { t } = useTranslation('activity');
   const [expanded, setExpanded] = useState(false);
-  const couldExpand = stdout.length > PREVIEW_CHARS || stderr.length > PREVIEW_CHARS;
+  // Truncation is decided server-side now (the listing ships a clipped
+  // preview, not the full buffer), so the expand affordance keys off
+  // the backend flags rather than a client-side length check.
+  const couldExpand = Boolean(stdoutTruncated || stderrTruncated);
   const { data, isFetching, error } = useQuery({
     queryKey: ['result', resultId],
     queryFn: () =>
@@ -478,8 +534,10 @@ function StdioPreview({
     enabled: expanded,
   });
 
-  const stdoutBody = expanded && data ? data.stdout : stdout.slice(0, PREVIEW_CHARS);
-  const stderrBody = expanded && data ? data.stderr : stderr.slice(0, PREVIEW_CHARS);
+  // Expanded → the full body just fetched; otherwise the clipped
+  // preview (or a highlighted match excerpt when a filter hit).
+  const full = expanded ? data : null;
+  const showStderr = full ? Boolean(full.stderr) : Boolean(stderrMatch) || Boolean(stderr);
 
   return (
     <div>
@@ -490,9 +548,13 @@ function StdioPreview({
             : 'text-xs whitespace-pre-wrap break-words bg-muted/5 p-2 rounded'
         }
       >
-        {stdoutBody || t('stdio.empty')}
+        {full
+          ? full.stdout || t('stdio.empty')
+          : stdoutMatch
+            ? <MatchedText m={stdoutMatch} />
+            : stdout || t('stdio.empty')}
       </pre>
-      {(expanded ? stderrBody : stderr) && (
+      {showStderr && (
         <pre
           className={
             expanded
@@ -500,7 +562,7 @@ function StdioPreview({
               : 'text-xs whitespace-pre-wrap break-words text-danger bg-danger/5 p-2 rounded mt-1'
           }
         >
-          {stderrBody}
+          {full ? full.stderr : stderrMatch ? <MatchedText m={stderrMatch} /> : stderr}
         </pre>
       )}
       {running && (
