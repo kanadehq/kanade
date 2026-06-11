@@ -2862,6 +2862,52 @@ inventory:
         let inv = m.inventory.as_ref().unwrap();
         assert!(inv.display[0].columns.is_none());
     }
+
+    // ---- checked-in JSON Schema freshness (docs/schemas/) ----
+
+    /// The JSON Schemas under `docs/schemas/` must match what
+    /// `schema_for!` produces today — a Cargo.lock-style freshness guard
+    /// so a `Schedule` / `Manifest` field change can't silently drift
+    /// the operator-facing schema. The SPA editor, the backend
+    /// `/api/schemas/*` endpoints, and these files all read the same
+    /// derived shape; this test fails CI if the checked-in copy lags.
+    /// Regenerate with:
+    ///   `UPDATE_SCHEMAS=1 cargo test -p kanade-shared schema_files_are_current`
+    #[test]
+    fn schema_files_are_current() {
+        assert_schema_file("schedule.schema.json", &schemars::schema_for!(Schedule));
+        assert_schema_file("job.schema.json", &schemars::schema_for!(Manifest));
+    }
+
+    fn assert_schema_file(name: &str, schema: &schemars::Schema) {
+        let generated = serde_json::to_string_pretty(schema).expect("serialize schema") + "\n";
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/schemas")
+            .join(name);
+        if std::env::var_os("UPDATE_SCHEMAS").is_some() {
+            std::fs::create_dir_all(path.parent().unwrap()).expect("mkdir docs/schemas");
+            std::fs::write(&path, &generated).unwrap_or_else(|e| panic!("write {path:?}: {e}"));
+            return;
+        }
+        // Normalize CRLF→LF before comparing: `.gitattributes` already
+        // pins these files to `eol=lf`, but a stray CRLF working-tree
+        // copy (autocrlf, a tool rewrite) shouldn't turn a *content*-
+        // freshness check into a confusing line-ending failure — that's
+        // .gitattributes' job, not this test's (gemini #588).
+        let on_disk = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "read {path:?}: {e}\n\
+                     generate it with: UPDATE_SCHEMAS=1 cargo test -p kanade-shared schema_files_are_current"
+                )
+            })
+            .replace("\r\n", "\n");
+        assert_eq!(
+            on_disk, generated,
+            "{name} is stale — a Schedule/Manifest schema change isn't reflected in docs/schemas/. \
+             Refresh with: UPDATE_SCHEMAS=1 cargo test -p kanade-shared schema_files_are_current"
+        );
+    }
 }
 
 /// Periodic schedule (spec §2.4.3). v0.18.0 carries the fanout plan
@@ -2908,12 +2954,12 @@ pub struct Schedule {
     /// and the agent's local scheduler.
     #[serde(default, skip_serializing_if = "Active::is_empty")]
     pub active: Active,
-    /// #418 Phase 3: operational constraints gating *when within an
-    /// active period* a fire may happen. Currently just `window`
-    /// (a maintenance time-of-day window); future `require`
-    /// (env gates) and `max_concurrent` land in the same namespace.
-    /// Evaluated in the schedule's `tz` like the other wall-clock
-    /// fields. Checked at tick time on both schedulers.
+    /// #418 operational constraints gating *when within an active
+    /// period* a fire may happen: a maintenance `window`, a fleet
+    /// `max_concurrent` cap, and `skip_dates` (holiday exclusion). The
+    /// wall-clock ones are evaluated in the schedule's `tz`; future
+    /// `require` (env gates) lands in the same namespace. Checked at
+    /// tick time on both schedulers (and surfaced by `preview`).
     #[serde(default, skip_serializing_if = "Constraints::is_empty")]
     pub constraints: Constraints,
     /// #418 Phase 4: what to do after a fire's script comes back
