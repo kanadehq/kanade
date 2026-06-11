@@ -23,7 +23,7 @@ use async_nats::jetstream::{
     object_store::Config as ObjectStoreConfig,
     stream::{Config as StreamConfig, DiscardPolicy},
 };
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::kv::{
     BUCKET_AGENT_CONFIG, BUCKET_AGENT_GROUPS, BUCKET_AGENTS_STATE, BUCKET_FLEET_CONFIG,
@@ -32,6 +32,42 @@ use crate::kv::{
     OBJECT_SCRIPTS, STREAM_AUDIT, STREAM_EVENTS, STREAM_EXEC, STREAM_INVENTORY, STREAM_OBS_EVENTS,
     STREAM_RESULTS,
 };
+
+/// Create-or-update an Object Store, but never let it wedge backend
+/// startup. `create_object_store` neither reconciles an existing
+/// store's config nor has a `create_or_update` form in async-nats
+/// 0.49, so a store whose desired config drifted — e.g. the #518
+/// `max_bytes` cap added after the bucket was first created uncapped,
+/// which the broker then rejects with error 10058 ("stream name
+/// already in use with a different configuration") — would otherwise
+/// fail `ensure_jetstream_resources` and crash the backend on boot
+/// (production outage 2026-06-11). Fall back to the existing store
+/// (uncapped, as it already was) and warn. #506 tracks real
+/// reconciliation of object-store config.
+async fn ensure_object_store(js: &jetstream::Context, cfg: ObjectStoreConfig) -> Result<()> {
+    let name = cfg.bucket.clone();
+    if let Err(e) = js.create_object_store(cfg).await {
+        // The fallback is deliberately broad — any create error is
+        // tolerated AS LONG AS the store already exists, because the
+        // alternative is a wedged backend and "never crash on boot"
+        // wins over "surface this specific error". The expected error
+        // is 10058 (config drift, the incident), but auth/network
+        // blips on an already-bootstrapped broker take this path too;
+        // they remain visible via the `warn!`. Only a genuine
+        // "can't create AND doesn't exist" is fatal.
+        if js.get_object_store(&name).await.is_err() {
+            return Err(e).with_context(|| {
+                format!("create_object_store {name} (and no existing store to fall back to)")
+            });
+        }
+        warn!(
+            store = %name, error = %e,
+            "object store exists with a different config; using it as-is (cap not reconciled)",
+        );
+    }
+    info!(store = %name, "ready");
+    Ok(())
+}
 
 /// Idempotently create every NATS JetStream resource the kanade
 /// fleet relies on. Calling repeatedly is safe — `create_*` returns
@@ -291,39 +327,42 @@ pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
 
     // ── Object Store ─────────────────────────────────────────────
     // agent_releases — one object per version, raw exe bytes.
-    js.create_object_store(ObjectStoreConfig {
-        bucket: OBJECT_AGENT_RELEASES.into(),
-        ..Default::default()
-    })
-    .await
-    .with_context(|| format!("create_object_store {OBJECT_AGENT_RELEASES}"))?;
-    info!(store = OBJECT_AGENT_RELEASES, "ready");
+    ensure_object_store(
+        js,
+        ObjectStoreConfig {
+            bucket: OBJECT_AGENT_RELEASES.into(),
+            ..Default::default()
+        },
+    )
+    .await?;
 
     // app_packages — generic operator-uploaded binary distribution
     // (kanade-client today; third-party installers like Webex /
     // Teams once those flows land). Object keys are
     // `<name>/<version>`; see `kanade-shared::kv::OBJECT_APP_PACKAGES`
     // for the full rationale.
-    js.create_object_store(ObjectStoreConfig {
-        bucket: OBJECT_APP_PACKAGES.into(),
-        ..Default::default()
-    })
-    .await
-    .with_context(|| format!("create_object_store {OBJECT_APP_PACKAGES}"))?;
-    info!(store = OBJECT_APP_PACKAGES, "ready");
+    ensure_object_store(
+        js,
+        ObjectStoreConfig {
+            bucket: OBJECT_APP_PACKAGES.into(),
+            ..Default::default()
+        },
+    )
+    .await?;
 
     // scripts — manifest script bodies referenced by
     // `Execute::script_object` (SPEC §2.4.1). Sibling of
     // `app_packages`; see `kanade-shared::kv::OBJECT_SCRIPTS` for
     // the bucket-split rationale (smaller payloads + manifest-
     // coupled lifecycle vs operator-curated installers).
-    js.create_object_store(ObjectStoreConfig {
-        bucket: OBJECT_SCRIPTS.into(),
-        ..Default::default()
-    })
-    .await
-    .with_context(|| format!("create_object_store {OBJECT_SCRIPTS}"))?;
-    info!(store = OBJECT_SCRIPTS, "ready");
+    ensure_object_store(
+        js,
+        ObjectStoreConfig {
+            bucket: OBJECT_SCRIPTS.into(),
+            ..Default::default()
+        },
+    )
+    .await?;
 
     // result_output — overflow stdout / stderr blobs for the
     // `ExecResult` wire kind (#227). Anything larger than the agent's
@@ -341,15 +380,148 @@ pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
     // The projector derefs blobs within seconds of publish, so
     // eviction only ever hits already-projected (or expired)
     // output.
-    js.create_object_store(ObjectStoreConfig {
-        bucket: OBJECT_RESULT_OUTPUT.into(),
-        max_age: Duration::from_secs(SECS_PER_DAY * 30),
-        max_bytes: GIB,
-        ..Default::default()
-    })
-    .await
-    .with_context(|| format!("create_object_store {OBJECT_RESULT_OUTPUT}"))?;
-    info!(store = OBJECT_RESULT_OUTPUT, "ready");
+    ensure_object_store(
+        js,
+        ObjectStoreConfig {
+            bucket: OBJECT_RESULT_OUTPUT.into(),
+            max_age: Duration::from_secs(SECS_PER_DAY * 30),
+            max_bytes: GIB,
+            ..Default::default()
+        },
+    )
+    .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Stdio;
+
+    /// Throwaway `nats-server -js` on a random port, like the
+    /// kv_cas_live / offline_boot harnesses. Ignored tests only.
+    struct Broker {
+        js: jetstream::Context,
+        _server: tokio::process::Child,
+        _storage: tempfile::TempDir,
+    }
+
+    async fn spawn_broker() -> Broker {
+        let port = portpicker::pick_unused_port().expect("pick port");
+        let storage = tempfile::TempDir::new().expect("storage tempdir");
+        let server = tokio::process::Command::new("nats-server")
+            .arg("-js")
+            .arg("-p")
+            .arg(port.to_string())
+            .arg("-sd")
+            .arg(storage.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn nats-server (is it in PATH?)");
+        let url = format!("nats://127.0.0.1:{port}");
+        let mut client = None;
+        for _ in 0..50 {
+            if let Ok(c) = async_nats::connect(&url).await {
+                client = Some(c);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Broker {
+            js: jetstream::new(client.expect("nats-server did not come up in 5s")),
+            _server: server,
+            _storage: storage,
+        }
+    }
+
+    /// #506 / 2026-06-11 incident: `create_object_store` neither
+    /// reconciles config nor has a create-or-update form, so adding
+    /// the #518 `max_bytes` cap to a store first created uncapped made
+    /// the broker reject the create (error 10058 "name already in use
+    /// with a different configuration") and crashed the backend on
+    /// boot. `ensure_object_store` must instead accept the existing
+    /// store and let startup proceed.
+    #[tokio::test]
+    #[ignore = "requires nats-server in PATH; cargo test -- --ignored"]
+    async fn ensure_object_store_accepts_config_drift() {
+        let b = spawn_broker().await;
+        // First create: uncapped, as the pre-#518 backend did.
+        ensure_object_store(
+            &b.js,
+            ObjectStoreConfig {
+                bucket: "result_output".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("fresh create");
+
+        // Second create with a conflicting config (now capped) must
+        // NOT error — it accepts the existing store.
+        ensure_object_store(
+            &b.js,
+            ObjectStoreConfig {
+                bucket: "result_output".into(),
+                max_bytes: 1024 * 1024 * 1024,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("config drift must not wedge startup");
+
+        // The store is still usable.
+        let store = b.js.get_object_store("result_output").await.expect("store");
+        store
+            .put("k", &mut &b"hi"[..])
+            .await
+            .expect("put after drift");
+    }
+
+    /// A fresh create with a cap succeeds on a broker with room (the
+    /// normal first-boot path).
+    #[tokio::test]
+    #[ignore = "requires nats-server in PATH; cargo test -- --ignored"]
+    async fn ensure_object_store_fresh_create_with_cap() {
+        let b = spawn_broker().await;
+        ensure_object_store(
+            &b.js,
+            ObjectStoreConfig {
+                bucket: "fresh".into(),
+                max_bytes: 64 * 1024 * 1024,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("fresh capped create");
+        b.js.get_object_store("fresh").await.expect("exists");
+    }
+
+    /// The fatal path: when create fails for a store that ALSO does
+    /// not exist, the error must propagate (we only swallow errors we
+    /// can fall back from). An invalid bucket name fails create's
+    /// charset validation and never creates a store to fall back to.
+    #[tokio::test]
+    #[ignore = "requires nats-server in PATH; cargo test -- --ignored"]
+    async fn ensure_object_store_propagates_when_no_fallback() {
+        let b = spawn_broker().await;
+        let err = ensure_object_store(
+            &b.js,
+            ObjectStoreConfig {
+                // Spaces / '!' are rejected by the object-store name
+                // rules, so create fails and get also finds nothing.
+                bucket: "bad name!".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("a create failure with no existing store must be fatal");
+        assert!(
+            err.to_string()
+                .contains("no existing store to fall back to"),
+            "unexpected error: {err:#}",
+        );
+    }
 }
