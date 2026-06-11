@@ -7,6 +7,7 @@ mod host_perf;
 mod job_object;
 mod job_tail;
 mod live_tail;
+mod log_tail;
 mod logs;
 mod ping;
 mod process;
