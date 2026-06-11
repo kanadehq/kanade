@@ -191,6 +191,21 @@
         }
       }
     },
+    "OnTrigger": {
+      "description": "An OS event the agent can fire a schedule on (#418 `when: { on }`).\n`unlock` / `network_change` are planned follow-ups.",
+      "oneOf": [
+        {
+          "description": "Once per OS boot (the agent's first run for that boot). Catches\nfreshly-imaged / reinstalled hosts at their next startup.",
+          "type": "string",
+          "const": "startup"
+        },
+        {
+          "description": "On an interactive-session user logon — console, RDP, or\nauto-logon (Windows `WTS_SESSION_LOGON`). Does not fire for\nservice / network / batch logons (no interactive session).",
+          "type": "string",
+          "const": "logon"
+        }
+      ]
+    },
     "OnceLiteral": {
       "description": "Single-variant enum so serde accepts exactly the string `once`\n(a free-form `String` would swallow typos like `onec`).",
       "type": "string",
@@ -365,6 +380,23 @@
           "additionalProperties": false,
           "required": [
             "calendar"
+          ]
+        },
+        {
+          "title": "418 OS-native event trigger: `when: { on: [startup, logon] }`.",
+          "description": "Fires when the agent observes the listed OS event(s) rather than\non a clock — there is no cron. `runs_on: agent` only (the agent\nowns the event source); [`Schedule::validate`] rejects it on\n`backend` and rejects an empty list. Each event occurrence fires\nonce, gated by the same freeze / active / `constraints.window` /\n`skip_dates` checks as the cron path. `startup` fires once per OS\nboot (deduped via the host boot time); a `starting_deadline`, if\nset, limits it to \"agent came up within that long after boot\".",
+          "type": "object",
+          "properties": {
+            "on": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/OnTrigger"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "on"
           ]
         }
       ]

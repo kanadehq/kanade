@@ -62,6 +62,11 @@ pub fn decide_fire(
         ExecMode::EveryTick => FireAction::FireWholeTarget,
         ExecMode::OncePerPc => decide_once_per_pc(cooldown, expected_pcs, completions, now),
         ExecMode::OncePerTarget => decide_once_per_target(cooldown, expected_pcs, completions, now),
+        // Event triggers (`when: { on }`) are agent-only — fired by the
+        // agent's OS event source, never by the backend scheduler
+        // (`Schedule::validate` rejects them on `runs_on: backend`).
+        // Defensive for a hand-edited KV blob: the backend never fires.
+        ExecMode::Event => FireAction::Skip,
     }
 }
 

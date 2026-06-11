@@ -673,6 +673,30 @@ when:
 tz: local
 ```
 
+**(3) event 型（OS イベントトリガ・加算的）** — 時計でなく **OS イベント**
+で発火。`runs_on: agent` 専用（agent が自分の event source を持つ。
+`backend` は validate で reject、空リストも reject）。各イベント発生ごとに
+1回、freeze / active / `constraints.window` / `skip_dates` の標準ゲート込みで
+発火する。現状 `startup` / `logon`（`unlock` / `network_change` は follow-up）。
+
+```yaml
+# OS 起動時とログオン時に走らせる（agent ネイティブ）
+when:
+  on: [startup, logon]
+runs_on: agent
+job_id: boot-inventory
+```
+
+`startup` は **OS 起動ごとに1回**（host の `boot_time` でデデュープ。agent の
+self-update / クラッシュ再起動など同一 boot 内の再起動では再発火しない）。
+既定は遅延しても発火（OS 起動から agent 起動まで間が空いても、その boot で
+未発火なら撃つ）。`starting_deadline` を付けると「OS 起動から N 以内に agent が
+起動したときのみ」に限定（boot 直後の通知など prompt 用途）。`logon` は Windows
+サービスの session-change 通知（`WTS_SESSION_LOGON`）で **対話型セッションの
+ユーザーログオン**時に発火 ─ コンソール / RDP リモート / 自動ログオンを含む。
+サービス / ネットワーク / バッチ等の非対話ログオンは WTS セッションを作らない
+ため発火しない。
+
 **`tz`（Phase 2）** — `local`（既定・実行ホストの TZ。`runs_on: agent`
 なら agent、それ以外は backend サーバー）/ `utc`。calendar の `at` も
 下記 `active` の境界も**同じ `tz` で評価**する（スケジュール単位で

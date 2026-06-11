@@ -1472,8 +1472,16 @@ target: { all: true }
             })),
             calendar("09:00", &["mon-fri"]),
             calendar("2026-06-10 09:00", &[]),
+            When::On(vec![OnTrigger::Startup]),
+            When::On(vec![OnTrigger::Startup, OnTrigger::Logon]),
         ] {
-            let s = schedule_with(when.clone(), RunsOn::Backend);
+            // Event triggers are agent-only; the rest validate on backend.
+            let runs_on = if matches!(when, When::On(_)) {
+                RunsOn::Agent
+            } else {
+                RunsOn::Backend
+            };
+            let s = schedule_with(when.clone(), runs_on);
 
             let json = serde_json::to_string(&s).expect("json serialise");
             let back: Schedule = serde_json::from_str(&json).expect("json deserialise");
@@ -1517,6 +1525,11 @@ target: { all: true }
             ),
             (calendar("09:00", &["mon-fri"]), "at 09:00 [mon-fri]"),
             (calendar("2026-06-10 09:00", &[]), "at 2026-06-10 09:00"),
+            (When::On(vec![OnTrigger::Startup]), "on [startup]"),
+            (
+                When::On(vec![OnTrigger::Startup, OnTrigger::Logon]),
+                "on [startup,logon]",
+            ),
         ] {
             assert_eq!(when.to_string(), expected);
         }
@@ -1826,6 +1839,51 @@ target: { all: true }
         )
         .validate()
         .expect("per_pc + agent is the offline-inventory shape");
+    }
+
+    // ---- #418 event triggers (when: { on }) ----
+
+    #[test]
+    fn validate_accepts_event_on_agent() {
+        for triggers in [
+            vec![OnTrigger::Startup],
+            vec![OnTrigger::Logon],
+            vec![OnTrigger::Startup, OnTrigger::Logon],
+        ] {
+            schedule_with(When::On(triggers), RunsOn::Agent)
+                .validate()
+                .expect("when.on is valid on runs_on: agent");
+        }
+    }
+
+    #[test]
+    fn validate_rejects_event_on_backend() {
+        let err = schedule_with(When::On(vec![OnTrigger::Startup]), RunsOn::Backend)
+            .validate()
+            .unwrap_err();
+        assert!(err.contains("when.on"), "got: {err}");
+        assert!(err.contains("runs_on: agent"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_empty_event_list() {
+        let err = schedule_with(When::On(vec![]), RunsOn::Agent)
+            .validate()
+            .unwrap_err();
+        assert!(err.contains("when.on"), "got: {err}");
+        assert!(err.contains("at least one"), "got: {err}");
+    }
+
+    #[test]
+    fn event_schedule_lowers_to_event_mode_and_is_event() {
+        let s = schedule_with(When::On(vec![OnTrigger::Startup]), RunsOn::Agent);
+        assert!(s.is_event());
+        assert_eq!(s.lowered().mode, ExecMode::Event);
+        assert_eq!(s.event_triggers(), &[OnTrigger::Startup]);
+        // non-event schedules report no triggers.
+        let cal = schedule_with(calendar("09:00", &[]), RunsOn::Backend);
+        assert!(!cal.is_event());
+        assert!(cal.event_triggers().is_empty());
     }
 
     #[test]
@@ -3047,6 +3105,13 @@ pub enum ExecMode {
     /// (or forever if no cooldown). Use for "one delegate is
     /// enough" tasks like license check-in.
     OncePerTarget,
+    /// #418 OS-native event trigger (`when: { on: [...] }`). There is
+    /// no cron — the agent fires it from an OS event source (boot /
+    /// session-change), not a tick — so the scheduler skips
+    /// `tokio-cron` registration for it. Each event occurrence fires
+    /// once, gated by the standard freeze / active / window /
+    /// skip_dates checks.
+    Event,
 }
 
 /// #418 Phase 1 — the single "when does this fire" axis.
@@ -3084,6 +3149,30 @@ pub enum When {
     /// the whole target at that wall-clock time in the schedule's
     /// `tz` — no dedup, no cooldown.
     Calendar(CalendarSpec),
+    /// #418 OS-native event trigger: `when: { on: [startup, logon] }`.
+    /// Fires when the agent observes the listed OS event(s) rather than
+    /// on a clock — there is no cron. `runs_on: agent` only (the agent
+    /// owns the event source); [`Schedule::validate`] rejects it on
+    /// `backend` and rejects an empty list. Each event occurrence fires
+    /// once, gated by the same freeze / active / `constraints.window` /
+    /// `skip_dates` checks as the cron path. `startup` fires once per OS
+    /// boot (deduped via the host boot time); a `starting_deadline`, if
+    /// set, limits it to "agent came up within that long after boot".
+    On(Vec<OnTrigger>),
+}
+
+/// An OS event the agent can fire a schedule on (#418 `when: { on }`).
+/// `unlock` / `network_change` are planned follow-ups.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum OnTrigger {
+    /// Once per OS boot (the agent's first run for that boot). Catches
+    /// freshly-imaged / reinstalled hosts at their next startup.
+    Startup,
+    /// On an interactive-session user logon — console, RDP, or
+    /// auto-logon (Windows `WTS_SESSION_LOGON`). Does not fire for
+    /// service / network / batch logons (no interactive session).
+    Logon,
 }
 
 /// Calendar time trigger (#418 Phase 2). `at` is either a time of
@@ -3412,6 +3501,20 @@ impl std::fmt::Display for When {
             When::PerTarget(p) => write!(f, "per_target {}", policy(p)),
             When::Calendar(c) if c.days.is_empty() => write!(f, "at {}", c.at),
             When::Calendar(c) => write!(f, "at {} [{}]", c.at, c.days.join(",")),
+            When::On(triggers) => {
+                let names: Vec<&str> = triggers.iter().map(|t| t.as_str()).collect();
+                write!(f, "on [{}]", names.join(","))
+            }
+        }
+    }
+}
+
+impl OnTrigger {
+    /// Lowercase wire/display label (matches the serde `snake_case`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OnTrigger::Startup => "startup",
+            OnTrigger::Logon => "logon",
         }
     }
 }
@@ -3950,6 +4053,33 @@ impl Schedule {
                 cooldown: None,
                 tz,
             },
+            // Event triggers have no cron — the agent fires them from an
+            // OS event source. The `# event-trigger` cron is never
+            // registered (the scheduler branches on `is_event()` first),
+            // but keep it deliberately-invalid as a belt-and-suspenders
+            // so a stray registration would fail rather than misfire.
+            When::On(_) => Lowered {
+                cron: "# event-trigger (no cron)".into(),
+                mode: ExecMode::Event,
+                cooldown: None,
+                tz,
+            },
+        }
+    }
+
+    /// True when this schedule fires from an OS event (`when: { on }`)
+    /// rather than a clock — the agent skips `tokio-cron` registration
+    /// for these and drives them from boot / session-change instead.
+    pub fn is_event(&self) -> bool {
+        matches!(self.when, When::On(_))
+    }
+
+    /// The OS event triggers this schedule listens for, or `&[]` when it
+    /// is not an event schedule.
+    pub fn event_triggers(&self) -> &[OnTrigger] {
+        match &self.when {
+            When::On(t) => t,
+            _ => &[],
         }
     }
 
@@ -4014,6 +4144,23 @@ impl Schedule {
                  so per-target dedup would be deduping across a target of 1)"
                     .into(),
             );
+        }
+        // #418 event triggers: the agent owns the OS event source
+        // (boot / session-change), so `when: { on }` is agent-only and
+        // needs at least one trigger.
+        if let When::On(triggers) = &self.when {
+            if !matches!(self.runs_on, RunsOn::Agent) {
+                return Err(
+                    "when.on (OS event trigger) is fired by the agent's own event \
+                     source, so it requires runs_on: agent"
+                        .into(),
+                );
+            }
+            if triggers.is_empty() {
+                return Err(
+                    "when.on must list at least one trigger (e.g. [startup, logon])".into(),
+                );
+            }
         }
         if let Some(cd) = self.lowered().cooldown.as_deref() {
             humantime::parse_duration(cd)

@@ -39,7 +39,9 @@ use kanade_shared::kv::{
     BUCKET_FLEET_CONFIG, BUCKET_JOBS, BUCKET_SCHEDULES, BUCKET_SCRIPT_CURRENT,
     BUCKET_SCRIPT_STATUS, KEY_FREEZE,
 };
-use kanade_shared::manifest::{ExecMode, Freeze, Manifest, RunsOn, Schedule, ScheduleTz, When};
+use kanade_shared::manifest::{
+    ExecMode, Freeze, Manifest, OnTrigger, RunsOn, Schedule, ScheduleTz, When,
+};
 use kanade_shared::wire::Command;
 use tokio::sync::Mutex;
 use tokio_cron_scheduler::{Job, JobScheduler};
@@ -92,6 +94,14 @@ struct State {
     completions: HashMap<String, DateTime<Utc>>,
     /// Path to the completions file (under agent's data dir).
     completions_path: PathBuf,
+    /// #418 event triggers: `schedule_id` → the OS `boot_time` (epoch
+    /// secs) we last fired an `on: startup` schedule for. Lets the boot
+    /// path fire startup schedules **once per OS boot** rather than on
+    /// every agent restart (self-update / crash) within the same boot.
+    /// Persisted to `startup_markers.json` so it survives the restart.
+    startup_markers: HashMap<String, u64>,
+    /// Path to the startup-markers file (under agent's data dir).
+    startup_markers_path: PathBuf,
     /// schedule_id → deadline. While a fire's `handle_command` runs,
     /// the schedule is marked here so a concurrent tick doesn't
     /// double-fire before the first run records its completion
@@ -160,7 +170,11 @@ impl State {
         claim_ttl: ChronoDuration,
     ) -> (bool, bool) {
         let should = match mode {
-            ExecMode::EveryTick => true,
+            // Event triggers fire on each occurrence — the OS event
+            // source already decided "now" (boot / logon). Per-occurrence
+            // dedup (startup once-per-boot) is the caller's job; here we
+            // only gate concurrent double-claims via `in_flight`.
+            ExecMode::EveryTick | ExecMode::Event => true,
             ExecMode::OncePerPc => match self.completions.get(&Self::key(schedule_id, job_id)) {
                 None => true,
                 Some(last) => cooldown.is_some_and(|cd| (now - *last) >= cd),
@@ -253,6 +267,83 @@ impl State {
             }
         }
     }
+
+    /// Record that an `on: startup` schedule fired for this OS boot, and
+    /// persist (best-effort, like completions — in-memory state stays
+    /// consistent on a write failure).
+    fn record_startup_marker(&mut self, schedule_id: &str, boot_time: u64) {
+        self.startup_markers
+            .insert(schedule_id.to_string(), boot_time);
+        if let Err(e) = self.flush_startup_markers() {
+            warn!(error = %e, "startup_markers.json flush failed; in-memory state still consistent");
+        }
+    }
+
+    fn flush_startup_markers(&self) -> Result<()> {
+        let tmp = self.startup_markers_path.with_extension("json.tmp");
+        let bytes = serde_json::to_vec_pretty(&self.startup_markers)
+            .context("serialise startup_markers")?;
+        if let Some(parent) = tmp.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::write(&tmp, &bytes).context("write tmp startup_markers file")?;
+        std::fs::rename(&tmp, &self.startup_markers_path).context("rename tmp → final")?;
+        Ok(())
+    }
+
+    fn load_startup_markers(path: &std::path::Path) -> HashMap<String, u64> {
+        match std::fs::read(path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+                warn!(error = %e, path = %path.display(), "parse startup_markers; starting empty");
+                HashMap::new()
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+            Err(e) => {
+                warn!(error = %e, path = %path.display(), "read startup_markers; starting empty");
+                HashMap::new()
+            }
+        }
+    }
+}
+
+/// How far apart two `boot_time` readings may be and still count as the
+/// **same** OS boot. `boot_time` is derived (`now − uptime`) so NTP /
+/// clock adjustments jitter it by seconds across a boot session; two
+/// *distinct* boots are always minutes apart (shutdown + boot). 120s
+/// absorbs the jitter without ever merging two real boots.
+const STARTUP_BOOT_THRESHOLD_SECS: u64 = 120;
+
+/// Pure decision for an `on: startup` fire (`#418`). Returns whether the
+/// schedule should fire on this agent run:
+/// - `recorded`: the `boot_time` we last fired this schedule for (`None`
+///   = never fired on this host).
+/// - `current_boot`: this OS boot time (epoch secs).
+/// - `uptime_secs`: `now − current_boot` (how long after boot the agent
+///   reached this point).
+/// - `deadline_secs`: the schedule's `starting_deadline` in seconds, if
+///   set — only fire when the agent came up within it after boot.
+///
+/// Fires when it's a **new boot** (no marker, or `current_boot` differs
+/// from `recorded` by more than [`STARTUP_BOOT_THRESHOLD_SECS`]) AND, if
+/// a `starting_deadline` is set, the agent is still within it. A restart
+/// in the *same* boot (self-update / crash) is the same boot → skip.
+fn should_fire_startup(
+    recorded: Option<u64>,
+    current_boot: u64,
+    uptime_secs: u64,
+    deadline_secs: Option<u64>,
+) -> bool {
+    let new_boot = match recorded {
+        None => true,
+        Some(r) => current_boot.abs_diff(r) > STARTUP_BOOT_THRESHOLD_SECS,
+    };
+    if !new_boot {
+        return false;
+    }
+    match deadline_secs {
+        Some(d) => uptime_secs <= d,
+        None => true,
+    }
 }
 
 /// Does this schedule target the given agent? Pure function for
@@ -328,12 +419,18 @@ async fn run(
         loaded = completions.len(),
         "local_scheduler: loaded completion state",
     );
+    // #418 event triggers: startup once-per-boot markers live next to
+    // the completions file in the same data dir.
+    let startup_markers_path = completions_path.with_file_name("startup_markers.json");
+    let startup_markers = State::load_startup_markers(&startup_markers_path);
     let state = Arc::new(Mutex::new(State {
         jobs: HashMap::new(),
         registered: HashMap::new(),
         schedules: HashMap::new(),
         completions,
         completions_path,
+        startup_markers,
+        startup_markers_path,
         in_flight: HashMap::new(),
         freeze: None,
     }));
@@ -352,6 +449,25 @@ async fn run(
         script_cache.clone(),
         check_sink.clone(),
     );
+
+    // #418 event triggers: a global channel lets the Windows service
+    // control handler signal interactive logons (`on: logon`) to this
+    // async task. Best-effort `set` (only the first run wins).
+    #[cfg(target_os = "windows")]
+    {
+        let (logon_tx, logon_rx) = tokio::sync::watch::channel(0u64);
+        let _ = LOGON_NOTIFY.set(logon_tx);
+        let _logon_task = spawn_logon_fire_task(
+            logon_rx,
+            client.clone(),
+            pc_id.clone(),
+            groups_rx.clone(),
+            state.clone(),
+            staleness.clone(),
+            script_cache.clone(),
+            check_sink.clone(),
+        );
+    }
 
     // #418 Phase 5: mirror the fleet change-freeze into `State` so
     // local_tick gates on it without a per-tick KV get (gemini #472).
@@ -436,6 +552,21 @@ async fn run(
         .await;
         let count = state.lock().await.registered.len();
         info!(count, "local_scheduler: registered schedules after resync");
+
+        // #418 event triggers: fire `on: startup` schedules once per OS
+        // boot (deduped by the host boot_time marker, so re-running this
+        // on a reconnect within the same boot is a no-op). Runs after the
+        // bulk reconcile so the event schedules are cached.
+        fire_startup_schedules(
+            &client,
+            &pc_id,
+            &state,
+            &my_groups,
+            &staleness,
+            &script_cache,
+            &check_sink,
+        )
+        .await;
 
         let mut schedules_watch = match schedules_kv.watch_all().await {
             Ok(w) => w,
@@ -838,6 +969,20 @@ async fn reconcile_schedule(
         return;
     }
 
+    // #418 event triggers (`when: { on }`): no cron — fired by the OS
+    // event source (boot / session-change), not a tick. Cache the
+    // Schedule so the event sources can find it, but skip the
+    // tokio-cron registration entirely.
+    if schedule.is_event() {
+        st.schedules.insert(schedule.id.clone(), schedule.clone());
+        info!(
+            schedule_id = %schedule.id,
+            when = %schedule.when,
+            "local_scheduler: registered (event-triggered, no cron)",
+        );
+        return;
+    }
+
     // #418: lower `when` onto the engine cron — POLL_CRON for
     // reconcile shapes, a 6/7-field cron for calendar shapes.
     // Phase 2: evaluated in the schedule's tz via new_async_tz
@@ -1050,6 +1195,229 @@ fn spawn_freeze_watch_task(
     })
 }
 
+/// #418 event triggers: fire every cached `on: startup` schedule that
+/// targets this agent **once per OS boot**. The host `boot_time` +
+/// per-schedule marker dedups across agent restarts (self-update /
+/// crash) inside the same boot; a `starting_deadline` (if set) limits
+/// firing to "the agent came up within that long after boot". Each fire
+/// goes through `local_tick`, so the freeze / active / window /
+/// skip_dates gates and the in-flight guard all still apply.
+async fn fire_startup_schedules(
+    client: &async_nats::Client,
+    pc_id: &str,
+    state: &Arc<Mutex<State>>,
+    my_groups: &[String],
+    staleness: &crate::staleness::Tracker,
+    script_cache: &ScriptCache,
+    check_sink: &crate::check_cache::CheckSink,
+) {
+    let now_secs = Utc::now().timestamp().max(0) as u64;
+    // `boot_time()` returns 0 when unavailable/unsupported. Left as 0 it
+    // breaks the dedup two ways (gemini #599): `uptime` becomes a huge
+    // epoch so any `starting_deadline` never passes, and a recorded `0`
+    // marker matches every future `0` so the schedule never fires again.
+    // Fall back to the agent's start time: `on: startup` then degrades to
+    // "fire on each agent start" (re-fires on restart) rather than
+    // silently never firing — the safe direction for a startup trigger.
+    let boot_time = match sysinfo::System::boot_time() {
+        0 => {
+            warn!(
+                "local_scheduler: sysinfo boot_time unavailable (0); using agent start time — \
+                 on:startup may re-fire on each agent restart until it reads correctly"
+            );
+            now_secs
+        }
+        bt => bt,
+    };
+    let uptime_secs = now_secs.saturating_sub(boot_time);
+
+    // Snapshot the matching startup schedules + their markers under one
+    // lock, then fire outside it (local_tick takes the lock itself).
+    let to_fire: Vec<Schedule> = {
+        let st = state.lock().await;
+        st.schedules
+            .values()
+            .filter(|s| {
+                s.event_triggers().contains(&OnTrigger::Startup) && st.matching(s, pc_id, my_groups)
+            })
+            .filter(|s| {
+                let deadline_secs = s
+                    .starting_deadline
+                    .as_deref()
+                    .and_then(|d| humantime::parse_duration(d).ok())
+                    .map(|d| d.as_secs());
+                should_fire_startup(
+                    st.startup_markers.get(&s.id).copied(),
+                    boot_time,
+                    uptime_secs,
+                    deadline_secs,
+                )
+            })
+            .cloned()
+            .collect()
+    };
+
+    for schedule in to_fire {
+        info!(
+            schedule_id = %schedule.id,
+            boot_time,
+            uptime_secs,
+            "local_scheduler: firing on:startup (once per OS boot)",
+        );
+        // Mark synchronously BEFORE the spawn — deliberate (claude #599).
+        // The marker is set under the same lock that read it, so a
+        // concurrent reconnect re-running this fn sees it and can't
+        // double-spawn (recording it inside the spawned task, after
+        // local_tick's gates, would open a TOCTOU window). The trade-off:
+        // the startup is "consumed" for this boot even if a freeze /
+        // active-window blocks the actual run at this instant — that boot
+        // is skipped rather than deferred. Acceptable for `on: startup`
+        // (a fleet frozen at boot should stay quiet; non-event cron
+        // schedules still run once unfrozen); kitting that must survive a
+        // freeze uses `per_pc: once`, not an event trigger.
+        state
+            .lock()
+            .await
+            .record_startup_marker(&schedule.id, boot_time);
+        // Spawn each fire so a slow / jitter-delayed run doesn't block the
+        // others (matches how tokio-cron spawns each tick; gemini #599).
+        // Different schedules run concurrently; the in-flight guard still
+        // dedups concurrent fires of the SAME schedule.
+        spawn_fire(
+            client.clone(),
+            pc_id.to_string(),
+            state.clone(),
+            schedule,
+            staleness.clone(),
+            script_cache.clone(),
+            check_sink.clone(),
+        );
+    }
+}
+
+/// Spawn a single `local_tick` fire as a detached task — the
+/// fire-and-forget shape tokio-cron uses for its ticks, so event fires
+/// (startup / logon) don't serialise behind each other (gemini #599).
+fn spawn_fire(
+    client: async_nats::Client,
+    pc_id: String,
+    state: Arc<Mutex<State>>,
+    schedule: Schedule,
+    staleness: crate::staleness::Tracker,
+    script_cache: ScriptCache,
+    check_sink: crate::check_cache::CheckSink,
+) {
+    tokio::spawn(async move {
+        local_tick(
+            &client,
+            &pc_id,
+            &state,
+            &schedule,
+            &staleness,
+            &script_cache,
+            &check_sink,
+        )
+        .await;
+    });
+}
+
+/// #418 event triggers: fire every cached event schedule that targets
+/// this agent and lists `trigger` (used by the logon session-change
+/// source). No per-occurrence marker — each event fires once, gated by
+/// `local_tick`'s freeze / active / window checks + in-flight guard.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[allow(clippy::too_many_arguments)]
+async fn fire_event_schedules(
+    client: &async_nats::Client,
+    pc_id: &str,
+    state: &Arc<Mutex<State>>,
+    my_groups: &[String],
+    staleness: &crate::staleness::Tracker,
+    script_cache: &ScriptCache,
+    check_sink: &crate::check_cache::CheckSink,
+    trigger: OnTrigger,
+) {
+    let to_fire: Vec<Schedule> = {
+        let st = state.lock().await;
+        st.schedules
+            .values()
+            .filter(|s| s.event_triggers().contains(&trigger) && st.matching(s, pc_id, my_groups))
+            .cloned()
+            .collect()
+    };
+    for schedule in to_fire {
+        info!(
+            schedule_id = %schedule.id,
+            trigger = trigger.as_str(),
+            "local_scheduler: firing event trigger",
+        );
+        // Spawn so multiple event schedules don't serialise (gemini #599).
+        spawn_fire(
+            client.clone(),
+            pc_id.to_string(),
+            state.clone(),
+            schedule,
+            staleness.clone(),
+            script_cache.clone(),
+            check_sink.clone(),
+        );
+    }
+}
+
+/// Bumped by the Windows service control handler on each interactive
+/// logon (#418 `on: logon`). The scheduler subscribes and fires
+/// matching event schedules. A global because the SCM control handler
+/// (a sync closure in `service.rs`) can't reach the async scheduler
+/// task directly.
+#[cfg(target_os = "windows")]
+pub(crate) static LOGON_NOTIFY: std::sync::OnceLock<tokio::sync::watch::Sender<u64>> =
+    std::sync::OnceLock::new();
+
+/// Signal an interactive logon to the scheduler. No-op until the
+/// scheduler has initialised the channel (early boot, or non-running).
+#[cfg(target_os = "windows")]
+pub(crate) fn notify_logon() {
+    if let Some(tx) = LOGON_NOTIFY.get() {
+        tx.send_modify(|c| *c = c.wrapping_add(1));
+    }
+}
+
+/// Long-lived task: fire `on: logon` schedules each time the control
+/// handler signals a logon via [`notify_logon`].
+#[cfg(target_os = "windows")]
+#[allow(clippy::too_many_arguments)]
+fn spawn_logon_fire_task(
+    mut logon_rx: tokio::sync::watch::Receiver<u64>,
+    client: async_nats::Client,
+    pc_id: String,
+    groups_rx: tokio::sync::watch::Receiver<Vec<String>>,
+    state: Arc<Mutex<State>>,
+    staleness: crate::staleness::Tracker,
+    script_cache: ScriptCache,
+    check_sink: crate::check_cache::CheckSink,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            // Skip the initial `0` — only react to real logon bumps.
+            if logon_rx.changed().await.is_err() {
+                break;
+            }
+            let my_groups = groups_rx.borrow().clone();
+            fire_event_schedules(
+                &client,
+                &pc_id,
+                &state,
+                &my_groups,
+                &staleness,
+                &script_cache,
+                &check_sink,
+                OnTrigger::Logon,
+            )
+            .await;
+        }
+    })
+}
+
 async fn local_tick(
     client: &async_nats::Client,
     pc_id: &str,
@@ -1164,7 +1532,13 @@ async fn local_tick(
         },
     };
     let should_fire = match lowered.mode {
-        ExecMode::EveryTick => true,
+        // Event schedules reach `local_tick` only when an OS event
+        // source (boot / session-change) calls it — the event already
+        // decided "fire now". The boot path applies the once-per-boot
+        // dedup BEFORE this; here it's an unconditional fire, gated by
+        // the freeze / active / window checks above + the in-flight
+        // claim below. (Event schedules are never tokio-cron-registered.)
+        ExecMode::EveryTick | ExecMode::Event => true,
         ExecMode::OncePerTarget => {
             // per_target needs fleet-wide completion data and is
             // rejected by Schedule::validate() for runs_on: agent —
@@ -1407,6 +1781,60 @@ mod tests {
         When,
     };
 
+    // ---- #418 on:startup boot-dedup decision ----
+
+    const T: u64 = STARTUP_BOOT_THRESHOLD_SECS; // 120
+
+    #[test]
+    fn startup_fires_when_never_recorded() {
+        // No marker → first time on this host → fire.
+        assert!(should_fire_startup(None, 1_000_000, 5, None));
+    }
+
+    #[test]
+    fn startup_skips_same_boot_within_threshold() {
+        // Agent restarted in the same boot: boot_time is the same (±jitter
+        // under the threshold) → already fired this boot → skip.
+        assert!(!should_fire_startup(Some(1_000_000), 1_000_000, 30, None));
+        assert!(!should_fire_startup(
+            Some(1_000_000),
+            1_000_000 + T - 1,
+            30,
+            None
+        ));
+        assert!(!should_fire_startup(
+            Some(1_000_000),
+            1_000_000 - (T - 1),
+            30,
+            None
+        ));
+    }
+
+    #[test]
+    fn startup_fires_on_new_boot_past_threshold() {
+        // A genuinely new boot is minutes apart → past the threshold → fire.
+        assert!(should_fire_startup(
+            Some(1_000_000),
+            1_000_000 + T + 1,
+            5,
+            None
+        ));
+    }
+
+    #[test]
+    fn startup_starting_deadline_gates_late_agent_start() {
+        // New boot, but the agent came up well after boot. With a
+        // starting_deadline the late start is skipped; without one it fires.
+        let new_boot = 2_000_000;
+        let recorded = Some(1_000_000); // far in the past = new boot
+        // uptime 600s, deadline 300s → too late → skip.
+        assert!(!should_fire_startup(recorded, new_boot, 600, Some(300)));
+        // uptime 100s, deadline 300s → within → fire.
+        assert!(should_fire_startup(recorded, new_boot, 100, Some(300)));
+        // no deadline → fire regardless of how late.
+        assert!(should_fire_startup(recorded, new_boot, 36_000, None));
+    }
+
     fn schedule(target: Target, runs_on: RunsOn) -> Schedule {
         Schedule {
             id: "s".into(),
@@ -1433,12 +1861,16 @@ mod tests {
         // harmless real write (and parallel tests don't collide).
         let mut p = std::env::temp_dir();
         p.push(format!("kanade-test-completions-{}.json", Uuid::new_v4()));
+        let mut sp = std::env::temp_dir();
+        sp.push(format!("kanade-test-startup-{}.json", Uuid::new_v4()));
         State {
             jobs: HashMap::new(),
             registered: HashMap::new(),
             schedules: HashMap::new(),
             completions: HashMap::new(),
             completions_path: p,
+            startup_markers: HashMap::new(),
+            startup_markers_path: sp,
             in_flight: HashMap::new(),
             freeze: None,
         }

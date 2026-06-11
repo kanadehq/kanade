@@ -26,7 +26,8 @@ use std::time::Duration;
 
 use windows_service::define_windows_service;
 use windows_service::service::{
-    ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus, ServiceType,
+    ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
+    ServiceType, SessionChangeReason,
 };
 use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
 use windows_service::service_dispatcher;
@@ -75,6 +76,19 @@ fn run_service() -> windows_service::Result<()> {
                 ServiceControlHandlerResult::NoError
             }
             ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
+            // #418 `on: logon`: signal the local scheduler to fire its
+            // `on: logon` schedules. `SessionLogon` (WTS_SESSION_LOGON)
+            // is an **interactive-session** user logon — console, RDP, or
+            // auto-logon; it does NOT fire for service / network / batch
+            // logons (those create no WTS session). Other session-change
+            // reasons (Lock/Unlock/Connect/...) are intentionally ignored
+            // here but acknowledged (NoError) so the SCM stays happy.
+            ServiceControl::SessionChange(param) => {
+                if param.reason == SessionChangeReason::SessionLogon {
+                    crate::local_scheduler::notify_logon();
+                }
+                ServiceControlHandlerResult::NoError
+            }
             _ => ServiceControlHandlerResult::NotImplemented,
         }
     };
@@ -84,7 +98,9 @@ fn run_service() -> windows_service::Result<()> {
     status_handle.set_service_status(ServiceStatus {
         service_type: SERVICE_TYPE,
         current_state: ServiceState::Running,
-        controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+        controls_accepted: ServiceControlAccept::STOP
+            | ServiceControlAccept::SHUTDOWN
+            | ServiceControlAccept::SESSION_CHANGE,
         exit_code: ServiceExitCode::Win32(0),
         checkpoint: 0,
         wait_hint: Duration::default(),
