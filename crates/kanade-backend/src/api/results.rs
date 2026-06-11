@@ -10,6 +10,24 @@ use tracing::warn;
 
 use super::AppState;
 
+/// A regex-match excerpt for the Activity listing. The matched run is
+/// returned split from its surrounding context (`before` / `matched` /
+/// `after`) so the SPA can wrap the hit in `<mark>` without juggling
+/// byte offsets — JS string indexing is UTF-16, so handing it raw
+/// regex byte offsets would mis-slice any multibyte output. The
+/// `clipped_*` flags say where the context was trimmed so the UI can
+/// render a leading / trailing ellipsis. Surfacing this lets operators
+/// see *where* a `stdout` / `stderr` filter matched even when the hit
+/// sits well past the collapsed preview cutoff.
+#[derive(Serialize, Debug, PartialEq)]
+pub struct MatchSnippet {
+    pub before: String,
+    pub matched: String,
+    pub after: String,
+    pub clipped_start: bool,
+    pub clipped_end: bool,
+}
+
 #[derive(Serialize)]
 pub struct ResultRow {
     /// v0.29 / Issue #19: PK (agent-minted per-PC UUID). For rows
@@ -47,6 +65,19 @@ pub struct ResultRow {
     /// (no events.started landed) — the Activity Finished view
     /// falls back to "—".
     pub version: Option<String>,
+    /// True when the `stdout` returned here is a server-clipped preview
+    /// (the listing ships the first PREVIEW_CHARS chars, not the whole
+    /// buffer — the full body is one detail fetch away). Always false on
+    /// the detail endpoint, which returns the complete buffer.
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+    /// First regex-match excerpt when a `stdout` / `stderr` filter is
+    /// active and hit this row. None on the no-regex fast path and on
+    /// the detail endpoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stdout_match: Option<MatchSnippet>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stderr_match: Option<MatchSnippet>,
 }
 
 /// Optional `status` filter on the results listing. `success` keeps
@@ -133,6 +164,21 @@ const META_COLUMNS: &str =
 /// operator-supplied large `limit` can't blow the query up.
 const HYDRATE_CHUNK: usize = 500;
 
+/// Chars of stdout/stderr preview the listing returns per row. The full
+/// body is fetched lazily from the detail endpoint when the operator
+/// clicks "show more", so the listing payload stays small even when a
+/// fleet-wide fan-out fills the window with kilobyte-each outputs.
+const PREVIEW_CHARS: usize = 200;
+
+/// Context chars kept on each side of a regex match in the snippet
+/// excerpt so the SPA can show *where* the pattern hit.
+const SNIPPET_CONTEXT_CHARS: usize = 80;
+
+/// Cap on the matched substring inside a snippet — a greedy pattern
+/// (`.*`) can span the whole buffer, which would defeat the payload
+/// trim, so clip it and flag the clip via `clipped_end`.
+const SNIPPET_MATCH_CHARS: usize = 240;
+
 fn compile(opt: Option<&str>) -> Result<Option<Regex>, (StatusCode, String)> {
     match opt.filter(|s| !s.is_empty()) {
         Some(s) => Regex::new(s)
@@ -213,11 +259,24 @@ pub async fn list(
         )
     })?;
 
-    // Fast path: no regex filters → SQL already applied the LIMIT, so
-    // just hydrate the rows and return. Avoids the per-row `try_get`
-    // dance + the manual capacity / break logic below.
+    // Fast path: no regex filters → SQL already applied the LIMIT.
+    // Hydrate each row with a *clipped* stdout/stderr preview (the full
+    // body is one detail fetch away on "show more") so a 1000-row
+    // fleet-wide window of kilobyte-each outputs doesn't ship megabytes
+    // of stdio the table only ever shows PREVIEW_CHARS of. The DB read
+    // is unchanged; only the wire payload shrinks.
     if !has_regex {
-        return Ok(Json(rows.into_iter().map(row_to_result).collect()));
+        let out: Vec<ResultRow> = rows
+            .iter()
+            .map(|r| {
+                let stdout_raw: &str = r.try_get("stdout").unwrap_or("");
+                let stderr_raw: &str = r.try_get("stderr").unwrap_or("");
+                let (sp, st) = take_prefix(stdout_raw, PREVIEW_CHARS);
+                let (ep, et) = take_prefix(stderr_raw, PREVIEW_CHARS);
+                build_row(r, sp.to_string(), ep.to_string(), st, et, None, None)
+            })
+            .collect();
+        return Ok(Json(out));
     }
 
     // Regex path: match against the raw column values first so a row
@@ -254,7 +313,30 @@ pub async fn list(
         {
             continue;
         }
-        out.push(row_to_result(r));
+        // Row survived every filter. Re-borrow the raw columns to build
+        // the match excerpt (around the *first* hit) and the clipped
+        // preview — matching already ran against the full text above, so
+        // clipping the wire payload here doesn't change which rows
+        // surface, only how much stdio rides along.
+        let stdout_raw: &str = r.try_get("stdout").unwrap_or("");
+        let stderr_raw: &str = r.try_get("stderr").unwrap_or("");
+        let stdout_match = stdout_re
+            .as_ref()
+            .and_then(|re| match_snippet(re, stdout_raw));
+        let stderr_match = stderr_re
+            .as_ref()
+            .and_then(|re| match_snippet(re, stderr_raw));
+        let (sp, st) = take_prefix(stdout_raw, PREVIEW_CHARS);
+        let (ep, et) = take_prefix(stderr_raw, PREVIEW_CHARS);
+        out.push(build_row(
+            &r,
+            sp.to_string(),
+            ep.to_string(),
+            st,
+            et,
+            stdout_match,
+            stderr_match,
+        ));
         if out.len() >= limit {
             break;
         }
@@ -297,8 +379,17 @@ pub async fn list(
         }
         for row in &mut out {
             if let Some((stdout, stderr)) = by_id.remove(&row.result_id) {
-                row.stdout = stdout;
-                row.stderr = stderr;
+                // Clip the re-fetched blobs to the preview, same as the
+                // fast path — otherwise rehydration would smuggle the
+                // full buffer back into the payload this PR set out to
+                // shrink. No match excerpt here: this path runs only
+                // when no stdout/stderr regex is active.
+                let (sp, st) = take_prefix(&stdout, PREVIEW_CHARS);
+                let (ep, et) = take_prefix(&stderr, PREVIEW_CHARS);
+                row.stdout = sp.to_string();
+                row.stderr = ep.to_string();
+                row.stdout_truncated = st;
+                row.stderr_truncated = et;
             }
         }
     }
@@ -466,7 +557,65 @@ pub async fn tail(
     }))
 }
 
-fn row_to_result(r: sqlx::sqlite::SqliteRow) -> ResultRow {
+/// First `n` chars of `s` plus whether `s` had more (so the caller can
+/// flag truncation / render an ellipsis). Operates on char boundaries
+/// so a multibyte sequence (CP932-origin U+FFFD, emoji, …) is never
+/// split mid-codepoint.
+fn take_prefix(s: &str, n: usize) -> (&str, bool) {
+    match s.char_indices().nth(n) {
+        Some((idx, _)) => (&s[..idx], true),
+        None => (s, false),
+    }
+}
+
+/// Last `n` chars of `s` plus whether `s` had more — the suffix mirror
+/// of `take_prefix`, used for the leading context of a match excerpt.
+/// Walks from the end so it's O(n) in the context window rather than
+/// O(L) in the (potentially multi-MB) buffer length.
+fn take_suffix(s: &str, n: usize) -> (&str, bool) {
+    if n == 0 {
+        return ("", !s.is_empty());
+    }
+    let mut iter = s.char_indices().rev();
+    match iter.nth(n - 1) {
+        // `nth(n-1)` lands on the n-th char from the end (its byte
+        // index); a further `next()` tells us whether an (n+1)-th char
+        // exists, i.e. whether the head was clipped.
+        Some((idx, _)) => (&s[idx..], iter.next().is_some()),
+        None => (s, false),
+    }
+}
+
+/// Build a match excerpt around the *first* hit of `re` in `hay`,
+/// splitting the matched run from its surrounding context so the SPA
+/// can wrap it in `<mark>`. Returns None when `re` doesn't match (e.g.
+/// the row qualified on a different filter axis like `pc_id`).
+fn match_snippet(re: &Regex, hay: &str) -> Option<MatchSnippet> {
+    let m = re.find(hay)?;
+    let (before, clipped_start) = take_suffix(&hay[..m.start()], SNIPPET_CONTEXT_CHARS);
+    let (matched, matched_clipped) = take_prefix(&hay[m.start()..m.end()], SNIPPET_MATCH_CHARS);
+    let (after, after_clipped) = take_prefix(&hay[m.end()..], SNIPPET_CONTEXT_CHARS);
+    Some(MatchSnippet {
+        before: before.to_string(),
+        matched: matched.to_string(),
+        after: after.to_string(),
+        clipped_start,
+        clipped_end: matched_clipped || after_clipped,
+    })
+}
+
+/// Assemble a `ResultRow` from a DB row plus the already-derived
+/// stdout/stderr payload — the full body on the detail endpoint, a
+/// clipped preview (+ optional match excerpt) on the listing.
+fn build_row(
+    r: &sqlx::sqlite::SqliteRow,
+    stdout: String,
+    stderr: String,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
+    stdout_match: Option<MatchSnippet>,
+    stderr_match: Option<MatchSnippet>,
+) -> ResultRow {
     ResultRow {
         result_id: r.try_get("result_id").unwrap_or_default(),
         request_id: r.try_get("request_id").unwrap_or_default(),
@@ -476,8 +625,8 @@ fn row_to_result(r: sqlx::sqlite::SqliteRow) -> ResultRow {
         // try_get(...).ok() collapses absent + NULL to None — the
         // SPA renders that as "—" / running placeholder.
         exit_code: r.try_get("exit_code").ok(),
-        stdout: r.try_get("stdout").unwrap_or_default(),
-        stderr: r.try_get("stderr").unwrap_or_default(),
+        stdout,
+        stderr,
         started_at: r.try_get("started_at").ok(),
         finished_at: r.try_get("finished_at").ok(),
         // try_get → ok() collapses both "column missing entirely"
@@ -485,7 +634,19 @@ fn row_to_result(r: sqlx::sqlite::SqliteRow) -> ResultRow {
         // `kanade run` rows) to None, which is what we want.
         job_id: r.try_get("job_id").ok(),
         version: r.try_get("version").ok(),
+        stdout_truncated,
+        stderr_truncated,
+        stdout_match,
+        stderr_match,
     }
+}
+
+/// Detail endpoint hydration: the whole buffer, never clipped, no match
+/// excerpt (the detail view shows the full body verbatim).
+fn row_to_result(r: sqlx::sqlite::SqliteRow) -> ResultRow {
+    let stdout: String = r.try_get("stdout").unwrap_or_default();
+    let stderr: String = r.try_get("stderr").unwrap_or_default();
+    build_row(&r, stdout, stderr, false, false, None, None)
 }
 
 #[cfg(test)]
@@ -617,7 +778,7 @@ mod tests {
 
     /// #517: a metadata regex (pc_id) uses the blob-free prefilter,
     /// then re-hydrates stdout/stderr for the winners — the response
-    /// must still carry the full output.
+    /// must still carry the (clipped) output.
     #[tokio::test]
     async fn metadata_regex_path_still_returns_output() {
         let pool = fresh_pool().await;
@@ -717,5 +878,139 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].result_id, "r-hit");
         assert_eq!(rows[0].stdout, "ERROR: kaboom");
+    }
+
+    /// Like `insert_row` but lets the test pick the stdout/stderr bodies
+    /// so the preview-clip + match-excerpt paths can be exercised.
+    async fn insert_row_io(pool: &SqlitePool, result_id: &str, stdout: &str, stderr: &str) {
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO execution_results
+                (result_id, request_id, pc_id, exit_code, stdout, stderr,
+                 started_at, finished_at, recorded_at)
+             VALUES (?, 'req', 'pc-1', 0, ?, ?, ?, ?, ?)",
+        )
+        .bind(result_id)
+        .bind(stdout)
+        .bind(stderr)
+        .bind(now - Duration::minutes(10))
+        .bind(now - Duration::minutes(9))
+        .bind(now - Duration::minutes(9))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// The listing must clip stdout to a preview (and flag it) so a
+    /// fleet-wide window doesn't ship the full buffer of every row —
+    /// the full body is fetched lazily from the detail endpoint.
+    #[tokio::test]
+    async fn list_clips_stdout_to_preview() {
+        let pool = fresh_pool().await;
+        let long = "x".repeat(PREVIEW_CHARS + 50);
+        insert_row_io(&pool, "r-long", &long, "").await;
+
+        let rows = list(
+            State(pool),
+            Query(params(Some(Utc::now() - Duration::hours(24)))),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(
+            row.stdout.chars().count(),
+            PREVIEW_CHARS,
+            "stdout must be clipped to the preview length",
+        );
+        assert!(row.stdout_truncated, "a clipped stdout must be flagged");
+        assert!(!row.stderr_truncated, "empty stderr is not truncated");
+        assert!(
+            row.stdout_match.is_none(),
+            "no regex filter → no match excerpt",
+        );
+    }
+
+    /// #517 + preview: a metadata-regex winner whose blobs are
+    /// re-hydrated must still be clipped to the preview (the rehydration
+    /// must not smuggle the full buffer back into the payload).
+    #[tokio::test]
+    async fn metadata_regex_path_clips_rehydrated_output() {
+        let pool = fresh_pool().await;
+        let long = "y".repeat(PREVIEW_CHARS + 80);
+        // pc-9 so a `^pc-9$` metadata regex selects it via the
+        // blob-free prefilter, forcing the rehydration path.
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO execution_results
+                (result_id, request_id, pc_id, exit_code, stdout, stderr,
+                 started_at, finished_at, recorded_at)
+             VALUES ('r-big', 'req', 'pc-9', 0, ?, '', ?, ?, ?)",
+        )
+        .bind(&long)
+        .bind(now - Duration::minutes(10))
+        .bind(now - Duration::minutes(9))
+        .bind(now - Duration::minutes(9))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mut p = params(None);
+        p.pc_id = Some("^pc-9$".into());
+        let rows = list(State(pool), Query(p)).await.unwrap().0;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].stdout.chars().count(),
+            PREVIEW_CHARS,
+            "rehydrated output must still be clipped to the preview",
+        );
+        assert!(
+            rows[0].stdout_truncated,
+            "a clipped rehydrated stdout must be flagged",
+        );
+    }
+
+    /// A stdout regex hit must come back with a match excerpt even when
+    /// the needle sits well past the preview cutoff — that's the only
+    /// way the SPA can show operators *where* it matched.
+    #[tokio::test]
+    async fn stdout_regex_returns_match_excerpt() {
+        let pool = fresh_pool().await;
+        let hay = format!("{}NEEDLE{}", "a".repeat(PREVIEW_CHARS + 20), "b".repeat(30));
+        insert_row_io(&pool, "r-match", &hay, "").await;
+
+        let mut p = params(Some(Utc::now() - Duration::hours(24)));
+        p.stdout = Some("NEEDLE".to_string());
+        let rows = list(State(pool), Query(p)).await.unwrap().0;
+        assert_eq!(rows.len(), 1);
+        let m = rows[0]
+            .stdout_match
+            .as_ref()
+            .expect("a stdout match must carry an excerpt");
+        assert_eq!(m.matched, "NEEDLE");
+        assert!(m.clipped_start, "context before the needle was clipped");
+        assert!(m.before.ends_with('a'), "before-context is the lead-in");
+        assert!(m.after.starts_with('b'), "after-context is the tail");
+    }
+
+    /// A greedy pattern can match the whole buffer; the excerpt must cap
+    /// the matched run so it can't defeat the payload trim.
+    #[tokio::test]
+    async fn greedy_match_is_capped() {
+        let pool = fresh_pool().await;
+        let hay = "z".repeat(SNIPPET_MATCH_CHARS + 100);
+        insert_row_io(&pool, "r-greedy", &hay, "").await;
+
+        let mut p = params(Some(Utc::now() - Duration::hours(24)));
+        p.stdout = Some("z+".to_string());
+        let rows = list(State(pool), Query(p)).await.unwrap().0;
+        let m = rows[0].stdout_match.as_ref().unwrap();
+        assert_eq!(
+            m.matched.chars().count(),
+            SNIPPET_MATCH_CHARS,
+            "matched run is capped",
+        );
+        assert!(m.clipped_end, "a capped match flags clipped_end");
     }
 }
