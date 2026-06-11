@@ -105,24 +105,47 @@ fn run_service() -> windows_service::Result<()> {
             windows_service::Error::Winapi(e)
         })?;
 
-    runtime.block_on(async {
+    let failed = runtime.block_on(async {
         tokio::select! {
             res = crate::run_agent() => {
-                if let Err(e) = res {
-                    tracing::error!(error = %e, "run_agent exited with error");
+                match res {
+                    Err(e) => {
+                        tracing::error!(error = %e, "run_agent exited with error");
+                        true
+                    }
+                    Ok(()) => false,
                 }
             }
             _ = poll_shutdown(shutdown) => {
                 tracing::info!("SCM stop received; agent shutting down");
+                false
             }
         }
     });
+
+    // #500: bound the runtime teardown. `Runtime::drop` blocks until
+    // spawn_blocking tasks finish — a `run_as: user` child parked in
+    // WaitForSingleObject(..., INFINITE) (process_as_user.rs's
+    // blocking reader/waiter threads) would otherwise hang the SCM
+    // stop transition indefinitely. 5 s gives in-flight DB/NATS
+    // writes a fair chance; stragglers are abandoned to process exit.
+    runtime.shutdown_timeout(Duration::from_secs(5));
 
     status_handle.set_service_status(ServiceStatus {
         service_type: SERVICE_TYPE,
         current_state: ServiceState::Stopped,
         controls_accepted: ServiceControlAccept::empty(),
-        exit_code: ServiceExitCode::Win32(0),
+        // #500: a run_agent failure must exit NON-zero — the whole
+        // recovery story is `sc.exe failure` + `failureflag 1`
+        // restarting the service on failure exits (that's how
+        // self-update's exit(64) works). Win32(0) reads as an
+        // intentional stop, so a config/boot-path error silently
+        // left the endpoint agent-less until a human intervened.
+        exit_code: if failed {
+            ServiceExitCode::ServiceSpecific(1)
+        } else {
+            ServiceExitCode::Win32(0)
+        },
         checkpoint: 0,
         wait_hint: Duration::default(),
         process_id: None,
