@@ -11,8 +11,11 @@
 //!   `notifications_read` KV and publish the
 //!   `events.notifications.acked.>` event the backend projects into the
 //!   operator's confirmation view.
-//!
-//! `notifications.list` (history replay) lands in a follow-up PR.
+//! - `notifications.list` — replay the `NOTIFICATIONS` stream filtered
+//!   to this agent's audience, annotate each entry with the caller's ack
+//!   state, drop expired, and return a paginated newest-first page
+//!   (unread/all). The recovery path for pushes missed while the Client
+//!   App was disconnected.
 //!
 //! Mirrors the `state.*` forwarder shape, but the source is a
 //! `broadcast::Receiver<Notification>` (discrete events) instead of a
@@ -21,23 +24,51 @@
 //! the cursor to the oldest still-buffered message, so delivery resumes
 //! there and works forward) and `RecvError::Closed` (the bus exited).
 
-use chrono::Utc;
+use std::collections::HashMap;
+
+use async_nats::jetstream::consumer::pull::Config as PullConfig;
+use async_nats::jetstream::consumer::{AckPolicy, DeliverPolicy};
+use async_nats::jetstream::kv::Operation;
+use chrono::{DateTime, Utc};
+use futures::StreamExt;
 use kanade_shared::ipc::envelope::RpcNotification;
 use kanade_shared::ipc::error::{ErrorKind, RpcError};
 use kanade_shared::ipc::method;
 use kanade_shared::ipc::notifications::{
     Notification, NotificationAcked, NotificationNewParams, NotificationsAckParams,
-    NotificationsAckResult, NotificationsSubscribeParams, NotificationsSubscribeResult,
-    NotificationsUnsubscribeParams,
+    NotificationsAckResult, NotificationsFilter, NotificationsListParams, NotificationsListResult,
+    NotificationsSubscribeParams, NotificationsSubscribeResult, NotificationsUnsubscribeParams,
 };
-use kanade_shared::kv::{BUCKET_NOTIFICATIONS_READ, notifications_read_key};
+use kanade_shared::kv::{
+    BUCKET_AGENT_GROUPS, BUCKET_NOTIFICATIONS_READ, STREAM_NOTIFICATIONS, notifications_read_key,
+    notifications_read_prefix,
+};
 use kanade_shared::subject;
+use serde::Deserialize;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use super::super::connection::ConnectionState;
+use super::super::notify_bus::filter_subjects;
 use super::system::HandlerResult;
+use crate::groups::parse_groups;
+
+/// Safety ceiling on how many notifications `notifications.list` replays
+/// from the stream in one call. Notifications are operator-broadcast
+/// (not telemetry), so a 90-day history is realistically dozens — this
+/// cap only guards against a runaway. If a fleet ever exceeds it the
+/// overflow is logged (never silently dropped) and the oldest beyond
+/// the cap are omitted.
+const MAX_REPLAY: usize = 5000;
+
+/// Per-fetch batch size when draining the stream.
+const REPLAY_BATCH: usize = 500;
+
+/// Hard upper bound on `limit`, mirroring the wire doc on
+/// [`NotificationsListParams::limit`]. A hand-rolled client asking for
+/// more is clamped rather than allowed to pull unbounded history.
+const MAX_LIMIT: usize = 200;
 
 /// `notifications.subscribe` — start streaming `notifications.new`
 /// pushes for this connection. Derives a fresh broadcast receiver from
@@ -101,8 +132,11 @@ pub async fn handle_notifications_ack(
     // broker).
     let user_sid = conn.peer.user_sid.as_str();
     if user_sid.is_empty() || user_sid == "<unknown>" {
+        // Identity problem, not a server fault, and not retryable —
+        // Unauthorized rather than InternalError (matches the same
+        // guard in notifications.list).
         return Err(RpcError::new(
-            ErrorKind::InternalError,
+            ErrorKind::Unauthorized,
             "caller SID could not be resolved; cannot record ack",
         ));
     }
@@ -183,6 +217,327 @@ pub async fn handle_notifications_ack(
         "notification acked",
     );
     Ok(NotificationsAckResult { acked_at })
+}
+
+/// `notifications.list` — paginated history of the notifications this
+/// agent is addressed by (SPEC §2.12.5 / Phase E). Replays the
+/// `NOTIFICATIONS` stream filtered to this PC's audience (`all` +
+/// `pc.<id>` + each `group.<g>`, the exact subjects the live bus
+/// subscribes to), annotates each notification with the caller's ack
+/// state from `notifications_read`, drops expired ones, and returns the
+/// requested page newest-first.
+///
+/// `filter = Unread` (the Client App's default first paint) returns only
+/// the notifications this user hasn't acked; `All` returns the full
+/// window. This is a cold, user-initiated path (opening the panel), so
+/// the stream replay + KV scan per call is fine — no cached snapshot, so
+/// a just-sent notification shows up on the next call without restart.
+pub async fn handle_notifications_list(
+    conn: &ConnectionState,
+    params: NotificationsListParams,
+) -> HandlerResult<NotificationsListResult> {
+    let client = conn.nats.as_ref().ok_or_else(|| {
+        RpcError::new(
+            ErrorKind::InternalError,
+            "notifications.list: NATS client not wired into the connection",
+        )
+    })?;
+    let user_sid = conn.peer.user_sid.as_str();
+    if user_sid.is_empty() || user_sid == "<unknown>" {
+        // An unresolved caller SID is an identity problem, not a
+        // server fault — and it won't fix itself on retry, so signal
+        // Unauthorized (non-retryable) rather than InternalError.
+        return Err(RpcError::new(
+            ErrorKind::Unauthorized,
+            "notifications.list: caller SID could not be resolved",
+        ));
+    }
+    let js = async_nats::jetstream::new(client.clone());
+
+    let my_groups = read_my_groups(&js, &conn.pc_id).await?;
+    let subjects = filter_subjects(&conn.pc_id, &my_groups);
+    let notifications = replay_notifications(&js, subjects).await?;
+    let acks = read_user_acks(&js, &conn.pc_id, user_sid).await?;
+
+    let limit = (params.limit as usize).clamp(1, MAX_LIMIT);
+    let offset = decode_cursor(params.cursor.as_deref());
+    Ok(build_notifications_list(
+        notifications,
+        &acks,
+        params.filter,
+        Utc::now(),
+        limit,
+        offset,
+    ))
+}
+
+/// Read this PC's group membership from `BUCKET_AGENT_GROUPS` (mirrors
+/// `maintenance.list`). A missing entry → no groups (not an error); a
+/// broker-level failure propagates so the client retries rather than
+/// silently missing every group-targeted notification.
+async fn read_my_groups(
+    js: &async_nats::jetstream::Context,
+    pc_id: &str,
+) -> HandlerResult<Vec<String>> {
+    let kv = js.get_key_value(BUCKET_AGENT_GROUPS).await.map_err(|e| {
+        warn!(error = %e, "notifications.list: open BUCKET_AGENT_GROUPS failed");
+        RpcError::new(
+            ErrorKind::InternalError,
+            format!("notifications.list: open group membership: {e}"),
+        )
+    })?;
+    match kv.get(pc_id).await {
+        Ok(Some(bytes)) => Ok(parse_groups(&bytes)),
+        Ok(None) => Ok(Vec::new()),
+        Err(e) => {
+            warn!(error = %e, "notifications.list: agent_groups read failed");
+            Err(RpcError::new(
+                ErrorKind::InternalError,
+                format!("notifications.list: read group membership: {e}"),
+            ))
+        }
+    }
+}
+
+/// Drain the `NOTIFICATIONS` stream for the given audience subjects via
+/// a throwaway ephemeral, read-only (`AckPolicy::None`) pull consumer.
+/// `fetch` returns immediately with whatever is retained (no waiting for
+/// new messages), so the loop ends when a fetch yields nothing.
+/// Unparseable payloads are skipped (logged). Capped at [`MAX_REPLAY`]
+/// with a warn — never a silent truncation.
+async fn replay_notifications(
+    js: &async_nats::jetstream::Context,
+    subjects: Vec<String>,
+) -> HandlerResult<Vec<Notification>> {
+    let stream = js.get_stream(STREAM_NOTIFICATIONS).await.map_err(|e| {
+        warn!(error = %e, "notifications.list: get_stream NOTIFICATIONS failed");
+        RpcError::new(
+            ErrorKind::InternalError,
+            format!("notifications.list: open stream: {e}"),
+        )
+    })?;
+    let consumer = stream
+        .create_consumer(PullConfig {
+            deliver_policy: DeliverPolicy::All,
+            ack_policy: AckPolicy::None,
+            filter_subjects: subjects,
+            // Reap the throwaway consumer shortly after this call ends.
+            inactive_threshold: std::time::Duration::from_secs(30),
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| {
+            warn!(error = %e, "notifications.list: create ephemeral consumer failed");
+            RpcError::new(
+                ErrorKind::InternalError,
+                format!("notifications.list: create consumer: {e}"),
+            )
+        })?;
+
+    // `DeliverPolicy::All` delivers oldest→newest. Keep a rolling
+    // window of the newest [`MAX_REPLAY`] (drop from the front as it
+    // overflows) so that if the stream ever exceeds the cap the page
+    // still surfaces the *freshest* notifications — the ones an
+    // unread-first UI cares about — rather than a wall of stale history.
+    let mut buf: std::collections::VecDeque<Notification> =
+        std::collections::VecDeque::with_capacity(REPLAY_BATCH.min(MAX_REPLAY));
+    let mut dropped = 0usize;
+    loop {
+        let mut batch = consumer
+            .fetch()
+            .max_messages(REPLAY_BATCH)
+            // Without an explicit expiry, the pull request blocks for
+            // the server default (~5 s) once the stream is drained
+            // (fewer than max available) — a latency penalty on every
+            // call. Retained messages deliver near-instantly, so a short
+            // window is ample; the loop just pays it once on the tail.
+            .expires(std::time::Duration::from_millis(200))
+            .messages()
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "notifications.list: fetch failed");
+                RpcError::new(
+                    ErrorKind::InternalError,
+                    format!("notifications.list: fetch: {e}"),
+                )
+            })?;
+        let mut got = 0usize;
+        while let Some(m) = batch.next().await {
+            let m = m.map_err(|e| {
+                RpcError::new(
+                    ErrorKind::InternalError,
+                    format!("notifications.list: message: {e}"),
+                )
+            })?;
+            got += 1;
+            match serde_json::from_slice::<Notification>(&m.payload) {
+                Ok(n) => {
+                    buf.push_back(n);
+                    if buf.len() > MAX_REPLAY {
+                        buf.pop_front();
+                        dropped += 1;
+                    }
+                }
+                Err(e) => warn!(
+                    error = %e,
+                    subject = %m.subject,
+                    "notifications.list: skipping unparseable notification",
+                ),
+            }
+        }
+        // A short (< full) batch means the stream is drained — stop
+        // rather than pay another expiry window on a guaranteed-empty
+        // fetch.
+        if got < REPLAY_BATCH {
+            break;
+        }
+    }
+    if dropped > 0 {
+        warn!(
+            dropped,
+            cap = MAX_REPLAY,
+            "notifications.list: stream exceeded replay cap; oldest beyond the cap omitted",
+        );
+    }
+    Ok(Vec::from(buf))
+}
+
+/// Value side of a `notifications_read` KV row — the agent writes
+/// `{"acked_at": …, "acked_by": …}` (see `handle_notifications_ack`); we
+/// only need `acked_at` back to annotate the history.
+#[derive(Deserialize)]
+struct ReadMark {
+    acked_at: DateTime<Utc>,
+}
+
+/// Read this `(pc_id, user_sid)`'s ack state from `notifications_read`
+/// into a `notification_id → acked_at` map. Keys are walked and filtered
+/// by the `{pc_id}.{user_sid}.` prefix (see
+/// [`notifications_read_prefix`]); the notification id is the suffix.
+async fn read_user_acks(
+    js: &async_nats::jetstream::Context,
+    pc_id: &str,
+    user_sid: &str,
+) -> HandlerResult<HashMap<String, DateTime<Utc>>> {
+    let kv = js
+        .get_key_value(BUCKET_NOTIFICATIONS_READ)
+        .await
+        .map_err(|e| {
+            warn!(error = %e, "notifications.list: open notifications_read failed");
+            RpcError::new(
+                ErrorKind::InternalError,
+                format!("notifications.list: open read state: {e}"),
+            )
+        })?;
+    let prefix = notifications_read_prefix(pc_id, user_sid);
+    // Wildcard history scoped to just this `(pc_id, user_sid)`'s keys —
+    // one streamed scan with the values inline, instead of listing the
+    // whole fleet's keys and then an N+1 `get` per match. The bucket is
+    // `history: 1`, so each key yields a single latest entry.
+    let wildcard = format!("{prefix}>");
+    let mut history = kv.history(&wildcard).await.map_err(|e| {
+        warn!(error = %e, %wildcard, "notifications.list: notifications_read history() failed");
+        RpcError::new(
+            ErrorKind::InternalError,
+            format!("notifications.list: scan read state: {e}"),
+        )
+    })?;
+
+    let mut out = HashMap::new();
+    while let Some(entry) = history.next().await {
+        let entry = entry.map_err(|e| {
+            warn!(error = %e, "notifications.list: read-state history stream faulted");
+            RpcError::new(
+                ErrorKind::InternalError,
+                format!("notifications.list: stream read state: {e}"),
+            )
+        })?;
+        // Skip delete / purge tombstones — only a live ack row counts.
+        if entry.operation != Operation::Put {
+            continue;
+        }
+        let Some(id) = entry.key.strip_prefix(&prefix) else {
+            continue;
+        };
+        match serde_json::from_slice::<ReadMark>(&entry.value) {
+            Ok(mark) => {
+                out.insert(id.to_string(), mark.acked_at);
+            }
+            Err(e) => {
+                warn!(key = %entry.key, error = %e, "notifications.list: skipping unparseable read mark")
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Decode the opaque pagination cursor into a row offset. A cursor is
+/// just the next offset as a decimal string (see
+/// [`build_notifications_list`]); anything unparseable restarts from 0.
+fn decode_cursor(cursor: Option<&str>) -> usize {
+    cursor.and_then(|c| c.parse::<usize>().ok()).unwrap_or(0)
+}
+
+/// Pure core: raw replayed notifications + the caller's ack map → one
+/// page of the `notifications.list` result. Annotates `acked_at`, drops
+/// expired (SPEC: the Client App stops surfacing past expiry), applies
+/// the unread/all filter, sorts newest-first, and slices `[offset,
+/// offset+limit)`. `next_cursor` is the next offset when more remain.
+///
+/// Offset-based pagination is pragmatic for this low-volume, cold path:
+/// a notification arriving mid-pagination could shift the offset by one,
+/// but the unread panel is typically a single page and the cost of a
+/// rare duplicate/skip across pages is negligible versus a seq cursor's
+/// complexity.
+fn build_notifications_list(
+    notifications: Vec<Notification>,
+    acks: &HashMap<String, DateTime<Utc>>,
+    filter: NotificationsFilter,
+    now: DateTime<Utc>,
+    limit: usize,
+    offset: usize,
+) -> NotificationsListResult {
+    // Annotate ack state, drop expired, and dedup by id (a well-behaved
+    // publish emits each id once, but a bad one could repeat it — keep
+    // the newest issued_at).
+    let mut idx_of: HashMap<String, usize> = HashMap::new();
+    let mut deduped: Vec<Notification> = Vec::new();
+    for mut n in notifications {
+        // Past expiry → never surfaced (SPEC: the Client App stops
+        // showing it). `is_some_and` keeps this a plain stable Option
+        // check (no let-chain) and reads cleanly.
+        if n.expires_at.is_some_and(|exp| exp <= now) {
+            continue;
+        }
+        n.acked_at = acks.get(&n.id).copied();
+        match idx_of.get(&n.id) {
+            Some(&i) if n.issued_at <= deduped[i].issued_at => {}
+            Some(&i) => deduped[i] = n,
+            None => {
+                idx_of.insert(n.id.clone(), deduped.len());
+                deduped.push(n);
+            }
+        }
+    }
+
+    let mut items: Vec<Notification> = match filter {
+        NotificationsFilter::Unread => deduped
+            .into_iter()
+            .filter(|n| n.acked_at.is_none())
+            .collect(),
+        NotificationsFilter::All => deduped,
+    };
+    // Newest first; id breaks ties so equal-instant entries are stable.
+    items.sort_by(|a, b| b.issued_at.cmp(&a.issued_at).then_with(|| a.id.cmp(&b.id)));
+
+    let total = items.len();
+    let page: Vec<Notification> = items.into_iter().skip(offset).take(limit).collect();
+    let next_offset = offset + page.len();
+    let next_cursor = (next_offset < total).then(|| next_offset.to_string());
+    NotificationsListResult {
+        items: page,
+        next_cursor,
+    }
 }
 
 /// `notifications.ack` id charset gate. Same `[A-Za-z0-9_.-]` set as
@@ -452,7 +807,7 @@ mod tests {
         .await
         .expect_err("unknown SID must error");
         let data = err.data.expect("data");
-        assert_eq!(data.kind, ErrorKind::InternalError);
+        assert_eq!(data.kind, ErrorKind::Unauthorized);
         assert!(data.detail.contains("SID"), "detail: {}", data.detail);
     }
 
@@ -471,5 +826,136 @@ mod tests {
         .await
         .expect_err("missing NATS client must error");
         assert_eq!(err.data.expect("data").kind, ErrorKind::InternalError);
+    }
+
+    // ---- notifications.list pure core ----
+
+    fn list_base() -> DateTime<Utc> {
+        chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 6, 1, 12, 0, 0).unwrap()
+    }
+
+    fn notif_at(id: &str, issued: DateTime<Utc>, expires: Option<DateTime<Utc>>) -> Notification {
+        Notification {
+            id: id.into(),
+            priority: NotificationPriority::Info,
+            require_ack: false,
+            title: "t".into(),
+            body: "b".into(),
+            issued_at: issued,
+            issued_by: None,
+            expires_at: expires,
+            acked_at: None,
+        }
+    }
+
+    #[test]
+    fn decode_cursor_parses_offset_or_zero() {
+        assert_eq!(decode_cursor(None), 0);
+        assert_eq!(decode_cursor(Some("25")), 25);
+        assert_eq!(decode_cursor(Some("garbage")), 0);
+    }
+
+    #[test]
+    fn unread_filter_excludes_acked_and_keeps_unacked() {
+        let base = list_base();
+        let items = vec![
+            notif_at("a", base, None),
+            notif_at("b", base + chrono::Duration::seconds(60), None),
+        ];
+        let mut acks = HashMap::new();
+        acks.insert("a".to_string(), base + chrono::Duration::seconds(120));
+        let r = build_notifications_list(items, &acks, NotificationsFilter::Unread, base, 50, 0);
+        assert_eq!(r.items.len(), 1, "only the unacked notification remains");
+        assert_eq!(r.items[0].id, "b");
+        assert!(r.items[0].acked_at.is_none());
+        assert!(r.next_cursor.is_none());
+    }
+
+    #[test]
+    fn all_filter_includes_acked_with_acked_at_annotated() {
+        let base = list_base();
+        let items = vec![notif_at("a", base, None)];
+        let mut acks = HashMap::new();
+        let when = base + chrono::Duration::seconds(120);
+        acks.insert("a".to_string(), when);
+        let r = build_notifications_list(items, &acks, NotificationsFilter::All, base, 50, 0);
+        assert_eq!(r.items.len(), 1);
+        assert_eq!(
+            r.items[0].acked_at,
+            Some(when),
+            "ack state annotated for history"
+        );
+    }
+
+    #[test]
+    fn drops_expired_in_both_filters() {
+        let base = list_base();
+        let past = base - chrono::Duration::seconds(60);
+        let items = vec![
+            notif_at("live", base, Some(base + chrono::Duration::seconds(3600))),
+            notif_at("dead", base, Some(past)),
+        ];
+        for filter in [NotificationsFilter::Unread, NotificationsFilter::All] {
+            let r = build_notifications_list(items.clone(), &HashMap::new(), filter, base, 50, 0);
+            let ids: Vec<&str> = r.items.iter().map(|n| n.id.as_str()).collect();
+            assert_eq!(
+                ids,
+                vec!["live"],
+                "expired notification dropped ({filter:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn newest_first_and_offset_pagination() {
+        let base = list_base();
+        let items = vec![
+            notif_at("oldest", base, None),
+            notif_at("mid", base + chrono::Duration::seconds(60), None),
+            notif_at("newest", base + chrono::Duration::seconds(120), None),
+        ];
+        // Page 1: limit 2 → newest two, cursor points past them.
+        let p1 = build_notifications_list(
+            items.clone(),
+            &HashMap::new(),
+            NotificationsFilter::All,
+            base,
+            2,
+            0,
+        );
+        let ids1: Vec<&str> = p1.items.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids1, vec!["newest", "mid"], "newest first");
+        assert_eq!(p1.next_cursor.as_deref(), Some("2"));
+        // Page 2: from the cursor offset → the tail, no further cursor.
+        let p2 = build_notifications_list(
+            items,
+            &HashMap::new(),
+            NotificationsFilter::All,
+            base,
+            2,
+            decode_cursor(p1.next_cursor.as_deref()),
+        );
+        let ids2: Vec<&str> = p2.items.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids2, vec!["oldest"]);
+        assert!(p2.next_cursor.is_none(), "tail page has no next cursor");
+    }
+
+    #[test]
+    fn dedups_by_id_keeping_newest_issued() {
+        let base = list_base();
+        let items = vec![
+            notif_at("dup", base, None),
+            notif_at("dup", base + chrono::Duration::seconds(60), None),
+        ];
+        let r = build_notifications_list(
+            items,
+            &HashMap::new(),
+            NotificationsFilter::All,
+            base,
+            50,
+            0,
+        );
+        assert_eq!(r.items.len(), 1, "same id collapses to one");
+        assert_eq!(r.items[0].issued_at, base + chrono::Duration::seconds(60));
     }
 }

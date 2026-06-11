@@ -50,7 +50,11 @@ pub const BROADCAST_CAPACITY: usize = 256;
 /// function of the membership *set* — equal sets compare equal
 /// regardless of KV ordering, keeping the unchanged-membership check in
 /// [`run`] honest. Mirrors `command_replay::filter_subjects`.
-fn filter_subjects(pc_id: &str, groups: &[String]) -> Vec<String> {
+///
+/// `pub(crate)` so `notifications.list` reuses the exact same audience →
+/// subjects mapping the live bus subscribes to — one source of truth
+/// for "which notifications is this agent addressed by".
+pub(crate) fn filter_subjects(pc_id: &str, groups: &[String]) -> Vec<String> {
     let mut group_subjects: Vec<String> = groups
         .iter()
         .map(|g| subject::notifications_group(g))
