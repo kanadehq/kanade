@@ -51,6 +51,35 @@ enum Command {
     /// re-deriving the path with a divergent default that silently
     /// misses a templated / non-default (e.g. `E:\…`) location.
     ResolveDbPath,
+    /// #582 Phase 4: exit non-zero if `version` is quarantined by the
+    /// boot sentinel (it crash-looped on a prior boot and was rolled
+    /// back). The backend deploy script calls this BEFORE swapping a
+    /// new binary in, so a known-bad version is refused at deploy time
+    /// instead of crash-looping the service again. Exit 0 = safe to
+    /// deploy, exit 3 = quarantined.
+    CheckQuarantine {
+        /// The version about to be deployed.
+        version: String,
+    },
+    /// #582 Phase 4: arm the boot sentinel right before a deploy swaps
+    /// the binary in. Snapshots the CURRENTLY-INSTALLED (outgoing,
+    /// known-good) exe to `<exe>.last-good` and writes a sentinel for
+    /// `new_version`, so if the new binary crash-loops on boot the
+    /// service auto-rolls-back to the snapshot. Without this the deploy
+    /// path never arms the sentinel and `check_on_boot` is a no-op
+    /// (nothing gets counted or quarantined). The deploy script runs the
+    /// STAGED (new) binary — which always carries this subcommand — and
+    /// points it at the installed exe path that is about to be
+    /// overwritten.
+    ArmForSwap {
+        /// The version about to be deployed (the staged/new binary).
+        new_version: String,
+        /// The installed exe path the service runs from. Its current
+        /// (outgoing) contents are snapshotted to `<exe>.last-good`
+        /// before the deploy overwrites it; `<exe>.last-good` also fixes
+        /// where `check_on_boot` looks for the rollback target.
+        installed_exe: PathBuf,
+    },
 }
 
 /// Top-level entry point.
@@ -68,7 +97,52 @@ fn main() -> Result<()> {
     if let Some(cmd) = &cli.command {
         return match cmd {
             Command::ResolveDbPath => print_resolved_db_path(cli.config.as_deref()),
+            Command::CheckQuarantine { version } => check_quarantine(version),
+            Command::ArmForSwap {
+                new_version,
+                installed_exe,
+            } => arm_for_swap(new_version, installed_exe),
         };
+    }
+
+    // #582 Phase 4: boot sentinel on the SERVICE path only (subcommands
+    // short-circuited above) — before the service dispatcher, config,
+    // DB, or JetStream bootstrap, so a binary that crash-loops on boot
+    // (exactly the #573 regression that caused the 2026-06-11 outage)
+    // is rolled back to last-good instead of looping forever.
+    //
+    // CAVEAT: the backend, unlike the agent, has a SQLite DB. If the
+    // failed release also ran forward migrations, rolling back to an
+    // older binary can hit "migration applied but missing in source"
+    // (the 0.43.48 rollback block during the incident) — last-good then
+    // also fails to boot. The sentinel is still strictly better than a
+    // crash loop (it tries, quarantines, and logs CRITICAL for the
+    // operator); pairing it with a deploy-time DB snapshot is tracked
+    // as a follow-up in #582.
+    // Resolve the exe once. A failure here must NOT silently skip the
+    // rollback decision (that would let a crash-looping binary boot
+    // unchecked) — surface it. Tracing isn't up yet on this path, so the
+    // note goes to stderr like the rollback message below.
+    match std::env::current_exe() {
+        Ok(exe) => {
+            use kanade_shared::boot_sentinel::{BootDecision, BootSentinel, DEFAULT_MAX_ATTEMPTS};
+            let sentinel =
+                BootSentinel::new(&default_paths::data_dir(), exe, env!("CARGO_PKG_VERSION"));
+            if let BootDecision::RolledBack { from } = sentinel.check_on_boot(DEFAULT_MAX_ATTEMPTS)
+            {
+                eprintln!(
+                    "boot sentinel: {from} crash-looped on boot — rolled back to last-good; \
+                     exiting (1) for restart"
+                );
+                std::process::exit(1);
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "boot sentinel: current_exe() failed ({e}) — skipping crash-loop rollback \
+                 check this boot; proceeding unguarded"
+            );
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -100,6 +174,61 @@ fn print_resolved_db_path(config: Option<&Path>) -> Result<()> {
     let cfg =
         load_backend_config(&cfg_path).with_context(|| format!("load config from {cfg_path:?}"))?;
     println!("{}", cfg.db.sqlite_path);
+    Ok(())
+}
+
+/// `check-quarantine <version>` subcommand (#582 Phase 4): the deploy
+/// script calls this before swapping a new binary in. Exit 3 if the
+/// version is quarantined (crash-looped on a prior boot and was rolled
+/// back) so the deploy aborts instead of re-deploying a known-bad
+/// binary; exit 0 (safe) otherwise. No config / tracing — the result
+/// is the exit code, and a one-line note goes to stderr.
+fn check_quarantine(version: &str) -> Result<()> {
+    let exe = std::env::current_exe().context("current_exe")?;
+    let sentinel = kanade_shared::boot_sentinel::BootSentinel::new(
+        &default_paths::data_dir(),
+        exe,
+        env!("CARGO_PKG_VERSION"),
+    );
+    if sentinel.is_quarantined(version) {
+        eprintln!(
+            "check-quarantine: {version} is QUARANTINED (it crash-looped on a prior boot and was \
+             rolled back). Refusing — republish a fixed binary under a new version, or clear the \
+             quarantine."
+        );
+        std::process::exit(3);
+    }
+    eprintln!("check-quarantine: {version} is not quarantined (safe to deploy)");
+    Ok(())
+}
+
+/// `arm-for-swap <new_version> <installed_exe>` subcommand (#582 Phase
+/// 4): the deploy script calls this with the STAGED (new) binary right
+/// before it overwrites the installed exe. We snapshot the still-present
+/// outgoing binary at `installed_exe` to `<installed_exe>.last-good` and
+/// write a sentinel for `new_version`. The next boot of the new binary
+/// then runs `check_on_boot`, which counts attempts and — if it
+/// crash-loops — restores the snapshot and quarantines `new_version`.
+///
+/// `installed_exe` (not `current_exe()`) anchors the last-good sibling
+/// path: we're running the staged binary from the release/staging dir,
+/// but the rollback target must sit next to where the service actually
+/// runs from. A failure returns `Err` (non-zero exit); the deploy script
+/// treats arming as best-effort and proceeds with a warning, so a single
+/// un-armed swap only loses rollback protection for that one deploy.
+fn arm_for_swap(new_version: &str, installed_exe: &Path) -> Result<()> {
+    let sentinel = kanade_shared::boot_sentinel::BootSentinel::new(
+        &default_paths::data_dir(),
+        installed_exe.to_path_buf(),
+        env!("CARGO_PKG_VERSION"),
+    );
+    sentinel
+        .arm_for_swap(installed_exe, new_version)
+        .with_context(|| format!("arm boot sentinel for {new_version}"))?;
+    eprintln!(
+        "arm-for-swap: snapshotted {} -> last-good and armed boot sentinel for {new_version}",
+        installed_exe.display()
+    );
     Ok(())
 }
 
@@ -473,6 +602,39 @@ pub(crate) async fn run_backend() -> Result<()> {
         .await
         .with_context(|| format!("bind {}", cfg.server.bind))?;
     info!(bind = %cfg.server.bind, "axum serving");
+
+    // #582 Phase 4: we've bound the port and are about to serve — past
+    // config, DB migrations, and JetStream bootstrap (where #573
+    // crashed). After a short healthy-uptime grace, confirm to the boot
+    // sentinel so this version is promoted to last-good and any pending
+    // swap sentinel clears. A crash before the grace leaves the sentinel
+    // armed, so the next boot re-counts toward rollback.
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        // A failed current_exe() here means we can't promote this version
+        // to last-good — surface it instead of silently leaving the
+        // sentinel armed (which would re-count this healthy boot toward
+        // rollback on the next restart).
+        match std::env::current_exe() {
+            Ok(exe) => {
+                let sentinel = kanade_shared::boot_sentinel::BootSentinel::new(
+                    &default_paths::data_dir(),
+                    exe,
+                    env!("CARGO_PKG_VERSION"),
+                );
+                if let Err(e) = sentinel.confirm_healthy() {
+                    tracing::warn!(error = %e, "boot sentinel: confirm_healthy failed");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "boot sentinel: current_exe() failed — healthy version not promoted to last-good"
+                );
+            }
+        }
+    });
+
     axum::serve(listener, app).await.context("axum serve")?;
     Ok(())
 }
