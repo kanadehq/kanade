@@ -78,6 +78,7 @@
     "description": "Per-job execution time from <code>execution_results.{started,finished}_at</code>. Use to spot a probe that's gotten unexpectedly slow without checking individual rows.",
     "error": "Couldn't load: {{error}}",
     "empty": "No finished executions in the last 24 h.",
+    "linkTitle": "View this job's runs in Activity",
     "table": {
       "jobId": "job_id",
       "count": "count",

@@ -868,7 +868,17 @@ export function Dashboard() {
                 {(scanDurQ.data ?? []).map((r) => (
                   <TableRow key={r.job_id}>
                     <TableCell>
-                      <code className="text-sm">{r.job_id}</code>
+                      {/* Deep-link into Activity filtered to this job —
+                          one click from "this probe is slow" to its
+                          actual runs, the same job_id bridge the Jobs
+                          live chip uses. */}
+                      <Link
+                        to={`/activity?job_id=${encodeURIComponent(r.job_id)}`}
+                        className="hover:underline"
+                        title={t('scanDuration.linkTitle')}
+                      >
+                        <code className="text-sm">{r.job_id}</code>
+                      </Link>
                     </TableCell>
                     <TableCell className="text-right text-muted text-xs">{r.count}</TableCell>
                     <TableCell className="text-right">{fmtMs(r.p50_ms)}</TableCell>
