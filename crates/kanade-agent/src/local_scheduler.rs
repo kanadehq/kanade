@@ -451,14 +451,15 @@ async fn run(
     );
 
     // #418 event triggers: a global channel lets the Windows service
-    // control handler signal interactive logons (`on: logon`) to this
-    // async task. Best-effort `set` (only the first run wins).
+    // control handler signal session events (`on: logon` / `lock` /
+    // `unlock`) to this async task. Best-effort `set` (only the first
+    // run wins).
     #[cfg(target_os = "windows")]
     {
-        let (logon_tx, logon_rx) = tokio::sync::watch::channel(0u64);
-        let _ = LOGON_NOTIFY.set(logon_tx);
-        let _logon_task = spawn_logon_fire_task(
-            logon_rx,
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let _ = SESSION_EVENT_NOTIFY.set(event_tx);
+        let _session_event_task = spawn_session_event_task(
+            event_rx,
             client.clone(),
             pc_id.clone(),
             groups_rx.clone(),
@@ -1370,24 +1371,33 @@ async fn fire_event_schedules(
 /// (a sync closure in `service.rs`) can't reach the async scheduler
 /// task directly.
 #[cfg(target_os = "windows")]
-pub(crate) static LOGON_NOTIFY: std::sync::OnceLock<tokio::sync::watch::Sender<u64>> =
-    std::sync::OnceLock::new();
+pub(crate) static SESSION_EVENT_NOTIFY: std::sync::OnceLock<
+    tokio::sync::mpsc::UnboundedSender<OnTrigger>,
+> = std::sync::OnceLock::new();
 
-/// Signal an interactive logon to the scheduler. No-op until the
-/// scheduler has initialised the channel (early boot, or non-running).
+/// Signal an OS session event (`logon` / `lock` / `unlock`) to the
+/// scheduler. No-op until the scheduler has initialised the channel
+/// (early boot, or non-running). An unbounded mpsc (not a watch) so two
+/// quick events — e.g. lock then unlock — both reach the task instead of
+/// coalescing to the latest.
 #[cfg(target_os = "windows")]
-pub(crate) fn notify_logon() {
-    if let Some(tx) = LOGON_NOTIFY.get() {
-        tx.send_modify(|c| *c = c.wrapping_add(1));
+pub(crate) fn notify_session_event(trigger: OnTrigger) {
+    if let Some(tx) = SESSION_EVENT_NOTIFY.get() {
+        // A send error means the receiver task is gone — i.e. the local
+        // scheduler died. Warn so that's diagnosable rather than a
+        // silently-dropped event (gemini #607).
+        if let Err(e) = tx.send(trigger) {
+            warn!(error = %e, ?trigger, "failed to signal session event — scheduler task gone?");
+        }
     }
 }
 
-/// Long-lived task: fire `on: logon` schedules each time the control
-/// handler signals a logon via [`notify_logon`].
+/// Long-lived task: fire `on: <event>` schedules each time the control
+/// handler signals a session event via [`notify_session_event`].
 #[cfg(target_os = "windows")]
 #[allow(clippy::too_many_arguments)]
-fn spawn_logon_fire_task(
-    mut logon_rx: tokio::sync::watch::Receiver<u64>,
+fn spawn_session_event_task(
+    mut event_rx: tokio::sync::mpsc::UnboundedReceiver<OnTrigger>,
     client: async_nats::Client,
     pc_id: String,
     groups_rx: tokio::sync::watch::Receiver<Vec<String>>,
@@ -1397,11 +1407,7 @@ fn spawn_logon_fire_task(
     check_sink: crate::check_cache::CheckSink,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        loop {
-            // Skip the initial `0` — only react to real logon bumps.
-            if logon_rx.changed().await.is_err() {
-                break;
-            }
+        while let Some(trigger) = event_rx.recv().await {
             let my_groups = groups_rx.borrow().clone();
             fire_event_schedules(
                 &client,
@@ -1411,7 +1417,7 @@ fn spawn_logon_fire_task(
                 &staleness,
                 &script_cache,
                 &check_sink,
-                OnTrigger::Logon,
+                trigger,
             )
             .await;
         }

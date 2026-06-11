@@ -192,7 +192,7 @@
       }
     },
     "OnTrigger": {
-      "description": "An OS event the agent can fire a schedule on (#418 `when: { on }`).\n`unlock` / `network_change` are planned follow-ups.",
+      "description": "An OS event the agent can fire a schedule on (#418 `when: { on }`).\n`network_change` is a planned follow-up.",
       "oneOf": [
         {
           "description": "Once per OS boot (the agent's first run for that boot). Catches\nfreshly-imaged / reinstalled hosts at their next startup.",
@@ -203,6 +203,16 @@
           "description": "On an interactive-session user logon — console, RDP, or\nauto-logon (Windows `WTS_SESSION_LOGON`). Does not fire for\nservice / network / batch logons (no interactive session).",
           "type": "string",
           "const": "logon"
+        },
+        {
+          "description": "When the workstation is locked (Win+L / idle lock; Windows\n`WTS_SESSION_LOCK`). Use for step-away compliance / cleanup.",
+          "type": "string",
+          "const": "lock"
+        },
+        {
+          "description": "When the workstation is unlocked — the user returns to a locked\nsession (Windows `WTS_SESSION_UNLOCK`). Use to re-check\ncompliance / refresh state when work resumes.",
+          "type": "string",
+          "const": "unlock"
         }
       ]
     },
