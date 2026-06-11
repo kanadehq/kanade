@@ -18,15 +18,17 @@ configs/jobs/installers/
 ├── README.md                       — this file
 ├── install-kanade-client.yaml      — client-app install/upgrade (#210, script_file)
 ├── install-kanade-backend.yaml     — backend self-update (#210, script_object)
+├── install-kanade-agent.yaml       — agent emergency out-of-band swap (#566, script_object)
 └── scripts/
     └── install-kanade-client.ps1   — inlined into the client manifest via `script_file:` (#215)
 ```
 
-The backend self-update doesn't ship a co-located `.ps1` here —
-its install script is the existing `scripts/deploy/backend.ps1`
-at the repo root (used for manual installs too). The manifest
-references it via `script_object:` after the operator publishes
-an edited copy to `OBJECT_SCRIPTS` (see the section below).
+The backend self-update and the agent emergency swap don't ship a
+co-located `.ps1` here — their scripts are `scripts/deploy/backend.ps1`
+and `scripts/deploy/agent-emergency-swap.ps1` at the repo root (used
+for manual installs too). The manifests reference them via
+`script_object:` after the operator publishes an edited copy to
+`OBJECT_SCRIPTS` (see the per-component sections below).
 
 ## Quick path: `scripts/fleet-deploy.ps1`
 
@@ -234,6 +236,80 @@ with `-SourceDir <folder containing exe + toml>`) — agent-mode
 errors out hard when no existing `backend.toml` is present at the
 canonical destination, because guessing a fresh config from the
 update path would silently overwrite operator settings.
+
+## install-kanade-agent — emergency out-of-band swap
+
+The normal agent upgrade path is **`kanade agent rollout`**
+(`fleet-deploy.ps1 -Role agent`), which sets a `target_version` and
+lets the running agent **self-update**. That path is useless when the
+bug is *in self-update itself* — e.g. #566, where a base64-padding
+mismatch in the staged-binary digest check made the agent reject every
+download and stay pinned to 0.43.46 with no way to pull the fix that
+would un-wedge it (a "can't update the updater" bootstrap).
+
+`install-kanade-agent` is that bootstrap. It rides on the **same wedged
+agent** (which is still running, just refusing self-updates) and swaps
+its binary out-of-band. The twist vs. the backend job: the agent can't
+stop *its own* service inline — that would kill the very script doing
+the work (the script is a child of `KanadeAgent`). So
+`scripts/deploy/agent-emergency-swap.ps1` instead **stages the verified
+binary and registers a one-shot SYSTEM Scheduled Task** that performs
+the `stop → back up → copy → start` a short delay later, fully detached
+from the agent's process tree. The detached runner rolls back to the
+saved binary if the new one won't start, logs to
+`%ProgramData%\Kanade\logs\agent-emergency-swap.log`, and self-cleans
+(task + staging + backup) on success.
+
+Five steps, same shape as the backend flow:
+
+1. **Upload the target binary to app-packages.**
+
+   ```bash
+   kanade app publish kanade-agent 0.43.48 dist/agent/kanade-agent.exe
+   ```
+
+2. **Stamp the swap script with this release's coordinates.** Copy
+   `scripts/deploy/agent-emergency-swap.ps1` locally and set the
+   `$Agent*` knobs near the top:
+
+   ```powershell
+   $AgentSourceUrl       = 'http://127.0.0.1:8080'
+   $AgentSourceVersion   = '0.43.48'
+   $AgentSourceSha256    = (Get-FileHash dist\agent\kanade-agent.exe -Algorithm SHA256).Hash.ToLower()
+   $AgentSourceAuthToken = 'dev'   # bearer for /api/app-packages
+   ```
+
+3. **Publish the edited script to `OBJECT_SCRIPTS`.**
+
+   ```bash
+   kanade script publish deploy-agent-emergency 0.43.48 ./deploy-agent-emergency.0.43.48.ps1
+   ```
+
+4. **Match the manifest's `version:` + `script_object:` pair, register.**
+
+   ```bash
+   kanade job create configs/jobs/installers/install-kanade-agent.yaml
+   ```
+
+5. **Exec against the wedged agent's host** (`--pcs <id>`, lowercased —
+   same gotcha as above).
+
+   ```bash
+   kanade exec install-kanade-agent --pcs <wedged-agent-host>
+   ```
+
+   The job result reports "swap scheduled in 60s" and publishes while
+   the agent is still up; the detached task then bounces the service
+   onto the new binary. Confirm the flip on the SPA Agents page (or
+   `/api/agents` → `agent_version`) ~60–90s after exec, and check the
+   swap log if it doesn't move.
+
+> **Why a separate `kanade-agent` app-package?** The rollout path ships
+> the binary to `OBJECT_AGENT_RELEASES` (what self-update reads); this
+> job downloads over plain HTTP from `OBJECT_APP_PACKAGES` like the
+> backend script does, so step 1 publishes it there explicitly. A
+> future `fleet-deploy.ps1 -Role agent -Emergency` one-liner can fold
+> steps 1–5 together (tracked as follow-up).
 
 ## script_file vs script_object
 
