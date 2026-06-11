@@ -400,6 +400,19 @@ pub(crate) async fn run_backend() -> Result<()> {
             }
         });
     }
+    // Phase E (KLP notifications): project
+    // `events.notifications.acked.>` (off the shared EVENTS stream)
+    // into `notification_acks` so the SPA can show who confirmed each
+    // notification and when.
+    {
+        let pool = pool.clone();
+        let js = jetstream.clone();
+        tokio::spawn(async move {
+            if let Err(e) = projector::notifications::run(js, pool).await {
+                error!(error = %e, "notification-acks projector exited");
+            }
+        });
+    }
     // v0.30 follow-up: periodic housekeeping that flips long-stale
     // `pending` executions to `expired`. Without this, fires whose
     // ExecResult never lands (offline targets, `run_as: user` with

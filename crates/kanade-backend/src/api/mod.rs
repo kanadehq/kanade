@@ -16,6 +16,7 @@ pub mod host_perf;
 pub mod inventory;
 pub mod jetstream_status;
 pub mod jobs;
+pub mod notifications;
 pub mod obs_events;
 pub mod process_perf;
 pub mod results;
@@ -233,6 +234,13 @@ pub fn router(state: AppState) -> Router {
         .route("/api/inventory/{pc_id}", get(inventory::list_for_pc))
         // #290 PR-E: fleet-wide compliance (operator-defined checks).
         .route("/api/checks", get(checks::list_all))
+        // Phase E (KLP notifications): per-recipient confirmation
+        // status for a sent notification. Read-only (viewer+); the
+        // send side is operator-gated below.
+        .route(
+            "/api/notifications/{id}/ack_status",
+            get(notifications::ack_status),
+        )
         .route("/api/agents/{pc_id}/logs", get(agent_logs::tail))
         .route("/api/agents/releases", get(agent_releases::list_releases))
         .route("/api/app-packages", get(app_packages::list_packages))
@@ -266,6 +274,9 @@ pub fn router(state: AppState) -> Router {
             put(agent_config::put_pc).delete(agent_config::delete_pc),
         )
         .route("/api/exec/{job_id}", post(exec::create))
+        // Phase E (KLP notifications): publish an end-user notification
+        // (fans out to notifications.{all|group.X|pc.Y}).
+        .route("/api/notifications", post(notifications::publish))
         .route("/api/schedules", post(schedules::create))
         .route("/api/schedules/{id}", delete(schedules::delete))
         .route("/api/schedules/{id}/disable", post(schedules::disable))

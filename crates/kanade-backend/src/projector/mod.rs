@@ -5,6 +5,7 @@ pub mod explode;
 pub mod heartbeat;
 pub mod history;
 pub mod host_perf;
+pub mod notifications;
 pub mod obs_events;
 pub mod process_perf;
 pub mod results;

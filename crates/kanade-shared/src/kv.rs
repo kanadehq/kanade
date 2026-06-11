@@ -39,6 +39,17 @@ pub const BUCKET_SCHEDULES_YAML: &str = "schedules_yaml";
 /// both the backend scheduler and every agent's local scheduler watch.
 pub const BUCKET_FLEET_CONFIG: &str = "fleet_config";
 
+/// `notifications_read` — per-user read/ack state for end-user
+/// notifications (SPEC §2.3.2 / Phase E). Key shape
+/// `{pc_id}.{user_sid}.{notification_id}`, value JSON
+/// `{"acked_at": ..., "acked_by": "<sid>"}`. The agent writes a row
+/// when it handles a KLP `notifications.ack`, stamping the connecting
+/// user's OS-derived SID — so a shared PC tracks each user's reads
+/// independently. The `{pc_id}.{user_sid}.` prefix lets
+/// `notifications.list` fetch one user's read set with a single prefix
+/// walk. `history: 1` — only the latest ack per key matters.
+pub const BUCKET_NOTIFICATIONS_READ: &str = "notifications_read";
+
 /// Singleton key in [`BUCKET_FLEET_CONFIG`] holding the JSON-encoded
 /// [`crate::manifest::Freeze`]. **Key absent ⇒ not frozen** (clearing
 /// the freeze is a KV delete), so readers treat a missing key as "fire
@@ -223,6 +234,16 @@ pub const STREAM_EXEC: &str = "EXEC";
 pub const STREAM_EVENTS: &str = "EVENTS";
 pub const STREAM_AUDIT: &str = "AUDIT";
 
+/// JetStream stream retaining end-user notification history (SPEC
+/// §2.3.1 / Phase E). Catches every `notifications.{all|group.X|pc.Y}`
+/// publish the backend fans out, so a Client App that connects after
+/// a notification was sent can still fetch it via KLP
+/// `notifications.list`. 90-day window — long enough for "what did I
+/// miss while on leave" without unbounded growth. Unlike `EXEC`,
+/// retains all messages per subject (no `max_messages_per_subject`):
+/// each notification is its own history entry, not a latest-only state.
+pub const STREAM_NOTIFICATIONS: &str = "NOTIFICATIONS";
+
 /// JetStream stream backing the per-PC observability event pipeline
 /// (Issue #246). Distinct from [`STREAM_EVENTS`] (in-flight script
 /// lifecycle) — `STREAM_OBS_EVENTS` carries the timeline data the
@@ -254,6 +275,7 @@ mod tests {
             BUCKET_JOBS_YAML,
             BUCKET_SCHEDULES_YAML,
             BUCKET_FLEET_CONFIG,
+            BUCKET_NOTIFICATIONS_READ,
             BUCKET_SCHEDULER_DISPATCH,
             OBJECT_AGENT_RELEASES,
             OBJECT_APP_PACKAGES,
@@ -281,6 +303,7 @@ mod tests {
             STREAM_EVENTS,
             STREAM_AUDIT,
             STREAM_OBS_EVENTS,
+            STREAM_NOTIFICATIONS,
         ];
         let mut deduped = names.to_vec();
         deduped.sort_unstable();

@@ -8,6 +8,47 @@ pub fn commands_pc(pc_id: &str) -> String {
     format!("commands.pc.{pc_id}")
 }
 
+/// `notifications.all` — broadcast end-user notification (SPEC
+/// §2.2.1 / Phase E). Mirrors [`COMMANDS_ALL`] but on the
+/// notification fan-out plane: the backend publishes here, the
+/// `NOTIFICATIONS` stream retains it, and every agent forwards it to
+/// the Client Apps in matching user sessions.
+pub const NOTIFICATIONS_ALL: &str = "notifications.all";
+
+/// `notifications.group.{group_name}` — group-scoped end-user
+/// notification. Sibling of [`commands_group`] on the notification
+/// plane.
+pub fn notifications_group(name: &str) -> String {
+    format!("notifications.group.{name}")
+}
+
+/// `notifications.pc.{pc_id}` — single-PC end-user notification.
+/// Sibling of [`commands_pc`] on the notification plane.
+pub fn notifications_pc(pc_id: &str) -> String {
+    format!("notifications.pc.{pc_id}")
+}
+
+/// `events.notifications.acked.{pc_id}.{user_sid}.{notif_id}` — the
+/// agent publishes this when a user clicks "確認" on a notification
+/// (SPEC §2.2.2 / Phase E). The `{user_sid}` segment distinguishes
+/// concurrent users on a shared PC (Fast User Switching / RDP). Lives
+/// under `events.>` so the existing `EVENTS` stream retains it; the
+/// backend's notification-acks projector consumes the narrowed
+/// [`EVENTS_NOTIFICATIONS_ACKED_FILTER`] to build the SPA's
+/// per-recipient confirmation view.
+///
+/// Subject spelling is fixed by SPEC §2.2.2 / §2.12.8 (`events.>`), so
+/// acks ride the `EVENTS` stream's retention (shorter than the 90-day
+/// `NOTIFICATIONS` history), not the notification stream's. That only
+/// bounds **re-projection** after a `-WipeDb`: the durable source of
+/// truth for ack_status is the `notification_acks` SQLite table, which
+/// persists independently — so a live fleet keeps full ack history;
+/// only a DB wipe truncates re-derivable acks to the EVENTS window,
+/// the same limitation every `events.*`-projected table already has.
+pub fn events_notifications_acked(pc_id: &str, user_sid: &str, notif_id: &str) -> String {
+    format!("events.notifications.acked.{pc_id}.{user_sid}.{notif_id}")
+}
+
 // `commands_exec` (subject `commands.exec.<job_id>`) was removed in
 // v0.22.1. The STREAM_EXEC stream now catches the existing
 // `commands.{all,group.X,pc.Y}` subjects directly, so the dedicated
@@ -88,6 +129,13 @@ pub fn events_started(exec_id: &str, pc_id: &str) -> String {
 /// the started subset.
 pub const EVENTS_STARTED_FILTER: &str = "events.started.>";
 
+/// Wildcard the backend notification-acks projector consumes on
+/// `STREAM_EVENTS`. Narrow (`events.notifications.acked.>`) rather
+/// than the whole `events.>` so the projector only wakes for ack
+/// events and not the high-volume `events.started.*` lifecycle
+/// traffic (which the events projector handles separately).
+pub const EVENTS_NOTIFICATIONS_ACKED_FILTER: &str = "events.notifications.acked.>";
+
 pub const INVENTORY_HW: &str = "hw";
 pub const INVENTORY_SW: &str = "sw";
 pub const INVENTORY_NET: &str = "net";
@@ -147,6 +195,43 @@ mod tests {
     fn commands_pc_formats_id() {
         assert_eq!(commands_pc("pc-01"), "commands.pc.pc-01");
         assert_eq!(commands_pc("PC1234"), "commands.pc.PC1234");
+    }
+
+    #[test]
+    fn notifications_all_constant() {
+        assert_eq!(NOTIFICATIONS_ALL, "notifications.all");
+    }
+
+    #[test]
+    fn notifications_group_formats_name() {
+        assert_eq!(
+            notifications_group("tokyo-office"),
+            "notifications.group.tokyo-office"
+        );
+    }
+
+    #[test]
+    fn notifications_pc_formats_id() {
+        assert_eq!(notifications_pc("PC1234"), "notifications.pc.PC1234");
+    }
+
+    #[test]
+    fn events_notifications_acked_formats_all_segments() {
+        assert_eq!(
+            events_notifications_acked("PC1234", "S-1-5-21-1001", "notif-9f3a"),
+            "events.notifications.acked.PC1234.S-1-5-21-1001.notif-9f3a"
+        );
+    }
+
+    #[test]
+    fn events_notifications_acked_filter_is_narrow_wildcard() {
+        assert_eq!(
+            EVENTS_NOTIFICATIONS_ACKED_FILTER,
+            "events.notifications.acked.>"
+        );
+        // Must stay a strict subset of the EVENTS stream's `events.>`
+        // subjects so STREAM_EVENTS retains it without a config change.
+        assert!(EVENTS_NOTIFICATIONS_ACKED_FILTER.starts_with("events."));
     }
 
     #[test]
