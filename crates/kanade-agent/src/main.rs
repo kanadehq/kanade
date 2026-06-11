@@ -280,6 +280,18 @@ pub(crate) async fn run_agent() -> Result<()> {
     // restart and shows last-known status while offline.
     let check_sink =
         check_cache::CheckSink::load(default_paths::data_dir().join("check_results.json"));
+    // KLP Phase E: process-wide notification broadcast. Created before
+    // the listener so the same sender feeds both the KLP
+    // `ListenerContext` (per-connection forwarders derive receivers from
+    // it) and the `notify_bus` task spawned once `groups_rx` exists.
+    // The initial receiver is dropped — receivers are minted on demand
+    // by `notifications.subscribe`; until then `send` is a no-op.
+    #[cfg(target_os = "windows")]
+    let notif_tx =
+        tokio::sync::broadcast::channel::<kanade_shared::ipc::notifications::Notification>(
+            klp::notify_bus::BROADCAST_CAPACITY,
+        )
+        .0;
     #[cfg(target_os = "windows")]
     {
         let initial_snapshot = klp::state::eval_once(
@@ -305,6 +317,7 @@ pub(crate) async fn run_agent() -> Result<()> {
             state_rx,
             log_path: std::path::PathBuf::from(&cfg.log.path),
             nats: client.clone(),
+            notif_tx: notif_tx.clone(),
         });
     }
 
@@ -348,6 +361,14 @@ pub(crate) async fn run_agent() -> Result<()> {
         script_cache.clone(),
         check_sink.clone(),
     );
+
+    // KLP Phase E (live push): subscribe to the membership-filtered
+    // `notifications.{all|group.X|pc.Y}` subjects and re-broadcast each
+    // incoming notification to every connected Client App. Follows
+    // `groups_rx` so the subject set tracks group membership, just like
+    // command_replay. Windows-only (the whole KLP module is).
+    #[cfg(target_os = "windows")]
+    klp::notify_bus::spawn(client.clone(), pc_id.clone(), groups_rx.clone(), notif_tx);
 
     // Reconnect catch-up: durable consumer on STREAM_EXEC that
     // replays the latest retained Command per subject. See
