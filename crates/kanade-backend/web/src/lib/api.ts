@@ -97,10 +97,24 @@ export async function apiFetchText(path: string, init: RequestInit = {}): Promis
 export async function apiFetchPaged<T = unknown>(
   path: string,
   init: RequestInit = {},
-): Promise<{ rows: T; total: number }> {
+): Promise<{ rows: T; total: number; online?: number; offline?: number }> {
   const { res, text } = await apiFetchRaw(path, init);
   const total = Number(res.headers.get('X-Total-Count') ?? '0');
-  return { rows: text ? (JSON.parse(text) as T) : (undefined as T), total };
+  // #563: /api/agents also reports fleet-wide per-status counts so
+  // the status chips stay correct whichever filter is active.
+  // Endpoints that don't send them leave the fields undefined.
+  const opt = (h: string) => {
+    const v = res.headers.get(h);
+    if (v === null) return undefined;
+    const n = Number(v);
+    return Number.isNaN(n) ? undefined : n;
+  };
+  return {
+    rows: text ? (JSON.parse(text) as T) : (undefined as T),
+    total,
+    online: opt('X-Online-Count'),
+    offline: opt('X-Offline-Count'),
+  };
 }
 
 // Pretty-prints whatever React Query handed back as the error. ApiError
