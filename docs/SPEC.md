@@ -706,8 +706,23 @@ constraints:
   window: "22:00-05:00"   # 夜間のみ発火（agent ローカル時刻）
 ```
 
-> `constraints:` は将来の `require`（端末状態ゲート idle/AC/network）や
-> `max_concurrent`（同時実行上限）も入る名前空間。現状は `window` のみ。
+**`constraints.skip_dates`（祝日除外）** — 発火を**禁止する日**を
+`YYYY-MM-DD` の配列で列挙（`tz` の壁時計日付で評価）。全 `when` 形に効く
+（reconcile はその日丸ごとスキップ／calendar のその日の発火を抑止）。
+組込みの祝日カレンダーは無く operator が日付を列挙する。スケジューラと
+`preview` の両方が `Constraints::allows` 経由で honor する。不正日付は
+create 時に reject、手編集 KV の壊れた日付は fail-closed（その日でなく
+全日ブロック・`bad_skip_date` で warn）:
+
+```yaml
+constraints:
+  window: "22:00-05:00"
+  skip_dates: ["2026-01-01", "2026-12-25"]   # 元日・クリスマスは撃たない
+```
+
+> `constraints:` は将来の `require`（端末状態ゲート idle/AC/network）も入る
+> 名前空間。現状は `window` / `max_concurrent`（同時実行上限・backend のみ）
+> / `skip_dates`。
 
 `Schedule::validate()`（`Manifest::validate()` と対称）が create 時
 （CLI / `POST /api/schedules` の両方）に検査する: `runs_on: agent`

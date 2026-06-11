@@ -401,6 +401,15 @@ async fn register(
             "constraints.window is unparseable — schedule blocked (fail-closed) until fixed",
         );
     }
+    // A corrupt constraints.skip_dates entry also fails closed (blocks
+    // every day) — same diagnosable warn (#418 holiday exclusion).
+    if let Some(err) = schedule.constraints.bad_skip_date() {
+        warn!(
+            schedule_id = %schedule.id,
+            %err,
+            "constraints.skip_dates has an unparseable date — schedule blocked (fail-closed) until fixed",
+        );
+    }
     // A calendar whose `at` time can never fall in its window also
     // never fires — warn instead of leaving a debug-only trail
     // (claude #452 review).
