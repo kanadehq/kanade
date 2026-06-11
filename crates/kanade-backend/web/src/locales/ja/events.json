@@ -59,5 +59,6 @@
     "bucketHint": "(バケット: {{bucket}})",
     "cellTooltip_one": "{{count}} 件",
     "cellTooltip_other": "{{count}} 件"
-  }
+  },
+  "chartPcCap": "イベント数上位 {{shown}} / {{total}} 台を表示 — 残りはフィルタで絞り込んでください"
 }

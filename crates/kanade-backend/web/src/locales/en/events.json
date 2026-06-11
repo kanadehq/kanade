@@ -59,5 +59,6 @@
     "bucketHint": "(bucket: {{bucket}})",
     "cellTooltip_one": "{{count}} event",
     "cellTooltip_other": "{{count}} events"
-  }
+  },
+  "chartPcCap": "showing busiest {{shown}} of {{total}} PCs — narrow the filters for the rest"
 }
