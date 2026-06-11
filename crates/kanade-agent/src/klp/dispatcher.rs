@@ -36,7 +36,8 @@ use kanade_shared::ipc::jobs::{JobsExecuteParams, JobsKillParams, JobsListParams
 use kanade_shared::ipc::maintenance::MaintenanceListParams;
 use kanade_shared::ipc::method;
 use kanade_shared::ipc::notifications::{
-    NotificationsAckParams, NotificationsSubscribeParams, NotificationsUnsubscribeParams,
+    NotificationsAckParams, NotificationsListParams, NotificationsSubscribeParams,
+    NotificationsUnsubscribeParams,
 };
 use kanade_shared::ipc::state::{
     StateSnapshotParams, StateSubscribeParams, StateUnsubscribeParams,
@@ -161,6 +162,15 @@ async fn dispatch_inner(
             let params: MaintenanceListParams =
                 decode_params(req.params.clone()).map_err(invalid_params)?;
             let result = handlers::maintenance::handle_maintenance_list(conn, params).await?;
+            serde_json::to_value(&result).map_err(internal)
+        }
+        method::NOTIFICATIONS_LIST => {
+            // All fields have serde defaults (filter=unread, limit=50,
+            // cursor=None) → decode_params so an omitted body is the
+            // Client App's default first-paint request.
+            let params: NotificationsListParams =
+                decode_params(req.params.clone()).map_err(invalid_params)?;
+            let result = handlers::notifications::handle_notifications_list(conn, params).await?;
             serde_json::to_value(&result).map_err(internal)
         }
         method::NOTIFICATIONS_SUBSCRIBE => {
