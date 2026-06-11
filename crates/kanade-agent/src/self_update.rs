@@ -370,25 +370,16 @@ async fn maybe_download(
     let digest = hasher.finalize();
 
     // #490: verify the staged bytes against the Object Store's own
-    // recorded digest (`SHA-256=<base64url-nopad>` per the NATS object
-    // spec) before swapping it into the service binary path. This
-    // catches transfer truncation/corruption — the previous code
-    // computed the hash but only logged it. (Authenticity — a
-    // publisher-signed expected hash — is a separate concern and out
-    // of scope here; the store digest is still integrity, not trust.)
+    // recorded digest (`SHA-256=<base64url>`) before swapping it into
+    // the service binary path. This catches transfer truncation /
+    // corruption — the previous code computed the hash but only logged
+    // it. (Authenticity — a publisher-signed expected hash — is a
+    // separate concern and out of scope here; the store digest is
+    // still integrity, not trust.)
     if let Some(expected) = object.info.digest.as_deref() {
-        let actual = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
-        // The algorithm prefix is matched case-insensitively, but
-        // the base64 payload exactly — base64 is case-sensitive, so
-        // an `eq_ignore_ascii_case` over the whole string would
-        // accept hashes that differ only in letter case (review PR
-        // #546).
-        let matches = expected
-            .strip_prefix("SHA-256=")
-            .or_else(|| expected.strip_prefix("sha-256="))
-            .is_some_and(|b64| b64 == actual);
-        if !matches {
+        if !digest_matches(expected, digest.as_slice()) {
             let _ = tokio::fs::remove_file(&staging).await;
+            let actual = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
             anyhow::bail!(
                 "staged binary digest mismatch for '{target}': object store records {expected}, downloaded bytes hash to SHA-256={actual} — discarding staged file"
             );
@@ -522,4 +513,92 @@ fn hex(bytes: &[u8]) -> String {
         let _ = write!(out, "{b:02x}");
     }
     out
+}
+
+/// Does the Object Store's recorded `SHA-256=<base64url>` digest match
+/// the freshly-hashed staged bytes? The algorithm prefix is accepted in
+/// either of the two casings NATS emits (`SHA-256=` / `sha-256=`); the
+/// payload is compared as decoded *bytes* so a base64 padding difference
+/// (NATS records WITH `=`, we'd encode without) or a url-safe/standard
+/// alphabet split can't trigger a false mismatch — the string-compare
+/// that #546 shipped wedged every self-update from 0.43.46 on for
+/// exactly that padding reason. A malformed / undecodable recorded
+/// digest fails closed (no match).
+fn digest_matches(expected: &str, actual: &[u8]) -> bool {
+    use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
+    expected
+        .strip_prefix("SHA-256=")
+        .or_else(|| expected.strip_prefix("sha-256="))
+        .and_then(|b64| {
+            // NATS records url-safe-with-padding today; trim the pad and
+            // try url-safe first, then the standard alphabet, so neither
+            // a padding nor an alphabet difference can false-mismatch.
+            let payload = b64.trim_end_matches('=');
+            URL_SAFE_NO_PAD
+                .decode(payload)
+                .or_else(|_| STANDARD_NO_PAD.decode(payload))
+                .ok()
+        })
+        .as_deref()
+        == Some(actual)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD};
+
+    // A 32-byte SHA-256 digest with a high bit set so its base64
+    // encoding exercises a url-safe character (`-`/`_`).
+    const DIGEST: [u8; 32] = [
+        0x21, 0x3e, 0x9b, 0xbd, 0xfc, 0x8e, 0x5c, 0x44, 0x6d, 0x51, 0x44, 0x24, 0xd0, 0xfe, 0xd3,
+        0x98, 0x63, 0x24, 0xd7, 0xa0, 0xaa, 0x9e, 0x9a, 0x0c, 0xf8, 0x68, 0x71, 0x91, 0x1a, 0xc4,
+        0xd2, 0x1f,
+    ];
+
+    #[test]
+    fn matches_padded_url_safe_digest() {
+        // The shape NATS actually records: url-safe, WITH `=` padding —
+        // the exact case that wedged self-update (regression guard).
+        let recorded = format!("SHA-256={}", URL_SAFE.encode(DIGEST));
+        assert!(recorded.ends_with('='), "fixture must carry padding");
+        assert!(digest_matches(&recorded, &DIGEST));
+    }
+
+    #[test]
+    fn matches_unpadded_and_standard_alphabet() {
+        // No-pad url-safe and padded standard-alphabet both decode to
+        // the same bytes — all accepted.
+        assert!(digest_matches(
+            &format!("SHA-256={}", URL_SAFE_NO_PAD.encode(DIGEST)),
+            &DIGEST
+        ));
+        assert!(digest_matches(
+            &format!("SHA-256={}", STANDARD.encode(DIGEST)),
+            &DIGEST
+        ));
+    }
+
+    #[test]
+    fn prefix_is_case_insensitive() {
+        assert!(digest_matches(
+            &format!("sha-256={}", URL_SAFE.encode(DIGEST)),
+            &DIGEST
+        ));
+    }
+
+    #[test]
+    fn rejects_wrong_bytes_missing_prefix_and_garbage() {
+        // A genuinely different digest still fails (integrity preserved).
+        let mut other = DIGEST;
+        other[0] ^= 0xff;
+        assert!(!digest_matches(
+            &format!("SHA-256={}", URL_SAFE.encode(DIGEST)),
+            &other
+        ));
+        // No `SHA-256=` prefix → fail closed.
+        assert!(!digest_matches(&URL_SAFE.encode(DIGEST), &DIGEST));
+        // Undecodable payload → fail closed.
+        assert!(!digest_matches("SHA-256=not*valid*base64", &DIGEST));
+    }
 }
