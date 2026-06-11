@@ -292,10 +292,12 @@ pub async fn scan_durations(
         (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
     })?;
 
-    // Bucket per job_id as (duration, result_id) pairs, sort each by
-    // duration, compute percentiles — and the slowest row's result_id
-    // for the dashboard's "max" deep-link.
-    let mut by_job: std::collections::HashMap<String, Vec<(i64, Option<String>)>> =
+    // Bucket per job_id: (durations, slowest run's result_id, slowest
+    // duration). Tracking the max + its result_id on the fly keeps the
+    // bucket a plain `Vec<i64>` — no tuple sort, no second allocation —
+    // while still surfacing the slowest run's result_id for the
+    // dashboard's "max" deep-link.
+    let mut by_job: std::collections::HashMap<String, (Vec<i64>, Option<String>, i64)> =
         std::collections::HashMap::new();
     for r in &rows {
         let Ok(job_id) = r.try_get::<String, _>("job_id") else {
@@ -307,20 +309,23 @@ pub async fn scan_durations(
         // a single agent, but cross-projector-restart edge cases
         // and NTP rewinds exist.)
         let dur = r.try_get::<i64, _>("dur_ms").unwrap_or(0).max(0);
-        let result_id = r.try_get::<String, _>("result_id").ok();
-        by_job.entry(job_id).or_default().push((dur, result_id));
+        // Nullable column: decode as Option so a NULL result_id is
+        // Ok(None) rather than a decode error.
+        let result_id = r.try_get::<Option<String>, _>("result_id").ok().flatten();
+        let entry = by_job.entry(job_id).or_insert_with(|| (Vec::new(), None, -1));
+        entry.0.push(dur);
+        if dur > entry.2 {
+            entry.1 = result_id;
+            entry.2 = dur;
+        }
     }
     let mut out: Vec<ScanDurationStats> = by_job
         .into_iter()
-        .map(|(job_id, mut pairs)| {
-            // Sort by duration so percentiles index by rank and the
-            // slowest run (carrying the deep-link result_id) is last.
-            pairs.sort_unstable_by_key(|(dur, _)| *dur);
-            let durs: Vec<i64> = pairs.iter().map(|(dur, _)| *dur).collect();
+        .map(|(job_id, (mut durs, max_result_id, _))| {
+            durs.sort_unstable();
             let count = durs.len() as i64;
             let sum: i64 = durs.iter().sum();
             let mean_ms = if count > 0 { sum / count } else { 0 };
-            let max_result_id = pairs.last().and_then(|(_, rid)| rid.clone());
             ScanDurationStats {
                 job_id,
                 count,
