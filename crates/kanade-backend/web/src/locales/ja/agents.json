@@ -45,5 +45,9 @@
   "groupsNone": "(なし)",
   "groupsCancelled": "(キャンセル)",
   "groupsLoading": "読み込み中…",
-  "rowLinkTitle": "PC ごとのパフォーマンスチャートを開く"
+  "rowLinkTitle": "PC ごとのパフォーマンスチャートを開く",
+  "searchPlaceholder": "pc_id / hostname を検索…",
+  "prev": "← 前へ",
+  "next": "次へ →",
+  "pageRange": "{{total}} 台中 {{from}}–{{to}} 台目"
 }

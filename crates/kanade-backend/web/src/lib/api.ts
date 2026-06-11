@@ -87,6 +87,22 @@ export async function apiFetchText(path: string, init: RequestInit = {}): Promis
   return text;
 }
 
+/**
+ * #495: variant for endpoints that page via `limit`/`offset` and
+ * report the pre-LIMIT match count in the `X-Total-Count` response
+ * header (GET /api/agents). The body stays the plain array existing
+ * consumers parse, so paging rides alongside without a response-shape
+ * break.
+ */
+export async function apiFetchPaged<T = unknown>(
+  path: string,
+  init: RequestInit = {},
+): Promise<{ rows: T; total: number }> {
+  const { res, text } = await apiFetchRaw(path, init);
+  const total = Number(res.headers.get('X-Total-Count') ?? '0');
+  return { rows: text ? (JSON.parse(text) as T) : (undefined as T), total };
+}
+
 // Pretty-prints whatever React Query handed back as the error. ApiError
 // already carries the status + body; anything else (network error, JSON
 // parse failure, etc.) falls back to its String() form.

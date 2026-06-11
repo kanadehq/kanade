@@ -45,5 +45,9 @@
   "groupsNone": "(none)",
   "groupsCancelled": "(cancelled)",
   "groupsLoading": "loading…",
-  "rowLinkTitle": "Open per-PC perf charts"
+  "rowLinkTitle": "Open per-PC perf charts",
+  "searchPlaceholder": "search pc_id / hostname…",
+  "prev": "← prev",
+  "next": "next →",
+  "pageRange": "{{from}}–{{to}} of {{total}}"
 }
