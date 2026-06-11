@@ -1,0 +1,49 @@
+{
+  "title": "Notifications",
+  "subtitle": "Send a notification to end users' Client App and track who confirmed it.",
+  "compose": {
+    "title": "Compose",
+    "priority": "Priority",
+    "issuedBy": "Issued by",
+    "issuedByPlaceholder": "e.g. infra-team",
+    "titleField": "Title",
+    "titlePlaceholder": "Short headline shown in the toast / modal",
+    "body": "Body",
+    "bodyPlaceholder": "The full message…",
+    "target": "Target",
+    "expiresAt": "Expires at (optional)",
+    "allWarning": "This notification will be delivered to every connected end user across the whole fleet.",
+    "groups": "Groups (comma-separated)",
+    "groupsPlaceholder": "tokyo-office, finance",
+    "pcs": "PCs",
+    "requireAck": "Require acknowledgement",
+    "requireAckHint": "When enabled, the notification shows a modal the user must acknowledge to dismiss, regardless of priority.",
+    "invalidExpiresAt": "Invalid expiry date — fix or clear the field before sending.",
+    "publish": "Send notification"
+  },
+  "priority": {
+    "info": "Info",
+    "warn": "Warning",
+    "emergency": "Emergency"
+  },
+  "target": {
+    "all": "All PCs",
+    "groups": "Groups",
+    "pcs": "Specific PCs"
+  },
+  "ack": {
+    "title": "Confirmation status",
+    "idField": "Notification id",
+    "idPlaceholder": "Paste a notification id (auto-filled after sending)",
+    "refresh": "Refresh",
+    "loadError": "Failed to load confirmation status",
+    "empty": "No confirmations yet for this notification.",
+    "pc": "PC",
+    "userSid": "User SID",
+    "ackedAt": "Confirmed at",
+    "count": "{{count}} confirmation(s)"
+  },
+  "toast": {
+    "published": "Sent — id {{id}}, fanned out to {{count}} subject(s)"
+  }
+}

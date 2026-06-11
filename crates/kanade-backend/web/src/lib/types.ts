@@ -188,3 +188,38 @@ export type ActiveInvestigationsResponse = {
   window_seconds: number;
   rows: ActiveInvestigation[];
 };
+
+// ---- Phase E notifications (mirror kanade-shared ipc::notifications) ----
+
+export type NotificationPriority = 'info' | 'warn' | 'emergency';
+
+// Request body for POST /api/notifications. `id` is optional — the
+// backend mints a UUID when omitted; `target` is the same shape as a
+// job manifest's `target` (at least one of all/groups/pcs must be set).
+export type PublishNotificationRequest = {
+  id?: string;
+  priority: NotificationPriority;
+  require_ack: boolean;
+  title: string;
+  body: string;
+  issued_by?: string;
+  expires_at?: string;
+  target: { all: boolean; groups: string[]; pcs: string[] };
+};
+
+export type PublishNotificationResponse = {
+  id: string;
+  subjects: string[];
+};
+
+// One recipient's confirmation, from GET /api/notifications/{id}/ack_status.
+export type NotificationAckEntry = {
+  pc_id: string;
+  user_sid: string;
+  acked_at: string;
+};
+
+export type NotificationAckStatus = {
+  id: string;
+  acks: NotificationAckEntry[];
+};
