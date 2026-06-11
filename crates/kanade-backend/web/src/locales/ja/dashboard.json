@@ -79,6 +79,7 @@
     "error": "読み込めませんでした: {{error}}",
     "empty": "直近 24時間に完了した実行はありません。",
     "linkTitle": "このジョブの実行をアクティビティで表示",
+    "maxLinkTitle": "最も遅い実行の詳細を開く",
     "table": {
       "jobId": "job_id",
       "count": "件数",

@@ -56,6 +56,10 @@ type ScanDurationStats = {
   p99_ms: number;
   max_ms: number;
   mean_ms: number;
+  /** result_id of the slowest run in the window — drives the "max"
+   *  cell deep-link to that run's detail page. Null only for legacy
+   *  rows with no result_id. */
+  max_result_id: string | null;
 };
 
 function fmtMs(ms: number): string {
@@ -884,7 +888,23 @@ export function Dashboard() {
                     <TableCell className="text-right">{fmtMs(r.p50_ms)}</TableCell>
                     <TableCell className="text-right">{fmtMs(r.p95_ms)}</TableCell>
                     <TableCell className="text-right">{fmtMs(r.p99_ms)}</TableCell>
-                    <TableCell className="text-right text-muted">{fmtMs(r.max_ms)}</TableCell>
+                    <TableCell className="text-right text-muted">
+                      {/* Deep-link the slowest single run straight to
+                          its detail page — "the max one, take me to
+                          it". Falls back to plain text for legacy rows
+                          with no result_id. */}
+                      {r.max_result_id ? (
+                        <Link
+                          to={`/activity/${encodeURIComponent(r.max_result_id)}`}
+                          className="hover:underline"
+                          title={t('scanDuration.maxLinkTitle')}
+                        >
+                          {fmtMs(r.max_ms)}
+                        </Link>
+                      ) : (
+                        fmtMs(r.max_ms)
+                      )}
+                    </TableCell>
                   </TableRow>
                 ))}
               </TableBody>

@@ -79,6 +79,7 @@
     "error": "Couldn't load: {{error}}",
     "empty": "No finished executions in the last 24 h.",
     "linkTitle": "View this job's runs in Activity",
+    "maxLinkTitle": "Open the slowest run's detail page",
     "table": {
       "jobId": "job_id",
       "count": "count",

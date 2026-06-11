@@ -232,6 +232,11 @@ pub struct ScanDurationStats {
     pub p99_ms: i64,
     pub max_ms: i64,
     pub mean_ms: i64,
+    /// `result_id` of the single slowest finished run in the window for
+    /// this job_id — lets the dashboard's "max" cell deep-link straight
+    /// to that run's detail page. `None` only when the slowest row had
+    /// no `result_id` (shouldn't happen for a finished row).
+    pub max_result_id: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -271,7 +276,7 @@ pub async fn scan_durations(
     // serve it (finished_at is the third column; leading-column
     // rule), which is why this query used to full-scan.
     let rows = sqlx::query(
-        "SELECT job_id, \
+        "SELECT job_id, result_id, \
                 CAST((julianday(finished_at) - julianday(started_at)) * 86400000.0 AS INTEGER) AS dur_ms \
            FROM execution_results \
           WHERE finished_at IS NOT NULL \
@@ -287,8 +292,11 @@ pub async fn scan_durations(
         (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
     })?;
 
-    // Bucket per job_id, sort each, compute percentiles.
-    let mut by_job: std::collections::HashMap<String, Vec<i64>> = std::collections::HashMap::new();
+    // Bucket per job_id as (duration, result_id) pairs, sort each by
+    // duration, compute percentiles — and the slowest row's result_id
+    // for the dashboard's "max" deep-link.
+    let mut by_job: std::collections::HashMap<String, Vec<(i64, Option<String>)>> =
+        std::collections::HashMap::new();
     for r in &rows {
         let Ok(job_id) = r.try_get::<String, _>("job_id") else {
             continue;
@@ -299,15 +307,20 @@ pub async fn scan_durations(
         // a single agent, but cross-projector-restart edge cases
         // and NTP rewinds exist.)
         let dur = r.try_get::<i64, _>("dur_ms").unwrap_or(0).max(0);
-        by_job.entry(job_id).or_default().push(dur);
+        let result_id = r.try_get::<String, _>("result_id").ok();
+        by_job.entry(job_id).or_default().push((dur, result_id));
     }
     let mut out: Vec<ScanDurationStats> = by_job
         .into_iter()
-        .map(|(job_id, mut durs)| {
-            durs.sort_unstable();
+        .map(|(job_id, mut pairs)| {
+            // Sort by duration so percentiles index by rank and the
+            // slowest run (carrying the deep-link result_id) is last.
+            pairs.sort_unstable_by_key(|(dur, _)| *dur);
+            let durs: Vec<i64> = pairs.iter().map(|(dur, _)| *dur).collect();
             let count = durs.len() as i64;
             let sum: i64 = durs.iter().sum();
             let mean_ms = if count > 0 { sum / count } else { 0 };
+            let max_result_id = pairs.last().and_then(|(_, rid)| rid.clone());
             ScanDurationStats {
                 job_id,
                 count,
@@ -317,6 +330,7 @@ pub async fn scan_durations(
                 p99_ms: percentile(&durs, 0.99),
                 max_ms: *durs.last().unwrap_or(&0),
                 mean_ms,
+                max_result_id,
             }
         })
         .collect();
