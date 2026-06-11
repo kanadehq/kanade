@@ -232,6 +232,11 @@ pub struct ScanDurationStats {
     pub p99_ms: i64,
     pub max_ms: i64,
     pub mean_ms: i64,
+    /// `result_id` of the single slowest finished run in the window for
+    /// this job_id — lets the dashboard's "max" cell deep-link straight
+    /// to that run's detail page. `None` only when the slowest row had
+    /// no `result_id` (shouldn't happen for a finished row).
+    pub max_result_id: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -271,7 +276,7 @@ pub async fn scan_durations(
     // serve it (finished_at is the third column; leading-column
     // rule), which is why this query used to full-scan.
     let rows = sqlx::query(
-        "SELECT job_id, \
+        "SELECT job_id, result_id, \
                 CAST((julianday(finished_at) - julianday(started_at)) * 86400000.0 AS INTEGER) AS dur_ms \
            FROM execution_results \
           WHERE finished_at IS NOT NULL \
@@ -287,8 +292,13 @@ pub async fn scan_durations(
         (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
     })?;
 
-    // Bucket per job_id, sort each, compute percentiles.
-    let mut by_job: std::collections::HashMap<String, Vec<i64>> = std::collections::HashMap::new();
+    // Bucket per job_id: (durations, slowest run's result_id, slowest
+    // duration). Tracking the max + its result_id on the fly keeps the
+    // bucket a plain `Vec<i64>` — no tuple sort, no second allocation —
+    // while still surfacing the slowest run's result_id for the
+    // dashboard's "max" deep-link.
+    let mut by_job: std::collections::HashMap<String, (Vec<i64>, Option<String>, i64)> =
+        std::collections::HashMap::new();
     for r in &rows {
         let Ok(job_id) = r.try_get::<String, _>("job_id") else {
             continue;
@@ -299,11 +309,21 @@ pub async fn scan_durations(
         // a single agent, but cross-projector-restart edge cases
         // and NTP rewinds exist.)
         let dur = r.try_get::<i64, _>("dur_ms").unwrap_or(0).max(0);
-        by_job.entry(job_id).or_default().push(dur);
+        // Nullable column: decode as Option so a NULL result_id is
+        // Ok(None) rather than a decode error.
+        let result_id = r.try_get::<Option<String>, _>("result_id").ok().flatten();
+        let entry = by_job
+            .entry(job_id)
+            .or_insert_with(|| (Vec::new(), None, -1));
+        entry.0.push(dur);
+        if dur > entry.2 {
+            entry.1 = result_id;
+            entry.2 = dur;
+        }
     }
     let mut out: Vec<ScanDurationStats> = by_job
         .into_iter()
-        .map(|(job_id, mut durs)| {
+        .map(|(job_id, (mut durs, max_result_id, _))| {
             durs.sort_unstable();
             let count = durs.len() as i64;
             let sum: i64 = durs.iter().sum();
@@ -317,6 +337,7 @@ pub async fn scan_durations(
                 p99_ms: percentile(&durs, 0.99),
                 max_ms: *durs.last().unwrap_or(&0),
                 mean_ms,
+                max_result_id,
             }
         })
         .collect();

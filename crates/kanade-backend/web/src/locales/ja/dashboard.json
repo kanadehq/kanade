@@ -78,6 +78,8 @@
     "description": "<code>execution_results.{started,finished}_at</code> から算出したジョブ別実行時間。個別の行を確認しなくても、急に遅くなったプローブを発見できます。",
     "error": "読み込めませんでした: {{error}}",
     "empty": "直近 24時間に完了した実行はありません。",
+    "linkTitle": "このジョブの実行をアクティビティで表示",
+    "maxLinkTitle": "最も遅い実行の詳細を開く",
     "table": {
       "jobId": "job_id",
       "count": "件数",
