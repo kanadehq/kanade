@@ -1,3 +1,4 @@
+pub mod boot_sentinel;
 pub mod bootstrap;
 pub mod config;
 pub mod default_paths;
