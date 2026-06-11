@@ -33,6 +33,13 @@ pub enum JobCategory {
     /// Self-service install catalog. Appears in the software
     /// catalog tab.
     Catalog,
+    /// #492: serde-level forward-compat catch-all. `#[non_exhaustive]`
+    /// only affects Rust match exhaustiveness — serde still hard-fails
+    /// on an unknown variant STRING, so a newer peer's new variant
+    /// used to make older readers reject the whole containing message.
+    /// Unknown decodes any unrecognised value; UIs render it neutrally.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Run-state machine for one `jobs.execute` invocation.
@@ -61,6 +68,13 @@ pub enum RunStatus {
     /// User-initiated kill via `jobs.kill`. Distinct from `Failed`
     /// so the SPA can show "stopped by you" instead of "errored".
     Killed,
+    /// #492: serde-level forward-compat catch-all. `#[non_exhaustive]`
+    /// only affects Rust match exhaustiveness — serde still hard-fails
+    /// on an unknown variant STRING, so a newer peer's new variant
+    /// used to make older readers reject the whole containing message.
+    /// Unknown decodes any unrecognised value; UIs render it neutrally.
+    #[serde(other)]
+    Unknown,
 }
 
 /// One entry in `jobs.list` — the SPEC §2.12.11 reference shape,
@@ -338,5 +352,54 @@ mod tests {
         let v = serde_json::to_value(&r).unwrap();
         assert!(v.get("finished_at").is_none(), "wire: {v:?}");
         assert!(v.get("exit_code").is_none(), "wire: {v:?}");
+    }
+
+    #[test]
+    fn unknown_enum_variants_decode_to_unknown() {
+        // #492: a newer peer's new variant must not make this build
+        // fail to decode the whole containing message — serde(other)
+        // catches it (non_exhaustive alone never protected the wire).
+        let s: RunStatus = serde_json::from_str("\"skipped\"").unwrap();
+        assert_eq!(s, RunStatus::Unknown);
+        let c: JobCategory = serde_json::from_str("\"future_tab\"").unwrap();
+        assert_eq!(c, JobCategory::Unknown);
+        // Known variants are untouched.
+        let r: RunStatus = serde_json::from_str("\"running\"").unwrap();
+        assert_eq!(r, RunStatus::Running);
+    }
+
+    #[test]
+    fn unknown_variant_round_trips() {
+        // PR #558 review (gemini): Unknown must SERIALIZE cleanly too
+        // — a node that decoded a newer peer's variant and re-emits
+        // the containing message (e.g. an agent forwarding a
+        // jobs.list entry) must not hit a runtime serialization
+        // error. It serialises as "unknown" and decodes back to
+        // Unknown on every #492-aware peer.
+        let s = serde_json::to_string(&RunStatus::Unknown).unwrap();
+        assert_eq!(s, "\"unknown\"");
+        let back: RunStatus = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, RunStatus::Unknown);
+    }
+
+    #[test]
+    fn unknown_decodes_across_the_other_wire_enums() {
+        // PR #558 review (claude): cover the remaining #492 enums.
+        use crate::ipc::error::ErrorKind;
+        use crate::ipc::maintenance::DeferDuration;
+        use crate::ipc::notifications::NotificationPriority;
+
+        let k: ErrorKind = serde_json::from_str("\"FutureErrorKind\"").unwrap();
+        assert_eq!(k, ErrorKind::Unknown);
+        assert_eq!(k.code(), -32099);
+        let known: ErrorKind = serde_json::from_str("\"Unauthorized\"").unwrap();
+        assert_eq!(known, ErrorKind::Unauthorized);
+
+        let p: NotificationPriority = serde_json::from_str("\"critical\"").unwrap();
+        assert_eq!(p, NotificationPriority::Unknown);
+
+        let d: DeferDuration = serde_json::from_str("\"2h\"").unwrap();
+        assert_eq!(d, DeferDuration::Unknown);
+        assert_eq!(d.as_duration(), chrono::Duration::minutes(15));
     }
 }

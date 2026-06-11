@@ -66,6 +66,13 @@ pub enum NotificationPriority {
     /// Red modal — grabs window focus, blocks until ack
     /// (SPEC §2.12.8: "緊急: ネットワーク機器メンテ").
     Emergency,
+    /// #492: serde-level forward-compat catch-all. `#[non_exhaustive]`
+    /// only affects Rust match exhaustiveness — serde still hard-fails
+    /// on an unknown variant STRING, so a newer peer's new variant
+    /// used to make older readers reject the whole containing message.
+    /// Unknown decodes any unrecognised value; UIs render it neutrally.
+    #[serde(other)]
+    Unknown,
 }
 
 // ---------- notifications.list ----------

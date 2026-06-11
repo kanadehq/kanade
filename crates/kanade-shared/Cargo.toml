@@ -28,6 +28,7 @@ serde_json = { workspace = true }
 # `when: { per_pc: once }` map shape (JSON output is unchanged —
 # the same singleton map external tagging produces).
 serde_yaml = { workspace = true }
+serde_ignored = { workspace = true }
 teravars   = { workspace = true }
 thiserror  = { workspace = true }
 tokio      = { workspace = true }

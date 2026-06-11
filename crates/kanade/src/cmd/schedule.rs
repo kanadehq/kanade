@@ -78,8 +78,10 @@ async fn create(base: &str, yaml: &PathBuf) -> Result<()> {
     // error site obvious. Then ship the raw YAML body so the
     // backend's BUCKET_SCHEDULES_YAML mirror preserves comments +
     // formatting across SPA edits.
-    let schedule: Schedule =
-        serde_yaml::from_str(&body).with_context(|| format!("parse {yaml:?}"))?;
+    // #492: strict parse — unknown keys are operator typos at this
+    // boundary; fleet-side reads of the same type stay tolerant.
+    let schedule: Schedule = kanade_shared::strict::from_yaml_str(&body)
+        .map_err(|e| anyhow::anyhow!("parse {yaml:?}: {e}"))?;
     // Same client-side-first rationale for the semantic checks
     // (#418 decision F): a per_target+agent combo or a bad `every`
     // fails right here instead of as the backend's 400. The backend

@@ -93,6 +93,11 @@ pub enum DeferDuration {
     /// 1 hour.
     #[serde(rename = "1h")]
     H1,
+    /// #492: serde-level forward-compat catch-all — a newer client's
+    /// new defer option decodes here instead of failing the whole
+    /// request on an older agent. Treated as the shortest defer.
+    #[serde(other)]
+    Unknown,
 }
 
 impl DeferDuration {
@@ -100,6 +105,14 @@ impl DeferDuration {
     pub fn as_duration(self) -> chrono::Duration {
         match self {
             Self::M15 => chrono::Duration::minutes(15),
+            // Unknown = a defer option this build doesn't know;
+            // shortest defer is the conservative interpretation.
+            // warn so a fleet-upgrade window's "defer was shorter
+            // than expected" is diagnosable (PR #558 review, claude).
+            Self::Unknown => {
+                tracing::warn!("unknown DeferDuration variant from a newer peer; treating as 15m");
+                chrono::Duration::minutes(15)
+            }
             Self::M30 => chrono::Duration::minutes(30),
             Self::H1 => chrono::Duration::hours(1),
         }

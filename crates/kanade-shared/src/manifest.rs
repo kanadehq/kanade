@@ -11,11 +11,18 @@ use crate::wire::{RunAs, Shell, Staleness};
 /// script can now be fired against different targets / rollouts
 /// without copying the script body.
 ///
-/// `deny_unknown_fields` makes operators copy-pasting an older yaml
-/// that still has `target:` / `rollout:` see a clear parse error at
-/// `kanade job create` time instead of mysteriously losing it.
+/// #492: these types are READ fleet-wide (agents decode them from
+/// BUCKET_JOBS / BUCKET_SCHEDULES and inside live Commands), so they
+/// must tolerate unknown fields — `deny_unknown_fields` here made a
+/// gradually-upgrading fleet's OLD agents reject the whole object
+/// the moment a newer backend added any field. Operator typo
+/// protection (the old reason for the attribute) lives at the WRITE
+/// boundaries instead: `kanade job/schedule create` and the backend
+/// POST extractor parse via [`crate::strict`], which rejects unknown
+/// keys with their full paths. The wire rule: new fields always get
+/// `#[serde(default)]` (+ `skip_serializing_if` while old readers
+/// may still be strict).
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
-#[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub id: String,
     pub version: String,
@@ -194,7 +201,6 @@ pub struct InventoryHint {
 /// too. This keeps checks maximally expressive without a bespoke
 /// payload type.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
-#[serde(deny_unknown_fields)]
 pub struct CheckHint {
     /// Stable check id → [`Check.name`](crate::ipc::state::Check),
     /// the SPA/Client React key + analytics label. Unique within the
@@ -251,7 +257,6 @@ fn default_fleet() -> bool {
 /// that `jobs.list` returns; the Client App renders one row per job in
 /// the tab named by `category`.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
-#[serde(deny_unknown_fields)]
 pub struct ClientHint {
     /// End-user-facing title for the job row. The operator-internal
     /// `Manifest::id` slug is rarely what an end user should read, so
@@ -282,7 +287,6 @@ pub struct ClientHint {
 /// to `inventory:` but for the append-only timeline pipeline; see
 /// `Manifest::emit` for the full contract.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
-#[serde(deny_unknown_fields)]
 pub struct EmitConfig {
     /// What kind of payload the agent should expect on stdout. Only
     /// `events` is defined today (parses each non-empty line as
@@ -449,7 +453,6 @@ impl Target {
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
-#[serde(deny_unknown_fields)]
 pub struct Execute {
     pub shell: ExecuteShell,
     /// Inline script body. Mutually exclusive with [`script_file`]
@@ -1088,8 +1091,9 @@ client:
 
     #[test]
     fn manifest_client_rejects_unknown_field() {
-        // `deny_unknown_fields` on ClientHint catches a fat-fingered
-        // `displayname:` instead of silently dropping it.
+        // #492: the strict create boundary catches a fat-fingered
+        // `displayname:` (with its path) instead of silently
+        // dropping it; the tolerant read path accepts it.
         let yaml = r#"
 id: j
 version: 1.0.0
@@ -1102,11 +1106,15 @@ client:
   category: catalog
   displayname: oops
 "#;
-        let r: Result<Manifest, _> = serde_yaml::from_str(yaml);
-        assert!(
-            r.is_err(),
-            "unknown client field must be a parse error, got {r:?}"
-        );
+        let r = crate::strict::from_yaml_str::<Manifest>(yaml);
+        let err = r.expect_err("unknown client field must be rejected at the write boundary");
+        // serde_ignored renders the Option layer as `?`:
+        // `client.?.displayname`. Assert on the leaf key.
+        assert!(err.contains("displayname"), "{err}");
+        // The READ path tolerates the same payload (gradual-upgrade
+        // contract: an old agent must accept a newer writer's field).
+        let m: Manifest = serde_yaml::from_str(yaml).expect("tolerant read");
+        assert_eq!(m.client.as_ref().map(|c| c.name.as_str()), Some("A job"));
     }
 
     fn execute_with(
@@ -1222,9 +1230,9 @@ execute:
 
     #[test]
     fn manifest_rejects_typo_in_script_field_name() {
-        // `deny_unknown_fields` on Execute catches `script_objectt`
-        // and similar fat-fingers at parse time instead of letting
-        // them silently fall through to "all three unset".
+        // #492: the strict create boundary catches `script_objectt`
+        // and similar fat-fingers (with the full path) instead of
+        // letting them silently fall through to "all three unset".
         let yaml = r#"
 id: typo
 version: 1.0.0
@@ -1233,8 +1241,9 @@ execute:
   script_objectt: oops
   timeout: 30s
 "#;
-        let r: Result<Manifest, _> = serde_yaml::from_str(yaml);
-        assert!(r.is_err(), "expected parse error, got {r:?}");
+        let err = crate::strict::from_yaml_str::<Manifest>(yaml)
+            .expect_err("typo'd execute field must be rejected at the write boundary");
+        assert!(err.contains("execute.script_objectt"), "{err}");
     }
 
     #[test]
@@ -1404,8 +1413,10 @@ target: {{ all: true }}
 
     #[test]
     fn when_rejects_unknown_key_in_every() {
-        // EverySpec is deny_unknown_fields so `evry:` typos fail
-        // even under the untagged PerPolicy.
+        // `{ evry: 6h }` still fails on the tolerant read path: the
+        // required `every` key is missing, so no PerPolicy variant
+        // matches (#492 removed deny_unknown_fields, but required
+        // keys keep the untagged disambiguation honest).
         let r: Result<Schedule, _> =
             serde_yaml::from_str(&schedule_yaml_with("  per_pc: { evry: 6h }"));
         assert!(r.is_err(), "expected parse error, got {r:?}");
@@ -2748,7 +2759,6 @@ pub enum When {
 /// date+time (`"YYYY-MM-DD HH:MM"`, a one-shot that fires once and
 /// never again). Evaluated in the schedule's top-level `tz`.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct CalendarSpec {
     /// `"HH:MM"` (24h) for a repeating trigger, or
     /// `"YYYY-MM-DD HH:MM"` (hyphen / slash / `T` separators all
@@ -2979,11 +2989,12 @@ pub enum OnceLiteral {
 }
 
 /// `{ every: <humantime> }`. Standalone struct (not an inline
-/// struct variant) so `deny_unknown_fields` still bites under the
-/// untagged [`PerPolicy`] — `{ evry: 6h }` is a parse error, not a
-/// silently-ignored key.
+/// struct variant). `{ evry: 6h }` still fails to parse (the
+/// required `every` key is missing), and the create boundaries
+/// reject the unknown `evry` via [`crate::strict`] with its path —
+/// while agents reading a future writer's extra fields tolerate
+/// them (#492).
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct EverySpec {
     /// Humantime interval (`10m`, `6h`, `1d`...). Parsed lazily —
     /// [`Schedule::validate`] rejects garbage at create time.
@@ -3031,7 +3042,6 @@ impl std::fmt::Display for When {
 /// calendar `at` AND the `active` window local — one consistent
 /// timezone per schedule.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct Active {
     /// Dormant before this instant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3088,7 +3098,6 @@ impl Active {
 /// `max_concurrent` (a fleet-wide running-instance cap) so far;
 /// `require` (env gates) joins this struct in a later phase.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct Constraints {
     /// `"HH:MM-HH:MM"` wall-clock window (evaluated in the schedule's
     /// `tz`). Fires outside it are skipped — mainly for reconcile
@@ -3185,7 +3194,6 @@ impl Constraints {
 /// came back bad. Only `retry` so far; future `notify` / `disable`
 /// would join the same namespace.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct OnFailure {
     /// Re-run the script in-process when it exits non-zero (or times
     /// out), up to a cap, with a fixed backoff between attempts.
@@ -3230,7 +3238,6 @@ impl OnFailure {
 /// "restart on failure" Task Scheduler path is deferred to the
 /// native-delegation phase (#418 decision H).
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct Retry {
     /// Max additional attempts after the first failure. Bounded
     /// `1..=10` by [`Schedule::validate`] — a typo'd `max: 1000`
@@ -3260,7 +3267,6 @@ pub struct Retry {
 /// freeze is a KV delete, and `is_active` only ever runs on a freeze
 /// the operator actually set.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct Freeze {
     /// Frozen from this instant (RFC3339 or bare `YYYY-MM-DD` in
     /// `tz`). `None` ⇒ frozen from the beginning of time.
