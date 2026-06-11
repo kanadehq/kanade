@@ -35,6 +35,9 @@ use kanade_shared::ipc::handshake::HandshakeParams;
 use kanade_shared::ipc::jobs::{JobsExecuteParams, JobsKillParams, JobsListParams};
 use kanade_shared::ipc::maintenance::MaintenanceListParams;
 use kanade_shared::ipc::method;
+use kanade_shared::ipc::notifications::{
+    NotificationsSubscribeParams, NotificationsUnsubscribeParams,
+};
 use kanade_shared::ipc::state::{
     StateSnapshotParams, StateSubscribeParams, StateUnsubscribeParams,
 };
@@ -159,6 +162,24 @@ async fn dispatch_inner(
                 decode_params(req.params.clone()).map_err(invalid_params)?;
             let result = handlers::maintenance::handle_maintenance_list(conn, params).await?;
             serde_json::to_value(&result).map_err(internal)
+        }
+        method::NOTIFICATIONS_SUBSCRIBE => {
+            // Empty-body params (no required fields) → decode_params so
+            // an omitted body is accepted, like state.subscribe.
+            let params: NotificationsSubscribeParams =
+                decode_params(req.params.clone()).map_err(invalid_params)?;
+            let result = handlers::notifications::handle_notifications_subscribe(conn, params)?;
+            serde_json::to_value(&result).map_err(internal)
+        }
+        method::NOTIFICATIONS_UNSUBSCRIBE => {
+            // NotificationsUnsubscribeParams has the required
+            // `subscription` field — route directly through serde so a
+            // missing id surfaces as InvalidParams.
+            let params: NotificationsUnsubscribeParams =
+                serde_json::from_value(req.params.clone()).map_err(invalid_params)?;
+            handlers::notifications::handle_notifications_unsubscribe(conn, params)?;
+            // SPEC §2.12.7's unsubscribe response is `{"result":null}`.
+            Ok(serde_json::Value::Null)
         }
         // Every other v1 method is reserved but not implemented
         // in this PR — answer MethodNotFound so client code can

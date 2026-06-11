@@ -12,5 +12,6 @@
 
 pub mod jobs;
 pub mod maintenance;
+pub mod notifications;
 pub mod state;
 pub mod system;

@@ -15,9 +15,10 @@
 use std::path::PathBuf;
 
 use kanade_shared::ipc::handshake::HandshakeSession;
+use kanade_shared::ipc::notifications::Notification;
 use kanade_shared::ipc::state::StateSnapshot;
 use kanade_shared::wire::EffectiveConfig;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 
 use super::auth::PeerCredentials;
 use super::subscriptions::SubscriptionRegistry;
@@ -88,6 +89,14 @@ pub struct ConnectionState {
     /// is bounded by runs-per-connection and dropped with the
     /// connection.
     runs: std::collections::HashSet<String>,
+    /// Process-wide notification broadcast sender (KLP Phase E). The
+    /// `notifications.subscribe` handler calls `.subscribe()` on it to
+    /// get a fresh receiver and spawns a forwarder that pushes
+    /// `notifications.new` frames down this connection. Fed by
+    /// [`crate::klp::notify_bus`]. `None` only in unit tests that don't
+    /// drive the notification path; production wires it via
+    /// [`ConnectionState::with_notifications`].
+    notif_tx: Option<broadcast::Sender<Notification>>,
     /// `Some(v)` once `system.handshake` succeeded; `None`
     /// otherwise. The dispatcher uses this as the gate for
     /// non-handshake methods.
@@ -121,6 +130,7 @@ impl ConnectionState {
             push_tx,
             nats: None,
             runs: std::collections::HashSet::new(),
+            notif_tx: None,
             agreed_protocol: None,
         }
     }
@@ -145,6 +155,24 @@ impl ConnectionState {
     pub fn with_nats(mut self, nats: async_nats::Client) -> Self {
         self.nats = Some(nats);
         self
+    }
+
+    /// Attach the process-wide notification broadcast sender
+    /// (KLP Phase E). The listener calls this on every accepted
+    /// connection; `notifications.subscribe` derives a fresh receiver
+    /// from it. Unit tests that don't drive notifications skip it.
+    pub fn with_notifications(mut self, notif_tx: broadcast::Sender<Notification>) -> Self {
+        self.notif_tx = Some(notif_tx);
+        self
+    }
+
+    /// A fresh [`broadcast::Receiver`] for incoming notifications, or
+    /// `None` if the bus wasn't wired (tests / a misconfigured boot).
+    /// The `notifications.subscribe` handler uses this to start a
+    /// forwarder; `None` surfaces to the client as an internal error
+    /// rather than a silently-dead subscription.
+    pub fn notif_subscribe(&self) -> Option<broadcast::Receiver<Notification>> {
+        self.notif_tx.as_ref().map(|tx| tx.subscribe())
     }
 
     /// `true` once `system.handshake` has been processed

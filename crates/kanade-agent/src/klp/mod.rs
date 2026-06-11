@@ -64,6 +64,8 @@ pub mod framing;
 #[cfg(target_os = "windows")]
 pub mod handlers;
 #[cfg(target_os = "windows")]
+pub mod notify_bus;
+#[cfg(target_os = "windows")]
 pub mod security;
 #[cfg(target_os = "windows")]
 pub mod server;

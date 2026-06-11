@@ -28,11 +28,12 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use kanade_shared::ipc::envelope::{RpcMessage, RpcResponse};
 use kanade_shared::ipc::error::{ErrorKind, RpcError};
+use kanade_shared::ipc::notifications::Notification;
 use kanade_shared::ipc::state::StateSnapshot;
 use kanade_shared::wire::EffectiveConfig;
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 use tracing::{debug, info, warn};
 
 use crate::klp::auth::resolve_peer;
@@ -85,6 +86,12 @@ pub struct ListenerContext {
     /// Arc-backed) and reconnect-resilient, so the listener never
     /// holds a stale KV handle.
     pub nats: async_nats::Client,
+    /// Process-wide notification broadcast sender (KLP Phase E). Fed
+    /// by [`crate::klp::notify_bus`]; each connection derives a fresh
+    /// receiver via `ConnectionState::notif_subscribe` when the client
+    /// calls `notifications.subscribe`. A `broadcast::Sender` is cheap
+    /// to clone (Arc-backed).
+    pub notif_tx: broadcast::Sender<Notification>,
 }
 
 /// Spawn the KLP listener. Returns immediately with a detached
@@ -224,7 +231,8 @@ async fn handle_connection(pipe: NamedPipeServer, ctx: ListenerContext) -> Resul
         ctx.log_path.clone(),
         push_tx.clone(),
     )
-    .with_nats(ctx.nats.clone());
+    .with_nats(ctx.nats.clone())
+    .with_notifications(ctx.notif_tx.clone());
 
     let read_loop_result = run_read_loop(reader, &mut conn, &push_tx).await;
 
