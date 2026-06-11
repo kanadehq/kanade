@@ -399,7 +399,19 @@ if (-not (Test-Path $configSrc)) {
 #   other   an unexpected failure of the guard itself — abort rather than
 #           silently treat a broken probe as "safe to deploy".
 $stagedVersion = ''
-try { $stagedVersion = ((& $exeSrc --version 2>$null) -split '\s+')[-1] } catch {}
+try {
+    $stagedVersion = ((& $exeSrc --version 2>$null) -split '\s+')[-1]
+} catch {
+    # A launch failure here (not a non-zero exit — that wouldn't throw)
+    # means the staged binary can't even run --version. Don't let the
+    # empty catch silently degrade to "no guard": warn that BOTH the
+    # quarantine check below AND the sentinel arming before the swap are
+    # skipped, so the operator knows this deploy proceeds unguarded.
+    Write-Warning ("deploy-backend: could not probe the staged binary's version " +
+        "($($_.Exception.Message)) — the boot-sentinel quarantine guard AND sentinel arming are " +
+        "BOTH SKIPPED for this deploy (it proceeds unguarded). A binary that can't run --version " +
+        "is usually corrupt or ABI-incompatible; investigate if this is unexpected.")
+}
 if ($stagedVersion) {
     & $exeSrc check-quarantine $stagedVersion
     switch ($LASTEXITCODE) {
