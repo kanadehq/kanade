@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { CheckCircle2, Loader2, Rocket, Trash2, Upload } from 'lucide-react';
-import { useState } from 'react';
+import { Activity, AlertTriangle, CheckCircle2, Loader2, Rocket, Trash2, Upload } from 'lucide-react';
+import { useMemo, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
+import { Link } from 'react-router-dom';
 
 import { ErrorCard } from '@/components/ErrorCard';
 import { Badge } from '@/components/ui/badge';
@@ -118,6 +119,28 @@ export function Rollout() {
     !!version &&
     (scopeKind === 'global' || (!!scopeValue && scopeValue.length > 0)) &&
     !rollout.isPending;
+
+  // #582 Phase 3: adoption breakdown for the selected target `version`
+  // across the whole fleet. `quarantined` (the agent rolled this target
+  // back after it crash-looped) takes precedence over `at-target`, so a
+  // stale heartbeat can't double-count. `pending` is everyone else —
+  // agents not yet on the target and not failed. One pass, memoised so
+  // typing into the jitter/scope fields doesn't re-scan the fleet.
+  const allAgents = agentsQ.data ?? [];
+  const totalAgents = allAgents.length;
+  const { quarantinedCount, atTargetCount, pendingCount } = useMemo(() => {
+    let quarantined = 0;
+    let atTarget = 0;
+    for (const a of allAgents) {
+      if ((a.quarantined_versions ?? []).includes(version)) quarantined++;
+      else if (a.agent_version === version) atTarget++;
+    }
+    return {
+      quarantinedCount: quarantined,
+      atTargetCount: atTarget,
+      pendingCount: allAgents.length - quarantined - atTarget,
+    };
+  }, [allAgents, version]);
 
   const scopeValueLabel =
     scopeKind === 'global'
@@ -289,6 +312,75 @@ export function Rollout() {
           </CardContent>
         )}
       </Card>
+
+      {/* #582 Phase 3: adoption health for the selected target version.
+          Turns a bad rollout from a silent fleet-wide failure into a
+          visible "N adopted / M still pending / K quarantined". */}
+      {version && (
+        <Card className={quarantinedCount > 0 ? 'border-danger' : undefined}>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              {quarantinedCount > 0 ? (
+                <AlertTriangle className="size-5 text-danger" />
+              ) : (
+                <Activity className="size-5 text-violet" />
+              )}
+              {t('health.title', { version })}
+            </CardTitle>
+            <CardDescription>{t('health.description')}</CardDescription>
+          </CardHeader>
+          <CardContent>
+            {agentsQ.isLoading ? (
+              <div className="flex items-center gap-2 text-muted">
+                <Loader2 className="size-4 animate-spin" />
+                {t('health.loading')}
+              </div>
+            ) : agentsQ.error ? (
+              <ErrorCard title={t('health.errorTitle')} error={agentsQ.error} />
+            ) : (
+              <div className="grid grid-cols-3 gap-6">
+                <div className="flex flex-col">
+                  <span className="text-xs uppercase tracking-wide text-muted">
+                    {t('health.atTarget')}
+                  </span>
+                  <span className="text-3xl font-bold tabular-nums leading-tight text-success">
+                    {atTargetCount}
+                  </span>
+                  <span className="text-xs text-muted mt-0.5">
+                    {t('health.ofTotal', { total: totalAgents })}
+                  </span>
+                </div>
+                <div className="flex flex-col">
+                  <span className="text-xs uppercase tracking-wide text-muted">
+                    {t('health.pending')}
+                  </span>
+                  <span className="text-3xl font-bold tabular-nums leading-tight">
+                    {pendingCount}
+                  </span>
+                  <span className="text-xs text-muted mt-0.5">{t('health.pendingHint')}</span>
+                </div>
+                <Link
+                  to="/agents"
+                  className="flex flex-col rounded-md -m-1 p-1 transition-colors hover:bg-muted/10"
+                  title={t('health.quarantinedLinkTitle')}
+                >
+                  <span className="text-xs uppercase tracking-wide text-muted">
+                    {t('health.quarantined')}
+                  </span>
+                  <span
+                    className={`text-3xl font-bold tabular-nums leading-tight ${
+                      quarantinedCount > 0 ? 'text-danger' : ''
+                    }`}
+                  >
+                    {quarantinedCount}
+                  </span>
+                  <span className="text-xs text-muted mt-0.5">{t('health.quarantinedHint')}</span>
+                </Link>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardHeader>

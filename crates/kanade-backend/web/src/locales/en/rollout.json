@@ -36,6 +36,19 @@
     "jitterBadge": "jitter {{jitter}}",
     "errorTitle": "Rollout failed"
   },
+  "health": {
+    "title": "Adoption: {{version}}",
+    "description": "How the fleet has taken up the selected target version. Quarantined hosts crash-looped on it and rolled back — a sign the rollout is bad.",
+    "loading": "loading agents…",
+    "errorTitle": "Couldn't load agents",
+    "atTarget": "at target",
+    "ofTotal": "of {{total}} agents",
+    "pending": "pending",
+    "pendingHint": "not yet on this version",
+    "quarantined": "quarantined",
+    "quarantinedHint": "rolled back after a failed boot",
+    "quarantinedLinkTitle": "View the agent list"
+  },
   "releases": {
     "title": "Object Store releases",
     "description": "From <code>/api/agents/releases</code>. Click <strong>Roll out</strong> to point the form above at a row; <strong>Delete</strong> removes the binary from the Object Store (refused with 409 if any scope still targets it).",
