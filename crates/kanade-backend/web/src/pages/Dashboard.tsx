@@ -32,7 +32,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { ApiError, apiFetch } from '@/lib/api';
+import { ApiError, apiFetch, formatError } from '@/lib/api';
 import { cn, isAgentOnline } from '@/lib/utils';
 import type {
   ActiveInvestigationsResponse,
@@ -220,7 +220,14 @@ export function Dashboard() {
         return await apiFetch<FleetHealth>('/api/health/fleet');
       } catch (e) {
         if (e instanceof ApiError && e.status === 503 && e.body) {
-          return JSON.parse(e.body) as FleetHealth;
+          // #522: a proxy/gateway 503 carries an HTML body, not the
+          // degraded-rollup JSON — surface the original error
+          // instead of letting JSON.parse throw into the query.
+          try {
+            return JSON.parse(e.body) as FleetHealth;
+          } catch {
+            throw e;
+          }
         }
         throw e;
       }
@@ -284,6 +291,26 @@ export function Dashboard() {
   const recentFail = (resultsQ.data ?? []).filter((r) => r.exit_code !== 0).length;
   const recentTotal = (resultsQ.data ?? []).length;
 
+  // #522: errors used to coalesce into `?? []` / conditional
+  // rendering, so an API outage rendered as a healthy-looking idle
+  // fleet ("Known 0", empty lists). One page-level banner names
+  // every failing query instead; the cards below keep their last
+  // known data.
+  const failedQueries: Array<[string, Error]> = (
+    [
+      ['agents', agentsQ.error],
+      ['jetstream', jsQ.error],
+      ['results', resultsQ.error],
+      ['audit', auditQ.error],
+      ['health', healthQ.error],
+      ['fleetCpu', fleetCpuQ.error],
+      ['fleetMem', fleetMemQ.error],
+      ['topCpu', topCpuQ.error],
+      ['topMem', topMemQ.error],
+      ['activeInvestigations', activeInvQ.error],
+    ] as Array<[string, Error | null]>
+  ).filter((pair): pair is [string, Error] => pair[1] != null);
+
   const health = healthQ.data;
   const healthMeta = health
     ? (
@@ -303,6 +330,26 @@ export function Dashboard() {
           {t('autoRefresh', { seconds: REFRESH_INTERVAL_SECONDS })}
         </span>
       </div>
+
+      {failedQueries.length > 0 && (
+        <Card className="border-danger">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-danger">
+              <AlertTriangle className="size-5" />
+              {t('degraded.title', { count: failedQueries.length })}
+            </CardTitle>
+            <CardDescription>{t('degraded.description')}</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-1">
+            {failedQueries.map(([name, err]) => (
+              <div key={name} className="text-sm">
+                <span className="font-medium">{t(`degraded.sources.${name}`)}</span>
+                <span className="text-muted"> — {formatError(err)}</span>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      )}
 
       {health && healthMeta && (
         <Card>

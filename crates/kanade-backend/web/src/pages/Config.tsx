@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Loader2, Save, Trash2 } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 
@@ -19,19 +19,35 @@ import type { ConfigScope, EffectiveConfigResponse } from '@/lib/types';
 function GlobalEditor() {
   const { t } = useTranslation('config');
   const qc = useQueryClient();
+  // #520: staleTime Infinity + no focus refetch — the app-wide
+  // defaults (staleTime 0, refetchOnWindowFocus) re-fired this query
+  // on every tab focus, and the seeding effect below replaced the
+  // operator's unsaved draft with whatever the server returned.
+  // With these options the only refetch is our own invalidation
+  // after a successful save.
   const { data, error, isLoading } = useQuery({
     queryKey: ['config', 'global'],
     queryFn: () => apiFetch<ConfigScope>('/api/config'),
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
   });
   const [draft, setDraft] = useState<string>('');
+  // Seed the textarea once per load session (same guard as
+  // YamlEditorDialog); reset after a save so the invalidated
+  // refetch re-seeds with the server-normalised result.
+  const seeded = useRef(false);
   useEffect(() => {
-    if (data) setDraft(JSON.stringify(data, null, 2));
+    if (data && !seeded.current) {
+      setDraft(JSON.stringify(data, null, 2));
+      seeded.current = true;
+    }
   }, [data]);
 
   const save = useMutation({
     mutationFn: (body: ConfigScope) =>
       apiFetch<ConfigScope>('/api/config', { method: 'PUT', body: JSON.stringify(body) }),
     onSuccess: () => {
+      seeded.current = false;
       qc.invalidateQueries({ queryKey: ['config', 'global'] });
       toast.success(t('global.toast.saveSuccess'));
     },

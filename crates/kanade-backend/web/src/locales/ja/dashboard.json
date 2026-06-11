@@ -124,5 +124,22 @@
     "description": "直近 5 分以内に <code>process_perf</code> サンプルを送信した PC。 解除し忘れは各エージェント詳細ページの <strong>今すぐ停止</strong> から。",
     "empty": "現在プロセス詳細計測中の PC はありません。",
     "latest": "最終サンプル {{age}} 前"
+  },
+  "degraded": {
+    "title_one": "ダッシュボードのデータを取得できません（{{count}}件）",
+    "title_other": "ダッシュボードのデータを取得できません（{{count}}件）",
+    "description": "以下のクエリが失敗しています。下のカードの数値は古いか不完全な可能性があります（フリートが静かなわけではありません）。",
+    "sources": {
+      "agents": "エージェント一覧",
+      "jetstream": "JetStream ステータス",
+      "results": "最近の実行結果",
+      "audit": "最近の監査ログ",
+      "health": "フリートヘルス",
+      "fleetCpu": "フリート CPU 履歴",
+      "fleetMem": "フリートメモリ履歴",
+      "topCpu": "CPU 上位",
+      "topMem": "メモリ上位",
+      "activeInvestigations": "アクティブ調査"
+    }
   }
 }
