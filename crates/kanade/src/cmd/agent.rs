@@ -198,26 +198,28 @@ async fn rollout(client: async_nats::Client, args: RolloutArgs) -> Result<()> {
             format!("KV '{BUCKET_AGENT_CONFIG}' missing — run `kanade jetstream setup`")
         })?;
 
-    let mut scope = match kv.get(&key).await? {
-        Some(b) => serde_json::from_slice::<ConfigScope>(&b)
-            .with_context(|| format!("decode existing {BUCKET_AGENT_CONFIG}.{key}"))?,
-        None => ConfigScope::default(),
-    };
-    scope.target_version = Some(args.version.clone());
     if let Some(j) = args.jitter.as_deref() {
-        // #491: validate BEFORE the KV put — the agent's parse
+        // #491: validate BEFORE the KV write — the agent's parse
         // failure used to silently fall back, so a typo'd jitter
         // produced exactly the fleet-wide download herd the flag
         // exists to prevent.
         humantime::parse_duration(j).with_context(|| {
             format!("--jitter: expected a humantime duration (e.g. 30s, 10m, 1h), got {j:?}")
         })?;
-        scope.target_version_jitter = Some(j.to_owned());
     }
-    let payload = serde_json::to_vec(&scope).context("encode ConfigScope")?;
-    kv.put(key.as_str(), payload.into())
-        .await
-        .context("KV put scope ConfigScope")?;
+    // #505: CAS read-modify-write — a blind get→put raced e.g. a
+    // `config set` on the same scope and clobbered its change.
+    kanade_shared::kv_cas::read_modify_write(&kv, &key, |scope: &mut ConfigScope| {
+        let before = scope.clone();
+        scope.target_version = Some(args.version.clone());
+        if let Some(j) = args.jitter.as_deref() {
+            scope.target_version_jitter = Some(j.to_owned());
+        }
+        // Re-rolling-out the current version is a no-op — skip the
+        // write so the revision doesn't bump for nothing.
+        *scope != before
+    })
+    .await?;
 
     info!(
         scope = %label,

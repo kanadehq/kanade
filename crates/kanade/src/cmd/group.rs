@@ -181,9 +181,17 @@ async fn members(kv: &async_nats::jetstream::kv::Store, name: &str) -> Result<()
 }
 
 async fn add(kv: &async_nats::jetstream::kv::Store, pc_id: &str, name: &str) -> Result<()> {
-    let mut g = read_groups(kv, pc_id).await?;
-    if g.insert(name) {
-        write_groups(kv, pc_id, &g).await?;
+    // #505: CAS read-modify-write — a blind get→put raced a
+    // concurrent add/remove for the same PC (two operators, or a
+    // script fanning out) and silently dropped one side's change.
+    let mut changed = false;
+    let g = kanade_shared::kv_cas::read_modify_write(kv, pc_id, |g: &mut AgentGroups| {
+        changed = g.insert(name);
+        changed
+    })
+    .await?;
+    if changed {
+        info!(pc_id, groups = ?g.groups, "agent_groups updated");
         println!("{pc_id}: added '{name}' -> [{}]", g.groups.join(", "));
     } else {
         println!("{pc_id}: already has '{name}' (no change)");
@@ -192,9 +200,14 @@ async fn add(kv: &async_nats::jetstream::kv::Store, pc_id: &str, name: &str) -> 
 }
 
 async fn rm(kv: &async_nats::jetstream::kv::Store, pc_id: &str, name: &str) -> Result<()> {
-    let mut g = read_groups(kv, pc_id).await?;
-    if g.remove(name) {
-        write_groups(kv, pc_id, &g).await?;
+    let mut changed = false;
+    let g = kanade_shared::kv_cas::read_modify_write(kv, pc_id, |g: &mut AgentGroups| {
+        changed = g.remove(name);
+        changed
+    })
+    .await?;
+    if changed {
+        info!(pc_id, groups = ?g.groups, "agent_groups updated");
         let after = if g.is_empty() {
             "(no groups)".to_string()
         } else {

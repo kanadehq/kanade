@@ -40,3 +40,7 @@ uuid       = { workspace = true }
 winreg = { workspace = true }
 
 [dev-dependencies]
+# kv_cas_live.rs spawns a throwaway `nats-server -js` like the
+# agent's offline_boot harness does.
+portpicker = "0.1.1"
+tempfile = "3.27.0"

@@ -167,9 +167,23 @@ pub async fn add_group(
         ));
     }
     let kv = open_bucket(&state).await?;
-    let mut current = read_or_default(&kv, &pc_id).await?;
-    if current.insert(&body.group) {
-        write(&kv, &pc_id, &current).await?;
+    // #505: CAS read-modify-write — a blind get→put here raced a
+    // concurrent add/remove for the same PC and silently dropped
+    // one side's change.
+    let mut changed = false;
+    let current = kanade_shared::kv_cas::read_modify_write(&kv, &pc_id, |g: &mut AgentGroups| {
+        changed = g.insert(&body.group);
+        changed
+    })
+    .await
+    .map_err(|e| {
+        warn!(error = %e, pc_id, "add agent_group");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("add group for {pc_id}: {e:#}"),
+        )
+    })?;
+    if changed {
         info!(pc_id = %pc_id, group = %body.group, "agent_group added");
     }
     Ok(Json(current))
@@ -180,9 +194,20 @@ pub async fn remove_group(
     Path((pc_id, group)): Path<(String, String)>,
 ) -> Result<Json<AgentGroups>, (StatusCode, String)> {
     let kv = open_bucket(&state).await?;
-    let mut current = read_or_default(&kv, &pc_id).await?;
-    if current.remove(&group) {
-        write(&kv, &pc_id, &current).await?;
+    let mut changed = false;
+    let current = kanade_shared::kv_cas::read_modify_write(&kv, &pc_id, |g: &mut AgentGroups| {
+        changed = g.remove(&group);
+        changed
+    })
+    .await
+    .map_err(|e| {
+        warn!(error = %e, pc_id, "remove agent_group");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("remove group for {pc_id}: {e:#}"),
+        )
+    })?;
+    if changed {
         info!(pc_id = %pc_id, group = %group, "agent_group removed");
     }
     Ok(Json(current))

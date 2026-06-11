@@ -15,7 +15,6 @@ use kanade_shared::kv::{
     agent_config_pc_key, parse_agent_config_group_key,
 };
 use kanade_shared::wire::{AgentGroups, ConfigScope, resolve};
-use tracing::info;
 
 #[derive(Args, Debug)]
 pub struct ConfigArgs {
@@ -119,19 +118,35 @@ async fn set(kv: &async_nats::jetstream::kv::Store, sel: &ScopeSel, spec: &str) 
     let (field, value) = spec
         .split_once('=')
         .ok_or_else(|| anyhow!("expected <field>=<value>, got '{spec}'"))?;
+    // Validate the field/value once up front so a typo fails before
+    // the CAS loop rather than on every retry.
+    apply_field(&mut ConfigScope::default(), field, Some(value))?;
     let key = scope_key(sel)?;
-    let mut scope = read_scope(kv, &key).await?;
-    apply_field(&mut scope, field, Some(value))?;
-    write_scope(kv, &key, &scope).await?;
+    // #505: CAS read-modify-write — a blind get→put raced e.g. a
+    // rollout writing target_version on the same scope and
+    // clobbered it.
+    kanade_shared::kv_cas::read_modify_write(kv, &key, |scope: &mut ConfigScope| {
+        let before = scope.clone();
+        // Pre-validated above, so Err is unreachable here; comparing
+        // against the prior state lets an already-set value skip the
+        // write entirely (no revision bump, no watcher wake).
+        let _ = apply_field(scope, field, Some(value));
+        *scope != before
+    })
+    .await?;
     println!("set {field} = {value} on {}", scope_label(sel));
     Ok(())
 }
 
 async fn unset(kv: &async_nats::jetstream::kv::Store, sel: &ScopeSel, field: &str) -> Result<()> {
+    apply_field(&mut ConfigScope::default(), field, None)?;
     let key = scope_key(sel)?;
-    let mut scope = read_scope(kv, &key).await?;
-    apply_field(&mut scope, field, None)?;
-    write_scope(kv, &key, &scope).await?;
+    kanade_shared::kv_cas::read_modify_write(kv, &key, |scope: &mut ConfigScope| {
+        let before = scope.clone();
+        let _ = apply_field(scope, field, None);
+        *scope != before
+    })
+    .await?;
     println!("unset {field} on {}", scope_label(sel));
     Ok(())
 }
@@ -205,17 +220,6 @@ async fn read_scope_optional(
         )),
         None => Ok(None),
     }
-}
-
-async fn write_scope(
-    kv: &async_nats::jetstream::kv::Store,
-    key: &str,
-    scope: &ConfigScope,
-) -> Result<()> {
-    let bytes = serde_json::to_vec(scope).context("encode ConfigScope")?;
-    kv.put(key, bytes.into()).await.context("kv put")?;
-    info!(key, scope = ?scope, "agent_config row updated");
-    Ok(())
 }
 
 /// Apply `value` (or `None` for unset) to the named field on
