@@ -2285,6 +2285,79 @@ constraints:
         }
     }
 
+    // ---- constraints.skip_dates (#418 holiday exclusion) ----
+
+    fn with_skip_dates(dates: &[&str]) -> Schedule {
+        let mut s = schedule_with(calendar("09:00", &[]), RunsOn::Backend);
+        s.tz = ScheduleTz::Utc; // host-independent date assertions
+        s.constraints.skip_dates = dates.iter().map(|d| (*d).to_string()).collect();
+        s
+    }
+
+    #[test]
+    fn allows_blocks_listed_skip_date() {
+        use chrono::TimeZone;
+        let s = with_skip_dates(&["2026-06-10", "2026-12-25"]);
+        // Any time on a listed date is blocked (whole day).
+        let on = chrono::Utc.with_ymd_and_hms(2026, 6, 10, 9, 0, 0).unwrap();
+        assert!(!s.constraints.allows(on, ScheduleTz::Utc));
+        let on_midnight = chrono::Utc.with_ymd_and_hms(2026, 12, 25, 0, 0, 0).unwrap();
+        assert!(!s.constraints.allows(on_midnight, ScheduleTz::Utc));
+        // A date not in the list fires normally.
+        let off = chrono::Utc.with_ymd_and_hms(2026, 6, 11, 9, 0, 0).unwrap();
+        assert!(s.constraints.allows(off, ScheduleTz::Utc));
+    }
+
+    #[test]
+    fn allows_corrupt_skip_date_fails_closed() {
+        use chrono::TimeZone;
+        // A garbled entry (only reachable via hand-edited KV) blocks
+        // rather than silently re-enabling fires — same posture as a
+        // corrupt window.
+        let s = with_skip_dates(&["not-a-date"]);
+        let any = chrono::Utc.with_ymd_and_hms(2026, 6, 11, 9, 0, 0).unwrap();
+        assert!(!s.constraints.allows(any, ScheduleTz::Utc));
+    }
+
+    #[test]
+    fn validate_accepts_good_skip_dates() {
+        with_skip_dates(&["2026-01-01", "2026-12-25", "2027-05-03"])
+            .validate()
+            .expect("well-formed skip dates should validate");
+    }
+
+    #[test]
+    fn validate_rejects_bad_skip_date() {
+        for bad in ["2026-13-01", "01-01-2026", "nope", "2026/01/01"] {
+            let err = with_skip_dates(&[bad]).validate().unwrap_err();
+            assert!(
+                err.contains("constraints.skip_dates"),
+                "for '{bad}', got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn preview_skips_holidays() {
+        use chrono::TimeZone;
+        // Daily 09:00 with two of the next five days marked as holidays
+        // — preview drops exactly those, since it gates on `allows`.
+        let mut s = cal_utc("09:00", &[]);
+        s.constraints.skip_dates = vec!["2026-06-11".into(), "2026-06-13".into()];
+        let now = chrono::Utc.with_ymd_and_hms(2026, 6, 10, 0, 0, 0).unwrap();
+        let got = s.preview_fires(now, 4);
+        let want: Vec<_> = [
+            (2026, 6, 10),
+            (2026, 6, 12), // skips 06-11
+            (2026, 6, 14), // skips 06-13
+            (2026, 6, 15),
+        ]
+        .iter()
+        .map(|(y, m, d)| chrono::Utc.with_ymd_and_hms(*y, *m, *d, 9, 0, 0).unwrap())
+        .collect();
+        assert_eq!(got, want);
+    }
+
     // ---- constraints.max_concurrent (#418) ----
 
     fn with_max_concurrent(max: u32, runs_on: RunsOn) -> Schedule {
@@ -3206,6 +3279,16 @@ impl ScheduleTz {
         }
     }
 
+    /// The wall-clock *date* `now` reads as in this tz — used by
+    /// [`Constraints::allows`] to test `skip_dates` (#418 holiday
+    /// exclusion). Same tz semantics as [`Self::wall_time`].
+    fn wall_date(self, now: chrono::DateTime<chrono::Utc>) -> chrono::NaiveDate {
+        match self {
+            ScheduleTz::Utc => now.date_naive(),
+            ScheduleTz::Local => now.with_timezone(&chrono::Local).date_naive(),
+        }
+    }
+
     /// Stable lowercase wire/display label (`local` / `utc`) — matches
     /// the serde `snake_case` representation. Used for the preview
     /// response's `tz` field so the JSON shape isn't coupled to the
@@ -3380,13 +3463,37 @@ pub struct Constraints {
     /// refills slots. `None` (default) = no cap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrent: Option<u32>,
+    /// Calendar dates the schedule must **not** fire on — holidays,
+    /// blackout days, one-off freeze dates (#418 "祝日除外"). Each is
+    /// `YYYY-MM-DD`, evaluated as a wall-clock date in the schedule's
+    /// `tz`. Applies to every `when` shape (a reconcile cadence skips
+    /// the whole day; a calendar fire landing on the date is
+    /// suppressed) and is honored by both the live scheduler and
+    /// `preview`, since both gate on [`Constraints::allows`]. Empty
+    /// (default) = no skips. Operator-supplied: there is no built-in
+    /// holiday calendar — list the dates you care about. Parsed lazily;
+    /// [`Schedule::validate`] rejects a malformed date at create time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skip_dates: Vec<String>,
 }
 
 impl Constraints {
     /// `skip_serializing_if` helper — empty constraints are omitted
     /// from the wire format entirely.
     pub fn is_empty(&self) -> bool {
-        self.window.is_none() && self.max_concurrent.is_none()
+        self.window.is_none() && self.max_concurrent.is_none() && self.skip_dates.is_empty()
+    }
+
+    /// The first unparseable `skip_dates` entry, if any — the
+    /// scheduler logs it at register time so a fail-closed
+    /// (never-firing) schedule from a hand-edited KV blob is
+    /// diagnosable, mirroring [`Schedule::bad_window`].
+    pub fn bad_skip_date(&self) -> Option<String> {
+        self.skip_dates.iter().find_map(|s| {
+            chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d")
+                .err()
+                .map(|e| format!("constraints.skip_dates: invalid date '{s}': {e}"))
+        })
     }
 
     /// Parse `"HH:MM-HH:MM"` into `(start, end)`. Equal bounds are an
@@ -3423,6 +3530,25 @@ impl Constraints {
     /// ([`Schedule::bad_window`]) so a stuck schedule is diagnosable.
     /// The tick path never panics regardless.
     pub fn allows(&self, now: chrono::DateTime<chrono::Utc>, tz: ScheduleTz) -> bool {
+        // #418 holiday / blackout dates: never fire on a listed wall
+        // date (in `tz`). Checked before the window since a skipped day
+        // overrides any within-window allowance. Fail-closed on a
+        // corrupt entry (same posture as `window`): a skip date is a
+        // *restrictive* constraint, so a garbled one must not silently
+        // re-enable fires — it blocks until fixed (`validate` rejects it
+        // at create time; `bad_skip_date` lets the scheduler warn).
+        if !self.skip_dates.is_empty() {
+            let today = tz.wall_date(now);
+            let blocked = self.skip_dates.iter().any(|s| {
+                match chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d") {
+                    Ok(d) => d == today,
+                    Err(_) => true, // corrupt entry → fail-closed (block)
+                }
+            });
+            if blocked {
+                return false;
+            }
+        }
         match self.window.as_deref() {
             // No window → always allowed.
             None => true,
@@ -3900,6 +4026,12 @@ impl Schedule {
         // time (parse_window also catches equal bounds).
         if let Some(w) = self.constraints.window.as_deref() {
             Constraints::parse_window(w)?;
+        }
+        // #418 holiday exclusion: reject a malformed skip date at create
+        // time so the fail-closed `allows` path only ever bites a
+        // hand-edited KV blob, not a fresh `kanade schedule create`.
+        if let Some(err) = self.constraints.bad_skip_date() {
+            return Err(err);
         }
         // #418: constraints.max_concurrent is a central running-instance
         // cap, so it needs the backend's counter — reject it on

@@ -931,6 +931,14 @@ async fn reconcile_schedule(
             "local_scheduler: constraints.window unparseable — blocked (fail-closed) until fixed",
         );
     }
+    // A corrupt constraints.skip_dates entry fails closed too (#418).
+    if let Some(err) = schedule.constraints.bad_skip_date() {
+        warn!(
+            schedule_id = %schedule_id,
+            %err,
+            "local_scheduler: constraints.skip_dates unparseable — blocked (fail-closed) until fixed",
+        );
+    }
     // A calendar whose `at` can never fall in its window never fires
     // (claude #452 review).
     if schedule.calendar_outside_window() {
