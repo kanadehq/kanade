@@ -1600,6 +1600,128 @@ target: { all: true }
         }
     }
 
+    // ---- preview_fires (#418 dry-run / preview) ----
+
+    fn cal_utc(at: &str, days: &[&str]) -> Schedule {
+        let mut s = schedule_with(calendar(at, days), RunsOn::Backend);
+        s.tz = ScheduleTz::Utc; // host-independent assertions
+        s
+    }
+
+    #[test]
+    fn preview_lists_next_calendar_occurrences() {
+        use chrono::TimeZone;
+        // Weekday 09:00, from Wed 2026-06-10 00:00 UTC: the next five
+        // fires skip the weekend (Sat 13 / Sun 14).
+        let s = cal_utc("09:00", &["mon-fri"]);
+        let now = chrono::Utc.with_ymd_and_hms(2026, 6, 10, 0, 0, 0).unwrap();
+        let got = s.preview_fires(now, 5);
+        let want: Vec<_> = [
+            (2026, 6, 10), // Wed
+            (2026, 6, 11), // Thu
+            (2026, 6, 12), // Fri
+            (2026, 6, 15), // Mon (skips Sat 13 / Sun 14)
+            (2026, 6, 16), // Tue
+        ]
+        .iter()
+        .map(|(y, m, d)| chrono::Utc.with_ymd_and_hms(*y, *m, *d, 9, 0, 0).unwrap())
+        .collect();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn preview_handles_nth_and_last_weekday() {
+        use chrono::TimeZone;
+        let now = chrono::Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
+        // 2nd Tuesday (Patch Tuesday): Jun 9, Jul 14 2026.
+        let nth = cal_utc("09:00", &["tue#2"]).preview_fires(now, 2);
+        assert_eq!(
+            nth,
+            vec![
+                chrono::Utc.with_ymd_and_hms(2026, 6, 9, 9, 0, 0).unwrap(),
+                chrono::Utc.with_ymd_and_hms(2026, 7, 14, 9, 0, 0).unwrap(),
+            ]
+        );
+        // Last Friday of the month: Jun 26, Jul 31 2026.
+        let last = cal_utc("22:00", &["friL"]).preview_fires(now, 2);
+        assert_eq!(
+            last,
+            vec![
+                chrono::Utc.with_ymd_and_hms(2026, 6, 26, 22, 0, 0).unwrap(),
+                chrono::Utc.with_ymd_and_hms(2026, 7, 31, 22, 0, 0).unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn preview_is_empty_for_reconcile_and_zero_count() {
+        let now = chrono::Utc::now();
+        // reconcile shapes have no discrete fire times
+        let recon = schedule_with(
+            When::PerPc(PerPolicy::Every(EverySpec { every: "6h".into() })),
+            RunsOn::Backend,
+        );
+        assert!(recon.preview_fires(now, 5).is_empty());
+        // count == 0 yields nothing even for a calendar
+        assert!(cal_utc("09:00", &[]).preview_fires(now, 0).is_empty());
+    }
+
+    #[test]
+    fn preview_skips_outside_active_window() {
+        use chrono::TimeZone;
+        // Daily 09:00, active only [2026-06-15, 2026-06-17). Occurrences
+        // before `from` are skipped; `until` is exclusive, so 06-17's
+        // fire is out — leaving exactly the 15th and 16th.
+        let mut s = cal_utc("09:00", &[]);
+        s.active = Active {
+            from: Some("2026-06-15".into()),
+            until: Some("2026-06-17".into()),
+        };
+        let now = chrono::Utc.with_ymd_and_hms(2026, 6, 10, 0, 0, 0).unwrap();
+        let got = s.preview_fires(now, 5);
+        assert_eq!(
+            got,
+            vec![
+                chrono::Utc.with_ymd_and_hms(2026, 6, 15, 9, 0, 0).unwrap(),
+                chrono::Utc.with_ymd_and_hms(2026, 6, 16, 9, 0, 0).unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn preview_empty_when_calendar_time_outside_window() {
+        use chrono::TimeZone;
+        // Fires at 09:00 but the maintenance window is overnight — it can
+        // never run, so the preview is empty (matches
+        // `calendar_outside_window`), and the scan still terminates.
+        let mut s = cal_utc("09:00", &[]);
+        s.constraints = Constraints {
+            window: Some("22:00-05:00".into()),
+            ..Constraints::default()
+        };
+        let now = chrono::Utc.with_ymd_and_hms(2026, 6, 10, 0, 0, 0).unwrap();
+        assert!(s.preview_fires(now, 5).is_empty());
+        // Every candidate tick is rejected, so this also exercises the
+        // SCAN_CAP bound: a large `count` must still terminate (and
+        // return empty) rather than spin (claude #578 review).
+        assert!(s.preview_fires(now, 50).is_empty());
+    }
+
+    #[test]
+    fn preview_past_one_shot_is_empty() {
+        use chrono::TimeZone;
+        // A dated one-shot whose instant has passed never fires again.
+        let s = cal_utc("2026-06-10 09:00", &[]);
+        let now = chrono::Utc.with_ymd_and_hms(2026, 6, 11, 0, 0, 0).unwrap();
+        assert!(s.preview_fires(now, 5).is_empty());
+        // …but from before it, the single future fire shows up.
+        let before = chrono::Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
+        assert_eq!(
+            s.preview_fires(before, 5),
+            vec![chrono::Utc.with_ymd_and_hms(2026, 6, 10, 9, 0, 0).unwrap()]
+        );
+    }
+
     #[test]
     fn lowering_matches_the_418_table() {
         let cases = [
@@ -3083,6 +3205,23 @@ impl ScheduleTz {
             ScheduleTz::Local => now.with_timezone(&chrono::Local).time(),
         }
     }
+
+    /// Stable lowercase wire/display label (`local` / `utc`) — matches
+    /// the serde `snake_case` representation. Used for the preview
+    /// response's `tz` field so the JSON shape isn't coupled to the
+    /// `Debug` repr (claude #578 review).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ScheduleTz::Local => "local",
+            ScheduleTz::Utc => "utc",
+        }
+    }
+}
+
+impl std::fmt::Display for ScheduleTz {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// `once` vs `{ every: <humantime> }` — shared by `per_pc` /
@@ -3519,6 +3658,93 @@ impl Schedule {
             return false;
         };
         matches!(self.constraints.window_contains(t), Some(false))
+    }
+
+    /// Up to `count` future instants this schedule will fire, as
+    /// absolute UTC, strictly after `now` — the dry-run / preview
+    /// surface (#418 "ドライラン / プレビュー"). Only **calendar**
+    /// schedules have discrete fire times; reconcile shapes
+    /// (`per_pc`/`per_target`) poll every minute gated by cooldown, so
+    /// they return an empty vec and the caller describes the cadence
+    /// instead. Occurrences outside the `active.{from,until}` window or
+    /// the `constraints.window` are **skipped**, so the list reflects
+    /// when the schedule will ACTUALLY run, not the raw cron ticks.
+    /// Evaluated in the schedule's `tz`, exactly like the scheduler's
+    /// `Job::new_async_tz`, and with the same croner config the
+    /// scheduler / [`Schedule::validate`] use, so a preview can never
+    /// disagree with a real fire. A schedule that can never fire (a
+    /// calendar time wholly outside its window, a past one-shot,
+    /// `enabled: false` is *not* considered here — callers gate on
+    /// `enabled` separately) yields an empty vec.
+    pub fn preview_fires(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+        count: usize,
+    ) -> Vec<chrono::DateTime<chrono::Utc>> {
+        use croner::parser::{CronParser, Seconds};
+        if !matches!(self.when, When::Calendar(_)) {
+            return Vec::new();
+        }
+        // Same lowering + croner config as `next_calendar_fire` and the
+        // live scheduler, so a preview can never disagree with a real
+        // fire. `preview_fires` adds the N-occurrence walk and the
+        // active / window filtering on top of that single seam.
+        let lowered = self.lowered();
+        let Ok(cron) = CronParser::builder()
+            .seconds(Seconds::Required)
+            .dom_and_dow(true)
+            .build()
+            .parse(&lowered.cron)
+        else {
+            return Vec::new();
+        };
+        let accept = |utc: chrono::DateTime<chrono::Utc>| {
+            self.active.contains(utc, self.tz) && self.constraints.allows(utc, self.tz)
+        };
+        match self.tz {
+            ScheduleTz::Utc => Self::next_occurrences(&cron, now, count, accept),
+            ScheduleTz::Local => {
+                Self::next_occurrences(&cron, now.with_timezone(&chrono::Local), count, accept)
+            }
+        }
+    }
+
+    /// Walk croner forward from `after` collecting up to `count`
+    /// accepted occurrences (converted to UTC). Generic over the tz the
+    /// cron is evaluated in so `preview_fires` can run it in either
+    /// `Utc` or `Local` without duplicating the loop.
+    fn next_occurrences<Tz>(
+        cron: &croner::Cron,
+        after: chrono::DateTime<Tz>,
+        count: usize,
+        accept: impl Fn(chrono::DateTime<chrono::Utc>) -> bool,
+    ) -> Vec<chrono::DateTime<chrono::Utc>>
+    where
+        Tz: chrono::TimeZone,
+    {
+        // Bound the scan so an `active`/window dead-end (every future
+        // tick rejected) can't spin forever: ~4096 raw ticks covers
+        // >10y of a daily calendar while staying instant for croner.
+        const SCAN_CAP: usize = 4096;
+        let mut out = Vec::with_capacity(count.min(SCAN_CAP));
+        let mut cursor = after;
+        let mut scanned = 0usize;
+        while out.len() < count && scanned < SCAN_CAP {
+            scanned += 1;
+            let Ok(next) = cron.find_next_occurrence(&cursor, false) else {
+                break;
+            };
+            let utc = next.with_timezone(&chrono::Utc);
+            if accept(utc) {
+                out.push(utc);
+            }
+            // `find_next_occurrence(.., inclusive = false)` already
+            // advances strictly past `cursor`, so handing it `next`
+            // verbatim gets the following occurrence — no manual +1s
+            // nudge (and `DateTime<Tz>` is `Copy`, so no clone).
+            cursor = next;
+        }
+        out
     }
 
     /// Lower the operator-facing `when` onto the engine vocabulary.

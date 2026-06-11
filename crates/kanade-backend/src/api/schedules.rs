@@ -51,6 +51,103 @@ pub async fn list(State(s): State<AppState>) -> Result<Json<Vec<Schedule>>, (Sta
     Ok(Json(out))
 }
 
+/// Query params for [`preview`].
+#[derive(Deserialize, Debug)]
+pub struct PreviewQuery {
+    /// How many upcoming fires to list (calendar schedules only).
+    /// Defaults to 5; clamped to `1..=50` so a huge `count` can't make
+    /// the backend walk croner thousands of times per request.
+    #[serde(default = "default_preview_count")]
+    pub count: usize,
+}
+
+fn default_preview_count() -> usize {
+    5
+}
+
+/// Dry-run result for [`preview`].
+#[derive(Serialize)]
+pub struct PreviewResponse {
+    pub id: String,
+    /// `When`'s Display — `at 09:00 [mon-fri]`, `per_pc every 6h`, …
+    pub when: String,
+    /// `local` / `utc` — the tz the fire times are resolved in.
+    pub tz: String,
+    /// The schedule's `enabled` flag. The fire times are computed from
+    /// the cron regardless, so a disabled schedule still previews its
+    /// *would-be* fires — surface the flag so callers don't mistake a
+    /// dormant schedule for an active one (claude #578 review).
+    pub enabled: bool,
+    /// Upcoming fire instants (RFC3339 UTC), soonest first. Empty for
+    /// reconcile shapes and for calendars that can never fire — see
+    /// `note`.
+    pub fires: Vec<String>,
+    /// Present only when `fires` is empty, explaining why.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// GET /api/schedules/{id}/preview?count=N — dry-run the next N fire
+/// times of a schedule (#418 "ドライラン / プレビュー"). Calendar
+/// schedules return discrete tz-resolved instants (honoring the
+/// `active` window + `constraints.window`); reconcile shapes have no
+/// discrete fire times, so `fires` is empty and `note` describes the
+/// cadence. Read-only: never touches KV state.
+pub async fn preview(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<PreviewQuery>,
+) -> Result<Json<PreviewResponse>, (StatusCode, String)> {
+    let kv = s
+        .jetstream
+        .get_key_value(BUCKET_SCHEDULES)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("schedules bucket missing: {e}"),
+            )
+        })?;
+    let bytes = kv
+        .get(&id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("KV get: {e}")))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("schedule '{id}' not found")))?;
+    let schedule: Schedule = serde_json::from_slice(&bytes).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("deserialize stored schedule: {e}"),
+        )
+    })?;
+
+    let count = q.count.clamp(1, 50);
+    let fires = schedule.preview_fires(chrono::Utc::now(), count);
+    let note = if !fires.is_empty() {
+        None
+    } else if matches!(schedule.when, kanade_shared::manifest::When::Calendar(_)) {
+        Some(
+            "no upcoming fires — a past one-shot, or the fire time is excluded by the \
+             active window / constraints.window"
+                .to_string(),
+        )
+    } else {
+        Some(format!(
+            "reconcile cadence ({}) polls every minute gated by cooldown — no discrete \
+             fire times to preview",
+            schedule.when
+        ))
+    };
+
+    Ok(Json(PreviewResponse {
+        id: schedule.id.clone(),
+        when: schedule.when.to_string(),
+        tz: schedule.tz.as_str().to_string(),
+        enabled: schedule.enabled,
+        fires: fires.iter().map(|t| t.to_rfc3339()).collect(),
+        note,
+    }))
+}
+
 /// POST /api/schedules — upsert.
 ///
 /// Accepts JSON (`application/json`, default) or YAML

@@ -184,6 +184,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/jobs", get(jobs::list))
         .route("/api/jobs/{id}/yaml", get(jobs::get_yaml))
         .route("/api/schedules/{id}/yaml", get(schedules::get_yaml))
+        .route("/api/schedules/{id}/preview", get(schedules::preview))
         .route("/api/schemas/manifest.json", get(schemas::manifest_schema))
         .route("/api/schemas/schedule.json", get(schemas::schedule_schema))
         .route("/api/jetstream/status", get(jetstream_status::status))
