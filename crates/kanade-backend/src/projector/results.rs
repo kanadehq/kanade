@@ -515,7 +515,8 @@ async fn upsert_check_status(
          ON CONFLICT(pc_id, check_name) DO UPDATE SET
              status      = excluded.status,
              detail      = excluded.detail,
-             recorded_at = excluded.recorded_at",
+             recorded_at = excluded.recorded_at
+         WHERE excluded.recorded_at >= check_status.recorded_at",
     )
     .bind(&r.pc_id)
     .bind(&hint.name)
@@ -586,7 +587,7 @@ async fn upsert_inventory(
     // so the table keeps one uniform timestamp text format. #398: the
     // value is the message's JetStream publish time, so re-projection
     // reproduces the original arrival stamp.
-    sqlx::query(
+    let rows = sqlx::query(
         "INSERT INTO inventory_facts (
              pc_id, job_id, facts_json, display_json, summary_json,
              collected_at, recorded_at
@@ -596,7 +597,8 @@ async fn upsert_inventory(
              display_json = excluded.display_json,
              summary_json = excluded.summary_json,
              collected_at = excluded.collected_at,
-             recorded_at  = excluded.recorded_at",
+             recorded_at  = excluded.recorded_at
+         WHERE excluded.recorded_at >= inventory_facts.recorded_at",
     )
     .bind(&r.pc_id)
     .bind(manifest_id)
@@ -607,6 +609,22 @@ async fn upsert_inventory(
     .bind(recorded_at)
     .execute(pool)
     .await?;
+    // #503: rows_affected == 0 means the recency guard rejected a
+    // stale redelivery. Everything downstream of the snapshot write
+    // must no-op too — most importantly the history diff: at this
+    // point `prior_facts_json` holds the NEWER facts still in the
+    // table and `facts` the OLDER replayed payload, so diffing them
+    // would write reversed newer→older history events for a
+    // snapshot that never changed (PR #569 review, claude).
+    let stale_replay = rows.rows_affected() == 0;
+    if stale_replay {
+        debug!(
+            pc_id = %r.pc_id,
+            manifest_id,
+            "stale inventory replay rejected by recency guard; skipping history diff",
+        );
+        return Ok(());
+    }
     debug!(
         pc_id = %r.pc_id,
         manifest_id,
@@ -985,6 +1003,69 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(status.0, "ok");
+    }
+
+    #[tokio::test]
+    async fn stale_check_replay_does_not_regress_status() {
+        // #503: an out-of-order JetStream redelivery (older
+        // recorded_at) must NOT roll the latest status back.
+        let pool = fresh_pool().await;
+        let hint = check_hint("bitlocker", "status");
+        let mut r = sample("res-r1", "req-r1", "pc-1", None);
+        let newer = chrono::Utc.with_ymd_and_hms(2026, 5, 21, 12, 0, 0).unwrap();
+        let older = newer - chrono::Duration::seconds(1);
+
+        r.stdout = r#"{"status":"ok","detail":"all protected"}"#.into();
+        upsert_check_status(&pool, &r, &hint, newer).await.unwrap();
+
+        // Stale replay carrying the OLD failing state.
+        r.stdout = r#"{"status":"fail","detail":"D: off"}"#.into();
+        upsert_check_status(&pool, &r, &hint, older).await.unwrap();
+
+        let status: (String,) = sqlx::query_as(
+            "SELECT status FROM check_status WHERE pc_id = 'pc-1' AND check_name = 'bitlocker'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status.0, "ok", "stale replay must not regress the row");
+    }
+
+    #[tokio::test]
+    async fn stale_inventory_replay_does_not_regress_facts() {
+        // #503: same guard on inventory_facts, including that the
+        // recency-rejected replay returns Ok (no redelivery storm).
+        let pool = fresh_pool().await;
+        let hint = InventoryHint {
+            display: vec![],
+            summary: None,
+            explode: None,
+            history_scalars: None,
+        };
+        let mut r = sample("res-i1", "req-i1", "pc-1", None);
+        let newer = chrono::Utc.with_ymd_and_hms(2026, 5, 21, 12, 0, 0).unwrap();
+        let older = newer - chrono::Duration::seconds(1);
+
+        r.stdout = r#"{"ram_gb": 32}"#.into();
+        upsert_inventory(&pool, &r, "inv-test", &hint, newer)
+            .await
+            .unwrap();
+        r.stdout = r#"{"ram_gb": 16}"#.into();
+        upsert_inventory(&pool, &r, "inv-test", &hint, older)
+            .await
+            .unwrap();
+
+        let facts: (String,) = sqlx::query_as(
+            "SELECT facts_json FROM inventory_facts WHERE pc_id = 'pc-1' AND job_id = 'inv-test'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            facts.0.contains("32"),
+            "stale replay must not regress facts: {}",
+            facts.0
+        );
     }
 
     #[tokio::test]
