@@ -107,10 +107,31 @@ fn default_limit() -> u32 {
 // compiled regexes and stopping once `limit` matches are collected.
 // Pulling the prefilter into Rust is the same trick used by
 // `api::audit::list` — sqlx 0.8 doesn't expose `create_scalar_function`
-// so a native REGEXP UDF isn't on the table. 10k rows is comfortable
-// even when `stdout` / `stderr` are kilobytes each (≈ tens of MB in
-// the worst case); operators wanting more should narrow `since`.
+// so a native REGEXP UDF isn't on the table.
+//
+// #517: the prefilter SELECT excludes `stdout` / `stderr` unless a
+// regex actually targets them — post-#227 each can be ~256 KB
+// inline, so `SELECT *` over the window was a multi-GB worst case
+// (and a single keystroke in the Activity pc_id filter triggered
+// it). Metadata-only rows are a few hundred bytes, so 10k is a few
+// MB. When an output regex IS present the blobs must be fetched to
+// match against, so that path gets a smaller window; operators
+// wanting more should narrow `since`.
 const MAX_FETCH: i64 = 10_000;
+const MAX_FETCH_WITH_OUTPUT: i64 = 1_000;
+
+/// Prefilter projection for the no-output-regex path: everything
+/// `row_to_result` reads except the two blob columns. MUST stay in
+/// sync with `row_to_result` — a column read there but missing here
+/// silently returns its zero-value on every metadata-regex call
+/// (guarded by `metadata_regex_projection_matches_full_row`).
+const META_COLUMNS: &str =
+    "result_id, request_id, exec_id, pc_id, exit_code, started_at, finished_at, job_id, version";
+
+/// SQLite's default bind-parameter ceiling is 999; the blob
+/// re-hydration `IN (...)` chunks its ids well under it so an
+/// operator-supplied large `limit` can't blow the query up.
+const HYDRATE_CHUNK: usize = 500;
 
 fn compile(opt: Option<&str>) -> Result<Option<Regex>, (StatusCode, String)> {
     match opt.filter(|s| !s.is_empty()) {
@@ -135,8 +156,17 @@ pub async fn list(
         || exec_re.is_some()
         || stdout_re.is_some()
         || stderr_re.is_some();
+    // #517: only fetch the (potentially ~256 KB each) blob columns
+    // into the prefilter window when a regex actually matches
+    // against them; otherwise winners are re-fetched by id below.
+    let needs_output = stdout_re.is_some() || stderr_re.is_some();
 
-    let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new("SELECT * FROM execution_results");
+    let select = if has_regex && !needs_output {
+        format!("SELECT {META_COLUMNS} FROM execution_results")
+    } else {
+        "SELECT * FROM execution_results".to_string()
+    };
+    let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(select);
     let mut sep = " WHERE ";
 
     if let Some(status) = &params.status {
@@ -166,10 +196,12 @@ pub async fn list(
     // pagination across refetches is deterministic. Served by
     // idx_execution_results_started_at.
     qb.push(" ORDER BY started_at DESC, result_id DESC LIMIT ");
-    let sql_limit = if has_regex {
-        MAX_FETCH
-    } else {
+    let sql_limit = if !has_regex {
         params.limit as i64
+    } else if needs_output {
+        MAX_FETCH_WITH_OUTPUT
+    } else {
+        MAX_FETCH
     };
     qb.push_bind(sql_limit);
 
@@ -225,6 +257,49 @@ pub async fn list(
         out.push(row_to_result(r));
         if out.len() >= limit {
             break;
+        }
+    }
+
+    // #517: the metadata-only prefilter left stdout/stderr behind —
+    // re-fetch them for just the winning rows (≤ `limit`, so this is
+    // a handful of point lookups by primary key). Chunked to stay
+    // under SQLite's 999 bind-parameter ceiling for large limits.
+    if !needs_output && !out.is_empty() {
+        let mut by_id: std::collections::HashMap<String, (String, String)> =
+            std::collections::HashMap::with_capacity(out.len());
+        for chunk in out.chunks(HYDRATE_CHUNK) {
+            let mut qb: QueryBuilder<Sqlite> =
+                QueryBuilder::new("SELECT result_id, stdout, stderr FROM execution_results");
+            qb.push(" WHERE result_id IN (");
+            {
+                let mut sep = qb.separated(", ");
+                for row in chunk {
+                    sep.push_bind(row.result_id.clone());
+                }
+            }
+            qb.push(")");
+            let blob_rows = qb.build().fetch_all(&pool).await.map_err(|e| {
+                warn!(error = %e, "hydrate result output");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "list results failed".to_string(),
+                )
+            })?;
+            by_id.extend(blob_rows.into_iter().map(|r| {
+                (
+                    r.try_get("result_id").unwrap_or_default(),
+                    (
+                        r.try_get("stdout").unwrap_or_default(),
+                        r.try_get("stderr").unwrap_or_default(),
+                    ),
+                )
+            }));
+        }
+        for row in &mut out {
+            if let Some((stdout, stderr)) = by_id.remove(&row.result_id) {
+                row.stdout = stdout;
+                row.stderr = stderr;
+            }
         }
     }
     Ok(Json(out))
@@ -538,5 +613,109 @@ mod tests {
             .unwrap()
             .0;
         assert_eq!(rows.len(), 1);
+    }
+
+    /// #517: a metadata regex (pc_id) uses the blob-free prefilter,
+    /// then re-hydrates stdout/stderr for the winners — the response
+    /// must still carry the full output.
+    #[tokio::test]
+    async fn metadata_regex_path_still_returns_output() {
+        let pool = fresh_pool().await;
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO execution_results
+                (result_id, request_id, pc_id, exit_code, stdout, stderr,
+                 started_at, finished_at, recorded_at)
+             VALUES ('r-out', 'req', 'pc-9', 0, 'hello stdout', 'hello stderr', ?, ?, ?)",
+        )
+        .bind(now - Duration::minutes(10))
+        .bind(now - Duration::minutes(9))
+        .bind(now - Duration::minutes(9))
+        .execute(&pool)
+        .await
+        .unwrap();
+        insert_row(&pool, "r-other").await; // pc-1, must not match
+
+        let mut p = params(None);
+        p.pc_id = Some("^pc-9$".into());
+        let rows = list(State(pool), Query(p)).await.unwrap().0;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].result_id, "r-out");
+        assert_eq!(
+            rows[0].stdout, "hello stdout",
+            "winners must be re-hydrated with their output",
+        );
+        assert_eq!(rows[0].stderr, "hello stderr");
+    }
+
+    /// #517 schema-drift guard: a row served through the metadata-
+    /// regex path must be field-for-field identical to the same row
+    /// served by the fast path. If `row_to_result` grows a column
+    /// read that `META_COLUMNS` is missing, the regex-path copy
+    /// silently carries the zero-value and this comparison fails.
+    #[tokio::test]
+    async fn metadata_regex_projection_matches_full_row() {
+        let pool = fresh_pool().await;
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO execution_results
+                (result_id, request_id, exec_id, pc_id, exit_code, stdout, stderr,
+                 started_at, finished_at, recorded_at, job_id, version)
+             VALUES ('r-full', 'req-1', 'ex-1', 'pc-7', 3, 'out body', 'err body',
+                     ?, ?, ?, 'job-x', '1.2.3')",
+        )
+        .bind(now - Duration::minutes(10))
+        .bind(now - Duration::minutes(9))
+        .bind(now - Duration::minutes(9))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let fast = list(State(pool.clone()), Query(params(None)))
+            .await
+            .unwrap()
+            .0;
+        let mut p = params(None);
+        p.pc_id = Some("pc-7".into());
+        let via_regex = list(State(pool), Query(p)).await.unwrap().0;
+
+        assert_eq!(fast.len(), 1);
+        assert_eq!(via_regex.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&fast[0]).unwrap(),
+            serde_json::to_value(&via_regex[0]).unwrap(),
+            "metadata projection + hydration must reproduce the full row exactly",
+        );
+    }
+
+    /// #517: an output regex needs the blobs in the prefilter window
+    /// itself — that path must keep matching against stdout.
+    #[tokio::test]
+    async fn stdout_regex_path_matches_against_output() {
+        let pool = fresh_pool().await;
+        let now = Utc::now();
+        for (id, out) in [("r-hit", "ERROR: kaboom"), ("r-miss", "all fine")] {
+            sqlx::query(
+                "INSERT INTO execution_results
+                    (result_id, request_id, pc_id, exit_code, stdout, stderr,
+                     started_at, finished_at, recorded_at)
+                 VALUES (?, 'req', 'pc-1', 0, ?, '', ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(out)
+            .bind(now - Duration::minutes(10))
+            .bind(now - Duration::minutes(9))
+            .bind(now - Duration::minutes(9))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let mut p = params(None);
+        p.stdout = Some("(?i)error".into());
+        let rows = list(State(pool), Query(p)).await.unwrap().0;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].result_id, "r-hit");
+        assert_eq!(rows[0].stdout, "ERROR: kaboom");
     }
 }
