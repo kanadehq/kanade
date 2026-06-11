@@ -42,22 +42,52 @@ use crate::kv::{
 /// (one round-trip per resource — ~10 RTTs total).
 pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
     // ── Streams ──────────────────────────────────────────────────
+    // #518: every stream carries a `max_bytes` cap with
+    // `Discard::Old` on top of its `max_age` window. Within their
+    // age windows the streams used to be unbounded by size, and
+    // JetStream's file store shares a disk with SQLite on the
+    // backend host — one job printing 200 KB per run fleet-wide
+    // could exhaust the store, at which point EVERY publish fails
+    // (results, obs, audit, KV puts). With the caps, worst-case
+    // degradation is "shorter history on the offending stream"
+    // instead of "broker down".
+    //
+    // Sizing: JetStream RESERVES each `max_bytes` against its
+    // available storage (min of max_file_store and free disk) at
+    // create/update time and fails with error 10047 when the sum
+    // doesn't fit, so these must stay small enough for modest
+    // hosts. That's fine: every stream here is a transport +
+    // replay buffer — the durable record is the backend's SQLite
+    // (results/inventory/obs/audit are all projected within
+    // seconds) — so the caps are runaway-output backstops, not
+    // history budgets. Total reservation ≈ 5.3 GiB including the
+    // result_output object store below.
+    const MIB: i64 = 1024 * 1024;
+    const GIB: i64 = 1024 * MIB;
+
     // INVENTORY — 90-day rolling history (spec §2.3.1).
     js.create_or_update_stream(StreamConfig {
         name: STREAM_INVENTORY.into(),
         subjects: vec!["inventory.>".into()],
         max_age: Duration::from_secs(90 * 24 * 60 * 60),
+        max_bytes: GIB,
+        discard: DiscardPolicy::Old,
         ..Default::default()
     })
     .await
     .with_context(|| format!("create_or_update_stream {STREAM_INVENTORY}"))?;
     info!(stream = STREAM_INVENTORY, "ready");
 
-    // RESULTS — 30-day rolling history.
+    // RESULTS — 30-day rolling history. The biggest producer by
+    // far (every job run on every PC, with up to 256 KB of inline
+    // stdout/stderr per message), so it gets the largest slice of
+    // the disk budget.
     js.create_or_update_stream(StreamConfig {
         name: STREAM_RESULTS.into(),
         subjects: vec!["results.>".into()],
         max_age: Duration::from_secs(30 * 24 * 60 * 60),
+        max_bytes: 2 * GIB,
+        discard: DiscardPolicy::Old,
         ..Default::default()
     })
     .await
@@ -76,8 +106,12 @@ pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
         name: STREAM_EXEC.into(),
         subjects: vec!["commands.>".into()],
         max_messages_per_subject: 1,
-        discard: DiscardPolicy::Old,
         max_age: Duration::from_secs(7 * 24 * 60 * 60),
+        // Latest-per-subject keeps this tiny (one Command per
+        // group/pc subject); the cap is a backstop against subject
+        // cardinality bugs, not a working budget.
+        max_bytes: 64 * MIB,
+        discard: DiscardPolicy::Old,
         ..Default::default()
     })
     .await
@@ -90,16 +124,28 @@ pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
         name: STREAM_EVENTS.into(),
         subjects: vec!["events.>".into()],
         max_age: Duration::from_secs(7 * 24 * 60 * 60),
+        max_bytes: 256 * MIB,
+        discard: DiscardPolicy::Old,
         ..Default::default()
     })
     .await
     .with_context(|| format!("create_or_update_stream {STREAM_EVENTS}"))?;
     info!(stream = STREAM_EVENTS, "ready");
 
-    // AUDIT — permanent record of operator actions (spec §2.3.1).
+    // AUDIT — operator-action record (spec §2.3.1). The DURABLE
+    // copy is the backend's SQLite `audit_log` table (the projector
+    // INSERTs each message, idempotently since #501; 365-day
+    // retention since #486) — the stream is transport + replay
+    // buffer, not the archive, so it can be bounded like the rest.
+    // 90 days / 512 MiB is far more than the projector ever lags;
+    // previously this stream had NO limits at all, making it an
+    // unbounded disk leak on the broker host.
     js.create_or_update_stream(StreamConfig {
         name: STREAM_AUDIT.into(),
         subjects: vec!["audit.>".into()],
+        max_age: Duration::from_secs(90 * 24 * 60 * 60),
+        max_bytes: 512 * MIB,
+        discard: DiscardPolicy::Old,
         ..Default::default()
     })
     .await
@@ -124,6 +170,8 @@ pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
         name: STREAM_OBS_EVENTS.into(),
         subjects: vec!["obs.>".into()],
         max_age: Duration::from_secs(OBS_EVENTS_RETENTION_DAYS * SECS_PER_DAY),
+        max_bytes: 512 * MIB,
+        discard: DiscardPolicy::Old,
         ..Default::default()
     })
     .await
@@ -286,9 +334,17 @@ pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
     // STREAM_RESULTS so the lifetimes stay in lockstep — a row still
     // resolvable in execution_results never points at a missing
     // blob.
+    // #518: capped like the streams — a job whose output overflows
+    // the inline threshold writes blobs HERE instead of
+    // STREAM_RESULTS, so without its own cap this store bypasses
+    // the stream budget entirely and can still fill the file store.
+    // The projector derefs blobs within seconds of publish, so
+    // eviction only ever hits already-projected (or expired)
+    // output.
     js.create_object_store(ObjectStoreConfig {
         bucket: OBJECT_RESULT_OUTPUT.into(),
         max_age: Duration::from_secs(SECS_PER_DAY * 30),
+        max_bytes: GIB,
         ..Default::default()
     })
     .await
