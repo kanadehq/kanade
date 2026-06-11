@@ -74,16 +74,16 @@ pub async fn serve(
 /// *template* (no date suffix yet), so we glob the directory for
 /// the matching `<stem>.*.<ext>` pattern and pick the alphabetically
 /// last match — daily rotation means alphabetical = chronological.
+///
+/// Delegates to [`crate::log_tail::read_tail_lines`] so a large
+/// active log does not spike RSS for every request.
 async fn read_tail(path: &Path, n: usize) -> Result<Vec<u8>> {
     let active = locate_active_file(path).await?;
-    let bytes = tokio::fs::read(&active)
+    let lines = crate::log_tail::read_tail_lines(&active, n)
         .await
         .with_context(|| format!("read {active:?}"))?;
 
-    let text = String::from_utf8_lossy(&bytes);
-    let lines: Vec<&str> = text.lines().collect();
-    let start = lines.len().saturating_sub(n);
-    let mut out = lines[start..].join("\n");
+    let mut out = lines.join("\n");
     if !out.is_empty() {
         out.push('\n');
     }

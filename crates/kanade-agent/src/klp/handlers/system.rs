@@ -18,6 +18,7 @@ use kanade_shared::ipc::system::{
 use tracing::warn;
 
 use super::super::connection::ConnectionState;
+use crate::log_tail::read_tail_lines;
 
 /// Result type for KLP handlers — either a JSON-encoded response
 /// payload or a [`RpcError`] the dispatcher will wrap into the
@@ -39,28 +40,6 @@ const SUPPORTED_FEATURES: &[&str] = &[];
 /// `tracing` event), 1000 lines fits in ~1 MiB. Callers needing
 /// more pull the full file via `support.upload_diagnostics`.
 const LOG_TAIL_HARD_CAP: u32 = 1000;
-
-/// Files at or below this size take the simple whole-file read
-/// path. Past it, [`read_tail_lines`] seeks near the end and reads
-/// forward so a chatty long-uptime endpoint with a hundreds-of-MB
-/// log doesn't balloon agent RSS just to serve a few hundred tail
-/// lines (issue #289). Daily-rotated logs are normally well under
-/// this, so the common case never pays the extra complexity.
-const TAIL_WHOLE_FILE_THRESHOLD: u64 = 4 * 1024 * 1024;
-
-/// Per-line byte budget for the reverse-read seek heuristic. The
-/// agent's `tracing` lines run comfortably under this; over-
-/// estimating only costs a slightly larger initial read, never
-/// correctness — the window grows and retries if it held too few
-/// lines.
-const TAIL_AVG_LINE_BYTES: u64 = 2 * 1024;
-
-/// Hard cap on how far back [`read_tail_lines`] will seek while
-/// hunting for enough lines. Bounds worst-case memory for
-/// pathological logs (one giant line, or no newlines at all). On
-/// hitting it we return whatever the window held rather than walk
-/// the whole file.
-const TAIL_MAX_WINDOW_BYTES: u64 = 32 * 1024 * 1024;
 
 /// `system.handshake` — protocol negotiation + session info.
 ///
@@ -232,99 +211,11 @@ pub async fn handle_log_tail(
     Ok(LogTailResult { lines, truncated })
 }
 
-/// Read the last `requested` lines of `path`, oldest-first (the
-/// order `str::lines` yields), without slurping the whole file when
-/// it's large.
-///
-/// Small files (≤ [`TAIL_WHOLE_FILE_THRESHOLD`]) take the plain
-/// whole-file read — the added seek/retry machinery isn't worth it
-/// for the daily-rotated common case. Larger files seek to roughly
-/// `len - requested × avg_line` and read forward, doubling the
-/// window (capped at [`TAIL_MAX_WINDOW_BYTES`]) until it holds
-/// enough lines or reaches the start of the file.
-///
-/// Propagates `io::Error` (the caller maps `NotFound` to an empty
-/// result).
-async fn read_tail_lines(path: &std::path::Path, requested: usize) -> io::Result<Vec<String>> {
-    use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
-
-    if requested == 0 {
-        return Ok(vec![]);
-    }
-
-    let mut file = tokio::fs::File::open(path).await?;
-    let len = file.metadata().await?.len();
-
-    if len <= TAIL_WHOLE_FILE_THRESHOLD {
-        let mut body = String::new();
-        file.read_to_string(&mut body).await?;
-        return Ok(tail_of(&body, requested));
-    }
-
-    // Large file: seek near the end and read forward, growing the
-    // window until it holds enough lines (or we reach offset 0 /
-    // the cap). Start from a line-count-based estimate.
-    let mut window = (requested as u64)
-        .saturating_mul(TAIL_AVG_LINE_BYTES)
-        .clamp(TAIL_AVG_LINE_BYTES, TAIL_MAX_WINDOW_BYTES);
-
-    loop {
-        let start = len.saturating_sub(window);
-        file.seek(SeekFrom::Start(start)).await?;
-        let mut buf = Vec::with_capacity(window.min(len) as usize);
-        // `take(window)` makes the window a *hard* byte bound. The
-        // agent's own log is appended to continuously, so the file
-        // can grow between `metadata()` above and this read; a plain
-        // `read_to_end` would chase the moving EOF and could blow
-        // past `window` (and `TAIL_MAX_WINDOW_BYTES` on the capped
-        // iteration), defeating the whole point of the bounded read.
-        (&mut file).take(window).read_to_end(&mut buf).await?;
-
-        // When we seeked past offset 0 the first line is almost
-        // certainly a mid-line fragment — drop everything up to and
-        // including the first `\n`. `\n` (0x0A) never appears inside
-        // a multibyte UTF-8 sequence, so the remainder sits on a
-        // clean UTF-8 boundary even though the seek itself wasn't
-        // char-aligned. No newline in the whole window means a
-        // single line longer than `window`: drop it all and grow.
-        let usable: &[u8] = if start > 0 {
-            match buf.iter().position(|&b| b == b'\n') {
-                Some(nl) => &buf[nl + 1..],
-                None => &[],
-            }
-        } else {
-            &buf
-        };
-
-        let text = String::from_utf8_lossy(usable);
-        let lines = tail_of(&text, requested);
-
-        // Done when we have enough, can't go back further, or hit
-        // the cap (return whatever the bounded window held).
-        if lines.len() >= requested || start == 0 || window >= TAIL_MAX_WINDOW_BYTES {
-            return Ok(lines);
-        }
-        window = window.saturating_mul(2).min(TAIL_MAX_WINDOW_BYTES);
-    }
-}
-
-/// Last `n` lines of `body`, trailing `\r\n` / `\n` stripped, in
-/// file order. Shared by both read paths in [`read_tail_lines`].
-///
-/// `str::Lines` is a `DoubleEndedIterator`, so we walk backward and
-/// `take(n)` instead of collecting every line: O(n) lines scanned
-/// and allocated rather than O(buffer) — matters on the large-file
-/// path where the window can hold far more lines than requested.
-fn tail_of(body: &str, n: usize) -> Vec<String> {
-    let mut lines: Vec<String> = body.lines().rev().take(n).map(str::to_string).collect();
-    lines.reverse();
-    lines
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::klp::auth::PeerCredentials;
+    use crate::log_tail::{TAIL_AVG_LINE_BYTES, TAIL_WHOLE_FILE_THRESHOLD};
     use kanade_shared::ipc::state::StateSnapshot;
     use kanade_shared::wire::EffectiveConfig;
     use std::path::PathBuf;
