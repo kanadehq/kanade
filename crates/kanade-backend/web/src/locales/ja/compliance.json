@@ -16,5 +16,8 @@
     "status": "ステータス",
     "detail": "詳細",
     "updated": "更新"
-  }
+  },
+  "showOk": "ok を表示 ({{count}})",
+  "hideOk": "ok を隠す",
+  "allOk": "{{count}} 台すべて ok 🎉"
 }
