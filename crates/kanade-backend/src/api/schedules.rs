@@ -148,6 +148,147 @@ pub async fn preview(
     }))
 }
 
+/// Trailing window for the success/fail tally in [`status`].
+const STATUS_WINDOW_HOURS: i64 = 24;
+
+/// The most recent run of a schedule's job (`exit_code` / `finished_at`
+/// `null` = still in flight).
+#[derive(Serialize, Default)]
+pub struct LastRun {
+    pub pc_id: String,
+    pub exit_code: Option<i64>,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+}
+
+/// Finished-run tally over the trailing [`STATUS_WINDOW_HOURS`].
+#[derive(Serialize, Default)]
+pub struct RecentCounts {
+    pub window_hours: i64,
+    pub ok: i64,
+    pub fail: i64,
+}
+
+/// Coverage view for [`status`].
+#[derive(Serialize)]
+pub struct StatusResponse {
+    pub id: String,
+    pub when: String,
+    pub tz: String,
+    pub enabled: bool,
+    /// Soonest upcoming fire (RFC3339 UTC) — calendar schedules only;
+    /// `null` for reconcile shapes or a schedule that can never fire.
+    pub next_run: Option<String>,
+    /// Most recent run, or `null` if this schedule's job has never run.
+    pub last_run: Option<LastRun>,
+    pub recent: RecentCounts,
+}
+
+/// Last run + trailing success/fail tally for a job. Keyed by `job_id`
+/// (a schedule references a job; `execution_results` has no
+/// `schedule_id`), so two schedules sharing a job share these numbers —
+/// accurate for the common 1:1 case, an over-count otherwise. Pure DB
+/// read, factored out so it's unit-testable against an in-memory pool.
+async fn schedule_run_stats(
+    pool: &sqlx::SqlitePool,
+    job_id: &str,
+    since: chrono::DateTime<chrono::Utc>,
+) -> Result<(Option<LastRun>, RecentCounts), sqlx::Error> {
+    use sqlx::Row;
+    let last = sqlx::query(
+        "SELECT pc_id, exit_code, started_at, finished_at
+           FROM execution_results
+          WHERE job_id = ?
+          ORDER BY recorded_at DESC
+          LIMIT 1",
+    )
+    .bind(job_id)
+    .fetch_optional(pool)
+    .await?
+    .map(|r| LastRun {
+        pc_id: r.try_get("pc_id").unwrap_or_default(),
+        // Read the nullable columns as `Option<_>` explicitly:
+        // sqlx-sqlite decodes a NULL via `try_get::<i64>` / `<String>`
+        // into `0` / `""` rather than erroring, so `try_get(..).ok()`
+        // would mislabel a still-running row (NULL exit_code +
+        // finished_at) as "exit 0, finished at ''". The Option form maps
+        // NULL → None. `started_at` is NOT NULL so it stays a plain read.
+        exit_code: r.try_get::<Option<i64>, _>("exit_code").unwrap_or(None),
+        started_at: r.try_get("started_at").ok(),
+        finished_at: r
+            .try_get::<Option<String>, _>("finished_at")
+            .unwrap_or(None),
+    });
+    let counts = sqlx::query(
+        "SELECT
+             COALESCE(SUM(CASE WHEN exit_code = 0 THEN 1 ELSE 0 END), 0) AS ok,
+             COALESCE(SUM(CASE WHEN exit_code IS NOT NULL AND exit_code <> 0 THEN 1 ELSE 0 END), 0) AS fail
+           FROM execution_results
+          WHERE job_id = ? AND finished_at IS NOT NULL AND recorded_at >= ?",
+    )
+    .bind(job_id)
+    .bind(since)
+    .fetch_one(pool)
+    .await?;
+    let recent = RecentCounts {
+        window_hours: STATUS_WINDOW_HOURS,
+        ok: counts.try_get("ok").unwrap_or(0),
+        fail: counts.try_get("fail").unwrap_or(0),
+    };
+    Ok((last, recent))
+}
+
+/// GET /api/schedules/{id}/status — coverage view: enabled, next fire
+/// (via `preview_fires`), the schedule's most recent run, and a 24h
+/// ok/fail tally (#418 "カバレッジ可視化"). Read-only. The run figures
+/// are `job_id`-keyed — see [`schedule_run_stats`].
+pub async fn status(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<StatusResponse>, (StatusCode, String)> {
+    let kv = s
+        .jetstream
+        .get_key_value(BUCKET_SCHEDULES)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("schedules bucket missing: {e}"),
+            )
+        })?;
+    let bytes = kv
+        .get(&id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("KV get: {e}")))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("schedule '{id}' not found")))?;
+    let schedule: Schedule = serde_json::from_slice(&bytes).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("deserialize stored schedule: {e}"),
+        )
+    })?;
+
+    let now = chrono::Utc::now();
+    let next_run = schedule
+        .preview_fires(now, 1)
+        .first()
+        .map(chrono::DateTime::to_rfc3339);
+    let since = now - chrono::Duration::hours(STATUS_WINDOW_HOURS);
+    let (last_run, recent) = schedule_run_stats(&s.pool, &schedule.job_id, since)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("run stats: {e}")))?;
+
+    Ok(Json(StatusResponse {
+        id: schedule.id.clone(),
+        when: schedule.when.to_string(),
+        tz: schedule.tz.as_str().to_string(),
+        enabled: schedule.enabled,
+        next_run,
+        last_run,
+        recent,
+    }))
+}
+
 /// POST /api/schedules — upsert.
 ///
 /// Accepts JSON (`application/json`, default) or YAML
@@ -719,5 +860,91 @@ mod tests {
         let yaml = "enabled: false\nenabled: false\n";
         let out = patch_yaml_enabled(yaml, true);
         assert_eq!(out.matches("enabled: true").count(), 1);
+    }
+
+    // ---- schedule_run_stats (#418 coverage view) ----
+
+    use super::schedule_run_stats;
+    use chrono::{Duration, Utc};
+    use sqlx::SqlitePool;
+
+    async fn fresh_pool() -> SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    /// Insert one `execution_results` row. `exit_code: None` +
+    /// `finished: false` models an in-flight run. `recorded_ago_min`
+    /// bounds it relative to "now". Every timestamp is bound via chrono
+    /// (RFC 3339), matching how the projector writes — the `since`
+    /// comparison breaks otherwise (#390).
+    async fn insert_exec(
+        pool: &SqlitePool,
+        result_id: &str,
+        job_id: &str,
+        exit_code: Option<i64>,
+        finished: bool,
+        recorded_ago_min: i64,
+    ) {
+        let now = Utc::now();
+        let recorded = now - Duration::minutes(recorded_ago_min);
+        let started = recorded - Duration::minutes(1);
+        let finished_at = finished.then_some(recorded);
+        sqlx::query(
+            "INSERT INTO execution_results
+                (result_id, request_id, pc_id, exit_code, stdout, stderr,
+                 started_at, finished_at, recorded_at, job_id)
+             VALUES (?, 'req', 'pc-1', ?, '', '', ?, ?, ?, ?)",
+        )
+        .bind(result_id)
+        .bind(exit_code)
+        .bind(started)
+        .bind(finished_at)
+        .bind(recorded)
+        .bind(job_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_stats_tallies_recent_and_picks_latest() {
+        let pool = fresh_pool().await;
+        // job j1: an old ok (outside 24h), a fail, an ok, then a still-
+        // running row that is the most recent. job j2 must not bleed in.
+        insert_exec(&pool, "old", "j1", Some(0), true, 60 * 30).await; // 30h ago
+        insert_exec(&pool, "fail", "j1", Some(1), true, 120).await;
+        insert_exec(&pool, "ok", "j1", Some(0), true, 60).await;
+        insert_exec(&pool, "running", "j1", None, false, 10).await; // latest
+        insert_exec(&pool, "other", "j2", Some(1), true, 60).await;
+
+        let since = Utc::now() - Duration::hours(24);
+        let (last, recent) = schedule_run_stats(&pool, "j1", since).await.unwrap();
+
+        // Most recent row wins, in-flight (no exit / finished) surfaced.
+        let last = last.expect("j1 has runs");
+        assert_eq!(last.exit_code, None);
+        assert!(last.finished_at.is_none());
+        // 24h tally: the ok and the fail; the 30h-old ok and the still-
+        // running row are excluded; j2 is a different job.
+        assert_eq!(recent.ok, 1);
+        assert_eq!(recent.fail, 1);
+        assert_eq!(recent.window_hours, 24);
+    }
+
+    #[tokio::test]
+    async fn run_stats_empty_for_unknown_job() {
+        let pool = fresh_pool().await;
+        insert_exec(&pool, "x", "j1", Some(0), true, 10).await;
+        let since = Utc::now() - Duration::hours(24);
+        let (last, recent) = schedule_run_stats(&pool, "no-such-job", since)
+            .await
+            .unwrap();
+        assert!(last.is_none());
+        assert_eq!((recent.ok, recent.fail), (0, 0));
     }
 }
