@@ -348,19 +348,6 @@ pub async fn rollout(
         .await
         .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e.to_string()))?;
 
-    let mut scope = match kv.get(&key).await.map_err(|e| {
-        warn!(error = %e, %key, "kv.get scope");
-        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-    })? {
-        Some(b) => serde_json::from_slice::<ConfigScope>(&b).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("decode existing {BUCKET_AGENT_CONFIG}.{key}: {e}"),
-            )
-        })?,
-        None => ConfigScope::default(),
-    };
-    scope.target_version = Some(body.version.clone());
     if let Some(j) = body.jitter.as_deref() {
         // #491: reject malformed jitter at the write boundary — the
         // agent's parse failure silently falls back, so a typo here
@@ -371,15 +358,28 @@ pub async fn rollout(
                 format!("jitter: expected a humantime duration (e.g. 30s, 10m, 1h): {e}"),
             )
         })?;
-        scope.target_version_jitter = Some(j.to_owned());
     }
-    let payload = serde_json::to_vec(&scope).map_err(|e| {
-        warn!(error = %e, "encode ConfigScope");
-        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-    })?;
-    kv.put(key.as_str(), payload.into()).await.map_err(|e| {
-        warn!(error = %e, %key, "kv.put scope");
-        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    // #505: CAS read-modify-write — the previous get→put raced
+    // concurrent writers on the same scope (e.g. a `config set`
+    // updating heartbeat_interval) and clobbered their change.
+    kanade_shared::kv_cas::read_modify_write(&kv, &key, |scope: &mut ConfigScope| {
+        let before = scope.clone();
+        scope.target_version = Some(body.version.clone());
+        if let Some(j) = body.jitter.as_deref() {
+            scope.target_version_jitter = Some(j.to_owned());
+        }
+        // Re-rolling-out the already-current version is a no-op:
+        // skip the write so the revision doesn't bump and agents'
+        // config watchers don't wake for nothing.
+        *scope != before
+    })
+    .await
+    .map_err(|e| {
+        warn!(error = %e, %key, "rollout scope RMW");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("update {BUCKET_AGENT_CONFIG}.{key}: {e:#}"),
+        )
     })?;
 
     info!(
