@@ -17,5 +17,8 @@
     "status": "Status",
     "detail": "Detail",
     "updated": "Updated"
-  }
+  },
+  "showOk": "show ok ({{count}})",
+  "hideOk": "hide ok",
+  "allOk": "all {{count}} PCs ok 🎉"
 }
