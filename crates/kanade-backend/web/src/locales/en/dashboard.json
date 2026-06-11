@@ -124,5 +124,22 @@
     "description": "PCs that have published a <code>process_perf</code> sample in the last 5 min. Clear stragglers with the <strong>Disable now</strong> button on each agent's detail page.",
     "empty": "No PCs in investigation mode right now.",
     "latest": "{{age}} since last sample"
+  },
+  "degraded": {
+    "title_one": "Dashboard data unavailable ({{count}} source)",
+    "title_other": "Dashboard data unavailable ({{count}} sources)",
+    "description": "These queries are failing - the numbers below may be stale or incomplete, not a quiet fleet.",
+    "sources": {
+      "agents": "Agents list",
+      "jetstream": "JetStream status",
+      "results": "Recent results",
+      "audit": "Recent audit",
+      "health": "Fleet health",
+      "fleetCpu": "Fleet CPU history",
+      "fleetMem": "Fleet memory history",
+      "topCpu": "Top CPU consumers",
+      "topMem": "Top memory consumers",
+      "activeInvestigations": "Active investigations"
+    }
   }
 }
