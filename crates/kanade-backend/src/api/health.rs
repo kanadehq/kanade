@@ -312,7 +312,9 @@ pub async fn scan_durations(
         // Nullable column: decode as Option so a NULL result_id is
         // Ok(None) rather than a decode error.
         let result_id = r.try_get::<Option<String>, _>("result_id").ok().flatten();
-        let entry = by_job.entry(job_id).or_insert_with(|| (Vec::new(), None, -1));
+        let entry = by_job
+            .entry(job_id)
+            .or_insert_with(|| (Vec::new(), None, -1));
         entry.0.push(dur);
         if dur > entry.2 {
             entry.1 = result_id;
