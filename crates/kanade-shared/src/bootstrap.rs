@@ -27,10 +27,10 @@ use tracing::{info, warn};
 
 use crate::kv::{
     BUCKET_AGENT_CONFIG, BUCKET_AGENT_GROUPS, BUCKET_AGENTS_STATE, BUCKET_FLEET_CONFIG,
-    BUCKET_JOBS, BUCKET_JOBS_YAML, BUCKET_SCHEDULES, BUCKET_SCHEDULES_YAML, BUCKET_SCRIPT_CURRENT,
-    BUCKET_SCRIPT_STATUS, OBJECT_AGENT_RELEASES, OBJECT_APP_PACKAGES, OBJECT_RESULT_OUTPUT,
-    OBJECT_SCRIPTS, STREAM_AUDIT, STREAM_EVENTS, STREAM_EXEC, STREAM_INVENTORY, STREAM_OBS_EVENTS,
-    STREAM_RESULTS,
+    BUCKET_JOBS, BUCKET_JOBS_YAML, BUCKET_NOTIFICATIONS_READ, BUCKET_SCHEDULES,
+    BUCKET_SCHEDULES_YAML, BUCKET_SCRIPT_CURRENT, BUCKET_SCRIPT_STATUS, OBJECT_AGENT_RELEASES,
+    OBJECT_APP_PACKAGES, OBJECT_RESULT_OUTPUT, OBJECT_SCRIPTS, STREAM_AUDIT, STREAM_EVENTS,
+    STREAM_EXEC, STREAM_INVENTORY, STREAM_NOTIFICATIONS, STREAM_OBS_EVENTS, STREAM_RESULTS,
 };
 
 /// Create-or-update an Object Store, but never let it wedge backend
@@ -214,6 +214,29 @@ pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
     .with_context(|| format!("create_or_update_stream {STREAM_OBS_EVENTS}"))?;
     info!(stream = STREAM_OBS_EVENTS, "ready");
 
+    // NOTIFICATIONS — end-user notification history (SPEC §2.3.1 /
+    // Phase E). 90-day window matches INVENTORY: a Client App that
+    // connects after a notification was sent fetches the missed ones
+    // via KLP `notifications.list`. Subject filter `notifications.>`
+    // catches every fan-out target (`all` / `group.X` / `pc.Y`) with
+    // one stream. Retains all messages per subject — each notification
+    // is its own history entry, not a latest-only state like EXEC.
+    // #518: 512 MiB cap + DiscardPolicy::Old, matching the other
+    // 90-day streams (AUDIT / OBS_EVENTS) — notification payloads are
+    // small, so this is generous headroom while still bounding the
+    // broker's disk lease.
+    js.create_or_update_stream(StreamConfig {
+        name: STREAM_NOTIFICATIONS.into(),
+        subjects: vec!["notifications.>".into()],
+        max_age: Duration::from_secs(90 * 24 * 60 * 60),
+        max_bytes: 512 * MIB,
+        discard: DiscardPolicy::Old,
+        ..Default::default()
+    })
+    .await
+    .with_context(|| format!("create_or_update_stream {STREAM_NOTIFICATIONS}"))?;
+    info!(stream = STREAM_NOTIFICATIONS, "ready");
+
     // ── KV buckets ───────────────────────────────────────────────
     // script_current — cmd_id → version (spec §2.6 Layer 2).
     js.create_or_update_key_value(KvConfig {
@@ -301,6 +324,20 @@ pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
     .await
     .with_context(|| format!("create_or_update_key_value {BUCKET_FLEET_CONFIG}"))?;
     info!(bucket = BUCKET_FLEET_CONFIG, "ready");
+
+    // notifications_read — per-(pc, user, notification) read/ack state
+    // (SPEC §2.3.2 / Phase E). The agent writes here on KLP
+    // `notifications.ack`; `notifications.list` reads it back to filter
+    // the unread bucket. history: 1 — only the latest ack per key
+    // matters.
+    js.create_or_update_key_value(KvConfig {
+        bucket: BUCKET_NOTIFICATIONS_READ.into(),
+        history: 1,
+        ..Default::default()
+    })
+    .await
+    .with_context(|| format!("create_or_update_key_value {BUCKET_NOTIFICATIONS_READ}"))?;
+    info!(bucket = BUCKET_NOTIFICATIONS_READ, "ready");
 
     // jobs_yaml / schedules_yaml — operator source-of-truth YAML
     // alongside the JSON catalogs above. Same key shape (manifest id

@@ -43,6 +43,13 @@ pub struct Notification {
     /// in the Client App for context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issued_by: Option<String>,
+    /// Optional expiry (SPEC §2.4.1 `expires_at`). Past this instant
+    /// the Client App stops surfacing the notification (it drops out
+    /// of toasts / the modal / the unread badge) even if never acked.
+    /// `None` ⇒ the notification never auto-expires. Additive +
+    /// optional so pre-Phase-E bodies on the wire still decode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
     /// `acked_at` from this user's perspective. Populated by
     /// `notifications.list` for already-acked entries; never set on
     /// `notifications.new` pushes (a fresh push by definition
@@ -183,6 +190,81 @@ pub struct NotificationsAckResult {
     pub acked_at: chrono::DateTime<chrono::Utc>,
 }
 
+// ---------- backend HTTP compose (POST /api/notifications) ----------
+
+/// Operator-facing request body for `POST /api/notifications` (and the
+/// equivalent `notifications/*.yaml` manifest, SPEC §2.4.1). The
+/// backend mints the [`Notification::id`] (when `id` is omitted) and
+/// [`Notification::issued_at`], resolves [`target`](Self::target) into
+/// the `notifications.{all|group.X|pc.Y}` fan-out subjects, and
+/// publishes one [`Notification`] per resolved subject into the
+/// `NOTIFICATIONS` stream.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
+pub struct PublishNotificationRequest {
+    /// Operator-supplied id — the manifest's `id:` doubles as the
+    /// notification id (SPEC §2.4.1). Omit it for ad-hoc SPA composer
+    /// sends and the backend mints a UUID instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub priority: NotificationPriority,
+    #[serde(default)]
+    pub require_ack: bool,
+    pub title: String,
+    pub body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issued_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Fan-out audience — same shape as a job manifest's `target:`
+    /// (SPEC §2.4.1). At least one of `all` / `groups` / `pcs` must be
+    /// set or the backend rejects the request.
+    pub target: crate::manifest::Target,
+}
+
+/// Response of `POST /api/notifications` — the minted/echoed id plus
+/// the subjects the notification fanned out to, so the operator UI can
+/// confirm the resolved audience.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
+pub struct PublishNotificationResponse {
+    pub id: String,
+    pub subjects: Vec<String>,
+}
+
+// ---------- ack event (Agent → NATS → backend projector) ----------
+
+/// Body of the
+/// `events.notifications.acked.{pc_id}.{user_sid}.{notif_id}` event the
+/// agent publishes when a user acks a notification. The backend's
+/// notification-acks projector reads these fields from the JSON body
+/// (not by parsing the subject) so an id / SID containing a `.` can't
+/// desync the projected row from its subject tokens.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
+pub struct NotificationAcked {
+    pub notification_id: String,
+    pub pc_id: String,
+    pub user_sid: String,
+    pub acked_at: chrono::DateTime<chrono::Utc>,
+}
+
+// ---------- ack status (GET /api/notifications/{id}/ack_status) ----
+
+/// One recipient's confirmation record for a notification.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
+pub struct NotificationAckEntry {
+    pub pc_id: String,
+    pub user_sid: String,
+    pub acked_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Response of `GET /api/notifications/{id}/ack_status` — every
+/// `(pc_id, user_sid, acked_at)` tuple recorded for the notification,
+/// powering the SPA's "who confirmed when" view.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
+pub struct NotificationAckStatus {
+    pub id: String,
+    pub acks: Vec<NotificationAckEntry>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,6 +312,56 @@ mod tests {
         assert!(p.notification.require_ack);
         assert_eq!(p.notification.title, "緊急: ネットワーク機器メンテ");
         assert_eq!(p.notification.issued_by.as_deref(), Some("infra-team"));
+    }
+
+    #[test]
+    fn notification_expires_at_is_optional_and_skipped_when_none() {
+        // Additive field: a body without expires_at decodes (None) and
+        // a None value is omitted from the wire so pre-Phase-E
+        // consumers don't see a null key.
+        let wire = r#"{
+            "id":"n1","priority":"info","title":"t","body":"b",
+            "issued_at":"2026-05-20T12:00:00Z"
+        }"#;
+        let n: Notification = serde_json::from_str(wire).expect("decode without expires_at");
+        assert!(n.expires_at.is_none());
+        let v = serde_json::to_value(&n).unwrap();
+        assert!(
+            v.get("expires_at").is_none(),
+            "None expires_at omitted: {v:?}"
+        );
+    }
+
+    #[test]
+    fn publish_request_requires_target_audience() {
+        // The wire decodes a target with no audience set; the handler
+        // is what rejects it. Here we just pin Target::is_specified so
+        // the handler's guard has a stable contract to lean on.
+        let req: PublishNotificationRequest =
+            serde_json::from_str(r#"{"priority":"warn","title":"t","body":"b","target":{}}"#)
+                .expect("decode");
+        assert!(!req.target.is_specified(), "empty target is unspecified");
+        assert_eq!(req.id, None, "id omitted ⇒ backend mints one");
+        assert!(!req.require_ack, "require_ack defaults false");
+    }
+
+    #[test]
+    fn notification_acked_round_trips() {
+        let t = chrono::Utc.with_ymd_and_hms(2026, 5, 20, 12, 0, 5).unwrap();
+        let a = NotificationAcked {
+            notification_id: "notif-9f3a".into(),
+            pc_id: "PC1234".into(),
+            // SIDs use hyphens, never dots — safe alongside the dotted
+            // subject, but the projector reads this body field anyway.
+            user_sid: "S-1-5-21-1001".into(),
+            acked_at: t,
+        };
+        let json = serde_json::to_string(&a).unwrap();
+        let back: NotificationAcked = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.notification_id, a.notification_id);
+        assert_eq!(back.pc_id, a.pc_id);
+        assert_eq!(back.user_sid, a.user_sid);
+        assert_eq!(back.acked_at, t);
     }
 
     #[test]

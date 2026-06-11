@@ -46,7 +46,7 @@ use tracing::{info, warn};
 /// events shares `execution_results` with results: `events.started`
 /// rows and `ExecResult` rows land in the same table, so emptiness of
 /// that one table is the freshness signal for both consumers.
-fn projector_consumers() -> [(&'static str, &'static str, &'static str); 4] {
+fn projector_consumers() -> [(&'static str, &'static str, &'static str); 5] {
     [
         (
             STREAM_RESULTS,
@@ -63,6 +63,14 @@ fn projector_consumers() -> [(&'static str, &'static str, &'static str); 4] {
             STREAM_OBS_EVENTS,
             super::obs_events::CONSUMER_NAME,
             "obs_events",
+        ),
+        // Notification acks share STREAM_EVENTS with the events
+        // projector (both ride `events.>`) but project into their own
+        // table, so their emptiness is tracked independently.
+        (
+            STREAM_EVENTS,
+            super::notifications::CONSUMER_NAME,
+            "notification_acks",
         ),
     ]
 }
