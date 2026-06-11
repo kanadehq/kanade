@@ -141,6 +141,62 @@ function useDebouncedValue<T>(value: T, delay: number): T {
 // badge palettes so an operator skimming the timeline can chunk
 // lifecycle (success/danger) vs informational (violet) vs neutral
 // (default) without reading every cell.
+// #496: cap the per-PC charts to the busiest hosts. At fleet scale a
+// distinct-PC axis is unbounded — 3,000 PCs made the scatter a
+// ~108,000px-tall SVG and the heatmap 3,000 rows x up-to-400 bucket
+// cells (1.2M divs). Top-N by event count keeps the charts readable
+// AND bounded; the table below still carries every event.
+const CHART_MAX_PCS = 40;
+
+function topPcsByEventCount(
+  events: EventRow[],
+  max: number,
+): { pcs: string[]; totalPcs: number } {
+  const counts = new Map<string, number>();
+  for (const e of events) counts.set(e.pc_id, (counts.get(e.pc_id) ?? 0) + 1);
+  const ranked = Array.from(counts.entries()).sort(
+    (a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1),
+  );
+  return {
+    // Sorted for a stable axis order, same as the previous full list.
+    pcs: ranked.slice(0, max).map(([pc]) => pc).sort(),
+    totalPcs: ranked.length,
+  };
+}
+
+// #496: stringify the payload only when the operator opens the
+// <details> — eagerly serialising up to 5,000 payloads per render
+// was a large hidden cost of the table.
+function PayloadDetails({ payload }: { payload: unknown }) {
+  const { t } = useTranslation('events');
+  const [open, setOpen] = useState(false);
+  // Sticky lazy cache: stringify on FIRST open only, then keep it so
+  // repeated toggles don't re-pay the serialisation (PR #561 review,
+  // claude — note a component-level useMemo would run during every
+  // row's render and reintroduce the eager cost this component
+  // exists to remove). Rows are keyed by event id, so a cached text
+  // never outlives its payload.
+  const [text, setText] = useState<string | null>(null);
+  return (
+    <details
+      onToggle={(e) => {
+        const isOpen = (e.target as HTMLDetailsElement).open;
+        setOpen(isOpen);
+        if (isOpen && text === null) {
+          setText(JSON.stringify(payload, null, 2));
+        }
+      }}
+    >
+      <summary className="cursor-pointer text-muted text-xs">{t('payload.show')}</summary>
+      {open && text !== null && (
+        <pre className="text-xs whitespace-pre-wrap break-words mt-2 bg-muted/5 p-2 rounded max-h-96 overflow-y-auto">
+          {text}
+        </pre>
+      )}
+    </details>
+  );
+}
+
 function kindVariant(kind: string): 'success' | 'amber' | 'danger' | 'violet' | 'default' {
   switch (kind) {
     case 'logon':
@@ -503,12 +559,7 @@ export function Events() {
                     : <span className="text-muted text-xs">—</span>}
                 </TableCell>
                 <TableCell>
-                  <details>
-                    <summary className="cursor-pointer text-muted text-xs">{t('payload.show')}</summary>
-                    <pre className="text-xs whitespace-pre-wrap break-words mt-2 bg-muted/5 p-2 rounded max-h-96 overflow-y-auto">
-                      {JSON.stringify(e.payload, null, 2)}
-                    </pre>
-                  </details>
+                  <PayloadDetails payload={e.payload} />
                 </TableCell>
               </TableRow>
             ))}
@@ -535,24 +586,29 @@ function EventsTimeline({ events }: { events: EventRow[] }) {
 
   // Stable PC list (sorted) drives the Y axis category domain. Doing
   // this once via useMemo so re-renders for tooltip hover don't
-  // re-sort the list and confuse Recharts' axis caching.
-  const pcs = useMemo(() => {
-    const set = new Set(events.map((e) => e.pc_id));
-    return Array.from(set).sort();
-  }, [events]);
+  // re-sort the list and confuse Recharts' axis caching. #496: capped
+  // to the busiest CHART_MAX_PCS so the axis (and the SVG height
+  // below) stays bounded at fleet scale.
+  const { pcs, totalPcs } = useMemo(
+    () => topPcsByEventCount(events, CHART_MAX_PCS),
+    [events],
+  );
 
   // Group points by kind so we can render one Scatter series per
   // kind (auto-coloured legend). Each point carries the original
-  // event so the tooltip can render full context.
+  // event so the tooltip can render full context. Points for PCs
+  // outside the top-N axis are dropped (they'd render off-axis).
   const byKind = useMemo(() => {
+    const kept = new Set(pcs);
     const out: Record<string, Array<{ ts: number; pc: string; ev: EventRow }>> = {};
     for (const ev of events) {
+      if (!kept.has(ev.pc_id)) continue;
       const ts = Date.parse(ev.at);
       if (Number.isNaN(ts)) continue;
       (out[ev.kind] ??= []).push({ ts, pc: ev.pc_id, ev });
     }
     return out;
-  }, [events]);
+  }, [events, pcs]);
 
   // Height scales with PC count so a fleet-wide view doesn't squash
   // every row; floor at 200 keeps the single-PC case readable.
@@ -562,9 +618,14 @@ function EventsTimeline({ events }: { events: EventRow[] }) {
   // re-renders. Recharts can auto-domain, but `type="number"`
   // requires an explicit domain to render the axis labels right.
   const [tMin, tMax] = useMemo(() => {
+    // #496 / PR #561 review: derive the axis from the RENDERED
+    // (top-N) PCs only, so a stray event on a dropped host can't
+    // stretch the domain past what the operator sees.
+    const kept = new Set(pcs);
     let lo = Infinity;
     let hi = -Infinity;
     for (const ev of events) {
+      if (!kept.has(ev.pc_id)) continue;
       const ts = Date.parse(ev.at);
       if (Number.isNaN(ts)) continue;
       if (ts < lo) lo = ts;
@@ -574,7 +635,7 @@ function EventsTimeline({ events }: { events: EventRow[] }) {
     // Pad 2% on each side so points don't hug the axis.
     const pad = Math.max(60_000, (hi - lo) * 0.02);
     return [lo - pad, hi + pad];
-  }, [events]);
+  }, [events, pcs]);
 
   // Decide X-axis tick format: short HH:mm when the window fits in a
   // day; switch to MM/DD HH:mm for multi-day ranges so the operator
@@ -595,7 +656,14 @@ function EventsTimeline({ events }: { events: EventRow[] }) {
   return (
     <Card>
       <CardHeader className="pb-2">
-        <CardTitle className="text-sm">{t('chart.title')}</CardTitle>
+        <CardTitle className="text-sm">
+          {t('chart.title')}
+          {totalPcs > pcs.length && (
+            <span className="ml-2 text-xs text-muted font-normal">
+              {t('chartPcCap', { shown: pcs.length, total: totalPcs })}
+            </span>
+          )}
+        </CardTitle>
       </CardHeader>
       <CardContent className="pt-0">
         <ResponsiveContainer width="100%" height={chartHeight}>
@@ -682,21 +750,26 @@ const DAY_MS = 24 * HOUR_MS;
 function EventsHeatmap({ events }: { events: EventRow[] }) {
   const { t } = useTranslation('events');
 
-  // PC list — same shape as the scatter so the two charts read in the
-  // same row order when stacked.
-  const pcs = useMemo(() => {
-    const set = new Set(events.map((e) => e.pc_id));
-    return Array.from(set).sort();
-  }, [events]);
+  // PC list — same shape (and same top-N cap, #496) as the scatter so
+  // the two charts read in the same row order when stacked.
+  const { pcs, totalPcs } = useMemo(
+    () => topPcsByEventCount(events, CHART_MAX_PCS),
+    [events],
+  );
 
   // Determine the bucket size + the bucket alignment fn. Aligning to
   // wall-clock boundaries (top-of-hour, midnight) keeps the columns
   // labelled with round numbers operators can match against their
   // own log of "what was I doing at 14:00".
   const { bucketMs, alignBucket, fmtBucket } = useMemo(() => {
+    // #496 / PR #561 review: span from the RENDERED (top-N) PCs only
+    // — a stray week-old event on a dropped host would otherwise
+    // flip the bucket size to daily for an hours-wide visible window.
+    const kept = new Set(pcs);
     let lo = Infinity;
     let hi = -Infinity;
     for (const ev of events) {
+      if (!kept.has(ev.pc_id)) continue;
       const ts = Date.parse(ev.at);
       if (Number.isNaN(ts)) continue;
       if (ts < lo) lo = ts;
@@ -743,7 +816,7 @@ function EventsHeatmap({ events }: { events: EventRow[] }) {
         return `${d.getMonth() + 1}/${d.getDate()}`;
       },
     };
-  }, [events]);
+  }, [events, pcs]);
 
   // (pc, bucket) → count + a CONTINUOUS bucket axis spanning lo..hi.
   //
@@ -761,10 +834,16 @@ function EventsHeatmap({ events }: { events: EventRow[] }) {
   // bucket.
   const { buckets, counts, max } = useMemo(() => {
     const map = new Map<string, number>();
+    const kept = new Set(pcs);
     let max = 0;
     let lo = Infinity;
     let hi = -Infinity;
     for (const ev of events) {
+      // #496: dropped (beyond-top-N) PCs never render a cell, so
+      // keeping them out of `max` keeps the alpha scale true to the
+      // rows actually shown. The time window still derives from the
+      // kept rows only, matching what the operator sees.
+      if (!kept.has(ev.pc_id)) continue;
       const ts = Date.parse(ev.at);
       if (Number.isNaN(ts)) continue;
       if (ts < lo) lo = ts;
@@ -799,7 +878,7 @@ function EventsHeatmap({ events }: { events: EventRow[] }) {
       }
     }
     return { buckets, counts: map, max };
-  }, [events, alignBucket, bucketMs]);
+  }, [events, pcs, alignBucket, bucketMs]);
 
   if (buckets.length === 0 || pcs.length === 0) return null;
 
@@ -822,6 +901,11 @@ function EventsHeatmap({ events }: { events: EventRow[] }) {
           <span className="ml-2 text-xs text-muted font-normal">
             {t('heatmap.bucketHint', { bucket: bucketLabel })}
           </span>
+          {totalPcs > pcs.length && (
+            <span className="ml-2 text-xs text-muted font-normal">
+              {t('chartPcCap', { shown: pcs.length, total: totalPcs })}
+            </span>
+          )}
         </CardTitle>
       </CardHeader>
       <CardContent className="pt-0 overflow-x-auto">
