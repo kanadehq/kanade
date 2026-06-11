@@ -1548,6 +1548,59 @@ target: { all: true }
     }
 
     #[test]
+    fn next_calendar_fire_returns_next_utc_occurrence() {
+        use chrono::TimeZone;
+        // Daily 09:00, evaluated in UTC. From 08:00 the same day, the
+        // next strict occurrence is 09:00 that day.
+        let mut s = schedule_with(calendar("09:00", &[]), RunsOn::Backend);
+        s.tz = ScheduleTz::Utc;
+        let now = chrono::Utc.with_ymd_and_hms(2026, 6, 9, 8, 0, 0).unwrap();
+        let next = s.next_calendar_fire(now).expect("calendar has a next fire");
+        assert_eq!(
+            next,
+            chrono::Utc.with_ymd_and_hms(2026, 6, 9, 9, 0, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn next_calendar_fire_is_strictly_after_now() {
+        use chrono::TimeZone;
+        // Standing exactly on a fire instant must preview the *next*
+        // one (inclusive = false), not the one firing right now.
+        let mut s = schedule_with(calendar("09:00", &[]), RunsOn::Backend);
+        s.tz = ScheduleTz::Utc;
+        let on_fire = chrono::Utc.with_ymd_and_hms(2026, 6, 9, 9, 0, 0).unwrap();
+        let next = s
+            .next_calendar_fire(on_fire)
+            .expect("calendar has a next fire");
+        assert_eq!(
+            next,
+            chrono::Utc.with_ymd_and_hms(2026, 6, 10, 9, 0, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn next_calendar_fire_none_for_reconcile_shapes() {
+        // `per_pc` / `per_target` lower to the every-minute poll cron —
+        // no discrete upcoming event to preview, so `None`.
+        let now = chrono::Utc::now();
+        for when in [
+            When::PerPc(PerPolicy::Once(OnceLiteral::Once)),
+            When::PerTarget(PerPolicy::Once(OnceLiteral::Once)),
+            When::PerPc(PerPolicy::Every(EverySpec { every: "6h".into() })),
+            When::PerTarget(PerPolicy::Every(EverySpec {
+                every: "24h".into(),
+            })),
+        ] {
+            let s = schedule_with(when, RunsOn::Backend);
+            assert!(
+                s.next_calendar_fire(now).is_none(),
+                "reconcile shapes have no calendar fire",
+            );
+        }
+    }
+
+    #[test]
     fn lowering_matches_the_418_table() {
         let cases = [
             (
@@ -3499,6 +3552,52 @@ impl Schedule {
                 cooldown: None,
                 tz,
             },
+        }
+    }
+
+    /// The next absolute (UTC) time this schedule fires, or `None` when
+    /// it has no discrete upcoming fire to preview.
+    ///
+    /// Used by the KLP `maintenance.list` preview ("what's about to
+    /// happen on my PC", SPEC §2.1). Returns `None` for:
+    ///
+    /// - reconcile shapes (`per_pc` / `per_target`) — they lower to the
+    ///   every-minute [`POLL_CRON`] and re-converge state continuously,
+    ///   so "next fire" is always ~60s away and means nothing to a user
+    ///   previewing upcoming maintenance;
+    /// - a calendar schedule whose lowered cron won't parse (a
+    ///   hand-edited KV blob that slipped past [`Schedule::validate`]);
+    /// - a cron with no future occurrence.
+    ///
+    /// The wall-clock fire is evaluated in the schedule's own `tz`
+    /// (matching the live tick's `Job::new_async_tz`) then normalised
+    /// to UTC for the wire. `inclusive = false`: strictly the *next*
+    /// fire after `now`, never one matching the current instant.
+    pub fn next_calendar_fire(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        if !matches!(self.when, When::Calendar(_)) {
+            return None;
+        }
+        let lowered = self.lowered();
+        // Same parser configuration tokio-cron-scheduler 0.15 uses
+        // internally, so this can never compute a fire the live
+        // scheduler wouldn't (seconds required, DOM-and-DOW honored).
+        let cron = croner::parser::CronParser::builder()
+            .seconds(croner::parser::Seconds::Required)
+            .dom_and_dow(true)
+            .build()
+            .parse(&lowered.cron)
+            .ok()?;
+        match lowered.tz {
+            ScheduleTz::Utc => cron.find_next_occurrence(&now, false).ok(),
+            ScheduleTz::Local => {
+                let now_local = now.with_timezone(&chrono::Local);
+                cron.find_next_occurrence(&now_local, false)
+                    .ok()
+                    .map(|t| t.with_timezone(&chrono::Utc))
+            }
         }
     }
 

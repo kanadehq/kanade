@@ -33,6 +33,7 @@ use kanade_shared::ipc::envelope::{RpcRequest, RpcResponse, decode_params};
 use kanade_shared::ipc::error::{ErrorKind, RpcError};
 use kanade_shared::ipc::handshake::HandshakeParams;
 use kanade_shared::ipc::jobs::{JobsExecuteParams, JobsKillParams, JobsListParams};
+use kanade_shared::ipc::maintenance::MaintenanceListParams;
 use kanade_shared::ipc::method;
 use kanade_shared::ipc::state::{
     StateSnapshotParams, StateSubscribeParams, StateUnsubscribeParams,
@@ -148,6 +149,15 @@ async fn dispatch_inner(
             let params: JobsKillParams =
                 serde_json::from_value(req.params.clone()).map_err(invalid_params)?;
             let result = handlers::jobs::handle_jobs_kill(conn, params).await?;
+            serde_json::to_value(&result).map_err(internal)
+        }
+        method::MAINTENANCE_LIST => {
+            // MaintenanceListParams.window_days has a serde default, so
+            // route through decode_params (an omitted body ⇒ the 7-day
+            // default), like jobs.list.
+            let params: MaintenanceListParams =
+                decode_params(req.params.clone()).map_err(invalid_params)?;
+            let result = handlers::maintenance::handle_maintenance_list(conn, params).await?;
             serde_json::to_value(&result).map_err(internal)
         }
         // Every other v1 method is reserved but not implemented
