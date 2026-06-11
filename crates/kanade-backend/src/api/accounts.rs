@@ -59,6 +59,33 @@ fn verify_password(pw: &str, phc: &str) -> bool {
     }
 }
 
+// #504: Argon2id is tens-to-hundreds of ms of pure CPU. The handlers
+// below run on the same tokio runtime as the projectors and the
+// scheduler, so hashing inline blocked a worker per attempt — and
+// `login` is public, so a dumb brute force coupled auth load
+// directly to fleet-pipeline latency on the mini PC's few cores.
+// spawn_blocking moves the work to the blocking pool.
+
+async fn hash_password_async(pw: String) -> anyhow::Result<String> {
+    tokio::task::spawn_blocking(move || hash_password(&pw))
+        .await
+        .map_err(|e| anyhow::anyhow!("hash task join: {e}"))?
+}
+
+async fn verify_password_async(pw: String, phc: String) -> bool {
+    // A join error means the verify closure panicked. Fail closed
+    // (treat as a failed verification), but log it — otherwise a
+    // panicking verifier is indistinguishable from a wrong password
+    // in production logs.
+    match tokio::task::spawn_blocking(move || verify_password(&pw, &phc)).await {
+        Ok(ok) => ok,
+        Err(e) => {
+            warn!(error = %e, "password verify task panicked; failing closed");
+            false
+        }
+    }
+}
+
 // ---- JWT minting ---------------------------------------------------
 
 /// Mint a signed HS256 token. `None` on a signing failure (logged) —
@@ -132,7 +159,7 @@ pub async fn login(
     let Some((hash, role, disabled, must_change_pw)) = row else {
         return Err(unauthorized());
     };
-    if disabled != 0 || !verify_password(&req.password, &hash) {
+    if disabled != 0 || !verify_password_async(req.password.clone(), hash).await {
         return Err(unauthorized());
     }
     let Some(role) = Role::parse(&role) else {
@@ -208,10 +235,11 @@ pub async fn change_password(
             .await
             .map_err(db_err)?
             .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "unknown account"))?;
-    if !verify_password(&req.old_password, &hash) {
+    if !verify_password_async(req.old_password.clone(), hash).await {
         return Err(err(StatusCode::UNAUTHORIZED, "old password incorrect"));
     }
-    let new_hash = hash_password(&req.new_password)
+    let new_hash = hash_password_async(req.new_password.clone())
+        .await
         .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "hash failed"))?;
     sqlx::query(
         "UPDATE users SET password_hash = ?, must_change_pw = 0, updated_at = CURRENT_TIMESTAMP WHERE username = ?",
@@ -286,7 +314,8 @@ pub async fn create(
             "role must be viewer/operator/admin",
         ));
     };
-    let hash = hash_password(&req.password)
+    let hash = hash_password_async(req.password.clone())
+        .await
         .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "hash failed"))?;
 
     let res = sqlx::query(
@@ -407,7 +436,8 @@ pub async fn update(
         }
     }
     if let Some(password) = &req.password {
-        let hash = hash_password(password)
+        let hash = hash_password_async(password.clone())
+            .await
             .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "hash failed"))?;
         // A reset forces the user to choose a new password on next login.
         sqlx::query(
