@@ -1,0 +1,53 @@
+# Emergency out-of-band swap of the kanade-agent binary — the recovery
+# path for when the agent's own self-update is wedged (e.g. #566, where
+# a digest-check bug pinned the agent to 0.43.46 with no way to pull the
+# fix). The normal upgrade path is `kanade agent rollout` (self-update);
+# this job is the bootstrap for when self-update itself is broken.
+#
+# The agent runs `agent-emergency-swap.ps1` as LocalSystem but cannot
+# stop its own service inline (that would kill the script), so the
+# script stages the verified binary and registers a one-shot SYSTEM
+# Scheduled Task that performs the stop -> swap -> start a short delay
+# later, detached from the agent's process tree. The job result reports
+# "swap scheduled" and publishes before the agent bounces.
+#
+# Workflow (operator side, edit version per release):
+#
+#   1. `kanade app publish kanade-agent 0.43.48 \
+#        dist/agent/kanade-agent.exe`            # target into app-packages
+#   2. Copy `scripts/deploy/agent-emergency-swap.ps1` locally, set:
+#        $AgentSourceUrl     = '<backend URL>'   # e.g. http://127.0.0.1:8080
+#        $AgentSourceVersion = '0.43.48'
+#        $AgentSourceSha256  = '<Get-FileHash ... -Algorithm SHA256>'
+#        $AgentSourceAuthToken = '<bearer for /api/app-packages>'
+#      then `kanade script publish deploy-agent-emergency 0.43.48 <edited copy>`
+#   3. Update `version:` below + `script_object:` to match.
+#   4. `kanade job create configs/jobs/installers/install-kanade-agent.yaml`
+#   5. `kanade exec install-kanade-agent --pcs <wedged-agent-host>`
+#      (flag is `--pcs <id>`, pc_id LOWERCASED).
+#
+# `require_approval: true` per SPEC §2.4.1 (parse-only today, #213) — a
+# binary swap of the control-plane endpoint is exactly the kind of
+# fan-out an operator should ack before it goes wide.
+
+id: install-kanade-agent
+version: 0.1.0
+description: "Emergency out-of-band swap of kanade-agent (self-update recovery, #566 follow-up)"
+
+execute:
+  shell: powershell
+  # `deploy-agent-emergency` lives in OBJECT_SCRIPTS (per
+  # `kanade script publish deploy-agent-emergency ...`). The agent
+  # fetches + sha-verifies it at exec time; the script's agent-mode
+  # knobs (edited before publish) say which kanade-agent version to
+  # pull from OBJECT_APP_PACKAGES and its expected sha.
+  script_object: deploy-agent-emergency/0.43.48
+  # Download (up to ~30s) + write runner + register task. The actual
+  # stop/swap/start runs in the detached task AFTER this returns, so
+  # this job's own window only needs to cover the staging work.
+  timeout: 180s
+  # MUST run as LocalSystem — Program Files write + Register-ScheduledTask
+  # (SYSTEM principal) + the detached Stop/Start-Service all need admin.
+  run_as: system
+
+require_approval: true
