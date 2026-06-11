@@ -36,6 +36,19 @@
     "jitterBadge": "ジッター {{jitter}}",
     "errorTitle": "ロールアウトに失敗しました"
   },
+  "health": {
+    "title": "採用状況: {{version}}",
+    "description": "選択中のターゲットバージョンをフリートがどれだけ採用したか。quarantined の端末はこのバージョンで起動失敗→ロールバック済み(= rollout が不良のサイン)。",
+    "loading": "エージェント読み込み中…",
+    "errorTitle": "エージェントを取得できません",
+    "atTarget": "到達",
+    "ofTotal": "全 {{total}} 台中",
+    "pending": "未到達",
+    "pendingHint": "まだこのバージョンでない",
+    "quarantined": "隔離",
+    "quarantinedHint": "起動失敗でロールバック済み",
+    "quarantinedLinkTitle": "エージェント一覧を見る"
+  },
   "releases": {
     "title": "オブジェクトストアのリリース",
     "description": "<code>/api/agents/releases</code> より。 <strong>ロールアウト</strong> をクリックすると、上のフォームを対象行に合わせて入力します。 <strong>削除</strong> はオブジェクトストアからバイナリを削除します (どこかのスコープがまだ対象としている場合は 409 で拒否されます)。",
