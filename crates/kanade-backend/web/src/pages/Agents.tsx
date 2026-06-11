@@ -65,13 +65,18 @@ export function Agents() {
   const [q, setQ] = useState('');
   const [offset, setOffset] = useState(0);
   const dQ = useDebouncedValue(q, FILTER_DEBOUNCE_MS);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const statusFilter = parseStatusFilter(searchParams.get('status'));
   const { data, error, isLoading } = useQuery({
-    queryKey: ['agents', dQ, offset],
+    queryKey: ['agents', dQ, offset, statusFilter],
     // Match the Dashboard cadence so the per-row online/offline badge
     // ages out a dropped agent within ~30s of the fleet-health tile.
+    // #563: the status filter rides to the server, so the Dashboard's
+    // `?status=offline` deep link pages over the whole fleet's
+    // offline hosts instead of filtering the current page.
     queryFn: () =>
       apiFetchPaged<AgentRow[]>(
-        `/api/agents?limit=${PAGE_SIZE}&offset=${offset}${dQ ? `&q=${encodeURIComponent(dQ)}` : ''}`,
+        `/api/agents?limit=${PAGE_SIZE}&offset=${offset}${dQ ? `&q=${encodeURIComponent(dQ)}` : ''}${statusFilter !== 'all' ? `&status=${statusFilter}` : ''}`,
       ),
     refetchInterval: 30_000,
   });
@@ -88,9 +93,6 @@ export function Agents() {
       else next.delete(pcId);
       return next;
     });
-  const [searchParams, setSearchParams] = useSearchParams();
-  const statusFilter = parseStatusFilter(searchParams.get('status'));
-
   // A new search (or status-chip change) resets to page 1 — a stale
   // offset against a narrower result set would show an empty page.
   // Adjusted during render (not useEffect) so the reset lands BEFORE
@@ -195,23 +197,27 @@ export function Agents() {
     );
   }
   if (error) return <ErrorCard title={t('errorTitle')} error={error} />;
-  const agents = data?.rows ?? [];
-  // One `now` snapshot for the whole render so the counts, the filter,
-  // and the per-row badges below all agree on liveness for an agent
-  // sitting right on the 2-min threshold.
+  // #563: rows arrive pre-filtered from the server; the fleet-wide
+  // per-status counts ride the response headers so the chips stay
+  // correct whichever chip is active (previously page-local).
+  const visible = data?.rows ?? [];
+  const onlineCount = data?.online ?? 0;
+  const offlineCount = data?.offline ?? 0;
+  // Headers missing (older backend) → fall back to the total so the
+  // "All" chip never shows a bogus 0 against a populated table.
+  const allCount =
+    data?.online !== undefined && data?.offline !== undefined
+      ? onlineCount + offlineCount
+      : total;
+  // One `now` snapshot for the whole render so the per-row badges
+  // below agree on liveness for an agent sitting on the threshold.
   const now = Date.now();
-  const onlineCount = agents.filter((a) => isAgentOnline(a.last_heartbeat, now)).length;
-  const offlineCount = agents.length - onlineCount;
-  const visible = agents.filter((a) => {
-    if (statusFilter === 'all') return true;
-    const online = isAgentOnline(a.last_heartbeat, now);
-    return statusFilter === 'online' ? online : !online;
-  });
 
   // Only the genuinely-empty fleet gets the onboarding card — a
-  // filtered-empty page (or an out-of-range offset) keeps the table
-  // chrome so the operator can clear the search / page back.
-  if (total === 0 && !dQ) {
+  // filtered-empty page (search, status chip, or an out-of-range
+  // offset) keeps the table chrome so the operator can clear the
+  // filter / page back.
+  if (total === 0 && !dQ && statusFilter === 'all') {
     return (
       <Card>
         <CardHeader className="items-center text-center">
@@ -254,11 +260,12 @@ export function Agents() {
           className="h-8 w-64"
         />
         {(['all', 'online', 'offline'] as const).map((s) => {
-          // 'All' shows the fleet-wide match count (the same number
-          // as the badge above); online/offline stay page-local —
-          // the acknowledged trade-off until a server-side status
-          // filter lands (PR #559 review, claude).
-          const count = s === 'online' ? onlineCount : s === 'offline' ? offlineCount : total;
+          // #563: every chip shows its fleet-wide (q-matching) count
+          // from the response headers — no longer page-local.
+          const count =
+            s === 'online' ? onlineCount
+            : s === 'offline' ? offlineCount
+            : allCount;
           const selected = statusFilter === s;
           return (
             <button

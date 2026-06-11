@@ -54,7 +54,19 @@ pub struct ListParams {
     /// `Vec<AgentRow>` and existing consumers (PcPicker, Dashboard)
     /// are untouched.
     pub offset: Option<u32>,
+    /// #563: `"online"` / `"offline"` liveness filter, evaluated
+    /// server-side against [`ALIVE_THRESHOLD`] so the Dashboard's
+    /// `/agents?status=offline` deep link pages over the WHOLE
+    /// fleet's offline hosts, not just the current page. Absent /
+    /// empty → no filter; anything else → 400.
+    pub status: Option<String>,
 }
+
+/// Heartbeat age past which an agent counts as offline. The single
+/// source of truth shared by this filter, the scheduler's expected-
+/// PC resolution, and (numerically — it hardcodes 2 min) the SPA's
+/// `isAgentOnline`.
+pub const ALIVE_THRESHOLD: chrono::Duration = chrono::Duration::minutes(2);
 
 pub async fn list(
     State(pool): State<SqlitePool>,
@@ -77,42 +89,70 @@ pub async fn list(
             format!("%{escaped}%")
         });
 
-    // `?2` is the row cap; SQLite treats a negative LIMIT as
+    // #563: validate the status filter up front — a typo'd value
+    // silently meaning "all" would defeat the deep link's purpose.
+    let status = match params.status.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(s @ ("online" | "offline")) => Some(s.to_string()),
+        Some(_) => return Err(StatusCode::BAD_REQUEST),
+    };
+    // One liveness instant for the whole request so the counts and
+    // the page rows agree about an agent sitting on the threshold.
+    let cutoff = chrono::Utc::now() - ALIVE_THRESHOLD;
+
+    // `?4` is the row cap; SQLite treats a negative LIMIT as
     // "unbounded", so the omitted-limit path binds -1 and keeps the
     // SQL a single static string (sqlx 0.9 rejects dynamically-built
     // query strings).
     let limit = params.limit.map(i64::from).unwrap_or(-1);
     let offset = params.offset.map(i64::from).unwrap_or(0);
 
-    // #495: pre-LIMIT match count for the paging header. The agents
-    // table is one row per PC (bounded by fleet size), so the COUNT
-    // is cheap — and skipped entirely for unbounded callers
+    // #495/#563: pre-LIMIT counts for the paging header + the
+    // status chips. One aggregate pass computes the q-matching
+    // total AND its online share, so the chips can show fleet-wide
+    // per-status numbers no matter which filter is active. The
+    // agents table is one row per PC (bounded by fleet size), so
+    // this is cheap — and skipped entirely for unbounded callers
     // (PcPicker / Dashboard pass no limit, so the row count IS the
     // total; PR #559 review, gemini).
     let needs_count = params.limit.is_some();
-    let counted: i64 = if !needs_count {
-        0
+    let (matched, online): (i64, i64) = if !needs_count {
+        (0, 0)
     } else {
-        sqlx::query_scalar(
-            "SELECT COUNT(*) FROM agents \
-         WHERE (?1 IS NULL OR pc_id LIKE ?1 ESCAPE '\\' OR hostname LIKE ?1 ESCAPE '\\')",
+        let row = sqlx::query(
+            "SELECT COUNT(*) AS matched, \
+                    CAST(COALESCE(SUM(CASE WHEN last_heartbeat IS NOT NULL \
+                                            AND last_heartbeat >= ?2 \
+                                           THEN 1 ELSE 0 END), 0) AS INTEGER) AS online \
+               FROM agents \
+              WHERE (?1 IS NULL OR pc_id LIKE ?1 ESCAPE '\\' OR hostname LIKE ?1 ESCAPE '\\')",
         )
         .bind(&like)
+        .bind(cutoff)
         .fetch_one(&pool)
         .await
         .map_err(|e| {
             warn!(error = %e, "count agents");
             StatusCode::INTERNAL_SERVER_ERROR
-        })?
+        })?;
+        (
+            row.try_get("matched").unwrap_or(0),
+            row.try_get("online").unwrap_or(0),
+        )
     };
 
     let rows = sqlx::query(
         "SELECT * FROM agents \
          WHERE (?1 IS NULL OR pc_id LIKE ?1 ESCAPE '\\' OR hostname LIKE ?1 ESCAPE '\\') \
+           AND (?2 IS NULL \
+                OR (?2 = 'online' AND last_heartbeat IS NOT NULL AND last_heartbeat >= ?3) \
+                OR (?2 = 'offline' AND (last_heartbeat IS NULL OR last_heartbeat < ?3))) \
          ORDER BY updated_at DESC \
-         LIMIT ?2 OFFSET ?3",
+         LIMIT ?4 OFFSET ?5",
     )
     .bind(&like)
+    .bind(&status)
+    .bind(cutoff)
     .bind(limit)
     .bind(offset)
     .fetch_all(&pool)
@@ -122,14 +162,29 @@ pub async fn list(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
+    // X-Total-Count reflects the ACTIVE filter (it drives paging);
+    // the per-status counts ride alongside so the chips stay
+    // fleet-wide-correct whichever chip is selected.
     let total: i64 = if needs_count {
-        counted
+        match status.as_deref() {
+            Some("online") => online,
+            Some("offline") => matched - online,
+            _ => matched,
+        }
     } else {
         offset + rows.len() as i64
     };
     let mut headers = HeaderMap::new();
     if let Ok(v) = total.to_string().parse() {
         headers.insert("X-Total-Count", v);
+    }
+    if needs_count {
+        if let Ok(v) = online.to_string().parse() {
+            headers.insert("X-Online-Count", v);
+        }
+        if let Ok(v) = (matched - online).to_string().parse() {
+            headers.insert("X-Offline-Count", v);
+        }
     }
     Ok((headers, Json(rows.into_iter().map(row_to_agent).collect())))
 }
@@ -202,11 +257,111 @@ mod tests {
                 q: q.map(Into::into),
                 limit,
                 offset: None,
+                status: None,
             }),
         )
         .await
         .unwrap();
         rows.into_iter().map(|r| r.pc_id).collect()
+    }
+
+    /// #563: mark a seeded agent online (heartbeat = now) or
+    /// long-offline (heartbeat = 1h ago); unset rows stay NULL.
+    async fn set_heartbeat(pool: &SqlitePool, pc_id: &str, online: bool) {
+        let hb = if online {
+            chrono::Utc::now()
+        } else {
+            chrono::Utc::now() - chrono::Duration::hours(1)
+        };
+        sqlx::query("UPDATE agents SET last_heartbeat = ? WHERE pc_id = ?")
+            .bind(hb)
+            .bind(pc_id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn status_filter_is_server_side_and_counts_are_fleet_wide() {
+        let pool = seeded_pool().await;
+        // PC001 online; PC002 stale; WS-9 / web%01 never heartbeated
+        // (NULL) — both NULL and stale count as offline.
+        set_heartbeat(&pool, "PC001", true).await;
+        set_heartbeat(&pool, "PC002", false).await;
+
+        let (headers, Json(rows)) = list(
+            State(pool),
+            Query(ListParams {
+                q: None,
+                limit: Some(2),
+                offset: None,
+                status: Some("offline".into()),
+            }),
+        )
+        .await
+        .unwrap();
+        let get = |h: &HeaderMap, k: &str| -> i64 {
+            h.get(k)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(|| panic!("{k} header missing or unparseable"))
+        };
+        // Page is offline-only and capped by limit…
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.pc_id != "PC001"));
+        // …while X-Total-Count reflects the active filter (3 offline
+        // fleet-wide — paging works past page 1) and the chip counts
+        // are fleet-wide regardless of the filter.
+        assert_eq!(get(&headers, "X-Total-Count"), 3);
+        assert_eq!(get(&headers, "X-Online-Count"), 1);
+        assert_eq!(get(&headers, "X-Offline-Count"), 3);
+    }
+
+    #[tokio::test]
+    async fn online_filter_returns_only_live_agents() {
+        let pool = seeded_pool().await;
+        set_heartbeat(&pool, "PC001", true).await;
+        let (headers, Json(rows)) = list(
+            State(pool),
+            Query(ListParams {
+                q: None,
+                limit: Some(10),
+                offset: None,
+                status: Some("online".into()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.pc_id.as_str()).collect::<Vec<_>>(),
+            vec!["PC001"]
+        );
+        let total: i64 = headers
+            .get("X-Total-Count")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse().ok())
+            .unwrap();
+        assert_eq!(total, 1);
+    }
+
+    #[tokio::test]
+    async fn invalid_status_is_a_bad_request() {
+        let pool = seeded_pool().await;
+        // `unwrap_err` would need AgentRow: Debug — match instead.
+        match list(
+            State(pool),
+            Query(ListParams {
+                q: None,
+                limit: Some(10),
+                offset: None,
+                status: Some("onlin".into()),
+            }),
+        )
+        .await
+        {
+            Err(code) => assert_eq!(code, StatusCode::BAD_REQUEST),
+            Ok(_) => panic!("a typo'd status must be a 400, not silently 'all'"),
+        }
     }
 
     #[tokio::test]
@@ -220,6 +375,7 @@ mod tests {
                 q: None,
                 limit: Some(1),
                 offset: Some(1),
+                status: None,
             }),
         )
         .await

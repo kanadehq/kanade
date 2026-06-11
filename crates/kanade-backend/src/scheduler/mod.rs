@@ -35,10 +35,10 @@ use crate::api::exec::exec_manifest;
 use policy::{Completion, FireAction, decide_fire, suppress_dispatched};
 
 /// `last_heartbeat` slack used to define "alive" for target
-/// resolution. Matches the dashboard/health rollup cutoff so a
-/// schedule's view of "all" lines up with what operators see in
-/// the SPA.
-const ALIVE_THRESHOLD: ChronoDuration = ChronoDuration::minutes(2);
+/// resolution. Re-exported from the agents API (#563) so the
+/// scheduler's view of "all", the `/api/agents` status filter, and
+/// the dashboard/health rollup all share one cutoff.
+use crate::api::agents::ALIVE_THRESHOLD;
 
 /// Drain margin folded into the in-flight suppression window — slack
 /// for a finished run's `ExecResult` to travel agent outbox → backend
