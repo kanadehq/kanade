@@ -55,6 +55,22 @@ pub enum ScheduleSub {
         #[arg(long)]
         cascade_kill: bool,
     },
+    /// Dry-run a schedule: print its next fire times (#418).
+    ///
+    /// Calendar schedules (`at` / `days`) print the next `--count`
+    /// wall-clock fires, resolved in the schedule's tz and honoring its
+    /// `active` window + `constraints.window` — so you can confirm a
+    /// `tue#2` / `friL` / overnight-window schedule does what you think
+    /// BEFORE deploying it. Reconcile shapes (`per_pc` / `per_target`)
+    /// poll every minute, so they print their cadence instead of
+    /// discrete times.
+    Preview {
+        id: String,
+        /// How many upcoming fires to list (1..=50, default 5). Rejected
+        /// at parse time when out of range rather than silently clamped.
+        #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u8).range(1..=50))]
+        count: u8,
+    },
 }
 
 pub async fn execute(backend_url: &str, args: ScheduleArgs) -> Result<()> {
@@ -68,7 +84,46 @@ pub async fn execute(backend_url: &str, args: ScheduleArgs) -> Result<()> {
             cascade,
             cascade_kill,
         } => disable(base, &id, cascade, cascade_kill).await,
+        ScheduleSub::Preview { id, count } => preview(base, &id, count).await,
     }
+}
+
+async fn preview(base: &str, id: &str, count: u8) -> Result<()> {
+    let url = format!("{base}/api/schedules/{id}/preview?count={count}");
+    let resp = crate::http_client::authed_client()?
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("preview failed: {status} — {body}");
+    }
+    let p: serde_json::Value = resp.json().await?;
+    let when = p.get("when").and_then(|v| v.as_str()).unwrap_or("?");
+    let tz = p.get("tz").and_then(|v| v.as_str()).unwrap_or("?");
+    let disabled = if p.get("enabled").and_then(|v| v.as_bool()) == Some(false) {
+        "  [DISABLED]"
+    } else {
+        ""
+    };
+    println!("{id}  —  {when}  (tz: {tz}){disabled}");
+    match p.get("fires").and_then(|v| v.as_array()) {
+        Some(f) if !f.is_empty() => {
+            for (i, t) in f.iter().enumerate() {
+                println!("  {:>2}. {}", i + 1, t.as_str().unwrap_or("?"));
+            }
+        }
+        _ => {
+            let note = p
+                .get("note")
+                .and_then(|v| v.as_str())
+                .unwrap_or("no upcoming fires");
+            println!("  (none) {note}");
+        }
+    }
+    Ok(())
 }
 
 async fn create(base: &str, yaml: &PathBuf) -> Result<()> {
