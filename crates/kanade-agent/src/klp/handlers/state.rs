@@ -154,6 +154,7 @@ mod tests {
         ConnectionState::new(
             PeerCredentials {
                 user: "DOMAIN\\alice".into(),
+                user_sid: "S-1-5-21-1001".into(),
                 session_id: 2,
             },
             "PC1234".into(),

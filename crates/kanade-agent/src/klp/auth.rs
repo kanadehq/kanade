@@ -32,6 +32,15 @@ pub struct PeerCredentials {
     /// account, deleted user, …). `username` on Unix once that
     /// path lands.
     pub user: String,
+    /// Canonical SID string (`S-1-5-21-…`) of the connected user,
+    /// from `ConvertSidToStringSidW` (or `"<unknown>"` if that call
+    /// fails — effectively never for a valid token SID). This — NOT
+    /// the renameable friendly [`user`](Self::user) — is the stable
+    /// per-user key KLP uses for the `notifications_read` KV row and
+    /// the `events.notifications.acked.>` subject (SPEC §2.12.4 / Phase
+    /// E): a shared PC tracks each user's notification acks
+    /// independently, and a SID survives an account rename.
+    pub user_sid: String,
     /// Console / RDP session id (Windows) or UID (Unix). Session
     /// 0 is the services session; user-interactive sessions start
     /// at 1.
@@ -51,7 +60,8 @@ mod windows_impl {
     use std::ffi::c_void;
     use std::os::windows::io::AsRawHandle;
     use tokio::net::windows::named_pipe::NamedPipeServer;
-    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Foundation::{CloseHandle, HANDLE, HLOCAL, LocalFree};
+    use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
     use windows::Win32::Security::{
         GetTokenInformation, LookupAccountSidW, PSID, SidTypeUser, TOKEN_QUERY, TOKEN_USER,
         TokenSessionId, TokenUser,
@@ -142,7 +152,7 @@ mod windows_impl {
             .context("GetTokenInformation(TokenUser) failed")?;
         }
 
-        let user = unsafe {
+        let (user, user_sid) = unsafe {
             // `buf` is a `Vec<u8>` with 1-byte alignment, but
             // `TOKEN_USER` wants pointer alignment (8 bytes on
             // x64). A `&*(buf.as_ptr() as *const TOKEN_USER)`
@@ -153,12 +163,50 @@ mod windows_impl {
             // assumption, so we get a well-aligned local.
             //
             // SAFETY: the embedded `PSID` still points into
-            // `buf`, which outlives `lookup_friendly` below.
+            // `buf`, which outlives both lookups below.
             let token_user: TOKEN_USER = std::ptr::read_unaligned(buf.as_ptr().cast());
-            lookup_friendly(token_user.User.Sid).unwrap_or_else(|_| "<unknown>".into())
+            let sid = token_user.User.Sid;
+            // Both resolutions are best-effort with a `"<unknown>"`
+            // fallback so a connection that only uses state/jobs still
+            // succeeds even on a pathological token. The Phase E ack
+            // handler rejects an `"<unknown>"` SID rather than writing a
+            // colliding KV row.
+            let user = lookup_friendly(sid).unwrap_or_else(|_| "<unknown>".into());
+            let user_sid = stringify_sid(sid).unwrap_or_else(|_| "<unknown>".into());
+            (user, user_sid)
         };
 
-        Ok(PeerCredentials { user, session_id })
+        Ok(PeerCredentials {
+            user,
+            user_sid,
+            session_id,
+        })
+    }
+
+    /// `ConvertSidToStringSidW` → canonical `S-1-5-21-…` string. The
+    /// SID string is the stable per-user identity KLP keys ack state on
+    /// (SPEC §2.12.4) — the friendly name can be renamed, the SID can't.
+    ///
+    /// # Safety
+    ///
+    /// `sid` must point to a valid SID owned by the caller, valid for
+    /// the duration of the call. The caller in
+    /// [`read_user_and_session`] holds the owning buffer (`buf`).
+    unsafe fn stringify_sid(sid: PSID) -> Result<String> {
+        unsafe {
+            // ConvertSidToStringSidW LocalAlloc's the output string and
+            // hands back a pointer we must LocalFree.
+            let mut raw = PWSTR::null();
+            ConvertSidToStringSidW(sid, &mut raw).context("ConvertSidToStringSidW failed")?;
+            if raw.is_null() {
+                bail!("ConvertSidToStringSidW returned a null string");
+            }
+            // Copy out before freeing; capture the result so the buffer
+            // is released on both the ok and err paths.
+            let owned = raw.to_string().context("SID string was not valid UTF-16");
+            let _ = LocalFree(Some(HLOCAL(raw.as_ptr() as *mut c_void)));
+            owned
+        }
     }
 
     /// `LookupAccountSidW` → `DOMAIN\\user`. Two-call sizing
