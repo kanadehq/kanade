@@ -210,6 +210,7 @@ mod tests {
     fn dummy_peer() -> PeerCredentials {
         PeerCredentials {
             user: "DOMAIN\\alice".into(),
+            user_sid: "S-1-5-21-1001".into(),
             session_id: 2,
         }
     }

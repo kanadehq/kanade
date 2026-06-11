@@ -7,10 +7,12 @@
 //!   for each incoming notification. Returns the subscription id
 //!   (`sub-n-<n>`).
 //! - `notifications.unsubscribe` — abort the named forwarder.
+//! - `notifications.ack` — write the per-user read mark into the
+//!   `notifications_read` KV and publish the
+//!   `events.notifications.acked.>` event the backend projects into the
+//!   operator's confirmation view.
 //!
-//! `notifications.list` (history replay) and `notifications.ack` land
-//! in follow-up PRs; this PR wires the live-push path so an operator
-//! send reaches a connected Client App.
+//! `notifications.list` (history replay) lands in a follow-up PR.
 //!
 //! Mirrors the `state.*` forwarder shape, but the source is a
 //! `broadcast::Receiver<Notification>` (discrete events) instead of a
@@ -19,16 +21,20 @@
 //! the cursor to the oldest still-buffered message, so delivery resumes
 //! there and works forward) and `RecvError::Closed` (the bus exited).
 
+use chrono::Utc;
 use kanade_shared::ipc::envelope::RpcNotification;
 use kanade_shared::ipc::error::{ErrorKind, RpcError};
 use kanade_shared::ipc::method;
 use kanade_shared::ipc::notifications::{
-    Notification, NotificationNewParams, NotificationsSubscribeParams,
-    NotificationsSubscribeResult, NotificationsUnsubscribeParams,
+    Notification, NotificationAcked, NotificationNewParams, NotificationsAckParams,
+    NotificationsAckResult, NotificationsSubscribeParams, NotificationsSubscribeResult,
+    NotificationsUnsubscribeParams,
 };
+use kanade_shared::kv::{BUCKET_NOTIFICATIONS_READ, notifications_read_key};
+use kanade_shared::subject;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use super::super::connection::ConnectionState;
 use super::system::HandlerResult;
@@ -69,6 +75,126 @@ pub fn handle_notifications_unsubscribe(
             format!("subscription '{}' not found", params.subscription),
         ))
     }
+}
+
+/// `notifications.ack` — record the caller's confirmation of one
+/// notification (SPEC §2.12.4 / Phase E). Two side effects:
+///
+/// 1. Write the per-user read mark into the `notifications_read` KV
+///    under `{pc_id}.{user_sid}.{notification_id}`, so
+///    `notifications.list` can filter this user's unread set.
+/// 2. Publish `events.notifications.acked.{pc_id}.{user_sid}.{notif_id}`
+///    (an acknowledged JetStream publish) so the backend's
+///    notification-acks projector records who confirmed when — that
+///    feeds `GET /api/notifications/{id}/ack_status`.
+///
+/// The SID is the OS-derived [`ConnectionState::peer`] identity, never
+/// a payload field (SPEC §2.12.4): a user can only ack as themselves,
+/// even on a shared PC. A connection whose SID couldn't be resolved
+/// (`"<unknown>"`) is rejected rather than writing a colliding row.
+pub async fn handle_notifications_ack(
+    conn: &ConnectionState,
+    params: NotificationsAckParams,
+) -> HandlerResult<NotificationsAckResult> {
+    // Validate inputs before touching NATS so a bad request fails
+    // cheaply (and so the guard paths are unit-testable without a
+    // broker).
+    let user_sid = conn.peer.user_sid.as_str();
+    if user_sid.is_empty() || user_sid == "<unknown>" {
+        return Err(RpcError::new(
+            ErrorKind::InternalError,
+            "caller SID could not be resolved; cannot record ack",
+        ));
+    }
+    let notif_id = params.id.trim();
+    if !valid_notification_id(notif_id) {
+        // The id flows into a NATS KV key and the ack publish subject,
+        // so an unvalidated id with NATS-special chars (space, `.`
+        // beyond the allowed set, wildcards `*` / `>`, `/`) would be
+        // rejected by the broker and surface as an opaque
+        // InternalError. Reject up front with InvalidParams instead.
+        return Err(RpcError::new(
+            ErrorKind::InvalidParams,
+            "notification id must be non-empty and contain only [A-Za-z0-9_.-]",
+        ));
+    }
+    let client = conn.nats.as_ref().ok_or_else(|| {
+        RpcError::new(
+            ErrorKind::InternalError,
+            "NATS client not available on this agent build",
+        )
+    })?;
+    let pc_id = conn.pc_id.as_str();
+    let acked_at = Utc::now();
+
+    let js = async_nats::jetstream::new(client.clone());
+
+    // 1. Persist the per-user read mark. Value matches SPEC §2.3.2:
+    //    `{"acked_at": ..., "acked_by": "<sid>"}`.
+    let kv = js
+        .get_key_value(BUCKET_NOTIFICATIONS_READ)
+        .await
+        .map_err(|e| {
+            RpcError::new(
+                ErrorKind::InternalError,
+                format!("open {BUCKET_NOTIFICATIONS_READ} KV: {e}"),
+            )
+        })?;
+    let key = notifications_read_key(pc_id, user_sid, notif_id);
+    let value = serde_json::to_vec(&serde_json::json!({
+        "acked_at": acked_at,
+        "acked_by": user_sid,
+    }))
+    .map_err(|e| RpcError::new(ErrorKind::InternalError, e.to_string()))?;
+    kv.put(key, value.into()).await.map_err(|e| {
+        RpcError::new(
+            ErrorKind::InternalError,
+            format!("write {BUCKET_NOTIFICATIONS_READ}: {e}"),
+        )
+    })?;
+
+    // 2. Publish the ack event (acknowledged JetStream publish so a
+    //    broker problem surfaces here instead of silently dropping the
+    //    operator's confirmation view).
+    let event = NotificationAcked {
+        notification_id: notif_id.to_string(),
+        pc_id: pc_id.to_string(),
+        user_sid: user_sid.to_string(),
+        acked_at,
+    };
+    let payload = serde_json::to_vec(&event)
+        .map_err(|e| RpcError::new(ErrorKind::InternalError, e.to_string()))?;
+    let subj = subject::events_notifications_acked(pc_id, user_sid, notif_id);
+    let ack = js
+        .publish(subj.clone(), payload.into())
+        .await
+        .map_err(|e| RpcError::new(ErrorKind::InternalError, format!("publish {subj}: {e}")))?;
+    ack.await.map_err(|e| {
+        RpcError::new(
+            ErrorKind::InternalError,
+            format!("ack publish to {subj} not confirmed: {e}"),
+        )
+    })?;
+
+    info!(
+        pc_id = %pc_id,
+        user_sid = %user_sid,
+        notification_id = %notif_id,
+        "notification acked",
+    );
+    Ok(NotificationsAckResult { acked_at })
+}
+
+/// `notifications.ack` id charset gate. Same `[A-Za-z0-9_.-]` set as
+/// `jobs::valid_job_id` (kept local so the two namespaces stay
+/// decoupled) — these are the characters safe in both a NATS KV key
+/// and a publish subject token, so a bad id is caught as
+/// `InvalidParams` here rather than as an opaque broker error later.
+fn valid_notification_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
 }
 
 /// Forwarder task body. Awaits each broadcast notification, builds a
@@ -168,6 +294,7 @@ mod tests {
         ConnectionState::new(
             PeerCredentials {
                 user: "DOMAIN\\alice".into(),
+                user_sid: "S-1-5-21-1001".into(),
                 session_id: 2,
             },
             "PC1234".into(),
@@ -261,5 +388,88 @@ mod tests {
         )
         .expect_err("unknown id must error");
         assert_eq!(err.data.expect("data").kind, ErrorKind::NotFound);
+    }
+
+    /// Build a connection with an explicit SID and no NATS client, for
+    /// exercising the `notifications.ack` input guards (which run before
+    /// any broker access). The happy path needs a live broker and is
+    /// covered by integration tests, not here.
+    fn conn_for_ack(user_sid: &str) -> ConnectionState {
+        let (_cfg_tx, cfg_rx) = watch::channel(EffectiveConfig::builtin_defaults());
+        let (_state_tx, state_rx) = watch::channel(dummy_snapshot());
+        let (push_tx, _push_rx) = mpsc::channel(8);
+        ConnectionState::new(
+            PeerCredentials {
+                user: "DOMAIN\\alice".into(),
+                user_sid: user_sid.into(),
+                session_id: 2,
+            },
+            "PC1234".into(),
+            "0.43.0".into(),
+            cfg_rx,
+            state_rx,
+            PathBuf::from("agent.log"),
+            push_tx,
+        )
+    }
+
+    #[test]
+    fn valid_notification_id_accepts_ids_rejects_nats_unsafe() {
+        for ok in ["notif-9f3a", "maintenance-2026-05-20", "a.b", "Job_123"] {
+            assert!(valid_notification_id(ok), "{ok} should be valid");
+        }
+        for bad in ["", "has space", "wild*", "a>b", "with/slash", "qu?x"] {
+            assert!(!valid_notification_id(bad), "{bad:?} should be invalid");
+        }
+    }
+
+    #[tokio::test]
+    async fn ack_blank_or_unsafe_id_returns_invalid_params() {
+        let conn = conn_for_ack("S-1-5-21-1001");
+        for bad in ["  ", "bad id", "wild*"] {
+            let err = handle_notifications_ack(&conn, NotificationsAckParams { id: bad.into() })
+                .await
+                .expect_err("bad id must error");
+            assert_eq!(
+                err.data.expect("data").kind,
+                ErrorKind::InvalidParams,
+                "id {bad:?}",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn ack_unknown_sid_is_rejected() {
+        // A connection whose SID couldn't be resolved must not write a
+        // colliding `<unknown>` KV row.
+        let conn = conn_for_ack("<unknown>");
+        let err = handle_notifications_ack(
+            &conn,
+            NotificationsAckParams {
+                id: "notif-1".into(),
+            },
+        )
+        .await
+        .expect_err("unknown SID must error");
+        let data = err.data.expect("data");
+        assert_eq!(data.kind, ErrorKind::InternalError);
+        assert!(data.detail.contains("SID"), "detail: {}", data.detail);
+    }
+
+    #[tokio::test]
+    async fn ack_without_nats_client_errors_internal() {
+        // Valid SID + id, but the test connection has no NATS client
+        // (conn_for_ack skips with_nats) — the handler reports an
+        // internal error rather than panicking.
+        let conn = conn_for_ack("S-1-5-21-1001");
+        let err = handle_notifications_ack(
+            &conn,
+            NotificationsAckParams {
+                id: "notif-1".into(),
+            },
+        )
+        .await
+        .expect_err("missing NATS client must error");
+        assert_eq!(err.data.expect("data").kind, ErrorKind::InternalError);
     }
 }

@@ -50,6 +50,30 @@ pub const BUCKET_FLEET_CONFIG: &str = "fleet_config";
 /// walk. `history: 1` — only the latest ack per key matters.
 pub const BUCKET_NOTIFICATIONS_READ: &str = "notifications_read";
 
+/// KV key in [`BUCKET_NOTIFICATIONS_READ`] for one user's ack of one
+/// notification: `{pc_id}.{user_sid}.{notification_id}` (SPEC §2.3.2).
+///
+/// The components are joined with `.` per the spec's documented key
+/// shape. In practice none of them contain a `.` — `pc_id` is a
+/// hostname, `user_sid` is `S-1-5-…` (hyphen-delimited), and the
+/// backend mints `notification_id` as a UUID (operator-supplied
+/// manifest ids are kebab-case) — so the join stays unambiguous and
+/// the `{pc_id}.{user_sid}.` prefix (see
+/// [`notifications_read_prefix`]) cleanly selects exactly one user's
+/// read set for `notifications.list`.
+pub fn notifications_read_key(pc_id: &str, user_sid: &str, notification_id: &str) -> String {
+    format!("{pc_id}.{user_sid}.{notification_id}")
+}
+
+/// Prefix selecting every ack row for one `(pc_id, user_sid)` in
+/// [`BUCKET_NOTIFICATIONS_READ`] — `{pc_id}.{user_sid}.`.
+/// `notifications.list` walks the bucket keys and keeps those carrying
+/// this prefix to compute the caller's unread set. Pairs with
+/// [`notifications_read_key`].
+pub fn notifications_read_prefix(pc_id: &str, user_sid: &str) -> String {
+    format!("{pc_id}.{user_sid}.")
+}
+
 /// Singleton key in [`BUCKET_FLEET_CONFIG`] holding the JSON-encoded
 /// [`crate::manifest::Freeze`]. **Key absent ⇒ not frozen** (clearing
 /// the freeze is a KV delete), so readers treat a missing key as "fire
@@ -313,6 +337,20 @@ mod tests {
             names.len(),
             "stream constants collide: {names:?}"
         );
+    }
+
+    #[test]
+    fn notifications_read_key_and_prefix_align() {
+        let key = notifications_read_key("PC1234", "S-1-5-21-1001", "notif-9f3a");
+        assert_eq!(key, "PC1234.S-1-5-21-1001.notif-9f3a");
+        let prefix = notifications_read_prefix("PC1234", "S-1-5-21-1001");
+        assert_eq!(prefix, "PC1234.S-1-5-21-1001.");
+        // The list path selects a user's read set by this prefix — the
+        // key for any of that user's notifications must carry it.
+        assert!(key.starts_with(&prefix));
+        // A different user's key must NOT match the prefix.
+        let other = notifications_read_key("PC1234", "S-1-5-21-1002", "notif-9f3a");
+        assert!(!other.starts_with(&prefix));
     }
 
     #[test]

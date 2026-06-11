@@ -36,7 +36,7 @@ use kanade_shared::ipc::jobs::{JobsExecuteParams, JobsKillParams, JobsListParams
 use kanade_shared::ipc::maintenance::MaintenanceListParams;
 use kanade_shared::ipc::method;
 use kanade_shared::ipc::notifications::{
-    NotificationsSubscribeParams, NotificationsUnsubscribeParams,
+    NotificationsAckParams, NotificationsSubscribeParams, NotificationsUnsubscribeParams,
 };
 use kanade_shared::ipc::state::{
     StateSnapshotParams, StateSubscribeParams, StateUnsubscribeParams,
@@ -181,6 +181,15 @@ async fn dispatch_inner(
             // SPEC §2.12.7's unsubscribe response is `{"result":null}`.
             Ok(serde_json::Value::Null)
         }
+        method::NOTIFICATIONS_ACK => {
+            // NotificationsAckParams has the required `id` field — route
+            // directly through serde so a missing id surfaces as
+            // InvalidParams.
+            let params: NotificationsAckParams =
+                serde_json::from_value(req.params.clone()).map_err(invalid_params)?;
+            let result = handlers::notifications::handle_notifications_ack(conn, params).await?;
+            serde_json::to_value(&result).map_err(internal)
+        }
         // Every other v1 method is reserved but not implemented
         // in this PR — answer MethodNotFound so client code can
         // tell "agent doesn't know about this" apart from
@@ -238,6 +247,7 @@ mod tests {
         ConnectionState::new(
             PeerCredentials {
                 user: "DOMAIN\\alice".into(),
+                user_sid: "S-1-5-21-1001".into(),
                 session_id: 2,
             },
             "PC1234".into(),
