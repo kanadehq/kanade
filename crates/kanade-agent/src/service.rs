@@ -76,16 +76,24 @@ fn run_service() -> windows_service::Result<()> {
                 ServiceControlHandlerResult::NoError
             }
             ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
-            // #418 `on: logon`: signal the local scheduler to fire its
-            // `on: logon` schedules. `SessionLogon` (WTS_SESSION_LOGON)
-            // is an **interactive-session** user logon — console, RDP, or
-            // auto-logon; it does NOT fire for service / network / batch
-            // logons (those create no WTS session). Other session-change
-            // reasons (Lock/Unlock/Connect/...) are intentionally ignored
-            // here but acknowledged (NoError) so the SCM stays happy.
+            // #418 event triggers: map the relevant WTS session-change
+            // reasons to `on:` triggers and signal the local scheduler.
+            // `SessionLogon` is an interactive-session user logon (console
+            // / RDP / auto-logon; NOT service / network / batch — those
+            // create no WTS session); `SessionLock` / `SessionUnlock` are
+            // the workstation lock / unlock. Other reasons
+            // (Connect/Disconnect/...) are intentionally ignored here but
+            // acknowledged (NoError) so the SCM stays happy.
             ServiceControl::SessionChange(param) => {
-                if param.reason == SessionChangeReason::SessionLogon {
-                    crate::local_scheduler::notify_logon();
+                use kanade_shared::manifest::OnTrigger;
+                let trigger = match param.reason {
+                    SessionChangeReason::SessionLogon => Some(OnTrigger::Logon),
+                    SessionChangeReason::SessionLock => Some(OnTrigger::Lock),
+                    SessionChangeReason::SessionUnlock => Some(OnTrigger::Unlock),
+                    _ => None,
+                };
+                if let Some(t) = trigger {
+                    crate::local_scheduler::notify_session_event(t);
                 }
                 ServiceControlHandlerResult::NoError
             }

@@ -1474,6 +1474,7 @@ target: { all: true }
             calendar("2026-06-10 09:00", &[]),
             When::On(vec![OnTrigger::Startup]),
             When::On(vec![OnTrigger::Startup, OnTrigger::Logon]),
+            When::On(vec![OnTrigger::Lock, OnTrigger::Unlock]),
         ] {
             // Event triggers are agent-only; the rest validate on backend.
             let runs_on = if matches!(when, When::On(_)) {
@@ -1529,6 +1530,10 @@ target: { all: true }
             (
                 When::On(vec![OnTrigger::Startup, OnTrigger::Logon]),
                 "on [startup,logon]",
+            ),
+            (
+                When::On(vec![OnTrigger::Lock, OnTrigger::Unlock]),
+                "on [lock,unlock]",
             ),
         ] {
             assert_eq!(when.to_string(), expected);
@@ -1848,7 +1853,14 @@ target: { all: true }
         for triggers in [
             vec![OnTrigger::Startup],
             vec![OnTrigger::Logon],
-            vec![OnTrigger::Startup, OnTrigger::Logon],
+            vec![OnTrigger::Lock],
+            vec![OnTrigger::Unlock],
+            vec![
+                OnTrigger::Startup,
+                OnTrigger::Logon,
+                OnTrigger::Lock,
+                OnTrigger::Unlock,
+            ],
         ] {
             schedule_with(When::On(triggers), RunsOn::Agent)
                 .validate()
@@ -3162,7 +3174,7 @@ pub enum When {
 }
 
 /// An OS event the agent can fire a schedule on (#418 `when: { on }`).
-/// `unlock` / `network_change` are planned follow-ups.
+/// `network_change` is a planned follow-up.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum OnTrigger {
@@ -3173,6 +3185,13 @@ pub enum OnTrigger {
     /// auto-logon (Windows `WTS_SESSION_LOGON`). Does not fire for
     /// service / network / batch logons (no interactive session).
     Logon,
+    /// When the workstation is locked (Win+L / idle lock; Windows
+    /// `WTS_SESSION_LOCK`). Use for step-away compliance / cleanup.
+    Lock,
+    /// When the workstation is unlocked — the user returns to a locked
+    /// session (Windows `WTS_SESSION_UNLOCK`). Use to re-check
+    /// compliance / refresh state when work resumes.
+    Unlock,
 }
 
 /// Calendar time trigger (#418 Phase 2). `at` is either a time of
@@ -3515,6 +3534,8 @@ impl OnTrigger {
         match self {
             OnTrigger::Startup => "startup",
             OnTrigger::Logon => "logon",
+            OnTrigger::Lock => "lock",
+            OnTrigger::Unlock => "unlock",
         }
     }
 }
