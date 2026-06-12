@@ -187,6 +187,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/schedules/{id}/yaml", get(schedules::get_yaml))
         .route("/api/schedules/{id}/preview", get(schedules::preview))
         .route("/api/schedules/{id}/status", get(schedules::status))
+        // #418 rollout coverage: per-schedule (full target roster vs
+        // run state) + a batch summary for the list view. The literal
+        // `/coverage` and the `{id}/coverage` param path don't collide
+        // (different segment counts).
+        .route("/api/schedules/coverage", get(schedules::coverage_summary))
+        .route("/api/schedules/{id}/coverage", get(schedules::coverage))
         .route("/api/schemas/manifest.json", get(schemas::manifest_schema))
         .route("/api/schemas/schedule.json", get(schemas::schedule_schema))
         .route("/api/jetstream/status", get(jetstream_status::status))

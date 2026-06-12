@@ -78,6 +78,20 @@ pub enum ScheduleSub {
     /// figures come from `execution_results` keyed by the schedule's
     /// `job_id` (so two schedules sharing a job share these numbers).
     Status { id: String },
+    /// Rollout coverage (#418): of the schedule's FULL target roster
+    /// (offline hosts included), how many have completed-ok / failed /
+    /// are running / are still pending — plus the manifest version each
+    /// agent last ran. Built for tracking a fleet-wide rollout (e.g. a
+    /// vuln-fix app upgrade) to completion.
+    ///
+    /// By default only the not-yet-done agents (fail / running /
+    /// pending) are listed; pass `--all` to list every targeted host.
+    Coverage {
+        id: String,
+        /// List every targeted host, not just the not-yet-done ones.
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 pub async fn execute(backend_url: &str, args: ScheduleArgs) -> Result<()> {
@@ -93,6 +107,7 @@ pub async fn execute(backend_url: &str, args: ScheduleArgs) -> Result<()> {
         } => disable(base, &id, cascade, cascade_kill).await,
         ScheduleSub::Preview { id, count } => preview(base, &id, count).await,
         ScheduleSub::Status { id } => status(base, &id).await,
+        ScheduleSub::Coverage { id, all } => coverage(base, &id, all).await,
     }
 }
 
@@ -186,6 +201,57 @@ async fn status(base: &str, id: &str) -> Result<()> {
         let ok = rec.get("ok").and_then(|v| v.as_i64()).unwrap_or(0);
         let fail = rec.get("fail").and_then(|v| v.as_i64()).unwrap_or(0);
         println!("  last {h}h : {ok} ok / {fail} fail");
+    }
+    Ok(())
+}
+
+async fn coverage(base: &str, id: &str, all: bool) -> Result<()> {
+    let url = format!("{base}/api/schedules/{id}/coverage");
+    let resp = crate::http_client::authed_client()?
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    if !resp.status().is_success() {
+        let s = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("coverage failed: {s} — {body}");
+    }
+    let p: serde_json::Value = resp.json().await?;
+    let when = p.get("when").and_then(|v| v.as_str()).unwrap_or("?");
+    let job = p.get("job_id").and_then(|v| v.as_str()).unwrap_or("?");
+    let runs_on = p.get("runs_on").and_then(|v| v.as_str()).unwrap_or("?");
+    let n = |k: &str| p.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+    let (total, ok, fail, running, pending) =
+        (n("total"), n("ok"), n("fail"), n("running"), n("pending"));
+    println!("{id}  —  {when}  (job: {job}, runs_on: {runs_on})");
+    println!("  rollout : {ok}/{total} ok · {fail} fail · {running} running · {pending} pending");
+
+    // Per-agent detail: not-yet-done by default (fail/running/pending),
+    // everything with --all. ok rows are quiet unless --all.
+    let show = |state: &str| all || state != "ok";
+    if let Some(agents) = p.get("agents").and_then(|v| v.as_array()) {
+        let mut shown = 0usize;
+        for a in agents {
+            let state = a.get("state").and_then(|v| v.as_str()).unwrap_or("?");
+            if !show(state) {
+                continue;
+            }
+            let pc = a.get("pc_id").and_then(|v| v.as_str()).unwrap_or("?");
+            let ver = a.get("version").and_then(|v| v.as_str()).unwrap_or("—");
+            println!("  {pc:<24} {state:<8} {ver}");
+            shown += 1;
+        }
+        if shown == 0 {
+            println!(
+                "  {}",
+                if all {
+                    "(no targeted agents)"
+                } else {
+                    "(all targeted agents done)"
+                }
+            );
+        }
     }
     Ok(())
 }
