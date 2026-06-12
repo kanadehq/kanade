@@ -468,6 +468,10 @@ async fn run(
             script_cache.clone(),
             check_sink.clone(),
         );
+        // #418 `on: network_change`: a blocking NotifyAddrChange watcher
+        // + debouncer that routes settled network changes through the
+        // same session-event channel.
+        spawn_network_change_watcher();
     }
 
     // #418 Phase 5: mirror the fleet change-freeze into `State` so
@@ -1422,6 +1426,88 @@ fn spawn_session_event_task(
             .await;
         }
     })
+}
+
+/// How long the network must be quiet before a burst of address changes
+/// (one connect / DHCP renew / VPN / Wi-Fi roam emits several) counts as
+/// a single `on: network_change` fire.
+#[cfg(target_os = "windows")]
+const NETWORK_CHANGE_DEBOUNCE_SECS: u64 = 8;
+
+/// #418 `on: network_change`: watch the OS for IP-address-table changes
+/// and route settled changes through [`notify_session_event`] (so they
+/// share the session-event fire path). A dedicated OS thread runs the
+/// blocking `NotifyAddrChange` (it returns once per change); an async
+/// debouncer coalesces a burst into one fire after the network is quiet
+/// for [`NETWORK_CHANGE_DEBOUNCE_SECS`].
+#[cfg(target_os = "windows")]
+fn spawn_network_change_watcher() {
+    let (raw_tx, mut raw_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+
+    // Async debouncer: one fire per settled burst.
+    tokio::spawn(async move {
+        let debounce = std::time::Duration::from_secs(NETWORK_CHANGE_DEBOUNCE_SECS);
+        while raw_rx.recv().await.is_some() {
+            // Drain further changes until the network is quiet for the
+            // whole debounce window, then fire once.
+            loop {
+                tokio::select! {
+                    next = raw_rx.recv() => {
+                        if next.is_none() { return; } // watcher thread gone
+                        // another change arrived — keep waiting
+                    }
+                    _ = tokio::time::sleep(debounce) => break,
+                }
+            }
+            debug!("local_scheduler: network change settled — firing on:network_change");
+            notify_session_event(OnTrigger::NetworkChange);
+        }
+    });
+
+    // Blocking watcher on a dedicated OS thread: NotifyAddrChange(NULL,
+    // NULL) blocks until the next IPv4 address-table change.
+    let spawned = std::thread::Builder::new()
+        .name("kanade-netwatch".into())
+        .spawn(move || {
+            use windows::Win32::NetworkManagement::IpHelper::NotifyAddrChange;
+            // Floor on how often the blocking call may return. Normally
+            // NotifyAddrChange genuinely blocks until the next change, but
+            // under anomalies (IP Helper service restart, driver glitch) it
+            // can return immediately and spin the thread at 100% CPU. Pace
+            // it to one wakeup / 500ms so a pathological stack can't melt a
+            // core (gemini #612).
+            const MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+            let mut last_run = std::time::Instant::now();
+            loop {
+                // SAFETY: both args NULL → synchronous blocking call that
+                // returns NO_ERROR (0) on the next address change.
+                let ret = unsafe { NotifyAddrChange(std::ptr::null_mut(), std::ptr::null()) };
+                if ret != 0 {
+                    // Transient failure — back off so we don't busy-loop.
+                    warn!(code = ret, "NotifyAddrChange failed; retrying");
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    last_run = std::time::Instant::now();
+                    continue;
+                }
+                // Anti-busy-loop pacing for the immediate-return case.
+                let elapsed = last_run.elapsed();
+                if elapsed < MIN_INTERVAL {
+                    std::thread::sleep(MIN_INTERVAL - elapsed);
+                }
+                last_run = std::time::Instant::now();
+                if raw_tx.send(()).is_err() {
+                    break; // debouncer dropped — agent shutting down
+                }
+            }
+        });
+    if let Err(e) = spawned {
+        // Without this thread, on:network_change never fires — surface it
+        // instead of swallowing the spawn error (claude #612).
+        warn!(
+            error = %e,
+            "failed to spawn kanade-netwatch thread; on:network_change will not fire",
+        );
+    }
 }
 
 async fn local_tick(

@@ -74,6 +74,9 @@ windows = { version = "0.62.2", features = [
     # `ConvertStringSecurityDescriptorToSecurityDescriptorW` from
     # the Authorization sub-feature.
     "Win32_Security_Authorization",
+    # #418 `on: network_change`: NotifyAddrChange (blocking) to wake the
+    # network-change watcher when the IP address table changes.
+    "Win32_NetworkManagement_IpHelper",
     "Win32_Storage_FileSystem",
     "Win32_System_Environment",
     "Win32_System_IO",

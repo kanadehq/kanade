@@ -1475,6 +1475,7 @@ target: { all: true }
             When::On(vec![OnTrigger::Startup]),
             When::On(vec![OnTrigger::Startup, OnTrigger::Logon]),
             When::On(vec![OnTrigger::Lock, OnTrigger::Unlock]),
+            When::On(vec![OnTrigger::NetworkChange]),
         ] {
             // Event triggers are agent-only; the rest validate on backend.
             let runs_on = if matches!(when, When::On(_)) {
@@ -1534,6 +1535,10 @@ target: { all: true }
             (
                 When::On(vec![OnTrigger::Lock, OnTrigger::Unlock]),
                 "on [lock,unlock]",
+            ),
+            (
+                When::On(vec![OnTrigger::NetworkChange]),
+                "on [network_change]",
             ),
         ] {
             assert_eq!(when.to_string(), expected);
@@ -1855,11 +1860,13 @@ target: { all: true }
             vec![OnTrigger::Logon],
             vec![OnTrigger::Lock],
             vec![OnTrigger::Unlock],
+            vec![OnTrigger::NetworkChange],
             vec![
                 OnTrigger::Startup,
                 OnTrigger::Logon,
                 OnTrigger::Lock,
                 OnTrigger::Unlock,
+                OnTrigger::NetworkChange,
             ],
         ] {
             schedule_with(When::On(triggers), RunsOn::Agent)
@@ -3174,7 +3181,6 @@ pub enum When {
 }
 
 /// An OS event the agent can fire a schedule on (#418 `when: { on }`).
-/// `network_change` is a planned follow-up.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum OnTrigger {
@@ -3192,6 +3198,18 @@ pub enum OnTrigger {
     /// session (Windows `WTS_SESSION_UNLOCK`). Use to re-check
     /// compliance / refresh state when work resumes.
     Unlock,
+    /// When the host's network changes — IP address table change on
+    /// connect / disconnect / DHCP renew / VPN / Wi-Fi roam (Windows
+    /// `NotifyAddrChange`). Debounced agent-side (a burst of changes
+    /// from one transition fires once after the network settles), so
+    /// use it for "re-check connectivity / re-register on network move"
+    /// rather than expecting one fire per raw adapter event.
+    ///
+    /// IPv4 only: `NotifyAddrChange` watches the IPv4 address table, so a
+    /// transition that touches only IPv6 addresses won't fire. In practice
+    /// dual-stack networks change both tables together, but a pure-IPv6
+    /// move (e.g. an IPv6-only Wi-Fi roam) is not detected.
+    NetworkChange,
 }
 
 /// Calendar time trigger (#418 Phase 2). `at` is either a time of
@@ -3536,6 +3554,7 @@ impl OnTrigger {
             OnTrigger::Logon => "logon",
             OnTrigger::Lock => "lock",
             OnTrigger::Unlock => "unlock",
+            OnTrigger::NetworkChange => "network_change",
         }
     }
 }

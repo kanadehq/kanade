@@ -677,8 +677,7 @@ tz: local
 で発火。`runs_on: agent` 専用（agent が自分の event source を持つ。
 `backend` は validate で reject、空リストも reject）。各イベント発生ごとに
 1回、freeze / active / `constraints.window` / `skip_dates` の標準ゲート込みで
-発火する。現状 `startup` / `logon` / `lock` / `unlock`（`network_change` は
-follow-up）。
+発火する。現状 `startup` / `logon` / `lock` / `unlock` / `network_change`。
 
 ```yaml
 # OS 起動時 / ログオン時 / ロック解除時に走らせる（agent ネイティブ）
@@ -698,6 +697,9 @@ self-update / クラッシュ再起動など同一 boot 内の再起動では再
 RDP リモート / 自動ログオンを含む。サービス / ネットワーク / バッチ等の非対話
 ログオンは WTS セッションを作らないため発火しない）、`lock` / `unlock`
 （`WTS_SESSION_LOCK` / `_UNLOCK`）はワークステーションのロック / ロック解除。
+`network_change`（`NotifyAddrChange`）は IP アドレステーブルの変化（接続/切断/
+DHCP 更新/VPN/Wi-Fi ローミング）で発火 ─ 1回の遷移が複数の生イベントを出すため
+**agent 側でデバウンス**（ネットワークが落ち着いてから1回）。
 
 **`tz`（Phase 2）** — `local`（既定・実行ホストの TZ。`runs_on: agent`
 なら agent、それ以外は backend サーバー）/ `utc`。calendar の `at` も
