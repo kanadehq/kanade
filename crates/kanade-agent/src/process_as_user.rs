@@ -56,8 +56,9 @@ use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
 use windows::Win32::System::Threading::{
     CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW,
-    GetCurrentProcess, GetExitCodeProcess, INFINITE, OpenProcessToken, PROCESS_INFORMATION,
-    ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOW, TerminateProcess, WaitForSingleObject,
+    DETACHED_PROCESS, GetCurrentProcess, GetExitCodeProcess, INFINITE, OpenProcessToken,
+    PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOW, TerminateProcess,
+    WaitForSingleObject,
 };
 use windows::core::PWSTR;
 
@@ -586,4 +587,169 @@ fn build_command_line(
     let mut wide: Vec<u16> = full.encode_wide().collect();
     wide.push(0);
     Ok((wide, launch))
+}
+
+/// Launch a GUI process **detached** in the active console session, as
+/// the logged-in user (Phase E emergency fallback, #102). Fire-and-forget:
+/// no stdio pipes, no wait, no job object — the agent only needs to
+/// *start* the Client App (which then shows its own toast and stays
+/// hidden until clicked); it doesn't capture output or manage the
+/// child's lifetime.
+///
+/// Mirrors the `RunAs::User` token path of [`run_command_in_user_session`]
+/// but strips everything that path needs for capture / kill / timeout,
+/// leaving the minimal "start it in the user's interactive session"
+/// core. `DETACHED_PROCESS` + `lpDesktop = winsta0\\default` so the
+/// child belongs to the interactive desktop (its window can appear when
+/// the user clicks the toast) without the agent owning a console.
+///
+/// Errors when there's no console user or the spawn fails; the caller
+/// logs and moves on (a missing fallback must not break anything).
+pub(crate) fn launch_detached_in_user_session(
+    exe: &std::path::Path,
+    args: &[&str],
+) -> anyhow::Result<()> {
+    // SAFETY: every Win32 call is checked; the token / env block are
+    // freed via RAII; the command-line and desktop buffers outlive the
+    // CreateProcessAsUserW call; both returned handles are closed.
+    unsafe {
+        let session = WTSGetActiveConsoleSessionId();
+        if session == u32::MAX {
+            bail!("no active console session (no logged-in user)");
+        }
+        let token = acquire_token(RunAs::User, session)?;
+
+        // Mutable, NUL-terminated wide command line. Each token is quoted
+        // and escaped per `CommandLineToArgvW` rules: a run of N
+        // backslashes before a `"` becomes 2N+1 (so the quote is
+        // literal), and a trailing run before the closing quote becomes
+        // 2N (so a path like `C:\dir\` doesn't escape the quote). Our only
+        // args today are an exe path + a UUID, but the helper is general.
+        let mut cmd = String::new();
+        push_quoted_arg(&mut cmd, &exe.to_string_lossy());
+        for a in args {
+            cmd.push(' ');
+            push_quoted_arg(&mut cmd, a);
+        }
+        let mut cmd_buf: Vec<u16> = cmd.encode_utf16().collect();
+        cmd_buf.push(0);
+
+        let mut env_block: *mut core::ffi::c_void = std::ptr::null_mut();
+        let env_ok = CreateEnvironmentBlock(&mut env_block, Some(token.raw()), false).is_ok();
+        if !env_ok {
+            warn!(
+                target: "kanade_agent::process_as_user",
+                "CreateEnvironmentBlock failed; client inherits the agent's env",
+            );
+        }
+        // Reuse the file-level RAII guard (identical to a local one).
+        let env_guard = EnvBlockGuard(if env_ok {
+            env_block
+        } else {
+            std::ptr::null_mut()
+        });
+
+        let mut si: STARTUPINFOW = std::mem::zeroed();
+        si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        let mut desktop: Vec<u16> = "winsta0\\default".encode_utf16().collect();
+        desktop.push(0);
+        si.lpDesktop = PWSTR(desktop.as_mut_ptr());
+
+        let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
+        let flags = CREATE_UNICODE_ENVIRONMENT | DETACHED_PROCESS;
+        let env_ptr = if env_guard.0.is_null() {
+            None
+        } else {
+            Some(env_guard.0 as *const _ as _)
+        };
+
+        CreateProcessAsUserW(
+            Some(token.raw()),
+            PWSTR::null(),
+            Some(PWSTR(cmd_buf.as_mut_ptr())),
+            None,
+            None,
+            false, // bInheritHandles = FALSE — no pipes to inherit.
+            flags,
+            env_ptr,
+            PWSTR::null(), // inherit the agent's cwd (irrelevant for a GUI app)
+            &si,
+            &mut pi,
+        )
+        .map_err(|e| {
+            anyhow!(
+                "CreateProcessAsUserW(client) failed: {e:?} (Win32 {:?})",
+                GetLastError(),
+            )
+        })?;
+
+        // Fire-and-forget: drop both handles, never wait on the GUI.
+        let _ = CloseHandle(pi.hThread);
+        let _ = CloseHandle(pi.hProcess);
+        Ok(())
+    }
+}
+
+/// Append one argument to a Windows command line, quoted and escaped per
+/// the `CommandLineToArgvW` rules: a run of N backslashes immediately
+/// before a `"` is doubled and a `\` added (2N+1) so the quote is
+/// literal, and a trailing run before the closing quote is doubled (2N)
+/// so a value like `C:\dir\` doesn't escape it.
+fn push_quoted_arg(cmd: &mut String, arg: &str) {
+    cmd.push('"');
+    let mut backslashes = 0usize;
+    for c in arg.chars() {
+        match c {
+            '\\' => backslashes += 1,
+            '"' => {
+                for _ in 0..backslashes * 2 + 1 {
+                    cmd.push('\\');
+                }
+                cmd.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                for _ in 0..backslashes {
+                    cmd.push('\\');
+                }
+                cmd.push(c);
+                backslashes = 0;
+            }
+        }
+    }
+    for _ in 0..backslashes * 2 {
+        cmd.push('\\');
+    }
+    cmd.push('"');
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use super::push_quoted_arg;
+
+    fn quoted(arg: &str) -> String {
+        let mut s = String::new();
+        push_quoted_arg(&mut s, arg);
+        s
+    }
+
+    #[test]
+    fn plain_arg_is_just_quoted() {
+        assert_eq!(quoted("--show-notification"), "\"--show-notification\"");
+        assert_eq!(quoted("notif-9f3a"), "\"notif-9f3a\"");
+    }
+
+    #[test]
+    fn trailing_backslashes_are_doubled() {
+        // `C:\dir\` → `"C:\dir\\"` so the closing quote isn't escaped.
+        assert_eq!(quoted(r"C:\dir\"), "\"C:\\dir\\\\\"");
+    }
+
+    #[test]
+    fn embedded_quote_is_escaped() {
+        // `a"b` → `"a\"b"`.
+        assert_eq!(quoted("a\"b"), "\"a\\\"b\"");
+        // `\"` → backslash then quote → `"\\\"" ` (2*1+1 = 3 backslashes).
+        assert_eq!(quoted("\\\""), "\"\\\\\\\"\"");
+    }
 }

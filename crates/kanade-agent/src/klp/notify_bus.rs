@@ -29,7 +29,7 @@
 //! a follow-up PR).
 
 use futures::stream::StreamExt;
-use kanade_shared::ipc::notifications::Notification;
+use kanade_shared::ipc::notifications::{Notification, NotificationPriority};
 use kanade_shared::subject;
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
@@ -182,11 +182,29 @@ fn forward(msg: &async_nats::Message, notif_tx: &broadcast::Sender<Notification>
                 Ok(n) => {
                     debug!(pc_id = %pc_id, notification_id = %id, receivers = n, "notify_bus: broadcast")
                 }
-                Err(_) => debug!(
-                    pc_id = %pc_id,
-                    notification_id = %id,
-                    "notify_bus: no connected clients; dropped (recoverable via notifications.list)",
-                ),
+                // `send` returns the un-delivered notification in the
+                // error, so we can inspect its priority: no Client App is
+                // subscribed (the normal idle, at-most-once drop). For an
+                // `emergency` that drop would silently lose the whole
+                // point of the notification, so launch the Client App in
+                // the user session to toast it (#102). info/warn stay
+                // dropped — they recover via `notifications.list`.
+                Err(broadcast::error::SendError(dropped)) => {
+                    if dropped.priority == NotificationPriority::Emergency {
+                        warn!(
+                            pc_id = %pc_id,
+                            notification_id = %id,
+                            "notify_bus: emergency with no subscribed client; launching client to toast it",
+                        );
+                        super::emergency_notify::surface_emergency(&id);
+                    } else {
+                        debug!(
+                            pc_id = %pc_id,
+                            notification_id = %id,
+                            "notify_bus: no connected clients; dropped (recoverable via notifications.list)",
+                        );
+                    }
+                }
             }
         }
         Err(e) => warn!(
