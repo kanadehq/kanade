@@ -21,9 +21,10 @@
       ├── <role>.toml         (or nats-server.conf — edit before deploy)
       └── deploy-<role>.ps1   (run on the target as Admin)
 
-  Default roles include nats, so a clean checkout produces everything
-  needed to bootstrap a fleet (the agent, the backend, and the
-  broker) in one invocation. Pass -Roles to restrict.
+  Default roles include nats and the end-user client, so a clean
+  checkout produces everything needed to bootstrap a fleet (the agent,
+  the backend, the broker) plus the Tauri client app in one
+  invocation. Pass -Roles to restrict.
 
   Pass -Zip to also produce <OutDir>\<role>.zip (Compress-Archive)
   for handoff via filesharing tools that prefer single archives.
@@ -62,12 +63,14 @@
   .zip.
 
 .PARAMETER Roles
-  Which roles to stage. Default: agent, backend, nats. `client` is
-  also supported but binary-only — it stages just kanade-client.exe
-  (no <role>.toml / deploy-<role>.ps1, since the Tauri app ships via
-  the install-kanade-client job rather than as a Windows service).
-  It's not in the default fleet-bootstrap set; pass `-Roles client`
-  (or include it explicitly) to stage it.
+  Which roles to stage. Default: agent, backend, nats, client.
+  `client` is binary-only — it stages just kanade-client.exe (no
+  <role>.toml / deploy-<role>.ps1, since the Tauri app ships via the
+  install-kanade-client job rather than as a Windows service). It's in
+  the default set so a release stage always carries the current client
+  binary alongside the services; its cache probe reads the exe's
+  embedded version metadata (not `--version`, which would run the GUI),
+  so an already-current client zip is skipped just like the services.
 
 .PARAMETER TargetDir
   Cargo `--target-dir` for cached build artifacts shared across runs.
@@ -111,7 +114,7 @@ param(
     [switch]  $FromCrates,
     [string]  $GitHubRepo  = 'yukimemi/kanade',
     [switch]  $Zip,
-    [string[]]$Roles       = @('agent', 'backend', 'nats'),
+    [string[]]$Roles       = @('agent', 'backend', 'nats', 'client'),
     [string]  $TargetDir,
     [switch]  $Force
 )
@@ -230,35 +233,46 @@ foreach ($role in $Roles) {
 
     $exeDst = Join-Path $stage $exeName
 
-    # Fast-path: skip the fetch when the staged binary already
-    # reports the desired version. nats-server has no embedded
-    # workspace metadata, so we still rely on its `--version` line
-    # for the cache hit check.
+    # Fast-path: skip the fetch when the staged binary already reports
+    # the desired version.
     #
-    # BinaryOnly roles (the Tauri client) are excluded from this
-    # exec-based cache probe: kanade-client is a GUI app and running
-    # it with `--version` here could pop a window / hang the ops
-    # script, so we just re-fetch it each run (an 11 MB download) and
-    # never invoke the staged exe.
+    # Two probe styles:
+    #   * BinaryOnly roles (the Tauri client) read the embedded PE
+    #     metadata (`(Get-Item).VersionInfo.ProductVersion`) — this does
+    #     NOT execute the GUI exe, so it can't pop a window / hang the
+    #     ops script, and matches how `install-kanade-client.ps1` checks
+    #     the installed version. So the client gets cache-hit skipping
+    #     too, instead of re-downloading its ~11 MB zip every run.
+    #   * Everything else runs `<exe> --version` (nats-server has no
+    #     embedded workspace metadata, so its `--version` line is the
+    #     only source).
     $wantVer = if ($spec.External) { $NatsVersion } else { $Version }
     $skipBuild = $false
-    if (-not $FromSource -and -not $Force -and -not $spec.BinaryOnly -and (Test-Path $exeDst)) {
+    if (-not $FromSource -and -not $Force -and (Test-Path $exeDst)) {
         try {
-            $verLine = (& $exeDst --version 2>$null) | Select-Object -First 1
-            if ($verLine) {
-                # `nats-server: v2.11.10` vs `kanade-agent 0.10.0` — split
-                # on whitespace and take the LAST token, then strip a
-                # leading 'v' if present.
-                $installed = ($verLine -split '\s+')[-1].TrimStart('v').Trim()
-                if ($installed -eq $wantVer) {
-                    Write-Host "Cached: $exeName already at v$wantVer (pass -Force to rebuild)."
-                    $skipBuild = $true
-                } else {
-                    Write-Host "Stale: $exeName reports '$installed', want '$wantVer' — rebuilding."
+            $installed = $null
+            if ($spec.BinaryOnly) {
+                # Embedded version metadata — no exec, no window.
+                $pv = (Get-Item $exeDst).VersionInfo.ProductVersion
+                if ($pv) { $installed = $pv.TrimStart('v').Trim() }
+            } else {
+                $verLine = (& $exeDst --version 2>$null) | Select-Object -First 1
+                if ($verLine) {
+                    # `nats-server: v2.11.10` vs `kanade-agent 0.10.0` —
+                    # split on whitespace, take the LAST token, strip a
+                    # leading 'v'.
+                    $installed = ($verLine -split '\s+')[-1].TrimStart('v').Trim()
                 }
             }
+            if ($installed -and $installed -eq $wantVer) {
+                Write-Host "Cached: $exeName already at v$wantVer (pass -Force to rebuild)."
+                $skipBuild = $true
+            } elseif ($installed) {
+                Write-Host "Stale: $exeName reports '$installed', want '$wantVer' — rebuilding."
+            }
         } catch {
-            # Couldn't run the staged exe — fall through to a rebuild.
+            # Couldn't read the staged binary's version — fall through to
+            # a rebuild.
         }
     }
 
