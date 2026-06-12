@@ -7,8 +7,9 @@ use futures::TryStreamExt;
 use kanade_shared::kv::{
     BUCKET_SCHEDULES, BUCKET_SCHEDULES_YAML, BUCKET_SCRIPT_STATUS, SCRIPT_STATUS_REVOKED,
 };
-use kanade_shared::manifest::Schedule;
+use kanade_shared::manifest::{RunsOn, Schedule};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use tracing::{info, warn};
 
 use crate::api::AppState;
@@ -287,6 +288,408 @@ pub async fn status(
         last_run,
         recent,
     }))
+}
+
+// ---- #418 rollout coverage (N targeted, M completed) ----
+
+/// One agent's standing in a schedule's rollout.
+#[derive(Serialize)]
+pub struct AgentRun {
+    pub pc_id: String,
+    /// `"ok"` | `"fail"` | `"running"` | `"pending"`.
+    pub state: &'static str,
+    /// Manifest version pinned on the agent's latest finished run —
+    /// the lever for vuln-response version tracking. `null` while
+    /// running / pending.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// RFC3339 finish time of that run; `null` while running / pending.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+}
+
+/// Rollout coverage of a schedule across its FULL targeted roster
+/// (offline hosts included → `pending`). `job_id`-keyed like
+/// [`schedule_run_stats`]: any run of the job counts, which is the
+/// right "did this upgrade reach the host" signal but means schedules
+/// sharing a job (or ad-hoc execs of it) share the figures.
+#[derive(Serialize, Default)]
+pub struct CoverageResponse {
+    pub id: String,
+    pub when: String,
+    pub job_id: String,
+    pub runs_on: String,
+    /// Size of the full targeted roster — the "N" of "M of N".
+    pub total: usize,
+    pub ok: usize,
+    pub fail: usize,
+    pub running: usize,
+    pub pending: usize,
+    pub agents: Vec<AgentRun>,
+}
+
+/// Per-schedule coverage counts for the list view (no per-agent detail).
+#[derive(Serialize)]
+pub struct CoverageSummary {
+    pub id: String,
+    pub total: usize,
+    pub ok: usize,
+    pub fail: usize,
+    pub running: usize,
+    pub pending: usize,
+}
+
+fn runs_on_str(r: RunsOn) -> &'static str {
+    match r {
+        RunsOn::Backend => "backend",
+        RunsOn::Agent => "agent",
+    }
+}
+
+/// An agent's latest finished run for a job: `(exit_code, version,
+/// finished_at)`. NULL-able since a finished row can carry a NULL exit.
+type FinishedRun = (Option<i64>, Option<String>, Option<String>);
+/// pc_id → its latest finished run, for one job.
+type FinishedMap = HashMap<String, FinishedRun>;
+
+/// Pure rollout-coverage aggregation, factored out of [`coverage`] so
+/// it's unit-testable without a DB/KV. For each pc in the FULL roster:
+/// in-flight (a row with `finished_at IS NULL`) → running; else its
+/// latest finished run's exit code → ok (`0`) / fail (anything else,
+/// incl. a NULL exit on a finished row); else (no rows at all) →
+/// pending. Offline-but-targeted hosts have no rows ⇒ pending — exactly
+/// the "hasn't rolled out yet" signal. Returns `(agents, ok, fail,
+/// running, pending)`.
+fn coverage_for(
+    roster: &[String],
+    inflight: &HashSet<String>,
+    finished: &FinishedMap,
+) -> (Vec<AgentRun>, usize, usize, usize, usize) {
+    let mut agents = Vec::with_capacity(roster.len());
+    let (mut ok, mut fail, mut running, mut pending) = (0usize, 0usize, 0usize, 0usize);
+    for pc in roster {
+        if inflight.contains(pc) {
+            running += 1;
+            agents.push(AgentRun {
+                pc_id: pc.clone(),
+                state: "running",
+                version: None,
+                finished_at: None,
+            });
+        } else if let Some((exit, version, finished_at)) = finished.get(pc) {
+            let state = match exit {
+                Some(0) => {
+                    ok += 1;
+                    "ok"
+                }
+                _ => {
+                    fail += 1;
+                    "fail"
+                }
+            };
+            agents.push(AgentRun {
+                pc_id: pc.clone(),
+                state,
+                version: version.clone(),
+                finished_at: finished_at.clone(),
+            });
+        } else {
+            pending += 1;
+            agents.push(AgentRun {
+                pc_id: pc.clone(),
+                state: "pending",
+                version: None,
+                finished_at: None,
+            });
+        }
+    }
+    (agents, ok, fail, running, pending)
+}
+
+/// Per-job in-flight set + latest-finished map for one job. The latest
+/// row per pc is picked deterministically via `ROW_NUMBER()` ordered by
+/// `finished_at DESC, result_id DESC` — so a same-millisecond tie
+/// resolves stably (claude #617) instead of relying on JOIN row order.
+/// Excludes stdout/stderr.
+async fn coverage_rows(
+    pool: &sqlx::SqlitePool,
+    job_id: &str,
+) -> Result<(HashSet<String>, FinishedMap), sqlx::Error> {
+    use sqlx::Row;
+    let inflight: HashSet<String> = sqlx::query(
+        "SELECT DISTINCT pc_id FROM execution_results
+          WHERE job_id = ? AND finished_at IS NULL",
+    )
+    .bind(job_id)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .filter_map(|r| r.try_get::<String, _>("pc_id").ok())
+    .collect();
+
+    let mut finished = HashMap::new();
+    let rows = sqlx::query(
+        "SELECT pc_id, exit_code, finished_at, version FROM (
+             SELECT pc_id, exit_code, finished_at, version,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY pc_id
+                        ORDER BY finished_at DESC, result_id DESC
+                    ) AS rn
+               FROM execution_results
+              WHERE job_id = ? AND finished_at IS NOT NULL
+         ) WHERE rn = 1",
+    )
+    .bind(job_id)
+    .fetch_all(pool)
+    .await?;
+    for r in rows {
+        let pc: String = r.try_get("pc_id").unwrap_or_default();
+        if pc.is_empty() {
+            continue;
+        }
+        // NULL-safe reads (see schedule_run_stats for the sqlx-sqlite
+        // NULL-decodes-to-default quirk).
+        let exit = r.try_get::<Option<i64>, _>("exit_code").unwrap_or(None);
+        let version = r.try_get::<Option<String>, _>("version").unwrap_or(None);
+        let finished_at = r
+            .try_get::<Option<String>, _>("finished_at")
+            .unwrap_or(None);
+        finished.insert(pc, (exit, version, finished_at));
+    }
+    Ok((inflight, finished))
+}
+
+/// GET /api/schedules/{id}/coverage — rollout coverage for one
+/// schedule: how many of its FULL targeted roster have completed-ok /
+/// failed / are running / are still pending, with the manifest version
+/// each agent last ran (#418 "ロールアウト・カバレッジ可視化"). The
+/// roster includes offline hosts so "pending" reflects true rollout
+/// progress. Read-only.
+pub async fn coverage(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<CoverageResponse>, (StatusCode, String)> {
+    let kv = s
+        .jetstream
+        .get_key_value(BUCKET_SCHEDULES)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("schedules bucket missing: {e}"),
+            )
+        })?;
+    let bytes = kv
+        .get(&id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("KV get: {e}")))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("schedule '{id}' not found")))?;
+    let schedule: Schedule = serde_json::from_slice(&bytes).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("deserialize stored schedule: {e}"),
+        )
+    })?;
+
+    let roster = crate::scheduler::resolve_roster(&s, &schedule.plan.target, false)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("roster: {e}")))?;
+    let (inflight, finished) = coverage_rows(&s.pool, &schedule.job_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("coverage: {e}")))?;
+    let (agents, ok, fail, running, pending) = coverage_for(&roster, &inflight, &finished);
+
+    Ok(Json(CoverageResponse {
+        id: schedule.id.clone(),
+        when: schedule.when.to_string(),
+        job_id: schedule.job_id.clone(),
+        runs_on: runs_on_str(schedule.runs_on).to_string(),
+        total: roster.len(),
+        ok,
+        fail,
+        running,
+        pending,
+        agents,
+    }))
+}
+
+/// GET /api/schedules/coverage — coverage counts for EVERY schedule in
+/// one shot (list-view progress bars, no per-agent detail).
+///
+/// Scaling: the `execution_results` row scan is **2 queries total**
+/// (one in-flight, one latest-finished, keyed by the union of job_ids).
+/// Rosters are resolved once per **distinct target** (deduped — many
+/// schedules share `all: true`) and **concurrently**, so the
+/// agents-table / KV work is O(distinct targets), not O(schedules).
+/// Caveat: a `groups` target with `alive_only = false` still reads the
+/// group KV once per agent ever seen; at thousands-of-PCs scale that
+/// wants an `agent_groups` SQL projection (follow-up, gemini #617).
+/// Read-only.
+pub async fn coverage_summary(
+    State(s): State<AppState>,
+) -> Result<Json<Vec<CoverageSummary>>, (StatusCode, String)> {
+    use futures::StreamExt;
+    use sqlx::Row;
+    let kv = match s.jetstream.get_key_value(BUCKET_SCHEDULES).await {
+        Ok(k) => k,
+        Err(_) => return Ok(Json(Vec::new())),
+    };
+    let keys: Vec<String> = kv
+        .keys()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("kv keys: {e}")))?
+        .try_collect()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("kv keys: {e}")))?;
+
+    // Concurrent KV fetch (gemini #617) — sequential get-per-key adds up.
+    let schedules: Vec<Schedule> = futures::stream::iter(keys)
+        .map(|k| {
+            let kv = kv.clone();
+            async move {
+                kv.get(&k)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|bytes| serde_json::from_slice::<Schedule>(&bytes).ok())
+            }
+        })
+        .buffer_unordered(16)
+        .filter_map(|s| async move { s })
+        .collect()
+        .await;
+
+    // Union of job_ids → two batch queries (dynamic IN list).
+    let job_ids: Vec<String> = schedules
+        .iter()
+        .map(|s| s.job_id.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    // job_id → in-flight pc set.
+    let mut inflight: HashMap<String, HashSet<String>> = HashMap::new();
+    // job_id → (pc → (exit, version, finished_at)).
+    let mut finished: HashMap<String, FinishedMap> = HashMap::new();
+
+    if !job_ids.is_empty() {
+        let placeholders = vec!["?"; job_ids.len()].join(",");
+
+        let inflight_sql = format!(
+            "SELECT DISTINCT job_id, pc_id FROM execution_results
+              WHERE job_id IN ({placeholders}) AND finished_at IS NULL"
+        );
+        // Safe: `placeholders` is a fixed count of literal `?`, no user
+        // data interpolated — values go through `bind` below.
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(inflight_sql));
+        for jid in &job_ids {
+            q = q.bind(jid);
+        }
+        for r in q
+            .fetch_all(&s.pool)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("inflight: {e}")))?
+        {
+            let (Ok(jid), Ok(pc)) = (
+                r.try_get::<String, _>("job_id"),
+                r.try_get::<String, _>("pc_id"),
+            ) else {
+                continue;
+            };
+            inflight.entry(jid).or_default().insert(pc);
+        }
+
+        // Deterministic latest-per-(job,pc) via ROW_NUMBER (ties broken
+        // by result_id, claude #617). The `job_id IN (..)` lives in the
+        // inner WHERE so the planner can seek a (job_id, finished_at)
+        // index instead of scanning the whole table.
+        let finished_sql = format!(
+            "SELECT job_id, pc_id, exit_code, finished_at, version FROM (
+                 SELECT job_id, pc_id, exit_code, finished_at, version,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY job_id, pc_id
+                            ORDER BY finished_at DESC, result_id DESC
+                        ) AS rn
+                   FROM execution_results
+                  WHERE job_id IN ({placeholders}) AND finished_at IS NOT NULL
+             ) WHERE rn = 1"
+        );
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(finished_sql));
+        for jid in &job_ids {
+            q = q.bind(jid);
+        }
+        for r in q
+            .fetch_all(&s.pool)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("finished: {e}")))?
+        {
+            let (Ok(jid), Ok(pc)) = (
+                r.try_get::<String, _>("job_id"),
+                r.try_get::<String, _>("pc_id"),
+            ) else {
+                continue;
+            };
+            if pc.is_empty() {
+                continue;
+            }
+            let exit = r.try_get::<Option<i64>, _>("exit_code").unwrap_or(None);
+            let version = r.try_get::<Option<String>, _>("version").unwrap_or(None);
+            let finished_at = r
+                .try_get::<Option<String>, _>("finished_at")
+                .unwrap_or(None);
+            finished
+                .entry(jid)
+                .or_default()
+                .insert(pc, (exit, version, finished_at));
+        }
+    }
+
+    // Resolve each DISTINCT target once, concurrently. The JSON form of
+    // `Target` is the dedup key; many schedules share `all: true` so
+    // this collapses the agents/KV work to O(distinct targets).
+    let mut distinct: HashMap<String, kanade_shared::manifest::Target> = HashMap::new();
+    for sched in &schedules {
+        let key = serde_json::to_string(&sched.plan.target).unwrap_or_default();
+        distinct
+            .entry(key)
+            .or_insert_with(|| sched.plan.target.clone());
+    }
+    let rosters: HashMap<String, Vec<String>> = futures::stream::iter(distinct)
+        .map(|(key, target)| {
+            let s = s.clone();
+            async move {
+                let roster = crate::scheduler::resolve_roster(&s, &target, false).await;
+                (key, roster)
+            }
+        })
+        .buffer_unordered(8)
+        .filter_map(|(k, r)| async move { r.ok().map(|v| (k, v)) })
+        .collect()
+        .await;
+
+    let empty_set: HashSet<String> = HashSet::new();
+    let empty_map: FinishedMap = HashMap::new();
+    let out: Vec<CoverageSummary> = schedules
+        .iter()
+        .map(|sched| {
+            let key = serde_json::to_string(&sched.plan.target).unwrap_or_default();
+            // A target that failed to resolve degrades to an empty
+            // roster (0/0) rather than failing the whole list.
+            let roster = rosters.get(&key).cloned().unwrap_or_default();
+            let inf = inflight.get(&sched.job_id).unwrap_or(&empty_set);
+            let fin = finished.get(&sched.job_id).unwrap_or(&empty_map);
+            let (_, ok, fail, running, pending) = coverage_for(&roster, inf, fin);
+            CoverageSummary {
+                id: sched.id.clone(),
+                total: roster.len(),
+                ok,
+                fail,
+                running,
+                pending,
+            }
+        })
+        .collect();
+    Ok(Json(out))
 }
 
 /// POST /api/schedules — upsert.
@@ -936,6 +1339,70 @@ mod tests {
         assert_eq!(recent.window_hours, 24);
     }
 
+    /// Insert a finished/in-flight row for a specific pc + version, so a
+    /// coverage_rows test can exercise the per-pc latest-wins SQL (the
+    /// shared `insert_exec` is pinned to pc-1 / no version).
+    #[allow(clippy::too_many_arguments)]
+    async fn insert_run(
+        pool: &SqlitePool,
+        result_id: &str,
+        job_id: &str,
+        pc_id: &str,
+        exit_code: Option<i64>,
+        finished: bool,
+        version: &str,
+        recorded_ago_min: i64,
+    ) {
+        let now = Utc::now();
+        let recorded = now - Duration::minutes(recorded_ago_min);
+        let started = recorded - Duration::minutes(1);
+        let finished_at = finished.then_some(recorded);
+        sqlx::query(
+            "INSERT INTO execution_results
+                (result_id, request_id, pc_id, exit_code, stdout, stderr,
+                 started_at, finished_at, recorded_at, job_id, version)
+             VALUES (?, 'req', ?, ?, '', '', ?, ?, ?, ?, ?)",
+        )
+        .bind(result_id)
+        .bind(pc_id)
+        .bind(exit_code)
+        .bind(started)
+        .bind(finished_at)
+        .bind(recorded)
+        .bind(job_id)
+        .bind(version)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn coverage_rows_picks_latest_finished_per_pc() {
+        let pool = fresh_pool().await;
+        // pc-a: an older ok then a newer fail (latest wins) + version.
+        insert_run(&pool, "a1", "j1", "pc-a", Some(0), true, "v1", 120).await;
+        insert_run(&pool, "a2", "j1", "pc-a", Some(1), true, "v2", 30).await;
+        // pc-b: finished ok AND a later in-flight row → must appear in
+        // BOTH the finished map (ok/v3) and the in-flight set.
+        insert_run(&pool, "b1", "j1", "pc-b", Some(0), true, "v3", 60).await;
+        insert_run(&pool, "b2", "j1", "pc-b", None, false, "v3", 5).await;
+        // Different job must not bleed in.
+        insert_run(&pool, "x1", "j2", "pc-a", Some(0), true, "v9", 10).await;
+
+        let (inflight, finished) = coverage_rows(&pool, "j1").await.unwrap();
+
+        assert!(inflight.contains("pc-b"));
+        assert!(!inflight.contains("pc-a"));
+        // pc-a latest finished is the fail at v2.
+        assert_eq!(finished.get("pc-a").unwrap().0, Some(1));
+        assert_eq!(finished.get("pc-a").unwrap().1.as_deref(), Some("v2"));
+        // pc-b finished ok at v3 (the in-flight row is separate).
+        assert_eq!(finished.get("pc-b").unwrap().0, Some(0));
+        assert_eq!(finished.get("pc-b").unwrap().1.as_deref(), Some("v3"));
+        // j2's pc-a row didn't leak.
+        assert_eq!(finished.len(), 2);
+    }
+
     #[tokio::test]
     async fn run_stats_empty_for_unknown_job() {
         let pool = fresh_pool().await;
@@ -946,5 +1413,106 @@ mod tests {
             .unwrap();
         assert!(last.is_none());
         assert_eq!((recent.ok, recent.fail), (0, 0));
+    }
+
+    // ---- coverage_for (#418 rollout coverage) ----
+
+    use super::{FinishedMap, coverage_for, coverage_rows};
+    use std::collections::{HashMap, HashSet};
+
+    fn pcs(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn coverage_classifies_each_roster_pc() {
+        // Roster of 5 targeted hosts. pc-ok succeeded, pc-fail failed,
+        // pc-run is in-flight, pc-pend never ran, pc-off is offline and
+        // never ran (still counted — that's the point of the full
+        // roster). in-flight wins over a stale finished row for the
+        // same pc.
+        let roster = pcs(&["pc-ok", "pc-fail", "pc-run", "pc-pend", "pc-off"]);
+        let inflight: HashSet<String> = ["pc-run"].iter().map(|s| s.to_string()).collect();
+        let mut finished: FinishedMap = HashMap::new();
+        finished.insert(
+            "pc-ok".into(),
+            (
+                Some(0),
+                Some("v1.4.3".into()),
+                Some("2026-06-12T00:00:00Z".into()),
+            ),
+        );
+        finished.insert(
+            "pc-fail".into(),
+            (
+                Some(1),
+                Some("v1.4.2".into()),
+                Some("2026-06-12T00:00:00Z".into()),
+            ),
+        );
+        // A stale finished row for the currently-running pc — running
+        // must take precedence.
+        finished.insert("pc-run".into(), (Some(0), None, None));
+
+        let (agents, ok, fail, running, pending) = coverage_for(&roster, &inflight, &finished);
+        assert_eq!((ok, fail, running, pending), (1, 1, 1, 2));
+        assert_eq!(agents.len(), 5);
+
+        let state = |pc: &str| agents.iter().find(|a| a.pc_id == pc).unwrap().state;
+        assert_eq!(state("pc-ok"), "ok");
+        assert_eq!(state("pc-fail"), "fail");
+        assert_eq!(state("pc-run"), "running");
+        assert_eq!(state("pc-pend"), "pending");
+        assert_eq!(state("pc-off"), "pending");
+
+        // Version is surfaced only on finished rows.
+        let ver = |pc: &str| {
+            agents
+                .iter()
+                .find(|a| a.pc_id == pc)
+                .unwrap()
+                .version
+                .clone()
+        };
+        assert_eq!(ver("pc-ok").as_deref(), Some("v1.4.3"));
+        assert_eq!(ver("pc-run"), None);
+        assert_eq!(ver("pc-pend"), None);
+    }
+
+    #[test]
+    fn coverage_all_pending_when_no_runs() {
+        let roster = pcs(&["a", "b", "c"]);
+        let (agents, ok, fail, running, pending) =
+            coverage_for(&roster, &HashSet::new(), &HashMap::new());
+        assert_eq!((ok, fail, running, pending), (0, 0, 0, 3));
+        assert!(agents.iter().all(|a| a.state == "pending"));
+    }
+
+    #[test]
+    fn coverage_finished_with_null_exit_is_fail() {
+        // A finished row (finished_at set) but NULL exit_code is treated
+        // conservatively as a failure, not a success.
+        let roster = pcs(&["x"]);
+        let mut finished: FinishedMap = HashMap::new();
+        finished.insert(
+            "x".into(),
+            (None, None, Some("2026-06-12T00:00:00Z".into())),
+        );
+        let (_, ok, fail, _, _) = coverage_for(&roster, &HashSet::new(), &finished);
+        assert_eq!((ok, fail), (0, 1));
+    }
+
+    #[test]
+    fn coverage_ignores_runs_for_pcs_outside_roster() {
+        // A finished run for a pc no longer in the target must not be
+        // counted — the totals follow the roster, not the result table.
+        let roster = pcs(&["in"]);
+        let mut finished: FinishedMap = HashMap::new();
+        finished.insert("in".into(), (Some(0), None, None));
+        finished.insert("gone".into(), (Some(0), None, None));
+        let (agents, ok, _, _, _) = coverage_for(&roster, &HashSet::new(), &finished);
+        assert_eq!(ok, 1);
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].pc_id, "in");
     }
 }

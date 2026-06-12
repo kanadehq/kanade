@@ -759,6 +759,30 @@ constraints:
 （書式・始端=終端）/ 未登録 `job_id`（API のみ・JOBS KV 照会）/
 `active.from >= until`。
 
+**可視化（read-only エンドポイント）** — schedule の状態は 3 つの
+read-only ビューで確認できる（CLI `kanade schedule {preview,status,coverage}`
++ 同名 API + SPA の Schedules ページ）:
+
+- `GET /api/schedules/{id}/preview` — calendar schedule の次 N 回の
+  発火時刻を tz 解決して列挙（`active` / `constraints.window` /
+  `skip_dates` を honor）。reconcile 形は cadence を返す。
+- `GET /api/schedules/{id}/status` — `enabled` / 次回発火 / 直近 1 件の
+  run / 直近 24h の ok・fail 集計。
+- `GET /api/schedules/{id}/coverage` — **ロールアウト・カバレッジ**。
+  schedule の `target` を**全台（オフライン含む）**に解決し、各 agent の
+  最新実行結果を `ok` / `fail` / `running`（`finished_at IS NULL`）/
+  `pending`（未実行）に分類して「N 台中 M 台完了」を出す。各 agent が
+  最後に実行した manifest `version` も並記（脆弱性対応の版追跡向け）。
+  脆弱性対応のアプリ更新等、フリート全体への行き渡りを追跡する用途。
+  `GET /api/schedules/coverage`（id 無し）は一覧用に全 schedule の
+  集計カウントを 1 リクエストで返す（SPA の進捗バー）。
+  集計は `execution_results.job_id` キー（`execution_results` に
+  `schedule_id` 列が無いため）— 同 job を共有する複数 schedule や同 job
+  への ad-hoc `exec` も同じ数字に乗る（「その job が行き渡ったか」と
+  しては正しい）。母数の「全台」は `resolve_roster(.., alive_only=false)`
+  で解決（dispatch は alive のみだが coverage は未実行のオフライン台も
+  pending として数える）。
+
 ### 2.4.4 Agent / Backend 設定ファイル (TOML + teravars 変数展開)
 
 Agent / Backend 自体の起動設定は **TOML + Tera テンプレート構文** で記述し、`yukimemi/teravars` crate (v0.1.5+) で読み込む。teravars は `[vars]` セクションの自己参照解決 + `system.*` context + クロスプラットフォーム判定 (`is_windows()` / `is_linux()`) + multi-file merge を一気通貫で提供します。

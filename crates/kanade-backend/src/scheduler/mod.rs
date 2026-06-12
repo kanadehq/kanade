@@ -1100,15 +1100,41 @@ async fn recent_completions(
 /// published (which flipped broadcast execs to 'completed' after the
 /// first reply).
 pub(crate) async fn resolve_expected_pcs(state: &AppState, target: &Target) -> Result<Vec<String>> {
+    resolve_roster(state, target, true).await
+}
+
+/// Resolve a `Target` to its PC set. `alive_only = true` keeps the
+/// dispatch semantics of [`resolve_expected_pcs`] (only agents seen
+/// within `ALIVE_THRESHOLD`). `alive_only = false` returns the FULL
+/// roster — every previously-seen agent the target covers, offline
+/// included — which is what rollout-coverage needs so "pending" counts
+/// hosts that have the schedule but haven't run yet (#418 coverage).
+///
+/// The candidate set for group membership is the `agents` table (ever
+/// seen), filtered by liveness only when `alive_only`. A host that has
+/// a group assignment but never heartbeated is out of scope either way
+/// (it can't have run anything to cover).
+pub(crate) async fn resolve_roster(
+    state: &AppState,
+    target: &Target,
+    alive_only: bool,
+) -> Result<Vec<String>> {
     let mut out: HashSet<String> = HashSet::new();
+    let cutoff = Utc::now() - ALIVE_THRESHOLD;
 
     if target.all {
-        let cutoff = Utc::now() - ALIVE_THRESHOLD;
-        let rows = sqlx::query("SELECT pc_id FROM agents WHERE last_heartbeat >= ? ORDER BY pc_id")
-            .bind(cutoff)
+        let mut q = sqlx::query(if alive_only {
+            "SELECT pc_id FROM agents WHERE last_heartbeat >= ? ORDER BY pc_id"
+        } else {
+            "SELECT pc_id FROM agents ORDER BY pc_id"
+        });
+        if alive_only {
+            q = q.bind(cutoff);
+        }
+        let rows = q
             .fetch_all(&state.pool)
             .await
-            .context("agents alive query")?;
+            .context("agents roster query")?;
         for r in rows {
             if let Ok(pc) = r.try_get::<String, _>("pc_id") {
                 out.insert(pc);
@@ -1119,25 +1145,30 @@ pub(crate) async fn resolve_expected_pcs(state: &AppState, target: &Target) -> R
     if !target.groups.is_empty() {
         // BUCKET_AGENT_GROUPS: key = pc_id, value = JSON list of group names.
         let want: HashSet<&str> = target.groups.iter().map(String::as_str).collect();
-        let cutoff = Utc::now() - ALIVE_THRESHOLD;
-        let alive: HashSet<String> =
-            sqlx::query("SELECT pc_id FROM agents WHERE last_heartbeat >= ?")
-                .bind(cutoff)
-                .fetch_all(&state.pool)
-                .await
-                .context("alive list for group resolve")?
-                .into_iter()
-                .filter_map(|r| r.try_get::<String, _>("pc_id").ok())
-                .collect();
+        let mut q = sqlx::query(if alive_only {
+            "SELECT pc_id FROM agents WHERE last_heartbeat >= ?"
+        } else {
+            "SELECT pc_id FROM agents"
+        });
+        if alive_only {
+            q = q.bind(cutoff);
+        }
+        let candidates: HashSet<String> = q
+            .fetch_all(&state.pool)
+            .await
+            .context("candidate list for group resolve")?
+            .into_iter()
+            .filter_map(|r| r.try_get::<String, _>("pc_id").ok())
+            .collect();
 
         if let Ok(kv) = state.jetstream.get_key_value(BUCKET_AGENT_GROUPS).await {
             // #487: bounded-concurrency membership reads over the
-            // ALIVE set directly — kv.keys() was an expensive
-            // stream-wide ordered-consumer scan, and alive PCs are
-            // the only ones we ever admit anyway (PR #557 review,
+            // candidate set directly — kv.keys() was an expensive
+            // stream-wide ordered-consumer scan, and the candidate PCs
+            // are the only ones we ever admit anyway (PR #557 review,
             // gemini). Concurrency matches the dispatch-mark reads
             // (gemini #444).
-            let members: Vec<String> = futures::stream::iter(alive)
+            let members: Vec<String> = futures::stream::iter(candidates)
                 .map(|k| {
                     let kv = kv.clone();
                     async move {

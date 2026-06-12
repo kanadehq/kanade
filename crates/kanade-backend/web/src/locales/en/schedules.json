@@ -20,8 +20,20 @@
     "deadline": "deadline",
     "jitter": "jitter",
     "rollout": "rollout",
+    "coverage": "coverage",
     "enabled": "enabled",
     "actions": "actions"
+  },
+  "coverage": {
+    "title": "Rollout coverage",
+    "summary": "{{ok}}/{{total}} ok · {{fail}} fail · {{running}} running · {{pending}} pending",
+    "more": "+{{count}} more",
+    "state": {
+      "ok": "ok",
+      "fail": "fail",
+      "running": "running",
+      "pending": "pending"
+    }
   },
   "target": {
     "all": "all"

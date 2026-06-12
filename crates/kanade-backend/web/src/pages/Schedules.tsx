@@ -61,6 +61,69 @@ type ScheduleRow = {
   enabled: boolean;
 };
 
+// #418 rollout coverage. One agent's standing in a schedule's rollout
+// + the per-schedule rollups served by `/api/schedules[/{id}]/coverage`.
+type AgentRun = {
+  pc_id: string;
+  state: 'ok' | 'fail' | 'running' | 'pending';
+  version?: string;
+  finished_at?: string;
+};
+type CoverageResponse = {
+  id: string;
+  when: string;
+  job_id: string;
+  runs_on: string;
+  total: number;
+  ok: number;
+  fail: number;
+  running: number;
+  pending: number;
+  agents: AgentRun[];
+};
+type CoverageCounts = {
+  total: number;
+  ok: number;
+  fail: number;
+  running: number;
+  pending: number;
+};
+type CoverageSummary = CoverageCounts & { id: string };
+
+// Map agent state → Badge variant (badge.tsx exposes
+// default|success|danger|violet|amber — no info/warning).
+const COVERAGE_VARIANT: Record<AgentRun['state'], 'success' | 'danger' | 'violet' | 'default'> = {
+  ok: 'success',
+  fail: 'danger',
+  running: 'violet',
+  pending: 'default',
+};
+
+// Max not-done agents rendered in the drawer before collapsing to a
+// "+N more" line — keeps a thousands-PC fleet from freezing the DOM.
+const COVERAGE_DETAIL_CAP = 100;
+
+// Compact stacked progress bar: ok (green) / fail (red) / running
+// (violet); pending is the uncolored remainder of the track. Total 0 →
+// an em-dash. The `title` carries the full breakdown for hover.
+function CoverageBar({ total, ok, fail, running, pending }: CoverageCounts) {
+  if (total === 0) return <span className="text-muted text-xs">—</span>;
+  const pct = (n: number) => `${(n / total) * 100}%`;
+  return (
+    <div className="flex items-center gap-2">
+      <div
+        className="flex h-2 w-24 overflow-hidden rounded-full bg-muted/20"
+        title={`${ok} ok · ${fail} fail · ${running} running · ${pending} pending`}
+      >
+        {ok > 0 && <div className="bg-success" style={{ width: pct(ok) }} />}
+        {fail > 0 && <div className="bg-danger" style={{ width: pct(fail) }} />}
+        {running > 0 && <div className="bg-violet" style={{ width: pct(running) }} />}
+      </div>
+      <span className="text-xs tabular-nums text-muted whitespace-nowrap">{ok}/{total}</span>
+    </div>
+  );
+}
+
 function summariseTarget(target: ScheduleRow['target'], allLabel: string): string {
   if (target.all) return allLabel;
   const parts: string[] = [];
@@ -94,6 +157,14 @@ export function Schedules() {
     queryKey: ['schedules'],
     queryFn: () => apiFetch<ScheduleRow[]>('/api/schedules'),
   });
+  // #418 rollout coverage — one batch request feeds every row's
+  // progress bar (no N+1). The per-schedule detail (per-agent list) is
+  // fetched lazily only when a drawer opens, below.
+  const coverageList = useQuery({
+    queryKey: ['schedule-coverage'],
+    queryFn: () => apiFetch<CoverageSummary[]>('/api/schedules/coverage'),
+  });
+  const coverageById = new Map((coverageList.data ?? []).map((c) => [c.id, c]));
 
   // Master-detail split (#374) — same shape as the Jobs page. The
   // table used to spread all schedule fields across columns;
@@ -103,10 +174,23 @@ export function Schedules() {
   // so the drawer follows query refetches.
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
+  // Per-schedule coverage detail (per-agent list) — fires only when a
+  // drawer is open, keyed by the selected id so it follows selection.
+  const coverageDetail = useQuery({
+    queryKey: ['schedule-coverage', selectedId],
+    queryFn: () =>
+      apiFetch<CoverageResponse>(`/api/schedules/${encodeURIComponent(selectedId!)}/coverage`),
+    enabled: selectedId !== null,
+  });
+
   const del = useMutation({
     mutationFn: (id: string) => apiFetch(`/api/schedules/${encodeURIComponent(id)}`, { method: 'DELETE' }),
     onSuccess: (_d, id) => {
       qc.invalidateQueries({ queryKey: ['schedules'] });
+      // Drop the stale coverage entry too — otherwise recreating a
+      // schedule with the same id would serve old coverage until the
+      // query goes stale (claude #617).
+      qc.invalidateQueries({ queryKey: ['schedule-coverage'] });
       // Close the drawer if it was showing the row we just deleted.
       setSelectedId((prev) => (prev === id ? null : prev));
       toast.success(t('toast.deleted', { id }));
@@ -366,6 +450,7 @@ export function Schedules() {
             <TableHead>{t('columns.schedule')}</TableHead>
             <TableHead>{t('columns.when')}</TableHead>
             <TableHead>{t('columns.target')}</TableHead>
+            <TableHead>{t('columns.coverage')}</TableHead>
             <TableHead>{t('columns.enabled')}</TableHead>
             <TableHead>{t('columns.actions')}</TableHead>
           </TableRow>
@@ -402,6 +487,12 @@ export function Schedules() {
               <TableCell><code className="text-xs whitespace-nowrap">{summariseWhen(s.when)}</code></TableCell>
               <TableCell className="text-xs max-w-48 truncate" title={summariseTarget(s.target, t('target.all'))}>
                 {summariseTarget(s.target, t('target.all'))}
+              </TableCell>
+              <TableCell>
+                {(() => {
+                  const c = coverageById.get(s.id);
+                  return c ? <CoverageBar {...c} /> : <span className="text-muted text-xs">…</span>;
+                })()}
               </TableCell>
               <TableCell>{enabledBadge(s)}</TableCell>
               {/* stopPropagation so action clicks don't also open
@@ -470,6 +561,61 @@ export function Schedules() {
                   : <span className="text-muted">—</span>}
               </DetailItem>
             </DetailList>
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-sm">{t('coverage.title')}</CardTitle>
+              </CardHeader>
+              <CardContent>
+                {coverageDetail.isLoading && <span className="text-muted text-xs">…</span>}
+                {coverageDetail.error && (
+                  <span className="text-danger text-xs">{formatError(coverageDetail.error)}</span>
+                )}
+                {coverageDetail.data && (() => {
+                  const c = coverageDetail.data;
+                  const notDone = c.agents.filter((a) => a.state !== 'ok');
+                  return (
+                    <div className="space-y-3">
+                      <CoverageBar {...c} />
+                      <div className="text-xs text-muted">
+                        {t('coverage.summary', {
+                          ok: c.ok,
+                          total: c.total,
+                          fail: c.fail,
+                          running: c.running,
+                          pending: c.pending,
+                        })}
+                      </div>
+                      {notDone.length > 0 && (
+                        <div className="space-y-1">
+                          {/* Cap the DOM list so a thousands-PC fleet
+                              doesn't freeze the drawer (gemini #617);
+                              the overflow count is shown below. */}
+                          {notDone.slice(0, COVERAGE_DETAIL_CAP).map((a) => (
+                            <div
+                              key={a.pc_id}
+                              className="flex items-center justify-between gap-2 text-xs"
+                            >
+                              <code className="truncate">{a.pc_id}</code>
+                              <span className="flex items-center gap-2 whitespace-nowrap">
+                                <Badge variant={COVERAGE_VARIANT[a.state]}>
+                                  {t(`coverage.state.${a.state}`)}
+                                </Badge>
+                                <span className="text-muted">{a.version ?? '—'}</span>
+                              </span>
+                            </div>
+                          ))}
+                          {notDone.length > COVERAGE_DETAIL_CAP && (
+                            <div className="text-muted text-xs">
+                              {t('coverage.more', { count: notDone.length - COVERAGE_DETAIL_CAP })}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+              </CardContent>
+            </Card>
             <SheetFooter>
               <div className="flex flex-wrap justify-end gap-2">
                 {renderActions(selected, true)}

@@ -20,8 +20,20 @@
     "deadline": "期限",
     "jitter": "ジッター",
     "rollout": "ロールアウト",
+    "coverage": "カバレッジ",
     "enabled": "有効",
     "actions": "操作"
+  },
+  "coverage": {
+    "title": "ロールアウト・カバレッジ",
+    "summary": "{{ok}}/{{total}} 完了 · {{fail}} 失敗 · {{running}} 実行中 · {{pending}} 未実行",
+    "more": "他 {{count}} 台",
+    "state": {
+      "ok": "完了",
+      "fail": "失敗",
+      "running": "実行中",
+      "pending": "未実行"
+    }
   },
   "target": {
     "all": "全て"
