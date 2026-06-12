@@ -16,6 +16,10 @@
         <button id="ping-btn">Ping agent</button>
         <p id="ping-result" class="muted"></p>
       </section>
+      <section id="notifications-section" hidden>
+        <h2>通知 <span id="notif-badge" class="badge" hidden></span></h2>
+        <div id="notifications"></div>
+      </section>
       <section id="health-section" hidden>
         <h2>端末ヘルス</h2>
         <div id="health">
@@ -32,6 +36,10 @@
         <div id="runs"></div>
       </section>
     </main>
+    <!-- Transient info/warn toasts stack here (auto-dismiss). -->
+    <div id="toast-container" class="toast-container"></div>
+    <!-- Emergency (priority=emergency) blocking modal overlay. -->
+    <div id="emergency-modal" class="emergency-modal" hidden></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

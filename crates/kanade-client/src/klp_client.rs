@@ -40,6 +40,10 @@ use kanade_shared::ipc::jobs::{
     JobsListResult,
 };
 use kanade_shared::ipc::method;
+use kanade_shared::ipc::notifications::{
+    NotificationsAckParams, NotificationsAckResult, NotificationsListParams,
+    NotificationsListResult, NotificationsSubscribeParams, NotificationsSubscribeResult,
+};
 use kanade_shared::ipc::state::{StateSnapshot, StateSnapshotParams};
 use kanade_shared::ipc::system::{PingParams, PingResult};
 use serde::{Serialize, de::DeserializeOwned};
@@ -295,6 +299,47 @@ impl KlpClient {
             &JobsKillParams {
                 run_id: run_id.to_string(),
             },
+        )
+        .await
+    }
+
+    /// `notifications.subscribe` — ask the agent to start streaming
+    /// `notifications.new` pushes on this connection (Phase E, #102).
+    /// Until it lands the agent fans nothing out to this client, so the
+    /// WebView calls it once per connection (re-called on reconnect);
+    /// the pushes then arrive via [`KlpClient::subscribe`] like any
+    /// other agent→client notification.
+    pub async fn notifications_subscribe(&self) -> Result<NotificationsSubscribeResult> {
+        self.request::<NotificationsSubscribeParams, NotificationsSubscribeResult>(
+            method::NOTIFICATIONS_SUBSCRIBE,
+            &NotificationsSubscribeParams::default(),
+        )
+        .await
+    }
+
+    /// `notifications.list` — this user's notification history (#102),
+    /// scoped to the caller's OS SID agent-side. `params.filter` selects
+    /// unread-only vs all; `params.cursor` pages.
+    pub async fn notifications_list(
+        &self,
+        params: &NotificationsListParams,
+    ) -> Result<NotificationsListResult> {
+        self.request::<NotificationsListParams, NotificationsListResult>(
+            method::NOTIFICATIONS_LIST,
+            params,
+        )
+        .await
+    }
+
+    /// `notifications.ack` — mark a notification read for the caller's
+    /// OS user (#102). The agent derives the SID from the connection,
+    /// never the payload, then persists `notifications_read` KV and
+    /// publishes the `events.notifications.acked.>` event the SPA's
+    /// ack-status view reads (#604).
+    pub async fn notifications_ack(&self, id: &str) -> Result<NotificationsAckResult> {
+        self.request::<NotificationsAckParams, NotificationsAckResult>(
+            method::NOTIFICATIONS_ACK,
+            &NotificationsAckParams { id: id.to_string() },
         )
         .await
     }
