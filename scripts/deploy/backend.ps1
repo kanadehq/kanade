@@ -419,7 +419,7 @@ if ($stagedVersion) {
         3 {
             throw ("deploy-backend: version $stagedVersion is QUARANTINED by the boot sentinel " +
                 "(it crash-looped on a prior boot). Refusing to deploy. Republish a fixed binary " +
-                "under a new version, or clear the quarantine (.boot-quarantine.json in the data dir).")
+                "under a new version, or clear the quarantine (.boot-quarantine-kanade-backend.json in the data dir).")
         }
         2 {
             Write-Warning ("check-quarantine: staged binary lacks the subcommand (clap exit 2 = " +

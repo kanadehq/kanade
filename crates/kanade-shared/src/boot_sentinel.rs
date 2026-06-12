@@ -10,7 +10,11 @@
 //!
 //! This module gates each boot. The swap step [`arm_for_swap`] writes
 //! a sentinel and snapshots the outgoing (known-good) binary to
-//! `<exe>.last-good`. Every boot calls [`check_on_boot`] as the very
+//! `<exe>.last-good`. The sentinel and quarantine files live in the
+//! shared `data_dir` but are namespaced by the exe's role
+//! (`.boot-sentinel-<role>.json`), so a backend and an agent co-located
+//! on the same host keep independent boot state instead of clobbering a
+//! single shared file. Every boot calls [`check_on_boot`] as the very
 //! first thing in `main()` — before NATS, the DB, or any bootstrap
 //! that can fail — which increments a persisted attempt counter and,
 //! once it crosses the crash-loop threshold, restores `.last-good`
@@ -41,11 +45,35 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
-/// Filenames under the data dir / next to the exe.
-const SENTINEL_FILE: &str = ".boot-sentinel.json";
-const QUARANTINE_FILE: &str = ".boot-quarantine.json";
+/// Filename prefixes under the data dir. The sentinel/quarantine files
+/// are suffixed with the exe's role (`-kanade-backend` / `-kanade-agent`)
+/// so a co-located backend + agent — which share one `data_dir` — keep
+/// SEPARATE boot state and can't clobber each other's pending sentinel
+/// or quarantine list. (`last-good` is already per-role: it sits next to
+/// each exe.)
+const SENTINEL_PREFIX: &str = ".boot-sentinel";
+const QUARANTINE_PREFIX: &str = ".boot-quarantine";
 const LAST_GOOD_SUFFIX: &str = "last-good";
 const ROLLBACK_BAK_SUFFIX: &str = "rollback-bak";
+
+/// The role namespace for the sentinel/quarantine filenames, derived
+/// from the exe's file stem (`kanade-backend.exe` → `kanade-backend`).
+/// Every call site passes the role's canonical exe — including the
+/// backend deploy's `arm-for-swap`, which is run by the staged binary
+/// but pointed at the installed `kanade-backend.exe` — so the namespace
+/// is stable across arm / boot / confirm for a given role.
+fn role_ns(exe: &Path) -> String {
+    // to_string_lossy (not to_str().unwrap_or): a non-UTF-8 exe path
+    // must still keep backend and agent DISTINCT. to_str() would return
+    // None on such a path and collapse both roles to the "kanade"
+    // fallback — re-introducing the very collision this namespacing
+    // fixes. Lossy conversion preserves the differing stem bytes; the
+    // "kanade" fallback is reachable only when there's no file stem at
+    // all (no real exe / no role to separate).
+    exe.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "kanade".to_string())
+}
 
 /// Crash-loop threshold. Boot attempts `1..=N` proceed; attempt
 /// `N+1` triggers the rollback (the check is `attempts <= max`). So
@@ -99,9 +127,10 @@ impl BootSentinel {
     /// `version` is this binary's own version string.
     pub fn new(data_dir: &Path, exe: PathBuf, version: impl Into<String>) -> Self {
         let last_good = sibling(&exe, LAST_GOOD_SUFFIX);
+        let role = role_ns(&exe);
         Self {
-            sentinel_path: data_dir.join(SENTINEL_FILE),
-            quarantine_path: data_dir.join(QUARANTINE_FILE),
+            sentinel_path: data_dir.join(format!("{SENTINEL_PREFIX}-{role}.json")),
+            quarantine_path: data_dir.join(format!("{QUARANTINE_PREFIX}-{role}.json")),
             exe,
             last_good,
             version: version.into(),
@@ -482,6 +511,30 @@ mod tests {
         s.clear_quarantine("2.0.0").unwrap();
         assert!(!s.is_quarantined("2.0.0"));
         assert!(s.is_quarantined("2.0.1"));
+    }
+
+    #[test]
+    fn sentinel_and_quarantine_are_namespaced_per_role() {
+        // A backend and an agent share one data_dir. Their sentinel and
+        // quarantine files must NOT collide — otherwise one role's
+        // confirm_healthy clears the other's pending sentinel, and one
+        // role's quarantine masquerades as the other's.
+        let dir = TempDir::new().unwrap();
+        let be = BootSentinel::new(dir.path(), dir.path().join("kanade-backend.exe"), "1.0.0");
+        let ag = BootSentinel::new(dir.path(), dir.path().join("kanade-agent.exe"), "1.0.0");
+        assert_ne!(be.sentinel_path, ag.sentinel_path);
+        assert_ne!(be.quarantine_path, ag.quarantine_path);
+
+        // Backend arms + quarantines; none of it is visible to the agent.
+        fs::write(&be.exe, "be").unwrap();
+        be.arm_for_swap(&be.exe.clone(), "2.0.0").unwrap();
+        be.quarantine("9.9.9");
+        assert!(be.is_quarantined("9.9.9"));
+        assert!(!ag.is_quarantined("9.9.9"));
+        // The agent boots with no sentinel of its own — the backend's
+        // pending swap must not make the agent count a phantom attempt.
+        assert_eq!(ag.check_on_boot(3), BootDecision::Proceed);
+        assert!(be.sentinel_path.exists()); // backend's sentinel survived
     }
 
     #[test]
