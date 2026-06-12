@@ -1,8 +1,45 @@
-<!--
-  Placeholder so `tauri.conf.json::build.frontendDist` resolves
-  to an existing directory at cargo build time. The actual
-  WebView content is produced by `bun run build` (cd web &&
-  bun install && bun run build), which overwrites this stub.
-  Kept in git as a one-byte sentinel so first-time clones can
-  `cargo check -p kanade-client` without needing bun set up.
--->
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Kanade</title>
+    <script type="module" crossorigin src="/assets/index-BXrOORao.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-D-lXRN4G.css">
+  </head>
+  <body>
+    <main>
+      <h1>Kanade Client</h1>
+      <section id="status">
+        <p class="muted">Connecting to agent…</p>
+      </section>
+      <section id="ping-section" hidden>
+        <button id="ping-btn">Ping agent</button>
+        <p id="ping-result" class="muted"></p>
+      </section>
+      <section id="notifications-section" hidden>
+        <h2>通知 <span id="notif-badge" class="badge" hidden></span></h2>
+        <div id="notifications"></div>
+      </section>
+      <section id="health-section" hidden>
+        <h2>端末ヘルス</h2>
+        <div id="health">
+          <p class="muted">読み込み中…</p>
+        </div>
+      </section>
+      <section id="jobs-section" hidden>
+        <h2>ジョブ</h2>
+        <div id="jobs-tabs" class="tab-bar"></div>
+        <div id="jobs-list"></div>
+      </section>
+      <section id="runs-section" hidden>
+        <h2>実行中・実行履歴</h2>
+        <div id="runs"></div>
+      </section>
+    </main>
+    <!-- Transient info/warn toasts stack here (auto-dismiss). -->
+    <div id="toast-container" class="toast-container"></div>
+    <!-- Emergency (priority=emergency) blocking modal overlay. -->
+    <div id="emergency-modal" class="emergency-modal" hidden></div>
+  </body>
+</html>

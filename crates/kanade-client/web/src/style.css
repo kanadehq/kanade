@@ -187,7 +187,7 @@ ul.checks {
   border-radius: 4px;
   font-size: 12px;
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: break-word;
 }
 
 .run-row.status-completed .run-status {
@@ -197,6 +197,209 @@ ul.checks {
 .run-row.status-failed .run-status,
 .run-row.status-killed .run-status {
   color: #b00020;
+}
+
+/* Notifications (Phase E, #102): panel rows + unread badge. */
+.badge {
+  display: inline-block;
+  min-width: 18px;
+  padding: 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
+  text-align: center;
+  color: #fff;
+  background: #b00020;
+  border-radius: 999px;
+  vertical-align: middle;
+}
+
+.notif-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 0;
+  border-top: 1px solid #eee;
+}
+
+.notif-row:first-child {
+  border-top: 0;
+}
+
+.notif-icon {
+  flex: 0 0 auto;
+  line-height: 1.4;
+}
+
+.notif-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.notif-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.notif-title {
+  font-weight: 600;
+}
+
+.notif-prio {
+  font-size: 12px;
+}
+
+.notif-text {
+  margin: 2px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+.notif-meta {
+  margin: 4px 0 0;
+  font-size: 12px;
+}
+
+/* Acked rows recede; unread ones keep full contrast. */
+.notif-row.acked {
+  opacity: 0.6;
+}
+
+.notif-row.priority-warn .notif-title {
+  color: #8a6d00;
+}
+
+.notif-row.priority-emergency .notif-title {
+  color: #b00020;
+}
+
+.notif-ack-btn {
+  flex: 0 0 auto;
+  padding: 4px 12px;
+  font-size: 13px;
+}
+
+.notif-acked {
+  flex: 0 0 auto;
+  font-size: 12px;
+}
+
+/* Transient toasts (info / warn pushes), bottom-right, auto-dismiss. */
+.toast-container {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 50;
+  max-width: min(360px, calc(100vw - 32px));
+}
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 12px 14px;
+  background: #fff;
+  color: #1a1a1a;
+  border: 1px solid #e0e0e0;
+  border-left: 4px solid #777;
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+
+.toast.priority-warn {
+  border-left-color: #e0a900;
+}
+
+.toast.priority-info {
+  border-left-color: #2a72d4;
+}
+
+.toast-out {
+  opacity: 0;
+  transform: translateX(16px);
+}
+
+.toast-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.toast-title {
+  font-size: 13px;
+}
+
+.toast-text {
+  font-size: 13px;
+  color: #555;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+/* Emergency modal: full-screen blocking overlay. */
+.emergency-modal {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 100;
+}
+
+.emergency-modal[hidden] {
+  display: none;
+}
+
+.emergency-card {
+  max-width: 420px;
+  width: 100%;
+  padding: 24px;
+  background: #fff;
+  color: #1a1a1a;
+  border-top: 6px solid #b00020;
+  border-radius: 8px;
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.4);
+}
+
+.emergency-head {
+  font-size: 17px;
+  font-weight: 700;
+  color: #b00020;
+  margin-bottom: 12px;
+}
+
+.emergency-text {
+  margin: 0 0 12px;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+.emergency-meta {
+  margin: 0 0 16px;
+  font-size: 12px;
+}
+
+.emergency-ack-btn,
+.emergency-close-btn {
+  width: 100%;
+  padding: 10px;
+  font-size: 15px;
+}
+
+.emergency-ack-btn {
+  background: #b00020;
+  color: #fff;
+}
+
+.emergency-ack-btn:hover {
+  background: #900019;
 }
 
 section {
@@ -300,5 +503,36 @@ button:hover {
   }
   .job-desc {
     color: #aaa;
+  }
+  .notif-row {
+    border-color: #3a3a3a;
+  }
+  .notif-row.priority-warn .notif-title {
+    color: #e0b341;
+  }
+  .notif-row.priority-emergency .notif-title {
+    color: #ff6b6b;
+  }
+  .toast {
+    background: #2a2a2a;
+    color: #f0f0f0;
+    border-color: #3a3a3a;
+  }
+  .toast-text {
+    color: #bbb;
+  }
+  .emergency-card {
+    background: #2a2a2a;
+    color: #f0f0f0;
+  }
+  .emergency-head {
+    color: #ff6b6b;
+  }
+  .emergency-ack-btn {
+    background: #b00020;
+    color: #fff;
+  }
+  .emergency-ack-btn:hover {
+    background: #c4102a;
   }
 }

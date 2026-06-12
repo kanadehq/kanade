@@ -400,6 +400,323 @@ function renderJobRow(j: UserInvokableJob): string {
     </div>`;
 }
 
+// ---- Notifications (Phase E, #102) ----
+
+// Mirrors `kanade_shared::ipc::notifications` — hand-written like the
+// other IPC types until TS bindings are generated. `unknown` is the
+// serde forward-compat catch-all (#492): a newer agent's new priority
+// decodes here and we render it neutrally rather than throwing.
+type NotificationPriority = "info" | "warn" | "emergency" | "unknown";
+
+type AppNotification = {
+  id: string;
+  priority: NotificationPriority;
+  require_ack: boolean;
+  title: string;
+  body: string;
+  issued_at: string;
+  issued_by?: string | null;
+  expires_at?: string | null;
+  // `acked_at` from THIS user's perspective; populated by
+  // notifications.list for already-acked entries, set locally on ack.
+  acked_at?: string | null;
+};
+
+type NotificationsListResult = {
+  items: AppNotification[];
+  next_cursor?: string | null;
+};
+
+type NotificationsAckResult = { acked_at: string };
+
+const PRIORITY_ICON: Record<NotificationPriority, string> = {
+  info: "ℹ️",
+  warn: "⚠️",
+  emergency: "🚨",
+  unknown: "🔔",
+};
+
+const PRIORITY_LABEL: Record<NotificationPriority, string> = {
+  info: "情報",
+  warn: "警告",
+  emergency: "緊急",
+  unknown: "通知",
+};
+
+// All known notifications, keyed by id, in insertion (≈ arrival) order.
+// Newest is rendered first. Acked + unread both kept so the panel
+// doubles as recent history; expired ones are filtered at render time.
+const notifications = new Map<string, AppNotification>();
+
+// Guards a double subscribe/list on the same connection (renderStatus
+// can be called more than once per connect). Reset on reconnect so a
+// fresh connection re-subscribes — the agent's subscription is
+// per-connection, so a stale flag would leave the new pipe push-less.
+let notifSubscribed = false;
+
+function isExpired(n: AppNotification): boolean {
+  if (!n.expires_at) return false;
+  const t = Date.parse(n.expires_at);
+  return !Number.isNaN(t) && t <= Date.now();
+}
+
+// Subscribe to live pushes and load recent history. Called on every
+// (re)connect; the guard makes a redundant same-connection call a no-op.
+async function loadNotifications(): Promise<void> {
+  // Subscribe once per connection (the guard makes a redundant
+  // same-connection call a no-op); the agent's subscription is
+  // per-connection so a failure here leaves the flag false to retry.
+  if (!notifSubscribed) {
+    try {
+      await invoke("notifications_subscribe");
+      notifSubscribed = true;
+    } catch (err) {
+      console.error("notifications_subscribe failed", err);
+      return;
+    }
+  }
+  // Load history on every call (not gated by `notifSubscribed`): a
+  // transient list failure must not wedge the panel empty for the rest
+  // of the connection — the next (re)connect retries it, and the
+  // re-set of map entries is idempotent.
+  try {
+    // Load `all` (acked + unread) so the panel shows recent history,
+    // with the unread badge derived from `acked_at`. The agent clamps
+    // the limit; one page is plenty for a glanceable panel.
+    const res = await invoke<NotificationsListResult>("notifications_list", {
+      filter: "all",
+      cursor: null,
+    });
+    for (const n of res.items) notifications.set(n.id, n);
+    renderNotifications();
+    // Recovery path (SPEC §2.12.8): an unacked, non-expired emergency
+    // the client missed while disconnected must still block on next
+    // launch — re-raise its modal from history, not just a push.
+    for (const n of res.items) {
+      if (n.priority === "emergency" && !n.acked_at && !isExpired(n)) {
+        showEmergencyModal(n);
+      }
+    }
+  } catch (err) {
+    console.error("notifications_list failed", err);
+  }
+}
+
+// Apply one `notifications.new` push: store, re-render, and surface it
+// (emergency → blocking modal; info/warn → transient toast).
+function handleNewNotification(n: AppNotification): void {
+  notifications.set(n.id, n);
+  renderNotifications();
+  if (isExpired(n)) return;
+  if (n.priority === "emergency") {
+    showEmergencyModal(n);
+  } else {
+    showToast(n);
+  }
+}
+
+// Ack a notification for this OS user. Marks it read locally on success
+// and dismisses its emergency modal if one is open.
+async function ackNotification(id: string): Promise<void> {
+  try {
+    const r = await invoke<NotificationsAckResult>("notifications_ack", { id });
+    const n = notifications.get(id);
+    if (n) n.acked_at = r.acked_at;
+    dismissEmergencyModal(id);
+    renderNotifications();
+  } catch (err) {
+    console.error("notifications_ack failed", err);
+    // Surface on the open modal (the user is staring at it) so a failed
+    // ack doesn't look like an unresponsive button.
+    const errEl = document.getElementById("emergency-error");
+    if (errEl) errEl.textContent = `確認に失敗しました: ${String(err)}`;
+    // Re-throw so the click handler can re-enable its disabled button
+    // and let the user retry (a transient failure shouldn't wedge it).
+    throw err;
+  }
+}
+
+function renderNotifications(): void {
+  evictOldNotifications();
+  const section = $("notifications-section");
+  // Sort newest-first by issued_at rather than leaning on Map insertion
+  // order: history (notifications.list) arrives newest-first but live
+  // pushes append to the end, so insertion order is a scramble — an
+  // explicit sort is the only correct ordering.
+  const live = [...notifications.values()]
+    .filter((n) => !isExpired(n))
+    .sort((a, b) => Date.parse(b.issued_at) - Date.parse(a.issued_at));
+  if (live.length === 0) {
+    section.hidden = true;
+    return;
+  }
+  section.hidden = false;
+  const unread = live.filter((n) => !n.acked_at).length;
+  const badge = $("notif-badge");
+  if (unread > 0) {
+    badge.hidden = false;
+    badge.textContent = String(unread);
+  } else {
+    badge.hidden = true;
+  }
+  $("notifications").innerHTML = live.map(renderNotification).join("");
+}
+
+// Cap the notifications map so a long-lived client fed a high volume of
+// non-expiring notifications doesn't grow it unbounded (mirrors the
+// `runs` MAX_RUNS eviction). Drop the oldest ACKED entries first —
+// unread ones still need surfacing — and only once over the cap.
+const MAX_NOTIFICATIONS = 100;
+
+function evictOldNotifications(): void {
+  if (notifications.size <= MAX_NOTIFICATIONS) return;
+  // Insertion order ≈ oldest-first for history; acked entries are the
+  // safe ones to forget (already confirmed, dropped from the unread
+  // badge). Iterate oldest-first and evict acked until back under cap.
+  for (const [id, n] of notifications) {
+    if (notifications.size <= MAX_NOTIFICATIONS) break;
+    if (n.acked_at) notifications.delete(id);
+  }
+}
+
+function renderNotification(n: AppNotification): string {
+  const icon = PRIORITY_ICON[n.priority] ?? PRIORITY_ICON.unknown;
+  const acked = !!n.acked_at;
+  const meta = [
+    n.issued_by ? `送信元: ${escapeHtml(n.issued_by)}` : "",
+    fmtTime(n.issued_at),
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  // Ack control: a 確認 button only while require_ack and not yet acked;
+  // once acked (any notification), a quiet "確認済み" marker.
+  const ackCtl =
+    n.require_ack && !acked
+      ? `<button class="notif-ack-btn" data-notif-id="${escapeHtml(n.id)}">確認</button>`
+      : acked
+        ? `<span class="notif-acked muted">✓ 確認済み</span>`
+        : "";
+  return `
+    <div class="notif-row priority-${escapeHtml(n.priority)}${acked ? " acked" : ""}">
+      <span class="notif-icon">${icon}</span>
+      <div class="notif-main">
+        <div class="notif-head">
+          <span class="notif-title">${escapeHtml(n.title)}</span>
+          <span class="notif-prio muted">${escapeHtml(PRIORITY_LABEL[n.priority] ?? PRIORITY_LABEL.unknown)}</span>
+        </div>
+        <p class="notif-text">${escapeHtml(n.body)}</p>
+        <p class="notif-meta muted">${meta}</p>
+      </div>
+      ${ackCtl}
+    </div>`;
+}
+
+// Transient toast for info/warn pushes (non-blocking). Auto-dismisses;
+// the notification stays in the panel for later reference / ack.
+function showToast(n: AppNotification): void {
+  const container = $("toast-container");
+  const el = document.createElement("div");
+  el.className = `toast priority-${n.priority}`;
+  el.innerHTML = `
+    <span class="toast-icon">${PRIORITY_ICON[n.priority] ?? PRIORITY_ICON.unknown}</span>
+    <div class="toast-main">
+      <strong class="toast-title">${escapeHtml(n.title)}</strong>
+      <span class="toast-text">${escapeHtml(n.body)}</span>
+    </div>`;
+  container.appendChild(el);
+  window.setTimeout(() => {
+    el.classList.add("toast-out");
+    window.setTimeout(() => el.remove(), 300);
+  }, 6000);
+}
+
+// Emergency notifications block on a focus-grabbing modal. Only one is
+// shown at a time; others queue (deduped by id) and surface as each is
+// dismissed, so a burst can't stack overlapping modals.
+const emergencyQueue: AppNotification[] = [];
+let emergencyShown: string | null = null;
+
+function showEmergencyModal(n: AppNotification): void {
+  if (emergencyShown === n.id || emergencyQueue.some((q) => q.id === n.id)) {
+    return;
+  }
+  emergencyQueue.push(n);
+  pumpEmergency();
+}
+
+function pumpEmergency(): void {
+  if (emergencyShown) return;
+  const modal = $("emergency-modal");
+  const next = emergencyQueue.shift();
+  if (!next) {
+    modal.hidden = true;
+    modal.innerHTML = "";
+    return;
+  }
+  emergencyShown = next.id;
+  modal.hidden = false;
+  const meta = [
+    next.issued_by ? `送信元: ${escapeHtml(next.issued_by)}` : "",
+    fmtTime(next.issued_at),
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  // require_ack → the only way out is 確認 (which acks). Otherwise a
+  // plain 閉じる that dismisses locally without acking (the operator
+  // didn't ask for a confirmation).
+  const btn = next.require_ack
+    ? `<button class="emergency-ack-btn" data-notif-id="${escapeHtml(next.id)}">確認</button>`
+    : `<button class="emergency-close-btn" data-notif-id="${escapeHtml(next.id)}">閉じる</button>`;
+  modal.innerHTML = `
+    <div class="emergency-card" role="alertdialog" aria-modal="true">
+      <div class="emergency-head">🚨 ${escapeHtml(next.title)}</div>
+      <p class="emergency-text">${escapeHtml(next.body)}</p>
+      <p class="emergency-meta muted">${meta}</p>
+      <p id="emergency-error" class="error"></p>
+      ${btn}
+    </div>`;
+  // `role="alertdialog"` / `aria-modal` don't grab focus on their own,
+  // so move keyboard focus onto the action button — otherwise the
+  // "blocking" modal stays navigable from the background page and is
+  // easy for keyboard / screen-reader users to miss.
+  modal
+    .querySelector<HTMLElement>(".emergency-ack-btn, .emergency-close-btn")
+    ?.focus();
+}
+
+// Remove a notification from the emergency flow — whether it was queued
+// or the one on screen. Advancing pulls the next queued emergency up.
+function dismissEmergencyModal(id: string): void {
+  const qi = emergencyQueue.findIndex((q) => q.id === id);
+  if (qi >= 0) emergencyQueue.splice(qi, 1);
+  if (emergencyShown === id) {
+    emergencyShown = null;
+    pumpEmergency();
+  }
+}
+
+// Drop expired notifications from the panel and close an expired modal.
+// Time-driven, so run on a timer (a notification can expire while the
+// app sits idle with nothing pushing a re-render).
+function sweepExpired(): void {
+  if (emergencyShown) {
+    const n = notifications.get(emergencyShown);
+    if (n && isExpired(n)) dismissEmergencyModal(emergencyShown);
+  }
+  renderNotifications();
+}
+
+// Format an ISO instant as the user's local wall-clock; fall back to
+// the raw string if it doesn't parse. The result is HTML-escaped at the
+// source: every caller splices it into `innerHTML`, and the fallback
+// branch returns an un-sanitised agent-supplied string — escaping here
+// (one place) closes that DOM-XSS hole without each call site having to
+// remember to wrap it (defence-in-depth; the agent pipe is high-trust).
+function fmtTime(iso: string): string {
+  const d = new Date(iso);
+  return escapeHtml(Number.isNaN(d.getTime()) ? iso : d.toLocaleString());
+}
+
 const $ = (id: string): HTMLElement => {
   const el = document.getElementById(id);
   if (!el) {
@@ -431,6 +748,8 @@ async function renderStatus() {
     // Load the user-invokable job catalog (アップデート / 困ったとき /
     // カタログ). One-shot — the catalog changes rarely.
     void loadJobs();
+    // Subscribe to live notifications + load recent history (Phase E).
+    void loadNotifications();
   } catch (err) {
     status.innerHTML = `<p class="error">Agent unavailable: ${escapeHtml(String(err))}</p>
       <p class="muted">Retrying in 5 s…</p>`;
@@ -557,6 +876,27 @@ window.addEventListener("DOMContentLoaded", () => {
       void killRun(killBtn.dataset.runId);
       return;
     }
+    // Notification ack — from the panel row or the emergency modal.
+    // Both ack the notification for this OS user; disable on click so a
+    // double-tap can't fire two acks before the first resolves.
+    const ackBtn = t.closest<HTMLButtonElement>(
+      ".notif-ack-btn, .emergency-ack-btn",
+    );
+    if (ackBtn?.dataset.notifId) {
+      ackBtn.disabled = true;
+      // Re-enable on failure so a transient error doesn't wedge the
+      // button. On success the row/modal re-renders (button gone).
+      ackNotification(ackBtn.dataset.notifId).catch(() => {
+        ackBtn.disabled = false;
+      });
+      return;
+    }
+    // Emergency with no ack required: 閉じる just dismisses locally.
+    const closeBtn = t.closest<HTMLElement>(".emergency-close-btn");
+    if (closeBtn?.dataset.notifId) {
+      dismissEmergencyModal(closeBtn.dataset.notifId);
+      return;
+    }
     // Job catalog: a tab switches the visible category…
     const tab = t.closest<HTMLElement>(".jobs-tab");
     if (tab?.dataset.category) {
@@ -585,13 +925,27 @@ window.addEventListener("DOMContentLoaded", () => {
   // events (#467). `jobs.progress` drives the remediation run rows
   // live; other methods (e.g. `state.changed`) can hook in here later.
   void listen<RpcNotification>("klp-notification", (event) => {
-    if (event.payload.method !== "jobs.progress") return;
-    // Guard the cast: a malformed / null payload (shouldn't happen on
-    // typed IPC, but a single bad frame must not break the listener
-    // for every future push) is dropped rather than throwing.
-    const p = event.payload.params as Partial<JobProgress> | null;
-    if (!p?.run_id) return;
-    handleProgress(p as JobProgress);
+    // Guard the payload before touching `method`: a malformed / null
+    // frame (shouldn't happen on typed IPC, but a single bad frame must
+    // not break the listener for every future push) is dropped rather
+    // than throwing on the dereference.
+    const payload = event.payload as Partial<RpcNotification> | null;
+    if (typeof payload?.method !== "string") return;
+    // Each branch then guards its own cast.
+    if (payload.method === "jobs.progress") {
+      const p = payload.params as Partial<JobProgress> | null;
+      if (!p?.run_id) return;
+      handleProgress(p as JobProgress);
+      return;
+    }
+    // `notifications.new` carries the full Notification body inline
+    // (flattened on the wire), so no second round-trip is needed.
+    if (payload.method === "notifications.new") {
+      const n = payload.params as Partial<AppNotification> | null;
+      if (!n?.id) return;
+      handleNewNotification(n as AppNotification);
+      return;
+    }
   });
 
   // Reconnect lifecycle (#468). The Tauri supervisor reconnects when
@@ -599,9 +953,11 @@ window.addEventListener("DOMContentLoaded", () => {
   // let the UI react instead of looking frozen.
   void listen("klp-connected", () => {
     // Fresh connection (initial or reconnect) — re-pull everything.
-    // `jobsLoaded` is reset so the catalog reloads against the new
-    // connection.
+    // `jobsLoaded` / `notifSubscribed` are reset so the catalog reloads
+    // and the notification subscription is re-established against the
+    // new connection (the agent's subscription is per-connection).
     jobsLoaded = false;
+    notifSubscribed = false;
     void renderStatus();
   });
   void listen("klp-disconnected", () => {
@@ -618,6 +974,10 @@ window.addEventListener("DOMContentLoaded", () => {
   // Stuck-run watchdog tick (see checkStuckRuns). Once a minute is
   // plenty for a 15-minute deadline.
   window.setInterval(checkStuckRuns, 60_000);
+
+  // Expire notifications off the panel / modal as their `expires_at`
+  // passes, even while the app sits idle (see sweepExpired).
+  window.setInterval(sweepExpired, 60_000);
 
   renderStatus();
 });

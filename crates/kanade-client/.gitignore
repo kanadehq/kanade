@@ -8,3 +8,9 @@ gen/
 # kanade-client` doesn't need bun set up, but build artifacts
 # below it are .ignored.
 web/dist/assets/
+
+# Bun lockfile — the WebView pins only loose `^` ranges in
+# package.json and is rebuilt fresh at release time (tauri
+# beforeBuildCommand), so the lockfile is a local-only artifact,
+# never committed (matches the existing client convention).
+web/bun.lock

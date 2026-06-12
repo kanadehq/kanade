@@ -7,8 +7,10 @@
 //!   globals.
 //! - Commands today: `get_handshake` (returns the cached
 //!   [`HandshakeResult`]), `ping_agent` (`system.ping`),
-//!   `state_snapshot` (`state.snapshot` for the Health tab), and the
-//!   `jobs_*` trio (`jobs.list` / `jobs.execute` / `jobs.kill`, #291).
+//!   `state_snapshot` (`state.snapshot` for the Health tab), the
+//!   `jobs_*` trio (`jobs.list` / `jobs.execute` / `jobs.kill`, #291),
+//!   and the `notifications_*` trio (`notifications.subscribe` /
+//!   `notifications.list` / `notifications.ack`, Phase E #102).
 //!   Each follow-up handler PR adds a sibling command and the matching
 //!   WebView call.
 //! - Push notifications: once connected, a forwarder task drains the
@@ -28,6 +30,10 @@ use std::sync::Arc;
 use kanade_shared::ipc::handshake::HandshakeResult;
 use kanade_shared::ipc::jobs::{
     JobCategory, JobsExecuteResult, JobsKillResult, JobsListParams, JobsListResult,
+};
+use kanade_shared::ipc::notifications::{
+    NotificationsAckResult, NotificationsFilter, NotificationsListParams, NotificationsListResult,
+    NotificationsSubscribeResult,
 };
 use kanade_shared::ipc::state::StateSnapshot;
 use kanade_shared::ipc::system::PingResult;
@@ -128,6 +134,57 @@ async fn jobs_kill(state: State<'_, AppState>, run_id: String) -> Result<JobsKil
     client.jobs_kill(&run_id).await.map_err(|e| e.to_string())
 }
 
+/// `notifications.subscribe` — start `notifications.new` pushes on the
+/// connection (Phase E, #102). The WebView calls this on connect; the
+/// pushes then arrive on the same `klp-notification` event stream as
+/// `jobs.progress`, demuxed by `method` in the WebView.
+#[tauri::command]
+async fn notifications_subscribe(
+    state: State<'_, AppState>,
+) -> Result<NotificationsSubscribeResult, String> {
+    let client = connected_client(&state).await?;
+    client
+        .notifications_subscribe()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// `notifications.list` — the user's notification history (#102).
+/// `filter` selects unread-only (default) vs all; `cursor` pages.
+#[tauri::command]
+async fn notifications_list(
+    state: State<'_, AppState>,
+    filter: Option<NotificationsFilter>,
+    cursor: Option<String>,
+) -> Result<NotificationsListResult, String> {
+    let client = connected_client(&state).await?;
+    let params = NotificationsListParams {
+        filter: filter.unwrap_or_default(),
+        cursor,
+        ..NotificationsListParams::default()
+    };
+    client
+        .notifications_list(&params)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// `notifications.ack` — mark a notification read for the caller's OS
+/// user (#102). The `run_id`-less analogue of the remediation flow: the
+/// agent persists the ack + emits the `events.notifications.acked.>`
+/// event the SPA's confirmation view consumes.
+#[tauri::command]
+async fn notifications_ack(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<NotificationsAckResult, String> {
+    let client = connected_client(&state).await?;
+    client
+        .notifications_ack(&id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Drain the client's push-notification broadcast and re-emit each
 /// notification to the WebView as a [`NOTIFICATION_EVENT`] Tauri event.
 /// Runs until the connection closes (the broadcast sender drops). A
@@ -215,7 +272,10 @@ pub fn run() {
             state_snapshot,
             jobs_list,
             jobs_execute,
-            jobs_kill
+            jobs_kill,
+            notifications_subscribe,
+            notifications_list,
+            notifications_ack
         ])
         .setup(move |app| {
             // Supervise the KLP connection for the app's lifetime:
