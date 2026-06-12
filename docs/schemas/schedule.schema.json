@@ -192,7 +192,7 @@
       }
     },
     "OnTrigger": {
-      "description": "An OS event the agent can fire a schedule on (#418 `when: { on }`).\n`network_change` is a planned follow-up.",
+      "description": "An OS event the agent can fire a schedule on (#418 `when: { on }`).",
       "oneOf": [
         {
           "description": "Once per OS boot (the agent's first run for that boot). Catches\nfreshly-imaged / reinstalled hosts at their next startup.",
@@ -213,6 +213,11 @@
           "description": "When the workstation is unlocked — the user returns to a locked\nsession (Windows `WTS_SESSION_UNLOCK`). Use to re-check\ncompliance / refresh state when work resumes.",
           "type": "string",
           "const": "unlock"
+        },
+        {
+          "description": "When the host's network changes — IP address table change on\nconnect / disconnect / DHCP renew / VPN / Wi-Fi roam (Windows\n`NotifyAddrChange`). Debounced agent-side (a burst of changes\nfrom one transition fires once after the network settles), so\nuse it for \"re-check connectivity / re-register on network move\"\nrather than expecting one fire per raw adapter event.\n\nIPv4 only: `NotifyAddrChange` watches the IPv4 address table, so a\ntransition that touches only IPv6 addresses won't fire. In practice\ndual-stack networks change both tables together, but a pure-IPv6\nmove (e.g. an IPv6-only Wi-Fi roam) is not detected.",
+          "type": "string",
+          "const": "network_change"
         }
       ]
     },
