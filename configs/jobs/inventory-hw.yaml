@@ -37,6 +37,7 @@ execute:
     $ErrorActionPreference = 'Stop'
     $cs    = Get-CimInstance Win32_ComputerSystem
     $os    = Get-CimInstance Win32_OperatingSystem
+    $bios  = Get-CimInstance Win32_Bios
     $cpus  = @(Get-CimInstance Win32_Processor)
     $cpu   = $cpus | Select-Object -First 1
     $disks = @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' |
@@ -48,11 +49,29 @@ execute:
                 file_system = $_.FileSystem
             }
         })
+    $displayVersion = $null
+    $osBuild = $os.BuildNumber
+    if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion") {
+        $displayVersion = Get-ItemPropertyValue -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -Name "DisplayVersion" -ErrorAction SilentlyContinue
+        if (-not $displayVersion) {
+            $displayVersion = Get-ItemPropertyValue -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -Name "ReleaseId" -ErrorAction SilentlyContinue
+        }
+        $currentBuild = Get-ItemPropertyValue -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -Name "CurrentBuild" -ErrorAction SilentlyContinue
+        $ubr = Get-ItemPropertyValue -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -Name "UBR" -ErrorAction SilentlyContinue
+        if ($currentBuild -and $null -ne $ubr) {
+            $osBuild = "${currentBuild}.${ubr}"
+        } elseif ($currentBuild) {
+            $osBuild = $currentBuild
+        }
+    }
     [pscustomobject]@{
         hostname    = $cs.Name
+        pc_model    = $cs.Model
+        serial_number = $bios.SerialNumber
         os_name     = $os.Caption
         os_version  = $os.Version
-        os_build    = $os.BuildNumber
+        os_build    = $osBuild
+        os_display_version = $displayVersion
         cpu_model   = $cpu.Name
         cpu_cores   = ($cpus | Measure-Object -Property NumberOfCores -Sum).Sum
         ram_bytes   = [int64]$cs.TotalPhysicalMemory
@@ -74,12 +93,16 @@ execute:
 #               Omitting `summary` falls back to `display`.
 inventory:
   display:
-    - { field: hostname,   label: Hostname  }
-    - { field: os_name,    label: OS        }
-    - { field: os_version, label: Version   }
-    - { field: cpu_model,  label: CPU       }
-    - { field: cpu_cores,  label: Cores,    type: number }
-    - { field: ram_bytes,  label: RAM,      type: bytes  }
+    - { field: hostname,           label: Hostname  }
+    - { field: pc_model,           label: Model     }
+    - { field: serial_number,      label: Serial    }
+    - { field: os_name,            label: OS        }
+    - { field: os_version,         label: Version   }
+    - { field: os_display_version, label: winver    }
+    - { field: os_build,           label: OS Build  }
+    - { field: cpu_model,          label: CPU       }
+    - { field: cpu_cores,          label: Cores,    type: number }
+    - { field: ram_bytes,          label: RAM,      type: bytes  }
     # v0.30 / #39: `type: table` makes the SPA detail page render
     # `disks: [{device_id, size_bytes, free_bytes, file_system}]`
     # as a nested sub-table using `columns` as the schema. The
@@ -94,10 +117,14 @@ inventory:
         - { field: free_bytes,  label: Free,  type: bytes }
         - { field: file_system, label: FS    }
   summary:
-    - { field: hostname,  label: Hostname }
-    - { field: os_name,   label: OS       }
-    - { field: cpu_cores, label: Cores,   type: number }
-    - { field: ram_bytes, label: RAM,     type: bytes  }
+    - { field: hostname,           label: Hostname }
+    - { field: pc_model,           label: Model    }
+    - { field: serial_number,      label: Serial   }
+    - { field: os_name,            label: OS       }
+    - { field: os_display_version, label: winver   }
+    - { field: os_build,           label: OS Build }
+    - { field: cpu_cores,          label: Cores,   type: number }
+    - { field: ram_bytes,          label: RAM,     type: bytes  }
   # v0.31 / #40: explode `disks[]` into a derived flat table so
   # cross-PC searches ("which PCs have C: under 10 GB free") are
   # normal SQL filters. The backend ensures this table at startup
@@ -133,4 +160,7 @@ inventory:
     - ram_bytes
     - os_version
     - os_build
+    - os_display_version
     - cpu_model
+    - pc_model
+    - serial_number
