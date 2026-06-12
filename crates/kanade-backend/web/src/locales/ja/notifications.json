@@ -31,6 +31,21 @@
     "groups": "グループ",
     "pcs": "特定の PC"
   },
+  "history": {
+    "title": "送信履歴",
+    "refresh": "更新",
+    "loading": "送信履歴を読み込み中…",
+    "loadError": "送信履歴の取得に失敗しました",
+    "empty": "まだ通知は送信されていません。",
+    "priority": "優先度",
+    "titleCol": "タイトル",
+    "issuedBy": "送信元",
+    "issuedAt": "送信日時",
+    "actions": "",
+    "viewAcks": "確認状況を見る",
+    "requireAck": "確認必須",
+    "expired": "期限切れ"
+  },
   "ack": {
     "title": "確認状況",
     "idField": "通知 ID",
