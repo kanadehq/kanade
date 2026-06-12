@@ -55,6 +55,7 @@ const groups: {
     links: [
       { to: '/jobs', labelKey: 'nav.jobs' },
       { to: '/schedules', labelKey: 'nav.schedules' },
+      { to: '/notifications', labelKey: 'nav.notifications' },
       { to: '/rollout', labelKey: 'nav.rollout' },
       { to: '/apps', labelKey: 'nav.apps' },
       // `nav.agentGroups` (not `nav.groups`) — that key is already

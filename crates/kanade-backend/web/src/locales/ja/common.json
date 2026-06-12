@@ -18,6 +18,7 @@
     "logs": "ログ",
     "jobs": "ジョブ",
     "schedules": "スケジュール",
+    "notifications": "通知",
     "rollout": "ロールアウト",
     "apps": "アプリ配信",
     "agentGroups": "グループ",

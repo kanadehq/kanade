@@ -18,6 +18,7 @@
     "logs": "Logs",
     "jobs": "Jobs",
     "schedules": "Schedules",
+    "notifications": "Notifications",
     "rollout": "Rollout",
     "apps": "Apps",
     "agentGroups": "Groups",

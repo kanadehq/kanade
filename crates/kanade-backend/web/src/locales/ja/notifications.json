@@ -1,0 +1,49 @@
+{
+  "title": "通知",
+  "subtitle": "エンドユーザーの Client App へ通知を送信し、確認状況を追跡します。",
+  "compose": {
+    "title": "作成",
+    "priority": "優先度",
+    "issuedBy": "送信元",
+    "issuedByPlaceholder": "例: infra-team",
+    "titleField": "タイトル",
+    "titlePlaceholder": "トースト / モーダルに表示される見出し",
+    "body": "本文",
+    "bodyPlaceholder": "メッセージ全文…",
+    "target": "送信先",
+    "expiresAt": "有効期限 (任意)",
+    "allWarning": "この通知はフリート全体の接続中エンドユーザー全員に配信されます。",
+    "groups": "グループ (カンマ区切り)",
+    "groupsPlaceholder": "tokyo-office, finance",
+    "pcs": "PC",
+    "requireAck": "確認を必須にする",
+    "requireAckHint": "有効にすると、優先度に関わらず、ユーザーが「確認」を押すまで閉じられないモーダルで表示されます。",
+    "invalidExpiresAt": "有効期限が不正です — 送信前に修正するか空にしてください。",
+    "publish": "通知を送信"
+  },
+  "priority": {
+    "info": "情報",
+    "warn": "警告",
+    "emergency": "緊急"
+  },
+  "target": {
+    "all": "全 PC",
+    "groups": "グループ",
+    "pcs": "特定の PC"
+  },
+  "ack": {
+    "title": "確認状況",
+    "idField": "通知 ID",
+    "idPlaceholder": "通知 ID を貼り付け (送信後に自動入力)",
+    "refresh": "更新",
+    "loadError": "確認状況の取得に失敗しました",
+    "empty": "この通知の確認はまだありません。",
+    "pc": "PC",
+    "userSid": "ユーザー SID",
+    "ackedAt": "確認日時",
+    "count": "{{count}} 件の確認"
+  },
+  "toast": {
+    "published": "送信しました — ID {{id}}、{{count}} 件の subject へ配信"
+  }
+}
