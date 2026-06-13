@@ -260,6 +260,14 @@
           "description": "Fire only while on **AC power** (skip on battery). Reads\n`GetSystemPowerStatus`; an unknown/unreadable status is treated\nas not-on-AC (fail-closed — a restrictive gate must not fire\nwhen it can't confirm the condition). `false` (default) = no\npower requirement.",
           "type": "boolean"
         },
+        "cpu_below": {
+          "description": "Fire only when the **whole-machine CPU usage is below this\npercent** (0–100; e.g. `20.0` = \"system CPU < 20%\") — \"don't run\nwhile the box is busy\". Reuses the agent's `host_perf` system CPU%\nsample (`sysinfo` mean over cores), so the reading is up to one\n`host_perf` cadence old (default 60s) — fine as a \"generally\nbusy?\" proxy, and more accurate than a fresh one-shot read (CPU%\nneeds two samples). An unavailable sample (host_perf not warmed\nup yet, or stale) is treated as \"not below\" (fail-closed — a\nrestrictive gate must not fire when it can't confirm). `None`\n(default) = no CPU requirement. [`Schedule::validate`] rejects an\nout-of-range value at create time.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
         "idle": {
           "description": "Fire only when the active console session has had **no keyboard /\nmouse input for at least this long** (humantime, e.g. `\"10m\"`) —\n\"don't run while the user is actively working\". Input-based\n(simpler than Task Scheduler's CPU/disk-aware idle). A\nheadless / disconnected console (no interactive user) trivially\nsatisfies it. `None` (default) = no idle requirement. Parsed\nlazily; [`Schedule::validate`] rejects garbage at create time.",
           "type": [
