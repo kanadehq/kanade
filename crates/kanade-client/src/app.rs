@@ -49,6 +49,27 @@ use crate::klp_client::KlpClient;
 /// Kept in sync with `kanade_agent::klp::emergency_notify`.
 const SHOW_NOTIFICATION_FLAG: &str = "--show-notification";
 
+/// The app's AppUserModelID — must match the tauri `identifier`, the
+/// AUMID the notification plugin tags toasts with, AND the
+/// `System.AppUserModel.ID` on the Start-Menu shortcut the installer
+/// registers. All three aligned is what lets a non-MSIX desktop app's
+/// WinRT toasts actually render (#102); a mismatch makes Windows silently
+/// drop them. A compile-time `w!` PCWSTR — no runtime encode/alloc.
+const APP_USER_MODEL_ID: windows::core::PCWSTR = windows::core::w!("com.yukimemi.kanade-client");
+
+/// Pin this process's explicit AUMID to [`APP_USER_MODEL_ID`] at startup
+/// so its toasts are associated with the registered shortcut. Best-effort
+/// — a failure only means toasts may not render, not a crash.
+fn set_app_user_model_id() {
+    use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+
+    // SAFETY: `APP_USER_MODEL_ID` is a compile-time NUL-terminated UTF-16
+    // string; the API only reads it.
+    if let Err(e) = unsafe { SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID) } {
+        warn!(error = ?e, "SetCurrentProcessExplicitAppUserModelID failed; toasts may not render");
+    }
+}
+
 /// Tauri event name the WebView listens on for agent→client pushes.
 /// Payload is the raw `RpcNotification` (`method` + `params`); the
 /// WebView switches on `method` (`jobs.progress`, `state.changed`, …).
@@ -304,6 +325,8 @@ fn parse_launch_notification() -> Option<String> {
 }
 
 pub fn run() {
+    // Pin the process AUMID before anything else so toasts render (#102).
+    set_app_user_model_id();
     let launch_notification = parse_launch_notification();
     // Launched by the agent for an emergency → start hidden (the WebView
     // toasts it; the window only appears when the user clicks the toast),

@@ -470,17 +470,41 @@ async function loadNotifications(): Promise<void> {
     renderNotifications();
 
     await ensureLaunchId();
-    if (pendingEmergencyId) {
-      const target = notifications.get(pendingEmergencyId);
-      if (target && !target.acked_at && !isExpired(target)) {
-        void surfaceEmergencyToast(target);
+    const target = pendingEmergencyId
+      ? notifications.get(pendingEmergencyId)
+      : null;
+    if (pendingEmergencyId && target) {
+      // Agent-launched for a specific emergency (#102): surface it as a
+      // native OS toast (the window stays hidden so it never bursts over
+      // a meeting) — clicking the toast opens the window onto it.
+      if (
+        !target.acked_at &&
+        !isExpired(target) &&
+        !toastedIds.has(target.id)
+      ) {
+        void surfaceOsToast(target);
       } else {
+        // Already acked / expired / toasted — reveal the window so the
+        // agent-launch isn't a silent no-op.
         void invoke("show_main_window").catch(() => {});
       }
+    } else if (pendingEmergencyId) {
+      // Launched for an id we don't have in history — reveal the window.
+      void invoke("show_main_window").catch(() => {});
     } else {
+      // Normal / reconnect launch (SPEC §2.12.8 recovery): an unread,
+      // non-expired emergency whose live push arrived while the pipe was
+      // down (so we never toasted it) is surfaced now from history. The
+      // `toastedIds` guard keeps a reconnect from re-toasting one already
+      // shown.
       for (const n of res.items) {
-        if (n.priority === "emergency" && !n.acked_at && !isExpired(n)) {
-          showEmergencyModal(n);
+        if (
+          n.priority === "emergency" &&
+          !n.acked_at &&
+          !isExpired(n) &&
+          !toastedIds.has(n.id)
+        ) {
+          void surfaceOsToast(n);
         }
       }
     }
@@ -493,8 +517,14 @@ async function loadNotifications(): Promise<void> {
 
 let pendingEmergencyId: string | null = null;
 let launchIdFetched = false;
-let emergencyToasted = false;
-let emergencyActionRegistered = false;
+// Ids we've already shown an OS toast for, so the reconnect-recovery loop
+// (and the agent-launch path) never re-toast the same notification.
+const toastedIds = new Set<string>();
+// `onAction` is registered at most once for the app's lifetime.
+let toastActionRegistered = false;
+// The notification a toast click should focus — the most-recently sent
+// one (onAction doesn't reliably carry our id back, so we track it).
+let lastToastNotifId: string | null = null;
 
 async function ensureLaunchId(): Promise<void> {
   if (launchIdFetched) return;
@@ -508,34 +538,60 @@ async function ensureLaunchId(): Promise<void> {
   }
 }
 
-async function surfaceEmergencyToast(n: AppNotification): Promise<void> {
-  if (emergencyToasted) return;
-  emergencyToasted = true;
+// Surface a notification as a native OS toast — the whole point of OS
+// toasts (vs an in-app toast or a modal) is that they show in Windows'
+// notification area regardless of whether our window is visible/focused,
+// so they never burst over whatever the user is doing (a meeting). ALL
+// priorities go through here. Clicking the toast reveals the window
+// focused on the notification in the panel (where its 確認 button lives).
+// Falls back to revealing the window if toast permission is denied or the
+// OS-toast call fails — so a notification is never silently lost.
+async function surfaceOsToast(n: AppNotification): Promise<void> {
+  const icon = PRIORITY_ICON[n.priority] ?? PRIORITY_ICON.unknown;
+  // Mark as toasted up front so the reconnect-recovery loop won't
+  // re-toast it (and a concurrent live push for the same id is a no-op).
+  toastedIds.add(n.id);
   try {
     let granted = await isPermissionGranted();
     if (!granted) granted = (await requestPermission()) === "granted";
     if (!granted) {
-      await invoke("show_main_window").catch(() => {});
-      focusNotificationInPanel(n.id);
+      revealForEmergency(n);
       return;
     }
-    if (!emergencyActionRegistered) {
-      emergencyActionRegistered = true;
+    if (!toastActionRegistered) {
+      // Fires when the user clicks any OS toast this app sent. onAction
+      // doesn't reliably carry our notification id, so it focuses the
+      // most-recently sent one (`lastToastNotifId`). Flip the guard only
+      // AFTER it resolves — a failed registration must be retryable.
       await onAction(() => {
-        void openEmergencyFromToast();
+        void openFromToast();
       });
+      toastActionRegistered = true;
     }
-    sendNotification({ title: `🚨 ${n.title}`, body: n.body });
+    // Set the click target as close to the actual send as possible (after
+    // the awaits) so a burst of concurrent toasts leaves the
+    // most-recently-SENT id here, not whichever call resolved last.
+    lastToastNotifId = n.id;
+    sendNotification({ title: `${icon} ${n.title}`, body: n.body });
   } catch (err) {
-    console.error("emergency toast failed; revealing window instead", err);
-    await invoke("show_main_window").catch(() => {});
-    focusNotificationInPanel(n.id);
+    console.error("OS toast failed", err);
+    revealForEmergency(n);
   }
 }
 
-async function openEmergencyFromToast(): Promise<void> {
+// Fallback when the OS toast can't be shown (permission denied / failure):
+// reveal the window ONLY for an emergency — stealing focus for a routine
+// info/warn would defeat the non-intrusive goal (it's still in the panel).
+function revealForEmergency(n: AppNotification): void {
+  if (n.priority !== "emergency") return;
+  void invoke("show_main_window").catch(() => {});
+  focusNotificationInPanel(n.id);
+}
+
+// Toast clicked → reveal + focus the window, scroll to the notification.
+async function openFromToast(): Promise<void> {
   await invoke("show_main_window").catch(() => {});
-  if (pendingEmergencyId) focusNotificationInPanel(pendingEmergencyId);
+  if (lastToastNotifId) focusNotificationInPanel(lastToastNotifId);
 }
 
 // Scroll the notification view to a notification and briefly flash it.
@@ -549,28 +605,27 @@ function focusNotificationInPanel(id: string): void {
   window.setTimeout(() => el.classList.remove("notif-flash"), 2000);
 }
 
+// Apply one `notifications.new` push: store, re-render, surface as a
+// non-intrusive OS toast (no screen-grabbing modal, no in-app toast that
+// only shows when the window is up). All priorities go through the same
+// path; emergency only differs in the fallback (revealForEmergency).
 function handleNewNotification(n: AppNotification): void {
   notifications.set(n.id, n);
   renderNotifications();
   if (isExpired(n)) return;
-  if (n.priority === "emergency") {
-    showEmergencyModal(n);
-  } else {
-    showToast(n);
-  }
+  void surfaceOsToast(n);
 }
 
+// Ack a notification for this OS user. Marks it read locally on success;
+// the panel re-renders to swap the 確認 button for the ✓確認済み marker.
 async function ackNotification(id: string): Promise<void> {
   try {
     const r = await invoke<NotificationsAckResult>("notifications_ack", { id });
     const n = notifications.get(id);
     if (n) n.acked_at = r.acked_at;
-    dismissEmergencyModal(id);
     renderNotifications();
   } catch (err) {
     console.error("notifications_ack failed", err);
-    const errEl = document.getElementById("emergency-error");
-    if (errEl) errEl.textContent = `確認に失敗しました: ${String(err)}`;
     throw err;
   }
 }
@@ -652,84 +707,11 @@ function renderNotification(n: AppNotification): string {
     </div>`;
 }
 
-// Transient toast for info/warn pushes (non-blocking).
-function showToast(n: AppNotification): void {
-  const container = $("toast-container");
-  const el = document.createElement("div");
-  el.className = `toast priority-${n.priority}`;
-  el.innerHTML = `
-    <span class="toast-icon">${PRIORITY_ICON[n.priority] ?? PRIORITY_ICON.unknown}</span>
-    <div class="toast-main">
-      <strong class="toast-title">${escapeHtml(n.title)}</strong>
-      <span class="toast-text">${escapeHtml(n.body)}</span>
-    </div>`;
-  container.appendChild(el);
-  window.setTimeout(() => {
-    el.classList.add("toast-out");
-    window.setTimeout(() => el.remove(), 300);
-  }, 6000);
-}
-
-// Emergency notifications block on a focus-grabbing modal (one at a time;
-// the rest queue, deduped by id).
-const emergencyQueue: AppNotification[] = [];
-let emergencyShown: string | null = null;
-
-function showEmergencyModal(n: AppNotification): void {
-  if (emergencyShown === n.id || emergencyQueue.some((q) => q.id === n.id)) {
-    return;
-  }
-  emergencyQueue.push(n);
-  pumpEmergency();
-}
-
-function pumpEmergency(): void {
-  if (emergencyShown) return;
-  const modal = $("emergency-modal");
-  const next = emergencyQueue.shift();
-  if (!next) {
-    modal.hidden = true;
-    modal.innerHTML = "";
-    return;
-  }
-  emergencyShown = next.id;
-  modal.hidden = false;
-  const meta = [
-    next.issued_by ? `送信元: ${escapeHtml(next.issued_by)}` : "",
-    fmtTime(next.issued_at),
-  ]
-    .filter(Boolean)
-    .join(" · ");
-  const btn = next.require_ack
-    ? `<button class="emergency-ack-btn" data-notif-id="${escapeHtml(next.id)}">確認</button>`
-    : `<button class="emergency-close-btn" data-notif-id="${escapeHtml(next.id)}">閉じる</button>`;
-  modal.innerHTML = `
-    <div class="emergency-card" role="alertdialog" aria-modal="true">
-      <div class="emergency-head">🚨 ${escapeHtml(next.title)}</div>
-      <p class="emergency-text">${escapeHtml(next.body)}</p>
-      <p class="emergency-meta muted">${meta}</p>
-      <p id="emergency-error" class="error"></p>
-      ${btn}
-    </div>`;
-  modal
-    .querySelector<HTMLElement>(".emergency-ack-btn, .emergency-close-btn")
-    ?.focus();
-}
-
-function dismissEmergencyModal(id: string): void {
-  const qi = emergencyQueue.findIndex((q) => q.id === id);
-  if (qi >= 0) emergencyQueue.splice(qi, 1);
-  if (emergencyShown === id) {
-    emergencyShown = null;
-    pumpEmergency();
-  }
-}
-
+// Drop expired notifications from the panel as their `expires_at` passes,
+// even while the app sits idle (a notification can expire with nothing
+// else pushing a re-render). All surfacing is via OS toasts now — there's
+// no in-app toast or blocking modal to tear down.
 function sweepExpired(): void {
-  if (emergencyShown) {
-    const n = notifications.get(emergencyShown);
-    if (n && isExpired(n)) dismissEmergencyModal(emergencyShown);
-  }
   renderNotifications();
 }
 
@@ -970,19 +952,14 @@ window.addEventListener("DOMContentLoaded", () => {
       void killRun(killBtn.dataset.runId);
       return;
     }
-    const ackBtn = t.closest<HTMLButtonElement>(
-      ".notif-ack-btn, .emergency-ack-btn",
-    );
+    // Notification ack — from the panel row (the only ack control now;
+    // the blocking emergency modal is gone, all surfacing is OS toasts).
+    const ackBtn = t.closest<HTMLButtonElement>(".notif-ack-btn");
     if (ackBtn?.dataset.notifId) {
       ackBtn.disabled = true;
       ackNotification(ackBtn.dataset.notifId).catch(() => {
         ackBtn.disabled = false;
       });
-      return;
-    }
-    const closeBtn = t.closest<HTMLElement>(".emergency-close-btn");
-    if (closeBtn?.dataset.notifId) {
-      dismissEmergencyModal(closeBtn.dataset.notifId);
       return;
     }
     // Job run button.

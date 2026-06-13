@@ -44,6 +44,11 @@ tauri = { version = "2.11.2", features = ["custom-protocol"] }
 # Native OS toast notifications — the Phase E emergency fallback (#102)
 # launches the client hidden and toasts the emergency from the WebView.
 tauri-plugin-notification = "2.3.3"
+# `SetCurrentProcessExplicitAppUserModelID` — pin the process AUMID to the
+# app identifier so Windows associates our toasts with the registered
+# Start-Menu shortcut's AppUserModelID (#102 OS-toast rendering); without
+# a matching AUMID Windows silently drops the toast.
+windows = { version = "0.62.2", features = ["Win32_UI_Shell"] }
 # Serde for the IPC commands' params / results.
 serde      = { workspace = true }
 serde_json = { workspace = true }
