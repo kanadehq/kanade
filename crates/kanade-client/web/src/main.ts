@@ -616,6 +616,42 @@ function handleNewNotification(n: AppNotification): void {
   void surfaceOsToast(n);
 }
 
+// Single-instance forward (#624): a SECOND `kanade-client` launched with
+// `--show-notification <id>` (the agent's per-emergency fallback) was
+// collapsed into this already-running instance, which forwarded the id
+// here. Toast that emergency from here so a new hidden process never piles
+// up. If we already toasted it (its live push beat the forward), do
+// nothing — `surfaceOsToast` only *records* into `toastedIds`, it doesn't
+// guard on it, so the caller must (else we'd double-toast). If we don't
+// have it yet (forwarded before its push), re-pull history once and
+// retry; failing that, reveal the window so the forward isn't a silent
+// no-op.
+async function surfaceForwardedEmergency(id: string): Promise<void> {
+  if (toastedIds.has(id)) return; // already surfaced by the live push
+  const tryToast = (): boolean => {
+    const n = notifications.get(id);
+    if (n && !isExpired(n) && !n.acked_at) {
+      void surfaceOsToast(n);
+      return true;
+    }
+    return false;
+  };
+  if (tryToast()) return;
+  try {
+    const res = await invoke<NotificationsListResult>("notifications_list", {
+      filter: "all",
+      cursor: null,
+    });
+    for (const n of res.items) notifications.set(n.id, n);
+    renderNotifications();
+  } catch (err) {
+    console.error("forwarded emergency: list re-pull failed", err);
+  }
+  if (!tryToast()) {
+    void invoke("show_main_window").catch(() => {});
+  }
+}
+
 // Ack a notification for this OS user. Marks it read locally on success;
 // the panel re-renders to swap the 確認 button for the ✓確認済み marker.
 async function ackNotification(id: string): Promise<void> {
@@ -1006,6 +1042,13 @@ window.addEventListener("DOMContentLoaded", () => {
       healthTimer = undefined;
     }
     setConn("disconnected");
+  });
+
+  // Single-instance forward (#624): a second launch carried an emergency
+  // id; the running instance toasts it here instead of a new process.
+  void listen<string>("klp-show-notification", (event) => {
+    const id = event.payload;
+    if (id) void surfaceForwardedEmergency(id);
   });
 
   window.setInterval(checkStuckRuns, 60_000);

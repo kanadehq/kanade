@@ -44,6 +44,11 @@ tauri = { version = "2.11.2", features = ["custom-protocol"] }
 # Native OS toast notifications — the Phase E emergency fallback (#102)
 # launches the client hidden and toasts the emergency from the WebView.
 tauri-plugin-notification = "2.3.3"
+# Single-instance guard (#624): the agent launches a fresh client per
+# emergency (#102 fallback), so without this a second emergency >10s after
+# the first piles up another hidden process. This forwards the second
+# launch's argv to the running instance and exits it.
+tauri-plugin-single-instance = "2.4.2"
 # `SetCurrentProcessExplicitAppUserModelID` — pin the process AUMID to the
 # app identifier so Windows associates our toasts with the registered
 # Start-Menu shortcut's AppUserModelID (#102 OS-toast rendering); without
