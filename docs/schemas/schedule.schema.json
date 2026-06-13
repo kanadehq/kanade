@@ -274,6 +274,10 @@
             "string",
             "null"
           ]
+        },
+        "network": {
+          "description": "Fire only when the host has **internet connectivity** (Windows\n`GetNetworkConnectivityHint` reports InternetAccess) — \"don't run\nuntil online\" for jobs that download / phone home. A captive\nportal (ConstrainedInternetAccess), LAN-only (LocalAccess), or\nunknown/unreadable state is treated as offline (fail-closed) — a\nportal would just fail a download, so we hold the run. For VPN /\nSASE / app-specific conditions, use a custom script gate (separate\nslice). `false` (default) = no network requirement.",
+          "type": "boolean"
         }
       }
     },

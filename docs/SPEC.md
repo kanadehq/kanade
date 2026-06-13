@@ -752,7 +752,9 @@ constraints:
 満たす時だけ発火する。現状 `ac_power`（AC 電源接続時のみ・バッテリ駆動中は
 skip）、`idle`（アクティブなコンソールセッションの無入力時間が指定 humantime
 以上の時のみ・「ユーザー作業中は撃たない」）、`cpu_below`（マシン全体の CPU
-使用率が指定パーセント未満の時のみ・「ビジー時は撃たない」）。`network` /
+使用率が指定パーセント未満の時のみ・「ビジー時は撃たない」）、`network`（インター
+ネット接続がある時のみ・「オンラインになるまで撃たない」）。VPN / SASE / 特定
+アプリ起動中などの込み入った条件はカスタムスクリプトゲート（別スライス）で。
 `wake` は別スライス。
 
 ```yaml
@@ -763,7 +765,8 @@ constraints:              #   条件未充足なら見送り）
   require:
     ac_power: true        # AC 接続時のみ
     idle: 10m             # コンソール無入力 10 分以上
-    cpu_below: 20         # system CPU < 20%（複数指定は AND）
+    cpu_below: 20         # system CPU < 20%
+    network: true         # インターネット接続あり（複数指定は AND）
 ```
 
 - **`runs_on: agent` 限定**。host の電源/入力状態は agent しか読めないため
@@ -771,16 +774,19 @@ constraints:              #   条件未充足なら見送り）
 - **runtime ゲート**：センシングは fire 時に毎回行う。`Constraints::allows` には
   入れない（純粋・preview が使う）ので **`preview` には反映されない**。
 - **Windows-only センシング**：`GetSystemPowerStatus`（AC）/
-  `WTSQuerySessionInformationW`（idle）。非 Windows agent は allow
-  （capability gap・decision K）。`cpu_below` は既存 `host_perf` の
-  system CPU%（`sysinfo` の全コア平均）を**再利用**するので、最大 host_perf
-  cadence（既定 60s）ぶん古い値になりうる（「概ねビジーか」の代理としては十分・
-  gate 時の単発読みより正確）。
+  `WTSQuerySessionInformationW`（idle）/ `GetNetworkConnectivityHint`
+  （network・**InternetAccess のみ**を「接続あり」と判定。captive portal=
+  ConstrainedInternetAccess は通信が傍受されダウンロードが失敗するので不可、
+  LAN のみ=LocalAccess も不可）。非 Windows agent は allow（capability gap・
+  decision K）。`cpu_below` は既存 `host_perf` の system CPU%（`sysinfo` の全コア
+  平均）を**再利用**するので、最大 host_perf cadence（既定 60s）ぶん古い値になり
+  うる（「概ねビジーか」の代理としては十分・gate 時の単発読みより正確）。
 - **fail-closed / 端**：AC が unknown/読めない → ac ゲートは block（確認できない
   制限ゲートは撃たない）。idle は、ヘッドレス/コンソール未接続（対話ユーザー
   不在）なら**充足扱い**（無人機は「作業中に撃たない」を自明に満たす）。
   `cpu_below` はサンプル未取得（host_perf 未ウォームアップ）なら block。比較は
-  厳密 `<`（閾値ちょうどは未充足）。
+  厳密 `<`（閾値ちょうどは未充足）。`network` はオフライン/LAN のみ/読めない
+  なら block。
 - **未充足時**：skip-this-tick。reconcile は次 tick で再チェック（実質デファー）、
   calendar 単発は `window` 同様に見送り。
 - **`when: { on: ... }` との併用注意**：イベント発火（startup/logon 等）は
@@ -791,8 +797,8 @@ constraints:              #   条件未充足なら見送り）
   cadence と併用してキャッチアップさせる。
 
 > `constraints:` は `window` / `max_concurrent`（同時実行上限・backend のみ）/
-> `skip_dates` / `require`（ac_power・idle・cpu_below、agent のみ）。
-> `require.network` / `wake` は別スライス。
+> `skip_dates` / `require`（ac_power・idle・cpu_below・network、agent のみ）。
+> カスタムスクリプト require ゲート（#631）と `wake` は別スライス。
 
 `Schedule::validate()`（`Manifest::validate()` と対称）が create 時
 （CLI / `POST /api/schedules` の両方）に検査する: `runs_on: agent`

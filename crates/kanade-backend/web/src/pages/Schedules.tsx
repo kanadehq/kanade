@@ -55,7 +55,7 @@ type ScheduleRow = {
   // absent when no constraints are set.
   constraints?: {
     window?: string;
-    require?: { ac_power?: boolean; idle?: string; cpu_below?: number };
+    require?: { ac_power?: boolean; idle?: string; cpu_below?: number; network?: boolean };
   };
   // #418 Phase 2: timezone for `when.at` + `active` bounds.
   tz: 'local' | 'utc';
@@ -559,6 +559,7 @@ export function Schedules() {
                   if (r?.ac_power) parts.push(t('require.ac'));
                   if (r?.idle) parts.push(t('require.idle', { duration: r.idle }));
                   if (r?.cpu_below != null) parts.push(t('require.cpu', { pct: r.cpu_below }));
+                  if (r?.network) parts.push(t('require.network'));
                   return parts.length
                     ? <code className="text-xs">{parts.join(' · ')}</code>
                     : <span className="text-muted text-xs">—</span>;

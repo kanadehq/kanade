@@ -1,11 +1,13 @@
 //! #418 `constraints.require` — host-environment fire-time gate.
 //!
 //! The agent senses host state in-process (Windows: `GetSystemPowerStatus`
-//! for AC, `WTSQuerySessionInformationW` for console idle) and feeds it to
-//! the pure decision fn [`kanade_shared::manifest::require_met`]. Only the
-//! sensing is platform-specific; the decision (and its tests) live in
-//! kanade-shared. This is `runs_on: agent` only (validate rejects backend),
-//! evaluated as a skip-this-tick gate in `local_scheduler::local_tick`.
+//! for AC, `WTSQuerySessionInformationW` for console idle,
+//! `GetNetworkConnectivityHint` for internet connectivity, plus the
+//! `host_perf` system CPU% sample) and feeds it to the pure decision fn
+//! [`kanade_shared::manifest::require_met`]. Only the sensing is
+//! platform-specific; the decision (and its tests) live in kanade-shared.
+//! This is `runs_on: agent` only (validate rejects backend), evaluated as
+//! a skip-this-tick gate in `local_scheduler::local_tick`.
 //!
 //! Not cfg-gated as a module: `local_tick` is cross-platform and calls
 //! [`require_satisfied`] on every target; the Windows sensing is gated
@@ -43,8 +45,8 @@ fn system_cpu() -> Option<f64> {
 
 /// Fire-time env gate. An empty `require` short-circuits to `true` with
 /// zero syscalls (the common case — most schedules have no require).
-/// Windows: sense AC + idle, fold in the latest host CPU%, apply
-/// `require_met`. Non-Windows: allow (sensing unsupported; no
+/// Windows: sense AC + idle + network, fold in the latest host CPU%,
+/// apply `require_met`. Non-Windows: allow (sensing unsupported; no
 /// non-Windows agents in the fleet).
 pub fn require_satisfied(req: &Require) -> bool {
     if req.is_empty() {
@@ -53,10 +55,18 @@ pub fn require_satisfied(req: &Require) -> bool {
     #[cfg(target_os = "windows")]
     {
         // Imported here (not at module scope) so non-Windows builds
-        // don't flag it unused — the stub below never calls it.
-        use kanade_shared::manifest::require_met;
-        let (ac_online, idle) = sense_windows();
-        require_met(req, ac_online, idle, system_cpu())
+        // don't flag them unused — the stub below never calls them.
+        use kanade_shared::manifest::{EnvState, require_met};
+        let (ac_online, idle, network_up) = sense_windows();
+        require_met(
+            req,
+            &EnvState {
+                ac_online,
+                idle,
+                cpu_pct: system_cpu(),
+                network_up,
+            },
+        )
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -68,17 +78,21 @@ pub fn require_satisfied(req: &Require) -> bool {
     }
 }
 
-/// Sense `(ac_online, console_idle)` on Windows. `ac_online` is
-/// fail-closed (`false`) when the power status can't be read — a
-/// restrictive gate must not fire when it can't confirm the condition.
-/// `idle` is `None` when it can't be determined (so an idle requirement
-/// is treated as unmet), EXCEPT a headless/disconnected console (no
-/// interactive user) reports `Duration::MAX` — idle is then trivially
-/// satisfied, since "don't run while the user is working" is vacuously
-/// true with no one at the console.
+/// Sense `(ac_online, console_idle, network_up)` on Windows. `ac_online`
+/// and `network_up` are fail-closed (`false`) when their status can't be
+/// read — a restrictive gate must not fire when it can't confirm the
+/// condition. `idle` is `None` when it can't be determined (so an idle
+/// requirement is treated as unmet), EXCEPT a headless/disconnected
+/// console (no interactive user) reports `Duration::MAX` — idle is then
+/// trivially satisfied, since "don't run while the user is working" is
+/// vacuously true with no one at the console.
 #[cfg(target_os = "windows")]
-fn sense_windows() -> (bool, Option<std::time::Duration>) {
+fn sense_windows() -> (bool, Option<std::time::Duration>, bool) {
     use std::time::Duration;
+    use windows::Win32::NetworkManagement::IpHelper::GetNetworkConnectivityHint;
+    use windows::Win32::Networking::WinSock::{
+        NL_NETWORK_CONNECTIVITY_HINT, NetworkConnectivityLevelHintInternetAccess,
+    };
     use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
     use windows::Win32::System::RemoteDesktop::{
         WTS_CURRENT_SERVER_HANDLE, WTS_INFO_CLASS, WTSFreeMemory, WTSGetActiveConsoleSessionId,
@@ -151,7 +165,28 @@ fn sense_windows() -> (bool, Option<std::time::Duration>) {
         }
     };
 
-    (ac_online, idle)
+    // ---- network (internet connectivity) ----
+    // SAFETY: `hint` is a valid, properly-aligned out-param the call only
+    // writes into. On error / non-internet level we fail-closed (offline).
+    // Note: unlike GetSystemPowerStatus, this API returns WIN32_ERROR
+    // directly (not wrapped in windows::core::Result), so we match ret.0.
+    let network_up = {
+        let mut hint = NL_NETWORK_CONNECTIVITY_HINT::default();
+        match unsafe { GetNetworkConnectivityHint(&mut hint) } {
+            // 0 (NO_ERROR) on success. "Up" = full internet
+            // (InternetAccess) ONLY. ConstrainedInternetAccess (captive
+            // portal — traffic intercepted) is deliberately treated as
+            // offline so a "don't run until online" download/phone-home
+            // job isn't fired into a portal where it would just fail.
+            // LocalAccess (LAN only), None, Unknown, Hidden → offline too.
+            ret if ret.0 == 0 => {
+                hint.ConnectivityLevel == NetworkConnectivityLevelHintInternetAccess
+            }
+            _ => false,
+        }
+    };
+
+    (ac_online, idle, network_up)
 }
 
 #[cfg(test)]
@@ -166,6 +201,7 @@ mod tests {
             ac_power: false,
             idle: None,
             cpu_below: None,
+            network: false,
         }));
         // Non-Windows: a non-empty require also returns true (allow-all
         // stub — the production fleet is all-Windows, decision K). Pins
@@ -175,6 +211,7 @@ mod tests {
             ac_power: true,
             idle: Some("10m".into()),
             cpu_below: Some(20.0),
+            network: true,
         }));
     }
 

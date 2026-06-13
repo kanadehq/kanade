@@ -39,7 +39,8 @@
   "require": {
     "ac": "AC power",
     "idle": "idle ≥ {{duration}}",
-    "cpu": "CPU < {{pct}}%"
+    "cpu": "CPU < {{pct}}%",
+    "network": "online"
   },
   "target": {
     "all": "all"

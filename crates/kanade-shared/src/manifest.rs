@@ -1920,43 +1920,62 @@ target: { all: true }
     fn require_met_combinations() {
         use std::time::Duration;
         let idle = |m: u64| Some(Duration::from_secs(m * 60));
+        // Builder for the sensed state: (ac, idle, cpu, network).
+        let env = |ac, idle, cpu, net| EnvState {
+            ac_online: ac,
+            idle,
+            cpu_pct: cpu,
+            network_up: net,
+        };
         // Empty require — always met regardless of sensed state.
-        assert!(require_met(&Require::default(), false, None, None));
+        assert!(require_met(
+            &Require::default(),
+            &env(false, None, None, false)
+        ));
         // ac_power: only on AC.
         let ac = Require {
             ac_power: true,
             ..Default::default()
         };
-        assert!(!require_met(&ac, false, None, None));
-        assert!(require_met(&ac, true, None, None));
+        assert!(!require_met(&ac, &env(false, None, None, true)));
+        assert!(require_met(&ac, &env(true, None, None, false)));
         // idle: needs >= the configured min; None idle never satisfies.
         let idle10 = Require {
             idle: Some("10m".into()),
             ..Default::default()
         };
-        assert!(!require_met(&idle10, true, None, None));
-        assert!(!require_met(&idle10, true, idle(5), None));
-        assert!(require_met(&idle10, true, idle(15), None));
-        assert!(require_met(&idle10, true, idle(10), None)); // boundary inclusive
+        assert!(!require_met(&idle10, &env(true, None, None, true)));
+        assert!(!require_met(&idle10, &env(true, idle(5), None, true)));
+        assert!(require_met(&idle10, &env(true, idle(15), None, true)));
+        assert!(require_met(&idle10, &env(true, idle(10), None, true))); // boundary inclusive
         // cpu_below: needs CPU strictly < threshold; None cpu never satisfies.
         let cpu20 = Require {
             cpu_below: Some(20.0),
             ..Default::default()
         };
-        assert!(!require_met(&cpu20, true, None, None)); // no sample → fail-closed
-        assert!(!require_met(&cpu20, true, None, Some(20.0))); // == threshold (not strictly below)
-        assert!(!require_met(&cpu20, true, None, Some(55.0))); // busy
-        assert!(require_met(&cpu20, true, None, Some(5.0))); // quiet
-        // all three: AND.
+        assert!(!require_met(&cpu20, &env(true, None, None, true))); // no sample → fail-closed
+        assert!(!require_met(&cpu20, &env(true, None, Some(20.0), true))); // == threshold
+        assert!(!require_met(&cpu20, &env(true, None, Some(55.0), true))); // busy
+        assert!(require_met(&cpu20, &env(true, None, Some(5.0), true))); // quiet
+        // network: only when online.
+        let net = Require {
+            network: true,
+            ..Default::default()
+        };
+        assert!(!require_met(&net, &env(true, None, None, false))); // offline
+        assert!(require_met(&net, &env(true, None, None, true))); // online
+        // all four: AND.
         let all = Require {
             ac_power: true,
             idle: Some("10m".into()),
             cpu_below: Some(20.0),
+            network: true,
         };
-        assert!(!require_met(&all, false, idle(20), Some(5.0))); // on battery
-        assert!(!require_met(&all, true, idle(1), Some(5.0))); // not idle enough
-        assert!(!require_met(&all, true, idle(20), Some(50.0))); // busy
-        assert!(require_met(&all, true, idle(20), Some(5.0)));
+        assert!(!require_met(&all, &env(false, idle(20), Some(5.0), true))); // on battery
+        assert!(!require_met(&all, &env(true, idle(1), Some(5.0), true))); // not idle enough
+        assert!(!require_met(&all, &env(true, idle(20), Some(50.0), true))); // busy
+        assert!(!require_met(&all, &env(true, idle(20), Some(5.0), false))); // offline
+        assert!(require_met(&all, &env(true, idle(20), Some(5.0), true)));
         // An unparseable idle is treated as no-requirement by require_met
         // (validate rejects it at create time, so this only guards a
         // hand-edited blob): ac still gates.
@@ -1965,8 +1984,8 @@ target: { all: true }
             idle: Some("garbage".into()),
             ..Default::default()
         };
-        assert!(require_met(&bad, true, None, None));
-        assert!(!require_met(&bad, false, None, None));
+        assert!(require_met(&bad, &env(true, None, None, true)));
+        assert!(!require_met(&bad, &env(false, None, None, true)));
     }
 
     #[test]
@@ -2017,6 +2036,7 @@ target: { all: true }
                 ac_power: true,
                 idle: Some("10m".into()),
                 cpu_below: Some(20.0),
+                network: true,
             },
             RunsOn::Agent,
         )
@@ -2075,16 +2095,19 @@ target: { all: true }
         // ac_power: false is skipped; an all-default require nested in
         // constraints is omitted (is_empty folds it in).
         let yaml = "id: s\nwhen: { per_pc: { every: 1m } }\njob_id: j\nruns_on: agent\n\
-                    constraints: { require: { ac_power: true, idle: 10m, cpu_below: 20 } }\n";
+                    constraints: { require: { ac_power: true, idle: 10m, cpu_below: 20, \
+                    network: true } }\n";
         let s: Schedule = serde_yaml::from_str(yaml).expect("parse");
         let req = s.constraints.require.as_ref().expect("require present");
         assert!(req.ac_power);
         assert_eq!(req.idle.as_deref(), Some("10m"));
         assert_eq!(req.cpu_below, Some(20.0));
-        // Re-serialize: idle + cpu_below present, ac_power present (true).
+        assert!(req.network);
+        // Re-serialize: idle + cpu_below + network present, ac_power true.
         let back = serde_json::to_string(&s.constraints).unwrap();
         assert!(back.contains("\"idle\":\"10m\""), "got: {back}");
         assert!(back.contains("\"cpu_below\":20"), "got: {back}");
+        assert!(back.contains("\"network\":true"), "got: {back}");
         // An empty require is omitted entirely by is_empty.
         let mut empty = s.clone();
         empty.constraints.require = Some(Require::default());
@@ -3850,12 +3873,22 @@ pub struct Require {
     /// out-of-range value at create time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu_below: Option<f64>,
+    /// Fire only when the host has **internet connectivity** (Windows
+    /// `GetNetworkConnectivityHint` reports InternetAccess) — "don't run
+    /// until online" for jobs that download / phone home. A captive
+    /// portal (ConstrainedInternetAccess), LAN-only (LocalAccess), or
+    /// unknown/unreadable state is treated as offline (fail-closed) — a
+    /// portal would just fail a download, so we hold the run. For VPN /
+    /// SASE / app-specific conditions, use a custom script gate (separate
+    /// slice). `false` (default) = no network requirement.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub network: bool,
 }
 
 impl Require {
     /// `skip_serializing_if` helper for an embedded empty `require`.
     pub fn is_empty(&self) -> bool {
-        !self.ac_power && self.idle.is_none() && self.cpu_below.is_none()
+        !self.ac_power && self.idle.is_none() && self.cpu_below.is_none() && !self.network
     }
 
     /// Parsed minimum-idle duration (`None` = no idle requirement, or an
@@ -3877,36 +3910,47 @@ impl Require {
     }
 }
 
+/// Host-environment state sensed by the agent, fed to [`require_met`].
+/// A named struct (not positional args) so the growing set of sensed
+/// signals — several of them `bool` — can't be transposed at a call
+/// site. The Win32 sensing lives in `kanade-agent::env_gate`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EnvState {
+    /// Is the host on AC power (`false` if on battery or unreadable).
+    pub ac_online: bool,
+    /// How long the console has been idle (`None` = couldn't determine).
+    pub idle: Option<std::time::Duration>,
+    /// Whole-machine CPU usage 0–100 (`None` = no sample yet).
+    pub cpu_pct: Option<f64>,
+    /// Does the host have internet connectivity (`false` if offline /
+    /// LAN-only / unreadable).
+    pub network_up: bool,
+}
+
 /// Pure env-gate decision (#418 `constraints.require`). The Win32
 /// sensing lives in the agent (`kanade-agent::env_gate`); this is the
-/// testable core, fed the already-sensed host state. Deliberately a
+/// testable core, fed the already-sensed [`EnvState`]. Deliberately a
 /// free fn (not folded into [`Constraints::allows`]) so `allows` stays
-/// pure and `preview` never evaluates a runtime gate.
-///
-/// `ac_online` = is the host on AC power. `idle` = how long the console
-/// has been idle (`None` = couldn't determine → an idle requirement is
-/// treated as unmet). `cpu_pct` = whole-machine CPU usage 0–100 (`None`
-/// = no sample yet → a `cpu_below` requirement is treated as unmet).
-pub fn require_met(
-    req: &Require,
-    ac_online: bool,
-    idle: Option<std::time::Duration>,
-    cpu_pct: Option<f64>,
-) -> bool {
-    if req.ac_power && !ac_online {
+/// pure and `preview` never evaluates a runtime gate. Each set
+/// requirement is a restrictive AND: any unmet (or unknown) gate skips.
+pub fn require_met(req: &Require, env: &EnvState) -> bool {
+    if req.ac_power && !env.ac_online {
         return false;
     }
     if let Some(min) = req.min_idle() {
-        match idle {
+        match env.idle {
             Some(d) if d >= min => {}
             _ => return false,
         }
     }
     if let Some(max) = req.cpu_below {
-        match cpu_pct {
+        match env.cpu_pct {
             Some(p) if p < max => {}
             _ => return false,
         }
+    }
+    if req.network && !env.network_up {
+        return false;
     }
     true
 }
@@ -4592,16 +4636,17 @@ impl Schedule {
             }
         }
         // #418: constraints.require (host-state env gates: ac_power /
-        // idle / cpu_below) is sensed in-process by the agent, so it
-        // needs runs_on: agent — the backend can't read a target host's
-        // power / idle / cpu state. Symmetric with `when: { on }` (also
-        // agent-only); inverse of max_concurrent (backend-only).
+        // idle / cpu_below / network) is sensed in-process by the agent,
+        // so it needs runs_on: agent — the backend can't read a target
+        // host's power / idle / cpu / connectivity state. Symmetric with
+        // `when: { on }` (also agent-only); inverse of max_concurrent
+        // (backend-only).
         if let Some(req) = &self.constraints.require {
             if !req.is_empty() && matches!(self.runs_on, RunsOn::Backend) {
                 return Err(
-                    "constraints.require (host-state env gates: ac_power / idle / cpu_below) \
-                     is sensed in-process by the agent and needs runs_on: agent; the backend \
-                     cannot read a target host's power / idle / cpu state"
+                    "constraints.require (host-state env gates: ac_power / idle / cpu_below / \
+                     network) is sensed in-process by the agent and needs runs_on: agent; the \
+                     backend cannot read a target host's power / idle / cpu / connectivity state"
                         .into(),
                 );
             }
