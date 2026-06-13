@@ -3072,6 +3072,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-notification",
  "tauri-plugin-single-instance",
+ "tauri-winrt-notification",
  "tokio",
  "tracing",
  "tracing-subscriber",

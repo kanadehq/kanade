@@ -551,6 +551,28 @@ async function surfaceOsToast(n: AppNotification): Promise<void> {
   // Mark as toasted up front so the reconnect-recovery loop won't
   // re-toast it (and a concurrent live push for the same id is a no-op).
   toastedIds.add(n.id);
+
+  // Emergency → native WinRT toast (show_emergency_toast): it persists on
+  // screen until dismissed (scenario=Reminder) and stays in the Action
+  // Center, unlike the plugin's sendNotification which auto-dismisses in
+  // ~7s. Fall through to the plugin path only if the native command fails.
+  // (Reveal-on-click is a follow-up — it needs a COM activator the non-MSIX
+  // app doesn't register yet.)
+  if (n.priority === "emergency") {
+    try {
+      await invoke("show_emergency_toast", {
+        title: `${icon} ${n.title}`,
+        body: n.body,
+      });
+      return;
+    } catch (err) {
+      console.error(
+        "native emergency toast failed; falling back to plugin toast",
+        err,
+      );
+    }
+  }
+
   try {
     let granted = await isPermissionGranted();
     if (!granted) granted = (await requestPermission()) === "granted";
@@ -561,12 +583,28 @@ async function surfaceOsToast(n: AppNotification): Promise<void> {
     if (!toastActionRegistered) {
       // Fires when the user clicks any OS toast this app sent. onAction
       // doesn't reliably carry our notification id, so it focuses the
-      // most-recently sent one (`lastToastNotifId`). Flip the guard only
-      // AFTER it resolves — a failed registration must be retryable.
-      await onAction(() => {
-        void openFromToast();
-      });
+      // most-recently sent one (`lastToastNotifId`).
+      //
+      // BEST-EFFORT: `onAction` is mobile-only in tauri-plugin-notification
+      // — on desktop its backing command isn't registered, so the call
+      // REJECTS. That rejection must NOT abort the toast: it sits before
+      // `sendNotification` below, so an unguarded `await` here threw us into
+      // the catch (revealForEmergency) and NO toast was ever sent — the
+      // emergency silently fell back to a window on every desktop launch.
+      // Mark it attempted up front (don't retry the unsupported call on
+      // every toast) and swallow the desktop rejection; toast-click focus
+      // just isn't available on desktop.
       toastActionRegistered = true;
+      try {
+        await onAction(() => {
+          void openFromToast();
+        });
+      } catch (e) {
+        console.warn(
+          "notification onAction unavailable on this platform; toast-click focus disabled",
+          e,
+        );
+      }
     }
     // Set the click target as close to the actual send as possible (after
     // the awaits) so a burst of concurrent toasts leaves the

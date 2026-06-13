@@ -43,7 +43,16 @@ anyhow = { workspace = true }
 tauri = { version = "2.11.2", features = ["custom-protocol"] }
 # Native OS toast notifications — the Phase E emergency fallback (#102)
 # launches the client hidden and toasts the emergency from the WebView.
+# Used for info/warn toasts; emergencies go through `tauri-winrt-notification`
+# directly (below) because the plugin can't make a toast persist or carry a
+# click handler on desktop.
 tauri-plugin-notification = "2.3.3"
+# Raw WinRT toast builder (already in the tree via the plugin) — pulled in
+# directly so the emergency toast can set `scenario=Reminder` (stays on
+# screen until dismissed, vs the plugin's ~7s auto-dismiss) and an
+# `on_activated` click handler that reveals the window. The plugin's
+# `sendNotification` exposes neither (#102 emergency-toast UX).
+tauri-winrt-notification = "0.7.2"
 # Single-instance guard (#624): the agent launches a fresh client per
 # emergency (#102 fallback), so without this a second emergency >10s after
 # the first piles up another hidden process. This forwards the second

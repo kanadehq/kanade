@@ -25,12 +25,32 @@ mod klp_client;
 
 #[cfg(target_os = "windows")]
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "kanade_client=info".into()),
-        )
-        .init();
+    // GUI-subsystem release builds have no console, so plain `fmt()` writes
+    // tracing into the void — write to a file instead so the client's logs
+    // (KLP connect, emergency-toast path, …) are inspectable like the agent's.
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "kanade_client=info".into());
+    let log_path = r"C:\ProgramData\Kanade\logs\client.log";
+    // Create the logs dir first (fresh install won't have it) — otherwise the
+    // open below fails into the console-less fallback and nothing is logged.
+    // Mirrors the agent/backend, which create_dir_all before opening.
+    if let Some(dir) = std::path::Path::new(log_path).parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+    {
+        Ok(file) => tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(file))
+            .init(),
+        // No writable log dir (non-standard install / CI) — fall back to the
+        // (console-less but harmless) default rather than failing to start.
+        Err(_) => tracing_subscriber::fmt().with_env_filter(filter).init(),
+    }
     app::run();
 }
 
