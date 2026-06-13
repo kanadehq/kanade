@@ -1,5 +1,5 @@
-import { useMutation, useQuery } from '@tanstack/react-query';
-import { AlertTriangle, Loader2, RefreshCw, Send } from 'lucide-react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { AlertTriangle, History, Loader2, RefreshCw, Send } from 'lucide-react';
 import { type FormEvent, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
@@ -25,6 +25,7 @@ import { useAuth } from '@/lib/auth';
 import type {
   NotificationAckStatus,
   NotificationPriority,
+  NotificationRecord,
   PublishNotificationRequest,
   PublishNotificationResponse,
 } from '@/lib/types';
@@ -49,6 +50,7 @@ export function Notifications() {
   const { t } = useTranslation('notifications');
   const { hasRole } = useAuth();
   const canOperate = hasRole('operator');
+  const queryClient = useQueryClient();
 
   // ---- composer state ----
   const [priority, setPriority] = useState<NotificationPriority>('info');
@@ -84,6 +86,9 @@ export function Notifications() {
       // follow-up to a different target) but clear the one-shot fields.
       setTitle('');
       setBody('');
+      // Surface the just-sent notification in the history list without a
+      // manual refresh.
+      void queryClient.invalidateQueries({ queryKey: ['notif-history'] });
     },
     onError: (e) => toast.error(formatError(e)),
   });
@@ -96,6 +101,25 @@ export function Notifications() {
       ),
     enabled: ackQueryId.trim().length > 0,
   });
+
+  // ---- sent history ----
+  const history = useQuery({
+    queryKey: ['notif-history'],
+    queryFn: () => apiFetch<NotificationRecord[]>('/api/notifications'),
+    // The fetch replays the whole NOTIFICATIONS stream (up to ~10 NATS
+    // round-trips), so don't re-run it on every window refocus — a short
+    // stale window covers the typical tab-switch-and-back.
+    staleTime: 30_000,
+  });
+
+  // Deep-link a history row into the ack-status view below. Mirror the
+  // ack form's same-id handling: a re-click on the same row keeps the
+  // query key unchanged, so refetch by hand instead of no-op'ing.
+  const viewAcks = (id: string) => {
+    setAckId(id);
+    if (id === ackQueryId) void ack.refetch();
+    else setAckQueryId(id);
+  };
 
   const targetReady =
     mode === 'all'
@@ -269,6 +293,85 @@ export function Notifications() {
               <p className="text-xs text-muted">{t('rbac.operatorRequired', { ns: 'common' })}</p>
             )}
           </form>
+        </CardContent>
+      </Card>
+
+      {/* ---- sent history ---- */}
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between gap-2">
+          <CardTitle className="text-base flex items-center gap-2">
+            <History className="size-4" />
+            {t('history.title')}
+          </CardTitle>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => history.refetch()}
+            disabled={history.isFetching}
+          >
+            {history.isFetching ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : (
+              <RefreshCw className="size-4" />
+            )}
+            {t('history.refresh')}
+          </Button>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {history.isLoading && (
+            <p className="text-muted text-sm flex items-center gap-2">
+              <Loader2 className="size-4 animate-spin" />
+              {t('history.loading')}
+            </p>
+          )}
+          {history.isError && <ErrorCard title={t('history.loadError')} error={history.error} />}
+          {history.data &&
+            (history.data.length === 0 ? (
+              <p className="text-muted text-sm">{t('history.empty')}</p>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>{t('history.priority')}</TableHead>
+                    <TableHead>{t('history.titleCol')}</TableHead>
+                    <TableHead>{t('history.issuedBy')}</TableHead>
+                    <TableHead>{t('history.issuedAt')}</TableHead>
+                    <TableHead className="text-right">{t('history.actions')}</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {history.data.map((n) => {
+                    const exp = n.expires_at ? Date.parse(n.expires_at) : Number.NaN;
+                    const expired = !Number.isNaN(exp) && exp <= Date.now();
+                    return (
+                      <TableRow key={n.id}>
+                        <TableCell>{t(`priority.${n.priority}`)}</TableCell>
+                        <TableCell className="font-medium">
+                          {n.title}
+                          {n.require_ack && (
+                            <span className="ml-1 text-xs text-muted">
+                              ({t('history.requireAck')})
+                            </span>
+                          )}
+                          {expired && (
+                            <span className="ml-1 text-xs text-danger">
+                              ({t('history.expired')})
+                            </span>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-muted">{n.issued_by ?? '—'}</TableCell>
+                        <TableCell>{fmtIsoLocal(n.issued_at)}</TableCell>
+                        <TableCell className="text-right">
+                          <Button variant="ghost" size="sm" onClick={() => viewAcks(n.id)}>
+                            {t('history.viewAcks')}
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            ))}
         </CardContent>
       </Card>
 

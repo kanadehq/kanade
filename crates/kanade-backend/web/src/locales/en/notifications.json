@@ -31,6 +31,21 @@
     "groups": "Groups",
     "pcs": "Specific PCs"
   },
+  "history": {
+    "title": "Sent history",
+    "refresh": "Refresh",
+    "loading": "Loading sent history…",
+    "loadError": "Failed to load sent history",
+    "empty": "No notifications have been sent yet.",
+    "priority": "Priority",
+    "titleCol": "Title",
+    "issuedBy": "Issued by",
+    "issuedAt": "Sent at",
+    "actions": "",
+    "viewAcks": "View confirmations",
+    "requireAck": "ack required",
+    "expired": "expired"
+  },
   "ack": {
     "title": "Confirmation status",
     "idField": "Notification id",

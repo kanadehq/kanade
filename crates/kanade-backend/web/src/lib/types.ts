@@ -223,3 +223,18 @@ export type NotificationAckStatus = {
   id: string;
   acks: NotificationAckEntry[];
 };
+
+// One sent notification, from GET /api/notifications (the operator's
+// sent history). Mirrors kanade-shared `ipc::notifications::Notification`
+// — `acked_at` is per-recipient and always absent here (the operator
+// view is "what was sent", not "did I personally ack it").
+export type NotificationRecord = {
+  id: string;
+  priority: NotificationPriority;
+  require_ack: boolean;
+  title: string;
+  body: string;
+  issued_at: string;
+  issued_by?: string | null;
+  expires_at?: string | null;
+};

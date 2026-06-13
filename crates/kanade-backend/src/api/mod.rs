@@ -247,6 +247,10 @@ pub fn router(state: AppState) -> Router {
             "/api/notifications/{id}/ack_status",
             get(notifications::ack_status),
         )
+        // Sent-notification history (viewer+) — replays the NOTIFICATIONS
+        // stream so the SPA can show "what did I send" and deep-link each
+        // entry into its ack_status view.
+        .route("/api/notifications", get(notifications::list_sent))
         .route("/api/agents/{pc_id}/logs", get(agent_logs::tail))
         .route("/api/agents/releases", get(agent_releases::list_releases))
         .route("/api/app-packages", get(app_packages::list_packages))
