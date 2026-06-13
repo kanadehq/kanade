@@ -23,17 +23,18 @@
   "columns": {
     "status": "status",
     "pcId": "pc_id",
-    "hostname": "hostname",
     "os": "os",
     "agent": "agent",
     "lastHeartbeat": "last heartbeat",
+    "lastLogon": "last sign-in",
     "cpu": "agent CPU",
     "rss": "agent RSS",
     "actions": "actions"
   },
   "columnTitles": {
     "cpu": "Agent process CPU % (one core = 100)",
-    "rss": "Agent process resident set size (current RAM footprint)"
+    "rss": "Agent process resident set size (current RAM footprint)",
+    "lastLogon": "Most recent account the Windows sign-in screen used (display name over login name)"
   },
   "actions": {
     "facts": "facts",

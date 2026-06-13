@@ -138,6 +138,13 @@ where
                 .expect("serialising Vec<String> is infallible"),
         )
     };
+    // #655: last signed-in account. COALESCE(excluded, agents) — the
+    // OPPOSITE precedence to hostname/os_family below: a non-NULL value
+    // the agent reports WINS, so a user switch is reflected on the next
+    // heartbeat. But a NULL (a ping reply, or a pre-#655 / non-Windows
+    // agent that doesn't report it) keeps whatever an earlier heartbeat
+    // stored rather than clearing it — so the column doesn't flap to
+    // blank between a real heartbeat and a cheap ping.
     sqlx::query(
         "INSERT INTO agents (
              pc_id, hostname, os_family, agent_version,
@@ -145,8 +152,9 @@ where
              agent_cpu_pct, agent_rss_bytes,
              agent_disk_read_bytes, agent_disk_written_bytes,
              quarantined_versions,
+             last_logon_user, last_logon_display_name,
              updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
          ON CONFLICT(pc_id) DO UPDATE SET
              hostname                  = COALESCE(agents.hostname, excluded.hostname),
              os_family                 = COALESCE(agents.os_family, excluded.os_family),
@@ -157,6 +165,8 @@ where
              agent_disk_read_bytes     = excluded.agent_disk_read_bytes,
              agent_disk_written_bytes  = excluded.agent_disk_written_bytes,
              quarantined_versions      = excluded.quarantined_versions,
+             last_logon_user           = COALESCE(excluded.last_logon_user, agents.last_logon_user),
+             last_logon_display_name   = COALESCE(excluded.last_logon_display_name, agents.last_logon_display_name),
              updated_at                = CURRENT_TIMESTAMP",
     )
     .bind(&hb.pc_id)
@@ -169,6 +179,8 @@ where
     .bind(hb.agent_disk_read_bytes)
     .bind(hb.agent_disk_written_bytes)
     .bind(quarantined_json)
+    .bind(&hb.last_logon_user)
+    .bind(&hb.last_logon_display_name)
     .execute(executor)
     .await?;
     Ok(())

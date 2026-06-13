@@ -14,6 +14,30 @@ fn hostname() -> Option<String> {
         .or_else(|| std::env::var("HOSTNAME").ok())
 }
 
+/// Most-recently signed-in account on this host, as
+/// `(account_name, display_name)`. Read from the Windows `LogonUI`
+/// registry key — `LastLoggedOnUser` is the `DOMAIN\sam` login name
+/// the sign-in screen last used, `LastLoggedOnDisplayName` its
+/// friendly name. Both survive logoff, so they stay populated even
+/// when no one is signed in.
+///
+/// Unlike `hostname` / `os_family` (read once at startup), this is
+/// re-read every tick: the signed-in user can change while the agent
+/// runs and we want the heartbeat to track it. The cost is two
+/// `RegQueryValue` calls — microseconds, far cheaper than the sysinfo
+/// snapshot already taken each tick.
+///
+/// `read_hklm_value` returns `None` for missing values and on
+/// non-Windows targets (where it's a stub), so both fields are simply
+/// `None` off-Windows. See #655 for the Linux/macOS follow-up.
+fn last_logon() -> (Option<String>, Option<String>) {
+    const LOGON_UI: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\LogonUI";
+    (
+        kanade_shared::secrets::read_hklm_value(LOGON_UI, "LastLoggedOnUser"),
+        kanade_shared::secrets::read_hklm_value(LOGON_UI, "LastLoggedOnDisplayName"),
+    )
+}
+
 /// Per-process self-perf snapshot at this heartbeat tick. All `i64`
 /// because sysinfo returns u64 but the wire schema (and the SQLite
 /// columns the backend persists into) are i64 — clamped to i64::MAX
@@ -130,6 +154,7 @@ pub async fn heartbeat_loop(
             _ = ticker.tick() => {
                 let perf = refresh_self_perf(&mut sys, is_first_tick);
                 is_first_tick = false;
+                let (last_logon_user, last_logon_display_name) = last_logon();
                 let hb = Heartbeat {
                     pc_id: pc_id.clone(),
                     at: chrono::Utc::now(),
@@ -141,6 +166,8 @@ pub async fn heartbeat_loop(
                     agent_disk_read_bytes: perf.disk_read_bytes,
                     agent_disk_written_bytes: perf.disk_written_bytes,
                     quarantined_versions: quarantined_versions.clone(),
+                    last_logon_user,
+                    last_logon_display_name,
                 };
                 let payload = match serde_json::to_vec(&hb) {
                     Ok(b) => b,

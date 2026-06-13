@@ -76,6 +76,22 @@ pub struct Heartbeat {
     /// `#[serde(default)]` leaves it empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub quarantined_versions: Vec<String>,
+    /// Most-recently signed-in account on this host, read from the
+    /// Windows `LogonUI` registry key
+    /// (`HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\LogonUI\LastLoggedOnUser`).
+    /// This is the `DOMAIN\sam` (or `.\user`) login name the sign-in
+    /// screen last used; it survives logoff, so it's populated even
+    /// when no one is currently signed in. `None` on a never-signed-in
+    /// host and on non-Windows agents (`read_hklm_value` returns `None`
+    /// off-Windows) — see #655 for the cross-platform follow-up — so
+    /// older agents keep sending valid heartbeats either way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_logon_user: Option<String>,
+    /// Display name paired with [`Self::last_logon_user`], from
+    /// `LogonUI\LastLoggedOnDisplayName` (e.g. `"Yamada Taro"`). `None`
+    /// when unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_logon_display_name: Option<String>,
 }
 
 #[cfg(test)]
@@ -96,6 +112,8 @@ mod tests {
             agent_disk_read_bytes: Some(1024 * 1024),
             agent_disk_written_bytes: Some(512 * 1024),
             quarantined_versions: vec!["0.43.51".into()],
+            last_logon_user: Some("EXAMPLE\\taro".into()),
+            last_logon_display_name: Some("Yamada Taro".into()),
         };
         let json = serde_json::to_string(&hb).unwrap();
         let back: Heartbeat = serde_json::from_str(&json).unwrap();
@@ -109,6 +127,8 @@ mod tests {
         assert_eq!(back.agent_disk_read_bytes, hb.agent_disk_read_bytes);
         assert_eq!(back.agent_disk_written_bytes, hb.agent_disk_written_bytes);
         assert_eq!(back.quarantined_versions, hb.quarantined_versions);
+        assert_eq!(back.last_logon_user, hb.last_logon_user);
+        assert_eq!(back.last_logon_display_name, hb.last_logon_display_name);
     }
 
     #[test]
@@ -124,6 +144,8 @@ mod tests {
             agent_disk_read_bytes: None,
             agent_disk_written_bytes: None,
             quarantined_versions: Vec::new(),
+            last_logon_user: None,
+            last_logon_display_name: None,
         };
         let json = serde_json::to_string(&hb).unwrap();
         assert!(
@@ -149,5 +171,9 @@ mod tests {
         assert_eq!(hb.agent_rss_bytes, None);
         assert_eq!(hb.agent_disk_read_bytes, None);
         assert_eq!(hb.agent_disk_written_bytes, None);
+        // last-logon fields are optional too: a heartbeat that omits
+        // them (older agent, non-Windows host) decodes to None.
+        assert_eq!(hb.last_logon_user, None);
+        assert_eq!(hb.last_logon_display_name, None);
     }
 }

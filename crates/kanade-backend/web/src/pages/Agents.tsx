@@ -293,11 +293,14 @@ export function Agents() {
         <TableHeader>
           <TableRow>
             <TableHead>{t('columns.status')}</TableHead>
+            {/* pc_id is usually COMPUTERNAME lower-cased, so a separate
+                hostname column duplicated it. The hostname now rides the
+                pc_id cell, shown only when it genuinely differs. */}
             <TableHead>{t('columns.pcId')}</TableHead>
-            <TableHead>{t('columns.hostname')}</TableHead>
             <TableHead>{t('columns.os')}</TableHead>
             <TableHead>{t('columns.agent')}</TableHead>
             <TableHead>{t('columns.lastHeartbeat')}</TableHead>
+            <TableHead title={t('columnTitles.lastLogon')}>{t('columns.lastLogon')}</TableHead>
             {/* v0.37 Part 2: agent process self-perf columns. Pre-
                 0.37 agents leave these null and the cell renders
                 as an em-dash, so the table stays usable during a
@@ -339,11 +342,34 @@ export function Agents() {
                 >
                   <code className="text-xs">{a.pc_id}</code>
                 </Link>
+                {/* Show hostname only when it differs from pc_id beyond
+                    casing — otherwise it's the same value (e.g. MINIPC
+                    vs minipc) and just noise. */}
+                {a.hostname &&
+                  a.hostname.toLowerCase() !== a.pc_id.toLowerCase() && (
+                    <div className="text-muted text-[10px]">{a.hostname}</div>
+                  )}
               </TableCell>
-              <TableCell>{a.hostname ?? <span className="text-muted">—</span>}</TableCell>
               <TableCell className="text-muted text-xs">{a.os_family ?? '—'}</TableCell>
               <TableCell className="text-muted text-xs">{a.agent_version ?? '—'}</TableCell>
               <TableCell className="text-muted text-xs">{fmtIsoLocal(a.last_heartbeat)}</TableCell>
+              <TableCell className="text-xs">
+                {a.last_logon_display_name || a.last_logon_user ? (
+                  <div className="flex flex-col">
+                    {/* Display name as the primary line; fall back to the
+                        login name when there's no display name (common for
+                        local / domain accounts). Show the login name as a
+                        secondary line only when it isn't already the
+                        primary one. */}
+                    <span>{a.last_logon_display_name ?? a.last_logon_user}</span>
+                    {a.last_logon_display_name && a.last_logon_user && (
+                      <code className="text-muted text-[10px]">{a.last_logon_user}</code>
+                    )}
+                  </div>
+                ) : (
+                  <span className="text-muted">—</span>
+                )}
+              </TableCell>
               <TableCell className="text-right text-muted text-xs">{fmtPct(a.agent_cpu_pct)}</TableCell>
               <TableCell className="text-right text-muted text-xs">{fmtBytes(a.agent_rss_bytes)}</TableCell>
               <TableCell>

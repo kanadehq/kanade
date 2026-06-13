@@ -27,6 +27,12 @@ export type AgentRow = {
   // for agents that never reported any (pre-#582). Defaulted in case
   // an older backend response omits the key.
   quarantined_versions?: string[];
+  // #655: the account the host's Windows sign-in screen last used —
+  // `last_logon_user` is the DOMAIN\\sam login name,
+  // `last_logon_display_name` its friendly name. Null for
+  // never-signed-in / pre-#655 / non-Windows agents.
+  last_logon_user: string | null;
+  last_logon_display_name: string | null;
 };
 
 export type Heartbeat = {
