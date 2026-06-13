@@ -14,6 +14,7 @@
 id: check-cert-expiry
 version: 0.1.0
 description: Soonest-expiring machine certificate (LocalMachine\My)
+tags: [health-check, security]
 execute:
   shell: powershell
   run_as: system
