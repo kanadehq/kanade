@@ -23,8 +23,23 @@
     "rollout": "ロールアウト",
     "coverage": "カバレッジ",
     "enabled": "有効",
+    "tags": "タグ",
     "actions": "操作"
   },
+  "search": {
+    "placeholder": "スケジュールを検索 (id・job_id・タグ)",
+    "clear": "検索をクリア"
+  },
+  "tags": {
+    "filterByTitle": "タグ「{{tag}}」で絞り込み",
+    "clear": "タグ絞り込みを解除"
+  },
+  "groups": {
+    "other": "その他",
+    "expand": "展開:",
+    "collapse": "折りたたみ:"
+  },
+  "noMatch": "条件に一致するスケジュールがありません",
   "coverage": {
     "title": "ロールアウト・カバレッジ",
     "summary": "{{ok}}/{{total}} 完了 · {{fail}} 失敗 · {{running}} 実行中 · {{pending}} 未実行",

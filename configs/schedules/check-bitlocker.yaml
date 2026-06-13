@@ -14,3 +14,6 @@ job_id: check-bitlocker
 target:
   all: true
 jitter: 5m
+# Free-form operator taxonomy — drives the Schedules page's tag filter
+# (orthogonal to the id-prefix grouping).
+tags: [health-check, security]

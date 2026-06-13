@@ -12,3 +12,4 @@ job_id: check-cert-expiry
 target:
   all: true
 jitter: 15m
+tags: [health-check, security]
