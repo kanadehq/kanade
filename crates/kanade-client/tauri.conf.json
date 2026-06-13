@@ -4,7 +4,7 @@
   "version": "0.43.55",
   "identifier": "com.yukimemi.kanade-client",
   "build": {
-    "frontendDist": "../web/dist",
+    "frontendDist": "web/dist",
     "devUrl": "http://localhost:1420",
     "beforeDevCommand": "cd web && bun dev",
     "beforeBuildCommand": "cd web && bun run build"
@@ -27,6 +27,7 @@
   },
   "bundle": {
     "active": false,
+    "icon": ["icons/icon.ico"],
     "category": "Utility",
     "shortDescription": "kanade Client App",
     "longDescription": "End-user-facing companion to the kanade agent: notifications, health, self-service jobs, support handoff."

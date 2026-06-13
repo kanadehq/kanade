@@ -74,6 +74,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         if: steps.gate.outputs.configured == 'true'
 
+      # Build the Tauri WebView BEFORE `cargo build`. Tauri bakes
+      # `crates/kanade-client/web/dist` into the binary at compile time
+      # (frontendDist + the custom-protocol feature), but plain
+      # `cargo build` does NOT run tauri.conf's `beforeBuildCommand`, and
+      # `dist/assets/` is .gitignored. Without this step the binary embeds
+      # only the committed index.html stub (broken asset refs) and the
+      # shipped client's WebView fails to load. release.yml builds this via
+      # `cargo make web-build`; this standalone job builds just the client
+      # WebView directly. (--frozen-lockfile: the committed bun.lock pins it.)
+      - uses: oven-sh/setup-bun@v2
+        if: steps.gate.outputs.configured == 'true'
+      - name: Build kanade-client WebView
+        if: steps.gate.outputs.configured == 'true'
+        shell: bash
+        run: |
+          cd crates/kanade-client/web
+          bun install --frozen-lockfile
+          bun run build
+
       # Build only kanade-client (not the full workspace) — this is
       # the only target this workflow ships. release.yml's matrix
       # already builds every workspace bin for the GitHub Release
