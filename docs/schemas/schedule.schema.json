@@ -133,7 +133,7 @@
       ]
     },
     "Constraints": {
-      "description": "Operational constraints on a [`Schedule`] (#418 Phase 3). Where\n[`Active`] decides *over what date range* a schedule is live,\n`Constraints` decides *when, within an active period,* a fire is\nallowed. `window` (a maintenance time-of-day window) and\n`max_concurrent` (a fleet-wide running-instance cap) so far;\n`require` (env gates) joins this struct in a later phase.",
+      "description": "[`Active`] decides *over what date range* a schedule is live,\n`Constraints` decides *when, within an active period,* a fire is\nallowed: `window` (a maintenance time-of-day window),\n`max_concurrent` (a fleet-wide running-instance cap), `skip_dates`\n(holiday exclusion) and `require` (host-environment gates, agent-only\n— see [`Require`]).",
       "type": "object",
       "properties": {
         "max_concurrent": {
@@ -144,6 +144,17 @@
           ],
           "format": "uint32",
           "minimum": 0
+        },
+        "require": {
+          "description": "Host-environment gate (#418): fire only when the target host is\nin the required state (on AC power, idle). Agent-sensed at fire\ntime, `runs_on: agent` only. See [`Require`]. `None` (default) =\nno environment requirement.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Require"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "skip_dates": {
           "description": "Calendar dates the schedule must **not** fire on — holidays,\nblackout days, one-off freeze dates (#418 \"祝日除外\"). Each is\n`YYYY-MM-DD`, evaluated as a wall-clock date in the schedule's\n`tz`. Applies to every `when` shape (a reconcile cadence skips\nthe whole day; a calendar fire landing on the date is\nsuppressed) and is honored by both the live scheduler and\n`preview`, since both gate on [`Constraints::allows`]. Empty\n(default) = no skips. Operator-supplied: there is no built-in\nholiday calendar — list the dates you care about. Parsed lazily;\n[`Schedule::validate`] rejects a malformed date at create time.",
@@ -240,6 +251,23 @@
           "$ref": "#/$defs/EverySpec"
         }
       ]
+    },
+    "Require": {
+      "description": "Host-environment gate (#418 `constraints.require`). Fire only when\nthe target host is in the required state. Sensed **in-process by the\nagent** (Win32), so it is `runs_on: agent` only — the backend cannot\nread a target host's power/idle state ([`Schedule::validate`]\nrejects it on `runs_on: backend`, symmetric with `when: { on }`).\n\nEvaluated at fire time as a skip-this-tick gate (NOT in\n[`Constraints::allows`], which stays pure for `preview`): a reconcile\ncadence re-checks every minute (so it effectively defers until the\nstate is met — the intended pairing); a `calendar` fire that lands\nwhile the state is unmet is simply missed, same as `window`. It is\ntherefore a *runtime* gate and does not appear in `preview`.",
+      "type": "object",
+      "properties": {
+        "ac_power": {
+          "description": "Fire only while on **AC power** (skip on battery). Reads\n`GetSystemPowerStatus`; an unknown/unreadable status is treated\nas not-on-AC (fail-closed — a restrictive gate must not fire\nwhen it can't confirm the condition). `false` (default) = no\npower requirement.",
+          "type": "boolean"
+        },
+        "idle": {
+          "description": "Fire only when the active console session has had **no keyboard /\nmouse input for at least this long** (humantime, e.g. `\"10m\"`) —\n\"don't run while the user is actively working\". Input-based\n(simpler than Task Scheduler's CPU/disk-aware idle). A\nheadless / disconnected console (no interactive user) trivially\nsatisfies it. `None` (default) = no idle requirement. Parsed\nlazily; [`Schedule::validate`] rejects garbage at create time.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
     },
     "Retry": {
       "description": "Fixed-backoff retry policy (#418 Phase 4). `max` is the number of\n*additional* attempts after the first run (so `max: 3` = up to 4\ntotal executions); `backoff` is the humantime delay slept between\nattempts. The retry happens fire-side (inside `kanade fire` /\n`handle_command`) on every OS for the PoC — the Windows-native\n\"restart on failure\" Task Scheduler path is deferred to the\nnative-delegation phase (#418 decision H).",

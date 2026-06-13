@@ -1562,6 +1562,22 @@ async fn local_tick(
         return;
     }
 
+    // 0c) Host-environment gate (#418 constraints.require) — ac_power /
+    //     idle, sensed in-process (Win32). runs_on: agent only (validate
+    //     rejects backend). Skip-this-tick if unmet: a reconcile cadence
+    //     re-checks next tick (effectively deferring until the state is
+    //     met — the intended pairing); a calendar one-shot is missed,
+    //     same as the window gate above. Empty require → zero syscalls.
+    if let Some(req) = &schedule.constraints.require
+        && !crate::env_gate::require_satisfied(req)
+    {
+        debug!(
+            schedule_id = %schedule.id,
+            "local_scheduler: constraints.require not met (env gate) — skip",
+        );
+        return;
+    }
+
     // 1) Manifest + (optional) pre-resolved script_object digest
     //    must be cached. If not, skip and try again next tick (the
     //    jobs_watch loop may pick it up).

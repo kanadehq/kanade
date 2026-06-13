@@ -748,16 +748,51 @@ constraints:
   skip_dates: ["2026-01-01", "2026-12-25"]   # 元日・クリスマスは撃たない
 ```
 
-> `constraints:` は将来の `require`（端末状態ゲート idle/AC/network）も入る
-> 名前空間。現状は `window` / `max_concurrent`（同時実行上限・backend のみ）
-> / `skip_dates`。
+**`constraints.require`（端末状態ゲート）** — 端末の**環境状態**が条件を
+満たす時だけ発火する。現状 `ac_power`（AC 電源接続時のみ・バッテリ駆動中は
+skip）と `idle`（アクティブなコンソールセッションの無入力時間が指定 humantime
+以上の時のみ・「ユーザー作業中は撃たない」）。`network` / `wake` は別スライス。
+
+```yaml
+when:
+  per_pc: { every: 1h }   # require は reconcile cadence 推奨（毎分再チェックで
+runs_on: agent            #   条件成立まで待って発火。calendar 単発はその瞬間に
+constraints:              #   条件未充足なら見送り）
+  require:
+    ac_power: true        # AC 接続時のみ
+    idle: 10m             # コンソール無入力 10 分以上
+```
+
+- **`runs_on: agent` 限定**。host の電源/入力状態は agent しか読めないため
+  `runs_on: backend` は create 時に reject（`when: { on }` と対称）。
+- **runtime ゲート**：センシングは fire 時に毎回行う。`Constraints::allows` には
+  入れない（純粋・preview が使う）ので **`preview` には反映されない**。
+- **Windows-only センシング**：`GetSystemPowerStatus`（AC）/
+  `WTSQuerySessionInformationW`（idle）。非 Windows agent は allow
+  （capability gap・decision K）。
+- **fail-closed / 端**：AC が unknown/読めない → ac ゲートは block（確認できない
+  制限ゲートは撃たない）。idle は、ヘッドレス/コンソール未接続（対話ユーザー
+  不在）なら**充足扱い**（無人機は「作業中に撃たない」を自明に満たす）。
+- **未充足時**：skip-this-tick。reconcile は次 tick で再チェック（実質デファー）、
+  calendar 単発は `window` 同様に見送り。
+- **`when: { on: ... }` との併用注意**：イベント発火（startup/logon 等）は
+  そのイベントにつき 1 回で、未充足ならその機会は消費される（例: `on: startup`
+  ＋ `ac_power: true` でバッテリ起動 → その起動では撃たず、後で AC を挿しても
+  再試行しない）。require は AC のように**セッション中に変化しうる**初の
+  ゲートなので、確実に行き渡らせたい場合は `per_pc: { every: 1h }` 等の reconcile
+  cadence と併用してキャッチアップさせる。
+
+> `constraints:` は `window` / `max_concurrent`（同時実行上限・backend のみ）/
+> `skip_dates` / `require`（ac_power・idle、agent のみ）。`require.network` /
+> `require.cpu_below` / `wake` は別スライス。
 
 `Schedule::validate()`（`Manifest::validate()` と対称）が create 時
 （CLI / `POST /api/schedules` の両方）に検査する: `runs_on: agent`
 + `per_target` / 不正な `every` (humantime) / 不正な calendar `at`
 （範囲外・日時 at と days の併用） / 不正な `constraints.window`
-（書式・始端=終端）/ 未登録 `job_id`（API のみ・JOBS KV 照会）/
-`active.from >= until`。
+（書式・始端=終端）/ `constraints.require` + `runs_on: backend` / 不正な
+`constraints.require.idle` (humantime) / 未登録 `job_id`（API のみ・JOBS KV
+照会）/ `active.from >= until`。
 
 **可視化（read-only エンドポイント）** — schedule の状態は 3 つの
 read-only ビューで確認できる（CLI `kanade schedule {preview,status,coverage}`
