@@ -94,6 +94,11 @@ fn run_service() -> windows_service::Result<()> {
                 };
                 if let Some(t) = trigger {
                     crate::local_scheduler::notify_session_event(t);
+                    // #647: re-surface an emergency that arrived while no user
+                    // was signed in, now that someone has logged on. `OnTrigger`
+                    // is `Copy`, so the scheduler signal above still owns its
+                    // value.
+                    crate::klp::emergency_notify::on_session_event(t);
                 }
                 ServiceControlHandlerResult::NoError
             }

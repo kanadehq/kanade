@@ -709,6 +709,31 @@ async function surfaceForwardedEmergency(id: string): Promise<void> {
   }
 }
 
+// Presence-driven re-surface (#647): the agent forwarded `--resurface` because
+// the user just became present (logon / unlock) after emergencies they
+// couldn't see — sent while signed out, or delivered to the Action Center
+// while the screen was locked. Re-pull the freshest unread set, then re-toast
+// every unread, unexpired emergency, DELIBERATELY bypassing the toastedIds
+// dedup (the whole point is to re-pop ones already silently delivered).
+// info/warn stay passive.
+async function resurfaceAllEmergencies(): Promise<void> {
+  try {
+    const res = await invoke<NotificationsListResult>("notifications_list", {
+      filter: "all",
+      cursor: null,
+    });
+    for (const n of res.items) notifications.set(n.id, n);
+    renderNotifications();
+  } catch (err) {
+    console.error("resurface: list re-pull failed", err);
+  }
+  for (const n of notifications.values()) {
+    if (n.priority === "emergency" && !n.acked_at && !isExpired(n)) {
+      void surfaceOsToast(n);
+    }
+  }
+}
+
 // Ack a notification for this OS user. Marks it read locally on success;
 // the panel re-renders to swap the 確認 button for the ✓確認済み marker.
 async function ackNotification(id: string): Promise<void> {
@@ -1175,6 +1200,12 @@ window.addEventListener("DOMContentLoaded", () => {
   void listen<string>("klp-show-notification", (event) => {
     const id = event.payload;
     if (id) void surfaceForwardedEmergency(id);
+  });
+
+  // Presence-driven re-surface (#647): a second `--resurface` launch was
+  // collapsed into this instance; re-pop every unread emergency.
+  void listen("klp-resurface", () => {
+    void resurfaceAllEmergencies();
   });
 
   window.setInterval(checkStuckRuns, 60_000);
