@@ -252,6 +252,26 @@ namespace Kanade {
     [Console]::Error.WriteLine("install-kanade-client: shortcut/AUMID step failed (toasts may not render): $_")
 }
 
+# --- kanade-client:// URL protocol (#647 toast-click reveal) --------------
+# A clicked emergency toast carries `launch="kanade-client://show?id=<id>"`
+# (activationType="protocol"). Windows resolves the scheme via this registry
+# entry and runs the client with the URI as `%1`; the single-instance guard
+# forwards it to the running instance, which reveals the window and scrolls to
+# the notification. Protocol activation needs no COM activator. Machine-wide
+# (HKLM\SOFTWARE\Classes) — this job runs as SYSTEM.
+try {
+    $protoKey = 'HKLM:\SOFTWARE\Classes\kanade-client'
+    New-Item -Path $protoKey -Force | Out-Null
+    Set-ItemProperty -Path $protoKey -Name '(default)'    -Value 'URL:Kanade Client Protocol'
+    Set-ItemProperty -Path $protoKey -Name 'URL Protocol' -Value ''
+    $cmdKey = Join-Path $protoKey 'shell\open\command'
+    New-Item -Path $cmdKey -Force | Out-Null
+    Set-ItemProperty -Path $cmdKey -Name '(default)' -Value ('"{0}" "%1"' -f $ExePath)
+    [Console]::Error.WriteLine("kanade-client:// protocol registered -> $ExePath")
+} catch {
+    [Console]::Error.WriteLine("install-kanade-client: protocol registration failed (toast-click reveal won't work): $_")
+}
+
 # --- Inventory payload ---------------------------------------------------
 # Read back ProductVersion from the embedded VERSIONINFO so the
 # inventory row reports what's actually on disk, not what the

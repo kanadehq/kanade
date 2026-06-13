@@ -474,6 +474,19 @@ async function loadNotifications(): Promise<void> {
     for (const n of res.items) notifications.set(n.id, n);
     renderNotifications();
 
+    // Toast-click launch (#647): this process was started by clicking an
+    // emergency toast (`kanade-client://show?id=<id>`), the window is visible —
+    // scroll to + flash that notification once.
+    if (!launchFocusFetched) {
+      launchFocusFetched = true;
+      try {
+        const focusId = (await invoke<string | null>("get_launch_focus")) ?? null;
+        if (focusId) focusNotificationInPanel(focusId);
+      } catch (err) {
+        console.error("get_launch_focus failed", err);
+      }
+    }
+
     await ensureLaunchId();
     const target = pendingEmergencyId
       ? notifications.get(pendingEmergencyId)
@@ -522,6 +535,8 @@ async function loadNotifications(): Promise<void> {
 
 let pendingEmergencyId: string | null = null;
 let launchIdFetched = false;
+// Whether we've consumed a toast-click launch focus id (#647) — fetched once.
+let launchFocusFetched = false;
 // Ids we've already shown an OS toast for, so the reconnect-recovery loop
 // (and the agent-launch path) never re-toast the same notification.
 const toastedIds = new Set<string>();
@@ -560,14 +575,15 @@ async function surfaceOsToast(n: AppNotification): Promise<void> {
   // Emergency → native WinRT toast (show_emergency_toast): it persists on
   // screen until dismissed (scenario=Reminder) and stays in the Action
   // Center, unlike the plugin's sendNotification which auto-dismisses in
-  // ~7s. Fall through to the plugin path only if the native command fails.
-  // (Reveal-on-click is a follow-up — it needs a COM activator the non-MSIX
-  // app doesn't register yet.)
+  // ~7s. Clicking it (body or 確認 button) opens the client focused on this
+  // notification via the kanade-client:// protocol (#647) — hence the id.
+  // Fall through to the plugin path only if the native command fails.
   if (n.priority === "emergency") {
     try {
       await invoke("show_emergency_toast", {
         title: `${icon} ${n.title}`,
         body: n.body,
+        id: n.id,
       });
       return;
     } catch (err) {
@@ -1208,6 +1224,13 @@ window.addEventListener("DOMContentLoaded", () => {
     void resurfaceAllEmergencies();
   });
 
+  // Toast clicked (#647): a `kanade-client://show?id=<id>` launch was forwarded
+  // to this running instance (the window was already revealed from Rust) —
+  // scroll to + flash the notification.
+  void listen<string>("klp-focus-notification", (event) => {
+    const id = event.payload;
+    if (id) focusNotificationInPanel(id);
+  });
   window.setInterval(checkStuckRuns, 60_000);
   window.setInterval(sweepExpired, 60_000);
 
