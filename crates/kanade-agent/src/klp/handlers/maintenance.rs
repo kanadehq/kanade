@@ -342,6 +342,7 @@ mod tests {
             starting_deadline: None,
             runs_on: RunsOn::Backend,
             enabled: true,
+            tags: Vec::new(),
         }
     }
 

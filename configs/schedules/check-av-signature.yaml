@@ -12,3 +12,4 @@ job_id: check-av-signature
 target:
   all: true
 jitter: 5m
+tags: [health-check, security]

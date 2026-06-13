@@ -23,8 +23,23 @@
     "rollout": "rollout",
     "coverage": "coverage",
     "enabled": "enabled",
+    "tags": "tags",
     "actions": "actions"
   },
+  "search": {
+    "placeholder": "Search schedules (id, job_id, tags)",
+    "clear": "Clear search"
+  },
+  "tags": {
+    "filterByTitle": "Filter by tag \"{{tag}}\"",
+    "clear": "Clear tag filter"
+  },
+  "groups": {
+    "other": "Other",
+    "expand": "Expand",
+    "collapse": "Collapse"
+  },
+  "noMatch": "No schedules match the current filter",
   "coverage": {
     "title": "Rollout coverage",
     "summary": "{{ok}}/{{total}} ok · {{fail}} fail · {{running}} running · {{pending}} pending",

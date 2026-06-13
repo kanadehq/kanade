@@ -1959,6 +1959,7 @@ mod tests {
             starting_deadline: None,
             runs_on,
             enabled: true,
+            tags: Vec::new(),
         }
     }
 

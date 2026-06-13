@@ -67,6 +67,13 @@
         "null"
       ]
     },
+    "tags": {
+      "description": "Free-form operator taxonomy for the Schedules page — the\nschedule-side mirror of `Manifest.tags` (added in #640; a plain\ncode ref rather than an intra-doc link, since that field isn't\non this branch until #640 merges). Purely a SPA-side\norganisational aid (search / filter chips alongside the\nid-prefix grouping); the scheduler never reads it, so any\nstring is allowed and it carries no firing semantics. A\nschedule's own tags are independent of its job's: the same job\nmay back a `weekly` maintenance schedule and a `canary` rollout\nschedule. Empty by default and `skip_serializing_if`-elided per\nthe #492 gradual-upgrade wire rule.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "target": {
       "$ref": "#/$defs/Target",
       "default": {

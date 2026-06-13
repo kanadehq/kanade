@@ -1396,6 +1396,55 @@ target: { all: true }
         assert!(s.enabled);
     }
 
+    #[test]
+    fn schedule_tags_default_empty_and_skip_serialise() {
+        let yaml = r#"
+id: x
+when:
+  per_pc: once
+job_id: y
+target: { all: true }
+"#;
+        let s: Schedule = serde_yaml::from_str(yaml).expect("parse");
+        assert!(s.tags.is_empty());
+        s.validate().expect("tag-less schedule validates");
+        let json = serde_json::to_string(&s).expect("serialize");
+        assert!(
+            !json.contains("tags"),
+            "empty tags must not serialise: {json}"
+        );
+    }
+
+    #[test]
+    fn schedule_parses_and_validates_tags() {
+        let yaml = r#"
+id: weekly-cleanup
+when:
+  per_pc: { every: 1h }
+job_id: cleanup
+target: { all: true }
+tags: [weekly, maintenance]
+"#;
+        let s: Schedule = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(s.tags, vec!["weekly", "maintenance"]);
+        s.validate().expect("tagged schedule validates");
+    }
+
+    #[test]
+    fn schedule_rejects_blank_tag() {
+        let yaml = r#"
+id: x
+when:
+  per_pc: once
+job_id: y
+target: { all: true }
+tags: [ok, "  "]
+"#;
+        let s: Schedule = serde_yaml::from_str(yaml).expect("parse");
+        let err = s.validate().expect_err("blank tag must fail");
+        assert!(err.contains("tags must not contain empty"), "err: {err}");
+    }
+
     // ---- `when` parsing (#418 Phase 1) ----
 
     fn schedule_yaml_with(when_block: &str) -> String {
@@ -1647,6 +1696,7 @@ target: { all: true }
             starting_deadline: None,
             runs_on,
             enabled: true,
+            tags: Vec::new(),
         }
     }
 
@@ -3378,6 +3428,19 @@ pub struct Schedule {
     pub runs_on: RunsOn,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Free-form operator taxonomy for the Schedules page — the
+    /// schedule-side mirror of `Manifest.tags` (added in #640; a plain
+    /// code ref rather than an intra-doc link, since that field isn't
+    /// on this branch until #640 merges). Purely a SPA-side
+    /// organisational aid (search / filter chips alongside the
+    /// id-prefix grouping); the scheduler never reads it, so any
+    /// string is allowed and it carries no firing semantics. A
+    /// schedule's own tags are independent of its job's: the same job
+    /// may back a `weekly` maintenance schedule and a `canary` rollout
+    /// schedule. Empty by default and `skip_serializing_if`-elided per
+    /// the #492 gradual-upgrade wire rule.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 /// v0.23 — where the cron tick fires from.
@@ -4782,6 +4845,14 @@ impl Schedule {
                      attempts after the first run",
                     r.max
                 ));
+            }
+        }
+        // A blank / whitespace-only tag renders an empty filter chip on
+        // the Schedules page — reject it at create time, mirroring the
+        // Manifest::validate tag guard.
+        for tag in &self.tags {
+            if tag.trim().is_empty() {
+                return Err("tags must not contain empty entries".to_string());
             }
         }
         Ok(())
