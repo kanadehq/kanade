@@ -443,6 +443,11 @@ const PRIORITY_LABEL: Record<NotificationPriority, string> = {
 };
 
 const notifications = new Map<string, AppNotification>();
+// Ids whose body is expanded in the panel. A notification renders collapsed
+// (title only) until the user clicks it open — opening an unread, ack-optional
+// notification is what marks it read (the user can't have "seen" a body that
+// was never expanded). Survives re-renders.
+const expandedIds = new Set<string>();
 let notifSubscribed = false;
 
 function isExpired(n: AppNotification): boolean {
@@ -636,6 +641,15 @@ async function openFromToast(): Promise<void> {
 // Switches to the notifications view first so the row is on screen.
 function focusNotificationInPanel(id: string): void {
   showView("notifications");
+  // Jumping to a notification reveals its body — same as opening it by hand,
+  // so mark an ack-optional one read here too (otherwise the unread dot
+  // lingers while the user is looking straight at the body).
+  expandedIds.add(id);
+  const focused = notifications.get(id);
+  if (focused && !focused.acked_at && !focused.require_ack) {
+    void ackNotification(id).catch(() => {});
+  }
+  renderNotifications();
   const el = document.getElementById(`cnotif-${id}`);
   if (!el) return;
   el.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -747,38 +761,77 @@ function evictOldNotifications(): void {
   if (notifications.size <= MAX_NOTIFICATIONS) return;
   for (const [id, n] of notifications) {
     if (notifications.size <= MAX_NOTIFICATIONS) break;
-    if (n.acked_at) notifications.delete(id);
+    if (n.acked_at) {
+      notifications.delete(id);
+      expandedIds.delete(id);
+    }
   }
 }
 
 function renderNotification(n: AppNotification): string {
   const icon = PRIORITY_ICON[n.priority] ?? PRIORITY_ICON.unknown;
   const acked = !!n.acked_at;
+  const expanded = expandedIds.has(n.id);
   const meta = [
     n.issued_by ? `送信元: ${escapeHtml(n.issued_by)}` : "",
     fmtTime(n.issued_at),
   ]
     .filter(Boolean)
     .join(" · ");
+  // Ack-required notifications clear their unread state via the explicit
+  // 確認 button; ack-optional ones clear it by being opened (read). So only
+  // require_ack carries an action control here.
   const ackCtl =
     n.require_ack && !acked
       ? `<button class="notif-ack-btn" data-notif-id="${escapeHtml(n.id)}">確認</button>`
-      : acked
+      : n.require_ack && acked
         ? `<span class="notif-acked muted">✓ 確認済み</span>`
         : "";
+  // An unread dot makes the badge count legible per-row; it clears the
+  // moment the notification is read/acked.
+  const unreadDot = acked ? "" : `<span class="notif-dot" aria-hidden="true"></span>`;
+  const classes = [
+    "notif-row",
+    `priority-${escapeHtml(n.priority)}`,
+    acked ? "acked" : "unread",
+    expanded ? "expanded" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
   return `
-    <div id="cnotif-${escapeHtml(n.id)}" class="notif-row priority-${escapeHtml(n.priority)}${acked ? " acked" : ""}">
+    <div id="cnotif-${escapeHtml(n.id)}" class="${classes}">
       <span class="notif-icon">${icon}</span>
       <div class="notif-main">
-        <div class="notif-head">
+        <div class="notif-head notif-toggle" data-notif-toggle="${escapeHtml(n.id)}" role="button" tabindex="0" aria-expanded="${expanded}">
+          ${unreadDot}
           <span class="notif-title">${escapeHtml(n.title)}</span>
           <span class="notif-prio muted">${escapeHtml(PRIORITY_LABEL[n.priority] ?? PRIORITY_LABEL.unknown)}</span>
+          <span class="notif-chevron" aria-hidden="true">▸</span>
         </div>
-        <p class="notif-text">${escapeHtml(n.body)}</p>
-        <p class="notif-meta muted">${meta}</p>
+        <div class="notif-collapse">
+          <p class="notif-text">${escapeHtml(n.body)}</p>
+          <p class="notif-meta muted">${meta}</p>
+        </div>
       </div>
       ${ackCtl}
     </div>`;
+}
+
+// Toggle a notification's body open/closed. Opening an unread, ack-optional
+// notification marks it read (the "seen" signal the user asked for — a body
+// you never expanded can't have been read). Ack-required ones still need the
+// explicit 確認 button, so opening them only reveals the body.
+function toggleNotification(id: string): void {
+  if (expandedIds.has(id)) {
+    expandedIds.delete(id);
+  } else {
+    expandedIds.add(id);
+    const n = notifications.get(id);
+    if (n && !n.acked_at && !n.require_ack) {
+      void ackNotification(id).catch(() => {});
+    }
+  }
+  renderNotifications();
 }
 
 // Drop expired notifications from the panel as their `expires_at` passes,
@@ -1026,8 +1079,15 @@ window.addEventListener("DOMContentLoaded", () => {
       void killRun(killBtn.dataset.runId);
       return;
     }
-    // Notification ack — from the panel row (the only ack control now;
-    // the blocking emergency modal is gone, all surfacing is OS toasts).
+    // Notification title clicked → expand/collapse its body (and mark an
+    // ack-optional one read on open). Checked before the ack button, but
+    // they live in separate subtrees so order is not load-bearing.
+    const toggle = t.closest<HTMLElement>("[data-notif-toggle]");
+    if (toggle?.dataset.notifToggle) {
+      toggleNotification(toggle.dataset.notifToggle);
+      return;
+    }
+    // Notification ack — the explicit 確認 button on ack-required rows.
     const ackBtn = t.closest<HTMLButtonElement>(".notif-ack-btn");
     if (ackBtn?.dataset.notifId) {
       ackBtn.disabled = true;
@@ -1047,6 +1107,19 @@ window.addEventListener("DOMContentLoaded", () => {
         runBtn.disabled = false;
       });
       return;
+    }
+  });
+
+  // Keyboard activation for the notification toggle (it carries
+  // role="button" + tabindex="0", so Enter/Space must work like a click).
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    const toggle = (e.target as HTMLElement).closest<HTMLElement>(
+      "[data-notif-toggle]",
+    );
+    if (toggle?.dataset.notifToggle) {
+      e.preventDefault();
+      toggleNotification(toggle.dataset.notifToggle);
     }
   });
 
