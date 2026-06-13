@@ -17,6 +17,12 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import {
+  isPermissionGranted,
+  onAction,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
 
 type HandshakeSession = {
   user: string;
@@ -489,17 +495,108 @@ async function loadNotifications(): Promise<void> {
     });
     for (const n of res.items) notifications.set(n.id, n);
     renderNotifications();
-    // Recovery path (SPEC §2.12.8): an unacked, non-expired emergency
-    // the client missed while disconnected must still block on next
-    // launch — re-raise its modal from history, not just a push.
-    for (const n of res.items) {
-      if (n.priority === "emergency" && !n.acked_at && !isExpired(n)) {
-        showEmergencyModal(n);
+
+    await ensureLaunchId();
+    if (pendingEmergencyId) {
+      // Agent-launched for a specific emergency (#102): surface it as a
+      // native toast (the window is hidden so it never bursts over a
+      // meeting) and DON'T pop the blocking modal — clicking the toast
+      // opens the window onto this notification instead.
+      const target = notifications.get(pendingEmergencyId);
+      if (target && !target.acked_at && !isExpired(target)) {
+        void surfaceEmergencyToast(target);
+      } else {
+        // Already acked / expired / unknown — nothing to surface; reveal
+        // the window so the launch isn't a silent no-op.
+        void invoke("show_main_window").catch(() => {});
+      }
+    } else {
+      // Normal launch — recovery path (SPEC §2.12.8): an unacked,
+      // non-expired emergency missed while disconnected re-raises its
+      // modal from history, not just a push.
+      for (const n of res.items) {
+        if (n.priority === "emergency" && !n.acked_at && !isExpired(n)) {
+          showEmergencyModal(n);
+        }
       }
     }
   } catch (err) {
     console.error("notifications_list failed", err);
   }
+}
+
+// ---- Emergency launch (#102): agent → `--show-notification <id>` ----
+
+// The notification id the agent launched us to surface, or null on a
+// normal launch. Fetched once (lazily) from the Rust side.
+let pendingEmergencyId: string | null = null;
+let launchIdFetched = false;
+// One-shot guard so a reconnect's loadNotifications doesn't re-toast.
+let emergencyToasted = false;
+// `onAction` is registered at most once for the app's lifetime.
+let emergencyActionRegistered = false;
+
+async function ensureLaunchId(): Promise<void> {
+  if (launchIdFetched) return;
+  launchIdFetched = true;
+  try {
+    pendingEmergencyId =
+      (await invoke<string | null>("get_launch_notification")) ?? null;
+  } catch (err) {
+    console.error("get_launch_notification failed", err);
+    pendingEmergencyId = null;
+  }
+}
+
+// Show the emergency as a native OS toast (hidden window). Clicking it
+// reveals the window focused on the notification panel.
+async function surfaceEmergencyToast(n: AppNotification): Promise<void> {
+  if (emergencyToasted) return;
+  emergencyToasted = true;
+  try {
+    let granted = await isPermissionGranted();
+    if (!granted) granted = (await requestPermission()) === "granted";
+    if (!granted) {
+      // No toast permission — don't leave the emergency invisible; reveal
+      // the window and focus the notification directly.
+      await invoke("show_main_window").catch(() => {});
+      focusNotificationInPanel(n.id);
+      return;
+    }
+    if (!emergencyActionRegistered) {
+      emergencyActionRegistered = true;
+      // Fires when the user clicks any OS notification this app sent.
+      // Scope assumption: `sendNotification` (the OS-toast path) is ONLY
+      // called from here for the emergency, so every onAction is an
+      // emergency-toast click. In-app DOM toasts (showToast) don't fire
+      // onAction. If a future change sends OS notifications elsewhere,
+      // this handler would need to disambiguate by notification id.
+      await onAction(() => {
+        void openEmergencyFromToast();
+      });
+    }
+    sendNotification({ title: `🚨 ${n.title}`, body: n.body });
+  } catch (err) {
+    console.error("emergency toast failed; revealing window instead", err);
+    await invoke("show_main_window").catch(() => {});
+    focusNotificationInPanel(n.id);
+  }
+}
+
+// Toast clicked → reveal + focus the window, scroll to the emergency.
+async function openEmergencyFromToast(): Promise<void> {
+  await invoke("show_main_window").catch(() => {});
+  if (pendingEmergencyId) focusNotificationInPanel(pendingEmergencyId);
+}
+
+// Scroll the notification panel to a notification and briefly flash it.
+function focusNotificationInPanel(id: string): void {
+  renderNotifications();
+  const el = document.getElementById(`cnotif-${id}`);
+  if (!el) return;
+  el.scrollIntoView({ behavior: "smooth", block: "center" });
+  el.classList.add("notif-flash");
+  window.setTimeout(() => el.classList.remove("notif-flash"), 2000);
 }
 
 // Apply one `notifications.new` push: store, re-render, and surface it
@@ -596,8 +693,11 @@ function renderNotification(n: AppNotification): string {
       : acked
         ? `<span class="notif-acked muted">✓ 確認済み</span>`
         : "";
+  // `id` lets the emergency-launch flow scroll to + flash this row
+  // (focusNotificationInPanel). n.id is an agent-minted UUID so escapeHtml
+  // is a no-op, but keep it escaped for the same XSS-hygiene reason.
   return `
-    <div class="notif-row priority-${escapeHtml(n.priority)}${acked ? " acked" : ""}">
+    <div id="cnotif-${escapeHtml(n.id)}" class="notif-row priority-${escapeHtml(n.priority)}${acked ? " acked" : ""}">
       <span class="notif-icon">${icon}</span>
       <div class="notif-main">
         <div class="notif-head">

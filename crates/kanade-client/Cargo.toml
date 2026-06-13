@@ -28,10 +28,12 @@ kanade-shared = { workspace = true }
 anyhow = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-# Tauri 2.x runtime. No extra features yet — system tray /
-# notification plugins land in follow-up PRs as their handlers
-# come online.
+# Tauri 2.x runtime. No extra features yet — system tray lands in a
+# follow-up PR as its handlers come online.
 tauri = { version = "2.11.2", features = [] }
+# Native OS toast notifications — the Phase E emergency fallback (#102)
+# launches the client hidden and toasts the emergency from the WebView.
+tauri-plugin-notification = "2"
 # Serde for the IPC commands' params / results.
 serde      = { workspace = true }
 serde_json = { workspace = true }

@@ -60,6 +60,8 @@ pub mod connection;
 #[cfg(target_os = "windows")]
 pub mod dispatcher;
 #[cfg(target_os = "windows")]
+pub mod emergency_notify;
+#[cfg(target_os = "windows")]
 pub mod framing;
 #[cfg(target_os = "windows")]
 pub mod handlers;

@@ -274,6 +274,22 @@ ul.checks {
   color: #b00020;
 }
 
+/* Brief highlight when the emergency-launch flow (#102) scrolls a
+   notification into view after the user clicks the toast. */
+.notif-row.notif-flash {
+  animation: notif-flash 2s ease-out;
+}
+
+@keyframes notif-flash {
+  0%,
+  40% {
+    background: rgba(176, 0, 32, 0.18);
+  }
+  100% {
+    background: transparent;
+  }
+}
+
 .notif-ack-btn {
   flex: 0 0 auto;
   padding: 4px 12px;

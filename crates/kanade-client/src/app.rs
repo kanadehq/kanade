@@ -37,12 +37,17 @@ use kanade_shared::ipc::notifications::{
 };
 use kanade_shared::ipc::state::StateSnapshot;
 use kanade_shared::ipc::system::PingResult;
-use tauri::{Emitter, State};
+use tauri::{Emitter, Manager, State};
 use tokio::sync::Mutex;
 use tokio::sync::broadcast::error::RecvError;
 use tracing::{info, warn};
 
 use crate::klp_client::KlpClient;
+
+/// CLI flag the agent passes when it launches the client to surface an
+/// emergency notification (Phase E, #102): `--show-notification <id>`.
+/// Kept in sync with `kanade_agent::klp::emergency_notify`.
+const SHOW_NOTIFICATION_FLAG: &str = "--show-notification";
 
 /// Tauri event name the WebView listens on for agent→client pushes.
 /// Payload is the raw `RpcNotification` (`method` + `params`); the
@@ -64,6 +69,11 @@ const DISCONNECTED_EVENT: &str = "klp-disconnected";
 /// while the `invoke` commands hold theirs.
 pub struct AppState {
     klp: Arc<Mutex<Option<KlpClient>>>,
+    /// `Some(id)` when the app was launched by the agent's emergency
+    /// fallback (`--show-notification <id>`): the WebView reads it on
+    /// load to toast that notification and start hidden, instead of the
+    /// normal visible startup. `None` on a normal user launch.
+    launch_notification: Option<String>,
 }
 
 /// Clone the connected client out of the state lock, erroring if the
@@ -185,6 +195,29 @@ async fn notifications_ack(
         .map_err(|e| e.to_string())
 }
 
+/// The notification id this app was launched to surface, or `None` on a
+/// normal launch (Phase E emergency fallback, #102). The WebView calls
+/// this on load: a `Some(id)` means "show a toast for this emergency and
+/// stay hidden", a `None` means "normal visible startup".
+#[tauri::command]
+fn get_launch_notification(state: State<'_, AppState>) -> Option<String> {
+    state.launch_notification.clone()
+}
+
+/// Reveal + focus the main window. Called from the WebView when the user
+/// clicks the emergency toast (the window was started hidden so the toast
+/// never bursts over a meeting); also used to bring an already-running
+/// client forward. Best-effort — a missing window just logs.
+#[tauri::command]
+fn show_main_window(app: tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.show();
+        let _ = win.set_focus();
+    } else {
+        warn!("show_main_window: no 'main' window");
+    }
+}
+
 /// Drain the client's push-notification broadcast and re-emit each
 /// notification to the WebView as a [`NOTIFICATION_EVENT`] Tauri event.
 /// Runs until the connection closes (the broadcast sender drops). A
@@ -258,13 +291,34 @@ async fn supervise_connection(slot: Arc<Mutex<Option<KlpClient>>>, handle: tauri
     }
 }
 
+/// Parse `--show-notification <id>` from the process args (Phase E
+/// emergency fallback). Returns the id when present and non-empty.
+fn parse_launch_notification() -> Option<String> {
+    let mut args = std::env::args();
+    while let Some(a) = args.next() {
+        if a == SHOW_NOTIFICATION_FLAG {
+            return args.next().filter(|s| !s.is_empty());
+        }
+    }
+    None
+}
+
 pub fn run() {
+    let launch_notification = parse_launch_notification();
+    // Launched by the agent for an emergency → start hidden (the WebView
+    // toasts it; the window only appears when the user clicks the toast),
+    // so it never bursts over whatever the user is doing.
+    let launched_for_emergency = launch_notification.is_some();
     let state = AppState {
         klp: Arc::new(Mutex::new(None)),
+        launch_notification,
     };
     let klp_slot = state.klp.clone();
 
     tauri::Builder::default()
+        // Native OS toasts for the emergency fallback (shown from the
+        // WebView via @tauri-apps/plugin-notification).
+        .plugin(tauri_plugin_notification::init())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             get_handshake,
@@ -275,7 +329,9 @@ pub fn run() {
             jobs_kill,
             notifications_subscribe,
             notifications_list,
-            notifications_ack
+            notifications_ack,
+            get_launch_notification,
+            show_main_window
         ])
         .setup(move |app| {
             // Supervise the KLP connection for the app's lifetime:
@@ -285,6 +341,21 @@ pub fn run() {
                 klp_slot.clone(),
                 app.handle().clone(),
             ));
+            // The window starts hidden (tauri.conf `visible: false`). On a
+            // normal launch, reveal it immediately; on an emergency
+            // launch, leave it hidden until the user clicks the toast
+            // (`show_main_window`).
+            if !launched_for_emergency {
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.show();
+                    let _ = win.set_focus();
+                } else {
+                    // "main" is always defined in tauri.conf, so this is
+                    // theoretical — but match `show_main_window`'s contract
+                    // and don't leave the window silently hidden.
+                    warn!("setup: 'main' window not found on normal launch");
+                }
+            }
             Ok(())
         })
         .run(tauri::generate_context!())
