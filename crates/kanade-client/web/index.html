@@ -7,39 +7,105 @@
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
-    <main>
-      <h1>Kanade Client</h1>
-      <section id="status">
-        <p class="muted">Connecting to agent…</p>
-      </section>
-      <section id="ping-section" hidden>
-        <button id="ping-btn">Ping agent</button>
-        <p id="ping-result" class="muted"></p>
-      </section>
-      <section id="notifications-section" hidden>
-        <h2>通知 <span id="notif-badge" class="badge" hidden></span></h2>
-        <div id="notifications"></div>
-      </section>
-      <section id="health-section" hidden>
-        <h2>端末ヘルス</h2>
-        <div id="health">
-          <p class="muted">読み込み中…</p>
+    <div id="app">
+      <!-- Slim header: brand + a single connection status dot. No
+           session / protocol / pc internals (operator-facing noise). -->
+      <header class="app-header">
+        <div class="brand"><span class="brand-mark">奏</span> Kanade</div>
+        <div class="conn conn-connecting" id="conn" title="エージェント接続状態">
+          <span class="conn-dot"></span>
+          <span class="conn-label">接続待ち</span>
         </div>
-      </section>
-      <section id="jobs-section" hidden>
-        <h2>ジョブ</h2>
-        <div id="jobs-tabs" class="tab-bar"></div>
-        <div id="jobs-list"></div>
-      </section>
-      <section id="runs-section" hidden>
-        <h2>実行中・実行履歴</h2>
-        <div id="runs"></div>
-      </section>
-    </main>
+      </header>
+
+      <div class="layout">
+        <!-- Left sidebar nav. Home / Notifications / Health are fixed;
+             the job categories below the divider are injected by main.ts
+             from `jobs.list` (only categories that actually have jobs). -->
+        <nav class="sidebar" id="sidebar">
+          <button class="nav-item active" data-view="home">
+            <i class="nav-icon" data-lucide="layout-dashboard"></i>
+            <span class="nav-label">ホーム</span>
+          </button>
+          <button class="nav-item" data-view="notifications">
+            <i class="nav-icon" data-lucide="bell"></i>
+            <span class="nav-label">通知</span>
+            <span class="nav-badge badge" id="nav-notif-badge" hidden></span>
+          </button>
+          <button class="nav-item" data-view="health">
+            <i class="nav-icon" data-lucide="heart-pulse"></i>
+            <span class="nav-label">端末ヘルス</span>
+          </button>
+          <div class="nav-sep" id="nav-jobs-sep" hidden></div>
+          <!-- Category nav items injected here (data-view="jobs" data-category=…). -->
+          <div id="nav-categories"></div>
+        </nav>
+
+        <main class="content">
+          <!-- Home / dashboard -->
+          <section class="view" id="view-home">
+            <h2 class="view-title">ホーム</h2>
+            <div class="dash-cards">
+              <button class="dash-card" data-view="health" id="card-health">
+                <i class="dash-icon" data-lucide="heart-pulse"></i>
+                <div class="dash-card-body">
+                  <span class="dash-card-label">端末ヘルス</span>
+                  <span class="dash-card-value" id="card-health-value">読み込み中…</span>
+                </div>
+              </button>
+              <button class="dash-card" data-view="notifications" id="card-notif">
+                <i class="dash-icon" data-lucide="bell"></i>
+                <div class="dash-card-body">
+                  <span class="dash-card-label">通知</span>
+                  <span class="dash-card-value" id="card-notif-value">—</span>
+                </div>
+              </button>
+              <div class="dash-card dash-card-static" id="card-runs" hidden>
+                <i class="dash-icon" data-lucide="loader"></i>
+                <div class="dash-card-body">
+                  <span class="dash-card-label">実行中のジョブ</span>
+                  <span class="dash-card-value" id="card-runs-value">—</span>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- Notifications -->
+          <section class="view" id="view-notifications" hidden>
+            <h2 class="view-title">
+              通知 <span class="badge" id="notif-badge" hidden></span>
+            </h2>
+            <div id="notifications"></div>
+          </section>
+
+          <!-- Health (check: jobs) -->
+          <section class="view" id="view-health" hidden>
+            <h2 class="view-title">端末ヘルス</h2>
+            <div id="health"><p class="muted">読み込み中…</p></div>
+          </section>
+
+          <!-- Jobs for the selected category (client: jobs). One view,
+               re-rendered per selected category. -->
+          <section class="view" id="view-jobs" hidden>
+            <h2 class="view-title" id="jobs-view-title">ジョブ</h2>
+            <div id="jobs-list"></div>
+          </section>
+
+          <!-- Persistent run status panel: shows live progress of any
+               jobs.execute regardless of the active view. -->
+          <section class="runs-panel" id="runs-section" hidden>
+            <h2 class="view-title">実行状況</h2>
+            <div id="runs"></div>
+          </section>
+        </main>
+      </div>
+    </div>
+
     <!-- Transient info/warn toasts stack here (auto-dismiss). -->
     <div id="toast-container" class="toast-container"></div>
     <!-- Emergency (priority=emergency) blocking modal overlay. -->
     <div id="emergency-modal" class="emergency-modal" hidden></div>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

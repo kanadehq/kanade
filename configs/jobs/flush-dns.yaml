@@ -1,0 +1,25 @@
+# USER-INVOKABLE job (#291) — "困ったとき" (Troubleshoot) tab.
+#
+# Flushes the DNS resolver cache — the first thing to try when a site
+# won't load or a just-changed hostname still resolves to the old IP.
+# `run_as: system`: the DNS Client cache is machine-wide. See
+# fix-teams-cache.yaml for the full `client:` contract.
+#
+# Register (user-fired, no schedule):
+#   kanade job create configs/jobs/flush-dns.yaml
+id: flush-dns
+version: 1.0.0
+description: Flush the DNS resolver cache (operator note)
+execute:
+  shell: powershell
+  run_as: system
+  timeout: 30s
+  script: |
+    $ErrorActionPreference = 'Stop'
+    Clear-DnsClientCache
+    Write-Output 'DNS キャッシュをクリアしました。'
+client:
+  name: "DNS キャッシュをクリア"
+  description: "サイトが開けない・名前解決がおかしいときに試してください"
+  category: troubleshoot
+  icon: globe
