@@ -53,7 +53,7 @@ type ScheduleRow = {
   active?: { from?: string; until?: string };
   // #418 Phase 3: optional maintenance window "HH:MM-HH:MM"; key
   // absent when no constraints are set.
-  constraints?: { window?: string };
+  constraints?: { window?: string; require?: { ac_power?: boolean; idle?: string } };
   // #418 Phase 2: timezone for `when.at` + `active` bounds.
   tz: 'local' | 'utc';
   starting_deadline: string | null;
@@ -548,6 +548,17 @@ export function Schedules() {
                 {selected.constraints?.window
                   ? <code className="text-xs">{selected.constraints.window}</code>
                   : <span className="text-muted text-xs">—</span>}
+              </DetailItem>
+              <DetailItem label={t('columns.require')}>
+                {(() => {
+                  const r = selected.constraints?.require;
+                  const parts: string[] = [];
+                  if (r?.ac_power) parts.push(t('require.ac'));
+                  if (r?.idle) parts.push(t('require.idle', { duration: r.idle }));
+                  return parts.length
+                    ? <code className="text-xs">{parts.join(' · ')}</code>
+                    : <span className="text-muted text-xs">—</span>;
+                })()}
               </DetailItem>
               <DetailItem label={t('columns.deadline')}>
                 <code className="text-xs">{selected.starting_deadline ?? '—'}</code>

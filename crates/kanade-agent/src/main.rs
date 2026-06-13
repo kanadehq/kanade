@@ -1,6 +1,7 @@
 mod check_cache;
 mod commands;
 mod config_supervisor;
+mod env_gate;
 mod groups;
 mod heartbeat;
 mod host_perf;

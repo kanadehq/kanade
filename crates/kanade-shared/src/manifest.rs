@@ -1905,6 +1905,151 @@ target: { all: true }
         assert!(cal.event_triggers().is_empty());
     }
 
+    // ---- #418 constraints.require (env gates) ----
+
+    fn require_schedule(req: Require, runs_on: RunsOn) -> Schedule {
+        let mut s = schedule_with(
+            When::PerPc(PerPolicy::Every(EverySpec { every: "1m".into() })),
+            runs_on,
+        );
+        s.constraints.require = Some(req);
+        s
+    }
+
+    #[test]
+    fn require_met_combinations() {
+        use std::time::Duration;
+        // Empty require — always met.
+        assert!(require_met(&Require::default(), false, None));
+        // ac_power: only on AC.
+        let ac = Require {
+            ac_power: true,
+            idle: None,
+        };
+        assert!(!require_met(&ac, false, None));
+        assert!(require_met(&ac, true, None));
+        // idle: needs >= the configured min; None idle never satisfies.
+        let idle10 = Require {
+            ac_power: false,
+            idle: Some("10m".into()),
+        };
+        assert!(!require_met(&idle10, true, None));
+        assert!(!require_met(
+            &idle10,
+            true,
+            Some(Duration::from_secs(5 * 60))
+        ));
+        assert!(require_met(
+            &idle10,
+            true,
+            Some(Duration::from_secs(15 * 60))
+        ));
+        assert!(require_met(
+            &idle10,
+            true,
+            Some(Duration::from_secs(10 * 60))
+        )); // boundary inclusive
+        // both: AND.
+        let both = Require {
+            ac_power: true,
+            idle: Some("10m".into()),
+        };
+        assert!(!require_met(
+            &both,
+            false,
+            Some(Duration::from_secs(20 * 60))
+        )); // on battery
+        assert!(!require_met(&both, true, Some(Duration::from_secs(60)))); // not idle enough
+        assert!(require_met(&both, true, Some(Duration::from_secs(20 * 60))));
+        // An unparseable idle is treated as no-requirement by require_met
+        // (validate rejects it at create time, so this only guards a
+        // hand-edited blob): ac still gates.
+        let bad = Require {
+            ac_power: true,
+            idle: Some("garbage".into()),
+        };
+        assert!(require_met(&bad, true, None));
+        assert!(!require_met(&bad, false, None));
+    }
+
+    #[test]
+    fn validate_accepts_require_on_agent() {
+        require_schedule(
+            Require {
+                ac_power: true,
+                idle: Some("10m".into()),
+            },
+            RunsOn::Agent,
+        )
+        .validate()
+        .expect("constraints.require is valid on runs_on: agent");
+    }
+
+    #[test]
+    fn validate_rejects_require_on_backend() {
+        let err = require_schedule(
+            Require {
+                ac_power: true,
+                idle: None,
+            },
+            RunsOn::Backend,
+        )
+        .validate()
+        .unwrap_err();
+        assert!(err.contains("constraints.require"), "got: {err}");
+        assert!(err.contains("runs_on: agent"), "got: {err}");
+
+        // An idle-only require (ac_power: false) is also non-empty
+        // (is_empty folds both fields) and must reject on backend too —
+        // guards against a regression in Require::is_empty.
+        let err = require_schedule(
+            Require {
+                ac_power: false,
+                idle: Some("10m".into()),
+            },
+            RunsOn::Backend,
+        )
+        .validate()
+        .unwrap_err();
+        assert!(
+            err.contains("constraints.require"),
+            "idle-only on backend: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_bad_require_idle() {
+        let err = require_schedule(
+            Require {
+                ac_power: false,
+                idle: Some("not-a-duration".into()),
+            },
+            RunsOn::Agent,
+        )
+        .validate()
+        .unwrap_err();
+        assert!(err.contains("constraints.require.idle"), "got: {err}");
+    }
+
+    #[test]
+    fn require_round_trips_and_skips_empty() {
+        // ac_power: false is skipped; an all-default require nested in
+        // constraints is omitted (is_empty folds it in).
+        let yaml = "id: s\nwhen: { per_pc: { every: 1m } }\njob_id: j\n\
+                    runs_on: agent\nconstraints: { require: { ac_power: true, idle: 10m } }\n";
+        let s: Schedule = serde_yaml::from_str(yaml).expect("parse");
+        let req = s.constraints.require.as_ref().expect("require present");
+        assert!(req.ac_power);
+        assert_eq!(req.idle.as_deref(), Some("10m"));
+        // Re-serialize: idle present, ac_power present (true).
+        let back = serde_json::to_string(&s.constraints).unwrap();
+        assert!(back.contains("\"idle\":\"10m\""), "got: {back}");
+        // An empty require is omitted entirely by is_empty.
+        let mut empty = s.clone();
+        empty.constraints.require = Some(Require::default());
+        assert!(empty.constraints.is_empty());
+    }
+
     #[test]
     fn validate_rejects_per_target_on_agent() {
         let err = schedule_with(
@@ -3620,12 +3765,91 @@ impl Active {
     }
 }
 
-/// Operational constraints on a [`Schedule`] (#418 Phase 3). Where
+/// Host-environment gate (#418 `constraints.require`). Fire only when
+/// the target host is in the required state. Sensed **in-process by the
+/// agent** (Win32), so it is `runs_on: agent` only — the backend cannot
+/// read a target host's power/idle state ([`Schedule::validate`]
+/// rejects it on `runs_on: backend`, symmetric with `when: { on }`).
+///
+/// Evaluated at fire time as a skip-this-tick gate (NOT in
+/// [`Constraints::allows`], which stays pure for `preview`): a reconcile
+/// cadence re-checks every minute (so it effectively defers until the
+/// state is met — the intended pairing); a `calendar` fire that lands
+/// while the state is unmet is simply missed, same as `window`. It is
+/// therefore a *runtime* gate and does not appear in `preview`.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
+pub struct Require {
+    /// Fire only while on **AC power** (skip on battery). Reads
+    /// `GetSystemPowerStatus`; an unknown/unreadable status is treated
+    /// as not-on-AC (fail-closed — a restrictive gate must not fire
+    /// when it can't confirm the condition). `false` (default) = no
+    /// power requirement.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ac_power: bool,
+    /// Fire only when the active console session has had **no keyboard /
+    /// mouse input for at least this long** (humantime, e.g. `"10m"`) —
+    /// "don't run while the user is actively working". Input-based
+    /// (simpler than Task Scheduler's CPU/disk-aware idle). A
+    /// headless / disconnected console (no interactive user) trivially
+    /// satisfies it. `None` (default) = no idle requirement. Parsed
+    /// lazily; [`Schedule::validate`] rejects garbage at create time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle: Option<String>,
+}
+
+impl Require {
+    /// `skip_serializing_if` helper for an embedded empty `require`.
+    pub fn is_empty(&self) -> bool {
+        !self.ac_power && self.idle.is_none()
+    }
+
+    /// Parsed minimum-idle duration (`None` = no idle requirement, or an
+    /// unparseable value — `validate` rejects the latter at create time).
+    pub fn min_idle(&self) -> Option<std::time::Duration> {
+        self.idle
+            .as_deref()
+            .and_then(|s| humantime::parse_duration(s.trim()).ok())
+    }
+
+    /// First unparseable field for create-time rejection (mirrors
+    /// [`Constraints::bad_skip_date`]).
+    pub fn bad_idle(&self) -> Option<String> {
+        self.idle.as_deref().and_then(|s| {
+            humantime::parse_duration(s.trim())
+                .err()
+                .map(|e| format!("constraints.require.idle: invalid duration '{s}': {e}"))
+        })
+    }
+}
+
+/// Pure env-gate decision (#418 `constraints.require`). The Win32
+/// sensing lives in the agent (`kanade-agent::env_gate`); this is the
+/// testable core, fed the already-sensed host state. Deliberately a
+/// free fn (not folded into [`Constraints::allows`]) so `allows` stays
+/// pure and `preview` never evaluates a runtime gate.
+///
+/// `ac_online` = is the host on AC power. `idle` = how long the console
+/// has been idle (`None` = couldn't determine → an idle requirement is
+/// treated as unmet).
+pub fn require_met(req: &Require, ac_online: bool, idle: Option<std::time::Duration>) -> bool {
+    if req.ac_power && !ac_online {
+        return false;
+    }
+    if let Some(min) = req.min_idle() {
+        match idle {
+            Some(d) if d >= min => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
 /// [`Active`] decides *over what date range* a schedule is live,
 /// `Constraints` decides *when, within an active period,* a fire is
-/// allowed. `window` (a maintenance time-of-day window) and
-/// `max_concurrent` (a fleet-wide running-instance cap) so far;
-/// `require` (env gates) joins this struct in a later phase.
+/// allowed: `window` (a maintenance time-of-day window),
+/// `max_concurrent` (a fleet-wide running-instance cap), `skip_dates`
+/// (holiday exclusion) and `require` (host-environment gates, agent-only
+/// — see [`Require`]).
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
 pub struct Constraints {
     /// `"HH:MM-HH:MM"` wall-clock window (evaluated in the schedule's
@@ -3664,13 +3888,22 @@ pub struct Constraints {
     /// [`Schedule::validate`] rejects a malformed date at create time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skip_dates: Vec<String>,
+    /// Host-environment gate (#418): fire only when the target host is
+    /// in the required state (on AC power, idle). Agent-sensed at fire
+    /// time, `runs_on: agent` only. See [`Require`]. `None` (default) =
+    /// no environment requirement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require: Option<Require>,
 }
 
 impl Constraints {
     /// `skip_serializing_if` helper — empty constraints are omitted
     /// from the wire format entirely.
     pub fn is_empty(&self) -> bool {
-        self.window.is_none() && self.max_concurrent.is_none() && self.skip_dates.is_empty()
+        self.window.is_none()
+            && self.max_concurrent.is_none()
+            && self.skip_dates.is_empty()
+            && self.require.as_ref().is_none_or(Require::is_empty)
     }
 
     /// The first unparseable `skip_dates` entry, if any — the
@@ -4288,6 +4521,27 @@ impl Schedule {
                      omit it for no cap)"
                         .into(),
                 );
+            }
+        }
+        // #418: constraints.require (host-state env gates: ac_power /
+        // idle) is sensed in-process by the agent, so it needs
+        // runs_on: agent — the backend can't read a target host's
+        // power / idle state. Symmetric with `when: { on }` (also
+        // agent-only); inverse of max_concurrent (backend-only).
+        if let Some(req) = &self.constraints.require {
+            if !req.is_empty() && matches!(self.runs_on, RunsOn::Backend) {
+                return Err(
+                    "constraints.require (host-state env gates: ac_power / idle) is sensed \
+                     in-process by the agent and needs runs_on: agent; the backend cannot \
+                     read a target host's power / idle state"
+                        .into(),
+                );
+            }
+            // Reject a malformed idle duration at create time so the
+            // fail-closed runtime path only ever bites a hand-edited
+            // KV blob (mirror skip_dates / on_failure.retry).
+            if let Some(err) = req.bad_idle() {
+                return Err(err);
             }
         }
         // #418 Phase 4: a bad on_failure.retry is rejected at create

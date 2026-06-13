@@ -17,6 +17,7 @@
     "tz": "tz",
     "active": "有効期間",
     "window": "実行窓",
+    "require": "環境条件",
     "deadline": "期限",
     "jitter": "ジッター",
     "rollout": "ロールアウト",
@@ -34,6 +35,10 @@
       "running": "実行中",
       "pending": "未実行"
     }
+  },
+  "require": {
+    "ac": "AC電源",
+    "idle": "無入力 ≥ {{duration}}"
   },
   "target": {
     "all": "全て"

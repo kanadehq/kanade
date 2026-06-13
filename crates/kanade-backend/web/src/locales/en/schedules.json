@@ -17,6 +17,7 @@
     "tz": "tz",
     "active": "active",
     "window": "window",
+    "require": "require",
     "deadline": "deadline",
     "jitter": "jitter",
     "rollout": "rollout",
@@ -34,6 +35,10 @@
       "running": "running",
       "pending": "pending"
     }
+  },
+  "require": {
+    "ac": "AC power",
+    "idle": "idle ≥ {{duration}}"
   },
   "target": {
     "all": "all"
