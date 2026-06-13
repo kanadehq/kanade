@@ -1,22 +1,22 @@
 // Kanade Client App WebView entry point.
 //
-// Sprint 8 skeleton: on load, ask the Tauri backend for the
-// cached handshake result, render "Connected to agent vX.Y.Z as
-// DOMAIN\\user (pc_id)". Wire up a "Ping" button that
-// round-trips system.ping through the backend's invoke handler
-// and shows the agent's wall-clock.
+// Dashboard redesign: a slim header (brand + a single connection
+// status dot), a left sidebar nav (ホーム / 通知 / 端末ヘルス + one
+// entry per user-invokable job *category*), and a content area that
+// switches views client-side. No framework — the existing IPC + render
+// logic is reused as-is; only the layout / navigation is new.
 //
-// The Health tab (#290) renders the agent's state.snapshot below;
-// each check's 「修復する」 button runs its `troubleshoot` job via
-// `jobs.execute` (#291). A job catalog (アップデート / 困ったとき /
-// カタログ tabs via `jobs.list`) lets the user run any user-invokable
-// job; a live run section tracks every execute from `jobs.progress`
-// pushes (forwarded as `klp-notification` events, #467). The page is
-// intentionally one-screen and dependency-light (no framework) so a
-// later UI redesign isn't fighting any priors.
+// - `client:` jobs (jobs.list, #291) become the category nav items
+//   (アップデート / 困ったとき / カタログ), grouped by `JobCategory`.
+// - `check:` jobs surface in 端末ヘルス via state.snapshot (#290); each
+//   check's 「修復する」 runs its `troubleshoot` job (jobs.execute).
+// - Notifications (Phase E, #102) get their own view + sidebar badge.
+// - A persistent 実行状況 panel tracks every jobs.execute live from
+//   `jobs.progress` pushes regardless of the active view.
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { createIcons, icons } from "lucide";
 import {
   isPermissionGranted,
   onAction,
@@ -24,26 +24,61 @@ import {
   sendNotification,
 } from "@tauri-apps/plugin-notification";
 
-type HandshakeSession = {
-  user: string;
-  session_id: number;
-  pc_id: string;
-};
+// ---- Lucide icon helpers ----------------------------------------------
 
-type HandshakeResult = {
-  protocol: number;
-  agent_version: string;
-  features: string[];
-  session: HandshakeSession;
-};
+// Replace every un-processed `<i data-lucide="…">` placeholder in the
+// document with its SVG. Idempotent: already-rendered icons carry no
+// `data-lucide`, so re-running only hydrates freshly-injected markup.
+function hydrateIcons(): void {
+  try {
+    createIcons({ icons });
+  } catch (e) {
+    console.error("lucide hydrate failed", e);
+  }
+}
 
-type PingResult = {
-  agent_time: string;
-};
+// kebab-case (config / data-lucide convention) → PascalCase (the keys of
+// lucide's `icons` map), so we can check whether a name is a real icon
+// before emitting it (an unknown name would render as an empty box).
+function toPascal(name: string): string {
+  return name.replace(/(^|-)([a-z0-9])/g, (_, _sep, c: string) =>
+    c.toUpperCase(),
+  );
+}
 
-// Mirrors `kanade_shared::ipc::state` (#290). Hand-written for the
-// same reason the Handshake/Ping types are — the client doesn't
-// generate TS bindings yet; a future PR can wire schemars → ts.
+// Resolve a config-supplied lucide name to a known icon, falling back to
+// the category/default icon when it isn't one (so a typo'd `icon:` in a
+// job manifest degrades to a sensible glyph instead of a blank).
+function lucideName(name: string | null | undefined, fallback: string): string {
+  const n = (name ?? "").trim();
+  if (n && Object.prototype.hasOwnProperty.call(icons, toPascal(n))) return n;
+  return fallback;
+}
+
+// Strict allow-list for `data:` icon URLs (a job manifest may ship a
+// base64 image instead of a lucide name). Anything not matching this is
+// treated as a lucide name — never spliced raw into `src`.
+const DATA_ICON_RE =
+  /^data:image\/(?:png|jpe?g|gif|webp|svg\+xml);base64,[A-Za-z0-9+/=]+$/;
+
+// Markup for a job/category icon: an inline `<img>` for an allow-listed
+// `data:` URL, otherwise a lucide `<i>` placeholder (hydrated later).
+function iconHtml(
+  icon: string | null | undefined,
+  fallback: string,
+  cls = "job-icon",
+): string {
+  const v = (icon ?? "").trim();
+  if (DATA_ICON_RE.test(v)) {
+    return `<img class="${cls}" src="${v}" alt="" />`;
+  }
+  // lucideName only ever returns a known-safe lucide slug or the
+  // hard-coded fallback, so the attribute value is a fixed charset.
+  return `<i class="${cls}" data-lucide="${lucideName(v, fallback)}"></i>`;
+}
+
+// ---- IPC types (hand-written; mirror kanade_shared::ipc) ---------------
+
 type CheckStatus = "ok" | "warn" | "fail" | "unknown";
 
 type Check = {
@@ -71,8 +106,6 @@ const STATUS_ICON: Record<CheckStatus, string> = {
 
 // ---- Jobs / remediation (#291) ----
 
-// Mirrors `kanade_shared::ipc::jobs` — hand-written like the other
-// IPC types until TS bindings are generated.
 type RunStatus = "queued" | "running" | "completed" | "failed" | "killed";
 
 type JobProgress = {
@@ -94,7 +127,6 @@ type UserInvokableJob = {
   icon?: string | null;
   category: JobCategory;
   version: string;
-  // `last_run` is in the wire shape but unused by the catalog view yet.
 };
 
 type JobsListResult = { items: UserInvokableJob[] };
@@ -103,13 +135,19 @@ type JobsListResult = { items: UserInvokableJob[] };
 // Tauri event; we switch on `method`.
 type RpcNotification = { jsonrpc: string; method: string; params: unknown };
 
-// The three Client App job tabs (SPEC §2.1), in display order. The
-// `category` matches `kanade_shared::ipc::jobs::JobCategory`.
-const CATEGORY_TABS: { category: JobCategory; label: string }[] = [
-  { category: "software_update", label: "アップデート" },
-  { category: "troubleshoot", label: "困ったとき" },
-  { category: "catalog", label: "カタログ" },
+// Per-category display metadata: sidebar label + default lucide icon
+// (used both for the nav entry and as the per-job icon fallback). Order
+// is the sidebar display order. `category` matches
+// `kanade_shared::ipc::jobs::JobCategory`.
+const CATEGORIES: { category: JobCategory; label: string; icon: string }[] = [
+  { category: "software_update", label: "アップデート", icon: "download" },
+  { category: "troubleshoot", label: "困ったとき", icon: "wrench" },
+  { category: "catalog", label: "カタログ", icon: "package" },
 ];
+
+function categoryMeta(c: JobCategory): { label: string; icon: string } {
+  return CATEGORIES.find((m) => m.category === c) ?? { label: c, icon: "box" };
+}
 
 const RUN_STATUS_ICON: Record<RunStatus, string> = {
   queued: "⏳",
@@ -129,20 +167,12 @@ const RUN_STATUS_LABEL: Record<RunStatus, string> = {
 
 type Run = {
   runId: string;
-  // The check name (or job id) — a human label for the run row.
   label: string;
   status: RunStatus;
-  // Accumulated stdout/stderr tail shown under the row.
   output: string;
-  // Date.now() of creation or last progress. Drives the stuck-run
-  // watchdog (a non-terminal run with no progress for too long).
   updatedAt: number;
 };
 
-// Active + recently-finished runs, keyed by run_id. Insertion order
-// drives the render (newest shown first). Bounded by MAX_RUNS so a
-// long-lived WebView (auto-launched, left open for days) doesn't
-// accumulate stale terminal rows forever.
 const runs = new Map<string, Run>();
 const MAX_RUNS = 30;
 
@@ -152,9 +182,6 @@ function isTerminal(status: RunStatus): boolean {
   );
 }
 
-// Evict the oldest *terminal* runs once over the cap. In-flight runs
-// (queued / running) are never evicted — they still have progress to
-// receive. Insertion order means the iterator yields oldest first.
 function evictOldRuns(): void {
   if (runs.size <= MAX_RUNS) return;
   for (const [id, r] of runs) {
@@ -163,14 +190,9 @@ function evictOldRuns(): void {
   }
 }
 
-// Stuck-run watchdog. `jobs.execute` streams no intermediate progress
-// between the Running push and the terminal one (#465), so the client
-// can't tell a long-running job from a dead agent by silence alone. Use
-// a deadline safely above any realistic user-invokable job (the winget
-// examples cap at ~10 min) and only THEN flag a still-non-terminal run
-// as unresponsive — otherwise a legitimately slow install would be
-// false-flagged. A finer signal needs agent-side heartbeat / incremental
-// progress (#469).
+// Stuck-run watchdog (see #465): jobs.execute streams no intermediate
+// progress, so flag a still-non-terminal run as unresponsive only after
+// a deadline safely above any realistic job.
 const WATCHDOG_MS = 15 * 60 * 1000;
 
 function checkStuckRuns(): void {
@@ -188,16 +210,9 @@ function checkStuckRuns(): void {
   if (changed) renderRuns();
 }
 
-// Execute a remediation job (the check's `troubleshoot` id) and track
-// its run; progress arrives asynchronously via `klp-notification`.
 async function executeJob(jobId: string, label: string): Promise<void> {
   try {
     const r = await invoke<JobsExecuteResult>("jobs_execute", { id: jobId });
-    // Race: a `jobs.progress` push for this run can arrive (via the
-    // notification listener) BEFORE this invoke promise resolves. If it
-    // did, `handleProgress` already created the row — keep its
-    // status/output and just attach the human label, don't clobber it
-    // back to "running" with empty output.
     const existing = runs.get(r.run_id);
     if (existing) {
       existing.label = label;
@@ -213,9 +228,6 @@ async function executeJob(jobId: string, label: string): Promise<void> {
     }
     renderRuns();
   } catch (err) {
-    // The execute call itself was rejected (e.g. Unauthorized / not
-    // found) — surface it as a synthetic failed row so the user sees
-    // why, instead of a click that silently does nothing.
     const pseudoId = `error-${jobId}-${runs.size}`;
     runs.set(pseudoId, {
       runId: pseudoId,
@@ -228,10 +240,6 @@ async function executeJob(jobId: string, label: string): Promise<void> {
   }
 }
 
-// Best-effort kill of a running job. The terminal `jobs.progress`
-// (status = killed) still arrives and updates the row. If the RPC
-// itself fails (e.g. the run already finished), surface a note on the
-// row so the lingering 中止 button doesn't look broken.
 async function killRun(runId: string): Promise<void> {
   try {
     await invoke("jobs_kill", { runId });
@@ -245,7 +253,6 @@ async function killRun(runId: string): Promise<void> {
   }
 }
 
-// Apply one `jobs.progress` push to the matching run row.
 function handleProgress(p: JobProgress): void {
   const existing = runs.get(p.run_id);
   const run: Run = existing ?? {
@@ -263,33 +270,42 @@ function handleProgress(p: JobProgress): void {
   renderRuns();
 }
 
+function activeRunCount(): number {
+  let n = 0;
+  for (const r of runs.values()) if (!isTerminal(r.status)) n++;
+  return n;
+}
+
 function renderRuns(): void {
   evictOldRuns();
   const section = $("runs-section");
-  if (runs.size === 0) {
-    section.hidden = true;
-    return;
+  section.hidden = runs.size === 0;
+  if (runs.size > 0) {
+    const list = [...runs.values()].reverse(); // newest first
+    const container = $("runs");
+    // Full render on any structural change; otherwise update each row in
+    // place so a status/output tick doesn't blow away scroll / text
+    // selection. A same-length set can still differ by key (an evict +
+    // add in one pass), so verify every list row has a matching DOM node
+    // before taking the in-place path — otherwise the new run would be
+    // skipped and the evicted one would linger (Gemini #636).
+    const hasAllRows = list.every((r) =>
+      document.getElementById(`run-${r.runId}`),
+    );
+    if (container.children.length !== list.length || !hasAllRows) {
+      container.innerHTML = list.map(renderRun).join("");
+    } else {
+      for (const r of list) {
+        const el = document.getElementById(`run-${r.runId}`);
+        if (!el) continue;
+        const tmp = document.createElement("div");
+        tmp.innerHTML = renderRun(r);
+        const fresh = tmp.firstElementChild;
+        if (fresh) el.replaceWith(fresh);
+      }
+    }
   }
-  section.hidden = false;
-  // Newest first.
-  const list = [...runs.values()].reverse();
-  const container = $("runs");
-  // Structural change (a run added / evicted) → full render. Otherwise
-  // update each row IN PLACE so a status/output tick doesn't blow away
-  // the user's scroll position or text selection in another run's
-  // output (progress can tick several times a second for a chatty job).
-  if (container.children.length !== list.length) {
-    container.innerHTML = list.map(renderRun).join("");
-    return;
-  }
-  for (const r of list) {
-    const el = document.getElementById(`run-${r.runId}`);
-    if (!el) continue;
-    const tmp = document.createElement("div");
-    tmp.innerHTML = renderRun(r);
-    const fresh = tmp.firstElementChild;
-    if (fresh) el.replaceWith(fresh);
-  }
+  updateRunsCard();
 }
 
 function renderRun(r: Run): string {
@@ -299,14 +315,9 @@ function renderRun(r: Run): string {
     r.status === "running" || r.status === "queued"
       ? `<button class="kill-btn" data-run-id="${escapeHtml(r.runId)}">中止</button>`
       : "";
-  // Cap the shown output so a chatty job can't blow up the DOM; the
-  // tail is what matters for "did it work".
   const output = r.output.trim()
     ? `<pre class="run-output">${escapeHtml(r.output.slice(-4000))}</pre>`
     : "";
-  // `id` lets renderRuns update this row in place (see above). runIds
-  // are agent-minted UUIDs / internal slugs, so escapeHtml is a no-op
-  // here, but keep it escaped for the same XSS-hygiene reason as below.
   return `
     <div class="run-row status-${escapeHtml(r.status)}" id="run-${escapeHtml(r.runId)}">
       <span class="run-icon">${icon}</span>
@@ -317,27 +328,17 @@ function renderRun(r: Run): string {
     </div>`;
 }
 
-// ---- Job catalog (#291): the three user-invokable job tabs ----
+// ---- Job catalog (#291): category nav + per-category job list ----
 
-// Jobs grouped by category, loaded once on connect via `jobs.list`.
 const jobsByCategory = new Map<JobCategory, UserInvokableJob[]>();
-let activeJobsTab: JobCategory = CATEGORY_TABS[0].category;
-// Re-entry guard: loadJobs is fired once per connect today, but
-// reconnect (#468) will call it again — the flag stops two overlapping
-// loads racing the `clear()` + refill against a tab-click read. Reset
-// on failure so the next connect retries.
+let activeJobsTab: JobCategory = CATEGORIES[0].category;
 let jobsLoaded = false;
 
-// Fetch the user-invokable job catalog and render the tabs. Called
-// once the agent is connected. The catalog changes rarely, so this is
-// a one-shot load (not polled) — re-run on reconnect when that lands.
 async function loadJobs(): Promise<void> {
   if (jobsLoaded) return;
   jobsLoaded = true;
-  const section = $("jobs-section");
   try {
-    // `category: null` → the agent returns every tab's jobs; we group
-    // client-side so a single round-trip fills all three tabs.
+    // `category: null` → every tab's jobs in one round-trip; group locally.
     const res = await invoke<JobsListResult>("jobs_list", { category: null });
     jobsByCategory.clear();
     for (const job of res.items) {
@@ -345,42 +346,41 @@ async function loadJobs(): Promise<void> {
       list.push(job);
       jobsByCategory.set(job.category, list);
     }
-    if (res.items.length === 0) {
-      // No user-invokable jobs registered → nothing to show.
-      section.hidden = true;
-      return;
-    }
-    section.hidden = false;
-    // If the default tab is empty, jump to the first tab that has jobs.
-    if ((jobsByCategory.get(activeJobsTab)?.length ?? 0) === 0) {
-      const firstNonEmpty = CATEGORY_TABS.find(
-        (t) => (jobsByCategory.get(t.category)?.length ?? 0) > 0,
-      );
-      if (firstNonEmpty) activeJobsTab = firstNonEmpty.category;
-    }
-    renderJobsTabs();
-    renderJobsList();
+    renderCategoryNav();
+    // Keep the current jobs view in sync if one is open.
+    if (activeView === "jobs") renderJobsList();
   } catch (err) {
-    // Let a later (re)connect retry, and don't show a bare empty tab
-    // bar next to the error.
-    jobsLoaded = false;
-    section.hidden = false;
-    $("jobs-tabs").hidden = true;
-    $("jobs-list").innerHTML =
-      `<p class="error">ジョブ一覧を取得できません: ${escapeHtml(String(err))}</p>`;
+    jobsLoaded = false; // let a later (re)connect retry
+    $("nav-categories").innerHTML =
+      `<p class="nav-error error">ジョブ一覧を取得できません</p>`;
+    console.error("jobs_list failed", err);
   }
 }
 
-function renderJobsTabs(): void {
-  $("jobs-tabs").hidden = false;
-  $("jobs-tabs").innerHTML = CATEGORY_TABS.map((t) => {
-    const count = jobsByCategory.get(t.category)?.length ?? 0;
-    const active = t.category === activeJobsTab ? " active" : "";
-    return `<button class="jobs-tab${active}" data-category="${t.category}">${escapeHtml(t.label)} (${count})</button>`;
-  }).join("");
+// Inject one sidebar entry per category that actually has jobs (an empty
+// category gets no menu item — that's the "category でメニュー化" ask).
+function renderCategoryNav(): void {
+  const withJobs = CATEGORIES.filter(
+    (m) => (jobsByCategory.get(m.category)?.length ?? 0) > 0,
+  );
+  $("nav-jobs-sep").hidden = withJobs.length === 0;
+  $("nav-categories").innerHTML = withJobs
+    .map((m) => {
+      const count = jobsByCategory.get(m.category)?.length ?? 0;
+      return `
+        <button class="nav-item" data-view="jobs" data-category="${m.category}">
+          ${iconHtml(m.icon, m.icon, "nav-icon")}
+          <span class="nav-label">${escapeHtml(m.label)}</span>
+          <span class="nav-count muted">${count}</span>
+        </button>`;
+    })
+    .join("");
+  hydrateIcons();
 }
 
 function renderJobsList(): void {
+  const meta = categoryMeta(activeJobsTab);
+  $("jobs-view-title").textContent = meta.label;
   const jobs = jobsByCategory.get(activeJobsTab) ?? [];
   if (jobs.length === 0) {
     $("jobs-list").innerHTML =
@@ -388,18 +388,17 @@ function renderJobsList(): void {
     return;
   }
   $("jobs-list").innerHTML = jobs.map(renderJobRow).join("");
+  hydrateIcons();
 }
 
 function renderJobRow(j: UserInvokableJob): string {
+  const fallback = categoryMeta(j.category).icon;
   const desc = j.display_description
     ? `<span class="job-desc">${escapeHtml(j.display_description)}</span>`
     : "";
-  // Button BEFORE the description: `.job-desc` is `flex: 1 1 100%` (it
-  // wraps to its own row), so the button must precede it to sit on the
-  // name's row (pushed right via margin-left:auto) rather than being
-  // bumped to a third line.
   return `
     <div class="job-row">
+      ${iconHtml(j.icon, fallback)}
       <span class="job-name">${escapeHtml(j.display_name)}</span>
       <button class="job-run-btn" data-job-id="${escapeHtml(j.id)}" data-label="${escapeHtml(j.display_name)}">実行</button>
       ${desc}
@@ -408,10 +407,6 @@ function renderJobRow(j: UserInvokableJob): string {
 
 // ---- Notifications (Phase E, #102) ----
 
-// Mirrors `kanade_shared::ipc::notifications` — hand-written like the
-// other IPC types until TS bindings are generated. `unknown` is the
-// serde forward-compat catch-all (#492): a newer agent's new priority
-// decodes here and we render it neutrally rather than throwing.
 type NotificationPriority = "info" | "warn" | "emergency" | "unknown";
 
 type AppNotification = {
@@ -423,8 +418,6 @@ type AppNotification = {
   issued_at: string;
   issued_by?: string | null;
   expires_at?: string | null;
-  // `acked_at` from THIS user's perspective; populated by
-  // notifications.list for already-acked entries, set locally on ack.
   acked_at?: string | null;
 };
 
@@ -449,15 +442,7 @@ const PRIORITY_LABEL: Record<NotificationPriority, string> = {
   unknown: "通知",
 };
 
-// All known notifications, keyed by id, in insertion (≈ arrival) order.
-// Newest is rendered first. Acked + unread both kept so the panel
-// doubles as recent history; expired ones are filtered at render time.
 const notifications = new Map<string, AppNotification>();
-
-// Guards a double subscribe/list on the same connection (renderStatus
-// can be called more than once per connect). Reset on reconnect so a
-// fresh connection re-subscribes — the agent's subscription is
-// per-connection, so a stale flag would leave the new pipe push-less.
 let notifSubscribed = false;
 
 function isExpired(n: AppNotification): boolean {
@@ -466,12 +451,7 @@ function isExpired(n: AppNotification): boolean {
   return !Number.isNaN(t) && t <= Date.now();
 }
 
-// Subscribe to live pushes and load recent history. Called on every
-// (re)connect; the guard makes a redundant same-connection call a no-op.
 async function loadNotifications(): Promise<void> {
-  // Subscribe once per connection (the guard makes a redundant
-  // same-connection call a no-op); the agent's subscription is
-  // per-connection so a failure here leaves the flag false to retry.
   if (!notifSubscribed) {
     try {
       await invoke("notifications_subscribe");
@@ -481,14 +461,7 @@ async function loadNotifications(): Promise<void> {
       return;
     }
   }
-  // Load history on every call (not gated by `notifSubscribed`): a
-  // transient list failure must not wedge the panel empty for the rest
-  // of the connection — the next (re)connect retries it, and the
-  // re-set of map entries is idempotent.
   try {
-    // Load `all` (acked + unread) so the panel shows recent history,
-    // with the unread badge derived from `acked_at`. The agent clamps
-    // the limit; one page is plenty for a glanceable panel.
     const res = await invoke<NotificationsListResult>("notifications_list", {
       filter: "all",
       cursor: null,
@@ -498,22 +471,13 @@ async function loadNotifications(): Promise<void> {
 
     await ensureLaunchId();
     if (pendingEmergencyId) {
-      // Agent-launched for a specific emergency (#102): surface it as a
-      // native toast (the window is hidden so it never bursts over a
-      // meeting) and DON'T pop the blocking modal — clicking the toast
-      // opens the window onto this notification instead.
       const target = notifications.get(pendingEmergencyId);
       if (target && !target.acked_at && !isExpired(target)) {
         void surfaceEmergencyToast(target);
       } else {
-        // Already acked / expired / unknown — nothing to surface; reveal
-        // the window so the launch isn't a silent no-op.
         void invoke("show_main_window").catch(() => {});
       }
     } else {
-      // Normal launch — recovery path (SPEC §2.12.8): an unacked,
-      // non-expired emergency missed while disconnected re-raises its
-      // modal from history, not just a push.
       for (const n of res.items) {
         if (n.priority === "emergency" && !n.acked_at && !isExpired(n)) {
           showEmergencyModal(n);
@@ -527,13 +491,9 @@ async function loadNotifications(): Promise<void> {
 
 // ---- Emergency launch (#102): agent → `--show-notification <id>` ----
 
-// The notification id the agent launched us to surface, or null on a
-// normal launch. Fetched once (lazily) from the Rust side.
 let pendingEmergencyId: string | null = null;
 let launchIdFetched = false;
-// One-shot guard so a reconnect's loadNotifications doesn't re-toast.
 let emergencyToasted = false;
-// `onAction` is registered at most once for the app's lifetime.
 let emergencyActionRegistered = false;
 
 async function ensureLaunchId(): Promise<void> {
@@ -548,8 +508,6 @@ async function ensureLaunchId(): Promise<void> {
   }
 }
 
-// Show the emergency as a native OS toast (hidden window). Clicking it
-// reveals the window focused on the notification panel.
 async function surfaceEmergencyToast(n: AppNotification): Promise<void> {
   if (emergencyToasted) return;
   emergencyToasted = true;
@@ -557,20 +515,12 @@ async function surfaceEmergencyToast(n: AppNotification): Promise<void> {
     let granted = await isPermissionGranted();
     if (!granted) granted = (await requestPermission()) === "granted";
     if (!granted) {
-      // No toast permission — don't leave the emergency invisible; reveal
-      // the window and focus the notification directly.
       await invoke("show_main_window").catch(() => {});
       focusNotificationInPanel(n.id);
       return;
     }
     if (!emergencyActionRegistered) {
       emergencyActionRegistered = true;
-      // Fires when the user clicks any OS notification this app sent.
-      // Scope assumption: `sendNotification` (the OS-toast path) is ONLY
-      // called from here for the emergency, so every onAction is an
-      // emergency-toast click. In-app DOM toasts (showToast) don't fire
-      // onAction. If a future change sends OS notifications elsewhere,
-      // this handler would need to disambiguate by notification id.
       await onAction(() => {
         void openEmergencyFromToast();
       });
@@ -583,15 +533,15 @@ async function surfaceEmergencyToast(n: AppNotification): Promise<void> {
   }
 }
 
-// Toast clicked → reveal + focus the window, scroll to the emergency.
 async function openEmergencyFromToast(): Promise<void> {
   await invoke("show_main_window").catch(() => {});
   if (pendingEmergencyId) focusNotificationInPanel(pendingEmergencyId);
 }
 
-// Scroll the notification panel to a notification and briefly flash it.
+// Scroll the notification view to a notification and briefly flash it.
+// Switches to the notifications view first so the row is on screen.
 function focusNotificationInPanel(id: string): void {
-  renderNotifications();
+  showView("notifications");
   const el = document.getElementById(`cnotif-${id}`);
   if (!el) return;
   el.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -599,8 +549,6 @@ function focusNotificationInPanel(id: string): void {
   window.setTimeout(() => el.classList.remove("notif-flash"), 2000);
 }
 
-// Apply one `notifications.new` push: store, re-render, and surface it
-// (emergency → blocking modal; info/warn → transient toast).
 function handleNewNotification(n: AppNotification): void {
   notifications.set(n.id, n);
   renderNotifications();
@@ -612,8 +560,6 @@ function handleNewNotification(n: AppNotification): void {
   }
 }
 
-// Ack a notification for this OS user. Marks it read locally on success
-// and dismisses its emergency modal if one is open.
 async function ackNotification(id: string): Promise<void> {
   try {
     const r = await invoke<NotificationsAckResult>("notifications_ack", { id });
@@ -623,53 +569,53 @@ async function ackNotification(id: string): Promise<void> {
     renderNotifications();
   } catch (err) {
     console.error("notifications_ack failed", err);
-    // Surface on the open modal (the user is staring at it) so a failed
-    // ack doesn't look like an unresponsive button.
     const errEl = document.getElementById("emergency-error");
     if (errEl) errEl.textContent = `確認に失敗しました: ${String(err)}`;
-    // Re-throw so the click handler can re-enable its disabled button
-    // and let the user retry (a transient failure shouldn't wedge it).
     throw err;
   }
 }
 
+// Count unread, non-expired notifications (drives the sidebar badge +
+// dashboard card).
+function unreadCount(): number {
+  let n = 0;
+  for (const x of notifications.values()) {
+    if (!isExpired(x) && !x.acked_at) n++;
+  }
+  return n;
+}
+
 function renderNotifications(): void {
   evictOldNotifications();
-  const section = $("notifications-section");
-  // Sort newest-first by issued_at rather than leaning on Map insertion
-  // order: history (notifications.list) arrives newest-first but live
-  // pushes append to the end, so insertion order is a scramble — an
-  // explicit sort is the only correct ordering.
   const live = [...notifications.values()]
     .filter((n) => !isExpired(n))
     .sort((a, b) => Date.parse(b.issued_at) - Date.parse(a.issued_at));
+  const container = $("notifications");
   if (live.length === 0) {
-    section.hidden = true;
-    return;
-  }
-  section.hidden = false;
-  const unread = live.filter((n) => !n.acked_at).length;
-  const badge = $("notif-badge");
-  if (unread > 0) {
-    badge.hidden = false;
-    badge.textContent = String(unread);
+    container.innerHTML = `<p class="muted">通知はありません</p>`;
   } else {
-    badge.hidden = true;
+    container.innerHTML = live.map(renderNotification).join("");
   }
-  $("notifications").innerHTML = live.map(renderNotification).join("");
+  updateNotifBadges();
 }
 
-// Cap the notifications map so a long-lived client fed a high volume of
-// non-expiring notifications doesn't grow it unbounded (mirrors the
-// `runs` MAX_RUNS eviction). Drop the oldest ACKED entries first —
-// unread ones still need surfacing — and only once over the cap.
+// Reflect the unread count onto the view-title badge, the sidebar nav
+// badge, and the dashboard card.
+function updateNotifBadges(): void {
+  const unread = unreadCount();
+  for (const id of ["notif-badge", "nav-notif-badge"]) {
+    const badge = $(id);
+    badge.hidden = unread === 0;
+    badge.textContent = String(unread);
+  }
+  $("card-notif-value").textContent =
+    unread > 0 ? `${unread}件の未読` : "未読なし";
+}
+
 const MAX_NOTIFICATIONS = 100;
 
 function evictOldNotifications(): void {
   if (notifications.size <= MAX_NOTIFICATIONS) return;
-  // Insertion order ≈ oldest-first for history; acked entries are the
-  // safe ones to forget (already confirmed, dropped from the unread
-  // badge). Iterate oldest-first and evict acked until back under cap.
   for (const [id, n] of notifications) {
     if (notifications.size <= MAX_NOTIFICATIONS) break;
     if (n.acked_at) notifications.delete(id);
@@ -685,17 +631,12 @@ function renderNotification(n: AppNotification): string {
   ]
     .filter(Boolean)
     .join(" · ");
-  // Ack control: a 確認 button only while require_ack and not yet acked;
-  // once acked (any notification), a quiet "確認済み" marker.
   const ackCtl =
     n.require_ack && !acked
       ? `<button class="notif-ack-btn" data-notif-id="${escapeHtml(n.id)}">確認</button>`
       : acked
         ? `<span class="notif-acked muted">✓ 確認済み</span>`
         : "";
-  // `id` lets the emergency-launch flow scroll to + flash this row
-  // (focusNotificationInPanel). n.id is an agent-minted UUID so escapeHtml
-  // is a no-op, but keep it escaped for the same XSS-hygiene reason.
   return `
     <div id="cnotif-${escapeHtml(n.id)}" class="notif-row priority-${escapeHtml(n.priority)}${acked ? " acked" : ""}">
       <span class="notif-icon">${icon}</span>
@@ -711,8 +652,7 @@ function renderNotification(n: AppNotification): string {
     </div>`;
 }
 
-// Transient toast for info/warn pushes (non-blocking). Auto-dismisses;
-// the notification stays in the panel for later reference / ack.
+// Transient toast for info/warn pushes (non-blocking).
 function showToast(n: AppNotification): void {
   const container = $("toast-container");
   const el = document.createElement("div");
@@ -730,9 +670,8 @@ function showToast(n: AppNotification): void {
   }, 6000);
 }
 
-// Emergency notifications block on a focus-grabbing modal. Only one is
-// shown at a time; others queue (deduped by id) and surface as each is
-// dismissed, so a burst can't stack overlapping modals.
+// Emergency notifications block on a focus-grabbing modal (one at a time;
+// the rest queue, deduped by id).
 const emergencyQueue: AppNotification[] = [];
 let emergencyShown: string | null = null;
 
@@ -761,9 +700,6 @@ function pumpEmergency(): void {
   ]
     .filter(Boolean)
     .join(" · ");
-  // require_ack → the only way out is 確認 (which acks). Otherwise a
-  // plain 閉じる that dismisses locally without acking (the operator
-  // didn't ask for a confirmation).
   const btn = next.require_ack
     ? `<button class="emergency-ack-btn" data-notif-id="${escapeHtml(next.id)}">確認</button>`
     : `<button class="emergency-close-btn" data-notif-id="${escapeHtml(next.id)}">閉じる</button>`;
@@ -775,17 +711,11 @@ function pumpEmergency(): void {
       <p id="emergency-error" class="error"></p>
       ${btn}
     </div>`;
-  // `role="alertdialog"` / `aria-modal` don't grab focus on their own,
-  // so move keyboard focus onto the action button — otherwise the
-  // "blocking" modal stays navigable from the background page and is
-  // easy for keyboard / screen-reader users to miss.
   modal
     .querySelector<HTMLElement>(".emergency-ack-btn, .emergency-close-btn")
     ?.focus();
 }
 
-// Remove a notification from the emergency flow — whether it was queued
-// or the one on screen. Advancing pulls the next queued emergency up.
 function dismissEmergencyModal(id: string): void {
   const qi = emergencyQueue.findIndex((q) => q.id === id);
   if (qi >= 0) emergencyQueue.splice(qi, 1);
@@ -795,9 +725,6 @@ function dismissEmergencyModal(id: string): void {
   }
 }
 
-// Drop expired notifications from the panel and close an expired modal.
-// Time-driven, so run on a timer (a notification can expire while the
-// app sits idle with nothing pushing a re-render).
 function sweepExpired(): void {
   if (emergencyShown) {
     const n = notifications.get(emergencyShown);
@@ -806,12 +733,6 @@ function sweepExpired(): void {
   renderNotifications();
 }
 
-// Format an ISO instant as the user's local wall-clock; fall back to
-// the raw string if it doesn't parse. The result is HTML-escaped at the
-// source: every caller splices it into `innerHTML`, and the fallback
-// branch returns an un-sanitised agent-supplied string — escaping here
-// (one place) closes that DOM-XSS hole without each call site having to
-// remember to wrap it (defence-in-depth; the agent pipe is high-trust).
 function fmtTime(iso: string): string {
   const d = new Date(iso);
   return escapeHtml(Number.isNaN(d.getTime()) ? iso : d.toLocaleString());
@@ -825,62 +746,115 @@ const $ = (id: string): HTMLElement => {
   return el;
 };
 
-async function renderStatus() {
-  const status = $("status");
-  try {
-    const hs = await invoke<HandshakeResult>("get_handshake");
-    status.innerHTML = `
-      <p>Connected to agent <strong>v${escapeHtml(hs.agent_version)}</strong></p>
-      <p class="muted">
-        Session: ${escapeHtml(hs.session.user)} (session ${hs.session.session_id})<br />
-        PC: ${escapeHtml(hs.session.pc_id)}<br />
-        Protocol: v${hs.protocol}${hs.features.length ? ` — features: ${hs.features.map(escapeHtml).join(", ")}` : ""}
-      </p>
-    `;
-    $("ping-section").hidden = false;
-    // Connected → reveal the Health tab, render it now, and keep it
-    // live with a light poll (the agent re-evaluates every ~30 s).
-    $("health-section").hidden = false;
-    void renderHealth();
-    if (healthTimer === undefined) {
-      healthTimer = window.setInterval(renderHealth, 10000);
-    }
-    // Load the user-invokable job catalog (アップデート / 困ったとき /
-    // カタログ). One-shot — the catalog changes rarely.
-    void loadJobs();
-    // Subscribe to live notifications + load recent history (Phase E).
-    void loadNotifications();
-  } catch (err) {
-    status.innerHTML = `<p class="error">Agent unavailable: ${escapeHtml(String(err))}</p>
-      <p class="muted">Retrying in 5 s…</p>`;
-    // Crude retry loop; a proper PR adds a tauri event the backend
-    // emits once the pipe lands.
-    setTimeout(renderStatus, 5000);
-  }
+// ---- Connection status dot --------------------------------------------
+
+type ConnState = "connected" | "connecting" | "disconnected";
+
+function setConn(state: ConnState): void {
+  const el = $("conn");
+  el.classList.remove(
+    "conn-connected",
+    "conn-connecting",
+    "conn-disconnected",
+  );
+  el.classList.add(`conn-${state}`);
+  const label =
+    state === "connected"
+      ? "接続中"
+      : state === "disconnected"
+        ? "再接続中…"
+        : "接続待ち";
+  const labelEl = el.querySelector(".conn-label");
+  if (labelEl) labelEl.textContent = label;
 }
 
-// Health tab (#290): SPEC §2.1.5 use case 2 — render the agent's
-// `state.snapshot` as a list of compliance checks (status light +
-// name + detail) plus the online / VPN / version header. The agent
-// re-evaluates every ~30 s, so a light poll keeps the tab live until
-// `state.changed` push lands in a follow-up.
+// ---- View router ------------------------------------------------------
+
+type ViewId = "home" | "notifications" | "health" | "jobs";
+let activeView: ViewId = "home";
+
+function showView(view: ViewId, category?: JobCategory): void {
+  activeView = view;
+  for (const id of ["home", "notifications", "health", "jobs"] as ViewId[]) {
+    $(`view-${id}`).hidden = id !== view;
+  }
+  // Sidebar active state: for a jobs view, the active item is the one
+  // matching the chosen category.
+  document.querySelectorAll<HTMLElement>(".nav-item").forEach((b) => {
+    const matches =
+      b.dataset.view === view &&
+      (view !== "jobs" || b.dataset.category === category);
+    b.classList.toggle("active", matches);
+  });
+  if (view === "jobs" && category) {
+    activeJobsTab = category;
+    renderJobsList();
+  }
+  if (view === "home") renderDashboard();
+}
+
+// ---- Dashboard (home) -------------------------------------------------
+
+let lastSnapshot: StateSnapshot | null = null;
+
+function renderDashboard(): void {
+  // Health summary card.
+  const hv = $("card-health-value");
+  const card = $("card-health");
+  card.classList.remove("ok", "warn", "fail");
+  if (!lastSnapshot) {
+    hv.textContent = "読み込み中…";
+  } else {
+    const s = lastSnapshot;
+    const fails = s.checks.filter((c) => c.status === "fail").length;
+    const warns = s.checks.filter((c) => c.status === "warn").length;
+    let text: string;
+    let level: "ok" | "warn" | "fail";
+    if (!s.online) {
+      text = "❌ オフライン";
+      level = "fail";
+    } else if (fails > 0) {
+      text = `❌ ${fails}件の異常`;
+      level = "fail";
+    } else if (warns > 0) {
+      text = `⚠️ ${warns}件の注意`;
+      level = "warn";
+    } else if (s.checks.length === 0) {
+      text = "✅ オンライン";
+      level = "ok";
+    } else {
+      text = "✅ 全て正常";
+      level = "ok";
+    }
+    hv.textContent = text;
+    card.classList.add(level);
+  }
+  updateNotifBadges();
+  updateRunsCard();
+}
+
+function updateRunsCard(): void {
+  const active = activeRunCount();
+  const card = $("card-runs");
+  card.hidden = active === 0;
+  $("card-runs-value").textContent = active > 0 ? `${active}件 実行中` : "—";
+}
+
+// ---- Health view (#290) -----------------------------------------------
+
 let healthTimer: number | undefined;
 
 async function renderHealth() {
   const el = $("health");
   try {
     const s = await invoke<StateSnapshot>("state_snapshot");
+    lastSnapshot = s;
     el.innerHTML = renderSnapshot(s);
+    hydrateIcons();
+    if (activeView === "home") renderDashboard();
   } catch (err) {
-    // Show the error only in the health section; do not touch the top
-    // status banner or stop the poll here. `klp-disconnected` now owns
-    // both (it fires once when the supervisor's reader task exits, #468).
-    // Duplicating that here is a race: a stale in-flight `state_snapshot`
-    // can reject *after* `klp-connected` has already restored the
-    // "Connected" banner and restarted the timer — clobbering the banner
-    // back to "reconnecting…" and killing the just-restarted poll. So a
-    // transient per-request failure stays local; connection-state
-    // transitions are event-driven (#468).
+    // Keep the failure local (connection-state transitions are
+    // event-driven via klp-disconnected, #468).
     el.innerHTML = `<p class="error">ヘルス情報を取得できません: ${escapeHtml(String(err))}</p>`;
   }
 }
@@ -906,10 +880,6 @@ function renderCheck(c: Check): string {
   const detail = c.detail
     ? `<span class="check-detail">${escapeHtml(c.detail)}</span>`
     : "";
-  // Remediation (#291): the button runs the check's `troubleshoot`
-  // job via `jobs.execute`. Clicks are caught by the delegated handler
-  // (the Health list is re-rendered on a poll, so per-button listeners
-  // wouldn't survive). The job id + a human label ride on data-attrs.
   const fix = c.troubleshoot
     ? `<button class="fix-btn" data-job-id="${escapeHtml(c.troubleshoot)}" data-check="${escapeHtml(c.name)}">修復する</button>`
     : "";
@@ -922,48 +892,72 @@ function renderCheck(c: Check): string {
     </li>`;
 }
 
-async function onPingClick() {
-  const out = $("ping-result");
-  out.textContent = "pinging…";
-  const sentAt = Date.now();
-  try {
-    const r = await invoke<PingResult>("ping_agent");
-    const rttMs = Date.now() - sentAt;
-    out.textContent = `OK — agent_time=${r.agent_time} (round-trip ${rttMs} ms)`;
-  } catch (err) {
-    out.textContent = `error: ${String(err)}`;
+// ---- Connection lifecycle ---------------------------------------------
+
+// Pending get_handshake retry timer — tracked so a fresh klp-connected
+// (or initial call) cancels an in-flight retry instead of spawning a
+// second concurrent retry loop (Gemini #636).
+let connectTimeout: number | undefined;
+
+// Called on each (re)connect: confirm the pipe is up (get_handshake
+// errors when it isn't), flip the status dot, and (re)pull all data.
+async function onConnected() {
+  if (connectTimeout !== undefined) {
+    clearTimeout(connectTimeout);
+    connectTimeout = undefined;
   }
+  try {
+    await invoke("get_handshake");
+  } catch {
+    // Pipe not ready yet — the supervisor retries; show "connecting".
+    setConn("connecting");
+    connectTimeout = window.setTimeout(onConnected, 2000);
+    return;
+  }
+  setConn("connected");
+  void renderHealth();
+  if (healthTimer === undefined) {
+    healthTimer = window.setInterval(renderHealth, 10000);
+  }
+  void loadJobs();
+  void loadNotifications();
 }
 
-// Defensive escape for any string we splice into `innerHTML`.
-// Covers the OWASP XSS prevention basics: `&` (encoding entity),
-// `<` / `>` (tag delimiters), `"` and `'` (attribute delimiters),
-// and `/` (closing-tag boundary). Overly broad for our own
-// controlled inputs but the cost is rounding-error.
+// Escape the five characters that actually matter in HTML text /
+// double-quoted-attribute contexts. We deliberately do NOT encode `/`
+// (the legacy OWASP `&#x2F;` is only needed for JSON-inside-`<script>`,
+// not here) — leaving it raw keeps element `id`s equal to their source
+// value (so `getElementById` matches without a decode round-trip) and
+// keeps slugs/paths readable in the DOM (Claude #636).
 function escapeHtml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;")
-    .replace(/\//g, "&#x2F;");
+    .replace(/'/g, "&#039;");
 }
 
 window.addEventListener("DOMContentLoaded", () => {
-  $("ping-btn").addEventListener("click", onPingClick);
+  // Hydrate the static sidebar / dashboard icons once.
+  hydrateIcons();
 
-  // Delegated click handling: both the Health list (fix buttons) and
-  // the runs list (kill buttons) are re-rendered via innerHTML, so a
-  // single document-level listener survives the churn that per-element
-  // listeners wouldn't.
+  // Delegated click handling: a single document-level listener survives
+  // the innerHTML churn that per-element listeners wouldn't.
   document.addEventListener("click", (e) => {
     const t = e.target as HTMLElement;
+
+    // Nav item / dashboard card → switch view.
+    const nav = t.closest<HTMLElement>(".nav-item, .dash-card");
+    if (nav?.dataset.view) {
+      const v = nav.dataset.view as ViewId;
+      showView(v, nav.dataset.category as JobCategory | undefined);
+      return;
+    }
+
+    // Health remediation: run the check's `troubleshoot` job.
     const fixBtn = t.closest<HTMLButtonElement>(".fix-btn");
     if (fixBtn?.dataset.jobId) {
-      // Disable on click so a rapid double-click can't spawn the job
-      // twice before the first invoke resolves. The next Health
-      // re-render (poll) restores a fresh, enabled button.
       fixBtn.disabled = true;
       void executeJob(
         fixBtn.dataset.jobId,
@@ -976,38 +970,22 @@ window.addEventListener("DOMContentLoaded", () => {
       void killRun(killBtn.dataset.runId);
       return;
     }
-    // Notification ack — from the panel row or the emergency modal.
-    // Both ack the notification for this OS user; disable on click so a
-    // double-tap can't fire two acks before the first resolves.
     const ackBtn = t.closest<HTMLButtonElement>(
       ".notif-ack-btn, .emergency-ack-btn",
     );
     if (ackBtn?.dataset.notifId) {
       ackBtn.disabled = true;
-      // Re-enable on failure so a transient error doesn't wedge the
-      // button. On success the row/modal re-renders (button gone).
       ackNotification(ackBtn.dataset.notifId).catch(() => {
         ackBtn.disabled = false;
       });
       return;
     }
-    // Emergency with no ack required: 閉じる just dismisses locally.
     const closeBtn = t.closest<HTMLElement>(".emergency-close-btn");
     if (closeBtn?.dataset.notifId) {
       dismissEmergencyModal(closeBtn.dataset.notifId);
       return;
     }
-    // Job catalog: a tab switches the visible category…
-    const tab = t.closest<HTMLElement>(".jobs-tab");
-    if (tab?.dataset.category) {
-      activeJobsTab = tab.dataset.category as JobCategory;
-      renderJobsTabs();
-      renderJobsList();
-      return;
-    }
-    // …and a run button executes the job. Unlike the catalog (loaded
-    // once, not polled), nothing re-renders this button, so disable it
-    // only for the in-flight invoke and re-enable after, allowing reruns.
+    // Job run button.
     const runBtn = t.closest<HTMLButtonElement>(".job-run-btn");
     if (runBtn?.dataset.jobId) {
       runBtn.disabled = true;
@@ -1021,25 +999,16 @@ window.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  // Agent→client pushes the backend forwards as `klp-notification`
-  // events (#467). `jobs.progress` drives the remediation run rows
-  // live; other methods (e.g. `state.changed`) can hook in here later.
+  // Agent→client pushes forwarded as `klp-notification` events (#467).
   void listen<RpcNotification>("klp-notification", (event) => {
-    // Guard the payload before touching `method`: a malformed / null
-    // frame (shouldn't happen on typed IPC, but a single bad frame must
-    // not break the listener for every future push) is dropped rather
-    // than throwing on the dereference.
     const payload = event.payload as Partial<RpcNotification> | null;
     if (typeof payload?.method !== "string") return;
-    // Each branch then guards its own cast.
     if (payload.method === "jobs.progress") {
       const p = payload.params as Partial<JobProgress> | null;
       if (!p?.run_id) return;
       handleProgress(p as JobProgress);
       return;
     }
-    // `notifications.new` carries the full Notification body inline
-    // (flattened on the wire), so no second round-trip is needed.
     if (payload.method === "notifications.new") {
       const n = payload.params as Partial<AppNotification> | null;
       if (!n?.id) return;
@@ -1048,36 +1017,24 @@ window.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  // Reconnect lifecycle (#468). The Tauri supervisor reconnects when
-  // the agent's pipe drops (e.g. the agent self-updated); these events
-  // let the UI react instead of looking frozen.
+  // Reconnect lifecycle (#468).
   void listen("klp-connected", () => {
-    // Fresh connection (initial or reconnect) — re-pull everything.
-    // `jobsLoaded` / `notifSubscribed` are reset so the catalog reloads
-    // and the notification subscription is re-established against the
-    // new connection (the agent's subscription is per-connection).
     jobsLoaded = false;
     notifSubscribed = false;
-    void renderStatus();
+    void onConnected();
   });
   void listen("klp-disconnected", () => {
-    // Connection dropped; the supervisor is reconnecting. Stop the
-    // health poll and show a banner instead of silently-failing calls.
     if (healthTimer !== undefined) {
       window.clearInterval(healthTimer);
       healthTimer = undefined;
     }
-    $("status").innerHTML =
-      `<p class="error">エージェントとの接続が切れました。再接続しています…</p>`;
+    setConn("disconnected");
   });
 
-  // Stuck-run watchdog tick (see checkStuckRuns). Once a minute is
-  // plenty for a 15-minute deadline.
   window.setInterval(checkStuckRuns, 60_000);
-
-  // Expire notifications off the panel / modal as their `expires_at`
-  // passes, even while the app sits idle (see sweepExpired).
   window.setInterval(sweepExpired, 60_000);
 
-  renderStatus();
+  // Initial connect attempt (the supervisor may already be connected
+  // before this WebView loaded; klp-connected also drives reconnects).
+  void onConnected();
 });

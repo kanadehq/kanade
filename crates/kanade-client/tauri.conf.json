@@ -14,8 +14,10 @@
       {
         "label": "main",
         "title": "Kanade",
-        "width": 720,
-        "height": 480,
+        "width": 880,
+        "height": 560,
+        "minWidth": 640,
+        "minHeight": 420,
         "resizable": true,
         "fullscreen": false,
         "visible": false

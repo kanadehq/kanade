@@ -1,42 +1,292 @@
-/* Minimal styling for the Kanade Client App skeleton.
-   The "real" UI redesign lands with the Health / Notifications
-   tabs; for now we just want the page legible. */
+/* Kanade Client App — dashboard UI.
+   Header + left sidebar nav + switchable content views. Design tokens
+   are CSS custom properties so light / dark only re-points a handful of
+   variables (see the :root / prefers-color-scheme blocks). */
+
+:root {
+  --bg: #f4f4f6;
+  --panel: #ffffff;
+  --panel-2: #f7f7f9;
+  --border: #e3e3e8;
+  --text: #1a1a1a;
+  --muted: #6b6b72;
+  --accent: #5b3a8c; /* baton violet */
+  --accent-soft: rgba(91, 58, 140, 0.1);
+  --ok: #2e7d32;
+  --warn: #8a6d00;
+  --fail: #b00020;
+  --sidebar-w: 188px;
+  --radius: 10px;
+}
 
 * {
   box-sizing: border-box;
 }
 
+/* `[hidden]` must win over the explicit `display` on components like
+   .badge / .dash-card / .view (an author `display` otherwise overrides
+   the UA `[hidden]{display:none}` rule and leaks "0" badges / empty
+   cards). */
+[hidden] {
+  display: none !important;
+}
+
+html,
+body {
+  height: 100%;
+}
+
 body {
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  background: #fafafa;
-  color: #1a1a1a;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Yu Gothic UI",
+    Meiryo, Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
   font-size: 14px;
   line-height: 1.5;
 }
 
-main {
-  max-width: 640px;
-  margin: 0 auto;
-  padding: 24px;
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
 }
 
-h1 {
-  font-size: 18px;
-  font-weight: 600;
-  margin: 0 0 16px;
+/* ---- Header ---- */
+.app-header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 48px;
+  padding: 0 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
 }
 
-h2 {
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
   font-size: 15px;
-  font-weight: 600;
-  margin: 0 0 12px;
+  letter-spacing: 0.02em;
 }
 
-/* Health tab (#290): one row per compliance check. */
+.brand-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  font-family: "Yu Mincho", "Noto Serif JP", serif;
+  font-weight: 700;
+  color: #fff;
+  background: linear-gradient(135deg, #5b3a8c, #d4a017 55%, #2a9d8f);
+}
+
+/* Connection status dot + label. */
+.conn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.conn-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #9aa;
+  box-shadow: 0 0 0 0 transparent;
+}
+
+.conn-connected .conn-dot {
+  background: #2e9d4f;
+  box-shadow: 0 0 0 3px rgba(46, 157, 79, 0.18);
+}
+
+.conn-connecting .conn-dot {
+  background: #c9a227;
+  box-shadow: 0 0 0 3px rgba(201, 162, 39, 0.18);
+}
+
+.conn-disconnected .conn-dot {
+  background: #c64141;
+  box-shadow: 0 0 0 3px rgba(198, 65, 65, 0.18);
+  animation: conn-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes conn-pulse {
+  50% {
+    opacity: 0.4;
+  }
+}
+
+/* ---- Layout: sidebar + content ---- */
+.layout {
+  flex: 1 1 auto;
+  display: flex;
+  min-height: 0;
+}
+
+.sidebar {
+  flex: 0 0 var(--sidebar-w);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 10px;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  font-size: 13.5px;
+  font-weight: 500;
+  text-align: left;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.nav-item:hover {
+  background: var(--panel-2);
+}
+
+.nav-item.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.nav-item .nav-icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  color: currentColor;
+}
+
+.nav-label {
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.nav-count {
+  font-size: 12px;
+}
+
+.nav-badge {
+  flex: 0 0 auto;
+}
+
+.nav-sep {
+  height: 1px;
+  margin: 8px 6px;
+  background: var(--border);
+}
+
+.nav-error {
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
+.content {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 20px 24px;
+  overflow-y: auto;
+}
+
+.view-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 16px;
+  font-weight: 700;
+  margin: 0 0 14px;
+}
+
+.view[hidden] {
+  display: none;
+}
+
+/* ---- Dashboard cards ---- */
+.dash-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.dash-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px;
+  text-align: left;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.dash-card-static {
+  cursor: default;
+}
+
+button.dash-card:hover {
+  border-color: var(--accent);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.06);
+}
+
+.dash-icon {
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+.dash-card-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.dash-card-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.dash-card-value {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.dash-card.ok .dash-card-value {
+  color: var(--ok);
+}
+.dash-card.warn .dash-card-value {
+  color: var(--warn);
+}
+.dash-card.fail .dash-card-value {
+  color: var(--fail);
+}
+
+/* ---- Health checks (#290) ---- */
 ul.checks {
   list-style: none;
-  margin: 12px 0 0;
+  margin: 4px 0 0;
   padding: 0;
 }
 
@@ -44,8 +294,8 @@ ul.checks {
   display: flex;
   align-items: baseline;
   gap: 8px;
-  padding: 8px 0;
-  border-top: 1px solid #eee;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
 }
 
 .check-row:first-child {
@@ -62,7 +312,7 @@ ul.checks {
 
 .check-detail {
   flex: 1 1 auto;
-  color: #666;
+  color: var(--muted);
 }
 
 .fix-btn {
@@ -77,55 +327,35 @@ ul.checks {
 }
 
 .status-warn .check-name {
-  color: #8a6d00;
+  color: var(--warn);
 }
-
 .status-fail .check-name {
-  color: #b00020;
+  color: var(--fail);
 }
-
 .status-unknown .check-name {
-  color: #777;
+  color: var(--muted);
 }
 
-/* Job catalog (#291): tab bar + one row per user-invokable job. */
-.tab-bar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 12px;
-}
-
-.jobs-tab {
-  padding: 4px 12px;
-  font-size: 13px;
-  background: transparent;
-  color: inherit;
-  border: 1px solid #ccc;
-  border-radius: 999px;
-}
-
-.jobs-tab:hover {
-  background: rgba(0, 0, 0, 0.05);
-}
-
-.jobs-tab.active {
-  background: #1a1a1a;
-  color: #fff;
-  border-color: #1a1a1a;
-}
-
+/* ---- Job list (#291) ---- */
 .job-row {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   flex-wrap: wrap;
-  gap: 8px;
-  padding: 8px 0;
-  border-top: 1px solid #eee;
+  gap: 10px;
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
 }
 
 .job-row:first-child {
   border-top: 0;
+}
+
+.job-icon {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  color: var(--accent);
+  object-fit: contain;
 }
 
 .job-name {
@@ -134,25 +364,35 @@ ul.checks {
 
 .job-desc {
   flex: 1 1 100%;
-  color: #666;
+  margin-left: 32px;
+  color: var(--muted);
   font-size: 13px;
 }
 
 .job-run-btn {
   margin-left: auto;
-  padding: 4px 14px;
+  padding: 5px 16px;
   font-size: 13px;
 }
 
-/* Remediation run rows (#291): one per jobs.execute, updated live by
-   jobs.progress pushes. */
+/* ---- Run status panel (#291) ---- */
+.runs-panel {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.runs-panel[hidden] {
+  display: none;
+}
+
 .run-row {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
   gap: 8px;
   padding: 8px 0;
-  border-top: 1px solid #eee;
+  border-top: 1px solid var(--border);
 }
 
 .run-row:first-child {
@@ -183,33 +423,33 @@ ul.checks {
   padding: 8px;
   max-height: 160px;
   overflow: auto;
-  background: #f4f4f4;
-  border-radius: 4px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
   font-size: 12px;
   white-space: pre-wrap;
   overflow-wrap: break-word;
 }
 
 .run-row.status-completed .run-status {
-  color: #2e7d32;
+  color: var(--ok);
 }
-
 .run-row.status-failed .run-status,
 .run-row.status-killed .run-status {
-  color: #b00020;
+  color: var(--fail);
 }
 
-/* Notifications (Phase E, #102): panel rows + unread badge. */
+/* ---- Notifications (#102) ---- */
 .badge {
   display: inline-block;
   min-width: 18px;
   padding: 0 6px;
-  font-size: 12px;
-  font-weight: 600;
+  font-size: 11px;
+  font-weight: 700;
   line-height: 18px;
   text-align: center;
   color: #fff;
-  background: #b00020;
+  background: var(--fail);
   border-radius: 999px;
   vertical-align: middle;
 }
@@ -218,8 +458,8 @@ ul.checks {
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  padding: 10px 0;
-  border-top: 1px solid #eee;
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
 }
 
 .notif-row:first-child {
@@ -261,21 +501,18 @@ ul.checks {
   font-size: 12px;
 }
 
-/* Acked rows recede; unread ones keep full contrast. */
 .notif-row.acked {
   opacity: 0.6;
 }
 
 .notif-row.priority-warn .notif-title {
-  color: #8a6d00;
+  color: var(--warn);
 }
 
 .notif-row.priority-emergency .notif-title {
-  color: #b00020;
+  color: var(--fail);
 }
 
-/* Brief highlight when the emergency-launch flow (#102) scrolls a
-   notification into view after the user clicks the toast. */
 .notif-row.notif-flash {
   animation: notif-flash 2s ease-out;
 }
@@ -301,7 +538,7 @@ ul.checks {
   font-size: 12px;
 }
 
-/* Transient toasts (info / warn pushes), bottom-right, auto-dismiss. */
+/* ---- Transient toasts ---- */
 .toast-container {
   position: fixed;
   right: 16px;
@@ -318,19 +555,20 @@ ul.checks {
   align-items: flex-start;
   gap: 8px;
   padding: 12px 14px;
-  background: #fff;
-  color: #1a1a1a;
-  border: 1px solid #e0e0e0;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
   border-left: 4px solid #777;
   border-radius: 6px;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
-  transition: opacity 0.3s ease, transform 0.3s ease;
+  transition:
+    opacity 0.3s ease,
+    transform 0.3s ease;
 }
 
 .toast.priority-warn {
   border-left-color: #e0a900;
 }
-
 .toast.priority-info {
   border-left-color: #2a72d4;
 }
@@ -352,12 +590,12 @@ ul.checks {
 
 .toast-text {
   font-size: 13px;
-  color: #555;
+  color: var(--muted);
   white-space: pre-wrap;
   overflow-wrap: break-word;
 }
 
-/* Emergency modal: full-screen blocking overlay. */
+/* ---- Emergency modal ---- */
 .emergency-modal {
   position: fixed;
   inset: 0;
@@ -377,9 +615,9 @@ ul.checks {
   max-width: 420px;
   width: 100%;
   padding: 24px;
-  background: #fff;
-  color: #1a1a1a;
-  border-top: 6px solid #b00020;
+  background: var(--panel);
+  color: var(--text);
+  border-top: 6px solid var(--fail);
   border-radius: 8px;
   box-shadow: 0 12px 48px rgba(0, 0, 0, 0.4);
 }
@@ -387,7 +625,7 @@ ul.checks {
 .emergency-head {
   font-size: 17px;
   font-weight: 700;
-  color: #b00020;
+  color: var(--fail);
   margin-bottom: 12px;
 }
 
@@ -410,7 +648,7 @@ ul.checks {
 }
 
 .emergency-ack-btn {
-  background: #b00020;
+  background: var(--fail);
   color: #fff;
 }
 
@@ -418,137 +656,73 @@ ul.checks {
   background: #900019;
 }
 
-section {
-  padding: 16px;
-  margin-bottom: 12px;
-  background: #ffffff;
-  border: 1px solid #e0e0e0;
-  border-radius: 6px;
-}
-
-section p {
-  margin: 0 0 8px;
-}
-
-section p:last-child {
-  margin-bottom: 0;
-}
-
+/* ---- Shared ---- */
 .muted {
-  color: #666;
+  color: var(--muted);
 }
 
 .error {
-  color: #b00020;
+  color: var(--fail);
 }
 
 button {
   padding: 6px 14px;
   font-size: 14px;
-  background: #1a1a1a;
-  color: #ffffff;
+  background: var(--accent);
+  color: #fff;
   border: 0;
-  border-radius: 4px;
+  border-radius: 6px;
   cursor: pointer;
 }
 
 button:hover {
-  background: #333;
+  background: #4a2f73;
 }
 
+/* Reset for the structural buttons that aren't "primary" actions. */
+.nav-item,
+.dash-card {
+  background: transparent;
+}
+
+button.nav-item:hover,
+button.dash-card:hover {
+  background: var(--panel-2);
+}
+
+button.nav-item.active:hover {
+  background: var(--accent-soft);
+}
+
+/* ---- Dark theme ---- */
 @media (prefers-color-scheme: dark) {
-  body {
-    background: #1a1a1a;
-    color: #f0f0f0;
+  :root {
+    --bg: #17171a;
+    --panel: #1f1f23;
+    --panel-2: #26262b;
+    --border: #33333a;
+    --text: #f0f0f2;
+    --muted: #a2a2ab;
+    --accent: #b89be0;
+    --accent-soft: rgba(184, 155, 224, 0.16);
+    --ok: #7cc47f;
+    --warn: #e0b341;
+    --fail: #ff6b6b;
   }
-  section {
-    background: #2a2a2a;
-    border-color: #3a3a3a;
-  }
-  .muted {
-    color: #aaa;
-  }
-  button {
-    background: #f0f0f0;
-    color: #1a1a1a;
-  }
+
   button:hover {
-    background: #d0d0d0;
+    background: #9f7fd0;
   }
-  .check-row {
-    border-color: #3a3a3a;
-  }
-  .check-detail {
-    color: #aaa;
-  }
-  .status-warn .check-name {
-    color: #e0b341;
-  }
-  .status-fail .check-name {
-    color: #ff6b6b;
-  }
-  .status-unknown .check-name {
-    color: #aaa;
-  }
-  .run-row {
-    border-color: #3a3a3a;
-  }
-  .run-output {
-    background: #1e1e1e;
-  }
-  .run-row.status-completed .run-status {
-    color: #7cc47f;
-  }
-  .run-row.status-failed .run-status,
-  .run-row.status-killed .run-status {
-    color: #ff6b6b;
-  }
-  .jobs-tab {
-    border-color: #4a4a4a;
-  }
-  .jobs-tab:hover {
-    background: rgba(255, 255, 255, 0.08);
-  }
-  .jobs-tab.active {
-    background: #f0f0f0;
-    color: #1a1a1a;
-    border-color: #f0f0f0;
-  }
-  .job-row {
-    border-color: #3a3a3a;
-  }
-  .job-desc {
-    color: #aaa;
-  }
-  .notif-row {
-    border-color: #3a3a3a;
-  }
-  .notif-row.priority-warn .notif-title {
-    color: #e0b341;
-  }
-  .notif-row.priority-emergency .notif-title {
-    color: #ff6b6b;
-  }
-  .toast {
-    background: #2a2a2a;
-    color: #f0f0f0;
-    border-color: #3a3a3a;
-  }
-  .toast-text {
-    color: #bbb;
-  }
-  .emergency-card {
-    background: #2a2a2a;
-    color: #f0f0f0;
-  }
-  .emergency-head {
-    color: #ff6b6b;
-  }
+
   .emergency-ack-btn {
     background: #b00020;
     color: #fff;
   }
   .emergency-ack-btn:hover {
     background: #c4102a;
+  }
+
+  .badge {
+    background: #b00020;
   }
 }
