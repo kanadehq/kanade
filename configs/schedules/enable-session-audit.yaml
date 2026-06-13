@@ -21,6 +21,7 @@
 #   kanade schedule create configs/schedules/enable-session-audit.yaml
 
 id: enable-session-audit
+tags: [observability, setup]   # operator taxonomy for the SPA tag filter
 when:
   per_pc: once
 enabled: true

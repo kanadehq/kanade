@@ -7,6 +7,7 @@
 # Register (user-fired, no schedule):
 #   kanade job create configs/jobs/install-vscode.yaml
 id: install-vscode
+tags: [app]   # operator taxonomy for the SPA tag filter
 version: 1.0.0
 description: Install Visual Studio Code via winget (operator note)
 execute:

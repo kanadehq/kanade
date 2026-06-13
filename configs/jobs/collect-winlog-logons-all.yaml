@@ -32,6 +32,7 @@
 #     filter (Issue #366) separates them on read.
 
 id: collect-winlog-logons-all
+tags: [observability]   # operator taxonomy for the SPA tag filter
 version: 0.1.0
 description: "On-demand: ALL Security logon/logoff events (no LogonType / account filter) → ObsEvent timeline"
 

@@ -22,6 +22,7 @@
 # where catching up later is exactly what we want.
 
 id: morning-greeting
+tags: [sample]   # operator taxonomy for the SPA tag filter
 when:
   calendar:
     at: "09:00"           # 9:00 in tz (sec/min auto)

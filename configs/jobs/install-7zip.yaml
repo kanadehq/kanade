@@ -7,6 +7,7 @@
 # Register (user-fired, no schedule):
 #   kanade job create configs/jobs/install-7zip.yaml
 id: install-7zip
+tags: [app]   # operator taxonomy for the SPA tag filter
 version: 1.0.0
 description: Install the 7-Zip archiver via winget (operator note)
 execute:

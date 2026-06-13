@@ -25,6 +25,7 @@
 # notification. This is intentionally dependency-free and harmless.
 
 id: show-toast
+tags: [sample]   # operator taxonomy for the SPA tag filter
 version: 0.1.0
 description: Show a good-morning toast to the logged-in user (sample)
 execute:

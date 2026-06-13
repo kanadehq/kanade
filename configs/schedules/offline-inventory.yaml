@@ -28,6 +28,7 @@
 #   kanade schedule create configs/schedules/offline-inventory.yaml
 
 id: offline-inventory
+tags: [inventory]   # operator taxonomy for the SPA tag filter
 when:
   per_pc: { every: 1h }       # fire at most once per hour per PC
 enabled: true

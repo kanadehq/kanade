@@ -21,6 +21,7 @@
 # active.until で期限を切るのが筋 (#418)。
 
 id: kitting-once
+tags: [setup, sample]   # operator taxonomy for the SPA tag filter
 when:
   per_pc: once
 enabled: true

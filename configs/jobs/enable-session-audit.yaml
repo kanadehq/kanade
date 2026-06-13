@@ -30,6 +30,7 @@
 # enable-session-audit --pcs <pc>` ad hoc).
 
 id: enable-session-audit
+tags: [observability, setup]   # operator taxonomy for the SPA tag filter
 version: 0.1.0
 description: "Enable the 'Other Logon/Logoff Events' audit subcategory (Security 4800/4801, lock/unlock) — once per PC"
 

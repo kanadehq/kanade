@@ -8,6 +8,7 @@
 # Register (user-fired, no schedule):
 #   kanade job create configs/jobs/restart-print-spooler.yaml
 id: restart-print-spooler
+tags: [troubleshoot]   # operator taxonomy for the SPA tag filter
 version: 1.0.0
 description: Restart the Windows Print Spooler service (operator note)
 execute:

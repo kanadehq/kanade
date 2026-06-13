@@ -19,6 +19,7 @@
 # takes — the "修復する" button on the Health tab runs a job exactly
 # like this one.
 id: fix-teams-cache
+tags: [troubleshoot, app]   # operator taxonomy for the SPA tag filter
 version: 1.0.0
 description: Clear the Microsoft Teams cache for the current user (operator note)
 execute:

@@ -8,6 +8,7 @@
 # Register (user-fired, no schedule):
 #   kanade job create configs/jobs/flush-dns.yaml
 id: flush-dns
+tags: [troubleshoot, network]   # operator taxonomy for the SPA tag filter
 version: 1.0.0
 description: Flush the DNS resolver cache (operator note)
 execute:

@@ -28,6 +28,7 @@
 # matches the "operator must intend" posture for the SPA action.
 
 id: install-kanade-client
+tags: [infra]   # operator taxonomy for the SPA tag filter
 version: 0.1.0
 description: "Install / update the kanade-client Tauri app from OBJECT_APP_PACKAGES (#210)"
 

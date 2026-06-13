@@ -31,6 +31,7 @@
 # fan-out an operator should ack before it goes wide.
 
 id: install-kanade-agent
+tags: [infra]   # operator taxonomy for the SPA tag filter
 version: 0.1.0
 description: "Emergency out-of-band swap of kanade-agent (self-update recovery, #566 follow-up)"
 
