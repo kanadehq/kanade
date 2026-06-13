@@ -89,6 +89,11 @@ pub async fn host_perf_loop(
                     // percent-of-one-core.
                     Some(f64::from(sys.global_cpu_usage()))
                 };
+                // #418 constraints.require.cpu_below reuses this sample —
+                // publish it to the env gate (None on the first tick =
+                // "unknown" until two samples exist). global_cpu_usage()
+                // is f32, so the down-cast is exact.
+                crate::env_gate::set_system_cpu(cpu_pct.map(|p| p as f32));
                 let cpu_count = u32::try_from(sys.cpus().len()).ok();
 
                 let mem_used = i64::try_from(sys.used_memory()).ok();

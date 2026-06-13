@@ -53,7 +53,10 @@ type ScheduleRow = {
   active?: { from?: string; until?: string };
   // #418 Phase 3: optional maintenance window "HH:MM-HH:MM"; key
   // absent when no constraints are set.
-  constraints?: { window?: string; require?: { ac_power?: boolean; idle?: string } };
+  constraints?: {
+    window?: string;
+    require?: { ac_power?: boolean; idle?: string; cpu_below?: number };
+  };
   // #418 Phase 2: timezone for `when.at` + `active` bounds.
   tz: 'local' | 'utc';
   starting_deadline: string | null;
@@ -555,6 +558,7 @@ export function Schedules() {
                   const parts: string[] = [];
                   if (r?.ac_power) parts.push(t('require.ac'));
                   if (r?.idle) parts.push(t('require.idle', { duration: r.idle }));
+                  if (r?.cpu_below != null) parts.push(t('require.cpu', { pct: r.cpu_below }));
                   return parts.length
                     ? <code className="text-xs">{parts.join(' · ')}</code>
                     : <span className="text-muted text-xs">—</span>;

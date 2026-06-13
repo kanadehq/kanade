@@ -38,7 +38,8 @@
   },
   "require": {
     "ac": "AC power",
-    "idle": "idle ≥ {{duration}}"
+    "idle": "idle ≥ {{duration}}",
+    "cpu": "CPU < {{pct}}%"
   },
   "target": {
     "all": "all"

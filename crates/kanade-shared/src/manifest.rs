@@ -1919,57 +1919,95 @@ target: { all: true }
     #[test]
     fn require_met_combinations() {
         use std::time::Duration;
-        // Empty require — always met.
-        assert!(require_met(&Require::default(), false, None));
+        let idle = |m: u64| Some(Duration::from_secs(m * 60));
+        // Empty require — always met regardless of sensed state.
+        assert!(require_met(&Require::default(), false, None, None));
         // ac_power: only on AC.
         let ac = Require {
             ac_power: true,
-            idle: None,
+            ..Default::default()
         };
-        assert!(!require_met(&ac, false, None));
-        assert!(require_met(&ac, true, None));
+        assert!(!require_met(&ac, false, None, None));
+        assert!(require_met(&ac, true, None, None));
         // idle: needs >= the configured min; None idle never satisfies.
         let idle10 = Require {
-            ac_power: false,
             idle: Some("10m".into()),
+            ..Default::default()
         };
-        assert!(!require_met(&idle10, true, None));
-        assert!(!require_met(
-            &idle10,
-            true,
-            Some(Duration::from_secs(5 * 60))
-        ));
-        assert!(require_met(
-            &idle10,
-            true,
-            Some(Duration::from_secs(15 * 60))
-        ));
-        assert!(require_met(
-            &idle10,
-            true,
-            Some(Duration::from_secs(10 * 60))
-        )); // boundary inclusive
-        // both: AND.
-        let both = Require {
+        assert!(!require_met(&idle10, true, None, None));
+        assert!(!require_met(&idle10, true, idle(5), None));
+        assert!(require_met(&idle10, true, idle(15), None));
+        assert!(require_met(&idle10, true, idle(10), None)); // boundary inclusive
+        // cpu_below: needs CPU strictly < threshold; None cpu never satisfies.
+        let cpu20 = Require {
+            cpu_below: Some(20.0),
+            ..Default::default()
+        };
+        assert!(!require_met(&cpu20, true, None, None)); // no sample → fail-closed
+        assert!(!require_met(&cpu20, true, None, Some(20.0))); // == threshold (not strictly below)
+        assert!(!require_met(&cpu20, true, None, Some(55.0))); // busy
+        assert!(require_met(&cpu20, true, None, Some(5.0))); // quiet
+        // all three: AND.
+        let all = Require {
             ac_power: true,
             idle: Some("10m".into()),
+            cpu_below: Some(20.0),
         };
-        assert!(!require_met(
-            &both,
-            false,
-            Some(Duration::from_secs(20 * 60))
-        )); // on battery
-        assert!(!require_met(&both, true, Some(Duration::from_secs(60)))); // not idle enough
-        assert!(require_met(&both, true, Some(Duration::from_secs(20 * 60))));
+        assert!(!require_met(&all, false, idle(20), Some(5.0))); // on battery
+        assert!(!require_met(&all, true, idle(1), Some(5.0))); // not idle enough
+        assert!(!require_met(&all, true, idle(20), Some(50.0))); // busy
+        assert!(require_met(&all, true, idle(20), Some(5.0)));
         // An unparseable idle is treated as no-requirement by require_met
         // (validate rejects it at create time, so this only guards a
         // hand-edited blob): ac still gates.
         let bad = Require {
             ac_power: true,
             idle: Some("garbage".into()),
+            ..Default::default()
         };
-        assert!(require_met(&bad, true, None));
-        assert!(!require_met(&bad, false, None));
+        assert!(require_met(&bad, true, None, None));
+        assert!(!require_met(&bad, false, None, None));
+    }
+
+    #[test]
+    fn validate_accepts_and_rejects_cpu_below() {
+        // In-range accepted.
+        require_schedule(
+            Require {
+                cpu_below: Some(20.0),
+                ..Default::default()
+            },
+            RunsOn::Agent,
+        )
+        .validate()
+        .expect("cpu_below 20 is valid");
+        // Upper boundary: 100.0 is accepted (fires unless CPU is exactly
+        // 100%). Pins the inclusive upper bound against a future c < 100.0.
+        require_schedule(
+            Require {
+                cpu_below: Some(100.0),
+                ..Default::default()
+            },
+            RunsOn::Agent,
+        )
+        .validate()
+        .expect("cpu_below 100 is valid");
+        // Out of range rejected (0 and >100).
+        for bad in [0.0, -5.0, 100.1] {
+            let err = require_schedule(
+                Require {
+                    cpu_below: Some(bad),
+                    ..Default::default()
+                },
+                RunsOn::Agent,
+            )
+            .validate()
+            .unwrap_err();
+            assert!(
+                err.contains("constraints.require.cpu_below"),
+                "cpu_below {bad}: {err}"
+            );
+        }
     }
 
     #[test]
@@ -1978,6 +2016,7 @@ target: { all: true }
             Require {
                 ac_power: true,
                 idle: Some("10m".into()),
+                cpu_below: Some(20.0),
             },
             RunsOn::Agent,
         )
@@ -1990,7 +2029,7 @@ target: { all: true }
         let err = require_schedule(
             Require {
                 ac_power: true,
-                idle: None,
+                ..Default::default()
             },
             RunsOn::Backend,
         )
@@ -2000,12 +2039,12 @@ target: { all: true }
         assert!(err.contains("runs_on: agent"), "got: {err}");
 
         // An idle-only require (ac_power: false) is also non-empty
-        // (is_empty folds both fields) and must reject on backend too —
+        // (is_empty folds the fields) and must reject on backend too —
         // guards against a regression in Require::is_empty.
         let err = require_schedule(
             Require {
-                ac_power: false,
                 idle: Some("10m".into()),
+                ..Default::default()
             },
             RunsOn::Backend,
         )
@@ -2021,8 +2060,8 @@ target: { all: true }
     fn validate_rejects_bad_require_idle() {
         let err = require_schedule(
             Require {
-                ac_power: false,
                 idle: Some("not-a-duration".into()),
+                ..Default::default()
             },
             RunsOn::Agent,
         )
@@ -2035,15 +2074,17 @@ target: { all: true }
     fn require_round_trips_and_skips_empty() {
         // ac_power: false is skipped; an all-default require nested in
         // constraints is omitted (is_empty folds it in).
-        let yaml = "id: s\nwhen: { per_pc: { every: 1m } }\njob_id: j\n\
-                    runs_on: agent\nconstraints: { require: { ac_power: true, idle: 10m } }\n";
+        let yaml = "id: s\nwhen: { per_pc: { every: 1m } }\njob_id: j\nruns_on: agent\n\
+                    constraints: { require: { ac_power: true, idle: 10m, cpu_below: 20 } }\n";
         let s: Schedule = serde_yaml::from_str(yaml).expect("parse");
         let req = s.constraints.require.as_ref().expect("require present");
         assert!(req.ac_power);
         assert_eq!(req.idle.as_deref(), Some("10m"));
-        // Re-serialize: idle present, ac_power present (true).
+        assert_eq!(req.cpu_below, Some(20.0));
+        // Re-serialize: idle + cpu_below present, ac_power present (true).
         let back = serde_json::to_string(&s.constraints).unwrap();
         assert!(back.contains("\"idle\":\"10m\""), "got: {back}");
+        assert!(back.contains("\"cpu_below\":20"), "got: {back}");
         // An empty require is omitted entirely by is_empty.
         let mut empty = s.clone();
         empty.constraints.require = Some(Require::default());
@@ -3777,7 +3818,8 @@ impl Active {
 /// state is met — the intended pairing); a `calendar` fire that lands
 /// while the state is unmet is simply missed, same as `window`. It is
 /// therefore a *runtime* gate and does not appear in `preview`.
-#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
+// No `Eq`: `cpu_below: Option<f64>` is only `PartialEq` (f64 is not Eq).
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Default, PartialEq)]
 pub struct Require {
     /// Fire only while on **AC power** (skip on battery). Reads
     /// `GetSystemPowerStatus`; an unknown/unreadable status is treated
@@ -3795,12 +3837,25 @@ pub struct Require {
     /// lazily; [`Schedule::validate`] rejects garbage at create time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle: Option<String>,
+    /// Fire only when the **whole-machine CPU usage is below this
+    /// percent** (0–100; e.g. `20.0` = "system CPU < 20%") — "don't run
+    /// while the box is busy". Reuses the agent's `host_perf` system CPU%
+    /// sample (`sysinfo` mean over cores), so the reading is up to one
+    /// `host_perf` cadence old (default 60s) — fine as a "generally
+    /// busy?" proxy, and more accurate than a fresh one-shot read (CPU%
+    /// needs two samples). An unavailable sample (host_perf not warmed
+    /// up yet, or stale) is treated as "not below" (fail-closed — a
+    /// restrictive gate must not fire when it can't confirm). `None`
+    /// (default) = no CPU requirement. [`Schedule::validate`] rejects an
+    /// out-of-range value at create time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_below: Option<f64>,
 }
 
 impl Require {
     /// `skip_serializing_if` helper for an embedded empty `require`.
     pub fn is_empty(&self) -> bool {
-        !self.ac_power && self.idle.is_none()
+        !self.ac_power && self.idle.is_none() && self.cpu_below.is_none()
     }
 
     /// Parsed minimum-idle duration (`None` = no idle requirement, or an
@@ -3830,14 +3885,26 @@ impl Require {
 ///
 /// `ac_online` = is the host on AC power. `idle` = how long the console
 /// has been idle (`None` = couldn't determine → an idle requirement is
-/// treated as unmet).
-pub fn require_met(req: &Require, ac_online: bool, idle: Option<std::time::Duration>) -> bool {
+/// treated as unmet). `cpu_pct` = whole-machine CPU usage 0–100 (`None`
+/// = no sample yet → a `cpu_below` requirement is treated as unmet).
+pub fn require_met(
+    req: &Require,
+    ac_online: bool,
+    idle: Option<std::time::Duration>,
+    cpu_pct: Option<f64>,
+) -> bool {
     if req.ac_power && !ac_online {
         return false;
     }
     if let Some(min) = req.min_idle() {
         match idle {
             Some(d) if d >= min => {}
+            _ => return false,
+        }
+    }
+    if let Some(max) = req.cpu_below {
+        match cpu_pct {
+            Some(p) if p < max => {}
             _ => return false,
         }
     }
@@ -3850,7 +3917,8 @@ pub fn require_met(req: &Require, ac_online: bool, idle: Option<std::time::Durat
 /// `max_concurrent` (a fleet-wide running-instance cap), `skip_dates`
 /// (holiday exclusion) and `require` (host-environment gates, agent-only
 /// — see [`Require`]).
-#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
+// No `Eq`: contains `require: Option<Require>` which holds an f64.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Default, PartialEq)]
 pub struct Constraints {
     /// `"HH:MM-HH:MM"` wall-clock window (evaluated in the schedule's
     /// `tz`). Fires outside it are skipped — mainly for reconcile
@@ -4524,16 +4592,16 @@ impl Schedule {
             }
         }
         // #418: constraints.require (host-state env gates: ac_power /
-        // idle) is sensed in-process by the agent, so it needs
-        // runs_on: agent — the backend can't read a target host's
-        // power / idle state. Symmetric with `when: { on }` (also
+        // idle / cpu_below) is sensed in-process by the agent, so it
+        // needs runs_on: agent — the backend can't read a target host's
+        // power / idle / cpu state. Symmetric with `when: { on }` (also
         // agent-only); inverse of max_concurrent (backend-only).
         if let Some(req) = &self.constraints.require {
             if !req.is_empty() && matches!(self.runs_on, RunsOn::Backend) {
                 return Err(
-                    "constraints.require (host-state env gates: ac_power / idle) is sensed \
-                     in-process by the agent and needs runs_on: agent; the backend cannot \
-                     read a target host's power / idle state"
+                    "constraints.require (host-state env gates: ac_power / idle / cpu_below) \
+                     is sensed in-process by the agent and needs runs_on: agent; the backend \
+                     cannot read a target host's power / idle / cpu state"
                         .into(),
                 );
             }
@@ -4542,6 +4610,17 @@ impl Schedule {
             // KV blob (mirror skip_dates / on_failure.retry).
             if let Some(err) = req.bad_idle() {
                 return Err(err);
+            }
+            // cpu_below is a percent — reject out-of-range so a typo
+            // can't make a schedule that never (>=100 is always-busy?
+            // no — <0 never matches) or trivially fires.
+            if let Some(c) = req.cpu_below
+                && !(c > 0.0 && c <= 100.0)
+            {
+                return Err(format!(
+                    "constraints.require.cpu_below must be in (0, 100] percent (got {c}); \
+                     omit it for no CPU requirement"
+                ));
             }
         }
         // #418 Phase 4: a bad on_failure.retry is rejected at create

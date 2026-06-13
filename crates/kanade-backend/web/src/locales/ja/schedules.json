@@ -38,7 +38,8 @@
   },
   "require": {
     "ac": "AC電源",
-    "idle": "無入力 ≥ {{duration}}"
+    "idle": "無入力 ≥ {{duration}}",
+    "cpu": "CPU < {{pct}}%"
   },
   "target": {
     "all": "全て"
