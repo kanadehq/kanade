@@ -20,6 +20,7 @@
 # effect on the next scheduled tick — no schedule re-create needed.
 
 id: inventory-hw
+tags: [inventory]   # operator taxonomy for the SPA tag filter
 when:
   per_pc: { every: 6h }
 enabled: true

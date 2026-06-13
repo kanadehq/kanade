@@ -12,6 +12,7 @@
 # Register (no schedule needed — user-fired):
 #   kanade job create configs/jobs/chrome-update.yaml
 id: chrome-update
+tags: [update, app]   # operator taxonomy for the SPA tag filter
 version: 1.2.0
 description: Update Google Chrome to the latest stable via winget (operator note)
 execute:

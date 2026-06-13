@@ -9,6 +9,7 @@
 # Register (user-fired, no schedule):
 #   kanade job create configs/jobs/windows-update-scan.yaml
 id: windows-update-scan
+tags: [update]   # operator taxonomy for the SPA tag filter
 version: 1.0.0
 description: Scan for pending Windows Updates (read-only, no install) (operator note)
 execute:

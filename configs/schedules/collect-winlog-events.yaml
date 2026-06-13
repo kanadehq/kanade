@@ -29,6 +29,7 @@
 #         kanade schedule create configs/schedules/collect-winlog-events.yaml
 
 id: collect-winlog-events
+tags: [observability]   # operator taxonomy for the SPA tag filter
 when:
   per_pc: { every: 10m }
 enabled: true

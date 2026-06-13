@@ -57,6 +57,7 @@
 # machine at 3am?" forensics.
 
 id: collect-winlog-events
+tags: [observability]   # operator taxonomy for the SPA tag filter
 version: 0.4.0
 description: "Windows Event Log → ObsEvent timeline (human logon / logoff / lock / unlock / boot / shutdown / sleep / resume / wake_detail)"
 

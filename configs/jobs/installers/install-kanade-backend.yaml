@@ -30,6 +30,7 @@
 # approval flow lands.
 
 id: install-kanade-backend
+tags: [infra]   # operator taxonomy for the SPA tag filter
 version: 0.1.0
 description: "Update kanade-backend on its host via deploy-backend.ps1 (#210 follow-up)"
 
