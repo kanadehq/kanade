@@ -482,12 +482,59 @@ ul.checks {
   gap: 8px;
 }
 
+/* The title row is the click target that expands/collapses the body. */
+.notif-toggle {
+  cursor: pointer;
+  user-select: none;
+}
+
+/* Unread marker — a small dot before the title; cleared once read/acked. */
+.notif-dot {
+  flex: 0 0 auto;
+  align-self: center;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.notif-row.priority-warn .notif-dot {
+  background: var(--warn);
+}
+
+.notif-row.priority-emergency .notif-dot {
+  background: var(--fail);
+}
+
 .notif-title {
   font-weight: 600;
 }
 
 .notif-prio {
   font-size: 12px;
+}
+
+/* Chevron pushed to the right of the title row; rotates when expanded. */
+.notif-chevron {
+  margin-left: auto;
+  flex: 0 0 auto;
+  align-self: center;
+  font-size: 12px;
+  color: var(--muted);
+  transition: transform 0.15s ease;
+}
+
+.notif-row.expanded .notif-chevron {
+  transform: rotate(90deg);
+}
+
+/* Body + meta collapse away until the row is expanded. */
+.notif-collapse {
+  display: none;
+}
+
+.notif-row.expanded .notif-collapse {
+  display: block;
 }
 
 .notif-text {
