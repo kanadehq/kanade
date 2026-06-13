@@ -39,6 +39,13 @@ pub struct AgentRow {
     /// matching the optional `quarantined_versions?` SPA type.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub quarantined_versions: Vec<String>,
+    /// #655: the account the host's Windows sign-in screen last used —
+    /// `last_logon_user` is the `DOMAIN\sam` login name,
+    /// `last_logon_display_name` its friendly name. Populated by the
+    /// heartbeat projector; `None` for never-signed-in / pre-#655 /
+    /// non-Windows agents.
+    pub last_logon_user: Option<String>,
+    pub last_logon_display_name: Option<String>,
 }
 
 /// Query params for `GET /api/agents`.
@@ -235,6 +242,8 @@ fn row_to_agent(r: sqlx::sqlite::SqliteRow) -> AgentRow {
             .flatten()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default(),
+        last_logon_user: r.try_get("last_logon_user").ok(),
+        last_logon_display_name: r.try_get("last_logon_display_name").ok(),
     }
 }
 

@@ -70,6 +70,11 @@ pub async fn serve(
                 // Ping is a liveness probe; the quarantine list rides
                 // the regular 30 s heartbeat. Keep ping replies cheap.
                 quarantined_versions: Vec::new(),
+                // Same rationale: the last-logon fields ride the regular
+                // heartbeat. The projector COALESCEs on these, so a None
+                // here never clears a value an earlier heartbeat stored.
+                last_logon_user: None,
+                last_logon_display_name: None,
             };
             let payload = match serde_json::to_vec(&hb) {
                 Ok(b) => b,
