@@ -77,6 +77,10 @@ windows = { version = "0.62.2", features = [
     # #418 `on: network_change`: NotifyAddrChange (blocking) to wake the
     # network-change watcher when the IP address table changes.
     "Win32_NetworkManagement_IpHelper",
+    # #418 `constraints.require.network`: GetNetworkConnectivityHint
+    # (iphlpapi) returns NL_NETWORK_CONNECTIVITY_HINT, which lives under
+    # the WinSock module — so the connectivity gate needs this feature.
+    "Win32_Networking_WinSock",
     "Win32_Storage_FileSystem",
     "Win32_System_Environment",
     "Win32_System_IO",
