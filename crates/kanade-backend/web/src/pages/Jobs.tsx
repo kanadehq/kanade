@@ -1,6 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Ban,
+  ChevronDown,
+  ChevronRight,
   CircleCheck,
   FilePlus2,
   Hourglass,
@@ -8,10 +10,13 @@ import {
   Pencil,
   Play,
   ScrollText,
+  Search,
   Skull,
+  Tags,
   Trash2,
+  X,
 } from 'lucide-react';
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -23,6 +28,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { useConfirm } from '@/components/ui/confirm-dialog';
 import { DetailItem, DetailList } from '@/components/ui/detail-list';
+import { Input } from '@/components/ui/input';
 import {
   Sheet,
   SheetContent,
@@ -45,6 +51,10 @@ type JobRow = {
     cwd?: string | null;
   };
   inventory: unknown | null;
+  /** Free-form operator taxonomy (manifest `tags:`). Absent / empty
+   *  for the majority of jobs — drives the tag-filter chips + search
+   *  on this page, orthogonal to the id-prefix grouping. */
+  tags?: string[];
   /** v0.30 / PR γ: in-flight counters joined onto each row by the
    *  backend so the Jobs page can show "is anything running right
    *  now" — drives the per-row live chip + kill button enable
@@ -79,6 +89,30 @@ export function Jobs() {
   // drawer re-derives fresh data from the query cache on every
   // refetch instead of pinning a stale snapshot.
   const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  // Job-catalog organisation (this PR): a free-text search, a set of
+  // active tag filters (OR semantics — a row matches if it carries any
+  // selected tag), and the set of collapsed id-prefix groups. All three
+  // are pure view state; none touch the server.
+  const [search, setSearch] = useState('');
+  const [activeTags, setActiveTags] = useState<Set<string>>(new Set());
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  function toggleTag(tag: string) {
+    setActiveTags((prev) => {
+      const next = new Set(prev);
+      if (next.has(tag)) next.delete(tag);
+      else next.add(tag);
+      return next;
+    });
+  }
+  function toggleGroup(key: string) {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
 
   const del = useMutation({
     mutationFn: (id: string) =>
@@ -363,6 +397,80 @@ export function Jobs() {
     );
   }
 
+  // One table row. Extracted from the old inline `.map` so the
+  // id-prefix groups below can each render their own slice without
+  // duplicating the cell layout. The tag badges sit under the
+  // description and are themselves filter toggles — clicking one
+  // flips it in `activeTags` (stopPropagation so the row's drawer
+  // doesn't also open).
+  function renderJobRow(j: JobRow) {
+    return (
+      <TableRow
+        key={j.id}
+        tabIndex={0}
+        className="cursor-pointer focus-visible:outline-none focus-visible:bg-muted/10"
+        onClick={() => setSelectedId(j.id)}
+        // Keyboard path for the clickable row. Guard on
+        // currentTarget so Enter/Space pressed on a focused
+        // action *button* (which bubbles its keydown up here)
+        // doesn't also pop the drawer open.
+        onKeyDown={(e) => {
+          if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) {
+            e.preventDefault();
+            setSelectedId(j.id);
+          }
+        }}
+        aria-label={t('row.openAria', { id: j.id })}
+      >
+        {/* `w-full max-w-0` — soak up whatever width is left
+            after the fixed-content columns, truncating the
+            description to fit (same trick the old 11-column
+            layout used, now on the merged id+description
+            cell). */}
+        <TableCell className="w-full max-w-0">
+          <div className="flex flex-col gap-0.5">
+            <code className="text-xs font-medium">{j.id}</code>
+            <span
+              className="block truncate text-xs text-muted"
+              title={j.description || undefined}
+            >
+              {j.description || '—'}
+            </span>
+            {j.tags && j.tags.length > 0 && (
+              <div className="mt-0.5 flex flex-wrap gap-1" onClick={(e) => e.stopPropagation()}>
+                {j.tags.map((tag) => (
+                  <button
+                    key={tag}
+                    type="button"
+                    onClick={() => toggleTag(tag)}
+                    title={t('tags.filterByTitle', { tag })}
+                    aria-pressed={activeTags.has(tag)}
+                    className="cursor-pointer"
+                  >
+                    <Badge
+                      variant={activeTags.has(tag) ? 'violet' : 'default'}
+                      className="px-1.5 py-0 text-[10px] transition-colors hover:bg-violet/15 hover:text-violet"
+                    >
+                      {tag}
+                    </Badge>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </TableCell>
+        <TableCell>{statusBadge(j.id)}</TableCell>
+        <TableCell>{liveChips(j)}</TableCell>
+        {/* stopPropagation so clicking an action (or the dead
+            space between buttons) doesn't also open the
+            drawer underneath the confirm dialog. */}
+        <TableCell onClick={(e) => e.stopPropagation()}>
+          <div className="flex flex-nowrap gap-2">{renderActions(j)}</div>
+        </TableCell>
+      </TableRow>
+    );
+  }
+
   if (isLoading) {
     return (
       <div className="flex items-center gap-2 text-muted">
@@ -382,6 +490,65 @@ export function Jobs() {
   if (selectedId !== null && selected === null) {
     setSelectedId(null);
   }
+
+  // ---- id-prefix grouping + search / tag filtering (this PR) ----
+  // The prefix is everything before the first hyphen (`install-tls` →
+  // `install`). We bucket rows by it so the operator's existing naming
+  // convention becomes free categories. Prefixes shared by only ONE
+  // job aren't worth a header of their own, so they fold into a single
+  // "その他" group — computed from the FULL set (not the filtered one)
+  // so a row's group membership stays stable while you search.
+  const OTHER = ' other'; // sentinel that can't collide with a real prefix
+  const prefixOf = (id: string) => {
+    const i = id.indexOf('-');
+    return i > 0 ? id.slice(0, i) : id;
+  };
+  const prefixCounts = new Map<string, number>();
+  for (const j of rows) {
+    const p = prefixOf(j.id);
+    prefixCounts.set(p, (prefixCounts.get(p) ?? 0) + 1);
+  }
+  const groupKeyOf = (id: string) => {
+    const p = prefixOf(id);
+    return (prefixCounts.get(p) ?? 0) >= 2 ? p : OTHER;
+  };
+
+  // Every distinct tag across the catalog, for the filter-chip row.
+  const allTags = Array.from(new Set(rows.flatMap((j) => j.tags ?? []))).sort((a, b) =>
+    a.localeCompare(b),
+  );
+
+  // Search matches id / description / any tag (case-insensitive); tag
+  // filter is OR across the active set. Both must hold.
+  const q = search.trim().toLowerCase();
+  const matches = (j: JobRow) => {
+    const tagHit =
+      activeTags.size === 0 || (j.tags ?? []).some((tag) => activeTags.has(tag));
+    if (!tagHit) return false;
+    if (q === '') return true;
+    return (
+      j.id.toLowerCase().includes(q) ||
+      (j.description ?? '').toLowerCase().includes(q) ||
+      (j.tags ?? []).some((tag) => tag.toLowerCase().includes(q))
+    );
+  };
+  const visibleRows = rows.filter(matches);
+  const filtering = q !== '' || activeTags.size > 0;
+
+  // Ordered groups: real prefixes alphabetically, then "その他" last.
+  // Only groups with at least one visible row render.
+  const realPrefixes = Array.from(prefixCounts.entries())
+    .filter(([, n]) => n >= 2)
+    .map(([p]) => p)
+    .sort((a, b) => a.localeCompare(b));
+  const orderedKeys = [...realPrefixes, OTHER];
+  const groups = orderedKeys
+    .map((key) => ({
+      key,
+      label: key === OTHER ? t('groups.other') : key,
+      rows: visibleRows.filter((j) => groupKeyOf(j.id) === key),
+    }))
+    .filter((g) => g.rows.length > 0);
 
   if (rows.length === 0) {
     return (
@@ -439,8 +606,65 @@ export function Jobs() {
             <FilePlus2 className="size-3.5" />
             {t('newJob')}
           </Button>
-          <Badge variant="violet">{rows.length}</Badge>
+          <Badge variant="violet">
+            {filtering ? `${visibleRows.length} / ${rows.length}` : rows.length}
+          </Badge>
         </div>
+      </div>
+      {/* Filter bar: free-text search + (when any job is tagged) the
+          tag-toggle chips. Both narrow the grouped table below. */}
+      <div className="space-y-2">
+        <div className="relative max-w-sm">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted" />
+          <Input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder={t('search.placeholder')}
+            aria-label={t('search.placeholder')}
+            className="pl-8 pr-8"
+          />
+          {search !== '' && (
+            <button
+              type="button"
+              onClick={() => setSearch('')}
+              title={t('search.clear')}
+              aria-label={t('search.clear')}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-muted hover:text-fg"
+            >
+              <X className="size-4" />
+            </button>
+          )}
+        </div>
+        {allTags.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Tags className="size-4 text-muted" />
+            {allTags.map((tag) => (
+              <button
+                key={tag}
+                type="button"
+                onClick={() => toggleTag(tag)}
+                aria-pressed={activeTags.has(tag)}
+                className="cursor-pointer"
+              >
+                <Badge
+                  variant={activeTags.has(tag) ? 'violet' : 'default'}
+                  className="transition-colors hover:bg-violet/15 hover:text-violet"
+                >
+                  {tag}
+                </Badge>
+              </button>
+            ))}
+            {activeTags.size > 0 && (
+              <button
+                type="button"
+                onClick={() => setActiveTags(new Set())}
+                className="text-xs text-muted hover:text-fg"
+              >
+                {t('tags.clear')}
+              </button>
+            )}
+          </div>
+        )}
       </div>
       <Table>
         <TableHeader>
@@ -452,50 +676,53 @@ export function Jobs() {
           </TableRow>
         </TableHeader>
         <TableBody>
-          {rows.map((j) => (
-            <TableRow
-              key={j.id}
-              tabIndex={0}
-              className="cursor-pointer focus-visible:outline-none focus-visible:bg-muted/10"
-              onClick={() => setSelectedId(j.id)}
-              // Keyboard path for the clickable row. Guard on
-              // currentTarget so Enter/Space pressed on a focused
-              // action *button* (which bubbles its keydown up here)
-              // doesn't also pop the drawer open.
-              onKeyDown={(e) => {
-                if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) {
-                  e.preventDefault();
-                  setSelectedId(j.id);
-                }
-              }}
-              aria-label={t('row.openAria', { id: j.id })}
-            >
-              {/* `w-full max-w-0` — soak up whatever width is left
-                  after the fixed-content columns, truncating the
-                  description to fit (same trick the old 11-column
-                  layout used, now on the merged id+description
-                  cell). */}
-              <TableCell className="w-full max-w-0">
-                <div className="flex flex-col gap-0.5">
-                  <code className="text-xs font-medium">{j.id}</code>
-                  <span
-                    className="block truncate text-xs text-muted"
-                    title={j.description || undefined}
-                  >
-                    {j.description || '—'}
-                  </span>
-                </div>
-              </TableCell>
-              <TableCell>{statusBadge(j.id)}</TableCell>
-              <TableCell>{liveChips(j)}</TableCell>
-              {/* stopPropagation so clicking an action (or the dead
-                  space between buttons) doesn't also open the
-                  drawer underneath the confirm dialog. */}
-              <TableCell onClick={(e) => e.stopPropagation()}>
-                <div className="flex flex-nowrap gap-2">{renderActions(j)}</div>
+          {groups.length === 0 ? (
+            <TableRow>
+              <TableCell colSpan={4} className="py-8 text-center text-sm text-muted">
+                {t('noMatch')}
               </TableCell>
             </TableRow>
-          ))}
+          ) : (
+            groups.map((g) => {
+              const isCollapsed = collapsed.has(g.key);
+              return (
+                <Fragment key={g.key}>
+                  {/* Group header — clicking (or Enter/Space when
+                      focused) toggles collapse for the whole prefix.
+                      colSpan covers all four columns. */}
+                  <TableRow
+                    tabIndex={0}
+                    role="button"
+                    aria-expanded={!isCollapsed}
+                    aria-label={`${isCollapsed ? t('groups.expand') : t('groups.collapse')} ${g.label}`}
+                    className="cursor-pointer bg-muted/5 hover:bg-muted/10 focus-visible:outline-none focus-visible:bg-muted/10"
+                    onClick={() => toggleGroup(g.key)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        toggleGroup(g.key);
+                      }
+                    }}
+                  >
+                    <TableCell colSpan={4} className="py-1.5">
+                      <div className="flex items-center gap-1.5 text-xs font-medium">
+                        {isCollapsed ? (
+                          <ChevronRight className="size-3.5 text-muted" />
+                        ) : (
+                          <ChevronDown className="size-3.5 text-muted" />
+                        )}
+                        <span>{g.label}</span>
+                        <Badge variant="default" className="px-1.5 py-0 text-[10px]">
+                          {g.rows.length}
+                        </Badge>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                  {!isCollapsed && g.rows.map((j) => renderJobRow(j))}
+                </Fragment>
+              );
+            })
+          )}
         </TableBody>
       </Table>
       <Sheet
@@ -540,6 +767,33 @@ export function Jobs() {
                 {selected.inventory
                   ? <Badge variant="violet"><ScrollText className="size-3" />{t('inventoryProbe')}</Badge>
                   : <span className="text-muted text-xs">—</span>}
+              </DetailItem>
+              <DetailItem label={t('columns.tags')}>
+                {selected.tags && selected.tags.length > 0 ? (
+                  <div className="flex flex-wrap gap-1">
+                    {selected.tags.map((tag) => (
+                      // Clickable filter toggle, same as the row tags —
+                      // keeps "tags are filter affordances" consistent.
+                      <button
+                        key={tag}
+                        type="button"
+                        onClick={() => toggleTag(tag)}
+                        title={t('tags.filterByTitle', { tag })}
+                        aria-pressed={activeTags.has(tag)}
+                        className="cursor-pointer"
+                      >
+                        <Badge
+                          variant={activeTags.has(tag) ? 'violet' : 'default'}
+                          className="px-1.5 py-0 text-[10px] transition-colors hover:bg-violet/15 hover:text-violet"
+                        >
+                          {tag}
+                        </Badge>
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <span className="text-muted text-xs">—</span>
+                )}
               </DetailItem>
             </DetailList>
             <SheetFooter>

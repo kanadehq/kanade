@@ -743,6 +743,7 @@ mod tests {
                 category,
                 icon: None,
             }),
+            tags: Vec::new(),
         }
     }
 

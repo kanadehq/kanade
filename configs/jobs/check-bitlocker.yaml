@@ -18,6 +18,10 @@
 id: check-bitlocker
 version: 0.1.0
 description: BitLocker protection status per volume (Health tab + per-volume sub-table)
+# Free-form operator taxonomy — drives the Jobs page's tag filter
+# (orthogonal to the id-prefix grouping). A check is at once a
+# health-check and a security control, so it carries both.
+tags: [health-check, security]
 execute:
   shell: powershell
   run_as: system

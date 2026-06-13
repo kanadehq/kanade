@@ -18,8 +18,23 @@
     "cwd": "cwd",
     "timeout": "timeout",
     "inventory": "inventory",
+    "tags": "tags",
     "actions": "actions"
   },
+  "search": {
+    "placeholder": "Search jobs (id, description, tags)",
+    "clear": "Clear search"
+  },
+  "tags": {
+    "filterByTitle": "Filter by tag \"{{tag}}\"",
+    "clear": "Clear tag filter"
+  },
+  "groups": {
+    "other": "Other",
+    "expand": "Expand",
+    "collapse": "Collapse"
+  },
+  "noMatch": "No jobs match the current filter",
   "row": {
     "openAria": "open details for job {{id}}"
   },

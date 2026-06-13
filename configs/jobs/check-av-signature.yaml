@@ -14,6 +14,7 @@
 id: check-av-signature
 version: 0.1.0
 description: Windows Defender antivirus signature age
+tags: [health-check, security]
 execute:
   shell: powershell
   run_as: system

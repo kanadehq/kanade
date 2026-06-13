@@ -18,8 +18,23 @@
     "cwd": "cwd",
     "timeout": "timeout",
     "inventory": "inventory",
+    "tags": "タグ",
     "actions": "操作"
   },
+  "search": {
+    "placeholder": "ジョブを検索 (id・説明・タグ)",
+    "clear": "検索をクリア"
+  },
+  "tags": {
+    "filterByTitle": "タグ「{{tag}}」で絞り込み",
+    "clear": "タグ絞り込みを解除"
+  },
+  "groups": {
+    "other": "その他",
+    "expand": "展開:",
+    "collapse": "折りたたみ:"
+  },
+  "noMatch": "条件に一致するジョブがありません",
   "row": {
     "openAria": "ジョブ {{id}} の詳細を開く"
   },

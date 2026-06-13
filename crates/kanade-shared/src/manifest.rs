@@ -95,6 +95,24 @@ pub struct Manifest {
     /// [`emit`]: Manifest::emit
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client: Option<ClientHint>,
+    /// Free-form operator taxonomy for the Jobs catalog. Purely a
+    /// SPA-side organisational aid — agents / scheduler / projector
+    /// never read it — so it carries no runtime semantics and any
+    /// string is allowed (`security`, `weekly`, `windows`, …). Jobs
+    /// cross-cut (a `check-bitlocker` is at once a health-check, a
+    /// security control, and Windows-specific), which is why this is
+    /// a multi-valued list rather than the single closed-enum
+    /// [`ClientHint::category`] (whose values are the end-user Client
+    /// App's tabs, a different concern). The operator Jobs page groups
+    /// rows by id-prefix for free; tags add the orthogonal filter axis
+    /// prefixes can't express.
+    ///
+    /// Empty by default (the overwhelming majority of jobs), and a
+    /// new field, so it follows the #492 wire rule: `serde(default)`
+    /// plus `skip_serializing_if` keep gradually-upgrading old readers
+    /// from tripping over its absence / presence.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 /// "Who + how + when-to-stagger" — the fanout-plan side of an exec.
@@ -617,6 +635,14 @@ impl Manifest {
                 }
             }
         }
+        // A blank / whitespace-only tag is an invisible operator typo
+        // that would render an empty filter chip on the Jobs page —
+        // reject it like the other present-but-blank display fields.
+        for tag in &self.tags {
+            if tag.trim().is_empty() {
+                return Err("tags must not contain empty entries".to_string());
+            }
+        }
         Ok(())
     }
 }
@@ -1115,6 +1141,67 @@ client:
         // contract: an old agent must accept a newer writer's field).
         let m: Manifest = serde_yaml::from_str(yaml).expect("tolerant read");
         assert_eq!(m.client.as_ref().map(|c| c.name.as_str()), Some("A job"));
+    }
+
+    #[test]
+    fn manifest_tags_default_empty() {
+        // The overwhelming majority of jobs carry no tags; the field
+        // must default to an empty Vec (not fail to parse) and skip
+        // serialisation so old readers never see the key.
+        let yaml = r#"
+id: echo-test
+version: 0.0.1
+execute:
+  shell: powershell
+  script: "echo 'kanade'"
+  timeout: 30s
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        assert!(m.tags.is_empty());
+        m.validate().expect("tag-less job validates");
+        // skip_serializing_if = empty ⇒ the key is absent from JSON.
+        let json = serde_json::to_string(&m).expect("serialize");
+        assert!(
+            !json.contains("tags"),
+            "empty tags must not serialise: {json}"
+        );
+    }
+
+    #[test]
+    fn manifest_parses_and_validates_tags() {
+        let yaml = r#"
+id: check-bitlocker
+version: 0.1.0
+execute:
+  shell: powershell
+  script: "echo x"
+  timeout: 30s
+tags: [security, windows, health-check]
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(m.tags, vec!["security", "windows", "health-check"]);
+        m.validate().expect("tagged job validates");
+        // Round-trips through JSON (the wire format the SPA reads).
+        let json = serde_json::to_string(&m).expect("serialize");
+        assert!(json.contains("\"tags\""), "non-empty tags must serialise");
+    }
+
+    #[test]
+    fn manifest_rejects_blank_tag() {
+        // A whitespace-only tag renders an empty filter chip — reject
+        // it at the write boundary like the other blank display fields.
+        let yaml = r#"
+id: j
+version: 0.1.0
+execute:
+  shell: powershell
+  script: "echo x"
+  timeout: 30s
+tags: [ok, "   "]
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        let err = m.validate().expect_err("blank tag must fail");
+        assert!(err.contains("tags must not contain empty"), "err: {err}");
     }
 
     fn execute_with(

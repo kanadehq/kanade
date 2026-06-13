@@ -77,6 +77,13 @@
         "mode": "cached"
       }
     },
+    "tags": {
+      "description": "Free-form operator taxonomy for the Jobs catalog. Purely a\nSPA-side organisational aid — agents / scheduler / projector\nnever read it — so it carries no runtime semantics and any\nstring is allowed (`security`, `weekly`, `windows`, …). Jobs\ncross-cut (a `check-bitlocker` is at once a health-check, a\nsecurity control, and Windows-specific), which is why this is\na multi-valued list rather than the single closed-enum\n[`ClientHint::category`] (whose values are the end-user Client\nApp's tabs, a different concern). The operator Jobs page groups\nrows by id-prefix for free; tags add the orthogonal filter axis\nprefixes can't express.\n\nEmpty by default (the overwhelming majority of jobs), and a\nnew field, so it follows the #492 wire rule: `serde(default)`\nplus `skip_serializing_if` keep gradually-upgrading old readers\nfrom tripping over its absence / presence.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "version": {
       "type": "string"
     }
