@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="kanade app icon">
+  <title>kanade — 奏 (app icon)</title>
+
+  <!--
+    APP / EXE ICON source (distinct from icon.svg / icon-dark.svg, which
+    are the transparent README + SPA brand marks the web can theme-swap).
+
+    A Windows .exe / taskbar icon is baked into the binary and does NOT
+    switch with the OS light/dark theme, so a transparent 奏 in near-black
+    vanished on a dark desktop. This variant sits the baton (タクト) + 奏
+    on a rounded cream tile, so the glyph contrasts against its own
+    surface and stays legible on any desktop background, at any size.
+
+    `assets/icon.ico` (winres → kanade / -agent / -backend) and
+    `crates/kanade-client/icons/icon.ico` (Tauri bundle.icon) are both
+    regenerated from THIS file via ImageMagick. Those `.ico` files are
+    committed binary artifacts — CI / release builds embed them and never
+    rasterize this SVG, so build output is font-independent. Regenerating
+    the `.ico` by hand needs a JP serif font installed (Noto Serif JP /
+    Yu Mincho — see the font-family list below) so 奏 renders as the brand
+    glyph rather than a generic-serif fallback. ImageMagick's built-in SVG
+    text renderer is unreliable for CJK; `rsvg-convert` (librsvg) renders
+    the glyph more faithfully if a regen ever looks off.
+  -->
+
+  <defs>
+    <linearGradient id="g-baton" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0"   stop-color="#5b3a8c"/>
+      <stop offset="0.5" stop-color="#d4a017"/>
+      <stop offset="1"   stop-color="#2a9d8f"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Cream tile so the icon owns its background regardless of OS theme. -->
+  <rect x="6" y="6" width="244" height="244" rx="46" fill="#f5f0e6" stroke="#d9d2c4" stroke-width="3"/>
+
+  <!-- 奏 (kanade): tapered baton sweeps across the upper half; the colour
+       triad rides violet handle → amber midline → teal tip. -->
+  <path d="M 54 60 A 12 12 0 1 1 68 41 L 212 162 Z" fill="url(#g-baton)"/>
+
+  <text x="128" y="222"
+        font-family="'Noto Serif JP', 'Yu Mincho', 'Hiragino Mincho ProN', 'IPAexMincho', 'Source Han Serif JP', serif"
+        font-size="104" font-weight="700"
+        fill="#1a1a1a" text-anchor="middle">奏</text>
+</svg>
