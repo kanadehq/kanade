@@ -28,7 +28,6 @@ use std::collections::HashMap;
 
 use async_nats::jetstream::consumer::pull::Config as PullConfig;
 use async_nats::jetstream::consumer::{AckPolicy, DeliverPolicy};
-use async_nats::jetstream::kv::Operation;
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use kanade_shared::ipc::envelope::RpcNotification;
@@ -411,61 +410,104 @@ struct ReadMark {
 }
 
 /// Read this `(pc_id, user_sid)`'s ack state from `notifications_read`
-/// into a `notification_id → acked_at` map. Keys are walked and filtered
-/// by the `{pc_id}.{user_sid}.` prefix (see
-/// [`notifications_read_prefix`]); the notification id is the suffix.
+/// into a `notification_id → acked_at` map.
+///
+/// `notifications_read` is a single **fleet-wide** KV bucket, so `kv.keys()`
+/// would stream every PC's + every user's ack key just to filter in memory,
+/// then issue an N+1 `get` per match — O(fleet) work per call. Instead, scan
+/// the bucket's backing JetStream stream (`KV_notifications_read`) through a
+/// throwaway ephemeral, read-only consumer filtered to **just this user's**
+/// subject space — `$KV.notifications_read.{pc_id}.{user_sid}.>` — the same
+/// ephemeral-consumer pattern [`replay_notifications`] uses. (Filtering on the
+/// JetStream subject is also what sidesteps the async-nats KV key validation
+/// that rejects a `>` wildcard passed to `kv.history()` — the original bug
+/// this change fixes.) The bucket is `history: 1`, so each key yields its
+/// single latest revision; a KV delete/purge arrives as an empty-payload
+/// tombstone, handled below.
 async fn read_user_acks(
     js: &async_nats::jetstream::Context,
     pc_id: &str,
     user_sid: &str,
 ) -> HandlerResult<HashMap<String, DateTime<Utc>>> {
-    let kv = js
-        .get_key_value(BUCKET_NOTIFICATIONS_READ)
-        .await
-        .map_err(|e| {
-            warn!(error = %e, "notifications.list: open notifications_read failed");
-            RpcError::new(
-                ErrorKind::InternalError,
-                format!("notifications.list: open read state: {e}"),
-            )
-        })?;
-    let prefix = notifications_read_prefix(pc_id, user_sid);
-    // Wildcard history scoped to just this `(pc_id, user_sid)`'s keys —
-    // one streamed scan with the values inline, instead of listing the
-    // whole fleet's keys and then an N+1 `get` per match. The bucket is
-    // `history: 1`, so each key yields a single latest entry.
-    let wildcard = format!("{prefix}>");
-    let mut history = kv.history(&wildcard).await.map_err(|e| {
-        warn!(error = %e, %wildcard, "notifications.list: notifications_read history() failed");
+    let stream_name = format!("KV_{BUCKET_NOTIFICATIONS_READ}");
+    let stream = js.get_stream(&stream_name).await.map_err(|e| {
+        warn!(error = %e, %stream_name, "notifications.list: get_stream for read state failed");
         RpcError::new(
             ErrorKind::InternalError,
-            format!("notifications.list: scan read state: {e}"),
+            format!("notifications.list: open read state stream: {e}"),
         )
     })?;
-
-    let mut out = HashMap::new();
-    while let Some(entry) = history.next().await {
-        let entry = entry.map_err(|e| {
-            warn!(error = %e, "notifications.list: read-state history stream faulted");
+    let prefix = notifications_read_prefix(pc_id, user_sid);
+    let filter = format!("$KV.{BUCKET_NOTIFICATIONS_READ}.{prefix}>");
+    let consumer = stream
+        .create_consumer(PullConfig {
+            deliver_policy: DeliverPolicy::All,
+            ack_policy: AckPolicy::None,
+            filter_subjects: vec![filter],
+            // Reap the throwaway consumer shortly after this call ends.
+            inactive_threshold: std::time::Duration::from_secs(30),
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| {
+            warn!(error = %e, "notifications.list: create read-state consumer failed");
             RpcError::new(
                 ErrorKind::InternalError,
-                format!("notifications.list: stream read state: {e}"),
+                format!("notifications.list: create read state consumer: {e}"),
             )
         })?;
-        // Skip delete / purge tombstones — only a live ack row counts.
-        if entry.operation != Operation::Put {
-            continue;
+
+    // Subject → notification id: strip the `$KV.<bucket>.{pc}.{sid}.` prefix;
+    // the remainder is the id (the same suffix `notifications_read_key`
+    // appends).
+    let subject_prefix = format!("$KV.{BUCKET_NOTIFICATIONS_READ}.{prefix}");
+    let mut out = HashMap::new();
+    loop {
+        let mut batch = consumer
+            .fetch()
+            .max_messages(REPLAY_BATCH)
+            .expires(std::time::Duration::from_millis(200))
+            .messages()
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "notifications.list: fetch read state failed");
+                RpcError::new(
+                    ErrorKind::InternalError,
+                    format!("notifications.list: fetch read state: {e}"),
+                )
+            })?;
+        let mut got = 0usize;
+        while let Some(m) = batch.next().await {
+            let m = m.map_err(|e| {
+                RpcError::new(
+                    ErrorKind::InternalError,
+                    format!("notifications.list: read state message: {e}"),
+                )
+            })?;
+            got += 1;
+            let Some(id) = m.subject.as_str().strip_prefix(&subject_prefix) else {
+                continue;
+            };
+            // A KV delete/purge is an empty-payload tombstone — the ack was
+            // cleared, so drop any earlier value for this id.
+            if m.payload.is_empty() {
+                out.remove(id);
+                continue;
+            }
+            match serde_json::from_slice::<ReadMark>(&m.payload) {
+                Ok(mark) => {
+                    out.insert(id.to_string(), mark.acked_at);
+                }
+                Err(e) => warn!(
+                    subject = %m.subject,
+                    error = %e,
+                    "notifications.list: skipping unparseable read mark",
+                ),
+            }
         }
-        let Some(id) = entry.key.strip_prefix(&prefix) else {
-            continue;
-        };
-        match serde_json::from_slice::<ReadMark>(&entry.value) {
-            Ok(mark) => {
-                out.insert(id.to_string(), mark.acked_at);
-            }
-            Err(e) => {
-                warn!(key = %entry.key, error = %e, "notifications.list: skipping unparseable read mark")
-            }
+        // A short (< full) batch means the stream is drained.
+        if got < REPLAY_BATCH {
+            break;
         }
     }
     Ok(out)
