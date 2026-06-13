@@ -86,13 +86,24 @@ end
 '''
 
 [tasks.web-build]
-description = "Build the React SPA into web/dist (consumed by rust-embed)"
+description = "Build both embedded frontends: the kanade-backend React SPA (rust-embed) and the kanade-client Tauri WebView (frontendDist)."
 # Install deps first so this task is self-contained: CI / release run it in
 # a fresh checkout with no node_modules, so `bun run build` (tsc + vite)
 # would otherwise fail with "tsc: command not found".
+#
+# The kanade-client WebView is built here too: release.yml runs this
+# task before `cargo build --release --workspace`, and Tauri bakes
+# `crates/kanade-client/web/dist` into the binary at compile time. Its
+# `dist/assets/` is .gitignored, so without this step the client embeds
+# only the committed index.html stub (broken asset refs) — the WebView
+# loads to a blank/failed page. Both WebViews commit a bun.lock and use
+# `--frozen-lockfile` for reproducible release builds.
 script_runner = "@shell"
 script = '''
 cd crates/kanade-backend/web
+bun install --frozen-lockfile
+bun run build
+cd ../../kanade-client/web
 bun install --frozen-lockfile
 bun run build
 '''

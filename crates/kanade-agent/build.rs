@@ -23,6 +23,20 @@ fn main() {
     res.set("ProductName", "kanade-agent");
     res.set("FileDescription", "Kanade endpoint management agent");
     res.set("OriginalFilename", "kanade-agent.exe");
+    // Embed the shared kanade brand icon (奏 + the タクト/baton mark) so
+    // the .exe carries an icon in Explorer / the taskbar / service
+    // listings. The canonical .ico lives at the repo root (next to the
+    // SVG sources the SPA + README use). It's outside this crate, so on a
+    // crates.io / sparse-checkout build the file isn't packaged — guard on
+    // existence so we don't emit a `rerun-if-changed` for a missing path
+    // (which would dirty the build-script fingerprint every build and
+    // defeat incremental compilation — Gemini #628). The GitHub-Release
+    // binaries are built from a full checkout, so they get the icon.
+    let icon = "../../assets/icon.ico";
+    if std::path::Path::new(icon).exists() {
+        println!("cargo:rerun-if-changed={icon}");
+        res.set_icon(icon);
+    }
     if let Ok(v) = std::env::var("CARGO_PKG_VERSION") {
         res.set("ProductVersion", &v);
         res.set("FileVersion", &v);

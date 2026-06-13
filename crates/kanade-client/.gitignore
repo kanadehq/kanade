@@ -9,8 +9,9 @@ gen/
 # below it are .ignored.
 web/dist/assets/
 
-# Bun lockfile — the WebView pins only loose `^` ranges in
-# package.json and is rebuilt fresh at release time (tauri
-# beforeBuildCommand), so the lockfile is a local-only artifact,
-# never committed (matches the existing client convention).
-web/bun.lock
+# NOTE: web/bun.lock IS committed (like kanade-backend/web/bun.lock).
+# The release pipeline now builds this WebView in CI (cargo make
+# web-build) and Tauri bakes it into the binary, so the build must be
+# reproducible — the lockfile is installed with `bun install
+# --frozen-lockfile`. (It used to be ignored back when nothing built the
+# client web in CI; that's no longer true.)

@@ -28,9 +28,19 @@ kanade-shared = { workspace = true }
 anyhow = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-# Tauri 2.x runtime. No extra features yet — system tray lands in a
-# follow-up PR as its handlers come online.
-tauri = { version = "2.11.2", features = [] }
+# Tauri 2.x runtime.
+#
+# `custom-protocol` is REQUIRED for a working production binary. Without
+# it Tauri compiles in "dev" mode (`cfg(dev)`) and at runtime loads
+# `build.devUrl` (http://localhost:1420, the Vite dev server) instead of
+# the embedded `frontendDist` assets — so a shipped client shows
+# "localhost — ERR_CONNECTION_REFUSED" because nothing is serving that
+# port. `tauri build` injects this feature automatically, but we build
+# the client with plain `cargo build --release --workspace`, so it must
+# be enabled here. (Trade-off: `cargo tauri dev` no longer hot-reloads
+# from the Vite server for this crate — this repo embeds at build time
+# and never uses the dev-server flow, so that's fine.)
+tauri = { version = "2.11.2", features = ["custom-protocol"] }
 # Native OS toast notifications — the Phase E emergency fallback (#102)
 # launches the client hidden and toasts the emergency from the WebView.
 tauri-plugin-notification = "2.3.3"
