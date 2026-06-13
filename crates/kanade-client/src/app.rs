@@ -57,6 +57,11 @@ const SHOW_NOTIFICATION_FLAG: &str = "--show-notification";
 /// drop them. A compile-time `w!` PCWSTR — no runtime encode/alloc.
 const APP_USER_MODEL_ID: windows::core::PCWSTR = windows::core::w!("com.yukimemi.kanade-client");
 
+/// Same AUMID as [`APP_USER_MODEL_ID`], as a `&str` — `tauri-winrt-notification`
+/// (the emergency-toast path) takes the app id as a string. Kept in lockstep
+/// with the `w!` constant above and the tauri `identifier`.
+const APP_USER_MODEL_ID_STR: &str = "com.yukimemi.kanade-client";
+
 /// Pin this process's explicit AUMID to [`APP_USER_MODEL_ID`] at startup
 /// so its toasts are associated with the registered shortcut. Best-effort
 /// — a failure only means toasts may not render, not a crash.
@@ -246,6 +251,71 @@ fn show_main_window(app: tauri::AppHandle) {
     }
 }
 
+/// Show an emergency notification as a NATIVE WinRT toast (#102).
+///
+/// The `@tauri-apps/plugin-notification` `sendNotification` can't make a toast
+/// **persist** on desktop, so the emergency path bypasses it and builds the
+/// toast directly here with `Scenario::Reminder` (+ an action button, which
+/// the scenario needs to actually stay on screen) — it stays until the user
+/// dismisses it and lands in the Action Center, instead of the plugin's ~7 s
+/// auto-dismiss (an emergency that vanishes in seconds is useless).
+///
+/// No `on_activated` (toast-click) handler: registering
+/// `ToastNotification.Activated` requires a non-MSIX app to have a
+/// COM-activator CLSID registered (registry + the shortcut's
+/// `ToastActivatorCLSID`); without it the `Activated` call inside `show()`
+/// fails and the toast never submits. Reveal-on-click is deferred to #647.
+///
+/// The toast is tagged with [`APP_USER_MODEL_ID_STR`] (the same AUMID the
+/// process pins + the Start-Menu shortcut carries), which is what lets a
+/// non-MSIX desktop app's toast render at all. Returns `Err` if the toast
+/// can't be shown so the WebView can fall back to the plugin path.
+#[tauri::command]
+async fn show_emergency_toast(title: String, body: String) -> Result<(), String> {
+    info!(title = %title, "show_emergency_toast: invoked");
+    // Build + show the toast on the async runtime — the SAME context the
+    // notification plugin submits from. Showing it on the command worker
+    // thread or hopping to the main thread via `run_on_main_thread` both
+    // returned without the toast ever reaching the platform. AWAIT the task so
+    // a `show()` failure is returned to the WebView (which then falls back to
+    // the plugin toast) rather than only logged.
+    let handle = tauri::async_runtime::spawn(async move {
+        use tauri_winrt_notification::{Scenario, Toast};
+
+        Toast::new(APP_USER_MODEL_ID_STR)
+            .title(&title)
+            .text1(&body)
+            // Pre-expanded, stays on screen until dismissed and persists in
+            // the Action Center — the whole point of an emergency (vs the
+            // default ~7 s auto-dismiss).
+            .scenario(Scenario::Reminder)
+            // `scenario=Reminder` only actually persists ("stays until the
+            // user dismisses it") when the toast carries at least one action
+            // — without a button Windows treats it as an ordinary toast and
+            // auto-dismisses it in seconds (confirmed live). This button
+            // satisfies that requirement; wiring its click to ack/reveal the
+            // app needs a COM activator (issue #647), so for now it only
+            // guarantees persistence.
+            .add_button("確認", "ack")
+            .show()
+            .map_err(|e| e.to_string())
+    });
+    match handle.await {
+        Ok(Ok(())) => {
+            info!("show_emergency_toast: toast.show() ok");
+            Ok(())
+        }
+        Ok(Err(e)) => {
+            warn!(error = %e, "show_emergency_toast: native toast failed");
+            Err(e)
+        }
+        Err(e) => {
+            warn!(error = %e, "show_emergency_toast: toast task did not complete");
+            Err(format!("toast task did not complete: {e}"))
+        }
+    }
+}
+
 /// Drain the client's push-notification broadcast and re-emit each
 /// notification to the WebView as a [`NOTIFICATION_EVENT`] Tauri event.
 /// Runs until the connection closes (the broadcast sender drops). A
@@ -405,7 +475,8 @@ pub fn run() {
             notifications_list,
             notifications_ack,
             get_launch_notification,
-            show_main_window
+            show_main_window,
+            show_emergency_toast
         ])
         .setup(move |app| {
             // Supervise the KLP connection for the app's lifetime:
