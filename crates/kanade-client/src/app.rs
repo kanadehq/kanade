@@ -85,6 +85,13 @@ const CONNECTED_EVENT: &str = "klp-connected";
 /// "reconnecting…" banner instead of silently-failing commands.
 const DISCONNECTED_EVENT: &str = "klp-disconnected";
 
+/// Emitted when a *second* process is launched with
+/// `--show-notification <id>` while this instance is already running
+/// (the single-instance guard, #624). Payload is the notification id;
+/// the WebView toasts that emergency from the already-running instance
+/// instead of a new process piling up.
+const SHOW_NOTIFICATION_EVENT: &str = "klp-show-notification";
+
 /// Tauri-managed shared state. `Arc<Mutex<…>>` instead of plain
 /// `Mutex<…>` so the spawned setup task can hold its own clone
 /// while the `invoke` commands hold theirs.
@@ -312,16 +319,52 @@ async fn supervise_connection(slot: Arc<Mutex<Option<KlpClient>>>, handle: tauri
     }
 }
 
-/// Parse `--show-notification <id>` from the process args (Phase E
-/// emergency fallback). Returns the id when present and non-empty.
-fn parse_launch_notification() -> Option<String> {
-    let mut args = std::env::args();
-    while let Some(a) = args.next() {
+/// Parse `--show-notification <id>` out of an arbitrary arg sequence.
+/// Returns the id when the flag is present with a non-empty value.
+/// Shared by the startup parse (`std::env::args`) and the single-instance
+/// handler (which gets the *second* process's argv, #624).
+fn parse_show_notification<I: IntoIterator<Item = String>>(args: I) -> Option<String> {
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
         if a == SHOW_NOTIFICATION_FLAG {
-            return args.next().filter(|s| !s.is_empty());
+            return it.next().filter(|s| !s.is_empty());
         }
     }
     None
+}
+
+/// Parse `--show-notification <id>` from this process's own args (Phase E
+/// emergency fallback). Returns the id when present and non-empty.
+fn parse_launch_notification() -> Option<String> {
+    parse_show_notification(std::env::args())
+}
+
+/// Single-instance callback (#624): fires in the ALREADY-RUNNING instance
+/// when a second `kanade-client` is launched (the agent's emergency
+/// fallback launches one per emergency, and without this guard each would
+/// pile up a new hidden process). The second process forwards its argv
+/// here and exits.
+///
+/// - Launched for an emergency (`--show-notification <id>`): forward the
+///   id to the WebView so the running instance toasts that emergency —
+///   the window stays hidden (clicking the toast reveals it), matching the
+///   normal emergency-launch UX.
+/// - Any other second launch (e.g. the user double-clicks the exe): just
+///   surface the existing window.
+#[cfg(target_os = "windows")]
+fn on_second_instance(app: &tauri::AppHandle, argv: Vec<String>) {
+    if let Some(id) = parse_show_notification(argv) {
+        if let Err(e) = app.emit(SHOW_NOTIFICATION_EVENT, id) {
+            warn!(error = %e, "single-instance: forward emergency id failed");
+        }
+    } else if let Some(win) = app.get_webview_window("main") {
+        let _ = win.show();
+        let _ = win.set_focus();
+    } else {
+        // Match `show_main_window`'s contract — surface the miss in traces
+        // rather than a silent no-op (Claude #643).
+        warn!("single-instance: plain second launch — 'main' window not found");
+    }
 }
 
 pub fn run() {
@@ -339,6 +382,14 @@ pub fn run() {
     let klp_slot = state.klp.clone();
 
     tauri::Builder::default()
+        // Single-instance guard (#624) — MUST be the first plugin. A
+        // second launch (the agent's per-emergency fallback, or a user
+        // double-click) forwards its argv to this callback and exits, so
+        // hidden client processes never pile up; the running instance
+        // toasts the forwarded emergency instead.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            on_second_instance(app, argv);
+        }))
         // Native OS toasts for the emergency fallback (shown from the
         // WebView via @tauri-apps/plugin-notification).
         .plugin(tauri_plugin_notification::init())
