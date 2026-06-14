@@ -66,7 +66,17 @@
     "placeholder": "pc_id / ホスト名で検索…",
     "loading": "検索中…",
     "noMatch": "該当するホストがありません",
-    "remove": "{{pcId}} を削除"
+    "remove": "{{pcId}} を削除",
+    "rejected": "存在しない pc_id のため除外しました: {{ids}}",
+    "error": "ホスト一覧を取得できませんでした"
+  },
+  "groupPicker": {
+    "placeholder": "グループ名で検索…",
+    "loading": "読み込み中…",
+    "noMatch": "該当するグループがありません",
+    "remove": "{{group}} を削除",
+    "rejected": "存在しないグループのため除外しました: {{names}}",
+    "error": "グループ一覧を取得できませんでした"
   },
   "comingSoon": {
     "title": "{{name}} — 準備中",

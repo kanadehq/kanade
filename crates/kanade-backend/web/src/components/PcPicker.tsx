@@ -14,8 +14,15 @@
  *     Logs / Inventory / Run. Free text can't be committed; only a
  *     candidate from the list sticks, which kills the silent-typo class
  *     of bug.
- *   - `multi` — pick several existing hosts, shown as removable chips.
- *     Used by Exec (was a comma-separated text box).
+ *   - `multi` — pick several hosts, shown as removable chips. Used by
+ *     Exec and the Groups add-form. The typeahead is the precise path,
+ *     but for bulk work (target 100 PCs) it also accepts a
+ *     comma/whitespace/newline-separated list — typed *or pasted* (e.g.
+ *     a column copied out of Excel) — splitting it into chips. Every
+ *     bulk token is existence-checked against the fleet (one
+ *     `^(a|b|c)$` regex query); ids that don't resolve to a real pc_id
+ *     are dropped and surfaced in an inline warning rather than
+ *     silently committed.
  *   - `filter` — a search/filter field that *also* accepts free text,
  *     because Activity/Events run a regex/substring match on the
  *     backend (`^PC001$`, partial ids, …). Candidates are offered as a
@@ -27,14 +34,21 @@
  */
 
 import { useQuery } from '@tanstack/react-query';
-import { Check, Loader2, Search, X } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { AlertTriangle, Check, Loader2, Search, X } from 'lucide-react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ClipboardEvent,
+  type KeyboardEvent,
+} from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { apiFetch } from '@/lib/api';
 import { useDebouncedValue } from '@/lib/hooks';
 import type { AgentRow } from '@/lib/types';
-import { cn } from '@/lib/utils';
+import { cn, escapeRegExp, splitTokens } from '@/lib/utils';
 
 type Mode = 'single' | 'multi' | 'filter';
 
@@ -52,6 +66,10 @@ type PcPickerProps =
 
 const SEARCH_LIMIT = 50;
 const SEARCH_DEBOUNCE_MS = 250;
+// Tokens per existence-check request. Keeps the `q=^(a|b|…)$` regex
+// (URL-encoded) well under the ~2 KB request-line limit even for a
+// thousand-host paste — at ~20 chars/id that's ~800 chars per chunk.
+const VALIDATE_CHUNK = 40;
 
 export function PcPicker(props: PcPickerProps) {
   const mode: Mode = props.mode ?? 'single';
@@ -65,9 +83,17 @@ export function PcPicker(props: PcPickerProps) {
   const [query, setQuery] = useState('');
   const [open, setOpen] = useState(false);
   const [highlight, setHighlight] = useState(0);
+  // multi: bulk tokens that didn't resolve to a real pc_id, shown in an
+  // inline warning until the next edit.
+  const [rejected, setRejected] = useState<string[]>([]);
   const rootRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const debounced = useDebouncedValue(query.trim(), SEARCH_DEBOUNCE_MS);
+  // Latest committed selection, so the async validation path merges
+  // onto what's on screen *now* — not the render-time snapshot it
+  // closed over before awaiting the network.
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
 
   // single/filter: when the field is closed, mirror the committed value
   // back into the textbox so the page and the picker never disagree.
@@ -90,18 +116,21 @@ export function PcPicker(props: PcPickerProps) {
   }, [isSingle, isMulti, singleValue, query, props.onChange]);
 
   // Close on an outside click — a plain listbox doesn't get Radix's
-  // dismiss-on-blur for free. `commitClose` is memoized so this only
-  // re-registers when it actually changes.
+  // dismiss-on-blur for free. `commitClose` changes every keystroke (it
+  // closes over `query`), so we read it through a ref and depend only on
+  // `open` — otherwise the listener would detach/reattach on each key.
+  const commitCloseRef = useRef(commitClose);
+  commitCloseRef.current = commitClose;
   useEffect(() => {
     if (!open) return;
     const onPointerDown = (e: MouseEvent) => {
       if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
-        commitClose();
+        commitCloseRef.current();
       }
     };
     document.addEventListener('mousedown', onPointerDown);
     return () => document.removeEventListener('mousedown', onPointerDown);
-  }, [open, commitClose]);
+  }, [open]);
 
   const agentsQ = useQuery({
     enabled: open,
@@ -120,13 +149,89 @@ export function PcPicker(props: PcPickerProps) {
     setHighlight(0);
   }, [options.length]);
 
+  // multi: merge tokens into the selection, skipping ones already
+  // chosen, preserving order. The single source of truth for both
+  // typed-comma and paste bulk entry.
+  function addMany(ids: string[]) {
+    if (!isMulti) return;
+    const current = selectedRef.current;
+    const merged = [...current];
+    for (const id of ids) if (!merged.includes(id)) merged.push(id);
+    if (merged.length !== current.length) {
+      (props.onChange as (v: string[]) => void)(merged);
+    }
+  }
+
+  // Existence-check bulk tokens before they become chips: an anchored
+  // regex-alternation query, then keep only tokens that came back as a
+  // real `pc_id` (the q regex also matches hostname, so we compare the
+  // returned pc_id set, not just "did anything match"). Unknown ids are
+  // dropped and surfaced in the inline warning. A failed lookup degrades
+  // to committing as-is rather than losing the operator's paste.
+  //
+  // The alternation is chunked: a 100+ host paste would otherwise build
+  // a `q=` longer than the ~2 KB URL limit and 414 at the proxy — and
+  // the catch below would then silently commit everything unchecked,
+  // exactly when validation matters most. Tokens are de-duped first so
+  // a `pc01, pc01` paste doesn't bloat the pattern (or the chunk count).
+  async function addValidated(tokens: string[]) {
+    const fresh = [...new Set(tokens)].filter((tk) => !selectedRef.current.includes(tk));
+    if (!fresh.length) return;
+    try {
+      const known = new Set<string>();
+      for (let i = 0; i < fresh.length; i += VALIDATE_CHUNK) {
+        const chunk = fresh.slice(i, i + VALIDATE_CHUNK);
+        const re = `^(${chunk.map(escapeRegExp).join('|')})$`;
+        const limit = Math.min(chunk.length * 2 + 16, 1000);
+        const rows = await apiFetch<AgentRow[]>(
+          `/api/agents?q=${encodeURIComponent(re)}&limit=${limit}`,
+        );
+        for (const r of rows) known.add(r.pc_id);
+      }
+      // One commit after all chunks so each chunk doesn't overwrite the
+      // previous chunk's additions.
+      addMany(fresh.filter((tk) => known.has(tk)));
+      setRejected(fresh.filter((tk) => !known.has(tk)));
+    } catch {
+      addMany(fresh);
+    }
+  }
+
   function handleInput(next: string) {
-    setQuery(next);
     setOpen(true);
     setHighlight(0);
+    setRejected([]);
+    // multi: a separator (comma / space / newline) means the operator
+    // finished an id — commit the completed tokens and keep only the
+    // still-being-typed tail in the box. The tail stays free for the
+    // typeahead to keep filtering.
+    if (isMulti && /[\s,]/.test(next)) {
+      const endsWithSep = /[\s,]$/.test(next);
+      const tokens = splitTokens(next);
+      const tail = endsWithSep ? '' : (tokens.pop() ?? '');
+      if (tokens.length) void addValidated(tokens);
+      setQuery(tail);
+      return;
+    }
+    setQuery(next);
     // filter mode commits every keystroke, matching the old free-text
     // box the page debounces on its own side.
     if (mode === 'filter') (props.onChange as (v: string) => void)(next);
+  }
+
+  // Paste is a complete action — split the whole clipboard into chips
+  // at once (a typed-comma's "keep the tail" rule would otherwise drop
+  // the last pasted id). Single-token pastes fall through to the normal
+  // input so the typeahead can still match them.
+  function handlePaste(e: ClipboardEvent<HTMLInputElement>) {
+    if (!isMulti) return;
+    const text = e.clipboardData.getData('text');
+    if (!/[\s,]/.test(text)) return;
+    e.preventDefault();
+    setRejected([]);
+    const tokens = splitTokens(text);
+    if (tokens.length) void addValidated(tokens);
+    setQuery('');
   }
 
   function pick(pcId: string) {
@@ -151,7 +256,9 @@ export function PcPicker(props: PcPickerProps) {
       case 'ArrowDown':
         e.preventDefault();
         setOpen(true);
-        setHighlight((h) => Math.min(h + 1, options.length - 1));
+        // Math.max(0, …) so an empty candidate list doesn't park the
+        // highlight at -1 (options.length - 1).
+        setHighlight((h) => Math.max(0, Math.min(h + 1, options.length - 1)));
         break;
       case 'ArrowUp':
         e.preventDefault();
@@ -160,7 +267,13 @@ export function PcPicker(props: PcPickerProps) {
       case 'Enter':
         e.preventDefault();
         if (open && options[highlight]) pick(options[highlight].pc_id);
-        else if (mode === 'filter') setOpen(false); // value already committed
+        else if (isMulti && query.trim()) {
+          // No highlighted candidate — existence-check the typed token,
+          // same path as a comma/paste (a typo is dropped + warned).
+          setRejected([]);
+          void addValidated(splitTokens(query));
+          setQuery('');
+        } else if (mode === 'filter') setOpen(false); // value already committed
         break;
       case 'Escape':
         if (open) {
@@ -222,6 +335,7 @@ export function PcPicker(props: PcPickerProps) {
           placeholder={props.placeholder ?? t('pcPicker.placeholder')}
           value={query}
           onChange={(e) => handleInput(e.target.value)}
+          onPaste={handlePaste}
           onFocus={() => setOpen(true)}
           onKeyDown={onKeyDown}
           role="combobox"
@@ -242,8 +356,14 @@ export function PcPicker(props: PcPickerProps) {
           className="absolute z-50 mt-1 max-h-64 w-full overflow-auto rounded-md border border-border bg-bg p-1 shadow-md"
         >
           {options.length === 0 ? (
-            <li className="px-2 py-1.5 text-xs text-muted">
-              {agentsQ.isLoading ? t('pcPicker.loading') : t('pcPicker.noMatch')}
+            <li
+              className={cn('px-2 py-1.5 text-xs', agentsQ.isError ? 'text-danger' : 'text-muted')}
+            >
+              {agentsQ.isError
+                ? t('pcPicker.error')
+                : agentsQ.isLoading
+                  ? t('pcPicker.loading')
+                  : t('pcPicker.noMatch')}
             </li>
           ) : (
             options.map((a, i) => (
@@ -274,6 +394,21 @@ export function PcPicker(props: PcPickerProps) {
             ))
           )}
         </ul>
+      )}
+
+      {rejected.length > 0 && (
+        <p className="mt-1 flex items-start gap-1.5 text-xs text-danger">
+          <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+          <span className="flex-1">{t('pcPicker.rejected', { ids: rejected.join(', ') })}</span>
+          <button
+            type="button"
+            aria-label={t('actions.clear')}
+            onClick={() => setRejected([])}
+            className="text-danger/70 hover:text-danger"
+          >
+            <X className="size-3" />
+          </button>
+        </p>
       )}
     </div>
   );

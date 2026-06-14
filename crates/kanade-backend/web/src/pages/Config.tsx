@@ -5,6 +5,8 @@ import { Trans, useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 
 import { ErrorCard } from '@/components/ErrorCard';
+import { GroupPicker } from '@/components/GroupPicker';
+import { PcPicker } from '@/components/PcPicker';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { useConfirm } from '@/components/ui/confirm-dialog';
@@ -257,14 +259,28 @@ function ScopeEditor() {
         <div className="grid grid-cols-1 md:grid-cols-[160px_1fr_auto] gap-3 items-end">
           <div>
             <Label>{t('scope.labels.scope')}</Label>
-            <Select value={kind} onChange={(e) => setKind(e.target.value as 'groups' | 'pcs')}>
+            <Select
+              value={kind}
+              onChange={(e) => {
+                setKind(e.target.value as 'groups' | 'pcs');
+                // A pc_id and a group name aren't interchangeable —
+                // drop the stale selection (and its loaded body) so the
+                // operator can't save one scope's body under the other.
+                setName('');
+                setBody('');
+              }}
+            >
               <option value="groups">{t('scope.kindOptions.groups')}</option>
               <option value="pcs">{t('scope.kindOptions.pcs')}</option>
             </Select>
           </div>
           <div>
             <Label>{t('scope.labels.name')}</Label>
-            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder={t('scope.placeholders.name')} />
+            {kind === 'pcs' ? (
+              <PcPicker value={name} onChange={setName} placeholder={t('scope.placeholders.name')} />
+            ) : (
+              <GroupPicker value={name} onChange={setName} placeholder={t('scope.placeholders.name')} />
+            )}
           </div>
           <Button variant="secondary" disabled={!name.trim() || load.isPending} onClick={() => load.mutate()}>
             {t('scope.buttons.load')}
@@ -336,7 +352,7 @@ function EffectiveResolver() {
         <div className="flex gap-3 items-end">
           <div className="flex-1">
             <Label>{t('effective.labels.pcId')}</Label>
-            <Input value={pcId} onChange={(e) => setPcId(e.target.value)} placeholder={t('effective.placeholders.pcId')} />
+            <PcPicker value={pcId} onChange={setPcId} placeholder={t('effective.placeholders.pcId')} />
           </div>
           <Button onClick={() => mut.mutate()} disabled={!pcId.trim() || mut.isPending} variant="secondary">
             {t('effective.buttons.resolve')}
