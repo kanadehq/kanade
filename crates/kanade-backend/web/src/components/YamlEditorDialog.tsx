@@ -18,7 +18,7 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Loader2, Save } from 'lucide-react';
+import { ExternalLink, GitBranch, Loader2, Save } from 'lucide-react';
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
@@ -38,11 +38,46 @@ const YamlEditor = lazy(() => import('./YamlEditor'));
 export type EditorKind = 'manifest' | 'schedule';
 export type EditorMode = { type: 'create' } | { type: 'edit'; id: string };
 
+/** GitOps provenance (#678) — mirrors `kanade_shared::manifest::JobOrigin`. */
+export type JobOrigin = {
+  /** Repo-relative path of the manifest YAML (forward slashes). */
+  path: string;
+  /** `origin` remote URL, when the repo has one. */
+  repo?: string | null;
+  /** Repo-relative path of the inlined `script_file:`, when any. */
+  script_file?: string | null;
+};
+
 interface YamlEditorDialogProps {
   open: boolean;
   onOpenChange: (next: boolean) => void;
   kind: EditorKind;
   mode: EditorMode;
+  /** When set on an edit, the job is Git-managed (SPEC §3 GitOps): the
+   *  editor opens read-only and points the operator back at the repo
+   *  instead of letting a SPA edit silently diverge from Git (#678). */
+  gitOrigin?: JobOrigin | null;
+}
+
+/** Best-effort conversion of a Git remote URL to an https repo link.
+ *  `git@host:owner/repo(.git)` → `https://host/owner/repo`; an http(s)
+ *  remote just loses a trailing `.git`. Returns null when it can't make
+ *  a confident web URL (we only link the repo root, not a blob path —
+ *  we don't know the branch). */
+function repoWebUrl(remote?: string | null): string | null {
+  if (!remote) return null;
+  const r = remote.trim();
+  const ssh = r.match(/^git@([^:]+):(.+?)(?:\.git)?$/);
+  if (ssh) return `https://${ssh[1]}/${ssh[2]}`;
+  const stripped = r.replace(/\.git$/, '');
+  if (/^https?:\/\//.test(stripped)) {
+    // Defence-in-depth: strip any embedded userinfo (`token@host`) so a
+    // credential-bearing remote never becomes a clickable link. The CLI
+    // already redacts on capture, but a hand-written origin could slip
+    // one through (#679 review).
+    return stripped.replace(/^(https?:\/\/)[^/@]*@/, '$1');
+  }
+  return null;
 }
 
 const JOB_TEMPLATE = `# A new job manifest. id + version + execute are required.
@@ -99,8 +134,18 @@ async function postYaml(kind: EditorKind, yaml: string): Promise<unknown> {
   });
 }
 
-export function YamlEditorDialog({ open, onOpenChange, kind, mode }: YamlEditorDialogProps) {
+export function YamlEditorDialog({
+  open,
+  onOpenChange,
+  kind,
+  mode,
+  gitOrigin,
+}: YamlEditorDialogProps) {
   const qc = useQueryClient();
+  // #678: a Git-managed job is read-only in the SPA — editing belongs in
+  // the repo (GitOps). Only meaningful on an edit; create is always
+  // SPA-born and editable.
+  const gitManaged = mode.type === 'edit' && Boolean(gitOrigin);
   const [text, setText] = useState<string>(() =>
     mode.type === 'create' ? templateFor(kind) : '',
   );
@@ -160,9 +205,15 @@ export function YamlEditorDialog({ open, onOpenChange, kind, mode }: YamlEditorD
       ? kind === 'manifest'
         ? 'New job'
         : 'New schedule'
-      : kind === 'manifest'
-        ? `Edit job: ${mode.id}`
-        : `Edit schedule: ${mode.id}`;
+      : gitManaged
+        ? kind === 'manifest'
+          ? `Job: ${mode.id} · read-only`
+          : `Schedule: ${mode.id} · read-only`
+        : kind === 'manifest'
+          ? `Edit job: ${mode.id}`
+          : `Edit schedule: ${mode.id}`;
+
+  const repoUrl = repoWebUrl(gitOrigin?.repo);
 
   const isLoadingExisting = mode.type === 'edit' && fetched.isLoading;
   const hasLoadError = mode.type === 'edit' && Boolean(fetched.error);
@@ -173,10 +224,52 @@ export function YamlEditorDialog({ open, onOpenChange, kind, mode }: YamlEditorD
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>
-            Schema-aware editor — comments and indentation round-trip through{' '}
-            <code className="text-xs">application/yaml</code>. Hover field names for docs.
+            {gitManaged ? (
+              <>
+                Managed in Git — read-only. Edit the source in the repo, then run{' '}
+                <code className="text-xs">kanade job create</code> to apply (SPEC §3 GitOps).
+              </>
+            ) : (
+              <>
+                Schema-aware editor — comments and indentation round-trip through{' '}
+                <code className="text-xs">application/yaml</code>. Hover field names for docs.
+              </>
+            )}
           </DialogDescription>
         </DialogHeader>
+
+        {gitManaged && gitOrigin && (
+          // #678: point the operator at the Git source of truth. The repo
+          // link (when a remote is configured) targets the repository
+          // root — we can't safely build a blob URL without the branch.
+          <div className="rounded border border-violet/30 bg-violet/5 p-2 text-xs">
+            <div className="flex items-center gap-1.5 font-medium text-violet">
+              <GitBranch className="size-3.5" />
+              Managed in Git
+            </div>
+            <div className="mt-1 flex flex-wrap items-center gap-1.5 text-muted">
+              <span>manifest:</span>
+              <code className="break-all text-fg">{gitOrigin.path}</code>
+              {repoUrl && (
+                <a
+                  href={repoUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-0.5 text-violet hover:underline"
+                >
+                  open repo
+                  <ExternalLink className="size-3" />
+                </a>
+              )}
+            </div>
+            {gitOrigin.script_file && (
+              <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-muted">
+                <span>↳ script:</span>
+                <code className="break-all text-fg">{gitOrigin.script_file}</code>
+              </div>
+            )}
+          </div>
+        )}
 
         {isLoadingExisting ? (
           <div className="flex items-center gap-2 text-muted h-[60vh] justify-center">
@@ -196,7 +289,7 @@ export function YamlEditorDialog({ open, onOpenChange, kind, mode }: YamlEditorD
               </div>
             }
           >
-            <YamlEditor value={text} onChange={setText} kind={kind} />
+            <YamlEditor value={text} onChange={setText} kind={kind} readOnly={gitManaged} />
           </Suspense>
         )}
 
@@ -207,26 +300,40 @@ export function YamlEditorDialog({ open, onOpenChange, kind, mode }: YamlEditorD
         )}
 
         <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={save.isPending}>
-            Cancel
-          </Button>
-          <Button
-            variant="default"
-            onClick={() => save.mutate()}
-            disabled={save.isPending || isLoadingExisting || hasLoadError}
-          >
-            {save.isPending ? (
-              <>
-                <Loader2 className="size-3.5 animate-spin" />
-                saving…
-              </>
-            ) : (
-              <>
-                <Save className="size-3.5" />
-                Save
-              </>
-            )}
-          </Button>
+          {gitManaged ? (
+            // Read-only: no Save. Editing happens in Git, so the only
+            // action is to dismiss the viewer.
+            <Button variant="default" onClick={() => onOpenChange(false)}>
+              Close
+            </Button>
+          ) : (
+            <>
+              <Button
+                variant="ghost"
+                onClick={() => onOpenChange(false)}
+                disabled={save.isPending}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="default"
+                onClick={() => save.mutate()}
+                disabled={save.isPending || isLoadingExisting || hasLoadError}
+              >
+                {save.isPending ? (
+                  <>
+                    <Loader2 className="size-3.5 animate-spin" />
+                    saving…
+                  </>
+                ) : (
+                  <>
+                    <Save className="size-3.5" />
+                    Save
+                  </>
+                )}
+              </Button>
+            </>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>

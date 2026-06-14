@@ -744,6 +744,7 @@ mod tests {
                 icon: None,
             }),
             tags: Vec::new(),
+            origin: None,
         }
     }
 

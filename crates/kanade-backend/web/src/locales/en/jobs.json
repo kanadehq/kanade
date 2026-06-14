@@ -38,6 +38,10 @@
   "row": {
     "openAria": "open details for job {{id}}"
   },
+  "git": {
+    "badge": "git",
+    "badgeTitle": "Managed in Git (read-only) — {{path}}"
+  },
   "detail": {
     "noDescription": "(no description)"
   },

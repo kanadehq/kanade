@@ -5,6 +5,7 @@ import {
   ChevronRight,
   CircleCheck,
   FilePlus2,
+  GitBranch,
   Hourglass,
   Loader2,
   Pencil,
@@ -23,7 +24,7 @@ import { Link } from 'react-router-dom';
 import { toast } from 'sonner';
 
 import { ErrorCard } from '@/components/ErrorCard';
-import { type EditorMode, YamlEditorDialog } from '@/components/YamlEditorDialog';
+import { type EditorMode, type JobOrigin, YamlEditorDialog } from '@/components/YamlEditorDialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -56,6 +57,11 @@ type JobRow = {
    *  for the majority of jobs — drives the tag-filter chips + search
    *  on this page, orthogonal to the id-prefix grouping. */
   tags?: string[];
+  /** GitOps provenance (#678). Present when the job was applied from a
+   *  Git work tree via `kanade job create` — drives the read-only Edit
+   *  modal + the per-row git badge. Absent / null for SPA-born jobs,
+   *  which stay freely editable. */
+  origin?: JobOrigin | null;
   /** v0.30 / PR γ: in-flight counters joined onto each row by the
    *  backend so the Jobs page can show "is anything running right
    *  now" — drives the per-row live chip + kill button enable
@@ -455,6 +461,23 @@ export function Jobs() {
             >
               {j.description || '—'}
             </span>
+            {j.origin && (
+              // #678: GitOps provenance marker — this whole job (manifest
+              // + script) is managed in Git, so the Edit modal opens
+              // read-only. Tooltip carries the repo-relative .yaml path.
+              <span
+                className="mt-0.5 inline-flex w-fit"
+                title={t('git.badgeTitle', { path: j.origin.path })}
+              >
+                <Badge
+                  variant="default"
+                  className="gap-1 px-1.5 py-0 text-[10px] text-muted"
+                >
+                  <GitBranch className="size-3" />
+                  {t('git.badge')}
+                </Badge>
+              </span>
+            )}
             {j.tags && j.tags.length > 0 && (
               <div className="mt-0.5 flex flex-wrap gap-1" onClick={(e) => e.stopPropagation()}>
                 {j.tags.map((tag) => (
@@ -610,6 +633,14 @@ export function Jobs() {
       </>
     );
   }
+
+  // #678: the Git provenance of the row being edited (if any), so the
+  // dialog can render a Git-managed job read-only. `null` for create
+  // mode and for SPA-born jobs.
+  const editingOrigin: JobOrigin | null =
+    editor?.type === 'edit'
+      ? (rows.find((r) => r.id === editor.id)?.origin ?? null)
+      : null;
 
   return (
     <div className="space-y-4">
@@ -835,6 +866,7 @@ export function Jobs() {
           }}
           kind="manifest"
           mode={editor}
+          gitOrigin={editingOrigin}
         />
       )}
     </div>
