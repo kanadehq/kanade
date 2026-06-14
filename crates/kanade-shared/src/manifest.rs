@@ -113,6 +113,38 @@ pub struct Manifest {
     /// from tripping over its absence / presence.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// GitOps provenance (#678) — see [`JobOrigin`]. Stamped by
+    /// `kanade job create` when the source YAML lives inside a Git work
+    /// tree, so the SPA can render the job read-only and point edits
+    /// back at the repo instead of letting a ClickOps edit silently
+    /// diverge from Git (SPEC design principle #3: 設定駆動 YAML + Git).
+    /// `None` for SPA-born jobs and for manifests applied from outside
+    /// any Git repo. Purely informational: agents / scheduler /
+    /// projector never read it, and it survives `script_file:` inlining
+    /// (it's orthogonal to the exactly-one-of script-source rule). New
+    /// field ⇒ #492 wire rule (`default` + `skip_serializing_if`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<JobOrigin>,
+}
+
+/// GitOps provenance for a [`Manifest`] (#678). Populated by
+/// `kanade job create` from the Git context of the source YAML; the
+/// SPA reads it to render Git-managed jobs read-only and link the
+/// operator back at the repo. Never consulted by the runtime.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct JobOrigin {
+    /// Repo-relative path of the manifest YAML — the primary edit
+    /// target the SPA surfaces (e.g. `configs/jobs/foo.yaml`). Forward
+    /// slashes regardless of the authoring OS.
+    pub path: String,
+    /// `origin` remote URL, when the repo has one. Lets the SPA turn
+    /// `path` into a clickable link; `None` for remote-less repos.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    /// Repo-relative path of the `script_file:` this manifest inlined,
+    /// when it used one — a secondary pointer shown beneath `path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_file: Option<String>,
 }
 
 /// "Who + how + when-to-stagger" — the fanout-plan side of an exec.
@@ -520,10 +552,12 @@ pub struct Execute {
     /// at Execute time via `/api/script-objects/{name}/{version}`
     /// and cache it locally. SPEC §2.4.1.
     ///
-    /// Resolver lands in the same follow-up PR as `script_file`;
-    /// today this field passes parse-time validation but the
-    /// backend / agent exec paths bail with "not yet implemented"
-    /// when they see it.
+    /// Fully wired (#210/#211): the backend resolves the digest at
+    /// exec submission (`api::exec::resolve_script_source`), the agent
+    /// fetches + sha-verifies + caches the body (`script_cache`), and
+    /// `kanade script` CRUDs the store. Unlike `script_file:` (inlined
+    /// CLI-side, git-managed), this keeps the body in versioned,
+    /// digest-pinned object storage — the ops-managed counterpart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script_object: Option<String>,
     /// humantime duration string (e.g. "30s", "10m"). Script-intrinsic

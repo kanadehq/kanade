@@ -38,6 +38,10 @@
   "row": {
     "openAria": "ジョブ {{id}} の詳細を開く"
   },
+  "git": {
+    "badge": "git",
+    "badgeTitle": "Git 管理（読み取り専用） — {{path}}"
+  },
   "detail": {
     "noDescription": "(説明なし)"
   },
