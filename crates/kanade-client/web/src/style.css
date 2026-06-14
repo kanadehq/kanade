@@ -201,6 +201,30 @@ body {
   font-size: 12px;
 }
 
+/* Client build version pinned to the sidebar foot. `margin-top: auto`
+   pushes it below the nav items in the flex column; dim + small so it's
+   an unobtrusive "what's running" readout (mirrors the SPA sidebar).
+   Starts `hidden` in the markup and is revealed by main.ts once filled
+   (robust against an HTML formatter breaking a `:empty` rule). */
+.sidebar-version {
+  /* `margin-top: auto` drops it to the bottom when the nav doesn't fill
+     the column; `position: sticky; bottom: 0` keeps it pinned to the
+     viewport bottom if the nav ever overflows and scrolls (the job
+     categories are injected, so the count isn't fixed). The panel
+     background stops scrolling nav items showing through. */
+  margin-top: auto;
+  position: sticky;
+  bottom: 0;
+  padding: 8px 10px 2px;
+  background: var(--panel);
+  font-size: 10px;
+  color: var(--muted);
+  opacity: 0.7;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .content {
   flex: 1 1 auto;
   min-width: 0;

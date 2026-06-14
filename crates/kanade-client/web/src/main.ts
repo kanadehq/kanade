@@ -1106,6 +1106,22 @@ window.addEventListener("DOMContentLoaded", () => {
   // Hydrate the static sidebar / dashboard icons once.
   hydrateIcons();
 
+  // Show this client binary's version dim at the sidebar foot (mirrors the
+  // SPA's /api/version badge). Baked at compile time, so it reflects the
+  // *running* process — not whatever a fleet-deploy just swapped onto disk.
+  void invoke<string>("app_version")
+    .then((v) => {
+      const el = document.getElementById("app-version");
+      if (el) {
+        el.textContent = `v${v}`;
+        // Reveal only once filled. Starting `hidden` (vs a CSS `:empty`
+        // rule) survives an HTML formatter inserting whitespace into the
+        // element, which would otherwise defeat `:empty`.
+        el.hidden = false;
+      }
+    })
+    .catch((e) => console.error("app_version failed", e));
+
   // Delegated click handling: a single document-level listener survives
   // the innerHTML churn that per-element listeners wouldn't.
   document.addEventListener("click", (e) => {

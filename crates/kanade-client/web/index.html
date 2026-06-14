@@ -39,6 +39,10 @@
           <div class="nav-sep" id="nav-jobs-sep" hidden></div>
           <!-- Category nav items injected here (data-view="jobs" data-category=…). -->
           <div id="nav-categories"></div>
+          <!-- Client build version, dim at the sidebar foot (mirrors the SPA's
+               /api/version badge). Filled by main.ts from the `app_version`
+               command; shows the *running* binary's version. -->
+          <div class="sidebar-version" id="app-version" title="クライアントのバージョン" hidden></div>
         </nav>
 
         <main class="content">
