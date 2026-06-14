@@ -406,6 +406,30 @@ fn coverage_for(
     (agents, ok, fail, running, pending)
 }
 
+/// Correlated `NOT EXISTS` guard shared by the detail (`coverage_rows`)
+/// and list (`coverage_summary`) in-flight queries so the two can't
+/// drift. An in-flight placeholder — aliased `i` in the outer query —
+/// only counts as "running" when NO finished row for the same (job, pc)
+/// completed at or after it started. This drops an abandoned
+/// `events.started` placeholder (agent died mid-run, no `ExecResult`,
+/// `finished_at IS NULL`) once a later run finishes, so it stops
+/// shadowing the newer completion and dropping coverage to 0/1 (#681).
+/// `started_at` / `finished_at` share one agent clock, so the intra-pc
+/// text compare is consistent with the `finished_at DESC` ordering the
+/// finished-map queries already rely on.
+///
+/// NOTE: this is supersession-based and deliberately NOT applied to the
+/// scheduler's `count_in_flight` (`max_concurrent`) gate — a wedged
+/// `max_concurrent: 1` schedule never produces the later completion that
+/// would supersede the orphan, so the correct fix there is the
+/// deadline-based reap tracked in #682, not this guard.
+const NOT_SUPERSEDED: &str = " AND NOT EXISTS (
+    SELECT 1 FROM execution_results f
+     WHERE f.job_id = i.job_id AND f.pc_id = i.pc_id
+       AND f.finished_at IS NOT NULL
+       AND f.finished_at >= i.started_at
+)";
+
 /// Per-job in-flight set + latest-finished map for one job. The latest
 /// row per pc is picked deterministically via `ROW_NUMBER()` ordered by
 /// `finished_at DESC, result_id DESC` — so a same-millisecond tie
@@ -416,16 +440,21 @@ async fn coverage_rows(
     job_id: &str,
 ) -> Result<(HashSet<String>, FinishedMap), sqlx::Error> {
     use sqlx::Row;
-    let inflight: HashSet<String> = sqlx::query(
-        "SELECT DISTINCT pc_id FROM execution_results
-          WHERE job_id = ? AND finished_at IS NULL",
-    )
-    .bind(job_id)
-    .fetch_all(pool)
-    .await?
-    .into_iter()
-    .filter_map(|r| r.try_get::<String, _>("pc_id").ok())
-    .collect();
+    // Guard the in-flight set so a superseded placeholder stops counting
+    // the pc as "running" (#681); see `NOT_SUPERSEDED`. The list-view
+    // `coverage_summary` shares the same fragment so the two endpoints
+    // can't drift.
+    let inflight_sql = format!(
+        "SELECT DISTINCT i.pc_id FROM execution_results i
+          WHERE i.job_id = ? AND i.finished_at IS NULL{NOT_SUPERSEDED}"
+    );
+    let inflight: HashSet<String> = sqlx::query(sqlx::AssertSqlSafe(inflight_sql))
+        .bind(job_id)
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .filter_map(|r| r.try_get::<String, _>("pc_id").ok())
+        .collect();
 
     let mut finished = HashMap::new();
     let rows = sqlx::query(
@@ -457,6 +486,43 @@ async fn coverage_rows(
         finished.insert(pc, (exit, version, finished_at));
     }
     Ok((inflight, finished))
+}
+
+/// Batch in-flight set for the list view (`coverage_summary`): the
+/// supersession-guarded (`NOT_SUPERSEDED`) running pcs for many jobs at
+/// once, as `job_id → {pc_id}`. Shares the guard with `coverage_rows`
+/// so the detail and list endpoints can't disagree (#681). Empty input
+/// → empty map (skips the query).
+async fn summary_inflight(
+    pool: &sqlx::SqlitePool,
+    job_ids: &[String],
+) -> Result<HashMap<String, HashSet<String>>, sqlx::Error> {
+    use sqlx::Row;
+    let mut inflight: HashMap<String, HashSet<String>> = HashMap::new();
+    if job_ids.is_empty() {
+        return Ok(inflight);
+    }
+    let placeholders = vec!["?"; job_ids.len()].join(",");
+    // Safe: `placeholders` is a fixed count of literal `?`, no user data
+    // interpolated — values go through `bind` below.
+    let sql = format!(
+        "SELECT DISTINCT i.job_id, i.pc_id FROM execution_results i
+          WHERE i.job_id IN ({placeholders}) AND i.finished_at IS NULL{NOT_SUPERSEDED}"
+    );
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
+    for jid in job_ids {
+        q = q.bind(jid);
+    }
+    for r in q.fetch_all(pool).await? {
+        let (Ok(jid), Ok(pc)) = (
+            r.try_get::<String, _>("job_id"),
+            r.try_get::<String, _>("pc_id"),
+        ) else {
+            continue;
+        };
+        inflight.entry(jid).or_default().insert(pc);
+    }
+    Ok(inflight)
 }
 
 /// GET /api/schedules/{id}/coverage — rollout coverage for one
@@ -568,36 +634,15 @@ pub async fn coverage_summary(
         .collect();
 
     // job_id → in-flight pc set.
-    let mut inflight: HashMap<String, HashSet<String>> = HashMap::new();
+    // job_id → in-flight pc set, supersession-guarded (see summary_inflight).
+    let inflight: HashMap<String, HashSet<String>> = summary_inflight(&s.pool, &job_ids)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("inflight: {e}")))?;
     // job_id → (pc → (exit, version, finished_at)).
     let mut finished: HashMap<String, FinishedMap> = HashMap::new();
 
     if !job_ids.is_empty() {
         let placeholders = vec!["?"; job_ids.len()].join(",");
-
-        let inflight_sql = format!(
-            "SELECT DISTINCT job_id, pc_id FROM execution_results
-              WHERE job_id IN ({placeholders}) AND finished_at IS NULL"
-        );
-        // Safe: `placeholders` is a fixed count of literal `?`, no user
-        // data interpolated — values go through `bind` below.
-        let mut q = sqlx::query(sqlx::AssertSqlSafe(inflight_sql));
-        for jid in &job_ids {
-            q = q.bind(jid);
-        }
-        for r in q
-            .fetch_all(&s.pool)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("inflight: {e}")))?
-        {
-            let (Ok(jid), Ok(pc)) = (
-                r.try_get::<String, _>("job_id"),
-                r.try_get::<String, _>("pc_id"),
-            ) else {
-                continue;
-            };
-            inflight.entry(jid).or_default().insert(pc);
-        }
 
         // Deterministic latest-per-(job,pc) via ROW_NUMBER (ties broken
         // by result_id, claude #617). The `job_id IN (..)` lives in the
@@ -1404,6 +1449,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn coverage_rows_excludes_superseded_inflight() {
+        // #681: an abandoned in-flight placeholder (agent died mid-run,
+        // no ExecResult) that PREDATES a newer successful completion must
+        // NOT keep the pc "running" — otherwise an hourly job that ran
+        // fine shows coverage 0/1 forever.
+        let pool = fresh_pool().await;
+        // pc-c: stale in-flight placeholder started ~2h ago, then a fresh
+        // ok that finished 30m ago (after the placeholder started).
+        insert_run(&pool, "c1", "j1", "pc-c", None, false, "v1", 120).await;
+        insert_run(&pool, "c2", "j1", "pc-c", Some(0), true, "v1", 30).await;
+        // pc-d: genuine in-flight — placeholder started AFTER its last
+        // finished row, so it is still legitimately running.
+        insert_run(&pool, "d1", "j1", "pc-d", Some(0), true, "v1", 90).await;
+        insert_run(&pool, "d2", "j1", "pc-d", None, false, "v1", 5).await;
+
+        let (inflight, finished) = coverage_rows(&pool, "j1").await.unwrap();
+
+        // Superseded placeholder dropped; the fresh ok stands.
+        assert!(!inflight.contains("pc-c"));
+        assert_eq!(finished.get("pc-c").unwrap().0, Some(0));
+        // Genuine in-flight still surfaces as running.
+        assert!(inflight.contains("pc-d"));
+    }
+
+    #[tokio::test]
+    async fn summary_inflight_excludes_superseded() {
+        // The list-view (coverage_summary) path must apply the same
+        // supersession guard as the detail view (#681), across multiple
+        // jobs in one batch query.
+        let pool = fresh_pool().await;
+        // j1/pc-a: stale placeholder predating a fresh ok → dropped.
+        insert_run(&pool, "a1", "j1", "pc-a", None, false, "v1", 120).await;
+        insert_run(&pool, "a2", "j1", "pc-a", Some(0), true, "v1", 30).await;
+        // j2/pc-b: genuine in-flight (placeholder newer than last finish).
+        insert_run(&pool, "b1", "j2", "pc-b", Some(0), true, "v1", 90).await;
+        insert_run(&pool, "b2", "j2", "pc-b", None, false, "v1", 5).await;
+
+        let jobs = vec!["j1".to_string(), "j2".to_string()];
+        let inflight = summary_inflight(&pool, &jobs).await.unwrap();
+
+        // Superseded placeholder dropped for j1; genuine one kept for j2.
+        assert!(!inflight.get("j1").is_some_and(|s| s.contains("pc-a")));
+        assert!(inflight.get("j2").unwrap().contains("pc-b"));
+    }
+
+    #[tokio::test]
     async fn run_stats_empty_for_unknown_job() {
         let pool = fresh_pool().await;
         insert_exec(&pool, "x", "j1", Some(0), true, 10).await;
@@ -1417,7 +1508,7 @@ mod tests {
 
     // ---- coverage_for (#418 rollout coverage) ----
 
-    use super::{FinishedMap, coverage_for, coverage_rows};
+    use super::{FinishedMap, coverage_for, coverage_rows, summary_inflight};
     use std::collections::{HashMap, HashSet};
 
     fn pcs(v: &[&str]) -> Vec<String> {
