@@ -167,6 +167,10 @@ pub fn router(state: AppState) -> Router {
             get(agent_config::effective),
         )
         .route("/api/config", get(agent_config::get_global))
+        // Built-in default EffectiveConfig — compiled-in floor values
+        // the SPA global editor renders as per-field placeholders.
+        // Read-only and viewer-open like the other config reads.
+        .route("/api/config/defaults", get(agent_config::defaults))
         .route("/api/groups/{name}/config", get(agent_config::get_group))
         .route("/api/pcs/{pc_id}/config", get(agent_config::get_pc))
         .route("/api/results", get(results::list))
