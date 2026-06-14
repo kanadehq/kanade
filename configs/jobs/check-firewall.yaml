@@ -1,0 +1,60 @@
+# Example operator-defined HEALTH CHECK (#290) — Windows Firewall
+# profile state. See `check-bitlocker.yaml` for the full `check:`
+# contract explanation; like that one it carries an `inventory:` block
+# with `explode` so the per-profile rows land in a `firewall_profiles`
+# sub-table operators can SQL-filter on the SPA.
+#
+# Emits {status, detail, profiles[]}: any profile (Domain / Private /
+# Public) disabled → fail; all enabled → ok. `Get-NetFirewallProfile`
+# is readable without elevation, but `run_as: system` keeps every
+# check on the same footing.
+#
+# Install:
+#   kanade job create      configs/jobs/check-firewall.yaml
+#   kanade schedule create configs/schedules/check-firewall.yaml
+id: check-firewall
+version: 0.1.0
+description: Windows Firewall enabled on all profiles (Health tab + per-profile sub-table)
+tags: [health-check, security]
+execute:
+  shell: powershell
+  run_as: system
+  timeout: 20s
+  script: |
+    $ErrorActionPreference = 'Stop'
+    try {
+      $profiles = @(Get-NetFirewallProfile -ErrorAction Stop | ForEach-Object {
+        [pscustomobject]@{ name = $_.Name; enabled = [int][bool]$_.Enabled }   # 1=on, 0=off
+      })
+      $off = @($profiles | Where-Object { $_.enabled -eq 0 })
+      if ($profiles.Count -eq 0) {
+        $status = 'unknown'; $detail = 'no firewall profiles reported'
+      } elseif ($off.Count -gt 0) {
+        $status = 'fail'; $detail = "firewall disabled on: $($off.name -join ', ')"
+      } else {
+        $status = 'ok';   $detail = "all $($profiles.Count) profile(s) enabled"
+      }
+    } catch {
+      $status = 'unknown'; $detail = $_.Exception.Message; $profiles = @()
+    }
+    [pscustomobject]@{ status = $status; detail = $detail; profiles = $profiles } | ConvertTo-Json -Compress -Depth 4
+check:
+  name: firewall
+  label: "ファイアウォール"
+inventory:
+  display:
+    - { field: status, label: Firewall }
+    - { field: detail, label: Detail }
+    - field: profiles
+      label: Profiles
+      type: table
+      columns:
+        - { field: name, label: Profile }
+        - { field: enabled, label: Enabled, type: number }
+  explode:
+    - field: profiles
+      table: firewall_profiles
+      primary_key: [name]
+      columns:
+        - { field: name }
+        - { field: enabled, type: integer }

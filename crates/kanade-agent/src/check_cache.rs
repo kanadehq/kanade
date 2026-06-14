@@ -173,8 +173,9 @@ impl Default for CheckSink {
 
 /// Merge operator-defined `extra` checks onto the agent's intrinsic
 /// `base` checks: an operator check overrides a built-in of the same
-/// name (so a fleet can replace e.g. `disk_free` with its own), and
-/// any remaining extras are appended. Pure; shared by `eval_once`.
+/// name (so a fleet could shadow e.g. `agent_self_update` with its
+/// own), and any remaining extras are appended. Pure; shared by
+/// `eval_once`.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub fn merge_checks(base: Vec<Check>, extra: &[Check]) -> Vec<Check> {
     let overridden: HashSet<&str> = extra.iter().map(|c| c.name.as_str()).collect();
@@ -219,6 +220,7 @@ pub fn build_check(hint: &CheckHint, stdout: &str) -> Check {
     let detail = obj.get(&hint.detail_field).and_then(json_to_detail);
     Check {
         name: hint.name.clone(),
+        label: hint.label.clone(),
         status,
         detail,
         troubleshoot: hint.troubleshoot.clone(),
@@ -243,6 +245,7 @@ pub fn build_check_failed(hint: &CheckHint, exit_code: i32, stderr: &str) -> Che
 fn unknown(hint: &CheckHint, detail: String) -> Check {
     Check {
         name: hint.name.clone(),
+        label: hint.label.clone(),
         status: CheckStatus::Unknown,
         detail: Some(detail),
         troubleshoot: hint.troubleshoot.clone(),
@@ -273,6 +276,7 @@ mod tests {
     fn hint(name: &str) -> CheckHint {
         CheckHint {
             name: name.into(),
+            label: None,
             status_field: "status".into(),
             detail_field: "detail".into(),
             troubleshoot: None,
@@ -295,6 +299,7 @@ mod tests {
     fn build_check_honours_custom_fields_and_troubleshoot() {
         let h = CheckHint {
             name: "patch".into(),
+            label: Some("Windows 更新プログラム".into()),
             status_field: "compliance".into(),
             detail_field: "summary".into(),
             troubleshoot: Some("fix-patch".into()),
@@ -305,6 +310,7 @@ mod tests {
             r#"{"compliance":"fail","summary":"12 missing","extra":[1,2]}"#,
         );
         assert_eq!(c.status, CheckStatus::Fail);
+        assert_eq!(c.label.as_deref(), Some("Windows 更新プログラム"));
         assert_eq!(c.detail.as_deref(), Some("12 missing"));
         assert_eq!(c.troubleshoot.as_deref(), Some("fix-patch"));
     }
@@ -341,42 +347,54 @@ mod tests {
 
     #[test]
     fn merge_checks_overrides_builtin_by_name() {
-        let base = vec![
+        let base = vec![Check {
+            name: "agent_self_update".into(),
+            label: None,
+            status: CheckStatus::Ok,
+            detail: None,
+            troubleshoot: None,
+        }];
+        let extra = vec![
+            // operator's own check named like the built-in replaces it
             Check {
                 name: "agent_self_update".into(),
-                status: CheckStatus::Ok,
-                detail: None,
-                troubleshoot: None,
-            },
-            Check {
-                name: "disk_free".into(),
-                status: CheckStatus::Ok,
-                detail: None,
-                troubleshoot: None,
-            },
-        ];
-        let extra = vec![
-            // operator's own disk_free replaces the built-in
-            Check {
-                name: "disk_free".into(),
+                label: None,
                 status: CheckStatus::Warn,
-                detail: Some("90%".into()),
+                detail: Some("override".into()),
+                troubleshoot: None,
+            },
+            Check {
+                name: "disk_space".into(),
+                label: None,
+                status: CheckStatus::Warn,
+                detail: Some("8% free".into()),
                 troubleshoot: None,
             },
             Check {
                 name: "bitlocker".into(),
+                label: None,
                 status: CheckStatus::Ok,
                 detail: None,
                 troubleshoot: None,
             },
         ];
         let merged = merge_checks(base, &extra);
-        // agent_self_update kept, disk_free overridden (Warn), bitlocker added.
+        // agent_self_update overridden (Warn, not duplicated); disk_space
+        // + bitlocker appended.
         assert_eq!(merged.len(), 3);
-        let disk = merged.iter().find(|c| c.name == "disk_free").unwrap();
-        assert_eq!(disk.status, CheckStatus::Warn);
+        let asu = merged
+            .iter()
+            .find(|c| c.name == "agent_self_update")
+            .unwrap();
+        assert_eq!(asu.status, CheckStatus::Warn);
         assert!(merged.iter().any(|c| c.name == "bitlocker"));
-        assert_eq!(merged.iter().filter(|c| c.name == "disk_free").count(), 1);
+        assert_eq!(
+            merged
+                .iter()
+                .filter(|c| c.name == "agent_self_update")
+                .count(),
+            1
+        );
     }
 
     #[test]

@@ -38,3 +38,4 @@ execute:
     [pscustomobject]@{ status = $status; detail = $detail } | ConvertTo-Json -Compress
 check:
   name: cert_expiry
+  label: "証明書の有効期限"

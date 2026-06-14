@@ -109,8 +109,15 @@
           "type": "boolean",
           "default": true
         },
+        "label": {
+          "description": "Optional human-facing display title →\n[`Check.label`](crate::ipc::state::Check). The Client App's\nHealth tab and the operator SPA's Compliance page render this\ninstead of the [`name`](CheckHint::name) slug when set\n(`\"ウイルス対策のリアルタイム保護\"` reads better than\n`defender_rtp`). Falls back to the slug when absent, so it's\npurely additive. Author it in the check's language — there's no\nper-locale variant; checks are operator-defined per fleet.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "name": {
-          "description": "Stable check id → [`Check.name`](crate::ipc::state::Check),\nthe SPA/Client React key + analytics label. Unique within the\nfleet's check set.",
+          "description": "Stable check id → [`Check.name`](crate::ipc::state::Check),\nthe SPA/Client React key + analytics label. Unique within the\nfleet's check set. Machine-friendly slug (`disk_space`,\n`defender_rtp`); for the human-facing row title see [`label`].\n\n[`label`]: CheckHint::label",
           "type": "string"
         },
         "status_field": {

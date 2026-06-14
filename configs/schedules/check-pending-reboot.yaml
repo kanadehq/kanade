@@ -1,0 +1,15 @@
+# Fires the registered `check-pending-reboot` job per-PC every 6 hours.
+# Reboot-pending state only changes around patch installs and reboots,
+# so a 6h tick is plenty to keep the laggard list current.
+#
+# Install (after `kanade job create configs/jobs/check-pending-reboot.yaml`):
+#   kanade schedule create configs/schedules/check-pending-reboot.yaml
+id: check-pending-reboot
+when:
+  per_pc: { every: 6h }
+enabled: true
+job_id: check-pending-reboot
+target:
+  all: true
+jitter: 10m
+tags: [health-check, patching]

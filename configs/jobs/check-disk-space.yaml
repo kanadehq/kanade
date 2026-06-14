@@ -1,0 +1,62 @@
+# Example operator-defined HEALTH CHECK (#290) — system-drive free
+# space. See `check-bitlocker.yaml` for the full `check:` contract
+# explanation.
+#
+# Emits {status, detail} plus the raw numbers; the agent surfaces
+# `status` on the Client App's Health tab and the SPA Compliance page.
+# Thresholds (operator-tunable below): >= 15% free → ok, >= 5% → warn,
+# < 5% → fail. `Win32_LogicalDisk` is readable without elevation, but
+# `run_as: system` keeps every check on the same footing.
+#
+# MIGRATION (this replaces the removed built-in `disk_free` check):
+#   * Register this file BEFORE or WITH the agent binary upgrade —
+#     upgrading the binary alone drops the built-in `disk_free` entry
+#     from StateSnapshot.checks and nothing replaces it until the first
+#     schedule tick after `kanade job/schedule create`.
+#   * The status-light name changed `disk_free` → `disk_space`; update
+#     any SPA saved queries / alert rules keyed on the old name.
+#   * The warn threshold moved 10% (old built-in) → 15% here, so hosts
+#     between 10–14.9% free flip ok → warn after the switch. Tune below
+#     if you want to preserve the old behaviour.
+#
+# Install:
+#   kanade job create      configs/jobs/check-disk-space.yaml
+#   kanade schedule create configs/schedules/check-disk-space.yaml
+id: check-disk-space
+version: 0.1.0
+description: Free space on the system drive (Health tab + Compliance)
+tags: [health-check, storage]
+execute:
+  shell: powershell
+  run_as: system
+  timeout: 20s
+  script: |
+    $ErrorActionPreference = 'Stop'
+    try {
+      $sys = $env:SystemDrive                      # e.g. "C:"
+      $d   = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$sys'"
+      if ($null -eq $d -or [double]$d.Size -eq 0) {
+        $status = 'unknown'; $detail = "system drive $sys not reported"
+        $freeGb = $null; $sizeGb = $null; $freePct = $null
+      } else {
+        $freeGb  = [math]::Round($d.FreeSpace / 1GB, 1)
+        $sizeGb  = [math]::Round($d.Size / 1GB, 1)
+        $freePct = [math]::Round(($d.FreeSpace / $d.Size) * 100, 1)
+        if     ($freePct -lt 5)  { $status = 'fail' }
+        elseif ($freePct -lt 15) { $status = 'warn' }
+        else                     { $status = 'ok' }
+        $detail = "$sys $freeGb GB free of $sizeGb GB ($freePct%)"
+      }
+    } catch {
+      $status = 'unknown'; $detail = $_.Exception.Message
+      $freeGb = $null; $sizeGb = $null; $freePct = $null
+    }
+    [pscustomobject]@{
+      status = $status; detail = $detail
+      drive = $sys; free_gb = $freeGb; size_gb = $sizeGb; free_pct = $freePct
+    } | ConvertTo-Json -Compress
+check:
+  name: disk_space
+  # Human-facing title shown on the Client App's Health tab and the
+  # operator SPA's Compliance page instead of the `disk_space` slug.
+  label: "ディスクの空き容量"

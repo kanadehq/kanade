@@ -1,0 +1,58 @@
+# Example operator-defined HEALTH CHECK (#290) — Windows Defender
+# protection STATE. Complements `check-av-signature.yaml` (signature
+# freshness): a host can have fresh signatures while real-time
+# protection is switched off, so this checks the live shields.
+# See `check-bitlocker.yaml` for the full `check:` contract.
+#
+# Emits {status, detail}: real-time protection off → fail; on but
+# tamper protection off → warn; on (or Defender stepped aside for a
+# third-party AV in passive mode) → ok. `MSFT_MpComputerStatus` is
+# readable without elevation, but `run_as: system` keeps every check
+# on the same footing.
+#
+# NOTE: this keys off `RealTimeProtectionEnabled` + `AMRunningMode`,
+# NOT `AntimalwareEnabled` — that property is unreliable (it comes back
+# empty/null on some Windows builds even when Defender is running
+# normally, which would false-fail a perfectly healthy box). And when
+# a third-party AV is installed Defender drops to "Passive Mode" with
+# `AntimalwareEnabled` unset, yet the endpoint is still protected — so
+# passive mode is treated as ok, not a failure.
+#
+# Install:
+#   kanade job create      configs/jobs/check-defender-rtp.yaml
+#   kanade schedule create configs/schedules/check-defender-rtp.yaml
+id: check-defender-rtp
+version: 0.1.0
+description: Windows Defender real-time / tamper protection state
+tags: [health-check, security]
+execute:
+  shell: powershell
+  run_as: system
+  timeout: 20s
+  script: |
+    $ErrorActionPreference = 'Stop'
+    try {
+      $s    = Get-CimInstance -Namespace 'root/Microsoft/Windows/Defender' -ClassName MSFT_MpComputerStatus
+      $rtp  = [bool]$s.RealTimeProtectionEnabled
+      $tp   = [bool]$s.IsTamperProtected
+      $mode = "$($s.AMRunningMode)".Trim()          # Normal / Passive Mode / SxS Passive Mode / EDR Block Mode
+      if     ($mode -match 'Passive|SxS') { $status = 'ok';   $detail = "third-party AV primary; Defender in '$mode' mode" }
+      elseif (-not $rtp)                  { $status = 'fail'; $detail = "real-time protection OFF (mode: $mode)" }
+      elseif (-not $tp)                   { $status = 'warn'; $detail = 'real-time protection ON; tamper protection OFF' }
+      else                                { $status = 'ok';   $detail = 'real-time + tamper protection ON' }
+    } catch {
+      $status = 'unknown'; $detail = $_.Exception.Message
+      $rtp = $null; $tp = $null; $mode = $null
+    }
+    [pscustomobject]@{
+      status = $status; detail = $detail
+      realtime = $rtp; tamper_protected = $tp; running_mode = $mode
+    } | ConvertTo-Json -Compress
+check:
+  name: defender_rtp
+  label: "ウイルス対策のリアルタイム保護"
+  # Wires the Health-tab "修復する" button to the remediation job below
+  # (configs/jobs/fix-defender-rtp.yaml). The job must carry a `client:`
+  # block so it's invokable — register it too:
+  #   kanade job create configs/jobs/fix-defender-rtp.yaml
+  troubleshoot: fix-defender-rtp

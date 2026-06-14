@@ -50,6 +50,9 @@ execute:
     [pscustomobject]@{ status = $status; detail = $detail; volumes = $vols } | ConvertTo-Json -Compress -Depth 4
 check:
   name: bitlocker
+  # Human-facing title for the Health tab / Compliance page (the
+  # `bitlocker` slug stays the stable id).
+  label: "BitLocker ディスク暗号化"
   # troubleshoot: enable-bitlocker   # optional remediation job id (job must carry a client: block)
 inventory:
   display:

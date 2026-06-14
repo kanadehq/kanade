@@ -222,8 +222,21 @@ pub struct InventoryHint {
 pub struct CheckHint {
     /// Stable check id → [`Check.name`](crate::ipc::state::Check),
     /// the SPA/Client React key + analytics label. Unique within the
-    /// fleet's check set.
+    /// fleet's check set. Machine-friendly slug (`disk_space`,
+    /// `defender_rtp`); for the human-facing row title see [`label`].
+    ///
+    /// [`label`]: CheckHint::label
     pub name: String,
+    /// Optional human-facing display title →
+    /// [`Check.label`](crate::ipc::state::Check). The Client App's
+    /// Health tab and the operator SPA's Compliance page render this
+    /// instead of the [`name`](CheckHint::name) slug when set
+    /// (`"ウイルス対策のリアルタイム保護"` reads better than
+    /// `defender_rtp`). Falls back to the slug when absent, so it's
+    /// purely additive. Author it in the check's language — there's no
+    /// per-locale variant; checks are operator-defined per fleet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     /// Top-level stdout field whose string value
     /// (`ok`/`warn`/`fail`/`unknown`) becomes the Health-tab light
     /// ([`CheckStatus`](crate::ipc::state::CheckStatus)). Defaults to
@@ -609,6 +622,14 @@ impl Manifest {
                     return Err("check.troubleshoot must not be empty when set".to_string());
                 }
             }
+            // A present-but-blank `label` would render an empty row
+            // title on the Health tab / Compliance page — reject it so
+            // the slug fallback only ever kicks in when label is absent.
+            if let Some(label) = &check.label {
+                if label.trim().is_empty() {
+                    return Err("check.label must not be empty when set".to_string());
+                }
+            }
         }
         // #291: a `client:` job is rendered in the Client App's
         // catalog (`jobs.list` → `jobs.execute`). serde already makes
@@ -686,6 +707,22 @@ mod tests {
                 "check-cert-expiry",
                 include_str!("../../../configs/jobs/check-cert-expiry.yaml"),
             ),
+            (
+                "check-disk-space",
+                include_str!("../../../configs/jobs/check-disk-space.yaml"),
+            ),
+            (
+                "check-pending-reboot",
+                include_str!("../../../configs/jobs/check-pending-reboot.yaml"),
+            ),
+            (
+                "check-defender-rtp",
+                include_str!("../../../configs/jobs/check-defender-rtp.yaml"),
+            ),
+            (
+                "check-firewall",
+                include_str!("../../../configs/jobs/check-firewall.yaml"),
+            ),
         ];
         for (name, yaml) in jobs {
             let m: Manifest =
@@ -697,10 +734,10 @@ mod tests {
                 .as_ref()
                 .unwrap_or_else(|| panic!("{name} must carry a check: hint"));
             assert!(!check.name.trim().is_empty(), "{name} check.name empty");
-            // These three examples all read admin-only WMI namespaces,
-            // so they run_as system. NOTE: that's a property of these
-            // particular checks, NOT of the `check:` contract — a check
-            // probing user-session state could legitimately run_as user.
+            // These examples all read admin-only WMI / registry / netsh
+            // state, so they run_as system. NOTE: that's a property of
+            // these particular checks, NOT of the `check:` contract — a
+            // check probing user-session state could run_as user.
             assert_eq!(
                 m.execute.run_as,
                 RunAs::System,
@@ -730,6 +767,11 @@ mod tests {
                 "install-slack",
                 JobCategory::Catalog,
                 include_str!("../../../configs/jobs/install-slack.yaml"),
+            ),
+            (
+                "fix-defender-rtp",
+                JobCategory::Troubleshoot,
+                include_str!("../../../configs/jobs/fix-defender-rtp.yaml"),
             ),
         ];
         for (id, category, yaml) in jobs {
@@ -761,6 +803,22 @@ mod tests {
             (
                 "check-cert-expiry",
                 include_str!("../../../configs/schedules/check-cert-expiry.yaml"),
+            ),
+            (
+                "check-disk-space",
+                include_str!("../../../configs/schedules/check-disk-space.yaml"),
+            ),
+            (
+                "check-pending-reboot",
+                include_str!("../../../configs/schedules/check-pending-reboot.yaml"),
+            ),
+            (
+                "check-defender-rtp",
+                include_str!("../../../configs/schedules/check-defender-rtp.yaml"),
+            ),
+            (
+                "check-firewall",
+                include_str!("../../../configs/schedules/check-firewall.yaml"),
             ),
         ];
         for (name, yaml) in schedules {

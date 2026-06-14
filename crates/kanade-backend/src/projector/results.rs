@@ -510,9 +510,10 @@ async fn upsert_check_status(
     };
 
     sqlx::query(
-        "INSERT INTO check_status (pc_id, check_name, status, detail, recorded_at)
-         VALUES (?, ?, ?, ?, ?)
+        "INSERT INTO check_status (pc_id, check_name, label, status, detail, recorded_at)
+         VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(pc_id, check_name) DO UPDATE SET
+             label       = excluded.label,
              status      = excluded.status,
              detail      = excluded.detail,
              recorded_at = excluded.recorded_at
@@ -520,6 +521,7 @@ async fn upsert_check_status(
     )
     .bind(&r.pc_id)
     .bind(&hint.name)
+    .bind(&hint.label)
     .bind(status)
     .bind(&detail)
     .bind(recorded_at)
@@ -963,6 +965,7 @@ mod tests {
     fn check_hint(name: &str, status_field: &str) -> CheckHint {
         CheckHint {
             name: name.into(),
+            label: None,
             status_field: status_field.into(),
             detail_field: "detail".into(),
             troubleshoot: None,
@@ -1089,6 +1092,42 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(row, ("unknown".into(), Some("12 patched".into())));
+    }
+
+    #[tokio::test]
+    async fn check_status_projects_label_when_hint_carries_one() {
+        let pool = fresh_pool().await;
+        // Operator-authored display title flows from the hint into the
+        // row; a hint without one leaves label NULL (UI falls back to
+        // the slug).
+        let hint = CheckHint {
+            label: Some("ディスクの空き容量".into()),
+            ..check_hint("disk_space", "status")
+        };
+        let mut r = sample("res-lbl", "req-lbl", "pc-9", None);
+        r.stdout = r#"{"status":"ok","detail":"20% free"}"#.into();
+        upsert_check_status(&pool, &r, &hint, chrono::Utc::now())
+            .await
+            .unwrap();
+        let labeled: Option<String> =
+            sqlx::query_scalar("SELECT label FROM check_status WHERE check_name = 'disk_space'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(labeled.as_deref(), Some("ディスクの空き容量"));
+
+        let bare = check_hint("firewall", "status");
+        let mut r2 = sample("res-lbl2", "req-lbl2", "pc-9", None);
+        r2.stdout = r#"{"status":"ok"}"#.into();
+        upsert_check_status(&pool, &r2, &bare, chrono::Utc::now())
+            .await
+            .unwrap();
+        let none: Option<String> =
+            sqlx::query_scalar("SELECT label FROM check_status WHERE check_name = 'firewall'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(none, None);
     }
 
     #[tokio::test]

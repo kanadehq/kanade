@@ -5,8 +5,10 @@
 //!
 //! 1. Snapshots the current `EffectiveConfig` to read the rollout
 //!    target version (for the `agent_self_update` check).
-//! 2. Runs each platform check (disk-free via Win32, others
-//!    stubbed for now — see TODOs).
+//! 2. Evaluates the agent's intrinsic, non-scriptable checks
+//!    (currently just `agent_self_update`) and merges in any
+//!    operator-defined `check:` results cached from the command
+//!    path (see [`crate::check_cache`]).
 //! 3. Builds a fresh [`StateSnapshot`] and publishes via the
 //!    `watch::Sender`. The [`klp::handlers::state`] forwarder
 //!    tasks pick up the change and push it down each subscribed
@@ -26,10 +28,10 @@ use tokio::sync::watch;
 use tracing::debug;
 
 /// How often the evaluator re-checks the endpoint. Picked so the
-/// SPA's Health tab feels live without burning CPU — most checks
-/// are sub-millisecond, but `disk_free` does a Win32 syscall and
-/// future checks (BitLocker, AV) will do WMI queries that can
-/// take 100-500 ms.
+/// SPA's Health tab feels live without burning CPU — the intrinsic
+/// `agent_self_update` check is a sub-millisecond version compare,
+/// and operator-defined `check:` results are read from cache (their
+/// PowerShell runs on the command path, not here).
 const EVAL_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Whether the agent currently holds a live broker connection —
@@ -54,7 +56,7 @@ pub fn client_online(client: &async_nats::Client) -> bool {
 ///
 /// `extra_checks` are operator-defined health checks (#290) the
 /// command path has run and cached (see [`crate::check_cache`]). They
-/// are merged onto the agent's two intrinsic checks; an operator
+/// are merged onto the agent's intrinsic check(s); an operator
 /// check overrides a built-in of the same name.
 pub fn eval_once(
     pc_id: &str,
@@ -63,14 +65,17 @@ pub fn eval_once(
     online: bool,
     extra_checks: &[Check],
 ) -> StateSnapshot {
-    // Intrinsic, agent-internal checks (not operator-scriptable):
-    // version-target compare + local disk headroom. Everything else
-    // (bitlocker / av / cert / …) is now an operator-defined `check:`
-    // job merged in from the cache.
-    let intrinsic = vec![
-        agent_self_update_check(agent_version, cfg.target_version.as_deref()),
-        disk_free_check(),
-    ];
+    // The only intrinsic, non-scriptable check is the version-target
+    // compare — it reads the agent's own running version against the
+    // rollout target, state no operator PowerShell can observe.
+    // Everything probe-able from the box (disk_free / bitlocker / av /
+    // cert / …) is an operator-defined `check:` job merged in from the
+    // cache, shipped as example YAMLs under `configs/jobs/` (disk_free
+    // → `check-disk-space.yaml`).
+    let intrinsic = vec![agent_self_update_check(
+        agent_version,
+        cfg.target_version.as_deref(),
+    )];
     let checks = crate::check_cache::merge_checks(intrinsic, extra_checks);
     StateSnapshot {
         pc_id: pc_id.to_string(),
@@ -151,10 +156,15 @@ pub async fn eval_loop(
 /// - Differ → Warn with detail so the SPA's Health tab shows
 ///   "restart pending" without yet being a hard failure.
 fn agent_self_update_check(running: &str, target: Option<&str>) -> Check {
+    // Human-facing title for the one intrinsic check — operator-defined
+    // checks carry their own `label`; this is the built-in equivalent so
+    // the Health tab never shows the bare `agent_self_update` slug.
+    let label = Some("エージェントの自動更新".to_string());
     let target = target.filter(|s| !s.is_empty()).unwrap_or(running);
     if running == target {
         Check {
             name: "agent_self_update".into(),
+            label,
             status: CheckStatus::Ok,
             detail: Some(format!("running {running} (target matches)")),
             troubleshoot: None,
@@ -162,6 +172,7 @@ fn agent_self_update_check(running: &str, target: Option<&str>) -> Check {
     } else {
         Check {
             name: "agent_self_update".into(),
+            label,
             status: CheckStatus::Warn,
             detail: Some(format!(
                 "running {running}, target {target} — restart pending"
@@ -174,77 +185,13 @@ fn agent_self_update_check(running: &str, target: Option<&str>) -> Check {
     }
 }
 
-/// `disk_free` — fraction of free space on `C:\` (Windows).
-///
-/// - > 10 % free → Ok.
-/// - 5 - 10 % free → Warn.
-/// - < 5 % free → Fail.
-///
-/// The threshold values are conservative defaults; future SPEC
-/// work may make them configurable per fleet.
-#[cfg(target_os = "windows")]
-fn disk_free_check() -> Check {
-    use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
-    use windows::core::w;
-
-    let mut free: u64 = 0;
-    let mut total: u64 = 0;
-    let result =
-        unsafe { GetDiskFreeSpaceExW(w!("C:\\"), None, Some(&mut total), Some(&mut free)) };
-    if let Err(e) = result {
-        return Check {
-            name: "disk_free".into(),
-            status: CheckStatus::Unknown,
-            detail: Some(format!("GetDiskFreeSpaceExW failed: {e}")),
-            troubleshoot: None,
-        };
-    }
-    if total == 0 {
-        return Check {
-            name: "disk_free".into(),
-            status: CheckStatus::Unknown,
-            detail: Some("C:\\ reports 0 total bytes".into()),
-            troubleshoot: None,
-        };
-    }
-    let pct = (free as f64 / total as f64) * 100.0;
-    let to_gb = |b: u64| (b as f64) / 1024.0 / 1024.0 / 1024.0;
-    let detail = Some(format!(
-        "{:.1}% free ({:.1} GB / {:.1} GB)",
-        pct,
-        to_gb(free),
-        to_gb(total),
-    ));
-    let status = if pct >= 10.0 {
-        CheckStatus::Ok
-    } else if pct >= 5.0 {
-        CheckStatus::Warn
-    } else {
-        CheckStatus::Fail
-    };
-    Check {
-        name: "disk_free".into(),
-        status,
-        detail,
-        troubleshoot: None,
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn disk_free_check() -> Check {
-    Check {
-        name: "disk_free".into(),
-        status: CheckStatus::Unknown,
-        detail: Some("disk_free not implemented on non-Windows targets".into()),
-        troubleshoot: None,
-    }
-}
-
-// bitlocker / av_signature / cert_expiry are no longer hardcoded
-// stubs here (#290) — they are operator-defined `check:` jobs merged
-// in from `crate::check_cache`, shipped as example YAMLs under
-// `configs/jobs/`. The agent keeps only intrinsic, non-scriptable
-// checks (`agent_self_update`, `disk_free`) built in.
+// disk_free / bitlocker / av_signature / cert_expiry are no longer
+// hardcoded here (#290 / #674-follow-up) — they are operator-defined
+// `check:` jobs merged in from `crate::check_cache`, shipped as
+// example YAMLs under `configs/jobs/` (disk_free → `check-disk-space`,
+// status-light name `disk_space`). The agent keeps only the intrinsic,
+// non-scriptable `agent_self_update` check built in — anything probe-
+// able from the endpoint belongs in a config file, not in the binary.
 
 #[cfg(test)]
 mod tests {
@@ -264,24 +211,28 @@ mod tests {
         assert_eq!(snap.vpn, "unknown");
         assert_eq!(snap.agent_version, "0.41.0");
         assert_eq!(snap.target_version, "0.41.0"); // target unset → falls back
-        // With no operator checks, only the two intrinsic ones (#290).
+        // With no operator checks, only the single intrinsic one (#290).
         let names: Vec<&str> = snap.checks.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, vec!["agent_self_update", "disk_free"]);
+        assert_eq!(names, vec!["agent_self_update"]);
     }
 
     #[test]
     fn eval_once_merges_operator_checks() {
         // #290: cached operator-defined checks appear alongside the
-        // intrinsic ones, and one named like a built-in overrides it.
+        // intrinsic one, and one named like a built-in overrides it.
         let extra = vec![
             Check {
-                name: "bitlocker".into(),
+                name: "disk_space".into(),
+                label: None,
                 status: CheckStatus::Warn,
-                detail: Some("D: unprotected".into()),
-                troubleshoot: Some("fix-bitlocker".into()),
+                detail: Some("C: 8% free".into()),
+                troubleshoot: None,
             },
+            // Same name as the intrinsic check → must override, not
+            // duplicate.
             Check {
-                name: "disk_free".into(),
+                name: "agent_self_update".into(),
+                label: None,
                 status: CheckStatus::Fail,
                 detail: Some("operator override".into()),
                 troubleshoot: None,
@@ -289,13 +240,19 @@ mod tests {
         ];
         let snap = eval_once("PC1234", "0.41.0", &cfg_with(None), true, &extra);
         let names: Vec<&str> = snap.checks.iter().map(|c| c.name.as_str()).collect();
-        // agent_self_update kept; disk_free overridden (not duplicated);
-        // bitlocker appended.
-        assert!(names.contains(&"agent_self_update"));
-        assert!(names.contains(&"bitlocker"));
-        assert_eq!(names.iter().filter(|n| **n == "disk_free").count(), 1);
-        let disk = snap.checks.iter().find(|c| c.name == "disk_free").unwrap();
-        assert_eq!(disk.status, CheckStatus::Fail);
+        // disk_space appended; agent_self_update overridden (not
+        // duplicated).
+        assert!(names.contains(&"disk_space"));
+        assert_eq!(
+            names.iter().filter(|n| **n == "agent_self_update").count(),
+            1
+        );
+        let asu = snap
+            .checks
+            .iter()
+            .find(|c| c.name == "agent_self_update")
+            .unwrap();
+        assert_eq!(asu.status, CheckStatus::Fail);
     }
 
     #[test]
@@ -335,29 +292,6 @@ mod tests {
         let c = agent_self_update_check("0.41.0", Some("0.42.0"));
         assert_eq!(c.status, CheckStatus::Warn);
         assert!(c.detail.unwrap().contains("restart pending"));
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn disk_free_returns_concrete_status_on_windows() {
-        // We can't pin the exact status (depends on the machine
-        // running the test), but the check must run without
-        // crashing and produce a sensible status + detail.
-        let c = disk_free_check();
-        assert_eq!(c.name, "disk_free");
-        // Status is whatever the actual disk reports; just
-        // assert it's not Unknown (which would indicate the
-        // Win32 call failed unexpectedly on a healthy dev box).
-        assert!(
-            matches!(
-                c.status,
-                CheckStatus::Ok | CheckStatus::Warn | CheckStatus::Fail
-            ),
-            "expected concrete status, got {:?}",
-            c.status
-        );
-        let detail = c.detail.expect("detail populated");
-        assert!(detail.contains("free"), "detail: {detail}");
     }
 
     #[test]
