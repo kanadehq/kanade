@@ -3,6 +3,9 @@
 //! Routes:
 //!   GET    /api/config                        -> global ConfigScope
 //!   PUT    /api/config                        (replace global scope)
+//!   GET    /api/config/defaults               -> built-in EffectiveConfig
+//!     (compiled-in floor values; read-only placeholder source for
+//!      the SPA global editor)
 //!   GET    /api/groups/{name}/config          -> group ConfigScope
 //!   PUT    /api/groups/{name}/config          (replace group scope)
 //!   DELETE /api/groups/{name}/config          (drop the row)
@@ -54,6 +57,19 @@ pub async fn put_global(
     write_scope(&kv, KEY_AGENT_CONFIG_GLOBAL, &scope).await?;
     info!(scope = ?scope, "agent_config.global replaced");
     Ok(Json(scope))
+}
+
+/// Built-in default [`EffectiveConfig`] — the floor every scope
+/// layers on top of. Read-only and state-free (the values are
+/// compiled in), so it needs no KV round-trip. The SPA's global
+/// editor reads this to show each field's inherited default as a
+/// placeholder: the operator sees what a left-blank field resolves
+/// to without having to pin the value into the global scope (pinning
+/// a default would freeze it against future #491-style default
+/// changes). Sourcing it here keeps Rust the single source of truth
+/// rather than duplicating the floor values in TypeScript.
+pub async fn defaults() -> Json<EffectiveConfig> {
+    Json(EffectiveConfig::builtin_defaults())
 }
 
 // -------- per-group scope --------

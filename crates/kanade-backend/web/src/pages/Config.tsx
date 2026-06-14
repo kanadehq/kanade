@@ -14,130 +14,77 @@ import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { apiFetch, formatError } from '@/lib/api';
-import type { ConfigScope, EffectiveConfigResponse } from '@/lib/types';
+import type { ConfigScope, EffectiveConfig, EffectiveConfigResponse } from '@/lib/types';
 
-// Friendly, single-purpose editor for the operator-facing client
-// product name (`client_display_name`). It lives on the global scope
-// — the common "one customer = whole fleet" case — but does a
-// read-modify-write that spreads the existing global ConfigScope, so
-// saving the name never clobbers the other global fields the raw JSON
-// editor below manages. Per-group / per-pc overrides still go through
-// the ScopeEditor's JSON. Shares the ['config','global'] query with
-// GlobalEditor so a save here invalidates both.
-function ClientDisplayNameEditor() {
-  const { t } = useTranslation('config');
-  const qc = useQueryClient();
-  const { data, error, isLoading } = useQuery({
-    queryKey: ['config', 'global'],
-    queryFn: () => apiFetch<ConfigScope>('/api/config'),
-    staleTime: Infinity,
-    refetchOnWindowFocus: false,
-  });
-  const [name, setName] = useState('');
-  // Track the last *server* value we seeded from (not just a "seeded
-  // once" boolean): this editor shares the ['config','global'] query
-  // with GlobalEditor, so when that editor saves a new name the value
-  // changes underneath us and the input must re-sync. Re-seeding only
-  // when the server value actually changes (staleTime Infinity + no
-  // focus refetch mean the only refetch is a post-save invalidation)
-  // avoids the #520 clobber: an idle refetch returning the same value
-  // won't wipe the operator's in-progress edit.
-  const lastServerValue = useRef<string | undefined>(undefined);
-  useEffect(() => {
-    if (!data) return;
-    const serverValue = data.client_display_name ?? '';
-    if (lastServerValue.current !== serverValue) {
-      setName(serverValue);
-      lastServerValue.current = serverValue;
-    }
-  }, [data]);
+// The string-valued global-scope knobs, paired with the
+// EffectiveConfig key whose built-in default seeds the field's
+// placeholder. `client_display_name` is in here too (its dedicated
+// editor was folded into this form), but it renders with a bespoke
+// placeholder and maxLength below rather than via `ph()` — its
+// EffectiveConfig default is `null` (the client supplies its own
+// built-in name), so there's no concrete floor value to show.
+const GLOBAL_TEXT_FIELDS = [
+  { key: 'target_version', defaultKey: 'target_version' },
+  { key: 'target_version_jitter', defaultKey: 'target_version_jitter' },
+  { key: 'heartbeat_interval', defaultKey: 'heartbeat_interval' },
+  { key: 'host_perf_interval', defaultKey: 'host_perf_interval' },
+  { key: 'client_display_name', defaultKey: 'client_display_name' },
+] as const satisfies ReadonlyArray<{
+  key: keyof ConfigScope;
+  defaultKey: keyof EffectiveConfig;
+}>;
 
-  const save = useMutation({
-    mutationFn: (next: ConfigScope) =>
-      apiFetch<ConfigScope>('/api/config', { method: 'PUT', body: JSON.stringify(next) }),
-    onSuccess: (_r, vars) => {
-      qc.invalidateQueries({ queryKey: ['config', 'global'] });
-      toast.success(
-        vars.client_display_name
-          ? t('clientName.toast.saveSuccess')
-          : t('clientName.toast.clearSuccess'),
-      );
-    },
-    onError: (e) => toast.error(t('clientName.toast.saveFailure', { error: formatError(e) })),
-  });
+// The name becomes the all-users Start-Menu `.lnk` filename; a path
+// past Windows MAX_PATH (~260, minus the ~57-char Start-Menu prefix)
+// would fail/truncate. 120 is far above any real product name yet
+// safely under the limit (Claude review #670).
+const CLIENT_DISPLAY_NAME_MAX = 120;
 
-  const commit = (value: string) => {
-    // Guard: this is a full-replace PUT on the whole global scope, so
-    // committing before the GET has populated `data` would spread `{}`
-    // and silently drop every other global field (heartbeat_interval,
-    // target_version, …). Bail until the snapshot is loaded (CodeRabbit
-    // PR #670). The buttons are also disabled in this state, but the
-    // guard makes the data-loss path unreachable regardless.
-    if (!data) {
-      toast.error(t('clientName.toast.notLoaded'));
-      return;
-    }
-    const trimmed = value.trim();
-    // Spread the current global scope so other fields survive; an empty
-    // value drops the key entirely (→ client falls back to its default).
-    const next: ConfigScope = { ...data };
-    if (trimmed) next.client_display_name = trimmed;
-    else delete next.client_display_name;
-    save.mutate(next);
+type GlobalForm = {
+  target_version: string;
+  target_version_jitter: string;
+  heartbeat_interval: string;
+  host_perf_interval: string;
+  // '' = inherit (key dropped → falls through to the built-in floor);
+  // 'true'/'false' pin the flag on the whole fleet.
+  process_perf_enabled: '' | 'true' | 'false';
+  process_perf_expires_at: string;
+  process_perf_top_n: string;
+  // Blank → key dropped → the client renders its own built-in name.
+  client_display_name: string;
+};
+
+const EMPTY_GLOBAL_FORM: GlobalForm = {
+  target_version: '',
+  target_version_jitter: '',
+  heartbeat_interval: '',
+  host_perf_interval: '',
+  process_perf_enabled: '',
+  process_perf_expires_at: '',
+  process_perf_top_n: '',
+  client_display_name: '',
+};
+
+// A field left blank means "this scope doesn't set it" — exactly the
+// `None`/key-absent state on the Rust side — so the value keeps
+// inheriting the (evolving) built-in default rather than freezing it.
+function scopeToGlobalForm(s: ConfigScope): GlobalForm {
+  return {
+    target_version: s.target_version ?? '',
+    target_version_jitter: s.target_version_jitter ?? '',
+    heartbeat_interval: s.heartbeat_interval ?? '',
+    host_perf_interval: s.host_perf_interval ?? '',
+    // `== null` (not `=== undefined`): the backend omits unset keys via
+    // skip_serializing_if so they arrive `undefined` today, but a JSON
+    // `null` must map to the same "inherit" state — otherwise it would
+    // read as an explicit 'false' / the string "null". Matches the
+    // nullish `?? ''` the string fields above already use.
+    process_perf_enabled:
+      s.process_perf_enabled == null ? '' : s.process_perf_enabled ? 'true' : 'false',
+    process_perf_expires_at: s.process_perf_expires_at ?? '',
+    process_perf_top_n: s.process_perf_top_n == null ? '' : String(s.process_perf_top_n),
+    client_display_name: s.client_display_name ?? '',
   };
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>{t('clientName.title')}</CardTitle>
-        <CardDescription>{t('clientName.description')}</CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        {isLoading && (
-          <div className="text-muted flex items-center gap-2">
-            <Loader2 className="size-4 animate-spin" />
-            {t('clientName.loading')}
-          </div>
-        )}
-        {error && <ErrorCard title={t('clientName.loadErrorTitle')} error={error} />}
-        <div>
-          <Label htmlFor="client-display-name">{t('clientName.label')}</Label>
-          <Input
-            id="client-display-name"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder={t('clientName.placeholder')}
-            // The name becomes the Start-Menu `.lnk` filename; a path
-            // past Windows MAX_PATH (~260, minus the ~57-char Start-Menu
-            // prefix) would fail/truncate. 120 is far above any real
-            // product name yet safely under the limit (Claude review #670).
-            maxLength={120}
-          />
-          <p className="mt-1 text-xs text-muted">{t('clientName.hint')}</p>
-        </div>
-        <div className="flex gap-2">
-          {/* Disabled until the global snapshot is loaded — a save built
-              from a missing `data` would full-replace the scope and drop
-              other fields (CodeRabbit PR #670). */}
-          <Button onClick={() => commit(name)} disabled={save.isPending || !data}>
-            {save.isPending ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
-            {t('clientName.saveButton')}
-          </Button>
-          <Button
-            variant="secondary"
-            disabled={save.isPending || !data || !name.trim()}
-            onClick={() => {
-              setName('');
-              commit('');
-            }}
-          >
-            {t('clientName.clearButton')}
-          </Button>
-        </div>
-        {save.error && <ErrorCard title={t('clientName.saveErrorTitle')} error={save.error} />}
-      </CardContent>
-    </Card>
-  );
 }
 
 function GlobalEditor() {
@@ -155,17 +102,29 @@ function GlobalEditor() {
     staleTime: Infinity,
     refetchOnWindowFocus: false,
   });
-  const [draft, setDraft] = useState<string>('');
-  // Seed the textarea once per load session (same guard as
-  // YamlEditorDialog); reset after a save so the invalidated
-  // refetch re-seeds with the server-normalised result.
+  // Built-in floor values, sourced from the backend so the
+  // placeholders never drift from the Rust source of truth (a default
+  // change like #491's 10m jitter shows up here for free). Read-only,
+  // so the app-wide caching defaults are fine — no #520 concern.
+  const { data: defaults, error: defaultsError } = useQuery({
+    queryKey: ['config', 'defaults'],
+    queryFn: () => apiFetch<EffectiveConfig>('/api/config/defaults'),
+    staleTime: Infinity,
+  });
+  const [form, setForm] = useState<GlobalForm>(EMPTY_GLOBAL_FORM);
+  // Seed the form once per load session (same #520 guard as before);
+  // reset after a save so the invalidated refetch re-seeds with the
+  // server-normalised scope.
   const seeded = useRef(false);
   useEffect(() => {
     if (data && !seeded.current) {
-      setDraft(JSON.stringify(data, null, 2));
+      setForm(scopeToGlobalForm(data));
       seeded.current = true;
     }
   }, [data]);
+
+  const setField = <K extends keyof GlobalForm>(key: K, value: GlobalForm[K]) =>
+    setForm((f) => ({ ...f, [key]: value }));
 
   const save = useMutation({
     mutationFn: (body: ConfigScope) =>
@@ -178,33 +137,201 @@ function GlobalEditor() {
     onError: (e) => toast.error(t('global.toast.saveFailure', { error: formatError(e) })),
   });
 
+  // Default value rendered as a field's placeholder. null/None
+  // (target_version, expires_at) has no concrete floor, so we show a
+  // localised "(unset)" hint instead of an empty box.
+  const ph = (key: keyof EffectiveConfig): string => {
+    const v = defaults?.[key];
+    if (v === null || v === undefined) return t('global.fields.unsetPlaceholder');
+    return String(v);
+  };
+
+  const submit = () => {
+    // Guard: this is a full-replace PUT on the whole global scope, so
+    // building it before the GET populated `data` would spread `{}` and
+    // drop every field. The button is also disabled in this state.
+    if (!data) {
+      toast.error(t('global.alerts.notLoaded'));
+      return;
+    }
+    // Read-modify-write: start from the freshest server scope so any
+    // field this form doesn't manage (e.g. a knob a future backend
+    // adds) survives the round-trip rather than being dropped.
+    const next: ConfigScope = { ...data };
+
+    for (const { key } of GLOBAL_TEXT_FIELDS) {
+      const trimmed = form[key].trim();
+      // Every GLOBAL_TEXT_FIELDS key maps to a `string?` field on
+      // ConfigScope (guaranteed by the `satisfies` constraint on the
+      // array), so this widened write is safe — the Record cast just
+      // spares a future reader from wondering why `never` was needed.
+      if (trimmed) (next as Record<string, unknown>)[key] = trimmed;
+      else delete next[key];
+    }
+
+    if (form.process_perf_enabled === '') delete next.process_perf_enabled;
+    else next.process_perf_enabled = form.process_perf_enabled === 'true';
+
+    const expires = form.process_perf_expires_at.trim();
+    if (expires) {
+      // The backend parses this as chrono::DateTime<Utc>; a malformed
+      // string comes back as an opaque PUT error. Catch the obvious
+      // typos here. Date.parse is lenient (accepts some non-RFC3339
+      // forms) but good enough to surface the format requirement early.
+      if (Number.isNaN(Date.parse(expires))) {
+        toast.error(t('global.alerts.invalidExpiresAt'));
+        return;
+      }
+      next.process_perf_expires_at = expires;
+    } else {
+      delete next.process_perf_expires_at;
+    }
+
+    const topN = form.process_perf_top_n.trim();
+    if (!topN) {
+      delete next.process_perf_top_n;
+    } else {
+      const n = Number(topN);
+      if (!Number.isInteger(n) || n <= 0) {
+        toast.error(t('global.alerts.invalidTopN'));
+        return;
+      }
+      next.process_perf_top_n = n;
+    }
+
+    save.mutate(next);
+  };
+
   return (
     <Card>
       <CardHeader>
         <CardTitle>{t('global.title')}</CardTitle>
         <CardDescription>{t('global.description')}</CardDescription>
       </CardHeader>
-      <CardContent className="space-y-3">
-        {isLoading && <div className="text-muted flex items-center gap-2"><Loader2 className="size-4 animate-spin" />{t('global.loading')}</div>}
+      <CardContent className="space-y-4">
+        {isLoading && (
+          <div className="text-muted flex items-center gap-2">
+            <Loader2 className="size-4 animate-spin" />
+            {t('global.loading')}
+          </div>
+        )}
         {error && <ErrorCard title={t('global.loadErrorTitle')} error={error} />}
-        {/* This raw editor PUTs the whole global scope from its seeded
-            snapshot. It seeds once on mount (#520 guard) and doesn't
-            re-seed when the Client-display-name editor above saves, so a
-            submit here from a pre-name snapshot would silently drop the
-            just-saved client_display_name. Warn instead of breaking the
-            #520 guard (Claude review PR #670). */}
-        <p className="text-xs text-amber">{t('global.overwriteWarning')}</p>
-        <Textarea value={draft} onChange={(e) => setDraft(e.target.value)} className="min-h-40" />
-        <Button
-          onClick={() => {
-            try {
-              save.mutate(JSON.parse(draft));
-            } catch (e) {
-              toast.error(t('global.alerts.invalidJson', { error: (e as Error).message }));
-            }
-          }}
-          disabled={save.isPending}
-        >
+        {defaultsError && <ErrorCard title={t('global.loadErrorTitle')} error={defaultsError} />}
+        <p className="text-xs text-muted">{t('global.blankHint')}</p>
+
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <div className="md:col-span-2">
+            <Label htmlFor="cfg-client-name">{t('global.fields.clientDisplayName.label')}</Label>
+            <Input
+              id="cfg-client-name"
+              value={form.client_display_name}
+              onChange={(e) => setField('client_display_name', e.target.value)}
+              placeholder={t('global.fields.clientDisplayName.placeholder')}
+              maxLength={CLIENT_DISPLAY_NAME_MAX}
+            />
+            <p className="mt-1 text-xs text-muted">{t('global.fields.clientDisplayName.hint')}</p>
+          </div>
+          <div>
+            <Label htmlFor="cfg-target-version">{t('global.fields.targetVersion.label')}</Label>
+            <Input
+              id="cfg-target-version"
+              value={form.target_version}
+              onChange={(e) => setField('target_version', e.target.value)}
+              placeholder={ph('target_version')}
+            />
+            <p className="mt-1 text-xs text-muted">{t('global.fields.targetVersion.hint')}</p>
+          </div>
+          <div>
+            <Label htmlFor="cfg-jitter">{t('global.fields.targetVersionJitter.label')}</Label>
+            <Input
+              id="cfg-jitter"
+              value={form.target_version_jitter}
+              onChange={(e) => setField('target_version_jitter', e.target.value)}
+              placeholder={ph('target_version_jitter')}
+            />
+            <p className="mt-1 text-xs text-muted">
+              {t('global.fields.targetVersionJitter.hint')}
+            </p>
+          </div>
+          <div>
+            <Label htmlFor="cfg-heartbeat">{t('global.fields.heartbeatInterval.label')}</Label>
+            <Input
+              id="cfg-heartbeat"
+              value={form.heartbeat_interval}
+              onChange={(e) => setField('heartbeat_interval', e.target.value)}
+              placeholder={ph('heartbeat_interval')}
+            />
+            <p className="mt-1 text-xs text-muted">
+              {t('global.fields.heartbeatInterval.hint')}
+            </p>
+          </div>
+          <div>
+            <Label htmlFor="cfg-host-perf">{t('global.fields.hostPerfInterval.label')}</Label>
+            <Input
+              id="cfg-host-perf"
+              value={form.host_perf_interval}
+              onChange={(e) => setField('host_perf_interval', e.target.value)}
+              placeholder={ph('host_perf_interval')}
+            />
+            <p className="mt-1 text-xs text-muted">{t('global.fields.hostPerfInterval.hint')}</p>
+          </div>
+          <div>
+            <Label htmlFor="cfg-pp-enabled">{t('global.fields.processPerfEnabled.label')}</Label>
+            <Select
+              id="cfg-pp-enabled"
+              value={form.process_perf_enabled}
+              onChange={(e) =>
+                setField('process_perf_enabled', e.target.value as GlobalForm['process_perf_enabled'])
+              }
+            >
+              <option value="">
+                {t('global.fields.processPerfEnabled.inherit', {
+                  value: defaults
+                    ? t(
+                        defaults.process_perf_enabled
+                          ? 'global.fields.processPerfEnabled.on'
+                          : 'global.fields.processPerfEnabled.off',
+                      )
+                    : '…',
+                })}
+              </option>
+              <option value="true">{t('global.fields.processPerfEnabled.on')}</option>
+              <option value="false">{t('global.fields.processPerfEnabled.off')}</option>
+            </Select>
+            <p className="mt-1 text-xs text-muted">
+              {t('global.fields.processPerfEnabled.hint')}
+            </p>
+          </div>
+          <div>
+            <Label htmlFor="cfg-pp-topn">{t('global.fields.processPerfTopN.label')}</Label>
+            <Input
+              id="cfg-pp-topn"
+              type="number"
+              min={1}
+              value={form.process_perf_top_n}
+              onChange={(e) => setField('process_perf_top_n', e.target.value)}
+              placeholder={ph('process_perf_top_n')}
+            />
+            <p className="mt-1 text-xs text-muted">{t('global.fields.processPerfTopN.hint')}</p>
+          </div>
+          <div className="md:col-span-2">
+            <Label htmlFor="cfg-pp-expires">{t('global.fields.processPerfExpiresAt.label')}</Label>
+            <Input
+              id="cfg-pp-expires"
+              value={form.process_perf_expires_at}
+              onChange={(e) => setField('process_perf_expires_at', e.target.value)}
+              placeholder={t('global.fields.processPerfExpiresAt.placeholder')}
+            />
+            <p className="mt-1 text-xs text-muted">
+              {t('global.fields.processPerfExpiresAt.hint')}
+            </p>
+          </div>
+        </div>
+
+        {/* Disabled until the global snapshot has loaded, so the
+            read-modify-write spread is never built from `{}` (which
+            would drop every field on save). */}
+        <Button onClick={submit} disabled={save.isPending || !data}>
           {save.isPending ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
           {t('global.saveButton')}
         </Button>
@@ -364,7 +491,6 @@ function EffectiveResolver() {
 export function Config() {
   return (
     <div className="space-y-4">
-      <ClientDisplayNameEditor />
       <GlobalEditor />
       <ScopeEditor />
       <EffectiveResolver />

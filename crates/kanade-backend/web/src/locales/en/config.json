@@ -1,36 +1,60 @@
 {
-  "clientName": {
-    "title": "Client display name",
-    "description": "Product name the end-user Client App shows in its window title, header, Start-Menu shortcut, and notification sender — so each deployment can brand the client per customer (e.g. \"端末管理支援ツール\"). Set on the whole fleet (global scope); use the per-group / per-pc override below for exceptions.",
-    "label": "Display name",
-    "placeholder": "端末管理支援ツール",
-    "hint": "Save blank to fall back to the client's built-in default name (端末管理支援ツール).",
-    "loading": "Loading…",
-    "loadErrorTitle": "Failed to load client display name",
-    "saveErrorTitle": "Save failed",
-    "saveButton": "Save display name",
-    "clearButton": "Reset to default",
-    "toast": {
-      "saveSuccess": "Client display name saved",
-      "clearSuccess": "Client display name reset to default",
-      "saveFailure": "Save failed: {{error}}",
-      "notLoaded": "Wait for the config to finish loading before saving"
-    }
-  },
   "global": {
     "title": "Global ConfigScope",
-    "description": "Whole-fleet default. Per-group / per-pc overrides win over this.",
-    "overwriteWarning": "This JSON editor overwrites the entire global scope. A display name saved via \"Client display name\" above is not reflected here until you reload the page — submitting a stale snapshot would silently drop it.",
+    "description": "Whole-fleet default, including the client's product name. Per-group / per-pc overrides win over this.",
+    "blankHint": "Each field's greyed placeholder is the built-in default it inherits when left blank. Fill one in only to override it fleet-wide — blank keeps inheriting the (evolving) default rather than pinning today's value.",
     "loading": "loading…",
     "loadErrorTitle": "Couldn't load global config",
     "saveErrorTitle": "Save failed",
-    "saveButton": "save global",
+    "saveButton": "Save global config",
     "toast": {
       "saveSuccess": "Saved global config",
       "saveFailure": "Save failed: {{error}}"
     },
     "alerts": {
-      "invalidJson": "Body must be valid JSON: {{error}}"
+      "notLoaded": "Wait for the config to finish loading before saving",
+      "invalidTopN": "Top-N processes must be a positive whole number",
+      "invalidExpiresAt": "Expiry must be an RFC 3339 timestamp (e.g. 2026-06-14T12:00:00Z)"
+    },
+    "fields": {
+      "unsetPlaceholder": "(unset)",
+      "clientDisplayName": {
+        "label": "Client display name",
+        "placeholder": "端末管理支援ツール",
+        "hint": "Product name the end-user Client App shows in its window title, header, Start-Menu shortcut, and notification sender — brands the client per customer. Leave blank to fall back to the client's built-in default name (端末管理支援ツール)."
+      },
+      "targetVersion": {
+        "label": "Target version",
+        "hint": "Fleet-wide rollout target. Usually left blank here and set per-group (canary) instead."
+      },
+      "targetVersionJitter": {
+        "label": "Rollout jitter",
+        "hint": "Random pre-download wait spreading a rollout across the fleet (humantime, e.g. 30m). 0s = no jitter."
+      },
+      "heartbeatInterval": {
+        "label": "Heartbeat interval",
+        "hint": "How often each agent checks in (humantime, e.g. 30s)."
+      },
+      "hostPerfInterval": {
+        "label": "Host perf interval",
+        "hint": "Cadence of the whole-host CPU/memory snapshot loop (humantime, e.g. 60s)."
+      },
+      "processPerfEnabled": {
+        "label": "Per-process perf",
+        "inherit": "Inherit default ({{value}})",
+        "on": "On",
+        "off": "Off",
+        "hint": "Heavy per-process collection. Off by default and normally toggled per-pc for investigation — turning it on here enables it for the whole fleet."
+      },
+      "processPerfTopN": {
+        "label": "Per-process top-N",
+        "hint": "How many processes (by CPU%) each agent publishes per tick."
+      },
+      "processPerfExpiresAt": {
+        "label": "Per-process perf expiry",
+        "placeholder": "2026-06-14T12:00:00Z",
+        "hint": "RFC3339 timestamp after which per-process collection auto-stops, even while the toggle stays on. Blank = no expiry."
+      }
     }
   },
   "scope": {
