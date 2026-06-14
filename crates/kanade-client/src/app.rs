@@ -97,6 +97,22 @@ const DISCONNECTED_EVENT: &str = "klp-disconnected";
 /// instead of a new process piling up.
 const SHOW_NOTIFICATION_EVENT: &str = "klp-show-notification";
 
+/// CLI flag the agent launches the client with to **re-surface** emergencies
+/// the user couldn't see when they arrived — sent while signed out, or
+/// delivered to the Action Center while the screen was locked — now that they
+/// are present again (logon / unlock, #647). Kept in sync with
+/// `kanade_agent::klp::emergency_notify`'s `RESURFACE_ARG`. A *fresh* launch
+/// with this flag starts hidden and the WebView's `notifications.list`
+/// recovery toasts every unread emergency; a *second* launch forwards it to
+/// the running instance, which re-pops via [`RESURFACE_EVENT`].
+const RESURFACE_FLAG: &str = "--resurface";
+
+/// Emitted to the WebView when a *second* `--resurface` launch is collapsed
+/// into the already-running instance (#647). No payload; the WebView re-toasts
+/// every still-unread, unexpired emergency, deliberately bypassing its
+/// duplicate-suppression (the user couldn't see them the first time).
+const RESURFACE_EVENT: &str = "klp-resurface";
+
 /// Tauri-managed shared state. `Arc<Mutex<…>>` instead of plain
 /// `Mutex<…>` so the spawned setup task can hold its own clone
 /// while the `invoke` commands hold theirs.
@@ -409,6 +425,12 @@ fn parse_launch_notification() -> Option<String> {
     parse_show_notification(std::env::args())
 }
 
+/// Whether `--resurface` is present in an arg sequence (#647). Shared by the
+/// startup parse (`std::env::args`) and the single-instance handler.
+fn has_resurface_flag<I: IntoIterator<Item = String>>(args: I) -> bool {
+    args.into_iter().any(|a| a == RESURFACE_FLAG)
+}
+
 /// Single-instance callback (#624): fires in the ALREADY-RUNNING instance
 /// when a second `kanade-client` is launched (the agent's emergency
 /// fallback launches one per emergency, and without this guard each would
@@ -423,7 +445,13 @@ fn parse_launch_notification() -> Option<String> {
 ///   surface the existing window.
 #[cfg(target_os = "windows")]
 fn on_second_instance(app: &tauri::AppHandle, argv: Vec<String>) {
-    if let Some(id) = parse_show_notification(argv) {
+    if has_resurface_flag(argv.iter().cloned()) {
+        // Presence-driven re-surface (#647): the already-running instance
+        // re-pops every unread emergency; the window stays hidden.
+        if let Err(e) = app.emit(RESURFACE_EVENT, ()) {
+            warn!(error = %e, "single-instance: forward resurface failed");
+        }
+    } else if let Some(id) = parse_show_notification(argv) {
         if let Err(e) = app.emit(SHOW_NOTIFICATION_EVENT, id) {
             warn!(error = %e, "single-instance: forward emergency id failed");
         }
@@ -441,10 +469,12 @@ pub fn run() {
     // Pin the process AUMID before anything else so toasts render (#102).
     set_app_user_model_id();
     let launch_notification = parse_launch_notification();
-    // Launched by the agent for an emergency → start hidden (the WebView
-    // toasts it; the window only appears when the user clicks the toast),
+    // Launched by the agent for an emergency (`--show-notification <id>`) or a
+    // presence-driven re-surface (`--resurface`, #647) → start hidden (the
+    // WebView toasts; the window only appears when the user clicks the toast),
     // so it never bursts over whatever the user is doing.
-    let launched_for_emergency = launch_notification.is_some();
+    let launched_for_emergency =
+        launch_notification.is_some() || has_resurface_flag(std::env::args());
     let state = AppState {
         klp: Arc::new(Mutex::new(None)),
         launch_notification,

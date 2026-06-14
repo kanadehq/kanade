@@ -178,9 +178,17 @@ fn forward(msg: &async_nats::Message, notif_tx: &broadcast::Sender<Notification>
     match serde_json::from_slice::<Notification>(&msg.payload) {
         Ok(notification) => {
             let id = notification.id.clone();
+            // Capture the priority before the value is moved into `send`.
+            let priority = notification.priority;
             match notif_tx.send(notification) {
                 Ok(n) => {
-                    debug!(pc_id = %pc_id, notification_id = %id, receivers = n, "notify_bus: broadcast")
+                    debug!(pc_id = %pc_id, notification_id = %id, receivers = n, "notify_bus: broadcast");
+                    // #647: an emergency live-pushed while the screen is locked
+                    // toasts silently to the Action Center — flag it so it
+                    // re-pops on unlock.
+                    if priority == NotificationPriority::Emergency {
+                        super::emergency_notify::note_emergency_live_pushed();
+                    }
                 }
                 // `send` returns the un-delivered notification in the
                 // error, so we can inspect its priority: no Client App is
