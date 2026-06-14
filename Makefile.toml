@@ -74,6 +74,14 @@ cwd = "${CARGO_MAKE_WORKING_DIRECTORY}/crates/kanade-backend/web"
 # over ENOTCONN on Windows (some packages reach out to the network
 # during postinstall). The deps we actually need at runtime — vite,
 # monaco, react etc. — don't require their postinstalls.
+#
+# --frozen-lockfile installs exactly what the committed bun.lock
+# records and refuses to rewrite it. Two wins: worktree creation is
+# reproducible (same tree as CI's `web-build`, which also pins the
+# lockfile), and a plain `bun install` can otherwise migrate the
+# lockfile to its strict text format / re-resolve peers, leaving an
+# unrelated bun.lock diff in every fresh worktree (see the known SPA
+# `bun add`-migrates-the-lockfile fragility).
 script_runner = "@duckscript"
 script = '''
 bun_path = which bun
@@ -81,7 +89,7 @@ bun_missing = is_empty ${bun_path}
 if ${bun_missing}
     echo "skipping web-install: bun not on PATH"
 else
-    exec --fail-on-error bun install --ignore-scripts
+    exec --fail-on-error bun install --frozen-lockfile --ignore-scripts
 end
 '''
 

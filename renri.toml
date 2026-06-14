@@ -27,6 +27,16 @@ shell = "auto"
 # and the operator has to run `bun install` by hand. Kept as its own
 # hook rather than wired into the language-agnostic `on-add` task so
 # it doesn't trip non-SPA projects that share the pj-rust base.
+#
+# MUST stay AFTER the on-add hook: kata owns `hooks.post_create[0]`
+# (`how = "merge-toml"`, `paths = ["hooks.post_create[0]"]` in
+# pj-rust's template.toml) and re-pokes it to `cargo make on-add` on
+# every `kata apply`. Consumers append later entries; moving this to
+# index 0 would get it overwritten by on-add on the next apply
+# (leaving a duplicated on-add and no web-install). If on-add's flaky
+# `apm install` aborts the chain before this runs (stale local apm
+# CLI → content-hash mismatch), the fix is `scoop update apm`, not a
+# reorder.
 [[hooks.post_create]]
 type = "command"
 run = "cargo make web-install"
