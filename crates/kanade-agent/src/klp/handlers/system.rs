@@ -83,11 +83,27 @@ pub fn handle_handshake(
 
     conn.mark_handshake(agreed);
 
+    // Operator-configured client product name from the live effective
+    // config. Defensive empty-string filter (same posture as
+    // `handle_version`'s target filter): a backend that confuses
+    // "cleared" with "empty string" would otherwise push `Some("")`
+    // and blank out the client's title instead of letting it fall back
+    // to its built-in default name.
+    let client_display_name = conn
+        .config_rx
+        .borrow()
+        .client_display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+
     Ok(HandshakeResult {
         protocol: agreed,
         agent_version: conn.agent_version.clone(),
         features: SUPPORTED_FEATURES.iter().map(|&s| s.to_string()).collect(),
         session: conn.session(),
+        client_display_name,
     })
 }
 
@@ -276,7 +292,56 @@ mod tests {
         assert_eq!(result.agent_version, "0.40.0");
         assert_eq!(result.session.user, "DOMAIN\\alice");
         assert_eq!(result.session.pc_id, "PC1234");
+        // No config name set → None so the client uses its built-in
+        // default product name.
+        assert!(result.client_display_name.is_none());
         assert!(conn.handshake_complete());
+    }
+
+    #[test]
+    fn handshake_surfaces_configured_client_display_name() {
+        let cfg = EffectiveConfig {
+            client_display_name: Some("端末管理支援ツール".into()),
+            ..EffectiveConfig::builtin_defaults()
+        };
+        let mut conn = fresh_conn_with(cfg, PathBuf::from("agent.log"));
+        let result = handle_handshake(
+            &mut conn,
+            HandshakeParams {
+                client: "kanade-client".into(),
+                client_version: "0.1.0".into(),
+                protocol: vec![PROTOCOL_V1],
+                features: vec![],
+            },
+        )
+        .expect("handshake should succeed");
+        assert_eq!(
+            result.client_display_name.as_deref(),
+            Some("端末管理支援ツール")
+        );
+    }
+
+    #[test]
+    fn handshake_treats_blank_client_display_name_as_unset() {
+        // A backend that clears the name by writing "" (or whitespace)
+        // must not blank the client title — the handler filters it back
+        // to None so the client falls back to its default name.
+        let cfg = EffectiveConfig {
+            client_display_name: Some("   ".into()),
+            ..EffectiveConfig::builtin_defaults()
+        };
+        let mut conn = fresh_conn_with(cfg, PathBuf::from("agent.log"));
+        let result = handle_handshake(
+            &mut conn,
+            HandshakeParams {
+                client: "kanade-client".into(),
+                client_version: "0.1.0".into(),
+                protocol: vec![PROTOCOL_V1],
+                features: vec![],
+            },
+        )
+        .expect("handshake should succeed");
+        assert!(result.client_display_name.is_none());
     }
 
     #[test]

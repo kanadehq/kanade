@@ -35,6 +35,8 @@ mod script_cache;
 mod staleness;
 
 #[cfg(target_os = "windows")]
+mod client_shortcut;
+#[cfg(target_os = "windows")]
 mod cwd_expand;
 #[cfg(target_os = "windows")]
 mod process_as_user;
@@ -206,6 +208,13 @@ pub(crate) async fn run_agent() -> Result<()> {
         pc_id.clone(),
         cfg_rx.clone(),
     ));
+    // Keep the end-user Client App's all-users Start-Menu shortcut
+    // (Start-Menu label + WinRT toast sender name) in step with the
+    // operator-configured `client_display_name`. Event-driven off the
+    // same config watch; the PowerShell re-stamp only fires when the
+    // resolved name actually changes (see client_shortcut docs).
+    #[cfg(target_os = "windows")]
+    client_shortcut::spawn(cfg_rx.clone());
     tokio::spawn(self_update::run(
         client.clone(),
         pc_id.clone(),

@@ -149,108 +149,13 @@ try {
 Remove-Item -Force -ErrorAction SilentlyContinue $OldPath
 
 # --- Start-Menu shortcut with AppUserModelID -----------------------------
-# Windows only renders WinRT toast notifications from a non-MSIX desktop
-# app if a Start-Menu shortcut exists whose `System.AppUserModel.ID`
-# property matches the AUMID the app tags its toasts with. kanade-client
-# is deployed as a bare exe (no MSI/NSIS installer to create that
-# shortcut), so the Phase E OS-toast notifications (#102) were silently
-# dropped — Windows fell back to a path-derived AUMID that didn't match
-# the app's. Create an all-users shortcut (this job runs as SYSTEM, so
-# ProgramData is the right scope — visible to every user) and stamp the
-# AUMID so it matches `kanade_client::app::APP_USER_MODEL_ID` /
-# tauri.conf `identifier`.
-#
-# Best-effort: a failure here must NOT fail the install — the binary is
-# already in place; only toast rendering is affected. Log to stderr and
-# continue.
-$Aumid = 'com.yukimemi.kanade-client'
-try {
-    $startMenu = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs'
-    $lnkPath = Join-Path $startMenu 'Kanade Client.lnk'
-
-    # 1) Create the basic shortcut (target/icon) via WScript.Shell.
-    $ws = New-Object -ComObject WScript.Shell
-    $lnk = $ws.CreateShortcut($lnkPath)
-    $lnk.TargetPath = $ExePath
-    $lnk.Description = 'Kanade Client'
-    $lnk.Save()
-
-    # 2) Stamp System.AppUserModel.ID on it via IPropertyStore — the COM
-    #    interop WScript.Shell can't reach. Load STGM_READWRITE (2) so the
-    #    final Save succeeds; idempotent on re-run. (This interop was
-    #    verified locally: set → read-back round-trips the AUMID.)
-    if (-not ([System.Management.Automation.PSTypeName]'Kanade.ShortcutAumid').Type) {
-        Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-namespace Kanade {
-  [StructLayout(LayoutKind.Sequential, Pack = 4)]
-  public struct PropertyKey { public Guid fmtid; public uint pid; }
-
-  // Native PROPVARIANT is 16 bytes on x64 (vt at 0, the value union at 8).
-  // Explicit layout matches it exactly — we only ever use the VT_LPWSTR
-  // pointer field.
-  [StructLayout(LayoutKind.Explicit, Size = 16)]
-  public struct PropVariant {
-    [FieldOffset(0)] public ushort vt;
-    [FieldOffset(8)] public IntPtr p;
-  }
-
-  [ComImport, Guid("886d8eeb-8cf2-4446-8d02-cdba1dbdcf99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-  public interface IPropertyStore {
-    int GetCount(out uint c);
-    int GetAt(uint i, out PropertyKey k);
-    int GetValue(ref PropertyKey k, out PropVariant v);
-    int SetValue(ref PropertyKey k, ref PropVariant v);
-    int Commit();
-  }
-
-  [ComImport, Guid("0000010b-0000-0000-C000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-  public interface IPersistFile {
-    int GetClassID(out Guid id);
-    int IsDirty();
-    int Load([MarshalAs(UnmanagedType.LPWStr)] string f, int mode);
-    int Save([MarshalAs(UnmanagedType.LPWStr)] string f, [MarshalAs(UnmanagedType.Bool)] bool remember);
-    int SaveCompleted([MarshalAs(UnmanagedType.LPWStr)] string f);
-    int GetCurFile([MarshalAs(UnmanagedType.LPWStr)] out string f);
-  }
-
-  public static class ShortcutAumid {
-    [DllImport("ole32.dll")] static extern int PropVariantClear(ref PropVariant pvar);
-
-    public static void Set(string lnk, string aumid) {
-      // CLSID_ShellLink
-      Type slType = Type.GetTypeFromCLSID(new Guid("00021401-0000-0000-C000-000000000046"));
-      object sl = Activator.CreateInstance(slType);
-      PropVariant pv = new PropVariant();
-      // try/finally so the CoTaskMem string + COM object are freed even
-      // if any of the COM calls throw.
-      try {
-        ((IPersistFile)sl).Load(lnk, 2); // STGM_READWRITE so Save() works
-        IPropertyStore ps = (IPropertyStore)sl;
-        // PKEY_AppUserModel_ID = {9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3}, 5
-        PropertyKey key = new PropertyKey {
-          fmtid = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3"), pid = 5
-        };
-        pv.vt = 31 /*VT_LPWSTR*/;
-        pv.p = Marshal.StringToCoTaskMemUni(aumid);
-        ps.SetValue(ref key, ref pv);
-        ps.Commit();
-        ((IPersistFile)sl).Save(lnk, true);
-      } finally {
-        PropVariantClear(ref pv);
-        Marshal.ReleaseComObject(sl);
-      }
-    }
-  }
-}
-'@
-    }
-    [Kanade.ShortcutAumid]::Set($lnkPath, $Aumid)
-    [Console]::Error.WriteLine("Start-Menu shortcut created with AppUserModelID=$Aumid at $lnkPath")
-} catch {
-    [Console]::Error.WriteLine("install-kanade-client: shortcut/AUMID step failed (toasts may not render): $_")
-}
+# REMOVED: the all-users Start-Menu shortcut (+ its System.AppUserModel.ID
+# stamp, which lets WinRT toasts render) is now created and kept in step
+# with the operator-configured product name by the AGENT
+# (kanade-agent `client_shortcut` module, driven by
+# agent_config.client_display_name). Creating it here too would just make a
+# transient "Kanade Client" entry the agent immediately renames, so the
+# install script no longer touches the Start-Menu.
 
 # --- kanade-client:// URL protocol (#647 toast-click reveal) --------------
 # A clicked emergency toast carries `launch="kanade-client://show?id=<id>"`

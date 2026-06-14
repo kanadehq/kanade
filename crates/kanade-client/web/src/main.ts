@@ -1063,6 +1063,30 @@ function renderCheck(c: Check): string {
 // second concurrent retry loop (Gemini #636).
 let connectTimeout: number | undefined;
 
+// Built-in fallback product name shown until (and when) the agent
+// reports no operator-configured `client_display_name`. The Rust source
+// of truth is `kanade_shared::DEFAULT_CLIENT_DISPLAY_NAME` (aliased by
+// app.rs + the agent shortcut); this WebView literal + index.html's
+// <title> must mirror it so an unconfigured fleet shows one name
+// everywhere.
+const DEFAULT_DISPLAY_NAME = "端末管理支援ツール";
+
+// The handshake fields main.ts cares about (subset of
+// kanade_shared::ipc::handshake::HandshakeResult; only the brand name
+// is read here).
+type Handshake = { client_display_name?: string | null };
+
+// Brand the in-page header + the document title from the
+// operator-configured product name, falling back to the built-in
+// default. The OS window title is set natively in app.rs; setting
+// document.title here keeps the WebView's own title in step.
+function applyDisplayName(name: string | null | undefined): void {
+  const display = (name ?? "").trim() || DEFAULT_DISPLAY_NAME;
+  document.title = display;
+  const el = document.querySelector(".brand-name");
+  if (el) el.textContent = display;
+}
+
 // Called on each (re)connect: confirm the pipe is up (get_handshake
 // errors when it isn't), flip the status dot, and (re)pull all data.
 async function onConnected() {
@@ -1071,7 +1095,10 @@ async function onConnected() {
     connectTimeout = undefined;
   }
   try {
-    await invoke("get_handshake");
+    // Doubles as the pipe-readiness probe (it errors when the agent
+    // isn't up yet) and the source of the operator-configured brand.
+    const hs = await invoke<Handshake>("get_handshake");
+    applyDisplayName(hs?.client_display_name ?? null);
   } catch {
     // Pipe not ready yet — the supervisor retries; show "connecting".
     setConn("connecting");

@@ -1,7 +1,26 @@
 {
+  "clientName": {
+    "title": "Client display name",
+    "description": "Product name the end-user Client App shows in its window title, header, Start-Menu shortcut, and notification sender — so each deployment can brand the client per customer (e.g. \"端末管理支援ツール\"). Set on the whole fleet (global scope); use the per-group / per-pc override below for exceptions.",
+    "label": "Display name",
+    "placeholder": "端末管理支援ツール",
+    "hint": "Save blank to fall back to the client's built-in default name (端末管理支援ツール).",
+    "loading": "Loading…",
+    "loadErrorTitle": "Failed to load client display name",
+    "saveErrorTitle": "Save failed",
+    "saveButton": "Save display name",
+    "clearButton": "Reset to default",
+    "toast": {
+      "saveSuccess": "Client display name saved",
+      "clearSuccess": "Client display name reset to default",
+      "saveFailure": "Save failed: {{error}}",
+      "notLoaded": "Wait for the config to finish loading before saving"
+    }
+  },
   "global": {
     "title": "Global ConfigScope",
     "description": "Whole-fleet default. Per-group / per-pc overrides win over this.",
+    "overwriteWarning": "This JSON editor overwrites the entire global scope. A display name saved via \"Client display name\" above is not reflected here until you reload the page — submitting a stale snapshot would silently drop it.",
     "loading": "loading…",
     "loadErrorTitle": "Couldn't load global config",
     "saveErrorTitle": "Save failed",

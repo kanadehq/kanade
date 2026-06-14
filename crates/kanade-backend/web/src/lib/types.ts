@@ -67,6 +67,10 @@ export type ConfigScope = {
   process_perf_enabled?: boolean;
   process_perf_expires_at?: string;
   process_perf_top_n?: number;
+  // Operator-facing product name the end-user Client App displays
+  // (window title / header / Start-Menu shortcut / toast sender).
+  // See [`ConfigScope::client_display_name`] on the Rust side.
+  client_display_name?: string;
 };
 
 export type EffectiveConfig = {
@@ -77,6 +81,7 @@ export type EffectiveConfig = {
   process_perf_enabled: boolean;
   process_perf_expires_at: string | null;
   process_perf_top_n: number;
+  client_display_name: string | null;
 };
 
 export type EffectiveConfigResponse = {

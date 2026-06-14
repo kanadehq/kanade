@@ -73,17 +73,13 @@ body {
   letter-spacing: 0.02em;
 }
 
+/* タクト (baton) mark — the inline SVG sits on transparent; the
+   gradient lives on the baton path itself, so no background tile. */
 .brand-mark {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  border-radius: 7px;
-  font-family: "Yu Mincho", "Noto Serif JP", serif;
-  font-weight: 700;
-  color: #fff;
-  background: linear-gradient(135deg, #5b3a8c, #d4a017 55%, #2a9d8f);
+  display: block;
+  width: 22px;
+  height: 22px;
+  flex: none;
 }
 
 /* Connection status dot + label. */

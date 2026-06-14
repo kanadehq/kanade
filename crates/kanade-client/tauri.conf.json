@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "kanade-client",
+  "productName": "端末管理支援ツール",
   "version": "0.43.66",
   "identifier": "com.yukimemi.kanade-client",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Kanade",
+        "title": "端末管理支援ツール",
         "width": 880,
         "height": 560,
         "minWidth": 640,
@@ -31,7 +31,7 @@
     "active": false,
     "icon": ["icons/icon.ico"],
     "category": "Utility",
-    "shortDescription": "kanade Client App",
-    "longDescription": "End-user-facing companion to the kanade agent: notifications, health, self-service jobs, support handoff."
+    "shortDescription": "端末管理支援ツール",
+    "longDescription": "端末の通知・ヘルス確認・セルフサービス操作・サポート連携を行うエンドユーザー向けクライアントです。"
   }
 }
