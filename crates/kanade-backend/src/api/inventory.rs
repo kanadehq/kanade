@@ -16,7 +16,7 @@ use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use kanade_shared::kv::BUCKET_JOBS;
-use kanade_shared::manifest::{DisplayField, ExplodeSpec, Manifest};
+use kanade_shared::manifest::{DisplayField, ExplodeSpec, InventoryHint, Manifest};
 use serde::Serialize;
 use sqlx::{AssertSqlSafe, Row};
 use tracing::warn;
@@ -482,6 +482,243 @@ pub async fn search(
         out.push(map);
     }
     Ok(Json(out))
+}
+
+/// One searchable top-level scalar fact, derived from an
+/// [`InventoryHint`]'s `display` list. `numeric` decides whether
+/// comparison filters CAST the JSON value to REAL (so `ram_bytes <
+/// 8e9` compares as a number) or compare it as text.
+struct ScalarColumn {
+    field: String,
+    numeric: bool,
+}
+
+/// #574: the set of top-level scalar facts an operator can filter on
+/// for `manifest_id`. Pulled from the manifest's `inventory.display`
+/// list — every display field EXCEPT the `kind: "table"` ones, which
+/// are arrays handled by `explode` sub-tables, not scalars. A
+/// `number` / `bytes` render hint marks the column numeric so the
+/// search builds a numeric comparison.
+fn scalar_columns(hint: &InventoryHint) -> Vec<ScalarColumn> {
+    hint.display
+        .iter()
+        .filter(|d| d.kind.as_deref() != Some("table"))
+        .map(|d| ScalarColumn {
+            field: d.field.clone(),
+            numeric: matches!(d.kind.as_deref(), Some("number") | Some("bytes")),
+        })
+        .collect()
+}
+
+/// `GET /api/inventory/{manifest_id}/search-scalars` — cross-PC query
+/// over the **top-level scalar facts** stored in
+/// `inventory_facts.facts_json`, with NO `explode` sub-table required
+/// (#574). Mirrors [`search`]'s Django-ish filter syntax, but each
+/// `<col>` must be a non-`table` `display` field on the manifest and
+/// the WHERE clause runs against `json_extract(facts_json, '$.<col>')`
+/// instead of a derived table column.
+///
+/// Filter syntax (same as [`search`]):
+///   * `<col>=<value>`        — exact match (eq)
+///   * `<col>__contains=<v>`  — LIKE '%v%'
+///   * `<col>__prefix=<v>`    — LIKE 'v%'
+///   * `<col>__suffix=<v>`    — LIKE '%v'
+///   * `<col>__lt|le|gt|ge|ne=<v>` — comparators (numeric for
+///     `number`/`bytes` columns, lexical otherwise)
+///
+/// Response: per-row `{ pc_id, collected_at, <each scalar field> }`.
+pub async fn search_scalars(
+    State(state): State<AppState>,
+    Path(manifest_id): Path<String>,
+    Query(filters): Query<HashMap<String, String>>,
+) -> Result<Json<Vec<serde_json::Map<String, serde_json::Value>>>, (StatusCode, String)> {
+    let hint = load_inventory_hint(&state, &manifest_id).await?;
+    let scalars = scalar_columns(&hint);
+    if scalars.is_empty() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("manifest {manifest_id:?} has no scalar display fields to search"),
+        ));
+    }
+    // validate_ident every field name before it's spliced into a
+    // json_extract path — the path can't be bound, only the value.
+    for s in &scalars {
+        validate_ident(&s.field)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("display field name: {e}")))?;
+    }
+
+    let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+        "SELECT pc_id, collected_at, facts_json FROM inventory_facts WHERE job_id = ",
+    );
+    qb.push_bind(&manifest_id);
+
+    let escape_like = |s: &str| -> String {
+        s.replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    };
+    for (raw_key, value) in &filters {
+        if raw_key == "limit" || raw_key == "offset" {
+            continue;
+        }
+        let (col, op) = match raw_key.split_once("__") {
+            Some((c, o)) => (c.to_string(), o),
+            None => (raw_key.clone(), "eq"),
+        };
+        let scalar = scalars.iter().find(|s| s.field == col).ok_or((
+            StatusCode::BAD_REQUEST,
+            format!("unknown column for filter: {col:?}"),
+        ))?;
+        // col == scalar.field, already validate_ident'd above — safe
+        // to splice into the JSON path. Values always go through bind.
+        match op {
+            "eq" | "ne" | "lt" | "le" | "gt" | "ge" => {
+                let comparator = match op {
+                    "eq" => "=",
+                    "ne" => "<>",
+                    "lt" => "<",
+                    "le" => "<=",
+                    "gt" => ">",
+                    "ge" => ">=",
+                    _ => unreachable!(),
+                };
+                if scalar.numeric {
+                    // CAST both sides to REAL: json_extract yields a
+                    // typed value (INTEGER/REAL/TEXT) and SQLite's
+                    // storage-class ordering would otherwise sort any
+                    // number before any text, breaking `< '120'`.
+                    let num: f64 = value.parse().map_err(|_| {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            format!(
+                                "filter on numeric column {col:?} needs a number, got {value:?}"
+                            ),
+                        )
+                    })?;
+                    qb.push(format!(
+                        " AND CAST(json_extract(facts_json, '$.{col}') AS REAL) {comparator} "
+                    ));
+                    qb.push_bind(num);
+                } else {
+                    qb.push(format!(
+                        " AND json_extract(facts_json, '$.{col}') {comparator} "
+                    ));
+                    qb.push_bind(value.clone());
+                }
+            }
+            "contains" | "prefix" | "suffix" => {
+                let pattern = match op {
+                    "contains" => format!("%{}%", escape_like(value)),
+                    "prefix" => format!("{}%", escape_like(value)),
+                    "suffix" => format!("%{}", escape_like(value)),
+                    _ => unreachable!(),
+                };
+                qb.push(format!(" AND json_extract(facts_json, '$.{col}') LIKE "));
+                qb.push_bind(pattern);
+                qb.push(" ESCAPE '\\'");
+            }
+            other => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!("unknown filter operator {other:?}"),
+                ));
+            }
+        }
+    }
+
+    let limit: i64 = filters
+        .get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1000)
+        .clamp(1, 5000);
+    let offset: i64 = filters
+        .get("offset")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+        .max(0);
+    qb.push(" ORDER BY pc_id LIMIT ");
+    qb.push_bind(limit);
+    qb.push(" OFFSET ");
+    qb.push_bind(offset);
+
+    let rows = qb.build().fetch_all(&state.pool).await.map_err(|e| {
+        warn!(error = %e, manifest_id, "scalar inventory search query");
+        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    })?;
+
+    let mut out: Vec<serde_json::Map<String, serde_json::Value>> = Vec::with_capacity(rows.len());
+    for r in rows {
+        let mut map = serde_json::Map::new();
+        if let Ok(pc_id) = r.try_get::<String, _>("pc_id") {
+            map.insert("pc_id".into(), serde_json::Value::String(pc_id));
+        }
+        if let Ok(Some(t)) = r.try_get::<Option<DateTime<Utc>>, _>("collected_at") {
+            map.insert(
+                "collected_at".into(),
+                serde_json::Value::String(t.to_rfc3339()),
+            );
+        }
+        // Project the scalar fields out of facts_json rather than
+        // re-extracting each in SQL — we already have the full object
+        // in hand, and a missing key becomes an explicit null cell.
+        let facts: serde_json::Value = r
+            .try_get::<String, _>("facts_json")
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or(serde_json::Value::Null);
+        let obj = facts.as_object();
+        for s in &scalars {
+            let v = obj
+                .and_then(|o| o.get(&s.field))
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            map.insert(s.field.clone(), v);
+        }
+        out.push(map);
+    }
+    Ok(Json(out))
+}
+
+/// #574: resolve a manifest's [`InventoryHint`] for the scalar search,
+/// preferring the warm spec cache (shared with the explode path) and
+/// falling back to the KV fetch on a miss. Returns 404 for an
+/// unknown manifest / a manifest with no `inventory:` block.
+async fn load_inventory_hint(
+    state: &AppState,
+    manifest_id: &str,
+) -> Result<InventoryHint, (StatusCode, String)> {
+    if let Some(m) = state.explode_spec_cache.manifest(manifest_id).await {
+        return m.inventory.clone().ok_or((
+            StatusCode::NOT_FOUND,
+            format!("manifest {manifest_id:?} has no inventory hint"),
+        ));
+    }
+
+    let kv = state
+        .jetstream
+        .get_key_value(BUCKET_JOBS)
+        .await
+        .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, format!("jobs KV: {e}")))?;
+    let entry = kv
+        .get(manifest_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            format!("manifest {manifest_id:?} not registered"),
+        ))?;
+    let manifest: Manifest = serde_json::from_slice(&entry).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("parse manifest: {e}"),
+        )
+    })?;
+    let hint = manifest.inventory.clone().ok_or((
+        StatusCode::NOT_FOUND,
+        format!("manifest {manifest_id:?} has no inventory hint"),
+    ))?;
+    state.explode_spec_cache.insert_manifest(manifest).await;
+    Ok(hint)
 }
 
 /// Fetch one manifest's [`ExplodeSpec`] by field name. Returns
@@ -960,5 +1197,71 @@ mod tests {
     fn parse_identity_filters_rejects_empty_field_name() {
         let err = parse_identity_filters(&params(&[("identity.", "x")])).unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    fn display(field: &str, kind: Option<&str>) -> DisplayField {
+        DisplayField {
+            field: field.to_string(),
+            label: field.to_string(),
+            kind: kind.map(str::to_string),
+            columns: None,
+        }
+    }
+
+    #[test]
+    fn scalar_columns_excludes_table_kind_and_marks_numeric() {
+        // `apps` is a `kind: table` array exploded into a sub-table —
+        // it must NOT appear as a searchable scalar. `ram_bytes` /
+        // `cpu_count` carry numeric render hints, so they compare as
+        // numbers; `os_build` / a hint-less field stay textual.
+        let hint = InventoryHint {
+            display: vec![
+                display("pc_model", None),
+                display("os_build", None),
+                display("ram_bytes", Some("bytes")),
+                display("cpu_count", Some("number")),
+                display("installed_at", Some("timestamp")),
+                display("apps", Some("table")),
+            ],
+            summary: None,
+            explode: None,
+            history_scalars: None,
+        };
+        let cols = scalar_columns(&hint);
+        let names: Vec<&str> = cols.iter().map(|c| c.field.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "pc_model",
+                "os_build",
+                "ram_bytes",
+                "cpu_count",
+                "installed_at"
+            ],
+            "table-kind fields are dropped, order preserved"
+        );
+        let numeric: std::collections::HashMap<&str, bool> =
+            cols.iter().map(|c| (c.field.as_str(), c.numeric)).collect();
+        assert!(numeric["ram_bytes"]);
+        assert!(numeric["cpu_count"]);
+        assert!(!numeric["pc_model"]);
+        assert!(!numeric["os_build"]);
+        // `timestamp` is rendered specially but compares lexically
+        // (ISO-8601 sorts correctly as text), so it's not numeric.
+        assert!(!numeric["installed_at"]);
+    }
+
+    #[test]
+    fn scalar_columns_empty_when_all_fields_are_tables() {
+        let hint = InventoryHint {
+            display: vec![
+                display("apps", Some("table")),
+                display("disks", Some("table")),
+            ],
+            summary: None,
+            explode: None,
+            history_scalars: None,
+        };
+        assert!(scalar_columns(&hint).is_empty());
     }
 }

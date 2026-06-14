@@ -34,11 +34,21 @@ type ExplodeSpec = {
   track_history?: boolean;
 };
 
+/** #574: a manifest's `inventory.display` field. Top-level scalar
+ *  facts (everything except `type: 'table'`, which is an exploded
+ *  array) become searchable columns on the scalar tab. */
+type DisplayField = {
+  field: string;
+  label: string;
+  type?: string;
+  columns?: DisplayField[];
+};
+
 type InventoryJob = {
   manifest_id: string;
   description: string | null;
-  display: unknown[];
-  summary: unknown[] | null;
+  display: DisplayField[];
+  summary: DisplayField[] | null;
   explode: ExplodeSpec[] | null;
 };
 
@@ -55,6 +65,28 @@ const MAX_LIMIT = 5000;
 // #523: same debounce the Activity / Events filter inputs use, so a
 // keystroke doesn't fire a fleet-sized exploded-table scan.
 const FILTER_DEBOUNCE_MS = 300;
+
+/** #574: sentinel `field` value for the scalar-facts tab. Distinct
+ *  from any real explode `field` (which is a plain JSON key, so it
+ *  can't contain the leading/trailing double underscores) — picked so
+ *  it never collides with an operator's array key. */
+const SCALAR_FIELD = '__scalars__';
+
+/** #574: derive the searchable scalar columns from a job's
+ *  `display` list — every field EXCEPT the `type: 'table'` ones,
+ *  which are arrays handled by the explode sub-table tabs. A
+ *  `number` / `bytes` render hint marks the column numeric so it
+ *  gets the comparator op set. Mirrors the backend's
+ *  `scalar_columns`. */
+function scalarColumnsOf(job: InventoryJob | null): ExplodeColumn[] {
+  if (!job) return [];
+  return (job.display ?? [])
+    .filter((d) => d.type !== 'table')
+    .map((d) => ({
+      field: d.field,
+      type: d.type === 'number' || d.type === 'bytes' ? 'integer' : 'text',
+    }));
+}
 
 type Filter = {
   /** Stable client-side id so React's keyed list stays sane across
@@ -92,14 +124,17 @@ function formatCell(v: unknown): string {
 }
 
 /** v0.35 / #87: cross-PC inventory search page. Drives
- *  `GET /api/inventory/{manifest_id}/search/{field}` programmatically
- *  so operators don't have to know the Django-style URL syntax.
+ *  `GET /api/inventory/{manifest_id}/search/{field}` (explode tabs)
+ *  and `GET /api/inventory/{manifest_id}/search-scalars` (#574, the
+ *  scalar-facts tab) programmatically so operators don't have to
+ *  know the Django-style URL syntax.
  *
  *  Originally named `Software` because the motivating use case was
  *  "find PCs with X app installed", but `explode:` manifests can
- *  flatten any array (disks / network adapters / services / …) so
- *  the page covers fleet-wide inventory search in general — renamed
- *  to match. */
+ *  flatten any array (disks / network adapters / services / …) and
+ *  #574 added top-level scalar search (`os_build` / `pc_model` /
+ *  `ram_bytes`), so the page covers fleet-wide inventory search in
+ *  general — renamed to match. */
 export function InventorySearch() {
   const { t } = useTranslation('search');
   const jobsQ = useQuery({
@@ -107,9 +142,15 @@ export function InventorySearch() {
     queryFn: () => apiFetch<InventoryJob[]>('/api/inventory/jobs'),
   });
 
-  // Only jobs with at least one explode spec are searchable.
+  // #574: a job is searchable if it has at least one explode spec OR
+  // at least one top-level scalar display field. Pre-#574 only
+  // explode-bearing jobs showed up — scalar-only inventory jobs
+  // (e.g. an OS-facts probe with no arrays) were invisible here.
   const searchableJobs = useMemo(
-    () => (jobsQ.data ?? []).filter((j) => (j.explode?.length ?? 0) > 0),
+    () =>
+      (jobsQ.data ?? []).filter(
+        (j) => (j.explode?.length ?? 0) > 0 || scalarColumnsOf(j).length > 0,
+      ),
     [jobsQ.data],
   );
 
@@ -124,9 +165,8 @@ export function InventorySearch() {
   // A ref-backed counter is fragility-free and survives re-renders.
   const filterUidCounter = useRef(0);
 
-  // Auto-pick the first searchable manifest / first field when the
-  // jobs list first lands or the operator picks a manifest whose
-  // field set changed.
+  // Auto-pick the first searchable manifest when the jobs list first
+  // lands.
   useEffect(() => {
     if (!manifestId && searchableJobs.length > 0) {
       setManifestId(searchableJobs[0].manifest_id);
@@ -137,28 +177,50 @@ export function InventorySearch() {
     () => searchableJobs.find((j) => j.manifest_id === manifestId) ?? null,
     [searchableJobs, manifestId],
   );
-  const currentSpec = useMemo(
-    () => currentJob?.explode?.find((s) => s.field === field) ?? null,
-    [currentJob, field],
-  );
+  const scalarCols = useMemo(() => scalarColumnsOf(currentJob), [currentJob]);
 
+  // #574: the tab set = one tab per explode field, plus a scalar tab
+  // (keyed SCALAR_FIELD) when the manifest has any scalar facts. The
+  // tab bar only renders when there's more than one (same rule as
+  // pre-#574); a scalar-only manifest shows its form directly.
+  const tabs = useMemo(() => {
+    const out: { key: string; label: string; isScalar: boolean }[] = (
+      currentJob?.explode ?? []
+    ).map((s) => ({ key: s.field, label: s.field, isScalar: false }));
+    if (scalarCols.length > 0) {
+      out.push({ key: SCALAR_FIELD, label: t('scalarTab'), isScalar: true });
+    }
+    return out;
+  }, [currentJob, scalarCols, t]);
+
+  const isScalar = field === SCALAR_FIELD;
+  const currentSpec = useMemo(
+    () =>
+      isScalar ? null : (currentJob?.explode?.find((s) => s.field === field) ?? null),
+    [currentJob, field, isScalar],
+  );
+  // Unified searchable column set for the active tab.
+  const columns = isScalar ? scalarCols : (currentSpec?.columns ?? []);
+  // Whether there's a tab to render a result view for.
+  const hasView = isScalar || !!currentSpec;
+
+  // Keep `field` pointed at a tab that exists on the current manifest.
   useEffect(() => {
-    const specs = currentJob?.explode ?? [];
-    if (specs.length === 0) {
+    if (tabs.length === 0) {
       setField('');
       return;
     }
-    if (!specs.some((s) => s.field === field)) {
-      setField(specs[0].field);
+    if (!tabs.some((tab) => tab.key === field)) {
+      setField(tabs[0].key);
       setFilters([]);
       setOffset(0);
     }
-  }, [currentJob, field]);
+  }, [tabs, field]);
 
   // #523: debounce the filter values before they reach the queryKey —
-  // each keystroke in a filter input previously issued a fresh
-  // GET /api/inventory/{id}/search/{field} (a scan over fleet-sized
-  // exploded tables). Same 300 ms the Activity / Events filters use.
+  // each keystroke in a filter input previously issued a fresh search
+  // request (a scan over fleet-sized exploded tables / facts_json).
+  // Same 300 ms the Activity / Events filters use.
   const dFilters = useDebouncedValue(filters, FILTER_DEBOUNCE_MS);
 
   // Build the search query URL. `null` when not enough state to fire.
@@ -167,9 +229,9 @@ export function InventorySearch() {
     const sp = new URLSearchParams();
     // Empty live filters bypass the debounce: a manifest/field switch
     // calls setFilters([]) synchronously, but dFilters would keep the
-    // OLD manifest's filters for 300 ms — pairing them with the new
-    // manifest fired one bogus request (and a flash of wrong data)
-    // before the debounce settled (review PR #551, gemini).
+    // OLD tab's filters for 300 ms — pairing them with the new tab
+    // fired one bogus request (and a flash of wrong data) before the
+    // debounce settled (review PR #551, gemini).
     const activeFilters = filters.length === 0 ? filters : dFilters;
     for (const f of activeFilters) {
       const param = filterToParam(f);
@@ -177,8 +239,13 @@ export function InventorySearch() {
     }
     sp.set('limit', String(limit));
     if (offset > 0) sp.set('offset', String(offset));
-    return `/api/inventory/${encodeURIComponent(manifestId)}/search/${encodeURIComponent(field)}?${sp.toString()}`;
-  }, [manifestId, field, filters, dFilters, limit, offset]);
+    // #574: scalar tab hits the facts_json endpoint; explode tabs hit
+    // the derived-table one keyed by the array `field`.
+    const base = isScalar
+      ? `/api/inventory/${encodeURIComponent(manifestId)}/search-scalars`
+      : `/api/inventory/${encodeURIComponent(manifestId)}/search/${encodeURIComponent(field)}`;
+    return `${base}?${sp.toString()}`;
+  }, [manifestId, field, filters, dFilters, limit, offset, isScalar]);
 
   const searchQ = useQuery({
     queryKey: ['inventory-search', searchUrl],
@@ -187,7 +254,6 @@ export function InventorySearch() {
   });
 
   const rows = searchQ.data ?? [];
-  const columns = currentSpec?.columns ?? [];
 
   function addFilter() {
     if (columns.length === 0) return;
@@ -284,24 +350,24 @@ export function InventorySearch() {
                 </div>
               </div>
 
-              {(currentJob?.explode?.length ?? 0) > 1 ? (
+              {tabs.length > 1 ? (
                 <div className="inline-flex rounded-md border border-border overflow-hidden text-sm">
-                  {(currentJob?.explode ?? []).map((s) => (
+                  {tabs.map((tab) => (
                     <button
-                      key={s.field}
+                      key={tab.key}
                       onClick={() => {
-                        setField(s.field);
+                        setField(tab.key);
                         setFilters([]);
                         setOffset(0);
                       }}
                       className={cn(
                         'px-3 py-1.5 transition-colors',
-                        field === s.field
+                        field === tab.key
                           ? 'bg-fg/10 text-fg font-medium'
                           : 'text-muted hover:bg-fg/5 hover:text-fg',
                       )}
                     >
-                      {s.field}
+                      {tab.label}
                     </button>
                   ))}
                 </div>
@@ -386,15 +452,22 @@ export function InventorySearch() {
         </CardContent>
       </Card>
 
-      {currentSpec ? (
+      {hasView ? (
         <Card>
           <CardHeader>
             <CardTitle className="text-base">
-              {currentJob?.manifest_id} · {currentSpec.field}
+              {currentJob?.manifest_id} · {isScalar ? t('scalarTab') : currentSpec?.field}
             </CardTitle>
             <CardDescription>
-              <code>{currentSpec.table}</code> · {t('labels.columns')}:{' '}
-              {currentSpec.columns.map((c, i) => (
+              {isScalar ? (
+                <span className="text-muted">{t('scalarSource')} · </span>
+              ) : (
+                <>
+                  <code>{currentSpec?.table}</code> ·{' '}
+                </>
+              )}
+              {t('labels.columns')}:{' '}
+              {columns.map((c, i) => (
                 <span key={c.field}>
                   {i > 0 ? ', ' : ''}
                   <code>{c.field}</code>
@@ -433,36 +506,30 @@ export function InventorySearch() {
                     <TableRow>
                       <TableHead>{t('results.columns.pcId')}</TableHead>
                       <TableHead>{t('results.columns.collectedAt')}</TableHead>
-                      {currentSpec.columns.map((c) => (
+                      {columns.map((c) => (
                         <TableHead key={c.field}>{c.field}</TableHead>
                       ))}
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {rows.map((row) => {
+                    {rows.map((row, i) => {
                       const pcId = formatCell(row.pc_id);
                       // Gemini #116 fix: derive a row key from the
                       // spec's primary_key tuple (= the SQL unique
-                      // identity per (pc_id, job_id)) instead of
-                      // index-based `${pcId}-${i}`. Index keys are a
-                      // React anti-pattern under pagination /
-                      // filter changes — switching pages reuses
-                      // indices and breaks reconciliation. The PK
-                      // tuple is what the backend already considers
-                      // unique within (pc_id, job_id), so combining
-                      // pc_id + those values yields a globally
-                      // stable key for the result set.
-                      const rowKey = [
-                        pcId,
-                        ...currentSpec.primary_key.map((k) => formatCell(row[k])),
-                      ].join('|');
+                      // identity per (pc_id, job_id)) for explode
+                      // results — index keys are a React anti-pattern
+                      // under pagination / filter changes. Scalar
+                      // results are one row per PC, so pc_id is already
+                      // stable; offset+index is a defensive tiebreaker.
+                      const rowKey = isScalar
+                        ? `${pcId}-${offset + i}`
+                        : [
+                            pcId,
+                            ...(currentSpec?.primary_key ?? []).map((k) => formatCell(row[k])),
+                          ].join('|');
                       // Gemini #116 fix: pass row.collected_at
-                      // through to fmtIsoLocal directly. The
-                      // previous `fmtIsoLocal(formatCell(...))`
-                      // round-tripped null through formatCell's
-                      // dash placeholder, which fmtIsoLocal then
-                      // re-tagged as the same dash via its own
-                      // null branch — fine, but inscrutable.
+                      // through to fmtIsoLocal directly rather than
+                      // round-tripping null through formatCell's dash.
                       const collectedAt =
                         typeof row.collected_at === 'string' ? row.collected_at : null;
                       return (
@@ -478,7 +545,7 @@ export function InventorySearch() {
                           <TableCell className="text-muted text-xs">
                             {fmtIsoLocal(collectedAt)}
                           </TableCell>
-                          {currentSpec.columns.map((c) => (
+                          {columns.map((c) => (
                             <TableCell key={c.field}>{formatCell(row[c.field])}</TableCell>
                           ))}
                         </TableRow>

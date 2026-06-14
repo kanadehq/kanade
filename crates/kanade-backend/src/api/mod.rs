@@ -216,6 +216,15 @@ pub fn router(state: AppState) -> Router {
             "/api/inventory/{manifest_id}/search/{field}",
             get(inventory::search),
         )
+        // #574: cross-PC search over top-level scalar facts in
+        // `facts_json` — no `explode` sub-table required. Columns are
+        // the manifest's non-`table` `display` fields; the query
+        // string carries the same Django-ish filter syntax as the
+        // explode search plus `limit` / `offset`.
+        .route(
+            "/api/inventory/{manifest_id}/search-scalars",
+            get(inventory::search_scalars),
+        )
         // v0.31 / #41: per-PC inventory history timeline.
         .route(
             "/api/inventory/{manifest_id}/history/pc/{pc_id}",
