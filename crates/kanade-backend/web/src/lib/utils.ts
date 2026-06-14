@@ -68,3 +68,41 @@ export function isAgentOnline(
   if (isNaN(ts)) return false;
   return referenceTime - ts < AGENT_ACTIVE_THRESHOLD_MS;
 }
+
+/**
+ * Compare two dotted version strings numerically: `true` when `a` is
+ * strictly newer than `b` (so "0.43.10" > "0.43.9", which a plain
+ * string compare gets wrong). Missing / non-numeric components count
+ * as 0, so a malformed version sorts low rather than throwing.
+ */
+export function isVersionNewer(a: string, b: string): boolean {
+  const pa = a.split('.').map((n) => Number.parseInt(n, 10) || 0);
+  const pb = b.split('.').map((n) => Number.parseInt(n, 10) || 0);
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const x = pa[i] ?? 0;
+    const y = pb[i] ?? 0;
+    if (x !== y) return x > y;
+  }
+  return false;
+}
+
+/**
+ * The still-UNRESOLVED quarantine entries for an agent: versions the
+ * boot sentinel rolled back that are NEWER than the version the agent
+ * currently runs. A rolled-back version older than what the agent now
+ * runs successfully is resolved — the host has since adopted a newer
+ * build — so it should not raise an alert (otherwise a 3000-host fleet
+ * would carry stale quarantine badges forever, with no way to clear
+ * them short of per-host `unquarantine`). When the agent version is
+ * unknown, every entry is treated as unresolved (we can't prove it
+ * healed).
+ */
+export function unresolvedQuarantine(
+  quarantined: string[] | undefined,
+  agentVersion: string | null | undefined,
+): string[] {
+  if (!quarantined || quarantined.length === 0) return [];
+  if (!agentVersion) return quarantined;
+  return quarantined.filter((v) => isVersionNewer(v, agentVersion));
+}
