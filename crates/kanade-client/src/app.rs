@@ -113,6 +113,15 @@ const RESURFACE_FLAG: &str = "--resurface";
 /// duplicate-suppression (the user couldn't see them the first time).
 const RESURFACE_EVENT: &str = "klp-resurface";
 
+/// Emitted when a toast was **clicked** (#647): the user activated a
+/// `kanade-client://show?id=<id>` toast (body or 確認 button), which the
+/// single-instance guard forwarded here. Payload is the notification id; the
+/// WebView reveals the window and scrolls to / flashes that notification.
+const FOCUS_NOTIFICATION_EVENT: &str = "klp-focus-notification";
+
+/// The `show?id=` form of the `kanade-client://` protocol the emergency toast's
+/// `launch` carries (#647). Registered to the client exe by the installer.
+const PROTOCOL_SHOW_PREFIX: &str = "kanade-client://show?id=";
 /// Tauri-managed shared state. `Arc<Mutex<…>>` instead of plain
 /// `Mutex<…>` so the spawned setup task can hold its own clone
 /// while the `invoke` commands hold theirs.
@@ -123,6 +132,11 @@ pub struct AppState {
     /// load to toast that notification and start hidden, instead of the
     /// normal visible startup. `None` on a normal user launch.
     launch_notification: Option<String>,
+    /// `Some(id)` when the app was launched by a **toast click**
+    /// (`kanade-client://show?id=<id>` protocol, #647): the WebView reads it on
+    /// load to scroll to + flash that notification — with the window *visible*
+    /// (the user asked to see it), unlike `launch_notification`.
+    launch_focus: Option<String>,
 }
 
 /// Clone the connected client out of the state lock, erroring if the
@@ -253,6 +267,15 @@ fn get_launch_notification(state: State<'_, AppState>) -> Option<String> {
     state.launch_notification.clone()
 }
 
+/// The notification id this app was launched to **focus** via a toast click
+/// (`kanade-client://show?id=<id>`, #647), or `None`. The WebView calls this on
+/// load: `Some(id)` means "the window is visible — scroll to + flash this
+/// notification".
+#[tauri::command]
+fn get_launch_focus(state: State<'_, AppState>) -> Option<String> {
+    state.launch_focus.clone()
+}
+
 /// Reveal + focus the main window. Called from the WebView when the user
 /// clicks the emergency toast (the window was started hidden so the toast
 /// never bursts over a meeting); also used to bring an already-running
@@ -267,54 +290,78 @@ fn show_main_window(app: tauri::AppHandle) {
     }
 }
 
-/// Show an emergency notification as a NATIVE WinRT toast (#102).
-///
-/// The `@tauri-apps/plugin-notification` `sendNotification` can't make a toast
-/// **persist** on desktop, so the emergency path bypasses it and builds the
-/// toast directly here with `Scenario::Reminder` (+ an action button, which
-/// the scenario needs to actually stay on screen) — it stays until the user
-/// dismisses it and lands in the Action Center, instead of the plugin's ~7 s
-/// auto-dismiss (an emergency that vanishes in seconds is useless).
-///
-/// No `on_activated` (toast-click) handler: registering
-/// `ToastNotification.Activated` requires a non-MSIX app to have a
-/// COM-activator CLSID registered (registry + the shortcut's
-/// `ToastActivatorCLSID`); without it the `Activated` call inside `show()`
-/// fails and the toast never submits. Reveal-on-click is deferred to #647.
-///
-/// The toast is tagged with [`APP_USER_MODEL_ID_STR`] (the same AUMID the
-/// process pins + the Start-Menu shortcut carries), which is what lets a
-/// non-MSIX desktop app's toast render at all. Returns `Err` if the toast
-/// can't be shown so the WebView can fall back to the plugin path.
-#[tauri::command]
-async fn show_emergency_toast(title: String, body: String) -> Result<(), String> {
-    info!(title = %title, "show_emergency_toast: invoked");
-    // Build + show the toast on the async runtime — the SAME context the
-    // notification plugin submits from. Showing it on the command worker
-    // thread or hopping to the main thread via `run_on_main_thread` both
-    // returned without the toast ever reaching the platform. AWAIT the task so
-    // a `show()` failure is returned to the WebView (which then falls back to
-    // the plugin toast) rather than only logged.
-    let handle = tauri::async_runtime::spawn(async move {
-        use tauri_winrt_notification::{Scenario, Toast};
+/// Escape the five XML metacharacters so a title/body/URI is safe inside the
+/// toast XML (both element text and double-quoted attributes).
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
 
-        Toast::new(APP_USER_MODEL_ID_STR)
-            .title(&title)
-            .text1(&body)
-            // Pre-expanded, stays on screen until dismissed and persists in
-            // the Action Center — the whole point of an emergency (vs the
-            // default ~7 s auto-dismiss).
-            .scenario(Scenario::Reminder)
-            // `scenario=Reminder` only actually persists ("stays until the
-            // user dismisses it") when the toast carries at least one action
-            // — without a button Windows treats it as an ordinary toast and
-            // auto-dismisses it in seconds (confirmed live). This button
-            // satisfies that requirement; wiring its click to ack/reveal the
-            // app needs a COM activator (issue #647), so for now it only
-            // guarantees persistence.
-            .add_button("確認", "ack")
-            .show()
-            .map_err(|e| e.to_string())
+/// Show an emergency notification as a NATIVE WinRT toast (#102 / #647).
+///
+/// The `@tauri-apps/plugin-notification` `sendNotification` can neither make a
+/// toast **persist** nor carry a click target on desktop, so the emergency
+/// path builds the toast XML directly:
+///
+/// - `scenario="reminder"` (+ one action, required for the scenario to take) →
+///   stays on screen until dismissed and persists in the Action Center,
+///   instead of the plugin's ~7 s auto-dismiss.
+/// - toast-level `launch="kanade-client://show?id=<id>" activationType="protocol"`
+///   (and the same on the 確認 button) → a **body OR button click opens the
+///   client** focused on this notification, via the registered
+///   `kanade-client://` protocol. Protocol activation needs no COM activator
+///   (that's only for in-process foreground/background activation), so this
+///   sidesteps the registration the `Activated`-event path would require.
+///
+/// Tagged with [`APP_USER_MODEL_ID_STR`] (the AUMID the process pins + the
+/// shortcut carries) so a non-MSIX desktop toast renders at all. Returns `Err`
+/// (so the WebView can fall back to the plugin path) if the toast can't show.
+#[tauri::command]
+async fn show_emergency_toast(title: String, body: String, id: String) -> Result<(), String> {
+    info!(title = %title, %id, "show_emergency_toast: invoked");
+    // Build + show on the async runtime — the SAME context the notification
+    // plugin submits from. A command worker thread / `run_on_main_thread` both
+    // returned without the toast reaching the platform. AWAIT so a failure is
+    // returned to the WebView (which then falls back to the plugin toast).
+    let handle = tauri::async_runtime::spawn(async move {
+        use windows::Data::Xml::Dom::XmlDocument;
+        use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
+        use windows::core::HSTRING;
+
+        // Build the URI in its natural form, then XML-escape once at the
+        // embedding point (the conventional pattern). The id charset is
+        // `[A-Za-z0-9_.-]` so today `xml_escape` is a no-op here, but escaping
+        // the whole URI keeps it correct-by-construction: escaping `id` first
+        // and embedding the result would double-encode an `&` (XML `&amp;` →
+        // the protocol handler receives `&`, truncating the id).
+        let uri = format!("kanade-client://show?id={id}");
+        let uri_xml = xml_escape(&uri);
+        let xml = format!(
+            "<toast launch=\"{uri_xml}\" activationType=\"protocol\" scenario=\"reminder\">\
+               <visual><binding template=\"ToastGeneric\">\
+                 <text>{title}</text><text>{body}</text>\
+               </binding></visual>\
+               <actions>\
+                 <action content=\"確認\" activationType=\"protocol\" arguments=\"{uri_xml}\"/>\
+               </actions>\
+             </toast>",
+            uri_xml = uri_xml,
+            title = xml_escape(&title),
+            body = xml_escape(&body),
+        );
+
+        let doc = XmlDocument::new().map_err(|e| e.to_string())?;
+        doc.LoadXml(&HSTRING::from(&xml))
+            .map_err(|e| e.to_string())?;
+        let toast = ToastNotification::CreateToastNotification(&doc).map_err(|e| e.to_string())?;
+        let notifier = ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(
+            APP_USER_MODEL_ID_STR,
+        ))
+        .map_err(|e| e.to_string())?;
+        notifier.Show(&toast).map_err(|e| e.to_string())
     });
     match handle.await {
         Ok(Ok(())) => {
@@ -431,6 +478,22 @@ fn has_resurface_flag<I: IntoIterator<Item = String>>(args: I) -> bool {
     args.into_iter().any(|a| a == RESURFACE_FLAG)
 }
 
+/// Parse the notification id out of a `kanade-client://show?id=<id>` protocol
+/// argument (#647 toast-click). The protocol handler passes the whole URI as
+/// one arg; a launch may append a trailing slash/fragment, so take just the
+/// id token (`[A-Za-z0-9_.-]`, the validated notification-id charset). Shared
+/// by the startup parse and the single-instance handler.
+fn parse_protocol_show<S: AsRef<str>, I: IntoIterator<Item = S>>(args: I) -> Option<String> {
+    args.into_iter().find_map(|a| {
+        let rest = a.as_ref().strip_prefix(PROTOCOL_SHOW_PREFIX)?;
+        let id: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+            .collect();
+        (!id.is_empty()).then_some(id)
+    })
+}
+
 /// Single-instance callback (#624): fires in the ALREADY-RUNNING instance
 /// when a second `kanade-client` is launched (the agent's emergency
 /// fallback launches one per emergency, and without this guard each would
@@ -451,6 +514,17 @@ fn on_second_instance(app: &tauri::AppHandle, argv: Vec<String>) {
         if let Err(e) = app.emit(RESURFACE_EVENT, ()) {
             warn!(error = %e, "single-instance: forward resurface failed");
         }
+    } else if let Some(id) = parse_protocol_show(&argv) {
+        // Toast clicked (#647 `kanade-client://show?id=<id>` protocol launch):
+        // reveal the window and tell the WebView to focus this notification.
+        if let Some(win) = app.get_webview_window("main") {
+            let _ = win.unminimize();
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
+        if let Err(e) = app.emit(FOCUS_NOTIFICATION_EVENT, id) {
+            warn!(error = %e, "single-instance: forward focus id failed");
+        }
     } else if let Some(id) = parse_show_notification(argv) {
         if let Err(e) = app.emit(SHOW_NOTIFICATION_EVENT, id) {
             warn!(error = %e, "single-instance: forward emergency id failed");
@@ -469,15 +543,21 @@ pub fn run() {
     // Pin the process AUMID before anything else so toasts render (#102).
     set_app_user_model_id();
     let launch_notification = parse_launch_notification();
+    // Launched by a toast click (`kanade-client://show?id=<id>`, #647) → the
+    // user asked to SEE it, so the window is visible and the WebView focuses
+    // the notification (vs `launch_notification`, which starts hidden + toasts).
+    let launch_focus = parse_protocol_show(std::env::args());
     // Launched by the agent for an emergency (`--show-notification <id>`) or a
     // presence-driven re-surface (`--resurface`, #647) → start hidden (the
     // WebView toasts; the window only appears when the user clicks the toast),
-    // so it never bursts over whatever the user is doing.
+    // so it never bursts over whatever the user is doing. A toast-click launch
+    // (`launch_focus`) is NOT hidden.
     let launched_for_emergency =
         launch_notification.is_some() || has_resurface_flag(std::env::args());
     let state = AppState {
         klp: Arc::new(Mutex::new(None)),
         launch_notification,
+        launch_focus,
     };
     let klp_slot = state.klp.clone();
 
@@ -505,6 +585,7 @@ pub fn run() {
             notifications_list,
             notifications_ack,
             get_launch_notification,
+            get_launch_focus,
             show_main_window,
             show_emergency_toast
         ])
