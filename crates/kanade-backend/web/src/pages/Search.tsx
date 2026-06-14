@@ -84,7 +84,12 @@ function scalarColumnsOf(job: InventoryJob | null): ExplodeColumn[] {
     .filter((d) => d.type !== 'table')
     .map((d) => ({
       field: d.field,
-      type: d.type === 'number' || d.type === 'bytes' ? 'integer' : 'text',
+      // `real`, not `integer`: the backend compares `number`/`bytes`
+      // columns with `CAST(... AS REAL)`, so the label shown in the
+      // filter row should match that float semantics. `columnKind()`
+      // treats `integer` and `real` alike as numeric, so the op set
+      // is unaffected (Claude review, #669).
+      type: d.type === 'number' || d.type === 'bytes' ? 'real' : 'text',
     }));
 }
 
