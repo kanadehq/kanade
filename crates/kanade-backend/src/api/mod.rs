@@ -172,7 +172,19 @@ pub fn router(state: AppState) -> Router {
         // Read-only and viewer-open like the other config reads.
         .route("/api/config/defaults", get(agent_config::defaults))
         .route("/api/groups/{name}/config", get(agent_config::get_group))
+        // Inherited (placeholder) EffectiveConfig for the SPA's per-scope
+        // editors: what a field falls back to when left blank. Group =
+        // built-in→global; PC = built-in→global→groups with the PC's own
+        // scope excluded. Read-only, viewer-open like the config reads.
+        .route(
+            "/api/groups/{name}/config/inherited",
+            get(agent_config::group_inherited),
+        )
         .route("/api/pcs/{pc_id}/config", get(agent_config::get_pc))
+        .route(
+            "/api/pcs/{pc_id}/config/inherited",
+            get(agent_config::pc_inherited),
+        )
         .route("/api/results", get(results::list))
         // v0.29 / Issue #19: path param is now `result_id` (was
         // `request_id`); pre-v0.29 rows backfilled `result_id = request_id`

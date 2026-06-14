@@ -1,16 +1,12 @@
 {
-  "global": {
-    "title": "Global ConfigScope",
-    "description": "Whole-fleet default, including the client's product name. Per-group / per-pc overrides win over this.",
-    "blankHint": "Each field's greyed placeholder is the built-in default it inherits when left blank. Fill one in only to override it fleet-wide — blank keeps inheriting the (evolving) default rather than pinning today's value.",
-    "loading": "loading…",
-    "loadErrorTitle": "Couldn't load global config",
-    "saveErrorTitle": "Save failed",
-    "saveButton": "Save global config",
-    "toast": {
-      "saveSuccess": "Saved global config",
-      "saveFailure": "Save failed: {{error}}"
-    },
+  "tabs": {
+    "label": "Config scope",
+    "global": "Global",
+    "groups": "Group",
+    "pcs": "PC"
+  },
+  "configForm": {
+    "placeholdersErrorTitle": "Couldn't load inherited defaults",
     "alerts": {
       "notLoaded": "Wait for the config to finish loading before saving",
       "invalidTopN": "Top-N processes must be a positive whole number",
@@ -21,11 +17,11 @@
       "clientDisplayName": {
         "label": "Client display name",
         "placeholder": "端末管理支援ツール",
-        "hint": "Product name the end-user Client App shows in its window title, header, Start-Menu shortcut, and notification sender — brands the client per customer. Leave blank to fall back to the client's built-in default name (端末管理支援ツール)."
+        "hint": "Product name the end-user Client App shows in its window title, header, Start-Menu shortcut, and notification sender — brands the client per customer. Leave blank to inherit (the client falls back to its built-in default name)."
       },
       "targetVersion": {
         "label": "Target version",
-        "hint": "Fleet-wide rollout target. Usually left blank here and set per-group (canary) instead."
+        "hint": "Rollout target version. Often left blank and set per-group (canary) instead."
       },
       "targetVersionJitter": {
         "label": "Rollout jitter",
@@ -41,10 +37,10 @@
       },
       "processPerfEnabled": {
         "label": "Per-process perf",
-        "inherit": "Inherit default ({{value}})",
+        "inherit": "Inherit ({{value}})",
         "on": "On",
         "off": "Off",
-        "hint": "Heavy per-process collection. Off by default and normally toggled per-pc for investigation — turning it on here enables it for the whole fleet."
+        "hint": "Heavy per-process collection. Off by default and normally toggled per-pc for investigation."
       },
       "processPerfTopN": {
         "label": "Per-process top-N",
@@ -57,30 +53,39 @@
       }
     }
   },
+  "global": {
+    "title": "Global ConfigScope",
+    "description": "Whole-fleet default, including the client's product name. Per-group / per-pc overrides win over this.",
+    "blankHint": "Each field's greyed placeholder is the built-in default it inherits when left blank. Fill one in only to override it fleet-wide — blank keeps inheriting the (evolving) default rather than pinning today's value.",
+    "loading": "loading…",
+    "loadErrorTitle": "Couldn't load global config",
+    "saveErrorTitle": "Save failed",
+    "saveButton": "Save global config",
+    "toast": {
+      "saveSuccess": "Saved global config",
+      "saveFailure": "Save failed: {{error}}"
+    }
+  },
   "scope": {
-    "title": "Per-group / Per-PC override",
-    "description": "Partial ConfigScope — only fields you set survive. Empty fields fall through to the global scope.",
+    "groupTitle": "Group override",
+    "pcTitle": "PC override",
+    "description": "Partial ConfigScope — only the fields you set are written. Blank fields fall through to the layer below.",
+    "blankHint": "Each field's greyed placeholder is what it resolves to if you leave it blank in this scope. Fill one in to override it here; blank deletes the key and inherits the layer below.",
+    "blankHintGroupNote": "(Placeholders show the built-in→global base; other groups' overrides are resolved per-PC and aren't reflected here.)",
     "labels": {
-      "scope": "scope",
-      "name": "name"
-    },
-    "kindOptions": {
-      "groups": "groups.<name>",
-      "pcs": "pcs.<pc_id>"
+      "group": "Group",
+      "pc": "PC"
     },
     "placeholders": {
-      "name": "canary or pc-01",
-      "body": "{\"target_version\":\"0.4.0\"}"
+      "group": "canary",
+      "pc": "pc-01"
     },
     "buttons": {
-      "load": "load",
-      "save": "save",
-      "delete": "delete"
+      "load": "Load",
+      "save": "Save override",
+      "delete": "Delete"
     },
     "errorTitle": "Scope op failed",
-    "alerts": {
-      "invalidJson": "Body must be valid JSON: {{error}}"
-    },
     "confirm": {
       "deleteTitle": "Delete {{url}}?",
       "deleteDescription": "Removes the override; the scope falls back through the layered config.",
