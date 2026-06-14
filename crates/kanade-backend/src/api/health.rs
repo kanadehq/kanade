@@ -6,10 +6,23 @@
 //! JetStream resource set, and recent execution failures. HTTP
 //! status mirrors `status`:
 //!
-//!   * `ok`        → 200 — all resources present, no stale agents
+//!   * `ok`        → 200 — all JetStream resources present, at least
+//!     one agent active
 //!   * `unknown`   → 200 — no agents reporting yet (fresh install)
-//!   * `degraded`  → 503 — at least one JetStream resource missing
-//!     OR one or more agents have gone stale
+//!   * `degraded`  → 503 — at least one JetStream resource missing,
+//!     OR every registered agent is offline (`active == 0` while
+//!     `known > 0`)
+//!
+//! A *single* offline (stale) agent does NOT mark the fleet degraded:
+//! powering a PC off is normal operation, so a shut-down host is an
+//! expected state, not an infra fault. But a *total* blackout — every
+//! known agent offline at once — is different: the backend host runs
+//! its own co-located agent, so in healthy operation `active` is never
+//! 0. `active == 0 && known > 0` therefore means something systemic
+//! (NATS partition, backend not ingesting heartbeats, expired certs),
+//! and that does degrade the fleet. The active/stale counts are also
+//! reported in the body (and on the Dashboard) for at-a-glance
+//! inventory freshness.
 //!
 //! The endpoint sits under `/api/*` so it inherits the same auth
 //! middleware as the rest of the admin surface; if your monitor
@@ -88,13 +101,7 @@ pub async fn fleet(State(state): State<AppState>) -> (StatusCode, Json<FleetHeal
     let jetstream = jetstream_health(&state.jetstream).await;
     let recent_results = recent_results(&state.pool, recent_cutoff).await;
 
-    let status = if jetstream.all_ok && agents.stale == 0 && agents.known > 0 {
-        HealthStatus::Ok
-    } else if !jetstream.all_ok || agents.stale > 0 {
-        HealthStatus::Degraded
-    } else {
-        HealthStatus::Unknown
-    };
+    let status = classify(jetstream.all_ok, agents.known, agents.active);
 
     let code = match status {
         HealthStatus::Ok | HealthStatus::Unknown => StatusCode::OK,
@@ -111,6 +118,29 @@ pub async fn fleet(State(state): State<AppState>) -> (StatusCode, Json<FleetHeal
             observed_at: now,
         }),
     )
+}
+
+/// Map the signals that matter into a fleet verdict.
+///
+/// A *single* stale agent is deliberately NOT a fault — see the module
+/// docs: a powered-off PC is expected operation. But a missing
+/// JetStream resource (real infra breakage) degrades the fleet, and so
+/// does a *total* blackout: `active == 0 && known > 0`. The backend
+/// host runs its own co-located agent, so in healthy operation at
+/// least one agent is always active — zero active means something
+/// systemic, not a routine shutdown. `unknown` covers the fresh
+/// install where no agent has registered yet (it would be wrong to
+/// call an empty fleet "ok").
+fn classify(jetstream_all_ok: bool, known_agents: i64, active_agents: i64) -> HealthStatus {
+    if !jetstream_all_ok {
+        HealthStatus::Degraded
+    } else if known_agents == 0 {
+        HealthStatus::Unknown
+    } else if active_agents == 0 {
+        HealthStatus::Degraded
+    } else {
+        HealthStatus::Ok
+    }
 }
 
 async fn agents_health(pool: &sqlx::SqlitePool, stale_cutoff: DateTime<Utc>) -> AgentsHealth {
@@ -368,6 +398,43 @@ fn percentile(sorted: &[i64], q: f64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A shut-down PC is normal operation — a *partial* set of stale
+    // agents must never flip the fleet to degraded. `classify` takes
+    // no stale count; it only cares whether ANY agent is active.
+    #[test]
+    fn jetstream_ok_with_some_active_is_ok_regardless_of_stale() {
+        // The realistic case the user hit: every agent registered,
+        // some powered off, at least one still reporting → ok.
+        assert!(matches!(classify(true, 5, 3), HealthStatus::Ok));
+        assert!(matches!(classify(true, 5, 1), HealthStatus::Ok));
+        assert!(matches!(classify(true, 1, 1), HealthStatus::Ok));
+    }
+
+    #[test]
+    fn total_blackout_degrades() {
+        // Every known agent offline at once. The backend's co-located
+        // agent means active is never 0 in healthy operation, so this
+        // signals something systemic — degraded, not "all PCs happen
+        // to be off".
+        assert!(matches!(classify(true, 5, 0), HealthStatus::Degraded));
+        assert!(matches!(classify(true, 1, 0), HealthStatus::Degraded));
+    }
+
+    #[test]
+    fn no_agents_is_unknown_not_degraded() {
+        // Fresh install: nothing has reported yet. Zero active here is
+        // "nobody registered", not a blackout.
+        assert!(matches!(classify(true, 0, 0), HealthStatus::Unknown));
+    }
+
+    #[test]
+    fn missing_jetstream_resource_degrades() {
+        // Real infra breakage — degraded regardless of agent counts.
+        assert!(matches!(classify(false, 5, 5), HealthStatus::Degraded));
+        assert!(matches!(classify(false, 5, 0), HealthStatus::Degraded));
+        assert!(matches!(classify(false, 0, 0), HealthStatus::Degraded));
+    }
 
     #[test]
     fn percentile_empty_is_zero() {
