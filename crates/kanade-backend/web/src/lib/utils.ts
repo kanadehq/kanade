@@ -11,6 +11,32 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 /**
+ * Split a bulk-entry string (pasted from Excel / a text editor, or
+ * typed) into a clean token list: split on commas **and** any
+ * whitespace (spaces, tabs, newlines), trim, drop empties. Lets the
+ * pickers accept `pc01,pc02,pc03`, `pc01, pc02,  pc03`, and
+ * tab/newline-separated columns all the same. Does NOT dedupe — the
+ * caller merges against its existing selection.
+ */
+export function splitTokens(text: string): string[] {
+  return text
+    .split(/[\s,]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Escape a string for safe interpolation into a `RegExp` / a regex
+ * query param — the pickers build a `^(a|b|c)$` alternation out of
+ * pasted ids to existence-check them server-side, and an id with a
+ * regex metachar (`.`, `+`, …) would otherwise change the pattern's
+ * meaning.
+ */
+export function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
  * Format an ISO-8601 timestamp for the table cells / detail pages in
  * the **browser's local timezone**, shaped like `2026-05-19 14:27:48`
  * (no `Z` / offset — the operator's wall clock is the implicit zone).

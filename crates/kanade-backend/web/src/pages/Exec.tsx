@@ -5,6 +5,7 @@ import { Trans, useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
 
 import { ErrorCard } from '@/components/ErrorCard';
+import { GroupPicker } from '@/components/GroupPicker';
 import { PcPicker } from '@/components/PcPicker';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -33,13 +34,6 @@ type FanoutPlan = {
   jitter?: string;
 };
 
-function splitCsv(s: string): string[] {
-  return s
-    .split(',')
-    .map((x) => x.trim())
-    .filter(Boolean);
-}
-
 export function Exec() {
   const { t } = useTranslation('exec');
   const { hasRole } = useAuth();
@@ -58,7 +52,7 @@ export function Exec() {
   // `targetReady` stays false so the submit button is disabled until
   // the operator names targets.
   const [mode, setMode] = useState<TargetMode>('pcs');
-  const [groups, setGroups] = useState('');
+  const [groups, setGroups] = useState<string[]>([]);
   const [pcs, setPcs] = useState<string[]>([]);
   const [jitter, setJitter] = useState('');
 
@@ -78,7 +72,7 @@ export function Exec() {
   const jobs = jobsQ.data ?? [];
 
   const onFire = async () => {
-    const targetGroups = mode === 'groups' ? splitCsv(groups) : [];
+    const targetGroups = mode === 'groups' ? groups : [];
     const targetPcs = mode === 'pcs' ? pcs : [];
     const plan: FanoutPlan = {
       target: {
@@ -113,7 +107,7 @@ export function Exec() {
 
   const targetReady =
     mode === 'all'
-      || (mode === 'groups' && splitCsv(groups).length > 0)
+      || (mode === 'groups' && groups.length > 0)
       || (mode === 'pcs' && pcs.length > 0);
 
   return (
@@ -189,12 +183,9 @@ export function Exec() {
               {mode === 'groups' && (
                 <div className="space-y-1">
                   <Label htmlFor="exec-groups">{t('fields.groups')}</Label>
-                  <Input
-                    id="exec-groups"
-                    value={groups}
-                    onChange={(e) => setGroups(e.target.value)}
-                    placeholder={t('placeholders.groups')}
-                  />
+                  {/* multi-select: pick groups as removable chips, or
+                      paste a comma/whitespace-separated bulk list */}
+                  <GroupPicker mode="multi" id="exec-groups" value={groups} onChange={setGroups} />
                 </div>
               )}
               {mode === 'pcs' && (

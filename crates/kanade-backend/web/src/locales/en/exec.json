@@ -10,8 +10,8 @@
   "fields": {
     "jobId": "job_id",
     "target": "target",
-    "groups": "groups (comma-separated)",
-    "pcs": "pc_ids (comma-separated)",
+    "groups": "groups",
+    "pcs": "pc_ids",
     "jitter": "jitter (optional, humantime — e.g. 30s, 5m)"
   },
   "options": {
@@ -29,10 +29,6 @@
     "confirmLabel": "Exec",
     "confirmLabelAll": "Exec on all agents",
     "cancelLabel": "Cancel"
-  },
-  "placeholders": {
-    "groups": "canary,wave1",
-    "pcs": "pc-01,pc-02"
   },
   "submit": "POST /api/exec/{{jobId}}",
   "submitFallback": "<job_id>",

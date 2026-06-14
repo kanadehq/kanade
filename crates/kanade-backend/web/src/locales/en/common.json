@@ -66,7 +66,17 @@
     "placeholder": "Search pc_id or hostname…",
     "loading": "Searching…",
     "noMatch": "No matching host",
-    "remove": "Remove {{pcId}}"
+    "remove": "Remove {{pcId}}",
+    "rejected": "Dropped — no such pc_id: {{ids}}",
+    "error": "Couldn't load hosts"
+  },
+  "groupPicker": {
+    "placeholder": "Search group name…",
+    "loading": "Loading…",
+    "noMatch": "No matching group",
+    "remove": "Remove {{group}}",
+    "rejected": "Dropped — no such group: {{names}}",
+    "error": "Couldn't load groups"
   },
   "comingSoon": {
     "title": "{{name}} — coming soon",

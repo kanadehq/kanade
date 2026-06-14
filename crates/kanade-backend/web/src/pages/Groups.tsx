@@ -50,23 +50,41 @@ export function Groups() {
 
   // add-membership form
   const [newGroup, setNewGroup] = useState('');
-  const [newPc, setNewPc] = useState('');
+  const [newPcs, setNewPcs] = useState<string[]>([]);
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ['groups'] });
   const onError = (err: unknown) => toast.error(formatError(err));
 
+  // Each membership is a separate per-PC KV row (`POST
+  // /api/agents/<pc>/groups`), so adding several at once is N
+  // independent POSTs. Fired in batches (not one big Promise.all):
+  // selecting 50-100 PCs would otherwise exceed the browser's per-host
+  // connection cap and pile a burst onto the backend KV store. A
+  // bounded window keeps it responsive without serialising every call.
   const add = useMutation({
-    mutationFn: (v: { pcId: string; group: string }) =>
-      apiFetch(`/api/agents/${encodeURIComponent(v.pcId)}/groups`, {
-        method: 'POST',
-        body: JSON.stringify({ group: v.group }),
-      }),
+    mutationFn: async (v: { pcIds: string[]; group: string }) => {
+      const BATCH = 10;
+      for (let i = 0; i < v.pcIds.length; i += BATCH) {
+        await Promise.all(
+          v.pcIds.slice(i, i + BATCH).map((pcId) =>
+            apiFetch(`/api/agents/${encodeURIComponent(pcId)}/groups`, {
+              method: 'POST',
+              body: JSON.stringify({ group: v.group }),
+            }),
+          ),
+        );
+      }
+    },
     onSuccess: (_data, v) => {
-      toast.success(t('toast.added', { pcId: v.pcId, group: v.group }));
-      setNewPc('');
+      toast.success(t('toast.added', { count: v.pcIds.length, group: v.group }));
+      setNewPcs([]);
       invalidate();
     },
-    onError,
+    onError: (err) => {
+      onError(err);
+      // Partial failure may have added some — refetch the real state.
+      invalidate();
+    },
   });
 
   const remove = useMutation({
@@ -129,8 +147,8 @@ export function Groups() {
             onSubmit={(e) => {
               e.preventDefault();
               const group = newGroup.trim();
-              if (!group || !newPc) return;
-              add.mutate({ pcId: newPc, group });
+              if (!group || newPcs.length === 0) return;
+              add.mutate({ pcIds: newPcs, group });
             }}
           >
             <div className="space-y-1">
@@ -154,11 +172,18 @@ export function Groups() {
             </div>
             <div className="space-y-1">
               <Label htmlFor="add-pc">{t('pc')}</Label>
-              <PcPicker id="add-pc" value={newPc} onChange={setNewPc} className="w-64" />
+              <PcPicker
+                id="add-pc"
+                mode="multi"
+                value={newPcs}
+                onChange={setNewPcs}
+                placeholder={t('pcMultiPlaceholder')}
+                className="w-64"
+              />
             </div>
             <Button
               type="submit"
-              disabled={!canOperate || !newGroup.trim() || !newPc || add.isPending}
+              disabled={!canOperate || !newGroup.trim() || newPcs.length === 0 || add.isPending}
               title={canOperate ? undefined : t('rbac.operatorRequired', { ns: 'common' })}
             >
               <Plus className="size-4 mr-2" />

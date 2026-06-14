@@ -10,8 +10,8 @@
   "fields": {
     "jobId": "job_id",
     "target": "ターゲット",
-    "groups": "グループ (カンマ区切り)",
-    "pcs": "pc_ids (カンマ区切り)",
+    "groups": "グループ",
+    "pcs": "pc_ids",
     "jitter": "ジッター (任意、humantime 形式 — 例: 30s, 5m)"
   },
   "options": {
@@ -29,10 +29,6 @@
     "confirmLabel": "実行",
     "confirmLabelAll": "全エージェントで実行",
     "cancelLabel": "キャンセル"
-  },
-  "placeholders": {
-    "groups": "canary,wave1",
-    "pcs": "pc-01,pc-02"
   },
   "submit": "POST /api/exec/{{jobId}}",
   "submitFallback": "<job_id>",
