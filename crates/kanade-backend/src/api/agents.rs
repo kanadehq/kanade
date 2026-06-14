@@ -2,7 +2,7 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
 use tracing::warn;
 
 /// v0.14: the agents table is now baseline-only. The fields are
@@ -50,29 +50,37 @@ pub struct AgentRow {
 
 /// Query params for `GET /api/agents`.
 ///
-/// Both default to the historical "whole fleet" behaviour when
-/// omitted, so existing callers (the Agents table) keep working
-/// untouched. The SPA's shared PcPicker passes both: a typed `q`
-/// plus a small `limit`, so a 3000-host fleet only ever streams the
-/// handful of typeahead candidates instead of the full table.
+/// All filters are optional and default to the historical "whole
+/// fleet" behaviour when omitted, so existing callers (the Agents
+/// table, the SPA's shared PcPicker, the Dashboard) keep working.
 #[derive(Debug, Default, Deserialize)]
 pub struct ListParams {
-    /// Case-insensitive substring match against `pc_id` OR
-    /// `hostname`. Absent / empty → no filter.
+    /// #652: regex over `pc_id` OR `hostname` (matches if EITHER
+    /// hits). Was a LIKE substring match before; now a regex to match
+    /// the Activity / Audit pages. Plain text without regex
+    /// metacharacters still behaves like a substring search. Blank /
+    /// whitespace-only → no filter.
     pub q: Option<String>,
+    /// #652: regex over `last_logon_user` OR `last_logon_display_name`.
+    pub user: Option<String>,
+    /// #652: regex over `agent_version`.
+    pub version: Option<String>,
+    /// #652: a version that must appear in the agent's
+    /// `quarantined_versions` (exact token match inside the JSON
+    /// array). Drives the Rollout "quarantined K" drill-down — the
+    /// link lands here with `?quarantined=<target>` so the operator
+    /// sees exactly which hosts rolled the target back. Pre-filtered
+    /// in SQL (a cheap LIKE on the quoted token) so it scales to a
+    /// large fleet.
+    pub quarantined: Option<String>,
     /// Cap on rows returned. Absent → unbounded (the full list).
     pub limit: Option<u32>,
-    /// #495: rows to skip — server-side paging for the Agents table.
-    /// Absent → 0. The pre-LIMIT match count rides back in the
-    /// `X-Total-Count` response header so the body stays a plain
-    /// `Vec<AgentRow>` and existing consumers (PcPicker, Dashboard)
-    /// are untouched.
+    /// #495: rows to skip — server-side paging. Absent → 0. The
+    /// pre-LIMIT match count rides back in `X-Total-Count`.
     pub offset: Option<u32>,
     /// #563: `"online"` / `"offline"` liveness filter, evaluated
-    /// server-side against [`ALIVE_THRESHOLD`] so the Dashboard's
-    /// `/agents?status=offline` deep link pages over the WHOLE
-    /// fleet's offline hosts, not just the current page. Absent /
-    /// empty → no filter; anything else → 400.
+    /// server-side against [`ALIVE_THRESHOLD`]. Absent / empty → no
+    /// filter; anything else → 400.
     pub status: Option<String>,
 }
 
@@ -82,112 +90,55 @@ pub struct ListParams {
 /// `isAgentOnline`.
 pub const ALIVE_THRESHOLD: chrono::Duration = chrono::Duration::minutes(2);
 
-pub async fn list(
-    State(pool): State<SqlitePool>,
-    Query(params): Query<ListParams>,
-) -> Result<(HeaderMap, Json<Vec<AgentRow>>), StatusCode> {
-    // Turn `q` into a bound LIKE pattern, escaping the LIKE
-    // metacharacters so a host literally named `pc_1` or `web%` is
-    // matched verbatim rather than as a wildcard. `\` is the escape
-    // char (declared via ESCAPE below).
-    let like = params
-        .q
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| {
-            let escaped = s
-                .replace('\\', "\\\\")
-                .replace('%', "\\%")
-                .replace('_', "\\_");
-            format!("%{escaped}%")
-        });
+/// Backstop on rows pulled into the regex prefilter window. The agents
+/// table is one row per PC, so even a multi-thousand-host fleet sits
+/// well under this — it's a guard against pathological growth, not an
+/// expected limit (cf. Activity's 10k full-text cap, #596).
+const MAX_FETCH: i64 = 10_000;
 
-    // #563: validate the status filter up front — a typo'd value
-    // silently meaning "all" would defeat the deep link's purpose.
-    let status = match params.status.as_deref().map(str::trim) {
-        None | Some("") => None,
-        Some(s @ ("online" | "offline")) => Some(s.to_string()),
-        Some(_) => return Err(StatusCode::BAD_REQUEST),
-    };
-    // One liveness instant for the whole request so the counts and
-    // the page rows agree about an agent sitting on the threshold.
-    let cutoff = chrono::Utc::now() - ALIVE_THRESHOLD;
+/// Build the `%"<version>"%` LIKE pattern that tests whether a version
+/// appears as a token inside the `quarantined_versions` JSON array
+/// (`["0.43.51","0.43.62"]`). Matching the quoted token avoids a
+/// version being matched as a substring of another (e.g. `0.43.6`
+/// must not hit `0.43.62`). LIKE metacharacters in the version are
+/// escaped (ESCAPE '\' is declared at the call site).
+fn quarantined_like(version: Option<&str>) -> Option<String> {
+    version.map(str::trim).filter(|s| !s.is_empty()).map(|s| {
+        let escaped = s
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        format!("%\"{escaped}\"%")
+    })
+}
 
-    // `?4` is the row cap; SQLite treats a negative LIMIT as
-    // "unbounded", so the omitted-limit path binds -1 and keeps the
-    // SQL a single static string (sqlx 0.9 rejects dynamically-built
-    // query strings).
-    let limit = params.limit.map(i64::from).unwrap_or(-1);
-    let offset = params.offset.map(i64::from).unwrap_or(0);
+fn is_online(a: &AgentRow, cutoff: chrono::DateTime<chrono::Utc>) -> bool {
+    a.last_heartbeat.is_some_and(|hb| hb >= cutoff)
+}
 
-    // #495/#563: pre-LIMIT counts for the paging header + the
-    // status chips. One aggregate pass computes the q-matching
-    // total AND its online share, so the chips can show fleet-wide
-    // per-status numbers no matter which filter is active. The
-    // agents table is one row per PC (bounded by fleet size), so
-    // this is cheap — and skipped entirely for unbounded callers
-    // (PcPicker / Dashboard pass no limit, so the row count IS the
-    // total; PR #559 review, gemini).
-    let needs_count = params.limit.is_some();
-    let (matched, online): (i64, i64) = if !needs_count {
-        (0, 0)
-    } else {
-        let row = sqlx::query(
-            "SELECT COUNT(*) AS matched, \
-                    CAST(COALESCE(SUM(CASE WHEN last_heartbeat IS NOT NULL \
-                                            AND last_heartbeat >= ?2 \
-                                           THEN 1 ELSE 0 END), 0) AS INTEGER) AS online \
-               FROM agents \
-              WHERE (?1 IS NULL OR pc_id LIKE ?1 ESCAPE '\\' OR hostname LIKE ?1 ESCAPE '\\')",
-        )
-        .bind(&like)
-        .bind(cutoff)
-        .fetch_one(&pool)
-        .await
-        .map_err(|e| {
-            warn!(error = %e, "count agents");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-        (
-            row.try_get("matched").unwrap_or(0),
-            row.try_get("online").unwrap_or(0),
-        )
-    };
+/// `X-Total-Count` reflects the ACTIVE status filter (it drives
+/// paging); when no count is requested it falls back to the row tally.
+fn total_count(
+    needs_count: bool,
+    status: Option<&str>,
+    matched: i64,
+    online: i64,
+    fallback: i64,
+) -> i64 {
+    if !needs_count {
+        return fallback;
+    }
+    match status {
+        Some("online") => online,
+        Some("offline") => matched - online,
+        _ => matched,
+    }
+}
 
-    let rows = sqlx::query(
-        "SELECT * FROM agents \
-         WHERE (?1 IS NULL OR pc_id LIKE ?1 ESCAPE '\\' OR hostname LIKE ?1 ESCAPE '\\') \
-           AND (?2 IS NULL \
-                OR (?2 = 'online' AND last_heartbeat IS NOT NULL AND last_heartbeat >= ?3) \
-                OR (?2 = 'offline' AND (last_heartbeat IS NULL OR last_heartbeat < ?3))) \
-         ORDER BY updated_at DESC \
-         LIMIT ?4 OFFSET ?5",
-    )
-    .bind(&like)
-    .bind(&status)
-    .bind(cutoff)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(&pool)
-    .await
-    .map_err(|e| {
-        warn!(error = %e, "list agents");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    // X-Total-Count reflects the ACTIVE filter (it drives paging);
-    // the per-status counts ride alongside so the chips stay
-    // fleet-wide-correct whichever chip is selected.
-    let total: i64 = if needs_count {
-        match status.as_deref() {
-            Some("online") => online,
-            Some("offline") => matched - online,
-            _ => matched,
-        }
-    } else {
-        offset + rows.len() as i64
-    };
+/// `X-Total-Count` + (when counting) the fleet-wide per-status chip
+/// counts. The chip counts ignore the active status filter so the
+/// chips stay correct whichever one is selected.
+fn build_headers(needs_count: bool, total: i64, matched: i64, online: i64) -> HeaderMap {
     let mut headers = HeaderMap::new();
     if let Ok(v) = total.to_string().parse() {
         headers.insert("X-Total-Count", v);
@@ -200,7 +151,209 @@ pub async fn list(
             headers.insert("X-Offline-Count", v);
         }
     }
-    Ok((headers, Json(rows.into_iter().map(row_to_agent).collect())))
+    headers
+}
+
+pub async fn list(
+    State(pool): State<SqlitePool>,
+    Query(params): Query<ListParams>,
+) -> Result<(HeaderMap, Json<Vec<AgentRow>>), (StatusCode, String)> {
+    // #563: validate the status filter up front — a typo'd value
+    // silently meaning "all" would defeat the deep link's purpose.
+    let status = match params.status.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(s @ ("online" | "offline")) => Some(s.to_string()),
+        Some(_) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "status must be 'online' or 'offline'".to_string(),
+            ));
+        }
+    };
+
+    // #652: text filters are now regexes (matching Activity / Audit).
+    // `compile` trims internally, so a whitespace-only box stays "no
+    // filter"; an invalid pattern is a 400.
+    let q_re = super::compile(params.q.as_deref())?;
+    let user_re = super::compile(params.user.as_deref())?;
+    let version_re = super::compile(params.version.as_deref())?;
+    let has_regex = q_re.is_some() || user_re.is_some() || version_re.is_some();
+
+    let quar_like = quarantined_like(params.quarantined.as_deref());
+    let cutoff = chrono::Utc::now() - ALIVE_THRESHOLD;
+    let needs_count = params.limit.is_some();
+
+    if !has_regex {
+        // Fast path: every filter is expressible in SQL, so let SQLite
+        // do the quarantine pre-filter, the status filter, LIMIT/OFFSET
+        // paging, and the fleet-wide count aggregate. Avoids pulling
+        // the whole fleet into memory for the common (no-regex) case.
+        let limit = params.limit.map(i64::from).unwrap_or(-1);
+        let offset = params.offset.map(i64::from).unwrap_or(0);
+
+        let (matched, online): (i64, i64) = if !needs_count {
+            (0, 0)
+        } else {
+            let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
+                "SELECT COUNT(*) AS matched, CAST(COALESCE(SUM(CASE WHEN \
+                 last_heartbeat IS NOT NULL AND last_heartbeat >= ",
+            );
+            qb.push_bind(cutoff)
+                .push(" THEN 1 ELSE 0 END), 0) AS INTEGER) AS online FROM agents");
+            if let Some(p) = &quar_like {
+                qb.push(" WHERE quarantined_versions LIKE ")
+                    .push_bind(p.clone())
+                    .push(" ESCAPE '\\'");
+            }
+            let row = qb.build().fetch_one(&pool).await.map_err(|e| {
+                warn!(error = %e, "count agents");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "count agents failed".to_string(),
+                )
+            })?;
+            (
+                row.try_get("matched").unwrap_or(0),
+                row.try_get("online").unwrap_or(0),
+            )
+        };
+
+        let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new("SELECT * FROM agents");
+        let mut sep = " WHERE ";
+        if let Some(p) = &quar_like {
+            qb.push(sep)
+                .push("quarantined_versions LIKE ")
+                .push_bind(p.clone())
+                .push(" ESCAPE '\\'");
+            sep = " AND ";
+        }
+        match status.as_deref() {
+            Some("online") => {
+                qb.push(sep)
+                    .push("last_heartbeat IS NOT NULL AND last_heartbeat >= ")
+                    .push_bind(cutoff);
+            }
+            Some("offline") => {
+                qb.push(sep)
+                    .push("(last_heartbeat IS NULL OR last_heartbeat < ")
+                    .push_bind(cutoff)
+                    .push(")");
+            }
+            _ => {}
+        }
+        qb.push(" ORDER BY updated_at DESC LIMIT ")
+            .push_bind(limit)
+            .push(" OFFSET ")
+            .push_bind(offset);
+        let rows = qb.build().fetch_all(&pool).await.map_err(|e| {
+            warn!(error = %e, "list agents");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "list agents failed".to_string(),
+            )
+        })?;
+        let page: Vec<AgentRow> = rows.into_iter().map(row_to_agent).collect();
+        let total = total_count(
+            needs_count,
+            status.as_deref(),
+            matched,
+            online,
+            offset + page.len() as i64,
+        );
+        return Ok((
+            build_headers(needs_count, total, matched, online),
+            Json(page),
+        ));
+    }
+
+    // Regex path: SQL can't run a regex, so pre-filter by quarantine
+    // (cheap) and pull the candidate rows, then apply the compiled
+    // regexes in Rust. The agents table is one row per PC, so this is
+    // a few-thousand-row scan at worst.
+    let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new("SELECT * FROM agents");
+    if let Some(p) = &quar_like {
+        qb.push(" WHERE quarantined_versions LIKE ")
+            .push_bind(p.clone())
+            .push(" ESCAPE '\\'");
+    }
+    qb.push(" ORDER BY updated_at DESC LIMIT ")
+        .push_bind(MAX_FETCH);
+    let rows = qb.build().fetch_all(&pool).await.map_err(|e| {
+        warn!(error = %e, "list agents");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "list agents failed".to_string(),
+        )
+    })?;
+    if rows.len() as i64 >= MAX_FETCH {
+        warn!(
+            cap = MAX_FETCH,
+            "agents regex prefilter hit the fetch cap; results may be truncated"
+        );
+    }
+
+    // `matched` = the q/user/version-matching set, BEFORE the status
+    // filter, so the per-status chip counts stay fleet-wide.
+    let matched_rows: Vec<AgentRow> = rows
+        .into_iter()
+        .filter(|r| {
+            // Match on the raw columns FIRST so a row about to be
+            // dropped never pays for row_to_agent's String allocations
+            // and the quarantine JSON parse (gemini #661). A NULL TEXT
+            // column surfaces as Err on a &str get, collapsed to "" —
+            // the same empty-string match semantics results.rs uses.
+            if let Some(re) = &q_re {
+                let pc: &str = r.try_get("pc_id").unwrap_or("");
+                let host: &str = r.try_get("hostname").unwrap_or("");
+                if !(re.is_match(pc) || re.is_match(host)) {
+                    return false;
+                }
+            }
+            if let Some(re) = &user_re {
+                let user: &str = r.try_get("last_logon_user").unwrap_or("");
+                let display: &str = r.try_get("last_logon_display_name").unwrap_or("");
+                if !(re.is_match(user) || re.is_match(display)) {
+                    return false;
+                }
+            }
+            if let Some(re) = &version_re {
+                let version: &str = r.try_get("agent_version").unwrap_or("");
+                if !re.is_match(version) {
+                    return false;
+                }
+            }
+            true
+        })
+        .map(row_to_agent)
+        .collect();
+
+    let matched = matched_rows.len() as i64;
+    let online = matched_rows.iter().filter(|a| is_online(a, cutoff)).count() as i64;
+
+    let offset = params.offset.unwrap_or(0) as usize;
+    let take = params.limit.map(|n| n as usize).unwrap_or(usize::MAX);
+    let page: Vec<AgentRow> = matched_rows
+        .into_iter()
+        .filter(|a| match status.as_deref() {
+            Some("online") => is_online(a, cutoff),
+            Some("offline") => !is_online(a, cutoff),
+            _ => true,
+        })
+        .skip(offset)
+        .take(take)
+        .collect();
+
+    let total = total_count(
+        needs_count,
+        status.as_deref(),
+        matched,
+        online,
+        offset as i64 + page.len() as i64,
+    );
+    Ok((
+        build_headers(needs_count, total, matched, online),
+        Json(page),
+    ))
 }
 
 pub async fn detail(
@@ -242,8 +395,22 @@ fn row_to_agent(r: sqlx::sqlite::SqliteRow) -> AgentRow {
             .flatten()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default(),
-        last_logon_user: r.try_get("last_logon_user").ok(),
-        last_logon_display_name: r.try_get("last_logon_display_name").ok(),
+        // #655 follow-up: a local account with no configured display
+        // name reports LastLoggedOnDisplayName as an EMPTY STRING (not
+        // absent), and older rows may hold a "" the projector stored
+        // before this normalisation. Treat "" as None here so the SPA's
+        // `display_name || user` fallback shows the login name instead
+        // of a blank cell.
+        last_logon_user: r
+            .try_get::<Option<String>, _>("last_logon_user")
+            .ok()
+            .flatten()
+            .filter(|s| !s.is_empty()),
+        last_logon_display_name: r
+            .try_get::<Option<String>, _>("last_logon_display_name")
+            .ok()
+            .flatten()
+            .filter(|s| !s.is_empty()),
     }
 }
 
@@ -275,19 +442,22 @@ mod tests {
         pool
     }
 
+    async fn ids_of(pool: SqlitePool, params: ListParams) -> Vec<String> {
+        let (_headers, Json(rows)) = list(State(pool), Query(params)).await.unwrap();
+        rows.into_iter().map(|r| r.pc_id).collect()
+    }
+
+    /// q-only convenience: regex over pc_id / hostname, no paging.
     async fn ids(pool: SqlitePool, q: Option<&str>, limit: Option<u32>) -> Vec<String> {
-        let (_headers, Json(rows)) = list(
-            State(pool),
-            Query(ListParams {
+        ids_of(
+            pool,
+            ListParams {
                 q: q.map(Into::into),
                 limit,
-                offset: None,
-                status: None,
-            }),
+                ..Default::default()
+            },
         )
         .await
-        .unwrap();
-        rows.into_iter().map(|r| r.pc_id).collect()
     }
 
     /// #582 Phase 2: a populated quarantine JSON blob (what the
@@ -309,17 +479,9 @@ mod tests {
             .await
             .unwrap();
 
-        let (_h, Json(rows)) = list(
-            State(pool),
-            Query(ListParams {
-                q: None,
-                limit: None,
-                offset: None,
-                status: None,
-            }),
-        )
-        .await
-        .unwrap();
+        let (_h, Json(rows)) = list(State(pool), Query(ListParams::default()))
+            .await
+            .unwrap();
         let by_id = |id: &str| {
             rows.iter()
                 .find(|r| r.pc_id == id)
@@ -351,6 +513,13 @@ mod tests {
             .unwrap();
     }
 
+    fn get_header(h: &HeaderMap, k: &str) -> i64 {
+        h.get(k)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| panic!("{k} header missing or unparseable"))
+    }
+
     #[tokio::test]
     async fn status_filter_is_server_side_and_counts_are_fleet_wide() {
         let pool = seeded_pool().await;
@@ -362,29 +531,22 @@ mod tests {
         let (headers, Json(rows)) = list(
             State(pool),
             Query(ListParams {
-                q: None,
                 limit: Some(2),
-                offset: None,
                 status: Some("offline".into()),
+                ..Default::default()
             }),
         )
         .await
         .unwrap();
-        let get = |h: &HeaderMap, k: &str| -> i64 {
-            h.get(k)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse().ok())
-                .unwrap_or_else(|| panic!("{k} header missing or unparseable"))
-        };
         // Page is offline-only and capped by limit…
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|r| r.pc_id != "PC001"));
         // …while X-Total-Count reflects the active filter (3 offline
         // fleet-wide — paging works past page 1) and the chip counts
         // are fleet-wide regardless of the filter.
-        assert_eq!(get(&headers, "X-Total-Count"), 3);
-        assert_eq!(get(&headers, "X-Online-Count"), 1);
-        assert_eq!(get(&headers, "X-Offline-Count"), 3);
+        assert_eq!(get_header(&headers, "X-Total-Count"), 3);
+        assert_eq!(get_header(&headers, "X-Online-Count"), 1);
+        assert_eq!(get_header(&headers, "X-Offline-Count"), 3);
     }
 
     #[tokio::test]
@@ -394,10 +556,9 @@ mod tests {
         let (headers, Json(rows)) = list(
             State(pool),
             Query(ListParams {
-                q: None,
                 limit: Some(10),
-                offset: None,
                 status: Some("online".into()),
+                ..Default::default()
             }),
         )
         .await
@@ -406,31 +567,41 @@ mod tests {
             rows.iter().map(|r| r.pc_id.as_str()).collect::<Vec<_>>(),
             vec!["PC001"]
         );
-        let total: i64 = headers
-            .get("X-Total-Count")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse().ok())
-            .unwrap();
-        assert_eq!(total, 1);
+        assert_eq!(get_header(&headers, "X-Total-Count"), 1);
     }
 
     #[tokio::test]
     async fn invalid_status_is_a_bad_request() {
         let pool = seeded_pool().await;
-        // `unwrap_err` would need AgentRow: Debug — match instead.
         match list(
             State(pool),
             Query(ListParams {
-                q: None,
                 limit: Some(10),
-                offset: None,
                 status: Some("onlin".into()),
+                ..Default::default()
             }),
         )
         .await
         {
-            Err(code) => assert_eq!(code, StatusCode::BAD_REQUEST),
+            Err((code, _)) => assert_eq!(code, StatusCode::BAD_REQUEST),
             Ok(_) => panic!("a typo'd status must be a 400, not silently 'all'"),
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_regex_is_a_bad_request() {
+        let pool = seeded_pool().await;
+        match list(
+            State(pool),
+            Query(ListParams {
+                q: Some("[unterminated".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        {
+            Err((code, _)) => assert_eq!(code, StatusCode::BAD_REQUEST),
+            Ok(_) => panic!("an invalid regex must be a 400"),
         }
     }
 
@@ -442,21 +613,19 @@ mod tests {
         let (headers, Json(page2)) = list(
             State(pool),
             Query(ListParams {
-                q: None,
                 limit: Some(1),
                 offset: Some(1),
-                status: None,
+                ..Default::default()
             }),
         )
         .await
         .unwrap();
         assert_eq!(page2.len(), 1);
-        let total: i64 = headers
-            .get("X-Total-Count")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse().ok())
-            .expect("total header present");
-        assert_eq!(total, 4, "seeded fleet has exactly four agents");
+        assert_eq!(
+            get_header(&headers, "X-Total-Count"),
+            4,
+            "seeded fleet has exactly four agents"
+        );
     }
 
     #[tokio::test]
@@ -467,34 +636,201 @@ mod tests {
 
     #[tokio::test]
     async fn blank_query_is_treated_as_no_filter() {
+        // Whitespace-only stays "no filter" (trimmed before compile),
+        // so it doesn't become a regex that matches a literal space.
         let got = ids(seeded_pool().await, Some("   "), None).await;
         assert_eq!(got.len(), 4);
     }
 
     #[tokio::test]
-    async fn filters_by_pc_id_substring() {
-        let mut got = ids(seeded_pool().await, Some("pc00"), None).await;
+    async fn q_is_a_regex_over_pc_id() {
+        // Anchored regex — only the two PC0* ids, not WS-9 / web%01.
+        let mut got = ids(seeded_pool().await, Some("^PC00"), None).await;
         got.sort();
         assert_eq!(got, vec!["PC001".to_string(), "PC002".to_string()]);
     }
 
     #[tokio::test]
-    async fn matches_hostname_too() {
-        let got = ids(seeded_pool().await, Some("gamma"), None).await;
-        assert_eq!(got, vec!["WS-9".to_string()]);
+    async fn q_alternation_matches_pc_id_or_hostname() {
+        // `gamma` only exists as a hostname; alternation hits it plus
+        // the PC002 id.
+        let mut got = ids(seeded_pool().await, Some("PC002|gamma"), None).await;
+        got.sort();
+        assert_eq!(got, vec!["PC002".to_string(), "WS-9".to_string()]);
     }
 
     #[tokio::test]
-    async fn like_metacharacters_match_literally() {
-        // `%` must match the host literally named `web%01`, not act as
-        // a wildcard that would sweep in every row.
-        let got = ids(seeded_pool().await, Some("web%0"), None).await;
-        assert_eq!(got, vec!["web%01".to_string()]);
+    async fn q_matches_hostname_too() {
+        let got = ids(seeded_pool().await, Some("^alpha$"), None).await;
+        assert_eq!(got, vec!["PC001".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn user_regex_matches_either_logon_field() {
+        let pool = seeded_pool().await;
+        sqlx::query(
+            "UPDATE agents SET last_logon_user = ?, last_logon_display_name = ? WHERE pc_id = 'PC001'",
+        )
+        .bind(r"CORP\taro")
+        .bind("Yamada Taro")
+        .execute(&pool)
+        .await
+        .unwrap();
+        // Match on the display name…
+        let got = ids_of(
+            pool.clone(),
+            ListParams {
+                user: Some("Yamada".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(got, vec!["PC001".to_string()]);
+        // …and on the login name.
+        let got = ids_of(
+            pool,
+            ListParams {
+                user: Some(r"taro".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(got, vec!["PC001".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn version_regex_filters_agent_version() {
+        let pool = seeded_pool().await;
+        sqlx::query("UPDATE agents SET agent_version = ? WHERE pc_id = 'PC001'")
+            .bind("0.43.62")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE agents SET agent_version = ? WHERE pc_id = 'PC002'")
+            .bind("0.43.61")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let got = ids_of(
+            pool,
+            ListParams {
+                version: Some(r"^0\.43\.62$".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(got, vec!["PC001".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn quarantined_filter_pre_filters_by_version_token() {
+        let pool = seeded_pool().await;
+        sqlx::query("UPDATE agents SET quarantined_versions = ? WHERE pc_id = 'PC001'")
+            .bind(r#"["0.43.62"]"#)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE agents SET quarantined_versions = ? WHERE pc_id = 'PC002'")
+            .bind(r#"["0.43.61"]"#)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let got = ids_of(
+            pool,
+            ListParams {
+                quarantined: Some("0.43.62".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(got, vec!["PC001".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn quarantined_token_match_is_not_a_substring_match() {
+        // `0.43.6` must NOT hit an agent quarantining `0.43.62` —
+        // the quoted-token LIKE guards against the substring trap.
+        let pool = seeded_pool().await;
+        sqlx::query("UPDATE agents SET quarantined_versions = ? WHERE pc_id = 'PC001'")
+            .bind(r#"["0.43.62"]"#)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let got = ids_of(
+            pool,
+            ListParams {
+                quarantined: Some("0.43.6".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(got.is_empty(), "0.43.6 must not match the 0.43.62 token");
+    }
+
+    #[tokio::test]
+    async fn quarantined_combines_with_regex_and_counts() {
+        // PC001 & PC002 both quarantine 0.43.62; a version regex then
+        // narrows to PC001. Counts reflect the combined filter set.
+        let pool = seeded_pool().await;
+        for pc in ["PC001", "PC002"] {
+            sqlx::query("UPDATE agents SET quarantined_versions = ? WHERE pc_id = ?")
+                .bind(r#"["0.43.62"]"#)
+                .bind(pc)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("UPDATE agents SET agent_version = ? WHERE pc_id = 'PC001'")
+            .bind("0.43.61")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (headers, Json(rows)) = list(
+            State(pool),
+            Query(ListParams {
+                quarantined: Some("0.43.62".into()),
+                version: Some("0.43.61".into()),
+                limit: Some(10),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.pc_id.as_str()).collect::<Vec<_>>(),
+            vec!["PC001"]
+        );
+        assert_eq!(get_header(&headers, "X-Total-Count"), 1);
     }
 
     #[tokio::test]
     async fn limit_caps_row_count() {
         let got = ids(seeded_pool().await, None, Some(2)).await;
         assert_eq!(got.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn empty_last_logon_display_name_normalises_to_none() {
+        // #655 follow-up: a local account reports an empty display
+        // name; it must surface as None (not "") so the SPA falls back
+        // to the login name instead of rendering a blank cell.
+        let pool = seeded_pool().await;
+        sqlx::query(
+            "UPDATE agents SET last_logon_user = ?, last_logon_display_name = ? WHERE pc_id = 'PC001'",
+        )
+        .bind(r".\yukimemi")
+        .bind("")
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (_h, Json(rows)) = list(State(pool), Query(ListParams::default()))
+            .await
+            .unwrap();
+        let a = rows.iter().find(|r| r.pc_id == "PC001").unwrap();
+        assert_eq!(a.last_logon_user.as_deref(), Some(r".\yukimemi"));
+        assert_eq!(
+            a.last_logon_display_name, None,
+            "empty display name must normalise to None"
+        );
     }
 }

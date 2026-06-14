@@ -47,7 +47,15 @@
   "groupsCancelled": "(cancelled)",
   "groupsLoading": "loading…",
   "rowLinkTitle": "Open per-PC perf charts",
-  "searchPlaceholder": "search pc_id / hostname…",
+  "search": {
+    "pcHost": "regex — e.g. ^web|db",
+    "user": "regex — e.g. taro",
+    "version": "regex — e.g. 0.43"
+  },
+  "quarantinedChip": "quarantined: {{version}}",
+  "quarantinedChipTitle": "Showing only agents that rolled this version back — click to clear",
+  "quarantinedBadge": "quarantined",
+  "quarantinedBadgeTitle": "Boot sentinel rolled back: {{versions}}",
   "prev": "← prev",
   "next": "next →",
   "pageRange": "{{from}}–{{to}} of {{total}}"

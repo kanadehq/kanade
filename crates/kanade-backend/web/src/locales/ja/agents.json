@@ -47,7 +47,15 @@
   "groupsCancelled": "(キャンセル)",
   "groupsLoading": "読み込み中…",
   "rowLinkTitle": "PC ごとのパフォーマンスチャートを開く",
-  "searchPlaceholder": "pc_id / hostname を検索…",
+  "search": {
+    "pcHost": "正規表現 — 例: ^web|db",
+    "user": "正規表現 — 例: taro",
+    "version": "正規表現 — 例: 0.43"
+  },
+  "quarantinedChip": "隔離: {{version}}",
+  "quarantinedChipTitle": "このバージョンをロールバックしたエージェントのみ表示中 — クリックで解除",
+  "quarantinedBadge": "隔離",
+  "quarantinedBadgeTitle": "起動センチネルがロールバック: {{versions}}",
   "prev": "← 前へ",
   "next": "次へ →",
   "pageRange": "{{total}} 台中 {{from}}–{{to}} 台目"
