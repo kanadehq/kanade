@@ -276,6 +276,17 @@ fn get_launch_focus(state: State<'_, AppState>) -> Option<String> {
     state.launch_focus.clone()
 }
 
+/// This client binary's build version (the workspace `CARGO_PKG_VERSION`,
+/// e.g. `0.43.63`). The WebView renders it dim in the sidebar footer so the
+/// user can confirm what's actually running — mirrors the SPA's
+/// `GET /api/version` badge. Baked at compile time, so it reflects the
+/// *running* binary, not whatever's on disk (a fleet-deploy swaps the file
+/// but the live process keeps its old version until restarted).
+#[tauri::command]
+fn app_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
 /// Reveal + focus the main window. Called from the WebView when the user
 /// clicks the emergency toast (the window was started hidden so the toast
 /// never bursts over a meeting); also used to bring an already-running
@@ -586,6 +597,7 @@ pub fn run() {
             notifications_ack,
             get_launch_notification,
             get_launch_focus,
+            app_version,
             show_main_window,
             show_emergency_toast
         ])
