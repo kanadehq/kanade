@@ -51,6 +51,9 @@
   },
   "inventoryProbe": "probe",
   "actions": {
+    "run": "run",
+    "runTitle": "run — open Exec with this job preselected, then pick targets",
+    "runAria": "run job {{id}}",
     "edit": "edit",
     "editTitle": "edit — open this job's YAML manifest",
     "editAria": "edit job {{id}}",

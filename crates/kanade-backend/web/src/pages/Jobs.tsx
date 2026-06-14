@@ -11,6 +11,7 @@ import {
   Play,
   ScrollText,
   Search,
+  Send,
   Skull,
   Tags,
   Trash2,
@@ -305,6 +306,24 @@ export function Jobs() {
     const inflight = j.live.running + j.live.pending;
     return (
       <>
+        {/* Fire this job at the fleet. A revoked job is refused on the
+            agents, so we hide the run shortcut while revoked (unrevoke
+            shows in its place) rather than route the operator to an
+            Exec that will bounce. The Link carries only job_id — Exec
+            preselects the job and still makes the operator pick
+            targets + confirm the blast radius. */}
+        {!isRevoked(j.id) && (
+          <Button variant="default" size="sm" asChild>
+            <Link
+              to={`/exec?job_id=${encodeURIComponent(j.id)}`}
+              title={t('actions.runTitle')}
+              aria-label={t('actions.runAria', { id: j.id })}
+            >
+              <Send className="size-3.5" />
+              {withLabels && t('actions.run')}
+            </Link>
+          </Button>
+        )}
         {inflight > 0 && (
           <Button
             variant="danger"
