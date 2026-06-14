@@ -51,6 +51,9 @@
   },
   "inventoryProbe": "probe",
   "actions": {
+    "run": "実行",
+    "runTitle": "実行 — このジョブを選択済みの状態でコマンド画面を開き、ターゲットを指定します",
+    "runAria": "ジョブ {{id}} を実行",
     "edit": "編集",
     "editTitle": "編集 — このジョブの YAML マニフェストを開きます",
     "editAria": "ジョブ {{id}} を編集",

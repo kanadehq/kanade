@@ -2,6 +2,7 @@ import { useMutation, useQuery } from '@tanstack/react-query';
 import { AlertTriangle, Loader2, Send } from 'lucide-react';
 import { useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
+import { useSearchParams } from 'react-router-dom';
 
 import { ErrorCard } from '@/components/ErrorCard';
 import { PcPicker } from '@/components/PcPicker';
@@ -44,7 +45,13 @@ export function Exec() {
   const { hasRole } = useAuth();
   const confirm = useConfirm();
   const canOperate = hasRole('operator');
-  const [jobId, setJobId] = useState('');
+  // Deep-link preselect: the Jobs page links here as
+  // `/exec?job_id=<id>`, so seed the picker from the query once on
+  // mount. Lazy initializer (not useEffect) so it's a plain default —
+  // the operator is then free to change the selection, and we never
+  // clobber that on rerender. Targets + confirm still happen here.
+  const [searchParams] = useSearchParams();
+  const [jobId, setJobId] = useState(() => searchParams.get('job_id') ?? '');
   // Default to 'pcs' (not 'all'): firing a job at every registered
   // agent should be a deliberate, explicit choice — never the state
   // the form lands in. With 'pcs' selected and no PCs picked,
