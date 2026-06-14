@@ -9,9 +9,15 @@
 //!   GET    /api/groups/{name}/config          -> group ConfigScope
 //!   PUT    /api/groups/{name}/config          (replace group scope)
 //!   DELETE /api/groups/{name}/config          (drop the row)
+//!   GET    /api/groups/{name}/config/inherited
+//!     -> EffectiveConfig a group scope layers on (built-in→global)
 //!   GET    /api/pcs/{pc_id}/config            -> pc ConfigScope
 //!   PUT    /api/pcs/{pc_id}/config            (replace pc scope)
 //!   DELETE /api/pcs/{pc_id}/config            (drop the row)
+//!   GET    /api/pcs/{pc_id}/config/inherited
+//!     -> EffectiveConfig the PC inherits with its own scope excluded
+//!        (built-in→global→groups). Read-only placeholder source for
+//!        the SPA's per-scope editors.
 //!   GET    /api/agents/{pc_id}/effective_config
 //!     -> the resolved EffectiveConfig + any ResolutionWarnings the
 //!        resolver emitted. Read-only convenience for debugging
@@ -162,11 +168,85 @@ pub async fn effective(
     let cfg_kv = open_cfg(&state).await?;
     let groups_kv = open_groups(&state).await?;
 
-    // Walk every key in agent_config so we can build the same view
-    // the agent would, minus the watch loop.
-    let global_scope = read_optional_scope(&cfg_kv, KEY_AGENT_CONFIG_GLOBAL).await?;
+    let (global_scope, group_scopes) = collect_global_and_groups(&cfg_kv).await?;
     let pc_scope = read_optional_scope(&cfg_kv, &agent_config_pc_key(&pc_id)).await?;
+    let my_groups = pc_group_memberships(&groups_kv, &pc_id).await;
 
+    let (effective, warns) = resolve(
+        global_scope.as_ref(),
+        &group_scopes,
+        pc_scope.as_ref(),
+        &my_groups,
+    );
+
+    Ok(Json(EffectiveConfigResponse {
+        pc_id,
+        effective,
+        warnings: warns.into_iter().map(render_warning).collect(),
+    }))
+}
+
+/// The EffectiveConfig a PC would resolve to **if its own
+/// `pcs.<pc_id>` scope were blank** — built-in → global → its groups,
+/// with the per-PC layer excluded. The SPA's PC editor renders these
+/// as per-field placeholders so an operator can see what each field
+/// falls back to when left blank, the same way the global editor uses
+/// `/api/config/defaults`. Read-only; warnings are irrelevant for a
+/// placeholder view and dropped.
+pub async fn pc_inherited(
+    State(state): State<AppState>,
+    Path(pc_id): Path<String>,
+) -> Result<Json<EffectiveConfig>, (StatusCode, String)> {
+    let cfg_kv = open_cfg(&state).await?;
+    let groups_kv = open_groups(&state).await?;
+
+    let (global_scope, group_scopes) = collect_global_and_groups(&cfg_kv).await?;
+    let my_groups = pc_group_memberships(&groups_kv, &pc_id).await;
+
+    // pc_scope = None → the PC's own overrides are excluded.
+    let (inherited, _warns) = resolve(global_scope.as_ref(), &group_scopes, None, &my_groups);
+    Ok(Json(inherited))
+}
+
+/// The base a group scope layers on top of: built-in → global only.
+/// A group's *other* layers (sibling groups, the per-PC scope) are
+/// resolved per-PC and can't be determined from the group name alone,
+/// so this deliberately shows just the built-in→global base; the SPA
+/// hints that sibling-group overrides aren't reflected here. The
+/// `name` path segment is unused today but keeps the route symmetric
+/// with the per-group config path (and lets us refine this later).
+pub async fn group_inherited(
+    State(state): State<AppState>,
+    Path(_name): Path<String>,
+) -> Result<Json<EffectiveConfig>, (StatusCode, String)> {
+    let cfg_kv = open_cfg(&state).await?;
+    let global_scope = read_optional_scope(&cfg_kv, KEY_AGENT_CONFIG_GLOBAL).await?;
+    let (inherited, _warns) = resolve(global_scope.as_ref(), &BTreeMap::new(), None, &[]);
+    Ok(Json(inherited))
+}
+
+fn render_warning(w: ResolutionWarning) -> String {
+    match w {
+        ResolutionWarning::MultiGroupConflict { field, groups } => format!(
+            "multi-group conflict on `{field}` — set by [{}]; alphabetical last wins (=> {})",
+            groups.join(", "),
+            groups.last().map(String::as_str).unwrap_or("<none>"),
+        ),
+    }
+}
+
+// -------- helpers --------
+
+/// Read the global scope and every `groups.<name>` scope from the
+/// agent_config bucket in one pass — the shared half of resolving any
+/// PC's or group's effective config (`effective` and `pc_inherited`).
+async fn collect_global_and_groups(
+    cfg_kv: &async_nats::jetstream::kv::Store,
+) -> Result<(Option<ConfigScope>, BTreeMap<String, ConfigScope>), (StatusCode, String)> {
+    let global_scope = read_optional_scope(cfg_kv, KEY_AGENT_CONFIG_GLOBAL).await?;
+
+    // Walk every key in agent_config so we build the same group view
+    // the agent would, minus the watch loop.
     let mut group_scopes: BTreeMap<String, ConfigScope> = BTreeMap::new();
     match cfg_kv.keys().await {
         Ok(mut keys) => {
@@ -191,38 +271,35 @@ pub async fn effective(
         }
     }
 
-    let my_groups: Vec<String> = match groups_kv.get(&pc_id).await {
-        Ok(Some(bytes)) => serde_json::from_slice::<AgentGroups>(&bytes)
-            .map(|g| g.groups)
-            .unwrap_or_default(),
-        _ => Vec::new(),
-    };
-
-    let (effective, warns) = resolve(
-        global_scope.as_ref(),
-        &group_scopes,
-        pc_scope.as_ref(),
-        &my_groups,
-    );
-
-    Ok(Json(EffectiveConfigResponse {
-        pc_id,
-        effective,
-        warnings: warns.into_iter().map(render_warning).collect(),
-    }))
+    Ok((global_scope, group_scopes))
 }
 
-fn render_warning(w: ResolutionWarning) -> String {
-    match w {
-        ResolutionWarning::MultiGroupConflict { field, groups } => format!(
-            "multi-group conflict on `{field}` — set by [{}]; alphabetical last wins (=> {})",
-            groups.join(", "),
-            groups.last().map(String::as_str).unwrap_or("<none>"),
-        ),
+/// A PC's group memberships from the agent_groups bucket. Returns an
+/// empty list when the PC has no row yet (a fresh, unassigned agent —
+/// the normal case) AND, deliberately, on a transient KV read or decode
+/// error: resolving against "no groups" keeps `effective`/`pc_inherited`
+/// answering (degraded) rather than 500-ing the whole config view when
+/// the agent_groups bucket hiccups. A read/decode failure is logged
+/// (not silent) so it's diagnosable — only `Ok(None)` is truly quiet.
+async fn pc_group_memberships(
+    groups_kv: &async_nats::jetstream::kv::Store,
+    pc_id: &str,
+) -> Vec<String> {
+    match groups_kv.get(pc_id).await {
+        Ok(Some(bytes)) => match serde_json::from_slice::<AgentGroups>(&bytes) {
+            Ok(g) => g.groups,
+            Err(e) => {
+                warn!(error = %e, pc_id, "decode AgentGroups — treating as no groups");
+                Vec::new()
+            }
+        },
+        Ok(None) => Vec::new(),
+        Err(e) => {
+            warn!(error = %e, pc_id, "read agent_groups — treating as no groups");
+            Vec::new()
+        }
     }
 }
-
-// -------- helpers --------
 
 async fn open_cfg(
     state: &AppState,
