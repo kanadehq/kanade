@@ -7,7 +7,7 @@
     "status": {
       "ok": {
         "label": "正常",
-        "hint": "エージェント新鮮、JetStream 正常"
+        "hint": "JetStream 正常（一部のオフラインPCは正常運用）"
       },
       "unknown": {
         "label": "不明",
@@ -15,7 +15,7 @@
       },
       "degraded": {
         "label": "劣化",
-        "hint": "フリートに対応が必要です"
+        "hint": "JetStream リソース欠落または全エージェントオフライン — 要対応"
       }
     },
     "stats": {

@@ -400,7 +400,10 @@ export function Dashboard() {
                 label={t('fleetHealth.stats.agents.label')}
                 value={`${health.agents.active} / ${health.agents.known}`}
                 hint={t('fleetHealth.stats.agents.hint')}
-                tone={health.agents.stale > 0 ? 'danger' : 'default'}
+                // A single offline PC is normal — don't alarm on it.
+                // A total blackout (0 active, some known) is the
+                // degraded case, so flag it red.
+                tone={health.agents.active === 0 && health.agents.known > 0 ? 'danger' : 'default'}
               />
             </Link>
             <Link
@@ -411,7 +414,15 @@ export function Dashboard() {
               <StatBlock
                 label={t('fleetHealth.stats.staleAgents.label')}
                 value={health.agents.stale}
-                tone={health.agents.stale > 0 ? 'danger' : 'success'}
+                // Red only on a total blackout; a partial set of
+                // stale hosts is expected, so neutral. Green at zero.
+                tone={
+                  health.agents.active === 0 && health.agents.known > 0
+                    ? 'danger'
+                    : health.agents.stale > 0
+                      ? 'default'
+                      : 'success'
+                }
                 hint={t('fleetHealth.stats.staleAgents.hint')}
               />
             </Link>

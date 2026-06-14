@@ -7,7 +7,7 @@
     "status": {
       "ok": {
         "label": "all green",
-        "hint": "agents fresh, JetStream healthy"
+        "hint": "JetStream healthy (some offline PCs are normal)"
       },
       "unknown": {
         "label": "unknown",
@@ -15,7 +15,7 @@
       },
       "degraded": {
         "label": "degraded",
-        "hint": "fleet attention needed"
+        "hint": "JetStream resource missing or all agents offline — attention needed"
       }
     },
     "stats": {
