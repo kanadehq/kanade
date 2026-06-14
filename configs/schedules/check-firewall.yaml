@@ -1,0 +1,16 @@
+# Fires the registered `check-firewall` job per-PC every 4 hours.
+# Firewall profile state rarely changes, but when it does (a misapplied
+# GPO, a user toggling it off) it's a compliance gap worth catching
+# within hours rather than a daily window.
+#
+# Install (after `kanade job create configs/jobs/check-firewall.yaml`):
+#   kanade schedule create configs/schedules/check-firewall.yaml
+id: check-firewall
+when:
+  per_pc: { every: 4h }
+enabled: true
+job_id: check-firewall
+target:
+  all: true
+jitter: 5m
+tags: [health-check, security]

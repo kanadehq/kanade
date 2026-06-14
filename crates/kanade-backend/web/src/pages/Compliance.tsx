@@ -27,6 +27,8 @@ import { fmtIsoLocal } from '@/lib/utils';
 type CheckRow = {
   pc_id: string;
   check_name: string;
+  // Operator-authored display title; null ⇒ render the check_name slug.
+  label: string | null;
   status: 'ok' | 'warn' | 'fail' | 'unknown' | string;
   detail: string | null;
   recorded_at: string;
@@ -38,6 +40,9 @@ type CheckRow = {
 // per 60 s poll for a healthy fleet.
 type CheckCounts = {
   check_name: string;
+  // Mirrors CheckRow.label so an all-ok check (no attention rows) still
+  // gets a titled card.
+  label: string | null;
   ok: number;
   warn: number;
   fail: number;
@@ -63,6 +68,8 @@ const STATUS_ORDER = ['fail', 'warn', 'unknown', 'ok'] as const;
 
 type CheckGroup = {
   name: string;
+  // Display title for the card header; falls back to `name` (the slug).
+  label: string | null;
   rows: CheckRow[];
   counts: Record<string, number>;
 };
@@ -128,6 +135,7 @@ export function Compliance() {
       .sort((a, b) => a.check_name.localeCompare(b.check_name))
       .map((c) => ({
         name: c.check_name,
+        label: c.label,
         rows: (byCheck.get(c.check_name) ?? [])
           .slice()
           .sort((a, b) => a.pc_id.localeCompare(b.pc_id)),
@@ -162,7 +170,14 @@ export function Compliance() {
         groups.map((g) => (
           <Card key={g.name}>
             <CardHeader className="flex flex-row items-center justify-between gap-2">
-              <CardTitle className="text-base">{g.name}</CardTitle>
+              <CardTitle className="text-base flex items-baseline gap-2">
+                {g.label || g.name}
+                {/* keep the stable slug visible for operators when a
+                    human title is set — it's the check's real id. */}
+                {g.label && (
+                  <code className="text-xs font-normal text-muted">{g.name}</code>
+                )}
+              </CardTitle>
               <div className="flex flex-wrap items-center gap-1">
                 {STATUS_ORDER.filter((s) => g.counts[s] > 0).map((s) => (
                   <Badge key={s} variant={STATUS_VARIANT[s]}>

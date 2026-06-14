@@ -1,0 +1,71 @@
+# Example REMEDIATION job (#291) wired to the `check-defender-rtp`
+# health check via its `troubleshoot:` field — the "修復する" button
+# on the Client App's Health tab (and the operator SPA) runs this job
+# exactly like any user-invokable job. See `fix-teams-cache.yaml` for
+# the `client:` block contract.
+#
+# It only ever moves protection in the SAFE direction — re-enable
+# real-time monitoring and start the antimalware service — and never
+# disables anything. If a third-party AV has put Defender into passive
+# mode, or Tamper Protection blocks the change, the attempt fails
+# gracefully and the job reports the resulting state instead of
+# pretending it fixed something.
+#
+# `run_as: system`: Defender preferences and the WinDefend service are
+# admin-only.
+#
+# Install (no schedule — fired on demand from the Health tab):
+#   kanade job create configs/jobs/fix-defender-rtp.yaml
+id: fix-defender-rtp
+version: 0.1.0
+description: Re-enable Windows Defender real-time protection (remediation for check-defender-rtp)
+tags: [troubleshoot, security]
+execute:
+  shell: powershell
+  run_as: system
+  timeout: 60s
+  script: |
+    $ErrorActionPreference = 'Stop'
+    $notes = @()
+
+    # 1. Re-enable real-time monitoring (no-op if already on; blocked by
+    #    Tamper Protection, which we surface rather than fight).
+    try {
+      Set-MpPreference -DisableRealtimeMonitoring $false -ErrorAction Stop
+      $notes += 'requested real-time protection ON'
+    } catch {
+      $notes += "could not set real-time protection: $($_.Exception.Message)"
+    }
+
+    # 2. Ensure the antimalware service is running. A third-party AV can
+    #    disable WinDefend by policy — Start-Service then fails, which we
+    #    report instead of treating as success.
+    $svc = Get-Service -Name WinDefend -ErrorAction SilentlyContinue
+    if ($null -eq $svc) {
+      $notes += 'WinDefend service not present'
+    } elseif ($svc.Status -ne 'Running') {
+      try {
+        Set-Service -Name WinDefend -StartupType Automatic -ErrorAction Stop
+        Start-Service -Name WinDefend -ErrorAction Stop
+        $notes += 'started WinDefend service'
+      } catch {
+        $notes += "could not start WinDefend (third-party AV active?): $($_.Exception.Message)"
+      }
+    } else {
+      $notes += 'WinDefend already running'
+    }
+
+    # 3. Report the resulting state so the operator can see whether the
+    #    fix actually took — the next check-defender-rtp tick confirms.
+    try {
+      $s = Get-CimInstance -Namespace 'root/Microsoft/Windows/Defender' -ClassName MSFT_MpComputerStatus
+      $notes += "now: antimalware=$([bool]$s.AntimalwareEnabled) realtime=$([bool]$s.RealTimeProtectionEnabled) tamper=$([bool]$s.IsTamperProtected)"
+    } catch {
+      $notes += "state read failed: $($_.Exception.Message)"
+    }
+    Write-Output ($notes -join "`n")
+client:
+  name: "Defender のリアルタイム保護を有効化"
+  description: "ウイルス対策のリアルタイム保護が無効なときに試してください"
+  category: troubleshoot
+  icon: shield-check

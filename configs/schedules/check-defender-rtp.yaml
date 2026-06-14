@@ -1,0 +1,15 @@
+# Fires the registered `check-defender-rtp` job per-PC every 2 hours.
+# Protection being switched off is a security event, so a tight cadence
+# (matching `check-av-signature`) keeps the Compliance page responsive.
+#
+# Install (after `kanade job create configs/jobs/check-defender-rtp.yaml`):
+#   kanade schedule create configs/schedules/check-defender-rtp.yaml
+id: check-defender-rtp
+when:
+  per_pc: { every: 2h }
+enabled: true
+job_id: check-defender-rtp
+target:
+  all: true
+jitter: 5m
+tags: [health-check, security]

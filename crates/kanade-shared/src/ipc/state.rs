@@ -54,13 +54,22 @@ pub struct StateSnapshot {
 }
 
 /// One compliance check result. `name` is the stable id (used as
-/// React key + analytics label); `status` drives the row's color;
+/// React key + analytics label); `label` is the optional human-facing
+/// title shown instead of the slug; `status` drives the row's color;
 /// `detail` is human-readable text for the row body. `troubleshoot`
 /// is the optional `Manifest.id` of the job whose execute button
 /// fixes this check — `None` means the check has no auto-remediation.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
 pub struct Check {
     pub name: String,
+    /// Optional human-facing row title. When set, the Client App's
+    /// Health tab renders this instead of [`name`](Check::name) — a
+    /// `defender_rtp` slug becomes e.g. "ウイルス対策のリアルタイム保護".
+    /// Sourced from the check job's
+    /// [`CheckHint.label`](crate::manifest::CheckHint::label); `None`
+    /// falls back to the slug, so it's purely additive on the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     pub status: CheckStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
@@ -181,6 +190,7 @@ mod tests {
     fn check_with_troubleshoot_round_trips() {
         let c = Check {
             name: "av_signature".into(),
+            label: Some("ウイルス対策の定義ファイル".into()),
             status: CheckStatus::Fail,
             detail: Some("Signatures > 7 days old".into()),
             troubleshoot: Some("update-av-signatures".into()),
@@ -188,6 +198,7 @@ mod tests {
         let json = serde_json::to_string(&c).unwrap();
         let back: Check = serde_json::from_str(&json).unwrap();
         assert_eq!(back.name, c.name);
+        assert_eq!(back.label, c.label);
         assert_eq!(back.status, c.status);
         assert_eq!(back.detail, c.detail);
         assert_eq!(back.troubleshoot, c.troubleshoot);
@@ -195,16 +206,18 @@ mod tests {
 
     #[test]
     fn check_without_optional_fields_decodes() {
-        // Minimal check — `detail` + `troubleshoot` should both be
-        // absent on the wire (not `null`) thanks to
+        // Minimal check — `label` + `detail` + `troubleshoot` should
+        // all be absent on the wire (not `null`) thanks to
         // `skip_serializing_if`.
         let c = Check {
             name: "bitlocker".into(),
+            label: None,
             status: CheckStatus::Ok,
             detail: None,
             troubleshoot: None,
         };
         let v = serde_json::to_value(&c).unwrap();
+        assert!(v.get("label").is_none(), "wire: {v:?}");
         assert!(v.get("detail").is_none(), "wire: {v:?}");
         assert!(v.get("troubleshoot").is_none(), "wire: {v:?}");
     }

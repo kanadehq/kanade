@@ -83,6 +83,8 @@ type CheckStatus = "ok" | "warn" | "fail" | "unknown";
 
 type Check = {
   name: string;
+  // Operator-authored display title; when absent we show the `name` slug.
+  label?: string | null;
   status: CheckStatus;
   detail?: string | null;
   troubleshoot?: string | null;
@@ -1047,10 +1049,12 @@ function renderCheck(c: Check): string {
   const fix = c.troubleshoot
     ? `<button class="fix-btn" data-job-id="${escapeHtml(c.troubleshoot)}" data-check="${escapeHtml(c.name)}">修復する</button>`
     : "";
+  // Show the operator's human title when set; fall back to the slug.
+  const title = c.label && c.label.trim() ? c.label : c.name;
   return `
     <li class="check-row status-${escapeHtml(c.status)}">
       <span class="check-icon">${icon}</span>
-      <span class="check-name">${escapeHtml(c.name)}</span>
+      <span class="check-name">${escapeHtml(title)}</span>
       ${detail}
       ${fix}
     </li>`;

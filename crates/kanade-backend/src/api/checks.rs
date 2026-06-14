@@ -28,6 +28,9 @@ use super::AppState;
 pub struct CheckRow {
     pub pc_id: String,
     pub check_name: String,
+    /// Operator-authored display title (`CheckHint.label`); `None` ⇒ the
+    /// SPA falls back to the `check_name` slug.
+    pub label: Option<String>,
     /// `ok` / `warn` / `fail` / `unknown` (normalised by the projector).
     pub status: String,
     pub detail: Option<String>,
@@ -41,6 +44,9 @@ pub struct CheckRow {
 #[derive(Serialize, Default, Clone)]
 pub struct CheckCounts {
     pub check_name: String,
+    /// Display title for the check's card; mirrors [`CheckRow::label`]
+    /// so an all-ok check (no attention rows) still gets a titled card.
+    pub label: Option<String>,
     pub ok: i64,
     pub warn: i64,
     pub fail: i64,
@@ -66,7 +72,7 @@ pub struct ChecksParams {
 /// Row query shared verbatim with the unit tests, so the tests can't
 /// silently diverge from what the handler executes (PR #565 review,
 /// claude).
-const ROWS_SQL: &str = "SELECT pc_id, check_name, status, detail, recorded_at
+const ROWS_SQL: &str = "SELECT pc_id, check_name, label, status, detail, recorded_at
          FROM check_status
          WHERE (?1 IS NULL OR check_name = ?1)
            AND (?2 OR status != 'ok')
@@ -92,11 +98,16 @@ pub async fn list_all(
     #[derive(sqlx::FromRow)]
     struct CountRow {
         check_name: String,
+        // `MAX(label)`: label is per check_name (every row of a check
+        // shares the hint's title), so the max over a (check, status)
+        // group is just that title — and it's non-null whenever any
+        // contributing row carried one.
+        label: Option<String>,
         status: String,
         n: i64,
     }
     let count_rows: Vec<CountRow> = sqlx::query_as(
-        "SELECT check_name, status, COUNT(*) AS n
+        "SELECT check_name, MAX(label) AS label, status, COUNT(*) AS n
          FROM check_status
          WHERE (?1 IS NULL OR check_name = ?1)
          GROUP BY check_name, status",
@@ -118,6 +129,11 @@ pub async fn list_all(
                 check_name: r.check_name,
                 ..CheckCounts::default()
             });
+        // Any group's non-null label is the check's title; keep the
+        // first one seen so a status group with no rows can't blank it.
+        if entry.label.is_none() {
+            entry.label = r.label;
+        }
         match r.status.as_str() {
             "ok" => entry.ok = r.n,
             "warn" => entry.warn = r.n,
@@ -161,19 +177,22 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
-        for (pc, check, status) in [
-            ("pc-1", "bitlocker", "ok"),
-            ("pc-2", "bitlocker", "fail"),
-            ("pc-3", "bitlocker", "ok"),
-            ("pc-1", "av", "warn"),
-            ("pc-2", "av", "ok"),
+        // `bitlocker` carries a label; `av` doesn't — exercises both the
+        // titled and slug-fallback paths through CheckRow / CheckCounts.
+        for (pc, check, label, status) in [
+            ("pc-1", "bitlocker", Some("BitLocker 暗号化"), "ok"),
+            ("pc-2", "bitlocker", Some("BitLocker 暗号化"), "fail"),
+            ("pc-3", "bitlocker", Some("BitLocker 暗号化"), "ok"),
+            ("pc-1", "av", None, "warn"),
+            ("pc-2", "av", None, "ok"),
         ] {
             sqlx::query(
-                "INSERT INTO check_status (pc_id, check_name, status, recorded_at)
-                 VALUES (?, ?, ?, ?)",
+                "INSERT INTO check_status (pc_id, check_name, label, status, recorded_at)
+                 VALUES (?, ?, ?, ?, ?)",
             )
             .bind(pc)
             .bind(check)
+            .bind(label)
             .bind(status)
             .bind(chrono::Utc::now())
             .execute(&pool)
@@ -198,6 +217,16 @@ mod tests {
         let rows = rows_for(&pool, None, false).await;
         assert_eq!(rows.len(), 2, "only warn+fail rows by default");
         assert!(rows.iter().all(|r| r.status != "ok"));
+    }
+
+    #[tokio::test]
+    async fn rows_carry_label_and_fall_back_to_none() {
+        let pool = seeded_pool().await;
+        let rows = rows_for(&pool, None, true).await;
+        let bl = rows.iter().find(|r| r.check_name == "bitlocker").unwrap();
+        assert_eq!(bl.label.as_deref(), Some("BitLocker 暗号化"));
+        let av = rows.iter().find(|r| r.check_name == "av").unwrap();
+        assert_eq!(av.label, None, "unlabeled check leaves label NULL");
     }
 
     #[tokio::test]

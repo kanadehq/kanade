@@ -1,0 +1,53 @@
+# Example operator-defined HEALTH CHECK (#290) — pending reboot.
+# See `check-bitlocker.yaml` for the full `check:` contract.
+#
+# A host that's installed updates but not rebooted is in a half-patched
+# state: the fix isn't live and the next maintenance window may stack a
+# second pending change on top. This surfaces that backlog fleet-wide
+# on the Compliance page so operators can chase the laggards.
+#
+# Emits {status, detail, reasons[]}: any of the well-known reboot-
+# pending registry markers present → warn (a pending reboot is rarely
+# an emergency, but should not linger). None → ok.
+#
+# Install:
+#   kanade job create      configs/jobs/check-pending-reboot.yaml
+#   kanade schedule create configs/schedules/check-pending-reboot.yaml
+id: check-pending-reboot
+version: 0.1.0
+description: Whether the host is waiting on a reboot (CBS / Windows Update / file-rename)
+tags: [health-check, patching]
+execute:
+  shell: powershell
+  run_as: system
+  timeout: 20s
+  script: |
+    $ErrorActionPreference = 'Stop'
+    try {
+      $reasons = @()
+      if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') {
+        $reasons += 'Component Based Servicing'
+      }
+      if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') {
+        $reasons += 'Windows Update'
+      }
+      # Read the whole key, not `-Name PendingFileRenameOperations`: when
+      # the value is absent (the common case — no reboot pending) the
+      # `-Name` form errors out and yields $null, so the trailing member
+      # access can trip Set-StrictMode. Reading the key and selecting the
+      # property returns $null cleanly. The Session Manager key always exists.
+      $pfro = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' `
+        -ErrorAction SilentlyContinue).PendingFileRenameOperations
+      if ($pfro) { $reasons += 'Pending file rename' }
+      if ($reasons.Count -eq 0) {
+        $status = 'ok';   $detail = 'no reboot pending'
+      } else {
+        $status = 'warn'; $detail = "reboot pending: $($reasons -join ', ')"
+      }
+    } catch {
+      $status = 'unknown'; $detail = $_.Exception.Message; $reasons = @()
+    }
+    [pscustomobject]@{ status = $status; detail = $detail; reasons = $reasons } | ConvertTo-Json -Compress
+check:
+  name: pending_reboot
+  label: "再起動の保留"

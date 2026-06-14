@@ -41,3 +41,4 @@ execute:
     [pscustomobject]@{ status = $status; detail = $detail } | ConvertTo-Json -Compress
 check:
   name: av_signature
+  label: "ウイルス定義ファイルの鮮度"

@@ -1,0 +1,15 @@
+# Fires the registered `check-disk-space` job per-PC every 4 hours.
+# Free space can fall fast (a runaway log, a big install), so a 4h
+# tick keeps the Compliance page honest without hammering WMI.
+#
+# Install (after `kanade job create configs/jobs/check-disk-space.yaml`):
+#   kanade schedule create configs/schedules/check-disk-space.yaml
+id: check-disk-space
+when:
+  per_pc: { every: 4h }
+enabled: true
+job_id: check-disk-space
+target:
+  all: true
+jitter: 5m
+tags: [health-check, storage]
