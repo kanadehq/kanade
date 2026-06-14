@@ -14,7 +14,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { apiFetch, apiFetchPaged } from '@/lib/api';
 import { useDebouncedValue } from '@/lib/hooks';
 import type { AgentGroups, AgentRow, EffectiveConfigResponse, Heartbeat } from '@/lib/types';
-import { cn, fmtIsoLocal, isAgentOnline } from '@/lib/utils';
+import { cn, fmtIsoLocal, isAgentOnline, unresolvedQuarantine } from '@/lib/utils';
 
 // #495: server-side page size. The endpoint supports q/limit/offset;
 // 50 rows keeps the polled payload and the rendered DOM bounded
@@ -388,6 +388,13 @@ export function Agents() {
         <TableBody>
           {visible.map((a) => {
             const online = isAgentOnline(a.last_heartbeat, now);
+            // #652 follow-up: only quarantine entries NEWER than the
+            // running version are unresolved. An older rolled-back
+            // version is healed once the agent adopted a newer build, so
+            // it must not keep raising a badge — otherwise a 3000-host
+            // fleet carries stale badges with no fleet-scale way to clear
+            // them.
+            const unresolvedVersions = unresolvedQuarantine(a.quarantined_versions, a.agent_version);
             return (
             <TableRow key={a.pc_id}>
               <TableCell>
@@ -407,11 +414,11 @@ export function Agents() {
                   {/* #652: per-row quarantine badge so the drill-down
                       list is actionable — the version(s) this host
                       rolled back show on hover. */}
-                  {a.quarantined_versions && a.quarantined_versions.length > 0 && (
+                  {unresolvedVersions.length > 0 && (
                     <Badge
                       variant="danger"
                       title={t('quarantinedBadgeTitle', {
-                        versions: a.quarantined_versions.join(', '),
+                        versions: unresolvedVersions.join(', '),
                       })}
                     >
                       <AlertTriangle className="mr-1 size-3" />
