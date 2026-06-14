@@ -212,10 +212,21 @@ export function InventorySearch() {
     }
     if (!tabs.some((tab) => tab.key === field)) {
       setField(tabs[0].key);
-      setFilters([]);
-      setOffset(0);
     }
   }, [tabs, field]);
+
+  // Gemini #669 fix: reset filters + pagination whenever the active
+  // manifest OR tab changes. Doing it here (not only when the tab key
+  // disappears) covers two manifests that share a tab key — e.g. both
+  // carry an `apps` tab, or both expose the SCALAR_FIELD tab — but
+  // with different columns: a stale filter referencing a column the
+  // new tab lacks would otherwise persist and could crash the filter
+  // row render. Centralising it also lets the manifest/tab onChange
+  // handlers stay purely about navigation.
+  useEffect(() => {
+    setFilters([]);
+    setOffset(0);
+  }, [manifestId, field]);
 
   // #523: debounce the filter values before they reach the queryKey —
   // each keystroke in a filter input previously issued a fresh search
@@ -335,11 +346,7 @@ export function InventorySearch() {
                   <Select
                     id="software-manifest"
                     value={manifestId}
-                    onChange={(e) => {
-                      setManifestId(e.target.value);
-                      setFilters([]);
-                      setOffset(0);
-                    }}
+                    onChange={(e) => setManifestId(e.target.value)}
                   >
                     {searchableJobs.map((j) => (
                       <option key={j.manifest_id} value={j.manifest_id}>
@@ -355,11 +362,7 @@ export function InventorySearch() {
                   {tabs.map((tab) => (
                     <button
                       key={tab.key}
-                      onClick={() => {
-                        setField(tab.key);
-                        setFilters([]);
-                        setOffset(0);
-                      }}
+                      onClick={() => setField(tab.key)}
                       className={cn(
                         'px-3 py-1.5 transition-colors',
                         field === tab.key

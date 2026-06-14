@@ -547,9 +547,22 @@ pub async fn search_scalars(
             .map_err(|e| (StatusCode::BAD_REQUEST, format!("display field name: {e}")))?;
     }
 
-    let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
-        "SELECT pc_id, collected_at, facts_json FROM inventory_facts WHERE job_id = ",
-    );
+    // Gemini #669 fix: let SQLite project just the requested scalar
+    // fields into a tiny JSON object instead of shipping the entire
+    // `facts_json` (which also carries every non-exploded array) over
+    // the connection and re-parsing it per row. At fleet scale (up to
+    // 5000 rows) that's a large CPU/memory saving. Field names are
+    // validate_ident'd above, so splicing them into the json_object
+    // keys + json_extract paths is safe.
+    let projection = scalars
+        .iter()
+        .map(|s| format!("'{0}', json_extract(facts_json, '$.{0}')", s.field))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(format!(
+        "SELECT pc_id, collected_at, json_object({projection}) AS projected_json \
+         FROM inventory_facts WHERE job_id = "
+    ));
     qb.push_bind(&manifest_id);
 
     let escape_like = |s: &str| -> String {
@@ -658,18 +671,17 @@ pub async fn search_scalars(
                 serde_json::Value::String(t.to_rfc3339()),
             );
         }
-        // Project the scalar fields out of facts_json rather than
-        // re-extracting each in SQL — we already have the full object
-        // in hand, and a missing key becomes an explicit null cell.
-        let facts: serde_json::Value = r
-            .try_get::<String, _>("facts_json")
+        // The SQL already projected just the scalar fields into a
+        // small JSON object, so parse that directly — a missing key
+        // (json_extract → NULL) becomes an explicit null cell.
+        let projected: serde_json::Map<String, serde_json::Value> = r
+            .try_get::<String, _>("projected_json")
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or(serde_json::Value::Null);
-        let obj = facts.as_object();
+            .unwrap_or_default();
         for s in &scalars {
-            let v = obj
-                .and_then(|o| o.get(&s.field))
+            let v = projected
+                .get(&s.field)
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
             map.insert(s.field.clone(), v);
