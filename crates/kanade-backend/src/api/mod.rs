@@ -29,7 +29,9 @@ pub mod yaml_body;
 
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, FromRef};
+use axum::http::StatusCode;
 use axum::routing::{delete, get, patch, post, put};
+use regex::Regex;
 use sqlx::SqlitePool;
 
 /// 64 MB upper bound for `POST /api/agents/publish` multipart bodies.
@@ -366,4 +368,18 @@ async fn version() -> axum::Json<VersionResponse> {
     axum::Json(VersionResponse {
         version: env!("CARGO_PKG_VERSION"),
     })
+}
+
+/// Shared regex compiler for list-endpoint text filters (results /
+/// audit / agents). `None` / empty → no filter; an invalid pattern →
+/// 400 with the offending expression echoed back so the SPA can
+/// surface it inline. Previously copy-pasted per handler; unified here
+/// so the three pages behave identically.
+pub(crate) fn compile(opt: Option<&str>) -> Result<Option<Regex>, (StatusCode, String)> {
+    match opt.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => Regex::new(s)
+            .map(Some)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid regex `{s}`: {e}"))),
+        None => Ok(None),
+    }
 }

@@ -166,7 +166,17 @@ where
              agent_disk_written_bytes  = excluded.agent_disk_written_bytes,
              quarantined_versions      = excluded.quarantined_versions,
              last_logon_user           = COALESCE(excluded.last_logon_user, agents.last_logon_user),
-             last_logon_display_name   = COALESCE(excluded.last_logon_display_name, agents.last_logon_display_name),
+             -- #655 follow-up: keep the display name PAIRED with the
+             -- user. COALESCE'ing it independently would keep the
+             -- PREVIOUS user's name when a new user with no display name
+             -- signs in (claude #661). Update it whenever this beat
+             -- reported a user (a real logon beat, not a ping) — even to
+             -- NULL — and keep the stored value otherwise.
+             last_logon_display_name   = CASE
+                 WHEN excluded.last_logon_user IS NOT NULL
+                     THEN excluded.last_logon_display_name
+                 ELSE agents.last_logon_display_name
+             END,
              updated_at                = CURRENT_TIMESTAMP",
     )
     .bind(&hb.pc_id)
@@ -179,6 +189,10 @@ where
     .bind(hb.agent_disk_read_bytes)
     .bind(hb.agent_disk_written_bytes)
     .bind(quarantined_json)
+    // #655 follow-up: bind the raw values (no ''→NULL here). The CASE
+    // above pairs display with user; the API read-side normalises ''→
+    // None for the display name so a no-display-name account falls back
+    // to the login name without making the stored value sticky.
     .bind(&hb.last_logon_user)
     .bind(&hb.last_logon_display_name)
     .execute(executor)

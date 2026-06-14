@@ -179,24 +179,15 @@ const SNIPPET_CONTEXT_CHARS: usize = 80;
 /// trim, so clip it and flag the clip via `clipped_end`.
 const SNIPPET_MATCH_CHARS: usize = 240;
 
-fn compile(opt: Option<&str>) -> Result<Option<Regex>, (StatusCode, String)> {
-    match opt.filter(|s| !s.is_empty()) {
-        Some(s) => Regex::new(s)
-            .map(Some)
-            .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid regex `{s}`: {e}"))),
-        None => Ok(None),
-    }
-}
-
 pub async fn list(
     State(pool): State<SqlitePool>,
     Query(params): Query<ListParams>,
 ) -> Result<Json<Vec<ResultRow>>, (StatusCode, String)> {
-    let pc_re = compile(params.pc_id.as_deref())?;
-    let job_re = compile(params.job_id.as_deref())?;
-    let exec_re = compile(params.exec_id.as_deref())?;
-    let stdout_re = compile(params.stdout.as_deref())?;
-    let stderr_re = compile(params.stderr.as_deref())?;
+    let pc_re = super::compile(params.pc_id.as_deref())?;
+    let job_re = super::compile(params.job_id.as_deref())?;
+    let exec_re = super::compile(params.exec_id.as_deref())?;
+    let stdout_re = super::compile(params.stdout.as_deref())?;
+    let stderr_re = super::compile(params.stderr.as_deref())?;
     let has_regex = pc_re.is_some()
         || job_re.is_some()
         || exec_re.is_some()

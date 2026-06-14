@@ -1,7 +1,6 @@
 use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
 use tracing::warn;
@@ -48,22 +47,13 @@ fn default_limit() -> u32 {
 // would need to exceed ~10k events per day for this cap to bite.
 const MAX_FETCH: i64 = 10_000;
 
-fn compile(opt: Option<&str>) -> Result<Option<Regex>, (StatusCode, String)> {
-    match opt.filter(|s| !s.is_empty()) {
-        Some(s) => Regex::new(s)
-            .map(Some)
-            .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid regex `{s}`: {e}"))),
-        None => Ok(None),
-    }
-}
-
 pub async fn list(
     State(pool): State<SqlitePool>,
     Query(params): Query<ListParams>,
 ) -> Result<Json<Vec<AuditRow>>, (StatusCode, String)> {
-    let action_re = compile(params.action.as_deref())?;
-    let target_re = compile(params.target.as_deref())?;
-    let payload_re = compile(params.payload.as_deref())?;
+    let action_re = super::compile(params.action.as_deref())?;
+    let target_re = super::compile(params.target.as_deref())?;
+    let payload_re = super::compile(params.payload.as_deref())?;
     let has_regex = action_re.is_some() || target_re.is_some() || payload_re.is_some();
 
     let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new("SELECT * FROM audit_log");

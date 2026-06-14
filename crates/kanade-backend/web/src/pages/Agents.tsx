@@ -1,5 +1,5 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { Activity, Loader2, ScrollText, Server, Settings2, Users } from 'lucide-react';
+import { Activity, AlertTriangle, Loader2, ScrollText, Server, Settings2, Users } from 'lucide-react';
 import { useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 import { Link, useSearchParams } from 'react-router-dom';
@@ -63,20 +63,37 @@ function fmtBytes(v: number | null): string {
 export function Agents() {
   const { t } = useTranslation('agents');
   const [q, setQ] = useState('');
+  const [user, setUser] = useState('');
+  const [version, setVersion] = useState('');
   const [offset, setOffset] = useState(0);
   const dQ = useDebouncedValue(q, FILTER_DEBOUNCE_MS);
+  const dUser = useDebouncedValue(user, FILTER_DEBOUNCE_MS);
+  const dVersion = useDebouncedValue(version, FILTER_DEBOUNCE_MS);
   const [searchParams, setSearchParams] = useSearchParams();
   const statusFilter = parseStatusFilter(searchParams.get('status'));
+  // #652: the Rollout "quarantined K" drill-down lands here with
+  // `?quarantined=<version>`. Read it from the URL (not local state) so
+  // the deep link is shareable and survives a refresh; cleared via the
+  // chip below.
+  const quarantined = searchParams.get('quarantined') ?? '';
   const { data, error, isLoading } = useQuery({
-    queryKey: ['agents', dQ, offset, statusFilter],
+    queryKey: ['agents', dQ, dUser, dVersion, quarantined, offset, statusFilter],
     // Match the Dashboard cadence so the per-row online/offline badge
     // ages out a dropped agent within ~30s of the fleet-health tile.
     // #563: the status filter rides to the server, so the Dashboard's
     // `?status=offline` deep link pages over the whole fleet's
     // offline hosts instead of filtering the current page.
+    // #652: q/user/version are server-side regexes; quarantined is an
+    // exact version pre-filter. Each is appended only when non-empty so
+    // the no-filter request stays on the SQL fast path.
     queryFn: () =>
       apiFetchPaged<AgentRow[]>(
-        `/api/agents?limit=${PAGE_SIZE}&offset=${offset}${dQ ? `&q=${encodeURIComponent(dQ)}` : ''}${statusFilter !== 'all' ? `&status=${statusFilter}` : ''}`,
+        `/api/agents?limit=${PAGE_SIZE}&offset=${offset}` +
+          (dQ ? `&q=${encodeURIComponent(dQ)}` : '') +
+          (dUser ? `&user=${encodeURIComponent(dUser)}` : '') +
+          (dVersion ? `&version=${encodeURIComponent(dVersion)}` : '') +
+          (quarantined ? `&quarantined=${encodeURIComponent(quarantined)}` : '') +
+          (statusFilter !== 'all' ? `&status=${statusFilter}` : ''),
       ),
     refetchInterval: 30_000,
   });
@@ -98,9 +115,21 @@ export function Agents() {
   // Adjusted during render (not useEffect) so the reset lands BEFORE
   // the query fires, avoiding one wasted fetch at the old offset
   // (PR #559 review, gemini + claude).
-  const [prevFilterKey, setPrevFilterKey] = useState({ dQ, statusFilter });
-  if (prevFilterKey.dQ !== dQ || prevFilterKey.statusFilter !== statusFilter) {
-    setPrevFilterKey({ dQ, statusFilter });
+  const [prevFilterKey, setPrevFilterKey] = useState({
+    dQ,
+    dUser,
+    dVersion,
+    quarantined,
+    statusFilter,
+  });
+  if (
+    prevFilterKey.dQ !== dQ ||
+    prevFilterKey.dUser !== dUser ||
+    prevFilterKey.dVersion !== dVersion ||
+    prevFilterKey.quarantined !== quarantined ||
+    prevFilterKey.statusFilter !== statusFilter
+  ) {
+    setPrevFilterKey({ dQ, dUser, dVersion, quarantined, statusFilter });
     setOffset(0);
   }
 
@@ -110,6 +139,19 @@ export function Agents() {
         const p = new URLSearchParams(prev);
         if (next === 'all') p.delete('status');
         else p.set('status', next);
+        return p;
+      },
+      { replace: true },
+    );
+  };
+
+  // #652: drop the quarantine drill-down filter, returning to the full
+  // list. Other URL params (status) are preserved.
+  const clearQuarantined = () => {
+    setSearchParams(
+      (prev) => {
+        const p = new URLSearchParams(prev);
+        p.delete('quarantined');
         return p;
       },
       { replace: true },
@@ -217,7 +259,7 @@ export function Agents() {
   // filtered-empty page (search, status chip, or an out-of-range
   // offset) keeps the table chrome so the operator can clear the
   // filter / page back.
-  if (total === 0 && !dQ && statusFilter === 'all') {
+  if (total === 0 && !dQ && !dUser && !dVersion && !quarantined && statusFilter === 'all') {
     return (
       <Card>
         <CardHeader className="items-center text-center">
@@ -253,11 +295,25 @@ export function Agents() {
           threshold, so toggling "offline" answers "which hosts are
           the N that aren't connected?" directly. */}
       <div className="flex flex-wrap items-center gap-2">
+        {/* #652: three regex filters (pc_id|hostname / user / version)
+            mirroring the Activity page's per-field inputs. */}
         <Input
           value={q}
           onChange={(e) => setQ(e.target.value)}
-          placeholder={t('searchPlaceholder')}
-          className="h-8 w-64"
+          placeholder={t('search.pcHost')}
+          className="h-8 w-56"
+        />
+        <Input
+          value={user}
+          onChange={(e) => setUser(e.target.value)}
+          placeholder={t('search.user')}
+          className="h-8 w-44"
+        />
+        <Input
+          value={version}
+          onChange={(e) => setVersion(e.target.value)}
+          placeholder={t('search.version')}
+          className="h-8 w-40"
         />
         {(['all', 'online', 'offline'] as const).map((s) => {
           // #563: every chip shows its fleet-wide (q-matching) count
@@ -288,6 +344,20 @@ export function Agents() {
             </button>
           );
         })}
+        {/* #652: active quarantine drill-down, arrived via the Rollout
+            link. Clearable to return to the full list. */}
+        {quarantined && (
+          <button
+            type="button"
+            onClick={clearQuarantined}
+            className="inline-flex items-center gap-1 rounded-full border border-danger/40 bg-danger/10 px-3 py-1 text-xs font-medium text-danger transition-colors hover:bg-danger/20"
+            title={t('quarantinedChipTitle')}
+          >
+            <AlertTriangle className="size-3" />
+            {t('quarantinedChip', { version: quarantined })}
+            <span aria-hidden>✕</span>
+          </button>
+        )}
       </div>
       <Table>
         <TableHeader>
@@ -321,18 +391,34 @@ export function Agents() {
             return (
             <TableRow key={a.pc_id}>
               <TableCell>
-                <Badge
-                  variant={online ? 'success' : 'danger'}
-                  title={t(online ? 'status.onlineTitle' : 'status.offlineTitle')}
-                >
-                  <span
-                    className={cn(
-                      'mr-1.5 inline-block size-1.5 rounded-full',
-                      online ? 'bg-success' : 'bg-danger',
-                    )}
-                  />
-                  {t(online ? 'status.online' : 'status.offline')}
-                </Badge>
+                <div className="flex flex-col items-start gap-1">
+                  <Badge
+                    variant={online ? 'success' : 'danger'}
+                    title={t(online ? 'status.onlineTitle' : 'status.offlineTitle')}
+                  >
+                    <span
+                      className={cn(
+                        'mr-1.5 inline-block size-1.5 rounded-full',
+                        online ? 'bg-success' : 'bg-danger',
+                      )}
+                    />
+                    {t(online ? 'status.online' : 'status.offline')}
+                  </Badge>
+                  {/* #652: per-row quarantine badge so the drill-down
+                      list is actionable — the version(s) this host
+                      rolled back show on hover. */}
+                  {a.quarantined_versions && a.quarantined_versions.length > 0 && (
+                    <Badge
+                      variant="danger"
+                      title={t('quarantinedBadgeTitle', {
+                        versions: a.quarantined_versions.join(', '),
+                      })}
+                    >
+                      <AlertTriangle className="mr-1 size-3" />
+                      {t('quarantinedBadge')}
+                    </Badge>
+                  )}
+                </div>
               </TableCell>
               <TableCell>
                 <Link
@@ -358,10 +444,12 @@ export function Agents() {
                   <div className="flex flex-col">
                     {/* Display name as the primary line; fall back to the
                         login name when there's no display name (common for
-                        local / domain accounts). Show the login name as a
-                        secondary line only when it isn't already the
-                        primary one. */}
-                    <span>{a.last_logon_display_name ?? a.last_logon_user}</span>
+                        local / domain accounts where LastLoggedOnDisplayName
+                        is an EMPTY STRING, not null — so `||`, not `??`,
+                        which would render the empty string). Show the login
+                        name as a secondary line only when a display name is
+                        actually present. */}
+                    <span>{a.last_logon_display_name || a.last_logon_user}</span>
                     {a.last_logon_display_name && a.last_logon_user && (
                       <code className="text-muted text-[10px]">{a.last_logon_user}</code>
                     )}

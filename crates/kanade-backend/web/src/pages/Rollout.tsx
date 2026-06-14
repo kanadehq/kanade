@@ -360,7 +360,7 @@ export function Rollout() {
                   <span className="text-xs text-muted mt-0.5">{t('health.pendingHint')}</span>
                 </div>
                 <Link
-                  to="/agents"
+                  to={`/agents?quarantined=${encodeURIComponent(version)}`}
                   className="flex flex-col rounded-md -m-1 p-1 transition-colors hover:bg-muted/10"
                   title={t('health.quarantinedLinkTitle')}
                 >
