@@ -1,4 +1,4 @@
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useMutation, useQuery } from '@tanstack/react-query';
 import { Activity, AlertTriangle, Loader2, ScrollText, Server, Settings2, Users } from 'lucide-react';
 import { useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
@@ -9,6 +9,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import { JsonOutput } from '@/components/ui/json-output';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { apiFetch, apiFetchPaged } from '@/lib/api';
@@ -76,7 +77,7 @@ export function Agents() {
   // the deep link is shareable and survives a refresh; cleared via the
   // chip below.
   const quarantined = searchParams.get('quarantined') ?? '';
-  const { data, error, isLoading } = useQuery({
+  const { data, error, isLoading, isFetching } = useQuery({
     queryKey: ['agents', dQ, dUser, dVersion, quarantined, offset, statusFilter],
     // Match the Dashboard cadence so the per-row online/offline badge
     // ages out a dropped agent within ~30s of the fleet-health tile.
@@ -96,6 +97,14 @@ export function Agents() {
           (statusFilter !== 'all' ? `&status=${statusFilter}` : ''),
       ),
     refetchInterval: 30_000,
+    // Keep the previous page rendered while a filter keystroke changes
+    // the queryKey, so `isLoading` only flips true on the very first
+    // load. Without this the whole screen fell back to the loading
+    // state on every keystroke (the `if (isLoading) return` below),
+    // remounting the filter inputs and dropping focus mid-type — the
+    // Activity page never had this because it swaps only the table on
+    // isLoading, not the whole screen.
+    placeholderData: keepPreviousData,
   });
   const total = data?.total ?? 0;
   const [result, setResult] = useState<ActionResult | null>(null);
@@ -238,7 +247,13 @@ export function Agents() {
       </div>
     );
   }
-  if (error) return <ErrorCard title={t('errorTitle')} error={error} />;
+  // Only take over the whole screen on the FIRST load failure. With
+  // keepPreviousData a later error (e.g. typing an invalid regex → 400)
+  // keeps the prior data, so we leave the filters mounted and show a
+  // non-disruptive inline error below instead — otherwise an invalid
+  // regex mid-type unmounts the inputs and the user can't backspace to
+  // fix it (gemini #666).
+  if (error && !data) return <ErrorCard title={t('errorTitle')} error={error} />;
   // #563: rows arrive pre-filtered from the server; the fleet-wide
   // per-status counts ride the response headers so the chips stay
   // correct whichever chip is active (previously page-local).
@@ -276,7 +291,16 @@ export function Agents() {
   return (
     <div className="space-y-4">
       <div className="flex items-baseline justify-between">
-        <h2 className="text-xl">{t('title')}</h2>
+        <div className="flex items-center gap-2">
+          <h2 className="text-xl">{t('title')}</h2>
+          {/* In-flight cue for a filter query: with keepPreviousData the
+              table keeps showing prior rows while the new query runs, so
+              without this the refresh is invisible (claude #666). Mirrors
+              the Activity page's isFetching spinner. */}
+          {isFetching && !isLoading && (
+            <Loader2 className="size-4 animate-spin text-muted" />
+          )}
+        </div>
         <Badge variant="violet">{t('countBadge', { count: total })}</Badge>
       </div>
       <p className="text-xs text-muted">
@@ -294,27 +318,43 @@ export function Agents() {
           known" tile. Counts come from the same `isAgentOnline`
           threshold, so toggling "offline" answers "which hosts are
           the N that aren't connected?" directly. */}
+      {/* #652: three regex filters, each LABELLED like the Activity
+          page — without a label an empty box is just a mystery box. */}
+      <div className="flex flex-wrap gap-3">
+        <div className="space-y-1">
+          <Label htmlFor="agents-q">{t('search.pcHostLabel')}</Label>
+          <Input
+            id="agents-q"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder={t('search.pcHost')}
+            className="h-8 w-56"
+          />
+        </div>
+        <div className="space-y-1">
+          <Label htmlFor="agents-user">{t('search.userLabel')}</Label>
+          <Input
+            id="agents-user"
+            value={user}
+            onChange={(e) => setUser(e.target.value)}
+            placeholder={t('search.user')}
+            className="h-8 w-44"
+          />
+        </div>
+        <div className="space-y-1">
+          <Label htmlFor="agents-version">{t('search.versionLabel')}</Label>
+          <Input
+            id="agents-version"
+            value={version}
+            onChange={(e) => setVersion(e.target.value)}
+            placeholder={t('search.version')}
+            className="h-8 w-40"
+          />
+        </div>
+      </div>
+
+      {/* Liveness chips + active quarantine drill-down. */}
       <div className="flex flex-wrap items-center gap-2">
-        {/* #652: three regex filters (pc_id|hostname / user / version)
-            mirroring the Activity page's per-field inputs. */}
-        <Input
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          placeholder={t('search.pcHost')}
-          className="h-8 w-56"
-        />
-        <Input
-          value={user}
-          onChange={(e) => setUser(e.target.value)}
-          placeholder={t('search.user')}
-          className="h-8 w-44"
-        />
-        <Input
-          value={version}
-          onChange={(e) => setVersion(e.target.value)}
-          placeholder={t('search.version')}
-          className="h-8 w-40"
-        />
         {(['all', 'online', 'offline'] as const).map((s) => {
           // #563: every chip shows its fleet-wide (q-matching) count
           // from the response headers — no longer page-local.
@@ -359,6 +399,13 @@ export function Agents() {
           </button>
         )}
       </div>
+      {/* Non-disruptive error (e.g. an invalid-regex 400) — the filters
+          above stay mounted so the user can fix the pattern in place. */}
+      {error && (
+        <p className="text-xs text-danger">
+          {t('errorTitle')}: {(error as Error).message}
+        </p>
+      )}
       <Table>
         <TableHeader>
           <TableRow>

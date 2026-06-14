@@ -48,8 +48,11 @@
   "groupsLoading": "読み込み中…",
   "rowLinkTitle": "PC ごとのパフォーマンスチャートを開く",
   "search": {
+    "pcHostLabel": "pc_id / ホスト名",
     "pcHost": "正規表現 — 例: ^web|db",
+    "userLabel": "ユーザー",
     "user": "正規表現 — 例: taro",
+    "versionLabel": "バージョン",
     "version": "正規表現 — 例: 0.43"
   },
   "quarantinedChip": "隔離: {{version}}",
