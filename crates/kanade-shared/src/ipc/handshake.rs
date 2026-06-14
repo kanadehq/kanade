@@ -57,6 +57,15 @@ pub struct HandshakeResult {
     /// OS at connect time, not from the client payload, so the
     /// values here are authoritative.
     pub session: HandshakeSession,
+    /// Operator-configured product name the client should display in
+    /// its window title + header (from the agent's effective
+    /// `agent_config.client_display_name`). `None` when no scope sets
+    /// one — the client then falls back to its built-in default name.
+    /// `#[serde(default)]` so a pre-this-field agent (which never
+    /// emits the key) still decodes against a newer client, and
+    /// `skip_serializing_if` keeps the wire tight when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_display_name: Option<String>,
 }
 
 /// Session info derived from the OS at connect time, surfaced back
@@ -139,6 +148,52 @@ mod tests {
         assert_eq!(r.session.user, "DOMAIN\\alice");
         assert_eq!(r.session.session_id, 2);
         assert_eq!(r.session.pc_id, "PC1234");
+    }
+
+    #[test]
+    fn handshake_result_omits_client_display_name_when_unset() {
+        // A pre-this-field agent emits no `client_display_name` key;
+        // skip_serializing_if keeps the wire identical to the old
+        // shape, and serde(default) decodes it back to None.
+        let r = HandshakeResult {
+            protocol: 1,
+            agent_version: "0.43.0".into(),
+            features: vec![],
+            session: HandshakeSession {
+                user: "DOMAIN\\alice".into(),
+                session_id: 2,
+                pc_id: "PC1".into(),
+            },
+            client_display_name: None,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(
+            !json.contains("client_display_name"),
+            "unset name must not appear on the wire: {json}"
+        );
+        let back: HandshakeResult = serde_json::from_str(&json).unwrap();
+        assert!(back.client_display_name.is_none());
+    }
+
+    #[test]
+    fn handshake_result_round_trips_client_display_name() {
+        let r = HandshakeResult {
+            protocol: 1,
+            agent_version: "0.43.0".into(),
+            features: vec![],
+            session: HandshakeSession {
+                user: "DOMAIN\\alice".into(),
+                session_id: 2,
+                pc_id: "PC1".into(),
+            },
+            client_display_name: Some("端末管理支援ツール".into()),
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        let back: HandshakeResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.client_display_name.as_deref(),
+            Some("端末管理支援ツール")
+        );
     }
 
     #[test]

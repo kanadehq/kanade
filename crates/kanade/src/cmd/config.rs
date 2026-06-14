@@ -47,7 +47,8 @@ pub enum ConfigSub {
     /// `process_perf_enabled=true`,
     /// `process_perf_expires_at=2026-05-24T15:30:00Z`,
     /// `process_perf_top_n=20`, `target_version_jitter=30m`,
-    /// `target_version=0.3.0`).
+    /// `target_version=0.3.0`,
+    /// `client_display_name=端末管理支援ツール`).
     Set {
         spec: String,
         #[command(flatten)]
@@ -281,8 +282,12 @@ fn apply_field(scope: &mut ConfigScope, field: &str, value: Option<&str>) -> Res
                 })?),
             };
         }
+        // Free-form product name (e.g. "端末管理支援ツール") — no
+        // format validation; any non-empty string is a valid brand.
+        // The agent/client trim + treat blank as "unset" downstream.
+        "client_display_name" => scope.client_display_name = value.map(String::from),
         other => bail!(
-            "unknown field '{other}' — supported: target_version, target_version_jitter, heartbeat_interval, host_perf_interval, process_perf_enabled, process_perf_expires_at, process_perf_top_n"
+            "unknown field '{other}' — supported: target_version, target_version_jitter, heartbeat_interval, host_perf_interval, process_perf_enabled, process_perf_expires_at, process_perf_top_n, client_display_name"
         ),
     }
     Ok(())
@@ -307,6 +312,15 @@ mod tests {
         };
         apply_field(&mut s, "heartbeat_interval", None).unwrap();
         assert!(s.heartbeat_interval.is_none());
+    }
+
+    #[test]
+    fn apply_field_sets_and_clears_client_display_name() {
+        let mut s = ConfigScope::default();
+        apply_field(&mut s, "client_display_name", Some("端末管理支援ツール")).unwrap();
+        assert_eq!(s.client_display_name.as_deref(), Some("端末管理支援ツール"));
+        apply_field(&mut s, "client_display_name", None).unwrap();
+        assert!(s.client_display_name.is_none());
     }
 
     #[test]

@@ -16,6 +16,130 @@ import { Textarea } from '@/components/ui/textarea';
 import { apiFetch, formatError } from '@/lib/api';
 import type { ConfigScope, EffectiveConfigResponse } from '@/lib/types';
 
+// Friendly, single-purpose editor for the operator-facing client
+// product name (`client_display_name`). It lives on the global scope
+// — the common "one customer = whole fleet" case — but does a
+// read-modify-write that spreads the existing global ConfigScope, so
+// saving the name never clobbers the other global fields the raw JSON
+// editor below manages. Per-group / per-pc overrides still go through
+// the ScopeEditor's JSON. Shares the ['config','global'] query with
+// GlobalEditor so a save here invalidates both.
+function ClientDisplayNameEditor() {
+  const { t } = useTranslation('config');
+  const qc = useQueryClient();
+  const { data, error, isLoading } = useQuery({
+    queryKey: ['config', 'global'],
+    queryFn: () => apiFetch<ConfigScope>('/api/config'),
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+  });
+  const [name, setName] = useState('');
+  // Track the last *server* value we seeded from (not just a "seeded
+  // once" boolean): this editor shares the ['config','global'] query
+  // with GlobalEditor, so when that editor saves a new name the value
+  // changes underneath us and the input must re-sync. Re-seeding only
+  // when the server value actually changes (staleTime Infinity + no
+  // focus refetch mean the only refetch is a post-save invalidation)
+  // avoids the #520 clobber: an idle refetch returning the same value
+  // won't wipe the operator's in-progress edit.
+  const lastServerValue = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!data) return;
+    const serverValue = data.client_display_name ?? '';
+    if (lastServerValue.current !== serverValue) {
+      setName(serverValue);
+      lastServerValue.current = serverValue;
+    }
+  }, [data]);
+
+  const save = useMutation({
+    mutationFn: (next: ConfigScope) =>
+      apiFetch<ConfigScope>('/api/config', { method: 'PUT', body: JSON.stringify(next) }),
+    onSuccess: (_r, vars) => {
+      qc.invalidateQueries({ queryKey: ['config', 'global'] });
+      toast.success(
+        vars.client_display_name
+          ? t('clientName.toast.saveSuccess')
+          : t('clientName.toast.clearSuccess'),
+      );
+    },
+    onError: (e) => toast.error(t('clientName.toast.saveFailure', { error: formatError(e) })),
+  });
+
+  const commit = (value: string) => {
+    // Guard: this is a full-replace PUT on the whole global scope, so
+    // committing before the GET has populated `data` would spread `{}`
+    // and silently drop every other global field (heartbeat_interval,
+    // target_version, …). Bail until the snapshot is loaded (CodeRabbit
+    // PR #670). The buttons are also disabled in this state, but the
+    // guard makes the data-loss path unreachable regardless.
+    if (!data) {
+      toast.error(t('clientName.toast.notLoaded'));
+      return;
+    }
+    const trimmed = value.trim();
+    // Spread the current global scope so other fields survive; an empty
+    // value drops the key entirely (→ client falls back to its default).
+    const next: ConfigScope = { ...data };
+    if (trimmed) next.client_display_name = trimmed;
+    else delete next.client_display_name;
+    save.mutate(next);
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{t('clientName.title')}</CardTitle>
+        <CardDescription>{t('clientName.description')}</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {isLoading && (
+          <div className="text-muted flex items-center gap-2">
+            <Loader2 className="size-4 animate-spin" />
+            {t('clientName.loading')}
+          </div>
+        )}
+        {error && <ErrorCard title={t('clientName.loadErrorTitle')} error={error} />}
+        <div>
+          <Label htmlFor="client-display-name">{t('clientName.label')}</Label>
+          <Input
+            id="client-display-name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder={t('clientName.placeholder')}
+            // The name becomes the Start-Menu `.lnk` filename; a path
+            // past Windows MAX_PATH (~260, minus the ~57-char Start-Menu
+            // prefix) would fail/truncate. 120 is far above any real
+            // product name yet safely under the limit (Claude review #670).
+            maxLength={120}
+          />
+          <p className="mt-1 text-xs text-muted">{t('clientName.hint')}</p>
+        </div>
+        <div className="flex gap-2">
+          {/* Disabled until the global snapshot is loaded — a save built
+              from a missing `data` would full-replace the scope and drop
+              other fields (CodeRabbit PR #670). */}
+          <Button onClick={() => commit(name)} disabled={save.isPending || !data}>
+            {save.isPending ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
+            {t('clientName.saveButton')}
+          </Button>
+          <Button
+            variant="secondary"
+            disabled={save.isPending || !data || !name.trim()}
+            onClick={() => {
+              setName('');
+              commit('');
+            }}
+          >
+            {t('clientName.clearButton')}
+          </Button>
+        </div>
+        {save.error && <ErrorCard title={t('clientName.saveErrorTitle')} error={save.error} />}
+      </CardContent>
+    </Card>
+  );
+}
+
 function GlobalEditor() {
   const { t } = useTranslation('config');
   const qc = useQueryClient();
@@ -63,6 +187,13 @@ function GlobalEditor() {
       <CardContent className="space-y-3">
         {isLoading && <div className="text-muted flex items-center gap-2"><Loader2 className="size-4 animate-spin" />{t('global.loading')}</div>}
         {error && <ErrorCard title={t('global.loadErrorTitle')} error={error} />}
+        {/* This raw editor PUTs the whole global scope from its seeded
+            snapshot. It seeds once on mount (#520 guard) and doesn't
+            re-seed when the Client-display-name editor above saves, so a
+            submit here from a pre-name snapshot would silently drop the
+            just-saved client_display_name. Warn instead of breaking the
+            #520 guard (Claude review PR #670). */}
+        <p className="text-xs text-amber">{t('global.overwriteWarning')}</p>
         <Textarea value={draft} onChange={(e) => setDraft(e.target.value)} className="min-h-40" />
         <Button
           onClick={() => {
@@ -233,6 +364,7 @@ function EffectiveResolver() {
 export function Config() {
   return (
     <div className="space-y-4">
+      <ClientDisplayNameEditor />
       <GlobalEditor />
       <ScopeEditor />
       <EffectiveResolver />

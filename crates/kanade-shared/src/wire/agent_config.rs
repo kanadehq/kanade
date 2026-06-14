@@ -89,6 +89,17 @@ pub struct ConfigScope {
     /// when several PCs are simultaneously in investigation mode.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub process_perf_top_n: Option<u32>,
+    /// Operator-facing product name the end-user Client App shows in
+    /// its window title, header, Start-Menu shortcut, and toast
+    /// attribution — so each deployment can brand the client for its
+    /// customer (e.g. `"端末管理支援ツール"`) instead of surfacing the
+    /// internal `kanade` name. Flows to the client via the KLP
+    /// handshake (window title / header) and is materialised into the
+    /// all-users Start-Menu shortcut by the agent (Start-Menu label /
+    /// toast sender name). `None` = inherit; the client falls back to
+    /// the built-in default name when nothing sets it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_display_name: Option<String>,
 }
 
 impl ConfigScope {
@@ -100,6 +111,7 @@ impl ConfigScope {
             && self.process_perf_enabled.is_none()
             && self.process_perf_expires_at.is_none()
             && self.process_perf_top_n.is_none()
+            && self.client_display_name.is_none()
     }
 }
 
@@ -121,6 +133,12 @@ pub struct EffectiveConfig {
     pub process_perf_expires_at: Option<chrono::DateTime<chrono::Utc>>,
     /// v0.41 / Phase 2 — see [`ConfigScope::process_perf_top_n`].
     pub process_perf_top_n: u32,
+    /// Operator-facing client product name — see
+    /// [`ConfigScope::client_display_name`]. Stays `Option` (unlike
+    /// the perf fields) because "no name set anywhere" is a real
+    /// state: the client then falls back to its built-in default name
+    /// rather than the agent inventing one here.
+    pub client_display_name: Option<String>,
 }
 
 impl EffectiveConfig {
@@ -154,6 +172,10 @@ impl EffectiveConfig {
             process_perf_enabled: false,
             process_perf_expires_at: None,
             process_perf_top_n: 20,
+            // No name set anywhere → the client renders its built-in
+            // default product name. The agent does not invent one here
+            // so "unset" stays distinguishable from "explicitly named".
+            client_display_name: None,
         }
     }
 
@@ -303,6 +325,12 @@ pub fn resolve(
                 .or_default()
                 .push(g.to_string());
         }
+        if scope.client_display_name.is_some() {
+            setters
+                .entry("client_display_name")
+                .or_default()
+                .push(g.to_string());
+        }
     }
     for (field, groups) in setters {
         if groups.len() > 1 {
@@ -346,6 +374,9 @@ fn apply_scope(out: &mut EffectiveConfig, s: &ConfigScope) {
     if let Some(v) = s.process_perf_top_n {
         out.process_perf_top_n = v;
     }
+    if let Some(v) = &s.client_display_name {
+        out.client_display_name = Some(v.clone());
+    }
 }
 
 #[cfg(test)]
@@ -361,6 +392,64 @@ mod tests {
         let (eff, warns) = resolve(None, &BTreeMap::new(), None, &[]);
         assert_eq!(eff, EffectiveConfig::builtin_defaults());
         assert!(warns.is_empty());
+    }
+
+    #[test]
+    fn client_display_name_unset_resolves_to_none() {
+        // Nothing sets it → stays None so the client uses its built-in
+        // default product name (the agent never invents one).
+        let (eff, _) = resolve(None, &BTreeMap::new(), None, &[]);
+        assert!(eff.client_display_name.is_none());
+    }
+
+    #[test]
+    fn client_display_name_layers_global_then_pc() {
+        let global = ConfigScope {
+            client_display_name: Some("端末管理支援ツール".into()),
+            ..scope()
+        };
+        let (eff, _) = resolve(Some(&global), &BTreeMap::new(), None, &[]);
+        assert_eq!(
+            eff.client_display_name.as_deref(),
+            Some("端末管理支援ツール")
+        );
+
+        // A per-pc override is the final word — lets one machine carry
+        // a customer-specific name distinct from the fleet default.
+        let pc = ConfigScope {
+            client_display_name: Some("PC専用名".into()),
+            ..scope()
+        };
+        let (eff, _) = resolve(Some(&global), &BTreeMap::new(), Some(&pc), &[]);
+        assert_eq!(eff.client_display_name.as_deref(), Some("PC専用名"));
+    }
+
+    #[test]
+    fn client_display_name_multi_group_conflict_warns() {
+        let mut groups = BTreeMap::new();
+        groups.insert(
+            "site-a".into(),
+            ConfigScope {
+                client_display_name: Some("A社ツール".into()),
+                ..scope()
+            },
+        );
+        groups.insert(
+            "site-b".into(),
+            ConfigScope {
+                client_display_name: Some("B社ツール".into()),
+                ..scope()
+            },
+        );
+        let (eff, warns) = resolve(None, &groups, None, &["site-a".into(), "site-b".into()]);
+        // "site-b" sorts last alphabetically, so it wins.
+        assert_eq!(eff.client_display_name.as_deref(), Some("B社ツール"));
+        assert_eq!(warns.len(), 1);
+        match &warns[0] {
+            ResolutionWarning::MultiGroupConflict { field, .. } => {
+                assert_eq!(*field, "client_display_name");
+            }
+        }
     }
 
     #[test]

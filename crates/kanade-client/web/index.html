@@ -3,7 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Kanade</title>
+    <!-- Default product name; main.ts swaps both this and the header
+         brand text to the operator-configured client_display_name once
+         the agent handshake lands. Mirrors the Rust source of truth
+         kanade_shared::DEFAULT_CLIENT_DISPLAY_NAME (and main.ts's
+         DEFAULT_DISPLAY_NAME) — keep all in sync. -->
+    <title>端末管理支援ツール</title>
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
@@ -11,7 +16,30 @@
       <!-- Slim header: brand + a single connection status dot. No
            session / protocol / pc internals (operator-facing noise). -->
       <header class="app-header">
-        <div class="brand"><span class="brand-mark">奏</span> Kanade</div>
+        <!-- Brand = タクト (baton) mark + the product name. The mark is
+             the same baton-only geometry as the SPA's leftmost icon
+             (no 奏 kanji). The name text defaults to the built-in
+             product name and is replaced by main.ts with the
+             operator-configured client_display_name after handshake. -->
+        <div class="brand">
+          <svg
+            class="brand-mark"
+            xmlns="http://www.w3.org/2000/svg"
+            viewBox="40 30 180 140"
+            role="img"
+            aria-label="baton"
+          >
+            <defs>
+              <linearGradient id="brand-baton" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" stop-color="#5b3a8c" />
+                <stop offset="0.5" stop-color="#d4a017" />
+                <stop offset="1" stop-color="#2a9d8f" />
+              </linearGradient>
+            </defs>
+            <path d="M 54 60 A 12 12 0 1 1 68 41 L 212 162 Z" fill="url(#brand-baton)" />
+          </svg>
+          <span class="brand-name">端末管理支援ツール</span>
+        </div>
         <div class="conn conn-connecting" id="conn" title="エージェント接続状態">
           <span class="conn-dot"></span>
           <span class="conn-label">接続待ち</span>

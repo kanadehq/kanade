@@ -44,6 +44,15 @@ use tracing::{info, warn};
 
 use crate::klp_client::KlpClient;
 
+/// Built-in fallback product name the client shows when no operator
+/// has configured `agent_config.client_display_name`. Aliases the
+/// single Rust source of truth in `kanade-shared` so this and the
+/// agent's Start-Menu default can't drift; the WebView's
+/// `DEFAULT_DISPLAY_NAME` (web/src/main.ts) + index.html mirror the same
+/// literal. The client UI is Japanese-only (no i18n), so the default is
+/// Japanese; English fleets override it via the backend config.
+const DEFAULT_DISPLAY_NAME: &str = kanade_shared::DEFAULT_CLIENT_DISPLAY_NAME;
+
 /// CLI flag the agent passes when it launches the client to surface an
 /// emergency notification (Phase E, #102): `--show-notification <id>`.
 /// Kept in sync with `kanade_agent::klp::emergency_notify`.
@@ -443,6 +452,25 @@ async fn supervise_connection(slot: Arc<Mutex<Option<KlpClient>>>, handle: tauri
             agent_version = %client.handshake().agent_version,
             "KLP client ready",
         );
+        // Brand the OS window title from the operator-configured
+        // product name (handshake `client_display_name`), falling back
+        // to the built-in default. This is the title Windows shows in
+        // the title bar + Alt-Tab; the WebView separately swaps its
+        // in-page header from the same field via `get_handshake`. Set
+        // it on every (re)connect so a config change picked up after an
+        // agent restart re-brands the live window without relaunch.
+        {
+            let title = client
+                .handshake()
+                .client_display_name
+                .clone()
+                .unwrap_or_else(|| DEFAULT_DISPLAY_NAME.to_string());
+            if let Some(win) = handle.get_webview_window("main") {
+                if let Err(e) = win.set_title(&title) {
+                    warn!(error = %e, "set window title from client_display_name failed");
+                }
+            }
+        }
         // Subscribe BEFORE publishing the client so no push between
         // connect and store is lost.
         spawn_notification_forwarder(&client, handle.clone());
