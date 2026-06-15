@@ -11,6 +11,8 @@ use kanade_shared::wire::{ConfigScope, LogsRequest};
 use tokio::fs;
 use tracing::info;
 
+use super::validate_segment;
+
 #[derive(Args, Debug)]
 pub struct AgentArgs {
     #[command(subcommand)]
@@ -99,16 +101,26 @@ async fn publish(client: async_nats::Client, binary: PathBuf) -> Result<()> {
         .await
         .with_context(|| format!("read {binary:?}"))?;
 
-    // v0.13.1+: extract version from the binary's embedded
-    // VERSIONINFO resource (pelite, no spawn, cross-arch safe). The
-    // operator never types a label — the binary IS its label.
-    let version = kanade_shared::exe_version::extract_pe_version(&bytes).with_context(|| {
-        format!(
-            "couldn't extract VERSIONINFO from {binary:?} — is it a Windows PE built \
-             with `winres` (kanade ≥ v0.13.1)? Older binaries need to be re-published \
-             from a current build."
-        )
-    })?;
+    // v0.13.1+: extract version from the binary's embedded VERSIONINFO
+    // resource (pelite, no spawn, cross-arch safe). Normally the binary
+    // IS its label. agent publish has no `--version` flag, so on the rare
+    // extraction failure the inline prompt (#270) is the only recovery
+    // short of re-running; pipe / CI still fails fast.
+    let version = match kanade_shared::exe_version::extract_pe_version(&bytes) {
+        Some(v) => v,
+        None => match super::prompt_version_if_interactive(binary.clone()).await? {
+            Some(v) => v,
+            None => bail!(
+                "couldn't extract VERSIONINFO from {binary:?} — is it a Windows PE built \
+                 with `winres` (kanade ≥ v0.13.1)? Older binaries need to be re-published \
+                 from a current build."
+            ),
+        },
+    };
+    // A pelite-extracted label is always key-safe, but a prompt-entered
+    // one (#270) is operator input — validate before it becomes the
+    // `<version>` object-store key, matching `app publish`.
+    validate_segment("version", &version)?;
 
     info!(version, size = bytes.len(), "uploading new agent binary");
 
