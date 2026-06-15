@@ -538,10 +538,27 @@ async fn expire_stale_pending(pool: &SqlitePool, cutoff: DateTime<Utc>) -> Resul
 /// empty (the common in-flight case, since the row was created by
 /// `events.started` with the default empty string).
 async fn reap_orphaned_results(pool: &SqlitePool, now: DateTime<Utc>) -> Result<u64> {
+    use sqlx::Row;
     let fallback_cutoff = now - chrono::Duration::hours(INFLIGHT_TIMEOUT_HOURS);
     // #390: finished_at is stamped from a chrono bind (RFC 3339), not
     // CURRENT_TIMESTAMP — the latter's space-separated text was the
     // one writer leaking a second format into a chrono-bound column.
+    // #682 Stage 2: RETURNING the reaped rows' exec_ids so we can settle
+    // their parent `executions` rows. Since events.started now promotes
+    // executions to `running`, a reaped orphan (agent died mid-run, no
+    // result) would otherwise leave the parent stuck `running` forever
+    // (running rows are never expired). Counting each reap as a failure
+    // lets bump_exec_counters transition the parent to `completed` once
+    // every target is accounted. The late-result path skips its own bump
+    // for already-reaped rows (see results::project_result), so a row is
+    // counted exactly once.
+    //
+    // The reap UPDATE and the per-exec bumps share ONE transaction
+    // (claude #694): if any bump fails the whole batch rolls back, so the
+    // rows stay in-flight (`finished_at IS NULL`) and the next 5-min sweep
+    // genuinely retries — a row never ends up reaped with its parent
+    // un-settled. Mirrors the insert+bump atomicity in project_result.
+    let mut tx = pool.begin().await.context("begin reap tx")?;
     let rows = sqlx::query(
         "UPDATE execution_results
             SET finished_at = ?,
@@ -555,7 +572,8 @@ async fn reap_orphaned_results(pool: &SqlitePool, now: DateTime<Utc>) -> Result<
             AND (
                   (expires_at IS NOT NULL AND expires_at < ?)
                OR (expires_at IS NULL     AND started_at < ?)
-            )",
+            )
+          RETURNING exec_id",
     )
     .bind(now)
     .bind(REAPED_EXIT_CODE)
@@ -563,10 +581,28 @@ async fn reap_orphaned_results(pool: &SqlitePool, now: DateTime<Utc>) -> Result<
     .bind(REAPED_STDERR_NOTE)
     .bind(now)
     .bind(fallback_cutoff)
-    .execute(pool)
+    .fetch_all(&mut *tx)
     .await
     .context("UPDATE execution_results reap orphaned in-flight")?;
-    Ok(rows.rows_affected())
+    let reaped_count = rows.len() as u64;
+
+    // Settle each reaped row's parent execution (failure → `completed`
+    // once the fan-out is fully accounted). `exec_id` is NULL for ad-hoc
+    // `kanade run` rows with no executions row — skip those.
+    for row in &rows {
+        let exec_id: Option<String> = row.try_get("exec_id").unwrap_or(None);
+        if let Some(exec_id) = exec_id {
+            crate::projector::results::bump_exec_counters(
+                &mut *tx,
+                &exec_id,
+                REAPED_EXIT_CODE as i32,
+            )
+            .await
+            .with_context(|| format!("settle parent execution {exec_id} after reap"))?;
+        }
+    }
+    tx.commit().await.context("commit reap tx")?;
+    Ok(reaped_count)
 }
 
 #[cfg(test)]
@@ -906,6 +942,44 @@ mod tests {
         .unwrap();
         let n = reap_orphaned_results(&pool, now).await.unwrap();
         assert_eq!(n, 0, "row exactly at expires_at must not be reaped");
+    }
+
+    #[tokio::test]
+    async fn reaping_orphan_settles_parent_execution() {
+        // #682 Stage 2: events.started promotes the parent execution to
+        // `running`; if the agent then dies (no result), the reaper must
+        // settle that parent — counting the reap as a failure so it tips
+        // to `completed` once every target is accounted, instead of
+        // lingering `running` forever.
+        let pool = fresh_pool().await;
+        insert_exec(&pool, "ex1", "running", 0).await; // target_count = 1
+        sqlx::query(
+            "INSERT INTO execution_results
+                (result_id, request_id, exec_id, pc_id, exit_code, stdout,
+                 stderr, started_at, finished_at)
+             VALUES ('r1', 'req', 'ex1', 'pc-1', NULL, '', '', ?, NULL)",
+        )
+        .bind(Utc::now() - chrono::Duration::hours(30)) // past the 24h fallback
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let n = reap_orphaned_results(&pool, Utc::now()).await.unwrap();
+        assert_eq!(n, 1);
+
+        let row: (i64, i64, String) = sqlx::query_as(
+            "SELECT success_count, failure_count, status FROM executions WHERE exec_id = ?",
+        )
+        .bind("ex1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0, 0, "reap is not a success");
+        assert_eq!(row.1, 1, "reap counts as a failure");
+        assert_eq!(
+            row.2, "completed",
+            "parent settles once the fan-out is accounted"
+        );
     }
 
     /// Insert a finished `execution_results` row with a chosen
