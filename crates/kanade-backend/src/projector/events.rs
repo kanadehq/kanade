@@ -150,6 +150,25 @@ pub async fn run(js: jetstream::Context, pool: SqlitePool, cache: ExplodeSpecCac
                     manifest_id = %e.manifest_id,
                     "projected events.started",
                 );
+                // #682 Stage 2: now that the agent has actually started,
+                // advance the parent `executions` row pending → running so
+                // the Jobs page live chip matches the Activity/coverage
+                // view (both already light up off the execution_results
+                // in-flight row this same event just wrote). Best-effort:
+                // the in-flight row is the source of truth, and the
+                // ExecResult's own bump_exec_counters repairs the status
+                // if this transient-fails. See `promote_execution_running`.
+                match promote_execution_running(&pool, &e.exec_id).await {
+                    Ok(n) if n > 0 => {
+                        debug!(exec_id = %e.exec_id, "promoted execution pending→running")
+                    }
+                    Ok(_) => {}
+                    Err(err) => warn!(
+                        error = %err,
+                        exec_id = %e.exec_id,
+                        "promote execution to running failed (non-fatal)",
+                    ),
+                }
             }
             Err(e) => warn!(
                 error = %e,
@@ -206,6 +225,33 @@ async fn insert_inflight_row(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// #682 Stage 2: flip the parent `executions` row pending → running when
+/// the agent actually starts (this events.started). Without it the
+/// `executions` row only leaves `pending` when the FIRST `ExecResult`
+/// lands (`bump_exec_counters`), so a run that takes longer than the 1h
+/// `expire_stale_pending` cutoff is wrongly flipped to `expired` while
+/// still running — and the Jobs page live chip (which reads
+/// `executions.status`) disagrees with the Activity/coverage view (which
+/// reads the `execution_results` in-flight row).
+///
+/// Guarded on `status = 'pending'`: idempotent under JetStream
+/// redelivery, and it never clobbers a row a racing result already
+/// advanced to running/completed, nor resurrects an `expired` one (a
+/// genuinely late result still settles that via `bump_exec_counters`).
+/// `exec_id` is empty only for ad-hoc `kanade run` (no executions row) —
+/// the UPDATE then matches nothing, a harmless no-op. Returns the rows
+/// affected (0 or 1).
+async fn promote_execution_running(pool: &SqlitePool, exec_id: &str) -> Result<u64> {
+    let rows = sqlx::query(
+        "UPDATE executions SET status = 'running'
+          WHERE exec_id = ? AND status = 'pending'",
+    )
+    .bind(exec_id)
+    .execute(pool)
+    .await?;
+    Ok(rows.rows_affected())
 }
 
 #[cfg(test)]
@@ -375,5 +421,52 @@ mod tests {
         let recorded = Utc.with_ymd_and_hms(2026, 5, 20, 12, 0, 0).unwrap();
         let d = reap_deadline(Duration::from_secs(3600), recorded);
         assert_eq!(d, recorded + chrono::Duration::minutes(90));
+    }
+
+    async fn insert_execution(pool: &SqlitePool, exec_id: &str, status: &str) {
+        sqlx::query(
+            "INSERT INTO executions
+                (exec_id, job_id, version, initiated_by, target_count, status)
+             VALUES (?, 'j', '1.0', 'tester', 1, ?)",
+        )
+        .bind(exec_id)
+        .bind(status)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn exec_status(pool: &SqlitePool, exec_id: &str) -> String {
+        sqlx::query_scalar("SELECT status FROM executions WHERE exec_id = ?")
+            .bind(exec_id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn promote_execution_running_flips_pending() {
+        // #682 Stage 2: events.started advances the parent execution
+        // pending → running the moment the agent starts.
+        let pool = fresh_pool().await;
+        insert_execution(&pool, "e1", "pending").await;
+        let n = promote_execution_running(&pool, "e1").await.unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(exec_status(&pool, "e1").await, "running");
+    }
+
+    #[tokio::test]
+    async fn promote_execution_running_is_idempotent_and_safe() {
+        // Re-running (redelivery) is a no-op; and it never resurrects a
+        // completed or expired row, nor errors on a missing exec_id.
+        let pool = fresh_pool().await;
+        insert_execution(&pool, "done", "completed").await;
+        insert_execution(&pool, "gone", "expired").await;
+        assert_eq!(promote_execution_running(&pool, "done").await.unwrap(), 0);
+        assert_eq!(promote_execution_running(&pool, "gone").await.unwrap(), 0);
+        assert_eq!(exec_status(&pool, "done").await, "completed");
+        assert_eq!(exec_status(&pool, "gone").await, "expired");
+        // Missing exec_id (ad-hoc run, no executions row) → harmless no-op.
+        assert_eq!(promote_execution_running(&pool, "nope").await.unwrap(), 0);
     }
 }

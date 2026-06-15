@@ -194,12 +194,29 @@ async fn project_result(
     recorded_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<bool> {
     let mut tx = pool.begin().await.context("begin result projection tx")?;
+    // #682 Stage 2: was this row already reaped? The cleanup reaper now
+    // counts a reaped orphan as a failure against `executions`
+    // (bump_exec_counters), so a *late* real result overwriting that
+    // reaped placeholder must NOT bump again — otherwise the exec's
+    // counters double-count that PC. Captured before the upsert clears
+    // `reaped` back to 0.
+    // COALESCE(reaped, 0): `reaped` is `NOT NULL DEFAULT 0` today so it
+    // can't actually be NULL, but the COALESCE keeps the Option<i64>
+    // decode robust if that constraint ever changes (gemini #694). The
+    // outer Option is row presence: None = no row yet (ExecResult-first
+    // race) → not reaped → bump proceeds.
+    let was_reaped: Option<i64> =
+        sqlx::query_scalar("SELECT COALESCE(reaped, 0) FROM execution_results WHERE result_id = ?")
+            .bind(result_id)
+            .fetch_optional(&mut *tx)
+            .await?;
     let fresh = insert_result(&mut *tx, r, result_id, recorded_at).await?;
     // Only bump exec counters on a fresh insert. Redeliveries
     // (`false`) must not double-count — JetStream redelivers on ack
     // timeout, and `executions.success_count` is an unconditional
-    // `+= 1`.
-    if fresh {
+    // `+= 1`. A reaped-placeholder overwrite (was_reaped) is also
+    // skipped: the reaper already counted that row at reap time.
+    if fresh && was_reaped != Some(1) {
         if let Some(exec_id) = r.exec_id.as_deref() {
             bump_exec_counters(&mut *tx, exec_id, r.exit_code).await?;
         }
@@ -303,7 +320,11 @@ where
 /// success/failure/status all change atomically without a follow-up
 /// query — important because the projector is concurrent with
 /// redeliveries.
-async fn bump_exec_counters<'e, E>(executor: E, exec_id: &str, exit_code: i32) -> Result<()>
+pub(crate) async fn bump_exec_counters<'e, E>(
+    executor: E,
+    exec_id: &str,
+    exit_code: i32,
+) -> Result<()>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
@@ -935,6 +956,69 @@ mod tests {
         assert!(
             !again,
             "redelivery after the real result must not re-update"
+        );
+    }
+
+    #[tokio::test]
+    async fn late_result_on_reaped_row_does_not_rebump_executions() {
+        // #682 Stage 2: the reaper already counts a reaped orphan as a
+        // failure against `executions`. If the REAL result then arrives
+        // late and overwrites the reaped placeholder, project_result must
+        // NOT bump again — otherwise that PC is counted twice. The output
+        // is still corrected (handled by insert_result); only the counter
+        // bump is suppressed.
+        let pool = fresh_pool().await;
+        sqlx::query(
+            "INSERT INTO executions (
+                 exec_id, job_id, version, initiated_by, target_count, status
+             ) VALUES ('exec-r', 'job-1', '1.0.0', 'tester', 1, 'running')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // Reaper already settled this PC as a failure.
+        bump_exec_counters(&pool, "exec-r", -1).await.unwrap();
+        // The reaped placeholder row it left behind.
+        sqlx::query(
+            "INSERT INTO execution_results
+                (result_id, request_id, exec_id, pc_id, exit_code, stdout, stderr,
+                 started_at, finished_at, reaped)
+             VALUES ('res-r', 'req-1', 'exec-r', 'pc-1', -1, '', '[backend: reaped …]',
+                     datetime('now', '-2 days'), datetime('now', '-1 day'), 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Late REAL result (success) overwrites the placeholder.
+        let mut r = sample("res-r", "req-1", "pc-1", Some("exec-r"));
+        r.exit_code = 0;
+        r.stdout = "real output".into();
+        let fresh = project_result(&pool, &r, "res-r", chrono::Utc::now())
+            .await
+            .unwrap();
+        assert!(fresh, "the overwrite is a fresh transition");
+
+        // Output corrected, but counters NOT double-bumped: still the
+        // single failure the reaper recorded (not failure=1 + success=1).
+        let er: (i64, String) =
+            sqlx::query_as("SELECT exit_code, stdout FROM execution_results WHERE result_id = ?")
+                .bind("res-r")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(er.0, 0, "real exit_code lands");
+        assert_eq!(er.1, "real output", "real stdout lands");
+        let ex: (i64, i64) =
+            sqlx::query_as("SELECT success_count, failure_count FROM executions WHERE exec_id = ?")
+                .bind("exec-r")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(ex.0, 0, "no extra success counted");
+        assert_eq!(
+            ex.1, 1,
+            "still exactly one (the reaper's) failure — not double-counted"
         );
     }
 
