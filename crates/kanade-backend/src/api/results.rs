@@ -457,8 +457,14 @@ pub async fn tail(
     .ok_or(StatusCode::NOT_FOUND)?;
 
     let pc_id: String = row.try_get("pc_id").unwrap_or_default();
-    let finished_at: Option<chrono::DateTime<chrono::Utc>> = row.try_get("finished_at").ok();
-    let exit_code: Option<i64> = row.try_get("exit_code").ok();
+    // Explicit `Option<_>` reads: `try_get("exit_code").ok()` would infer
+    // `try_get::<i64>` and sqlx-sqlite decodes NULL → `Some(0)`, so an
+    // in-flight row (NULL exit_code) would tail as "exit 0" instead of
+    // None/running. (#590)
+    let finished_at: Option<chrono::DateTime<chrono::Utc>> = row
+        .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("finished_at")
+        .unwrap_or(None);
+    let exit_code: Option<i64> = row.try_get::<Option<i64>, _>("exit_code").unwrap_or(None);
 
     // Finished + projected: the DB row is authoritative. No NATS hop.
     if finished_at.is_some() {
@@ -610,21 +616,28 @@ fn build_row(
     ResultRow {
         result_id: r.try_get("result_id").unwrap_or_default(),
         request_id: r.try_get("request_id").unwrap_or_default(),
-        exec_id: r.try_get("exec_id").ok(),
+        // Nullable columns are read as `Option<_>` EXPLICITLY. sqlx-sqlite
+        // decodes a NULL via `try_get::<i64>` / `<String>` into `0` / `""`
+        // rather than erroring, so the old `try_get(..).ok()` form yielded
+        // `Some(0)` / `Some("")` for NULL — mislabelling an in-flight row
+        // (NULL exit_code) as "exit 0 / success" and an ad-hoc-run row
+        // (NULL exec_id/job_id) as `Some("")`. The `Option<_>` form maps
+        // NULL → None; `.unwrap_or(None)` still folds an absent column
+        // (legacy DB pre-migration 0002) to None. (#590; same fix as #589's
+        // schedule_run_stats.)
+        exec_id: r.try_get::<Option<String>, _>("exec_id").unwrap_or(None),
         pc_id: r.try_get("pc_id").unwrap_or_default(),
-        // v0.30 / PR α' unified: exit_code is now NULLABLE.
-        // try_get(...).ok() collapses absent + NULL to None — the
-        // SPA renders that as "—" / running placeholder.
-        exit_code: r.try_get("exit_code").ok(),
+        exit_code: r.try_get::<Option<i64>, _>("exit_code").unwrap_or(None),
         stdout,
         stderr,
-        started_at: r.try_get("started_at").ok(),
-        finished_at: r.try_get("finished_at").ok(),
-        // try_get → ok() collapses both "column missing entirely"
-        // (legacy DB pre-migration 0002) and "column NULL" (ad-hoc
-        // `kanade run` rows) to None, which is what we want.
-        job_id: r.try_get("job_id").ok(),
-        version: r.try_get("version").ok(),
+        started_at: r
+            .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("started_at")
+            .unwrap_or(None),
+        finished_at: r
+            .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("finished_at")
+            .unwrap_or(None),
+        job_id: r.try_get::<Option<String>, _>("job_id").unwrap_or(None),
+        version: r.try_get::<Option<String>, _>("version").unwrap_or(None),
         stdout_truncated,
         stderr_truncated,
         stdout_match,
@@ -837,6 +850,54 @@ mod tests {
             serde_json::to_value(&fast[0]).unwrap(),
             serde_json::to_value(&via_regex[0]).unwrap(),
             "metadata projection + hydration must reproduce the full row exactly",
+        );
+    }
+
+    /// #590 regression: an in-flight row (events.started landed, no
+    /// ExecResult yet → NULL exit_code/finished_at, and an ad-hoc run
+    /// with NULL exec_id/job_id/version) must come back with `None` for
+    /// every nullable column. The bug was `try_get(..).ok()`: sqlx-sqlite
+    /// decodes a NULL `i64` to `0` and a NULL `String` to `""` instead of
+    /// erroring, so `.ok()` produced `Some(0)` / `Some("")` — rendering a
+    /// still-running command as "exit 0 / success" in the Activity list.
+    #[tokio::test]
+    async fn in_flight_row_keeps_nullable_columns_none() {
+        let pool = fresh_pool().await;
+        let now = Utc::now();
+        // started_at set, everything else (exit_code, finished_at, exec_id,
+        // job_id, version) left NULL — the shape the events.started insert
+        // creates before the matching ExecResult lands.
+        sqlx::query(
+            "INSERT INTO execution_results
+                (result_id, request_id, pc_id, stdout, stderr,
+                 started_at, recorded_at)
+             VALUES ('r-running', 'req', 'pc-1', '', '', ?, ?)",
+        )
+        .bind(now - Duration::minutes(1))
+        .bind(now - Duration::minutes(1))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let rows = list(State(pool), Query(params(None))).await.unwrap().0;
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(
+            row.exit_code, None,
+            "NULL exit_code must stay None, not decode to Some(0) / success",
+        );
+        assert_eq!(row.finished_at, None, "NULL finished_at must stay None");
+        assert_eq!(
+            row.exec_id, None,
+            "NULL exec_id (ad-hoc run) must stay None, not Some(\"\")",
+        );
+        assert_eq!(
+            row.job_id, None,
+            "NULL job_id must stay None, not Some(\"\")"
+        );
+        assert_eq!(
+            row.version, None,
+            "NULL version must stay None, not Some(\"\")",
         );
     }
 
