@@ -63,6 +63,10 @@
   "row": {
     "openAria": "open details for schedule {{id}}"
   },
+  "git": {
+    "badge": "git",
+    "badgeTitle": "Managed in Git (read-only) — {{path}}"
+  },
   "detail": {
     "jobRef": "runs job {{jobId}}"
   },

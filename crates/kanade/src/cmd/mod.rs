@@ -10,6 +10,7 @@ pub mod job;
 pub mod kill;
 pub mod login;
 pub mod ping;
+pub mod provenance;
 pub mod publish_verify;
 pub mod revoke;
 pub mod run;

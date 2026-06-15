@@ -24,7 +24,7 @@ import { Link } from 'react-router-dom';
 import { toast } from 'sonner';
 
 import { ErrorCard } from '@/components/ErrorCard';
-import { type EditorMode, type JobOrigin, YamlEditorDialog } from '@/components/YamlEditorDialog';
+import { type EditorMode, type RepoOrigin, YamlEditorDialog } from '@/components/YamlEditorDialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -61,7 +61,7 @@ type JobRow = {
    *  Git work tree via `kanade job create` — drives the read-only Edit
    *  modal + the per-row git badge. Absent / null for SPA-born jobs,
    *  which stay freely editable. */
-  origin?: JobOrigin | null;
+  origin?: RepoOrigin | null;
   /** v0.30 / PR γ: in-flight counters joined onto each row by the
    *  backend so the Jobs page can show "is anything running right
    *  now" — drives the per-row live chip + kill button enable
@@ -637,7 +637,7 @@ export function Jobs() {
   // #678: the Git provenance of the row being edited (if any), so the
   // dialog can render a Git-managed job read-only. `null` for create
   // mode and for SPA-born jobs.
-  const editingOrigin: JobOrigin | null =
+  const editingOrigin: RepoOrigin | null =
     editor?.type === 'edit'
       ? (rows.find((r) => r.id === editor.id)?.origin ?? null)
       : null;

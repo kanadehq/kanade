@@ -3,6 +3,7 @@ import {
   ChevronDown,
   ChevronRight,
   FilePlus2,
+  GitBranch,
   Loader2,
   Pencil,
   Power,
@@ -18,7 +19,7 @@ import { Trans, useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 
 import { ErrorCard } from '@/components/ErrorCard';
-import { type EditorMode, YamlEditorDialog } from '@/components/YamlEditorDialog';
+import { type EditorMode, type RepoOrigin, YamlEditorDialog } from '@/components/YamlEditorDialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -80,6 +81,11 @@ type ScheduleRow = {
    *  empty for most schedules — drives the tag-filter chips + search,
    *  orthogonal to the id-prefix grouping. */
   tags?: string[];
+  /** GitOps provenance (#695). Present when the schedule was applied
+   *  from a Git work tree via `kanade schedule create` — drives the
+   *  read-only Edit modal + the per-row git badge. Absent / null for
+   *  SPA-born schedules, which stay editable. */
+  origin?: RepoOrigin | null;
 };
 
 // #418 rollout coverage. One agent's standing in a schedule's rollout
@@ -447,6 +453,23 @@ export function Schedules() {
             <span className="block truncate text-xs text-muted" title={s.job_id}>
               {s.job_id}
             </span>
+            {s.origin && (
+              // #695: GitOps provenance marker — this schedule is managed
+              // in Git, so the Edit modal opens read-only. Tooltip carries
+              // the repo-relative .yaml path.
+              <span
+                className="mt-0.5 inline-flex w-fit"
+                title={t('git.badgeTitle', { path: s.origin.path })}
+              >
+                <Badge
+                  variant="default"
+                  className="gap-1 px-1.5 py-0 text-[10px] text-muted"
+                >
+                  <GitBranch className="size-3" />
+                  {t('git.badge')}
+                </Badge>
+              </span>
+            )}
             {s.tags && s.tags.length > 0 && (
               <div className="mt-0.5 flex flex-wrap gap-1" onClick={(e) => e.stopPropagation()}>
                 {s.tags.map((tag) => (
@@ -501,6 +524,14 @@ export function Schedules() {
   if (selectedId !== null && selected === null) {
     setSelectedId(null);
   }
+
+  // #695: Git provenance of the row being edited (if any), so the dialog
+  // renders a Git-managed schedule read-only. `null` for create mode and
+  // for SPA-born schedules.
+  const editingOrigin: RepoOrigin | null =
+    editor?.type === 'edit'
+      ? (rows.find((s) => s.id === editor.id)?.origin ?? null)
+      : null;
 
   // ---- id-prefix grouping + search / tag filtering (mirrors Jobs) ----
   // Prefix = everything before the first hyphen of the SCHEDULE id
@@ -902,6 +933,7 @@ export function Schedules() {
           }}
           kind="schedule"
           mode={editor}
+          gitOrigin={editingOrigin}
         />
       )}
     </div>

@@ -67,10 +67,10 @@
       "default": null
     },
     "origin": {
-      "description": "GitOps provenance (#678) — see [`JobOrigin`]. Stamped by\n`kanade job create` when the source YAML lives inside a Git work\ntree, so the SPA can render the job read-only and point edits\nback at the repo instead of letting a ClickOps edit silently\ndiverge from Git (SPEC design principle #3: 設定駆動 YAML + Git).\n`None` for SPA-born jobs and for manifests applied from outside\nany Git repo. Purely informational: agents / scheduler /\nprojector never read it, and it survives `script_file:` inlining\n(it's orthogonal to the exactly-one-of script-source rule). New\nfield ⇒ #492 wire rule (`default` + `skip_serializing_if`).",
+      "description": "GitOps provenance (#678) — see [`RepoOrigin`]. Stamped by\n`kanade job create` when the source YAML lives inside a Git work\ntree, so the SPA can render the job read-only and point edits\nback at the repo instead of letting a ClickOps edit silently\ndiverge from Git (SPEC design principle #3: 設定駆動 YAML + Git).\n`None` for SPA-born jobs and for manifests applied from outside\nany Git repo. Purely informational: agents / scheduler /\nprojector never read it, and it survives `script_file:` inlining\n(it's orthogonal to the exactly-one-of script-source rule). New\nfield ⇒ #492 wire rule (`default` + `skip_serializing_if`).",
       "anyOf": [
         {
-          "$ref": "#/$defs/JobOrigin"
+          "$ref": "#/$defs/RepoOrigin"
         },
         {
           "type": "null"
@@ -436,12 +436,12 @@
         }
       ]
     },
-    "JobOrigin": {
-      "description": "GitOps provenance for a [`Manifest`] (#678). Populated by\n`kanade job create` from the Git context of the source YAML; the\nSPA reads it to render Git-managed jobs read-only and link the\noperator back at the repo. Never consulted by the runtime.",
+    "RepoOrigin": {
+      "description": "GitOps provenance for a repo-managed YAML artifact — a [`Manifest`]\n(#678) or a [`Schedule`] (#695). Populated by `kanade job create` /\n`kanade schedule create` from the Git context of the source YAML;\nthe SPA reads it to render Git-managed entries read-only and link\nthe operator back at the repo. Never consulted by the runtime.",
       "type": "object",
       "properties": {
         "path": {
-          "description": "Repo-relative path of the manifest YAML — the primary edit\ntarget the SPA surfaces (e.g. `configs/jobs/foo.yaml`). Forward\nslashes regardless of the authoring OS.",
+          "description": "Repo-relative path of the source YAML — the primary edit target\nthe SPA surfaces (e.g. `configs/jobs/foo.yaml`). Forward slashes\nregardless of the authoring OS.",
           "type": "string"
         },
         "repo": {
@@ -452,7 +452,7 @@
           ]
         },
         "script_file": {
-          "description": "Repo-relative path of the `script_file:` this manifest inlined,\nwhen it used one — a secondary pointer shown beneath `path`.",
+          "description": "Repo-relative path of the `script_file:` a job manifest inlined,\nwhen it used one — a secondary pointer shown beneath `path`.\nAlways `None` for schedules (they carry no script).",
           "type": [
             "string",
             "null"

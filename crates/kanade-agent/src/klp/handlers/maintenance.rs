@@ -343,6 +343,7 @@ mod tests {
             runs_on: RunsOn::Backend,
             enabled: true,
             tags: Vec::new(),
+            origin: None,
         }
     }
 

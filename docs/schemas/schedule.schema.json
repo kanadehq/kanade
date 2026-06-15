@@ -44,6 +44,17 @@
       "description": "failed. Currently just `retry` (fixed-backoff in-process\nre-run); future `notify` / `disable` join the same namespace.\nApplied fire-side in `handle_command` (the retry policy is\nlowered onto every Command this schedule produces), so it\ncovers both `runs_on` locations.",
       "$ref": "#/$defs/OnFailure"
     },
+    "origin": {
+      "description": "GitOps provenance (#695) — see [`RepoOrigin`]. Stamped by\n`kanade schedule create` when the source YAML lives inside a Git\nwork tree, so the SPA renders the schedule read-only and points\nedits back at the repo (SPEC design principle #3: 設定駆動 YAML +\nGit), parity with a job's [`Manifest::origin`]. `None` for\nSPA-born schedules and ones applied from outside any repo. Purely\ninformational — the scheduler never reads it. New field ⇒ #492\nwire rule (`default` + `skip_serializing_if`).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RepoOrigin"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "rollout": {
       "description": "Optional wave rollout — when present, the backend publishes\neach wave's group subject on its own delay schedule instead\nof fanning out the `target` block in one go. `target` then\nonly labels the deploy for the audit log.",
       "anyOf": [
@@ -257,6 +268,33 @@
           "description": "Re-arm after the humantime interval, e.g. `{ every: 6h }`.",
           "$ref": "#/$defs/EverySpec"
         }
+      ]
+    },
+    "RepoOrigin": {
+      "description": "GitOps provenance for a repo-managed YAML artifact — a [`Manifest`]\n(#678) or a [`Schedule`] (#695). Populated by `kanade job create` /\n`kanade schedule create` from the Git context of the source YAML;\nthe SPA reads it to render Git-managed entries read-only and link\nthe operator back at the repo. Never consulted by the runtime.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "description": "Repo-relative path of the source YAML — the primary edit target\nthe SPA surfaces (e.g. `configs/jobs/foo.yaml`). Forward slashes\nregardless of the authoring OS.",
+          "type": "string"
+        },
+        "repo": {
+          "description": "`origin` remote URL, when the repo has one. Lets the SPA turn\n`path` into a clickable link; `None` for remote-less repos.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "script_file": {
+          "description": "Repo-relative path of the `script_file:` a job manifest inlined,\nwhen it used one — a secondary pointer shown beneath `path`.\nAlways `None` for schedules (they carry no script).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path"
       ]
     },
     "Require": {
