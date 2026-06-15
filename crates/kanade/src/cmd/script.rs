@@ -16,11 +16,13 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use futures::StreamExt;
 use kanade_shared::kv::OBJECT_SCRIPTS;
 use tracing::info;
+
+use super::validate_segment;
 
 #[derive(Args, Debug)]
 pub struct ScriptArgs {
@@ -62,31 +64,6 @@ pub async fn execute(client: async_nats::Client, args: ScriptArgs) -> Result<()>
         ScriptSub::List => list(client).await,
         ScriptSub::Delete { name, version } => delete(client, name, version).await,
     }
-}
-
-/// Mirror of `kanade-backend::api::script_objects::validate_segment`.
-/// See the matching note in `cmd::app::validate_segment` — keeping
-/// a CLI-side copy fails fast on a typo before round-tripping to
-/// the bucket.
-fn validate_segment(label: &str, value: &str) -> Result<()> {
-    if value.is_empty() {
-        bail!("{label} must be non-empty");
-    }
-    if value.contains('/') {
-        bail!("{label} must not contain '/'");
-    }
-    for c in value.chars() {
-        if !c.is_ascii() {
-            bail!("{label} must be ASCII-printable (rejected non-ASCII {c:?})");
-        }
-        if c.is_ascii_control() {
-            bail!("{label} must not contain control characters");
-        }
-        if c == '"' || c == '\\' {
-            bail!("{label} must not contain '\"' or '\\\\'");
-        }
-    }
-    Ok(())
 }
 
 async fn publish(

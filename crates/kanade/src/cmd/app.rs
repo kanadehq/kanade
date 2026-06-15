@@ -20,6 +20,8 @@ use futures::StreamExt;
 use kanade_shared::kv::OBJECT_APP_PACKAGES;
 use tracing::info;
 
+use super::validate_segment;
+
 #[derive(Args, Debug)]
 pub struct AppArgs {
     #[command(subcommand)]
@@ -73,32 +75,6 @@ pub async fn execute(client: async_nats::Client, args: AppArgs) -> Result<()> {
     }
 }
 
-/// Mirror of `kanade-backend::api::app_packages::validate_segment`
-/// so the CLI rejects the same shapes the HTTP endpoint would
-/// (avoids a confusing "upload succeeded; download 400s" loop).
-/// Keeping a separate copy is fine — the constraint set is small,
-/// stable, and lives outside the wire crate today.
-fn validate_segment(label: &str, value: &str) -> Result<()> {
-    if value.is_empty() {
-        bail!("{label} must be non-empty");
-    }
-    if value.contains('/') {
-        bail!("{label} must not contain '/'");
-    }
-    for c in value.chars() {
-        if !c.is_ascii() {
-            bail!("{label} must be ASCII-printable (rejected non-ASCII {c:?})");
-        }
-        if c.is_ascii_control() {
-            bail!("{label} must not contain control characters");
-        }
-        if c == '"' || c == '\\' {
-            bail!("{label} must not contain '\"' or '\\\\'");
-        }
-    }
-    Ok(())
-}
-
 async fn publish(
     client: async_nats::Client,
     name: String,
@@ -133,12 +109,19 @@ async fn publish(
             let bytes = tokio::fs::read(&binary)
                 .await
                 .with_context(|| format!("read {binary:?}"))?;
-            kanade_shared::exe_version::extract_pe_version(&bytes).with_context(|| {
-                format!(
-                    "no --version given and couldn't extract VERSIONINFO from {binary:?} \
-                     (Windows PE built with `winres`? otherwise pass `--version <label>`)"
-                )
-            })?
+            match kanade_shared::exe_version::extract_pe_version(&bytes) {
+                Some(v) => v,
+                // #270: extraction failed. Interactive shell → prompt for
+                // the label inline; pipe / CI → fail fast with the same
+                // guidance the original path emitted.
+                None => match super::prompt_version_if_interactive(binary.clone()).await? {
+                    Some(v) => v,
+                    None => bail!(
+                        "no --version given and couldn't extract VERSIONINFO from {binary:?} \
+                         (Windows PE built with `winres`? otherwise pass `--version <label>`)"
+                    ),
+                },
+            }
         }
     };
     validate_segment("version", &resolved_version)?;
