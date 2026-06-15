@@ -58,7 +58,7 @@
 
 id: collect-winlog-events
 tags: [observability]   # operator taxonomy for the SPA tag filter
-version: 0.4.0
+version: 0.4.1
 description: "Windows Event Log → ObsEvent timeline (human logon / logoff / lock / unlock / boot / shutdown / sleep / resume / wake_detail)"
 
 execute:
@@ -138,9 +138,16 @@ execute:
     #                configs/schedules/enable-session-audit.yaml).
     #                Until that job has run on a box, 4800/4801
     #                simply return no rows here.
-    # System 12 / 13 — kernel-general boot / shutdown.
+    # System 12 / 13 (kernel-general) — boot / shutdown. Provider
+    #                pinned in 0.4.1: System-log Event ID 12 /
+    #                13 are GENERIC ids many providers reuse, so an
+    #                unpinned `Id=12` query scoops up every provider's
+    #                ID 12 and floods the timeline with bogus per-second
+    #                `boot` rows (same collision class as Winlogon 7001
+    #                vs SCM #378 and Kernel-Power 42/107 #385).
     # System 41    — unexpected shutdown (kernel-power, "the system
-    #                rebooted without cleanly shutting down").
+    #                rebooted without cleanly shutting down"). Provider
+    #                pinned in 0.4.1 for the same reason.
     # System 42 / 107 (kernel-power) — classic S3 sleep / resume.
     #                Provider pinned in 0.4.0 — System-log event
     #                IDs collide across providers (same lesson as
@@ -173,9 +180,9 @@ execute:
         @{ Log='System';   Provider='Microsoft-Windows-Winlogon'; Id=7002; Kind='logoff' }
         @{ Log='Security'; Id=4800; Kind='lock' }
         @{ Log='Security'; Id=4801; Kind='unlock' }
-        @{ Log='System';   Id=12;   Kind='boot' }
-        @{ Log='System';   Id=13;   Kind='shutdown' }
-        @{ Log='System';   Id=41;   Kind='unexpected_shutdown' }
+        @{ Log='System';   Provider='Microsoft-Windows-Kernel-General'; Id=12; Kind='boot' }
+        @{ Log='System';   Provider='Microsoft-Windows-Kernel-General'; Id=13; Kind='shutdown' }
+        @{ Log='System';   Provider='Microsoft-Windows-Kernel-Power';   Id=41; Kind='unexpected_shutdown' }
         @{ Log='System';   Provider='Microsoft-Windows-Kernel-Power'; Id=42;  Kind='sleep' }
         @{ Log='System';   Provider='Microsoft-Windows-Kernel-Power'; Id=107; Kind='resume' }
         @{ Log='System';   Provider='Microsoft-Windows-Kernel-Power'; Id=506; Kind='sleep' }
@@ -266,8 +273,11 @@ execute:
             Id        = $s.Id
             StartTime = $bootstrapStart
         }
-        # Winlogon rows pin the provider — Event ID 7001 in the
-        # System log is also used by Service Control Manager.
+        # Rows with a Provider pin it — many System-log Event IDs are
+        # generic slots reused across providers (7001 Winlogon vs SCM,
+        # 12/13 Kernel-General, 41/42/107/506/507 Kernel-Power), so
+        # without the provider filter Get-WinEvent scoops up unrelated
+        # events sharing the same numeric ID.
         if ($s.ContainsKey('Provider')) { $filter.ProviderName = $s.Provider }
         $events = Get-WinEvent -FilterHashtable $filter -ErrorAction SilentlyContinue
         if ($null -eq $events) { continue }
