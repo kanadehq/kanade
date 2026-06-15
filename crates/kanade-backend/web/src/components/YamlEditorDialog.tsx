@@ -38,13 +38,14 @@ const YamlEditor = lazy(() => import('./YamlEditor'));
 export type EditorKind = 'manifest' | 'schedule';
 export type EditorMode = { type: 'create' } | { type: 'edit'; id: string };
 
-/** GitOps provenance (#678) — mirrors `kanade_shared::manifest::JobOrigin`. */
-export type JobOrigin = {
-  /** Repo-relative path of the manifest YAML (forward slashes). */
+/** GitOps provenance (#678/#695) — mirrors `kanade_shared::manifest::RepoOrigin`. */
+export type RepoOrigin = {
+  /** Repo-relative path of the source YAML (forward slashes). */
   path: string;
   /** `origin` remote URL, when the repo has one. */
   repo?: string | null;
-  /** Repo-relative path of the inlined `script_file:`, when any. */
+  /** Repo-relative path of a job's inlined `script_file:`, when any
+   *  (always absent for schedules). */
   script_file?: string | null;
 };
 
@@ -53,10 +54,11 @@ interface YamlEditorDialogProps {
   onOpenChange: (next: boolean) => void;
   kind: EditorKind;
   mode: EditorMode;
-  /** When set on an edit, the job is Git-managed (SPEC §3 GitOps): the
+  /** When set on an edit, the entry is Git-managed (SPEC §3 GitOps): the
    *  editor opens read-only and points the operator back at the repo
-   *  instead of letting a SPA edit silently diverge from Git (#678). */
-  gitOrigin?: JobOrigin | null;
+   *  instead of letting a SPA edit silently diverge from Git
+   *  (#678 jobs / #695 schedules). */
+  gitOrigin?: RepoOrigin | null;
 }
 
 /** Best-effort conversion of a Git remote URL to an https repo link.
@@ -214,6 +216,10 @@ export function YamlEditorDialog({
           : `Edit schedule: ${mode.id}`;
 
   const repoUrl = repoWebUrl(gitOrigin?.repo);
+  // #695: the read-only banner is shared by jobs + schedules, so the
+  // apply command and the source-path label follow `kind`.
+  const applyCmd = kind === 'manifest' ? 'kanade job create' : 'kanade schedule create';
+  const sourceLabel = kind === 'manifest' ? 'manifest:' : 'schedule:';
 
   const isLoadingExisting = mode.type === 'edit' && fetched.isLoading;
   const hasLoadError = mode.type === 'edit' && Boolean(fetched.error);
@@ -227,7 +233,7 @@ export function YamlEditorDialog({
             {gitManaged ? (
               <>
                 Managed in Git — read-only. Edit the source in the repo, then run{' '}
-                <code className="text-xs">kanade job create</code> to apply (SPEC §3 GitOps).
+                <code className="text-xs">{applyCmd}</code> to apply (SPEC §3 GitOps).
               </>
             ) : (
               <>
@@ -248,7 +254,7 @@ export function YamlEditorDialog({
               Managed in Git
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-1.5 text-muted">
-              <span>manifest:</span>
+              <span>{sourceLabel}</span>
               <code className="break-all text-fg">{gitOrigin.path}</code>
               {repoUrl && (
                 <a

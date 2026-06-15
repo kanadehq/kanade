@@ -113,7 +113,7 @@ pub struct Manifest {
     /// from tripping over its absence / presence.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
-    /// GitOps provenance (#678) — see [`JobOrigin`]. Stamped by
+    /// GitOps provenance (#678) — see [`RepoOrigin`]. Stamped by
     /// `kanade job create` when the source YAML lives inside a Git work
     /// tree, so the SPA can render the job read-only and point edits
     /// back at the repo instead of letting a ClickOps edit silently
@@ -124,25 +124,27 @@ pub struct Manifest {
     /// (it's orthogonal to the exactly-one-of script-source rule). New
     /// field ⇒ #492 wire rule (`default` + `skip_serializing_if`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub origin: Option<JobOrigin>,
+    pub origin: Option<RepoOrigin>,
 }
 
-/// GitOps provenance for a [`Manifest`] (#678). Populated by
-/// `kanade job create` from the Git context of the source YAML; the
-/// SPA reads it to render Git-managed jobs read-only and link the
-/// operator back at the repo. Never consulted by the runtime.
+/// GitOps provenance for a repo-managed YAML artifact — a [`Manifest`]
+/// (#678) or a [`Schedule`] (#695). Populated by `kanade job create` /
+/// `kanade schedule create` from the Git context of the source YAML;
+/// the SPA reads it to render Git-managed entries read-only and link
+/// the operator back at the repo. Never consulted by the runtime.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, PartialEq, Eq)]
-pub struct JobOrigin {
-    /// Repo-relative path of the manifest YAML — the primary edit
-    /// target the SPA surfaces (e.g. `configs/jobs/foo.yaml`). Forward
-    /// slashes regardless of the authoring OS.
+pub struct RepoOrigin {
+    /// Repo-relative path of the source YAML — the primary edit target
+    /// the SPA surfaces (e.g. `configs/jobs/foo.yaml`). Forward slashes
+    /// regardless of the authoring OS.
     pub path: String,
     /// `origin` remote URL, when the repo has one. Lets the SPA turn
     /// `path` into a clickable link; `None` for remote-less repos.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
-    /// Repo-relative path of the `script_file:` this manifest inlined,
+    /// Repo-relative path of the `script_file:` a job manifest inlined,
     /// when it used one — a secondary pointer shown beneath `path`.
+    /// Always `None` for schedules (they carry no script).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script_file: Option<String>,
 }
@@ -1897,6 +1899,7 @@ target: { all: true }
             runs_on,
             enabled: true,
             tags: Vec::new(),
+            origin: None,
         }
     }
 
@@ -3641,6 +3644,16 @@ pub struct Schedule {
     /// the #492 gradual-upgrade wire rule.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// GitOps provenance (#695) — see [`RepoOrigin`]. Stamped by
+    /// `kanade schedule create` when the source YAML lives inside a Git
+    /// work tree, so the SPA renders the schedule read-only and points
+    /// edits back at the repo (SPEC design principle #3: 設定駆動 YAML +
+    /// Git), parity with a job's [`Manifest::origin`]. `None` for
+    /// SPA-born schedules and ones applied from outside any repo. Purely
+    /// informational — the scheduler never reads it. New field ⇒ #492
+    /// wire rule (`default` + `skip_serializing_if`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<RepoOrigin>,
 }
 
 /// v0.23 — where the cron tick fires from.

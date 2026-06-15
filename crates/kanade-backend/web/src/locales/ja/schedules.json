@@ -63,6 +63,10 @@
   "row": {
     "openAria": "スケジュール {{id}} の詳細を開く"
   },
+  "git": {
+    "badge": "git",
+    "badgeTitle": "Git 管理（読み取り専用） — {{path}}"
+  },
   "detail": {
     "jobRef": "対象ジョブ: {{jobId}}"
   },

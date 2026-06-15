@@ -1960,6 +1960,7 @@ mod tests {
             runs_on,
             enabled: true,
             tags: Vec::new(),
+            origin: None,
         }
     }
 

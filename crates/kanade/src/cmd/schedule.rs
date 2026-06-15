@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use kanade_shared::manifest::Schedule;
-use tracing::info;
+use tracing::{info, warn};
+
+use crate::cmd::provenance::{append_origin_yaml, detect_repo_origin, has_top_level_origin};
 
 #[derive(Args, Debug)]
 pub struct ScheduleArgs {
@@ -257,7 +259,7 @@ async fn coverage(base: &str, id: &str, all: bool) -> Result<()> {
 }
 
 async fn create(base: &str, yaml: &PathBuf) -> Result<()> {
-    let body = std::fs::read_to_string(yaml).with_context(|| format!("read {yaml:?}"))?;
+    let mut body = std::fs::read_to_string(yaml).with_context(|| format!("read {yaml:?}"))?;
     // Parse client-side first so a malformed YAML errors at the
     // operator's shell rather than via the backend's 400 — keeps the
     // error site obvious. Then ship the raw YAML body so the
@@ -280,6 +282,26 @@ async fn create(base: &str, yaml: &PathBuf) -> Result<()> {
         job_id = %schedule.job_id,
         "upserting schedule",
     );
+
+    // #695: GitOps provenance — parity with `kanade job create` (#678).
+    // Stamp the schedule with its repo-relative path when applied from a
+    // Git/jj work tree, so the SPA renders it read-only and points edits
+    // back at the repo instead of letting a ClickOps edit silently
+    // diverge from Git. Schedules carry no script, so the script_file arg
+    // is always `None`. Append to the raw body the CLI already ships, so
+    // the backend's BUCKET_SCHEDULES_YAML mirror carries it too.
+    if let Some(origin) = detect_repo_origin(yaml, None) {
+        if has_top_level_origin(&body) {
+            warn!(
+                schedule_id = %schedule.id,
+                "origin: already present in source YAML; preserving it. \
+                 If the repo / remote changed, delete + recreate the schedule \
+                 to refresh provenance",
+            );
+        } else {
+            append_origin_yaml(&mut body, &origin).context("append origin provenance")?;
+        }
+    }
 
     let url = format!("{base}/api/schedules");
     let resp = crate::http_client::authed_client()?
