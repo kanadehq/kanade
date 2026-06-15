@@ -21,11 +21,38 @@ pub struct JobArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum JobSub {
-    /// Upsert a job into the catalog from a YAML manifest.
+    /// Upsert one or more jobs into the catalog from YAML manifests.
+    ///
+    /// Accepts multiple files, a directory (its top-level `*.yaml` /
+    /// `*.yml`), and/or glob patterns — e.g. `kanade job create
+    /// configs/jobs/*.yaml` or `kanade job create configs/jobs/`. Each
+    /// file is registered independently (fail-soft per file); the
+    /// command exits non-zero if any file fails.
     Create {
-        /// Path to the job YAML (Manifest body — `id` / `version` /
-        /// `target` / `execute` / optional `inventory`).
-        yaml: PathBuf,
+        /// Job YAML paths (Manifest body — `id` / `version` / `target` /
+        /// `execute` / optional `inventory`). Globs / directories are
+        /// expanded CLI-side, so quote a glob to keep your shell from
+        /// expanding it first.
+        #[arg(required = true, num_args = 1..)]
+        paths: Vec<PathBuf>,
+    },
+    /// Export registered job YAML (the comment-preserving mirror).
+    ///
+    /// `kanade job export <id>` prints to stdout; with `--out-dir` it
+    /// writes `<dir>/<id>.yaml`. `--all --out-dir <dir>` dumps every
+    /// registered job. Round-trips with `create`: `kanade job export
+    /// foo > foo.yaml` → edit → `kanade job create foo.yaml`.
+    Export {
+        /// Job id to export. Omit only with `--all`.
+        #[arg(required_unless_present = "all")]
+        id: Option<String>,
+        /// Export every registered job (requires `--out-dir`).
+        #[arg(long, conflicts_with = "id", requires = "out_dir")]
+        all: bool,
+        /// Directory to write `<id>.yaml` into. Required with `--all`;
+        /// for a single id, omit it to print to stdout instead.
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
     },
     /// List every job in the catalog.
     List,
@@ -40,13 +67,35 @@ pub enum JobSub {
 pub async fn execute(backend_url: &str, args: JobArgs) -> Result<()> {
     let base = backend_url.trim_end_matches('/');
     match args.sub {
-        JobSub::Create { yaml } => create(base, &yaml).await,
+        JobSub::Create { paths } => create_all(base, paths).await,
+        JobSub::Export { id, all, out_dir } => {
+            crate::cmd::bulk::export(base, "jobs", id, all, out_dir).await
+        }
         JobSub::List => list(base).await,
         JobSub::Delete { id } => delete(base, &id).await,
     }
 }
 
-async fn create(base: &str, yaml: &PathBuf) -> Result<()> {
+/// Expand the operator's `create` arguments (files / dirs / globs) and
+/// upsert each manifest. Fail-soft per file so one bad manifest in a
+/// batch doesn't abort the rest; the command still exits non-zero if any
+/// file failed (#654).
+async fn create_all(base: &str, paths: Vec<PathBuf>) -> Result<()> {
+    let files = crate::cmd::bulk::expand_manifest_paths(&paths)?;
+    let mut failures = 0usize;
+    for f in &files {
+        if let Err(e) = create_one(base, f).await {
+            eprintln!("✗ {}: {e:#}", f.display());
+            failures += 1;
+        }
+    }
+    if failures > 0 {
+        anyhow::bail!("{failures}/{} job manifest(s) failed", files.len());
+    }
+    Ok(())
+}
+
+async fn create_one(base: &str, yaml: &std::path::Path) -> Result<()> {
     let raw = std::fs::read_to_string(yaml).with_context(|| format!("read {yaml:?}"))?;
     // Parse client-side so a malformed YAML errors before any HTTP
     // round-trip — keeps the original error site obvious in operator
@@ -172,8 +221,20 @@ async fn create(base: &str, yaml: &PathBuf) -> Result<()> {
         let body = resp.text().await.unwrap_or_default();
         anyhow::bail!("create rejected: {status} — {body}");
     }
-    let payload: serde_json::Value = resp.json().await?;
-    println!("{}", serde_json::to_string_pretty(&payload)?);
+    // Concise per-file line so a bulk `create` reads as a digestible
+    // list rather than N pretty-printed JSON blobs (#654). The summary
+    // payload is `{id, version, ...}`; fall back to the source path if a
+    // field is somehow absent.
+    let payload: serde_json::Value = resp
+        .json()
+        .await
+        .context("parse JSON response from server")?;
+    let id = payload.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+    let version = payload
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    println!("✓ {} → job '{id}' v{version}", yaml.display());
     Ok(())
 }
 

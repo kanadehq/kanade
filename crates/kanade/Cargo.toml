@@ -24,6 +24,7 @@ dirs       = { workspace = true }
 kaishin    = { workspace = true }
 clap       = { workspace = true }
 futures    = { workspace = true }
+glob       = { workspace = true }
 humantime  = { workspace = true }
 reqwest    = { workspace = true }
 rpassword  = { workspace = true }

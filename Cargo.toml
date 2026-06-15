@@ -51,6 +51,9 @@ clap               = { version = "4.6.1", features = ["derive", "env"] }
 uuid               = { version = "1.23.3", features = ["v4", "v5", "serde"] }
 chrono             = { version = "0.4.45", features = ["serde"] }
 futures            = "0.3.32"
+# CLI-side expansion of `job/schedule create` glob/dir arguments (#654).
+# PowerShell never expands globs before exec, so the CLI does it itself.
+glob               = "0.3.3"
 bytes              = "1.11.1"
 humantime          = "2.3.0"
 rand               = "0.10"
