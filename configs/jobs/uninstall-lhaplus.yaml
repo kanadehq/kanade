@@ -1,0 +1,106 @@
+# OPERATOR-ONLY job — fleet security remediation, no `client:` block.
+#
+# Lhaplus は長年メンテナンスが止まった旧来の解凍ソフトで、書庫展開時の
+# ディレクトリトラバーサルなど既知の脆弱性が複数報告されているため、
+# 全台からアンインストールするための修復ジョブ。end-user の自己申告では
+# なくオペレータが一斉に流す運用なので `client:` は付けない
+# (install-7zip.yaml が後継として使える)。
+#
+# Lhaplus は winget 管理外の NSIS 系インストーラなので、winget uninstall
+# ではなくレジストリの UninstallString を引いてサイレント実行する。
+# 32bit アプリなので WOW6432Node 配下に登録されるが、念のため x64 hive も
+# 走査する(inventory-sw.yaml と同じ二面走査)。
+#
+# `run_as: system`: アンインストーラは Program Files (x86) を書き換える
+# ため昇格が要る。エージェントは LocalSystem なので UAC は出ない。
+#
+# Register (operator-fired, no schedule):
+#   kanade job create configs/jobs/uninstall-lhaplus.yaml
+# Run against the fleet (target the EXACT registered pc_id casing):
+#   kanade exec uninstall-lhaplus --groups all
+id: uninstall-lhaplus
+tags: [app, security]   # operator taxonomy for the SPA tag filter
+version: 1.0.0
+description: Uninstall the Lhaplus archiver (known-vulnerable, EOL) fleet-wide (operator note)
+execute:
+  shell: powershell
+  run_as: system
+  # NSIS のサイレントアンインストールは通常数秒で終わるが、ファイル
+  # ロック等での待ち時間に余裕を持たせて 300s。
+  timeout: 300s
+  script: |
+    $ErrorActionPreference = 'Stop'
+
+    # inventory-sw.yaml と同じ二面走査。Lhaplus は 32bit なので実体は
+    # WOW6432Node 側だが、将来の 64bit 版や別経路インストールに備えて
+    # x64 hive も見る。
+    $hives = @(
+      'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+      'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
+
+    $entries = foreach ($hive in $hives) {
+      Get-ItemProperty -Path $hive -ErrorAction SilentlyContinue |
+        Where-Object { $_.DisplayName -like '*Lhaplus*' }
+    }
+
+    if (-not $entries) {
+      Write-Output 'Lhaplus は見つかりませんでした(既にアンインストール済みです)。'
+      return
+    }
+
+    foreach ($e in $entries) {
+      $cmd = [string]$e.UninstallString
+      if (-not $cmd) {
+        throw "Lhaplus ($($e.DisplayName)) の UninstallString が空でした。手動確認が必要です。"
+      }
+
+      # UninstallString は `"C:\...\uninstall.exe"` 形式(NSIS)。先頭の
+      # 引用符で囲まれたパスだけを取り出す。末尾に引数が付く形
+      # (`"...\Uninstall.exe" /S`)でも壊れないよう、Trim ではなく正規表現
+      # で先頭の引用符内を抜く(引用符なしならそのまま使う)。
+      $exe = if ($cmd -match '^"([^"]+)"') { $Matches[1] } else { $cmd }
+      # exe が無い場合は throw せず continue。両 hive に同一エントリがあって
+      # 1つ目の実行で既に削除されたケースを失敗扱いにしないため。本当に
+      # 何も消せなければ末尾のレジストリ検証が残存エントリを検出して失敗
+      # させるので、ここでの continue で取りこぼしは起きない。
+      if (-not (Test-Path $exe)) {
+        Write-Output "アンインストーラが存在しません(別エントリで削除済みの可能性): $exe"
+        continue
+      }
+
+      $installDir = if ($e.InstallLocation) {
+        ([string]$e.InstallLocation).TrimEnd('\')
+      } else {
+        Split-Path -Parent $exe
+      }
+
+      # NSIS の引数は **単一文字列** で渡す。配列で渡すと PowerShell が
+      # スペースを含む `_?=C:\Program Files (x86)\Lhaplus` を二重引用符で
+      # 囲んでしまい、先頭が `"` になって NSIS が `_?=` プレフィックスを
+      # 認識できず、自身を temp にコピーして即 return → -Wait が効かなく
+      # なる。単一文字列なら NSIS が `_?=` 以降をパス(スペース込み)として
+      # 正しく解釈する。
+      #   /S        : サイレント
+      #   _?=<dir>  : 自身を temp にコピーせず同期実行する
+      Write-Output "Lhaplus ($($e.DisplayName)) をアンインストールします: $exe"
+      $p = Start-Process -FilePath $exe `
+        -ArgumentList "/S _?=$installDir" `
+        -Wait -PassThru
+      if ($p.ExitCode -ne 0) {
+        throw "アンインストーラが異常終了しました (exit $($p.ExitCode)): $exe"
+      }
+    }
+
+    # 完了検証 — レジストリにまだ残っていれば失敗扱いにする。
+    # -Wait + _?= は同期実行(プロセス終了時点でレジストリ書き込みも完了)
+    # なので sleep は不要。
+    $remaining = foreach ($hive in $hives) {
+      Get-ItemProperty -Path $hive -ErrorAction SilentlyContinue |
+        Where-Object { $_.DisplayName -like '*Lhaplus*' }
+    }
+    if ($remaining) {
+      throw "アンインストール後も Lhaplus のエントリが残っています: $(($remaining.DisplayName) -join ', ')"
+    }
+
+    Write-Output 'Lhaplus をアンインストールしました。'
