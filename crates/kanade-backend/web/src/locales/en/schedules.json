@@ -17,7 +17,10 @@
     "tz": "tz",
     "active": "active",
     "window": "window",
+    "maxConcurrent": "max_concurrent",
+    "skipDates": "skip_dates",
     "require": "require",
+    "onFailure": "on_failure",
     "deadline": "deadline",
     "jitter": "jitter",
     "rollout": "rollout",
@@ -72,6 +75,8 @@
   },
   "rollout_one": "{{count}} wave",
   "rollout_other": "{{count}} waves",
+  "retry": "retry {{max}}× · backoff {{backoff}}",
+  "skipDatesSummary": "{{first}} +{{count}} more",
   "status": {
     "on": "on",
     "off": "off"
