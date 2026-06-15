@@ -15,11 +15,37 @@ pub struct ScheduleArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum ScheduleSub {
-    /// Upsert a schedule from a YAML file.
+    /// Upsert one or more schedules from YAML files.
+    ///
+    /// Accepts multiple files, a directory (its top-level `*.yaml` /
+    /// `*.yml`), and/or glob patterns — e.g. `kanade schedule create
+    /// configs/schedules/*.yaml`. Each file is registered independently
+    /// (fail-soft per file); the command exits non-zero if any fails.
+    /// The referenced job must already be registered via `kanade job
+    /// create`.
     Create {
-        /// Path to the schedule YAML (`id` / `when` / `job_id` / `enabled`).
-        /// The referenced job must already be registered via `kanade job create`.
-        yaml: PathBuf,
+        /// Schedule YAML paths (`id` / `when` / `job_id` / `enabled`).
+        /// Globs / directories are expanded CLI-side, so quote a glob to
+        /// keep your shell from expanding it first.
+        #[arg(required = true, num_args = 1..)]
+        paths: Vec<PathBuf>,
+    },
+    /// Export registered schedule YAML (the comment-preserving mirror).
+    ///
+    /// `kanade schedule export <id>` prints to stdout; with `--out-dir`
+    /// it writes `<dir>/<id>.yaml`. `--all --out-dir <dir>` dumps every
+    /// registered schedule. Round-trips with `create`.
+    Export {
+        /// Schedule id to export. Omit only with `--all`.
+        #[arg(required_unless_present = "all")]
+        id: Option<String>,
+        /// Export every registered schedule (requires `--out-dir`).
+        #[arg(long, conflicts_with = "id", requires = "out_dir")]
+        all: bool,
+        /// Directory to write `<id>.yaml` into. Required with `--all`;
+        /// for a single id, omit it to print to stdout instead.
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
     },
     /// List all schedules currently stored in the schedules KV.
     List,
@@ -99,7 +125,10 @@ pub enum ScheduleSub {
 pub async fn execute(backend_url: &str, args: ScheduleArgs) -> Result<()> {
     let base = backend_url.trim_end_matches('/');
     match args.sub {
-        ScheduleSub::Create { yaml } => create(base, &yaml).await,
+        ScheduleSub::Create { paths } => create_all(base, paths).await,
+        ScheduleSub::Export { id, all, out_dir } => {
+            crate::cmd::bulk::export(base, "schedules", id, all, out_dir).await
+        }
         ScheduleSub::List => list(base).await,
         ScheduleSub::Delete { id } => delete(base, &id).await,
         ScheduleSub::Disable {
@@ -258,7 +287,28 @@ async fn coverage(base: &str, id: &str, all: bool) -> Result<()> {
     Ok(())
 }
 
-async fn create(base: &str, yaml: &PathBuf) -> Result<()> {
+/// Expand the operator's `create` arguments (files / dirs / globs) and
+/// upsert each schedule. Fail-soft per file so one bad schedule in a
+/// batch doesn't abort the rest; the command still exits non-zero if any
+/// file failed (#654).
+async fn create_all(base: &str, paths: Vec<PathBuf>) -> Result<()> {
+    let files = crate::cmd::bulk::expand_manifest_paths(&paths)?;
+    let mut failures = 0usize;
+    for f in &files {
+        if let Err(e) = create_one(base, f).await {
+            eprintln!("✗ {}: {e:#}", f.display());
+            failures += 1;
+        }
+    }
+    if failures > 0 {
+        anyhow::bail!("{failures}/{} schedule manifest(s) failed", files.len());
+    }
+    Ok(())
+}
+
+async fn create_one(base: &str, yaml: &std::path::Path) -> Result<()> {
+    // `mut` because the #695 provenance step below appends an `origin:`
+    // block to the raw YAML before it is shipped.
     let mut body = std::fs::read_to_string(yaml).with_context(|| format!("read {yaml:?}"))?;
     // Parse client-side first so a malformed YAML errors at the
     // operator's shell rather than via the backend's 400 — keeps the
@@ -316,8 +366,15 @@ async fn create(base: &str, yaml: &PathBuf) -> Result<()> {
         let body = resp.text().await.unwrap_or_default();
         anyhow::bail!("create rejected: {status} — {body}");
     }
-    let payload: serde_json::Value = resp.json().await?;
-    println!("{}", serde_json::to_string_pretty(&payload)?);
+    // Concise per-file line so a bulk `create` stays digestible (#654).
+    // Summary payload is `{id, when, job_id, enabled}`.
+    let payload: serde_json::Value = resp
+        .json()
+        .await
+        .context("parse JSON response from server")?;
+    let id = payload.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+    let when = payload.get("when").and_then(|v| v.as_str()).unwrap_or("?");
+    println!("✓ {} → schedule '{id}' ({when})", yaml.display());
     Ok(())
 }
 
