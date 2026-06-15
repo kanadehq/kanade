@@ -66,12 +66,19 @@ type ScheduleRow = {
   // Optional validity window; the key is absent when the schedule
   // has no window (Rust skips serialising the empty struct).
   active?: { from?: string; until?: string };
-  // #418 Phase 3: optional maintenance window "HH:MM-HH:MM"; key
-  // absent when no constraints are set.
+  // #418 operational constraints; key absent when none are set
+  // (Rust elides the empty struct). All four sub-fields are optional
+  // and individually `skip_serializing_if`-elided.
   constraints?: {
     window?: string;
+    // #418 fleet-wide concurrency cap (backend-only).
+    max_concurrent?: number;
+    // #418 holiday / blackout dates the schedule must not fire on.
+    skip_dates?: string[];
     require?: { ac_power?: boolean; idle?: string; cpu_below?: number; network?: boolean };
   };
+  // #418 Phase 4: post-failure policy; key absent when no retry is set.
+  on_failure?: { retry?: { max: number; backoff: string } };
   // #418 Phase 2: timezone for `when.at` + `active` bounds.
   tz: 'local' | 'utc';
   starting_deadline: string | null;
@@ -808,6 +815,30 @@ export function Schedules() {
                   ? <code className="text-xs">{selected.constraints.window}</code>
                   : <span className="text-muted text-xs">—</span>}
               </DetailItem>
+              <DetailItem label={t('columns.maxConcurrent')}>
+                {selected.constraints?.max_concurrent != null
+                  ? <code className="text-xs">{selected.constraints.max_concurrent}</code>
+                  : <span className="text-muted text-xs">—</span>}
+              </DetailItem>
+              <DetailItem label={t('columns.skipDates')}>
+                {(() => {
+                  const dates = selected.constraints?.skip_dates;
+                  if (!dates || dates.length === 0)
+                    return <span className="text-muted text-xs">—</span>;
+                  // Compact summary for long blackout lists (a weekly
+                  // freeze can be 50+ dates); full list in the tooltip.
+                  const full = dates.join(', ');
+                  const display =
+                    dates.length <= 3
+                      ? full
+                      : t('skipDatesSummary', { first: dates[0], count: dates.length - 1 });
+                  return (
+                    <code className="text-xs" title={full}>
+                      {display}
+                    </code>
+                  );
+                })()}
+              </DetailItem>
               <DetailItem label={t('columns.require')}>
                 {(() => {
                   const r = selected.constraints?.require;
@@ -821,6 +852,25 @@ export function Schedules() {
                     : <span className="text-muted text-xs">—</span>;
                 })()}
               </DetailItem>
+              <DetailItem label={t('columns.onFailure')}>
+                {selected.on_failure?.retry
+                  ? (
+                    <code className="text-xs">
+                      {t('retry', {
+                        max: selected.on_failure.retry.max,
+                        backoff: selected.on_failure.retry.backoff,
+                      })}
+                    </code>
+                  )
+                  : <span className="text-muted text-xs">—</span>}
+              </DetailItem>
+              {/* Field coverage (#688): every persisted Schedule field above is
+                  shown except two, intentionally:
+                  - `deadline_at` (FanoutPlan) — scheduler-computed per-Command
+                    (`tick_at + starting_deadline`), not an operator-set schedule
+                    field; the operator-facing `starting_deadline` is shown below.
+                  - `origin` (#695) — surfaced as the per-row git badge + the
+                    read-only Edit modal, not as a detail row. */}
               <DetailItem label={t('columns.deadline')}>
                 <code className="text-xs">{selected.starting_deadline ?? '—'}</code>
               </DetailItem>

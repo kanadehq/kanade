@@ -17,7 +17,10 @@
     "tz": "tz",
     "active": "有効期間",
     "window": "実行窓",
+    "maxConcurrent": "同時実行上限",
+    "skipDates": "除外日",
     "require": "環境条件",
+    "onFailure": "失敗時",
     "deadline": "期限",
     "jitter": "ジッター",
     "rollout": "ロールアウト",
@@ -72,6 +75,8 @@
   },
   "rollout_one": "{{count}} 波",
   "rollout_other": "{{count}} 波",
+  "retry": "リトライ {{max}}回 · 間隔 {{backoff}}",
+  "skipDatesSummary": "{{first}} 他{{count}}件",
   "status": {
     "on": "ON",
     "off": "OFF"
