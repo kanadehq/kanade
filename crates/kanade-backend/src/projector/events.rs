@@ -19,18 +19,71 @@
 
 use anyhow::{Context, Result};
 use async_nats::jetstream::{self, consumer::pull::Config as PullConfig};
+use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use kanade_shared::kv::STREAM_EVENTS;
 use kanade_shared::subject::EVENTS_STARTED_FILTER;
 use kanade_shared::wire::EventStarted;
 use sqlx::SqlitePool;
+use std::time::Duration;
 use tracing::{debug, info, warn};
+
+use super::spec_cache::ExplodeSpecCache;
+
+/// Minimum reap slack regardless of how short a job's timeout is — the
+/// agent still needs time to force-kill its child, flush its events
+/// outbox, and for the strictly-serial projector to land the result.
+const MIN_REAP_SLACK: Duration = Duration::from_secs(120);
+
+/// Per-run reap deadline: the instant the backend should stop waiting
+/// for an `ExecResult` and let the cleanup reaper give up on the
+/// in-flight row. The agent force-kills its child at `execute.timeout`
+/// and emits a result, so a row still in-flight past `timeout + slack`
+/// means the agent itself died mid-run (or the result was lost), not
+/// that the run is slow. `slack = max(2m, timeout/2)` absorbs the
+/// agent-kill + outbox-flush + projector lag and gives longer jobs
+/// proportionally more grace.
+///
+/// Computed off `recorded_at` — the JetStream/backend-side publish
+/// clock — NOT the agent-stamped `started_at`, so the deadline lives in
+/// the same clock domain as the reaper's `now` and is immune to agent
+/// clock skew across the fleet (#682).
+fn reap_deadline(timeout: Duration, recorded_at: DateTime<Utc>) -> DateTime<Utc> {
+    let slack = std::cmp::max(MIN_REAP_SLACK, timeout / 2);
+    // Every arm is checked_*: a malformed/absurd manifest timeout (humantime
+    // can parse values near Duration::MAX) must not overflow and panic — the
+    // events projector runs in a background task, so a panic here halts ALL
+    // future projection (gemini/claude #684). On overflow, clamp the span to
+    // a 1-year cap (still far past any real run's timeout).
+    let cap = chrono::Duration::days(365);
+    let span = timeout
+        .checked_add(slack)
+        .and_then(|d| chrono::Duration::from_std(d).ok())
+        .unwrap_or(cap);
+    recorded_at
+        .checked_add_signed(span)
+        .unwrap_or_else(|| recorded_at + cap)
+}
+
+/// Resolve a started run's reap deadline from the cached manifest's
+/// `execute.timeout`. Returns None when the manifest isn't cached
+/// (ad-hoc / not-yet-warmed) or its timeout string won't parse — the
+/// reaper then falls back to the flat `INFLIGHT_TIMEOUT_HOURS` cutoff.
+async fn resolve_expires_at(
+    cache: &ExplodeSpecCache,
+    manifest_id: &str,
+    recorded_at: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    let manifest = cache.manifest(manifest_id).await?;
+    let timeout = humantime::parse_duration(&manifest.execute.timeout).ok()?;
+    Some(reap_deadline(timeout, recorded_at))
+}
 
 // pub(crate): consumer_reset::reset_if_wiped names this durable when
 // deciding what to drop after a projection-DB wipe (#389).
 pub(crate) const CONSUMER_NAME: &str = "backend_events_projector";
 
-pub async fn run(js: jetstream::Context, pool: SqlitePool) -> Result<()> {
+pub async fn run(js: jetstream::Context, pool: SqlitePool, cache: ExplodeSpecCache) -> Result<()> {
     let stream = js
         .get_stream(STREAM_EVENTS)
         .await
@@ -72,7 +125,11 @@ pub async fn run(js: jetstream::Context, pool: SqlitePool) -> Result<()> {
         let recorded_at = super::publish_time(&msg);
         match serde_json::from_slice::<EventStarted>(&msg.payload) {
             Ok(e) => {
-                if let Err(err) = insert_inflight_row(&pool, &e, recorded_at).await {
+                // #682: stamp the per-run reap deadline now (cache hit =
+                // no broker round-trip). A miss leaves it NULL and the
+                // reaper falls back to the flat 24h cutoff.
+                let expires_at = resolve_expires_at(&cache, &e.manifest_id, recorded_at).await;
+                if let Err(err) = insert_inflight_row(&pool, &e, recorded_at, expires_at).await {
                     warn!(
                         error = %err,
                         result_id = %e.result_id,
@@ -116,7 +173,8 @@ pub async fn run(js: jetstream::Context, pool: SqlitePool) -> Result<()> {
 async fn insert_inflight_row(
     pool: &SqlitePool,
     e: &EventStarted,
-    recorded_at: chrono::DateTime<chrono::Utc>,
+    recorded_at: DateTime<Utc>,
+    expires_at: Option<DateTime<Utc>>,
 ) -> Result<()> {
     // `execution_results.job_id` (added in migration 0002) holds
     // the manifest id (= cmd id), NOT exec_id — naming legacy from
@@ -132,8 +190,8 @@ async fn insert_inflight_row(
     sqlx::query(
         "INSERT INTO execution_results (
              result_id, request_id, exec_id, pc_id, started_at,
-             version, job_id, recorded_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             version, job_id, recorded_at, expires_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(result_id) DO NOTHING",
     )
     .bind(&e.result_id)
@@ -144,6 +202,7 @@ async fn insert_inflight_row(
     .bind(&e.version)
     .bind(&e.manifest_id)
     .bind(recorded_at)
+    .bind(expires_at)
     .execute(pool)
     .await?;
     Ok(())
@@ -180,7 +239,7 @@ mod tests {
     #[tokio::test]
     async fn events_started_creates_inflight_row() {
         let pool = fresh_pool().await;
-        insert_inflight_row(&pool, &sample("r1", "e1", "pc1"), Utc::now())
+        insert_inflight_row(&pool, &sample("r1", "e1", "pc1"), Utc::now(), None)
             .await
             .unwrap();
         let row: (Option<i64>, Option<chrono::DateTime<chrono::Utc>>) = sqlx::query_as(
@@ -201,8 +260,12 @@ mod tests {
         // NOTHING` makes the second insert a no-op.
         let pool = fresh_pool().await;
         let e = sample("r1", "e1", "pc1");
-        insert_inflight_row(&pool, &e, Utc::now()).await.unwrap();
-        insert_inflight_row(&pool, &e, Utc::now()).await.unwrap();
+        insert_inflight_row(&pool, &e, Utc::now(), None)
+            .await
+            .unwrap();
+        insert_inflight_row(&pool, &e, Utc::now(), None)
+            .await
+            .unwrap();
         let count: (i64,) =
             sqlx::query_as("SELECT COUNT(*) FROM execution_results WHERE result_id = ?")
                 .bind("r1")
@@ -237,7 +300,7 @@ mod tests {
         .await
         .unwrap();
         // Out-of-order start arrives.
-        insert_inflight_row(&pool, &sample("r1", "e1", "pc1"), Utc::now())
+        insert_inflight_row(&pool, &sample("r1", "e1", "pc1"), Utc::now(), None)
             .await
             .unwrap();
         // Row count still 1, finished_at still set.
@@ -260,13 +323,13 @@ mod tests {
         // Broadcast Command → N PCs each emit events.started with
         // distinct result_id (= per-PC UUID). All N rows persist.
         let pool = fresh_pool().await;
-        insert_inflight_row(&pool, &sample("r1", "e1", "pc1"), Utc::now())
+        insert_inflight_row(&pool, &sample("r1", "e1", "pc1"), Utc::now(), None)
             .await
             .unwrap();
-        insert_inflight_row(&pool, &sample("r2", "e1", "pc2"), Utc::now())
+        insert_inflight_row(&pool, &sample("r2", "e1", "pc2"), Utc::now(), None)
             .await
             .unwrap();
-        insert_inflight_row(&pool, &sample("r3", "e1", "pc3"), Utc::now())
+        insert_inflight_row(&pool, &sample("r3", "e1", "pc3"), Utc::now(), None)
             .await
             .unwrap();
         let count: (i64,) =
@@ -276,5 +339,41 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(count.0, 3);
+    }
+
+    #[tokio::test]
+    async fn insert_inflight_row_persists_expires_at() {
+        // #682: when the projector resolves a deadline it must land on
+        // the row so the reaper can key on it.
+        let pool = fresh_pool().await;
+        let recorded = Utc.with_ymd_and_hms(2026, 5, 20, 12, 0, 0).unwrap();
+        let expires = reap_deadline(Duration::from_secs(360), recorded);
+        insert_inflight_row(&pool, &sample("r1", "e1", "pc1"), recorded, Some(expires))
+            .await
+            .unwrap();
+        let row: (Option<DateTime<Utc>>,) =
+            sqlx::query_as("SELECT expires_at FROM execution_results WHERE result_id = ?")
+                .bind("r1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(row.0, Some(expires));
+    }
+
+    #[test]
+    fn reap_deadline_uses_min_slack_for_short_timeouts() {
+        // A 20s check: slack floors at MIN_REAP_SLACK (2m), not 10s.
+        let recorded = Utc.with_ymd_and_hms(2026, 5, 20, 12, 0, 0).unwrap();
+        let d = reap_deadline(Duration::from_secs(20), recorded);
+        // 20s timeout + 120s floor slack = 140s.
+        assert_eq!(d, recorded + chrono::Duration::seconds(140));
+    }
+
+    #[test]
+    fn reap_deadline_scales_slack_for_long_timeouts() {
+        // A 1h timeout: slack = timeout/2 = 30m, so deadline = +90m.
+        let recorded = Utc.with_ymd_and_hms(2026, 5, 20, 12, 0, 0).unwrap();
+        let d = reap_deadline(Duration::from_secs(3600), recorded);
+        assert_eq!(d, recorded + chrono::Duration::minutes(90));
     }
 }

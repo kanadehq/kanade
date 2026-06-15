@@ -510,8 +510,12 @@ pub(crate) async fn run_backend() -> Result<()> {
     {
         let pool = pool.clone();
         let js = jetstream.clone();
+        // #682: the events projector stamps each in-flight row's
+        // per-run reap deadline from the cached manifest's timeout, so
+        // it shares the same ExplodeSpecCache as the results projector.
+        let cache = explode_spec_cache.clone();
         tokio::spawn(async move {
-            if let Err(e) = projector::events::run(js, pool).await {
+            if let Err(e) = projector::events::run(js, pool, cache).await {
                 error!(error = %e, "events projector exited");
             }
         });

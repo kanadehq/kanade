@@ -65,13 +65,20 @@ const PENDING_TIMEOUT_HOURS: i64 = 1;
 /// no result is ever emitted and the row is stuck in-flight
 /// permanently.
 ///
-/// Why 24 h (vs the 1 h pending timeout): a legitimately long run —
-/// e.g. a job that drives an interactive `claude` session — can sit
-/// `finished_at IS NULL` for hours by design, so the threshold must
-/// clear the longest plausible real run. Post-#330 every run is
-/// force-killed at its `timeout_secs` and returns a result, so a row
-/// still NULL after 24 h is genuinely abandoned, not slow. Tunable
-/// here; deliberately generous to avoid demoting a live run.
+/// #682: this is now only the FALLBACK cutoff for in-flight rows whose
+/// per-run `expires_at` is NULL — legacy rows written before the column
+/// existed, and any run whose manifest/timeout the events projector
+/// couldn't resolve. Rows that DO carry `expires_at` (the common case)
+/// are reaped the moment `now > expires_at` instead, i.e. roughly at
+/// `recorded_at + timeout + slack` — minutes after an abandoned short
+/// run, not a day. See `projector::events::reap_deadline`.
+///
+/// Why 24 h for the fallback (vs the 1 h pending timeout): a legitimately
+/// long run — e.g. a job that drives an interactive `claude` session —
+/// can sit `finished_at IS NULL` for hours by design, so the blind
+/// threshold must clear the longest plausible real run. Post-#330 every
+/// run is force-killed at its `timeout_secs` and returns a result, so a
+/// row still NULL after 24 h with no deadline is genuinely abandoned.
 const INFLIGHT_TIMEOUT_HOURS: i64 = 24;
 
 /// Sentinel `exit_code` stamped on a reaped in-flight row. `-1`
@@ -82,8 +89,8 @@ const REAPED_EXIT_CODE: i64 = -1;
 
 /// Note appended to a reaped row's `stderr` so an operator opening
 /// the Activity detail sees WHY the row finished without real output.
-const REAPED_STDERR_NOTE: &str = "[backend: reaped — no ExecResult within 24h; agent likely died mid-run \
-     or hit the pre-v0.43.14 kill-hang (#330)]";
+const REAPED_STDERR_NOTE: &str = "[backend: reaped — no ExecResult before the run's deadline; agent likely \
+     died mid-run or hit the pre-v0.43.14 kill-hang (#330)]";
 
 /// v0.31 / #41: `inventory_history` retention. 90 d is enough for
 /// rollout-curve / first-seen use cases without unbounded growth.
@@ -191,15 +198,13 @@ pub fn spawn(pool: SqlitePool) -> tokio::task::JoinHandle<()> {
             // rows whose `ExecResult` never arrived (agent died /
             // pre-#330 kill-hang). Without this they show "実行中"
             // forever on the Activity page. Shares the 5 min timer.
-            match reap_orphaned_results(
-                &pool,
-                now - chrono::Duration::hours(INFLIGHT_TIMEOUT_HOURS),
-            )
-            .await
-            {
+            // #682: the reaper now keys on each row's per-run
+            // `expires_at` (with the 24h cutoff as the NULL fallback),
+            // so it passes the tick `now` and derives both internally.
+            match reap_orphaned_results(&pool, now).await {
                 Ok(n) if n > 0 => info!(
                     reaped = n,
-                    "execution_results cleanup: reaped {n} orphaned in-flight rows (no result within {INFLIGHT_TIMEOUT_HOURS}h)",
+                    "execution_results cleanup: reaped {n} orphaned in-flight rows past their reap deadline",
                 ),
                 Ok(_) => {}
                 Err(e) => warn!(error = %e, "execution_results reap failed"),
@@ -497,29 +502,43 @@ async fn expire_stale_pending(pool: &SqlitePool, cutoff: DateTime<Utc>) -> Resul
     Ok(rows.rows_affected())
 }
 
-/// Reap in-flight `execution_results` rows (`finished_at IS NULL`)
-/// whose `started_at` predates [`INFLIGHT_TIMEOUT_HOURS`]: stamp
-/// `finished_at = now`, set [`REAPED_EXIT_CODE`], mark `reaped = 1`,
-/// and append [`REAPED_STDERR_NOTE`] to `stderr`. Returns the number
-/// of rows affected. Idempotent — the `finished_at IS NULL` guard
-/// means a row reaped on one tick is invisible to the next.
+/// Reap abandoned in-flight `execution_results` rows (`finished_at IS
+/// NULL`): stamp `finished_at = now`, set [`REAPED_EXIT_CODE`], mark
+/// `reaped = 1`, and append [`REAPED_STDERR_NOTE`] to `stderr`. Returns
+/// the number of rows affected. Idempotent — the `finished_at IS NULL`
+/// guard means a row reaped on one tick is invisible to the next.
+///
+/// #682: a row is "abandoned" once `now` passes its per-run
+/// `expires_at` (= `recorded_at + timeout + slack`, stamped by the
+/// events projector). Rows without an `expires_at` (legacy rows, or runs
+/// whose manifest/timeout couldn't be resolved) fall back to the blind
+/// `started_at < now - INFLIGHT_TIMEOUT_HOURS` cutoff — the pre-#682
+/// behaviour. `now` is the cleanup tick's single timestamp, in the same
+/// clock domain as the `recorded_at` the deadline was computed from.
 ///
 /// `reaped = 1` tags the row as a placeholder so the results
 /// projector can still overwrite it if the *real* `ExecResult`
 /// arrives late (migration 0010 / gemini review on #332); on that
 /// overwrite the projector clears the flag back to 0.
 ///
-/// `WHERE finished_at IS NULL AND started_at < ...` is served by the
-/// partial index `idx_execution_results_inflight` (started_at DESC,
-/// scoped to in-flight rows), so the scan stays cheap regardless of
-/// how large the finished-row history grows.
+/// SQLite serves the nested OR by scanning the `expires_at` partial
+/// index `idx_execution_results_expires` and applying the OR as a filter
+/// (verified via EXPLAIN QUERY PLAN: `SCAN ... USING INDEX
+/// idx_execution_results_expires`) — NOT a two-index UNION across both
+/// partial indexes (the nested-OR form doesn't qualify for that). It
+/// doesn't need to: because that index is scoped to `finished_at IS
+/// NULL`, the scan visits only the small in-flight working set and never
+/// touches the finished-row history, so it stays cheap regardless of how
+/// large the history grows. (`idx_execution_results_inflight` on
+/// `started_at` still serves the coverage/scheduler in-flight reads.)
 ///
 /// `stderr` is appended-to rather than overwritten so any partial
 /// capture the agent DID manage to ship before dying survives; the
 /// `CASE` keeps the note flush against the top when `stderr` was
 /// empty (the common in-flight case, since the row was created by
 /// `events.started` with the default empty string).
-async fn reap_orphaned_results(pool: &SqlitePool, cutoff: DateTime<Utc>) -> Result<u64> {
+async fn reap_orphaned_results(pool: &SqlitePool, now: DateTime<Utc>) -> Result<u64> {
+    let fallback_cutoff = now - chrono::Duration::hours(INFLIGHT_TIMEOUT_HOURS);
     // #390: finished_at is stamped from a chrono bind (RFC 3339), not
     // CURRENT_TIMESTAMP — the latter's space-separated text was the
     // one writer leaking a second format into a chrono-bound column.
@@ -533,13 +552,17 @@ async fn reap_orphaned_results(pool: &SqlitePool, cutoff: DateTime<Utc>) -> Resu
                     ELSE stderr || char(10) || ?
                 END
           WHERE finished_at IS NULL
-            AND started_at < ?",
+            AND (
+                  (expires_at IS NOT NULL AND expires_at < ?)
+               OR (expires_at IS NULL     AND started_at < ?)
+            )",
     )
-    .bind(Utc::now())
+    .bind(now)
     .bind(REAPED_EXIT_CODE)
     .bind(REAPED_STDERR_NOTE)
     .bind(REAPED_STDERR_NOTE)
-    .bind(cutoff)
+    .bind(now)
+    .bind(fallback_cutoff)
     .execute(pool)
     .await
     .context("UPDATE execution_results reap orphaned in-flight")?;
@@ -565,10 +588,6 @@ mod tests {
     /// call time.
     fn pending_cutoff() -> DateTime<Utc> {
         Utc::now() - chrono::Duration::hours(PENDING_TIMEOUT_HOURS)
-    }
-
-    fn inflight_cutoff() -> DateTime<Utc> {
-        Utc::now() - chrono::Duration::hours(INFLIGHT_TIMEOUT_HOURS)
     }
 
     /// Insert an executions row at a chosen `initiated_at` offset
@@ -709,9 +728,7 @@ mod tests {
     async fn inflight_older_than_24h_is_reaped() {
         let pool = fresh_pool().await;
         insert_inflight_result(&pool, "r-stale", -25 * 60, "").await; // 25h ago
-        let n = reap_orphaned_results(&pool, inflight_cutoff())
-            .await
-            .unwrap();
+        let n = reap_orphaned_results(&pool, Utc::now()).await.unwrap();
         assert_eq!(n, 1);
         let row: (Option<String>, Option<i64>, String, i64) = sqlx::query_as(
             "SELECT finished_at, exit_code, stderr, reaped \
@@ -733,9 +750,7 @@ mod tests {
         // legitimately long job — must NOT be reaped.
         let pool = fresh_pool().await;
         insert_inflight_result(&pool, "r-fresh", -60, "").await; // 1h ago
-        let n = reap_orphaned_results(&pool, inflight_cutoff())
-            .await
-            .unwrap();
+        let n = reap_orphaned_results(&pool, Utc::now()).await.unwrap();
         assert_eq!(n, 0, "fresh in-flight row must not be touched");
         let fin: (Option<String>,) =
             sqlx::query_as("SELECT finished_at FROM execution_results WHERE result_id = ?")
@@ -763,9 +778,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        let n = reap_orphaned_results(&pool, inflight_cutoff())
-            .await
-            .unwrap();
+        let n = reap_orphaned_results(&pool, Utc::now()).await.unwrap();
         assert_eq!(n, 0);
         let row: (Option<i64>, String) =
             sqlx::query_as("SELECT exit_code, stderr FROM execution_results WHERE result_id = ?")
@@ -783,9 +796,7 @@ mod tests {
         // survive; the note is appended, not overwritten.
         let pool = fresh_pool().await;
         insert_inflight_result(&pool, "r-partial", -25 * 60, "partial output").await;
-        reap_orphaned_results(&pool, inflight_cutoff())
-            .await
-            .unwrap();
+        reap_orphaned_results(&pool, Utc::now()).await.unwrap();
         let s: (String,) =
             sqlx::query_as("SELECT stderr FROM execution_results WHERE result_id = ?")
                 .bind("r-partial")
@@ -806,14 +817,95 @@ mod tests {
     async fn reap_is_idempotent() {
         let pool = fresh_pool().await;
         insert_inflight_result(&pool, "r-old", -30 * 60, "").await; // 30h ago
-        let first = reap_orphaned_results(&pool, inflight_cutoff())
-            .await
-            .unwrap();
-        let second = reap_orphaned_results(&pool, inflight_cutoff())
-            .await
-            .unwrap();
+        let first = reap_orphaned_results(&pool, Utc::now()).await.unwrap();
+        let second = reap_orphaned_results(&pool, Utc::now()).await.unwrap();
         assert_eq!(first, 1);
         assert_eq!(second, 0, "reaped row is no longer in-flight");
+    }
+
+    /// Insert an in-flight row with an explicit per-run `expires_at`
+    /// (#682), both offsets in minutes from now (negative = past).
+    async fn insert_inflight_with_expiry(
+        pool: &SqlitePool,
+        result_id: &str,
+        started_offset_min: i64,
+        expires_offset_min: i64,
+    ) {
+        sqlx::query(
+            "INSERT INTO execution_results
+                (result_id, request_id, pc_id, exit_code, stdout, stderr,
+                 started_at, finished_at, expires_at)
+             VALUES (?, 'req', 'pc-1', NULL, '', '', ?, NULL, ?)",
+        )
+        .bind(result_id)
+        .bind(Utc::now() + chrono::Duration::minutes(started_offset_min))
+        .bind(Utc::now() + chrono::Duration::minutes(expires_offset_min))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn inflight_past_expires_at_is_reaped_before_24h() {
+        // #682: a short run abandoned mid-flight is reaped as soon as
+        // its per-run deadline passes — minutes, not a full day. The
+        // row started only 10 min ago (far inside the 24h fallback) but
+        // its expires_at is already 5 min in the past.
+        let pool = fresh_pool().await;
+        insert_inflight_with_expiry(&pool, "r-deadline", -10, -5).await;
+        let n = reap_orphaned_results(&pool, Utc::now()).await.unwrap();
+        assert_eq!(n, 1, "row past its expires_at must be reaped early");
+        let row: (Option<String>, Option<i64>, i64) = sqlx::query_as(
+            "SELECT finished_at, exit_code, reaped \
+             FROM execution_results WHERE result_id = ?",
+        )
+        .bind("r-deadline")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(row.0.is_some(), "finished_at stamped");
+        assert_eq!(row.1, Some(REAPED_EXIT_CODE));
+        assert_eq!(row.2, 1);
+    }
+
+    #[tokio::test]
+    async fn inflight_before_expires_at_survives_past_24h() {
+        // #682: a legitimately long run keeps its full timeout. Even
+        // though it started 30h ago (past the blind 24h fallback), its
+        // expires_at is still in the future, so it must NOT be reaped —
+        // the deadline arm wins and the NULL-only fallback never fires.
+        let pool = fresh_pool().await;
+        insert_inflight_with_expiry(&pool, "r-longrun", -30 * 60, 60).await;
+        let n = reap_orphaned_results(&pool, Utc::now()).await.unwrap();
+        assert_eq!(n, 0, "a run before its deadline must survive past 24h");
+        let fin: (Option<String>,) =
+            sqlx::query_as("SELECT finished_at FROM execution_results WHERE result_id = ?")
+                .bind("r-longrun")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(fin.0.is_none(), "row stays in-flight");
+    }
+
+    #[tokio::test]
+    async fn inflight_at_exact_expires_at_boundary_survives() {
+        // Strict `<` boundary (matches the pending/finished cutoff tests):
+        // a row whose expires_at equals `now` exactly must NOT be reaped.
+        let pool = fresh_pool().await;
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO execution_results
+                (result_id, request_id, pc_id, exit_code, stdout, stderr,
+                 started_at, finished_at, expires_at)
+             VALUES ('r-boundary', 'req', 'pc-1', NULL, '', '', ?, NULL, ?)",
+        )
+        .bind(now - chrono::Duration::minutes(10))
+        .bind(now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let n = reap_orphaned_results(&pool, now).await.unwrap();
+        assert_eq!(n, 0, "row exactly at expires_at must not be reaped");
     }
 
     /// Insert a finished `execution_results` row with a chosen
