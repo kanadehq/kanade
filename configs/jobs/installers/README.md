@@ -80,8 +80,8 @@ What it automates per role:
   `-BootstrapAdminPassword`) into a **temp** copy → publish it
   (backend `script_object`, client inlined `script_file`) → render a
   version-pinned **temp** manifest → `kanade job create` → `kanade exec
-  --pcs <pc>` (lower-cased) / `--groups <g>` → poll the installed exe to
-  verify. Nothing under version control is mutated.
+  --pcs <pc>` (verbatim casing) / `--groups <g>` → poll the installed exe
+  to verify. Nothing under version control is mutated.
 - **agent** — `kanade agent publish` → `kanade agent rollout <ver>` with
   the scope mapped from the same flags (`-Pc` → `--pc`, one `-Groups` →
   `--group`, `-All` → `--global`, plus optional `-Jitter`). Verification:
@@ -211,11 +211,14 @@ Five steps per backend release:
    ```
 
    > **Target flag gotcha.** It's `--pcs <id>` / `--groups <grp>` —
-   > NOT `--target pcs=<id>`. And the agent registers its `pc_id`
-   > **lowercased**, so an upper-cased `$env:COMPUTERNAME` must be
-   > passed in lower case. Targeting the upper-cased name
-   > publishes to a subject no agent is subscribed to, so the exec
-   > sticks at `pending` with no error.
+   > NOT `--target pcs=<id>`. And the agent registers its `pc_id` as
+   > its `$env:COMPUTERNAME` **verbatim** — casing is NOT uniform
+   > across the fleet (some boxes upper-, some lower-case), so pass
+   > the **exact registered casing** (check the SPA Inventory /
+   > `kanade ping`); do NOT case-fold it. NATS subjects are
+   > case-sensitive, so a mis-cased name publishes to a subject no
+   > agent is subscribed to and the exec sticks at `pending` with no
+   > error.
 
    The agent (running on the backend host as LocalSystem) fetches
    the deploy script from `OBJECT_SCRIPTS`, sha-verifies it,
@@ -291,8 +294,8 @@ Five steps, same shape as the backend flow:
    kanade job create configs/jobs/installers/install-kanade-agent.yaml
    ```
 
-5. **Exec against the wedged agent's host** (`--pcs <id>`, lowercased —
-   same gotcha as above).
+5. **Exec against the wedged agent's host** (`--pcs <id>`, verbatim
+   casing — same gotcha as above).
 
    ```bash
    kanade exec install-kanade-agent --pcs <wedged-agent-host>

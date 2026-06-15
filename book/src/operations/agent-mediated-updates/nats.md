@@ -46,9 +46,8 @@ service.
 
 ## Agent-mediated update (steady state)
 
-> **Status:** template-only. `scripts/deploy/nats.ps1` doesn't
-> ship `$AgentSource*` knobs yet — agent-mode is on the backlog.
-> The shape below is what it WILL look like once the knobs land.
+`scripts/deploy/nats.ps1` ships the `$AgentSource*` knobs (#234), so the
+broker can be upgraded through the fleet — no RDP to the broker host.
 
 ### 1. Build / fetch nats-server.exe
 
@@ -69,7 +68,7 @@ kanade app publish nats-server 2.10.20 .\nats-server.exe
 
 ### 3. Edit deploy-nats.ps1
 
-Once the agent-mode knobs ship, the pattern matches
+The pattern matches
 [deploy/backend.ps1](./backend.md#3-edit-scriptsdeploybackendps1):
 
 ```powershell
@@ -87,7 +86,8 @@ kanade job create jobs\install-kanade-nats.yaml
 kanade exec install-kanade-nats --pcs <broker-host>
 ```
 
-The job manifest will look like:
+The job manifest ships at
+`configs/jobs/installers/install-kanade-nats.yaml`:
 
 ```yaml
 id: install-kanade-nats

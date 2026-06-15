@@ -24,7 +24,9 @@
 #   3. Update `version:` below + `script_object:` to match.
 #   4. `kanade job create configs/jobs/installers/install-kanade-agent.yaml`
 #   5. `kanade exec install-kanade-agent --pcs <wedged-agent-host>`
-#      (flag is `--pcs <id>`, pc_id LOWERCASED).
+#      (flag is `--pcs <id>`, pc_id VERBATIM — match the registered casing
+#      of $env:COMPUTERNAME exactly, do NOT case-fold; NATS subjects are
+#      case-sensitive so a mis-cased id sticks at pending).
 #
 # `require_approval: true` per SPEC §2.4.1 (parse-only today, #213) — a
 # binary swap of the control-plane endpoint is exactly the kind of
