@@ -1,0 +1,60 @@
+# #234: agent-mediated update path for nats-server (the broker).
+# Run an agent on the broker host, register this manifest, exec
+# against `--pcs <broker-host>` — the agent stops the KanadeNats
+# service, swaps nats-server.exe, and starts it back up.
+#
+# The agent talks to the broker OVER the broker, so the broker restart
+# drops its own connection mid-job. This is safe, not lossy: the agent's
+# outbox queues the result during the outage and drains it on reconnect
+# once the upgraded broker is back. The result row lands a few seconds
+# late in `/api/results` — "delayed, not lost".
+#
+# Workflow (operator side, edit version per nats-server release):
+#
+#   1. `kanade app publish nats-server 2.10.20 .\nats-server.exe`
+#      (nats-server.exe is upstream's — `build-release.ps1 -Roles nats`
+#      fetches it from github.com/nats-io/nats-server/releases)
+#   2. Copy `scripts/deploy/nats.ps1` locally, set:
+#        $AgentSourceUrl     = '<backend URL>'
+#        $AgentSourceVersion = '2.10.20'
+#        $AgentSourceSha256  = '<Get-FileHash ... -Algorithm SHA256>'
+#      then `kanade script publish deploy-nats 2.10.20 <edited copy>`
+#   3. Update `version:` below + `script_object:` to match.
+#   4. `kanade job create configs/jobs/installers/install-kanade-nats.yaml`
+#   5. `kanade exec install-kanade-nats --pcs <broker-host>`
+#      (flag is `--pcs <id>`, NOT `--target pcs=<id>`; pass the pc_id
+#      VERBATIM — match the registered casing of $env:COMPUTERNAME exactly
+#      (check SPA Inventory / `kanade ping`), do NOT case-fold it: NATS
+#      subjects are case-sensitive, so a mis-cased id sticks at pending).
+#      Roll a single canary broker first, watch the
+#      outbox + backend health, then fan out.
+#
+# `require_approval: true` is the SPEC §2.4.1 marker for "operator must
+# explicitly ack before fan-out". Today the field parses but doesn't gate
+# anything (parse-only since #213) — kept here so the manifest is correct
+# against the SPEC and starts gating once the approval flow lands.
+
+id: install-kanade-nats
+tags: [infra]   # operator taxonomy for the SPA tag filter
+version: 0.1.0
+description: "Update nats-server on the broker host via deploy/nats.ps1 (#234)"
+
+execute:
+  shell: powershell
+  # `deploy-nats.ps1` lives in OBJECT_SCRIPTS (per `kanade script publish
+  # deploy-nats ...` in the workflow above). Agent fetches + sha-verifies
+  # it from there at exec time (#214). The script's "agent-mode" knobs
+  # (edited before the publish) tell it which nats-server version to pull
+  # from OBJECT_APP_PACKAGES. Bump this to match the published version.
+  script_object: deploy-nats/2.10.20
+  # Generous timeout: BITS download on slow links + service stop (up to
+  # 30s WaitForStatus) + copy + ACL harden + service start (up to 30s
+  # WaitForStatus) + headroom for sc.exe failure-config.
+  timeout: 300s
+  # MUST run as LocalSystem — Stop-Service / Start-Service / sc.exe /
+  # icacls all need admin. Agent already runs as LocalSystem in prod, so
+  # this is the default anyway; spelt out so a future runas-default change
+  # can't silently break the install.
+  run_as: system
+
+require_approval: true

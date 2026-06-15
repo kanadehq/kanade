@@ -22,6 +22,27 @@
   default. Pass -NoFirewall when an external firewall (corporate /
   WAF / cloud security group) is the source of truth.
 
+  Agent-mediated update mode (#234): like deploy-backend.ps1, this
+  script has a second mode for upgrading the broker through the fleet
+  itself instead of RDP-ing to the broker host. Set the `$AgentSource*`
+  knobs near the top BEFORE `kanade script publish`, reference the
+  uploaded copy from a manifest via `execute.script_object`, and run it
+  with `kanade exec install-kanade-nats`: the script downloads
+  nats-server.exe from `/api/app-packages/nats-server/<version>`,
+  sha-verifies it, reuses the existing nats-server.conf on the target
+  (so the operator's token edits survive), and then runs the normal
+  install flow against the downloaded staging dir. Leave the knobs empty
+  for the original operator-direct (`-SourceDir`) flow used on first-host
+  bootstrap.
+
+  CAVEAT unique to NATS: the agent reaches the broker OVER the broker,
+  so stopping nats-server for the swap drops the agent's own connection
+  mid-job. This is safe — not lossy: the agent's outbox queues results
+  during the outage and drains them on reconnect once the upgraded
+  broker is back up. The job result is therefore "delayed, not lost".
+  Expect the `install-kanade-nats` exec result to land a few seconds
+  late (after the broker restarts and the agent reconnects).
+
 .PARAMETER SourceDir
   Directory holding nats-server.exe and nats-server.conf. Defaults
   to the directory this script lives in.
@@ -107,6 +128,128 @@ the shipped sample's commented-out auth block).
 }
 
 $ErrorActionPreference = 'Stop'
+
+# === Agent-mode knobs (#234 — mirror of deploy-backend.ps1) ================
+# When this script is uploaded to OBJECT_SCRIPTS via
+# `kanade script publish deploy-nats <v> <edited-copy>` and a manifest
+# references it through `execute.script_object`, PowerShell runs the body
+# with NO CLI args — the `param()` block takes defaults, so
+# `$SourceDir = $PSScriptRoot` ends up `$null` and the folder-install path
+# fails fast.
+#
+# Set the `$AgentSource*` constants BEFORE publishing to switch into
+# agent mode: the script downloads nats-server.exe from
+# OBJECT_APP_PACKAGES into a temp staging dir, reuses the existing
+# nats-server.conf on the destination host, then runs the existing install
+# flow against that staging dir. Leave them empty (= default) to keep the
+# manual `-SourceDir <folder>` flow working unchanged for first-host
+# bootstrap.
+#
+# `Get-FileHash <nats-server.exe> -Algorithm SHA256` for the Sha256 value
+# — a mismatch aborts BEFORE the swap, so a MITM / corrupted upload leaves
+# the running broker intact.
+#
+# Unlike deploy-backend.ps1 there is no boot-sentinel quarantine / arm-for-
+# swap step: nats-server is upstream's binary, not a kanade build, so it
+# carries none of the `check-quarantine` / `arm-for-swap` subcommands.
+$AgentSourceUrl       = ''   # e.g. 'http://kanade-backend.local:8080'
+$AgentSourceVersion   = ''   # e.g. '2.10.20' (the nats-server release)
+$AgentSourceSha256    = ''   # lowercase hex of the uploaded nats-server.exe
+# Bearer for /api/app-packages (the endpoint returns HTTP 401 without it
+# when the backend gates app-packages on auth). Same token the agent uses
+# against the backend HTTP API. Leave empty if app-packages is unauthed.
+$AgentSourceAuthToken = ''
+# How long BITS keeps retrying after a transient transfer error before
+# giving up (the download time itself is unbounded). Mirrors the backend
+# knob; the outer manifest `timeout:` still bounds the whole job.
+$AgentDownloadRetryTimeoutSecs = 1800
+# ===========================================================================
+
+# If the agent-mode knobs are set, download the binary into a temp staging
+# dir + repoint `$SourceDir` at it before the existing install flow runs.
+$AgentStaging = $null
+
+# Trap defined BEFORE any throw-prone agent-mode code: PowerShell's `trap`
+# only catches terminating errors that fire AFTER its definition in the
+# same scope, so placing it later would leak the staging dir on a failed
+# download / sha-verify. `$AgentStaging` is $null above so the Test-Path
+# guard never throws on a not-yet-bound name. `break` re-throws the
+# original error after cleanup.
+trap {
+    if ($AgentStaging -and (Test-Path $AgentStaging)) {
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $AgentStaging
+    }
+    break
+}
+
+if ($AgentSourceUrl) {
+    if (-not $AgentSourceVersion) {
+        throw 'deploy-nats (agent mode): $AgentSourceVersion must be set alongside $AgentSourceUrl.'
+    }
+    if (-not $AgentSourceSha256) {
+        throw 'deploy-nats (agent mode): $AgentSourceSha256 must be set — leaving it blank would silently install whatever the backend serves.'
+    }
+
+    $tmpRoot = [System.IO.Path]::GetTempPath()
+    $AgentStaging = Join-Path $tmpRoot ('kanade-deploy-nats-' + [System.Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $AgentStaging | Out-Null
+    $stagedExe = Join-Path $AgentStaging 'nats-server.exe'
+
+    $url = "$($AgentSourceUrl.TrimEnd('/'))/api/app-packages/nats-server/$AgentSourceVersion"
+    Write-Host "deploy-nats (agent mode): downloading nats-server $AgentSourceVersion from $url (BITS)"
+    # BITS so a transient network drop resumes from the last byte instead
+    # of restarting; -Priority Foreground runs at interactive speed during
+    # the deploy window. Bearer auth via -CustomHeaders (BITS on PS 5.1+).
+    # On any throw (HTTP error, BITS stopped, sha mismatch below) the trap
+    # above clears $AgentStaging before re-throwing — no leaked tmp dir.
+    $bitsHeaders = @()
+    if ($AgentSourceAuthToken) {
+        $bitsHeaders += "Authorization: Bearer $($AgentSourceAuthToken.Trim())"
+    }
+    $bitsArgs = @{
+        Source       = $url
+        Destination  = $stagedExe
+        Priority     = 'Foreground'
+        RetryTimeout = $AgentDownloadRetryTimeoutSecs
+    }
+    if ($bitsHeaders.Count -gt 0) {
+        $bitsArgs.CustomHeaders = $bitsHeaders
+    }
+    Start-BitsTransfer @bitsArgs
+
+    # Sha verify BEFORE swap. Inline Remove-Item + throw is redundant with
+    # the trap (which would also fire) but keeps the mismatch message even
+    # if a future refactor bypasses the trap.
+    $actual = (Get-FileHash $stagedExe -Algorithm SHA256).Hash.ToLowerInvariant()
+    $expected = $AgentSourceSha256.ToLowerInvariant()
+    if ($actual -ne $expected) {
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $AgentStaging
+        throw "deploy-nats (agent mode): sha256 mismatch — expected=$expected actual=$actual. Refusing to install (possible MITM / corrupted upload)."
+    }
+    Write-Host "deploy-nats (agent mode): sha256 verified"
+
+    # nats-server.conf: reuse the one already installed (the operator's
+    # production config, with their token edits). Agent-mode is an upgrade
+    # path, not a fresh install — error fast if it's absent rather than
+    # reaching for a default sample that would clobber the live token.
+    #
+    # This path is spelled out literally rather than via $configDst because
+    # $configDir / $configDst are computed AFTER this block (forward
+    # reference). It MUST stay in sync with $configDst below if the install
+    # layout ever changes. (Mirrors deploy/backend.ps1's agent-mode block.)
+    $existingConfig = Join-Path (Join-Path $env:ProgramData 'Kanade') 'config\nats-server.conf'
+    if (Test-Path $existingConfig) {
+        Copy-Item -Force $existingConfig (Join-Path $AgentStaging 'nats-server.conf')
+        Write-Host "deploy-nats (agent mode): reusing existing nats-server.conf from $existingConfig"
+    } else {
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $AgentStaging
+        throw "deploy-nats (agent mode): no existing nats-server.conf at $existingConfig — agent-mode is an upgrade path, not a fresh install. Run with -SourceDir <folder> manually for the initial install."
+    }
+
+    # The install vars below ($exeSrc / $configSrc) are computed from
+    # $SourceDir *after* this block, so repointing it here is enough.
+    $SourceDir = $AgentStaging
+}
 
 $binDir    = Join-Path $env:ProgramFiles 'Kanade'
 $dataRoot  = Join-Path $env:ProgramData  'Kanade'
@@ -266,3 +409,10 @@ Write-Host "Installed bin: $exeDst"
 Write-Host "Runtime root:  $natsDir"
 Write-Host "Config (hardened ACL): $configDst"
 & $exeDst --version
+
+# Agent-mode staging dir cleanup on success. The `trap` above handles
+# failure paths; this clears the temp dir for the happy path so the agent
+# doesn't leak a staging dir per upgrade.
+if ($AgentStaging -and (Test-Path $AgentStaging)) {
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $AgentStaging
+}

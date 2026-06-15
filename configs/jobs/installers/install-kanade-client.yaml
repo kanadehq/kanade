@@ -21,7 +21,9 @@
 #   4. `kanade job create configs/jobs/installers/install-kanade-client.yaml`
 #   5. `kanade exec install-kanade-client --groups <grp>` / `--pcs <id>`
 #      (flags are `--groups`/`--pcs`/`--all`, NOT `--target ...`; pc_ids
-#      are LOWERCASED — an upper-cased COMPUTERNAME must be lower-cased)
+#      are VERBATIM — match the registered casing of $env:COMPUTERNAME
+#      exactly, do NOT case-fold; NATS subjects are case-sensitive so a
+#      mis-cased id sticks at pending)
 #
 # `require_approval: true` because client-app rollouts touch the
 # end-user-visible install path; gating behind an explicit ack
