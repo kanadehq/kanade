@@ -1,0 +1,135 @@
+# Device-driver inventory snapshot — per-PC driver versions projected
+# into inventory_facts + an exploded `inventory_drivers` table.
+#
+# Motivation: the hardware inventory (inventory-hw) captures the box's
+# shape but NOT driver versions, which is exactly what you need when
+# chasing a flaky device — e.g. the Intel AX211 Wi-Fi adapter behind
+# the `collect-wlan-events` disconnect investigation. With this job
+# registered + scheduled, "what Wi-Fi / GPU / storage driver is PC X
+# on, and when did it last change?" is a normal SQL/Inventory-page
+# lookup instead of an ad-hoc `kanade run`.
+#
+# This file is a Manifest (the shape `kanade exec` / `kanade job
+# create` expect). Same two usage modes as inventory-hw:
+#
+#   * One-shot (no projection — projector only matches registered jobs):
+#         kanade exec configs/jobs/inventory-driver.yaml --pcs <pc-id>
+#   * Register + schedule (facts projected into inventory_facts):
+#         kanade job create configs/jobs/inventory-driver.yaml
+#         # then a schedule yaml referencing id: inventory-driver
+#
+# Scope: signed drivers in a curated set of DeviceClasses (Net,
+# Bluetooth, Display, System, storage, USB, media, firmware). The full
+# Win32_PnPSignedDriver set is hundreds of rows per PC — most of them
+# generic Microsoft inbox drivers nobody troubleshoots — so the class
+# whitelist keeps the payload small (well under the 1 MiB NATS frame)
+# and the Inventory table scannable. Widen `$classes` below if you need
+# more; the explode table absorbs new rows without a schema change.
+
+id: inventory-driver
+tags: [inventory]   # operator taxonomy for the SPA tag filter
+version: 0.1.0
+description: Device-driver inventory (versions/dates for key device classes) via Win32_PnPSignedDriver
+execute:
+  shell: powershell
+  timeout: 60s
+  # Reading driver metadata is admin-only on some classes; the agent
+  # runs as LocalSystem in prod anyway. run_as left default (system).
+  # The script MUST emit a single JSON object on stdout (ConvertTo-Json
+  # -Compress -Depth 5 keeps the nested driver list intact and small).
+  script: |
+    $ErrorActionPreference = 'Stop'
+
+    # Curated DeviceClass whitelist — the drivers IT actually chases
+    # for stability. Win32_PnPSignedDriver's full set is hundreds of
+    # mostly-inbox rows; this keeps the payload bounded and the
+    # Inventory table readable. Add classes here as needed.
+    $classes = @(
+        'Net'          # Wi-Fi / Ethernet  (Intel AX211 lives here)
+        'Bluetooth'
+        'Display'      # GPU
+        'System'       # chipset / management engine / power
+        'DiskDrive'
+        'SCSIAdapter'  # NVMe / storage controllers
+        'USB'
+        'MEDIA'        # audio
+        'Firmware'
+    )
+
+    # Filter on the raw CIM object up front — class whitelist plus the
+    # two fields we dedup/key on (DeviceID is the explode PK;
+    # DriverVersion is what we report). Filtering before building the
+    # [pscustomobject] avoids a second nested pipeline per driver
+    # (CodeRabbit/Gemini #690).
+    $drivers = @(
+        Get-CimInstance Win32_PnPSignedDriver -ErrorAction Stop |
+            Where-Object { $_.DeviceID -and $_.DriverVersion -and ($classes -contains $_.DeviceClass) } |
+            ForEach-Object {
+                # Get-CimInstance converts CIM_DATETIME → [DateTime];
+                # null-guard for drivers that report no date.
+                $dd = $null
+                if ($_.DriverDate) {
+                    try { $dd = $_.DriverDate.ToString('yyyy-MM-dd') } catch { $dd = $null }
+                }
+                [pscustomobject]@{
+                    device_name    = $_.DeviceName
+                    device_class   = $_.DeviceClass
+                    driver_version = $_.DriverVersion
+                    driver_date    = $dd
+                    provider       = $_.DriverProviderName
+                    manufacturer   = $_.Manufacturer
+                    inf_name       = $_.InfName
+                    device_id      = $_.DeviceID
+                }
+            } |
+            Sort-Object device_class, device_name
+    )
+
+    [pscustomobject]@{
+        hostname     = $env:COMPUTERNAME
+        driver_count = $drivers.Count
+        drivers      = $drivers
+    } | ConvertTo-Json -Compress -Depth 5
+
+# Display config — drives the SPA Inventory page for this manifest.
+inventory:
+  display:
+    - { field: hostname,     label: Hostname }
+    - { field: driver_count, label: Drivers, type: number }
+    # `type: table` renders `drivers: [{...}]` as a nested sub-table on
+    # the per-PC detail page using `columns` as the schema; the fleet
+    # summary collapses it to a row count.
+    - field: drivers
+      label: Drivers
+      type: table
+      columns:
+        - { field: device_class,   label: Class    }
+        - { field: device_name,    label: Device   }
+        - { field: driver_version, label: Version  }
+        - { field: driver_date,    label: Date     }
+        - { field: provider,       label: Provider }
+  summary:
+    - { field: hostname,     label: Hostname }
+    - { field: driver_count, label: Drivers, type: number }
+  # Explode `drivers[]` into a flat table so cross-PC queries ("which
+  # PCs run AX211 driver < 24.40.0.4") are normal SQL filters. PK =
+  # (pc_id, job_id, device_id); track_history records driver-version
+  # changes into inventory_history so "when did PC X's Wi-Fi driver
+  # update?" is answerable. 90-day retention sweeper bounds storage.
+  explode:
+    - field: drivers
+      table: inventory_drivers
+      primary_key: [device_id]
+      track_history: true
+      columns:
+        # `device_id` is the primary_key, so it MUST also appear in
+        # columns (the backend's ensure-derived-table check rejects a
+        # PK entry that isn't a declared column — otherwise inventory
+        # search 500s). Mirrors inventory-hw's disks explode.
+        - { field: device_id,      type: text,    index: false }
+        - { field: device_name,    type: text,    index: false }
+        - { field: device_class,   type: text,    index: true  }
+        - { field: driver_version, type: text,    index: true  }
+        - { field: driver_date,    type: text,    index: false }
+        - { field: provider,       type: text,    index: false }
+        - { field: inf_name,       type: text,    index: false }
