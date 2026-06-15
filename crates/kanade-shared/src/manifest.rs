@@ -869,6 +869,40 @@ mod tests {
         }
     }
 
+    /// The `inventory:` snapshot jobs under `configs/jobs/` project
+    /// facts into `inventory_facts` + exploded tables. `include_str!`
+    /// pins them at compile time so a breaking edit (bad explode
+    /// schema, a YAML typo in the PowerShell block, an `inventory:`
+    /// accidentally paired with `emit:`) fails `cargo test` rather
+    /// than the projector at deploy. Each must carry an `inventory:`
+    /// block and NO emit (validate() rejects the pairing).
+    #[test]
+    fn example_inventory_job_yamls_parse_and_validate() {
+        let jobs = [
+            (
+                "inventory-hw",
+                include_str!("../../../configs/jobs/inventory-hw.yaml"),
+            ),
+            (
+                "inventory-sw",
+                include_str!("../../../configs/jobs/inventory-sw.yaml"),
+            ),
+            (
+                "inventory-driver",
+                include_str!("../../../configs/jobs/inventory-driver.yaml"),
+            ),
+        ];
+        for (id, yaml) in jobs {
+            let m: Manifest =
+                serde_yaml::from_str(yaml).unwrap_or_else(|e| panic!("{id} parse: {e}"));
+            m.validate()
+                .unwrap_or_else(|e| panic!("{id} validate: {e}"));
+            assert_eq!(m.id, id, "{id} id mismatch");
+            assert!(m.inventory.is_some(), "{id} must carry an inventory: block");
+            assert!(m.emit.is_none(), "{id}: inventory jobs must not set emit:");
+        }
+    }
+
     #[test]
     fn example_check_schedule_yamls_parse_and_validate() {
         let schedules = [
@@ -899,6 +933,34 @@ mod tests {
             (
                 "check-firewall",
                 include_str!("../../../configs/schedules/check-firewall.yaml"),
+            ),
+        ];
+        for (name, yaml) in schedules {
+            let s: Schedule =
+                serde_yaml::from_str(yaml).unwrap_or_else(|e| panic!("{name} schedule parse: {e}"));
+            s.validate()
+                .unwrap_or_else(|e| panic!("{name} schedule validate: {e}"));
+            assert_eq!(s.job_id, name, "{name} schedule must reference its job");
+        }
+    }
+
+    /// Inventory schedule wrappers (`per_pc` cadence) must stay valid
+    /// alongside the schedule schema. `include_str!` pins them so a
+    /// breaking edit fails `cargo test`, not `kanade schedule create`.
+    #[test]
+    fn example_inventory_schedule_yamls_parse_and_validate() {
+        let schedules = [
+            (
+                "inventory-hw",
+                include_str!("../../../configs/schedules/inventory-hw.yaml"),
+            ),
+            (
+                "inventory-sw",
+                include_str!("../../../configs/schedules/inventory-sw.yaml"),
+            ),
+            (
+                "inventory-driver",
+                include_str!("../../../configs/schedules/inventory-driver.yaml"),
             ),
         ];
         for (name, yaml) in schedules {

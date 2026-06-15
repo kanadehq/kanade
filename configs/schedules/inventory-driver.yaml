@@ -1,0 +1,57 @@
+# Schedule wrapper that fires the registered job `inventory-driver`
+# (see `configs/jobs/inventory-driver.yaml`) on a per-PC daily cadence.
+#
+# Cadence rationale — `per_pc: { every: 24h }` (NOT the 6h that
+# inventory-hw / inventory-sw use): driver versions change far less
+# often than hardware shape or installed software (only on a driver
+# update / rollback), so a daily scan is plenty to keep the Inventory
+# page current. The job's `explode.track_history: true` records the
+# exact change into `inventory_history` regardless of cadence, so a
+# longer interval doesn't lose "when did the driver change" fidelity —
+# it just costs one extra Win32_PnPSignedDriver enumeration per PC per
+# day instead of four. If you'd rather have all three inventory probes
+# share one rhythm for operator simplicity, change this to `6h`.
+#
+# Order of operations:
+#
+#   1. Register the job:
+#         kanade job create configs/jobs/inventory-driver.yaml
+#   2. Register this schedule:
+#         kanade schedule create configs/schedules/inventory-driver.yaml
+#
+# Editing the job afterwards (`kanade job create ...` again) takes
+# effect on the next scheduled tick — no schedule re-create needed.
+
+id: inventory-driver
+tags: [inventory]   # operator taxonomy for the SPA tag filter
+when:
+  per_pc: { every: 24h }
+enabled: true
+job_id: inventory-driver
+# v0.18: target lives on the schedule, not the job. Same job_id can be
+# wrapped in multiple schedules with different target/cadence.
+target:
+  all: true
+# Fleet-scale (~3000 PCs) load control is done by the HARD concurrency
+# ceiling below, not by a wide jitter. `constraints.max_concurrent`
+# (#418) caps how many runs of this job are in-flight at once: the
+# backend scheduler counts `execution_results.finished_at IS NULL`
+# each poll tick and only dispatches to as many remaining PCs as there
+# are free slots, refilling as runs finish. That bounds the NATS +
+# SQLite-projector load to a fixed N regardless of how synchronized
+# due-times are — strictly better than jitter's statistical spread for
+# a `per_pc` reconcile cadence (the docs call this out as the case
+# max_concurrent is "most meaningful" for). 100 simultaneous heavy
+# (full signed-driver list + multi-row explode) results is comfortable
+# for the projector; at a few seconds per run the whole fleet drains
+# in a handful of poll cycles. Dial to 50 to be gentler, 200 to go
+# faster. NOTE: max_concurrent is BACKEND-only (needs a central
+# counter) — it forces `runs_on: backend` (the default here); it can't
+# combine with `runs_on: agent`.
+constraints:
+  max_concurrent: 100
+# Jitter stays modest — with the hard cap doing the pacing, jitter's
+# only job is to de-synchronize the exact start instant of the PCs in
+# a single slot-fill batch, so a wide window isn't needed (and a large
+# jitter muddies the in-flight slot accounting the cap relies on).
+jitter: 5m
