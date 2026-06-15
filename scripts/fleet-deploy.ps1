@@ -41,11 +41,17 @@
   agent goes through publish + rollout.
 
 .PARAMETER Pc
-  Target pc_id (lower-cased automatically — the agent registers pc_ids
-  lower-cased, so an upper-cased COMPUTERNAME must target its lower-cased
-  form or the exec sticks at pending). Maps to `--pcs` for the job-install
-  roles and `--pc` for the agent rollout. No baked-in default: falls back
-  to $env:KANADE_TARGET_PC, else one of -Pc / -Groups / -All is required.
+  Target pc_id, passed through VERBATIM (no case folding). The agent
+  registers/subscribes with its `{{ system.host }}` = the OS hostname
+  (Windows COMPUTERNAME), and NATS subjects are CASE-SENSITIVE:
+  `commands.pc.<id>` must match the agent's subscription exactly or the
+  exec is published to a subject no one is listening on and the install
+  never fires. Hostname casing is NOT uniform across the fleet (some boxes
+  register upper-, some lower-case), so there is no safe auto-transform —
+  type the pc_id in its actual registered case (check the SPA Inventory /
+  `kanade ping`). Maps to `--pcs` for the job-install roles and `--pc` for
+  the agent rollout. No baked-in default: falls back to
+  $env:KANADE_TARGET_PC, else one of -Pc / -Groups / -All is required.
   Mutually exclusive with -Groups / -All.
 
 .PARAMETER Groups
@@ -95,12 +101,19 @@
 
 .PARAMETER SourceUrl
   Where the *target host's* agent downloads the app package from — i.e. a
-  backend app-packages HTTP reachable FROM THE TARGET. Default
-  `http://127.0.0.1:8080`, which is correct when the agent is co-located
-  with the backend (the usual case), regardless of where you run this
-  script. Override only if the target's agent must pull from a different
-  backend. Distinct from -Server/-BackendUrl (which are this terminal ->
-  infra).
+  backend app-packages HTTP reachable FROM THE TARGET (the agent knows
+  only NATS, so it can't supply this itself). When omitted, resolved as:
+    1. $env:KANADE_BACKEND_URL, if set and NOT loopback — the
+       ops-terminal-to-remote-box case: the backend this terminal targets
+       is almost always reachable from the target too, so inherit it
+       rather than the useless 127.0.0.1 (which makes a remote agent try
+       to download from itself — the install then times out).
+    2. else `http://127.0.0.1:<port-from-staged-backend.toml>` — correct
+       when the agent is co-located with the backend.
+  Pass -SourceUrl explicitly only when the target must pull from a
+  DIFFERENT backend than this terminal's (e.g. KANADE_BACKEND_URL is a
+  terminal-only path like an SSH-tunnelled localhost). Distinct from
+  -Server/-BackendUrl (which are this terminal -> infra).
 
 .PARAMETER AuthToken
   Bearer for the backend HTTP app-packages endpoint. Default:
@@ -179,7 +192,10 @@ param(
 
     [string]$Server = '',
     [string]$BackendUrl = '',
-    [string]$SourceUrl = 'http://127.0.0.1:8080',
+    # Empty default: when -SourceUrl is omitted it's resolved below
+    # (KANADE_BACKEND_URL / -BackendUrl, else 127.0.0.1:<port>), so a
+    # literal here would just be dead — kept '' to not mislead readers.
+    [string]$SourceUrl = '',
     [string]$AuthToken = '',
     [string]$NatsToken = '',
 
@@ -324,11 +340,38 @@ function Get-BackendHttpPort {
 
 # ---- resolve the staged binary + version ----------------------------------
 
-# Default SourceUrl: localhost on the backend's actual HTTP port (read
-# from the staged backend.toml). Override -SourceUrl for a remote target
-# (e.g. clients on other hosts can't reach 127.0.0.1).
+# Default SourceUrl. The target's agent downloads the app package from
+# this URL over HTTP (client: install-kanade-client.ps1 `$BackendBase`;
+# backend: the deploy script's `AgentSourceUrl`), so it must be reachable
+# FROM THE TARGET — and the agent itself knows only NATS, not any HTTP
+# backend base, so it can't supply one. Resolution, when -SourceUrl is
+# omitted:
+#   1. $BackendUrl (resolved from -BackendUrl / KANADE_BACKEND_URL), IF
+#      set and not loopback — the common ops-terminal case (deploying to a
+#      remote box from a management shell): the same backend this terminal
+#      talks to is almost always the one the target can reach too, so
+#      inherit it instead of the useless 127.0.0.1 (which tells the remote
+#      agent to download from ITSELF — BITS fails and the install never
+#      completes / verify times out). The whole 127.0.0.0/8 loopback block
+#      is skipped because it's no better than the fallback.
+#   2. else http://127.0.0.1:<port-from-staged-backend.toml> — correct
+#      when the agent is co-located with the backend (the original
+#      assumption).
+# A target that must pull from a DIFFERENT backend than this terminal's
+# (e.g. KANADE_BACKEND_URL is a terminal-only path like an SSH-tunnelled
+# localhost) still needs an explicit -SourceUrl.
 if (-not $PSBoundParameters.ContainsKey('SourceUrl')) {
-    $SourceUrl = "http://127.0.0.1:$(Get-BackendHttpPort)"
+    # Read the already-resolved $BackendUrl (it was set from
+    # KANADE_BACKEND_URL / -BackendUrl earlier), not $env:KANADE_BACKEND_URL
+    # directly — same value here, but without the implicit dependency on
+    # the env-var being mutated first. Reject the whole 127.0.0.0/8
+    # loopback block (not just 127.0.0.1) so a 127.x backend never gets
+    # inherited as a remote target's SourceUrl.
+    if (-not [string]::IsNullOrWhiteSpace($BackendUrl) -and $BackendUrl -notmatch '://(127\.\d{1,3}\.\d{1,3}\.\d{1,3}|localhost|\[::1\])(:|/|$)') {
+        $SourceUrl = $BackendUrl
+    } else {
+        $SourceUrl = "http://127.0.0.1:$(Get-BackendHttpPort)"
+    }
 }
 
 $exeName = "kanade-$Role.exe"
@@ -390,7 +433,7 @@ Write-Host ''
 Write-Host "=== fleet-deploy: $Role v$Version ===" -ForegroundColor Cyan
 Write-Host "  exe    : $ExePath"
 Write-Host "  broker : $Server"
-Write-Host "  target : $(if ($All) { if ($Role -eq 'agent') { 'global (fleet-wide rollout)' } else { 'all agents' } } elseif ($Groups) { "groups=$($Groups -join ',')" } else { "pc=$($Pc.ToLower())" })"
+Write-Host "  target : $(if ($All) { if ($Role -eq 'agent') { 'global (fleet-wide rollout)' } else { 'all agents' } } elseif ($Groups) { "groups=$($Groups -join ',')" } else { "pc=$Pc" })"
 if ($DryRun) { Write-Host '  (dry-run: no NATS writes, no exec)' -ForegroundColor Yellow }
 Write-Host ''
 
@@ -408,7 +451,7 @@ if ($Role -eq 'agent') {
     $rolloutArgs = @('agent', 'rollout', $Version)
     if ($All) { $rolloutArgs += '--global' }
     elseif ($Groups) { $rolloutArgs += @('--group', $Groups[0]) }
-    else { $rolloutArgs += @('--pc', $Pc.ToLower()) }
+    else { $rolloutArgs += @('--pc', $Pc) }
     if ($Jitter) { $rolloutArgs += @('--jitter', $Jitter) }
     elseif (-not $All -and -not $Groups) {
         # Single-host pin: jitter exists to de-synchronise FLEET downloads,
@@ -524,7 +567,7 @@ Write-Host '--- exec ---'
 $execArgs = @('exec', $spec.JobId)
 if ($All) { $execArgs += '--all' }
 elseif ($Groups) { $execArgs += @('--groups', ($Groups -join ',')) }
-else { $execArgs += @('--pcs', $Pc.ToLower()) }
+else { $execArgs += @('--pcs', $Pc) }
 Invoke-Kanade $execArgs | ForEach-Object { Write-Host "    $_" }
 
 # 7. verify — poll the locally-installed exe (only meaningful when this box
