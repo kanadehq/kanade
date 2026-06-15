@@ -374,8 +374,12 @@ agent + nats) is a separate, agent-driven step:
    manual fallback.
 
 Gotchas (each has cost a session): the exec target is `--pcs <id>` /
-`--groups <g>` **not** `--target pcs=`, and pc_ids register **lower-cased**
-(an upper-cased `$env:COMPUTERNAME` must be targeted in lower case). Dev
+`--groups <g>` **not** `--target pcs=`, and pc_ids must be passed
+**VERBATIM** — an agent registers its pc_id as its OS hostname
+(`$env:COMPUTERNAME`) as-is, casing is **not** uniform across the fleet
+(some boxes upper-, some lower-case), and NATS subjects are
+case-sensitive, so target the exact registered casing (check the SPA
+Inventory / `kanade ping`); do **not** case-fold it. Dev
 tokens are the literal `dev`. A squashed-migration upgrade needs
 `-WipeDb`; a plain upgrade does not (no
 new files under `crates/kanade-backend/migrations/`).
