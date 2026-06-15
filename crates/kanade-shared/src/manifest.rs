@@ -823,6 +823,52 @@ mod tests {
         }
     }
 
+    /// The `emit: { type: events }` collector jobs under
+    /// `configs/jobs/` feed the obs_events timeline. `include_str!`
+    /// pins them at compile time so a breaking edit (e.g. an `emit:`
+    /// paired with `check:`/`inventory:`, a bad watermark field, or a
+    /// YAML typo in the PowerShell block) fails `cargo test` rather
+    /// than `kanade job create` at deploy. Every one must carry an
+    /// `emit.type=events` block and NO check/inventory (validate()
+    /// rejects the pairing).
+    #[test]
+    fn example_event_collector_job_yamls_parse_and_validate() {
+        let jobs = [
+            (
+                "collect-winlog-events",
+                include_str!("../../../configs/jobs/collect-winlog-events.yaml"),
+            ),
+            (
+                "collect-winlog-logons-all",
+                include_str!("../../../configs/jobs/collect-winlog-logons-all.yaml"),
+            ),
+            (
+                "collect-wlan-events",
+                include_str!("../../../configs/jobs/collect-wlan-events.yaml"),
+            ),
+        ];
+        for (id, yaml) in jobs {
+            // Strict parse so an unknown-key typo in these fixtures fails
+            // here (not silently at deploy) — the runtime Manifest is
+            // unknown-key-tolerant, so the lenient serde_yaml::from_str
+            // wouldn't catch fixture drift (CodeRabbit #689).
+            let m: Manifest =
+                crate::strict::from_yaml_str(yaml).unwrap_or_else(|e| panic!("{id} parse: {e}"));
+            m.validate()
+                .unwrap_or_else(|e| panic!("{id} validate: {e}"));
+            assert_eq!(m.id, id, "{id} id mismatch");
+            let emit = m
+                .emit
+                .as_ref()
+                .unwrap_or_else(|| panic!("{id} must carry an emit: block"));
+            assert_eq!(emit.kind, EmitKind::Events, "{id} emit.type");
+            assert!(
+                m.check.is_none() && m.inventory.is_none(),
+                "{id}: emit jobs must not pair with check/inventory"
+            );
+        }
+    }
+
     #[test]
     fn example_check_schedule_yamls_parse_and_validate() {
         let schedules = [

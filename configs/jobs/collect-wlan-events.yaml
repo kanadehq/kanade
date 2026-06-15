@@ -1,0 +1,214 @@
+# On-demand Wi-Fi (WLAN) connection diagnostics → ObsEvent timeline.
+#
+# Use case: "誰かが Wi-Fi 切断されて自動再接続されなかった" — pull the
+# WLAN-AutoConfig connection history for the affected PC so the
+# disconnect cause and the failed auto-reconnect attempt land on
+# the per-PC Activity timeline next to the boot / sleep / resume
+# rows already collected by `collect-winlog-events`.
+#
+# Where the logs land: the obs_events timeline (`emit.type=events`),
+# same destination as the other `collect-winlog-*` jobs — NOT a
+# diagnostic bundle. The `kanade logs collect` / `OBJECT_DIAGNOSTICS`
+# blob bundle (Issue #219) referenced by the `diagnostic` ObsEvent
+# kind is still DEFERRED (doc-comment only; no bucket constant, no
+# CLI command), so structured timeline events are the supported way
+# to collect this today. Each event becomes one queryable, deduped
+# row you can read in the SPA per PC.
+#
+# Source: the WHOLE `Microsoft-Windows-WLAN-AutoConfig/Operational`
+# channel. Rather than an event-ID whitelist (which risks dropping or
+# mislabelling the IDs whose meaning shifts across Windows builds),
+# this job walks EVERY event in the channel for full coverage and
+# labels the well-known ones with a friendly `kind`; anything else
+# lands as `wifi_evt_<id>` so nothing is ever silently missed. The
+# full named EventData set rides along in `payload`.
+#
+# The IDs that matter most for a "dropped and didn't come back"
+# report (all get friendly kinds below):
+#   8003 — disconnected (why the link dropped)
+#   8002 — connection FAILED (the auto-reconnect attempt + ReasonCode
+#          — the smoking gun for "didn't reconnect")
+#   8001 — connection succeeded (when/if it eventually recovered)
+#   8000 — connection started (an attempt was made at all)
+#   11002 / 11006 / 12013 — association / security / authentication
+#          failure (WHY the reconnect failed: out of range vs. auth
+#          vs. credentials). 11001 / 11005 / 12012 are the success
+#          counterparts, for the full assoc→security→auth handshake.
+#   11010 — wireless security stopped (roaming / teardown).
+#
+# Deliberately NOT scheduled — this is an ad-hoc forensic pull, same
+# shape as `collect-winlog-logons-all`. Register it once:
+#
+#     kanade job create configs/jobs/collect-wlan-events.yaml
+#
+# then fire it at the PC under investigation:
+#
+#     kanade exec collect-wlan-events --pcs <pc-id>
+#
+# Mechanics mirror `collect-winlog-events` (watermark, 24h
+# bootstrap/rolling window, NDJSON `ObsEvent` on stdout,
+# `emit.type=events`) with a separate watermark file so this job's
+# progress never races the scheduled collector's. The backend's
+# UNIQUE constraint on (pc_id, source, event_record_id) absorbs any
+# re-send. Run it again the next day if the investigation spans more
+# than the 24h window.
+
+id: collect-wlan-events
+tags: [observability]   # operator taxonomy for the SPA tag filter
+version: 0.1.0
+description: "On-demand: full Wi-Fi (WLAN-AutoConfig/Operational) connect / disconnect / assoc / security / auth history → ObsEvent timeline"
+
+execute:
+  shell: powershell
+  # Same 60 s headroom rationale as collect-winlog-events; the
+  # WLAN-AutoConfig channel is low-volume and a 24h window walks in
+  # seconds even when reading the whole channel.
+  timeout: 60s
+  run_as: system
+  script: |
+    $ErrorActionPreference = 'Stop'
+
+    # Watermark file: a SINGLE line keyed by the channel —
+    # `<channel>\t<lastRecordId>`. Walking the whole channel (no
+    # per-ID split) means one watermark suffices. Separate file from
+    # the scheduled collectors' so the jobs never race. Same
+    # corrupted-line tolerance as collect-winlog-events: a bad row is
+    # warned + dropped, an unreadable file bootstraps fresh.
+    $stateDir = Join-Path $env:ProgramData 'Kanade\state'
+    if (-not (Test-Path $stateDir)) {
+        New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
+    }
+    $watermarkPath = Join-Path $stateDir 'wlan-events-watermark.txt'
+    $watermarks = @{}
+    if (Test-Path $watermarkPath) {
+        try {
+            foreach ($line in Get-Content $watermarkPath -ErrorAction Stop) {
+                if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                $parts = $line -split "`t", 2
+                if ($parts.Length -ne 2) { continue }
+                try {
+                    $watermarks[$parts[0]] = [int64]$parts[1]
+                } catch {
+                    Write-Warning "wlan watermark: dropping malformed line ($($parts[0])): $_"
+                }
+            }
+        } catch {
+            Write-Warning "wlan watermark: file unreadable, bootstrapping fresh: $_"
+            $watermarks = @{}
+        }
+    }
+
+    $wlanLog = 'Microsoft-Windows-WLAN-AutoConfig/Operational'
+
+    # Friendly kind labels for the well-known IDs — everything else
+    # falls back to `wifi_evt_<id>` so the SPA still gets a usable
+    # filter chip and no event is dropped for being "unknown". The
+    # full named EventData rides in `payload` regardless of kind.
+    $kindMap = @{
+        8000  = 'wifi_connect_start'
+        8001  = 'wifi_connect_success'
+        8002  = 'wifi_connect_failed'      # <- ReasonCode lives here
+        8003  = 'wifi_disconnect'          # <- disconnect reason
+        11000 = 'wifi_assoc_start'
+        11001 = 'wifi_assoc_success'
+        11002 = 'wifi_assoc_failed'
+        11004 = 'wifi_security_start'
+        11005 = 'wifi_security_success'
+        11006 = 'wifi_security_failed'
+        11010 = 'wifi_security_stopped'
+        12011 = 'wifi_auth_start'
+        12012 = 'wifi_auth_success'
+        12013 = 'wifi_auth_failed'
+    }
+
+    # 24h bootstrap + rolling window, same trade as the scheduled
+    # collector: "what happened recently on this box", not a deep
+    # forensic archive. The WLAN-AutoConfig channel is small and
+    # rotates, so deep history may not exist anyway. Get-WinEvent ALSO
+    # needs a StartTime on subsequent runs, otherwise it scans the
+    # whole channel from the beginning (Gemini #250 high).
+    $bootstrapStart = (Get-Date).AddHours(-24)
+    $key = $wlanLog
+    $cutoff = $watermarks[$key]
+
+    # No `Id` filter — pull EVERY event in the channel for full
+    # coverage. `-ErrorAction SilentlyContinue` so a channel with no
+    # rows in the window (or disabled) yields $null instead of
+    # throwing under `$ErrorActionPreference = 'Stop'`.
+    $events = Get-WinEvent -FilterHashtable @{ LogName = $wlanLog; StartTime = $bootstrapStart } -ErrorAction SilentlyContinue
+    # Sort ascending so the projector sees events in source order.
+    $events = @($events) | Where-Object { $null -ne $_ } | Sort-Object -Property RecordId
+    $maxSeen = $cutoff
+    foreach ($e in $events) {
+        if ($null -ne $cutoff -and $e.RecordId -le $cutoff) { continue }
+        # Watermark advances over EVERY event walked so the next run
+        # never re-scans them.
+        if ($null -eq $maxSeen -or $e.RecordId -gt $maxSeen) { $maxSeen = $e.RecordId }
+
+        $kind = $kindMap[[int]$e.Id]
+        if ([string]::IsNullOrEmpty($kind)) { $kind = "wifi_evt_$($e.Id)" }
+
+        # WLAN-AutoConfig events carry rich, NAMED EventData fields
+        # (SSID, BSSType, PHYType, AuthenticationAlgorithm,
+        # CipherAlgorithm, FailureReason, Reason, ReasonCode, ...)
+        # whose positional ordering differs across IDs and Windows
+        # builds. Extract by NAME from the event XML — the same
+        # robustness posture as the wake_detail handler in
+        # collect-winlog-events — and carry the whole named set as the
+        # payload so an investigator sees every field the event
+        # recorded. A parse failure emits with a null payload ("it
+        # happened" beats "we could parse it").
+        $payload = $null
+        try {
+            $x = [xml]$e.ToXml()
+            $data = [ordered]@{}
+            # Some events carry no <EventData> (e.g. a <UserData>-only
+            # schema); guard so the foreach doesn't trip on a null under
+            # `$ErrorActionPreference = 'Stop'`. EventId below is still
+            # recorded either way (Gemini #689).
+            if ($null -ne $x.Event.EventData) {
+                foreach ($d in $x.Event.EventData.Data) {
+                    if ($d -isnot [System.Xml.XmlElement]) { continue }
+                    # GetAttribute is immune to the XML adapter's
+                    # property-shadowing rules (e.g. a field literally
+                    # named "Name") — zero ambiguity for one extra call.
+                    $n = $d.GetAttribute('Name')
+                    if (-not [string]::IsNullOrEmpty($n)) { $data[$n] = [string]$d.'#text' }
+                }
+            }
+            # Always record the raw event id so unknown (wifi_evt_*)
+            # kinds stay self-describing on the timeline. Set AFTER the
+            # loop on purpose: the script-injected EventId deliberately
+            # wins over any EventData field literally named "EventId"
+            # (none known on WLAN events today, but explicit) — Claude #689.
+            $data['EventId'] = [string]$e.Id
+            $payload = $data
+        } catch {
+            Write-Warning "wlan payload parse failed for record $($e.RecordId): $_"
+        }
+
+        $obj = [ordered]@{
+            pc_id           = $env:COMPUTERNAME
+            at              = $e.TimeCreated.ToUniversalTime().ToString('o')
+            kind            = $kind
+            source          = "winlog:WLAN-AutoConfig"
+            event_record_id = [string]$e.RecordId
+            payload         = $payload
+        }
+        Write-Output ($obj | ConvertTo-Json -Depth 5 -Compress)
+    }
+    if ($null -ne $maxSeen -and $maxSeen -ne $cutoff) { $watermarks[$key] = $maxSeen }
+
+    # Persist watermark file LAST (after all stdout has been emitted)
+    # so a crash mid-loop re-emits on the next run; the backend UNIQUE
+    # constraint on (pc_id, source, event_record_id) makes the re-emit
+    # a no-op.
+    $tmp = "$watermarkPath.tmp"
+    $watermarks.GetEnumerator() |
+        ForEach-Object { "{0}`t{1}" -f $_.Key, $_.Value } |
+        Set-Content -Path $tmp -Encoding utf8 -Force
+    Move-Item -Force -Path $tmp -Destination $watermarkPath
+
+emit:
+  type: events
+  watermark_path: state/wlan-events-watermark.txt
