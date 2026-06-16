@@ -88,6 +88,35 @@ export async function apiFetchText(path: string, init: RequestInit = {}): Promis
 }
 
 /**
+ * Variant for endpoints that stream a binary body (e.g.
+ * `GET /api/collect/bundles/{*key}`, a zip). Reuses the same auth /
+ * source-tag plumbing but returns the raw `Blob` instead of decoding
+ * JSON — `apiFetch`'s `res.text()` would corrupt binary bytes. Used by
+ * the Collect page's download button.
+ */
+export async function apiFetchBlob(path: string, init: RequestInit = {}): Promise<Blob> {
+  const headers = new Headers(init.headers ?? {});
+  for (const [k, v] of Object.entries(authHeaders())) headers.set(k, v as string);
+  if (!headers.has('X-Kanade-Source')) headers.set('X-Kanade-Source', 'spa');
+
+  const res = await fetch(path, { ...init, headers });
+  if (res.status === 401) {
+    localStorage.removeItem(TOKEN_KEY);
+    window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
+  }
+  if (res.status === 403) {
+    toast.error('You do not have permission to perform this action.');
+  }
+  if (!res.ok) {
+    // Body is an error string here, not the binary payload, so reading
+    // it as text is safe and gives ApiError a useful message.
+    const body = await res.text().catch(() => '');
+    throw new ApiError(res.status, res.statusText, body);
+  }
+  return res.blob();
+}
+
+/**
  * #495: variant for endpoints that page via `limit`/`offset` and
  * report the pre-LIMIT match count in the `X-Total-Count` response
  * header (GET /api/agents). The body stays the plain array existing

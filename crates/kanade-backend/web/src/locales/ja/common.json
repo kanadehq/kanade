@@ -16,6 +16,7 @@
     "events": "イベント",
     "audit": "監査ログ",
     "logs": "ログ",
+    "collect": "収集",
     "jobs": "ジョブ",
     "schedules": "スケジュール",
     "notifications": "通知",

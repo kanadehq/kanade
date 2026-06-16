@@ -1,0 +1,25 @@
+{
+  "title": "収集",
+  "intro": "<code>collect:</code> ジョブが採取したファイルバンドル。採取は Exec ページ（またはクライアントアプリ）から実行します。",
+  "bundles": {
+    "title": "採取済みバンドル",
+    "description": "<code>collect:</code> ジョブがアップロードしたバンドル。30 日で自動失効します。",
+    "loading": "バンドルを読み込み中…",
+    "errorTitle": "バンドルの読み込みに失敗しました",
+    "empty": "採取済みバンドルはまだありません。Exec ページから collect: ジョブを実行すると作成されます。",
+    "columns": {
+      "name": "収集内容",
+      "pc": "pc_id",
+      "job": "job_id",
+      "collectedAt": "採取日時",
+      "size": "サイズ",
+      "actions": "操作"
+    },
+    "downloadTitle": "バンドルをダウンロード (.zip)",
+    "deleteTitle": "バンドルを削除",
+    "confirmDeleteTitle": "バンドル「{{key}}」を削除しますか？",
+    "confirmDeleteDescription": "Object Store からバンドルを完全に削除します（30 日で自動失効もします）。",
+    "confirmDeleteButton": "削除",
+    "deleteErrorTitle": "バンドルの削除に失敗しました"
+  }
+}

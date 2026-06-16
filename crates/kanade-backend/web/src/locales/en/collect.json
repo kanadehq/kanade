@@ -1,0 +1,25 @@
+{
+  "title": "Collect",
+  "intro": "Collected file bundles from <code>collect:</code> jobs. Trigger a collection from the Exec page (or the Client App).",
+  "bundles": {
+    "title": "Collected bundles",
+    "description": "Bundles uploaded by <code>collect:</code> jobs. They auto-expire after 30 days.",
+    "loading": "Loading bundles…",
+    "errorTitle": "Failed to load bundles",
+    "empty": "No collected bundles yet. Run a collect: job from the Exec page to produce one.",
+    "columns": {
+      "name": "collection",
+      "pc": "pc_id",
+      "job": "job_id",
+      "collectedAt": "collected",
+      "size": "size",
+      "actions": "actions"
+    },
+    "downloadTitle": "Download bundle (.zip)",
+    "deleteTitle": "Delete bundle",
+    "confirmDeleteTitle": "Delete bundle \"{{key}}\"?",
+    "confirmDeleteDescription": "This permanently removes the bundle from the Object Store. (Bundles also auto-expire after 30 days.)",
+    "confirmDeleteButton": "Delete",
+    "deleteErrorTitle": "Failed to delete bundle"
+  }
+}

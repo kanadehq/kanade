@@ -11,6 +11,7 @@ import { Agents } from '@/pages/Agents';
 import { Apps } from '@/pages/Apps';
 import { ChangePassword } from '@/pages/ChangePassword';
 import { Audit } from '@/pages/Audit';
+import { Collect } from '@/pages/Collect';
 import { Compliance } from '@/pages/Compliance';
 import { Config } from '@/pages/Config';
 import { Dashboard } from '@/pages/Dashboard';
@@ -107,6 +108,7 @@ function AppContent() {
               <Route path="/inventory" element={<Inventory />} />
               <Route path="/inventory/search" element={<Inventory />} />
               <Route path="/compliance" element={<Compliance />} />
+              <Route path="/collect" element={<Collect />} />
               <Route path="/jobs" element={<Jobs />} />
               <Route path="/schedules" element={<Schedules />} />
               <Route path="/exec" element={<Exec />} />
