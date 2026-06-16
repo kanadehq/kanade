@@ -28,13 +28,18 @@ type UtilizationResponse = {
   top_apps: { app: string; samples: number }[];
   top_sites: { host: string; visits: number }[];
   site_visits_capped: boolean;
+  timeline: { hour: number; total: number; active: number }[];
 };
 
 // Local calendar day → UTC [from, to) bounds, so the day boundary is the
 // operator's, not UTC's. setDate(+1) (not +86_400_000 ms) so DST change
-// days still land on the next calendar midnight.
-function dayBounds(date: string): { from: string; to: string } {
+// days still land on the next calendar midnight. Returns null for an
+// empty/invalid date (a cleared picker) so we don't call toISOString on
+// an Invalid Date and crash (coderabbit).
+function dayBounds(date: string): { from: string; to: string } | null {
+  if (!date) return null;
   const start = new Date(`${date}T00:00:00`);
+  if (Number.isNaN(start.getTime())) return null;
   const end = new Date(start);
   end.setDate(end.getDate() + 1);
   return { from: start.toISOString(), to: end.toISOString() };
@@ -64,15 +69,24 @@ export function Utilization() {
   // Default to the first agent once the list loads.
   const pcId = pc || agentsQ.data?.[0]?.pc_id || '';
 
-  const { from, to } = useMemo(() => dayBounds(date), [date]);
+  const bounds = useMemo(() => dayBounds(date), [date]);
+  // Minutes to ADD to UTC to get local time (JST = +540), for hour-of-
+  // day bucketing. Computed for the SELECTED day (not "now") so a
+  // historical date with a different DST status buckets correctly.
+  const tzOffset = useMemo(
+    () => (date ? -new Date(`${date}T00:00:00`).getTimezoneOffset() : 0),
+    [date],
+  );
 
   const q = useQuery({
-    queryKey: ['utilization', pcId, from, to],
-    queryFn: () =>
-      apiFetch<UtilizationResponse>(
-        `/api/utilization/${encodeURIComponent(pcId)}?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
-      ),
-    enabled: !!pcId,
+    queryKey: ['utilization', pcId, bounds?.from, bounds?.to, tzOffset],
+    queryFn: () => {
+      if (!bounds) throw new Error('no date bounds');
+      return apiFetch<UtilizationResponse>(
+        `/api/utilization/${encodeURIComponent(pcId)}?from=${encodeURIComponent(bounds.from)}&to=${encodeURIComponent(bounds.to)}&tz_offset_minutes=${tzOffset}`,
+      );
+    },
+    enabled: !!pcId && !!bounds,
   });
 
   const a = q.data?.active;
@@ -139,6 +153,21 @@ export function Utilization() {
               />
               <Stat label={t('active.first')} value={a?.first_active ? fmtIsoLocal(a.first_active) : '—'} />
               <Stat label={t('active.last')} value={a?.last_active ? fmtIsoLocal(a.last_active) : '—'} />
+            </CardContent>
+          </Card>
+
+          {/* Hourly active/idle timeline */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm">{t('timeline.title')}</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <TimelineStrip
+                timeline={q.data?.timeline ?? []}
+                activeLabel={t('timeline.active')}
+                idleLabel={t('timeline.idle')}
+                noDataLabel={t('timeline.noData')}
+              />
             </CardContent>
           </Card>
 
@@ -231,5 +260,65 @@ function TopTable({
         ))}
       </TableBody>
     </Table>
+  );
+}
+
+// 24-hour active/idle strip. Each hour is a column whose violet fill is
+// the active proportion of that hour's presence samples; hours with no
+// samples render as an empty dashed slot.
+function TimelineStrip({
+  timeline,
+  activeLabel,
+  idleLabel,
+  noDataLabel,
+}: {
+  timeline: { hour: number; total: number; active: number }[];
+  activeLabel: string;
+  idleLabel: string;
+  noDataLabel: string;
+}) {
+  const byHour = new Map(timeline.map((b) => [b.hour, b]));
+  const hours = Array.from({ length: 24 }, (_, h) => h);
+  return (
+    <div>
+      <div className="flex h-24 items-end gap-[2px]">
+        {hours.map((h) => {
+          const b = byHour.get(h);
+          const total = b?.total ?? 0;
+          const active = b?.active ?? 0;
+          const activePct = total > 0 ? (active / total) * 100 : 0;
+          const title =
+            total > 0 ? `${h}:00 — ${activeLabel} ${active}/${total}` : `${h}:00 — ${noDataLabel}`;
+          return (
+            <div key={h} className="flex h-full flex-1 flex-col justify-end" title={title}>
+              {total > 0 ? (
+                <div className="flex h-full w-full flex-col justify-end overflow-hidden rounded-sm bg-muted/20">
+                  <div className="w-full bg-violet/60" style={{ height: `${activePct}%` }} />
+                </div>
+              ) : (
+                <div className="h-full w-full rounded-sm border border-dashed border-border/40" />
+              )}
+            </div>
+          );
+        })}
+      </div>
+      <div className="mt-1 flex gap-[2px] text-[9px] text-muted">
+        {hours.map((h) => (
+          <div key={h} className="flex-1 text-center">
+            {h % 6 === 0 ? h : ''}
+          </div>
+        ))}
+      </div>
+      <div className="mt-2 flex gap-4 text-[10px] text-muted">
+        <span className="flex items-center gap-1">
+          <span className="inline-block size-2 rounded-sm bg-violet/60" />
+          {activeLabel}
+        </span>
+        <span className="flex items-center gap-1">
+          <span className="inline-block size-2 rounded-sm bg-muted/20" />
+          {idleLabel}
+        </span>
+      </div>
+    </div>
   );
 }

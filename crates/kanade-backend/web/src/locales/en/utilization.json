@@ -15,6 +15,12 @@
     "first": "First active",
     "last": "Last active"
   },
+  "timeline": {
+    "title": "Hourly activity (local time)",
+    "active": "active",
+    "idle": "idle",
+    "noData": "no samples"
+  },
   "apps": {
     "title": "Top apps",
     "app": "app",

@@ -8,8 +8,9 @@
 //! the SPA computes them from the operator's chosen LOCAL day so the
 //! day boundary is correct in their timezone. Both omitted ⇒ last 24h.
 //!
-//! v1 returns three rollups; the hourly active/idle timeline is a
-//! follow-up PR.
+//! Returns an active summary, top apps, top sites, and an hourly
+//! active/idle timeline (bucketed into the operator's local hours via
+//! `tz_offset_minutes`).
 
 use std::collections::HashMap;
 
@@ -32,6 +33,10 @@ pub struct WindowQuery {
     pub from: Option<DateTime<Utc>>,
     /// RFC3339 upper bound (exclusive). Default: now.
     pub to: Option<DateTime<Utc>>,
+    /// Minutes to ADD to a UTC `at` to get the operator's local time,
+    /// used only to bucket the hourly timeline into local hours-of-day
+    /// (e.g. JST = `540`). Default 0 (UTC buckets). Clamped to ±900.
+    pub tz_offset_minutes: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -63,6 +68,15 @@ pub struct SiteCount {
     pub visits: i64,
 }
 
+/// One local hour-of-day bucket of presence samples for the timeline.
+#[derive(Serialize)]
+pub struct HourBucket {
+    /// Local hour 0–23 (bucketed using `tz_offset_minutes`).
+    pub hour: i64,
+    pub total: i64,
+    pub active: i64,
+}
+
 #[derive(Serialize)]
 pub struct UtilizationResponse {
     pub pc_id: String,
@@ -75,6 +89,9 @@ pub struct UtilizationResponse {
     /// top-sites ranking is then over a truncated set, so the SPA can
     /// warn that it's approximate.
     pub site_visits_capped: bool,
+    /// Presence samples bucketed by local hour-of-day (sparse — only
+    /// hours with samples appear; the SPA fills 0–23).
+    pub timeline: Vec<HourBucket>,
 }
 
 /// Best-effort host (registrable-ish authority) from a URL string,
@@ -132,6 +149,10 @@ pub async fn get(
     if from >= to {
         return Err(StatusCode::BAD_REQUEST);
     }
+    // strftime modifier to shift a UTC `at` into the operator's local
+    // time for hour-of-day bucketing (e.g. "+540 minutes" for JST).
+    let tz_off = q.tz_offset_minutes.unwrap_or(0).clamp(-900, 900);
+    let tz_mod = format!("{tz_off:+} minutes");
 
     // ── active summary (presence) ───────────────────────────────────
     // json_extract of a JSON boolean `true` yields 1 in SQLite, so the
@@ -207,13 +228,15 @@ pub async fn get(
 
     // ── top sites (web_visit) ───────────────────────────────────────
     // SQLite can't parse URLs, so pull the day's visit URLs (capped) and
-    // fold them into host counts in Rust.
+    // fold them into host counts in Rust. ORDER BY at DESC makes the cap
+    // deterministic — when a day exceeds MAX_VISIT_ROWS we keep the most
+    // recent visits rather than an arbitrary subset (coderabbit).
     let visit_rows = sqlx::query(
         "SELECT json_extract(payload, '$.url') AS url \
          FROM obs_events \
          WHERE pc_id = ? AND kind = 'web_visit' AND at >= ? AND at < ? \
            AND json_extract(payload, '$.url') IS NOT NULL \
-         LIMIT ?",
+         ORDER BY at DESC LIMIT ?",
     )
     .bind(&pc_id)
     .bind(from)
@@ -244,6 +267,41 @@ pub async fn get(
     top_sites.sort_by(|a, b| b.visits.cmp(&a.visits).then_with(|| a.host.cmp(&b.host)));
     top_sites.truncate(10);
 
+    // ── hourly timeline (presence by local hour-of-day) ─────────────
+    // strftime applies the tz modifier to shift `at` into local time,
+    // then '%H' gives the 0–23 hour; the SPA fills the missing hours.
+    let hour_rows = sqlx::query(
+        "SELECT CAST(strftime('%H', at, ?) AS INTEGER) AS hour, \
+                COUNT(*) AS total, \
+                COALESCE(SUM(CASE WHEN json_extract(payload, '$.active') = 1 THEN 1 ELSE 0 END), 0) AS active \
+         FROM obs_events \
+         WHERE pc_id = ? AND kind = 'presence' AND at >= ? AND at < ? \
+         GROUP BY hour ORDER BY hour",
+    )
+    .bind(&tz_mod)
+    .bind(&pc_id)
+    .bind(from)
+    .bind(to)
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| {
+        warn!(error = %e, "utilization: timeline aggregate");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let timeline = hour_rows
+        .into_iter()
+        .filter_map(|r| {
+            let hour: i64 = r.try_get("hour").ok()?;
+            let total: i64 = r.try_get("total").unwrap_or(0);
+            let active: i64 = r.try_get("active").unwrap_or(0);
+            Some(HourBucket {
+                hour,
+                total,
+                active,
+            })
+        })
+        .collect();
+
     Ok(Json(UtilizationResponse {
         pc_id,
         from,
@@ -252,6 +310,7 @@ pub async fn get(
         top_apps,
         top_sites,
         site_visits_capped,
+        timeline,
     }))
 }
 
