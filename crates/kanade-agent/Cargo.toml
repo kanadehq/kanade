@@ -37,7 +37,7 @@ sysinfo    = { workspace = true }
 # #219 collect: zip the script's listed files into a bundle before
 # uploading to OBJECT_COLLECTIONS. Minimal feature set (deflate only) —
 # no bzip2/zstd/aes — keeps the build lean.
-zip        = { version = "2.2", default-features = false, features = ["deflate"] }
+zip        = { version = "2.4.2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
