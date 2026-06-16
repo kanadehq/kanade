@@ -1,0 +1,116 @@
+# #219 example: an operator/end-user-triggered diagnostic bundle.
+#
+# Demonstrates the `collect:` hint. The script GATHERS the data (it does
+# the real work — event logs, process list, network state, agent logs,
+# redacted config, outbox/cache listings), writes each artifact to a temp
+# dir, and prints a single JSON object on stdout listing the absolute
+# paths to bundle. The agent then zips those files and uploads the
+# archive to the OBJECT_COLLECTIONS Object Store; operators download it
+# from the SPA Collect page.
+#
+# `client:` makes it user-invokable too — an end user can press a button
+# in the Client App ("困ったとき" tab) and the same-host agent runs this,
+# producing a bundle the admin can fetch. Trigger from the operator side
+# with the normal exec path: `kanade exec collect-diagnostics --pcs <id>`.
+#
+# stdout MUST be a single pure JSON object (the `files` array) — progress
+# goes to stderr via [Console]::Error.WriteLine, never Write-Host.
+
+id: collect-diagnostics
+tags: [infra, support]
+version: 0.1.0
+description: "Collect a Windows diagnostic bundle (event logs, processes, network, agent logs)"
+
+execute:
+  shell: powershell
+  run_as: system
+  timeout: 180s
+  script: |
+    $ErrorActionPreference = 'Stop'
+    # v0 has no agent-provided per-run staging dir (KANADE_COLLECT_DIR is
+    # a #219 follow-up), so use TEMP and recreate it each run to avoid
+    # piling up old artifacts. CAVEAT: two concurrent runs on the same
+    # host (e.g. a NATS-driven and a KLP/Client-App-driven fire) race on
+    # this dir — the second run's Remove-Item can wipe the first's staged
+    # files mid-flight. Acceptable for a rare manual-trigger job; the
+    # per-run staging env var will remove the race.
+    $dir = Join-Path $env:TEMP 'kanade-collect'
+    if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
+    New-Item -ItemType Directory -Path $dir | Out-Null
+    $files = New-Object System.Collections.Generic.List[string]
+    function Add-Artifact($p) { if (Test-Path $p) { $files.Add((Resolve-Path $p).Path) } }
+
+    # Windows event logs (last 24h): Application / System / Setup.
+    $since = (Get-Date).AddHours(-24)
+    foreach ($log in 'Application','System','Setup') {
+      $out = Join-Path $dir "eventlog-$log.csv"
+      try {
+        Get-WinEvent -FilterHashtable @{ LogName = $log; StartTime = $since } -ErrorAction Stop |
+          Select-Object TimeCreated, Id, LevelDisplayName, ProviderName, Message |
+          Export-Csv -NoTypeInformation -Path $out
+        Add-Artifact $out
+      } catch { [Console]::Error.WriteLine("skip eventlog ${log}: $_") }
+    }
+
+    # Process list.
+    $proc = Join-Path $dir 'processes.json'
+    Get-Process | Select-Object Name, Id, CPU, WS, Path |
+      ConvertTo-Json -Depth 3 | Set-Content -Path $proc
+    Add-Artifact $proc
+
+    # Network state (all streams folded into the file, nothing to stdout).
+    $net = Join-Path $dir 'network.txt'
+    & {
+      ipconfig /all
+      '--- Get-NetAdapter ---'
+      Get-NetAdapter | Format-Table -AutoSize | Out-String
+      '--- Get-NetTCPConnection ---'
+      Get-NetTCPConnection | Format-Table -AutoSize | Out-String
+    } *>&1 | Out-File -FilePath $net
+    Add-Artifact $net
+
+    # Agent logs — the most recent few rotated files.
+    $logDir = Join-Path $env:ProgramData 'Kanade\logs'
+    if (Test-Path $logDir) {
+      Get-ChildItem -Path $logDir -Filter '*.log' |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 3 |
+        ForEach-Object { Add-Artifact $_.FullName }
+    }
+
+    # agent.toml with secret-ish values redacted.
+    $cfg = Join-Path $env:ProgramData 'Kanade\config\agent.toml'
+    if (Test-Path $cfg) {
+      $red = Join-Path $dir 'agent.redacted.toml'
+      (Get-Content $cfg) -replace '(?i)(token|secret|password)\s*=\s*".*"', '$1 = "<redacted>"' |
+        Set-Content -Path $red
+      Add-Artifact $red
+    }
+
+    # outbox / cache directory LISTINGS only (names + sizes, NOT contents —
+    # outbox payloads can carry PII).
+    $listing = Join-Path $dir 'dir-listings.txt'
+    foreach ($sub in 'data\outbox','data\events-outbox','data\script_cache') {
+      $p = Join-Path $env:ProgramData (Join-Path 'Kanade' $sub)
+      "== $p ==" | Out-File -FilePath $listing -Append
+      if (Test-Path $p) {
+        Get-ChildItem $p -Recurse -File | Select-Object FullName, Length |
+          Format-Table -AutoSize | Out-String | Out-File -FilePath $listing -Append
+      }
+    }
+    Add-Artifact $listing
+
+    # The ONLY thing on stdout: the JSON file list the agent bundles.
+    @{ files = @($files) } | ConvertTo-Json -Compress
+
+collect:
+  name: "診断情報の収集"
+  description: "イベントログ・プロセス・ネットワーク・エージェントログを ZIP で採取"
+  max_size: 50MB
+
+client:
+  name: "診断情報を送る"
+  description: "サポート用の診断情報を採取して管理者に送ります"
+  category: troubleshoot
+  icon: stethoscope
+
+require_approval: true

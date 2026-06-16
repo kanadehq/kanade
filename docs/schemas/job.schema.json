@@ -209,7 +209,7 @@
           "default": "files"
         },
         "max_size": {
-          "description": "Human-readable cap on the bundle's total input size\n(`\"50MB\"`, `\"500KB\"`, `\"1GiB\"`). The agent refuses to build a\nbundle whose listed files exceed this. `None` ⇒\n[`DEFAULT_COLLECT_MAX_SIZE`]. Parsed by [`parse_size_bytes`];\n[`Manifest::validate`] rejects an unparseable value at create\ntime.",
+          "description": "Human-readable cap on the bundle's total input size\n(`\"50MB\"`, `\"500KB\"`, `\"1GiB\"`). The agent refuses to build a\nbundle whose listed files exceed this. `None` ⇒\n[`DEFAULT_COLLECT_MAX_SIZE`]. Parsed by [`parse_size_bytes`];\n[`Manifest::validate`] rejects an unparseable value at create\ntime.\n\nNote: this bounds the **uncompressed** bytes the agent reads off\ndisk, not the resulting zip. Text logs compress well, so the\ndownload is usually much smaller; many tiny files add a little\nper-entry zip overhead. Read it as \"how much the agent reads +\npacks\", not \"the exact download size\".",
           "type": [
             "string",
             "null"

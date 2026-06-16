@@ -444,10 +444,23 @@ async fn run_job(
     debug!(run_id = %run_id, pc_id = %pc_id, status = ?terminal.status, "jobs.execute: run finished");
     push_progress(&push_tx, terminal).await;
 
+    // #219: if this is a `collect:` job (typically `collect:` + `client:`
+    // so it shows in the Client App) and it succeeded, bundle the
+    // script's listed files and upload to OBJECT_COLLECTIONS — the same
+    // helper the NATS path uses, so a Client-App-triggered collection
+    // produces a bundle too. Read `&stdout` before build_exec_result
+    // moves it. Best-effort: failure leaves `collect_object = None`.
+    let collect_object = if exit_code == 0 && cmd.collect.is_some() {
+        let js = async_nats::jetstream::new(client.clone());
+        crate::collect::maybe_collect(&js, &cmd, &pc_id, &stdout, finished_at).await
+    } else {
+        None
+    };
+
     // #478: record the run on the backend so operators see
     // user-initiated jobs on the Activity page (audit trail), via the
     // same outbox → JetStream path a normal NATS-driven run uses.
-    let result = build_exec_result(
+    let mut result = build_exec_result(
         &cmd,
         &pc_id,
         exit_code,
@@ -456,6 +469,7 @@ async fn run_job(
         started_at,
         finished_at,
     );
+    result.collect_object = collect_object;
     enqueue_exec_result(result);
 }
 

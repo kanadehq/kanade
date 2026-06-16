@@ -357,6 +357,12 @@ pub struct CollectHint {
     /// [`DEFAULT_COLLECT_MAX_SIZE`]. Parsed by [`parse_size_bytes`];
     /// [`Manifest::validate`] rejects an unparseable value at create
     /// time.
+    ///
+    /// Note: this bounds the **uncompressed** bytes the agent reads off
+    /// disk, not the resulting zip. Text logs compress well, so the
+    /// download is usually much smaller; many tiny files add a little
+    /// per-entry zip overhead. Read it as "how much the agent reads +
+    /// packs", not "the exact download size".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_size: Option<String>,
     /// Top-level stdout JSON key holding the array of file paths to
@@ -963,6 +969,29 @@ mod tests {
             assert!(!client.name.trim().is_empty(), "{id} client.name empty");
             assert_eq!(client.category, category, "{id} category");
         }
+    }
+
+    /// #219: the shipped `collect:` example must stay valid as the
+    /// schema evolves. `include_str!` pins it at compile time so a
+    /// breaking edit (or a YAML typo in the PowerShell block) fails
+    /// `cargo test` rather than `kanade job create` at deploy. It carries
+    /// both `collect:` and `client:` (end-user-triggerable), which must
+    /// compose.
+    #[test]
+    fn example_collect_job_yaml_parses_and_validates() {
+        let yaml = include_str!("../../../configs/jobs/collect-diagnostics.yaml");
+        let m: Manifest = serde_yaml::from_str(yaml).expect("collect-diagnostics parse");
+        m.validate().expect("collect-diagnostics validate");
+        assert_eq!(m.id, "collect-diagnostics");
+        let collect = m.collect.as_ref().expect("collect: block present");
+        assert!(!collect.name.trim().is_empty());
+        assert_eq!(collect.files_field, "files");
+        assert_eq!(collect.max_size_bytes(), 50_000_000);
+        // collect + client compose — the Client App can trigger it.
+        assert!(
+            m.client.is_some(),
+            "collect-diagnostics also carries client:"
+        );
     }
 
     /// The `emit: { type: events }` collector jobs under

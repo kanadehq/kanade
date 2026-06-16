@@ -1,4 +1,5 @@
 mod check_cache;
+mod collect;
 mod commands;
 mod config_supervisor;
 mod env_gate;
