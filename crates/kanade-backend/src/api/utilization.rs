@@ -27,6 +27,21 @@ use tracing::warn;
 /// an unbounded set into memory.
 const MAX_VISIT_ROWS: i64 = 10_000;
 
+/// Minutes-per-sample used to turn sample COUNTS into approximate TIME.
+/// These match the attendance schedules' cadences (attendance-snapshot
+/// = 5 min, app-usage = 2 min). They're estimates — sampling can't give
+/// exact active seconds — and must be kept in sync if those schedule
+/// cadences change. The endpoint is generic, but presenting "≈ time"
+/// is far more legible than a bare sample tally.
+const PRESENCE_SAMPLE_MINUTES: i64 = 5;
+const APP_SAMPLE_MINUTES: i64 = 2;
+
+/// The Windows lock-screen process surfaces as the "foreground app"
+/// while the screen is locked. Excluded from the app ranking so it
+/// doesn't dominate "apps used" — lock/idle time is already captured by
+/// the presence summary.
+const LOCK_SCREEN_APP: &str = "LockApp";
+
 #[derive(Deserialize)]
 pub struct WindowQuery {
     /// RFC3339 lower bound (inclusive). Default: `to` − 24h.
@@ -59,7 +74,12 @@ pub struct ActiveSummary {
 #[derive(Serialize)]
 pub struct AppCount {
     pub app: String,
+    /// Raw foreground-sample count — kept as the underlying measurement so
+    /// API consumers can re-derive time at a different cadence; the SPA
+    /// displays `est_minutes` instead.
     pub samples: i64,
+    /// Approximate foreground time = `samples × APP_SAMPLE_MINUTES`.
+    pub est_minutes: i64,
 }
 
 #[derive(Serialize)]
@@ -193,24 +213,28 @@ pub async fn get(
         last_active: active_row
             .try_get::<Option<DateTime<Utc>>, _>("last_active")
             .unwrap_or(None),
-        est_active_minutes: active_samples * 5,
+        est_active_minutes: active_samples * PRESENCE_SAMPLE_MINUTES,
     };
 
     // ── top apps (app_sample foreground) ────────────────────────────
     // NB: SELECT aliases (`app`) aren't visible in WHERE in SQLite —
     // repeat the json_extract expression there (and in GROUP BY) rather
     // than referencing the alias, which would error at runtime.
+    // Exclude the lock-screen app so it doesn't top the "apps used" list
+    // (lock/idle time is already in the presence summary).
     let app_rows = sqlx::query(
         "SELECT json_extract(payload, '$.foreground.app') AS app, COUNT(*) AS n \
          FROM obs_events \
          WHERE pc_id = ? AND kind = 'app_sample' AND at >= ? AND at < ? \
            AND json_extract(payload, '$.foreground.app') IS NOT NULL \
            AND json_extract(payload, '$.foreground.app') <> '' \
+           AND json_extract(payload, '$.foreground.app') <> ? \
          GROUP BY json_extract(payload, '$.foreground.app') ORDER BY n DESC LIMIT 10",
     )
     .bind(&pc_id)
     .bind(from)
     .bind(to)
+    .bind(LOCK_SCREEN_APP)
     .fetch_all(&pool)
     .await
     .map_err(|e| {
@@ -222,7 +246,11 @@ pub async fn get(
         .filter_map(|r| {
             let app: String = r.try_get("app").ok()?;
             let samples: i64 = r.try_get("n").unwrap_or(0);
-            Some(AppCount { app, samples })
+            Some(AppCount {
+                app,
+                samples,
+                est_minutes: samples * APP_SAMPLE_MINUTES,
+            })
         })
         .collect();
 

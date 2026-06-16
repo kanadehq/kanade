@@ -25,7 +25,7 @@ type UtilizationResponse = {
     last_active: string | null;
     est_active_minutes: number;
   };
-  top_apps: { app: string; samples: number }[];
+  top_apps: { app: string; samples: number; est_minutes: number }[];
   top_sites: { host: string; visits: number }[];
   site_visits_capped: boolean;
   timeline: { hour: number; total: number; active: number }[];
@@ -179,10 +179,11 @@ export function Utilization() {
               </CardHeader>
               <CardContent>
                 <TopTable
-                  rows={(q.data?.top_apps ?? []).map((r) => ({ name: r.app, count: r.samples }))}
+                  rows={(q.data?.top_apps ?? []).map((r) => ({ name: r.app, count: r.est_minutes }))}
                   nameHead={t('apps.app')}
-                  countHead={t('apps.samples')}
+                  countHead={t('apps.time')}
                   empty={t('apps.empty')}
+                  fmtValue={fmtMinutes}
                 />
               </CardContent>
             </Card>
@@ -226,11 +227,13 @@ function TopTable({
   nameHead,
   countHead,
   empty,
+  fmtValue,
 }: {
   rows: { name: string; count: number }[];
   nameHead: string;
   countHead: string;
   empty: string;
+  fmtValue?: (n: number) => string;
 }) {
   if (rows.length === 0) return <div className="text-muted text-sm">{empty}</div>;
   const max = Math.max(...rows.map((r) => r.count), 1);
@@ -255,7 +258,9 @@ function TopTable({
                 <code className="text-xs break-all">{r.name}</code>
               </div>
             </TableCell>
-            <TableCell className="text-right text-muted text-xs">{r.count}</TableCell>
+            <TableCell className="text-right text-muted text-xs">
+              {fmtValue ? fmtValue(r.count) : r.count}
+            </TableCell>
           </TableRow>
         ))}
       </TableBody>

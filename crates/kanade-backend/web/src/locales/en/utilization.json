@@ -24,7 +24,7 @@
   "apps": {
     "title": "Top apps",
     "app": "app",
-    "samples": "samples",
+    "time": "est. time",
     "empty": "No app samples in this window."
   },
   "sites": {
