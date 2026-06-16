@@ -575,6 +575,9 @@ pub async fn handle_command(
         // results projector uses this to look up the manifest's
         // `inventory:` hint and upsert `inventory_facts` rows.
         manifest_id: Some(cmd.id.clone()),
+        // #219: set by the collect step (PR2) when this job carries a
+        // `collect:` hint and the run succeeded; None otherwise.
+        collect_object: None,
     };
     let outbox_dir = default_paths::data_dir().join("outbox");
     let path = outbox::enqueue(&outbox_dir, &result)?;
@@ -720,6 +723,8 @@ async fn publish_staleness_skipped(
         stdout_object: None,
         stderr_object: None,
         manifest_id: Some(cmd.id.clone()),
+        // #219: skip results never collect.
+        collect_object: None,
     };
     let outbox_dir = default_paths::data_dir().join("outbox");
     let path = outbox::enqueue(&outbox_dir, &result)?;
@@ -768,6 +773,8 @@ async fn publish_skipped(
         stdout_object: None,
         stderr_object: None,
         manifest_id: Some(cmd.id.clone()),
+        // #219: skip results never collect.
+        collect_object: None,
     };
     let outbox_dir = default_paths::data_dir().join("outbox");
     let path = outbox::enqueue(&outbox_dir, &result)?;
@@ -813,6 +820,8 @@ async fn publish_version_mismatch_skipped(
         stdout_object: None,
         stderr_object: None,
         manifest_id: Some(cmd.id.clone()),
+        // #219: skip results never collect.
+        collect_object: None,
     };
     let outbox_dir = default_paths::data_dir().join("outbox");
     let path = outbox::enqueue(&outbox_dir, &result)?;
@@ -852,6 +861,8 @@ async fn publish_revoked_skipped(pc_id: &str, cmd: &Command) -> Result<()> {
         stdout_object: None,
         stderr_object: None,
         manifest_id: Some(cmd.id.clone()),
+        // #219: skip results never collect.
+        collect_object: None,
     };
     let outbox_dir = default_paths::data_dir().join("outbox");
     let path = outbox::enqueue(&outbox_dir, &result)?;

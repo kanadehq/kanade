@@ -68,6 +68,16 @@ pub struct ExecResult {
     /// `inventory_facts` rows for inventory-tagged jobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest_id: Option<String>,
+    /// #219: Object Store key under [`crate::kv::OBJECT_COLLECTIONS`] for
+    /// the bundle this run collected, when the job carried a `collect:`
+    /// hint and the run succeeded. Set by the agent to
+    /// `Some("<pc_id>/<job_id>/<rfc3339>.zip")` after it zips the
+    /// script's listed files and uploads the archive. `None` for every
+    /// non-collect job + every pre-#219 payload (`serde(default)` keeps
+    /// older results decodable). The SPA Collect page lists / downloads
+    /// these straight from the bucket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collect_object: Option<String>,
 }
 
 impl ExecResult {
@@ -112,6 +122,7 @@ mod tests {
             stdout_object: None,
             stderr_object: None,
             manifest_id: Some("inventory-hw".into()),
+            collect_object: None,
         };
         let json = serde_json::to_string(&r).unwrap();
         let back: ExecResult = serde_json::from_str(&json).unwrap();
@@ -221,7 +232,42 @@ mod tests {
             stdout_object: None,
             stderr_object: None,
             manifest_id: None,
+            collect_object: None,
         };
         assert_eq!(r.stable_result_id(), "agent-minted-uuid");
+    }
+
+    #[test]
+    fn exec_result_collect_object_round_trips_and_omits_when_absent() {
+        // #219: collect_object is off the wire when None
+        // (skip_serializing_if) so pre-#219 readers stay compatible...
+        let t0 = chrono::Utc.with_ymd_and_hms(2026, 6, 15, 0, 0, 0).unwrap();
+        let mut r = ExecResult {
+            result_id: "r1".into(),
+            request_id: "req".into(),
+            exec_id: None,
+            pc_id: "PC1".into(),
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            started_at: t0,
+            finished_at: t0,
+            stdout_object: None,
+            stderr_object: None,
+            manifest_id: Some("collect-diagnostics".into()),
+            collect_object: None,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(
+            !json.contains("collect_object"),
+            "collect_object must be absent when None: {json}"
+        );
+        // ...and a set key survives the round-trip.
+        r.collect_object = Some("PC1/collect-diagnostics/20260615T000000Z.zip".into());
+        let back: ExecResult = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+        assert_eq!(
+            back.collect_object.as_deref(),
+            Some("PC1/collect-diagnostics/20260615T000000Z.zip"),
+        );
     }
 }

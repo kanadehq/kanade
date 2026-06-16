@@ -300,6 +300,7 @@ mod tests {
             stdout_object: None,
             stderr_object: None,
             manifest_id: Some("inventory-hw".into()),
+            collect_object: None,
         }
     }
 

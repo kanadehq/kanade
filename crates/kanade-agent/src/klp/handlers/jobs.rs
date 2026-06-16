@@ -377,6 +377,11 @@ pub fn build_command(
         // hints (the run path would otherwise try to project them).
         emit: None,
         check: None,
+        // #219: collect IS forwarded (unlike emit/check) — a
+        // `collect:` + `client:` job exists precisely so an end user can
+        // trigger a collection from the Client App; `run_job` bundles +
+        // uploads the listed files on success.
+        collect: manifest.collect.clone(),
         // #418 Phase 4: a KLP-fired one-shot has no schedule behind it,
         // so no on_failure.retry policy — the user re-runs from the app.
         retry: None,
@@ -511,6 +516,10 @@ fn build_exec_result(
         stdout_object: None,
         stderr_object: None,
         manifest_id: Some(cmd.id.clone()),
+        // #219: set by the collect step (PR2) for a `collect:` job; None
+        // otherwise. The KLP path is exactly how a `collect:`+`client:`
+        // job fired from the Client App gets bundled.
+        collect_object: None,
     }
 }
 
@@ -736,6 +745,7 @@ mod tests {
             inventory: None,
             emit: None,
             check: None,
+            collect: None,
             staleness: Staleness::default(),
             client: client.map(|(name, category)| ClientHint {
                 name: name.into(),

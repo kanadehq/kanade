@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::Staleness;
-use crate::manifest::{CheckHint, EmitConfig};
+use crate::manifest::{CheckHint, CollectHint, EmitConfig};
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
 pub struct Command {
@@ -97,6 +97,17 @@ pub struct Command {
     /// `#[serde(default)]` → `None` preserves prior behaviour.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check: Option<CheckHint>,
+    /// #219: forwarded from `Manifest.collect` so the agent can bundle
+    /// the script's listed files without re-fetching the Manifest. When
+    /// `Some`, the agent — after a successful run — reads the
+    /// `files_field` path array out of the stdout JSON object, zips those
+    /// files (capped at `max_size`), uploads the archive to
+    /// `OBJECT_COLLECTIONS`, and records the key in
+    /// [`ExecResult::collect_object`](super::ExecResult::collect_object).
+    /// Pre-#219 wire omits this; `#[serde(default)]` → `None` preserves
+    /// prior behaviour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collect: Option<CollectHint>,
     /// #418 Phase 4: lowered from `Schedule.on_failure.retry` by the
     /// command builders (backend `exec_manifest` + the agent's local
     /// scheduler). When `Some`, the agent re-runs the script
@@ -187,6 +198,7 @@ mod tests {
             staleness: Staleness::Cached,
             emit: None,
             check: None,
+            collect: None,
             retry: None,
         }
     }
@@ -366,5 +378,31 @@ mod tests {
             !json.contains("retry"),
             "retry must not appear when None: {json}"
         );
+    }
+
+    #[test]
+    fn command_collect_round_trips_and_omits_when_absent() {
+        // #219: `collect` is off the wire when None (skip_serializing_if),
+        // so pre-#219 readers don't trip over it...
+        let json = serde_json::to_string(&sample_command()).unwrap();
+        assert!(
+            !json.contains("collect"),
+            "collect must be absent when None: {json}"
+        );
+        // ...and a forwarded CollectHint survives the round-trip.
+        let cmd = Command {
+            collect: Some(CollectHint {
+                name: "diag".into(),
+                description: Some("logs".into()),
+                max_size: Some("50MB".into()),
+                files_field: "files".into(),
+            }),
+            ..sample_command()
+        };
+        let back: Command = serde_json::from_str(&serde_json::to_string(&cmd).unwrap()).unwrap();
+        let c = back.collect.expect("collect survived round-trip");
+        assert_eq!(c.name, "diag");
+        assert_eq!(c.max_size.as_deref(), Some("50MB"));
+        assert_eq!(c.files_field, "files");
     }
 }

@@ -7,6 +7,7 @@ pub mod agents;
 pub mod app_packages;
 pub mod audit;
 pub mod checks;
+pub mod collect;
 pub mod exec;
 pub mod executions;
 pub mod fleet_perf;
@@ -289,7 +290,13 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/script-objects/{name}/{version}",
             get(script_objects::download),
-        );
+        )
+        // #219 collected bundles — list + download are viewer-readable
+        // (the delete is operator-gated in the mutations router below).
+        // The `{*key}` wildcard captures the full <pc_id>/<job_id>/<ts>.zip
+        // key (it contains slashes, unlike the 2-segment package keys).
+        .route("/api/collect/bundles", get(collect::list_bundles))
+        .route("/api/collect/bundles/{*key}", get(collect::download_bundle));
 
     // Fleet mutations — operator+ only.
     let operator = Router::new()
@@ -357,6 +364,12 @@ pub fn router(state: AppState) -> Router {
             post(script_objects::publish)
                 .delete(script_objects::delete_object)
                 .layer(DefaultBodyLimit::max(SCRIPT_OBJECT_BODY_LIMIT)),
+        )
+        // #219: collected-bundle gc. No upload here — bundles are
+        // produced by agents via the exec result path, not POSTed.
+        .route(
+            "/api/collect/bundles/{*key}",
+            axum::routing::delete(collect::delete_bundle),
         )
         .route_layer(axum::middleware::from_fn(crate::auth::require_operator));
 
