@@ -7,7 +7,7 @@
       "dependencies": {
         "@tauri-apps/api": "^2.11.0",
         "@tauri-apps/plugin-notification": "^2.3.3",
-        "lucide": "^1.18.0",
+        "lucide": "^1.20.0",
       },
       "devDependencies": {
         "typescript": "^6.0.3",
@@ -94,7 +94,7 @@
 
     "lightningcss-win32-x64-msvc": ["lightningcss-win32-x64-msvc@1.32.0", "", { "os": "win32", "cpu": "x64" }, "sha512-Amq9B/SoZYdDi1kFrojnoqPLxYhQ4Wo5XiL8EVJrVsB8ARoC1PWW6VGtT0WKCemjy8aC+louJnjS7U18x3b06Q=="],
 
-    "lucide": ["lucide@1.18.0", "", {}, "sha512-xzUa3LbA/Uvn3DCs7B7YfDcOZeqV8aZ4r4OFyCgJSfZGUdMglJiK3PJSbd26SXLLQvGGsYX9PdETCRXvfK4rnA=="],
+    "lucide": ["lucide@1.20.0", "", {}, "sha512-j7D9KWJDHYX7L6WBeuUjKkzHqWQHD130tndta0Vf2no9tnxfrFCCQY8wxQ3jeq3Ja7i6k2mJOEUCAVwM0yZF6Q=="],
 
     "nanoid": ["nanoid@3.3.12", "", { "bin": { "nanoid": "bin/nanoid.cjs" } }, "sha512-ZB9RH/39qpq5Vu6Y+NmUaFhQR6pp+M2Xt76XBnEwDaGcVAqhlvxrl3B2bKS5D3NH3QR76v3aSrKaF/Kiy7lEtQ=="],
 
