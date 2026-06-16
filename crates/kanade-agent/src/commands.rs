@@ -518,6 +518,20 @@ pub async fn handle_command(
         check_sink.record(check);
     }
 
+    // #219: if this job is a file collector, parse stdout for the file
+    // list, zip those files, and upload the bundle to OBJECT_COLLECTIONS.
+    // Only on a clean exit (a failed run has no trustworthy file list).
+    // `collect:` is validated mutually exclusive with `emit:`, so the
+    // emit branch below never blanks a collect job's stdout — but we read
+    // it here first regardless. Best-effort: on any failure the result
+    // still publishes with `collect_object = None`.
+    let collect_object = if exit_code == 0 && cmd.collect.is_some() {
+        let js = async_nats::jetstream::new(client.clone());
+        crate::collect::maybe_collect(&js, &cmd, &pc_id, &stdout, finished_at).await
+    } else {
+        None
+    };
+
     // Issue #246: if the manifest is an event emitter, parse stdout
     // as NDJSON `ObsEvent` and route each line to obs_outbox.
     // Stdout is then DROPPED from the ExecResult — the timeline
@@ -575,9 +589,9 @@ pub async fn handle_command(
         // results projector uses this to look up the manifest's
         // `inventory:` hint and upsert `inventory_facts` rows.
         manifest_id: Some(cmd.id.clone()),
-        // #219: set by the collect step (PR2) when this job carries a
-        // `collect:` hint and the run succeeded; None otherwise.
-        collect_object: None,
+        // #219: the bundle key from the collect step above (None unless
+        // this job carried a `collect:` hint and the run succeeded).
+        collect_object,
     };
     let outbox_dir = default_paths::data_dir().join("outbox");
     let path = outbox::enqueue(&outbox_dir, &result)?;
