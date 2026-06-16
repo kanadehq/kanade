@@ -68,6 +68,24 @@ pub struct Manifest {
     /// `emit:` (NDJSON stdout) is incompatible.
     #[serde(default)]
     pub check: Option<CheckHint>,
+    /// #219: opt-in marker that this job COLLECTS files into a bundle.
+    /// The script does the collection work and prints a single JSON
+    /// object on stdout carrying a `files` array of paths (the field
+    /// name is [`CollectHint::files_field`], default `"files"`); the
+    /// agent — after the script exits successfully — zips those files,
+    /// uploads the archive to the `OBJECT_COLLECTIONS` Object Store
+    /// bucket (key `<pc_id>/<job_id>/<timestamp>.zip`), and records the
+    /// key in [`crate::wire::ExecResult::collect_object`]. The operator
+    /// downloads bundles from the SPA Collect page.
+    ///
+    /// Like `inventory:` / `check:` this reads a JSON object from stdout,
+    /// but it consumes that stdout for its OWN contract (a `files`
+    /// list), so it is mutually exclusive with `inventory:` / `check:` /
+    /// `emit:` (enforced in [`Manifest::validate`]). It composes with
+    /// `client:` — a `collect:` + `client:` job lets an end user trigger
+    /// a collection from the Client App (the same-host agent runs it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collect: Option<CollectHint>,
     /// v0.26: Layer 2 staleness policy (SPEC.md §2.6.2). Controls
     /// what the agent does at fire time when it can't verify the
     /// `script_current` / `script_status` KV values are fresh —
@@ -307,6 +325,93 @@ fn default_detail_field() -> String {
 
 fn default_fleet() -> bool {
     true
+}
+
+fn default_files_field() -> String {
+    "files".to_string()
+}
+
+/// Fallback cap on a collect bundle's total input size when the
+/// manifest's `collect.max_size` is unset. 50 MB (decimal).
+pub const DEFAULT_COLLECT_MAX_SIZE: u64 = 50 * 1_000_000;
+
+/// Manifest sub-section (#219): marks a job as a **file collector** and
+/// carries how the collected bundle presents in the SPA. Parallel to
+/// [`InventoryHint`] / [`CheckHint`] — the block's presence is the
+/// opt-in. The script prints a single JSON object on stdout whose
+/// [`files_field`](CollectHint::files_field) key holds an array of file
+/// paths to bundle (env vars are expanded); the agent zips them and
+/// uploads to `OBJECT_COLLECTIONS`. See [`Manifest::collect`].
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
+pub struct CollectHint {
+    /// Operator/end-user-facing title for the collection, shown as the
+    /// bundle's heading on the SPA Collect page (and the Client App row
+    /// when paired with `client:`). Required; validated non-empty.
+    pub name: String,
+    /// Optional one-line description of what the bundle contains.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Human-readable cap on the bundle's total input size
+    /// (`"50MB"`, `"500KB"`, `"1GiB"`). The agent refuses to build a
+    /// bundle whose listed files exceed this. `None` ⇒
+    /// [`DEFAULT_COLLECT_MAX_SIZE`]. Parsed by [`parse_size_bytes`];
+    /// [`Manifest::validate`] rejects an unparseable value at create
+    /// time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_size: Option<String>,
+    /// Top-level stdout JSON key holding the array of file paths to
+    /// bundle. Defaults to `"files"`.
+    #[serde(default = "default_files_field")]
+    pub files_field: String,
+}
+
+impl CollectHint {
+    /// The effective size cap in bytes — the parsed `max_size` or
+    /// [`DEFAULT_COLLECT_MAX_SIZE`] when unset. Assumes `max_size` (if
+    /// present) already passed [`Manifest::validate`]; falls back to the
+    /// default on a parse error rather than panicking on the fire path.
+    pub fn max_size_bytes(&self) -> u64 {
+        match &self.max_size {
+            Some(s) => parse_size_bytes(s).unwrap_or(DEFAULT_COLLECT_MAX_SIZE),
+            None => DEFAULT_COLLECT_MAX_SIZE,
+        }
+    }
+}
+
+/// Parse a human-readable byte size (`"50MB"`, `"500 KB"`, `"1GiB"`,
+/// `"1024"`). Decimal units (KB/MB/GB) are 1000-based; binary units
+/// (KiB/MiB/GiB) are 1024-based; a bare number (or `B`) is bytes.
+/// Case-insensitive. Shared by `collect.max_size` validation and the
+/// agent's bundle-size enforcement.
+pub fn parse_size_bytes(s: &str) -> Result<u64, String> {
+    let t = s.trim();
+    if t.is_empty() {
+        return Err("size must not be empty".to_string());
+    }
+    let split = t.find(|c: char| !c.is_ascii_digit()).unwrap_or(t.len());
+    let (num_str, unit_raw) = t.split_at(split);
+    if num_str.is_empty() {
+        return Err(format!("size '{s}': missing leading number"));
+    }
+    let num: u64 = num_str
+        .parse()
+        .map_err(|_| format!("size '{s}': bad number '{num_str}'"))?;
+    let mult: u64 = match unit_raw.trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1,
+        "kb" => 1_000,
+        "mb" => 1_000_000,
+        "gb" => 1_000_000_000,
+        "kib" => 1024,
+        "mib" => 1024 * 1024,
+        "gib" => 1024 * 1024 * 1024,
+        other => {
+            return Err(format!(
+                "size '{s}': unknown unit '{other}' (use B/KB/MB/GB/KiB/MiB/GiB)"
+            ));
+        }
+    };
+    num.checked_mul(mult)
+        .ok_or_else(|| format!("size '{s}': overflow"))
 }
 
 /// Manifest sub-section (#291): marks a job as **user-invokable**
@@ -635,6 +740,19 @@ impl Manifest {
                     .to_string(),
             );
         }
+        // `collect:` consumes stdout for its OWN contract (a JSON object
+        // carrying a `files` array), so unlike the inventory+check pair it
+        // can't share stdout with another stdout-reading hint. It composes
+        // only with `client:` (which doesn't touch stdout).
+        if self.collect.is_some()
+            && (self.inventory.is_some() || self.check.is_some() || self.emit.is_some())
+        {
+            return Err(
+                "`collect:` is incompatible with `inventory:` / `check:` / `emit:` — collect \
+                 reads its own `files` JSON object from stdout. (It composes with `client:`.)"
+                    .to_string(),
+            );
+        }
         // A check's `name` is the Health-tab row id (React key); the
         // field names tell the agent where to read status/detail.
         // An empty value is an invisible runtime bug, and the serde
@@ -690,6 +808,28 @@ impl Manifest {
                         return Err(format!("{label} must not be empty when set"));
                     }
                 }
+            }
+        }
+        // #219: a `collect:` job's `name` heads the bundle on the SPA
+        // Collect page (and the Client App row when paired with
+        // `client:`), `files_field` tells the agent where to read the
+        // path list, and `max_size` must be a parseable size so a typo
+        // is caught at create time rather than silently capping the
+        // bundle at the default on the fire path.
+        if let Some(collect) = &self.collect {
+            if collect.name.trim().is_empty() {
+                return Err("collect.name must not be empty".to_string());
+            }
+            if collect.files_field.trim().is_empty() {
+                return Err("collect.files_field must not be empty".to_string());
+            }
+            if let Some(description) = &collect.description {
+                if description.trim().is_empty() {
+                    return Err("collect.description must not be empty when set".to_string());
+                }
+            }
+            if let Some(max_size) = &collect.max_size {
+                parse_size_bytes(max_size).map_err(|e| format!("collect.max_size: {e}"))?;
             }
         }
         // A blank / whitespace-only tag is an invisible operator typo
@@ -1120,6 +1260,157 @@ inventory:
         let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
         assert!(m.check.is_some() && m.inventory.is_some());
         m.validate().expect("check + inventory compose");
+    }
+
+    #[test]
+    fn manifest_parses_collect_job_and_validates() {
+        // #219: a `collect:` hint + a script that lists files on stdout.
+        let yaml = r#"
+id: collect-diagnostics
+version: 0.1.0
+execute:
+  shell: powershell
+  run_as: system
+  timeout: 120s
+  script: |
+    @{ files = @("$env:KANADE_COLLECT_DIR/system.csv") } | ConvertTo-Json
+collect:
+  name: "Full diagnostics"
+  description: "Event logs + process"
+  max_size: 50MB
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        let c = m.collect.as_ref().expect("collect hint present");
+        assert_eq!(c.name, "Full diagnostics");
+        assert_eq!(c.files_field, "files"); // default
+        assert_eq!(c.max_size_bytes(), 50_000_000);
+        m.validate().expect("collect-only manifest validates");
+    }
+
+    #[test]
+    fn manifest_collect_max_size_defaults_when_unset() {
+        let m: Manifest = serde_yaml::from_str(
+            r#"
+id: collect-min
+version: 0.1.0
+execute:
+  shell: powershell
+  script: "echo x"
+  timeout: 10s
+collect:
+  name: minimal
+"#,
+        )
+        .expect("parse");
+        let c = m.collect.as_ref().unwrap();
+        assert!(c.max_size.is_none());
+        assert_eq!(c.max_size_bytes(), DEFAULT_COLLECT_MAX_SIZE);
+        m.validate().expect("validates");
+    }
+
+    #[test]
+    fn manifest_allows_collect_with_client() {
+        // collect composes with client (client doesn't touch stdout):
+        // an end user can trigger a collection from the Client App.
+        let yaml = r#"
+id: collect-diag-client
+version: 0.1.0
+execute:
+  shell: powershell
+  script: "echo x"
+  timeout: 10s
+collect:
+  name: diagnostics
+client:
+  name: "Send diagnostics"
+  category: troubleshoot
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        assert!(m.collect.is_some() && m.client.is_some());
+        m.validate().expect("collect + client compose");
+    }
+
+    #[test]
+    fn manifest_rejects_collect_combined_with_inventory() {
+        // collect consumes stdout for its own `files` contract → can't
+        // share with inventory/check/emit.
+        let yaml = r#"
+id: bad-collect-mix
+version: 0.1.0
+execute:
+  shell: powershell
+  script: "echo x"
+  timeout: 10s
+collect:
+  name: diag
+inventory:
+  display:
+    - { field: status, label: Status }
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        let err = m
+            .validate()
+            .expect_err("collect + inventory must be rejected");
+        assert!(err.contains("collect"), "error mentions collect: {err}");
+    }
+
+    #[test]
+    fn manifest_rejects_collect_combined_with_check_or_emit() {
+        // collect is exclusive with every stdout-consuming hint, not
+        // just inventory — guard the check + emit branches too.
+        for extra in ["check:\n  name: health\n", "emit:\n  type: events\n"] {
+            let yaml = format!(
+                "id: bad-collect-mix\nversion: 0.1.0\nexecute:\n  shell: powershell\n  \
+                 script: \"echo x\"\n  timeout: 10s\ncollect:\n  name: diag\n{extra}"
+            );
+            let m: Manifest = serde_yaml::from_str(&yaml).expect("parse");
+            let err = m
+                .validate()
+                .expect_err("collect + stdout-consuming hint must fail");
+            assert!(err.contains("collect"), "error mentions collect: {err}");
+        }
+    }
+
+    #[test]
+    fn manifest_rejects_collect_empty_name_and_bad_size() {
+        let empty_name: Manifest = serde_yaml::from_str(
+            r#"
+id: c
+version: 0.1.0
+execute: { shell: powershell, script: "echo x", timeout: 10s }
+collect: { name: "  " }
+"#,
+        )
+        .expect("parse");
+        assert!(
+            empty_name.validate().is_err(),
+            "blank collect.name rejected"
+        );
+
+        let bad_size: Manifest = serde_yaml::from_str(
+            r#"
+id: c
+version: 0.1.0
+execute: { shell: powershell, script: "echo x", timeout: 10s }
+collect: { name: diag, max_size: "50 quux" }
+"#,
+        )
+        .expect("parse");
+        let err = bad_size.validate().expect_err("bad max_size rejected");
+        assert!(err.contains("max_size"), "error mentions max_size: {err}");
+    }
+
+    #[test]
+    fn parse_size_bytes_units() {
+        assert_eq!(parse_size_bytes("1024").unwrap(), 1024);
+        assert_eq!(parse_size_bytes("1B").unwrap(), 1);
+        assert_eq!(parse_size_bytes("50MB").unwrap(), 50_000_000);
+        assert_eq!(parse_size_bytes("500 KB").unwrap(), 500_000);
+        assert_eq!(parse_size_bytes("1GiB").unwrap(), 1024 * 1024 * 1024);
+        assert_eq!(parse_size_bytes("2mib").unwrap(), 2 * 1024 * 1024);
+        assert!(parse_size_bytes("").is_err());
+        assert!(parse_size_bytes("MB").is_err());
+        assert!(parse_size_bytes("12 zonks").is_err());
     }
 
     #[test]

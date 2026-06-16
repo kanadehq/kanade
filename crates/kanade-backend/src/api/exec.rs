@@ -129,6 +129,10 @@ pub async fn exec_manifest(
         // #290: forward the manifest's check hint so the agent builds
         // a KLP Health-tab Check from the job's stdout (no re-fetch).
         check: manifest.check.clone(),
+        // #219: forward the manifest's collect hint so the agent bundles
+        // the script's listed files and uploads to OBJECT_COLLECTIONS
+        // (no re-fetch).
+        collect: manifest.collect.clone(),
         // #418 Phase 4: the schedule's retry policy (None for ad-hoc
         // exec). Copy is cheap — RetrySpec is Copy.
         retry,

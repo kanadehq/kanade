@@ -29,8 +29,9 @@ use crate::kv::{
     BUCKET_AGENT_CONFIG, BUCKET_AGENT_GROUPS, BUCKET_AGENTS_STATE, BUCKET_FLEET_CONFIG,
     BUCKET_JOBS, BUCKET_JOBS_YAML, BUCKET_NOTIFICATIONS_READ, BUCKET_SCHEDULES,
     BUCKET_SCHEDULES_YAML, BUCKET_SCRIPT_CURRENT, BUCKET_SCRIPT_STATUS, OBJECT_AGENT_RELEASES,
-    OBJECT_APP_PACKAGES, OBJECT_RESULT_OUTPUT, OBJECT_SCRIPTS, STREAM_AUDIT, STREAM_EVENTS,
-    STREAM_EXEC, STREAM_INVENTORY, STREAM_NOTIFICATIONS, STREAM_OBS_EVENTS, STREAM_RESULTS,
+    OBJECT_APP_PACKAGES, OBJECT_COLLECTIONS, OBJECT_RESULT_OUTPUT, OBJECT_SCRIPTS, STREAM_AUDIT,
+    STREAM_EVENTS, STREAM_EXEC, STREAM_INVENTORY, STREAM_NOTIFICATIONS, STREAM_OBS_EVENTS,
+    STREAM_RESULTS,
 };
 
 /// Create-or-update an Object Store, but never let it wedge backend
@@ -423,6 +424,25 @@ pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
             bucket: OBJECT_RESULT_OUTPUT.into(),
             max_age: Duration::from_secs(SECS_PER_DAY * 30),
             max_bytes: GIB,
+            ..Default::default()
+        },
+    )
+    .await?;
+
+    // #219: collected file bundles. A `collect:` job's agent zips the
+    // script's listed files and uploads the archive here under
+    // `<pc_id>/<job_id>/<rfc3339>.zip`; the SPA Collect page lists /
+    // downloads them. 30-day max_age — bundles are debugging / audit
+    // artifacts (not curated config like app_packages / scripts), so
+    // they auto-expire and the bucket doesn't grow unbounded. Capped
+    // at 5 GiB (DiscardPolicy::Old evicts oldest first) so a fleet's
+    // worth of bundles can't fill the file store.
+    ensure_object_store(
+        js,
+        ObjectStoreConfig {
+            bucket: OBJECT_COLLECTIONS.into(),
+            max_age: Duration::from_secs(SECS_PER_DAY * 30),
+            max_bytes: 5 * GIB,
             ..Default::default()
         },
     )

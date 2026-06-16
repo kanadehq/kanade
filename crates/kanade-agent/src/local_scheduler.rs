@@ -1754,6 +1754,9 @@ async fn local_tick(
         // #290: forward the check hint so an agent-scheduled
         // (`runs_on: agent`) check job still feeds the Health tab.
         check: manifest.check.clone(),
+        // #219: forward the collect hint so an agent-scheduled collect
+        // job bundles + uploads its files even on the offline path.
+        collect: manifest.collect.clone(),
         // #418 Phase 4: lower this schedule's on_failure.retry onto
         // the Command so handle_command re-runs a failed script
         // in-process even on the offline (`runs_on: agent`) path.

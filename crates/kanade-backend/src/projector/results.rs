@@ -773,6 +773,7 @@ mod tests {
             stdout_object: None,
             stderr_object: None,
             manifest_id: None,
+            collect_object: None,
         }
     }
 

@@ -367,6 +367,7 @@ mod tests {
             inventory: None,
             emit: None,
             check: None,
+            collect: None,
             staleness: Staleness::default(),
             client: client.map(|(name, category)| ClientHint {
                 name: name.into(),

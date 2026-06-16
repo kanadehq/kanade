@@ -29,6 +29,18 @@
         }
       ]
     },
+    "collect": {
+      "title": "219: opt-in marker that this job COLLECTS files into a bundle.",
+      "description": "The script does the collection work and prints a single JSON\nobject on stdout carrying a `files` array of paths (the field\nname is [`CollectHint::files_field`], default `\"files\"`); the\nagent — after the script exits successfully — zips those files,\nuploads the archive to the `OBJECT_COLLECTIONS` Object Store\nbucket (key `<pc_id>/<job_id>/<timestamp>.zip`), and records the\nkey in [`crate::wire::ExecResult::collect_object`]. The operator\ndownloads bundles from the SPA Collect page.\n\nLike `inventory:` / `check:` this reads a JSON object from stdout,\nbut it consumes that stdout for its OWN contract (a `files`\nlist), so it is mutually exclusive with `inventory:` / `check:` /\n`emit:` (enforced in [`Manifest::validate`]). It composes with\n`client:` — a `collect:` + `client:` job lets an end user trigger\na collection from the Client App (the same-host agent runs it).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CollectHint"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "description": {
       "type": [
         "string",
@@ -178,6 +190,38 @@
       "required": [
         "name",
         "category"
+      ]
+    },
+    "CollectHint": {
+      "description": "Manifest sub-section (#219): marks a job as a **file collector** and\ncarries how the collected bundle presents in the SPA. Parallel to\n[`InventoryHint`] / [`CheckHint`] — the block's presence is the\nopt-in. The script prints a single JSON object on stdout whose\n[`files_field`](CollectHint::files_field) key holds an array of file\npaths to bundle (env vars are expanded); the agent zips them and\nuploads to `OBJECT_COLLECTIONS`. See [`Manifest::collect`].",
+      "type": "object",
+      "properties": {
+        "description": {
+          "description": "Optional one-line description of what the bundle contains.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "files_field": {
+          "description": "Top-level stdout JSON key holding the array of file paths to\nbundle. Defaults to `\"files\"`.",
+          "type": "string",
+          "default": "files"
+        },
+        "max_size": {
+          "description": "Human-readable cap on the bundle's total input size\n(`\"50MB\"`, `\"500KB\"`, `\"1GiB\"`). The agent refuses to build a\nbundle whose listed files exceed this. `None` ⇒\n[`DEFAULT_COLLECT_MAX_SIZE`]. Parsed by [`parse_size_bytes`];\n[`Manifest::validate`] rejects an unparseable value at create\ntime.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Operator/end-user-facing title for the collection, shown as the\nbundle's heading on the SPA Collect page (and the Client App row\nwhen paired with `client:`). Required; validated non-empty.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
       ]
     },
     "DisplayField": {
