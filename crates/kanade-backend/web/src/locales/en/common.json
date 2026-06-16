@@ -17,6 +17,7 @@
     "audit": "Audit",
     "logs": "Logs",
     "collect": "Collect",
+    "utilization": "Utilization",
     "jobs": "Jobs",
     "schedules": "Schedules",
     "notifications": "Notifications",

@@ -26,6 +26,7 @@ pub mod schedules;
 pub mod schemas;
 pub mod script_objects;
 pub mod scripts;
+pub mod utilization;
 pub mod yaml_body;
 
 use axum::Router;
@@ -139,6 +140,9 @@ pub fn router(state: AppState) -> Router {
         // Issue #391: distinct sources for the include/exclude chips.
         .route("/api/obs_events/sources", get(obs_events::sources))
         .route("/api/obs_events/recent", get(obs_events::recent))
+        // Per-PC activity rollup (obs_events aggregate) for the
+        // Utilization page. Viewer-readable like the obs_events feeds.
+        .route("/api/utilization/{pc_id}", get(utilization::get))
         .route(
             "/api/perf/active-investigations",
             get(fleet_perf::active_investigations),

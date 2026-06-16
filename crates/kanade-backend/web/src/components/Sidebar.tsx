@@ -48,6 +48,7 @@ const groups: {
       { to: '/audit', labelKey: 'nav.audit' },
       { to: '/logs', labelKey: 'nav.logs' },
       { to: '/collect', labelKey: 'nav.collect' },
+      { to: '/utilization', labelKey: 'nav.utilization' },
     ],
   },
   {

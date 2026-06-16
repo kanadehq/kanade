@@ -1,0 +1,31 @@
+{
+  "title": "Utilization",
+  "controls": {
+    "pc": "PC",
+    "date": "Date"
+  },
+  "noAgents": "No agents registered yet.",
+  "loading": "Loading…",
+  "errorTitle": "Failed to load utilization",
+  "active": {
+    "title": "Activity summary",
+    "ratio": "Active ratio",
+    "estHours": "Est. active time",
+    "estHint": "{{active}}/{{total}} samples × 5 min",
+    "first": "First active",
+    "last": "Last active"
+  },
+  "apps": {
+    "title": "Top apps",
+    "app": "app",
+    "samples": "samples",
+    "empty": "No app samples in this window."
+  },
+  "sites": {
+    "title": "Top sites",
+    "host": "host",
+    "visits": "visits",
+    "empty": "No web visits in this window.",
+    "capped": "Approximate — visit count hit the scan cap (10,000)."
+  }
+}
