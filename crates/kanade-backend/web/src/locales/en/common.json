@@ -16,6 +16,7 @@
     "events": "Events",
     "audit": "Audit",
     "logs": "Logs",
+    "collect": "Collect",
     "jobs": "Jobs",
     "schedules": "Schedules",
     "notifications": "Notifications",
