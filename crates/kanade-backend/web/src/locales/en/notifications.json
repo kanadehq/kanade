@@ -70,10 +70,6 @@
   },
   "ack": {
     "title": "Confirmation status",
-    "idField": "Notification id",
-    "idPlaceholder": "Paste a notification id (auto-filled after sending)",
-    "refresh": "Refresh",
-    "loadError": "Failed to load confirmation status",
     "empty": "No confirmations yet for this notification.",
     "pc": "PC",
     "user": "Confirmed by",

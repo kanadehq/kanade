@@ -70,10 +70,6 @@
   },
   "ack": {
     "title": "確認状況",
-    "idField": "通知 ID",
-    "idPlaceholder": "通知 ID を貼り付け (送信後に自動入力)",
-    "refresh": "更新",
-    "loadError": "確認状況の取得に失敗しました",
     "empty": "この通知の確認はまだありません。",
     "pc": "PC",
     "user": "確認者",
