@@ -13,7 +13,7 @@ import { Select } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { apiFetch } from '@/lib/api';
 import { useDebouncedValue } from '@/lib/hooks';
-import { cn, fmtIsoLocal } from '@/lib/utils';
+import { cn, fmtAccount, fmtIsoLocal } from '@/lib/utils';
 
 /** v0.35 / #87: per-explode-column descriptor returned by
  *  `GET /api/inventory/jobs`. The SPA uses `kind` to pick the right
@@ -59,6 +59,14 @@ type Op = 'eq' | 'contains' | 'prefix' | 'lt' | 'le' | 'gt' | 'ge' | 'ne';
 
 const TEXT_OPS: Op[] = ['eq', 'contains', 'prefix', 'ne'];
 const NUMERIC_OPS: Op[] = ['eq', 'lt', 'le', 'gt', 'ge', 'ne'];
+
+/** Keys the backend injects on every cross-PC search row with the
+ *  account last seen on that PC (joined from the `agents` baseline).
+ *  The leading `@` mirrors the server constant — it can never collide
+ *  with an explode / scalar column name (those are `[A-Za-z0-9_]`),
+ *  so reading them off the row is always safe. */
+const ACCOUNT_USER_KEY = '@account_user';
+const ACCOUNT_DISPLAY_NAME_KEY = '@account_display_name';
 
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 5000;
@@ -513,6 +521,7 @@ export function InventorySearch() {
                   <TableHeader>
                     <TableRow>
                       <TableHead>{t('results.columns.pcId')}</TableHead>
+                      <TableHead>{t('results.columns.lastUser')}</TableHead>
                       <TableHead>{t('results.columns.collectedAt')}</TableHead>
                       {columns.map((c) => (
                         <TableHead key={c.field}>{c.field}</TableHead>
@@ -549,6 +558,12 @@ export function InventorySearch() {
                             >
                               {pcId}
                             </Link>
+                          </TableCell>
+                          <TableCell>
+                            {fmtAccount(
+                              row[ACCOUNT_DISPLAY_NAME_KEY],
+                              row[ACCOUNT_USER_KEY],
+                            )}
                           </TableCell>
                           <TableCell className="text-muted text-xs">
                             {fmtIsoLocal(collectedAt)}

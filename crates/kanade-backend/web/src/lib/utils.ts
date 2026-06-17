@@ -64,6 +64,25 @@ export function fmtIsoLocal(iso: string | null): string {
 }
 
 /**
+ * Render a PC's last-seen account for a table cell. Prefers the
+ * friendly display name, falls back to the `DOMAIN\user` login name,
+ * and shows both as `Display Name (DOMAIN\user)` when they differ —
+ * the shape an operator needs to actually identify and contact whoever
+ * uses a machine. Blank / non-string inputs collapse to `—`.
+ *
+ * Inputs are `unknown` because the cross-PC inventory-search rows carry
+ * the account under dynamic `@account_*` keys read off a
+ * `Record<string, unknown>`; the typed fleet-list row passes
+ * `string | null`, which `unknown` also accepts.
+ */
+export function fmtAccount(displayName: unknown, user: unknown): string {
+  const dn = typeof displayName === 'string' && displayName.trim() ? displayName : null;
+  const u = typeof user === 'string' && user.trim() ? user : null;
+  if (dn && u && dn !== u) return `${dn} (${u})`;
+  return dn ?? u ?? '—';
+}
+
+/**
  * Heartbeat freshness window. An agent whose `last_heartbeat` falls
  * within this window counts as **online**; anything older (or never
  * heard from) is **offline / stale**.

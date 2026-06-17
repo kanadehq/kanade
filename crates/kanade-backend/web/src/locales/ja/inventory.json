@@ -24,6 +24,7 @@
     "empty": "まだファクトがありません。 <code>kanade exec &lt;job-id&gt;</code> で 1 回実行するか、 次回のスケジュール実行をお待ちください。",
     "columns": {
       "pcId": "pc_id",
+      "lastUser": "最終ユーザー",
       "collected": "収集日時"
     },
     "nestedRowCount_one": "{{count}} 行",

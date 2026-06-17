@@ -65,6 +65,14 @@ pub struct InventoryRow {
     pub pc_id: String,
     pub facts: serde_json::Value,
     pub collected_at: Option<DateTime<Utc>>,
+    /// Account last seen on this PC, LEFT JOINed from the `agents`
+    /// baseline row (maintained by the heartbeat projector, ~30 s
+    /// cadence). Shown next to each PC's inventory facts so an operator
+    /// can tell who uses a machine without cross-referencing the
+    /// Agents page. `None` when the PC has no agent row yet or no
+    /// sign-in has been recorded (non-Windows / pre-#655 agents).
+    pub last_logon_user: Option<String>,
+    pub last_logon_display_name: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -130,12 +138,21 @@ pub async fn list_for_job(
         (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
     })?;
 
+    // LEFT JOIN the agents baseline row so each PC's last-seen account
+    // rides along with its facts. The account lives on `agents`
+    // (heartbeat-maintained, single source of truth) — not in
+    // inventory facts — so we join at read time keyed by pc_id rather
+    // than re-collecting it per inventory job. The join is 1:0/1:1
+    // (agents.pc_id is unique), so it doesn't change the row count the
+    // `total` COUNT above reports.
     let rows = sqlx::query(
-        "SELECT pc_id, facts_json, display_json, summary_json, collected_at
-         FROM inventory_facts
-         WHERE job_id = ?
-           AND (?2 IS NULL OR pc_id LIKE ?2 ESCAPE '\\')
-         ORDER BY pc_id
+        "SELECT f.pc_id, f.facts_json, f.display_json, f.summary_json, f.collected_at,
+                a.last_logon_user, a.last_logon_display_name
+         FROM inventory_facts f
+         LEFT JOIN agents a ON a.pc_id = f.pc_id
+         WHERE f.job_id = ?
+           AND (?2 IS NULL OR f.pc_id LIKE ?2 ESCAPE '\\')
+         ORDER BY f.pc_id
          LIMIT ?3 OFFSET ?4",
     )
     .bind(&manifest_id)
@@ -213,6 +230,14 @@ pub async fn list_for_job(
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or(serde_json::Value::Null),
             collected_at: r.try_get("collected_at").ok(),
+            last_logon_user: r
+                .try_get::<Option<String>, _>("last_logon_user")
+                .ok()
+                .flatten(),
+            last_logon_display_name: r
+                .try_get::<Option<String>, _>("last_logon_display_name")
+                .ok()
+                .flatten(),
         })
         .collect();
 
@@ -481,7 +506,124 @@ pub async fn search(
         }
         out.push(map);
     }
+    enrich_with_account(&state.pool, &mut out).await;
     Ok(Json(out))
+}
+
+/// Keys under which [`enrich_with_account`] injects the per-PC account
+/// into a cross-PC search result row. The leading `@` is deliberate:
+/// every explode / scalar column name passes `validate_ident` (which
+/// permits only `[A-Za-z0-9_]`), so a `@`-prefixed key can never
+/// collide with an operator-defined column — the enrichment is always
+/// purely additive, never clobbering a real fact.
+const ACCOUNT_USER_KEY: &str = "@account_user";
+const ACCOUNT_DISPLAY_NAME_KEY: &str = "@account_display_name";
+
+/// Enrich cross-PC inventory search rows with the account last seen on
+/// each PC. The account (`last_logon_user` / `last_logon_display_name`)
+/// is a per-PC baseline fact kept on the `agents` row by the heartbeat
+/// projector (~30 s cadence) — fresher than any inventory schedule and
+/// a single source of truth — so we join it in at read time keyed by
+/// `pc_id` rather than re-collecting it per inventory job. The lookup
+/// is chunked so it stays under SQLite's bind-variable ceiling even at
+/// the 5000-row search cap (see below).
+///
+/// Best-effort: a query failure logs and leaves the rows unenriched
+/// rather than failing the search the operator actually asked for.
+/// Rows whose PC has no agent row (or a NULL account) still get the
+/// keys set to JSON null, so the SPA renders a stable column.
+async fn enrich_with_account(
+    pool: &sqlx::SqlitePool,
+    rows: &mut [serde_json::Map<String, serde_json::Value>],
+) {
+    use std::collections::{BTreeSet, HashMap};
+
+    // Distinct pc_ids present in this page (BTreeSet dedupes + gives a
+    // stable bind order).
+    let pc_ids: Vec<String> = rows
+        .iter()
+        .filter_map(|r| match r.get("pc_id") {
+            Some(serde_json::Value::String(p)) => Some(p.clone()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let mut by_pc: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+    if pc_ids.is_empty() {
+        // No string pc_id on any row (empty page, or a decode miss):
+        // still run apply_account with an empty map so every row gets
+        // the `@account_*` keys set to null. This keeps the documented
+        // "keys are always present" invariant true unconditionally,
+        // rather than only when the agents lookup actually ran (Claude
+        // review #729).
+        apply_account(rows, &by_pc);
+        return;
+    }
+    // Gemini #729: the scalar search is one row per PC and caps at 5000
+    // rows, so `pc_ids` can exceed SQLite's default host-parameter limit
+    // (`SQLITE_MAX_VARIABLE_NUMBER` — 999 on older builds; bundled
+    // builds raise it to 32766, but we don't control the runtime's
+    // SQLite). Chunk the `IN (...)` lookup at 999 so we never trip
+    // `too many SQL variables` regardless of the build.
+    for chunk in pc_ids.chunks(999) {
+        let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+            "SELECT pc_id, last_logon_user, last_logon_display_name \
+               FROM agents WHERE pc_id IN (",
+        );
+        let mut sep = qb.separated(", ");
+        for id in chunk {
+            sep.push_bind(id);
+        }
+        qb.push(")");
+
+        let account_rows = match qb.build().fetch_all(pool).await {
+            Ok(rs) => rs,
+            Err(e) => {
+                warn!(error = %e, "inventory account enrichment query");
+                return;
+            }
+        };
+        for r in account_rows {
+            let Ok(pc) = r.try_get::<String, _>("pc_id") else {
+                continue;
+            };
+            let user = r
+                .try_get::<Option<String>, _>("last_logon_user")
+                .ok()
+                .flatten();
+            let name = r
+                .try_get::<Option<String>, _>("last_logon_display_name")
+                .ok()
+                .flatten();
+            by_pc.insert(pc, (user, name));
+        }
+    }
+
+    apply_account(rows, &by_pc);
+}
+
+/// Inject the per-PC account into each row under the `@account_*` keys
+/// (pure; the DB lookup lives in [`enrich_with_account`]). Split out so
+/// the namespacing / null-fallback behaviour is unit-testable without a
+/// pool. A row whose pc_id isn't in `by_pc` (or maps to a NULL account)
+/// gets both keys set to JSON null, so the column is always present.
+fn apply_account(
+    rows: &mut [serde_json::Map<String, serde_json::Value>],
+    by_pc: &std::collections::HashMap<String, (Option<String>, Option<String>)>,
+) {
+    let to_json = |s: Option<String>| {
+        s.map(serde_json::Value::String)
+            .unwrap_or(serde_json::Value::Null)
+    };
+    for r in rows.iter_mut() {
+        let (user, name) = match r.get("pc_id") {
+            Some(serde_json::Value::String(p)) => by_pc.get(p).cloned().unwrap_or((None, None)),
+            _ => (None, None),
+        };
+        r.insert(ACCOUNT_USER_KEY.into(), to_json(user));
+        r.insert(ACCOUNT_DISPLAY_NAME_KEY.into(), to_json(name));
+    }
 }
 
 /// One searchable top-level scalar fact, derived from an
@@ -688,6 +830,7 @@ pub async fn search_scalars(
         }
         out.push(map);
     }
+    enrich_with_account(&state.pool, &mut out).await;
     Ok(Json(out))
 }
 
@@ -1261,6 +1404,72 @@ mod tests {
         // `timestamp` is rendered specially but compares lexically
         // (ISO-8601 sorts correctly as text), so it's not numeric.
         assert!(!numeric["installed_at"]);
+    }
+
+    fn row(pairs: &[(&str, serde_json::Value)]) -> serde_json::Map<String, serde_json::Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn apply_account_injects_namespaced_keys() {
+        use serde_json::Value;
+        let mut rows = vec![row(&[
+            ("pc_id", Value::String("PC-1".into())),
+            // An operator-defined column literally named `last_logon_user`
+            // must survive untouched — enrichment uses the `@`-prefixed
+            // keys, which `validate_ident` can never produce.
+            ("last_logon_user", Value::String("not-the-account".into())),
+        ])];
+        let mut by_pc = std::collections::HashMap::new();
+        by_pc.insert(
+            "PC-1".to_string(),
+            (
+                Some("CONTOSO\\jdoe".to_string()),
+                Some("John Doe".to_string()),
+            ),
+        );
+
+        apply_account(&mut rows, &by_pc);
+
+        let r = &rows[0];
+        assert_eq!(r[ACCOUNT_USER_KEY], Value::String("CONTOSO\\jdoe".into()));
+        assert_eq!(
+            r[ACCOUNT_DISPLAY_NAME_KEY],
+            Value::String("John Doe".into())
+        );
+        // The collision-named real column is preserved.
+        assert_eq!(
+            r["last_logon_user"],
+            Value::String("not-the-account".into())
+        );
+    }
+
+    #[test]
+    fn apply_account_nulls_when_pc_absent_or_account_empty() {
+        use serde_json::Value;
+        let mut rows = vec![
+            row(&[("pc_id", Value::String("PC-unknown".into()))]),
+            row(&[("pc_id", Value::String("PC-no-name".into()))]),
+        ];
+        let mut by_pc = std::collections::HashMap::new();
+        // PC-no-name has a login but no display name; PC-unknown isn't
+        // in the map at all.
+        by_pc.insert(
+            "PC-no-name".to_string(),
+            (Some("WG\\kiosk".to_string()), None),
+        );
+
+        apply_account(&mut rows, &by_pc);
+
+        // Unknown PC → both keys present, both null (stable SPA column).
+        assert_eq!(rows[0][ACCOUNT_USER_KEY], Value::Null);
+        assert_eq!(rows[0][ACCOUNT_DISPLAY_NAME_KEY], Value::Null);
+        // Known PC, no display name → user set, display name null.
+        assert_eq!(rows[1][ACCOUNT_USER_KEY], Value::String("WG\\kiosk".into()));
+        assert_eq!(rows[1][ACCOUNT_DISPLAY_NAME_KEY], Value::Null);
     }
 
     #[test]
