@@ -2,9 +2,9 @@
 //! `aggregate:` manifest hint (#720). Discovers every job's
 //! [`AggregateWidget`] specs from `BUCKET_JOBS` and computes each into a
 //! render-ready payload, so an operator can chart any emitted event from
-//! YAML without a Rust change. This generalizes `api/utilization.rs` (the
-//! hardcoded presence/app_sample/web_visit rollup), which is retired once
-//! the example configs reach parity.
+//! YAML without a Rust change. This replaced the old hardcoded
+//! presence/app_sample/web_visit rollup (`api/utilization.rs`) once the
+//! example configs reached parity.
 //!
 //! `?from=&to=` are RFC3339 UTC bounds (from inclusive, to exclusive;
 //! both omitted ⇒ last 24h). `?tz_offset_minutes=` buckets the hourly

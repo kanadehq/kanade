@@ -34,9 +34,9 @@ type Widget = { dashboard: string; title: string; scope: 'pc' | 'fleet' } & (
 
 type Scope = 'fleet' | 'pc';
 
-// Local calendar range → UTC [from, to) bounds (shared logic with the old
-// Utilization page): `to` is the inclusive last day, so the exclusive
-// upper bound is its midnight + 1. setDate(+1) keeps DST-change days on
+// Local calendar range → UTC [from, to) bounds: `to` is the inclusive
+// last day, so the exclusive upper bound is its midnight + 1.
+// setDate(+1) keeps DST-change days on
 // the next calendar midnight; swaps if from > to; null on a cleared date.
 function rangeBounds(fromDate: string, toDate: string): { from: string; to: string } | null {
   if (!fromDate || !toDate) return null;
