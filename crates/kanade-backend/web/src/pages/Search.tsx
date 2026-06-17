@@ -521,7 +521,7 @@ export function InventorySearch() {
                   <TableHeader>
                     <TableRow>
                       <TableHead>{t('results.columns.pcId')}</TableHead>
-                      <TableHead>{t('results.columns.lastUser')}</TableHead>
+                      <TableHead>{t('results.columns.lastLogon')}</TableHead>
                       <TableHead>{t('results.columns.collectedAt')}</TableHead>
                       {columns.map((c) => (
                         <TableHead key={c.field}>{c.field}</TableHead>

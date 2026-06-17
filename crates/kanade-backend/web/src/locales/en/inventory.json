@@ -24,7 +24,7 @@
     "empty": "No facts yet. Trigger one with <code>kanade exec &lt;job-id&gt;</code> or wait for the next scheduled tick.",
     "columns": {
       "pcId": "pc_id",
-      "lastUser": "last user",
+      "lastLogon": "last sign-in",
       "collected": "collected"
     },
     "nestedRowCount_one": "{{count}} row",
