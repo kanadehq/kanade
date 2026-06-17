@@ -40,6 +40,7 @@
     "showingMore": "{{from}}–{{to}} 行目を表示中 (ページサイズ = {{limit}}; さらに結果がある可能性があります)",
     "columns": {
       "pcId": "pc_id",
+      "lastUser": "最終ユーザー",
       "collectedAt": "collected_at"
     }
   },

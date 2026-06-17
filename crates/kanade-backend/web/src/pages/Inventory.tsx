@@ -14,7 +14,7 @@ import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { apiFetch } from '@/lib/api';
-import { cn, fmtIsoLocal } from '@/lib/utils';
+import { cn, fmtAccount, fmtIsoLocal } from '@/lib/utils';
 
 type DisplayField = {
   field: string;
@@ -49,6 +49,11 @@ type InventoryRow = {
   pc_id: string;
   facts: Record<string, unknown>;
   collected_at: string | null;
+  /** Account last seen on this PC, joined server-side from the
+   *  `agents` baseline row (heartbeat-maintained). Null when the PC has
+   *  no agent row / no recorded sign-in. */
+  last_logon_user: string | null;
+  last_logon_display_name: string | null;
 };
 
 type InventoryByJob = {
@@ -403,6 +408,7 @@ function FleetProbeTable({
             <TableHeader>
               <TableRow>
                 <TableHead>{t('fleet.columns.pcId')}</TableHead>
+                <TableHead>{t('fleet.columns.lastUser')}</TableHead>
                 {columns.map((c) => (
                   <TableHead key={c.field}>{c.label}</TableHead>
                 ))}
@@ -417,6 +423,9 @@ function FleetProbeTable({
                   onClick={() => pickPc(r.pc_id)}
                 >
                   <TableCell><code className="text-xs">{r.pc_id}</code></TableCell>
+                  <TableCell className="text-xs">
+                    {fmtAccount(r.last_logon_display_name, r.last_logon_user)}
+                  </TableCell>
                   {columns.map((c) => {
                     // Gemini #84 medium fix: extract once. `Array.isArray`
                     // acts as a type guard so the inner accesses don't
