@@ -482,7 +482,7 @@ export function Notifications() {
                 <TableHeader>
                   <TableRow>
                     <TableHead>{t('ack.pc')}</TableHead>
-                    <TableHead>{t('ack.userSid')}</TableHead>
+                    <TableHead>{t('ack.user')}</TableHead>
                     <TableHead>{t('ack.ackedAt')}</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -493,7 +493,11 @@ export function Notifications() {
                         <code>{a.pc_id}</code>
                       </TableCell>
                       <TableCell>
-                        <code className="text-xs">{a.user_sid}</code>
+                        {a.account?.trim() ? (
+                          <span title={a.user_sid}>{a.account}</span>
+                        ) : (
+                          <code className="text-xs">{a.user_sid}</code>
+                        )}
                       </TableCell>
                       <TableCell>{fmtIsoLocal(a.acked_at)}</TableCell>
                     </TableRow>

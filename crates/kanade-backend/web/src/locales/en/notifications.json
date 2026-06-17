@@ -66,7 +66,7 @@
     "loadError": "Failed to load confirmation status",
     "empty": "No confirmations yet for this notification.",
     "pc": "PC",
-    "userSid": "User SID",
+    "user": "Confirmed by",
     "ackedAt": "Confirmed at",
     "count": "{{count}} confirmation(s)"
   },

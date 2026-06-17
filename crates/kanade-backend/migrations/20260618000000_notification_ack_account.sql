@@ -1,0 +1,11 @@
+-- ⑤ Per-recipient confirmation: store the acking user's login name
+-- (`DOMAIN\sam`) alongside the SID so the operator's confirmation view
+-- can show a legible account instead of a raw SID. Carried in the
+-- `events.notifications.acked.>` body (agent reads it from the resolved
+-- peer identity) and projected here by the notification-acks projector.
+--
+-- NULL for acks recorded before this version (the agent didn't emit it
+-- yet) or when the agent couldn't resolve the login — the backend then
+-- falls back to the PC's last-logon identity (agents.last_logon_*), and
+-- finally to the SID, when building ack_status.
+ALTER TABLE notification_acks ADD COLUMN account TEXT;

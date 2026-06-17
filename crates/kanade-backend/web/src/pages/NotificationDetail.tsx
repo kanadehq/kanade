@@ -141,7 +141,7 @@ export function NotificationDetail() {
                 <TableHeader>
                   <TableRow>
                     <TableHead>{t('ack.pc')}</TableHead>
-                    <TableHead>{t('ack.userSid')}</TableHead>
+                    <TableHead>{t('ack.user')}</TableHead>
                     <TableHead>{t('ack.ackedAt')}</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -152,7 +152,14 @@ export function NotificationDetail() {
                         <code>{a.pc_id}</code>
                       </TableCell>
                       <TableCell>
-                        <code className="text-xs">{a.user_sid}</code>
+                        {a.account?.trim() ? (
+                          // SID kept in a tooltip — the account label is what
+                          // an operator actually recognises. `trim()` guards a
+                          // whitespace-only label (truthy but blank on screen).
+                          <span title={a.user_sid}>{a.account}</span>
+                        ) : (
+                          <code className="text-xs">{a.user_sid}</code>
+                        )}
                       </TableCell>
                       <TableCell>{fmtIsoLocal(a.acked_at)}</TableCell>
                     </TableRow>

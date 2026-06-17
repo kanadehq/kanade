@@ -112,8 +112,8 @@ async fn insert_ack_row(
 ) -> Result<()> {
     sqlx::query(
         "INSERT INTO notification_acks (
-             notification_id, pc_id, user_sid, acked_at, recorded_at
-         ) VALUES (?, ?, ?, ?, ?)
+             notification_id, pc_id, user_sid, acked_at, recorded_at, account
+         ) VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(notification_id, pc_id, user_sid) DO NOTHING",
     )
     .bind(&a.notification_id)
@@ -121,6 +121,7 @@ async fn insert_ack_row(
     .bind(&a.user_sid)
     .bind(a.acked_at)
     .bind(recorded_at)
+    .bind(&a.account)
     .execute(pool)
     .await?;
     Ok(())
@@ -148,6 +149,7 @@ mod tests {
             pc_id: pc.into(),
             user_sid: sid.into(),
             acked_at: Utc.with_ymd_and_hms(2026, 5, 20, 12, 0, 5).unwrap(),
+            account: Some("EXAMPLE\\taro".into()),
         }
     }
 
@@ -157,14 +159,15 @@ mod tests {
         insert_ack_row(&pool, &sample("n1", "pc1", "S-1-5-21-1001"), Utc::now())
             .await
             .unwrap();
-        let row: (String, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
-            "SELECT user_sid, acked_at FROM notification_acks WHERE notification_id = ?",
+        let row: (String, chrono::DateTime<chrono::Utc>, Option<String>) = sqlx::query_as(
+            "SELECT user_sid, acked_at, account FROM notification_acks WHERE notification_id = ?",
         )
         .bind("n1")
         .fetch_one(&pool)
         .await
         .unwrap();
         assert_eq!(row.0, "S-1-5-21-1001");
+        assert_eq!(row.2.as_deref(), Some("EXAMPLE\\taro"));
     }
 
     #[tokio::test]
