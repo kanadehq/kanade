@@ -1,7 +1,16 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertTriangle, History, Loader2, RefreshCw, Send } from 'lucide-react';
-import { type FormEvent, useState } from 'react';
+import {
+  AlertTriangle,
+  ExternalLink,
+  History,
+  Loader2,
+  RefreshCw,
+  Repeat,
+  Send,
+} from 'lucide-react';
+import { type FormEvent, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 
 import { ErrorCard } from '@/components/ErrorCard';
@@ -26,6 +35,7 @@ import type {
   NotificationAckStatus,
   NotificationPriority,
   NotificationRecord,
+  NotificationReuse,
   PublishNotificationRequest,
   PublishNotificationResponse,
 } from '@/lib/types';
@@ -51,6 +61,8 @@ export function Notifications() {
   const { hasRole } = useAuth();
   const canOperate = hasRole('operator');
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
+  const location = useLocation();
 
   // ---- composer state ----
   const [priority, setPriority] = useState<NotificationPriority>('info');
@@ -112,14 +124,23 @@ export function Notifications() {
     staleTime: 30_000,
   });
 
-  // Deep-link a history row into the ack-status view below. Mirror the
-  // ack form's same-id handling: a re-click on the same row keeps the
-  // query key unchanged, so refetch by hand instead of no-op'ing.
-  const viewAcks = (id: string) => {
-    setAckId(id);
-    if (id === ackQueryId) void ack.refetch();
-    else setAckQueryId(id);
-  };
+  // "Reuse" a sent notification: a history row / the detail page navigates
+  // here carrying the prior content in router state, and we seed the
+  // composer with it for a quick edit-and-resend. Applied once, then the
+  // state is cleared (navigate-replace) so a refresh doesn't re-prefill
+  // over edits the operator has since made. The audience is NOT stored on
+  // the notification, so the target picker stays at its default — the
+  // operator re-picks who to send to.
+  useEffect(() => {
+    const reuse = (location.state as NotificationReuse | null)?.reuse;
+    if (!reuse) return;
+    setPriority(reuse.priority);
+    setRequireAck(reuse.require_ack);
+    setTitle(reuse.title);
+    setBody(reuse.body);
+    setIssuedBy(reuse.issued_by ?? '');
+    navigate(location.pathname, { replace: true, state: null });
+  }, [location.state, location.pathname, navigate]);
 
   const targetReady =
     mode === 'all'
@@ -362,9 +383,43 @@ export function Notifications() {
                         <TableCell className="text-muted">{n.issued_by ?? '—'}</TableCell>
                         <TableCell>{fmtIsoLocal(n.issued_at)}</TableCell>
                         <TableCell className="text-right">
-                          <Button variant="ghost" size="sm" onClick={() => viewAcks(n.id)}>
-                            {t('history.viewAcks')}
-                          </Button>
+                          <div className="flex items-center justify-end gap-1">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              title={t('history.reuseTitle')}
+                              onClick={() =>
+                                navigate('/notifications', {
+                                  state: {
+                                    reuse: {
+                                      priority: n.priority,
+                                      require_ack: n.require_ack,
+                                      title: n.title,
+                                      body: n.body,
+                                      issued_by: n.issued_by ?? null,
+                                    },
+                                  },
+                                })
+                              }
+                            >
+                              <Repeat className="size-3.5" />
+                              {t('history.reuse')}
+                            </Button>
+                            {/* Deep-link to the detail page (content + ack
+                                status) — Ctrl/⌘ click opens a new tab so the
+                                confirmation status is right there instead of
+                                scrolling to a card at the bottom. Mirrors the
+                                Activity result_id link. */}
+                            <Button variant="ghost" size="sm" asChild>
+                              <Link
+                                to={`/notifications/${encodeURIComponent(n.id)}`}
+                                title={t('history.viewDetailTitle')}
+                              >
+                                {t('history.viewDetail')}
+                                <ExternalLink className="size-3.5" />
+                              </Link>
+                            </Button>
+                          </div>
                         </TableCell>
                       </TableRow>
                     );
@@ -433,7 +488,7 @@ export function Notifications() {
                 </TableHeader>
                 <TableBody>
                   {ack.data.acks.map((a) => (
-                    <TableRow key={`${a.pc_id}.${a.user_sid}`}>
+                    <TableRow key={`${a.pc_id}::${a.user_sid}`}>
                       <TableCell className="font-medium">
                         <code>{a.pc_id}</code>
                       </TableCell>

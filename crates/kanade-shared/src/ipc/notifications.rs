@@ -265,6 +265,24 @@ pub struct NotificationAckStatus {
     pub acks: Vec<NotificationAckEntry>,
 }
 
+// ---------- detail (GET /api/notifications/{id}) ------------------
+
+/// Response of `GET /api/notifications/{id}` — one sent notification's
+/// full content (so the SPA can show "what was sent", including the
+/// `body` the history table truncates away) paired with its
+/// per-recipient confirmation list. Powers the deep-linkable
+/// `/notifications/{id}` detail page, which an operator opens in a new
+/// tab from the history list (Ctrl/⌘ click), mirroring the Activity →
+/// result-detail deep link.
+///
+/// `acks` is the same set `ack_status` returns; bundling it here saves
+/// the detail page a second round-trip.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
+pub struct NotificationDetail {
+    pub notification: Notification,
+    pub acks: Vec<NotificationAckEntry>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

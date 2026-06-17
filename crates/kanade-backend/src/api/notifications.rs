@@ -19,8 +19,8 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use futures::StreamExt;
 use kanade_shared::ipc::notifications::{
-    Notification, NotificationAckEntry, NotificationAckStatus, PublishNotificationRequest,
-    PublishNotificationResponse,
+    Notification, NotificationAckEntry, NotificationAckStatus, NotificationDetail,
+    PublishNotificationRequest, PublishNotificationResponse,
 };
 use kanade_shared::kv::STREAM_NOTIFICATIONS;
 use kanade_shared::subject;
@@ -182,14 +182,24 @@ pub async fn ack_status(
     State(pool): State<SqlitePool>,
     Path(id): Path<String>,
 ) -> Result<Json<NotificationAckStatus>, (StatusCode, String)> {
+    let acks = fetch_acks(&pool, &id).await?;
+    Ok(Json(NotificationAckStatus { id, acks }))
+}
+
+/// Read every recorded confirmation for one notification, oldest-first.
+/// Shared by [`ack_status`] and [`detail`] so the two stay in lock-step.
+async fn fetch_acks(
+    pool: &SqlitePool,
+    id: &str,
+) -> Result<Vec<NotificationAckEntry>, (StatusCode, String)> {
     let rows: Vec<(String, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
         "SELECT pc_id, user_sid, acked_at
            FROM notification_acks
           WHERE notification_id = ?
           ORDER BY acked_at ASC",
     )
-    .bind(&id)
-    .fetch_all(&pool)
+    .bind(id)
+    .fetch_all(pool)
     .await
     .map_err(|e| {
         (
@@ -198,16 +208,14 @@ pub async fn ack_status(
         )
     })?;
 
-    let acks = rows
+    Ok(rows
         .into_iter()
         .map(|(pc_id, user_sid, acked_at)| NotificationAckEntry {
             pc_id,
             user_sid,
             acked_at,
         })
-        .collect();
-
-    Ok(Json(NotificationAckStatus { id, acks }))
+        .collect())
 }
 
 /// Safety ceiling on how many stream messages `list_sent` replays in one
@@ -239,6 +247,55 @@ const SENT_MAX_ITEMS: usize = 200;
 pub async fn list_sent(
     State(s): State<AppState>,
 ) -> Result<Json<Vec<Notification>>, (StatusCode, String)> {
+    let raw = replay_all_sent(&s).await?;
+    Ok(Json(dedup_newest_first(raw, SENT_MAX_ITEMS)))
+}
+
+/// `GET /api/notifications/{id}` (viewer+) — one sent notification's full
+/// content plus its confirmation list, for the deep-linkable detail page.
+///
+/// Same stream source as [`list_sent`] (the NOTIFICATIONS stream is the
+/// only record of what was sent), filtered down to the requested id: the
+/// history table only carries the truncated columns, so the detail page
+/// re-fetches the full body here — which also makes the page work on a
+/// cold deep link (Ctrl/⌘-click → new tab) where no client-side state
+/// carried the notification over. A missing id is a real 404 (unlike
+/// `ack_status`, which can't tell "never sent" from "sent, not yet
+/// acked"): the stream IS the sent-ledger, so absence here is
+/// authoritative.
+pub async fn detail(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<NotificationDetail>, (StatusCode, String)> {
+    let raw = replay_all_sent(&s).await?;
+    // Find the requested id directly in the raw replay, keeping the newest
+    // fan-out copy (one publish lands on `all` + each `group.X` + each
+    // `pc.Y`). NOT via `dedup_newest_first(.., SENT_MAX_ITEMS)`: that caps
+    // the result at the 200 newest *distinct* notifications, so deep-linking
+    // one older than the 200th-newest — but still inside the 5000-message
+    // replay window — would 404 spuriously. The detail lookup must see the
+    // full replay, and it only needs the single matching id, so the
+    // list-wide sort/truncate is also wasted work here.
+    let notification = raw
+        .into_iter()
+        .filter(|n| n.id == id)
+        .max_by_key(|n| n.issued_at)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("notification {id} not found"),
+            )
+        })?;
+    let acks = fetch_acks(&s.pool, &id).await?;
+    Ok(Json(NotificationDetail { notification, acks }))
+}
+
+/// Drain every retained `notifications.>` message into raw (pre-dedup)
+/// `Notification`s, newest-biased via a rolling window. Shared by
+/// [`list_sent`] and [`detail`]; callers dedup the per-subject fan-out
+/// copies (one publish lands on `all` + each `group.X` + each `pc.Y`)
+/// with [`dedup_newest_first`].
+async fn replay_all_sent(s: &AppState) -> Result<Vec<Notification>, (StatusCode, String)> {
     let stream = s
         .jetstream
         .get_stream(STREAM_NOTIFICATIONS)
@@ -256,7 +313,7 @@ pub async fn list_sent(
     // is free. A message landing between here and a real fetch would be
     // missed, but "0 → return empty" self-corrects on the next call.
     if stream.cached_info().state.messages == 0 {
-        return Ok(Json(Vec::new()));
+        return Ok(Vec::new());
     }
 
     let consumer = stream
@@ -337,7 +394,7 @@ pub async fn list_sent(
         );
     }
 
-    Ok(Json(dedup_newest_first(Vec::from(buf), SENT_MAX_ITEMS)))
+    Ok(Vec::from(buf))
 }
 
 /// Pure core of [`list_sent`]: collapse the per-subject fan-out copies to

@@ -42,9 +42,21 @@
     "issuedBy": "Issued by",
     "issuedAt": "Sent at",
     "actions": "",
-    "viewAcks": "View confirmations",
+    "viewDetail": "Detail",
+    "viewDetailTitle": "Open detail (content + confirmations). Ctrl/⌘ click for a new tab.",
+    "reuse": "Reuse",
+    "reuseTitle": "Load this content into the composer to edit and resend",
     "requireAck": "ack required",
     "expired": "expired"
+  },
+  "detail": {
+    "back": "Back to notifications",
+    "reuse": "Reuse",
+    "loading": "Loading notification…",
+    "loadError": "Failed to load the notification",
+    "notFound": "Notification not found",
+    "emptyBody": "(no body)",
+    "id": "ID"
   },
   "ack": {
     "title": "Confirmation status",

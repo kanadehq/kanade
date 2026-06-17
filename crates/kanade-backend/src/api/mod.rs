@@ -283,6 +283,12 @@ pub fn router(state: AppState) -> Router {
             "/api/notifications/{id}/ack_status",
             get(notifications::ack_status),
         )
+        // Single sent notification (viewer+) — full content + acks for the
+        // deep-linkable `/notifications/{id}` detail page. Kept adjacent to
+        // the bare `/api/notifications` list route for readability (axum
+        // routes by segment structure, not registration order, so the two
+        // can't conflict regardless of which is declared first).
+        .route("/api/notifications/{id}", get(notifications::detail))
         // Sent-notification history (viewer+) — replays the NOTIFICATIONS
         // stream so the SPA can show "what did I send" and deep-link each
         // entry into its ack_status view.
