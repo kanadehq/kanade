@@ -1118,6 +1118,12 @@ impl Manifest {
                         "{at}.group_by: pc_id is only valid with scope: fleet"
                     ));
                 }
+                // `transform` rewrites the grouped PAYLOAD value (URL→host);
+                // it's meaningless on a `pc_id` grouping (the pc_id column,
+                // not a payload field), so reject the combo at create time.
+                if w.transform.is_some() && w.group_by.as_deref() == Some("pc_id") {
+                    return Err(format!("{at}.transform is not valid with group_by: pc_id"));
+                }
                 // limit / transform / exclude all operate on grouped values,
                 // so without a `group_by` they're silent no-ops — reject.
                 if w.group_by.is_none() {
@@ -2108,6 +2114,20 @@ tags: [ok, "   "]
         let err = m.validate().expect_err("pc_id grouping needs fleet");
         assert!(
             err.contains("pc_id is only valid with scope: fleet"),
+            "err: {err}"
+        );
+    }
+
+    #[test]
+    fn aggregate_rejects_transform_with_pc_id_group() {
+        let m = manifest_with_aggregate(
+            "aggregate:\n- { dashboard: D, title: T, scope: fleet, kind: web_visit, agg: count, group_by: pc_id, transform: host, render: bar }\n",
+        );
+        let err = m
+            .validate()
+            .expect_err("transform on pc_id grouping must fail");
+        assert!(
+            err.contains("transform is not valid with group_by: pc_id"),
             "err: {err}"
         );
     }

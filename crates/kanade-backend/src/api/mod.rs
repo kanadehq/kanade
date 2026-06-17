@@ -4,6 +4,7 @@ pub mod agent_groups;
 pub mod agent_logs;
 pub mod agent_releases;
 pub mod agents;
+pub mod analytics;
 pub mod app_packages;
 pub mod audit;
 pub mod checks;
@@ -143,6 +144,9 @@ pub fn router(state: AppState) -> Router {
         // Per-PC activity rollup (obs_events aggregate) for the
         // Utilization page. Viewer-readable like the obs_events feeds.
         .route("/api/utilization/{pc_id}", get(utilization::get))
+        // #720: generic obs_events rollups driven by the `aggregate:`
+        // manifest hint. Viewer-readable like the other obs feeds.
+        .route("/api/analytics", get(analytics::get))
         .route(
             "/api/perf/active-investigations",
             get(fleet_perf::active_investigations),
