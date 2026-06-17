@@ -15,17 +15,28 @@ pub fn commands_pc(pc_id: &str) -> String {
 /// the Client Apps in matching user sessions.
 pub const NOTIFICATIONS_ALL: &str = "notifications.all";
 
+/// Subject prefix for [`notifications_group`]. Exposed so callers that
+/// parse a subject back into its group name (the backend's notification
+/// audience resolver) strip against the same string the builder emits —
+/// if the format ever changes, both move together instead of the parser
+/// silently failing to match.
+pub const NOTIFICATIONS_GROUP_PREFIX: &str = "notifications.group.";
+
+/// Subject prefix for [`notifications_pc`]. See
+/// [`NOTIFICATIONS_GROUP_PREFIX`].
+pub const NOTIFICATIONS_PC_PREFIX: &str = "notifications.pc.";
+
 /// `notifications.group.{group_name}` — group-scoped end-user
 /// notification. Sibling of [`commands_group`] on the notification
 /// plane.
 pub fn notifications_group(name: &str) -> String {
-    format!("notifications.group.{name}")
+    format!("{NOTIFICATIONS_GROUP_PREFIX}{name}")
 }
 
 /// `notifications.pc.{pc_id}` — single-PC end-user notification.
 /// Sibling of [`commands_pc`] on the notification plane.
 pub fn notifications_pc(pc_id: &str) -> String {
-    format!("notifications.pc.{pc_id}")
+    format!("{NOTIFICATIONS_PC_PREFIX}{pc_id}")
 }
 
 /// `events.notifications.acked.{pc_id}.{user_sid}.{notif_id}` — the

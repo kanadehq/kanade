@@ -127,6 +127,71 @@ export function NotificationDetail() {
         </CardContent>
       </Card>
 
+      {/* ---- audience roster: who hasn't confirmed (④) ---- */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">
+            {t('audience.title')}
+            {data.audience.length > 0 && (
+              <span className="ml-2 text-xs text-muted font-normal">
+                {t('audience.summary', {
+                  confirmed: data.audience.filter((p) => p.confirmed).length,
+                  total: data.audience.length,
+                })}
+              </span>
+            )}
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          {data.audience.length === 0 ? (
+            // Render the card even when empty so the section isn't silently
+            // absent: an empty roster means the targeted PCs couldn't be
+            // resolved (e.g. a group with no current members), which is
+            // itself worth surfacing rather than hiding.
+            <p className="text-muted text-sm">{t('audience.empty')}</p>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>{t('audience.pc')}</TableHead>
+                  <TableHead>{t('audience.user')}</TableHead>
+                  <TableHead>{t('audience.status')}</TableHead>
+                  <TableHead>{t('ack.ackedAt')}</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {data.audience.map((p) => {
+                  // Representative user: display name preferred, else login.
+                  const who = p.last_logon_display_name || p.last_logon_user;
+                  return (
+                    <TableRow key={p.pc_id}>
+                      <TableCell className="font-medium">
+                        <code>{p.pc_id}</code>
+                      </TableCell>
+                      <TableCell>
+                        {who ? (
+                          <span title={p.last_logon_user}>{who}</span>
+                        ) : (
+                          <span className="text-muted text-xs">—</span>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        {p.confirmed ? (
+                          <Badge variant="success">{t('audience.confirmed')}</Badge>
+                        ) : (
+                          <Badge variant="amber">{t('audience.pending')}</Badge>
+                        )}
+                      </TableCell>
+                      <TableCell>{p.acked_at ? fmtIsoLocal(p.acked_at) : '—'}</TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
+
       {/* ---- confirmation status ---- */}
       <Card>
         <CardHeader>

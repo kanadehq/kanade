@@ -291,10 +291,44 @@ pub struct NotificationAckStatus {
 ///
 /// `acks` is the same set `ack_status` returns; bundling it here saves
 /// the detail page a second round-trip.
+///
+/// `audience` is the per-PC confirmation roster (④): the set of PCs the
+/// notification was addressed to, each flagged confirmed/pending, so an
+/// operator can see *who hasn't* acknowledged — not just who has. Empty
+/// when the audience couldn't be reconstructed (e.g. the fan-out subjects
+/// aged out of the stream).
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
 pub struct NotificationDetail {
     pub notification: Notification,
     pub acks: Vec<NotificationAckEntry>,
+    #[serde(default)]
+    pub audience: Vec<AudiencePc>,
+}
+
+/// One targeted PC's confirmation state, for the detail page's "who
+/// hasn't confirmed" roster (④). Resolved by expanding the notification's
+/// fan-out subjects (`all` / `group.X` / `pc.Y`) to the fleet's PCs and
+/// joining against the recorded acks.
+///
+/// Granularity is the PC, not the individual user: the backend has no
+/// full per-PC user roster, only each host's last-logon identity, so
+/// `last_logon_*` stands in as "the PC's representative user". `confirmed`
+/// is true when *any* user on that PC acked (the detailed who-and-when is
+/// in `acks`).
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
+pub struct AudiencePc {
+    pub pc_id: String,
+    /// The host's last sign-in account (`DOMAIN\sam`) / display name from
+    /// the `agents` row — `None` for a targeted PC with no agent record
+    /// (e.g. an explicit `pc.Y` target that never registered).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_logon_user: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_logon_display_name: Option<String>,
+    pub confirmed: bool,
+    /// Earliest ack instant recorded for this PC; `None` while pending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acked_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[cfg(test)]
