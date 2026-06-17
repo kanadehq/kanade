@@ -281,6 +281,14 @@
           "format": "uint32",
           "minimum": 1
         },
+        "order": {
+          "description": "Optional sort weight (#743). Once the order-aware sort lands (PR2)\nwidgets render in `(order, dashboard, title)` order, so a lower\n`order` pulls a widget — and its tab — earlier; equal/absent `order`\nfalls back to the alphabetical `(dashboard, title)` ordering. Treated\nas `0` when unset, so a fleet with no `order` anywhere stays purely\nalphabetical (today's behaviour); negatives are allowed to pin\nsomething first. (This field only carries the value; the backend\napplies it.)",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
         "render": {
           "description": "Which widget the SPA draws. See [`AggregateRender`].",
           "$ref": "#/$defs/AggregateRender"

@@ -792,6 +792,7 @@ mod tests {
         AggregateWidget {
             dashboard: "D".into(),
             title: "T".into(),
+            order: None,
             scope: AggregateScope::Pc,
             kind: kind.into(),
             source: None,
