@@ -4,6 +4,17 @@
   "description": "YAML job manifest (= registered \"what to run\", v0.18.0+).\n\nOwns only script-intrinsic fields. **Who** (`target`), **how to\nphase fanout** (`rollout`), and **when to stagger start**\n(`jitter`) all moved to the Schedule / exec request side — same\nscript can now be fired against different targets / rollouts\nwithout copying the script body.\n\n#492: these types are READ fleet-wide (agents decode them from\nBUCKET_JOBS / BUCKET_SCHEDULES and inside live Commands), so they\nmust tolerate unknown fields — `deny_unknown_fields` here made a\ngradually-upgrading fleet's OLD agents reject the whole object\nthe moment a newer backend added any field. Operator typo\nprotection (the old reason for the attribute) lives at the WRITE\nboundaries instead: `kanade job/schedule create` and the backend\nPOST extractor parse via [`crate::strict`], which rejects unknown\nkeys with their full paths. The wire rule: new fields always get\n`#[serde(default)]` (+ `skip_serializing_if` while old readers\nmay still be strict).",
   "type": "object",
   "properties": {
+    "aggregate": {
+      "title": "720: opt-in declarative aggregation over `obs_events` that drives",
+      "description": "the SPA **Analytics** page. Unlike the other hints this one never\ntouches stdout and is never delivered to the agent — it's a pure\n*read spec* the backend reads from `BUCKET_JOBS` at query time and\nturns into `json_extract` aggregation SQL. Each entry is one widget\n(a `dashboard:` tab groups them); `scope:` selects per-PC vs\nfleet-wide rollup. Because it consumes nothing at run time it\ncomposes with every other hint (typically paired with `emit:`,\nwhich produces the events it reads). See [`AggregateWidget`].\n\nNew field ⇒ #492 wire rule (`default` + `skip_serializing_if`).",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/AggregateWidget"
+      }
+    },
     "check": {
       "title": "290: opt-in marker that this job is an operator-defined",
       "description": "**health check** whose result feeds the Client App's Health\ntab over KLP (`StateSnapshot.checks`). The script prints a\nfree-form JSON object on stdout (like any inventory job); the\nagent reads the [`CheckHint::status_field`] value dynamically\ninto a [`crate::ipc::state::Check`] named `check.name`.\nCadence / windows / conditions come from\nthe job's Schedule (exactly like inventory) — there is\ndeliberately no interval here. **Composes with `inventory:`**:\nthe script's stdout is one JSON object, so a check can also\ncarry an `inventory:` block to project the rest of that object\n(incl. `explode` sub-tables) for SPA fleet-querying. Only\n`emit:` (NDJSON stdout) is incompatible.",
@@ -117,6 +128,226 @@
     "execute"
   ],
   "$defs": {
+    "AggregateAgg": {
+      "description": "The rollup function for an [`AggregateWidget`].",
+      "oneOf": [
+        {
+          "description": "Row count, optionally grouped (`group_by`) and time-estimated\n(`sample_minutes`).",
+          "type": "string",
+          "const": "count"
+        },
+        {
+          "description": "`true_count / total` over `bool_path`.",
+          "type": "string",
+          "const": "ratio"
+        },
+        {
+          "description": "Sum of `value_path`, optionally grouped.",
+          "type": "string",
+          "const": "sum"
+        },
+        {
+          "title": "492 forward-compat catch-all (see [`AggregateScope::Unknown`]).",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
+    },
+    "AggregateRender": {
+      "description": "Which visual the SPA renders an [`AggregateWidget`] as.",
+      "oneOf": [
+        {
+          "description": "Ranked horizontal bars (a grouped `count` / `sum`).",
+          "type": "string",
+          "const": "bar"
+        },
+        {
+          "description": "A single ratio dial (`agg: ratio`).",
+          "type": "string",
+          "const": "gauge"
+        },
+        {
+          "description": "24-hour activity strip (`time_bucket: hour`).",
+          "type": "string",
+          "const": "timeline"
+        },
+        {
+          "description": "A single headline number (an ungrouped total).",
+          "type": "string",
+          "const": "stat"
+        },
+        {
+          "title": "492 forward-compat catch-all (see [`AggregateScope::Unknown`]).",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
+    },
+    "AggregateScope": {
+      "description": "Per-PC vs fleet-wide rollup for an [`AggregateWidget`].",
+      "oneOf": [
+        {
+          "description": "Roll up the single PC the operator selected. The default.",
+          "type": "string",
+          "const": "pc"
+        },
+        {
+          "description": "Roll up across every PC. Unlocks `group_by: pc_id`.",
+          "type": "string",
+          "const": "fleet"
+        },
+        {
+          "title": "492 forward-compat catch-all — a Manifest is read fleet-wide, so",
+          "description": "an older reader must tolerate a future variant rather than failing\nto decode the whole job. The backend skips an `Unknown` widget.",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
+    },
+    "AggregateTimeBucket": {
+      "description": "Time bucketing for an [`AggregateWidget`] (drives a `timeline`).",
+      "oneOf": [
+        {
+          "description": "Bucket by local hour-of-day (0–23), summed over the window.",
+          "type": "string",
+          "const": "hour"
+        },
+        {
+          "title": "492 forward-compat catch-all (see [`AggregateScope::Unknown`]).",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
+    },
+    "AggregateTransform": {
+      "description": "Optional pre-grouping value transform for an [`AggregateWidget`].",
+      "oneOf": [
+        {
+          "description": "Parse the grouped value as a URL and keep only its host.",
+          "type": "string",
+          "const": "host"
+        },
+        {
+          "title": "492 forward-compat catch-all (see [`AggregateScope::Unknown`]).",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
+    },
+    "AggregateWidget": {
+      "title": "720 — one widget on the SPA **Analytics** page: a declarative",
+      "description": "aggregation over the `obs_events` table. The backend reads these off\n`Manifest::aggregate` (from `BUCKET_JOBS`) at query time and builds\nthe `json_extract` GROUP BY / time-bucket SQL from these generic\nprimitives, so an operator can chart any emitted event without a Rust\nchange. The reference shapes are the attendance dashboards\n(presence / app_sample / web_visit), but the same DSL covers logon /\nreboot / agent-health trends, etc.",
+      "type": "object",
+      "properties": {
+        "agg": {
+          "description": "How to roll the matching events up. See [`AggregateAgg`].",
+          "$ref": "#/$defs/AggregateAgg"
+        },
+        "bool_path": {
+          "description": "Dotted JSON path to a boolean for `agg: ratio` (e.g. `active`):\nthe widget reports `true_count / total`. Required when `agg: ratio`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dashboard": {
+          "description": "Tab this widget lives under on the Analytics page. Widgets from\nevery job are collected and grouped by this label, so the same\nstring across jobs builds one multi-source dashboard. Required.",
+          "type": "string"
+        },
+        "exclude": {
+          "description": "Grouped values to drop from the rollup (e.g. `[\"LockApp\"]` so the\nlock screen doesn't top the app ranking). Empty by default.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "group_by": {
+          "description": "Dotted JSON path (no `$.` prefix) to group by for `agg: count` /\n`sum` — e.g. `foreground.app`. The literal `pc_id` is special:\nit groups by the `pc_id` column (fleet ranking), not a payload\nfield. Omit for a single total. Required when `agg: sum` needs a\nbreakdown; for `agg: count` omitting it yields the grand total.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "description": "`obs_events.kind` this widget reads (e.g. `app_sample`,\n`presence`, `unexpected_shutdown`). Required.",
+          "type": "string"
+        },
+        "limit": {
+          "description": "Top-N cap for grouped renders (`bar`). Defaults to 10 when unset.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 1
+        },
+        "render": {
+          "description": "Which widget the SPA draws. See [`AggregateRender`].",
+          "$ref": "#/$defs/AggregateRender"
+        },
+        "sample_minutes": {
+          "description": "Optional sampling cadence in minutes. When set, a `count` is also\nreported as estimated time (`count × sample_minutes`) — e.g. a\n2-minute app sampler turns 11 samples into ~22 minutes. Must be ≥ 1.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 1
+        },
+        "scope": {
+          "description": "`pc` rolls up a single selected PC; `fleet` rolls up all PCs\n(and unlocks `group_by: pc_id` to rank PCs against each other).\nDefaults to `pc`.",
+          "$ref": "#/$defs/AggregateScope",
+          "default": "pc"
+        },
+        "source": {
+          "description": "Optional `obs_events.source` filter, when one `kind` is emitted by\nmore than one collector.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "time_bucket": {
+          "description": "Optional time bucketing — `hour` buckets events by local\nhour-of-day for a `timeline` render. See [`AggregateTimeBucket`].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AggregateTimeBucket"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "title": {
+          "description": "Widget heading. Required, validated non-empty.",
+          "type": "string"
+        },
+        "transform": {
+          "description": "Optional value transform applied before grouping. Currently only\n`host` (parse a URL down to its host) — used by the top-sites\nwidget, where SQLite can't parse a URL so the backend does it in\nRust. See [`AggregateTransform`].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AggregateTransform"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "value_path": {
+          "description": "Dotted JSON path to a number for `agg: sum`. Required when `agg: sum`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "dashboard",
+        "title",
+        "kind",
+        "agg",
+        "render"
+      ]
+    },
     "CheckHint": {
       "description": "Manifest sub-section (#290): marks a job as an operator-defined\n**health check**. Parallel to [`InventoryHint`] / `EmitConfig`.\nThe stdout contract is a free-form JSON object (same as any\ninventory job) from which the agent reads `status_field` /\n`detail_field` to build the KLP [`crate::ipc::state::Check`] shown\non the Client App's Health tab.\n\nThere is deliberately **no timing field** — when / how often /\nin which window a check runs is driven by the job's Schedule,\nexactly like inventory jobs, so operators get the full `when:` /\nrollout / `runs_on` expressiveness for free.\n\nA check's stdout is a **free-form inventory object** (arbitrary\nkey/value pairs + arrays) — same as any inventory job — that also\ncarries a status field. `check:` adds only the health semantics on\ntop: which field is the ok/warn/fail/unknown status, an optional\none-line summary field, and a remediation job. Everything else\n(rich per-PC detail, `explode` sub-tables like a software list) is\ndriven by a co-present [`InventoryHint`] and rendered with the\nSAME display logic the SPA Inventory page uses — on the Client App\ntoo. This keeps checks maximally expressive without a bespoke\npayload type.",
       "type": "object",
