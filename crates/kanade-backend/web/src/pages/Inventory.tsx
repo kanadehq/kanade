@@ -408,7 +408,7 @@ function FleetProbeTable({
             <TableHeader>
               <TableRow>
                 <TableHead>{t('fleet.columns.pcId')}</TableHead>
-                <TableHead>{t('fleet.columns.lastUser')}</TableHead>
+                <TableHead>{t('fleet.columns.lastLogon')}</TableHead>
                 {columns.map((c) => (
                   <TableHead key={c.field}>{c.label}</TableHead>
                 ))}

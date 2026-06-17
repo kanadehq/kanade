@@ -40,7 +40,7 @@
     "showingMore": "Showing rows {{from}}–{{to}} (page size = {{limit}}; more may be available)",
     "columns": {
       "pcId": "pc_id",
-      "lastUser": "last user",
+      "lastLogon": "last sign-in",
       "collectedAt": "collected_at"
     }
   },
