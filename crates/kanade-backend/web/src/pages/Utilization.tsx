@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 
 import { ErrorCard } from '@/components/ErrorCard';
 import { PcPicker } from '@/components/PcPicker';
+import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -30,18 +31,21 @@ type UtilizationResponse = {
   timeline: { hour: number; total: number; active: number }[];
 };
 
-// Local calendar day → UTC [from, to) bounds, so the day boundary is the
-// operator's, not UTC's. setDate(+1) (not +86_400_000 ms) so DST change
-// days still land on the next calendar midnight. Returns null for an
-// empty/invalid date (a cleared picker) so we don't call toISOString on
-// an Invalid Date and crash (coderabbit).
-function dayBounds(date: string): { from: string; to: string } | null {
-  if (!date) return null;
-  const start = new Date(`${date}T00:00:00`);
-  if (Number.isNaN(start.getTime())) return null;
-  const end = new Date(start);
-  end.setDate(end.getDate() + 1);
-  return { from: start.toISOString(), to: end.toISOString() };
+// Local calendar range → UTC [from, to) bounds, so the day boundaries are
+// the operator's, not UTC's. `to` is the inclusive last day, so the
+// exclusive upper bound is its midnight + 1. setDate(+1) (not +ms) so DST
+// change days still land on the next calendar midnight. Swaps if the
+// operator picks from > to. Returns null for an empty/invalid date (a
+// cleared picker) so we don't call toISOString on an Invalid Date and
+// crash (coderabbit).
+function rangeBounds(fromDate: string, toDate: string): { from: string; to: string } | null {
+  if (!fromDate || !toDate) return null;
+  let start = new Date(`${fromDate}T00:00:00`);
+  let endExclusive = new Date(`${toDate}T00:00:00`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(endExclusive.getTime())) return null;
+  if (endExclusive < start) [start, endExclusive] = [endExclusive, start];
+  endExclusive.setDate(endExclusive.getDate() + 1);
+  return { from: start.toISOString(), to: endExclusive.toISOString() };
 }
 
 function todayLocal(): string {
@@ -49,6 +53,21 @@ function todayLocal(): string {
   const off = d.getTimezoneOffset() * 60_000;
   return new Date(d.getTime() - off).toISOString().slice(0, 10);
 }
+
+// `date` shifted by `days` calendar days, returned as a local YYYY-MM-DD.
+function addDaysLocal(date: string, days: number): string {
+  const d = new Date(`${date}T00:00:00`);
+  d.setDate(d.getDate() + days);
+  const off = d.getTimezoneOffset() * 60_000;
+  return new Date(d.getTime() - off).toISOString().slice(0, 10);
+}
+
+// Quick ranges ending today; `days` is inclusive (today = 1 day).
+const PRESETS: { key: string; days: number }[] = [
+  { key: 'today', days: 1 },
+  { key: 'last7', days: 7 },
+  { key: 'last30', days: 30 },
+];
 
 function fmtMinutes(min: number): string {
   const h = Math.floor(min / 60);
@@ -59,16 +78,36 @@ function fmtMinutes(min: number): string {
 export function Utilization() {
   const { t } = useTranslation('utilization');
   const [pcId, setPcId] = useState('');
-  const [date, setDate] = useState(todayLocal());
+  const [fromDate, setFromDate] = useState(todayLocal());
+  const [toDate, setToDate] = useState(todayLocal());
 
-  const bounds = useMemo(() => dayBounds(date), [date]);
+  const today = useMemo(() => todayLocal(), []);
+  const bounds = useMemo(() => rangeBounds(fromDate, toDate), [fromDate, toDate]);
   // Minutes to ADD to UTC to get local time (JST = +540), for hour-of-
-  // day bucketing. Computed for the SELECTED day (not "now") so a
-  // historical date with a different DST status buckets correctly.
+  // day bucketing. Computed for the range's start (not "now") so a
+  // historical range with a different DST status buckets correctly.
   const tzOffset = useMemo(
-    () => (date ? -new Date(`${date}T00:00:00`).getTimezoneOffset() : 0),
-    [date],
+    () => (fromDate ? -new Date(`${fromDate}T00:00:00`).getTimezoneOffset() : 0),
+    [fromDate],
   );
+
+  // Keep the inputs a valid range: dragging one end past the other pulls
+  // the other with it, so the boxes always show the range that's queried
+  // (a silent swap would leave from > to on screen). YYYY-MM-DD strings
+  // compare lexicographically.
+  function handleFrom(v: string) {
+    setFromDate(v);
+    if (v && toDate && v > toDate) setToDate(v);
+  }
+  function handleTo(v: string) {
+    setToDate(v);
+    if (v && fromDate && v < fromDate) setFromDate(v);
+  }
+
+  function applyPreset(days: number) {
+    setFromDate(addDaysLocal(today, -(days - 1)));
+    setToDate(today);
+  }
 
   const q = useQuery({
     queryKey: ['utilization', pcId, bounds?.from, bounds?.to, tzOffset],
@@ -93,21 +132,48 @@ export function Utilization() {
             <PcPicker id="util-pc" value={pcId} onChange={setPcId} className="w-56" />
           </div>
           <div className="space-y-1">
-            <Label htmlFor="util-date">{t('controls.date')}</Label>
+            <Label htmlFor="util-from">{t('controls.from')}</Label>
             <Input
-              id="util-date"
+              id="util-from"
               type="date"
-              value={date}
-              max={todayLocal()}
-              onChange={(e) => setDate(e.target.value)}
+              value={fromDate}
+              max={today}
+              onChange={(e) => handleFrom(e.target.value)}
               className="w-40"
             />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="util-to">{t('controls.to')}</Label>
+            <Input
+              id="util-to"
+              type="date"
+              value={toDate}
+              min={fromDate || undefined}
+              max={today}
+              onChange={(e) => handleTo(e.target.value)}
+              className="w-40"
+            />
+          </div>
+          <div className="flex items-center gap-1 pb-0.5">
+            {PRESETS.map((p) => (
+              <Button
+                key={p.key}
+                type="button"
+                variant="secondary"
+                size="sm"
+                onClick={() => applyPreset(p.days)}
+              >
+                {t(`controls.presets.${p.key}`)}
+              </Button>
+            ))}
           </div>
         </div>
       </div>
 
       {!pcId ? (
         <div className="text-muted text-sm">{t('selectPc')}</div>
+      ) : !bounds ? (
+        <div className="text-muted text-sm">{t('selectDates')}</div>
       ) : q.isLoading ? (
         <div className="flex items-center gap-2 text-muted">
           <Loader2 className="size-4 animate-spin" />
