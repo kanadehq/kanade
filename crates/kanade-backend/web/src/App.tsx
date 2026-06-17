@@ -33,7 +33,6 @@ import { Run } from '@/pages/Run';
 import { Analytics } from '@/pages/Analytics';
 import { Schedules } from '@/pages/Schedules';
 import { Settings } from '@/pages/Settings';
-import { Utilization } from '@/pages/Utilization';
 import { ThemeProvider, useTheme } from '@/lib/theme';
 
 const queryClient = new QueryClient({
@@ -112,7 +111,6 @@ function AppContent() {
               <Route path="/inventory/search" element={<Inventory />} />
               <Route path="/compliance" element={<Compliance />} />
               <Route path="/collect" element={<Collect />} />
-              <Route path="/utilization" element={<Utilization />} />
               <Route path="/analytics" element={<Analytics />} />
               <Route path="/jobs" element={<Jobs />} />
               <Route path="/schedules" element={<Schedules />} />
