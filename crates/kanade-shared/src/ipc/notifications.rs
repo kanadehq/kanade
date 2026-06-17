@@ -244,6 +244,14 @@ pub struct NotificationAcked {
     pub pc_id: String,
     pub user_sid: String,
     pub acked_at: chrono::DateTime<chrono::Utc>,
+    /// The acking user's login name (`DOMAIN\sam` or `.\user`), from the
+    /// agent connection's resolved peer identity — far more legible than
+    /// the raw SID in the operator's confirmation view. Additive +
+    /// optional so a pre-this-version agent's ack (SID only) still
+    /// decodes; the backend falls back to the PC's last-logon identity
+    /// when it's absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
 }
 
 // ---------- ack status (GET /api/notifications/{id}/ack_status) ----
@@ -254,6 +262,12 @@ pub struct NotificationAckEntry {
     pub pc_id: String,
     pub user_sid: String,
     pub acked_at: chrono::DateTime<chrono::Utc>,
+    /// Human-readable label for who confirmed — the acking user's login
+    /// name from the ack event, or (for pre-account acks) the PC's
+    /// last-logon display name / login as a fallback. `None` only when
+    /// neither is available, in which case the SPA shows the `user_sid`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
 }
 
 /// Response of `GET /api/notifications/{id}/ack_status` — every
@@ -373,6 +387,7 @@ mod tests {
             // subject, but the projector reads this body field anyway.
             user_sid: "S-1-5-21-1001".into(),
             acked_at: t,
+            account: Some("EXAMPLE\\taro".into()),
         };
         let json = serde_json::to_string(&a).unwrap();
         let back: NotificationAcked = serde_json::from_str(&json).unwrap();
@@ -380,6 +395,22 @@ mod tests {
         assert_eq!(back.pc_id, a.pc_id);
         assert_eq!(back.user_sid, a.user_sid);
         assert_eq!(back.acked_at, t);
+        assert_eq!(back.account.as_deref(), Some("EXAMPLE\\taro"));
+    }
+
+    #[test]
+    fn notification_acked_without_account_decodes() {
+        // A pre-account agent emits the ack body without `account`; it must
+        // still decode (None), and a None account is omitted on the wire so
+        // older readers never see a null key.
+        let wire = r#"{
+            "notification_id":"n1","pc_id":"PC1","user_sid":"S-1-5-21-1",
+            "acked_at":"2026-05-20T12:00:05Z"
+        }"#;
+        let a: NotificationAcked = serde_json::from_str(wire).expect("decode without account");
+        assert_eq!(a.account, None);
+        let v = serde_json::to_value(&a).unwrap();
+        assert!(v.get("account").is_none(), "None account omitted: {v:?}");
     }
 
     #[test]

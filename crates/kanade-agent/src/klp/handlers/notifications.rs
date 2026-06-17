@@ -189,11 +189,21 @@ pub async fn handle_notifications_ack(
     // 2. Publish the ack event (acknowledged JetStream publish so a
     //    broker problem surfaces here instead of silently dropping the
     //    operator's confirmation view).
+    // The login name (`DOMAIN\sam`) the agent resolved for this
+    // connection's peer — a far more legible label than the SID in the
+    // operator's confirmation view. Omit it when unresolved so the
+    // backend's PC-last-logon fallback takes over instead of recording a
+    // useless `<unknown>`.
+    let account = {
+        let u = conn.peer.user.as_str();
+        (!u.is_empty() && u != "<unknown>").then(|| u.to_string())
+    };
     let event = NotificationAcked {
         notification_id: notif_id.to_string(),
         pc_id: pc_id.to_string(),
         user_sid: user_sid.to_string(),
         acked_at,
+        account,
     };
     let payload = serde_json::to_vec(&event)
         .map_err(|e| RpcError::new(ErrorKind::InternalError, e.to_string()))?;

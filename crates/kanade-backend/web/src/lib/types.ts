@@ -224,10 +224,15 @@ export type PublishNotificationResponse = {
 };
 
 // One recipient's confirmation, from GET /api/notifications/{id}/ack_status.
+// `account` is a human-readable label for who confirmed (the acking user's
+// login, or the PC's last-logon as a fallback). Absent (not null — the Rust
+// side skips a None field on the wire) when unavailable, in which case the
+// UI falls back to `user_sid`.
 export type NotificationAckEntry = {
   pc_id: string;
   user_sid: string;
   acked_at: string;
+  account?: string;
 };
 
 export type NotificationAckStatus = {

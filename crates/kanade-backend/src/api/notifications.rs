@@ -188,15 +188,30 @@ pub async fn ack_status(
 
 /// Read every recorded confirmation for one notification, oldest-first.
 /// Shared by [`ack_status`] and [`detail`] so the two stay in lock-step.
+///
+/// `account` is a human-readable label for who confirmed (⑤): the login
+/// name the agent recorded with the ack when available, else — for acks
+/// recorded before agents emitted it — the PC's last-logon display name
+/// or login from the `agents` row (a best-effort fallback that's exact on
+/// single-user PCs and a reasonable approximation otherwise). When neither
+/// exists the field is `None` and the SPA shows the SID. The `LEFT JOIN`
+/// keeps acks from PCs with no `agents` row (e.g. de-registered hosts).
 async fn fetch_acks(
     pool: &SqlitePool,
     id: &str,
 ) -> Result<Vec<NotificationAckEntry>, (StatusCode, String)> {
-    let rows: Vec<(String, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-        "SELECT pc_id, user_sid, acked_at
-           FROM notification_acks
-          WHERE notification_id = ?
-          ORDER BY acked_at ASC",
+    let rows: Vec<(
+        String,
+        String,
+        chrono::DateTime<chrono::Utc>,
+        Option<String>,
+    )> = sqlx::query_as(
+        "SELECT na.pc_id, na.user_sid, na.acked_at,
+                    COALESCE(na.account, a.last_logon_display_name, a.last_logon_user)
+               FROM notification_acks na
+               LEFT JOIN agents a ON a.pc_id = na.pc_id
+              WHERE na.notification_id = ?
+              ORDER BY na.acked_at ASC",
     )
     .bind(id)
     .fetch_all(pool)
@@ -210,11 +225,14 @@ async fn fetch_acks(
 
     Ok(rows
         .into_iter()
-        .map(|(pc_id, user_sid, acked_at)| NotificationAckEntry {
-            pc_id,
-            user_sid,
-            acked_at,
-        })
+        .map(
+            |(pc_id, user_sid, acked_at, account)| NotificationAckEntry {
+                pc_id,
+                user_sid,
+                acked_at,
+                account,
+            },
+        )
         .collect())
 }
 
