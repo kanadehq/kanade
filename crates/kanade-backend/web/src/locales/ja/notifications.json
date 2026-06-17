@@ -58,6 +58,16 @@
     "emptyBody": "(本文なし)",
     "id": "ID"
   },
+  "audience": {
+    "title": "対象 PC の確認状況",
+    "summary": "{{confirmed}} / {{total}} 台 確認済",
+    "pc": "PC",
+    "user": "担当者 (最終ログイン)",
+    "status": "状況",
+    "confirmed": "確認済",
+    "pending": "未確認",
+    "empty": "対象 PC を特定できませんでした (対象グループに現在メンバーがいない、または対象 PC が未登録の可能性があります)。"
+  },
   "ack": {
     "title": "確認状況",
     "idField": "通知 ID",

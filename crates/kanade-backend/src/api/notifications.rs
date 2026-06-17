@@ -9,7 +9,7 @@
 //!   `(pc_id, user_sid, acked_at)` recorded for the notification by the
 //!   notification-acks projector, for the SPA's confirmation view.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use async_nats::jetstream::consumer::pull::Config as PullConfig;
@@ -19,7 +19,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use futures::StreamExt;
 use kanade_shared::ipc::notifications::{
-    Notification, NotificationAckEntry, NotificationAckStatus, NotificationDetail,
+    AudiencePc, Notification, NotificationAckEntry, NotificationAckStatus, NotificationDetail,
     PublishNotificationRequest, PublishNotificationResponse,
 };
 use kanade_shared::kv::STREAM_NOTIFICATIONS;
@@ -29,6 +29,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::api::AppState;
+use crate::api::agent_groups;
 use crate::audit;
 use crate::audit::Caller;
 
@@ -266,7 +267,10 @@ pub async fn list_sent(
     State(s): State<AppState>,
 ) -> Result<Json<Vec<Notification>>, (StatusCode, String)> {
     let raw = replay_all_sent(&s).await?;
-    Ok(Json(dedup_newest_first(raw, SENT_MAX_ITEMS)))
+    // The history list doesn't need the per-copy subjects (audience is a
+    // detail-page concern), so drop them before dedup.
+    let notifs = raw.into_iter().map(|(n, _subj)| n).collect();
+    Ok(Json(dedup_newest_first(notifs, SENT_MAX_ITEMS)))
 }
 
 /// `GET /api/notifications/{id}` (viewer+) — one sent notification's full
@@ -286,34 +290,238 @@ pub async fn detail(
     Path(id): Path<String>,
 ) -> Result<Json<NotificationDetail>, (StatusCode, String)> {
     let raw = replay_all_sent(&s).await?;
-    // Find the requested id directly in the raw replay, keeping the newest
-    // fan-out copy (one publish lands on `all` + each `group.X` + each
-    // `pc.Y`). NOT via `dedup_newest_first(.., SENT_MAX_ITEMS)`: that caps
-    // the result at the 200 newest *distinct* notifications, so deep-linking
-    // one older than the 200th-newest — but still inside the 5000-message
-    // replay window — would 404 spuriously. The detail lookup must see the
-    // full replay, and it only needs the single matching id, so the
-    // list-wide sort/truncate is also wasted work here.
-    let notification = raw
-        .into_iter()
-        .filter(|n| n.id == id)
-        .max_by_key(|n| n.issued_at)
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                format!("notification {id} not found"),
-            )
-        })?;
+    // Walk the raw replay once, keeping the requested id's newest fan-out
+    // copy AND collecting every subject it landed on. NOT via
+    // `dedup_newest_first(.., SENT_MAX_ITEMS)`: that caps the result at the
+    // 200 newest *distinct* notifications, so deep-linking one older than
+    // the 200th-newest — but still inside the 5000-message replay window —
+    // would 404 spuriously. The subjects are the only record of who the
+    // notification was addressed to (the body carries no target), so we
+    // capture them here to reconstruct the audience below.
+    let mut notification: Option<Notification> = None;
+    let mut subjects: Vec<String> = Vec::new();
+    for (n, subj) in raw {
+        if n.id != id {
+            continue;
+        }
+        subjects.push(subj);
+        match &notification {
+            Some(prev) if n.issued_at <= prev.issued_at => {}
+            _ => notification = Some(n),
+        }
+    }
+    let notification = notification.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            format!("notification {id} not found"),
+        )
+    })?;
+
     let acks = fetch_acks(&s.pool, &id).await?;
-    Ok(Json(NotificationDetail { notification, acks }))
+    let audience = resolve_audience(&s, &subjects, &acks).await?;
+    Ok(Json(NotificationDetail {
+        notification,
+        acks,
+        audience,
+    }))
+}
+
+/// Reconstruct the per-PC confirmation roster (④) for a notification from
+/// the fan-out subjects it was published to, joined against its recorded
+/// acks.
+///
+/// The notification body carries no audience, so the only record of who it
+/// was addressed to is the set of `notifications.{all|group.X|pc.Y}`
+/// subjects its copies landed on (captured in [`detail`]). Expand those to
+/// the expected PC set:
+/// - `notifications.all` → every PC in the `agents` table (the registered
+///   fleet);
+/// - `notifications.group.X` → the PCs in group `X` (via the `agent_groups`
+///   bucket);
+/// - `notifications.pc.Y` → PC `Y` directly.
+///
+/// Then flag each expected PC confirmed/pending by joining the acks (PC
+/// granularity: a PC is confirmed once *any* of its users acked), attach
+/// the host's last-logon identity from `agents`, and sort pending-first so
+/// "who hasn't confirmed" is at the top. Any PC that acked is always
+/// included even if it's since fallen out of the resolved audience (a
+/// group membership change after the send), so a real confirmation never
+/// vanishes from the roster.
+async fn resolve_audience(
+    s: &AppState,
+    subjects: &[String],
+    acks: &[NotificationAckEntry],
+) -> Result<Vec<AudiencePc>, (StatusCode, String)> {
+    let all = subjects.iter().any(|s| s == subject::NOTIFICATIONS_ALL);
+    let needs_groups = subjects
+        .iter()
+        .any(|s| s.starts_with(subject::NOTIFICATIONS_GROUP_PREFIX));
+
+    // Only pay the agent_groups KV walk when a group was actually targeted.
+    let membership = if needs_groups {
+        agent_groups::membership_map(s).await
+    } else {
+        HashMap::new()
+    };
+
+    // Load last-logon identity per PC. For a broadcast (`all`) we need the
+    // whole fleet; for a group/pc-scoped send we only need the candidate
+    // PCs, so scope the query to them rather than scanning every agent row
+    // (the common case on a large fleet — a targeted send shouldn't read
+    // the whole table). `assemble_roster` re-derives the same expected set,
+    // so the rows we skip here would only have been filtered out there.
+    let agent_rows = if all {
+        load_agents(s, None).await?
+    } else {
+        let mut candidates: HashSet<String> = HashSet::new();
+        for subj in subjects {
+            if let Some(pc) = subj.strip_prefix(subject::NOTIFICATIONS_PC_PREFIX) {
+                candidates.insert(pc.to_string());
+            }
+        }
+        for a in acks {
+            candidates.insert(a.pc_id.clone());
+        }
+        for (pc_id, pc_groups) in &membership {
+            if pc_groups
+                .iter()
+                .any(|g| subjects.contains(&subject::notifications_group(g)))
+            {
+                candidates.insert(pc_id.clone());
+            }
+        }
+        if candidates.is_empty() {
+            Vec::new()
+        } else {
+            load_agents(s, Some(candidates)).await?
+        }
+    };
+
+    Ok(assemble_roster(subjects, &agent_rows, &membership, acks))
+}
+
+/// Load `(pc_id, last_logon_user, last_logon_display_name)` from `agents`.
+/// `only = None` reads the whole fleet (the `all` broadcast case); `Some`
+/// scopes to a candidate PC set via a parameter-bound `IN (…)` clause so a
+/// targeted send doesn't scan every agent row.
+async fn load_agents(
+    s: &AppState,
+    only: Option<HashSet<String>>,
+) -> Result<Vec<(String, Option<String>, Option<String>)>, (StatusCode, String)> {
+    let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+        "SELECT pc_id, last_logon_user, last_logon_display_name FROM agents",
+    );
+    if let Some(candidates) = only {
+        qb.push(" WHERE pc_id IN (");
+        let mut sep = qb.separated(", ");
+        for pc in candidates {
+            sep.push_bind(pc);
+        }
+        sep.push_unseparated(")");
+    }
+    qb.build_query_as().fetch_all(&s.pool).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("query agents for audience: {e}"),
+        )
+    })
+}
+
+/// Pure core of [`resolve_audience`]: turn the captured fan-out
+/// `subjects`, the fleet's `agent_rows` (`pc_id`, last-logon user/display),
+/// the `pc_id -> [group]` `membership` map, and the recorded `acks` into
+/// the per-PC roster. Split out so the expansion / ack-join / ordering is
+/// unit-testable without a broker or DB.
+fn assemble_roster(
+    subjects: &[String],
+    agent_rows: &[(String, Option<String>, Option<String>)],
+    membership: &HashMap<String, Vec<String>>,
+    acks: &[NotificationAckEntry],
+) -> Vec<AudiencePc> {
+    // Parse the fan-out subjects back into the address triple.
+    let mut all = false;
+    let mut groups: HashSet<&str> = HashSet::new();
+    let mut pcs: HashSet<String> = HashSet::new();
+    for subj in subjects {
+        if subj == subject::NOTIFICATIONS_ALL {
+            all = true;
+        } else if let Some(g) = subj.strip_prefix(subject::NOTIFICATIONS_GROUP_PREFIX) {
+            groups.insert(g);
+        } else if let Some(pc) = subj.strip_prefix(subject::NOTIFICATIONS_PC_PREFIX) {
+            pcs.insert(pc.to_string());
+        }
+    }
+
+    let logon: HashMap<&str, (Option<String>, Option<String>)> = agent_rows
+        .iter()
+        .map(|(pc, u, d)| (pc.as_str(), (u.clone(), d.clone())))
+        .collect();
+
+    // Expand the address triple to the expected PC set.
+    let mut expected: HashSet<String> = pcs;
+    if all {
+        expected.extend(agent_rows.iter().map(|(pc, _, _)| pc.clone()));
+    }
+    if !groups.is_empty() {
+        for (pc_id, pc_groups) in membership {
+            if pc_groups.iter().any(|g| groups.contains(g.as_str())) {
+                expected.insert(pc_id.clone());
+            }
+        }
+    }
+
+    // Fold acks to PC granularity (confirmed + earliest ack), and make sure
+    // every acked PC is in the roster even if it's since fallen out of the
+    // resolved audience (a group membership change after the send).
+    let mut acked: HashMap<&str, chrono::DateTime<chrono::Utc>> = HashMap::new();
+    for a in acks {
+        acked
+            .entry(a.pc_id.as_str())
+            .and_modify(|t| {
+                if a.acked_at < *t {
+                    *t = a.acked_at;
+                }
+            })
+            .or_insert(a.acked_at);
+        expected.insert(a.pc_id.clone());
+    }
+
+    // Materialise, sorted pending-first then by pc_id so "who hasn't
+    // confirmed" surfaces at the top.
+    let mut roster: Vec<AudiencePc> = expected
+        .into_iter()
+        .map(|pc_id| {
+            let acked_at = acked.get(pc_id.as_str()).copied();
+            let (last_logon_user, last_logon_display_name) =
+                logon.get(pc_id.as_str()).cloned().unwrap_or((None, None));
+            AudiencePc {
+                last_logon_user,
+                last_logon_display_name,
+                confirmed: acked_at.is_some(),
+                acked_at,
+                pc_id,
+            }
+        })
+        .collect();
+    roster.sort_by(|a, b| {
+        a.confirmed
+            .cmp(&b.confirmed)
+            .then_with(|| a.pc_id.cmp(&b.pc_id))
+    });
+    roster
 }
 
 /// Drain every retained `notifications.>` message into raw (pre-dedup)
-/// `Notification`s, newest-biased via a rolling window. Shared by
-/// [`list_sent`] and [`detail`]; callers dedup the per-subject fan-out
-/// copies (one publish lands on `all` + each `group.X` + each `pc.Y`)
-/// with [`dedup_newest_first`].
-async fn replay_all_sent(s: &AppState) -> Result<Vec<Notification>, (StatusCode, String)> {
+/// `(Notification, subject)` pairs, newest-biased via a rolling window.
+/// Shared by [`list_sent`] and [`detail`]; callers dedup the per-subject
+/// fan-out copies (one publish lands on `all` + each `group.X` + each
+/// `pc.Y`) with [`dedup_newest_first`]. The subject is carried so
+/// [`detail`] can reconstruct a notification's audience (④) from the very
+/// fan-out copies it dedups away — there's no other record of who a
+/// notification was addressed to.
+async fn replay_all_sent(
+    s: &AppState,
+) -> Result<Vec<(Notification, String)>, (StatusCode, String)> {
     let stream = s
         .jetstream
         .get_stream(STREAM_NOTIFICATIONS)
@@ -359,7 +567,7 @@ async fn replay_all_sent(s: &AppState) -> Result<Vec<Notification>, (StatusCode,
     // freshest sends (what an operator history cares about).
     // Size up front at the ceiling the rolling window allows (cap + the
     // one transient overflow entry) so a full stream doesn't realloc.
-    let mut buf: std::collections::VecDeque<Notification> =
+    let mut buf: std::collections::VecDeque<(Notification, String)> =
         std::collections::VecDeque::with_capacity(SENT_MAX_REPLAY + 1);
     let mut dropped = 0usize;
     loop {
@@ -385,7 +593,7 @@ async fn replay_all_sent(s: &AppState) -> Result<Vec<Notification>, (StatusCode,
             }
             match serde_json::from_slice::<Notification>(&m.payload) {
                 Ok(n) => {
-                    buf.push_back(n);
+                    buf.push_back((n, m.subject.to_string()));
                     if buf.len() > SENT_MAX_REPLAY {
                         buf.pop_front();
                         dropped += 1;
@@ -498,5 +706,119 @@ mod tests {
         let out = dedup_newest_first(raw, 2);
         let ids: Vec<&str> = out.iter().map(|n| n.id.as_str()).collect();
         assert_eq!(ids, vec!["c", "b"], "newest two kept");
+    }
+
+    // ---- audience roster (assemble_roster pure core) ----
+
+    fn agent(
+        pc: &str,
+        user: Option<&str>,
+        display: Option<&str>,
+    ) -> (String, Option<String>, Option<String>) {
+        (pc.into(), user.map(Into::into), display.map(Into::into))
+    }
+
+    fn ack(pc: &str, sid: &str, secs: i64) -> NotificationAckEntry {
+        NotificationAckEntry {
+            pc_id: pc.into(),
+            user_sid: sid.into(),
+            acked_at: at(secs),
+            account: None,
+        }
+    }
+
+    #[test]
+    fn roster_all_targets_every_agent_pending_first() {
+        // `notifications.all` → every agent PC; only PC2 acked.
+        let agents = vec![
+            agent("PC1", Some("D\\a"), Some("Alice")),
+            agent("PC2", Some("D\\b"), Some("Bob")),
+            agent("PC3", None, None),
+        ];
+        let roster = assemble_roster(
+            &["notifications.all".to_string()],
+            &agents,
+            &HashMap::new(),
+            &[ack("PC2", "S-2", 10)],
+        );
+        let view: Vec<(&str, bool)> = roster
+            .iter()
+            .map(|r| (r.pc_id.as_str(), r.confirmed))
+            .collect();
+        // Pending first (PC1, PC3), then confirmed (PC2), each block by pc_id.
+        assert_eq!(view, vec![("PC1", false), ("PC3", false), ("PC2", true)]);
+        let pc2 = roster.iter().find(|r| r.pc_id == "PC2").unwrap();
+        assert_eq!(pc2.acked_at, Some(at(10)));
+        assert_eq!(pc2.last_logon_display_name.as_deref(), Some("Bob"));
+    }
+
+    #[test]
+    fn roster_group_expands_via_membership_and_pc_is_direct() {
+        // Target group "fin" + PC9 directly. PC1/PC2 are in "fin".
+        let agents = vec![
+            agent("PC1", None, None),
+            agent("PC2", None, None),
+            agent("PC9", None, None),
+            agent("PCX", None, None), // not targeted
+        ];
+        let membership: HashMap<String, Vec<String>> = [
+            ("PC1".to_string(), vec!["fin".to_string()]),
+            (
+                "PC2".to_string(),
+                vec!["fin".to_string(), "ops".to_string()],
+            ),
+            ("PCX".to_string(), vec!["ops".to_string()]),
+        ]
+        .into_iter()
+        .collect();
+        let roster = assemble_roster(
+            &[
+                "notifications.group.fin".to_string(),
+                "notifications.pc.PC9".to_string(),
+            ],
+            &agents,
+            &membership,
+            &[],
+        );
+        let mut pcs: Vec<&str> = roster.iter().map(|r| r.pc_id.as_str()).collect();
+        pcs.sort();
+        assert_eq!(pcs, vec!["PC1", "PC2", "PC9"], "fin members + direct PC9");
+        assert!(roster.iter().all(|r| !r.confirmed), "no acks → all pending");
+    }
+
+    #[test]
+    fn roster_includes_acked_pc_outside_resolved_audience() {
+        // PC7 acked but isn't in the targeted group (membership changed
+        // after the send) — it must still appear, confirmed.
+        let agents = vec![agent("PC1", None, None), agent("PC7", None, None)];
+        let membership: HashMap<String, Vec<String>> =
+            [("PC1".to_string(), vec!["fin".to_string()])]
+                .into_iter()
+                .collect();
+        let roster = assemble_roster(
+            &["notifications.group.fin".to_string()],
+            &agents,
+            &membership,
+            &[ack("PC7", "S-7", 5)],
+        );
+        let pc7 = roster.iter().find(|r| r.pc_id == "PC7");
+        assert!(
+            pc7.is_some_and(|r| r.confirmed),
+            "acked PC always in roster"
+        );
+    }
+
+    #[test]
+    fn roster_earliest_ack_wins_per_pc() {
+        // Two users on PC1 acked at different times → earliest is recorded.
+        let agents = vec![agent("PC1", None, None)];
+        let roster = assemble_roster(
+            &["notifications.pc.PC1".to_string()],
+            &agents,
+            &HashMap::new(),
+            &[ack("PC1", "S-a", 30), ack("PC1", "S-b", 5)],
+        );
+        assert_eq!(roster.len(), 1);
+        assert_eq!(roster[0].acked_at, Some(at(5)), "earliest ack per PC");
     }
 }

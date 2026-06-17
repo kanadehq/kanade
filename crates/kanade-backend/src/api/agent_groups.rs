@@ -15,7 +15,7 @@
 //! storing, so the KV row is bit-identical regardless of operator
 //! ordering or duplicate input.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -128,6 +128,48 @@ pub async fn list_all_groups(
         .collect();
 
     Ok(Json(GroupsOverview { groups }))
+}
+
+/// Build the fleet's `pc_id -> [group]` membership map from the
+/// `agent_groups` bucket — the same walk [`list_all_groups`] does, but
+/// returned raw (not inverted, no config-only groups) for callers that
+/// need to expand a group-targeted address to its member PCs (the
+/// notifications audience resolver). PCs with no groups are omitted.
+///
+/// Best-effort: a bucket-open / key-read failure degrades to an empty
+/// map rather than propagating — the caller then resolves only the
+/// explicitly-addressed PCs, which is a safe partial answer for a
+/// read-only confirmation view.
+pub(crate) async fn membership_map(state: &AppState) -> HashMap<String, Vec<String>> {
+    let Ok(kv) = open_bucket(state).await else {
+        return HashMap::new();
+    };
+    let mut pc_ids: Vec<String> = Vec::new();
+    if let Ok(mut keys) = kv.keys().await {
+        while let Some(k) = keys.next().await {
+            match k {
+                Ok(k) => pc_ids.push(k),
+                Err(e) => warn!(error = %e, "membership_map keys()"),
+            }
+        }
+    }
+    // Fetch the per-PC rows concurrently (bounded) rather than one
+    // round-trip at a time — the dominant cost on a large fleet, same as
+    // `list_all_groups`. A per-PC read error degrades that PC to "no
+    // groups" rather than failing the whole map.
+    const READ_CONCURRENCY: usize = 16;
+    futures::stream::iter(pc_ids)
+        .map(|pc_id| {
+            let kv = kv.clone();
+            async move {
+                let g = read_or_default(&kv, &pc_id).await.ok()?;
+                (!g.groups.is_empty()).then_some((pc_id, g.groups))
+            }
+        })
+        .buffer_unordered(READ_CONCURRENCY)
+        .filter_map(|x| async move { x })
+        .collect()
+        .await
 }
 
 pub async fn list_groups(

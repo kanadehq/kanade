@@ -255,11 +255,26 @@ export type NotificationRecord = {
   expires_at?: string | null;
 };
 
-// One sent notification's full content + its confirmation list, from
-// GET /api/notifications/{id}. Powers the deep-linkable detail page.
+// One targeted PC's confirmation state (④), from the detail endpoint's
+// `audience` roster. PC granularity: `confirmed` is true once any user on
+// the PC acked; `last_logon_*` is the host's representative user.
+// All optionals are absent (not null) on the wire — the Rust side skips a
+// None field — so `?: T` mirrors the contract; `| null` would be dead.
+export type AudiencePc = {
+  pc_id: string;
+  last_logon_user?: string;
+  last_logon_display_name?: string;
+  confirmed: boolean;
+  acked_at?: string;
+};
+
+// One sent notification's full content + its confirmation list + the
+// per-PC audience roster, from GET /api/notifications/{id}. Powers the
+// deep-linkable detail page.
 export type NotificationDetail = {
   notification: NotificationRecord;
   acks: NotificationAckEntry[];
+  audience: AudiencePc[];
 };
 
 // Router state carried from a history row's "reuse" action into the

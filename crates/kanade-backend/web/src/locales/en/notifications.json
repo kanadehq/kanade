@@ -58,6 +58,16 @@
     "emptyBody": "(no body)",
     "id": "ID"
   },
+  "audience": {
+    "title": "Target PC confirmation",
+    "summary": "{{confirmed}} / {{total}} PCs confirmed",
+    "pc": "PC",
+    "user": "User (last logon)",
+    "status": "Status",
+    "confirmed": "Confirmed",
+    "pending": "Pending",
+    "empty": "No target PCs could be resolved (the targeted group may have no current members, or the targeted PC isn't registered)."
+  },
   "ack": {
     "title": "Confirmation status",
     "idField": "Notification id",
