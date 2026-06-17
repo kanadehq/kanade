@@ -24,10 +24,10 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use chrono::{DateTime, Duration, Utc};
 use futures::StreamExt;
-use kanade_shared::kv::BUCKET_JOBS;
+use kanade_shared::kv::{BUCKET_JOBS, BUCKET_VIEWS};
 use kanade_shared::manifest::{
     AggregateAgg, AggregateRender, AggregateScope, AggregateTimeBucket, AggregateTransform,
-    AggregateWidget, Manifest,
+    AggregateWidget, Manifest, View,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -153,7 +153,12 @@ pub async fn get(
         tz_mod: &tz_mod,
     };
 
-    let widgets = load_widgets(&state.jetstream).await;
+    let mut widgets = load_widgets(&state.jetstream).await;
+    // Render order (#743): explicit `order` weight first (absent ⇒ 0), then
+    // the alphabetical (dashboard, title) fallback. Sorting the specs up
+    // front means the compute loop preserves it (one bad/skipped widget
+    // keeps the rest in order) and the SPA derives tab order from it.
+    widgets.sort_by(|a, b| widget_sort_key(a).cmp(&widget_sort_key(b)));
     let mut out = Vec::new();
     for w in widgets {
         if w.scope != want_scope {
@@ -176,32 +181,59 @@ pub async fn get(
             }
         }
     }
-    // Deterministic order: dashboard tab, then title within it.
-    out.sort_by(|a, b| a.dashboard.cmp(&b.dashboard).then(a.title.cmp(&b.title)));
+    // `widgets` was pre-sorted, so `out` is already in render order.
     Ok(Json(out))
 }
 
-/// Collect every job's `aggregate:` widgets from `BUCKET_JOBS` (the same
-/// scan `inventory::list_jobs` does for inventory hints). A job with no
-/// `aggregate:` contributes nothing; an unreadable entry is skipped.
+/// Render-order key for a widget (#743): explicit `order` weight (absent
+/// ⇒ 0), then the alphabetical (dashboard, title) fallback. So a fleet
+/// with no `order` anywhere stays purely alphabetical, and a lower `order`
+/// pulls a widget — and, via first-appearance, its tab — earlier.
+fn widget_sort_key(w: &AggregateWidget) -> (i32, &str, &str) {
+    (w.order.unwrap_or(0), &w.dashboard, &w.title)
+}
+
+/// Collect every aggregate widget the fleet declares, merging two sources
+/// (#743): the co-located `aggregate:` hint on each **job** in
+/// `BUCKET_JOBS` (a job charting its own emitted data), and standalone
+/// **view** resources in `BUCKET_VIEWS` (cross-cutting dashboards that
+/// reference kinds emitted by other jobs / the agent). An unreadable or
+/// missing entry / bucket is skipped, not fatal.
+///
+/// No dedup across the two sources: the same `(dashboard, title)` defined
+/// in both a job hint and a view renders twice (the visible duplicate is
+/// the signal — define a widget in one place). Silently dropping one copy
+/// could hide a diverging config, so we surface both rather than guess.
 async fn load_widgets(jetstream: &async_nats::jetstream::Context) -> Vec<AggregateWidget> {
     let mut out = Vec::new();
-    let Ok(kv) = jetstream.get_key_value(BUCKET_JOBS).await else {
-        return out;
-    };
-    let Ok(mut keys) = kv.keys().await else {
-        return out;
-    };
-    while let Some(key) = keys.next().await {
-        let Ok(key) = key else { continue };
-        let Some(entry) = kv.get(&key).await.unwrap_or(None) else {
-            continue;
-        };
-        let Ok(job) = serde_json::from_slice::<Manifest>(&entry) else {
-            continue;
-        };
-        if let Some(widgets) = job.aggregate {
-            out.extend(widgets);
+    // Job hints.
+    if let Ok(kv) = jetstream.get_key_value(BUCKET_JOBS).await
+        && let Ok(mut keys) = kv.keys().await
+    {
+        while let Some(key) = keys.next().await {
+            let Ok(key) = key else { continue };
+            let Some(entry) = kv.get(&key).await.unwrap_or(None) else {
+                continue;
+            };
+            if let Ok(job) = serde_json::from_slice::<Manifest>(&entry)
+                && let Some(widgets) = job.aggregate
+            {
+                out.extend(widgets);
+            }
+        }
+    }
+    // Standalone views.
+    if let Ok(kv) = jetstream.get_key_value(BUCKET_VIEWS).await
+        && let Ok(mut keys) = kv.keys().await
+    {
+        while let Some(key) = keys.next().await {
+            let Ok(key) = key else { continue };
+            let Some(entry) = kv.get(&key).await.unwrap_or(None) else {
+                continue;
+            };
+            if let Ok(view) = serde_json::from_slice::<View>(&entry) {
+                out.extend(view.widgets);
+            }
         }
     }
     out
@@ -817,6 +849,42 @@ mod tests {
             to: Utc.with_ymd_and_hms(2026, 6, 18, 0, 0, 0).unwrap(),
             tz_mod: "+0 minutes",
         }
+    }
+
+    #[test]
+    fn widget_sort_key_orders_by_order_then_alpha() {
+        let mut ws = [
+            {
+                let mut w = widget("k", AggregateAgg::Count, AggregateRender::Stat);
+                w.dashboard = "Utilization".into();
+                w.title = "B".into();
+                w
+            },
+            {
+                let mut w = widget("k", AggregateAgg::Count, AggregateRender::Stat);
+                w.dashboard = "Utilization".into();
+                w.title = "A".into();
+                w
+            },
+            {
+                // Explicit low order pulls this first despite "Z"/"Zzz".
+                let mut w = widget("k", AggregateAgg::Count, AggregateRender::Stat);
+                w.dashboard = "Zzz".into();
+                w.title = "Z".into();
+                w.order = Some(-1);
+                w
+            },
+        ];
+        ws.sort_by(|a, b| widget_sort_key(a).cmp(&widget_sort_key(b)));
+        let got: Vec<(&str, &str)> = ws
+            .iter()
+            .map(|w| (w.dashboard.as_str(), w.title.as_str()))
+            .collect();
+        // order:-1 first; then the order:0 pair alphabetical by title.
+        assert_eq!(
+            got,
+            [("Zzz", "Z"), ("Utilization", "A"), ("Utilization", "B")]
+        );
     }
 
     #[tokio::test]

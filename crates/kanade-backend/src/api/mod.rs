@@ -27,6 +27,7 @@ pub mod schedules;
 pub mod schemas;
 pub mod script_objects;
 pub mod scripts;
+pub mod views;
 pub mod yaml_body;
 
 use axum::Router;
@@ -209,6 +210,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/scripts/status", get(scripts::list_status))
         .route("/api/jobs", get(jobs::list))
         .route("/api/jobs/{id}/yaml", get(jobs::get_yaml))
+        // #743: standalone view resources (viewer-readable list + YAML).
+        .route("/api/views", get(views::list))
+        .route("/api/views/{id}/yaml", get(views::get_yaml))
         .route("/api/schedules/{id}/yaml", get(schedules::get_yaml))
         .route("/api/schedules/{id}/preview", get(schedules::preview))
         .route("/api/schedules/{id}/status", get(schedules::status))
@@ -335,6 +339,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/notifications", post(notifications::publish))
         .route("/api/schedules", post(schedules::create))
         .route("/api/schedules/{id}", delete(schedules::delete))
+        // #743: view create/delete (operator).
+        .route("/api/views", post(views::create))
+        .route("/api/views/{id}", delete(views::delete))
         .route("/api/schedules/{id}/disable", post(schedules::disable))
         .route("/api/schedules/{id}/enable", post(schedules::enable))
         .route("/api/freeze", put(freeze::set).delete(freeze::clear))
