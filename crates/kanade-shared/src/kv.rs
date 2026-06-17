@@ -32,6 +32,18 @@ pub const BUCKET_JOBS: &str = "jobs";
 pub const BUCKET_JOBS_YAML: &str = "jobs_yaml";
 pub const BUCKET_SCHEDULES_YAML: &str = "schedules_yaml";
 
+/// View catalog (#743) — operator-registered [`View`](crate::manifest::View)
+/// resources, keyed by `view.id`. A view is a pure, declarative
+/// read/aggregation over stored fleet data (`obs_events`, …) for the
+/// Analytics page — no `execute`, no schedule. The backend reads these at
+/// query time and merges their widgets with the co-located `aggregate:`
+/// hints on jobs. Distinct from `BUCKET_JOBS` so a cross-cutting dashboard
+/// doesn't need a noop job carrier.
+pub const BUCKET_VIEWS: &str = "views";
+/// Operator source-of-truth YAML mirror for `BUCKET_VIEWS` (same role as
+/// `BUCKET_JOBS_YAML`): keeps comments/formatting for the SPA editor.
+pub const BUCKET_VIEWS_YAML: &str = "views_yaml";
+
 /// Fleet-wide singleton settings that aren't per-agent (so they don't
 /// belong in `agent_config`'s layered scopes) and aren't per-schedule
 /// (so they don't belong in `schedules`). First and only key so far is
@@ -310,6 +322,8 @@ mod tests {
             BUCKET_JOBS,
             BUCKET_JOBS_YAML,
             BUCKET_SCHEDULES_YAML,
+            BUCKET_VIEWS,
+            BUCKET_VIEWS_YAML,
             BUCKET_FLEET_CONFIG,
             BUCKET_NOTIFICATIONS_READ,
             BUCKET_SCHEDULER_DISPATCH,

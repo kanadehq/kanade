@@ -487,6 +487,16 @@ pub struct AggregateWidget {
     pub dashboard: String,
     /// Widget heading. Required, validated non-empty.
     pub title: String,
+    /// Optional sort weight (#743). Once the order-aware sort lands (PR2)
+    /// widgets render in `(order, dashboard, title)` order, so a lower
+    /// `order` pulls a widget — and its tab — earlier; equal/absent `order`
+    /// falls back to the alphabetical `(dashboard, title)` ordering. Treated
+    /// as `0` when unset, so a fleet with no `order` anywhere stays purely
+    /// alphabetical (today's behaviour); negatives are allowed to pin
+    /// something first. (This field only carries the value; the backend
+    /// applies it.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<i32>,
     /// `pc` rolls up a single selected PC; `fleet` rolls up all PCs
     /// (and unlocks `group_by: pc_id` to rank PCs against each other).
     /// Defaults to `pc`.
@@ -633,6 +643,210 @@ fn is_valid_json_path(p: &str) -> bool {
         && p.split('.').all(|seg| {
             !seg.is_empty() && seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         })
+}
+
+/// Per-widget validation for a list of [`AggregateWidget`]s — shared by
+/// the `aggregate:` job hint ([`Manifest::validate`]) and the standalone
+/// [`View`] resource (#743) so the two can't diverge. `field` names the
+/// containing key for error messages (`"aggregate"` or `"widgets"`).
+///
+/// Enforces: non-empty list; non-empty dashboard/title/kind; a
+/// blank-when-set `source`; rejection of any #492 `Unknown` enum
+/// (an operator typo at create time); safe dotted JSON paths; the value
+/// path each `agg` needs (and rejection of mis-paired ones); `pc_id`
+/// grouping only in `fleet` scope; `transform`/`limit`/`exclude` only with
+/// a `group_by`; positive `limit`/`sample_minutes`; `gauge`⇔`ratio`; and
+/// `timeline`⇔`time_bucket`.
+pub fn validate_aggregate_widgets(widgets: &[AggregateWidget], field: &str) -> Result<(), String> {
+    if widgets.is_empty() {
+        return Err(format!(
+            "`{field}:` must list at least one widget when present"
+        ));
+    }
+    for (i, w) in widgets.iter().enumerate() {
+        let at = format!("{field}[{i}]");
+        for (label, value) in [
+            ("dashboard", &w.dashboard),
+            ("title", &w.title),
+            ("kind", &w.kind),
+        ] {
+            if value.trim().is_empty() {
+                return Err(format!("{at}.{label} must not be empty"));
+            }
+        }
+        // A present-but-blank `source` is a no-op filter — reject like the
+        // other blank-when-set guards.
+        if let Some(source) = &w.source {
+            if source.trim().is_empty() {
+                return Err(format!("{at}.source must not be empty when set"));
+            }
+        }
+        // Reject values that fell through to the #492 `Unknown` catch-all:
+        // at create time on the current version that's an operator typo. (A
+        // genuinely-future variant only reaches an older reader via a stored
+        // resource, which is never re-validated, so forward-compat holds.)
+        if w.scope == AggregateScope::Unknown {
+            return Err(format!("{at}.scope is not a known value (pc | fleet)"));
+        }
+        if w.agg == AggregateAgg::Unknown {
+            return Err(format!(
+                "{at}.agg is not a known value (count | ratio | sum)"
+            ));
+        }
+        if w.render == AggregateRender::Unknown {
+            return Err(format!(
+                "{at}.render is not a known value (bar | gauge | timeline | stat)"
+            ));
+        }
+        if w.transform == Some(AggregateTransform::Unknown) {
+            return Err(format!("{at}.transform is not a known value (host)"));
+        }
+        if w.time_bucket == Some(AggregateTimeBucket::Unknown) {
+            return Err(format!("{at}.time_bucket is not a known value (hour)"));
+        }
+        for (label, path) in [
+            ("group_by", &w.group_by),
+            ("bool_path", &w.bool_path),
+            ("value_path", &w.value_path),
+        ] {
+            if let Some(p) = path {
+                if !is_valid_json_path(p) {
+                    return Err(format!(
+                        "{at}.{label} '{p}' must be a dotted JSON path of [A-Za-z0-9_] segments"
+                    ));
+                }
+            }
+        }
+        // Each agg uses exactly one value path; reject a mis-paired path so
+        // a typo fails at create rather than being ignored.
+        match w.agg {
+            // count: grouped → ranking, ungrouped → grand total.
+            AggregateAgg::Count => {
+                for (label, path) in [("bool_path", &w.bool_path), ("value_path", &w.value_path)] {
+                    if path.is_some() {
+                        return Err(format!("{at}.agg=count does not use `{label}`"));
+                    }
+                }
+            }
+            AggregateAgg::Ratio => {
+                if w.bool_path.is_none() {
+                    return Err(format!("{at}.agg=ratio requires `bool_path`"));
+                }
+                if w.value_path.is_some() {
+                    return Err(format!("{at}.agg=ratio does not use `value_path`"));
+                }
+            }
+            AggregateAgg::Sum => {
+                if w.value_path.is_none() {
+                    return Err(format!("{at}.agg=sum requires `value_path`"));
+                }
+                if w.bool_path.is_some() {
+                    return Err(format!("{at}.agg=sum does not use `bool_path`"));
+                }
+            }
+            // Rejected above; arm exists only for exhaustiveness.
+            AggregateAgg::Unknown => {}
+        }
+        // Ranking PCs against each other only means something across the
+        // fleet — within one PC it's a single bar.
+        if w.group_by.as_deref() == Some("pc_id") && w.scope != AggregateScope::Fleet {
+            return Err(format!(
+                "{at}.group_by: pc_id is only valid with scope: fleet"
+            ));
+        }
+        // `transform` rewrites the grouped PAYLOAD value (URL→host); it's
+        // meaningless on a `pc_id` grouping (the pc_id column, not a payload
+        // field), so reject the combo at create time.
+        if w.transform.is_some() && w.group_by.as_deref() == Some("pc_id") {
+            return Err(format!("{at}.transform is not valid with group_by: pc_id"));
+        }
+        // limit / transform / exclude all operate on grouped values, so
+        // without a `group_by` they're silent no-ops — reject.
+        if w.group_by.is_none() {
+            if w.limit.is_some() {
+                return Err(format!("{at}.limit requires `group_by`"));
+            }
+            if w.transform.is_some() {
+                return Err(format!("{at}.transform requires `group_by`"));
+            }
+            if !w.exclude.is_empty() {
+                return Err(format!("{at}.exclude requires `group_by`"));
+            }
+        }
+        if w.limit == Some(0) {
+            return Err(format!("{at}.limit must be > 0"));
+        }
+        if w.sample_minutes == Some(0) {
+            return Err(format!("{at}.sample_minutes must be > 0"));
+        }
+        for ex in &w.exclude {
+            if ex.trim().is_empty() {
+                return Err(format!("{at}.exclude must not contain empty entries"));
+            }
+        }
+        // A gauge draws a single ratio dial — only meaningful for agg: ratio.
+        if w.render == AggregateRender::Gauge && w.agg != AggregateAgg::Ratio {
+            return Err(format!("{at}.render=gauge is only valid with agg: ratio"));
+        }
+        // A timeline needs a bucket; a bucket on any other render is a no-op
+        // that signals operator confusion — reject both.
+        match (w.render, &w.time_bucket) {
+            (AggregateRender::Timeline, None) => {
+                return Err(format!("{at}.render=timeline requires `time_bucket`"));
+            }
+            (r, Some(_)) if r != AggregateRender::Timeline => {
+                return Err(format!(
+                    "{at}.time_bucket is only valid with render: timeline"
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// A standalone declarative read/aggregation for the Analytics page (#743).
+///
+/// A **view** aggregates stored fleet data (`obs_events`, …) without an
+/// `execute` or a schedule — unlike a [`Manifest`] it only declares
+/// [`AggregateWidget`]s. (The first line is concise on purpose: `schemars`
+/// uses it as the generated schema's `title`.) The backend reads views from
+/// `BUCKET_VIEWS` at
+/// query time and merges their widgets with the co-located `aggregate:`
+/// hints on jobs, so a cross-cutting dashboard (one that charts events
+/// emitted by several other jobs / the agent) has a home that doesn't need
+/// a noop job carrier. Stored JSON in `BUCKET_VIEWS`, keyed by `id`.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
+pub struct View {
+    /// Stable identifier (the KV key). Required, validated non-empty.
+    pub id: String,
+    /// Optional human description shown on the Views admin page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The widgets this view contributes to the Analytics page.
+    pub widgets: Vec<AggregateWidget>,
+    /// Free-form operator taxonomy (same role as [`Manifest::tags`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// GitOps provenance (#678), stamped by `kanade view create` from the
+    /// source YAML's Git context — same as [`Manifest::origin`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<RepoOrigin>,
+}
+
+impl View {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.id.trim().is_empty() {
+            return Err("view.id must not be empty".to_string());
+        }
+        validate_aggregate_widgets(&self.widgets, "widgets")?;
+        for tag in &self.tags {
+            if tag.trim().is_empty() {
+                return Err("tags must not contain empty entries".to_string());
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Issue #246 — `emit:` manifest block for jobs whose stdout is
@@ -1015,158 +1229,12 @@ impl Manifest {
                 parse_size_bytes(max_size).map_err(|e| format!("collect.max_size: {e}"))?;
             }
         }
-        // #720: `aggregate:` is a pure read-spec (it never touches stdout
-        // and is never sent to an agent), so it composes with every other
-        // hint. Validate each widget's internal consistency: the value
-        // path its `agg` needs, a safe JSON path charset (these bind into
-        // `json_extract(payload, '$.' || ?)`), and scope/render coherence.
+        // #720/#743: `aggregate:` is a pure read-spec (it never touches
+        // stdout and is never sent to an agent), so it composes with every
+        // other hint. The per-widget rules are shared with the standalone
+        // `view` resource — see [`validate_aggregate_widgets`].
         if let Some(widgets) = &self.aggregate {
-            if widgets.is_empty() {
-                return Err("`aggregate:` must list at least one widget when present".to_string());
-            }
-            for (i, w) in widgets.iter().enumerate() {
-                let at = format!("aggregate[{i}]");
-                for (label, value) in [
-                    ("dashboard", &w.dashboard),
-                    ("title", &w.title),
-                    ("kind", &w.kind),
-                ] {
-                    if value.trim().is_empty() {
-                        return Err(format!("{at}.{label} must not be empty"));
-                    }
-                }
-                // A present-but-blank `source` is a no-op filter — reject
-                // like the other blank-when-set guards.
-                if let Some(source) = &w.source {
-                    if source.trim().is_empty() {
-                        return Err(format!("{at}.source must not be empty when set"));
-                    }
-                }
-                // Reject values that fell through to the #492 `Unknown`
-                // catch-all: at create time on the current version that's an
-                // operator typo. (A genuinely-future variant only reaches an
-                // older reader via a stored manifest, which is never
-                // re-validated, so forward-compat is preserved.)
-                if w.scope == AggregateScope::Unknown {
-                    return Err(format!("{at}.scope is not a known value (pc | fleet)"));
-                }
-                if w.agg == AggregateAgg::Unknown {
-                    return Err(format!(
-                        "{at}.agg is not a known value (count | ratio | sum)"
-                    ));
-                }
-                if w.render == AggregateRender::Unknown {
-                    return Err(format!(
-                        "{at}.render is not a known value (bar | gauge | timeline | stat)"
-                    ));
-                }
-                if w.transform == Some(AggregateTransform::Unknown) {
-                    return Err(format!("{at}.transform is not a known value (host)"));
-                }
-                if w.time_bucket == Some(AggregateTimeBucket::Unknown) {
-                    return Err(format!("{at}.time_bucket is not a known value (hour)"));
-                }
-                for (label, path) in [
-                    ("group_by", &w.group_by),
-                    ("bool_path", &w.bool_path),
-                    ("value_path", &w.value_path),
-                ] {
-                    if let Some(p) = path {
-                        if !is_valid_json_path(p) {
-                            return Err(format!(
-                                "{at}.{label} '{p}' must be a dotted JSON path of [A-Za-z0-9_] segments"
-                            ));
-                        }
-                    }
-                }
-                // Each agg uses exactly one value path; reject a mis-paired
-                // path so a typo fails at create rather than being ignored.
-                match w.agg {
-                    // count: grouped → ranking, ungrouped → grand total.
-                    AggregateAgg::Count => {
-                        for (label, path) in
-                            [("bool_path", &w.bool_path), ("value_path", &w.value_path)]
-                        {
-                            if path.is_some() {
-                                return Err(format!("{at}.agg=count does not use `{label}`"));
-                            }
-                        }
-                    }
-                    AggregateAgg::Ratio => {
-                        if w.bool_path.is_none() {
-                            return Err(format!("{at}.agg=ratio requires `bool_path`"));
-                        }
-                        if w.value_path.is_some() {
-                            return Err(format!("{at}.agg=ratio does not use `value_path`"));
-                        }
-                    }
-                    AggregateAgg::Sum => {
-                        if w.value_path.is_none() {
-                            return Err(format!("{at}.agg=sum requires `value_path`"));
-                        }
-                        if w.bool_path.is_some() {
-                            return Err(format!("{at}.agg=sum does not use `bool_path`"));
-                        }
-                    }
-                    // Rejected above; arm exists only for exhaustiveness.
-                    AggregateAgg::Unknown => {}
-                }
-                // Ranking PCs against each other only means something across
-                // the fleet — within one PC it's a single bar.
-                if w.group_by.as_deref() == Some("pc_id") && w.scope != AggregateScope::Fleet {
-                    return Err(format!(
-                        "{at}.group_by: pc_id is only valid with scope: fleet"
-                    ));
-                }
-                // `transform` rewrites the grouped PAYLOAD value (URL→host);
-                // it's meaningless on a `pc_id` grouping (the pc_id column,
-                // not a payload field), so reject the combo at create time.
-                if w.transform.is_some() && w.group_by.as_deref() == Some("pc_id") {
-                    return Err(format!("{at}.transform is not valid with group_by: pc_id"));
-                }
-                // limit / transform / exclude all operate on grouped values,
-                // so without a `group_by` they're silent no-ops — reject.
-                if w.group_by.is_none() {
-                    if w.limit.is_some() {
-                        return Err(format!("{at}.limit requires `group_by`"));
-                    }
-                    if w.transform.is_some() {
-                        return Err(format!("{at}.transform requires `group_by`"));
-                    }
-                    if !w.exclude.is_empty() {
-                        return Err(format!("{at}.exclude requires `group_by`"));
-                    }
-                }
-                if w.limit == Some(0) {
-                    return Err(format!("{at}.limit must be > 0"));
-                }
-                if w.sample_minutes == Some(0) {
-                    return Err(format!("{at}.sample_minutes must be > 0"));
-                }
-                for ex in &w.exclude {
-                    if ex.trim().is_empty() {
-                        return Err(format!("{at}.exclude must not contain empty entries"));
-                    }
-                }
-                // A gauge draws a single ratio dial — only meaningful for
-                // agg: ratio.
-                if w.render == AggregateRender::Gauge && w.agg != AggregateAgg::Ratio {
-                    return Err(format!("{at}.render=gauge is only valid with agg: ratio"));
-                }
-                // A timeline needs a bucket; a bucket on any other render is
-                // a no-op that signals operator confusion — reject both.
-                match (w.render, &w.time_bucket) {
-                    (AggregateRender::Timeline, None) => {
-                        return Err(format!("{at}.render=timeline requires `time_bucket`"));
-                    }
-                    (r, Some(_)) if r != AggregateRender::Timeline => {
-                        return Err(format!(
-                            "{at}.time_bucket is only valid with render: timeline"
-                        ));
-                    }
-                    _ => {}
-                }
-            }
+            validate_aggregate_widgets(widgets, "aggregate")?;
         }
         // A blank / whitespace-only tag is an invisible operator typo
         // that would render an empty filter chip on the Jobs page —
@@ -2300,6 +2368,62 @@ tags: [ok, "   "]
         );
         let err = m.validate().expect_err("unknown render must fail");
         assert!(err.contains("render is not a known value"), "err: {err}");
+    }
+
+    #[test]
+    fn aggregate_accepts_order_field() {
+        let m = manifest_with_aggregate(
+            "aggregate:\n- { dashboard: D, title: T, order: -5, kind: k, agg: count, render: stat }\n",
+        );
+        m.validate().expect("order is a valid optional field");
+        let w = &m.aggregate.as_ref().unwrap()[0];
+        assert_eq!(w.order, Some(-5));
+    }
+
+    // ── #743 View resource ───────────────────────────────────────────
+    fn view_from(yaml_body: &str) -> View {
+        serde_yaml::from_str(&format!("id: v1\n{yaml_body}")).expect("parse view")
+    }
+
+    #[test]
+    fn view_accepts_valid_widgets() {
+        let v = view_from(
+            "widgets:\n\
+             - { dashboard: Reliability, title: Crashes by PC, scope: fleet, kind: unexpected_shutdown, agg: count, group_by: pc_id, render: bar }\n\
+             - { dashboard: Reliability, title: Total, scope: fleet, kind: unexpected_shutdown, agg: count, render: stat }\n",
+        );
+        v.validate().expect("valid view");
+    }
+
+    #[test]
+    fn view_rejects_empty_widgets() {
+        let v = view_from("widgets: []\n");
+        let err = v.validate().expect_err("empty widgets must fail");
+        assert!(err.contains("at least one widget"), "err: {err}");
+    }
+
+    #[test]
+    fn view_rejects_blank_id() {
+        let v: View = serde_yaml::from_str(
+            "id: \"  \"\nwidgets:\n- { dashboard: D, title: T, kind: k, agg: count, render: stat }\n",
+        )
+        .expect("parse");
+        let err = v.validate().expect_err("blank id must fail");
+        assert!(err.contains("view.id must not be empty"), "err: {err}");
+    }
+
+    #[test]
+    fn view_reuses_shared_widget_validation() {
+        // The same per-widget rule the job hint enforces (ratio needs
+        // bool_path), reported under the `widgets[..]` field.
+        let v = view_from(
+            "widgets:\n- { dashboard: D, title: T, kind: presence, agg: ratio, render: gauge }\n",
+        );
+        let err = v.validate().expect_err("ratio without bool_path must fail");
+        assert!(
+            err.contains("widgets[0].agg=ratio requires `bool_path`"),
+            "err: {err}"
+        );
     }
 
     fn execute_with(
@@ -4399,6 +4523,7 @@ inventory:
     fn schema_files_are_current() {
         assert_schema_file("schedule.schema.json", &schemars::schema_for!(Schedule));
         assert_schema_file("job.schema.json", &schemars::schema_for!(Manifest));
+        assert_schema_file("view.schema.json", &schemars::schema_for!(View));
     }
 
     fn assert_schema_file(name: &str, schema: &schemars::Schema) {
