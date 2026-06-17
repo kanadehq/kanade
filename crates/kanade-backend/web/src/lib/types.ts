@@ -249,3 +249,23 @@ export type NotificationRecord = {
   issued_by?: string | null;
   expires_at?: string | null;
 };
+
+// One sent notification's full content + its confirmation list, from
+// GET /api/notifications/{id}. Powers the deep-linkable detail page.
+export type NotificationDetail = {
+  notification: NotificationRecord;
+  acks: NotificationAckEntry[];
+};
+
+// Router state carried from a history row's "reuse" action into the
+// composer (NOT the wire — the audience isn't stored on the notification,
+// so the operator re-picks the target after a reuse).
+export type NotificationReuse = {
+  reuse: {
+    priority: NotificationPriority;
+    require_ack: boolean;
+    title: string;
+    body: string;
+    issued_by?: string | null;
+  };
+};

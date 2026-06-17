@@ -42,9 +42,21 @@
     "issuedBy": "送信元",
     "issuedAt": "送信日時",
     "actions": "",
-    "viewAcks": "確認状況を見る",
+    "viewDetail": "詳細",
+    "viewDetailTitle": "詳細 (内容＋確認状況) を開く。Ctrl/⌘+クリックで別タブ。",
+    "reuse": "再利用",
+    "reuseTitle": "この内容を作成欄に読み込んで編集・再送します",
     "requireAck": "確認必須",
     "expired": "期限切れ"
+  },
+  "detail": {
+    "back": "通知一覧へ戻る",
+    "reuse": "再利用",
+    "loading": "通知を読み込み中…",
+    "loadError": "通知の取得に失敗しました",
+    "notFound": "通知が見つかりません",
+    "emptyBody": "(本文なし)",
+    "id": "ID"
   },
   "ack": {
     "title": "確認状況",

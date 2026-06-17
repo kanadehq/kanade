@@ -23,6 +23,7 @@ import { JetStream } from '@/pages/JetStream';
 import { Jobs } from '@/pages/Jobs';
 import { Login } from '@/pages/Login';
 import { Logs } from '@/pages/Logs';
+import { NotificationDetail } from '@/pages/NotificationDetail';
 import { Notifications } from '@/pages/Notifications';
 import { Placeholder } from '@/pages/Placeholder';
 import { Activity } from '@/pages/Activity';
@@ -120,6 +121,7 @@ function AppContent() {
               <Route path="/apps" element={<Apps />} />
               <Route path="/groups" element={<Groups />} />
               <Route path="/notifications" element={<Notifications />} />
+              <Route path="/notifications/:id" element={<NotificationDetail />} />
               <Route path="/config" element={<Config />} />
               <Route path="/jetstream" element={<JetStream />} />
               <Route path="/settings" element={<Settings />} />
