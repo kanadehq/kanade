@@ -1,0 +1,961 @@
+//! `GET /api/analytics` — generic `obs_events` rollups driven by the
+//! `aggregate:` manifest hint (#720). Discovers every job's
+//! [`AggregateWidget`] specs from `BUCKET_JOBS` and computes each into a
+//! render-ready payload, so an operator can chart any emitted event from
+//! YAML without a Rust change. This generalizes `api/utilization.rs` (the
+//! hardcoded presence/app_sample/web_visit rollup), which is retired once
+//! the example configs reach parity.
+//!
+//! `?from=&to=` are RFC3339 UTC bounds (from inclusive, to exclusive;
+//! both omitted ⇒ last 24h). `?tz_offset_minutes=` buckets the hourly
+//! timeline into the operator's local hours. `?pc_id=` selects the scope:
+//! present ⇒ per-PC (`scope: pc`) widgets for that PC; absent ⇒
+//! fleet-wide (`scope: fleet`) widgets across all PCs.
+//!
+//! SQL is static per shape (the lint forbids dynamic assembly); JSON
+//! paths are bound into `json_extract(payload, '$.' || ?)` and were
+//! charset-validated at create time, and the source/pc filters are
+//! `(? IS NULL OR col = ?)` gates so one statement serves both scopes.
+
+use std::collections::HashMap;
+
+use axum::Json;
+use axum::extract::{Query, State};
+use axum::http::StatusCode;
+use chrono::{DateTime, Duration, Utc};
+use futures::StreamExt;
+use kanade_shared::kv::BUCKET_JOBS;
+use kanade_shared::manifest::{
+    AggregateAgg, AggregateRender, AggregateScope, AggregateTimeBucket, AggregateTransform,
+    AggregateWidget, Manifest,
+};
+use serde::{Deserialize, Serialize};
+use sqlx::{Row, SqlitePool};
+use tracing::warn;
+
+use super::AppState;
+
+/// Default top-N for grouped (`bar`) widgets when the spec omits `limit`.
+const DEFAULT_LIMIT: i64 = 10;
+
+/// Cap on rows pulled for a Rust-side `transform: host` fold — a busy day
+/// is well under this; the bound just stops a pathological PC from pulling
+/// an unbounded set into memory (mirrors the old utilization top-sites).
+const MAX_RAW_ROWS: i64 = 10_000;
+
+#[derive(Deserialize)]
+pub struct AnalyticsQuery {
+    /// RFC3339 lower bound (inclusive). Default: `to` − 24h.
+    pub from: Option<DateTime<Utc>>,
+    /// RFC3339 upper bound (exclusive). Default: now.
+    pub to: Option<DateTime<Utc>>,
+    /// Minutes to ADD to a UTC `at` for local hour-of-day bucketing
+    /// (e.g. JST = 540). Default 0. Clamped to ±900.
+    pub tz_offset_minutes: Option<i64>,
+    /// When set, compute the `scope: pc` widgets for this PC. When
+    /// omitted, compute the `scope: fleet` widgets across all PCs.
+    pub pc_id: Option<String>,
+}
+
+/// The shared query context for one request — the pieces every widget
+/// query needs. Bundled so the per-shape helpers stay readable (and under
+/// the argument-count lint).
+struct Ctx<'a> {
+    pool: &'a SqlitePool,
+    /// `Some` ⇒ filter to one PC (per-PC scope); `None` ⇒ all PCs (fleet).
+    /// Bound into the `(? IS NULL OR pc_id = ?)` gate either way.
+    pc_id: Option<&'a str>,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    /// strftime modifier shifting `at` into local time (e.g. `+540 minutes`).
+    tz_mod: &'a str,
+}
+
+#[derive(Serialize)]
+pub struct BarRow {
+    pub label: String,
+    pub value: i64,
+    /// `value × sample_minutes` when the widget declares a cadence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub est_minutes: Option<i64>,
+}
+
+/// One local hour-of-day bucket for a `timeline` widget.
+#[derive(Serialize)]
+pub struct HourBucket {
+    pub hour: i64,
+    pub total: i64,
+    pub active: i64,
+}
+
+/// The render-specific payload. Tagged by `render` so the SPA picks the
+/// matching widget component; flattened into [`WidgetResult`].
+#[derive(Serialize)]
+#[serde(tag = "render", rename_all = "lowercase")]
+pub enum WidgetData {
+    Bar {
+        rows: Vec<BarRow>,
+    },
+    Gauge {
+        total: i64,
+        active: i64,
+        ratio: f64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        est_minutes: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        first: Option<DateTime<Utc>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        last: Option<DateTime<Utc>>,
+    },
+    Timeline {
+        buckets: Vec<HourBucket>,
+    },
+    Stat {
+        value: i64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        est_minutes: Option<i64>,
+    },
+}
+
+#[derive(Serialize)]
+pub struct WidgetResult {
+    pub dashboard: String,
+    pub title: String,
+    /// `"pc"` or `"fleet"` — the scope this result was computed at.
+    pub scope: &'static str,
+    #[serde(flatten)]
+    pub data: WidgetData,
+}
+
+pub async fn get(
+    State(state): State<AppState>,
+    Query(q): Query<AnalyticsQuery>,
+) -> Result<Json<Vec<WidgetResult>>, StatusCode> {
+    let to = q.to.unwrap_or_else(Utc::now);
+    let from = q.from.unwrap_or(to - Duration::hours(24));
+    if from >= to {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let tz_off = q.tz_offset_minutes.unwrap_or(0).clamp(-900, 900);
+    let tz_mod = format!("{tz_off:+} minutes");
+    // pc_id present ⇒ per-PC widgets; absent ⇒ fleet widgets.
+    let want_scope = if q.pc_id.is_some() {
+        AggregateScope::Pc
+    } else {
+        AggregateScope::Fleet
+    };
+    let scope_str = if q.pc_id.is_some() { "pc" } else { "fleet" };
+    let ctx = Ctx {
+        pool: &state.pool,
+        pc_id: q.pc_id.as_deref(),
+        from,
+        to,
+        tz_mod: &tz_mod,
+    };
+
+    let widgets = load_widgets(&state.jetstream).await;
+    let mut out = Vec::new();
+    for w in widgets {
+        if w.scope != want_scope {
+            continue;
+        }
+        match compute_widget(&ctx, &w).await {
+            Ok(Some(data)) => out.push(WidgetResult {
+                dashboard: w.dashboard,
+                title: w.title,
+                scope: scope_str,
+                data,
+            }),
+            // A widget whose enums fell through to the #492 Unknown
+            // catch-all (a future variant this build doesn't understand)
+            // is skipped, not failed.
+            Ok(None) => {}
+            // One bad widget shouldn't 500 the whole page — log and drop.
+            Err(e) => {
+                warn!(error = %e, dashboard = %w.dashboard, title = %w.title, "analytics: widget compute")
+            }
+        }
+    }
+    // Deterministic order: dashboard tab, then title within it.
+    out.sort_by(|a, b| a.dashboard.cmp(&b.dashboard).then(a.title.cmp(&b.title)));
+    Ok(Json(out))
+}
+
+/// Collect every job's `aggregate:` widgets from `BUCKET_JOBS` (the same
+/// scan `inventory::list_jobs` does for inventory hints). A job with no
+/// `aggregate:` contributes nothing; an unreadable entry is skipped.
+async fn load_widgets(jetstream: &async_nats::jetstream::Context) -> Vec<AggregateWidget> {
+    let mut out = Vec::new();
+    let Ok(kv) = jetstream.get_key_value(BUCKET_JOBS).await else {
+        return out;
+    };
+    let Ok(mut keys) = kv.keys().await else {
+        return out;
+    };
+    while let Some(key) = keys.next().await {
+        let Ok(key) = key else { continue };
+        let Some(entry) = kv.get(&key).await.unwrap_or(None) else {
+            continue;
+        };
+        let Ok(job) = serde_json::from_slice::<Manifest>(&entry) else {
+            continue;
+        };
+        if let Some(widgets) = job.aggregate {
+            out.extend(widgets);
+        }
+    }
+    out
+}
+
+/// Compute one widget into its render payload, or `None` when its spec
+/// uses a forward-compat `Unknown` enum this build can't execute.
+async fn compute_widget(ctx: &Ctx<'_>, w: &AggregateWidget) -> anyhow::Result<Option<WidgetData>> {
+    // Skip a widget whose spec uses any #492 `Unknown` catch-all (a future
+    // variant this build can't execute) — across every enum field, not
+    // just agg/render, so a future `transform`/`time_bucket` is dropped
+    // cleanly rather than silently misrouted.
+    if matches!(w.agg, AggregateAgg::Unknown)
+        || matches!(w.render, AggregateRender::Unknown)
+        || matches!(w.transform, Some(AggregateTransform::Unknown))
+        || matches!(w.time_bucket, Some(AggregateTimeBucket::Unknown))
+    {
+        return Ok(None);
+    }
+    let exclude_json = if w.exclude.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&w.exclude)?)
+    };
+    let limit = w.limit.map(i64::from).unwrap_or(DEFAULT_LIMIT);
+    let sample = w.sample_minutes.map(i64::from);
+
+    // A time bucket always renders a timeline, regardless of agg.
+    if matches!(w.time_bucket, Some(AggregateTimeBucket::Hour)) {
+        return Ok(Some(timeline(ctx, w).await?));
+    }
+
+    let data = match w.agg {
+        AggregateAgg::Ratio => gauge(ctx, w, sample).await?,
+        // pc_id ranking is matched before the host transform so a stored
+        // `group_by: pc_id` + `transform: host` (nonsense, and rejected at
+        // create time) can't misroute into bar_host("pc_id").
+        AggregateAgg::Count => match &w.group_by {
+            Some(gb) if gb == "pc_id" => bar_count_pc(ctx, w, exclude_json, limit, sample).await?,
+            Some(gb) if matches!(w.transform, Some(AggregateTransform::Host)) => {
+                bar_host(ctx, w, gb, limit, sample).await?
+            }
+            Some(gb) => bar_count_path(ctx, w, gb, exclude_json, limit, sample).await?,
+            None => stat_count(ctx, w, sample).await?,
+        },
+        AggregateAgg::Sum => {
+            let vp = w.value_path.as_deref().unwrap_or_default();
+            match &w.group_by {
+                Some(gb) if gb == "pc_id" => sum_bar_pc(ctx, w, vp, exclude_json, limit).await?,
+                Some(gb) => sum_bar_path(ctx, w, gb, vp, exclude_json, limit).await?,
+                None => sum_stat(ctx, w, vp).await?,
+            }
+        }
+        // Unknown (handled above) + any future #[non_exhaustive] variant.
+        _ => return Ok(None),
+    };
+    Ok(Some(data))
+}
+
+/// `agg: count` + `group_by: <json path>` → top-N bars by row count.
+async fn bar_count_path(
+    ctx: &Ctx<'_>,
+    w: &AggregateWidget,
+    path: &str,
+    exclude_json: Option<String>,
+    limit: i64,
+    sample: Option<i64>,
+) -> anyhow::Result<WidgetData> {
+    let rows = sqlx::query(
+        "SELECT json_extract(payload, '$.' || ?6) AS g, COUNT(*) AS n \
+         FROM obs_events \
+         WHERE (?1 IS NULL OR pc_id = ?1) AND kind = ?2 AND (?3 IS NULL OR source = ?3) \
+           AND at >= ?4 AND at < ?5 \
+           AND json_extract(payload, '$.' || ?6) IS NOT NULL \
+           AND json_extract(payload, '$.' || ?6) <> '' \
+           AND (?7 IS NULL OR json_extract(payload, '$.' || ?6) NOT IN (SELECT value FROM json_each(?7))) \
+         GROUP BY json_extract(payload, '$.' || ?6) ORDER BY n DESC LIMIT ?8",
+    )
+    .bind(ctx.pc_id)
+    .bind(&w.kind)
+    .bind(w.source.as_deref())
+    .bind(ctx.from)
+    .bind(ctx.to)
+    .bind(path)
+    .bind(exclude_json)
+    .bind(limit)
+    .fetch_all(ctx.pool)
+    .await?;
+    Ok(WidgetData::Bar {
+        rows: rows
+            .into_iter()
+            .filter_map(|r| bar_row(&r, sample))
+            .collect(),
+    })
+}
+
+/// `agg: count` + `group_by: pc_id` → fleet ranking of PCs by row count.
+async fn bar_count_pc(
+    ctx: &Ctx<'_>,
+    w: &AggregateWidget,
+    exclude_json: Option<String>,
+    limit: i64,
+    sample: Option<i64>,
+) -> anyhow::Result<WidgetData> {
+    let rows = sqlx::query(
+        "SELECT pc_id AS g, COUNT(*) AS n \
+         FROM obs_events \
+         WHERE (?1 IS NULL OR pc_id = ?1) AND kind = ?2 AND (?3 IS NULL OR source = ?3) \
+           AND at >= ?4 AND at < ?5 \
+           AND (?6 IS NULL OR pc_id NOT IN (SELECT value FROM json_each(?6))) \
+         GROUP BY pc_id ORDER BY n DESC LIMIT ?7",
+    )
+    .bind(ctx.pc_id)
+    .bind(&w.kind)
+    .bind(w.source.as_deref())
+    .bind(ctx.from)
+    .bind(ctx.to)
+    .bind(exclude_json)
+    .bind(limit)
+    .fetch_all(ctx.pool)
+    .await?;
+    Ok(WidgetData::Bar {
+        rows: rows
+            .into_iter()
+            .filter_map(|r| bar_row(&r, sample))
+            .collect(),
+    })
+}
+
+/// `agg: count` + `transform: host` → pull the day's values (capped) and
+/// fold them into host counts in Rust (SQLite can't parse a URL). Mirrors
+/// the old utilization top-sites. `exclude` is applied post-host.
+async fn bar_host(
+    ctx: &Ctx<'_>,
+    w: &AggregateWidget,
+    path: &str,
+    limit: i64,
+    sample: Option<i64>,
+) -> anyhow::Result<WidgetData> {
+    let rows = sqlx::query(
+        "SELECT json_extract(payload, '$.' || ?6) AS v \
+         FROM obs_events \
+         WHERE (?1 IS NULL OR pc_id = ?1) AND kind = ?2 AND (?3 IS NULL OR source = ?3) \
+           AND at >= ?4 AND at < ?5 \
+           AND json_extract(payload, '$.' || ?6) IS NOT NULL \
+         ORDER BY at DESC LIMIT ?7",
+    )
+    .bind(ctx.pc_id)
+    .bind(&w.kind)
+    .bind(w.source.as_deref())
+    .bind(ctx.from)
+    .bind(ctx.to)
+    .bind(path)
+    .bind(MAX_RAW_ROWS)
+    .fetch_all(ctx.pool)
+    .await?;
+    let excluded: std::collections::HashSet<&str> = w.exclude.iter().map(String::as_str).collect();
+    let mut counts: HashMap<String, i64> = HashMap::new();
+    for r in &rows {
+        let v: String = r.try_get("v").unwrap_or_default();
+        if let Some(host) = host_of(&v) {
+            if excluded.contains(host.as_str()) {
+                continue;
+            }
+            *counts.entry(host).or_insert(0) += 1;
+        }
+    }
+    let mut ranked: Vec<(String, i64)> = counts.into_iter().collect();
+    // Count desc, then host asc to make the cut deterministic on ties.
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    ranked.truncate(limit.max(0) as usize);
+    Ok(WidgetData::Bar {
+        rows: ranked
+            .into_iter()
+            .map(|(label, value)| BarRow {
+                label,
+                value,
+                est_minutes: sample.map(|m| value * m),
+            })
+            .collect(),
+    })
+}
+
+/// `agg: count` with no `group_by` → a single total (stat).
+async fn stat_count(
+    ctx: &Ctx<'_>,
+    w: &AggregateWidget,
+    sample: Option<i64>,
+) -> anyhow::Result<WidgetData> {
+    let row = sqlx::query(
+        "SELECT COUNT(*) AS n FROM obs_events \
+         WHERE (?1 IS NULL OR pc_id = ?1) AND kind = ?2 AND (?3 IS NULL OR source = ?3) \
+           AND at >= ?4 AND at < ?5",
+    )
+    .bind(ctx.pc_id)
+    .bind(&w.kind)
+    .bind(w.source.as_deref())
+    .bind(ctx.from)
+    .bind(ctx.to)
+    .fetch_one(ctx.pool)
+    .await?;
+    let value: i64 = row.try_get("n").unwrap_or(0);
+    Ok(WidgetData::Stat {
+        value,
+        est_minutes: sample.map(|m| value * m),
+    })
+}
+
+/// `agg: ratio` over `bool_path` → a gauge (true/total + first/last).
+async fn gauge(
+    ctx: &Ctx<'_>,
+    w: &AggregateWidget,
+    sample: Option<i64>,
+) -> anyhow::Result<WidgetData> {
+    let bool_path = w.bool_path.as_deref().unwrap_or_default();
+    let row = sqlx::query(
+        "SELECT COUNT(*) AS total, \
+                COALESCE(SUM(CASE WHEN json_extract(payload, '$.' || ?6) = 1 THEN 1 ELSE 0 END), 0) AS active, \
+                MIN(CASE WHEN json_extract(payload, '$.' || ?6) = 1 THEN at END) AS first_at, \
+                MAX(CASE WHEN json_extract(payload, '$.' || ?6) = 1 THEN at END) AS last_at \
+         FROM obs_events \
+         WHERE (?1 IS NULL OR pc_id = ?1) AND kind = ?2 AND (?3 IS NULL OR source = ?3) \
+           AND at >= ?4 AND at < ?5",
+    )
+    .bind(ctx.pc_id)
+    .bind(&w.kind)
+    .bind(w.source.as_deref())
+    .bind(ctx.from)
+    .bind(ctx.to)
+    .bind(bool_path)
+    .fetch_one(ctx.pool)
+    .await?;
+    let total: i64 = row.try_get("total").unwrap_or(0);
+    let active: i64 = row.try_get("active").unwrap_or(0);
+    Ok(WidgetData::Gauge {
+        total,
+        active,
+        ratio: if total > 0 {
+            active as f64 / total as f64
+        } else {
+            0.0
+        },
+        est_minutes: sample.map(|m| active * m),
+        first: row
+            .try_get::<Option<DateTime<Utc>>, _>("first_at")
+            .unwrap_or(None),
+        last: row
+            .try_get::<Option<DateTime<Utc>>, _>("last_at")
+            .unwrap_or(None),
+    })
+}
+
+/// `time_bucket: hour` → local hour-of-day strip. With a `bool_path`
+/// it's an active/total ratio per hour (presence); without one it's pure
+/// volume (active = total so the bars fill).
+async fn timeline(ctx: &Ctx<'_>, w: &AggregateWidget) -> anyhow::Result<WidgetData> {
+    // Two static SQLs rather than one: the ratio form evaluates the
+    // bool_path; the volume form (no bool_path) must NOT — binding an empty
+    // path would make `json_extract(payload, '$.')` (a malformed path that
+    // errors in SQLite). Volume sets active = total so the bars fill.
+    let rows = match w.bool_path.as_deref() {
+        Some(bool_path) => {
+            sqlx::query(
+                "SELECT CAST(strftime('%H', at, ?1) AS INTEGER) AS hour, \
+                        COUNT(*) AS total, \
+                        COALESCE(SUM(CASE WHEN json_extract(payload, '$.' || ?7) = 1 THEN 1 ELSE 0 END), 0) AS active \
+                 FROM obs_events \
+                 WHERE (?2 IS NULL OR pc_id = ?2) AND kind = ?3 AND (?4 IS NULL OR source = ?4) \
+                   AND at >= ?5 AND at < ?6 \
+                 GROUP BY hour ORDER BY hour",
+            )
+            .bind(ctx.tz_mod)
+            .bind(ctx.pc_id)
+            .bind(&w.kind)
+            .bind(w.source.as_deref())
+            .bind(ctx.from)
+            .bind(ctx.to)
+            .bind(bool_path)
+            .fetch_all(ctx.pool)
+            .await?
+        }
+        None => {
+            sqlx::query(
+                "SELECT CAST(strftime('%H', at, ?1) AS INTEGER) AS hour, \
+                        COUNT(*) AS total, COUNT(*) AS active \
+                 FROM obs_events \
+                 WHERE (?2 IS NULL OR pc_id = ?2) AND kind = ?3 AND (?4 IS NULL OR source = ?4) \
+                   AND at >= ?5 AND at < ?6 \
+                 GROUP BY hour ORDER BY hour",
+            )
+            .bind(ctx.tz_mod)
+            .bind(ctx.pc_id)
+            .bind(&w.kind)
+            .bind(w.source.as_deref())
+            .bind(ctx.from)
+            .bind(ctx.to)
+            .fetch_all(ctx.pool)
+            .await?
+        }
+    };
+    let buckets = rows
+        .into_iter()
+        .filter_map(|r| {
+            let hour: i64 = r.try_get("hour").ok()?;
+            let total: i64 = r.try_get("total").unwrap_or(0);
+            let active: i64 = r.try_get("active").unwrap_or(0);
+            Some(HourBucket {
+                hour,
+                total,
+                active,
+            })
+        })
+        .collect();
+    Ok(WidgetData::Timeline { buckets })
+}
+
+/// `agg: sum` + `group_by: <json path>` → top-N bars by summed value.
+async fn sum_bar_path(
+    ctx: &Ctx<'_>,
+    w: &AggregateWidget,
+    path: &str,
+    value_path: &str,
+    exclude_json: Option<String>,
+    limit: i64,
+) -> anyhow::Result<WidgetData> {
+    let rows = sqlx::query(
+        "SELECT json_extract(payload, '$.' || ?6) AS g, \
+                COALESCE(SUM(json_extract(payload, '$.' || ?7)), 0) AS s \
+         FROM obs_events \
+         WHERE (?1 IS NULL OR pc_id = ?1) AND kind = ?2 AND (?3 IS NULL OR source = ?3) \
+           AND at >= ?4 AND at < ?5 \
+           AND json_extract(payload, '$.' || ?6) IS NOT NULL \
+           AND (?8 IS NULL OR json_extract(payload, '$.' || ?6) NOT IN (SELECT value FROM json_each(?8))) \
+         GROUP BY json_extract(payload, '$.' || ?6) ORDER BY s DESC LIMIT ?9",
+    )
+    .bind(ctx.pc_id)
+    .bind(&w.kind)
+    .bind(w.source.as_deref())
+    .bind(ctx.from)
+    .bind(ctx.to)
+    .bind(path)
+    .bind(value_path)
+    .bind(exclude_json)
+    .bind(limit)
+    .fetch_all(ctx.pool)
+    .await?;
+    Ok(WidgetData::Bar {
+        rows: rows.into_iter().filter_map(|r| sum_row(&r)).collect(),
+    })
+}
+
+/// `agg: sum` + `group_by: pc_id` → fleet ranking by summed value.
+async fn sum_bar_pc(
+    ctx: &Ctx<'_>,
+    w: &AggregateWidget,
+    value_path: &str,
+    exclude_json: Option<String>,
+    limit: i64,
+) -> anyhow::Result<WidgetData> {
+    let rows = sqlx::query(
+        "SELECT pc_id AS g, COALESCE(SUM(json_extract(payload, '$.' || ?6)), 0) AS s \
+         FROM obs_events \
+         WHERE (?1 IS NULL OR pc_id = ?1) AND kind = ?2 AND (?3 IS NULL OR source = ?3) \
+           AND at >= ?4 AND at < ?5 \
+           AND (?7 IS NULL OR pc_id NOT IN (SELECT value FROM json_each(?7))) \
+         GROUP BY pc_id ORDER BY s DESC LIMIT ?8",
+    )
+    .bind(ctx.pc_id)
+    .bind(&w.kind)
+    .bind(w.source.as_deref())
+    .bind(ctx.from)
+    .bind(ctx.to)
+    .bind(value_path)
+    .bind(exclude_json)
+    .bind(limit)
+    .fetch_all(ctx.pool)
+    .await?;
+    Ok(WidgetData::Bar {
+        rows: rows.into_iter().filter_map(|r| sum_row(&r)).collect(),
+    })
+}
+
+/// `agg: sum` with no `group_by` → a single summed total (stat).
+async fn sum_stat(
+    ctx: &Ctx<'_>,
+    w: &AggregateWidget,
+    value_path: &str,
+) -> anyhow::Result<WidgetData> {
+    let row = sqlx::query(
+        "SELECT COALESCE(SUM(json_extract(payload, '$.' || ?6)), 0) AS s FROM obs_events \
+         WHERE (?1 IS NULL OR pc_id = ?1) AND kind = ?2 AND (?3 IS NULL OR source = ?3) \
+           AND at >= ?4 AND at < ?5",
+    )
+    .bind(ctx.pc_id)
+    .bind(&w.kind)
+    .bind(w.source.as_deref())
+    .bind(ctx.from)
+    .bind(ctx.to)
+    .bind(value_path)
+    .fetch_one(ctx.pool)
+    .await?;
+    Ok(WidgetData::Stat {
+        value: sum_value(&row),
+        est_minutes: None,
+    })
+}
+
+/// A `(g, n)` count row → a [`BarRow`], dropping a null/blank group.
+fn bar_row(r: &sqlx::sqlite::SqliteRow, sample: Option<i64>) -> Option<BarRow> {
+    let label: String = r.try_get("g").ok()?;
+    let value: i64 = r.try_get("n").unwrap_or(0);
+    Some(BarRow {
+        label,
+        value,
+        est_minutes: sample.map(|m| value * m),
+    })
+}
+
+/// A `(g, s)` sum row → a [`BarRow`]. `SUM` of JSON numbers can be
+/// fractional; we round to a whole unit (bytes/counts) for display.
+fn sum_row(r: &sqlx::sqlite::SqliteRow) -> Option<BarRow> {
+    let label: String = r.try_get("g").ok()?;
+    Some(BarRow {
+        label,
+        value: sum_value(r),
+        est_minutes: None,
+    })
+}
+
+/// Read a `SUM(...)` column as i64, tolerating SQLite returning it as a
+/// float (json numbers) or integer.
+fn sum_value(r: &sqlx::sqlite::SqliteRow) -> i64 {
+    r.try_get::<i64, _>("s")
+        .or_else(|_| r.try_get::<f64, _>("s").map(|f| f.round() as i64))
+        .unwrap_or(0)
+}
+
+/// Best-effort host (registrable-ish authority) from a URL string, done
+/// in Rust because SQLite has no URL parser. Strips scheme,
+/// path/query/fragment, userinfo and port; lowercases. `None` for a
+/// blank/non-navigational value so it's dropped from the rollup.
+fn host_of(url: &str) -> Option<String> {
+    let lower = url.trim_start().to_ascii_lowercase();
+    for scheme in [
+        "about:",
+        "data:",
+        "javascript:",
+        "chrome:",
+        "chrome-extension:",
+        "edge:",
+        "brave:",
+        "view-source:",
+        "file:",
+    ] {
+        if lower.starts_with(scheme) {
+            return None;
+        }
+    }
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let no_userinfo = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if no_userinfo.starts_with('[') {
+        match no_userinfo.rfind(']') {
+            Some(i) => &no_userinfo[..=i],
+            None => no_userinfo,
+        }
+    } else {
+        no_userinfo.split(':').next().unwrap_or(no_userinfo)
+    };
+    let host = host.trim();
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_lowercase())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::TimeZone;
+
+    use super::*;
+
+    #[test]
+    fn host_of_extracts_authority() {
+        assert_eq!(
+            host_of("https://user:pw@Example.com:8443/x?y#z").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(host_of("http://[::1]:8080/").as_deref(), Some("[::1]"));
+        assert_eq!(host_of("github.com/foo").as_deref(), Some("github.com"));
+        assert_eq!(host_of("about:blank"), None);
+        assert_eq!(host_of("chrome-extension://abc/page"), None);
+        assert_eq!(host_of("   "), None);
+    }
+
+    // A bare obs_events table so the SQL — json_extract paths, GROUP BY,
+    // exclude via json_each, strftime bucketing — runs for real (a SQL
+    // typo or WHERE-alias bug only shows up against a live DB; #714).
+    async fn seeded_pool() -> SqlitePool {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE obs_events ( \
+               id INTEGER PRIMARY KEY AUTOINCREMENT, pc_id TEXT NOT NULL, \
+               at TIMESTAMP NOT NULL, kind TEXT NOT NULL, source TEXT NOT NULL, \
+               event_record_id TEXT, payload TEXT )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let at = |h: u32| Utc.with_ymd_and_hms(2026, 6, 17, h, 0, 0).unwrap();
+        for (pc, t, kind, payload) in [
+            ("p1", at(9), "presence", r#"{"active":true}"#),
+            ("p1", at(10), "presence", r#"{"active":true}"#),
+            ("p1", at(11), "presence", r#"{"active":false}"#),
+            ("p1", at(12), "presence", r#"{"active":false}"#),
+            (
+                "p1",
+                at(9),
+                "app_sample",
+                r#"{"foreground":{"app":"brave"}}"#,
+            ),
+            (
+                "p1",
+                at(10),
+                "app_sample",
+                r#"{"foreground":{"app":"brave"}}"#,
+            ),
+            (
+                "p1",
+                at(11),
+                "app_sample",
+                r#"{"foreground":{"app":"brave"}}"#,
+            ),
+            (
+                "p1",
+                at(12),
+                "app_sample",
+                r#"{"foreground":{"app":"code"}}"#,
+            ),
+            (
+                "p1",
+                at(13),
+                "app_sample",
+                r#"{"foreground":{"app":"LockApp"}}"#,
+            ),
+            (
+                "p1",
+                at(9),
+                "web_visit",
+                r#"{"url":"https://github.com/a"}"#,
+            ),
+            (
+                "p1",
+                at(10),
+                "web_visit",
+                r#"{"url":"https://github.com/b"}"#,
+            ),
+            (
+                "p1",
+                at(11),
+                "web_visit",
+                r#"{"url":"https://example.com/"}"#,
+            ),
+            (
+                "p2",
+                at(9),
+                "app_sample",
+                r#"{"foreground":{"app":"brave"}}"#,
+            ),
+        ] {
+            sqlx::query(
+                "INSERT INTO obs_events (pc_id, at, kind, source, payload) VALUES (?,?,?,?,?)",
+            )
+            .bind(pc)
+            .bind(t)
+            .bind(kind)
+            .bind("test")
+            .bind(payload)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        pool
+    }
+
+    fn widget(kind: &str, agg: AggregateAgg, render: AggregateRender) -> AggregateWidget {
+        AggregateWidget {
+            dashboard: "D".into(),
+            title: "T".into(),
+            scope: AggregateScope::Pc,
+            kind: kind.into(),
+            source: None,
+            agg,
+            group_by: None,
+            bool_path: None,
+            value_path: None,
+            transform: None,
+            sample_minutes: None,
+            exclude: Vec::new(),
+            time_bucket: None,
+            limit: None,
+            render,
+        }
+    }
+
+    fn ctx<'a>(pool: &'a SqlitePool, pc_id: Option<&'a str>) -> Ctx<'a> {
+        Ctx {
+            pool,
+            pc_id,
+            from: Utc.with_ymd_and_hms(2026, 6, 17, 0, 0, 0).unwrap(),
+            to: Utc.with_ymd_and_hms(2026, 6, 18, 0, 0, 0).unwrap(),
+            tz_mod: "+0 minutes",
+        }
+    }
+
+    #[tokio::test]
+    async fn count_bar_groups_excludes_and_estimates_time() {
+        let pool = seeded_pool().await;
+        let mut w = widget("app_sample", AggregateAgg::Count, AggregateRender::Bar);
+        w.group_by = Some("foreground.app".into());
+        w.exclude = vec!["LockApp".into()];
+        w.sample_minutes = Some(2);
+        let data = compute_widget(&ctx(&pool, Some("p1")), &w)
+            .await
+            .unwrap()
+            .unwrap();
+        let WidgetData::Bar { rows } = data else {
+            panic!("expected bar")
+        };
+        // brave (3) then code (1); LockApp excluded; p2's brave not counted.
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].label, "brave");
+        assert_eq!(rows[0].value, 3);
+        assert_eq!(rows[0].est_minutes, Some(6));
+        assert_eq!(rows[1].label, "code");
+    }
+
+    #[tokio::test]
+    async fn ratio_gauge_counts_true_over_total() {
+        let pool = seeded_pool().await;
+        let mut w = widget("presence", AggregateAgg::Ratio, AggregateRender::Gauge);
+        w.bool_path = Some("active".into());
+        w.sample_minutes = Some(5);
+        let data = compute_widget(&ctx(&pool, Some("p1")), &w)
+            .await
+            .unwrap()
+            .unwrap();
+        let WidgetData::Gauge {
+            total,
+            active,
+            ratio,
+            est_minutes,
+            ..
+        } = data
+        else {
+            panic!("expected gauge")
+        };
+        assert_eq!(total, 4);
+        assert_eq!(active, 2);
+        assert!((ratio - 0.5).abs() < 1e-9);
+        assert_eq!(est_minutes, Some(10));
+    }
+
+    #[tokio::test]
+    async fn host_transform_folds_urls_in_rust() {
+        let pool = seeded_pool().await;
+        let mut w = widget("web_visit", AggregateAgg::Count, AggregateRender::Bar);
+        w.group_by = Some("url".into());
+        w.transform = Some(AggregateTransform::Host);
+        let data = compute_widget(&ctx(&pool, Some("p1")), &w)
+            .await
+            .unwrap()
+            .unwrap();
+        let WidgetData::Bar { rows } = data else {
+            panic!("expected bar")
+        };
+        assert_eq!(rows[0].label, "github.com");
+        assert_eq!(rows[0].value, 2);
+        assert_eq!(rows[1].label, "example.com");
+        assert_eq!(rows[1].value, 1);
+    }
+
+    #[tokio::test]
+    async fn count_stat_is_grand_total() {
+        let pool = seeded_pool().await;
+        let w = widget("app_sample", AggregateAgg::Count, AggregateRender::Stat);
+        let data = compute_widget(&ctx(&pool, Some("p1")), &w)
+            .await
+            .unwrap()
+            .unwrap();
+        let WidgetData::Stat { value, .. } = data else {
+            panic!("expected stat")
+        };
+        // All 5 p1 app_sample rows (LockApp included — stat has no exclude).
+        assert_eq!(value, 5);
+    }
+
+    #[tokio::test]
+    async fn fleet_pc_ranking_counts_all_pcs() {
+        let pool = seeded_pool().await;
+        let mut w = widget("app_sample", AggregateAgg::Count, AggregateRender::Bar);
+        w.scope = AggregateScope::Fleet;
+        w.group_by = Some("pc_id".into());
+        // Fleet scope ⇒ pc_id filter is None.
+        let data = compute_widget(&ctx(&pool, None), &w)
+            .await
+            .unwrap()
+            .unwrap();
+        let WidgetData::Bar { rows } = data else {
+            panic!("expected bar")
+        };
+        assert_eq!(rows[0].label, "p1"); // 5 samples
+        assert_eq!(rows[0].value, 5);
+        assert_eq!(rows[1].label, "p2"); // 1 sample
+    }
+
+    #[tokio::test]
+    async fn ratio_timeline_buckets_by_local_hour() {
+        let pool = seeded_pool().await;
+        let mut w = widget("presence", AggregateAgg::Ratio, AggregateRender::Timeline);
+        w.bool_path = Some("active".into());
+        w.time_bucket = Some(AggregateTimeBucket::Hour);
+        let data = compute_widget(&ctx(&pool, Some("p1")), &w)
+            .await
+            .unwrap()
+            .unwrap();
+        let WidgetData::Timeline { buckets } = data else {
+            panic!("expected timeline")
+        };
+        // Hours 9 & 10 active, 11 & 12 inactive — one bucket each (UTC).
+        let h9 = buckets.iter().find(|b| b.hour == 9).unwrap();
+        assert_eq!((h9.total, h9.active), (1, 1));
+        let h11 = buckets.iter().find(|b| b.hour == 11).unwrap();
+        assert_eq!((h11.total, h11.active), (1, 0));
+    }
+
+    #[tokio::test]
+    async fn timeline_shifts_into_local_hours() {
+        // tz +540 (JST) shifts the UTC 09:00 active sample to local 18:00,
+        // exercising the strftime modifier binding (a `{tz_off:+} minutes`
+        // bug would only show with a non-zero offset).
+        let pool = seeded_pool().await;
+        let mut c = ctx(&pool, Some("p1"));
+        c.tz_mod = "+540 minutes";
+        let mut w = widget("presence", AggregateAgg::Ratio, AggregateRender::Timeline);
+        w.bool_path = Some("active".into());
+        w.time_bucket = Some(AggregateTimeBucket::Hour);
+        let data = compute_widget(&c, &w).await.unwrap().unwrap();
+        let WidgetData::Timeline { buckets } = data else {
+            panic!("expected timeline")
+        };
+        // UTC 09:00 (+9h) → local 18:00; nothing left in UTC-hour 9.
+        assert!(buckets.iter().any(|b| b.hour == 18 && b.active == 1));
+        assert!(buckets.iter().all(|b| b.hour != 9));
+    }
+}
