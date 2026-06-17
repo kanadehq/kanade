@@ -4,7 +4,7 @@
     "pc": "PC",
     "date": "日付"
   },
-  "noAgents": "登録済みエージェントがありません。",
+  "selectPc": "PC を選択すると稼働状況を表示します。",
   "loading": "読み込み中…",
   "errorTitle": "稼働状況の読み込みに失敗しました",
   "active": {

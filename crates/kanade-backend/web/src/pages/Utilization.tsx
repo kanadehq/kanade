@@ -4,14 +4,13 @@ import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { ErrorCard } from '@/components/ErrorCard';
+import { PcPicker } from '@/components/PcPicker';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { apiFetch } from '@/lib/api';
 import { fmtIsoLocal } from '@/lib/utils';
-
-type AgentRow = { pc_id: string };
 
 type UtilizationResponse = {
   pc_id: string;
@@ -59,15 +58,8 @@ function fmtMinutes(min: number): string {
 
 export function Utilization() {
   const { t } = useTranslation('utilization');
-  const [pc, setPc] = useState('');
+  const [pcId, setPcId] = useState('');
   const [date, setDate] = useState(todayLocal());
-
-  const agentsQ = useQuery({
-    queryKey: ['agents-min'],
-    queryFn: () => apiFetch<AgentRow[]>('/api/agents'),
-  });
-  // Default to the first agent once the list loads.
-  const pcId = pc || agentsQ.data?.[0]?.pc_id || '';
 
   const bounds = useMemo(() => dayBounds(date), [date]);
   // Minutes to ADD to UTC to get local time (JST = +540), for hour-of-
@@ -98,18 +90,7 @@ export function Utilization() {
         <div className="flex flex-wrap items-end gap-3">
           <div className="space-y-1">
             <Label htmlFor="util-pc">{t('controls.pc')}</Label>
-            <select
-              id="util-pc"
-              value={pcId}
-              onChange={(e) => setPc(e.target.value)}
-              className="h-9 rounded-md border border-border bg-card px-2 text-sm"
-            >
-              {(agentsQ.data ?? []).map((ag) => (
-                <option key={ag.pc_id} value={ag.pc_id}>
-                  {ag.pc_id}
-                </option>
-              ))}
-            </select>
+            <PcPicker id="util-pc" value={pcId} onChange={setPcId} className="w-56" />
           </div>
           <div className="space-y-1">
             <Label htmlFor="util-date">{t('controls.date')}</Label>
@@ -125,13 +106,13 @@ export function Utilization() {
         </div>
       </div>
 
-      {agentsQ.isLoading || (pcId && q.isLoading) ? (
+      {!pcId ? (
+        <div className="text-muted text-sm">{t('selectPc')}</div>
+      ) : q.isLoading ? (
         <div className="flex items-center gap-2 text-muted">
           <Loader2 className="size-4 animate-spin" />
           {t('loading')}
         </div>
-      ) : !pcId ? (
-        <div className="text-muted text-sm">{t('noAgents')}</div>
       ) : q.error ? (
         <ErrorCard title={t('errorTitle')} error={q.error} />
       ) : (
