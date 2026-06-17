@@ -4,7 +4,7 @@
     "pc": "PC",
     "date": "Date"
   },
-  "noAgents": "No agents registered yet.",
+  "selectPc": "Select a PC to view its utilization.",
   "loading": "Loading…",
   "errorTitle": "Failed to load utilization",
   "active": {
