@@ -29,6 +29,7 @@ import { Activity } from '@/pages/Activity';
 import { ResultDetail } from '@/pages/ResultDetail';
 import { Rollout } from '@/pages/Rollout';
 import { Run } from '@/pages/Run';
+import { Analytics } from '@/pages/Analytics';
 import { Schedules } from '@/pages/Schedules';
 import { Settings } from '@/pages/Settings';
 import { Utilization } from '@/pages/Utilization';
@@ -111,6 +112,7 @@ function AppContent() {
               <Route path="/compliance" element={<Compliance />} />
               <Route path="/collect" element={<Collect />} />
               <Route path="/utilization" element={<Utilization />} />
+              <Route path="/analytics" element={<Analytics />} />
               <Route path="/jobs" element={<Jobs />} />
               <Route path="/schedules" element={<Schedules />} />
               <Route path="/exec" element={<Exec />} />
