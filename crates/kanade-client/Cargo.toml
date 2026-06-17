@@ -89,4 +89,4 @@ chrono  = { workspace = true }
 # preserves the file's original key order, formatting, and any
 # future comments — anything an `serde_json::Value` round-trip
 # would silently rewrite alphabetically (Gemini #266).
-tauri-build = { version = "2.6.2", features = [] }
+tauri-build = { version = "2.6.3", features = [] }
