@@ -32,7 +32,6 @@ import { Textarea } from '@/components/ui/textarea';
 import { apiFetch, formatError } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import type {
-  NotificationAckStatus,
   NotificationPriority,
   NotificationRecord,
   NotificationReuse,
@@ -75,15 +74,6 @@ export function Notifications() {
   const [groups, setGroups] = useState('');
   const [pcs, setPcs] = useState<string[]>([]);
 
-  // ---- ack-status state ----
-  // `ackId` is the free-text input; `ackQueryId` is what the query
-  // actually keys off. They are decoupled so typing/pasting an id does
-  // NOT fire a request per keystroke (global staleTime is 0) — the
-  // query only runs once the operator submits, or once a publish
-  // auto-seeds both from its response.
-  const [ackId, setAckId] = useState('');
-  const [ackQueryId, setAckQueryId] = useState('');
-
   const publish = useMutation({
     mutationFn: (req: PublishNotificationRequest) =>
       apiFetch<PublishNotificationResponse>('/api/notifications', {
@@ -92,26 +82,16 @@ export function Notifications() {
       }),
     onSuccess: (data) => {
       toast.success(t('toast.published', { id: data.id, count: data.subjects.length }));
-      setAckId(data.id);
-      setAckQueryId(data.id);
       // Keep the composed message on screen (operators often send a
       // follow-up to a different target) but clear the one-shot fields.
       setTitle('');
       setBody('');
-      // Surface the just-sent notification in the history list without a
+      // Surface the just-sent notification in the history list (deep-link
+      // its row to the detail page for the confirmation status) without a
       // manual refresh.
       void queryClient.invalidateQueries({ queryKey: ['notif-history'] });
     },
     onError: (e) => toast.error(formatError(e)),
-  });
-
-  const ack = useQuery({
-    queryKey: ['notif-ack', ackQueryId],
-    queryFn: () =>
-      apiFetch<NotificationAckStatus>(
-        `/api/notifications/${encodeURIComponent(ackQueryId)}/ack_status`,
-      ),
-    enabled: ackQueryId.trim().length > 0,
   });
 
   // ---- sent history ----
@@ -427,89 +407,6 @@ export function Notifications() {
                 </TableBody>
               </Table>
             ))}
-        </CardContent>
-      </Card>
-
-      {/* ---- ack status ---- */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">{t('ack.title')}</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <form
-            className="flex flex-wrap items-end gap-3"
-            onSubmit={(e) => {
-              e.preventDefault();
-              const trimmed = ackId.trim();
-              if (!trimmed) return;
-              // Same id → key is unchanged, so refetch by hand; new id →
-              // updating the query key triggers the fetch on its own.
-              if (trimmed === ackQueryId) ack.refetch();
-              else setAckQueryId(trimmed);
-            }}
-          >
-            <div className="space-y-1 grow">
-              <Label htmlFor="notif-ackid">{t('ack.idField')}</Label>
-              <Input
-                id="notif-ackid"
-                value={ackId}
-                onChange={(e) => setAckId(e.target.value)}
-                placeholder={t('ack.idPlaceholder')}
-                className="font-mono"
-              />
-            </div>
-            <Button
-              type="submit"
-              variant="secondary"
-              disabled={!ackId.trim() || ack.isFetching}
-            >
-              {ack.isFetching ? (
-                <Loader2 className="size-4 animate-spin" />
-              ) : (
-                <RefreshCw className="size-4" />
-              )}
-              {t('ack.refresh')}
-            </Button>
-          </form>
-
-          {ack.isError && <ErrorCard title={t('ack.loadError')} error={ack.error} />}
-
-          {ack.data &&
-            (ack.data.acks.length === 0 ? (
-              <p className="text-muted text-sm">{t('ack.empty')}</p>
-            ) : (
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>{t('ack.pc')}</TableHead>
-                    <TableHead>{t('ack.user')}</TableHead>
-                    <TableHead>{t('ack.ackedAt')}</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {ack.data.acks.map((a) => (
-                    <TableRow key={`${a.pc_id}::${a.user_sid}`}>
-                      <TableCell className="font-medium">
-                        <code>{a.pc_id}</code>
-                      </TableCell>
-                      <TableCell>
-                        {a.account?.trim() ? (
-                          <span title={a.user_sid}>{a.account}</span>
-                        ) : (
-                          <code className="text-xs">{a.user_sid}</code>
-                        )}
-                      </TableCell>
-                      <TableCell>{fmtIsoLocal(a.acked_at)}</TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            ))}
-          {ack.data && ack.data.acks.length > 0 && (
-            <p className="text-xs text-muted">
-              {t('ack.count', { count: ack.data.acks.length })}
-            </p>
-          )}
         </CardContent>
       </Card>
     </div>
