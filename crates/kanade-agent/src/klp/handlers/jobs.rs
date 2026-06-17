@@ -760,6 +760,7 @@ mod tests {
             emit: None,
             check: None,
             collect: None,
+            aggregate: None,
             staleness: Staleness::default(),
             client: client.map(|(name, category)| ClientHint {
                 name: name.into(),
