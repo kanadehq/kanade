@@ -78,11 +78,15 @@ function ensureMonacoBootstrapped() {
         uri: '/api/schemas/schedule.json',
         fileMatch: ['schedule.yaml'],
       },
+      {
+        uri: '/api/schemas/view.json',
+        fileMatch: ['view.yaml'],
+      },
     ],
   });
 }
 
-export type YamlEditorKind = 'manifest' | 'schedule';
+export type YamlEditorKind = 'manifest' | 'schedule' | 'view';
 
 export interface YamlEditorProps {
   value: string;
@@ -128,7 +132,7 @@ export default function YamlEditor({
   readOnly = false,
 }: YamlEditorProps) {
   ensureMonacoBootstrapped();
-  const path = kind === 'manifest' ? 'manifest.yaml' : 'schedule.yaml';
+  const path = `${kind}.yaml`;
   const prefersDark = usePrefersDark();
 
   return (

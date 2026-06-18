@@ -53,10 +53,16 @@ pub async fn list(State(s): State<AppState>) -> Result<Json<Vec<View>>, (StatusC
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("kv keys: {e}")))?;
     let mut out = Vec::with_capacity(keys.len());
     for k in keys {
-        if let Ok(Some(bytes)) = kv.get(&k).await
-            && let Ok(view) = serde_json::from_slice::<View>(&bytes)
-        {
-            out.push(view);
+        match kv.get(&k).await {
+            Ok(Some(bytes)) => match serde_json::from_slice::<View>(&bytes) {
+                Ok(view) => out.push(view),
+                // Surface a corrupt entry instead of silently dropping it
+                // (so a bad write is diagnosable) — still skip so one bad
+                // row doesn't fail the whole list.
+                Err(e) => warn!(view_id = %k, error = %e, "views: skipping undecodable entry"),
+            },
+            Ok(None) => {}
+            Err(e) => warn!(view_id = %k, error = %e, "views: kv get failed, skipping"),
         }
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));

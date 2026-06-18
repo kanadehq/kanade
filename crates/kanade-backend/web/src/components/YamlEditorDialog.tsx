@@ -35,7 +35,7 @@ import { apiFetch, apiFetchText, formatError } from '@/lib/api';
 
 const YamlEditor = lazy(() => import('./YamlEditor'));
 
-export type EditorKind = 'manifest' | 'schedule';
+export type EditorKind = 'manifest' | 'schedule' | 'view';
 export type EditorMode = { type: 'create' } | { type: 'edit'; id: string };
 
 /** GitOps provenance (#678/#695) — mirrors `kanade_shared::manifest::RepoOrigin`. */
@@ -112,16 +112,45 @@ target:
 enabled: true
 `;
 
+const VIEW_TEMPLATE = `# A new Analytics view (#743). id + widgets are required.
+# A view declares dashboards over obs_events with no execute / schedule.
+id: my-view
+description: ""
+widgets:
+  - dashboard: Reliability
+    title: Unexpected shutdowns by PC
+    scope: fleet            # pc | fleet
+    kind: unexpected_shutdown
+    agg: count              # count | ratio | sum
+    group_by: pc_id         # JSON path, or the literal pc_id (fleet ranking)
+    render: bar             # bar | gauge | timeline | stat
+    # order: 0              # optional sort weight (lower = earlier)
+`;
+
 function templateFor(kind: EditorKind): string {
-  return kind === 'manifest' ? JOB_TEMPLATE : SCHEDULE_TEMPLATE;
+  switch (kind) {
+    case 'manifest':
+      return JOB_TEMPLATE;
+    case 'schedule':
+      return SCHEDULE_TEMPLATE;
+    case 'view':
+      return VIEW_TEMPLATE;
+  }
 }
 
 function endpointBase(kind: EditorKind): string {
-  return kind === 'manifest' ? '/api/jobs' : '/api/schedules';
+  switch (kind) {
+    case 'manifest':
+      return '/api/jobs';
+    case 'schedule':
+      return '/api/schedules';
+    case 'view':
+      return '/api/views';
+  }
 }
 
 function listQueryKey(kind: EditorKind): readonly string[] {
-  return kind === 'manifest' ? ['jobs'] : ['schedules'];
+  return [endpointBase(kind).replace('/api/', '')];
 }
 
 async function fetchYaml(kind: EditorKind, id: string): Promise<string> {
@@ -202,24 +231,22 @@ export function YamlEditorDialog({
     onError: (e) => toast.error(`Save failed: ${formatError(e)}`),
   });
 
+  // Display noun per kind ('manifest' surfaces to operators as "job").
+  const noun = kind === 'manifest' ? 'job' : kind; // job | schedule | view
+  const Noun = noun.charAt(0).toUpperCase() + noun.slice(1);
   const title =
     mode.type === 'create'
-      ? kind === 'manifest'
-        ? 'New job'
-        : 'New schedule'
+      ? `New ${noun}`
       : gitManaged
-        ? kind === 'manifest'
-          ? `Job: ${mode.id} · read-only`
-          : `Schedule: ${mode.id} · read-only`
-        : kind === 'manifest'
-          ? `Edit job: ${mode.id}`
-          : `Edit schedule: ${mode.id}`;
+        ? `${Noun}: ${mode.id} · read-only`
+        : `Edit ${noun}: ${mode.id}`;
 
   const repoUrl = repoWebUrl(gitOrigin?.repo);
-  // #695: the read-only banner is shared by jobs + schedules, so the
-  // apply command and the source-path label follow `kind`.
-  const applyCmd = kind === 'manifest' ? 'kanade job create' : 'kanade schedule create';
-  const sourceLabel = kind === 'manifest' ? 'manifest:' : 'schedule:';
+  // #695: the read-only banner is shared across kinds, so the apply
+  // command and the source-path label follow `kind`.
+  const applyCmd = `kanade ${noun} create`;
+  // The YAML's source-path label is the manifest's top-level key name.
+  const sourceLabel = `${kind === 'manifest' ? 'manifest' : noun}:`;
 
   const isLoadingExisting = mode.type === 'edit' && fetched.isLoading;
   const hasLoadError = mode.type === 'edit' && Boolean(fetched.error);

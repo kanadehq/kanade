@@ -224,6 +224,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/schedules/{id}/coverage", get(schedules::coverage))
         .route("/api/schemas/manifest.json", get(schemas::manifest_schema))
         .route("/api/schemas/schedule.json", get(schemas::schedule_schema))
+        .route("/api/schemas/view.json", get(schemas::view_schema))
         .route("/api/jetstream/status", get(jetstream_status::status))
         .route("/api/health/fleet", get(health::fleet))
         // v0.37 / agent perf: per-job duration aggregates
