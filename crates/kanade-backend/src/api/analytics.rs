@@ -121,6 +121,9 @@ pub enum WidgetData {
 pub struct WidgetResult {
     pub dashboard: String,
     pub title: String,
+    /// Optional muted subtitle for the SPA (carried from the spec).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// `"pc"` or `"fleet"` — the scope this result was computed at.
     pub scope: &'static str,
     #[serde(flatten)]
@@ -168,6 +171,7 @@ pub async fn get(
             Ok(Some(data)) => out.push(WidgetResult {
                 dashboard: w.dashboard,
                 title: w.title,
+                description: w.description,
                 scope: scope_str,
                 data,
             }),
@@ -824,6 +828,7 @@ mod tests {
         AggregateWidget {
             dashboard: "D".into(),
             title: "T".into(),
+            description: None,
             order: None,
             scope: AggregateScope::Pc,
             kind: kind.into(),

@@ -172,6 +172,13 @@
           "description": "Tab this widget lives under on the Analytics page. Widgets from\nevery job are collected and grouped by this label, so the same\nstring across jobs builds one multi-source dashboard. Required.",
           "type": "string"
         },
+        "description": {
+          "description": "Optional one-line subtitle shown muted under the `title` on the\nAnalytics page — room for a unit, a caveat, or what the number\nmeans (\"samples × 2 min\", \"Security 4624 only\"). Rejected if\npresent-but-blank.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "exclude": {
           "description": "Grouped values to drop from the rollup (e.g. `[\"LockApp\"]` so the\nlock screen doesn't top the app ranking). Empty by default.",
           "type": "array",
