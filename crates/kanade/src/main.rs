@@ -48,6 +48,8 @@ enum SubCmd {
     Job(cmd::job::JobArgs),
     /// CRUD cron schedules (spec §2.5.3).
     Schedule(cmd::schedule::ScheduleArgs),
+    /// CRUD Analytics views (#743): declarative cross-cutting dashboards.
+    View(cmd::view::ViewArgs),
     /// Fleet-wide change-freeze: stop all schedule fires (#418 Phase 5).
     Freeze(cmd::freeze::FreezeArgs),
     /// Manage agent releases (publish a new binary, query the target version).
@@ -106,6 +108,8 @@ async fn dispatch(server: String, backend_url: String, command: SubCmd) -> Resul
         return cmd::job::execute(&backend_url, args).await;
     } else if let SubCmd::Schedule(args) = command {
         return cmd::schedule::execute(&backend_url, args).await;
+    } else if let SubCmd::View(args) = command {
+        return cmd::view::execute(&backend_url, args).await;
     } else if let SubCmd::Freeze(args) = command {
         return cmd::freeze::execute(&backend_url, args).await;
     } else if let SubCmd::Login(args) = command {
@@ -137,6 +141,7 @@ async fn dispatch(server: String, backend_url: String, command: SubCmd) -> Resul
         SubCmd::Exec(_)
         | SubCmd::Job(_)
         | SubCmd::Schedule(_)
+        | SubCmd::View(_)
         | SubCmd::Freeze(_)
         | SubCmd::Login(_)
         | SubCmd::Account(_)

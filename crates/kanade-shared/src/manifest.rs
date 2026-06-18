@@ -834,10 +834,26 @@ pub struct View {
     pub origin: Option<RepoOrigin>,
 }
 
+/// True if `id` is a safe resource identifier — non-empty and only
+/// `[A-Za-z0-9._-]`. A view `id` becomes a NATS KV key *and* a URL path
+/// segment (`/api/views/{id}`), so this blocks `/`, `..`, whitespace and
+/// other characters that would break the KV key or let a CLI arg wander
+/// the URL space. (#743 / #744 follow-up — a deliberately small charset
+/// rather than the looser set NATS technically allows.)
+pub fn is_valid_resource_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+}
+
 impl View {
     pub fn validate(&self) -> Result<(), String> {
-        if self.id.trim().is_empty() {
-            return Err("view.id must not be empty".to_string());
+        if !is_valid_resource_id(self.id.trim()) {
+            return Err(
+                "view.id must be non-empty and only [A-Za-z0-9._-] (it's a KV key + URL segment)"
+                    .to_string(),
+            );
         }
         validate_aggregate_widgets(&self.widgets, "widgets")?;
         for tag in &self.tags {
@@ -2409,7 +2425,22 @@ tags: [ok, "   "]
         )
         .expect("parse");
         let err = v.validate().expect_err("blank id must fail");
-        assert!(err.contains("view.id must not be empty"), "err: {err}");
+        assert!(err.contains("view.id must"), "err: {err}");
+    }
+
+    #[test]
+    fn view_rejects_unsafe_id() {
+        // A `/` or `..` in the id would break the KV key and the
+        // `/api/views/{id}` URL segment — reject at create time.
+        for bad in ["../etc", "a/b", "has space", "x;y"] {
+            let v: View = serde_yaml::from_str(&format!(
+                "id: \"{bad}\"\nwidgets:\n- {{ dashboard: D, title: T, kind: k, agg: count, render: stat }}\n",
+            ))
+            .expect("parse");
+            let err = v.validate().expect_err("unsafe id must fail");
+            assert!(err.contains("[A-Za-z0-9._-]"), "id {bad}: {err}");
+        }
+        assert!(is_valid_resource_id("dashboards-fleet.v1_2"));
     }
 
     #[test]
