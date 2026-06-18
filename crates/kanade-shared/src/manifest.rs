@@ -487,6 +487,12 @@ pub struct AggregateWidget {
     pub dashboard: String,
     /// Widget heading. Required, validated non-empty.
     pub title: String,
+    /// Optional one-line subtitle shown muted under the `title` on the
+    /// Analytics page — room for a unit, a caveat, or what the number
+    /// means ("samples × 2 min", "Security 4624 only"). Rejected if
+    /// present-but-blank.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// Optional sort weight (#743). Once the order-aware sort lands (PR2)
     /// widgets render in `(order, dashboard, title)` order, so a lower
     /// `order` pulls a widget — and its tab — earlier; equal/absent `order`
@@ -679,6 +685,13 @@ pub fn validate_aggregate_widgets(widgets: &[AggregateWidget], field: &str) -> R
         if let Some(source) = &w.source {
             if source.trim().is_empty() {
                 return Err(format!("{at}.source must not be empty when set"));
+            }
+        }
+        // A present-but-blank `description` renders an empty muted line —
+        // reject it so the subtitle only shows when it says something.
+        if let Some(description) = &w.description {
+            if description.trim().is_empty() {
+                return Err(format!("{at}.description must not be empty when set"));
             }
         }
         // Reject values that fell through to the #492 `Unknown` catch-all:
@@ -2277,6 +2290,27 @@ tags: [ok, "   "]
         let err = m.validate().expect_err("blank source must fail");
         assert!(
             err.contains("source must not be empty when set"),
+            "err: {err}"
+        );
+    }
+
+    #[test]
+    fn aggregate_accepts_description_and_rejects_blank() {
+        let ok = manifest_with_aggregate(
+            "aggregate:\n- { dashboard: D, title: T, description: \"samples x 2 min\", kind: k, agg: count, render: stat }\n",
+        );
+        ok.validate()
+            .expect("description is a valid optional field");
+        assert_eq!(
+            ok.aggregate.as_ref().unwrap()[0].description.as_deref(),
+            Some("samples x 2 min")
+        );
+        let bad = manifest_with_aggregate(
+            "aggregate:\n- { dashboard: D, title: T, description: \"  \", kind: k, agg: count, render: stat }\n",
+        );
+        let err = bad.validate().expect_err("blank description must fail");
+        assert!(
+            err.contains("description must not be empty when set"),
             "err: {err}"
         );
     }

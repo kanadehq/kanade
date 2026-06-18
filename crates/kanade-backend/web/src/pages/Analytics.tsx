@@ -17,7 +17,12 @@ import { fmtIsoLocal } from '@/lib/utils';
 // `aggregate:` widgets, computed per scope, tagged by `render`.
 type BarRow = { label: string; value: number; est_minutes?: number };
 type HourBucket = { hour: number; total: number; active: number };
-type Widget = { dashboard: string; title: string; scope: 'pc' | 'fleet' } & (
+type Widget = {
+  dashboard: string;
+  title: string;
+  description?: string;
+  scope: 'pc' | 'fleet';
+} & (
   | { render: 'bar'; rows: BarRow[] }
   | {
       render: 'gauge';
@@ -258,6 +263,7 @@ function WidgetCard({ w, t }: { w: Widget; t: (k: string) => string }) {
     <Card className={span}>
       <CardHeader>
         <CardTitle className="text-sm">{w.title}</CardTitle>
+        {w.description?.trim() && <p className="mt-1 text-muted text-xs">{w.description}</p>}
       </CardHeader>
       <CardContent>
         {w.render === 'bar' && <BarTable rows={w.rows} empty={t('noData')} />}
