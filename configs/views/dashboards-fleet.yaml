@@ -1,36 +1,25 @@
-# Fleet analytics dashboards (#720) — declares `aggregate:` widgets for
-# the SPA Analytics page over obs_events the fleet ALREADY emits:
-# logon / boot / unexpected_shutdown from `collect-winlog-events`, and
-# agent_started / agent_self_update from the agent itself. No new
-# collector is needed.
+# Fleet analytics dashboards (#743) — a `view`: a standalone declarative
+# read/aggregation over obs_events the fleet ALREADY emits (logon / boot /
+# unexpected_shutdown from collect-winlog-events, agent_started /
+# agent_self_update from the agent). No new collector.
 #
-# This is a DEFINITION-ONLY carrier: `aggregate:` is read by the backend
-# straight from the job catalog (BUCKET_JOBS) at query time, so this job
-# never has to run. The `execute:` block is a no-op and there is no
-# schedule — registering it (`kanade job create`) is enough to make the
-# dashboards appear.
+# This replaces the old definition-only JOB carrier (configs/jobs/
+# dashboards-fleet.yaml) that needed a noop `execute:` just to host these
+# widgets. A view has no execute and no schedule — the backend reads it
+# from BUCKET_VIEWS at query time and merges its widgets with the
+# co-located `aggregate:` hints on jobs.
 #
-# `aggregate:` widgets reference an obs_event `kind`, not this job's own
-# output, so one carrier can chart events emitted by many other jobs.
+#   kanade view create configs/views/dashboards-fleet.yaml
 #
-#   kanade job create configs/jobs/dashboards-fleet.yaml
-#
-# See configs/jobs/collect-winlog-events.yaml for the source events, and
-# the per-job `aggregate:` blocks (e.g. attendance dashboards) for the
-# co-located pattern.
+# Widgets reference an obs_event `kind`, not a job's output, so one view
+# can chart events emitted by many sources. (The Utilization dashboard
+# itself stays co-located as `aggregate:` hints on its emit jobs.)
 
 id: dashboards-fleet
-version: 0.1.0
-description: "Analytics dashboards: reliability / access / agent health (definition-only)"
+description: "Fleet analytics: reliability / access / agent health"
 tags: [dashboards]
 
-# Never scheduled or run — a placeholder so the manifest is valid.
-execute:
-  shell: powershell
-  timeout: 10s
-  script: "exit 0"
-
-aggregate:
+widgets:
   # ── Reliability ──────────────────────────────────────────────────
   - dashboard: Reliability
     title: Unexpected shutdowns by PC
