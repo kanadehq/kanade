@@ -1,0 +1,22 @@
+{
+  "title": "ビュー",
+  "subtitle": "宣言型の分析ダッシュボード（obs_events を集計する widget 群）。",
+  "actions": {
+    "new": "新規ビュー",
+    "editAria": "ビュー {{id}} を編集",
+    "deleteAria": "ビュー {{id}} を削除"
+  },
+  "loading": "読み込み中…",
+  "errorTitle": "ビューの読み込みに失敗しました",
+  "empty": "ビューがありません。作成すると分析ページに横断ダッシュボードを追加できます。",
+  "widgetCount": "widget {{count}} 個",
+  "confirm": {
+    "deleteTitle": "ビュー {{id}} を削除しますか？",
+    "deleteDescription": "分析ページから widget が消えます。元に戻せません。",
+    "deleteLabel": "削除"
+  },
+  "toast": {
+    "deleted": "ビュー {{id}} を削除しました",
+    "deleteFailed": "削除に失敗しました: {{error}}"
+  }
+}

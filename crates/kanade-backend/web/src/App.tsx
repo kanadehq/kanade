@@ -33,6 +33,7 @@ import { Run } from '@/pages/Run';
 import { Analytics } from '@/pages/Analytics';
 import { Schedules } from '@/pages/Schedules';
 import { Settings } from '@/pages/Settings';
+import { Views } from '@/pages/Views';
 import { ThemeProvider, useTheme } from '@/lib/theme';
 
 const queryClient = new QueryClient({
@@ -114,6 +115,7 @@ function AppContent() {
               <Route path="/analytics" element={<Analytics />} />
               <Route path="/jobs" element={<Jobs />} />
               <Route path="/schedules" element={<Schedules />} />
+              <Route path="/views" element={<Views />} />
               <Route path="/exec" element={<Exec />} />
               <Route path="/rollout" element={<Rollout />} />
               <Route path="/apps" element={<Apps />} />

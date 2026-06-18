@@ -57,6 +57,7 @@ const groups: {
     links: [
       { to: '/jobs', labelKey: 'nav.jobs' },
       { to: '/schedules', labelKey: 'nav.schedules' },
+      { to: '/views', labelKey: 'nav.views' },
       { to: '/notifications', labelKey: 'nav.notifications' },
       { to: '/rollout', labelKey: 'nav.rollout' },
       { to: '/apps', labelKey: 'nav.apps' },

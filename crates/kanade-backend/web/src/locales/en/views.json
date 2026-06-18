@@ -1,0 +1,23 @@
+{
+  "title": "Views",
+  "subtitle": "Declarative Analytics dashboards (aggregate widgets over obs_events).",
+  "actions": {
+    "new": "New view",
+    "editAria": "Edit view {{id}}",
+    "deleteAria": "Delete view {{id}}"
+  },
+  "loading": "Loading…",
+  "errorTitle": "Failed to load views",
+  "empty": "No views yet. Create one to add cross-cutting dashboards to the Analytics page.",
+  "widgetCount": "{{count}} widget",
+  "widgetCount_other": "{{count}} widgets",
+  "confirm": {
+    "deleteTitle": "Delete view {{id}}?",
+    "deleteDescription": "Its widgets disappear from the Analytics page. This can't be undone.",
+    "deleteLabel": "Delete"
+  },
+  "toast": {
+    "deleted": "Deleted view {{id}}",
+    "deleteFailed": "Delete failed: {{error}}"
+  }
+}
