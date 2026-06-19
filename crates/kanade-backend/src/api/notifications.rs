@@ -88,49 +88,9 @@ pub async fn publish(
         acked_at: None,
     };
 
-    // Resolve the audience into fan-out subjects, mirroring the exec
-    // path's target → `commands.*` resolution.
-    let mut subjects = Vec::new();
-    if req.target.all {
-        subjects.push(subject::NOTIFICATIONS_ALL.to_string());
-    }
-    for g in &req.target.groups {
-        subjects.push(subject::notifications_group(g));
-    }
-    for pc in &req.target.pcs {
-        subjects.push(subject::notifications_pc(pc));
-    }
-
-    let payload = serde_json::to_vec(&notification)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialize: {e}")))?;
-
-    // Acknowledged JetStream publish (not core `nats.publish`): each
-    // call awaits a broker ack confirming the message landed in the
-    // NOTIFICATIONS stream, so a backpressured / full broker surfaces
-    // an error instead of silently dropping the notification. Fan-out
-    // is best-effort — one failed subject doesn't abort delivery to
-    // the rest (partial delivery beats none for a notification), and
-    // the response echoes back only the subjects that actually
-    // landed. The ack supersedes a manual `flush()`.
-    let mut delivered = Vec::new();
-    let mut failures = Vec::new();
-    for subj in &subjects {
-        let outcome = match s
-            .jetstream
-            .publish(subj.clone(), payload.clone().into())
-            .await
-        {
-            Ok(ack) => ack.await.map_err(|e| e.to_string()),
-            Err(e) => Err(e.to_string()),
-        };
-        match outcome {
-            Ok(_) => delivered.push(subj.clone()),
-            Err(e) => {
-                warn!(error = %e, subject = %subj, "notification publish failed");
-                failures.push(subj.clone());
-            }
-        }
-    }
+    let (delivered, failures) = fan_out_notification(&s.jetstream, &notification, &req.target)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     if delivered.is_empty() {
         return Err((
             StatusCode::BAD_GATEWAY,
@@ -167,6 +127,54 @@ pub async fn publish(
         id,
         subjects: delivered,
     }))
+}
+
+/// Resolve a notification's audience [`Target`] into the
+/// `notifications.{all|group.X|pc.Y}` fan-out subjects and
+/// acknowledged-JetStream-publish the body to each, returning
+/// `(delivered, failed)` subjects. Best-effort: one failed subject doesn't
+/// abort the rest (partial delivery beats none). Shared by the operator
+/// HTTP [`publish`] and the compliance-alert projector path so the two
+/// fan out identically. `Err` only on a serialize failure (the publish
+/// errors are folded into `failed`).
+pub(crate) async fn fan_out_notification(
+    js: &async_nats::jetstream::Context,
+    notification: &Notification,
+    target: &kanade_shared::manifest::Target,
+) -> Result<(Vec<String>, Vec<String>), String> {
+    let mut subjects = Vec::new();
+    if target.all {
+        subjects.push(subject::NOTIFICATIONS_ALL.to_string());
+    }
+    for g in &target.groups {
+        subjects.push(subject::notifications_group(g));
+    }
+    for pc in &target.pcs {
+        subjects.push(subject::notifications_pc(pc));
+    }
+
+    // Serialize once into `Bytes`: `js.publish` takes `bytes::Bytes`, whose
+    // clone is a cheap refcount bump (not a full buffer copy per subject).
+    let payload: bytes::Bytes = serde_json::to_vec(notification)
+        .map_err(|e| format!("serialize: {e}"))?
+        .into();
+
+    let mut delivered = Vec::new();
+    let mut failures = Vec::new();
+    for subj in &subjects {
+        let outcome = match js.publish(subj.clone(), payload.clone()).await {
+            Ok(ack) => ack.await.map_err(|e| e.to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        match outcome {
+            Ok(_) => delivered.push(subj.clone()),
+            Err(e) => {
+                warn!(error = %e, subject = %subj, "notification publish failed");
+                failures.push(subj.clone());
+            }
+        }
+    }
+    Ok((delivered, failures))
 }
 
 /// `GET /api/notifications/{id}/ack_status` — per-recipient

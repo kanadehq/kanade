@@ -281,6 +281,7 @@ mod tests {
             detail_field: "detail".into(),
             troubleshoot: None,
             fleet: true,
+            alert: None,
         }
     }
 
@@ -304,6 +305,7 @@ mod tests {
             detail_field: "summary".into(),
             troubleshoot: Some("fix-patch".into()),
             fleet: true,
+            alert: None,
         };
         let c = build_check(
             &h,
