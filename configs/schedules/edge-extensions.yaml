@@ -1,0 +1,14 @@
+# Re-check Edge extensions per PC every 6h. Extensions change rarely, so
+# a long-ish cadence is plenty; jitter spreads the result/obs load.
+#
+#   kanade schedule create configs/schedules/edge-extensions.yaml
+
+id: edge-extensions
+tags: [health-check, security]
+when:
+  per_pc: { every: 6h }
+enabled: true
+job_id: edge-extensions
+target:
+  all: true
+jitter: 10m
