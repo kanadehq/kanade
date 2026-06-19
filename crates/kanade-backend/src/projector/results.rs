@@ -162,7 +162,8 @@ pub async fn run(
                 // so the SPA never shows a stale green for a check that
                 // has started failing.
                 if let Err(e) =
-                    maybe_project_check_status(&pool, &jobs_cache, &jobs_kv, &r, recorded_at).await
+                    maybe_project_check_status(&js, &pool, &jobs_cache, &jobs_kv, &r, recorded_at)
+                        .await
                 {
                     warn!(error = ?e, result_id = %resolved_id, "check status projection failed");
                 }
@@ -474,6 +475,7 @@ async fn maybe_project_inventory(
 /// the operator SPA's fleet-wide compliance view. Same "no hint =
 /// nothing to do" non-error contract as inventory.
 async fn maybe_project_check_status(
+    js: &jetstream::Context,
     pool: &SqlitePool,
     cache: &ExplodeSpecCache,
     jobs_kv: &async_nats::jetstream::kv::Store,
@@ -486,12 +488,61 @@ async fn maybe_project_check_status(
     let Some(job) = lookup_manifest(cache, jobs_kv, manifest_id).await? else {
         return Ok(());
     };
-    match job.check.as_ref() {
-        // `fleet: false` opts a check out of the SPA projection (it
-        // still drives the end-user Client App's Health tab).
-        Some(hint) if hint.fleet => upsert_check_status(pool, r, hint, recorded_at).await,
-        _ => Ok(()),
+    let Some(hint) = job.check.as_ref().filter(|h| h.fleet) else {
+        // `fleet: false` opts a check out of the SPA projection (it still
+        // drives the end-user Client App's Health tab).
+        return Ok(());
+    };
+    let proj = upsert_check_status(pool, r, hint, recorded_at).await?;
+
+    // Compliance auto-notification (PR-B): fire once on a transition into an
+    // alert status, for live results only. `fresh` also folds in "this is
+    // the newest result" so an out-of-order (stale) result — whose upsert
+    // was a no-op — doesn't alert. Best-effort: `fire` logs and swallows its
+    // own errors so a publish hiccup never wedges the projector.
+    //
+    // The prior-read + upsert in `upsert_check_status` aren't one
+    // transaction, and `proj.status` is the *incoming* status (not the
+    // post-upsert table value). Both are safe because this consumer is
+    // serial (durable pull, one message at a time): no two projections of
+    // the same PC+check interleave, and a stale/out-of-order result is
+    // rejected here by `is_newest` before its `proj.status` is ever used.
+    // If concurrency is ever added, wrap the read+upsert in a transaction
+    // with `RETURNING` to capture the prior atomically.
+    if let Some(alert) = &hint.alert {
+        let is_newest = proj
+            .prior
+            .as_ref()
+            .is_none_or(|(_, prev_at)| recorded_at >= *prev_at);
+        let fresh = is_newest && super::check_alert::is_fresh(recorded_at, chrono::Utc::now());
+        let prior_status = proj.prior.as_ref().map(|(s, _)| s.as_str());
+        if super::check_alert::should_fire(alert, prior_status, proj.status, fresh) {
+            super::check_alert::fire(
+                js,
+                pool,
+                r,
+                hint,
+                alert,
+                proj.status,
+                proj.detail.as_deref().unwrap_or(""),
+            )
+            .await;
+        }
     }
+    Ok(())
+}
+
+/// What [`upsert_check_status`] hands back so [`maybe_project_check_status`]
+/// can decide whether to fire a compliance alert.
+struct CheckProjection {
+    /// The status just projected (`ok`/`warn`/`fail`/`unknown`).
+    status: &'static str,
+    /// The one-line detail just projected.
+    detail: Option<String>,
+    /// The prior `(status, recorded_at)` for this PC+check — `None` when
+    /// this was the first projection, or when the check has no `alert:`
+    /// block (in which case it isn't read at all).
+    prior: Option<(String, chrono::DateTime<chrono::Utc>)>,
 }
 
 async fn upsert_check_status(
@@ -499,7 +550,7 @@ async fn upsert_check_status(
     r: &ExecResult,
     hint: &CheckHint,
     recorded_at: chrono::DateTime<chrono::Utc>,
-) -> Result<()> {
+) -> Result<CheckProjection> {
     // Derive (status, detail) the same way the agent's `build_check` /
     // `build_check_failed` do, so the SPA compliance view and the
     // Client App's Health tab never disagree. (A future refactor can
@@ -530,6 +581,24 @@ async fn upsert_check_status(
         ("unknown", Some(detail))
     };
 
+    // Read the prior projected state BEFORE the upsert so a compliance
+    // alert can fire on a *transition* (e.g. ok → fail), not on every
+    // poll. `None` = first projection for this PC+check. Only loaded when
+    // the check actually carries an `alert:` block (the common case has
+    // none, so we skip the extra read).
+    let prior: Option<(String, chrono::DateTime<chrono::Utc>)> = if hint.alert.is_some() {
+        sqlx::query_as(
+            "SELECT status, recorded_at FROM check_status WHERE pc_id = ? AND check_name = ?",
+        )
+        .bind(&r.pc_id)
+        .bind(&hint.name)
+        .fetch_optional(pool)
+        .await
+        .with_context(|| format!("read prior check_status for {}/{}", r.pc_id, hint.name))?
+    } else {
+        None
+    };
+
     sqlx::query(
         "INSERT INTO check_status (pc_id, check_name, label, status, detail, recorded_at)
          VALUES (?, ?, ?, ?, ?, ?)
@@ -551,7 +620,12 @@ async fn upsert_check_status(
     .with_context(|| format!("upsert check_status for {}/{}", r.pc_id, hint.name))?;
 
     debug!(pc_id = %r.pc_id, check = %hint.name, status, "projected check status");
-    Ok(())
+
+    Ok(CheckProjection {
+        status,
+        detail,
+        prior,
+    })
 }
 
 /// Render a check `detail` field value as a string, mirroring the
@@ -1055,6 +1129,7 @@ mod tests {
             detail_field: "detail".into(),
             troubleshoot: None,
             fleet: true,
+            alert: None,
         }
     }
 
@@ -1213,6 +1288,53 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(none, None);
+    }
+
+    #[tokio::test]
+    async fn alert_check_captures_prior_status_across_projections() {
+        use kanade_shared::manifest::{CheckAlert, CheckAlertStatus};
+        // An `alert:`-enabled check makes `upsert_check_status` read the
+        // prior (status, recorded_at) before the upsert — the input the
+        // transition decision in `maybe_project_check_status` keys off.
+        // This locks in that DB-integration so a refactor can't silently
+        // break the prior-capture (the firing decision itself is unit-
+        // tested in `check_alert`).
+        let pool = fresh_pool().await;
+        let hint = CheckHint {
+            alert: Some(CheckAlert {
+                on: vec![CheckAlertStatus::Fail],
+                notify_user: true,
+                notify_groups: vec![],
+                priority: kanade_shared::ipc::notifications::NotificationPriority::Warn,
+                require_ack: false,
+                toast: true,
+                title: "t".into(),
+                body: None,
+            }),
+            ..check_hint("bitlocker", "status")
+        };
+        let t0 = chrono::Utc.with_ymd_and_hms(2026, 6, 1, 12, 0, 0).unwrap();
+
+        // First-ever projection: no prior.
+        let mut r = sample("a1", "q1", "pc-a", None);
+        r.stdout = r#"{"status":"ok"}"#.into();
+        let p1 = upsert_check_status(&pool, &r, &hint, t0).await.unwrap();
+        assert!(p1.prior.is_none(), "first projection ⇒ no prior");
+        assert_eq!(p1.status, "ok");
+
+        // ok → fail: prior is the just-stored "ok".
+        r.stdout = r#"{"status":"fail"}"#.into();
+        let p2 = upsert_check_status(&pool, &r, &hint, t0 + chrono::Duration::seconds(1))
+            .await
+            .unwrap();
+        assert_eq!(p2.prior.as_ref().map(|(s, _)| s.as_str()), Some("ok"));
+        assert_eq!(p2.status, "fail");
+
+        // Stays fail: prior is "fail" (so the decision layer won't re-fire).
+        let p3 = upsert_check_status(&pool, &r, &hint, t0 + chrono::Duration::seconds(2))
+            .await
+            .unwrap();
+        assert_eq!(p3.prior.as_ref().map(|(s, _)| s.as_str()), Some("fail"));
     }
 
     #[tokio::test]

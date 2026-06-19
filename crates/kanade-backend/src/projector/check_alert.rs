@@ -1,0 +1,274 @@
+//! Compliance auto-notification (PR-B): publish an end-user notification
+//! when a check transitions *into* an alert status (e.g. ok → fail).
+//!
+//! Driven by the operator-defined [`CheckAlert`] on a check's manifest, so
+//! who gets told, how loud, and the wording all live in config — not
+//! hardcoded here. Fired inline from the results projector
+//! ([`super::results::upsert_check_status`]) the moment a check's projected
+//! status changes, which is the single choke point every check result
+//! passes through.
+//!
+//! Edge-triggered (transition only, not every poll) and live-only (stale
+//! `-WipeDb` re-projections are suppressed by [`is_fresh`]), so a failing
+//! check doesn't spam and a wipe doesn't replay a storm of old alerts.
+
+use chrono::{DateTime, Duration, Utc};
+use kanade_shared::ExecResult;
+use kanade_shared::ipc::notifications::Notification;
+use kanade_shared::manifest::{CheckAlert, CheckHint, Target};
+use sqlx::SqlitePool;
+use tracing::{info, warn};
+use uuid::Uuid;
+
+use crate::api::notifications::fan_out_notification;
+
+/// Only alert for results whose `recorded_at` is within this window of now
+/// (a live projection). On a `-WipeDb` full replay the projector re-derives
+/// every historical transition with the original (old) `recorded_at`, so
+/// this keeps a wipe from re-sending a storm of stale "your PC is
+/// non-compliant" notifications. The trade-off: a real failure projected
+/// long after the fact (e.g. the backend was down for >15 min) is not
+/// alerted — but it still shows on the SPA Compliance page.
+const ALERT_LIVE_WINDOW: Duration = Duration::minutes(15);
+
+/// Whether a result is recent enough to alert on (live, not a replay).
+pub(super) fn is_fresh(recorded_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+    now - recorded_at < ALERT_LIVE_WINDOW
+}
+
+/// Pure decision core: should a status change fire the alert? Fires on a
+/// *transition into* one of `alert.on` — i.e. the new status is an alert
+/// status and the prior one wasn't (a check that stays failing doesn't
+/// re-alert every poll). A missing `prior` (first projection for this
+/// PC+check) counts as "not previously alerting", so a first-ever fail
+/// fires. `fresh` gates out stale replays / out-of-order results.
+pub(super) fn should_fire(
+    alert: &CheckAlert,
+    prior: Option<&str>,
+    new_status: &str,
+    fresh: bool,
+) -> bool {
+    if !fresh {
+        return false;
+    }
+    let is_alert = |s: &str| alert.on.iter().any(|st| st.as_str() == s);
+    is_alert(new_status) && !prior.is_some_and(is_alert)
+}
+
+/// Expand a title/body template's `{…}` placeholders.
+pub(super) fn render(
+    template: &str,
+    pc_id: &str,
+    hint: &CheckHint,
+    status: &str,
+    detail: &str,
+    last_logon: &str,
+) -> String {
+    template
+        .replace("{pc_id}", pc_id)
+        .replace("{name}", &hint.name)
+        .replace("{label}", hint.label.as_deref().unwrap_or(&hint.name))
+        .replace("{status}", status)
+        .replace("{detail}", detail)
+        .replace("{last_logon}", last_logon)
+}
+
+/// Fire a compliance alert: build one notification and fan it out to the
+/// failing PC's user (`notify_user`) and/or the operator groups
+/// (`notify_groups`). One notification id covers both audiences, so the
+/// SPA's per-PC confirmation roster (④) and account names (⑤) track who
+/// has fixed it. Best-effort: failures are logged and swallowed — a missed
+/// alert must never wedge the results projector.
+pub(super) async fn fire(
+    js: &async_nats::jetstream::Context,
+    pool: &SqlitePool,
+    r: &ExecResult,
+    hint: &CheckHint,
+    alert: &CheckAlert,
+    status: &str,
+    detail: &str,
+) {
+    // Resolve `{last_logon}` only when a template references it.
+    let needs_logon = alert.title.contains("{last_logon}")
+        || alert
+            .body
+            .as_deref()
+            .is_some_and(|b| b.contains("{last_logon}"));
+    let last_logon = if needs_logon {
+        last_logon_for(pool, &r.pc_id).await
+    } else {
+        String::new()
+    };
+
+    let title = render(&alert.title, &r.pc_id, hint, status, detail, &last_logon);
+    let body = alert
+        .body
+        .as_deref()
+        .map(|b| render(b, &r.pc_id, hint, status, detail, &last_logon))
+        .unwrap_or_default();
+
+    let target = Target {
+        all: false,
+        groups: alert.notify_groups.clone(),
+        pcs: if alert.notify_user {
+            vec![r.pc_id.clone()]
+        } else {
+            Vec::new()
+        },
+    };
+
+    let notification = Notification {
+        id: Uuid::new_v4().to_string(),
+        priority: alert.priority,
+        require_ack: alert.require_ack,
+        title,
+        body,
+        toast: alert.toast,
+        // Send time, not the check's run time (`recorded_at`): the
+        // notification goes out now, not backdated to when the check ran.
+        issued_at: Utc::now(),
+        // Marks the send as auto-generated by this check (vs an operator).
+        issued_by: Some(format!("compliance:{}", hint.name)),
+        expires_at: None,
+        acked_at: None,
+    };
+
+    match fan_out_notification(js, &notification, &target).await {
+        Ok((delivered, failed)) => info!(
+            pc_id = %r.pc_id,
+            check = %hint.name,
+            status,
+            notification_id = %notification.id,
+            delivered = ?delivered,
+            failed = ?failed,
+            "compliance alert published",
+        ),
+        Err(e) => warn!(
+            error = %e,
+            pc_id = %r.pc_id,
+            check = %hint.name,
+            "compliance alert: failed to publish",
+        ),
+    }
+}
+
+/// Best-effort `{last_logon}` label for a PC — its last sign-in display
+/// name, else login name, from the `agents` row. Empty when unknown (or on
+/// a query error; the alert still fires, just without the name).
+async fn last_logon_for(pool: &SqlitePool, pc_id: &str) -> String {
+    let row: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT last_logon_display_name, last_logon_user FROM agents WHERE pc_id = ?",
+    )
+    .bind(pc_id)
+    .fetch_optional(pool)
+    .await
+    .unwrap_or(None);
+    row.and_then(|(disp, user)| disp.or(user))
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+    use kanade_shared::ipc::notifications::NotificationPriority;
+    use kanade_shared::manifest::CheckAlertStatus;
+
+    fn alert(on: Vec<CheckAlertStatus>) -> CheckAlert {
+        CheckAlert {
+            on,
+            notify_user: true,
+            notify_groups: vec![],
+            priority: NotificationPriority::Warn,
+            require_ack: false,
+            toast: true,
+            title: "t".into(),
+            body: None,
+        }
+    }
+
+    fn hint() -> CheckHint {
+        CheckHint {
+            name: "bitlocker".into(),
+            label: Some("BitLocker".into()),
+            status_field: "status".into(),
+            detail_field: "detail".into(),
+            troubleshoot: None,
+            fleet: true,
+            alert: None,
+        }
+    }
+
+    #[test]
+    fn fires_on_transition_into_alert_status() {
+        let a = alert(vec![CheckAlertStatus::Fail]);
+        // ok → fail fires.
+        assert!(should_fire(&a, Some("ok"), "fail", true));
+        // first-ever fail (no prior) fires.
+        assert!(should_fire(&a, None, "fail", true));
+    }
+
+    #[test]
+    fn does_not_refire_while_staying_failed() {
+        let a = alert(vec![CheckAlertStatus::Fail]);
+        assert!(!should_fire(&a, Some("fail"), "fail", true));
+    }
+
+    #[test]
+    fn does_not_fire_on_recovery_or_non_alert_status() {
+        let a = alert(vec![CheckAlertStatus::Fail]);
+        assert!(!should_fire(&a, Some("fail"), "ok", true), "fail → ok");
+        assert!(
+            !should_fire(&a, Some("ok"), "warn", true),
+            "warn not in `on`"
+        );
+    }
+
+    #[test]
+    fn stale_replay_is_suppressed() {
+        let a = alert(vec![CheckAlertStatus::Fail]);
+        // Same ok → fail transition, but not fresh ⇒ no fire (wipe-replay).
+        assert!(!should_fire(&a, Some("ok"), "fail", false));
+    }
+
+    #[test]
+    fn multi_status_on_fires_only_on_entering_the_alert_set() {
+        let a = alert(vec![CheckAlertStatus::Warn, CheckAlertStatus::Fail]);
+        // ok → warn enters the alert set ⇒ fires.
+        assert!(should_fire(&a, Some("ok"), "warn", true));
+        // warn → fail stays within the alert set ⇒ no re-fire (edge-trigger
+        // is on entering `on`, not on escalation between alert statuses).
+        assert!(!should_fire(&a, Some("warn"), "fail", true));
+    }
+
+    #[test]
+    fn template_expands_all_placeholders() {
+        let h = hint();
+        let out = render(
+            "{label} on {pc_id} is {status}: {detail} (user {last_logon})",
+            "PC1",
+            &h,
+            "fail",
+            "D: unprotected",
+            "Yamada Taro",
+        );
+        assert_eq!(
+            out,
+            "BitLocker on PC1 is fail: D: unprotected (user Yamada Taro)"
+        );
+        // `{label}` falls back to the slug when no label is set.
+        let mut h2 = hint();
+        h2.label = None;
+        assert_eq!(render("{label}", "PC1", &h2, "fail", "", ""), "bitlocker");
+    }
+
+    #[test]
+    fn freshness_window() {
+        let now = chrono::Utc.with_ymd_and_hms(2026, 6, 1, 12, 0, 0).unwrap();
+        assert!(is_fresh(now - Duration::minutes(5), now), "5 min ⇒ fresh");
+        assert!(
+            !is_fresh(now - Duration::minutes(30), now),
+            "30 min ⇒ stale"
+        );
+    }
+}

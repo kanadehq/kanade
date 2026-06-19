@@ -1,4 +1,5 @@
 pub mod audit;
+pub mod check_alert;
 pub mod consumer_reset;
 pub mod events;
 pub mod explode;

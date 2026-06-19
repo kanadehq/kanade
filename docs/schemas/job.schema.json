@@ -363,10 +363,87 @@
         "render"
       ]
     },
+    "CheckAlert": {
+      "description": "Auto-notification rule for a [`CheckHint`] (compliance alerting). When a\ncheck's status transitions into one of [`on`](Self::on), the backend\npublishes a notification to the failing PC's user\n([`notify_user`](Self::notify_user)) and/or operator groups\n([`notify_groups`](Self::notify_groups)). Deliberately config-driven:\nwho gets told, how loud, and the wording all live in the manifest, not\nhardcoded in the backend.",
+      "type": "object",
+      "properties": {
+        "body": {
+          "description": "Notification body template. Placeholders: `{pc_id}`, `{name}` (check\nslug), `{label}` (check label, falls back to slug), `{status}`,\n`{detail}` (the check's one-line summary), `{last_logon}` (the PC's\nlast sign-in account). Absent → empty body.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "notify_groups": {
+          "description": "Notify these operator groups (`notifications.group.<name>`).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "notify_user": {
+          "description": "Notify the user(s) on the failing PC (`notifications.pc.<pc_id>`).",
+          "type": "boolean",
+          "default": false
+        },
+        "on": {
+          "description": "Statuses that fire the alert on *transition into* them (a check that\nstays failing doesn't re-alert every poll). Defaults to `[fail]`.\n`ok` is not representable — [`CheckAlertStatus`] has no `Ok` variant,\nso a YAML `on: [ok]` fails to deserialize (before `validate()` is\neven reached); \"recovered\" notifications are out of scope.",
+          "type": "array",
+          "default": [
+            "fail"
+          ],
+          "items": {
+            "$ref": "#/$defs/CheckAlertStatus"
+          }
+        },
+        "priority": {
+          "description": "Notification priority (colour/label only — toasting is the separate\n`toast` flag). Defaults to `warn`.",
+          "$ref": "#/$defs/NotificationPriority",
+          "default": "warn"
+        },
+        "require_ack": {
+          "description": "Require the recipient to click 確認 to dismiss.",
+          "type": "boolean",
+          "default": false
+        },
+        "title": {
+          "description": "Notification title (required). May use the same `{…}` placeholders\nas [`body`](Self::body).",
+          "type": "string"
+        },
+        "toast": {
+          "description": "Surface an OS toast (launches a closed Client App, Action Center\nwhile locked). Recommended `true` for `notify_user` so a\nnon-emergency \"your PC is non-compliant\" nudge still reaches a user\nwhose app is closed.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "title"
+      ]
+    },
+    "CheckAlertStatus": {
+      "description": "A check status that can trigger a [`CheckAlert`]. Mirrors the\nprojected `check_status.status` values minus `ok` (alerting on `ok` is\nrejected at validation).",
+      "type": "string",
+      "enum": [
+        "warn",
+        "fail",
+        "unknown"
+      ]
+    },
     "CheckHint": {
       "description": "Manifest sub-section (#290): marks a job as an operator-defined\n**health check**. Parallel to [`InventoryHint`] / `EmitConfig`.\nThe stdout contract is a free-form JSON object (same as any\ninventory job) from which the agent reads `status_field` /\n`detail_field` to build the KLP [`crate::ipc::state::Check`] shown\non the Client App's Health tab.\n\nThere is deliberately **no timing field** — when / how often /\nin which window a check runs is driven by the job's Schedule,\nexactly like inventory jobs, so operators get the full `when:` /\nrollout / `runs_on` expressiveness for free.\n\nA check's stdout is a **free-form inventory object** (arbitrary\nkey/value pairs + arrays) — same as any inventory job — that also\ncarries a status field. `check:` adds only the health semantics on\ntop: which field is the ok/warn/fail/unknown status, an optional\none-line summary field, and a remediation job. Everything else\n(rich per-PC detail, `explode` sub-tables like a software list) is\ndriven by a co-present [`InventoryHint`] and rendered with the\nSAME display logic the SPA Inventory page uses — on the Client App\ntoo. This keeps checks maximally expressive without a bespoke\npayload type.",
       "type": "object",
       "properties": {
+        "alert": {
+          "description": "Optional auto-notification on a compliance transition. When set, the\nbackend publishes an end-user notification the moment this check\ntransitions *into* one of [`CheckAlert::on`] (e.g. ok → fail) — to\nthe failing PC's user and/or operator groups. Fired once per\ntransition (not on every poll). Requires `fleet: true` (the alert\nrides the same projection that fills `check_status`).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CheckAlert"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "detail_field": {
           "description": "Top-level stdout field used as the Health-tab row's one-line\nsummary. Defaults to `\"detail\"`; absent in the payload → no\ndetail line (the rich breakdown lives in the inventory view).",
           "type": "string",
@@ -717,6 +794,32 @@
           "description": "Self-service install catalog. Appears in the software\ncatalog tab.",
           "type": "string",
           "const": "catalog"
+        },
+        {
+          "title": "492: serde-level forward-compat catch-all. `#[non_exhaustive]`",
+          "description": "only affects Rust match exhaustiveness — serde still hard-fails\non an unknown variant STRING, so a newer peer's new variant\nused to make older readers reject the whole containing message.\nUnknown decodes any unrecognised value; UIs render it neutrally.",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
+    },
+    "NotificationPriority": {
+      "description": "Severity ladder. Drives the SPA color, toast/dialog choice, and\nwhether the Client App grabs window focus on push arrival.\n`#[non_exhaustive]` so a future SPEC can add severities (e.g.\n`Critical` above Emergency) without a wire bump.",
+      "oneOf": [
+        {
+          "description": "Background-style toast. Routine maintenance reminders.",
+          "type": "string",
+          "const": "info"
+        },
+        {
+          "description": "Yellow toast. Heads-up about upcoming changes.",
+          "type": "string",
+          "const": "warn"
+        },
+        {
+          "description": "Red modal — grabs window focus, blocks until ack\n(SPEC §2.12.8: \"緊急: ネットワーク機器メンテ\").",
+          "type": "string",
+          "const": "emergency"
         },
         {
           "title": "492: serde-level forward-compat catch-all. `#[non_exhaustive]`",

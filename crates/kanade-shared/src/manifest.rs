@@ -326,6 +326,90 @@ pub struct CheckHint {
     /// check the operator doesn't want surfaced across the fleet.
     #[serde(default = "default_fleet")]
     pub fleet: bool,
+    /// Optional auto-notification on a compliance transition. When set, the
+    /// backend publishes an end-user notification the moment this check
+    /// transitions *into* one of [`CheckAlert::on`] (e.g. ok → fail) — to
+    /// the failing PC's user and/or operator groups. Fired once per
+    /// transition (not on every poll). Requires `fleet: true` (the alert
+    /// rides the same projection that fills `check_status`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alert: Option<CheckAlert>,
+}
+
+/// Auto-notification rule for a [`CheckHint`] (compliance alerting). When a
+/// check's status transitions into one of [`on`](Self::on), the backend
+/// publishes a notification to the failing PC's user
+/// ([`notify_user`](Self::notify_user)) and/or operator groups
+/// ([`notify_groups`](Self::notify_groups)). Deliberately config-driven:
+/// who gets told, how loud, and the wording all live in the manifest, not
+/// hardcoded in the backend.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
+pub struct CheckAlert {
+    /// Statuses that fire the alert on *transition into* them (a check that
+    /// stays failing doesn't re-alert every poll). Defaults to `[fail]`.
+    /// `ok` is not representable — [`CheckAlertStatus`] has no `Ok` variant,
+    /// so a YAML `on: [ok]` fails to deserialize (before `validate()` is
+    /// even reached); "recovered" notifications are out of scope.
+    #[serde(default = "default_alert_on")]
+    pub on: Vec<CheckAlertStatus>,
+    /// Notify the user(s) on the failing PC (`notifications.pc.<pc_id>`).
+    #[serde(default)]
+    pub notify_user: bool,
+    /// Notify these operator groups (`notifications.group.<name>`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notify_groups: Vec<String>,
+    /// Notification priority (colour/label only — toasting is the separate
+    /// `toast` flag). Defaults to `warn`.
+    #[serde(default = "default_alert_priority")]
+    pub priority: crate::ipc::notifications::NotificationPriority,
+    /// Require the recipient to click 確認 to dismiss.
+    #[serde(default)]
+    pub require_ack: bool,
+    /// Surface an OS toast (launches a closed Client App, Action Center
+    /// while locked). Recommended `true` for `notify_user` so a
+    /// non-emergency "your PC is non-compliant" nudge still reaches a user
+    /// whose app is closed.
+    #[serde(default)]
+    pub toast: bool,
+    /// Notification title (required). May use the same `{…}` placeholders
+    /// as [`body`](Self::body).
+    pub title: String,
+    /// Notification body template. Placeholders: `{pc_id}`, `{name}` (check
+    /// slug), `{label}` (check label, falls back to slug), `{status}`,
+    /// `{detail}` (the check's one-line summary), `{last_logon}` (the PC's
+    /// last sign-in account). Absent → empty body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+}
+
+/// A check status that can trigger a [`CheckAlert`]. Mirrors the
+/// projected `check_status.status` values minus `ok` (alerting on `ok` is
+/// rejected at validation).
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckAlertStatus {
+    Warn,
+    Fail,
+    Unknown,
+}
+
+impl CheckAlertStatus {
+    /// The wire string, matching the projected `check_status.status`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Warn => "warn",
+            Self::Fail => "fail",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+fn default_alert_on() -> Vec<CheckAlertStatus> {
+    vec![CheckAlertStatus::Fail]
+}
+
+fn default_alert_priority() -> crate::ipc::notifications::NotificationPriority {
+    crate::ipc::notifications::NotificationPriority::Warn
 }
 
 fn default_status_field() -> String {
@@ -1210,6 +1294,31 @@ impl Manifest {
                     return Err("check.label must not be empty when set".to_string());
                 }
             }
+            if let Some(alert) = &check.alert {
+                // An alert that names no recipient is a silent no-op.
+                if !alert.notify_user && alert.notify_groups.is_empty() {
+                    return Err("check.alert must set notify_user and/or notify_groups".to_string());
+                }
+                if alert.title.trim().is_empty() {
+                    return Err("check.alert.title must not be empty".to_string());
+                }
+                // `on: []` would never fire; an empty group name resolves to
+                // a malformed `notifications.group.` subject.
+                if alert.on.is_empty() {
+                    return Err("check.alert.on must list at least one status".to_string());
+                }
+                if alert.notify_groups.iter().any(|g| g.trim().is_empty()) {
+                    return Err("check.alert.notify_groups must not contain blanks".to_string());
+                }
+                // The alert rides the `check_status` projection, which only
+                // runs for `fleet: true`.
+                if !check.fleet {
+                    return Err(
+                        "check.alert requires fleet: true (the alert rides the compliance projection)"
+                            .to_string(),
+                    );
+                }
+            }
         }
         // #291: a `client:` job is rendered in the Client App's
         // catalog (`jobs.list` → `jobs.execute`). serde already makes
@@ -1932,6 +2041,72 @@ inventory:
             let m: Manifest = serde_yaml::from_str(&base(inner)).expect("parse");
             let err = m.validate().expect_err("empty field must fail");
             assert!(err.contains("must not be empty"), "err: {err}");
+        }
+    }
+
+    #[test]
+    fn check_alert_decodes_with_defaults_and_validates() {
+        let yaml = r#"
+id: c
+version: 0.1.0
+execute:
+  shell: powershell
+  script: "echo x"
+  timeout: 10s
+check:
+  name: bitlocker
+  alert:
+    notify_user: true
+    title: "BitLocker 未準拠"
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        m.validate().expect("valid alert");
+        let alert = m.check.unwrap().alert.unwrap();
+        // Defaults: on = [fail], priority = warn, body = None.
+        assert_eq!(alert.on, vec![CheckAlertStatus::Fail]);
+        assert_eq!(
+            alert.priority,
+            crate::ipc::notifications::NotificationPriority::Warn
+        );
+        assert!(alert.body.is_none());
+        assert!(alert.notify_user);
+    }
+
+    #[test]
+    fn check_alert_validation_rejects_bad_configs() {
+        let base = |alert: &str| {
+            format!(
+                "id: c\nversion: 0.1.0\nexecute:\n  shell: powershell\n  script: \"echo x\"\n  timeout: 10s\ncheck:\n  name: bitlocker\n  alert:\n{alert}"
+            )
+        };
+        let cases = [
+            // No recipient.
+            ("    title: t\n", "notify_user and/or notify_groups"),
+            // Empty title.
+            (
+                "    notify_user: true\n    title: \"  \"\n",
+                "title must not be empty",
+            ),
+            // Empty `on`.
+            (
+                "    notify_user: true\n    title: t\n    on: []\n",
+                "on must list at least one status",
+            ),
+            // Blank group name.
+            (
+                "    notify_groups: [\"  \"]\n    title: t\n",
+                "notify_groups must not contain blanks",
+            ),
+            // alert requires fleet: true.
+            (
+                "    notify_user: true\n    title: t\n  fleet: false\n",
+                "requires fleet: true",
+            ),
+        ];
+        for (alert, want) in cases {
+            let m: Manifest = serde_yaml::from_str(&base(alert)).expect("parse");
+            let err = m.validate().expect_err("bad alert must fail");
+            assert!(err.contains(want), "for {alert:?}: got {err}");
         }
     }
 

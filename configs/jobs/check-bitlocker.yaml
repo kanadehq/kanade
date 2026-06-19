@@ -54,6 +54,23 @@ check:
   # `bitlocker` slug stays the stable id).
   label: "BitLocker ディスク暗号化"
   # troubleshoot: enable-bitlocker   # optional remediation job id (job must carry a client: block)
+  # alert: auto-notify on a compliance transition (e.g. ok -> fail).
+  # Fires ONCE when the status enters one of `on:` (not every poll), to
+  # the failing PC's user and/or operator groups. Placeholders in
+  # title/body: {pc_id} {name} {label} {status} {detail} {last_logon}.
+  #
+  # Commented out so deploying this sample verbatim does NOT start sending
+  # live notifications. Uncomment (and set a real `notify_groups`) to
+  # activate compliance alerting for this check:
+  # alert:
+  #   on: [fail]                    # statuses that trigger (default [fail]; `ok` not allowed)
+  #   notify_user: true             # -> the failing PC's user (notifications.pc.<pc_id>)
+  #   notify_groups: [it-admins]    # -> operator group(s) (notifications.group.<name>)
+  #   priority: warn                # colour/label only
+  #   require_ack: true             # demand a 確認 click (tracked on the SPA)
+  #   toast: true                   # OS toast even if the Client App is closed
+  #   title: "BitLocker が未準拠です"
+  #   body: "{label} の状態が {status} です: {detail}（PC: {pc_id} / 利用者: {last_logon}）"
 inventory:
   display:
     - { field: status, label: BitLocker }
