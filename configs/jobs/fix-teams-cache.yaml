@@ -25,13 +25,19 @@ description: Clear the Microsoft Teams cache for the current user (operator note
 execute:
   shell: powershell
   run_as: user
-  timeout: 60s
+  # 180s (not 60s): a large GPUCache/LocalCache — or an APPDATA that's
+  # redirected to a slow roaming/network profile — can take well over a
+  # minute to delete even when it's progressing fine. The per-path
+  # `removing ...` progress output below is what tells a slow-but-working
+  # run apart from a genuine hang when this *does* time out.
+  timeout: 180s
   script: |
     # Stop globally so a Remove-Item failure (locked file, denied ACL)
     # surfaces as a failed job instead of a false success. Only the
     # process-stop is allowed to be best-effort (Teams may not be
     # running), via a targeted -ErrorAction SilentlyContinue.
     $ErrorActionPreference = 'Stop'
+    Write-Output 'stopping Teams processes'
     Get-Process -Name Teams, ms-teams -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 2
     $paths = @(
@@ -40,7 +46,22 @@ execute:
       "$env:LOCALAPPDATA\Packages\MSTeams_8wekyb3d8bbwe\LocalCache"
     )
     foreach ($p in $paths) {
-      if (Test-Path $p) { Remove-Item $p -Recurse -Force }
+      if (Test-Path $p) {
+        # Emit BEFORE the delete so a timeout/hang leaves the offending
+        # path as the last stdout line — that's the whole diagnostic.
+        Write-Output "removing $p"
+        try {
+          Remove-Item $p -Recurse -Force
+        } catch {
+          # Make WHICH path failed (and why) explicit on stderr instead
+          # of letting the bare $ErrorActionPreference='Stop' throw bury
+          # it. Re-throw so the job still ends as Failed, not a false 0.
+          Write-Error "failed to remove ${p}: $($_.Exception.Message)"
+          throw
+        }
+      } else {
+        Write-Output "skip (absent) $p"
+      }
     }
     Write-Output 'Teams cache cleared. Please relaunch Teams.'
 client:
