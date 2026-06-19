@@ -18,6 +18,8 @@
     "pcs": "PCs",
     "requireAck": "Require acknowledgement",
     "requireAckHint": "When enabled, the notification shows a modal the user must acknowledge to dismiss, regardless of priority.",
+    "toast": "Show OS toast",
+    "toastHint": "When enabled, surfaces an OS toast regardless of priority — launches the Client App even when it's closed, and lands in the Action Center while locked. When off, it only appears in the in-app list.",
     "invalidExpiresAt": "Invalid expiry date — fix or clear the field before sending.",
     "publish": "Send notification"
   },
@@ -47,6 +49,7 @@
     "reuse": "Reuse",
     "reuseTitle": "Load this content into the composer to edit and resend",
     "requireAck": "ack required",
+    "toast": "toast",
     "expired": "expired"
   },
   "detail": {

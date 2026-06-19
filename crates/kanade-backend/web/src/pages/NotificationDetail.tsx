@@ -72,6 +72,7 @@ export function NotificationDetail() {
         reuse: {
           priority: n.priority,
           require_ack: n.require_ack,
+          toast: n.toast,
           title: n.title,
           body: n.body,
           issued_by: n.issued_by ?? null,

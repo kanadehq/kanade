@@ -29,7 +29,7 @@
 //! a follow-up PR).
 
 use futures::stream::StreamExt;
-use kanade_shared::ipc::notifications::{Notification, NotificationPriority};
+use kanade_shared::ipc::notifications::Notification;
 use kanade_shared::subject;
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
@@ -178,33 +178,34 @@ fn forward(msg: &async_nats::Message, notif_tx: &broadcast::Sender<Notification>
     match serde_json::from_slice::<Notification>(&msg.payload) {
         Ok(notification) => {
             let id = notification.id.clone();
-            // Capture the priority before the value is moved into `send`.
-            let priority = notification.priority;
+            // Capture the toast flag before the value is moved into `send`.
+            // Toast surfacing is driven by this flag, NOT by priority.
+            let toast = notification.toast;
             match notif_tx.send(notification) {
                 Ok(n) => {
                     debug!(pc_id = %pc_id, notification_id = %id, receivers = n, "notify_bus: broadcast");
-                    // #647: an emergency live-pushed while the screen is locked
-                    // toasts silently to the Action Center — flag it so it
-                    // re-pops on unlock.
-                    if priority == NotificationPriority::Emergency {
-                        super::emergency_notify::note_emergency_live_pushed();
+                    // #647: a toast notification live-pushed while the screen
+                    // is locked toasts silently to the Action Center — flag it
+                    // so it re-pops on unlock.
+                    if toast {
+                        super::emergency_notify::note_toast_live_pushed();
                     }
                 }
                 // `send` returns the un-delivered notification in the
-                // error, so we can inspect its priority: no Client App is
-                // subscribed (the normal idle, at-most-once drop). For an
-                // `emergency` that drop would silently lose the whole
-                // point of the notification, so launch the Client App in
-                // the user session to toast it (#102). info/warn stay
-                // dropped — they recover via `notifications.list`.
+                // error: no Client App is subscribed (the normal idle,
+                // at-most-once drop). For a `toast: true` notification that
+                // drop would silently lose the whole point, so launch the
+                // Client App in the user session to toast it (#102).
+                // `toast: false` ones stay dropped — they recover via
+                // `notifications.list`.
                 Err(broadcast::error::SendError(dropped)) => {
-                    if dropped.priority == NotificationPriority::Emergency {
+                    if dropped.toast {
                         warn!(
                             pc_id = %pc_id,
                             notification_id = %id,
-                            "notify_bus: emergency with no subscribed client; launching client to toast it",
+                            "notify_bus: toast notification with no subscribed client; launching client to toast it",
                         );
-                        super::emergency_notify::surface_emergency(&id);
+                        super::emergency_notify::surface_toast_notification(&id);
                     } else {
                         debug!(
                             pc_id = %pc_id,

@@ -66,6 +66,8 @@ export function Notifications() {
   // ---- composer state ----
   const [priority, setPriority] = useState<NotificationPriority>('info');
   const [requireAck, setRequireAck] = useState(false);
+  // `osToast` (not `toast`) to avoid shadowing the sonner `toast` import.
+  const [osToast, setOsToast] = useState(false);
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');
   const [issuedBy, setIssuedBy] = useState('');
@@ -116,6 +118,7 @@ export function Notifications() {
     if (!reuse) return;
     setPriority(reuse.priority);
     setRequireAck(reuse.require_ack);
+    setOsToast(reuse.toast);
     setTitle(reuse.title);
     setBody(reuse.body);
     setIssuedBy(reuse.issued_by ?? '');
@@ -134,6 +137,7 @@ export function Notifications() {
     const req: PublishNotificationRequest = {
       priority,
       require_ack: requireAck,
+      toast: osToast,
       title: title.trim(),
       body,
       target: {
@@ -278,6 +282,17 @@ export function Notifications() {
             </label>
             <p className="text-xs text-muted -mt-2">{t('compose.requireAckHint')}</p>
 
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={osToast}
+                onChange={(e) => setOsToast(e.target.checked)}
+                className="size-4 rounded border-border accent-violet"
+              />
+              {t('compose.toast')}
+            </label>
+            <p className="text-xs text-muted -mt-2">{t('compose.toastHint')}</p>
+
             <Button
               type="submit"
               disabled={!canSubmit}
@@ -354,6 +369,11 @@ export function Notifications() {
                               ({t('history.requireAck')})
                             </span>
                           )}
+                          {n.toast && (
+                            <span className="ml-1 text-xs text-muted">
+                              ({t('history.toast')})
+                            </span>
+                          )}
                           {expired && (
                             <span className="ml-1 text-xs text-danger">
                               ({t('history.expired')})
@@ -374,6 +394,7 @@ export function Notifications() {
                                     reuse: {
                                       priority: n.priority,
                                       require_ack: n.require_ack,
+                                      toast: n.toast,
                                       title: n.title,
                                       body: n.body,
                                       issued_by: n.issued_by ?? null,
