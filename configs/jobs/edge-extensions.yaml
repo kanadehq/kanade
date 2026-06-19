@@ -1,0 +1,247 @@
+# Edge browser extension compliance + inventory (operator-defined).
+#
+# Reads each Edge profile's installed extensions (id / name / version /
+# enabled / install source) from `Secure Preferences` (Chromium signs
+# extension settings into it; falls back to `Preferences`), resolves
+# `__MSG_*__` localized names from the extension's `_locales`, and emits
+# ONE JSON object on stdout. Two hints consume it (they compose — the
+# single JSON object feeds both):
+#
+#   * check:     → Compliance page pass/fail against the policy below
+#                  (blocklist / allowlist / sideload flag).
+#   * inventory: → Inventory page table + the `inventory_edge_exts`
+#                  explode table, so "which PCs have extension X" is an
+#                  indexed cross-PC query, with install/remove history.
+#
+# run_as: user — extensions live under the signed-in user's
+# %LOCALAPPDATA%, invisible to SYSTEM (session 0). Disclosed,
+# policy-backed auditing of company devices.
+#
+#   kanade job create      configs/jobs/edge-extensions.yaml
+#   kanade schedule create configs/schedules/edge-extensions.yaml
+
+id: edge-extensions
+version: 0.1.0
+description: Edge installed-extension compliance + inventory (per user profile)
+tags: [health-check, security, inventory]
+
+execute:
+  shell: powershell
+  run_as: user
+  timeout: 60s
+  script: |
+    $ErrorActionPreference = 'Stop'
+
+    # Edge's `Secure Preferences` is large and Windows PowerShell 5.1's
+    # ConvertFrom-Json chokes on it (depth / duplicate keys). Parse with
+    # JavaScriptSerializer (System.Web.Extensions, always present on the
+    # .NET Framework PS 5.1 runs on) into nested IDictionary / object[].
+    Add-Type -AssemblyName System.Web.Extensions
+    $jss = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+    $jss.MaxJsonLength = [int]::MaxValue
+    $jss.RecursionLimit = 1024
+
+    # ── Policy (operator-editable) ───────────────────────────────────
+    # Banned extension IDs — any present → fail. e.g. @('aapbdbdomjkkjkaonfhkkikfgjllcleb')
+    $Blocklist = @()
+    # If non-empty, ANY extension whose id isn't listed (and isn't
+    # policy-/component-installed) → fail. Leave empty to allow all.
+    $Allowlist = @()
+    # Warn on sideloaded / developer-mode extensions (not from the Web
+    # Store, not policy-forced, not a browser component).
+    $FlagSideloaded = $true
+
+    # Chromium Extension::Location enum → human source. `from_webstore`
+    # (when present) wins. policy/component are "managed"; unpacked /
+    # external are "sideloaded".
+    function Source-Of($s) {
+      if ($s.ContainsKey('from_webstore') -and [bool]$s['from_webstore']) { return 'webstore' }
+      $loc = if ($s.ContainsKey('location')) { [int]$s['location'] } else { -1 }
+      switch ($loc) {
+        1  { 'webstore' }
+        4  { 'unpacked' }            # load-unpacked / dev mode
+        2  { 'external' }            # external_pref
+        3  { 'external_registry' }   # sideloaded via registry
+        6  { 'external' }            # external_pref_download
+        5  { 'component' }
+        10 { 'component' }           # external_component
+        7  { 'policy' }              # external_policy_download
+        9  { 'policy' }              # external_policy
+        8  { 'command_line' }
+        default { "other($loc)" }
+      }
+    }
+
+    # Resolve a possibly-localized extension name (`__MSG_key__`) from the
+    # extension's newest version manifest + _locales messages.
+    function Resolve-Name($id, $raw, $extRoot) {
+      if ($raw -and $raw -notlike '__MSG_*') { return $raw }
+      $dir = Join-Path $extRoot $id
+      if (-not (Test-Path $dir)) { return $(if ($raw) { $raw } else { $id }) }
+      # Version dirs are `<semver>_<n>` (e.g. `2.0.16_0`) — sort by parsed
+      # [version], not alphabetically (else 10.x < 9.x picks the wrong one).
+      $ver = Get-ChildItem $dir -Directory -ErrorAction SilentlyContinue |
+        Sort-Object { try { [version](($_.Name -split '_')[0]) } catch { [version]'0.0' } } -Descending |
+        Select-Object -First 1
+      if (-not $ver) { return $(if ($raw) { $raw } else { $id }) }
+      $mf = Join-Path $ver.FullName 'manifest.json'
+      if (-not (Test-Path $mf)) { return $(if ($raw) { $raw } else { $id }) }
+      try {
+        $m = Get-Content $mf -Raw -ErrorAction Stop | ConvertFrom-Json
+        $n = [string]$m.name
+        if ($n -notlike '__MSG_*') { return $(if ($n) { $n } else { $id }) }
+        $key = ($n -replace '^__MSG_','' -replace '__$','')
+        $loc = if ($m.default_locale) { [string]$m.default_locale } else { 'en' }
+        foreach ($l in @($loc,'en','en_US') | Select-Object -Unique) {
+          $msgs = Join-Path $ver.FullName "_locales\$l\messages.json"
+          if (Test-Path $msgs) {
+            $mm = Get-Content $msgs -Raw -ErrorAction Stop | ConvertFrom-Json
+            $e = $mm.$key
+            if ($e -and $e.message) { return [string]$e.message }
+          }
+        }
+      } catch {}
+      return $id
+    }
+
+    $root = Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\User Data'
+    $exts = @()
+    if (Test-Path $root) {
+      $profiles = Get-ChildItem $root -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -eq 'Default' -or $_.Name -like 'Profile *' }
+      foreach ($p in $profiles) {
+        $extRoot = Join-Path $p.FullName 'Extensions'
+        $prefsFile = Join-Path $p.FullName 'Secure Preferences'
+        if (-not (Test-Path $prefsFile)) { $prefsFile = Join-Path $p.FullName 'Preferences' }
+        if (-not (Test-Path $prefsFile)) { continue }
+        # Share-read copy: Edge may hold the prefs file open, so a plain
+        # read can fail and silently zero the scan (same reason
+        # web-history copies the History DB).
+        $tmp = Join-Path $env:TEMP ('kanade-edgeprefs-' + [Guid]::NewGuid().ToString('N') + '.json')
+        $in = $null; $out = $null
+        try {
+          $in = [System.IO.File]::Open($prefsFile, 'Open', 'Read', 'ReadWrite,Delete')
+          $out = [System.IO.File]::Create($tmp)
+          $in.CopyTo($out)
+          $out.Close(); $out = $null
+          $in.Close();  $in = $null
+          $prefs = $jss.DeserializeObject([System.IO.File]::ReadAllText($tmp))
+        } catch {
+          [Console]::Error.WriteLine("edge-extensions: skip $($p.Name) (read failed: $_)")
+          continue
+        } finally {
+          # Close handles even if CopyTo threw mid-transfer (else the locked
+          # temp file lingers), then drop the temp copy.
+          if ($out) { $out.Dispose() }
+          if ($in)  { $in.Dispose() }
+          Remove-Item -Force $tmp -ErrorAction SilentlyContinue
+        }
+        # JavaScriptSerializer yields nested IDictionary[string,object].
+        if (-not ($prefs -is [System.Collections.IDictionary]) -or -not $prefs.ContainsKey('extensions')) { continue }
+        $extsNode = $prefs['extensions']
+        if (-not ($extsNode -is [System.Collections.IDictionary]) -or -not $extsNode.ContainsKey('settings')) { continue }
+        $settings = $extsNode['settings']
+        if (-not ($settings -is [System.Collections.IDictionary])) { continue }
+        foreach ($id in @($settings.Keys)) {
+          # Extension IDs are 32 lowercase a-p letters; skip anything else
+          # (Chromium also stashes non-extension keys here).
+          if ($id -notmatch '^[a-p]{32}$') { continue }
+          $s = $settings[$id]
+          if (-not ($s -is [System.Collections.IDictionary])) { continue }
+          $manifest = if ($s.ContainsKey('manifest')) { $s['manifest'] } else { $null }
+          $hasManifest = ($manifest -is [System.Collections.IDictionary])
+          # A settings entry with no manifest is a Chromium bookkeeping
+          # stub (no name/version/location), not a real installed
+          # extension — skip so the inventory + count stay meaningful.
+          if (-not $hasManifest) { continue }
+          $rawName = if ($manifest.ContainsKey('name')) { [string]$manifest['name'] } else { '' }
+          $version = if ($manifest.ContainsKey('version')) { [string]$manifest['version'] } else { '' }
+          $state   = if ($s.ContainsKey('state')) { [int]$s['state'] } else { 0 }
+          $exts += [pscustomobject]@{
+            profile = $p.Name
+            id      = $id
+            name    = Resolve-Name $id $rawName $extRoot
+            version = $version
+            enabled = ($state -eq 1)
+            source  = (Source-Of $s)
+          }
+        }
+      }
+    }
+    $exts = @($exts | Sort-Object -Property profile, name)
+
+    # ── Evaluate policy ──────────────────────────────────────────────
+    $managed = @('policy','component')
+    $blocked    = @($exts | Where-Object { $Blocklist -contains $_.id })
+    # Sideloaded = anything not from the Web Store and not managed
+    # (policy/component) — covers unpacked / external / external_registry /
+    # command_line / unknown locations, not just a hardcoded few.
+    $sideloaded = @($exts | Where-Object { $_.source -ne 'webstore' -and $_.source -notin $managed })
+    $notAllowed = @()
+    if ($Allowlist.Count -gt 0) {
+      $notAllowed = @($exts | Where-Object { $Allowlist -notcontains $_.id -and $_.source -notin $managed })
+    }
+
+    $status = 'ok'; $parts = @()
+    if ($blocked.Count -gt 0) {
+      $status = 'fail'; $parts += "blocked: " + (($blocked | ForEach-Object { $_.name }) -join ', ')
+    }
+    if ($notAllowed.Count -gt 0) {
+      $status = 'fail'; $parts += "not allow-listed: " + (($notAllowed | ForEach-Object { $_.name }) -join ', ')
+    }
+    if ($FlagSideloaded -and $sideloaded.Count -gt 0) {
+      if ($status -ne 'fail') { $status = 'warn' }
+      $parts += "sideloaded: " + (($sideloaded | ForEach-Object { $_.name }) -join ', ')
+    }
+    $detail = if ($parts.Count -gt 0) { $parts -join ' | ' } else { "$($exts.Count) extension(s), all compliant" }
+
+    [pscustomobject]@{
+      status     = $status
+      detail     = $detail
+      hostname   = $env:COMPUTERNAME
+      count      = $exts.Count
+      extensions = $exts
+    } | ConvertTo-Json -Compress -Depth 5
+
+# Compliance gate (Compliance page). status/detail are the default
+# fields the agent reads.
+check:
+  name: edge_extensions
+  label: "Edge 拡張機能のコンプライアンス"
+
+# Cross-PC audit (Inventory page) — composes with check: by reading the
+# rest of the same stdout object.
+inventory:
+  display:
+    - { field: hostname, label: Hostname }
+    - { field: count, label: Extensions }
+    - field: extensions
+      label: Installed extensions
+      type: table
+      columns:
+        - { field: profile, label: Profile }
+        - { field: name,    label: Name    }
+        - { field: version, label: Version }
+        - { field: enabled, label: Enabled }
+        - { field: source,  label: Source  }
+        - { field: id,      label: ID      }
+  summary:
+    - { field: hostname, label: Hostname }
+    - { field: count, label: Extensions }
+  # Flatten extensions[] into a queryable table keyed by (id, profile) —
+  # an extension can exist in more than one profile. History tracks
+  # install / remove / version changes per (pc, id, profile).
+  explode:
+    - field: extensions
+      table: inventory_edge_exts
+      primary_key: [id, profile]
+      track_history: true
+      columns:
+        - { field: profile, type: text }
+        - { field: id,      type: text, index: true }
+        - { field: name,    type: text, index: true }
+        - { field: version, type: text }
+        # JSON bools bind as "true"/"false" text (the projector stringifies
+        # them regardless of affinity), so query this column as = 'true'.
+        - { field: enabled, type: text }
+        - { field: source,  type: text, index: true }
