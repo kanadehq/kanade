@@ -104,6 +104,21 @@ execute:
       return $id
     }
 
+    # Guard an unset LOCALAPPDATA (non-Windows / a context without a user
+    # profile): `Join-Path $null` throws under ErrorActionPreference=Stop
+    # and would hard-fail the job. Emit a clean empty, compliant payload
+    # instead (CodeRabbit).
+    if (-not $env:LOCALAPPDATA) {
+      [pscustomobject]@{
+        status     = 'ok'
+        detail     = 'Edge extension scan skipped: LOCALAPPDATA unavailable on this host'
+        hostname   = $env:COMPUTERNAME
+        count      = 0
+        extensions = @()
+      } | ConvertTo-Json -Compress -Depth 5
+      exit 0
+    }
+
     $root = Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\User Data'
     $exts = @()
     if (Test-Path $root) {
