@@ -1,34 +1,32 @@
 # Edge browser extension compliance + inventory (operator-defined).
 #
-# Reads each Edge profile's installed extensions (id / name / version /
-# enabled / install source) from `Secure Preferences` (Chromium signs
-# extension settings into it; falls back to `Preferences`), resolves
-# `__MSG_*__` localized names from the extension's `_locales`, and emits
-# ONE JSON object on stdout. Two hints consume it (they compose — the
-# single JSON object feeds both):
+# Scans EVERY local user's Edge profiles (id / name / version / enabled /
+# install source) and emits ONE JSON object two hints consume (compose):
 #
 #   * check:     → Compliance page pass/fail against the policy below
 #                  (blocklist / allowlist / sideload flag).
 #   * inventory: → Inventory page table + the `inventory_edge_exts`
-#                  explode table, so "which PCs have extension X" is an
-#                  indexed cross-PC query, with install/remove history.
+#                  explode table, so "which user on which PC has extension
+#                  X" is an indexed cross-PC/user query, with history.
 #
-# run_as: user — extensions live under the signed-in user's
-# %LOCALAPPDATA%, invisible to SYSTEM (session 0). Disclosed,
-# policy-backed auditing of company devices.
+# run_as: system — SYSTEM can read every user's profile under C:\Users, so
+# this covers all accounts on a shared / RDP / multi-user box (and runs
+# even when nobody is interactively logged in). A per-user job would only
+# ever see the active session. Reading other users' browser profile data
+# is appropriate for a disclosed, policy-backed compliance control.
 #
 #   kanade job create      configs/jobs/edge-extensions.yaml
 #   kanade schedule create configs/schedules/edge-extensions.yaml
 
 id: edge-extensions
-version: 0.1.0
-description: Edge installed-extension compliance + inventory (per user profile)
+version: 0.2.0
+description: Edge installed-extension compliance + inventory (all local users)
 tags: [health-check, security, inventory]
 
 execute:
   shell: powershell
-  run_as: user
-  timeout: 60s
+  run_as: system
+  timeout: 120s
   script: |
     $ErrorActionPreference = 'Stop'
 
@@ -104,71 +102,71 @@ execute:
       return $id
     }
 
-    $root = Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\User Data'
+    # Real user profiles via Win32_UserProfile — robust to redirected /
+    # non-C: profile paths and skips service/system profiles (`Special`)
+    # without a hardcoded list. SYSTEM reads them all (multi-user coverage).
     $exts = @()
-    if (Test-Path $root) {
-      $profiles = Get-ChildItem $root -Directory -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -eq 'Default' -or $_.Name -like 'Profile *' }
-      foreach ($p in $profiles) {
-        $extRoot = Join-Path $p.FullName 'Extensions'
-        $prefsFile = Join-Path $p.FullName 'Secure Preferences'
-        if (-not (Test-Path $prefsFile)) { $prefsFile = Join-Path $p.FullName 'Preferences' }
-        if (-not (Test-Path $prefsFile)) { continue }
-        # Share-read copy: Edge may hold the prefs file open, so a plain
-        # read can fail and silently zero the scan (same reason
-        # web-history copies the History DB).
-        $tmp = Join-Path $env:TEMP ('kanade-edgeprefs-' + [Guid]::NewGuid().ToString('N') + '.json')
-        $in = $null; $out = $null
-        try {
-          $in = [System.IO.File]::Open($prefsFile, 'Open', 'Read', 'ReadWrite,Delete')
-          $out = [System.IO.File]::Create($tmp)
-          $in.CopyTo($out)
-          $out.Close(); $out = $null
-          $in.Close();  $in = $null
-          $prefs = $jss.DeserializeObject([System.IO.File]::ReadAllText($tmp))
-        } catch {
-          [Console]::Error.WriteLine("edge-extensions: skip $($p.Name) (read failed: $_)")
-          continue
-        } finally {
-          # Close handles even if CopyTo threw mid-transfer (else the locked
-          # temp file lingers), then drop the temp copy.
-          if ($out) { $out.Dispose() }
-          if ($in)  { $in.Dispose() }
-          Remove-Item -Force $tmp -ErrorAction SilentlyContinue
-        }
-        # JavaScriptSerializer yields nested IDictionary[string,object].
-        if (-not ($prefs -is [System.Collections.IDictionary]) -or -not $prefs.ContainsKey('extensions')) { continue }
-        $extsNode = $prefs['extensions']
-        if (-not ($extsNode -is [System.Collections.IDictionary]) -or -not $extsNode.ContainsKey('settings')) { continue }
-        $settings = $extsNode['settings']
-        if (-not ($settings -is [System.Collections.IDictionary])) { continue }
-        foreach ($id in @($settings.Keys)) {
-          # Extension IDs are 32 lowercase a-p letters; skip anything else
-          # (Chromium also stashes non-extension keys here).
-          if ($id -notmatch '^[a-p]{32}$') { continue }
-          $s = $settings[$id]
-          if (-not ($s -is [System.Collections.IDictionary])) { continue }
-          $manifest = if ($s.ContainsKey('manifest')) { $s['manifest'] } else { $null }
-          $hasManifest = ($manifest -is [System.Collections.IDictionary])
-          # A settings entry with no manifest is a Chromium bookkeeping
-          # stub (no name/version/location), not a real installed
-          # extension — skip so the inventory + count stay meaningful.
-          if (-not $hasManifest) { continue }
-          $rawName = if ($manifest.ContainsKey('name')) { [string]$manifest['name'] } else { '' }
-          $version = if ($manifest.ContainsKey('version')) { [string]$manifest['version'] } else { '' }
-          $state   = if ($s.ContainsKey('state')) { [int]$s['state'] } else { 0 }
-          $exts += [pscustomobject]@{
-            profile = $p.Name
-            id      = $id
-            name    = Resolve-Name $id $rawName $extRoot
-            version = $version
-            enabled = ($state -eq 1)
-            source  = (Source-Of $s)
+    $userProfiles = @(Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue |
+      Where-Object { -not $_.Special -and $_.LocalPath })
+    foreach ($up in $userProfiles) {
+        $userName = Split-Path -Leaf $up.LocalPath
+        $root = Join-Path $up.LocalPath 'AppData\Local\Microsoft\Edge\User Data'
+        if (-not (Test-Path $root)) { continue }
+        $profiles = Get-ChildItem $root -Directory -ErrorAction SilentlyContinue |
+          Where-Object { $_.Name -eq 'Default' -or $_.Name -like 'Profile *' }
+        foreach ($p in $profiles) {
+          $extRoot = Join-Path $p.FullName 'Extensions'
+          $prefsFile = Join-Path $p.FullName 'Secure Preferences'
+          if (-not (Test-Path $prefsFile)) { $prefsFile = Join-Path $p.FullName 'Preferences' }
+          if (-not (Test-Path $prefsFile)) { continue }
+          # Open share-read (Edge holds the prefs file open for a logged-in
+          # user) and read the stream directly — no temp copy needed since
+          # FileShare ReadWrite|Delete lets us read the live file.
+          $fs = $null; $sr = $null
+          try {
+            $fs = [System.IO.File]::Open($prefsFile, 'Open', 'Read', 'ReadWrite,Delete')
+            $sr = New-Object System.IO.StreamReader($fs)
+            $prefs = $jss.DeserializeObject($sr.ReadToEnd())
+          } catch {
+            [Console]::Error.WriteLine("edge-extensions: skip $userName/$($p.Name) (read failed: $_)")
+            continue
+          } finally {
+            if ($sr) { $sr.Dispose() }
+            if ($fs) { $fs.Dispose() }
+          }
+          if (-not ($prefs -is [System.Collections.IDictionary]) -or -not $prefs.ContainsKey('extensions')) { continue }
+          $extsNode = $prefs['extensions']
+          if (-not ($extsNode -is [System.Collections.IDictionary]) -or -not $extsNode.ContainsKey('settings')) { continue }
+          $settings = $extsNode['settings']
+          if (-not ($settings -is [System.Collections.IDictionary])) { continue }
+          foreach ($id in @($settings.Keys)) {
+            # Extension IDs are 32 lowercase a-p letters; skip anything else
+            # (Chromium also stashes non-extension keys here).
+            if ($id -notmatch '^[a-p]{32}$') { continue }
+            $s = $settings[$id]
+            if (-not ($s -is [System.Collections.IDictionary])) { continue }
+            $manifest = if ($s.ContainsKey('manifest')) { $s['manifest'] } else { $null }
+            $hasManifest = ($manifest -is [System.Collections.IDictionary])
+            # A settings entry with no manifest is a Chromium bookkeeping
+            # stub (no name/version/location), not a real installed
+            # extension — skip so the inventory + count stay meaningful.
+            if (-not $hasManifest) { continue }
+            $rawName = if ($manifest.ContainsKey('name')) { [string]$manifest['name'] } else { '' }
+            $version = if ($manifest.ContainsKey('version')) { [string]$manifest['version'] } else { '' }
+            $state   = if ($s.ContainsKey('state')) { [int]$s['state'] } else { 0 }
+            $exts += [pscustomobject]@{
+              user    = $userName
+              profile = $p.Name
+              id      = $id
+              name    = Resolve-Name $id $rawName $extRoot
+              version = $version
+              enabled = ($state -eq 1)
+              source  = (Source-Of $s)
+            }
           }
         }
-      }
     }
-    $exts = @($exts | Sort-Object -Property profile, name)
+    $exts = @($exts | Sort-Object -Property user, profile, name)
 
     # ── Evaluate policy ──────────────────────────────────────────────
     $managed = @('policy','component')
@@ -181,24 +179,26 @@ execute:
     if ($Allowlist.Count -gt 0) {
       $notAllowed = @($exts | Where-Object { $Allowlist -notcontains $_.id -and $_.source -notin $managed })
     }
+    # Offenders read "<user>/<name>" so a multi-user box says who.
+    $fmt = { param($x) ($x | ForEach-Object { "$($_.user)/$($_.name)" }) -join ', ' }
 
     $status = 'ok'; $parts = @()
     if ($blocked.Count -gt 0) {
-      $status = 'fail'; $parts += "blocked: " + (($blocked | ForEach-Object { $_.name }) -join ', ')
+      $status = 'fail'; $parts += "blocked: " + (& $fmt $blocked)
     }
     if ($notAllowed.Count -gt 0) {
-      $status = 'fail'; $parts += "not allow-listed: " + (($notAllowed | ForEach-Object { $_.name }) -join ', ')
+      $status = 'fail'; $parts += "not allow-listed: " + (& $fmt $notAllowed)
     }
     if ($FlagSideloaded -and $sideloaded.Count -gt 0) {
       if ($status -ne 'fail') { $status = 'warn' }
-      $parts += "sideloaded: " + (($sideloaded | ForEach-Object { $_.name }) -join ', ')
+      $parts += "sideloaded: " + (& $fmt $sideloaded)
     }
     $detail = if ($parts.Count -gt 0) { $parts -join ' | ' } else { "$($exts.Count) extension(s), all compliant" }
 
     [pscustomobject]@{
       status     = $status
       detail     = $detail
-      hostname   = $env:COMPUTERNAME
+      hostname   = [System.Environment]::MachineName
       count      = $exts.Count
       extensions = $exts
     } | ConvertTo-Json -Compress -Depth 5
@@ -209,8 +209,8 @@ check:
   name: edge_extensions
   label: "Edge 拡張機能のコンプライアンス"
 
-# Cross-PC audit (Inventory page) — composes with check: by reading the
-# rest of the same stdout object.
+# Cross-PC/user audit (Inventory page) — composes with check: by reading
+# the rest of the same stdout object.
 inventory:
   display:
     - { field: hostname, label: Hostname }
@@ -219,6 +219,7 @@ inventory:
       label: Installed extensions
       type: table
       columns:
+        - { field: user,    label: User    }
         - { field: profile, label: Profile }
         - { field: name,    label: Name    }
         - { field: version, label: Version }
@@ -228,15 +229,21 @@ inventory:
   summary:
     - { field: hostname, label: Hostname }
     - { field: count, label: Extensions }
-  # Flatten extensions[] into a queryable table keyed by (id, profile) —
-  # an extension can exist in more than one profile. History tracks
-  # install / remove / version changes per (pc, id, profile).
+  # Flatten extensions[] into a queryable table keyed by (id, user,
+  # profile) — an extension can exist for several users / profiles.
+  # History tracks install / remove / version changes per key.
+  #
+  # DEPLOY NOTE: the explode table isn't auto-migrated (the projector does
+  # CREATE TABLE IF NOT EXISTS, no ALTER). v0.2.0 changed the primary key
+  # (added `user`) vs the v0.1.0 (id, profile) shape, so if you ran v0.1.0
+  # drop the table once before applying:  DROP TABLE inventory_edge_exts;
   explode:
     - field: extensions
       table: inventory_edge_exts
-      primary_key: [id, profile]
+      primary_key: [id, user, profile]
       track_history: true
       columns:
+        - { field: user,    type: text, index: true }
         - { field: profile, type: text }
         - { field: id,      type: text, index: true }
         - { field: name,    type: text, index: true }
