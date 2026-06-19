@@ -56,12 +56,14 @@
   Install + register the service but don't start it.
 
 .PARAMETER WipeDb
-  Delete the backend's projector SQLite database — the file named by
+  Wipe the backend's projector SQLite database — the file named by
   backend.toml's `[db] sqlite_path` (default backend.db) plus its
-  -wal/-shm sidecars — so the backend recreates it from scratch on next
-  start. Targets that one DB explicitly, NOT a `data\*.db` glob: the
-  agent's `state.db` shares this data dir on combined installs and must
-  not be clobbered by a backend deploy.
+  -wal/-shm sidecars — so the backend re-derives it from JetStream on
+  next start. Delegates to `kanade-backend wipe-projector`, which
+  preserves the durable `users` table across the wipe (snapshot → delete
+  → migrate → restore). Targets that one DB explicitly, NOT a `data\*.db`
+  glob: the agent's `state.db` shares this data dir on combined installs
+  and must not be clobbered by a backend deploy.
 
   Required when upgrading across a *squashed-migration baseline*: the
   old `_sqlx_migrations` rows reference migration files that no longer
@@ -75,9 +77,10 @@
   each stream from the beginning (#389; backends older than that fix
   resume from the old consumer position and re-derive nothing). The
   wipe is still NOT fully lossless:
-    * `users` / accounts are NOT a projection — only the bootstrap admin
-      re-seeds (registry BootstrapAdminPassword / env); recreate any
-      other accounts by hand afterward.
+    * `users` / accounts ARE preserved across the wipe (no re-seed
+      needed). The only durable table NOT kept is `executions` (run
+      history): its counters are bumped incrementally by the results
+      projector, so preserving it across a replay would double-count.
     * Re-projection is bounded by each stream's `max_age` (7-90 d):
       execution history older than retention is gone, and `once_per_pc`
       completions older than retention look un-done, so those schedules
@@ -110,7 +113,8 @@
   ACL). On first start with an empty `users` table the backend seeds an
   admin account from it (username from $KANADE_BOOTSTRAP_ADMIN_USER,
   default `admin`), so an RBAC box is reachable via the SPA right after
-  a fresh install / -WipeDb. Pair with -JwtSecret.
+  a fresh install. (A -WipeDb on an existing box now preserves accounts,
+  so this is only needed for genuinely fresh installs.) Pair with -JwtSecret.
 
   The agent / job path has no CLI args; set the `$AgentWipeDb` /
   `$AgentStaticToken` / `$AgentJwtSecret` / `$AgentBootstrapAdminPassword`
@@ -464,30 +468,28 @@ foreach ($d in @($binDir, $configDir, $dataDir, $logsDir)) {
     }
 }
 
-# -WipeDb: drop the backend's projector SQLite DB so it recreates it on
-# next start. The service is already stopped above (file unlocked) and
-# the dirs are ensured.
+# -WipeDb: drop the backend's projector SQLite DB so it re-derives from
+# JetStream replay on next start, WHILE preserving the durable `users`
+# table (auth accounts live only in SQLite — no NATS stream carries them,
+# so a blind delete locks every operator out until a bootstrap re-seed).
+# The service is already stopped above (file unlocked) and dirs are ensured.
 #
-# Resolve the DB path the SAME way the backend does, by asking the binary
-# itself: `kanade-backend resolve-db-path --config <toml>` renders the
-# teravars template (`{{ vars.base }}`, `env()`, `is_windows()`) and
-# prints the exact path the service will open. We query $exeSrc — the NEW
-# exe, BEFORE the swap — against the config that will ACTUALLY be installed
-# (the seeded $configSrc under -ForceConfig / fresh box, else the existing
-# $configDst), so the wiped file matches what the just-installed backend
-# mounts. Resolving the about-to-be-overwritten $configDst would wipe the
-# OLD sqlite_path and still boot the service on the NEW, un-wiped DB.
+# This delegates to `kanade-backend wipe-projector --config <toml>` rather
+# than deleting the file here, so the binary that owns the schema does the
+# snapshot → delete → migrate → restore atomically. The subcommand also
+# resolves the DB path the SAME way the service does (teravars: `{{ vars.base
+# }}`, `env()`, `is_windows()`), so a templated / non-default `sqlite_path`
+# (e.g. base on E:\) is wiped correctly — a hand-rolled regex here couldn't
+# expand the template and used to leave the REAL DB un-wiped, crash-looping
+# the squashed-baseline backend at migrate!(). It touches only that one DB +
+# its -wal/-shm sidecars (never a `data\*.db` glob), so a co-located agent
+# state.db is never clobbered.
 #
-# Why not parse the toml here: a hand-rolled regex can't expand
-# `{{ vars.base }}`, so a templated / non-default `sqlite_path` (e.g. base
-# on E:\) used to fall back to the C:\ProgramData default and leave the
-# REAL DB un-wiped — the squashed-baseline backend then crash-looped at
-# migrate!(). If resolution fails we now ABORT (no silent default): better
-# to stop the deploy than to start the service on a stale DB.
-#
-# Targets that one resolved DB + its -wal/-shm sidecars explicitly — NOT a
-# `data\*.db` glob: the agent's state.db shares this data dir on combined
-# installs and must not be clobbered by a backend deploy.
+# We run $exeSrc — the NEW exe, BEFORE the swap — so the recreated schema
+# matches the just-installed backend, against the config that will ACTUALLY
+# be installed (the seeded $configSrc under -ForceConfig / fresh box, else
+# the existing $configDst). Any failure ABORTS the deploy: starting on a
+# stale / half-wiped DB would crash-loop at migrate.
 if ($WipeDb) {
     # Resolve from the config that will ACTUALLY be installed (see comment
     # above): -ForceConfig (or a fresh box with no $configDst) means the
@@ -496,48 +498,18 @@ if ($WipeDb) {
     # taken when it exists, so $configForWipe always points to a real file.
     $configForWipe = if ($ForceConfig -or -not (Test-Path $configDst)) { $configSrc } else { $configDst }
 
+    Write-Host "WipeDb: wiping projector DB (preserving users) via '$exeName wipe-projector'"
     # NOTE: no 2>&1 here. Under $ErrorActionPreference='Stop', merging native
     # stderr into the success stream wraps each line in an ErrorRecord that can
-    # terminate the script, and a stray warning would also shadow the path
-    # below. Let stderr fall through to the console; $resolved stays pure stdout.
-    $resolved = & $exeSrc resolve-db-path --config $configForWipe
-    if ($LASTEXITCODE -ne 0 -or -not $resolved) {
-        throw ("WipeDb: could not resolve sqlite_path via '$exeName resolve-db-path' " +
-            "(exit $LASTEXITCODE) from '$configForWipe'. Refusing to proceed — starting on " +
-            "a stale DB would crash-loop at migrate. Fix the config / binary, then re-run.")
-    }
-    # resolve-db-path prints only the path to stdout; take the last
-    # line so any incidental warning ahead of it is ignored.
-    $dbPath = ($resolved | Select-Object -Last 1).ToString().Trim()
-    if ([string]::IsNullOrWhiteSpace($dbPath)) {
-        # Exit 0 but an empty/whitespace path: never let Test-Path "" (false)
-        # silently no-op the wipe and boot the service on a stale DB.
-        throw ("WipeDb: '$exeName resolve-db-path' exited 0 but returned no path " +
-            "(from '$configForWipe'). Refusing to proceed — fix the config / binary, then re-run.")
-    }
-    Write-Host "WipeDb: resolved projector DB = $dbPath"
-
-    # -LiteralPath: a sqlite_path containing wildcard metacharacters ([ ] ? *)
-    # must match itself, never glob onto sibling files in the data dir.
-    $targets = @($dbPath, "$dbPath-wal", "$dbPath-shm") | Where-Object { Test-Path -LiteralPath $_ }
-    if ($targets) {
-        foreach ($f in $targets) {
-            Write-Host "WipeDb: removing $f"
-            try {
-                Remove-Item -Force -LiteralPath $f
-            } catch {
-                # A locked file (open SQLite client, a still-running
-                # backend, an antivirus scan) would otherwise abort the
-                # deploy with a raw terminating error ($ErrorActionPreference
-                # = 'Stop'). Fail with an actionable message instead — we
-                # must NOT proceed to start the service on a stale DB.
-                throw ("WipeDb: failed to delete '$f': $($_.Exception.Message). " +
-                    "Something is holding the projector DB open — stop the $ServiceName service " +
-                    "and close any SQLite client / kanade-backend process, then re-run.")
-            }
-        }
-    } else {
-        Write-Host "WipeDb: no projector DB at $dbPath (nothing to wipe)."
+    # terminate the script before we inspect $LASTEXITCODE. Let the subcommand's
+    # progress line ("wiped … preserved N user account(s)") fall through to the
+    # console; we gate solely on the exit code.
+    & $exeSrc wipe-projector --config $configForWipe
+    if ($LASTEXITCODE -ne 0) {
+        throw ("WipeDb: '$exeName wipe-projector' failed (exit $LASTEXITCODE) from " +
+            "'$configForWipe'. Refusing to proceed — starting on a stale / half-wiped DB would " +
+            "crash-loop at migrate. Ensure the $ServiceName service is stopped (so the DB is " +
+            "unlocked) and the config / binary are valid, then re-run.")
     }
 }
 

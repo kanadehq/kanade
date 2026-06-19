@@ -124,8 +124,9 @@
   else `dev`.
 
 .PARAMETER WipeDb
-  (backend only) Drop the projector DB on deploy — needed across a
-  squashed-migration baseline. Off by default.
+  (backend only) Wipe the projector DB on deploy so it re-derives from
+  JetStream — needed across a squashed-migration baseline. Preserves the
+  `users` table (accounts survive the wipe). Off by default.
 
 .PARAMETER JwtSecret
 .PARAMETER StaticToken

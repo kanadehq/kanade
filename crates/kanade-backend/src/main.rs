@@ -80,6 +80,17 @@ enum Command {
         /// where `check_on_boot` looks for the rollback target.
         installed_exe: PathBuf,
     },
+    /// Drop the projector SQLite DB so it re-derives from JetStream
+    /// replay on next boot, WITHOUT losing the durable `users` table.
+    /// `deploy-backend.ps1 -WipeDb` calls this instead of `rm
+    /// backend.db`: auth accounts live ONLY in SQLite (no NATS stream
+    /// carries them), so a plain file delete locks every operator out
+    /// until a bootstrap re-seed. This snapshots `users`, deletes the
+    /// DB (+ `-wal`/`-shm`), re-creates the schema via migrations, then
+    /// restores the accounts. Resolves the DB path the same way the
+    /// service does (the global `--config`), so it targets the exact
+    /// file the backend opens.
+    WipeProjector,
 }
 
 /// Top-level entry point.
@@ -102,6 +113,7 @@ fn main() -> Result<()> {
                 new_version,
                 installed_exe,
             } => arm_for_swap(new_version, installed_exe),
+            Command::WipeProjector => wipe_projector(cli.config.as_deref()),
         };
     }
 
@@ -174,6 +186,224 @@ fn print_resolved_db_path(config: Option<&Path>) -> Result<()> {
     let cfg =
         load_backend_config(&cfg_path).with_context(|| format!("load config from {cfg_path:?}"))?;
     println!("{}", cfg.db.sqlite_path);
+    Ok(())
+}
+
+/// One row of the durable `users` table, captured verbatim so a wipe can
+/// restore accounts (incl. their original timestamps) byte-for-byte.
+/// Timestamps are read as TEXT to round-trip them unchanged.
+struct UserRow {
+    username: String,
+    password_hash: String,
+    role: String,
+    disabled: i64,
+    must_change_pw: i64,
+    created_at: String,
+    updated_at: String,
+}
+
+/// `wipe-projector` subcommand: drop the projector DB so it re-derives
+/// from JetStream replay, preserving the durable `users` table.
+///
+/// Why a dedicated subcommand instead of `rm backend.db` in the deploy
+/// script: of all the projector DB's tables, only `users` and
+/// `executions` are NOT sourced from a NATS stream — everything else
+/// (audit_log, notification_acks, execution_results, agents, perf
+/// samples, obs_events, inventory_*, check_status, the explode tables)
+/// re-projects on replay. A blind file delete therefore takes the auth
+/// accounts with it and locks every operator out until a bootstrap
+/// re-seed (the lockout that motivated this).
+///
+/// `executions` is the OTHER durable table but is deliberately NOT
+/// preserved: the results projector bumps its `success_count` /
+/// `failure_count` *incrementally* (an `UPDATE ... SET success_count =
+/// success_count + delta`), so keeping a row across a wipe+replay would
+/// double-count, and faithfully rebuilding it would mean reconstructing
+/// the exec-lifecycle reaping state too. Losing run history is
+/// acceptable collateral; an auth lockout is not.
+fn wipe_projector(config: Option<&Path>) -> Result<()> {
+    let cfg_path = default_paths::find_config(config, "KANADE_BACKEND_CONFIG", "backend.toml")?;
+    let cfg =
+        load_backend_config(&cfg_path).with_context(|| format!("load config from {cfg_path:?}"))?;
+    let db_path = cfg.db.sqlite_path.clone();
+
+    // A current-thread runtime is enough — the work is one short, serial
+    // sequence of sqlite calls, no concurrency. The default service path
+    // builds a multi-thread runtime; this subcommand must not.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("build current-thread runtime")?;
+    let restored = runtime.block_on(wipe_projector_at(&db_path))?;
+    eprintln!(
+        "wipe-projector: wiped projector DB at {db_path}; preserved {restored} user account(s)"
+    );
+    Ok(())
+}
+
+/// Core of `wipe-projector`, split out so it can be unit-tested against a
+/// throwaway DB path: snapshot `users` → delete the DB + sidecars →
+/// re-create the schema via migrations → restore `users`. Returns the
+/// number of accounts restored.
+async fn wipe_projector_at(db_path: &str) -> Result<usize> {
+    let users = snapshot_users(db_path).await.context("snapshot users")?;
+    remove_db_files(db_path).context("remove projector DB files")?;
+
+    // Re-create with the SAME pragmas the service uses (WAL etc.) so the
+    // sidecars it leaves match what the backend expects on next open.
+    let opts = SqliteConnectOptions::from_str(&format!("sqlite://{db_path}"))
+        .with_context(|| format!("parse sqlite path {db_path}"))?
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
+        .busy_timeout(std::time::Duration::from_secs(30));
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(opts)
+        .await
+        .context("open fresh sqlite pool")?;
+    sqlx::migrate!("./migrations")
+        .run(&pool)
+        .await
+        .context("run migrations on fresh DB")?;
+    let restored = restore_users(&pool, &users)
+        .await
+        .context("restore users")?;
+    pool.close().await;
+    Ok(restored)
+}
+
+/// Read every `users` row from an existing projector DB. Tolerates a
+/// missing DB file (fresh box) and a missing `users` table (older /
+/// partially-migrated DB) by returning an empty snapshot — both mean
+/// "no accounts to preserve", not an error.
+async fn snapshot_users(db_path: &str) -> Result<Vec<UserRow>> {
+    if !Path::new(db_path).exists() {
+        return Ok(Vec::new());
+    }
+    // Open read-only — we only read here, and the file is about to be
+    // deleted; no need to create or migrate it.
+    let opts = SqliteConnectOptions::from_str(&format!("sqlite://{db_path}"))
+        .with_context(|| format!("parse sqlite path {db_path}"))?
+        .read_only(true)
+        .busy_timeout(std::time::Duration::from_secs(30));
+    // The file EXISTS but we can't open it: do NOT swallow this and
+    // proceed to wipe with an empty snapshot — a transient lock (a still-
+    // running backend, a stray SQLite client, an antivirus scan) would
+    // then cause silent account loss and re-lock the operator out, the
+    // exact failure this code exists to prevent. Abort instead, so the
+    // wipe is re-runnable once the DB is unlocked. (A genuinely corrupt
+    // DB the operator wants to discard can be deleted by hand first.)
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(opts)
+        .await
+        .with_context(|| {
+            format!(
+                "open existing projector DB at {db_path} to preserve accounts — refusing to wipe \
+                 rather than risk silent account loss. Stop the service and close any SQLite \
+                 client holding it open, then re-run (or, if the DB is corrupt and you accept \
+                 losing accounts, delete it by hand first)."
+            )
+        })?;
+
+    let has_users: Option<String> =
+        sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+            .fetch_optional(&pool)
+            .await
+            .context("probe for users table")?;
+    if has_users.is_none() {
+        pool.close().await;
+        return Ok(Vec::new());
+    }
+
+    let rows = sqlx::query_as::<_, (String, String, String, i64, i64, String, String)>(
+        "SELECT username, password_hash, role, disabled, must_change_pw, created_at, updated_at \
+         FROM users",
+    )
+    .fetch_all(&pool)
+    .await
+    .context("select users")?;
+    pool.close().await;
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(username, password_hash, role, disabled, must_change_pw, created_at, updated_at)| {
+                UserRow {
+                    username,
+                    password_hash,
+                    role,
+                    disabled,
+                    must_change_pw,
+                    created_at,
+                    updated_at,
+                }
+            },
+        )
+        .collect())
+}
+
+/// Re-insert the snapshotted accounts into a freshly-migrated DB,
+/// preserving their original timestamps. Returns how many were restored.
+///
+/// All inserts run in a single transaction: a mid-restore failure (a
+/// constraint violation, or a schema-incompatible column from a squash
+/// migration) rolls the whole thing back rather than committing a
+/// partial set and silently dropping some accounts. The error then
+/// propagates and aborts the deploy so the operator sees it.
+async fn restore_users(pool: &sqlx::SqlitePool, users: &[UserRow]) -> Result<usize> {
+    let mut tx = pool.begin().await.context("begin restore transaction")?;
+    for u in users {
+        sqlx::query(
+            "INSERT INTO users \
+             (username, password_hash, role, disabled, must_change_pw, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&u.username)
+        .bind(&u.password_hash)
+        .bind(&u.role)
+        .bind(u.disabled)
+        .bind(u.must_change_pw)
+        .bind(&u.created_at)
+        .bind(&u.updated_at)
+        .execute(&mut *tx)
+        .await
+        .with_context(|| format!("restore user {}", u.username))?;
+    }
+    tx.commit().await.context("commit restore transaction")?;
+    Ok(users.len())
+}
+
+/// Delete the SQLite DB and its WAL/SHM sidecars. A missing file is fine
+/// (nothing to wipe). Only these three exact paths are touched — never a
+/// `data/*.db` glob — so a co-located agent `state.db` is never clobbered.
+///
+/// Order matters: the sidecars go FIRST and the main DB file LAST. The
+/// caller has already snapshotted `users` into memory, so if a delete
+/// fails (a lock / permission error) and aborts the wipe, we must not
+/// have already destroyed the on-disk DB — otherwise the in-memory
+/// snapshot dies with the process and the accounts are gone (the very
+/// lockout this code prevents). Deleting the main DB last means any
+/// failure leaves it (and its accounts) intact and the wipe re-runnable.
+fn remove_db_files(db_path: &str) -> Result<()> {
+    for path in [
+        format!("{db_path}-wal"),
+        format!("{db_path}-shm"),
+        db_path.to_string(),
+    ] {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "failed to delete '{path}': {e}. Something is holding the projector DB open \
+                     (a running backend, a SQLite client, an antivirus scan) — stop the service \
+                     and close any client, then re-run."
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -701,4 +931,122 @@ fn init_tracing(log: &LogSection) -> Result<Option<tracing_appender::non_blockin
         .try_init();
 
     Ok(Some(guard))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::SqlitePool;
+
+    /// A throwaway DB path under the temp dir, unique to this process so
+    /// parallel test runs don't collide. Sidecars (-wal/-shm) sit next
+    /// to it and are cleaned by the wipe itself.
+    fn temp_db_path(tag: &str) -> String {
+        let p = std::env::temp_dir().join(format!(
+            "kanade-wipe-test-{}-{}.db",
+            std::process::id(),
+            tag
+        ));
+        // Start from a clean slate even if a prior run left a file.
+        let _ = remove_db_files(p.to_str().unwrap());
+        p.to_string_lossy().into_owned()
+    }
+
+    async fn open(db_path: &str) -> SqlitePool {
+        let opts = SqliteConnectOptions::from_str(&format!("sqlite://{db_path}"))
+            .unwrap()
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn wipe_preserves_users_and_drops_projector_rows() {
+        let db_path = temp_db_path("preserve");
+
+        // Seed a durable account + a projector-derived row.
+        let pool = open(&db_path).await;
+        sqlx::query(
+            "INSERT INTO users \
+             (username, password_hash, role, disabled, must_change_pw, created_at, updated_at) \
+             VALUES ('admin', 'argon2hash', 'admin', 0, 1, '2026-01-02 03:04:05', '2026-01-02 03:04:05')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO check_status (pc_id, check_name, status, detail, recorded_at, label) \
+             VALUES ('pc1', 'c', 'ok', 'd', '2026-01-02 03:04:05', 'L')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        let restored = wipe_projector_at(&db_path).await.unwrap();
+        assert_eq!(restored, 1, "the one admin account is restored");
+
+        // Reopen WITHOUT migrating (open() migrates, but the wipe already
+        // left a migrated DB) and assert the split: users kept verbatim,
+        // projector table emptied.
+        let pool = open(&db_path).await;
+        let (user, hash, role, disabled, must, created): (
+            String,
+            String,
+            String,
+            i64,
+            i64,
+            String,
+        ) = sqlx::query_as(
+            "SELECT username, password_hash, role, disabled, must_change_pw, created_at \
+                 FROM users",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(user, "admin");
+        assert_eq!(hash, "argon2hash");
+        assert_eq!(role, "admin");
+        assert_eq!(disabled, 0);
+        assert_eq!(must, 1);
+        assert_eq!(created, "2026-01-02 03:04:05", "timestamps round-trip");
+
+        let checks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM check_status")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            checks, 0,
+            "projector-derived rows are dropped (replay refills)"
+        );
+        pool.close().await;
+
+        let _ = remove_db_files(&db_path);
+    }
+
+    #[tokio::test]
+    async fn wipe_on_missing_db_is_a_noop() {
+        // A fresh box (no DB yet): snapshot finds nothing, the wipe still
+        // creates a migrated DB, and zero accounts are restored.
+        let db_path = temp_db_path("missing");
+        assert!(!Path::new(&db_path).exists());
+        let restored = wipe_projector_at(&db_path).await.unwrap();
+        assert_eq!(restored, 0);
+        assert!(Path::new(&db_path).exists(), "schema is (re)created");
+
+        let pool = open(&db_path).await;
+        let users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(users, 0);
+        pool.close().await;
+        let _ = remove_db_files(&db_path);
+    }
 }
