@@ -36,6 +36,17 @@ pub struct Notification {
     pub require_ack: bool,
     pub title: String,
     pub body: String,
+    /// Whether to surface an OS toast for this notification — decoupled
+    /// from [`priority`](Self::priority). `true` gives the full "make
+    /// sure they see it" treatment (persistent native toast; the agent
+    /// launches the Client App when it isn't running; lands in the lock
+    /// screen / Action Center; re-pops on logon/unlock). `false` shows it
+    /// only in the in-app list. `#[serde(default)]` (⇒ `false`) just so a
+    /// pre-this-field body on the retained stream still decodes — it is
+    /// NOT a priority fallback; toast behaviour is driven solely by this
+    /// flag.
+    #[serde(default)]
+    pub toast: bool,
     /// When the notification was created (backend wall clock).
     pub issued_at: chrono::DateTime<chrono::Utc>,
     /// Optional human-readable label of who created the
@@ -211,6 +222,10 @@ pub struct PublishNotificationRequest {
     pub require_ack: bool,
     pub title: String,
     pub body: String,
+    /// Surface an OS toast (see [`Notification::toast`]). Decoupled from
+    /// `priority`; defaults to `false` (in-app only).
+    #[serde(default)]
+    pub toast: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issued_by: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -399,6 +414,46 @@ mod tests {
     }
 
     #[test]
+    fn notification_toast_defaults_false_and_round_trips() {
+        // A body on the retained stream from before the `toast` field
+        // decodes with toast = false (so old messages just don't toast).
+        let wire = r#"{
+            "id":"n1","priority":"info","title":"t","body":"b",
+            "issued_at":"2026-05-20T12:00:00Z"
+        }"#;
+        let n: Notification = serde_json::from_str(wire).expect("decode without toast");
+        assert!(!n.toast, "absent toast ⇒ false (in-app only, not a toast)");
+
+        // And an explicit toast:true round-trips.
+        let wire_true = r#"{
+            "id":"n2","priority":"warn","title":"t","body":"b","toast":true,
+            "issued_at":"2026-05-20T12:00:00Z"
+        }"#;
+        let n: Notification = serde_json::from_str(wire_true).expect("decode toast:true");
+        assert!(n.toast);
+        // Decoupled from priority: a warn can carry toast:true.
+        assert_eq!(n.priority, NotificationPriority::Warn);
+    }
+
+    #[test]
+    fn publish_request_toast_defaults_false_and_decodes() {
+        // Toast is driven ONLY by this flag (decoupled from priority by
+        // design): an omitted `toast` decodes to false even for an
+        // emergency — the caller must opt in with `toast: true`. There is
+        // deliberately no priority fallback.
+        let req: PublishNotificationRequest =
+            serde_json::from_str(r#"{"priority":"emergency","title":"t","body":"b","target":{}}"#)
+                .expect("decode without toast");
+        assert!(!req.toast, "omitted toast ⇒ false, even for emergency");
+
+        let req: PublishNotificationRequest = serde_json::from_str(
+            r#"{"priority":"warn","title":"t","body":"b","toast":true,"target":{}}"#,
+        )
+        .expect("decode with toast:true");
+        assert!(req.toast, "explicit toast:true on a non-emergency priority");
+    }
+
+    #[test]
     fn publish_request_requires_target_audience() {
         // The wire decodes a target with no audience set; the handler
         // is what rejects it. Here we just pin Target::is_specified so
@@ -409,6 +464,7 @@ mod tests {
         assert!(!req.target.is_specified(), "empty target is unspecified");
         assert_eq!(req.id, None, "id omitted ⇒ backend mints one");
         assert!(!req.require_ack, "require_ack defaults false");
+        assert!(!req.toast, "toast defaults false");
     }
 
     #[test]

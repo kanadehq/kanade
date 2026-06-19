@@ -213,6 +213,10 @@ export type PublishNotificationRequest = {
   require_ack: boolean;
   title: string;
   body: string;
+  // Surface an OS toast on the Client App — decoupled from priority.
+  // true = persistent toast (+ launches a closed app, lock screen / Action
+  // Center); false = in-app list only. Defaults to false when omitted.
+  toast: boolean;
   issued_by?: string;
   expires_at?: string;
   target: { all: boolean; groups: string[]; pcs: string[] };
@@ -250,6 +254,7 @@ export type NotificationRecord = {
   require_ack: boolean;
   title: string;
   body: string;
+  toast: boolean;
   issued_at: string;
   issued_by?: string | null;
   expires_at?: string | null;
@@ -286,6 +291,7 @@ export type NotificationReuse = {
     require_ack: boolean;
     title: string;
     body: string;
+    toast: boolean;
     issued_by?: string | null;
   };
 };

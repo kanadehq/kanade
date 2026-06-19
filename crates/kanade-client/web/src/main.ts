@@ -417,6 +417,10 @@ type AppNotification = {
   require_ack: boolean;
   title: string;
   body: string;
+  // Whether to surface an OS toast — driven by this flag, NOT by priority.
+  // true = persistent native toast (+ agent launches us when closed, lock
+  // screen / Action Center, re-pop on unlock); false = in-app panel only.
+  toast: boolean;
   issued_at: string;
   issued_by?: string | null;
   expires_at?: string | null;
@@ -490,10 +494,10 @@ async function loadNotifications(): Promise<void> {
     }
 
     await ensureLaunchId();
-    const target = pendingEmergencyId
-      ? notifications.get(pendingEmergencyId)
+    const target = pendingNotificationId
+      ? notifications.get(pendingNotificationId)
       : null;
-    if (pendingEmergencyId && target) {
+    if (pendingNotificationId && target) {
       // Agent-launched for a specific emergency (#102): surface it as a
       // native OS toast (the window stays hidden so it never bursts over
       // a meeting) — clicking the toast opens the window onto it.
@@ -508,18 +512,18 @@ async function loadNotifications(): Promise<void> {
         // agent-launch isn't a silent no-op.
         void invoke("show_main_window").catch(() => {});
       }
-    } else if (pendingEmergencyId) {
+    } else if (pendingNotificationId) {
       // Launched for an id we don't have in history — reveal the window.
       void invoke("show_main_window").catch(() => {});
     } else {
       // Normal / reconnect launch (SPEC §2.12.8 recovery): an unread,
-      // non-expired emergency whose live push arrived while the pipe was
-      // down (so we never toasted it) is surfaced now from history. The
-      // `toastedIds` guard keeps a reconnect from re-toasting one already
-      // shown.
+      // non-expired toast notification whose live push arrived while the
+      // pipe was down (so we never toasted it) is surfaced now from
+      // history. The `toastedIds` guard keeps a reconnect from re-toasting
+      // one already shown.
       for (const n of res.items) {
         if (
-          n.priority === "emergency" &&
+          n.toast &&
           !n.acked_at &&
           !isExpired(n) &&
           !toastedIds.has(n.id)
@@ -533,9 +537,9 @@ async function loadNotifications(): Promise<void> {
   }
 }
 
-// ---- Emergency launch (#102): agent → `--show-notification <id>` ----
+// ---- Toast-fallback launch (#102): agent → `--show-notification <id>` ----
 
-let pendingEmergencyId: string | null = null;
+let pendingNotificationId: string | null = null;
 let launchIdFetched = false;
 // Whether we've consumed a toast-click launch focus id (#647) — fetched once.
 let launchFocusFetched = false;
@@ -552,55 +556,53 @@ async function ensureLaunchId(): Promise<void> {
   if (launchIdFetched) return;
   launchIdFetched = true;
   try {
-    pendingEmergencyId =
+    pendingNotificationId =
       (await invoke<string | null>("get_launch_notification")) ?? null;
   } catch (err) {
     console.error("get_launch_notification failed", err);
-    pendingEmergencyId = null;
+    pendingNotificationId = null;
   }
 }
 
 // Surface a notification as a native OS toast — the whole point of OS
 // toasts (vs an in-app toast or a modal) is that they show in Windows'
 // notification area regardless of whether our window is visible/focused,
-// so they never burst over whatever the user is doing (a meeting). ALL
-// priorities go through here. Clicking the toast reveals the window
-// focused on the notification in the panel (where its 確認 button lives).
-// Falls back to revealing the window if toast permission is denied or the
-// OS-toast call fails — so a notification is never silently lost.
+// so they never burst over whatever the user is doing (a meeting).
+// Surfacing is driven by the `toast` flag, NOT by priority: a
+// notification with toast:false stays in the in-app panel only and this is
+// a no-op. Clicking the toast reveals the window focused on the
+// notification in the panel (where its 確認 button lives). Falls back to
+// revealing the window if toast permission is denied or the OS-toast call
+// fails — so a toast notification is never silently lost.
 async function surfaceOsToast(n: AppNotification): Promise<void> {
+  if (!n.toast) return;
   const icon = PRIORITY_ICON[n.priority] ?? PRIORITY_ICON.unknown;
   // Mark as toasted up front so the reconnect-recovery loop won't
   // re-toast it (and a concurrent live push for the same id is a no-op).
   toastedIds.add(n.id);
 
-  // Emergency → native WinRT toast (show_emergency_toast): it persists on
+  // toast:true → native WinRT toast (show_emergency_toast): it persists on
   // screen until dismissed (scenario=Reminder) and stays in the Action
   // Center, unlike the plugin's sendNotification which auto-dismisses in
   // ~7s. Clicking it (body or 確認 button) opens the client focused on this
   // notification via the kanade-client:// protocol (#647) — hence the id.
   // Fall through to the plugin path only if the native command fails.
-  if (n.priority === "emergency") {
-    try {
-      await invoke("show_emergency_toast", {
-        title: `${icon} ${n.title}`,
-        body: n.body,
-        id: n.id,
-      });
-      return;
-    } catch (err) {
-      console.error(
-        "native emergency toast failed; falling back to plugin toast",
-        err,
-      );
-    }
+  try {
+    await invoke("show_emergency_toast", {
+      title: `${icon} ${n.title}`,
+      body: n.body,
+      id: n.id,
+    });
+    return;
+  } catch (err) {
+    console.error("native toast failed; falling back to plugin toast", err);
   }
 
   try {
     let granted = await isPermissionGranted();
     if (!granted) granted = (await requestPermission()) === "granted";
     if (!granted) {
-      revealForEmergency(n);
+      revealForToast(n);
       return;
     }
     if (!toastActionRegistered) {
@@ -612,8 +614,8 @@ async function surfaceOsToast(n: AppNotification): Promise<void> {
       // — on desktop its backing command isn't registered, so the call
       // REJECTS. That rejection must NOT abort the toast: it sits before
       // `sendNotification` below, so an unguarded `await` here threw us into
-      // the catch (revealForEmergency) and NO toast was ever sent — the
-      // emergency silently fell back to a window on every desktop launch.
+      // the catch (revealForToast) and NO toast was ever sent — the toast
+      // silently fell back to a window on every desktop launch.
       // Mark it attempted up front (don't retry the unsupported call on
       // every toast) and swallow the desktop rejection; toast-click focus
       // just isn't available on desktop.
@@ -636,15 +638,16 @@ async function surfaceOsToast(n: AppNotification): Promise<void> {
     sendNotification({ title: `${icon} ${n.title}`, body: n.body });
   } catch (err) {
     console.error("OS toast failed", err);
-    revealForEmergency(n);
+    revealForToast(n);
   }
 }
 
 // Fallback when the OS toast can't be shown (permission denied / failure):
-// reveal the window ONLY for an emergency — stealing focus for a routine
-// info/warn would defeat the non-intrusive goal (it's still in the panel).
-function revealForEmergency(n: AppNotification): void {
-  if (n.priority !== "emergency") return;
+// reveal the window ONLY for a toast notification — stealing focus for a
+// non-toast info/warn would defeat the non-intrusive goal (it's still in
+// the panel).
+function revealForToast(n: AppNotification): void {
+  if (!n.toast) return;
   void invoke("show_main_window").catch(() => {});
   focusNotificationInPanel(n.id);
 }
@@ -680,10 +683,10 @@ function focusNotificationInPanel(id: string): void {
   }
 }
 
-// Apply one `notifications.new` push: store, re-render, surface as a
-// non-intrusive OS toast (no screen-grabbing modal, no in-app toast that
-// only shows when the window is up). All priorities go through the same
-// path; emergency only differs in the fallback (revealForEmergency).
+// Apply one `notifications.new` push: store, re-render, and (when
+// `toast:true`) surface as a non-intrusive OS toast (no screen-grabbing
+// modal, no in-app toast that only shows when the window is up).
+// `surfaceOsToast` is a no-op for `toast:false` (in-app panel only).
 function handleNewNotification(n: AppNotification): void {
   notifications.set(n.id, n);
   renderNotifications();
@@ -692,16 +695,16 @@ function handleNewNotification(n: AppNotification): void {
 }
 
 // Single-instance forward (#624): a SECOND `kanade-client` launched with
-// `--show-notification <id>` (the agent's per-emergency fallback) was
+// `--show-notification <id>` (the agent's no-subscriber toast fallback) was
 // collapsed into this already-running instance, which forwarded the id
-// here. Toast that emergency from here so a new hidden process never piles
-// up. If we already toasted it (its live push beat the forward), do
+// here. Toast that notification from here so a new hidden process never
+// piles up. If we already toasted it (its live push beat the forward), do
 // nothing — `surfaceOsToast` only *records* into `toastedIds`, it doesn't
 // guard on it, so the caller must (else we'd double-toast). If we don't
 // have it yet (forwarded before its push), re-pull history once and
 // retry; failing that, reveal the window so the forward isn't a silent
 // no-op.
-async function surfaceForwardedEmergency(id: string): Promise<void> {
+async function surfaceForwardedToast(id: string): Promise<void> {
   if (toastedIds.has(id)) return; // already surfaced by the live push
   const tryToast = (): boolean => {
     const n = notifications.get(id);
@@ -720,7 +723,7 @@ async function surfaceForwardedEmergency(id: string): Promise<void> {
     for (const n of res.items) notifications.set(n.id, n);
     renderNotifications();
   } catch (err) {
-    console.error("forwarded emergency: list re-pull failed", err);
+    console.error("forwarded toast notification: list re-pull failed", err);
   }
   if (!tryToast()) {
     void invoke("show_main_window").catch(() => {});
@@ -728,13 +731,13 @@ async function surfaceForwardedEmergency(id: string): Promise<void> {
 }
 
 // Presence-driven re-surface (#647): the agent forwarded `--resurface` because
-// the user just became present (logon / unlock) after emergencies they
+// the user just became present (logon / unlock) after toast notifications they
 // couldn't see — sent while signed out, or delivered to the Action Center
 // while the screen was locked. Re-pull the freshest unread set, then re-toast
-// every unread, unexpired emergency, DELIBERATELY bypassing the toastedIds
-// dedup (the whole point is to re-pop ones already silently delivered).
-// info/warn stay passive.
-async function resurfaceAllEmergencies(): Promise<void> {
+// every unread, unexpired `toast:true` notification, DELIBERATELY bypassing the
+// toastedIds dedup (the whole point is to re-pop ones already silently
+// delivered). `toast:false` ones stay passive.
+async function resurfaceAllToasts(): Promise<void> {
   try {
     const res = await invoke<NotificationsListResult>("notifications_list", {
       filter: "all",
@@ -746,7 +749,7 @@ async function resurfaceAllEmergencies(): Promise<void> {
     console.error("resurface: list re-pull failed", err);
   }
   for (const n of notifications.values()) {
-    if (n.priority === "emergency" && !n.acked_at && !isExpired(n)) {
+    if (n.toast && !n.acked_at && !isExpired(n)) {
       void surfaceOsToast(n);
     }
   }
@@ -1262,13 +1265,13 @@ window.addEventListener("DOMContentLoaded", () => {
   // id; the running instance toasts it here instead of a new process.
   void listen<string>("klp-show-notification", (event) => {
     const id = event.payload;
-    if (id) void surfaceForwardedEmergency(id);
+    if (id) void surfaceForwardedToast(id);
   });
 
   // Presence-driven re-surface (#647): a second `--resurface` launch was
-  // collapsed into this instance; re-pop every unread emergency.
+  // collapsed into this instance; re-pop every unread toast notification.
   void listen("klp-resurface", () => {
-    void resurfaceAllEmergencies();
+    void resurfaceAllToasts();
   });
 
   // Toast clicked (#647): a `kanade-client://show?id=<id>` launch was forwarded
