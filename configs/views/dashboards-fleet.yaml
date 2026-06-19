@@ -23,6 +23,7 @@ widgets:
   # ── Reliability ──────────────────────────────────────────────────
   - dashboard: Reliability
     title: Unexpected shutdowns by PC
+    description: Event 41 count per PC (top offenders)
     scope: fleet
     kind: unexpected_shutdown
     agg: count
@@ -30,12 +31,14 @@ widgets:
     render: bar
   - dashboard: Reliability
     title: Unexpected shutdowns (total)
+    description: Event 41 across the fleet
     scope: fleet
     kind: unexpected_shutdown
     agg: count
     render: stat
   - dashboard: Reliability
     title: Reboots by hour (fleet)
+    description: Boot events bucketed by local hour
     scope: fleet
     kind: boot
     agg: count
@@ -43,6 +46,7 @@ widgets:
     render: timeline
   - dashboard: Reliability
     title: This PC's reboots by hour
+    description: Boot events bucketed by local hour
     scope: pc
     kind: boot
     agg: count
@@ -59,6 +63,7 @@ widgets:
   # the top-users / by-hour widgets work on the default fleet.
   - dashboard: Access
     title: Logons by type (Security 4624)
+    description: Needs the on-demand collect-winlog-logons-all job
     scope: fleet
     kind: logon
     source: winlog:Security
@@ -67,6 +72,7 @@ widgets:
     render: bar
   - dashboard: Access
     title: Top users by logon (fleet)
+    description: Winlogon 7001 + Security 4624, by user
     scope: fleet
     kind: logon
     agg: count
@@ -74,6 +80,7 @@ widgets:
     render: bar
   - dashboard: Access
     title: Logons by hour (fleet)
+    description: Logon events bucketed by local hour
     scope: fleet
     kind: logon
     agg: count
@@ -81,6 +88,7 @@ widgets:
     render: timeline
   - dashboard: Access
     title: This PC's logons by hour
+    description: Logon events bucketed by local hour
     scope: pc
     kind: logon
     agg: count
@@ -90,6 +98,7 @@ widgets:
   # ── Agent health ─────────────────────────────────────────────────
   - dashboard: Agent health
     title: Self-updates by PC
+    description: agent_self_update count per PC
     scope: fleet
     kind: agent_self_update
     agg: count
@@ -97,6 +106,7 @@ widgets:
     render: bar
   - dashboard: Agent health
     title: Agent restarts by PC
+    description: agent_started count per PC
     scope: fleet
     kind: agent_started
     agg: count
