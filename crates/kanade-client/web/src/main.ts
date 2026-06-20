@@ -434,6 +434,14 @@ type NotificationsListResult = {
 
 type NotificationsAckResult = { acked_at: string };
 
+// `notifications.amended` push: a post-send operation on a notification this
+// client may be showing. Currently only `recall` (the operator deleted it) —
+// the `op.kind` tag leaves room for a future `update`.
+type NotificationAmend = {
+  id: string;
+  op: { kind: "recall" };
+};
+
 const PRIORITY_ICON: Record<NotificationPriority, string> = {
   info: "ℹ️",
   warn: "⚠️",
@@ -478,6 +486,22 @@ async function loadNotifications(): Promise<void> {
       cursor: null,
     });
     for (const n of res.items) notifications.set(n.id, n);
+    // Reconcile recalls missed while offline: an id deleted from the stream
+    // no longer comes back in `notifications.list`, so any locally-held id
+    // absent from a COMPLETE listing was recalled — drop it. Guard on
+    // `next_cursor`: if the history is paginated (more pages exist) an id
+    // beyond this first page isn't really gone, so skip the prune entirely
+    // rather than wrongly evicting it. Expired ids are handled separately by
+    // `evictOldNotifications`, so leave them be here.
+    if (!res.next_cursor) {
+      const present = new Set(res.items.map((n) => n.id));
+      for (const [id, n] of notifications) {
+        if (!present.has(id) && !isExpired(n)) {
+          notifications.delete(id);
+          expandedIds.delete(id);
+        }
+      }
+    }
     renderNotifications();
 
     // Toast-click launch (#647): this process was started by clicking an
@@ -694,6 +718,20 @@ function handleNewNotification(n: AppNotification): void {
   void surfaceOsToast(n);
 }
 
+// Apply one `notifications.amended` push. Currently only `recall`: the
+// operator deleted the notification, so drop it from the panel + unread count.
+// An id we never held is a no-op (this is a single fleet-wide broadcast, so
+// every client sees every recall and filters by what it has). An OS toast
+// already surfaced in the Action Center can't be programmatically dismissed —
+// only the in-app panel clears.
+function handleAmendNotification(a: NotificationAmend): void {
+  if (a.op?.kind !== "recall") return;
+  if (!notifications.has(a.id)) return;
+  notifications.delete(a.id);
+  expandedIds.delete(a.id);
+  renderNotifications();
+}
+
 // Single-instance forward (#624): a SECOND `kanade-client` launched with
 // `--show-notification <id>` (the agent's no-subscriber toast fallback) was
 // collapsed into this already-running instance, which forwarded the id
@@ -744,6 +782,23 @@ async function resurfaceAllToasts(): Promise<void> {
       cursor: null,
     });
     for (const n of res.items) notifications.set(n.id, n);
+    // Reconcile recalls (same guard as `loadNotifications`): a notification
+    // recalled while the screen was locked is gone from the stream but still
+    // in the map, and this function re-toasts every map entry — so without
+    // this prune a recalled notification would re-pop on unlock. Only prune on
+    // a COMPLETE listing (`next_cursor` absent) so a paginated-out id isn't
+    // wrongly evicted. `klp-connected`/`loadNotifications` does NOT fire on a
+    // plain unlock of an already-connected session, so this is the only place
+    // that catches a lock-window recall before the re-toast loop.
+    if (!res.next_cursor) {
+      const present = new Set(res.items.map((n) => n.id));
+      for (const [id, n] of notifications) {
+        if (!present.has(id) && !isExpired(n)) {
+          notifications.delete(id);
+          expandedIds.delete(id);
+        }
+      }
+    }
     renderNotifications();
   } catch (err) {
     console.error("resurface: list re-pull failed", err);
@@ -1243,6 +1298,12 @@ window.addEventListener("DOMContentLoaded", () => {
       const n = payload.params as Partial<AppNotification> | null;
       if (!n?.id) return;
       handleNewNotification(n as AppNotification);
+      return;
+    }
+    if (payload.method === "notifications.amended") {
+      const a = payload.params as Partial<NotificationAmend> | null;
+      if (!a?.id || !a.op) return;
+      handleAmendNotification(a as NotificationAmend);
       return;
     }
   });

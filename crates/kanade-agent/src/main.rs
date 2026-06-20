@@ -303,6 +303,13 @@ pub(crate) async fn run_agent() -> Result<()> {
             klp::notify_bus::BROADCAST_CAPACITY,
         )
         .0;
+    // Sibling broadcast for post-send amends (recall). Same lifecycle as
+    // `notif_tx`: one sender feeds the listener + the notify_bus task.
+    #[cfg(target_os = "windows")]
+    let amend_tx = tokio::sync::broadcast::channel::<
+        kanade_shared::ipc::notifications::NotificationAmend,
+    >(klp::notify_bus::BROADCAST_CAPACITY)
+    .0;
     #[cfg(target_os = "windows")]
     {
         let initial_snapshot = klp::state::eval_once(
@@ -329,6 +336,7 @@ pub(crate) async fn run_agent() -> Result<()> {
             log_path: std::path::PathBuf::from(&cfg.log.path),
             nats: client.clone(),
             notif_tx: notif_tx.clone(),
+            amend_tx: amend_tx.clone(),
         });
     }
 
@@ -379,7 +387,13 @@ pub(crate) async fn run_agent() -> Result<()> {
     // `groups_rx` so the subject set tracks group membership, just like
     // command_replay. Windows-only (the whole KLP module is).
     #[cfg(target_os = "windows")]
-    klp::notify_bus::spawn(client.clone(), pc_id.clone(), groups_rx.clone(), notif_tx);
+    klp::notify_bus::spawn(
+        client.clone(),
+        pc_id.clone(),
+        groups_rx.clone(),
+        notif_tx,
+        amend_tx,
+    );
 
     // Reconnect catch-up: durable consumer on STREAM_EXEC that
     // replays the latest retained Command per subject. See

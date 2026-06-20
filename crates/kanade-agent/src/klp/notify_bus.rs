@@ -29,7 +29,7 @@
 //! a follow-up PR).
 
 use futures::stream::StreamExt;
-use kanade_shared::ipc::notifications::Notification;
+use kanade_shared::ipc::notifications::{Notification, NotificationAmend};
 use kanade_shared::subject;
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
@@ -77,8 +77,9 @@ pub fn spawn(
     pc_id: String,
     groups_rx: tokio::sync::watch::Receiver<Vec<String>>,
     notif_tx: broadcast::Sender<Notification>,
+    amend_tx: broadcast::Sender<NotificationAmend>,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(run(client, pc_id, groups_rx, notif_tx))
+    tokio::spawn(run(client, pc_id, groups_rx, notif_tx, amend_tx))
 }
 
 async fn run(
@@ -86,6 +87,7 @@ async fn run(
     pc_id: String,
     mut groups_rx: tokio::sync::watch::Receiver<Vec<String>>,
     notif_tx: broadcast::Sender<Notification>,
+    amend_tx: broadcast::Sender<NotificationAmend>,
 ) {
     // Once the groups task drops its sender (never within a running
     // process, but be defensive), `changed()` resolves immediately and
@@ -131,6 +133,22 @@ async fn run(
                 "notify_bus: partial subscription; some subjects unavailable until next membership change",
             );
         }
+        // The amend channel (recall etc.) is a single fleet-wide subject,
+        // NOT membership-filtered: a recall is keyed by id and a client
+        // ignores ids it doesn't hold, so one subscription reaches everyone.
+        // Added to the same `merged` stream and routed by subject in
+        // `forward`; deliberately kept out of `filter_subjects` (which
+        // `notifications.list` reuses for history replay — `notif-amend`
+        // carries no history). Its failure to subscribe is non-fatal (recall
+        // just won't live-reflect until the next rebuild).
+        match client.subscribe(subject::NOTIFICATIONS_AMEND_SUBJECT).await {
+            Ok(s) => subs.push(s),
+            Err(e) => warn!(
+                error = %e,
+                subject = subject::NOTIFICATIONS_AMEND_SUBJECT,
+                "notify_bus: amend subscribe failed",
+            ),
+        }
         let mut merged = futures::stream::select_all(subs);
         info!(
             pc_id = %pc_id,
@@ -143,7 +161,7 @@ async fn run(
             tokio::select! {
                 maybe_msg = merged.next() => {
                     match maybe_msg {
-                        Some(msg) => forward(&msg, &notif_tx, &pc_id),
+                        Some(msg) => forward(&msg, &notif_tx, &amend_tx, &pc_id),
                         // Every subscriber ended at once — unexpected
                         // for core subs, but rebuild rather than spin.
                         None => {
@@ -170,11 +188,21 @@ async fn run(
     }
 }
 
-/// Decode one NATS message into a [`Notification`] and broadcast it.
+/// Route one incoming bus message: an amend (recall etc.) on the
+/// fleet-wide amend subject, otherwise a [`Notification`] fan-out copy.
 /// A `send` error means no Client App is currently subscribed — a
 /// normal idle state, not an error, so it's dropped silently (the
 /// at-most-once contract; history recovers it via `notifications.list`).
-fn forward(msg: &async_nats::Message, notif_tx: &broadcast::Sender<Notification>, pc_id: &str) {
+fn forward(
+    msg: &async_nats::Message,
+    notif_tx: &broadcast::Sender<Notification>,
+    amend_tx: &broadcast::Sender<NotificationAmend>,
+    pc_id: &str,
+) {
+    if msg.subject.as_str() == subject::NOTIFICATIONS_AMEND_SUBJECT {
+        forward_amend(msg, amend_tx, pc_id);
+        return;
+    }
     match serde_json::from_slice::<Notification>(&msg.payload) {
         Ok(notification) => {
             let id = notification.id.clone();
@@ -220,6 +248,37 @@ fn forward(msg: &async_nats::Message, notif_tx: &broadcast::Sender<Notification>
             error = %e,
             subject = %msg.subject,
             "notify_bus: failed to decode Notification",
+        ),
+    }
+}
+
+/// Decode one [`NotificationAmend`] off the fleet-wide amend subject and
+/// broadcast it to the per-connection forwarders. A `send` error (no Client
+/// App subscribed) is dropped silently: an offline client reconciles a recall
+/// on reconnect via `notifications.list` (the deleted id no longer appears).
+fn forward_amend(
+    msg: &async_nats::Message,
+    amend_tx: &broadcast::Sender<NotificationAmend>,
+    pc_id: &str,
+) {
+    match serde_json::from_slice::<NotificationAmend>(&msg.payload) {
+        Ok(amend) => {
+            let id = amend.id.clone();
+            match amend_tx.send(amend) {
+                Ok(n) => {
+                    debug!(pc_id = %pc_id, notification_id = %id, receivers = n, "notify_bus: amend broadcast")
+                }
+                Err(_) => debug!(
+                    pc_id = %pc_id,
+                    notification_id = %id,
+                    "notify_bus: no connected clients for amend; dropped (recoverable via notifications.list)",
+                ),
+            }
+        }
+        Err(e) => warn!(
+            error = %e,
+            subject = %msg.subject,
+            "notify_bus: failed to decode NotificationAmend",
         ),
     }
 }

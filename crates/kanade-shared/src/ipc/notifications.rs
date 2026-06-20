@@ -367,6 +367,44 @@ pub struct AudiencePc {
     pub acked_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+// ---------- amend (post-send operations) -------------------------
+
+/// A post-send amendment to an already-fanned-out notification, broadcast
+/// fleet-wide on the ephemeral [`crate::subject::NOTIFICATIONS_AMEND_SUBJECT`]
+/// channel so every connected client showing the notification can react in
+/// real time. Carries only the notification `id` plus the operation — a
+/// client applies it only if it currently holds that id (an id it never
+/// received is a no-op), so the single broadcast needs no audience routing.
+///
+/// The durable half of an operation lives in the backend (recall deletes the
+/// stream copies; a future edit re-publishes them); this is the "update the
+/// screens that are showing it right now" half. Built to grow: today only
+/// `Recall`, but `op` is a tagged enum so an `Update`/`SetExpiry` variant can
+/// be added without breaking the wire format.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct NotificationAmend {
+    pub id: String,
+    pub op: NotificationAmendOp,
+}
+
+/// The operation an [`NotificationAmend`] applies. Tagged on `kind` so future
+/// data-carrying variants (e.g. `Update { notification }`) stay wire-compatible.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum NotificationAmendOp {
+    /// The notification was recalled (deleted): remove it from the panel,
+    /// unread badge, and any open require-ack modal.
+    Recall,
+}
+
+/// Params of the `notifications.amended` push (Agent → Client) — the
+/// flattened [`NotificationAmend`] (`{ "id", "kind": "recall" }`).
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
+pub struct NotificationAmendedParams {
+    #[serde(flatten)]
+    pub amend: NotificationAmend,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -507,6 +545,29 @@ mod tests {
         assert_eq!(back.user_sid, a.user_sid);
         assert_eq!(back.acked_at, t);
         assert_eq!(back.account.as_deref(), Some("EXAMPLE\\taro"));
+    }
+
+    #[test]
+    fn notification_amend_recall_round_trips() {
+        // Wire shape the backend broadcasts and the client decodes:
+        // the op is tagged on `kind` so adding a data-carrying variant
+        // later (Update { .. }) stays compatible.
+        let a = NotificationAmend {
+            id: "notif-9f3a".into(),
+            op: NotificationAmendOp::Recall,
+        };
+        let v = serde_json::to_value(&a).unwrap();
+        assert_eq!(v["id"], "notif-9f3a");
+        assert_eq!(v["op"]["kind"], "recall");
+        let back: NotificationAmend = serde_json::from_value(v).unwrap();
+        assert_eq!(back, a);
+
+        // The push params flatten the amend (no nested "amend" key).
+        let p = NotificationAmendedParams { amend: a.clone() };
+        let pv = serde_json::to_value(&p).unwrap();
+        assert_eq!(pv["id"], "notif-9f3a");
+        assert_eq!(pv["op"]["kind"], "recall");
+        assert!(pv.get("amend").is_none(), "amend is flattened: {pv:?}");
     }
 
     #[test]

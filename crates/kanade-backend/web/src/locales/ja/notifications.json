@@ -65,6 +65,15 @@
     "targetPc": "PC: {{name}}",
     "targetUnknown": "(送信先を特定できませんでした)"
   },
+  "recall": {
+    "action": "取り消し",
+    "tooltip": "この通知を完全に削除します（接続中のクライアントからも消えます）",
+    "confirmTitle": "通知を取り消しますか？",
+    "confirmBody": "この通知を完全に削除します。送信履歴から消え、接続中のクライアントの一覧からも即座に除去されます。すでに表示された OS トーストは取り消せません。この操作は元に戻せません。",
+    "confirmLabel": "取り消す",
+    "cancelLabel": "キャンセル",
+    "done": "通知を取り消しました。"
+  },
   "audience": {
     "title": "対象 PC の確認状況",
     "summary": "{{confirmed}} / {{total}} 台 確認済",

@@ -65,6 +65,15 @@
     "targetPc": "PC: {{name}}",
     "targetUnknown": "(target could not be reconstructed)"
   },
+  "recall": {
+    "action": "Recall",
+    "tooltip": "Completely delete this notification (also removed from connected clients)",
+    "confirmTitle": "Recall this notification?",
+    "confirmBody": "This permanently deletes the notification. It disappears from the sent history and is removed from connected clients' panels at once. An OS toast that already surfaced cannot be recalled. This cannot be undone.",
+    "confirmLabel": "Recall",
+    "cancelLabel": "Cancel",
+    "done": "Notification recalled."
+  },
   "audience": {
     "title": "Target PC confirmation",
     "summary": "{{confirmed}} / {{total}} PCs confirmed",

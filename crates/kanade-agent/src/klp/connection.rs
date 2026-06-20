@@ -15,7 +15,7 @@
 use std::path::PathBuf;
 
 use kanade_shared::ipc::handshake::HandshakeSession;
-use kanade_shared::ipc::notifications::Notification;
+use kanade_shared::ipc::notifications::{Notification, NotificationAmend};
 use kanade_shared::ipc::state::StateSnapshot;
 use kanade_shared::wire::EffectiveConfig;
 use tokio::sync::{broadcast, mpsc, watch};
@@ -97,6 +97,13 @@ pub struct ConnectionState {
     /// drive the notification path; production wires it via
     /// [`ConnectionState::with_notifications`].
     notif_tx: Option<broadcast::Sender<Notification>>,
+    /// Process-wide notification *amend* broadcast sender (KLP Phase E —
+    /// post-send ops). Fed by [`crate::klp::notify_bus`] from the fleet-wide
+    /// `notif-amend` subject; the `notifications.subscribe` forwarder derives
+    /// a receiver from it to push `notifications.amended` (recall) frames down
+    /// this connection alongside `notifications.new`. `None` only in unit
+    /// tests / a misconfigured boot.
+    amend_tx: Option<broadcast::Sender<NotificationAmend>>,
     /// `Some(v)` once `system.handshake` succeeded; `None`
     /// otherwise. The dispatcher uses this as the gate for
     /// non-handshake methods.
@@ -131,6 +138,7 @@ impl ConnectionState {
             nats: None,
             runs: std::collections::HashSet::new(),
             notif_tx: None,
+            amend_tx: None,
             agreed_protocol: None,
         }
     }
@@ -173,6 +181,23 @@ impl ConnectionState {
     /// rather than a silently-dead subscription.
     pub fn notif_subscribe(&self) -> Option<broadcast::Receiver<Notification>> {
         self.notif_tx.as_ref().map(|tx| tx.subscribe())
+    }
+
+    /// Attach the process-wide notification *amend* broadcast sender
+    /// (post-send ops — recall). Wired by the listener alongside
+    /// [`Self::with_notifications`]; a forwarder derives a receiver from it.
+    pub fn with_amends(mut self, amend_tx: broadcast::Sender<NotificationAmend>) -> Self {
+        self.amend_tx = Some(amend_tx);
+        self
+    }
+
+    /// A fresh [`broadcast::Receiver`] for notification amends (recall), or
+    /// `None` if the amend bus wasn't wired. The `notifications.subscribe`
+    /// forwarder pushes `notifications.amended` frames from it; `None` simply
+    /// means no live recall delivery (history reconciliation still cleans up
+    /// recalled ids on the next `notifications.list`).
+    pub fn amend_subscribe(&self) -> Option<broadcast::Receiver<NotificationAmend>> {
+        self.amend_tx.as_ref().map(|tx| tx.subscribe())
     }
 
     /// `true` once `system.handshake` has been processed

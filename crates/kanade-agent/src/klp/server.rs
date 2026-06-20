@@ -28,7 +28,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use kanade_shared::ipc::envelope::{RpcMessage, RpcResponse};
 use kanade_shared::ipc::error::{ErrorKind, RpcError};
-use kanade_shared::ipc::notifications::Notification;
+use kanade_shared::ipc::notifications::{Notification, NotificationAmend};
 use kanade_shared::ipc::state::StateSnapshot;
 use kanade_shared::wire::EffectiveConfig;
 use tokio::io::{ReadHalf, WriteHalf};
@@ -92,6 +92,11 @@ pub struct ListenerContext {
     /// calls `notifications.subscribe`. A `broadcast::Sender` is cheap
     /// to clone (Arc-backed).
     pub notif_tx: broadcast::Sender<Notification>,
+    /// Process-wide notification *amend* broadcast sender (post-send ops —
+    /// recall). Fed by the same [`crate::klp::notify_bus`] from the fleet-wide
+    /// `notif-amend` subject; the `notifications.subscribe` forwarder derives
+    /// a receiver to push `notifications.amended` frames.
+    pub amend_tx: broadcast::Sender<NotificationAmend>,
 }
 
 /// Spawn the KLP listener. Returns immediately with a detached
@@ -232,7 +237,8 @@ async fn handle_connection(pipe: NamedPipeServer, ctx: ListenerContext) -> Resul
         push_tx.clone(),
     )
     .with_nats(ctx.nats.clone())
-    .with_notifications(ctx.notif_tx.clone());
+    .with_notifications(ctx.notif_tx.clone())
+    .with_amends(ctx.amend_tx.clone());
 
     let read_loop_result = run_read_loop(reader, &mut conn, &push_tx).await;
 
