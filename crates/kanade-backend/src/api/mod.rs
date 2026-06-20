@@ -21,6 +21,7 @@ pub mod jetstream_status;
 pub mod jobs;
 pub mod notifications;
 pub mod obs_events;
+pub mod password_setup;
 pub mod process_perf;
 pub mod results;
 pub mod run;
@@ -94,6 +95,10 @@ pub struct AppState {
     /// shared. Used by the compliance-alert projector today; available to
     /// any future feature that needs to send mail.
     pub mailer: Option<std::sync::Arc<crate::mail::Mailer>>,
+    /// Configured external base URL (`[server] public_url`) for absolute
+    /// links in account emails. `None` ⇒ the link base is derived from the
+    /// request `Host` header instead (see `password_setup::link_base`).
+    pub public_url: Option<String>,
 }
 
 impl FromRef<AppState> for SqlitePool {
@@ -127,6 +132,16 @@ pub fn router(state: AppState) -> Router {
         .route("/api/auth/login", post(accounts::login))
         .route("/api/auth/me", get(accounts::me))
         .route("/api/auth/change-password", post(accounts::change_password))
+        // #770: PUBLIC one-time password setup/reset links + self-service
+        // forgot-password (allow-listed in crate::auth::verify, like login).
+        .route(
+            "/api/auth/password-setup/{token}",
+            get(password_setup::get_token).post(password_setup::set_password),
+        )
+        .route(
+            "/api/auth/forgot-password",
+            post(password_setup::forgot_password),
+        )
         .route("/api/agents", get(agents::list))
         .route("/api/agents/{pc_id}", get(agents::detail))
         // v0.40 Part 1: per-PC host-wide perf time-series. Bucketed
@@ -425,6 +440,11 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/accounts/{username}",
             patch(accounts::update).delete(accounts::delete),
+        )
+        // #770: mail a one-time password setup/reset link to the account.
+        .route(
+            "/api/accounts/{username}/reset-link",
+            post(accounts::reset_link),
         )
         .route_layer(axum::middleware::from_fn(crate::auth::require_admin));
 

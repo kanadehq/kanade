@@ -93,6 +93,17 @@ pub enum MailEncryption {
 #[derive(Deserialize, Debug, Clone)]
 pub struct ServerSection {
     pub bind: String,
+    /// Externally-reachable base URL of the SPA (e.g.
+    /// `https://kanade.example.com`), used to build absolute links in
+    /// emails (password setup / reset). Optional: when unset the backend
+    /// derives the base from each request's `Host` header (+
+    /// `X-Forwarded-Proto`), which is correct for a direct LAN deploy.
+    /// Set this when behind a reverse proxy / TLS terminator, or to harden
+    /// the public forgot-password path against `Host`-header poisoning
+    /// (`bind` can't be used — it's a wildcard like `0.0.0.0:8080` and
+    /// carries no scheme/hostname).
+    #[serde(default)]
+    pub public_url: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Clone)]

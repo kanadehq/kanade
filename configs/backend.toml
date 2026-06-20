@@ -9,6 +9,13 @@ log_dir = '''{% if is_windows() %}{{ env(name="ProgramData") }}\Kanade\logs{% el
 
 [server]
 bind = '0.0.0.0:8080'
+# Externally-reachable base URL of the SPA, used to build absolute links
+# in account emails (password setup / reset). Optional: when unset the
+# backend derives the base from each request's Host header, which is
+# correct for a direct LAN deploy. Set it behind a reverse proxy / TLS
+# terminator, or to harden the public forgot-password path against
+# Host-header poisoning. (`bind` can't be used — 0.0.0.0 is a wildcard.)
+# public_url = 'https://kanade.example.com'
 
 [nats]
 url = 'nats://127.0.0.1:4222'
