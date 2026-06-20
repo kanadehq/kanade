@@ -318,6 +318,27 @@ pub struct NotificationDetail {
     pub acks: Vec<NotificationAckEntry>,
     #[serde(default)]
     pub audience: Vec<AudiencePc>,
+    /// The original send target (where it was addressed: all / groups /
+    /// pcs), reconstructed from the fan-out subjects — so the SPA can show
+    /// "送信先" (vs `audience`, which is the *resolved* per-PC roster).
+    /// `None` when the subjects couldn't be reconstructed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<NotificationTarget>,
+}
+
+/// The audience a notification was *addressed* to (the `target:` of the
+/// publish), reconstructed from its fan-out subjects
+/// (`notifications.{all|group.X|pc.Y}`). Distinct from the resolved
+/// per-PC [`AudiencePc`] roster: this is the operator's intent ("sent to
+/// the it-admins group + PC minipc"), not the expanded PC list.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
+pub struct NotificationTarget {
+    #[serde(default)]
+    pub all: bool,
+    #[serde(default)]
+    pub groups: Vec<String>,
+    #[serde(default)]
+    pub pcs: Vec<String>,
 }
 
 /// One targeted PC's confirmation state, for the detail page's "who

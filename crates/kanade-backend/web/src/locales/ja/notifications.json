@@ -59,7 +59,11 @@
     "loadError": "通知の取得に失敗しました",
     "notFound": "通知が見つかりません",
     "emptyBody": "(本文なし)",
-    "id": "ID"
+    "id": "ID",
+    "target": "送信先",
+    "targetGroup": "グループ: {{name}}",
+    "targetPc": "PC: {{name}}",
+    "targetUnknown": "(送信先を特定できませんでした)"
   },
   "audience": {
     "title": "対象 PC の確認状況",

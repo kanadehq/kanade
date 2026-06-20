@@ -273,6 +273,15 @@ export type AudiencePc = {
   acked_at?: string;
 };
 
+// The original send target (where it was addressed), reconstructed from
+// the fan-out subjects — the operator's intent, vs the resolved per-PC
+// `audience` roster.
+export type NotificationTarget = {
+  all: boolean;
+  groups: string[];
+  pcs: string[];
+};
+
 // One sent notification's full content + its confirmation list + the
 // per-PC audience roster, from GET /api/notifications/{id}. Powers the
 // deep-linkable detail page.
@@ -280,6 +289,7 @@ export type NotificationDetail = {
   notification: NotificationRecord;
   acks: NotificationAckEntry[];
   audience: AudiencePc[];
+  target?: NotificationTarget;
 };
 
 // Router state carried from a history row's "reuse" action into the

@@ -59,7 +59,11 @@
     "loadError": "Failed to load the notification",
     "notFound": "Notification not found",
     "emptyBody": "(no body)",
-    "id": "ID"
+    "id": "ID",
+    "target": "Sent to",
+    "targetGroup": "Group: {{name}}",
+    "targetPc": "PC: {{name}}",
+    "targetUnknown": "(target could not be reconstructed)"
   },
   "audience": {
     "title": "Target PC confirmation",
