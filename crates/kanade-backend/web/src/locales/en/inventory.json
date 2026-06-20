@@ -31,7 +31,15 @@
     "nestedRowCount_other": "{{count}} rows",
     "prev": "← prev",
     "next": "next →",
-    "pageRange": "showing {{from}}–{{to}}"
+    "pageRange": "showing {{from}}–{{to}}",
+    "filterLabel": "filter by pc_id",
+    "filterPlaceholder": "filter by pc_id…",
+    "filterEmpty": "No PCs match \"{{q}}\"."
+  },
+  "sidebar": {
+    "ariaLabel": "Inventory types",
+    "deviceCount_one": "{{count}} device",
+    "deviceCount_other": "{{count}} devices"
   },
   "detail": {
     "backToFleet": "← back to fleet view",

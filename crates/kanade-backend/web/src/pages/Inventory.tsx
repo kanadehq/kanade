@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { Loader2, ScrollText } from 'lucide-react';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 import { Link, useMatch, useSearchParams } from 'react-router-dom';
 
@@ -10,10 +10,12 @@ import { InventorySearch } from '@/pages/Search';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { apiFetch } from '@/lib/api';
+import { useDebouncedValue } from '@/lib/hooks';
 import { cn, fmtAccount, fmtIsoLocal } from '@/lib/utils';
 
 type DisplayField = {
@@ -43,6 +45,9 @@ type InventoryJob = {
   description: string | null;
   display: DisplayField[];
   summary: DisplayField[] | null;
+  // Reported-PC tally for this manifest (backend joins it from
+  // inventory_facts). Drives the fleet sidebar's per-type badge.
+  pc_count: number;
 };
 
 type InventoryRow = {
@@ -218,8 +223,26 @@ export function Inventory() {
     const next = new URLSearchParams(search);
     if (pc) next.set('pc', pc);
     else next.delete('pc');
+    // Note: `job` is intentionally preserved. Clicking a fleet row sets
+    // `pc` while leaving the selected type in the URL, so the PC-detail
+    // view knows which FactCard to scroll to — and clearing `pc`
+    // (back-to-fleet) returns to that same type's table, not the top.
     setSearch(next);
   }, [search, setSearch, pcId]);
+
+  // `?job=` is the selected inventory type in the fleet overview: the
+  // sidebar highlights it and only its table renders (no more stacking
+  // every probe). It doubles as the scroll anchor on the detail view.
+  const jobId = search.get('job') ?? '';
+  const setJobId = useCallback((job: string) => {
+    const next = new URLSearchParams(search);
+    if (job) next.set('job', job);
+    else next.delete('job');
+    // Picking a type is in-overview navigation, not a view swap — keep
+    // it out of history (replace) so browser-back still steps
+    // fleet ↔ detail rather than cycling every type the operator tried.
+    setSearch(next, { replace: true });
+  }, [search, setSearch]);
 
   const jobsQ = useQuery({
     queryKey: ['inventory-jobs'],
@@ -314,9 +337,14 @@ export function Inventory() {
               </CardHeader>
             </Card>
           ) : pcId ? (
-            <PcDetail pcId={pcId} clear={() => setPcId('')} />
+            <PcDetail pcId={pcId} selectedJob={jobId} clear={() => setPcId('')} />
           ) : (
-            <FleetView jobs={jobsQ.data ?? []} pickPc={setPcId} />
+            <FleetOverview
+              jobs={jobsQ.data ?? []}
+              selectedJobId={jobId}
+              onSelectJob={setJobId}
+              pickPc={setPcId}
+            />
           )}
         </>
       )}
@@ -324,20 +352,91 @@ export function Inventory() {
   );
 }
 
-/// Fleet view: per probe, render a horizontal table with rows = PCs
-/// and columns = the manifest's `summary` (or `display` fallback).
-function FleetView({
+/// Fleet overview: a sidebar of inventory types on the left, and the
+/// table for the *one* selected type on the right. Pre-redesign every
+/// probe's table stacked vertically, so at fleet scale (thousands of
+/// PCs × several probes) reaching the second type meant scrolling past
+/// the whole first one. Now the operator picks a type and sees only it.
+function FleetOverview({
   jobs,
+  selectedJobId,
+  onSelectJob,
   pickPc,
 }: {
   jobs: InventoryJob[];
+  selectedJobId: string;
+  onSelectJob: (job: string) => void;
   pickPc: (pc: string) => void;
 }) {
+  const { t } = useTranslation('inventory');
+  // Resolve the effective selection: an empty / stale `?job=` (e.g. a
+  // bookmarked type that's since been removed) falls back to the first
+  // probe so the right pane is never blank.
+  const selected =
+    jobs.find((j) => j.manifest_id === selectedJobId) ?? jobs[0];
+
+  // Write the resolved fallback back into `?job=` so the URL actually
+  // encodes what's on screen — otherwise a freshly-loaded / stale-`job=`
+  // overview shows `jobs[0]` while the URL says nothing, so a shared
+  // link or a drill-down click carries no type (the detail view then
+  // can't tell which FactCard to anchor). `replace: true` keeps this
+  // sync out of history. Runs only when `job=` is absent or stale, so
+  // it settles in one pass and never loops.
+  useEffect(() => {
+    if (selected && selected.manifest_id !== selectedJobId) {
+      onSelectJob(selected.manifest_id);
+    }
+  }, [selected, selectedJobId, onSelectJob]);
+
   return (
-    <div className="space-y-6">
-      {jobs.map((j) => (
-        <FleetProbeTable key={j.manifest_id} job={j} pickPc={pickPc} />
-      ))}
+    <div className="flex flex-col gap-4 md:flex-row md:items-start">
+      {/* Type sidebar. On md+ it's a fixed-width left rail; on narrow
+          screens it collapses to a full-width scrollable list above the
+          table so the page stays usable on a phone. */}
+      <nav
+        aria-label={t('sidebar.ariaLabel')}
+        className="md:w-64 md:shrink-0 max-h-56 md:max-h-[calc(100vh-12rem)] overflow-auto rounded-md border border-border"
+      >
+        <ul className="divide-y divide-border">
+          {jobs.map((j) => {
+            const active = selected?.manifest_id === j.manifest_id;
+            return (
+              <li key={j.manifest_id}>
+                <button
+                  type="button"
+                  aria-current={active ? 'true' : undefined}
+                  onClick={() => onSelectJob(j.manifest_id)}
+                  className={cn(
+                    'w-full text-left px-3 py-2 transition-colors flex items-center gap-2',
+                    active ? 'bg-fg/10 text-fg' : 'text-muted hover:bg-fg/5 hover:text-fg',
+                  )}
+                >
+                  <ScrollText
+                    className={cn('size-4 shrink-0', active ? 'text-violet' : 'text-muted')}
+                  />
+                  <span className="min-w-0 flex-1">
+                    <code className="block truncate text-xs">{j.manifest_id}</code>
+                    {j.description && (
+                      <span className="block truncate text-[11px] text-muted">
+                        {j.description}
+                      </span>
+                    )}
+                  </span>
+                  <Badge variant={active ? 'violet' : 'default'} className="shrink-0">
+                    {t('sidebar.deviceCount', { count: j.pc_count })}
+                  </Badge>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      </nav>
+
+      <div className="min-w-0 flex-1">
+        {selected ? (
+          <FleetProbeTable key={selected.manifest_id} job={selected} pickPc={pickPc} />
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -354,12 +453,31 @@ function FleetProbeTable({
   // facts_json per probe, every 30 s poll. At fleet scale that's an
   // unbounded payload and an unbounded table.
   const [offset, setOffset] = useState(0);
+  // pc_id substring filter. The backend `by-job` endpoint already
+  // takes `q` (case-insensitive LIKE) and folds it into `total`, so the
+  // filter narrows both the page and the pagination. Debounced so a
+  // keystroke doesn't fire a fleet-sized scan per character (same 300 ms
+  // as the Search tab / Activity / Events filters).
+  const [q, setQ] = useState('');
+  const dq = useDebouncedValue(q, 300);
+  // A narrowed filter can leave the current offset past the new (smaller)
+  // total, which would render an empty page with no rows; snap back to
+  // the first page whenever the effective filter changes.
+  useEffect(() => {
+    setOffset(0);
+  }, [dq]);
   const byJob = useQuery({
-    queryKey: ['inventory-by-job', job.manifest_id, offset],
-    queryFn: () =>
-      apiFetch<InventoryByJob>(
-        `/api/inventory/by-job/${encodeURIComponent(job.manifest_id)}?limit=${FLEET_PAGE_SIZE}&offset=${offset}`,
-      ),
+    queryKey: ['inventory-by-job', job.manifest_id, offset, dq],
+    queryFn: () => {
+      const sp = new URLSearchParams({
+        limit: String(FLEET_PAGE_SIZE),
+        offset: String(offset),
+      });
+      if (dq) sp.set('q', dq);
+      return apiFetch<InventoryByJob>(
+        `/api/inventory/by-job/${encodeURIComponent(job.manifest_id)}?${sp.toString()}`,
+      );
+    },
     refetchInterval: 30_000,
   });
   const total = byJob.data?.total ?? 0;
@@ -389,6 +507,19 @@ function FleetProbeTable({
         </CardDescription>
       </CardHeader>
       <CardContent>
+        <div className="mb-3">
+          <Label htmlFor={`fleet-filter-${job.manifest_id}`} className="sr-only">
+            {t('fleet.filterLabel')}
+          </Label>
+          <Input
+            id={`fleet-filter-${job.manifest_id}`}
+            type="search"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder={t('fleet.filterPlaceholder')}
+            className="max-w-xs"
+          />
+        </div>
         {byJob.isLoading ? (
           <div className="flex items-center gap-2 text-muted">
             <Loader2 className="size-4 animate-spin" />{t('fleet.loading')}
@@ -396,13 +527,22 @@ function FleetProbeTable({
         ) : byJob.error ? (
           <ErrorCard title={t('fleet.errorTitle', { manifestId: job.manifest_id })} error={byJob.error} />
         ) : (byJob.data?.rows ?? []).length === 0 ? (
-          <div className="text-muted text-sm">
-            <Trans
-              ns="inventory"
-              i18nKey="fleet.empty"
-              components={{ code: <code /> }}
-            />
-          </div>
+          dq ? (
+            // Filter matched nothing — distinct from "this probe has no
+            // facts at all" so the operator knows to clear the box, not
+            // to go run the job.
+            <div className="text-muted text-sm">
+              {t('fleet.filterEmpty', { q: dq })}
+            </div>
+          ) : (
+            <div className="text-muted text-sm">
+              <Trans
+                ns="inventory"
+                i18nKey="fleet.empty"
+                components={{ code: <code /> }}
+              />
+            </div>
+          )
         ) : (
           <Table>
             <TableHeader>
@@ -416,7 +556,7 @@ function FleetProbeTable({
               </TableRow>
             </TableHeader>
             <TableBody>
-              {byJob.data!.rows.map((r) => (
+              {(byJob.data?.rows ?? []).map((r) => (
                 <TableRow
                   key={r.pc_id}
                   className="cursor-pointer hover:bg-muted/5"
@@ -489,7 +629,18 @@ function FleetProbeTable({
 }
 
 /// Detail view: vertical "field / value" per probe for one PC.
-function PcDetail({ pcId, clear }: { pcId: string; clear: () => void }) {
+/// `selectedJob` is the manifest the operator drilled in from — its
+/// FactCard auto-scrolls into view and flashes a highlight so they land
+/// on the one they were looking at instead of the top of the stack.
+function PcDetail({
+  pcId,
+  selectedJob,
+  clear,
+}: {
+  pcId: string;
+  selectedJob: string;
+  clear: () => void;
+}) {
   const { t } = useTranslation('inventory');
   const factsQ = useQuery({
     queryKey: ['inventory-facts', pcId],
@@ -529,7 +680,12 @@ function PcDetail({ pcId, clear }: { pcId: string; clear: () => void }) {
         </Card>
       ) : (
         (factsQ.data ?? []).map((fact) => (
-          <FactCard key={fact.job_id} fact={fact} pcId={pcId} />
+          <FactCard
+            key={fact.job_id}
+            fact={fact}
+            pcId={pcId}
+            highlight={fact.job_id === selectedJob}
+          />
         ))
       )}
     </div>
@@ -540,12 +696,42 @@ function PcDetail({ pcId, clear }: { pcId: string; clear: () => void }) {
  *  `History` is the new timeline of `inventory_history` events for
  *  this PC + this manifest. State is local to each card so an operator
  *  can be on different tabs across different probes simultaneously. */
-function FactCard({ fact, pcId }: { fact: InventoryFact; pcId: string }) {
+function FactCard({
+  fact,
+  pcId,
+  highlight,
+}: {
+  fact: InventoryFact;
+  pcId: string;
+  highlight: boolean;
+}) {
   const { t } = useTranslation('inventory');
   const [tab, setTab] = useState<'now' | 'history'>('now');
   const factsObj = (fact.facts ?? {}) as Record<string, unknown>;
 
+  // Scroll the drilled-in-from card into view and flash a ring so the
+  // operator lands on it rather than the top of the stack. The flash is
+  // transient (2 s) so the highlight doesn't linger as a permanent
+  // "selected" affordance once they've found it. Cards mount only after
+  // the facts query resolves, so the ref is live when this runs.
+  const ref = useRef<HTMLDivElement>(null);
+  const [flash, setFlash] = useState(false);
+  useEffect(() => {
+    if (!highlight) return;
+    ref.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    setFlash(true);
+    const id = setTimeout(() => setFlash(false), 2000);
+    return () => clearTimeout(id);
+  }, [highlight]);
+
   return (
+    <div
+      ref={ref}
+      className={cn(
+        'scroll-mt-4 rounded-lg transition-shadow',
+        flash && 'ring-2 ring-accent',
+      )}
+    >
     <Card>
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
@@ -622,6 +808,7 @@ function FactCard({ fact, pcId }: { fact: InventoryFact; pcId: string }) {
         )}
       </CardContent>
     </Card>
+    </div>
   );
 }
 
