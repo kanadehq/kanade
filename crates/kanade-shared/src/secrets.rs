@@ -14,6 +14,7 @@
 //!   backend\
 //!     StaticToken    — KANADE_AUTH_STATIC_TOKEN counterpart
 //!     JwtSecret      — KANADE_JWT_SECRET counterpart
+//!     MailPassword   — KANADE_MAIL_PASSWORD counterpart (SMTP AUTH)
 //! ```
 //!
 //! `deploy-agent.ps1` / `deploy-backend.ps1` provision these keys and

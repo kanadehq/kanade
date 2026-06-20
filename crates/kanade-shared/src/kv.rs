@@ -9,6 +9,15 @@ pub const BUCKET_SCRIPT_STATUS: &str = "script_status";
 pub const BUCKET_AGENTS_STATE: &str = "agents_state";
 pub const BUCKET_AGENT_CONFIG: &str = "agent_config";
 pub const BUCKET_AGENT_GROUPS: &str = "agent_groups";
+
+/// `group_contacts` — per-group notification email addresses, keyed by
+/// group name, value JSON [`GroupContacts`](crate::wire::GroupContacts).
+/// Operator-managed via the SPA Groups page. Distinct from
+/// `agent_groups` (per-PC membership) and `agent_config`'s `groups.*`
+/// scopes (agent config pushed to machines): this is operator contact
+/// info, read backend-side to fan a compliance alert out to email.
+pub const BUCKET_GROUP_CONTACTS: &str = "group_contacts";
+
 pub const BUCKET_SCHEDULES: &str = "schedules";
 
 /// Job catalog (v0.15) — operator-registered Manifests, keyed by
@@ -318,6 +327,7 @@ mod tests {
             BUCKET_AGENTS_STATE,
             BUCKET_AGENT_CONFIG,
             BUCKET_AGENT_GROUPS,
+            BUCKET_GROUP_CONTACTS,
             BUCKET_SCHEDULES,
             BUCKET_JOBS,
             BUCKET_JOBS_YAML,

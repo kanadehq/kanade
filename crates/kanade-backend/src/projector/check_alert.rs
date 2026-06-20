@@ -79,6 +79,10 @@ pub(super) fn render(
 /// SPA's per-PC confirmation roster (④) and account names (⑤) track who
 /// has fixed it. Best-effort: failures are logged and swallowed — a missed
 /// alert must never wedge the results projector.
+// Independent inputs (NATS handle, DB, the result, the hint, the alert
+// config, the projected status/detail, the optional mailer) — bundling
+// them into a struct would just move the noise, not reduce it.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn fire(
     js: &async_nats::jetstream::Context,
     pool: &SqlitePool,
@@ -87,6 +91,9 @@ pub(super) async fn fire(
     alert: &CheckAlert,
     status: &str,
     detail: &str,
+    // Present only when the backend has a working `[mail]` config; the
+    // alert's own `email` opt-in still gates whether mail is sent.
+    mailer: Option<&crate::mail::Mailer>,
 ) {
     // Resolve `{last_logon}` only when a template references it.
     let needs_logon = alert.title.contains("{last_logon}")
@@ -150,6 +157,56 @@ pub(super) async fn fire(
             "compliance alert: failed to publish",
         ),
     }
+
+    // Additive email channel: only when the alert opted in (`email:
+    // true`) AND the backend has a mailer. Reuses the already-rendered
+    // title/body and resolves `notify_groups` → addresses via the
+    // `group_contacts` KV.
+    //
+    // Spawned, NOT awaited inline: this runs on the results projector, a
+    // serial durable-pull consumer that handles one ExecResult at a time.
+    // SMTP I/O to an external relay can be slow or hang on connect, so
+    // awaiting it here would stall projection for every other agent behind
+    // one alert. Best-effort fire-and-forget — a mail failure is logged
+    // and dropped, never touching the projector.
+    if alert.email
+        && let Some(mailer) = mailer
+    {
+        let mailer = mailer.clone();
+        let js = js.clone();
+        let groups = alert.notify_groups.clone();
+        let subject = notification.title.clone();
+        let body = notification.body.clone();
+        let pc_id = r.pc_id.clone();
+        let check = hint.name.clone();
+        let notification_id = notification.id.clone();
+        tokio::spawn(async move {
+            let to = crate::api::group_contacts::emails_for_groups(&js, &groups).await;
+            if to.is_empty() {
+                warn!(
+                    pc_id = %pc_id,
+                    check = %check,
+                    "compliance alert email: no addresses for notify_groups — skipping email",
+                );
+                return;
+            }
+            match mailer.send(&to, &subject, &body).await {
+                Ok(()) => info!(
+                    pc_id = %pc_id,
+                    check = %check,
+                    recipients = to.len(),
+                    notification_id = %notification_id,
+                    "compliance alert emailed",
+                ),
+                Err(e) => warn!(
+                    error = %format!("{e:#}"),
+                    pc_id = %pc_id,
+                    check = %check,
+                    "compliance alert: failed to email",
+                ),
+            }
+        });
+    }
 }
 
 /// Best-effort `{last_logon}` label for a PC — its last sign-in display
@@ -182,6 +239,7 @@ mod tests {
             priority: NotificationPriority::Warn,
             require_ack: false,
             toast: true,
+            email: false,
             title: "t".into(),
             body: None,
         }

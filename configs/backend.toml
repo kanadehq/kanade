@@ -19,3 +19,18 @@ sqlite_path = '{{ vars.base }}/backend.db'
 [log]
 path  = '{{ vars.log_dir }}/backend.log'
 level = 'info'
+
+# Outbound SMTP relay for compliance-alert + generic email. Optional:
+# omit the whole [mail] section and email features are simply off (the
+# in-app / NATS notification path is unaffected). Only the non-secret
+# connection settings live here — the SMTP password is provisioned to the
+# registry via `deploy-backend.ps1 -MailPassword '<pw>'` (or
+# $KANADE_MAIL_PASSWORD), never written to this file. Per-group recipient
+# addresses are managed on the SPA Groups page (group_contacts KV), not
+# here.
+# [mail]
+# host       = 'smtp.example.com'
+# port       = 587
+# encryption = 'starttls'              # starttls | tls | none
+# from       = 'kanade-noreply@example.com'
+# username   = 'kanade-noreply'        # omit for an unauthenticated relay

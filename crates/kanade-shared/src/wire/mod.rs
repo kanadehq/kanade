@@ -2,6 +2,7 @@ mod agent_config;
 mod agent_groups;
 mod command;
 mod event;
+mod group_contacts;
 mod heartbeat;
 mod host_perf;
 mod inventory;
@@ -16,6 +17,7 @@ pub use agent_config::{ConfigScope, EffectiveConfig, ResolutionWarning, resolve}
 pub use agent_groups::AgentGroups;
 pub use command::{Command, RetrySpec, RunAs, Shell};
 pub use event::EventStarted;
+pub use group_contacts::GroupContacts;
 pub use heartbeat::Heartbeat;
 pub use host_perf::HostPerf;
 pub use inventory::{DiskInfo, HwInventory};

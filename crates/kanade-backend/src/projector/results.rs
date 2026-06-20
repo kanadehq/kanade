@@ -11,6 +11,7 @@ use tokio::io::AsyncReadExt;
 use tracing::{debug, info, warn};
 
 use super::spec_cache::ExplodeSpecCache;
+use crate::mail::Mailer;
 
 // pub(crate): consumer_reset::reset_if_wiped names this durable when
 // deciding what to drop after a projection-DB wipe (#389).
@@ -37,6 +38,9 @@ pub async fn run(
     js: jetstream::Context,
     pool: SqlitePool,
     jobs_cache: ExplodeSpecCache,
+    // Optional SMTP mailer for compliance-alert email (`[mail]` config).
+    // `None` ⇒ alerts publish to NATS/in-app only, never email.
+    mailer: Option<Arc<Mailer>>,
 ) -> Result<()> {
     let stream = js
         .get_stream(STREAM_RESULTS)
@@ -161,9 +165,16 @@ pub async fn run(
                 // `unknown` (mirrors the agent's Health-tab behaviour),
                 // so the SPA never shows a stale green for a check that
                 // has started failing.
-                if let Err(e) =
-                    maybe_project_check_status(&js, &pool, &jobs_cache, &jobs_kv, &r, recorded_at)
-                        .await
+                if let Err(e) = maybe_project_check_status(
+                    &js,
+                    &pool,
+                    &jobs_cache,
+                    &jobs_kv,
+                    &r,
+                    recorded_at,
+                    mailer.as_deref(),
+                )
+                .await
                 {
                     warn!(error = ?e, result_id = %resolved_id, "check status projection failed");
                 }
@@ -481,6 +492,7 @@ async fn maybe_project_check_status(
     jobs_kv: &async_nats::jetstream::kv::Store,
     r: &ExecResult,
     recorded_at: chrono::DateTime<chrono::Utc>,
+    mailer: Option<&Mailer>,
 ) -> Result<()> {
     let Some(manifest_id) = r.manifest_id.as_deref() else {
         return Ok(());
@@ -525,6 +537,7 @@ async fn maybe_project_check_status(
                 alert,
                 proj.status,
                 proj.detail.as_deref().unwrap_or(""),
+                mailer,
             )
             .await;
         }
@@ -1308,6 +1321,7 @@ mod tests {
                 priority: kanade_shared::ipc::notifications::NotificationPriority::Warn,
                 require_ack: false,
                 toast: true,
+                email: false,
                 title: "t".into(),
                 body: None,
             }),

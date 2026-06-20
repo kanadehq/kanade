@@ -374,6 +374,11 @@
             "null"
           ]
         },
+        "email": {
+          "description": "Also send the alert by email, to every address mapped to the\n`notify_groups` (via the `group_contacts` KV, edited on the SPA\nGroups page). Opt-in: defaults to `false`, so an existing alert\nnever starts emailing on its own. Requires `notify_groups` to be\nnon-empty (there is no per-PC user email) and the backend's\n`[mail]` config to be present; otherwise the email is a logged\nno-op while the in-app/toast notification still fires.",
+          "type": "boolean",
+          "default": false
+        },
         "notify_groups": {
           "description": "Notify these operator groups (`notifications.group.<name>`).",
           "type": "array",

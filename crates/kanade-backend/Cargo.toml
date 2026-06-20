@@ -35,6 +35,7 @@ clap       = { workspace = true }
 futures    = { workspace = true }
 humantime  = { workspace = true }
 jsonwebtoken = { workspace = true }
+lettre     = { workspace = true }
 mime_guess = { workspace = true }
 rand       = { workspace = true }
 regex      = { workspace = true }

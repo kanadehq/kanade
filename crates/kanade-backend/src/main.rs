@@ -2,6 +2,7 @@ mod api;
 mod audit;
 mod auth;
 mod cleanup;
+mod mail;
 mod projector;
 mod scheduler;
 mod web;
@@ -671,6 +672,27 @@ pub(crate) async fn run_backend() -> Result<()> {
     // BUCKET_JOBS watcher are wired up further down.
     let explode_spec_cache = projector::spec_cache::ExplodeSpecCache::new();
 
+    // Optional outbound SMTP relay (compliance-alert + generic email).
+    // Built once here from the `[mail]` config and the `MailPassword`
+    // registry secret (env fallback), then shared (Arc) with the results
+    // projector and AppState. `None` when `[mail]` is absent or the build
+    // fails — email becomes a no-op, the in-app/NATS path is unaffected,
+    // and the backend still starts (a mail misconfig must not gate boot).
+    let mailer: Option<std::sync::Arc<mail::Mailer>> = cfg.mail.as_ref().and_then(|m| {
+        let password = kanade_shared::secrets::read_hklm_value(r"SOFTWARE\kanade\backend", "MailPassword")
+            .or_else(|| std::env::var("KANADE_MAIL_PASSWORD").ok().filter(|s| !s.is_empty()));
+        match mail::Mailer::from_config(m, password) {
+            Ok(mx) => {
+                info!(host = %m.host, port = m.port, "SMTP mailer configured");
+                Some(std::sync::Arc::new(mx))
+            }
+            Err(e) => {
+                warn!(error = %format!("{e:#}"), "[mail] present but Mailer build failed — email disabled");
+                None
+            }
+        }
+    });
+
     // Projectors run in the background; if either exits the backend keeps
     // serving HTTP (read-only API stays useful even if a stream is missing).
     //
@@ -681,8 +703,9 @@ pub(crate) async fn run_backend() -> Result<()> {
         let pool = pool.clone();
         let js = jetstream.clone();
         let cache = explode_spec_cache.clone();
+        let mailer = mailer.clone();
         tokio::spawn(async move {
-            if let Err(e) = projector::results::run(js, pool, cache).await {
+            if let Err(e) = projector::results::run(js, pool, cache, mailer).await {
                 error!(error = %e, "results projector exited");
             }
         });
@@ -810,6 +833,7 @@ pub(crate) async fn run_backend() -> Result<()> {
         nats,
         jetstream,
         explode_spec_cache,
+        mailer,
     };
 
     // Scheduler runs alongside the projectors; if it can't init (no
