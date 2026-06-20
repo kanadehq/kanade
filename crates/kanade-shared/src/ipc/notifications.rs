@@ -67,6 +67,21 @@ pub struct Notification {
     /// hasn't been acked yet).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acked_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// When this notification was last edited (`PATCH /api/notifications/{id}`),
+    /// re-published with the same `id` + `issued_at` but new content. `None`
+    /// ⇒ never edited. Lets the SPA show an "edited" badge and lets a client
+    /// recognise a re-published copy as a content update of one it already
+    /// holds (vs a fresh arrival). Additive + optional so pre-edit bodies on
+    /// the retained stream still decode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edited_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// When an edit reset confirmations: any ack (read mark) recorded *before*
+    /// this instant is stale and the user must re-confirm the new content.
+    /// The agent's `notifications.list` treats a read mark older than this as
+    /// unread; a connected client clears a locally-held ack older than this on
+    /// the live update. `None` ⇒ acks were never reset (the common case).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acks_reset_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Severity ladder. Drives the SPA color, toast/dialog choice, and
@@ -243,6 +258,45 @@ pub struct PublishNotificationRequest {
 pub struct PublishNotificationResponse {
     pub id: String,
     pub subjects: Vec<String>,
+}
+
+// ---------- backend HTTP edit (PATCH /api/notifications/{id}) --------
+
+/// Operator-facing request body for `PATCH /api/notifications/{id}` — edit
+/// an already-sent notification's content (fix a typo, shorten/extend the
+/// expiry, change priority / require_ack / toast) without re-sending it.
+///
+/// The **audience is immutable** here — there is no `target` field. Changing
+/// who it goes to is "recall → re-send" (the backend keeps the original
+/// fan-out subjects). `id`, `issued_at`, and `issued_by` are preserved; only
+/// the fields below change. The backend deletes the old stream copies and
+/// re-publishes the merged notification under the same id + `issued_at` (so
+/// "sent at" is unchanged), stamping [`Notification::edited_at`].
+///
+/// Unlike [`PublishNotificationRequest`] this is a *full* edit set (the SPA
+/// pre-fills every field from the current notification and submits them all),
+/// so there is no per-field optionality to disambiguate; `expires_at: None`
+/// means "never expires", a past instant expires it immediately.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
+pub struct EditNotificationRequest {
+    pub priority: NotificationPriority,
+    #[serde(default)]
+    pub require_ack: bool,
+    pub title: String,
+    pub body: String,
+    #[serde(default)]
+    pub toast: bool,
+    /// `None` ⇒ never expires; a past instant expires it immediately (unlike
+    /// `publish`, which rejects a past expiry as a likely typo — here it is a
+    /// deliberate "retire it but keep history" choice, distinct from recall).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Reset confirmations: when `true` the backend clears every recorded ack
+    /// for this notification and stamps [`Notification::acks_reset_at`], so a
+    /// materially-changed body forces everyone to re-confirm. `false` (the
+    /// default, e.g. a typo fix) leaves existing confirmations intact.
+    #[serde(default)]
+    pub reset_acks: bool,
 }
 
 // ---------- ack event (Agent → NATS → backend projector) ----------
@@ -524,6 +578,51 @@ mod tests {
         assert_eq!(req.id, None, "id omitted ⇒ backend mints one");
         assert!(!req.require_ack, "require_ack defaults false");
         assert!(!req.toast, "toast defaults false");
+    }
+
+    #[test]
+    fn edit_request_decodes_with_defaults() {
+        // Minimal body: the SPA always submits all editable fields, but
+        // require_ack / toast / reset_acks default false and expires_at omitted
+        // ⇒ never expires.
+        let req: EditNotificationRequest =
+            serde_json::from_str(r#"{"priority":"warn","title":"t","body":"b"}"#).expect("decode");
+        assert!(!req.require_ack);
+        assert!(!req.toast);
+        assert!(
+            !req.reset_acks,
+            "reset_acks defaults false (keep confirmations)"
+        );
+        assert_eq!(req.expires_at, None, "omitted expiry ⇒ never expires");
+
+        // reset_acks + an explicit expiry decode as set.
+        let req: EditNotificationRequest = serde_json::from_str(
+            r#"{"priority":"info","title":"t","body":"b","reset_acks":true,"expires_at":"2099-01-01T00:00:00Z"}"#,
+        )
+        .expect("decode");
+        assert!(req.reset_acks);
+        assert!(req.expires_at.is_some());
+    }
+
+    #[test]
+    fn notification_edit_fields_default_none_and_round_trip() {
+        // A pre-edit body (no edited_at / acks_reset_at) still decodes, and
+        // both fields are omitted on the wire when None.
+        let n: Notification = serde_json::from_str(
+            r#"{"id":"n1","priority":"info","title":"t","body":"b","issued_at":"2026-06-01T00:00:00Z"}"#,
+        )
+        .expect("decode pre-edit body");
+        assert_eq!(n.edited_at, None);
+        assert_eq!(n.acks_reset_at, None);
+        let v = serde_json::to_value(&n).unwrap();
+        assert!(
+            v.get("edited_at").is_none(),
+            "None edited_at omitted: {v:?}"
+        );
+        assert!(
+            v.get("acks_reset_at").is_none(),
+            "None acks_reset_at omitted: {v:?}"
+        );
     }
 
     #[test]

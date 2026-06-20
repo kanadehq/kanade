@@ -344,6 +344,9 @@ pub fn router(state: AppState) -> Router {
             "/api/notifications/{id}/recall",
             post(notifications::recall),
         )
+        // Edit a sent notification in place (content/expiry/priority/ack/toast;
+        // audience immutable) — deletes the old copies + re-publishes merged.
+        .route("/api/notifications/{id}", patch(notifications::edit))
         .route("/api/schedules", post(schedules::create))
         .route("/api/schedules/{id}", delete(schedules::delete))
         // #743: view create/delete (operator).

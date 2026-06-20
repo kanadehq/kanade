@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, Loader2, Repeat, Trash2 } from 'lucide-react';
+import { ArrowLeft, Loader2, Pencil, Repeat, Trash2 } from 'lucide-react';
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -10,6 +11,16 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { useConfirm } from '@/components/ui/confirm-dialog';
 import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Select } from '@/components/ui/select';
+import {
   Table,
   TableBody,
   TableCell,
@@ -17,10 +28,24 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import { Textarea } from '@/components/ui/textarea';
 import { apiFetch, formatError } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import type { NotificationDetail as NotificationDetailData, NotificationPriority } from '@/lib/types';
+import type {
+  EditNotificationRequest,
+  NotificationDetail as NotificationDetailData,
+  NotificationPriority,
+} from '@/lib/types';
 import { fmtIsoLocal } from '@/lib/utils';
+
+/** ISO instant → local wall-clock "YYYY-MM-DDTHH:mm" for a datetime-local input. */
+function isoToLocalInput(iso?: string | null): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const pad = (x: number) => String(x).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
 
 /** Priority → Badge variant. info is neutral; warn/emergency escalate. */
 function priorityVariant(p: NotificationPriority): 'default' | 'amber' | 'danger' {
@@ -84,6 +109,33 @@ export function NotificationDetail() {
     if (ok) recall.mutate();
   };
 
+  // Edit (在席編集): re-publish the notification's content in place. The
+  // audience is immutable, so there's no target picker — only the editable
+  // fields + a "reset confirmations" toggle for a materially-changed body.
+  const [editOpen, setEditOpen] = useState(false);
+  const [ePriority, setEPriority] = useState<NotificationPriority>('info');
+  const [eTitle, setETitle] = useState('');
+  const [eBody, setEBody] = useState('');
+  const [eRequireAck, setERequireAck] = useState(false);
+  const [eToast, setEToast] = useState(false);
+  const [eExpiresAt, setEExpiresAt] = useState('');
+  const [eResetAcks, setEResetAcks] = useState(false);
+
+  const edit = useMutation({
+    mutationFn: (req: EditNotificationRequest) =>
+      apiFetch<{ id: string; subjects: string[] }>(
+        `/api/notifications/${encodeURIComponent(id!)}`,
+        { method: 'PATCH', body: JSON.stringify(req) },
+      ),
+    onSuccess: () => {
+      toast.success(t('edit.done'));
+      setEditOpen(false);
+      void queryClient.invalidateQueries({ queryKey: ['notif-detail', id] });
+      void queryClient.invalidateQueries({ queryKey: ['notif-history'] });
+    },
+    onError: (e) => toast.error(formatError(e)),
+  });
+
   if (isLoading) {
     return (
       <div className="flex items-center gap-2 text-muted p-4">
@@ -98,6 +150,43 @@ export function NotificationDetail() {
   const n = data.notification;
   const exp = n.expires_at ? Date.parse(n.expires_at) : Number.NaN;
   const expired = !Number.isNaN(exp) && exp <= Date.now();
+
+  const openEdit = () => {
+    setEPriority(n.priority);
+    setETitle(n.title);
+    setEBody(n.body);
+    setERequireAck(n.require_ack);
+    setEToast(n.toast);
+    setEExpiresAt(isoToLocalInput(n.expires_at));
+    setEResetAcks(false);
+    setEditOpen(true);
+  };
+
+  const onSubmitEdit = () => {
+    if (!eTitle.trim()) {
+      toast.error(t('edit.titleRequired'));
+      return;
+    }
+    const req: EditNotificationRequest = {
+      priority: ePriority,
+      require_ack: eRequireAck,
+      toast: eToast,
+      title: eTitle.trim(),
+      body: eBody,
+      reset_acks: eResetAcks,
+    };
+    // Empty field ⇒ omit ⇒ never expires (clears any prior expiry). A
+    // malformed value aborts rather than silently dropping the expiry.
+    if (eExpiresAt) {
+      const parsed = new Date(eExpiresAt);
+      if (Number.isNaN(parsed.getTime())) {
+        toast.error(t('edit.invalidExpiresAt'));
+        return;
+      }
+      req.expires_at = parsed.toISOString();
+    }
+    edit.mutate(req);
+  };
 
   const onReuse = () => {
     navigate('/notifications', {
@@ -132,6 +221,17 @@ export function NotificationDetail() {
           </Button>
           {canOperate && (
             <Button
+              variant="secondary"
+              size="sm"
+              onClick={openEdit}
+              title={t('edit.tooltip')}
+            >
+              <Pencil className="size-4" />
+              {t('edit.action')}
+            </Button>
+          )}
+          {canOperate && (
+            <Button
               variant="danger"
               size="sm"
               onClick={onRecall}
@@ -160,6 +260,14 @@ export function NotificationDetail() {
             )}
             {expired && (
               <span className="text-xs text-danger font-normal">({t('history.expired')})</span>
+            )}
+            {n.edited_at && (
+              <span
+                className="text-xs text-muted font-normal"
+                title={t('edit.editedAt', { time: fmtIsoLocal(n.edited_at) })}
+              >
+                ({t('edit.editedBadge')})
+              </span>
             )}
           </CardTitle>
         </CardHeader>
@@ -313,6 +421,84 @@ export function NotificationDetail() {
           )}
         </CardContent>
       </Card>
+
+      {/* ---- edit dialog (在席編集) ---- */}
+      <Dialog open={editOpen} onOpenChange={(o) => !o && setEditOpen(false)}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>{t('edit.dialogTitle')}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-1">
+              <Label htmlFor="edit-priority">{t('compose.priority')}</Label>
+              <Select
+                id="edit-priority"
+                value={ePriority}
+                onChange={(e) => setEPriority(e.target.value as NotificationPriority)}
+              >
+                <option value="info">{t('priority.info')}</option>
+                <option value="warn">{t('priority.warn')}</option>
+                <option value="emergency">{t('priority.emergency')}</option>
+              </Select>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="edit-title">{t('compose.titleField')}</Label>
+              <Input id="edit-title" value={eTitle} onChange={(e) => setETitle(e.target.value)} />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="edit-body">{t('compose.body')}</Label>
+              <Textarea id="edit-body" value={eBody} onChange={(e) => setEBody(e.target.value)} />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="edit-expires">{t('compose.expiresAt')}</Label>
+              <Input
+                id="edit-expires"
+                type="datetime-local"
+                value={eExpiresAt}
+                onChange={(e) => setEExpiresAt(e.target.value)}
+              />
+              <p className="text-xs text-muted">{t('edit.expiresHint')}</p>
+            </div>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={eRequireAck}
+                onChange={(e) => setERequireAck(e.target.checked)}
+                className="size-4 rounded border-border accent-violet"
+              />
+              {t('compose.requireAck')}
+            </label>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={eToast}
+                onChange={(e) => setEToast(e.target.checked)}
+                className="size-4 rounded border-border accent-violet"
+              />
+              {t('compose.toast')}
+            </label>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={eResetAcks}
+                onChange={(e) => setEResetAcks(e.target.checked)}
+                className="size-4 rounded border-border accent-violet"
+              />
+              {t('edit.resetAcks')}
+            </label>
+            <p className="text-xs text-muted -mt-2">{t('edit.resetAcksHint')}</p>
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setEditOpen(false)}>
+              {t('edit.cancel')}
+            </Button>
+            <Button disabled={edit.isPending || !eTitle.trim()} onClick={onSubmitEdit}>
+              {edit.isPending && <Loader2 className="size-4 animate-spin" />}
+              {t('edit.save')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

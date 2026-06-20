@@ -131,6 +131,8 @@ pub(super) async fn fire(
         issued_by: Some(format!("compliance:{}", hint.name)),
         expires_at: None,
         acked_at: None,
+        edited_at: None,
+        acks_reset_at: None,
     };
 
     match fan_out_notification(js, &notification, &target).await {
