@@ -19,7 +19,7 @@
 #   kanade schedule create configs/schedules/edge-extensions.yaml
 
 id: edge-extensions
-version: 0.2.0
+version: 0.2.1
 description: Edge installed-extension compliance + inventory (all local users)
 tags: [health-check, security, inventory]
 
@@ -48,6 +48,14 @@ execute:
     # Warn on sideloaded / developer-mode extensions (not from the Web
     # Store, not policy-forced, not a browser component).
     $FlagSideloaded = $true
+    # Sideloaded IDs that are sanctioned and should NOT warn — vendor
+    # extensions that install via an app / registry (so they report as
+    # 'external') but are approved. This exempts ONLY the sideload
+    # warning; it is NOT the strict $Allowlist above (which would fail
+    # every extension not on it).
+    $SideloadAllowlist = @(
+      'kagpabjoboikccfdghpdlaaopmgpgfdc'  # Microsoft Power Automate
+    )
 
     # Chromium Extension::Location enum → human source. `from_webstore`
     # (when present) wins. policy/component are "managed"; unpacked /
@@ -173,8 +181,11 @@ execute:
     $blocked    = @($exts | Where-Object { $Blocklist -contains $_.id })
     # Sideloaded = anything not from the Web Store and not managed
     # (policy/component) — covers unpacked / external / external_registry /
-    # command_line / unknown locations, not just a hardcoded few.
-    $sideloaded = @($exts | Where-Object { $_.source -ne 'webstore' -and $_.source -notin $managed })
+    # command_line / unknown locations, not just a hardcoded few. IDs on
+    # $SideloadAllowlist are sanctioned and excluded from the warning.
+    $sideloaded = @($exts | Where-Object {
+      $_.source -ne 'webstore' -and $_.source -notin $managed -and $SideloadAllowlist -notcontains $_.id
+    })
     $notAllowed = @()
     if ($Allowlist.Count -gt 0) {
       $notAllowed = @($exts | Where-Object { $Allowlist -notcontains $_.id -and $_.source -notin $managed })
