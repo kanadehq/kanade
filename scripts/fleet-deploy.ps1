@@ -131,8 +131,12 @@
 .PARAMETER JwtSecret
 .PARAMETER StaticToken
 .PARAMETER BootstrapAdminPassword
+.PARAMETER MailPassword
   (backend only) Provision these backend secrets during the deploy. Empty
-  = leave the existing registry value untouched.
+  = leave the existing registry value untouched. `MailPassword` is the SMTP
+  AUTH password for the `[mail]` relay (e.g. a Gmail app password, spaces
+  removed); the backend resolves it from the `MailPassword` registry value
+  ahead of `$KANADE_MAIL_PASSWORD`.
 
 .PARAMETER NoVerify
   Skip the post-deploy version check.
@@ -204,6 +208,7 @@ param(
     [string]$JwtSecret = '',
     [string]$StaticToken = '',
     [string]$BootstrapAdminPassword = '',
+    [string]$MailPassword = '',
 
     [switch]$NoVerify,
     [switch]$DryRun
@@ -426,8 +431,8 @@ if (-not $Version) {
     else { throw "$msg — re-run with -Stage to fetch it (or fix -ExePath)." }
 }
 
-if ($Role -ne 'backend' -and ($WipeDb -or $JwtSecret -or $StaticToken -or $BootstrapAdminPassword)) {
-    Write-Warning "-WipeDb / -JwtSecret / -StaticToken / -BootstrapAdminPassword apply to -Role backend only; ignored for $Role."
+if ($Role -ne 'backend' -and ($WipeDb -or $JwtSecret -or $StaticToken -or $BootstrapAdminPassword -or $MailPassword)) {
+    Write-Warning "-WipeDb / -JwtSecret / -StaticToken / -BootstrapAdminPassword / -MailPassword apply to -Role backend only; ignored for $Role."
 }
 
 Write-Host ''
@@ -530,11 +535,17 @@ $lines = Set-PsAssignment $lines $k.Ver $Version
 $lines = Set-PsAssignment $lines $k.Sha $sha256
 $lines = Set-PsAssignment $lines $k.Tok $AuthToken
 if ($Role -eq 'backend') {
-    if ($WipeDb)                 { $lines = Set-PsAssignment $lines 'AgentWipeDb' '$true' -Raw }
-    if ($StaticToken)            { $lines = Set-PsAssignment $lines 'AgentStaticToken' $StaticToken }
-    if ($JwtSecret)              { $lines = Set-PsAssignment $lines 'AgentJwtSecret' $JwtSecret }
-    if ($BootstrapAdminPassword) { $lines = Set-PsAssignment $lines 'AgentBootstrapAdminPassword' $BootstrapAdminPassword }
-    Write-Host "    knobs: $($k.Url)/$($k.Ver)/$($k.Sha)/$($k.Tok)$(if ($WipeDb) { ' +WipeDb' })$(if ($JwtSecret) { ' +JwtSecret' })$(if ($StaticToken) { ' +StaticToken' })$(if ($BootstrapAdminPassword) { ' +BootstrapAdminPassword' })"
+    # Inject only the backend secret knobs that were passed; build the
+    # `+Flag` suffix incrementally so adding a knob is one line, not a
+    # longer nested-`if` string interpolation.
+    $extra = [System.Collections.Generic.List[string]]::new()
+    if ($WipeDb)                 { $lines = Set-PsAssignment $lines 'AgentWipeDb' '$true' -Raw; $extra.Add('WipeDb') }
+    if ($StaticToken)            { $lines = Set-PsAssignment $lines 'AgentStaticToken' $StaticToken; $extra.Add('StaticToken') }
+    if ($JwtSecret)              { $lines = Set-PsAssignment $lines 'AgentJwtSecret' $JwtSecret; $extra.Add('JwtSecret') }
+    if ($BootstrapAdminPassword) { $lines = Set-PsAssignment $lines 'AgentBootstrapAdminPassword' $BootstrapAdminPassword; $extra.Add('BootstrapAdminPassword') }
+    if ($MailPassword)           { $lines = Set-PsAssignment $lines 'AgentMailPassword' $MailPassword; $extra.Add('MailPassword') }
+    $suffix = if ($extra.Count) { ' +' + ($extra -join ' +') } else { '' }
+    Write-Host "    knobs: $($k.Url)/$($k.Ver)/$($k.Sha)/$($k.Tok)$suffix"
 } else {
     Write-Host "    knobs: $($k.Url)/$($k.Ver)/$($k.Sha)/$($k.Tok)"
 }
