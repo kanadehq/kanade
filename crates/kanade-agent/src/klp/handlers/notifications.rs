@@ -567,7 +567,15 @@ fn build_notifications_list(
         if n.expires_at.is_some_and(|exp| exp <= now) {
             continue;
         }
-        n.acked_at = acks.get(&n.id).copied();
+        // Annotate this user's ack — but an edit that reset confirmations
+        // (`acks_reset_at`) invalidates any read mark recorded *before* it: the
+        // content changed, so the old confirmation is stale and the user must
+        // re-confirm. A mark at/after the reset still counts (they re-acked the
+        // new content). No KV deletion needed — the comparison makes it unread.
+        n.acked_at = match (acks.get(&n.id).copied(), n.acks_reset_at) {
+            (Some(ack), Some(reset)) if ack < reset => None,
+            (ack, _) => ack,
+        };
         match idx_of.get(&n.id) {
             Some(&i) if n.issued_at <= deduped[i].issued_at => {}
             Some(&i) => deduped[i] = n,
@@ -760,6 +768,8 @@ mod tests {
             issued_by: Some("infra-team".into()),
             expires_at: None,
             acked_at: None,
+            edited_at: None,
+            acks_reset_at: None,
         }
     }
 
@@ -1005,6 +1015,8 @@ mod tests {
             issued_by: None,
             expires_at: expires,
             acked_at: None,
+            edited_at: None,
+            acks_reset_at: None,
         }
     }
 
@@ -1029,6 +1041,60 @@ mod tests {
         assert_eq!(r.items[0].id, "b");
         assert!(r.items[0].acked_at.is_none());
         assert!(r.next_cursor.is_none());
+    }
+
+    #[test]
+    fn acks_reset_at_invalidates_an_earlier_ack() {
+        // An edit that reset confirmations stamps `acks_reset_at`. A read mark
+        // recorded BEFORE that instant is stale → unread; one recorded AT/AFTER
+        // it (a re-confirm of the new content) still counts.
+        let base = list_base();
+        let reset = base + chrono::Duration::seconds(100);
+
+        let mut stale = notif_at("stale", base, None);
+        stale.acks_reset_at = Some(reset);
+        let mut reconfirmed = notif_at("reconfirmed", base, None);
+        reconfirmed.acks_reset_at = Some(reset);
+        let mut untouched = notif_at("untouched", base, None); // no reset
+
+        let mut acks = HashMap::new();
+        // Stale: acked before the reset → must become unread.
+        acks.insert("stale".to_string(), reset - chrono::Duration::seconds(10));
+        // Reconfirmed: acked after the reset → stays acked.
+        let reack = reset + chrono::Duration::seconds(10);
+        acks.insert("reconfirmed".to_string(), reack);
+        // Untouched: a normal ack with no reset on the notification.
+        let plain = base + chrono::Duration::seconds(5);
+        acks.insert("untouched".to_string(), plain);
+        untouched.acks_reset_at = None;
+
+        let items = vec![stale, reconfirmed, untouched];
+        let r = build_notifications_list(items, &acks, NotificationsFilter::All, base, 50, 0);
+        let by_id = |id: &str| r.items.iter().find(|n| n.id == id).unwrap().acked_at;
+        assert_eq!(by_id("stale"), None, "pre-reset ack is invalidated");
+        assert_eq!(by_id("reconfirmed"), Some(reack), "post-reset ack counts");
+        assert_eq!(by_id("untouched"), Some(plain), "no reset ⇒ ack untouched");
+
+        // And in the Unread filter, only the stale (now-unread) one surfaces.
+        let items = vec![
+            {
+                let mut n = notif_at("stale", base, None);
+                n.acks_reset_at = Some(reset);
+                n
+            },
+            {
+                let mut n = notif_at("reconfirmed", base, None);
+                n.acks_reset_at = Some(reset);
+                n
+            },
+        ];
+        let r = build_notifications_list(items, &acks, NotificationsFilter::Unread, base, 50, 0);
+        let ids: Vec<&str> = r.items.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["stale"],
+            "only the reset-invalidated one is unread"
+        );
     }
 
     #[test]

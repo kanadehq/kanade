@@ -74,6 +74,21 @@
     "cancelLabel": "Cancel",
     "done": "Notification recalled."
   },
+  "edit": {
+    "action": "Edit",
+    "tooltip": "Edit this notification's content (body, expiry, priority, …). The audience can't be changed.",
+    "dialogTitle": "Edit notification",
+    "editedBadge": "edited",
+    "editedAt": "Edited at {{time}}",
+    "expiresHint": "Leave empty for no expiry. A past time hides it immediately.",
+    "resetAcks": "Reset confirmations",
+    "resetAcksHint": "Enable when you materially changed the body — existing confirmations are cleared and everyone is asked to re-confirm. Leave off for typo fixes.",
+    "titleRequired": "Title is required.",
+    "invalidExpiresAt": "Invalid expiry — fix it or leave it empty.",
+    "save": "Save",
+    "cancel": "Cancel",
+    "done": "Notification edited."
+  },
   "audience": {
     "title": "Target PC confirmation",
     "summary": "{{confirmed}} / {{total}} PCs confirmed",

@@ -19,9 +19,9 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use futures::StreamExt;
 use kanade_shared::ipc::notifications::{
-    AudiencePc, Notification, NotificationAckEntry, NotificationAckStatus, NotificationAmend,
-    NotificationAmendOp, NotificationDetail, NotificationTarget, PublishNotificationRequest,
-    PublishNotificationResponse,
+    AudiencePc, EditNotificationRequest, Notification, NotificationAckEntry, NotificationAckStatus,
+    NotificationAmend, NotificationAmendOp, NotificationDetail, NotificationTarget,
+    PublishNotificationRequest, PublishNotificationResponse,
 };
 use kanade_shared::kv::STREAM_NOTIFICATIONS;
 use kanade_shared::subject;
@@ -87,6 +87,9 @@ pub async fn publish(
         expires_at: req.expires_at,
         // Fresh publish — never acked yet from anyone's perspective.
         acked_at: None,
+        // Never edited / reset on a fresh publish.
+        edited_at: None,
+        acks_reset_at: None,
     };
 
     let (delivered, failures) = fan_out_notification(&s.jetstream, &notification, &req.target)
@@ -428,6 +431,189 @@ pub async fn recall(
     .await;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `PATCH /api/notifications/{id}` (operator+) — edit a sent notification's
+/// content in place: title, body, expiry, priority, require_ack, toast. The
+/// **audience is immutable** (re-targeting = recall → re-send), and `id`,
+/// `issued_at` (the "sent at"), and `issued_by` are preserved.
+///
+/// Flow (builds on recall's primitives): replay to find the notification + its
+/// fan-out subjects + sequences (404 if none) → delete the old stream copies
+/// (all-or-nothing, like recall, so a partial failure never leaves a duplicate
+/// id with stale content) → re-publish the merged notification to the SAME
+/// subjects with the same id + `issued_at`, stamping `edited_at`. Connected
+/// clients receive the re-published copy through the normal `notifications.new`
+/// path and replace the content in place (the client recognises a same-id,
+/// same-`issued_at` arrival as an edit, not a fresh toast); offline clients
+/// pick it up on the next `notifications.list`.
+///
+/// `reset_acks` additionally stamps `acks_reset_at` and clears the projected
+/// ack ledger, forcing re-confirmation of a materially-changed body. Per-user
+/// read marks are NOT scanned/deleted: the agent's `notifications.list` treats
+/// a read mark older than `acks_reset_at` as unread, so end users re-confirm
+/// without an O(fleet) KV sweep.
+///
+/// ⚠ Same OS-toast limitation as recall: an already-surfaced toast keeps its
+/// original text (OS-managed); only the in-app panel reflects the new content.
+pub async fn edit(
+    State(s): State<AppState>,
+    caller: Caller,
+    Path(id): Path<String>,
+    Json(req): Json<EditNotificationRequest>,
+) -> Result<Json<PublishNotificationResponse>, (StatusCode, String)> {
+    if req.title.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "title must not be empty".to_string(),
+        ));
+    }
+    // Note: unlike `publish`, a past `expires_at` is intentionally allowed here
+    // — it's a deliberate "retire it but keep history" edit, distinct from a
+    // DOA typo on a fresh send.
+
+    let raw = replay_all_sent(&s).await?;
+    // Keep the newest copy of the id AND every subject/sequence it landed on
+    // (mirrors `detail` + `recall`).
+    let mut existing: Option<Notification> = None;
+    let mut subjects: Vec<String> = Vec::new();
+    let mut seqs: Vec<u64> = Vec::new();
+    for (n, subj, seq) in raw {
+        if n.id != id {
+            continue;
+        }
+        subjects.push(subj);
+        seqs.push(seq);
+        match &existing {
+            Some(prev) if n.issued_at <= prev.issued_at => {}
+            _ => existing = Some(n),
+        }
+    }
+    let existing = existing.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            format!("notification {id} not found"),
+        )
+    })?;
+
+    let now = chrono::Utc::now();
+    // A new reset wins; otherwise carry any prior reset forward so a later
+    // typo-fix edit (reset_acks=false) doesn't un-reset an earlier reset.
+    let acks_reset_at = if req.reset_acks {
+        Some(now)
+    } else {
+        existing.acks_reset_at
+    };
+    let merged = Notification {
+        id: existing.id.clone(),
+        priority: req.priority,
+        require_ack: req.require_ack,
+        title: req.title,
+        body: req.body,
+        toast: req.toast,
+        // Preserve identity + "sent at" so the edit isn't a re-send.
+        issued_at: existing.issued_at,
+        issued_by: existing.issued_by.clone(),
+        expires_at: req.expires_at,
+        acked_at: None,
+        edited_at: Some(now),
+        acks_reset_at,
+    };
+
+    // Audience is immutable on edit — re-publish to the very subjects the
+    // original landed on.
+    let parsed = parse_notification_target(&subjects);
+    let target = kanade_shared::manifest::Target {
+        all: parsed.all,
+        groups: parsed.groups,
+        pcs: parsed.pcs,
+    };
+
+    // Delete the old copies first (all-or-nothing) so the re-publish never
+    // produces a duplicate id with stale content. A partial delete aborts
+    // before re-publishing — same reasoning as recall.
+    let (deleted, failed) = delete_stream_msgs(&s, &seqs).await?;
+    if deleted == 0 || failed > 0 {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            format!(
+                "failed to replace notification {id}: deleted {deleted}, failed {failed} of {} copies; not re-publishing to avoid a duplicate",
+                seqs.len()
+            ),
+        ));
+    }
+
+    // Re-publish the merged notification to the same audience. Because the old
+    // copies are already fully deleted, a PARTIAL re-publish is data loss — the
+    // failed subjects now have no copy at all — so (unlike `publish`, which
+    // deletes nothing) edit treats any `pub_failures` as a hard error, not just
+    // the all-failed case. The operator recovers with recall → re-send.
+    // (claude #774.)
+    let (delivered, pub_failures) = fan_out_notification(&s.jetstream, &merged, &target)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    if delivered.is_empty() || !pub_failures.is_empty() {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            format!(
+                "deleted the old copies of {id} but re-publish failed for {pub_failures:?} (delivered {delivered:?}); the notification is now missing from the failed subjects — recall and re-send it"
+            ),
+        ));
+    }
+
+    // Reset confirmations if asked: clear the projected ack ledger so the
+    // operator's confirmation view shows everyone unconfirmed. (End users are
+    // handled by `acks_reset_at` in `notifications.list`; no KV sweep here.)
+    // Non-fatal: the edit already shipped, and `acks_reset_at` still drives the
+    // end-user re-confirm — but record the outcome in the audit (below) so a
+    // failed clear (a stale operator "who confirmed" view) is visible in the
+    // persisted record, not only a transient warn log. (claude #774.)
+    let acks_cleared = if req.reset_acks {
+        match sqlx::query("DELETE FROM notification_acks WHERE notification_id = ?")
+            .bind(&id)
+            .execute(&s.pool)
+            .await
+        {
+            Ok(_) => true,
+            Err(e) => {
+                warn!(error = %e, notification_id = %id, "edit: clearing notification_acks failed");
+                false
+            }
+        }
+    } else {
+        // No reset requested — nothing to clear (don't imply a failure).
+        true
+    };
+
+    info!(
+        notification_id = %id,
+        delivered = ?delivered,
+        reset_acks = req.reset_acks,
+        acks_cleared,
+        "notification edited",
+    );
+
+    audit::record(
+        &s.nats,
+        "operator",
+        "notification.edit",
+        Some(&id),
+        Some(&caller),
+        serde_json::json!({
+            "notification_id": id,
+            "subjects": delivered,
+            "reset_acks": req.reset_acks,
+            // false ⇒ reset was asked but the ledger clear failed; the operator
+            // confirmation view may be stale (end users still re-confirm).
+            "acks_cleared": acks_cleared,
+        }),
+    )
+    .await;
+
+    Ok(Json(PublishNotificationResponse {
+        id,
+        subjects: delivered,
+    }))
 }
 
 /// Physically delete the given `NOTIFICATIONS` stream messages by sequence,
@@ -864,6 +1050,8 @@ mod tests {
             issued_by: None,
             expires_at: None,
             acked_at: None,
+            edited_at: None,
+            acks_reset_at: None,
         }
     }
 

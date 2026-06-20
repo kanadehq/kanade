@@ -74,6 +74,21 @@
     "cancelLabel": "キャンセル",
     "done": "通知を取り消しました。"
   },
+  "edit": {
+    "action": "編集",
+    "tooltip": "この通知の内容（本文・有効期限・優先度など）を修正します。送信先は変更できません。",
+    "dialogTitle": "通知を編集",
+    "editedBadge": "編集済み",
+    "editedAt": "編集日時: {{time}}",
+    "expiresHint": "空にすると期限なし（無期限）になります。過去の日時にするとすぐに非表示になります。",
+    "resetAcks": "確認状況をリセットする",
+    "resetAcksHint": "本文を実質的に変更した場合に有効化してください。これまでの確認済みが取り消され、全員に再確認を促します。誤字修正などではオフのままにします。",
+    "titleRequired": "タイトルは必須です。",
+    "invalidExpiresAt": "有効期限が不正です — 修正するか空にしてください。",
+    "save": "保存",
+    "cancel": "キャンセル",
+    "done": "通知を編集しました。"
+  },
   "audience": {
     "title": "対象 PC の確認状況",
     "summary": "{{confirmed}} / {{total}} 台 確認済",

@@ -425,6 +425,12 @@ type AppNotification = {
   issued_by?: string | null;
   expires_at?: string | null;
   acked_at?: string | null;
+  // Set when the notification was edited in place (re-published with the same
+  // id + issued_at but new content). Used to recognise an edit vs a fresh send.
+  edited_at?: string | null;
+  // When an edit reset confirmations: a local ack older than this is stale and
+  // the user must re-confirm the new content.
+  acks_reset_at?: string | null;
 };
 
 type NotificationsListResult = {
@@ -711,10 +717,45 @@ function focusNotificationInPanel(id: string): void {
 // `toast:true`) surface as a non-intrusive OS toast (no screen-grabbing
 // modal, no in-app toast that only shows when the window is up).
 // `surfaceOsToast` is a no-op for `toast:false` (in-app panel only).
-function handleNewNotification(n: AppNotification): void {
+//
+// An EDIT (`PATCH /api/notifications/{id}`) re-publishes the notification with
+// the SAME id + issued_at, so it arrives here too. We treat that as a content
+// update of a notification the user already holds, NOT a fresh arrival:
+//  - don't re-toast a typo fix — only surface when the edit NEWLY enabled toast
+//    (false→true) AND this user hasn't confirmed it yet (deliberate "make it
+//    pop for people who haven't dealt with it");
+//  - preserve this user's local ack across the replace (the re-published copy
+//    carries acked_at:null), UNLESS the edit reset confirmations
+//    (`acks_reset_at` newer than the local ack) — then it goes back to unread.
+function handleNewNotification(incoming: AppNotification): void {
+  const existing = notifications.get(incoming.id);
+  const isEdit = !!existing && existing.issued_at === incoming.issued_at;
+
+  let n = incoming;
+  if (isEdit && existing) {
+    const resetAt = incoming.acks_reset_at ? Date.parse(incoming.acks_reset_at) : NaN;
+    const localAck = existing.acked_at ? Date.parse(existing.acked_at) : NaN;
+    const ackInvalidated =
+      !Number.isNaN(resetAt) && (Number.isNaN(localAck) || localAck < resetAt);
+    // Carry the local ack forward unless the reset invalidated it.
+    if (!ackInvalidated && existing.acked_at) {
+      n = { ...incoming, acked_at: existing.acked_at };
+    }
+  }
+
   notifications.set(n.id, n);
   renderNotifications();
   if (isExpired(n)) return;
+
+  if (isEdit && existing) {
+    // Silent content update by default. Only surface when this edit turned
+    // toast ON and the user hasn't (re-)confirmed it.
+    const newlyEnabledToast = n.toast && !existing.toast;
+    if (newlyEnabledToast && !n.acked_at) void surfaceOsToast(n);
+    return;
+  }
+
+  // Genuinely new arrival.
   void surfaceOsToast(n);
 }
 

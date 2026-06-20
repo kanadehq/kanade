@@ -258,6 +258,23 @@ export type NotificationRecord = {
   issued_at: string;
   issued_by?: string | null;
   expires_at?: string | null;
+  // Set when the notification was edited in place (PATCH); drives the
+  // "edited" badge. Absent (not null) on the wire when never edited.
+  edited_at?: string | null;
+  acks_reset_at?: string | null;
+};
+
+// Request body for PATCH /api/notifications/{id} — edit a sent notification's
+// content. Audience is immutable (no `target`); `reset_acks` forces re-confirm
+// of a materially-changed body. The SPA submits the full editable set.
+export type EditNotificationRequest = {
+  priority: NotificationPriority;
+  require_ack: boolean;
+  title: string;
+  body: string;
+  toast: boolean;
+  expires_at?: string;
+  reset_acks: boolean;
 };
 
 // One targeted PC's confirmation state (④), from the detail endpoint's
