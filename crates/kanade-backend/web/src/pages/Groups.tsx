@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Plus, Settings2, X } from 'lucide-react';
+import { Check, Mail, Plus, Settings2, X } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
@@ -25,12 +25,25 @@ import { useAuth } from '@/lib/auth';
 
 // Mirror of the backend GroupSummary (api/agent_groups.rs): the
 // group-centric inverse of the per-PC agent_groups KV rows, plus
-// whether a `groups.<name>` config override exists.
+// whether a `groups.<name>` config override exists and the group's
+// notification email addresses (`group_contacts` KV).
 type GroupSummary = {
   name: string;
   members: string[];
   has_config: boolean;
+  emails: string[];
 };
+
+// Split an operator's free-form input (comma / whitespace / newline
+// separated) into trimmed, non-empty address tokens. The backend
+// re-normalises (lower-case + dedup + validate), so this is just a
+// liberal tokenizer.
+function parseEmails(raw: string): string[] {
+  return raw
+    .split(/[\s,]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
 
 type GroupsOverview = {
   groups: GroupSummary[];
@@ -51,6 +64,11 @@ export function Groups() {
   // add-membership form
   const [newGroup, setNewGroup] = useState('');
   const [newPcs, setNewPcs] = useState<string[]>([]);
+
+  // Inline notify-email editor: which group's address list is open,
+  // and the in-progress draft text.
+  const [editingEmail, setEditingEmail] = useState<string | null>(null);
+  const [emailDraft, setEmailDraft] = useState('');
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ['groups'] });
   const onError = (err: unknown) => toast.error(formatError(err));
@@ -126,6 +144,23 @@ export function Groups() {
       // table shows the actual remaining membership.
       invalidate();
     },
+  });
+
+  // Replace a group's notify-email list (`PUT /api/groups/<name>/email`).
+  // The backend normalises + validates, so a bad address comes back as a
+  // 400 surfaced via onError.
+  const saveEmails = useMutation({
+    mutationFn: (v: { group: string; emails: string[] }) =>
+      apiFetch(`/api/groups/${encodeURIComponent(v.group)}/email`, {
+        method: 'PUT',
+        body: JSON.stringify({ emails: v.emails }),
+      }),
+    onSuccess: (_data, v) => {
+      toast.success(t('toast.emailSaved', { group: v.group }));
+      setEditingEmail(null);
+      invalidate();
+    },
+    onError,
   });
 
   const groups = overview.data?.groups ?? [];
@@ -210,6 +245,7 @@ export function Groups() {
             <TableRow>
               <TableHead>{t('groupName')}</TableHead>
               <TableHead>{t('members')}</TableHead>
+              <TableHead>{t('email')}</TableHead>
               <TableHead>{t('config')}</TableHead>
               <TableHead className="text-right">{t('actions')}</TableHead>
             </TableRow>
@@ -257,6 +293,71 @@ export function Groups() {
                         </span>
                       ))}
                     </div>
+                  )}
+                </TableCell>
+                <TableCell>
+                  {editingEmail === g.name ? (
+                    <div className="flex items-center gap-1.5">
+                      <Input
+                        autoFocus
+                        value={emailDraft}
+                        onChange={(e) => setEmailDraft(e.target.value)}
+                        placeholder={t('emailPlaceholder')}
+                        title={t('emailHint')}
+                        className="w-64"
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            // Guard against a double-submit from holding/
+                            // mashing Enter while the PUT is in flight.
+                            if (!saveEmails.isPending) {
+                              saveEmails.mutate({
+                                group: g.name,
+                                emails: parseEmails(emailDraft),
+                              });
+                            }
+                          } else if (e.key === 'Escape') {
+                            setEditingEmail(null);
+                          }
+                        }}
+                      />
+                      <Button
+                        size="sm"
+                        disabled={saveEmails.isPending}
+                        aria-label={t('save')}
+                        onClick={() =>
+                          saveEmails.mutate({ group: g.name, emails: parseEmails(emailDraft) })
+                        }
+                      >
+                        <Check className="size-3" />
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        aria-label={t('cancel')}
+                        onClick={() => setEditingEmail(null)}
+                      >
+                        <X className="size-3" />
+                      </Button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={!canOperate}
+                      title={canOperate ? t('emailEdit', { group: g.name }) : undefined}
+                      onClick={() => {
+                        setEditingEmail(g.name);
+                        setEmailDraft(g.emails.join(', '));
+                      }}
+                      className="inline-flex items-center gap-1 text-left enabled:hover:text-fg disabled:cursor-default"
+                    >
+                      <Mail className="size-3 text-muted shrink-0" />
+                      {g.emails.length === 0 ? (
+                        <span className="text-muted text-xs">{t('emailNone')}</span>
+                      ) : (
+                        <span className="text-xs break-all">{g.emails.join(', ')}</span>
+                      )}
+                    </button>
                   )}
                 </TableCell>
                 <TableCell>

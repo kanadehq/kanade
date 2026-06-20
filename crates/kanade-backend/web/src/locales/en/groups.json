@@ -12,6 +12,13 @@
   "config": "Config",
   "configured": "configured",
   "configHint": "A groups.<name> config override exists — manage it on the Config page.",
+  "email": "Notify email",
+  "emailNone": "(none)",
+  "emailEdit": "Edit notify emails for {{group}}",
+  "emailPlaceholder": "ops@example.com, it@example.com",
+  "emailHint": "Comma- or space-separated. Used by compliance alerts with email: true.",
+  "save": "Save",
+  "cancel": "Cancel",
   "actions": "Actions",
   "removeMember": "Remove {{pcId}} from {{group}}",
   "confirmRemove": "Remove {{pcId}} from \"{{group}}\"?",
@@ -23,6 +30,7 @@
   "toast": {
     "added": "Added {{count}} PC(s) to {{group}}",
     "removed": "Removed {{pcId}} from {{group}}",
-    "removedAll": "Removed all members from {{group}}"
+    "removedAll": "Removed all members from {{group}}",
+    "emailSaved": "Updated notify emails for {{group}}"
   }
 }

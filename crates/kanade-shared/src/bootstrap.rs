@@ -27,11 +27,11 @@ use tracing::{info, warn};
 
 use crate::kv::{
     BUCKET_AGENT_CONFIG, BUCKET_AGENT_GROUPS, BUCKET_AGENTS_STATE, BUCKET_FLEET_CONFIG,
-    BUCKET_JOBS, BUCKET_JOBS_YAML, BUCKET_NOTIFICATIONS_READ, BUCKET_SCHEDULES,
-    BUCKET_SCHEDULES_YAML, BUCKET_SCRIPT_CURRENT, BUCKET_SCRIPT_STATUS, OBJECT_AGENT_RELEASES,
-    OBJECT_APP_PACKAGES, OBJECT_COLLECTIONS, OBJECT_RESULT_OUTPUT, OBJECT_SCRIPTS, STREAM_AUDIT,
-    STREAM_EVENTS, STREAM_EXEC, STREAM_INVENTORY, STREAM_NOTIFICATIONS, STREAM_OBS_EVENTS,
-    STREAM_RESULTS,
+    BUCKET_GROUP_CONTACTS, BUCKET_JOBS, BUCKET_JOBS_YAML, BUCKET_NOTIFICATIONS_READ,
+    BUCKET_SCHEDULES, BUCKET_SCHEDULES_YAML, BUCKET_SCRIPT_CURRENT, BUCKET_SCRIPT_STATUS,
+    OBJECT_AGENT_RELEASES, OBJECT_APP_PACKAGES, OBJECT_COLLECTIONS, OBJECT_RESULT_OUTPUT,
+    OBJECT_SCRIPTS, STREAM_AUDIT, STREAM_EVENTS, STREAM_EXEC, STREAM_INVENTORY,
+    STREAM_NOTIFICATIONS, STREAM_OBS_EVENTS, STREAM_RESULTS,
 };
 
 /// Create-or-update an Object Store, but never let it wedge backend
@@ -289,6 +289,17 @@ pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
     .await
     .with_context(|| format!("create_or_update_key_value {BUCKET_AGENT_GROUPS}"))?;
     info!(bucket = BUCKET_AGENT_GROUPS, "ready");
+
+    // group_contacts — per-group notification email addresses
+    // (operator-managed via the SPA Groups page).
+    js.create_or_update_key_value(KvConfig {
+        bucket: BUCKET_GROUP_CONTACTS.into(),
+        history: 5,
+        ..Default::default()
+    })
+    .await
+    .with_context(|| format!("create_or_update_key_value {BUCKET_GROUP_CONTACTS}"))?;
+    info!(bucket = BUCKET_GROUP_CONTACTS, "ready");
 
     // schedules — admin-API CRUD'd cron table (spec §2.5.3).
     // Backend's scheduler.rs also creates this on startup; calling

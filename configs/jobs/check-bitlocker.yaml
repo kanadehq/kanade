@@ -69,6 +69,8 @@ check:
   #   priority: warn                # colour/label only
   #   require_ack: true             # demand a 確認 click (tracked on the SPA)
   #   toast: true                   # OS toast even if the Client App is closed
+  #   email: true                   # ALSO email the notify_groups (needs backend [mail] +
+  #                                 # per-group addresses on the SPA Groups page); opt-in
   #   title: "BitLocker が未準拠です"
   #   body: "{label} の状態が {status} です: {detail}（PC: {pc_id} / 利用者: {last_logon}）"
 inventory:

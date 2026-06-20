@@ -49,6 +49,45 @@ pub struct BackendConfig {
     pub nats: NatsSection,
     pub db: DbSection,
     pub log: LogSection,
+    /// Outbound SMTP relay for compliance-alert + generic email.
+    /// Absent ⇒ email features are no-ops (the in-app/NATS notification
+    /// path is unaffected), so an existing deploy keeps working with no
+    /// config change. Holds only the *non-secret* connection settings —
+    /// the SMTP password is NOT here, it comes from the `MailPassword`
+    /// registry secret (or `$KANADE_MAIL_PASSWORD`), the same way
+    /// `JwtSecret` / `StaticToken` are resolved (kanade keeps secrets out
+    /// of the un-ACL'd `backend.toml`).
+    #[serde(default)]
+    pub mail: Option<MailSection>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct MailSection {
+    /// SMTP relay host (e.g. an internal mail relay).
+    pub host: String,
+    /// SMTP port — 587 (STARTTLS), 465 (implicit TLS), or 25 (plain).
+    pub port: u16,
+    #[serde(default)]
+    pub encryption: MailEncryption,
+    /// Envelope/`From` address every kanade email is sent as.
+    pub from: String,
+    /// SMTP AUTH username. Omit for an unauthenticated internal relay;
+    /// when set, pair it with the `MailPassword` secret.
+    #[serde(default)]
+    pub username: Option<String>,
+}
+
+/// Transport security for the SMTP connection.
+#[derive(Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MailEncryption {
+    /// Upgrade a plaintext connection via STARTTLS (port 587). Default.
+    #[default]
+    Starttls,
+    /// Implicit TLS from the first byte (port 465).
+    Tls,
+    /// No transport security (port 25 on a trusted internal segment).
+    None,
 }
 
 #[derive(Deserialize, Debug, Clone)]

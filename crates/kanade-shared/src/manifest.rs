@@ -371,6 +371,15 @@ pub struct CheckAlert {
     /// whose app is closed.
     #[serde(default)]
     pub toast: bool,
+    /// Also send the alert by email, to every address mapped to the
+    /// `notify_groups` (via the `group_contacts` KV, edited on the SPA
+    /// Groups page). Opt-in: defaults to `false`, so an existing alert
+    /// never starts emailing on its own. Requires `notify_groups` to be
+    /// non-empty (there is no per-PC user email) and the backend's
+    /// `[mail]` config to be present; otherwise the email is a logged
+    /// no-op while the in-app/toast notification still fires.
+    #[serde(default)]
+    pub email: bool,
     /// Notification title (required). May use the same `{…}` placeholders
     /// as [`body`](Self::body).
     pub title: String,
@@ -1310,6 +1319,14 @@ impl Manifest {
                 if alert.notify_groups.iter().any(|g| g.trim().is_empty()) {
                     return Err("check.alert.notify_groups must not contain blanks".to_string());
                 }
+                // Email is addressed via group_contacts (group → email), so
+                // there must be a group to map. notify_user has no email.
+                if alert.email && alert.notify_groups.is_empty() {
+                    return Err(
+                        "check.alert.email requires notify_groups (email is addressed per group, not per user)"
+                            .to_string(),
+                    );
+                }
                 // The alert rides the `check_status` projection, which only
                 // runs for `fleet: true`.
                 if !check.fleet {
@@ -2101,6 +2118,11 @@ check:
             (
                 "    notify_user: true\n    title: t\n  fleet: false\n",
                 "requires fleet: true",
+            ),
+            // email opt-in without a group to address.
+            (
+                "    notify_user: true\n    email: true\n    title: t\n",
+                "email requires notify_groups",
             ),
         ];
         for (alert, want) in cases {

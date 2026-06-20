@@ -13,6 +13,7 @@ pub mod exec;
 pub mod executions;
 pub mod fleet_perf;
 pub mod freeze;
+pub mod group_contacts;
 pub mod health;
 pub mod host_perf;
 pub mod inventory;
@@ -87,6 +88,12 @@ pub struct AppState {
     /// hot path hits this instead of a NATS round-trip per request.
     /// `Clone` is cheap (Arc).
     pub explode_spec_cache: crate::projector::spec_cache::ExplodeSpecCache,
+    /// Outbound SMTP relay, built from the `[mail]` config when present.
+    /// `None` ⇒ email features are no-ops. `Arc` so `AppState`'s `Clone`
+    /// (one per request) stays cheap and the relay's connection pool is
+    /// shared. Used by the compliance-alert projector today; available to
+    /// any future feature that needs to send mail.
+    pub mailer: Option<std::sync::Arc<crate::mail::Mailer>>,
 }
 
 impl FromRef<AppState> for SqlitePool {
@@ -170,6 +177,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/agents/{pc_id}/groups", get(agent_groups::list_groups))
         // Group-centric inverse view — drives the SPA Groups page.
         .route("/api/groups", get(agent_groups::list_all_groups))
+        // Per-group notification email addresses (viewer-readable;
+        // PUT is operator-gated below). Drives the Groups page email column.
+        .route(
+            "/api/groups/{name}/email",
+            get(group_contacts::get_contacts),
+        )
         .route(
             "/api/agents/{pc_id}/effective_config",
             get(agent_config::effective),
@@ -329,6 +342,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/groups/{name}/config",
             put(agent_config::put_group).delete(agent_config::delete_group),
+        )
+        .route(
+            "/api/groups/{name}/email",
+            put(group_contacts::put_contacts),
         )
         .route(
             "/api/pcs/{pc_id}/config",

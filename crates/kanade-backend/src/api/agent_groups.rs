@@ -39,6 +39,9 @@ pub struct GroupSummary {
     /// Sorted member pc_ids.
     pub members: Vec<String>,
     pub has_config: bool,
+    /// Notification email addresses for this group (`group_contacts`
+    /// KV). Empty when none are set. Drives the Groups page email column.
+    pub emails: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -113,14 +116,20 @@ pub async fn list_all_groups(
     // Union: every name that appears in either side gets a row.
     let mut all_names: BTreeSet<String> = by_group.keys().cloned().collect();
     all_names.extend(with_config.iter().cloned());
+    // A group can exist solely via a contacts entry (email set before
+    // any PC joined), so fold those names into the union too.
+    let mut contacts = super::group_contacts::contacts_map(&state).await;
+    all_names.extend(contacts.keys().cloned());
 
     let groups = all_names
         .into_iter()
         .map(|name| {
             let mut members = by_group.remove(&name).unwrap_or_default();
             members.sort();
+            let emails = contacts.remove(&name).unwrap_or_default();
             GroupSummary {
                 has_config: with_config.contains(&name),
+                emails,
                 name,
                 members,
             }

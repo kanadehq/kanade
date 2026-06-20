@@ -120,6 +120,15 @@
   `$AgentStaticToken` / `$AgentJwtSecret` / `$AgentBootstrapAdminPassword`
   knobs in the published copy instead (they fold into these params).
 
+.PARAMETER MailPassword
+  If set, write the SMTP AUTH password to
+  HKLM\SOFTWARE\kanade\backend\MailPassword (REG_SZ, hardened ACL).
+  Backend resolves it ahead of $env:KANADE_MAIL_PASSWORD and pairs it
+  with the `[mail] username` in backend.toml to authenticate to the SMTP
+  relay (compliance-alert + generic email). Omit for an unauthenticated
+  internal relay. The SMTP host/port/from live in backend.toml; only the
+  password is a secret, so it goes in the registry, not the un-ACL'd toml.
+
 .EXAMPLE
   PS> .\deploy-backend.ps1                            # opens whatever backend.toml binds to
 
@@ -161,7 +170,8 @@ param(
     [string]$NatsToken    = '',
     [string]$StaticToken  = '',
     [string]$JwtSecret    = '',
-    [string]$BootstrapAdminPassword = ''
+    [string]$BootstrapAdminPassword = '',
+    [string]$MailPassword = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -220,10 +230,12 @@ $AgentWipeDb                 = $false
 $AgentStaticToken            = ''
 $AgentJwtSecret              = ''
 $AgentBootstrapAdminPassword = ''
+$AgentMailPassword           = ''
 if ($AgentWipeDb)                 { $WipeDb                 = $true }
 if ($AgentStaticToken)            { $StaticToken            = $AgentStaticToken }
 if ($AgentJwtSecret)              { $JwtSecret              = $AgentJwtSecret }
 if ($AgentBootstrapAdminPassword) { $BootstrapAdminPassword = $AgentBootstrapAdminPassword }
+if ($AgentMailPassword)           { $MailPassword           = $AgentMailPassword }
 # ===========================================================================
 
 # If the agent-mode knobs are set, download the binary into a temp
@@ -557,6 +569,9 @@ if ($JwtSecret) {
 }
 if ($BootstrapAdminPassword) {
     Set-KanadeRegistrySecret -Subkey 'backend' -ValueName 'BootstrapAdminPassword' -Value $BootstrapAdminPassword
+}
+if ($MailPassword) {
+    Set-KanadeRegistrySecret -Subkey 'backend' -ValueName 'MailPassword' -Value $MailPassword
 }
 
 # Service binPath = quoted exe + --config flag pointing at the

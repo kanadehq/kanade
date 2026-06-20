@@ -12,6 +12,13 @@
   "config": "設定",
   "configured": "設定あり",
   "configHint": "groups.<name> の設定オーバーライドがあります — 設定ページで管理できます。",
+  "email": "通知メール",
+  "emailNone": "（なし）",
+  "emailEdit": "{{group}} の通知メールを編集",
+  "emailPlaceholder": "ops@example.com, it@example.com",
+  "emailHint": "カンマまたは空白区切り。email: true のコンプライアンス alert で使われます。",
+  "save": "保存",
+  "cancel": "キャンセル",
   "actions": "操作",
   "removeMember": "{{pcId}} を {{group}} から削除",
   "confirmRemove": "{{pcId}} を「{{group}}」から削除しますか？",
@@ -23,6 +30,7 @@
   "toast": {
     "added": "{{count}} 台を {{group}} に追加しました",
     "removed": "{{pcId}} を {{group}} から削除しました",
-    "removedAll": "{{group}} の全メンバーを削除しました"
+    "removedAll": "{{group}} の全メンバーを削除しました",
+    "emailSaved": "{{group}} の通知メールを更新しました"
   }
 }
