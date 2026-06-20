@@ -19,8 +19,9 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use futures::StreamExt;
 use kanade_shared::ipc::notifications::{
-    AudiencePc, Notification, NotificationAckEntry, NotificationAckStatus, NotificationDetail,
-    NotificationTarget, PublishNotificationRequest, PublishNotificationResponse,
+    AudiencePc, Notification, NotificationAckEntry, NotificationAckStatus, NotificationAmend,
+    NotificationAmendOp, NotificationDetail, NotificationTarget, PublishNotificationRequest,
+    PublishNotificationResponse,
 };
 use kanade_shared::kv::STREAM_NOTIFICATIONS;
 use kanade_shared::subject;
@@ -276,9 +277,9 @@ pub async fn list_sent(
     State(s): State<AppState>,
 ) -> Result<Json<Vec<Notification>>, (StatusCode, String)> {
     let raw = replay_all_sent(&s).await?;
-    // The history list doesn't need the per-copy subjects (audience is a
-    // detail-page concern), so drop them before dedup.
-    let notifs = raw.into_iter().map(|(n, _subj)| n).collect();
+    // The history list doesn't need the per-copy subjects or stream seqs
+    // (those are detail-page / recall concerns), so drop them before dedup.
+    let notifs = raw.into_iter().map(|(n, _subj, _seq)| n).collect();
     Ok(Json(dedup_newest_first(notifs, SENT_MAX_ITEMS)))
 }
 
@@ -309,7 +310,7 @@ pub async fn detail(
     // capture them here to reconstruct the audience below.
     let mut notification: Option<Notification> = None;
     let mut subjects: Vec<String> = Vec::new();
-    for (n, subj) in raw {
+    for (n, subj, _seq) in raw {
         if n.id != id {
             continue;
         }
@@ -335,6 +336,162 @@ pub async fn detail(
         audience,
         target,
     }))
+}
+
+/// `POST /api/notifications/{id}/recall` (operator+) — completely delete a
+/// sent notification.
+///
+/// Unlike letting it lapse at `expires_at` (which only hides it on clients),
+/// recall is a *full* removal an operator reaches for after a misfire: every
+/// fan-out copy of the id is physically deleted from the `NOTIFICATIONS`
+/// stream, so it vanishes from the history (`list_sent`), the detail page,
+/// and any client's `notifications.list` re-sync. A live amend broadcast then
+/// pulls it off the screens of clients currently showing it.
+///
+/// Flow: replay the stream → collect every `stream_sequence` carrying this id
+/// (404 if none — the stream is the authoritative sent-ledger, so absence is
+/// "never sent / already recalled") → `delete_message` each (best-effort: a
+/// partial failure still removes what it can and is logged) → broadcast a
+/// `Recall` amend to the fleet → audit.
+///
+/// ⚠ Already-delivered OS toasts (Action Center) can't be programmatically
+/// dismissed — recall clears the in-app panel / unread / ack modal, but a
+/// toast that already surfaced stays until the user clears it.
+pub async fn recall(
+    State(s): State<AppState>,
+    caller: Caller,
+    Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let raw = replay_all_sent(&s).await?;
+    let seqs: Vec<u64> = raw
+        .iter()
+        .filter(|(n, _, _)| n.id == id)
+        .map(|(_, _, seq)| *seq)
+        .collect();
+    if seqs.is_empty() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("notification {id} not found"),
+        ));
+    }
+
+    let (deleted, failed) = delete_stream_msgs(&s, &seqs).await?;
+    // Recall is all-or-nothing: only a fully-deleted notification may report
+    // success + broadcast the live amend. On a partial delete (`failed > 0`)
+    // the un-deleted copies would resurrect on the next `notifications.list`
+    // re-sync, so clearing live panels would be a lie — and `deleted == 0`
+    // (every delete failed, or every seq was the info-failed `0` sentinel)
+    // means nothing was removed at all. Either way, return an error and don't
+    // broadcast: the operator retries, and since the already-deleted copies
+    // are gone a retry replays only the remainder, converging once the broker
+    // recovers. (CodeRabbit #771.)
+    if deleted == 0 || failed > 0 {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            format!(
+                "failed to fully recall notification {id}: deleted {deleted}, failed {failed} of {} copies",
+                seqs.len()
+            ),
+        ));
+    }
+
+    // Pull it off the screens of clients showing it right now. Best-effort
+    // (core NATS, fire-and-forget): offline clients reconcile on reconnect
+    // via `notifications.list`, which no longer returns the deleted id.
+    fan_out_amend(
+        &s,
+        &NotificationAmend {
+            id: id.clone(),
+            op: NotificationAmendOp::Recall,
+        },
+    )
+    .await;
+
+    info!(
+        notification_id = %id,
+        deleted,
+        "notification recalled",
+    );
+
+    audit::record(
+        &s.nats,
+        "operator",
+        "notification.recall",
+        Some(&id),
+        Some(&caller),
+        serde_json::json!({
+            "notification_id": id,
+            // Always == seqs.len() here: a partial delete returned early above.
+            "deleted_copies": deleted,
+        }),
+    )
+    .await;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Physically delete the given `NOTIFICATIONS` stream messages by sequence,
+/// returning `(deleted, failed)` counts. Best-effort: a single failed delete
+/// is logged and counted but doesn't abort the rest (a partial removal still
+/// beats leaving the whole notification live). The caller collects every seq
+/// first, then deletes, so a mid-iteration error can't leave seqs un-visited.
+async fn delete_stream_msgs(
+    s: &AppState,
+    seqs: &[u64],
+) -> Result<(u64, u64), (StatusCode, String)> {
+    let stream = s
+        .jetstream
+        .get_stream(STREAM_NOTIFICATIONS)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("open {STREAM_NOTIFICATIONS} stream: {e}"),
+            )
+        })?;
+
+    let mut deleted = 0u64;
+    let mut failed = 0u64;
+    for &seq in seqs {
+        // 0 is the `replay_all_sent` sentinel for a copy whose `info()`
+        // failed (no real JetStream message has sequence 0); skip it rather
+        // than pay a roundtrip that always fails + logs a false warning.
+        if seq == 0 {
+            continue;
+        }
+        match stream.delete_message(seq).await {
+            Ok(_) => deleted += 1,
+            Err(e) => {
+                warn!(error = %e, seq, "recall: delete_message failed");
+                failed += 1;
+            }
+        }
+    }
+    Ok((deleted, failed))
+}
+
+/// Broadcast a post-send [`NotificationAmend`] to the whole fleet on the
+/// ephemeral [`subject::NOTIFICATIONS_AMEND_SUBJECT`] core-NATS channel. Every
+/// agent subscribes and forwards a `notifications.amended` push to its
+/// clients; a client applies it only if it holds the referenced id, so this
+/// single subject reaches everyone without per-audience routing. Fire-and-
+/// forget (no JetStream ack) — the durable half of the operation already
+/// happened (the stream delete); this is just the live screen update.
+async fn fan_out_amend(s: &AppState, amend: &NotificationAmend) {
+    let payload = match serde_json::to_vec(amend) {
+        Ok(b) => bytes::Bytes::from(b),
+        Err(e) => {
+            warn!(error = %e, "fan_out_amend: serialize failed");
+            return;
+        }
+    };
+    if let Err(e) = s
+        .nats
+        .publish(subject::NOTIFICATIONS_AMEND_SUBJECT, payload)
+        .await
+    {
+        warn!(error = %e, "fan_out_amend: publish failed");
+    }
 }
 
 /// Reconstruct the per-PC confirmation roster (④) for a notification from
@@ -547,16 +704,18 @@ fn assemble_roster(
 }
 
 /// Drain every retained `notifications.>` message into raw (pre-dedup)
-/// `(Notification, subject)` pairs, newest-biased via a rolling window.
-/// Shared by [`list_sent`] and [`detail`]; callers dedup the per-subject
-/// fan-out copies (one publish lands on `all` + each `group.X` + each
-/// `pc.Y`) with [`dedup_newest_first`]. The subject is carried so
+/// `(Notification, subject, stream_seq)` triples, newest-biased via a
+/// rolling window. Shared by [`list_sent`] and [`detail`]; callers dedup the
+/// per-subject fan-out copies (one publish lands on `all` + each `group.X` +
+/// each `pc.Y`) with [`dedup_newest_first`]. The subject is carried so
 /// [`detail`] can reconstruct a notification's audience (④) from the very
 /// fan-out copies it dedups away — there's no other record of who a
-/// notification was addressed to.
+/// notification was addressed to. The stream sequence is carried so
+/// [`recall`] can `delete_message` every copy of an id (the only way to
+/// physically remove a sent notification from the append-only stream).
 async fn replay_all_sent(
     s: &AppState,
-) -> Result<Vec<(Notification, String)>, (StatusCode, String)> {
+) -> Result<Vec<(Notification, String, u64)>, (StatusCode, String)> {
     let stream = s
         .jetstream
         .get_stream(STREAM_NOTIFICATIONS)
@@ -602,7 +761,7 @@ async fn replay_all_sent(
     // freshest sends (what an operator history cares about).
     // Size up front at the ceiling the rolling window allows (cap + the
     // one transient overflow entry) so a full stream doesn't realloc.
-    let mut buf: std::collections::VecDeque<(Notification, String)> =
+    let mut buf: std::collections::VecDeque<(Notification, String, u64)> =
         std::collections::VecDeque::with_capacity(SENT_MAX_REPLAY + 1);
     let mut dropped = 0usize;
     loop {
@@ -622,13 +781,20 @@ async fn replay_all_sent(
             got += 1;
             // The server reports how many messages remain pending for this
             // consumer; once it hits 0 we've drained the stream and can
-            // stop without paying the next fetch's expiry window.
-            if m.info().is_ok_and(|i| i.pending == 0) {
+            // stop without paying the next fetch's expiry window. The same
+            // info carries the stream sequence recall needs to delete the
+            // message — read it once.
+            let info = m.info();
+            if info.as_ref().is_ok_and(|i| i.pending == 0) {
                 exhausted = true;
             }
+            // Seq 0 never names a real message (JetStream seqs start at 1),
+            // so it's a harmless sentinel if info() failed — delete would
+            // just no-op, and list/detail ignore the seq entirely.
+            let seq = info.as_ref().map(|i| i.stream_sequence).unwrap_or(0);
             match serde_json::from_slice::<Notification>(&m.payload) {
                 Ok(n) => {
-                    buf.push_back((n, m.subject.to_string()));
+                    buf.push_back((n, m.subject.to_string(), seq));
                     if buf.len() > SENT_MAX_REPLAY {
                         buf.pop_front();
                         dropped += 1;

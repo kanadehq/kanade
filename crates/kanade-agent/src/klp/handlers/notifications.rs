@@ -34,9 +34,10 @@ use kanade_shared::ipc::envelope::RpcNotification;
 use kanade_shared::ipc::error::{ErrorKind, RpcError};
 use kanade_shared::ipc::method;
 use kanade_shared::ipc::notifications::{
-    Notification, NotificationAcked, NotificationNewParams, NotificationsAckParams,
-    NotificationsAckResult, NotificationsFilter, NotificationsListParams, NotificationsListResult,
-    NotificationsSubscribeParams, NotificationsSubscribeResult, NotificationsUnsubscribeParams,
+    Notification, NotificationAcked, NotificationAmend, NotificationAmendedParams,
+    NotificationNewParams, NotificationsAckParams, NotificationsAckResult, NotificationsFilter,
+    NotificationsListParams, NotificationsListResult, NotificationsSubscribeParams,
+    NotificationsSubscribeResult, NotificationsUnsubscribeParams,
 };
 use kanade_shared::kv::{
     BUCKET_AGENT_GROUPS, BUCKET_NOTIFICATIONS_READ, STREAM_NOTIFICATIONS, notifications_read_key,
@@ -83,9 +84,14 @@ pub fn handle_notifications_subscribe(
             "notification bus not available on this agent build",
         )
     })?;
+    // The amend (recall) bus is forwarded by the SAME task so one
+    // `notifications.unsubscribe` tears down both streams. `None` (amend bus
+    // unwired) degrades to new-only live push — recalled ids still vanish on
+    // the next `notifications.list` reconciliation.
+    let amend_rx = conn.amend_subscribe();
     let push_tx = conn.push_tx.clone();
     let pc_id = conn.pc_id.clone();
-    let handle = tokio::spawn(forward_notifications(rx, push_tx, pc_id));
+    let handle = tokio::spawn(forward_notifications(rx, amend_rx, push_tx, pc_id));
     let id = conn.subscriptions.register("n", handle);
     Ok(NotificationsSubscribeResult { subscription: id })
 }
@@ -604,53 +610,117 @@ fn valid_notification_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
 }
 
-/// Forwarder task body. Awaits each broadcast notification, builds a
-/// `notifications.new` push, and sends it on `push_tx`. Exits when the
-/// connection's writer is gone (`push_tx` closed) or the bus shut down
-/// (`Closed`). On `Lagged` (only reachable after a >256-deep backlog,
-/// implausible for operator-initiated notifications) tokio drops the
-/// missed span and advances to the oldest still-buffered message; the
-/// loop logs the skip and resumes delivery from there.
+/// Forwarder task body. Multiplexes two broadcast streams onto this
+/// connection's `push_tx`: each incoming [`Notification`] becomes a
+/// `notifications.new` push, and each [`NotificationAmend`] (recall) becomes a
+/// `notifications.amended` push. One task for both so a single
+/// `notifications.unsubscribe` aborts the whole stream. Exits when the
+/// connection's writer is gone (`push_tx` closed) or the notification bus shut
+/// down (`Closed`). On `Lagged` (only reachable after a >256-deep backlog,
+/// implausible for operator-initiated traffic) tokio drops the missed span and
+/// advances to the oldest still-buffered message; the loop logs the skip and
+/// resumes there.
+///
+/// `amend_rx` is optional: `None` (amend bus unwired, e.g. tests) just
+/// disables the recall arm. If it later `Closed`s it's dropped to `None` so
+/// the select doesn't spin on a dead receiver while notifications keep
+/// flowing.
 async fn forward_notifications(
     mut rx: broadcast::Receiver<Notification>,
+    mut amend_rx: Option<broadcast::Receiver<NotificationAmend>>,
     push_tx: mpsc::Sender<Vec<u8>>,
     pc_id: String,
 ) {
     debug!(pc_id = %pc_id, "notifications forwarder: subscribed");
     loop {
-        let notification = match rx.recv().await {
-            Ok(n) => n,
-            Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                warn!(
-                    pc_id = %pc_id,
-                    skipped,
-                    "notifications forwarder: lagged; resuming at oldest buffered",
-                );
-                continue;
+        let body = tokio::select! {
+            notif = rx.recv() => {
+                match notif {
+                    Ok(notification) => encode_new(notification, &pc_id),
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        warn!(
+                            pc_id = %pc_id,
+                            skipped,
+                            "notifications forwarder: lagged; resuming at oldest buffered",
+                        );
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        debug!(pc_id = %pc_id, "notifications forwarder: bus closed, exiting");
+                        return;
+                    }
+                }
             }
-            Err(broadcast::error::RecvError::Closed) => {
-                debug!(pc_id = %pc_id, "notifications forwarder: bus closed, exiting");
-                return;
+            amend = recv_amend(&mut amend_rx) => {
+                match amend {
+                    Ok(amend) => encode_amended(amend, &pc_id),
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        warn!(
+                            pc_id = %pc_id,
+                            skipped,
+                            "notifications forwarder: amend lagged; resuming at oldest buffered",
+                        );
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        // Drop the dead amend arm but keep forwarding new
+                        // notifications — disabling it stops the select from
+                        // busy-looping on the closed receiver.
+                        debug!(pc_id = %pc_id, "notifications forwarder: amend bus closed, disabling recall arm");
+                        amend_rx = None;
+                        continue;
+                    }
+                }
             }
         };
-        let params = NotificationNewParams { notification };
-        let notif = match RpcNotification::new(method::NOTIFICATIONS_NEW, &params) {
-            Ok(n) => n,
-            Err(e) => {
-                warn!(error = %e, "notifications forwarder: failed to encode notification");
-                continue;
-            }
-        };
-        let body = match serde_json::to_vec(&notif) {
-            Ok(b) => b,
-            Err(e) => {
-                warn!(error = %e, "notifications forwarder: failed to serialise frame");
-                continue;
-            }
-        };
+        let Some(body) = body else { continue };
         if push_tx.send(body).await.is_err() {
             debug!(pc_id = %pc_id, "notifications forwarder: push channel closed, exiting");
             return;
+        }
+    }
+}
+
+/// Await the next amend, or never resolve when the amend bus is unwired —
+/// keeps the `select!` arm valid without a separate code path.
+async fn recv_amend(
+    rx: &mut Option<broadcast::Receiver<NotificationAmend>>,
+) -> Result<NotificationAmend, broadcast::error::RecvError> {
+    match rx {
+        Some(r) => r.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Encode a `notifications.new` push frame; `None` on a (logged) encode error
+/// so the forwarder skips it rather than dying.
+fn encode_new(notification: Notification, pc_id: &str) -> Option<Vec<u8>> {
+    let params = NotificationNewParams { notification };
+    encode_push(method::NOTIFICATIONS_NEW, &params, pc_id)
+}
+
+/// Encode a `notifications.amended` push frame (recall); `None` on a (logged)
+/// encode error.
+fn encode_amended(amend: NotificationAmend, pc_id: &str) -> Option<Vec<u8>> {
+    let params = NotificationAmendedParams { amend };
+    encode_push(method::NOTIFICATIONS_AMENDED, &params, pc_id)
+}
+
+/// Shared push-frame encoder: wrap `params` in an [`RpcNotification`] under
+/// `method` and serialise it. Logs + returns `None` on either failure.
+fn encode_push<P: serde::Serialize>(method: &str, params: &P, pc_id: &str) -> Option<Vec<u8>> {
+    let notif = match RpcNotification::new(method, params) {
+        Ok(n) => n,
+        Err(e) => {
+            warn!(error = %e, method, pc_id, "notifications forwarder: failed to encode frame");
+            return None;
+        }
+    };
+    match serde_json::to_vec(&notif) {
+        Ok(b) => Some(b),
+        Err(e) => {
+            warn!(error = %e, method, pc_id, "notifications forwarder: failed to serialise frame");
+            None
         }
     }
 }
@@ -754,6 +824,42 @@ mod tests {
                     params.notification.priority,
                     NotificationPriority::Emergency
                 );
+            }
+            other => panic!("expected Notification, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn subscribed_forwarder_pushes_notifications_amended_on_recall() {
+        use kanade_shared::ipc::notifications::{NotificationAmend, NotificationAmendOp};
+        let (notif_tx, _) = broadcast::channel(8);
+        let (amend_tx, _) = broadcast::channel::<NotificationAmend>(8);
+        let (push_tx, mut push_rx) = mpsc::channel(8);
+        // Same connection, now with the amend bus wired — the single
+        // forwarder must multiplex both push kinds.
+        let mut conn = fresh_conn(&notif_tx, push_tx).with_amends(amend_tx.clone());
+        let _ = handle_notifications_subscribe(&mut conn, NotificationsSubscribeParams::default())
+            .unwrap();
+
+        amend_tx
+            .send(NotificationAmend {
+                id: "notif-9f3a".into(),
+                op: NotificationAmendOp::Recall,
+            })
+            .unwrap();
+
+        let body = tokio::time::timeout(Duration::from_secs(1), push_rx.recv())
+            .await
+            .expect("forwarder should push within 1s")
+            .expect("push_tx still open");
+        let msg: RpcMessage = serde_json::from_slice(&body).expect("decode frame");
+        match msg {
+            RpcMessage::Notification(n) => {
+                assert_eq!(n.method, method::NOTIFICATIONS_AMENDED);
+                let params: NotificationAmendedParams =
+                    serde_json::from_value(n.params).expect("decode NotificationAmendedParams");
+                assert_eq!(params.amend.id, "notif-9f3a");
+                assert_eq!(params.amend.op, NotificationAmendOp::Recall);
             }
             other => panic!("expected Notification, got {other:?}"),
         }

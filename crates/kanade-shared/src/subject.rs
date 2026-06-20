@@ -39,6 +39,18 @@ pub fn notifications_pc(pc_id: &str) -> String {
     format!("{NOTIFICATIONS_PC_PREFIX}{pc_id}")
 }
 
+/// `notif-amend` — ephemeral fleet-wide control channel for post-send
+/// operations on a notification (currently: recall). Deliberately NOT
+/// under `notifications.>` so the `NOTIFICATIONS` JetStream stream doesn't
+/// retain it (these are live control pushes, not history). Published via
+/// **core NATS** (fire-and-forget); every agent subscribes and forwards a
+/// `notifications.amended` push to its clients, each of which applies it
+/// only if it holds the referenced id — so a single broadcast needs no
+/// per-audience routing (an id a client doesn't have is a no-op). The
+/// durable half of a recall is the stream message deletion; this is just
+/// the "remove it from screens that are showing it now" half.
+pub const NOTIFICATIONS_AMEND_SUBJECT: &str = "notif-amend";
+
 /// `events.notifications.acked.{pc_id}.{user_sid}.{notif_id}` — the
 /// agent publishes this when a user clicks "確認" on a notification
 /// (SPEC §2.2.2 / Phase E). The `{user_sid}` segment distinguishes
@@ -224,6 +236,15 @@ mod tests {
     #[test]
     fn notifications_pc_formats_id() {
         assert_eq!(notifications_pc("PC1234"), "notifications.pc.PC1234");
+    }
+
+    #[test]
+    fn notifications_amend_subject_constant() {
+        // Pin the value: backend publisher and every agent subscriber must
+        // agree on it, and it must stay OUTSIDE `notifications.>` so the
+        // NOTIFICATIONS stream never retains these ephemeral control messages.
+        assert_eq!(NOTIFICATIONS_AMEND_SUBJECT, "notif-amend");
+        assert!(!NOTIFICATIONS_AMEND_SUBJECT.starts_with("notifications."));
     }
 
     #[test]

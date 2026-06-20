@@ -44,6 +44,9 @@ pub const NOTIFICATIONS_NEW: &str = "notifications.new";
 /// Mark a notification read for this user — agent publishes
 /// `events.notifications.acked.>` on NATS with the OS-derived SID.
 pub const NOTIFICATIONS_ACK: &str = "notifications.ack";
+/// Push (Agent → Client) carrying a post-send amendment to a notification
+/// the client may be showing — currently a recall (delete it from screen).
+pub const NOTIFICATIONS_AMENDED: &str = "notifications.amended";
 
 // ---- jobs.* ----
 
@@ -98,6 +101,7 @@ mod tests {
         assert_eq!(NOTIFICATIONS_UNSUBSCRIBE, "notifications.unsubscribe");
         assert_eq!(NOTIFICATIONS_NEW, "notifications.new");
         assert_eq!(NOTIFICATIONS_ACK, "notifications.ack");
+        assert_eq!(NOTIFICATIONS_AMENDED, "notifications.amended");
 
         assert_eq!(JOBS_LIST, "jobs.list");
         assert_eq!(JOBS_EXECUTE, "jobs.execute");

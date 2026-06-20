@@ -338,6 +338,12 @@ pub fn router(state: AppState) -> Router {
         // Phase E (KLP notifications): publish an end-user notification
         // (fans out to notifications.{all|group.X|pc.Y}).
         .route("/api/notifications", post(notifications::publish))
+        // Completely recall (delete) a sent notification — deletes every
+        // fan-out copy from the stream + broadcasts a live amend.
+        .route(
+            "/api/notifications/{id}/recall",
+            post(notifications::recall),
+        )
         .route("/api/schedules", post(schedules::create))
         .route("/api/schedules/{id}", delete(schedules::delete))
         // #743: view create/delete (operator).

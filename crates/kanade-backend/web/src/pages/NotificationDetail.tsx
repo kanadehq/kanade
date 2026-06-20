@@ -1,12 +1,14 @@
-import { useQuery } from '@tanstack/react-query';
-import { ArrowLeft, Loader2, Repeat } from 'lucide-react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { ArrowLeft, Loader2, Repeat, Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { Link, useNavigate, useParams } from 'react-router-dom';
+import { toast } from 'sonner';
 
 import { ErrorCard } from '@/components/ErrorCard';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { useConfirm } from '@/components/ui/confirm-dialog';
 import {
   Table,
   TableBody,
@@ -15,7 +17,8 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { apiFetch } from '@/lib/api';
+import { apiFetch, formatError } from '@/lib/api';
+import { useAuth } from '@/lib/auth';
 import type { NotificationDetail as NotificationDetailData, NotificationPriority } from '@/lib/types';
 import { fmtIsoLocal } from '@/lib/utils';
 
@@ -43,6 +46,10 @@ export function NotificationDetail() {
   const { t } = useTranslation('notifications');
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const confirm = useConfirm();
+  const { hasRole } = useAuth();
+  const canOperate = hasRole('operator');
 
   const { data, error, isLoading } = useQuery({
     queryKey: ['notif-detail', id],
@@ -50,6 +57,32 @@ export function NotificationDetail() {
       apiFetch<NotificationDetailData>(`/api/notifications/${encodeURIComponent(id!)}`),
     enabled: !!id,
   });
+
+  // Recall (完全削除): the notification is deleted from the stream, so on
+  // success it's gone from the history list AND this detail page 404s — send
+  // the operator back to the list rather than re-rendering a dead page.
+  const recall = useMutation({
+    mutationFn: () =>
+      apiFetch<void>(`/api/notifications/${encodeURIComponent(id!)}/recall`, { method: 'POST' }),
+    onSuccess: () => {
+      toast.success(t('recall.done'));
+      void queryClient.invalidateQueries({ queryKey: ['notif-history'] });
+      void queryClient.removeQueries({ queryKey: ['notif-detail', id] });
+      navigate('/notifications');
+    },
+    onError: (e) => toast.error(formatError(e)),
+  });
+
+  const onRecall = async () => {
+    const ok = await confirm({
+      title: t('recall.confirmTitle'),
+      description: t('recall.confirmBody'),
+      confirmLabel: t('recall.confirmLabel'),
+      cancelLabel: t('recall.cancelLabel'),
+      danger: true,
+    });
+    if (ok) recall.mutate();
+  };
 
   if (isLoading) {
     return (
@@ -92,10 +125,28 @@ export function NotificationDetail() {
             </Link>
           </Button>
         </div>
-        <Button variant="secondary" size="sm" onClick={onReuse}>
-          <Repeat className="size-4" />
-          {t('detail.reuse')}
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button variant="secondary" size="sm" onClick={onReuse}>
+            <Repeat className="size-4" />
+            {t('detail.reuse')}
+          </Button>
+          {canOperate && (
+            <Button
+              variant="danger"
+              size="sm"
+              onClick={onRecall}
+              disabled={recall.isPending}
+              title={t('recall.tooltip')}
+            >
+              {recall.isPending ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <Trash2 className="size-4" />
+              )}
+              {t('recall.action')}
+            </Button>
+          )}
+        </div>
       </div>
 
       {/* ---- what was sent (①) ---- */}
