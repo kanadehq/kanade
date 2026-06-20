@@ -20,7 +20,7 @@ use axum::http::StatusCode;
 use futures::StreamExt;
 use kanade_shared::ipc::notifications::{
     AudiencePc, Notification, NotificationAckEntry, NotificationAckStatus, NotificationDetail,
-    PublishNotificationRequest, PublishNotificationResponse,
+    NotificationTarget, PublishNotificationRequest, PublishNotificationResponse,
 };
 use kanade_shared::kv::STREAM_NOTIFICATIONS;
 use kanade_shared::subject;
@@ -327,11 +327,13 @@ pub async fn detail(
     })?;
 
     let acks = fetch_acks(&s.pool, &id).await?;
+    let target = Some(parse_notification_target(&subjects));
     let audience = resolve_audience(&s, &subjects, &acks).await?;
     Ok(Json(NotificationDetail {
         notification,
         acks,
         audience,
+        target,
     }))
 }
 
@@ -441,6 +443,30 @@ async fn load_agents(
 /// the `pc_id -> [group]` `membership` map, and the recorded `acks` into
 /// the per-PC roster. Split out so the expansion / ack-join / ordering is
 /// unit-testable without a broker or DB.
+/// Reconstruct the original send [`NotificationTarget`] (all / groups /
+/// pcs) from a notification's captured fan-out subjects — the operator's
+/// addressing intent, for the SPA's "送信先" display. Groups/pcs are
+/// sorted + deduped so the display is stable across replays.
+fn parse_notification_target(subjects: &[String]) -> NotificationTarget {
+    let mut all = false;
+    let mut groups: Vec<String> = Vec::new();
+    let mut pcs: Vec<String> = Vec::new();
+    for subj in subjects {
+        if subj == subject::NOTIFICATIONS_ALL {
+            all = true;
+        } else if let Some(g) = subj.strip_prefix(subject::NOTIFICATIONS_GROUP_PREFIX) {
+            groups.push(g.to_string());
+        } else if let Some(pc) = subj.strip_prefix(subject::NOTIFICATIONS_PC_PREFIX) {
+            pcs.push(pc.to_string());
+        }
+    }
+    groups.sort();
+    groups.dedup();
+    pcs.sort();
+    pcs.dedup();
+    NotificationTarget { all, groups, pcs }
+}
+
 fn assemble_roster(
     subjects: &[String],
     agent_rows: &[(String, Option<String>, Option<String>)],
@@ -735,6 +761,29 @@ mod tests {
             acked_at: at(secs),
             account: None,
         }
+    }
+
+    #[test]
+    fn parse_target_from_subjects() {
+        // group + pc fan-out → the operator's addressing intent.
+        let t = parse_notification_target(&[
+            "notifications.group.it-admins".to_string(),
+            "notifications.pc.minipc".to_string(),
+        ]);
+        assert!(!t.all);
+        assert_eq!(t.groups, vec!["it-admins"]);
+        assert_eq!(t.pcs, vec!["minipc"]);
+
+        // `all` is detected; groups/pcs sorted + deduped.
+        let t = parse_notification_target(&[
+            "notifications.all".to_string(),
+            "notifications.group.b".to_string(),
+            "notifications.group.a".to_string(),
+            "notifications.group.a".to_string(),
+        ]);
+        assert!(t.all);
+        assert_eq!(t.groups, vec!["a", "b"]);
+        assert!(t.pcs.is_empty());
     }
 
     #[test]

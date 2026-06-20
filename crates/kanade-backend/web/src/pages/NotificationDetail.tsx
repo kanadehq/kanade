@@ -125,6 +125,31 @@ export function NotificationDetail() {
             />
             <Field label={t('detail.id')} value={<code className="text-xs">{n.id}</code>} />
           </div>
+          {data.target && (
+            <Field
+              label={t('detail.target')}
+              value={
+                <span className="flex flex-wrap items-center gap-1">
+                  {data.target.all && <Badge variant="violet">{t('target.all')}</Badge>}
+                  {data.target.groups.map((g) => (
+                    <Badge key={`g-${g}`} variant="default">
+                      {t('detail.targetGroup', { name: g })}
+                    </Badge>
+                  ))}
+                  {data.target.pcs.map((pc) => (
+                    <Badge key={`p-${pc}`} variant="default">
+                      {t('detail.targetPc', { name: pc })}
+                    </Badge>
+                  ))}
+                  {!data.target.all &&
+                    data.target.groups.length === 0 &&
+                    data.target.pcs.length === 0 && (
+                      <span className="text-muted text-xs">{t('detail.targetUnknown')}</span>
+                    )}
+                </span>
+              }
+            />
+          )}
         </CardContent>
       </Card>
 
