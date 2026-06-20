@@ -27,6 +27,11 @@ export function Login() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  // Self-service password reset: toggles the form to a username-only
+  // "send me a reset link" view. The response is deliberately uniform
+  // (no account-existence disclosure), so success just shows a fixed note.
+  const [mode, setMode] = useState<'login' | 'forgot'>('login');
+  const [forgotSent, setForgotSent] = useState(false);
   const { t } = useTranslation('login');
 
   const from = (location.state as LocationState | null)?.from?.pathname ?? '/dashboard';
@@ -65,6 +70,26 @@ export function Login() {
     }
   }
 
+  async function submitForgot(e: React.FormEvent) {
+    e.preventDefault();
+    if (!username.trim()) return;
+    setBusy(true);
+    try {
+      // Always 200 server-side; we don't even branch on the result so
+      // timing/behaviour can't reveal whether the account exists.
+      await apiFetch('/api/auth/forgot-password', {
+        method: 'POST',
+        body: JSON.stringify({ username: username.trim() }),
+      });
+    } catch {
+      // Swallow — surfacing an error would leak existence/state. The
+      // uniform "if the account exists…" note covers every outcome.
+    } finally {
+      setForgotSent(true);
+      setBusy(false);
+    }
+  }
+
   return (
     <main className="min-h-screen flex items-center justify-center px-4 py-8 bg-bg">
       <Card className="w-full max-w-md">
@@ -80,39 +105,96 @@ export function Login() {
               {t('title')}
             </span>
           </CardTitle>
-          <CardDescription>{t('subtitle')}</CardDescription>
+          <CardDescription>{mode === 'forgot' ? t('forgotTitle') : t('subtitle')}</CardDescription>
         </CardHeader>
         <CardContent>
-          <form onSubmit={submit} className="space-y-4">
-            <div className="space-y-1">
-              <Label htmlFor="login-username">{t('usernameLabel')}</Label>
-              <Input
-                id="login-username"
-                autoFocus
-                autoComplete="username"
-                placeholder={t('usernamePlaceholder')}
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-              />
+          {mode === 'login' ? (
+            <>
+              <form onSubmit={submit} className="space-y-4">
+                <div className="space-y-1">
+                  <Label htmlFor="login-username">{t('usernameLabel')}</Label>
+                  <Input
+                    id="login-username"
+                    autoFocus
+                    autoComplete="username"
+                    placeholder={t('usernamePlaceholder')}
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="login-password">{t('passwordLabel')}</Label>
+                  <Input
+                    id="login-password"
+                    type="password"
+                    autoComplete="current-password"
+                    placeholder={t('passwordPlaceholder')}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                  />
+                </div>
+                {error && <p className="text-sm text-red-500">{error}</p>}
+                <Button
+                  type="submit"
+                  disabled={busy || !username.trim() || !password}
+                  className="w-full"
+                >
+                  <LogIn className="size-4 mr-2" />
+                  {busy ? t('submitting') : t('submit')}
+                </Button>
+              </form>
+              <button
+                type="button"
+                className="mt-3 text-xs text-muted hover:text-fg underline"
+                onClick={() => {
+                  setMode('forgot');
+                  setError('');
+                }}
+              >
+                {t('forgot')}
+              </button>
+              <p className="mt-4 text-xs text-muted">{t('hint')}</p>
+            </>
+          ) : forgotSent ? (
+            <div className="space-y-4">
+              <p className="text-sm">{t('forgotSent')}</p>
+              <Button
+                variant="secondary"
+                className="w-full"
+                onClick={() => {
+                  setMode('login');
+                  setForgotSent(false);
+                }}
+              >
+                {t('backToLogin')}
+              </Button>
             </div>
-            <div className="space-y-1">
-              <Label htmlFor="login-password">{t('passwordLabel')}</Label>
-              <Input
-                id="login-password"
-                type="password"
-                autoComplete="current-password"
-                placeholder={t('passwordPlaceholder')}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-              />
-            </div>
-            {error && <p className="text-sm text-red-500">{error}</p>}
-            <Button type="submit" disabled={busy || !username.trim() || !password} className="w-full">
-              <LogIn className="size-4 mr-2" />
-              {busy ? t('submitting') : t('submit')}
-            </Button>
-          </form>
-          <p className="mt-4 text-xs text-muted">{t('hint')}</p>
+          ) : (
+            <form onSubmit={submitForgot} className="space-y-4">
+              <p className="text-xs text-muted">{t('forgotHint')}</p>
+              <div className="space-y-1">
+                <Label htmlFor="forgot-username">{t('usernameLabel')}</Label>
+                <Input
+                  id="forgot-username"
+                  autoFocus
+                  autoComplete="username"
+                  placeholder={t('usernamePlaceholder')}
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                />
+              </div>
+              <Button type="submit" disabled={busy || !username.trim()} className="w-full">
+                {busy ? t('forgotSending') : t('forgotSubmit')}
+              </Button>
+              <button
+                type="button"
+                className="text-xs text-muted hover:text-fg underline"
+                onClick={() => setMode('login')}
+              >
+                {t('backToLogin')}
+              </button>
+            </form>
+          )}
         </CardContent>
       </Card>
     </main>

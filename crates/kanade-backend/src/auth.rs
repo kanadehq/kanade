@@ -208,9 +208,15 @@ pub async fn verify(
         return Ok(next.run(req).await);
     }
 
-    // 2. Public endpoints reachable without a token: the login route and
-    //    the backend version probe (so the SPA can show it pre-login).
-    if path == "/api/auth/login" || path == "/api/version" {
+    // 2. Public endpoints reachable without a token: the login route, the
+    //    backend version probe (so the SPA can show it pre-login), and the
+    //    #770 password setup/reset link + forgot-password flow (the user
+    //    has no session yet — the one-time token IS the credential).
+    if path == "/api/auth/login"
+        || path == "/api/version"
+        || path == "/api/auth/forgot-password"
+        || path.starts_with("/api/auth/password-setup/")
+    {
         return Ok(next.run(req).await);
     }
 

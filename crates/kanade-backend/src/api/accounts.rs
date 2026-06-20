@@ -12,7 +12,7 @@ use argon2::password_hash::SaltString;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use axum::Json;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use chrono::{Duration, Utc};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
@@ -20,8 +20,10 @@ use rand::Rng as _;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tracing::warn;
+use uuid::Uuid;
 
 use crate::api::AppState;
+use crate::api::password_setup::{self, PURPOSE_RESET, PURPOSE_SETUP};
 use crate::audit::{self, Caller};
 use crate::auth::{Claims, EXPECTED_AUDIENCE, Role, signing_secret};
 
@@ -30,7 +32,9 @@ use crate::auth::{Claims, EXPECTED_AUDIENCE, Role, signing_secret};
 /// valid after the user record is *deleted* — `disable` takes effect
 /// immediately regardless.
 const TOKEN_TTL_HOURS: i64 = 12;
-const MIN_PASSWORD_LEN: usize = 8;
+/// Shared with [`crate::api::password_setup`] so the link-based set/reset
+/// path enforces the same minimum as login-managed changes.
+pub(crate) const MIN_PASSWORD_LEN: usize = 8;
 
 const REG_SUBKEY: &str = r"SOFTWARE\kanade\backend";
 const REG_BOOTSTRAP_PW: &str = "BootstrapAdminPassword";
@@ -66,7 +70,7 @@ fn verify_password(pw: &str, phc: &str) -> bool {
 // directly to fleet-pipeline latency on the mini PC's few cores.
 // spawn_blocking moves the work to the blocking pool.
 
-async fn hash_password_async(pw: String) -> anyhow::Result<String> {
+pub(crate) async fn hash_password_async(pw: String) -> anyhow::Result<String> {
     tokio::task::spawn_blocking(move || hash_password(&pw))
         .await
         .map_err(|e| anyhow::anyhow!("hash task join: {e}"))?
@@ -270,6 +274,9 @@ pub struct UserRow {
     role: String,
     disabled: i64,
     must_change_pw: i64,
+    /// Optional contact email (#770) — drives the SPA's email column and
+    /// the "send setup/reset link" action. `None` when unset.
+    email: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -277,7 +284,7 @@ pub struct UserRow {
 /// `GET /api/accounts` — admin. Never returns password hashes.
 pub async fn list(State(state): State<AppState>) -> Result<Json<Vec<UserRow>>, Response> {
     let rows = sqlx::query_as::<_, UserRow>(
-        "SELECT username, role, disabled, must_change_pw, created_at, updated_at FROM users ORDER BY username",
+        "SELECT username, role, disabled, must_change_pw, email, created_at, updated_at FROM users ORDER BY username",
     )
     .fetch_all(&state.pool)
     .await
@@ -288,25 +295,42 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<Vec<UserRow>>, R
 #[derive(Deserialize)]
 pub struct CreateReq {
     username: String,
-    password: String,
+    /// Optional (#770): when omitted, an `email` must be given and the
+    /// user sets their own password via the emailed setup link.
+    #[serde(default)]
+    password: Option<String>,
     role: String,
+    /// Optional contact email. When present without a `password`, the
+    /// account is created with an unusable password and a one-time setup
+    /// link is mailed.
+    #[serde(default)]
+    email: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct CreateResp {
+    /// True when the account was created via the email-link path and a
+    /// setup link was issued/sent (so the SPA can tell the admin the user
+    /// will receive a link rather than needing a password handed over).
+    setup_link_sent: bool,
 }
 
 /// `POST /api/accounts` — admin. Creates a user; `409` on duplicate.
+///
+/// Two paths:
+///  - **password given** → classic create (email, if any, is stored;
+///    no link sent).
+///  - **email given, no password** → create with an unusable random hash
+///    and mail a one-time setup link (requires `[mail]` configured).
 pub async fn create(
     State(state): State<AppState>,
     caller: Caller,
+    headers: HeaderMap,
     Json(req): Json<CreateReq>,
-) -> Result<StatusCode, Response> {
+) -> Result<(StatusCode, Json<CreateResp>), Response> {
     let username = req.username.trim();
     if username.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "username required"));
-    }
-    if req.password.chars().count() < MIN_PASSWORD_LEN {
-        return Err(err(
-            StatusCode::BAD_REQUEST,
-            "password too short (min 8 chars)",
-        ));
     }
     let Some(role) = Role::parse(&req.role) else {
         return Err(err(
@@ -314,16 +338,61 @@ pub async fn create(
             "role must be viewer/operator/admin",
         ));
     };
-    let hash = hash_password_async(req.password.clone())
-        .await
-        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "hash failed"))?;
+    let email = req
+        .email
+        .as_deref()
+        .map(str::trim)
+        .filter(|e| !e.is_empty());
+    if let Some(e) = email
+        && e.parse::<lettre::Address>().is_err()
+    {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid email address"));
+    }
+    let password = req.password.as_deref().filter(|p| !p.is_empty());
+
+    // Decide the path. The link path needs a mailer; the no-credential
+    // case (neither password nor email) is rejected.
+    let use_link = match (password, email) {
+        (Some(pw), _) => {
+            if pw.chars().count() < MIN_PASSWORD_LEN {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "password too short (min 8 chars)",
+                ));
+            }
+            false
+        }
+        (None, Some(_)) => {
+            if state.mailer.is_none() {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "[mail] not configured — set a password instead of emailing a setup link",
+                ));
+            }
+            true
+        }
+        (None, None) => {
+            return Err(err(StatusCode::BAD_REQUEST, "password or email required"));
+        }
+    };
+
+    // The link path stores an unguessable random hash so the account
+    // can't be logged into until the user sets a password via the link.
+    let hash = match password {
+        Some(pw) => hash_password_async(pw.to_owned()),
+        None => hash_password_async(Uuid::new_v4().to_string()),
+    }
+    .await
+    .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "hash failed"))?;
 
     let res = sqlx::query(
-        "INSERT INTO users (username, password_hash, role, must_change_pw) VALUES (?, ?, ?, 0)",
+        "INSERT INTO users (username, password_hash, role, must_change_pw, email) \
+         VALUES (?, ?, ?, 0, ?)",
     )
     .bind(username)
     .bind(&hash)
     .bind(role.as_str())
+    .bind(email)
     .execute(&state.pool)
     .await;
     match res {
@@ -334,16 +403,100 @@ pub async fn create(
         Err(e) => return Err(db_err(e)),
     }
 
+    // Email path: issue + mail the setup link (best-effort). The account
+    // already exists; if the link can't be sent (no Host/public_url) the
+    // admin can re-send via `reset_link`.
+    let mut setup_link_sent = false;
+    if use_link
+        && let Some(email) = email
+        && let Some(mailer) = &state.mailer
+    {
+        match password_setup::link_base(state.public_url.as_deref(), &headers) {
+            Some(base) => {
+                match password_setup::issue_token(&state.pool, username, PURPOSE_SETUP).await {
+                    // Reflect the real SMTP outcome, not just "a token was
+                    // made", so the admin UI doesn't claim a link went out
+                    // when delivery actually failed.
+                    Ok(raw) => {
+                        setup_link_sent =
+                            password_setup::send_link(mailer, &base, email, &raw, PURPOSE_SETUP)
+                                .await;
+                    }
+                    Err(e) => warn!(error = %e, username, "create: issue setup token"),
+                }
+            }
+            None => warn!(
+                username,
+                "create: no link base (Host/public_url) — setup link not sent"
+            ),
+        }
+    }
+
     audit::record(
         &state.nats,
         "admin",
         "account.create",
         Some(username),
         Some(&caller),
-        serde_json::json!({ "role": role.as_str() }),
+        serde_json::json!({
+            "role": role.as_str(),
+            "has_email": email.is_some(),
+            "setup_link_sent": setup_link_sent,
+        }),
     )
     .await;
-    Ok(StatusCode::CREATED)
+    Ok((StatusCode::CREATED, Json(CreateResp { setup_link_sent })))
+}
+
+/// `POST /api/accounts/{username}/reset-link` — admin. Mails a one-time
+/// password-reset link to the account's stored email. `409` when the
+/// account has no email on file; `400` when `[mail]` is unconfigured.
+pub async fn reset_link(
+    State(state): State<AppState>,
+    Path(username): Path<String>,
+    caller: Caller,
+    headers: HeaderMap,
+) -> Result<StatusCode, Response> {
+    let Some(mailer) = &state.mailer else {
+        return Err(err(StatusCode::BAD_REQUEST, "[mail] not configured"));
+    };
+    let Some(email) = password_setup::email_for_user(&state.pool, &username)
+        .await
+        .map_err(db_err)?
+    else {
+        return Err(err(StatusCode::CONFLICT, "account has no email on file"));
+    };
+    let Some(base) = password_setup::link_base(state.public_url.as_deref(), &headers) else {
+        return Err(err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cannot determine link base URL (set [server] public_url)",
+        ));
+    };
+    let raw = password_setup::issue_token(&state.pool, &username, PURPOSE_RESET)
+        .await
+        .map_err(db_err)?;
+    let delivered = password_setup::send_link(mailer, &base, &email, &raw, PURPOSE_RESET).await;
+
+    audit::record(
+        &state.nats,
+        "admin",
+        "account.reset_link",
+        Some(&username),
+        Some(&caller),
+        serde_json::json!({ "delivered": delivered }),
+    )
+    .await;
+    // Surface a failed send honestly — the token was issued but the email
+    // didn't go out, so the admin should retry / check SMTP rather than
+    // assume the user got a link.
+    if delivered {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(err(
+            StatusCode::BAD_GATEWAY,
+            "link generated but email delivery failed — check [mail] / SMTP",
+        ))
+    }
 }
 
 #[derive(Deserialize)]
@@ -351,6 +504,10 @@ pub struct UpdateReq {
     role: Option<String>,
     password: Option<String>,
     disabled: Option<bool>,
+    /// Set/clear the contact email (#770). `Some("")` (or whitespace)
+    /// clears it; `None` leaves it unchanged. Storing only — never sends.
+    #[serde(default)]
+    email: Option<String>,
 }
 
 /// `PATCH /api/accounts/{username}` — admin. Any subset of role /
@@ -381,6 +538,21 @@ pub async fn update(
             "password too short (min 8 chars)",
         ));
     }
+    // Validate email up front (empty = clear).
+    let new_email: Option<Option<&str>> = match &req.email {
+        None => None,
+        Some(e) => {
+            let t = e.trim();
+            if t.is_empty() {
+                Some(None)
+            } else {
+                if t.parse::<lettre::Address>().is_err() {
+                    return Err(err(StatusCode::BAD_REQUEST, "invalid email address"));
+                }
+                Some(Some(t))
+            }
+        }
+    };
 
     // 404 if the account is gone. The last-admin guards below live
     // *inside* each mutating statement (a `NOT (… AND
@@ -449,6 +621,16 @@ pub async fn update(
         .await
         .map_err(db_err)?;
     }
+    if let Some(email) = new_email {
+        sqlx::query(
+            "UPDATE users SET email = ?, updated_at = CURRENT_TIMESTAMP WHERE username = ?",
+        )
+        .bind(email)
+        .bind(&username)
+        .execute(&state.pool)
+        .await
+        .map_err(db_err)?;
+    }
 
     audit::record(
         &state.nats,
@@ -460,6 +642,7 @@ pub async fn update(
             "role": req.role,
             "disabled": req.disabled,
             "password_reset": req.password.is_some(),
+            "email_changed": new_email.is_some(),
         }),
     )
     .await;
@@ -497,6 +680,18 @@ pub async fn delete(
             StatusCode::CONFLICT,
             "cannot delete the last enabled admin",
         ));
+    }
+    // Clean up any outstanding setup/reset token explicitly: the FK's
+    // `ON DELETE CASCADE` is a no-op because the pool doesn't run with
+    // `PRAGMA foreign_keys = ON` (enabling it globally would change
+    // behaviour for the whole schema), so without this a deleted user
+    // would leave an orphaned token row behind.
+    if let Err(e) = sqlx::query("DELETE FROM password_setup_tokens WHERE username = ?")
+        .bind(&username)
+        .execute(&state.pool)
+        .await
+    {
+        warn!(error = %e, %username, "delete: failed to clear password setup token");
     }
 
     audit::record(

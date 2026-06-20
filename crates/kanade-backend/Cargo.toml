@@ -49,6 +49,9 @@ uuid       = { workspace = true }
 # is obvious.
 serde      = { workspace = true }
 serde_json = { workspace = true }
+# SHA-256 of password setup/reset tokens — the DB stores the hash, the
+# emailed URL carries the raw token (so a DB read can't mint a live link).
+sha2       = { workspace = true }
 sqlx       = { workspace = true }
 tokio      = { workspace = true }
 # `ReaderStream` wraps the NATS Object Store's `AsyncRead` for

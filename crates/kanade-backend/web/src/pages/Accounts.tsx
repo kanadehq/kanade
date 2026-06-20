@@ -34,9 +34,12 @@ type Account = {
   role: Role;
   disabled: number;
   must_change_pw: number;
+  email: string | null;
   created_at: string;
   updated_at: string;
 };
+
+type CreateResp = { setup_link_sent: boolean };
 
 const ROLES: Role[] = ['viewer', 'operator', 'admin'];
 
@@ -55,6 +58,7 @@ export function Accounts() {
   // create form
   const [newUser, setNewUser] = useState('');
   const [newPw, setNewPw] = useState('');
+  const [newEmail, setNewEmail] = useState('');
   const [newRole, setNewRole] = useState<Role>('viewer');
   // reset-password dialog
   const [resetFor, setResetFor] = useState<string | null>(null);
@@ -65,17 +69,36 @@ export function Accounts() {
 
   const create = useMutation({
     mutationFn: () =>
-      apiFetch('/api/accounts', {
+      apiFetch<CreateResp>('/api/accounts', {
         method: 'POST',
-        body: JSON.stringify({ username: newUser.trim(), password: newPw, role: newRole }),
+        body: JSON.stringify({
+          username: newUser.trim(),
+          // Omit empty password so the backend takes the email-link path.
+          password: newPw || undefined,
+          role: newRole,
+          email: newEmail.trim() || undefined,
+        }),
       }),
-    onSuccess: () => {
-      toast.success(t('toast.created', { username: newUser.trim() }));
+    onSuccess: (resp) => {
+      toast.success(
+        resp.setup_link_sent
+          ? t('toast.createdLink', { username: newUser.trim() })
+          : t('toast.created', { username: newUser.trim() }),
+      );
       setNewUser('');
       setNewPw('');
+      setNewEmail('');
       setNewRole('viewer');
       invalidate();
     },
+    onError,
+  });
+
+  // Mail a one-time setup/reset link to the account's stored email.
+  const sendLink = useMutation({
+    mutationFn: (username: string) =>
+      apiFetch(`/api/accounts/${encodeURIComponent(username)}/reset-link`, { method: 'POST' }),
+    onSuccess: (_data, username) => toast.success(t('toast.linkSent', { username })),
     onError,
   });
 
@@ -123,7 +146,14 @@ export function Accounts() {
             className="flex flex-wrap items-end gap-3"
             onSubmit={(e) => {
               e.preventDefault();
-              if (!newUser.trim() || newPw.length < 8) {
+              // Need a username, and either a password (≥8) or an email
+              // (which triggers the setup-link path). A non-empty password
+              // must still meet the length floor.
+              const hasEmail = newEmail.trim().length > 0;
+              // Count code points (like the backend's chars().count()), so
+              // an emoji password doesn't pass here then 400 on the server.
+              const pwLen = [...newPw].length;
+              if (!newUser.trim() || (!hasEmail && pwLen < 8) || (newPw && pwLen < 8)) {
                 toast.error(t('createHint'));
                 return;
               }
@@ -140,11 +170,26 @@ export function Accounts() {
               />
             </div>
             <div className="space-y-1">
-              <Label htmlFor="new-password">{t('password')}</Label>
+              <Label htmlFor="new-email">{t('emailOptional')}</Label>
+              <Input
+                id="new-email"
+                type="email"
+                autoComplete="off"
+                placeholder={t('emailPlaceholder')}
+                value={newEmail}
+                onChange={(e) => setNewEmail(e.target.value)}
+                className="w-52"
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="new-password">
+                {newEmail.trim() ? t('passwordOrLink') : t('password')}
+              </Label>
               <Input
                 id="new-password"
                 type="password"
                 autoComplete="new-password"
+                placeholder={newEmail.trim() ? t('passwordLinkPlaceholder') : undefined}
                 value={newPw}
                 onChange={(e) => setNewPw(e.target.value)}
                 className="w-44"
@@ -180,6 +225,7 @@ export function Accounts() {
         <TableHeader>
           <TableRow>
             <TableHead>{t('username')}</TableHead>
+            <TableHead>{t('email')}</TableHead>
             <TableHead>{t('role')}</TableHead>
             <TableHead>{t('status')}</TableHead>
             <TableHead>{t('created')}</TableHead>
@@ -195,6 +241,13 @@ export function Accounts() {
                   <Badge variant="amber" className="ml-2">
                     {t('mustChange')}
                   </Badge>
+                )}
+              </TableCell>
+              <TableCell className="text-xs">
+                {a.email ? (
+                  <span className="break-all">{a.email}</span>
+                ) : (
+                  <span className="text-muted">—</span>
                 )}
               </TableCell>
               <TableCell>
@@ -221,6 +274,19 @@ export function Accounts() {
               </TableCell>
               <TableCell className="text-muted text-xs">{a.created_at}</TableCell>
               <TableCell className="text-right space-x-2 whitespace-nowrap">
+                {/* Mail a setup/reset link; only when the account has an
+                    email on file. */}
+                {a.email && (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={sendLink.isPending}
+                    title={t('sendLinkHint')}
+                    onClick={() => sendLink.mutate(a.username)}
+                  >
+                    {t('sendLink')}
+                  </Button>
+                )}
                 <Button
                   variant="secondary"
                   size="sm"

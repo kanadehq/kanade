@@ -8,5 +8,12 @@
   "submit": "Sign in",
   "submitting": "Signing in…",
   "iconAlt": "kanade",
-  "hint": "Accounts are managed by an administrator. Forgot your password? Ask an admin to reset it. Your session token is stored in localStorage; log out from the nav to clear."
+  "hint": "Accounts are managed by an administrator. Your session token is stored in localStorage; log out from the nav to clear.",
+  "forgot": "Forgot your password?",
+  "forgotTitle": "Reset your password",
+  "forgotHint": "Enter your username. If the account exists and has an email on file, a reset link will be sent.",
+  "forgotSubmit": "Send reset link",
+  "forgotSending": "Sending…",
+  "forgotSent": "If the account exists, a reset link has been sent.",
+  "backToLogin": "Back to sign in"
 }

@@ -25,6 +25,7 @@ import { Login } from '@/pages/Login';
 import { Logs } from '@/pages/Logs';
 import { NotificationDetail } from '@/pages/NotificationDetail';
 import { Notifications } from '@/pages/Notifications';
+import { PasswordSetup } from '@/pages/PasswordSetup';
 import { Placeholder } from '@/pages/Placeholder';
 import { Activity } from '@/pages/Activity';
 import { ResultDetail } from '@/pages/ResultDetail';
@@ -81,8 +82,11 @@ function AppContent() {
         <ConfirmDialogProvider>
           <ThemedToaster />
           <Routes>
-            {/* Public route — the only thing reachable when not signed in. */}
+            {/* Public routes — reachable without a session. The
+                password-setup link's one-time token IS the credential, so
+                it sits outside the auth gate like /login. */}
             <Route path="/login" element={<Login />} />
+            <Route path="/password-setup/:token" element={<PasswordSetup />} />
 
             {/* Everything else lives under ProtectedLayout's auth gate. */}
             <Route element={<ProtectedLayout />}>

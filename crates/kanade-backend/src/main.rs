@@ -199,6 +199,10 @@ struct UserRow {
     role: String,
     disabled: i64,
     must_change_pw: i64,
+    /// #770 contact email. `None` for accounts captured from a pre-email
+    /// DB (the column didn't exist yet) — preserved across the wipe so a
+    /// migration-driven wipe doesn't drop everyone's address.
+    email: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -318,10 +322,35 @@ async fn snapshot_users(db_path: &str) -> Result<Vec<UserRow>> {
         return Ok(Vec::new());
     }
 
-    let rows = sqlx::query_as::<_, (String, String, String, i64, i64, String, String)>(
-        "SELECT username, password_hash, role, disabled, must_change_pw, created_at, updated_at \
-         FROM users",
+    // The `email` column (#770) may be absent in a pre-migration DB being
+    // wiped to upgrade. Probe for it and `CAST(NULL AS TEXT)` when missing,
+    // so a single row shape works for both old and new schemas.
+    let has_email = sqlx::query_scalar::<_, String>(
+        "SELECT name FROM pragma_table_info('users') WHERE name = 'email'",
     )
+    .fetch_optional(&pool)
+    .await
+    .context("probe for users.email column")?
+    .is_some();
+    let select = if has_email {
+        "SELECT username, password_hash, role, disabled, must_change_pw, created_at, updated_at, email FROM users"
+    } else {
+        "SELECT username, password_hash, role, disabled, must_change_pw, created_at, updated_at, CAST(NULL AS TEXT) AS email FROM users"
+    };
+
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            i64,
+            i64,
+            String,
+            String,
+            Option<String>,
+        ),
+    >(select)
     .fetch_all(&pool)
     .await
     .context("select users")?;
@@ -330,13 +359,23 @@ async fn snapshot_users(db_path: &str) -> Result<Vec<UserRow>> {
     Ok(rows
         .into_iter()
         .map(
-            |(username, password_hash, role, disabled, must_change_pw, created_at, updated_at)| {
+            |(
+                username,
+                password_hash,
+                role,
+                disabled,
+                must_change_pw,
+                created_at,
+                updated_at,
+                email,
+            )| {
                 UserRow {
                     username,
                     password_hash,
                     role,
                     disabled,
                     must_change_pw,
+                    email,
                     created_at,
                     updated_at,
                 }
@@ -358,8 +397,8 @@ async fn restore_users(pool: &sqlx::SqlitePool, users: &[UserRow]) -> Result<usi
     for u in users {
         sqlx::query(
             "INSERT INTO users \
-             (username, password_hash, role, disabled, must_change_pw, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+             (username, password_hash, role, disabled, must_change_pw, created_at, updated_at, email) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&u.username)
         .bind(&u.password_hash)
@@ -368,6 +407,7 @@ async fn restore_users(pool: &sqlx::SqlitePool, users: &[UserRow]) -> Result<usi
         .bind(u.must_change_pw)
         .bind(&u.created_at)
         .bind(&u.updated_at)
+        .bind(&u.email)
         .execute(&mut *tx)
         .await
         .with_context(|| format!("restore user {}", u.username))?;
@@ -834,6 +874,7 @@ pub(crate) async fn run_backend() -> Result<()> {
         jetstream,
         explode_spec_cache,
         mailer,
+        public_url: cfg.server.public_url.clone(),
     };
 
     // Scheduler runs alongside the projectors; if it can't init (no
