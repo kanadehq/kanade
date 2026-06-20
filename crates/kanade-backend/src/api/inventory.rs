@@ -267,6 +267,11 @@ pub struct InventoryJob {
     /// columns / kinds each spec has (drives the filter chip row),
     /// without a separate per-manifest endpoint.
     pub explode: Option<Vec<ExplodeSpec>>,
+    /// Reported-PC count for this manifest, joined from
+    /// `inventory_facts` in one grouped query (see `list_jobs`). The
+    /// SPA fleet sidebar shows this as a per-type device tally so the
+    /// operator can pick a probe without scrolling every table.
+    pub pc_count: i64,
 }
 
 pub async fn list_jobs(
@@ -307,9 +312,41 @@ pub async fn list_jobs(
                 display: hint.display,
                 summary: hint.summary,
                 explode: hint.explode,
+                pc_count: 0,
             });
         }
     }
+
+    // Attach the reported-PC tally per manifest with a single grouped
+    // query rather than an N+1 of `by-job?limit=1` calls from the SPA.
+    // A failed/missing count is non-fatal: the sidebar still lists the
+    // probe, just with a 0 tally, so a transient DB hiccup never blanks
+    // the whole inventory nav. COUNT(DISTINCT pc_id) (not COUNT(*))
+    // makes the *device* intent explicit so the badge can't silently
+    // inflate if a retry / dual-write ever lands two rows for the same
+    // (job_id, pc_id) pair.
+    let counts: std::collections::HashMap<String, i64> = sqlx::query(
+        "SELECT job_id, COUNT(DISTINCT pc_id) AS n FROM inventory_facts GROUP BY job_id",
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map(|rows| {
+        rows.into_iter()
+            .filter_map(|r| {
+                let id: String = r.try_get("job_id").ok()?;
+                let n: i64 = r.try_get("n").ok()?;
+                Some((id, n))
+            })
+            .collect()
+    })
+    .unwrap_or_else(|e| {
+        warn!(error = %e, "inventory jobs pc_count query");
+        std::collections::HashMap::new()
+    });
+    for job in &mut out {
+        job.pc_count = counts.get(&job.manifest_id).copied().unwrap_or(0);
+    }
+
     out.sort_by(|a, b| a.manifest_id.cmp(&b.manifest_id));
     Ok(Json(out))
 }

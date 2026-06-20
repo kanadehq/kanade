@@ -31,7 +31,15 @@
     "nestedRowCount_other": "{{count}} 行",
     "prev": "← 前へ",
     "next": "次へ →",
-    "pageRange": "{{from}}–{{to}} 件目を表示中"
+    "pageRange": "{{from}}–{{to}} 件目を表示中",
+    "filterLabel": "pc_id で絞り込み",
+    "filterPlaceholder": "pc_id で絞り込み…",
+    "filterEmpty": "「{{q}}」に一致する PC はありません。"
+  },
+  "sidebar": {
+    "ariaLabel": "インベントリ種別",
+    "deviceCount_one": "{{count}} 台",
+    "deviceCount_other": "{{count}} 台"
   },
   "detail": {
     "backToFleet": "← フリートビューに戻る",
