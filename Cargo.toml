@@ -75,7 +75,7 @@ reqwest            = { version = "0.13.4", features = ["json"] }
 # Compliance-alert + generic outbound email over an internal SMTP relay
 # (backend only). rustls TLS to match reqwest and avoid an OpenSSL
 # build dependency; `pool` reuses connections across sends.
-lettre             = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder", "pool"] }
+lettre             = { version = "0.11.22", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder", "pool"] }
 # Hidden password prompt for `kanade login` / account creation. Cross-
 # platform (Win/macOS/Linux), no cfg gating needed.
 rpassword          = "7.5.4"
