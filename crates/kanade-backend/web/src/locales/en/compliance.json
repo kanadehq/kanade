@@ -20,5 +20,13 @@
   },
   "showOk": "show ok ({{count}})",
   "hideOk": "hide ok",
-  "allOk": "all {{count}} PCs ok 🎉"
+  "allOk": "all {{count}} PCs ok 🎉",
+  "clear": "Clear",
+  "clearHint": "Remove this check's stored rows — for a deleted / renamed check or a one-off test. It reappears if the check runs again.",
+  "confirmClear": "Clear all stored rows for \"{{name}}\"?",
+  "toast": {
+    "cleared_one": "Cleared {{count}} row",
+    "cleared_other": "Cleared {{count}} rows",
+    "nothingToClear": "Nothing to clear — already gone."
+  }
 }

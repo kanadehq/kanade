@@ -393,6 +393,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/scripts/{cmd_id}/unrevoke", post(scripts::unrevoke))
         .route("/api/jobs", post(jobs::create))
         .route("/api/jobs/{id}", delete(jobs::delete))
+        // Clear orphaned compliance rows for a check (deleted / renamed
+        // check job, decommissioned PC, a one-off test). Not cascaded
+        // from job delete by design — see `checks::clear`.
+        .route("/api/checks/{check_name}", delete(checks::clear))
         .route("/api/jobs/{job_id}/kill", post(jobs::kill))
         .route(
             "/api/agents/releases/{version}",
