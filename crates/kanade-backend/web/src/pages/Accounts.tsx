@@ -63,6 +63,9 @@ export function Accounts() {
   // reset-password dialog
   const [resetFor, setResetFor] = useState<string | null>(null);
   const [resetPw, setResetPw] = useState('');
+  // edit-email dialog
+  const [emailFor, setEmailFor] = useState<string | null>(null);
+  const [emailVal, setEmailVal] = useState('');
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ['accounts'] });
   const onError = (err: unknown) => toast.error(formatError(err));
@@ -129,6 +132,11 @@ export function Accounts() {
       </div>
     );
   }
+
+  // For the edit-email dialog: the value currently on file, and whether
+  // the input differs from it — used to skip a no-op PATCH on Save.
+  const emailOrig = accounts.data?.find((a) => a.username === emailFor)?.email ?? '';
+  const emailChanged = emailVal.trim() !== emailOrig;
 
   return (
     <div className="p-4 md:p-6 space-y-6 max-w-5xl">
@@ -244,11 +252,22 @@ export function Accounts() {
                 )}
               </TableCell>
               <TableCell className="text-xs">
-                {a.email ? (
-                  <span className="break-all">{a.email}</span>
-                ) : (
-                  <span className="text-muted">—</span>
-                )}
+                {/* Click to edit the stored email (PATCH /api/accounts). */}
+                <button
+                  type="button"
+                  className="text-left hover:underline"
+                  title={t('editEmail')}
+                  onClick={() => {
+                    setEmailFor(a.username);
+                    setEmailVal(a.email ?? '');
+                  }}
+                >
+                  {a.email ? (
+                    <span className="break-all">{a.email}</span>
+                  ) : (
+                    <span className="text-muted">{t('setEmail')}</span>
+                  )}
+                </button>
               </TableCell>
               <TableCell>
                 <Select
@@ -370,6 +389,62 @@ export function Accounts() {
               {t('resetPassword')}
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={emailFor !== null} onOpenChange={(o) => !o && setEmailFor(null)}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>{t('editEmailTitle', { username: emailFor ?? '' })}</DialogTitle>
+          </DialogHeader>
+          {/* A <form> gives Enter-to-submit and native email validation
+              (type="email" only validates on form submit). Empty is valid
+              and clears the address; a malformed non-empty value is blocked
+              by the browser before the request. */}
+          <form
+            className="space-y-4"
+            onSubmit={(e) => {
+              e.preventDefault();
+              // emailChanged also skips a no-op PATCH (and its toast).
+              if (!emailFor || !emailChanged) return;
+              // Trim → empty string clears the email server-side.
+              const next = emailVal.trim();
+              patch.mutate(
+                { username: emailFor, body: { email: next } },
+                {
+                  onSuccess: () => {
+                    toast.success(
+                      next
+                        ? t('toast.emailUpdated', { username: emailFor })
+                        : t('toast.emailCleared', { username: emailFor }),
+                    );
+                    setEmailFor(null);
+                  },
+                },
+              );
+            }}
+          >
+            <div className="space-y-1">
+              <Label htmlFor="edit-email">{t('email')}</Label>
+              <Input
+                id="edit-email"
+                type="email"
+                autoComplete="off"
+                placeholder={t('emailPlaceholder')}
+                value={emailVal}
+                onChange={(e) => setEmailVal(e.target.value)}
+              />
+              <p className="text-xs text-muted">{t('emailHint')}</p>
+            </div>
+            <DialogFooter>
+              <Button type="button" variant="ghost" onClick={() => setEmailFor(null)}>
+                {t('cancel')}
+              </Button>
+              <Button type="submit" disabled={patch.isPending || !emailChanged}>
+                {t('save')}
+              </Button>
+            </DialogFooter>
+          </form>
         </DialogContent>
       </Dialog>
     </div>
