@@ -19,5 +19,12 @@
   },
   "showOk": "ok を表示 ({{count}})",
   "hideOk": "ok を隠す",
-  "allOk": "{{count}} 台すべて ok 🎉"
+  "allOk": "{{count}} 台すべて ok 🎉",
+  "clear": "クリア",
+  "clearHint": "このチェックの保存済み行を削除します（削除/改名したチェックや一度きりのテスト用）。チェックが再実行されれば再表示されます。",
+  "confirmClear": "「{{name}}」の保存済み行をすべてクリアしますか？",
+  "toast": {
+    "cleared_other": "{{count}} 件をクリアしました",
+    "nothingToClear": "クリア対象はありませんでした（既に削除済み）。"
+  }
 }

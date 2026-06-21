@@ -5,14 +5,17 @@
 // tab: a check written with just `check:` shows up here for free
 // (unless the operator set `fleet: false`).
 
-import { useQuery } from '@tanstack/react-query';
-import { Loader2 } from 'lucide-react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Loader2, Trash2 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { toast } from 'sonner';
 
 import { ErrorCard } from '@/components/ErrorCard';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { useConfirm } from '@/components/ui/confirm-dialog';
 import {
   Table,
   TableBody,
@@ -21,7 +24,8 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { apiFetch } from '@/lib/api';
+import { apiFetch, formatError } from '@/lib/api';
+import { useAuth } from '@/lib/auth';
 import { fmtIsoLocal } from '@/lib/utils';
 
 type CheckRow = {
@@ -111,6 +115,9 @@ function OkRows({ check }: { check: string }) {
 
 export function Compliance() {
   const { t } = useTranslation('compliance');
+  const { hasRole } = useAuth();
+  const qc = useQueryClient();
+  const confirm = useConfirm();
   const q = useQuery({
     queryKey: ['checks'],
     queryFn: () => apiFetch<ChecksResponse>('/api/checks'),
@@ -120,6 +127,26 @@ export function Compliance() {
   });
   // #497: which checks the operator expanded to include the ok bulk.
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+
+  // Clear a check's stored rows (orphaned by a deleted / renamed check
+  // job, or a one-off test). Operator-gated; not auto-cascaded from job
+  // delete by design — see the `checks::clear` backend handler.
+  const clear = useMutation({
+    mutationFn: (check: string) =>
+      apiFetch<{ deleted: number }>(`/api/checks/${encodeURIComponent(check)}`, {
+        method: 'DELETE',
+      }),
+    onSuccess: (resp) => {
+      // deleted === 0 ⇒ nothing matched (already cleared / typo / a race
+      // with the 60s refetch). DELETE is idempotent so the backend
+      // returns 200, but a "success" toast would imply something
+      // happened — show a neutral one instead.
+      if (resp.deleted === 0) toast.info(t('toast.nothingToClear'));
+      else toast.success(t('toast.cleared', { count: resp.deleted }));
+      qc.invalidateQueries({ queryKey: ['checks'] });
+    },
+    onError: (e) => toast.error(formatError(e)),
+  });
 
   const groups = useMemo<CheckGroup[]>(() => {
     // Groups derive from COUNTS (complete), so an all-ok check still
@@ -201,6 +228,37 @@ export function Compliance() {
                       ? t('hideOk')
                       : t('showOk', { count: g.counts.ok })}
                   </button>
+                )}
+                {hasRole('operator') && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="ml-2 text-muted"
+                    // Scope the pending state to the clicked card —
+                    // `clear` is one shared mutation, so a bare
+                    // `clear.isPending` would disable every card's button.
+                    // `variables` is the arg last passed to mutate().
+                    disabled={clear.isPending && clear.variables === g.name}
+                    title={t('clearHint')}
+                    onClick={async () => {
+                      if (
+                        await confirm({
+                          title: t('confirmClear', { name: g.label || g.name }),
+                          confirmLabel: t('clear'),
+                          danger: true,
+                        })
+                      ) {
+                        clear.mutate(g.name);
+                      }
+                    }}
+                  >
+                    {clear.isPending && clear.variables === g.name ? (
+                      <Loader2 className="size-3.5 mr-1 animate-spin" />
+                    ) : (
+                      <Trash2 className="size-3.5 mr-1" />
+                    )}
+                    {t('clear')}
+                  </Button>
                 )}
               </div>
             </CardHeader>

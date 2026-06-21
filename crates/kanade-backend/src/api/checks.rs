@@ -16,13 +16,15 @@
 use std::collections::HashMap;
 
 use axum::Json;
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use super::AppState;
+use crate::audit;
+use crate::audit::Caller;
 
 #[derive(Serialize, sqlx::FromRow)]
 pub struct CheckRow {
@@ -77,6 +79,13 @@ const ROWS_SQL: &str = "SELECT pc_id, check_name, label, status, detail, recorde
          WHERE (?1 IS NULL OR check_name = ?1)
            AND (?2 OR status != 'ok')
          ORDER BY check_name, pc_id";
+
+/// Delete query shared with the unit tests (same rationale as
+/// [`ROWS_SQL`]). `?2 IS NULL` ⇒ clear the check across every PC;
+/// bound non-null ⇒ clear just that one PC's row.
+const CLEAR_SQL: &str = "DELETE FROM check_status
+         WHERE check_name = ?1
+           AND (?2 IS NULL OR pc_id = ?2)";
 
 /// `GET /api/checks` — attention rows + complete per-check counts.
 /// The SPA groups rows into the fleet matrix (check × PC).
@@ -162,6 +171,72 @@ pub async fn list_all(
     Ok(Json(ChecksResponse { counts, rows }))
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct ClearParams {
+    /// Clear only this PC's row for the check. Omit to clear the check
+    /// across every PC — the common case for a deleted / renamed check
+    /// whose status rows are now orphaned on the Compliance page.
+    pub pc_id: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ClearResponse {
+    pub deleted: u64,
+}
+
+/// `DELETE /api/checks/{check_name}` — drop stored `check_status` rows
+/// for a check. Deleting the *job* that produced a check never touched
+/// these rows: jobs live in NATS KV, status in SQLite keyed by
+/// `(pc_id, check_name)` with no job link, so a removed / renamed check
+/// leaves orphaned rows on the Compliance page indefinitely. This is the
+/// operator's explicit "clear it". By design it is NOT auto-cascaded
+/// from job delete — a same-named replacement job legitimately keeps
+/// writing the slug, and observed state shouldn't vanish as a side
+/// effect of a config edit (and a slug *rename* never hits the delete
+/// path at all). `?pc_id=` scopes the clear to one PC.
+pub async fn clear(
+    State(state): State<AppState>,
+    Path(check_name): Path<String>,
+    Query(params): Query<ClearParams>,
+    caller: Caller,
+) -> Result<Json<ClearResponse>, (StatusCode, String)> {
+    let check_name = check_name.trim();
+    if check_name.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "check_name must be non-empty".into(),
+        ));
+    }
+    let pc_id = params
+        .pc_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let deleted = sqlx::query(CLEAR_SQL)
+        .bind(check_name)
+        .bind(pc_id)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| {
+            warn!(error = %e, check_name, "check_status delete");
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        })?
+        .rows_affected();
+
+    audit::record(
+        &state.nats,
+        "operator",
+        "check_clear",
+        Some(check_name),
+        Some(&caller),
+        serde_json::json!({ "check_name": check_name, "pc_id": pc_id, "deleted": deleted }),
+    )
+    .await;
+
+    Ok(Json(ClearResponse { deleted }))
+}
+
 // AppState carries NATS handles that can't be constructed in a unit
 // test, so these tests exercise the exact SQL list_all binds.
 #[cfg(test)]
@@ -235,5 +310,37 @@ mod tests {
         let rows = rows_for(&pool, Some("bitlocker"), true).await;
         assert_eq!(rows.len(), 3, "all bitlocker rows incl. ok");
         assert!(rows.iter().all(|r| r.check_name == "bitlocker"));
+    }
+
+    #[tokio::test]
+    async fn clear_removes_every_pc_for_a_check() {
+        let pool = seeded_pool().await;
+        let deleted = sqlx::query(CLEAR_SQL)
+            .bind("bitlocker")
+            .bind(Option::<&str>::None)
+            .execute(&pool)
+            .await
+            .unwrap()
+            .rows_affected();
+        assert_eq!(deleted, 3, "all three bitlocker rows cleared");
+        assert!(rows_for(&pool, Some("bitlocker"), true).await.is_empty());
+        // A different check is left untouched.
+        assert_eq!(rows_for(&pool, Some("av"), true).await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn clear_scoped_to_one_pc() {
+        let pool = seeded_pool().await;
+        let deleted = sqlx::query(CLEAR_SQL)
+            .bind("bitlocker")
+            .bind(Some("pc-2"))
+            .execute(&pool)
+            .await
+            .unwrap()
+            .rows_affected();
+        assert_eq!(deleted, 1, "only pc-2's bitlocker row cleared");
+        let left = rows_for(&pool, Some("bitlocker"), true).await;
+        assert_eq!(left.len(), 2);
+        assert!(left.iter().all(|r| r.pc_id != "pc-2"));
     }
 }
