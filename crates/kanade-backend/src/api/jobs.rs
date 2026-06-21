@@ -347,6 +347,32 @@ pub async fn get_yaml(
 /// To undo the cascade: re-create the Manifest with
 /// `kanade job create`, then `kanade unrevoke <id>` to flip
 /// `script_status` back to `ACTIVE`.
+const CASCADE_FACTS_SQL: &str = "DELETE FROM inventory_facts WHERE job_id = ?";
+const CASCADE_HISTORY_SQL: &str = "DELETE FROM inventory_history WHERE job_id = ?";
+
+/// Drop a job's inventory rows (facts + history), keyed by `job_id`.
+/// Both deletes run in one transaction so the two tables can't end up
+/// half-cleared if the second fails. Returns `(facts_deleted,
+/// history_deleted)`. The `delete` handler runs this AND the
+/// `delete_cascades_inventory_for_that_job_only` test calls it directly,
+/// so the test exercises the real SQL (a table/column typo fails the
+/// test rather than silently passing reimplemented SQL).
+async fn cascade_inventory(pool: &SqlitePool, job_id: &str) -> sqlx::Result<(u64, u64)> {
+    let mut tx = pool.begin().await?;
+    let facts = sqlx::query(CASCADE_FACTS_SQL)
+        .bind(job_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    let history = sqlx::query(CASCADE_HISTORY_SQL)
+        .bind(job_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    tx.commit().await?;
+    Ok((facts, history))
+}
+
 pub async fn delete(
     State(s): State<AppState>,
     Path(id): Path<String>,
@@ -450,14 +476,49 @@ pub async fn delete(
             ),
         ));
     }
-    info!(job_id = %id, cascade_revoke = true, "job deleted");
+    // Cascade inventory cleanup. inventory_facts / inventory_history are
+    // keyed by job_id, so this job's rows are unambiguously its own —
+    // unlike check_status (keyed by check slug, deliberately NOT cascaded
+    // so a same-named replacement job keeps its rows). Without this a
+    // deleted inventory job leaves orphaned facts stuck under a dead
+    // job_id on the SPA — there is no other cleanup path for
+    // inventory_facts (inventory_history additionally has a 90d TTL).
+    //
+    // Best-effort: the manifest is already gone from KV, so a failed
+    // sweep must not fail the request — that would only mean orphans
+    // remain (the pre-cascade status quo). Surface it via warn + audit
+    // rather than a misleading 500 for an already-deleted job.
+    let (facts_deleted, history_deleted, cascade_error) =
+        match cascade_inventory(&s.pool, &id).await {
+            Ok((f, h)) => (f, h, None),
+            Err(e) => {
+                warn!(error = %e, job_id = %id, "job_delete inventory cascade failed");
+                (0, 0, Some(e.to_string()))
+            }
+        };
+
+    info!(
+        job_id = %id,
+        cascade_revoke = true,
+        inventory_facts_deleted = facts_deleted,
+        inventory_history_deleted = history_deleted,
+        cascade_ok = cascade_error.is_none(),
+        "job deleted",
+    );
     audit::record(
         &s.nats,
         "operator",
         "job_delete",
         Some(&id),
         Some(&caller),
-        serde_json::json!({ "cascade_revoke": true }),
+        serde_json::json!({
+            "cascade_revoke": true,
+            "inventory_facts_deleted": facts_deleted,
+            "inventory_history_deleted": history_deleted,
+            // null on success; an error string distinguishes a failed
+            // sweep (orphans may remain) from a genuine "0 rows matched".
+            "inventory_cascade_error": cascade_error,
+        }),
     )
     .await;
     Ok(StatusCode::NO_CONTENT)
@@ -568,5 +629,55 @@ mod tests {
         let pool = fresh_pool().await;
         let counts = fetch_live_counts(&pool).await.unwrap();
         assert!(counts.is_empty());
+    }
+
+    async fn insert_inv_fact(pool: &SqlitePool, pc: &str, job: &str) {
+        sqlx::query("INSERT INTO inventory_facts (pc_id, job_id, facts_json) VALUES (?, ?, '{}')")
+            .bind(pc)
+            .bind(job)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    async fn insert_inv_hist(pool: &SqlitePool, pc: &str, job: &str) {
+        sqlx::query(
+            "INSERT INTO inventory_history (pc_id, job_id, field_path, change_kind)
+             VALUES (?, ?, 'x', 'added')",
+        )
+        .bind(pc)
+        .bind(job)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    // Calls the real `cascade_inventory` the handler uses (not
+    // reimplemented SQL), so a table/column typo fails here: dropping a
+    // job's inventory must hit only that job_id, leaving other jobs' rows.
+    #[tokio::test]
+    async fn delete_cascades_inventory_for_that_job_only() {
+        let pool = fresh_pool().await;
+        insert_inv_fact(&pool, "pc-1", "inv-hw").await;
+        insert_inv_fact(&pool, "pc-2", "inv-hw").await;
+        insert_inv_fact(&pool, "pc-1", "inv-sw").await; // a different job
+        insert_inv_hist(&pool, "pc-1", "inv-hw").await;
+        insert_inv_hist(&pool, "pc-1", "inv-sw").await;
+
+        let (facts, hist) = cascade_inventory(&pool, "inv-hw").await.unwrap();
+        assert_eq!(facts, 2, "both inv-hw fact rows cleared");
+        assert_eq!(hist, 1, "inv-hw history row cleared");
+
+        // inv-sw is untouched.
+        let facts_left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM inventory_facts")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let hist_left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM inventory_history")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(facts_left, 1, "the other job's fact survives");
+        assert_eq!(hist_left, 1, "the other job's history survives");
     }
 }
