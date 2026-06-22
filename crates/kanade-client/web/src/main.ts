@@ -212,6 +212,17 @@ function checkStuckRuns(): void {
   if (changed) renderRuns();
 }
 
+// Briefly highlight the (now sticky) 実行状況 panel so a launched job
+// gives an unmistakable "it started" signal — guards against re-pressing
+// 実行 when the confirmation would otherwise be easy to miss.
+function flashRunsPanel(): void {
+  const section = $("runs-section");
+  if (section.hidden) return;
+  section.classList.remove("runs-flash");
+  void section.offsetWidth; // restart the animation
+  section.classList.add("runs-flash");
+}
+
 async function executeJob(jobId: string, label: string): Promise<void> {
   try {
     const r = await invoke<JobsExecuteResult>("jobs_execute", { id: jobId });
@@ -229,6 +240,7 @@ async function executeJob(jobId: string, label: string): Promise<void> {
       });
     }
     renderRuns();
+    flashRunsPanel();
   } catch (err) {
     const pseudoId = `error-${jobId}-${runs.size}`;
     runs.set(pseudoId, {
@@ -239,6 +251,7 @@ async function executeJob(jobId: string, label: string): Promise<void> {
       updatedAt: Date.now(),
     });
     renderRuns();
+    flashRunsPanel();
   }
 }
 
