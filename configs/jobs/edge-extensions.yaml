@@ -19,7 +19,7 @@
 #   kanade schedule create configs/schedules/edge-extensions.yaml
 
 id: edge-extensions
-version: 0.2.1
+version: 0.3.0
 description: Edge installed-extension compliance + inventory (all local users)
 tags: [health-check, security, inventory]
 
@@ -219,6 +219,17 @@ execute:
 check:
   name: edge_extensions
   label: "Edge 拡張機能のコンプライアンス"
+  # Fire ONCE when compliance enters `fail` (blocklist hit / not allow-listed),
+  # not every 6h poll. Operator-only: notify the it-admins group, NOT the
+  # failing PC's user (an end user can't remediate a managed-extension policy).
+  alert:
+    on: [fail]                    # statuses that trigger (default [fail]; `ok` not allowed)
+    notify_user: false            # no end-user notification
+    notify_groups: [it-admins]    # -> operator group only (notifications.group.it-admins)
+    priority: warn
+    require_ack: true
+    title: "Edge 拡張機能が未準拠です: {pc_id}"
+    body: "{label} の状態が {status} です: {detail}（PC: {pc_id} / 利用者: {last_logon}）"
 
 # Cross-PC/user audit (Inventory page) — composes with check: by reading
 # the rest of the same stdout object.
