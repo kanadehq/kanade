@@ -53,7 +53,7 @@
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--scrollbar-thumb);
+  background-color: var(--scrollbar-thumb);
   border-radius: 999px;
   /* Transparent border + padding-box clip insets the thumb so it reads as
      a slim pill with breathing room rather than a full-width slab. */
@@ -62,8 +62,9 @@
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--scrollbar-thumb-hover);
-  background-clip: padding-box;
+  /* `background-color`, not the `background` shorthand — the shorthand
+     would reset `background-clip` back to border-box and lose the inset. */
+  background-color: var(--scrollbar-thumb-hover);
 }
 
 ::-webkit-scrollbar-corner {
@@ -457,12 +458,17 @@ ul.checks {
   position: sticky;
   bottom: 0;
   /* Span the full content width (content has 24px side padding) so the
-     opaque backing sits flush edge-to-edge under the scrolling rows. */
+     opaque backing sits flush edge-to-edge under the scrolling rows. The
+     negative bottom margin cancels .content's 20px bottom padding so the
+     panel meets the window edge when scrolled to the end instead of
+     revealing a strip of --bg below it; padding-bottom (16px interior +
+     the reclaimed 20px) keeps the visible inner spacing the same. */
   margin-left: -24px;
   margin-right: -24px;
+  margin-bottom: -20px;
   padding-left: 24px;
   padding-right: 24px;
-  padding-bottom: 16px;
+  padding-bottom: 36px;
   background: var(--panel);
   /* Cap the height so a busy panel scrolls internally instead of eating
      the whole viewport; a soft top shadow lifts it off the rows above. */
@@ -484,7 +490,10 @@ ul.checks {
 @keyframes runs-flash {
   0%,
   30% {
-    background: var(--accent-soft);
+    /* An *opaque* accent tint — mixing the solid --accent (not the
+       translucent --accent-soft) with --panel keeps the sticky panel from
+       letting the scrolled rows beneath it bleed through mid-flash. */
+    background: color-mix(in srgb, var(--accent) 12%, var(--panel));
   }
   100% {
     background: var(--panel);
