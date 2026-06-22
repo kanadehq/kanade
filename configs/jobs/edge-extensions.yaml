@@ -223,10 +223,11 @@ check:
   # not every 6h poll. Operator-only: notify the it-admins group, NOT the
   # failing PC's user (an end user can't remediate a managed-extension policy).
   alert:
-    on: [fail]                    # statuses that trigger (default [fail]; `ok` not allowed)
+    on: [fail, warn]              # statuses that trigger (default [fail]; `ok` not allowed)
     notify_user: false            # no end-user notification
     notify_groups: [it-admins]    # -> operator group only (notifications.group.it-admins)
     priority: warn
+    toast: true
     require_ack: true
     title: "Edge 拡張機能が未準拠です: {pc_id}"
     body: "{label} の状態が {status} です: {detail}（PC: {pc_id} / 利用者: {last_logon}）"
