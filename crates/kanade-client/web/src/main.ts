@@ -178,6 +178,13 @@ type Run = {
 const runs = new Map<string, Run>();
 const MAX_RUNS = 30;
 
+// Completed-run ids whose output the user has manually expanded in the
+// dock. Running rows always show their output; completed ones collapse to
+// the header (a click toggles them here). Mirrors the notifications panel's
+// `expandedIds`. A run dropping out of the map is also dropped here on
+// evict so the set doesn't leak.
+const expandedRunIds = new Set<string>();
+
 function isTerminal(status: RunStatus): boolean {
   return (
     status === "completed" || status === "failed" || status === "killed"
@@ -188,8 +195,19 @@ function evictOldRuns(): void {
   if (runs.size <= MAX_RUNS) return;
   for (const [id, r] of runs) {
     if (runs.size <= MAX_RUNS) break;
-    if (isTerminal(r.status)) runs.delete(id);
+    if (isTerminal(r.status)) {
+      runs.delete(id);
+      expandedRunIds.delete(id);
+    }
   }
+}
+
+// Toggle a completed run's output open/closed (running rows always show
+// theirs, so this only ever fires on collapsible terminal rows).
+function toggleRun(id: string): void {
+  if (expandedRunIds.has(id)) expandedRunIds.delete(id);
+  else expandedRunIds.add(id);
+  renderRuns();
 }
 
 // Stuck-run watchdog (see #465): jobs.execute streams no intermediate
@@ -291,23 +309,39 @@ function activeRunCount(): number {
   return n;
 }
 
+// Dock row order: active (running / queued) runs first so they're always
+// at the top of the scroll and never pushed out of view by a pile of
+// completed ones, then terminal runs — each group newest-first.
+function orderedRuns(): Run[] {
+  const all = [...runs.values()];
+  const active = all.filter((r) => !isTerminal(r.status)).reverse();
+  const terminal = all.filter((r) => isTerminal(r.status)).reverse();
+  return [...active, ...terminal];
+}
+
 function renderRuns(): void {
   evictOldRuns();
   const section = $("runs-section");
   section.hidden = runs.size === 0;
   if (runs.size > 0) {
-    const list = [...runs.values()].reverse(); // newest first
+    const list = orderedRuns();
     const container = $("runs");
-    // Full render on any structural change; otherwise update each row in
-    // place so a status/output tick doesn't blow away scroll / text
-    // selection. A same-length set can still differ by key (an evict +
-    // add in one pass), so verify every list row has a matching DOM node
-    // before taking the in-place path — otherwise the new run would be
-    // skipped and the evicted one would linger (Gemini #636).
-    const hasAllRows = list.every((r) =>
-      document.getElementById(`run-${r.runId}`),
-    );
-    if (container.children.length !== list.length || !hasAllRows) {
+    // Full render whenever the row set OR its order changes (a run going
+    // terminal moves it from the active group to the terminal one); only
+    // then do we accept the reflow. Otherwise update each row in place so a
+    // status/output tick doesn't blow away scroll / text selection. The
+    // order check also subsumes the "same length, different keys" case (an
+    // evict + add in one pass) the length check alone would miss.
+    // Compare against the RAW runId: `el.id` returns the browser-decoded
+    // value, so a runId with an HTML-special char (`&` etc.) would never
+    // match the escaped form and force a full re-render every tick. The
+    // `getElementById` lookup below is already keyed on the raw id.
+    const domIds = [...container.children].map((el) => el.id);
+    const wantIds = list.map((r) => `run-${r.runId}`);
+    const sameOrder =
+      domIds.length === wantIds.length &&
+      domIds.every((id, i) => id === wantIds[i]);
+    if (!sameOrder) {
       container.innerHTML = list.map(renderRun).join("");
     } else {
       for (const r of list) {
@@ -320,25 +354,53 @@ function renderRuns(): void {
       }
     }
   }
+  updateRunsActiveBadge();
   updateRunsCard();
+}
+
+// Live 実行中 count in the fixed dock header (visible regardless of how far
+// the row list is scrolled).
+function updateRunsActiveBadge(): void {
+  const active = activeRunCount();
+  const badge = $("runs-active-badge");
+  badge.hidden = active === 0;
+  badge.textContent = `実行中 ${active}`;
 }
 
 function renderRun(r: Run): string {
   const icon = RUN_STATUS_ICON[r.status] ?? "⏳";
   const label = RUN_STATUS_LABEL[r.status] ?? r.status;
-  const kill =
-    r.status === "running" || r.status === "queued"
-      ? `<button class="kill-btn" data-run-id="${escapeHtml(r.runId)}">中止</button>`
-      : "";
-  const output = r.output.trim()
-    ? `<pre class="run-output">${escapeHtml(r.output.slice(-4000))}</pre>`
+  const active = !isTerminal(r.status);
+  const hasOutput = !!r.output.trim();
+  // Running rows always show output; completed rows collapse it behind a
+  // chevron and only render it when the user has expanded the row.
+  const collapsible = !active && hasOutput;
+  const expanded = active || expandedRunIds.has(r.runId);
+  const id = escapeHtml(r.runId);
+
+  const kill = active
+    ? `<button class="kill-btn" data-run-id="${id}">中止</button>`
     : "";
+  const chevron = collapsible
+    ? `<span class="run-chevron" aria-hidden="true">▸</span>`
+    : "";
+  const toggleAttrs = collapsible
+    ? ` data-run-toggle="${id}" role="button" tabindex="0" aria-expanded="${expanded}"`
+    : "";
+  const output =
+    hasOutput && expanded
+      ? `<pre class="run-output">${escapeHtml(r.output.slice(-4000))}</pre>`
+      : "";
+
   return `
-    <div class="run-row status-${escapeHtml(r.status)}" id="run-${escapeHtml(r.runId)}">
-      <span class="run-icon">${icon}</span>
-      <span class="run-name">${escapeHtml(r.label)}</span>
-      <span class="run-status muted">${escapeHtml(label)}</span>
-      ${kill}
+    <div class="run-row status-${escapeHtml(r.status)}${expanded ? " expanded" : ""}" id="run-${id}">
+      <div class="run-head"${toggleAttrs}>
+        <span class="run-icon">${icon}</span>
+        <span class="run-name">${escapeHtml(r.label)}</span>
+        <span class="run-status muted">${escapeHtml(label)}</span>
+        ${kill}
+        ${chevron}
+      </div>
       ${output}
     </div>`;
 }
@@ -1293,6 +1355,14 @@ window.addEventListener("DOMContentLoaded", () => {
       void killRun(killBtn.dataset.runId);
       return;
     }
+    // Run header clicked → expand/collapse a completed run's output.
+    // Checked after the kill button so 中止 (only on running rows, which
+    // aren't collapsible anyway) always wins its own click.
+    const runToggle = t.closest<HTMLElement>("[data-run-toggle]");
+    if (runToggle?.dataset.runToggle) {
+      toggleRun(runToggle.dataset.runToggle);
+      return;
+    }
     // Notification title clicked → expand/collapse its body (and mark an
     // ack-optional one read on open). Checked before the ack button, but
     // they live in separate subtrees so order is not load-bearing.
@@ -1335,6 +1405,13 @@ window.addEventListener("DOMContentLoaded", () => {
     if (toggle?.dataset.notifToggle) {
       e.preventDefault();
       toggleNotification(toggle.dataset.notifToggle);
+      return;
+    }
+    // Same keyboard affordance for the run-output disclosure header.
+    const runToggle = e.target.closest<HTMLElement>("[data-run-toggle]");
+    if (runToggle?.dataset.runToggle) {
+      e.preventDefault();
+      toggleRun(runToggle.dataset.runToggle);
     }
   });
 

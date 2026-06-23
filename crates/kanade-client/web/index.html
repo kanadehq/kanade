@@ -73,63 +73,77 @@
           <div class="sidebar-version" id="app-version" title="クライアントのバージョン" hidden></div>
         </nav>
 
-        <main class="content">
-          <!-- Home / dashboard -->
-          <section class="view" id="view-home">
-            <h2 class="view-title">ホーム</h2>
-            <div class="dash-cards">
-              <button class="dash-card" data-view="health" id="card-health">
-                <i class="dash-icon" data-lucide="heart-pulse"></i>
-                <div class="dash-card-body">
-                  <span class="dash-card-label">端末ヘルス</span>
-                  <span class="dash-card-value" id="card-health-value">読み込み中…</span>
-                </div>
-              </button>
-              <button class="dash-card" data-view="notifications" id="card-notif">
-                <i class="dash-icon" data-lucide="bell"></i>
-                <div class="dash-card-body">
-                  <span class="dash-card-label">通知</span>
-                  <span class="dash-card-value" id="card-notif-value">—</span>
-                </div>
-              </button>
-              <div class="dash-card dash-card-static" id="card-runs" hidden>
-                <i class="dash-icon" data-lucide="loader"></i>
-                <div class="dash-card-body">
-                  <span class="dash-card-label">実行中のジョブ</span>
-                  <span class="dash-card-value" id="card-runs-value">—</span>
+        <!-- Content column: the active view scrolls on top, the 実行状況
+             dock is pinned to the bottom as a flex sibling (NOT sticky-in-
+             scroll, which left a gap on short pages and nested scrollbars). -->
+        <div class="main">
+          <main class="content">
+            <!-- Home / dashboard -->
+            <section class="view" id="view-home">
+              <h2 class="view-title">ホーム</h2>
+              <div class="dash-cards">
+                <button class="dash-card" data-view="health" id="card-health">
+                  <i class="dash-icon" data-lucide="heart-pulse"></i>
+                  <div class="dash-card-body">
+                    <span class="dash-card-label">端末ヘルス</span>
+                    <span class="dash-card-value" id="card-health-value">読み込み中…</span>
+                  </div>
+                </button>
+                <button class="dash-card" data-view="notifications" id="card-notif">
+                  <i class="dash-icon" data-lucide="bell"></i>
+                  <div class="dash-card-body">
+                    <span class="dash-card-label">通知</span>
+                    <span class="dash-card-value" id="card-notif-value">—</span>
+                  </div>
+                </button>
+                <div class="dash-card dash-card-static" id="card-runs" hidden>
+                  <i class="dash-icon" data-lucide="loader"></i>
+                  <div class="dash-card-body">
+                    <span class="dash-card-label">実行中のジョブ</span>
+                    <span class="dash-card-value" id="card-runs-value">—</span>
+                  </div>
                 </div>
               </div>
-            </div>
-          </section>
+            </section>
 
-          <!-- Notifications -->
-          <section class="view" id="view-notifications" hidden>
-            <h2 class="view-title">
-              通知 <span class="badge" id="notif-badge" hidden></span>
-            </h2>
-            <div id="notifications"></div>
-          </section>
+            <!-- Notifications -->
+            <section class="view" id="view-notifications" hidden>
+              <h2 class="view-title">
+                通知 <span class="badge" id="notif-badge" hidden></span>
+              </h2>
+              <div id="notifications"></div>
+            </section>
 
-          <!-- Health (check: jobs) -->
-          <section class="view" id="view-health" hidden>
-            <h2 class="view-title">端末ヘルス</h2>
-            <div id="health"><p class="muted">読み込み中…</p></div>
-          </section>
+            <!-- Health (check: jobs) -->
+            <section class="view" id="view-health" hidden>
+              <h2 class="view-title">端末ヘルス</h2>
+              <div id="health"><p class="muted">読み込み中…</p></div>
+            </section>
 
-          <!-- Jobs for the selected category (client: jobs). One view,
-               re-rendered per selected category. -->
-          <section class="view" id="view-jobs" hidden>
-            <h2 class="view-title" id="jobs-view-title">ジョブ</h2>
-            <div id="jobs-list"></div>
-          </section>
+            <!-- Jobs for the selected category (client: jobs). One view,
+                 re-rendered per selected category. -->
+            <section class="view" id="view-jobs" hidden>
+              <h2 class="view-title" id="jobs-view-title">ジョブ</h2>
+              <div id="jobs-list"></div>
+            </section>
 
-          <!-- Persistent run status panel: shows live progress of any
-               jobs.execute regardless of the active view. -->
+          </main>
+
+          <!-- Persistent run status dock: a flex-fixed bottom region (always
+               flush to the window edge, no sticky gap) showing live progress
+               of any jobs.execute regardless of the active view. A fixed
+               header carries the 実行中 count; only the row list below it
+               scrolls — so the dock and the view above each own a single
+               scrollbar instead of nesting. Running rows pin to the top with
+               their output open; completed rows sink below, output collapsed. -->
           <section class="runs-panel" id="runs-section" hidden>
-            <h2 class="view-title">実行状況</h2>
-            <div id="runs"></div>
+            <header class="runs-header">
+              <h2 class="runs-title">実行状況</h2>
+              <span class="badge runs-active-badge" id="runs-active-badge" hidden></span>
+            </header>
+            <div id="runs" class="runs-scroll"></div>
           </section>
-        </main>
+        </div>
       </div>
     </div>
 
