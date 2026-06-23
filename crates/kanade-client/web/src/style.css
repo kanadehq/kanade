@@ -269,9 +269,22 @@ body {
   text-overflow: ellipsis;
 }
 
+/* Content column: the scrolling active view stacked above the fixed
+   実行状況 dock. As a flex column it lets .content take the slack and the
+   dock keep its own bounded height, so the dock is always flush to the
+   window bottom (no sticky-on-short-page gap). */
+.main {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
 .content {
   flex: 1 1 auto;
   min-width: 0;
+  min-height: 0;
   padding: 20px 24px;
   overflow-y: auto;
 }
@@ -443,42 +456,61 @@ ul.checks {
   font-size: 13px;
 }
 
-/* ---- Run status panel (#291) ---- */
+/* ---- Run status dock (#291) ----
+   A flex-fixed region at the bottom of the content column (see .main): a
+   fixed header above an internally-scrolling row list. Being a flex
+   sibling of .content — not `position: sticky` *inside* it — the dock
+   always sits flush to the window bottom (sticky only pins on overflow,
+   so on a short page it used to float up mid-column leaving a gap), and
+   its scrollbar lives in its own region instead of nesting with the
+   view's. */
 .runs-panel {
-  margin-top: 20px;
-  padding-top: 16px;
-  border-top: 1px solid var(--border);
-  /* Pin 実行状況 to the bottom of the scrolling content so a freshly
-     launched job's "実行中…" line stays on screen even when a long
-     client: job list overflows above it. Without this the panel scrolls
-     out of view, the operator can't tell the job already started, and
-     they re-press 実行 — a double-execute trap. The panel sticks to the
-     viewport bottom; once the content is short enough it falls back to
-     its natural in-flow position. */
-  position: sticky;
-  bottom: 0;
-  /* Span the full content width (content has 24px side padding) so the
-     opaque backing sits flush edge-to-edge under the scrolling rows. The
-     negative bottom margin cancels .content's 20px bottom padding so the
-     panel meets the window edge when scrolled to the end instead of
-     revealing a strip of --bg below it; padding-bottom (16px interior +
-     the reclaimed 20px) keeps the visible inner spacing the same. */
-  margin-left: -24px;
-  margin-right: -24px;
-  margin-bottom: -20px;
-  padding-left: 24px;
-  padding-right: 24px;
-  padding-bottom: 36px;
-  background: var(--panel);
-  /* Cap the height so a busy panel scrolls internally instead of eating
-     the whole viewport; a soft top shadow lifts it off the rows above. */
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  /* Cap the dock height so a busy panel scrolls its rows internally
+     rather than eating the whole window; the view above keeps the slack.
+     A soft top shadow lifts it off the rows above. */
   max-height: 45vh;
-  overflow-y: auto;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
   box-shadow: 0 -10px 18px -10px rgba(0, 0, 0, 0.3);
 }
 
 .runs-panel[hidden] {
   display: none;
+}
+
+/* Fixed dock header: the 実行状況 title + a live 実行中 count. It stays put
+   while only the row list below scrolls, so the count is always visible. */
+.runs-header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 24px 8px;
+}
+
+.runs-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+/* 実行中 count pill — accent-tinted (work in progress), deliberately NOT
+   the red --fail of the unread-notifications badge. Hidden at zero. */
+.runs-active-badge {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* The dock's one scrolling region: the run rows. */
+.runs-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 24px 16px;
 }
 
 /* Brief highlight when a new run is registered — positive "it started"
@@ -490,9 +522,6 @@ ul.checks {
 @keyframes runs-flash {
   0%,
   30% {
-    /* An *opaque* accent tint — mixing the solid --accent (not the
-       translucent --accent-soft) with --panel keeps the sticky panel from
-       letting the scrolled rows beneath it bleed through mid-flash. */
     background: color-mix(in srgb, var(--accent) 12%, var(--panel));
   }
   100% {
@@ -500,17 +529,31 @@ ul.checks {
   }
 }
 
+/* A run row is a column: a header line (icon / name / status / kill or
+   chevron) above its output block. */
 .run-row {
   display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 8px;
+  flex-direction: column;
+  gap: 6px;
   padding: 8px 0;
   border-top: 1px solid var(--border);
 }
 
 .run-row:first-child {
   border-top: 0;
+}
+
+.run-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+/* Completed rows collapse their output behind a click on the header. */
+.run-head[data-run-toggle] {
+  cursor: pointer;
+  user-select: none;
 }
 
 .run-icon {
@@ -531,12 +574,26 @@ ul.checks {
   font-size: 13px;
 }
 
+/* Disclosure chevron on collapsible (completed-with-output) rows; rotates
+   when the row is expanded. Mirrors the notifications panel affordance. */
+.run-chevron {
+  margin-left: auto;
+  flex: 0 0 auto;
+  align-self: center;
+  font-size: 12px;
+  color: var(--muted);
+  transition: transform 0.15s ease;
+}
+
+.run-row.expanded .run-chevron {
+  transform: rotate(90deg);
+}
+
+/* Output flows inside the dock's scroll (no inner scrollbar of its own —
+   that nested third bar was the readability complaint). */
 .run-output {
-  flex: 1 0 100%;
-  margin: 4px 0 0;
+  margin: 0;
   padding: 8px;
-  max-height: 160px;
-  overflow: auto;
   background: var(--panel-2);
   border: 1px solid var(--border);
   border-radius: 6px;
