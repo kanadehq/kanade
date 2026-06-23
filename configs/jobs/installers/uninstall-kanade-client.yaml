@@ -1,0 +1,126 @@
+# Counterpart to install-kanade-client.yaml — removes the
+# kanade-client Tauri app from a PC.
+#
+#   kanade job create configs/jobs/installers/uninstall-kanade-client.yaml
+#   kanade exec uninstall-kanade-client --pcs <id>
+#     (flag is `--pcs <id>`, pc_id VERBATIM — match the registered
+#      casing of $env:COMPUTERNAME exactly, do NOT case-fold; NATS
+#      subjects are case-sensitive so a mis-cased id sticks at pending)
+#
+# Mirrors scripts/undeploy/client.ps1 (the standalone admin tool) but
+# additionally removes:
+#   - the `kanade-client://` URL-protocol handler the install script
+#     registers under HKLM\SOFTWARE\Classes (#647), and
+#   - the all-users Start-Menu shortcut the AGENT's client_shortcut
+#     module creates. The agent only (re)materialises that .lnk while
+#     the exe exists, so once the binary is gone it won't be recreated
+#     — but the agent also won't clean up the now-dangling .lnk itself
+#     (its already-current guard leaves an existing .lnk alone), so we
+#     remove it here. Its name follows the operator's
+#     client_display_name (+ a legacy fixed name), so we match by TARGET
+#     path, not by name, to catch every variant.
+# Idempotent: safe to re-run / re-target.
+#
+# `require_approval: true` matches the install posture — removing a
+# binary off the end-user-visible install path is an operator-intent
+# action that should be acked before it goes wide.
+
+id: uninstall-kanade-client
+tags: [infra]   # operator taxonomy for the SPA tag filter
+version: 0.1.0
+description: "Uninstall the kanade-client Tauri app (counterpart to install-kanade-client)"
+
+execute:
+  shell: powershell
+  # SYSTEM session — the install lands under %ProgramFiles% and the
+  # protocol key lives in HKLM, so removal needs the same elevation.
+  run_as: system
+  timeout: 60s
+  script: |
+    $ErrorActionPreference = 'Stop'
+
+    # NB: %ProgramFiles%\Kanade is SHARED with the agent (kanade-agent.exe
+    # + agent.toml live here too), so we remove only the client's own
+    # files below — never the directory itself.
+    $installDir = Join-Path $env:ProgramFiles 'Kanade'
+    $exePath    = Join-Path $installDir 'kanade-client.exe'
+
+    $removed = @()
+    $killed  = @()
+
+    # Stop any running client first — the exe is launched in the user
+    # session and would hold a file lock that fails Remove-Item below.
+    # This job runs as SYSTEM, so it can terminate the user-session
+    # process. Match by image path so we only kill the install we're
+    # removing (not an unrelated dev build run from elsewhere).
+    foreach ($proc in @(Get-Process -Name 'kanade-client' -ErrorAction SilentlyContinue)) {
+        if ($proc.Path -eq $exePath) {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            $killed += $proc.Id
+        }
+    }
+    # Wait for the stopped process(es) to fully exit so their file lock
+    # is released before deletion — a dynamic wait returns immediately
+    # once they're gone yet tolerates a slow exit under load, beating a
+    # blind sleep. Bounded so a wedged process can't hang the job.
+    if ($killed.Count -gt 0) {
+        Wait-Process -Id $killed -Timeout 15 -ErrorAction SilentlyContinue
+    }
+
+    # Binary + any half-completed swap artefacts (.new / .old) left by
+    # an aborted install (same atomic-replace files install-kanade-client
+    # stages). Handle release can lag past process exit, so retry a few
+    # times before giving up rather than failing on a transient lock.
+    foreach ($p in @($exePath, "$exePath.new", "$exePath.old")) {
+        if (-not (Test-Path $p)) { continue }
+        for ($i = 1; $i -le 5; $i++) {
+            try {
+                Remove-Item -Path $p -Force
+                $removed += $p
+                break
+            } catch {
+                if ($i -eq 5) { throw }
+                Start-Sleep -Milliseconds 300
+            }
+        }
+    }
+
+    # kanade-client:// URL-protocol handler the install script registers
+    # (HKLM\SOFTWARE\Classes\kanade-client, machine-wide). Recurse to drop
+    # the nested shell\open\command subkey.
+    $protoKey = 'HKLM:\SOFTWARE\Classes\kanade-client'
+    if (Test-Path $protoKey) {
+        Remove-Item -Path $protoKey -Recurse -Force
+        $removed += $protoKey
+    }
+
+    # All-users Start-Menu shortcut(s) the agent created for this client.
+    # Resolve each .lnk's target and delete the ones pointing at the exe
+    # we just removed — matching by target (not by the operator-set
+    # display name) catches the configured name, the default, and the
+    # legacy fixed name alike.
+    $startMenu = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs'
+    if (Test-Path $startMenu) {
+        $ws = New-Object -ComObject WScript.Shell
+        try {
+            foreach ($lnk in @(Get-ChildItem -LiteralPath $startMenu -Filter '*.lnk' -File -ErrorAction SilentlyContinue)) {
+                $target = $null
+                try { $target = $ws.CreateShortcut($lnk.FullName).TargetPath } catch {}
+                if ($target -eq $exePath) {
+                    Remove-Item -LiteralPath $lnk.FullName -Force
+                    $removed += $lnk.FullName
+                }
+            }
+        } finally {
+            [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($ws)
+        }
+    }
+
+    $stopped = if ($killed.Count -gt 0) { ' (起動中プロセスを停止: ' + ($killed -join ', ') + ')' } else { '' }
+    if ($removed.Count -eq 0) {
+        Write-Output ('kanade-client は見つかりませんでした（削除対象なし）。' + $stopped)
+    } else {
+        Write-Output ('kanade-client をアンインストールしました: ' + ($removed -join ', ') + $stopped)
+    }
+
+require_approval: true
