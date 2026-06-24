@@ -1617,6 +1617,12 @@ mod tests {
                 "settings",
                 include_str!("../../../configs/jobs/example-power-plan.yaml"),
             ),
+            // #792: diagnostics moved to its own "support" tab.
+            (
+                "collect-diagnostics",
+                "support",
+                include_str!("../../../configs/jobs/collect-diagnostics.yaml"),
+            ),
         ];
         for (id, category, yaml) in jobs {
             let m: Manifest =
