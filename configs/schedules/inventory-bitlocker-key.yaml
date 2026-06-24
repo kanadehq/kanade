@@ -1,0 +1,17 @@
+# Fires the registered `inventory-bitlocker-key` job per-PC once a day.
+# Recovery passwords rarely change (only on re-encryption / key
+# rotation), so a 24h cadence keeps the escrow table fresh without
+# re-reading secrets more often than needed.
+#
+# Install (after `kanade job create configs/jobs/inventory-bitlocker-key.yaml`):
+#   kanade schedule create configs/schedules/inventory-bitlocker-key.yaml
+id: inventory-bitlocker-key
+tags: [inventory, security]
+when:
+  per_pc: { every: 24h }
+enabled: true
+job_id: inventory-bitlocker-key
+target:
+  all: true
+# Stagger start times so the fleet doesn't hit WMI at the same instant.
+jitter: 5m
