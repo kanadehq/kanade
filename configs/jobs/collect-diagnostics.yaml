@@ -9,7 +9,7 @@
 # from the SPA Collect page.
 #
 # `client:` makes it user-invokable too — an end user can press a button
-# in the Client App ("困ったとき" tab) and the same-host agent runs this,
+# in the Client App ("サポート" tab, #792) and the same-host agent runs this,
 # producing a bundle the admin can fetch. Trigger from the operator side
 # with the normal exec path: `kanade exec collect-diagnostics --pcs <id>`.
 #
@@ -110,7 +110,12 @@ collect:
 client:
   name: "診断情報を送る"
   description: "サポート用の診断情報を採取して管理者に送ります"
-  category: troubleshoot
+  # #792: sending diagnostics is a support action, not a "fix when broken"
+  # remedy, so it lives in its own 「サポート」 tab rather than 困ったとき.
+  category: support
+  category_label: "サポート"
+  category_icon: life-buoy
+  category_order: 25
   icon: stethoscope
 
 require_approval: true
