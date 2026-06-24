@@ -297,8 +297,27 @@ function handleProgress(p: JobProgress): void {
   };
   run.status = p.status;
   run.updatedAt = Date.now();
-  if (p.stdout_chunk) run.output += p.stdout_chunk;
-  if (p.stderr_chunk) run.output += p.stderr_chunk;
+  // #806: a Running push carries an incremental delta — append it for the
+  // live view. A terminal push carries the authoritative FULL output, so
+  // REPLACE the streamed-so-far buffer with it; that self-heals any live
+  // delta that was dropped or duplicated. (Pre-#806 the agent sent no
+  // running-body, so replace == append == full — unchanged for old agents.)
+  if (isTerminal(p.status)) {
+    const full = (p.stdout_chunk ?? "") + (p.stderr_chunk ?? "");
+    // Don't let the terminal push DESTROY output we already streamed:
+    //  - the terminal is capped at 256 KiB and keeps only the HEAD
+    //    (marked "truncated"), whereas the live stream carried the real
+    //    tail — keep the longer streamed buffer in that case;
+    //  - a terminal with no body at all must not wipe a non-empty stream.
+    // Otherwise the terminal is authoritative and replaces.
+    const lossy = full.includes("truncated: output exceeded") || full === "";
+    if (!(lossy && run.output.length > full.length)) {
+      run.output = full;
+    }
+  } else {
+    if (p.stdout_chunk) run.output += p.stdout_chunk;
+    if (p.stderr_chunk) run.output += p.stderr_chunk;
+  }
   runs.set(p.run_id, run);
   renderRuns();
 }
