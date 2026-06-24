@@ -17,30 +17,18 @@ use serde::{Deserialize, Serialize};
 
 // ---------- shared types ----------
 
-/// Job category from the manifest's `category:` field. Drives which
-/// Client App tab the job appears in. `#[non_exhaustive]` leaves
-/// room for SPEC additions (new tabs) without a wire bump.
-#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum JobCategory {
-    /// Chrome / Edge / Office / runtime updaters. Appears in the
-    /// "アップデート" tab.
-    SoftwareUpdate,
-    /// Teams cache clear, Office repair, network reset, … Appears
-    /// in the "困ったとき" tab.
-    Troubleshoot,
-    /// Self-service install catalog. Appears in the software
-    /// catalog tab.
-    Catalog,
-    /// #492: serde-level forward-compat catch-all. `#[non_exhaustive]`
-    /// only affects Rust match exhaustiveness — serde still hard-fails
-    /// on an unknown variant STRING, so a newer peer's new variant
-    /// used to make older readers reject the whole containing message.
-    /// Unknown decodes any unrecognised value; UIs render it neutrally.
-    #[serde(other)]
-    Unknown,
-}
+/// Category key for a user-invokable job (the manifest's
+/// `client.category`). #792: this is now a **free-form string**, not a
+/// closed enum — an operator names a tab from the manifest alone and the
+/// Client App renders one tab per distinct key it sees (label / icon /
+/// order supplied by `client.category_label` / `_icon` / `_order`, with
+/// built-in defaults for the well-known keys below).
+///
+/// The agent's maintenance / auto-reboot logic special-cases the
+/// `software_update` key, so it's named here as a constant rather than a
+/// bare literal; the other well-known keys only carry Client App display
+/// defaults, so they live there.
+pub const CATEGORY_SOFTWARE_UPDATE: &str = "software_update";
 
 /// Run-state machine for one `jobs.execute` invocation.
 ///
@@ -96,7 +84,22 @@ pub struct UserInvokableJob {
     /// icon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
-    pub category: JobCategory,
+    /// Free-form category key (#792). The Client App groups jobs into one
+    /// tab per distinct key.
+    pub category: String,
+    /// Operator-supplied display name for the category's tab (from
+    /// `client.category_label`). `None` ⇒ the Client App uses a built-in
+    /// default for a well-known key, else the key itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_label: Option<String>,
+    /// Operator-supplied tab icon (lucide name or `data:` URL) for the
+    /// category (from `client.category_icon`). `None` ⇒ Client App default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_icon: Option<String>,
+    /// Operator-supplied sort order for the tab (from
+    /// `client.category_order`); lower sorts first. `None` ⇒ default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_order: Option<i64>,
     /// Pinned version string from the manifest. Same field as
     /// `Manifest.version`.
     pub version: String,
@@ -127,11 +130,11 @@ pub struct JobRun {
 /// App is showing a single tab and doesn't want the full set).
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Default)]
 pub struct JobsListParams {
-    /// `None` ⇒ return every user-invokable job. `Some(c)` ⇒ filter
-    /// to that category. The agent always strips
+    /// `None` ⇒ return every user-invokable job. `Some(key)` ⇒ filter
+    /// to that category key. The agent always strips
     /// `user_invokable: false` manifests regardless of filter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub category: Option<JobCategory>,
+    pub category: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
@@ -242,17 +245,18 @@ mod tests {
     use chrono::TimeZone;
 
     #[test]
-    fn job_category_serialises_snake_case() {
-        for (variant, expected) in [
-            (JobCategory::SoftwareUpdate, "\"software_update\""),
-            (JobCategory::Troubleshoot, "\"troubleshoot\""),
-            (JobCategory::Catalog, "\"catalog\""),
-        ] {
-            let s = serde_json::to_string(&variant).unwrap();
-            assert_eq!(s, expected, "encode {variant:?}");
-            let back: JobCategory = serde_json::from_str(expected).unwrap();
-            assert_eq!(back, variant, "round-trip {expected}");
-        }
+    fn user_invokable_job_carries_free_form_category() {
+        // #792: category is a free-form string + optional tab metadata.
+        let wire = r#"{
+            "id":"wifi-tweak","display_name":"Wi-Fi 省電力を切る",
+            "category":"settings","category_label":"設定",
+            "category_icon":"settings","category_order":15,"version":"1.0.0"
+        }"#;
+        let j: UserInvokableJob = serde_json::from_str(wire).unwrap();
+        assert_eq!(j.category, "settings");
+        assert_eq!(j.category_label.as_deref(), Some("設定"));
+        assert_eq!(j.category_icon.as_deref(), Some("settings"));
+        assert_eq!(j.category_order, Some(15));
     }
 
     #[test]
@@ -361,8 +365,6 @@ mod tests {
         // catches it (non_exhaustive alone never protected the wire).
         let s: RunStatus = serde_json::from_str("\"skipped\"").unwrap();
         assert_eq!(s, RunStatus::Unknown);
-        let c: JobCategory = serde_json::from_str("\"future_tab\"").unwrap();
-        assert_eq!(c, JobCategory::Unknown);
         // Known variants are untouched.
         let r: RunStatus = serde_json::from_str("\"running\"").unwrap();
         assert_eq!(r, RunStatus::Running);

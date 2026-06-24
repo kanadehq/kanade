@@ -40,7 +40,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Duration, Utc};
 use futures::TryStreamExt;
 use kanade_shared::ipc::error::{ErrorKind, RpcError};
-use kanade_shared::ipc::jobs::JobCategory;
+use kanade_shared::ipc::jobs::CATEGORY_SOFTWARE_UPDATE;
 use kanade_shared::ipc::maintenance::{
     MaintenanceItem, MaintenanceListParams, MaintenanceListResult,
 };
@@ -303,7 +303,7 @@ fn display_name_for(schedule: &Schedule, manifest: Option<&Manifest>) -> String 
 fn is_deferrable(manifest: Option<&Manifest>) -> bool {
     manifest
         .and_then(|m| m.client.as_ref())
-        .is_some_and(|c| c.category == JobCategory::SoftwareUpdate)
+        .is_some_and(|c| c.category == CATEGORY_SOFTWARE_UPDATE)
 }
 
 #[cfg(test)]
@@ -347,9 +347,9 @@ mod tests {
         }
     }
 
-    /// Manifest fixture; `client: Some((name, category))` for a
+    /// Manifest fixture; `client: Some((name, category_key))` for a
     /// user-invokable job, `None` for operator-only.
-    fn manifest(id: &str, client: Option<(&str, JobCategory)>) -> Manifest {
+    fn manifest(id: &str, client: Option<(&str, &str)>) -> Manifest {
         Manifest {
             id: id.into(),
             version: "1.0.0".into(),
@@ -373,7 +373,10 @@ mod tests {
             client: client.map(|(name, category)| ClientHint {
                 name: name.into(),
                 description: None,
-                category,
+                category: category.into(),
+                category_label: None,
+                category_icon: None,
+                category_order: None,
                 icon: None,
             }),
             tags: Vec::new(),
@@ -390,7 +393,7 @@ mod tests {
         let schedules = [cal_schedule("nightly-reboot", "reboot-job", "09:00")];
         let manifests = manifest_map(vec![manifest(
             "reboot-job",
-            Some(("今夜の再起動", JobCategory::SoftwareUpdate)),
+            Some(("今夜の再起動", "software_update")),
         )]);
         let r = build_maintenance_list(&schedules, &manifests, "PC1", &[], now(), 7);
         assert_eq!(r.items.len(), 1);

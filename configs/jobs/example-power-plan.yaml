@@ -1,0 +1,63 @@
+# Example OPT-IN SETTINGS job that shows two recent features together:
+#
+#   * #792 custom category — `client.category: settings` is a free-form
+#     key, so this lands in its own "設定" tab (named/iconed/ordered from
+#     the manifest), NOT shoehorned into アップデート / 困ったとき / カタログ.
+#   * #809 message + inventory in one job — the script prints a readable
+#     Japanese message for the end user, then fences an inventory JSON
+#     object between the sentinels. The Client App shows only the message;
+#     the backend projector records the JSON to the SPA Inventory page.
+#
+# It is an opt-in tweak (switch the power plan to High performance), not an
+# update, a fix, or an install — exactly the "no neutral home" case #792
+# was filed for.
+#
+# Install (on demand from the 設定 tab; add a schedule to refresh the
+# inventory fact periodically):
+#   kanade job create configs/jobs/example-power-plan.yaml
+id: example-power-plan
+version: 0.1.0
+description: Switch the active power plan to High performance (opt-in setting)
+tags: [settings, optin]
+execute:
+  shell: powershell
+  run_as: system
+  timeout: 60s
+  script: |
+    $ErrorActionPreference = 'Stop'
+    # High performance GUID is stable across Windows installs.
+    $highPerf = '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'
+    $applied = $false
+    # Native exes (powercfg) don't throw on non-zero exit even under
+    # ErrorActionPreference=Stop — check $LASTEXITCODE, not try/catch.
+    powercfg /setactive $highPerf | Out-Null
+    if ($LASTEXITCODE -eq 0) { $applied = $true }
+
+    $activeLine = (powercfg /getactivescheme)
+    $plan = ($activeLine -replace '.*\((.*)\).*', '$1')
+
+    # 1) Human-readable message for the end user (shown in the Client App).
+    if ($applied) {
+      Write-Output "電源プランを「高パフォーマンス」に切り替えました。"
+    } else {
+      Write-Output "電源プランの切り替えに失敗しました（このPWの権限/ポリシーをご確認ください）。"
+    }
+
+    # 2) Inventory JSON for the SPA — fenced so it never shows to the user.
+    Write-Output '#KANADE-INVENTORY-BEGIN'
+    @{ active_plan = $plan; high_performance = $applied } | ConvertTo-Json -Compress | Write-Output
+    Write-Output '#KANADE-INVENTORY-END'
+client:
+  name: "電源プランを高パフォーマンスに"
+  description: "動作が重いと感じるときに試してください（任意設定）"
+  category: settings
+  category_label: "設定"
+  category_icon: sliders-horizontal
+  category_order: 15
+  icon: zap
+inventory:
+  display:
+    - field: active_plan
+      label: 電源プラン
+    - field: high_performance
+      label: 高パフォーマンス

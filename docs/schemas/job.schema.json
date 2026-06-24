@@ -493,8 +493,30 @@
       "type": "object",
       "properties": {
         "category": {
-          "description": "Which Client App tab the job lives in (`software_update` →\nアップデート, `troubleshoot` → 困ったとき, `catalog` → software\ncatalog). Required — without it the agent can't place the job\nin a tab.",
-          "$ref": "#/$defs/JobCategory"
+          "description": "Which Client App tab the job lives in — a **free-form category\nkey** (#792). The Client App renders one tab per distinct key.\nWell-known keys (`software_update`, `troubleshoot`, `catalog`)\ncarry built-in tab labels/icons; any other key defines a new tab\n(style it with `category_label` / `category_icon`). Required and\nvalidated non-empty — without it the agent can't place the job.\nNote: the `software_update` key also drives the agent's\nmaintenance / auto-reboot grouping.",
+          "type": "string"
+        },
+        "category_icon": {
+          "description": "Optional icon for the category's TAB (lucide name or `data:` URL).\n`None` ⇒ Client App default for the key.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "category_label": {
+          "description": "Optional display name for the category's TAB. Set it on (at least\none of) a custom category's jobs to name the tab; `None` ⇒ a\nbuilt-in default for a well-known key, else the key itself.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "category_order": {
+          "description": "Optional sort order for the TAB; lower sorts first. `None` ⇒\ndefault (well-known keys keep their familiar order; custom keys\nsort after, then by label).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
         },
         "description": {
           "description": "Optional one-line subtitle under `name` in the Client App.\nDistinct from the operator-facing top-level\n[`Manifest::description`] — this one is written for the end\nuser. Maps to `UserInvokableJob::display_description`.",
@@ -504,7 +526,7 @@
           ]
         },
         "icon": {
-          "description": "Optional icon hint for the job row — a lucide-react icon name\nor a `data:` URL. `None` ⇒ the Client App falls back to the\ncategory's default icon. Surfaced verbatim in\n`jobs.list[].icon`.",
+          "description": "Optional icon hint for the job ROW — a lucide-react icon name\nor a `data:` URL. `None` ⇒ the Client App falls back to the\ncategory's icon. Surfaced verbatim in `jobs.list[].icon`.",
           "type": [
             "string",
             "null"
@@ -780,32 +802,6 @@
       },
       "required": [
         "display"
-      ]
-    },
-    "JobCategory": {
-      "description": "Job category from the manifest's `category:` field. Drives which\nClient App tab the job appears in. `#[non_exhaustive]` leaves\nroom for SPEC additions (new tabs) without a wire bump.",
-      "oneOf": [
-        {
-          "description": "Chrome / Edge / Office / runtime updaters. Appears in the\n\"アップデート\" tab.",
-          "type": "string",
-          "const": "software_update"
-        },
-        {
-          "description": "Teams cache clear, Office repair, network reset, … Appears\nin the \"困ったとき\" tab.",
-          "type": "string",
-          "const": "troubleshoot"
-        },
-        {
-          "description": "Self-service install catalog. Appears in the software\ncatalog tab.",
-          "type": "string",
-          "const": "catalog"
-        },
-        {
-          "title": "492: serde-level forward-compat catch-all. `#[non_exhaustive]`",
-          "description": "only affects Rust match exhaustiveness — serde still hard-fails\non an unknown variant STRING, so a newer peer's new variant\nused to make older readers reject the whole containing message.\nUnknown decodes any unrecognised value; UIs render it neutrally.",
-          "type": "string",
-          "const": "unknown"
-        }
       ]
     },
     "NotificationPriority": {

@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-use crate::ipc::jobs::JobCategory;
 use crate::wire::{RunAs, Shell, Staleness};
 
 /// YAML job manifest (= registered "what to run", v0.18.0+).
@@ -596,15 +595,32 @@ pub struct ClientHint {
     /// user. Maps to `UserInvokableJob::display_description`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// Which Client App tab the job lives in (`software_update` →
-    /// アップデート, `troubleshoot` → 困ったとき, `catalog` → software
-    /// catalog). Required — without it the agent can't place the job
-    /// in a tab.
-    pub category: JobCategory,
-    /// Optional icon hint for the job row — a lucide-react icon name
+    /// Which Client App tab the job lives in — a **free-form category
+    /// key** (#792). The Client App renders one tab per distinct key.
+    /// Well-known keys (`software_update`, `troubleshoot`, `catalog`)
+    /// carry built-in tab labels/icons; any other key defines a new tab
+    /// (style it with `category_label` / `category_icon`). Required and
+    /// validated non-empty — without it the agent can't place the job.
+    /// Note: the `software_update` key also drives the agent's
+    /// maintenance / auto-reboot grouping.
+    pub category: String,
+    /// Optional display name for the category's TAB. Set it on (at least
+    /// one of) a custom category's jobs to name the tab; `None` ⇒ a
+    /// built-in default for a well-known key, else the key itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_label: Option<String>,
+    /// Optional icon for the category's TAB (lucide name or `data:` URL).
+    /// `None` ⇒ Client App default for the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_icon: Option<String>,
+    /// Optional sort order for the TAB; lower sorts first. `None` ⇒
+    /// default (well-known keys keep their familiar order; custom keys
+    /// sort after, then by label).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_order: Option<i64>,
+    /// Optional icon hint for the job ROW — a lucide-react icon name
     /// or a `data:` URL. `None` ⇒ the Client App falls back to the
-    /// category's default icon. Surfaced verbatim in
-    /// `jobs.list[].icon`.
+    /// category's icon. Surfaced verbatim in `jobs.list[].icon`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
 }
@@ -1391,6 +1407,11 @@ impl Manifest {
             if client.name.trim().is_empty() {
                 return Err("client.name must not be empty".to_string());
             }
+            // #792: category is a free-form key now, so a blank one would
+            // group the job under an empty tab — reject it like `name`.
+            if client.category.trim().is_empty() {
+                return Err("client.category must not be empty".to_string());
+            }
             // Optional display fields, when present, must be
             // meaningful: a blank `description` renders an empty
             // subtitle and a blank `icon` is a dangling lucide name.
@@ -1399,6 +1420,8 @@ impl Manifest {
             for (label, value) in [
                 ("client.description", &client.description),
                 ("client.icon", &client.icon),
+                ("client.category_label", &client.category_label),
+                ("client.category_icon", &client.category_icon),
             ] {
                 if let Some(v) = value {
                     if v.trim().is_empty() {
@@ -1570,23 +1593,29 @@ mod tests {
         let jobs = [
             (
                 "fix-teams-cache",
-                JobCategory::Troubleshoot,
+                "troubleshoot",
                 include_str!("../../../configs/jobs/fix-teams-cache.yaml"),
             ),
             (
                 "chrome-update",
-                JobCategory::SoftwareUpdate,
+                "software_update",
                 include_str!("../../../configs/jobs/chrome-update.yaml"),
             ),
             (
                 "install-slack",
-                JobCategory::Catalog,
+                "catalog",
                 include_str!("../../../configs/jobs/install-slack.yaml"),
             ),
             (
                 "fix-defender-rtp",
-                JobCategory::Troubleshoot,
+                "troubleshoot",
                 include_str!("../../../configs/jobs/fix-defender-rtp.yaml"),
+            ),
+            // #792 custom category ("settings") + #809 message/inventory.
+            (
+                "example-power-plan",
+                "settings",
+                include_str!("../../../configs/jobs/example-power-plan.yaml"),
             ),
         ];
         for (id, category, yaml) in jobs {
@@ -2255,7 +2284,7 @@ client:
             c.description.as_deref(),
             Some("Teams が重いときに試してください")
         );
-        assert_eq!(c.category, JobCategory::Troubleshoot);
+        assert_eq!(c.category, "troubleshoot");
         assert_eq!(c.icon.as_deref(), Some("brush-cleaning"));
         m.validate().expect("user-invokable job validates");
     }
@@ -2277,7 +2306,7 @@ client:
 "#;
         let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
         let c = m.client.as_ref().expect("client present");
-        assert_eq!(c.category, JobCategory::Catalog);
+        assert_eq!(c.category, "catalog");
         assert!(c.description.is_none() && c.icon.is_none());
         m.validate().expect("minimal client validates");
     }
@@ -2310,6 +2339,10 @@ client:
         for (field, line) in [
             ("client.description", "  description: \"  \"\n"),
             ("client.icon", "  icon: \"\"\n"),
+            // #792: the new category tab-metadata fields get the same
+            // present-but-blank guard.
+            ("client.category_label", "  category_label: \"  \"\n"),
+            ("client.category_icon", "  category_icon: \"\"\n"),
         ] {
             let yaml = format!(
                 "id: j\nversion: 1.0.0\nexecute:\n  shell: powershell\n  script: \"echo x\"\n  timeout: 30s\nclient:\n  name: A\n  category: catalog\n{line}"
@@ -2318,6 +2351,27 @@ client:
             let err = m.validate().expect_err("blank optional field must fail");
             assert!(err.contains(field), "expected {field} in err: {err}");
         }
+    }
+
+    #[test]
+    fn manifest_client_rejects_blank_category() {
+        // #792: category is a free-form key now; serde keeps it required,
+        // but a present-but-blank value would group the job under an empty
+        // tab — validate() must reject it.
+        let yaml = r#"
+id: j
+version: 1.0.0
+execute:
+  shell: powershell
+  script: "echo x"
+  timeout: 30s
+client:
+  name: "A job"
+  category: "   "
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        let err = m.validate().expect_err("blank category must fail");
+        assert!(err.contains("client.category"), "err: {err}");
     }
 
     #[test]

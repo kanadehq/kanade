@@ -6,8 +6,9 @@
 // switches views client-side. No framework — the existing IPC + render
 // logic is reused as-is; only the layout / navigation is new.
 //
-// - `client:` jobs (jobs.list, #291) become the category nav items
-//   (アップデート / 困ったとき / カタログ), grouped by `JobCategory`.
+// - `client:` jobs (jobs.list, #291) become the category nav items,
+//   grouped by their free-form category key (#792) — one tab per
+//   distinct key, with operator-supplied label/icon/order.
 // - `check:` jobs surface in 端末ヘルス via state.snapshot (#290); each
 //   check's 「修復する」 runs its `troubleshoot` job (jobs.execute).
 // - Notifications (Phase E, #102) get their own view + sidebar badge.
@@ -120,14 +121,20 @@ type JobProgress = {
 
 type JobsExecuteResult = { run_id: string };
 
-type JobCategory = "software_update" | "troubleshoot" | "catalog";
+// #792: a category is now a free-form key, not a fixed enum.
+type JobCategory = string;
 
 type UserInvokableJob = {
   id: string;
   display_name: string;
   display_description?: string | null;
   icon?: string | null;
-  category: JobCategory;
+  category: string;
+  // Operator-supplied tab metadata (#792); absent ⇒ fall back to a
+  // built-in default for a well-known key, else the key itself.
+  category_label?: string | null;
+  category_icon?: string | null;
+  category_order?: number | null;
   version: string;
 };
 
@@ -137,18 +144,40 @@ type JobsListResult = { items: UserInvokableJob[] };
 // Tauri event; we switch on `method`.
 type RpcNotification = { jsonrpc: string; method: string; params: unknown };
 
-// Per-category display metadata: sidebar label + default lucide icon
-// (used both for the nav entry and as the per-job icon fallback). Order
-// is the sidebar display order. `category` matches
-// `kanade_shared::ipc::jobs::JobCategory`.
-const CATEGORIES: { category: JobCategory; label: string; icon: string }[] = [
-  { category: "software_update", label: "アップデート", icon: "download" },
-  { category: "troubleshoot", label: "困ったとき", icon: "wrench" },
-  { category: "catalog", label: "カタログ", icon: "package" },
-];
+type CategoryMeta = { label: string; icon: string; order: number };
 
-function categoryMeta(c: JobCategory): { label: string; icon: string } {
-  return CATEGORIES.find((m) => m.category === c) ?? { label: c, icon: "box" };
+// Built-in display defaults for the well-known category keys. Operators
+// override per manifest (`client.category_label` / `_icon` / `_order`);
+// these are just sensible fallbacks so the common tabs look right with no
+// metadata. ANY key now renders a tab — this map is cosmetic, NOT a
+// constraint (#792). Orders are spaced so custom tabs slot between/after.
+const CATEGORY_DEFAULTS: Record<string, CategoryMeta> = {
+  software_update: { label: "アップデート", icon: "download", order: 10 },
+  troubleshoot: { label: "困ったとき", icon: "wrench", order: 20 },
+  catalog: { label: "カタログ", icon: "package", order: 30 },
+};
+
+// Custom keys with no operator order sort after the well-known three.
+const CATEGORY_FALLBACK_ORDER = 1000;
+
+// Resolve a category key's tab label / icon / order. Precedence:
+// operator metadata carried on the category's jobs (first non-empty) →
+// built-in default for a well-known key → the key itself + generic icon.
+function categoryMeta(key: string): CategoryMeta {
+  const jobs = jobsByCategory.get(key) ?? [];
+  const pick = <T>(get: (j: UserInvokableJob) => T | null | undefined): T | undefined => {
+    for (const j of jobs) {
+      const v = get(j);
+      if (v !== null && v !== undefined && String(v).trim() !== "") return v;
+    }
+    return undefined;
+  };
+  const def = CATEGORY_DEFAULTS[key];
+  return {
+    label: (pick((j) => j.category_label) as string)?.trim() || def?.label || key,
+    icon: (pick((j) => j.category_icon) as string)?.trim() || def?.icon || "box",
+    order: (pick((j) => j.category_order) as number) ?? def?.order ?? CATEGORY_FALLBACK_ORDER,
+  };
 }
 
 const RUN_STATUS_ICON: Record<RunStatus, string> = {
@@ -462,7 +491,9 @@ function renderRun(r: Run): string {
 // ---- Job catalog (#291): category nav + per-category job list ----
 
 const jobsByCategory = new Map<JobCategory, UserInvokableJob[]>();
-let activeJobsTab: JobCategory = CATEGORIES[0].category;
+// Set when a category tab is opened (#792: categories are dynamic, so
+// there's no fixed first tab to default to).
+let activeJobsTab: JobCategory = "";
 let jobsLoaded = false;
 
 async function loadJobs(): Promise<void> {
@@ -488,18 +519,26 @@ async function loadJobs(): Promise<void> {
   }
 }
 
-// Inject one sidebar entry per category that actually has jobs (an empty
-// category gets no menu item — that's the "category でメニュー化" ask).
+// Distinct categories that actually have jobs, each with its resolved tab
+// metadata, sorted by (order, label) for a stable layout (#792). Shared by
+// the nav and the active-tab fallback so both order identically.
+function sortedCategories(): (CategoryMeta & { key: string })[] {
+  return [...jobsByCategory.keys()]
+    .filter((k) => (jobsByCategory.get(k)?.length ?? 0) > 0)
+    .map((key) => ({ key, ...categoryMeta(key) }))
+    .sort((a, b) => a.order - b.order || a.label.localeCompare(b.label));
+}
+
+// Inject one sidebar entry per category that actually has jobs (#792:
+// tabs are driven by the distinct category keys present, not a fixed list).
 function renderCategoryNav(): void {
-  const withJobs = CATEGORIES.filter(
-    (m) => (jobsByCategory.get(m.category)?.length ?? 0) > 0,
-  );
-  $("nav-jobs-sep").hidden = withJobs.length === 0;
-  $("nav-categories").innerHTML = withJobs
+  const cats = sortedCategories();
+  $("nav-jobs-sep").hidden = cats.length === 0;
+  $("nav-categories").innerHTML = cats
     .map((m) => {
-      const count = jobsByCategory.get(m.category)?.length ?? 0;
+      const count = jobsByCategory.get(m.key)?.length ?? 0;
       return `
-        <button class="nav-item" data-view="jobs" data-category="${m.category}">
+        <button class="nav-item" data-view="jobs" data-category="${escapeHtml(m.key)}">
           ${iconHtml(m.icon, m.icon, "nav-icon")}
           <span class="nav-label">${escapeHtml(m.label)}</span>
           <span class="nav-count muted">${count}</span>
@@ -510,6 +549,13 @@ function renderCategoryNav(): void {
 }
 
 function renderJobsList(): void {
+  // If the jobs view is shown without a tab ever having been clicked
+  // (e.g. a reconnect re-render), fall back to the first tab instead of an
+  // empty-state for a phantom category (Claude #811).
+  if (!jobsByCategory.has(activeJobsTab)) {
+    const first = sortedCategories()[0];
+    if (first) activeJobsTab = first.key;
+  }
   const meta = categoryMeta(activeJobsTab);
   $("jobs-view-title").textContent = meta.label;
   const jobs = jobsByCategory.get(activeJobsTab) ?? [];
