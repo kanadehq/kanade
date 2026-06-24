@@ -28,9 +28,7 @@
 use std::sync::Arc;
 
 use kanade_shared::ipc::handshake::HandshakeResult;
-use kanade_shared::ipc::jobs::{
-    JobCategory, JobsExecuteResult, JobsKillResult, JobsListParams, JobsListResult,
-};
+use kanade_shared::ipc::jobs::{JobsExecuteResult, JobsKillResult, JobsListParams, JobsListResult};
 use kanade_shared::ipc::notifications::{
     NotificationsAckResult, NotificationsFilter, NotificationsListParams, NotificationsListResult,
     NotificationsSubscribeResult,
@@ -184,13 +182,13 @@ async fn state_snapshot(state: State<'_, AppState>) -> Result<StateSnapshot, Str
     client.snapshot().await.map_err(|e| e.to_string())
 }
 
-/// `jobs.list` — the user-invokable job catalog (#291). `category`
-/// narrows to one tab (`software_update` / `troubleshoot` / `catalog`);
-/// `None` returns every tab's jobs.
+/// `jobs.list` — the user-invokable job catalog (#291). `category` is a
+/// free-form key (#792) narrowing to one tab; `None` returns every tab's
+/// jobs.
 #[tauri::command]
 async fn jobs_list(
     state: State<'_, AppState>,
-    category: Option<JobCategory>,
+    category: Option<String>,
 ) -> Result<JobsListResult, String> {
     let client = connected_client(&state).await?;
     client

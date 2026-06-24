@@ -1,9 +1,10 @@
 //! `jobs.*` method handlers (SPEC §2.12.5 / §2.12.11).
 //!
 //! - `jobs.list` — return every manifest carrying a `client:` block,
-//!   optionally narrowed to one [`JobCategory`], mapped into the
-//!   [`UserInvokableJob`] wire shape the Client App's three job tabs
-//!   (アップデート / 困ったとき / catalog) render.
+//!   optionally narrowed to one category key, mapped into the
+//!   [`UserInvokableJob`] wire shape the Client App renders. Categories
+//!   are free-form keys (#792): the client groups jobs into one tab per
+//!   distinct key, using the operator-supplied label/icon/order.
 //! - `jobs.execute` — run a user-invokable job. Looks the manifest up
 //!   by id, refuses anything without a `client:` block
 //!   (`Unauthorized` per SPEC §2.12.4), mints a `run_id`, spawns the
@@ -159,14 +160,11 @@ pub async fn handle_jobs_list(
 /// [`UserInvokableJob`], applies the optional category filter, and
 /// sorts by display name so the catalog renders in a stable order
 /// regardless of KV key iteration order.
-pub fn build_job_list(
-    manifests: &[Manifest],
-    filter: Option<kanade_shared::ipc::jobs::JobCategory>,
-) -> JobsListResult {
+pub fn build_job_list(manifests: &[Manifest], filter: Option<String>) -> JobsListResult {
     let mut items: Vec<UserInvokableJob> = manifests
         .iter()
         .filter_map(manifest_to_job)
-        .filter(|j| filter.is_none_or(|c| j.category == c))
+        .filter(|j| filter.as_deref().is_none_or(|c| j.category == c))
         .collect();
     // Stable, human-meaningful order: display name, then id as the
     // tiebreaker so two jobs sharing a name don't render
@@ -192,7 +190,10 @@ fn manifest_to_job(m: &Manifest) -> Option<UserInvokableJob> {
         display_name: client.name.clone(),
         display_description: client.description.clone(),
         icon: client.icon.clone(),
-        category: client.category,
+        category: client.category.clone(),
+        category_label: client.category_label.clone(),
+        category_icon: client.category_icon.clone(),
+        category_order: client.category_order,
         version: m.version.clone(),
         // Per-user run history is minted by `jobs.execute` (a
         // follow-up PR); until then every row is "never run by you".
@@ -863,13 +864,12 @@ pub async fn handle_jobs_kill(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kanade_shared::ipc::jobs::JobCategory;
     use kanade_shared::manifest::{ClientHint, Execute, ExecuteShell};
     use kanade_shared::wire::{RunAs, Staleness};
 
-    /// Build a manifest fixture. Pass `client: Some((name, category))`
+    /// Build a manifest fixture. Pass `client: Some((name, category_key))`
     /// for a user-invokable job, `None` for an operator-only one.
-    fn manifest(id: &str, client: Option<(&str, JobCategory)>) -> Manifest {
+    fn manifest(id: &str, client: Option<(&str, &str)>) -> Manifest {
         Manifest {
             id: id.into(),
             version: "1.0.0".into(),
@@ -893,7 +893,10 @@ mod tests {
             client: client.map(|(name, category)| ClientHint {
                 name: name.into(),
                 description: None,
-                category,
+                category: category.into(),
+                category_label: None,
+                category_icon: None,
+                category_order: None,
                 icon: None,
             }),
             tags: Vec::new(),
@@ -905,31 +908,25 @@ mod tests {
     fn lists_only_client_jobs() {
         let manifests = [
             manifest("inv-hw", None),
-            manifest(
-                "chrome-update",
-                Some(("Chrome を更新", JobCategory::SoftwareUpdate)),
-            ),
+            manifest("chrome-update", Some(("Chrome を更新", "software_update"))),
             manifest("check-bitlocker", None),
         ];
         let result = build_job_list(&manifests, None);
         assert_eq!(result.items.len(), 1);
         assert_eq!(result.items[0].id, "chrome-update");
         assert_eq!(result.items[0].display_name, "Chrome を更新");
-        assert_eq!(result.items[0].category, JobCategory::SoftwareUpdate);
+        assert_eq!(result.items[0].category, "software_update");
         assert!(result.items[0].last_run.is_none());
     }
 
     #[test]
     fn category_filter_narrows_to_one_tab() {
         let manifests = [
-            manifest(
-                "chrome-update",
-                Some(("Chrome", JobCategory::SoftwareUpdate)),
-            ),
-            manifest("fix-teams", Some(("Teams 修復", JobCategory::Troubleshoot))),
-            manifest("install-slack", Some(("Slack", JobCategory::Catalog))),
+            manifest("chrome-update", Some(("Chrome", "software_update"))),
+            manifest("fix-teams", Some(("Teams 修復", "troubleshoot"))),
+            manifest("install-slack", Some(("Slack", "catalog"))),
         ];
-        let only_troubleshoot = build_job_list(&manifests, Some(JobCategory::Troubleshoot));
+        let only_troubleshoot = build_job_list(&manifests, Some("troubleshoot".to_string()));
         assert_eq!(only_troubleshoot.items.len(), 1);
         assert_eq!(only_troubleshoot.items[0].id, "fix-teams");
     }
@@ -944,7 +941,7 @@ mod tests {
     #[test]
     fn maps_all_client_fields() {
         // Full projection incl. the optional description + icon.
-        let mut m = manifest("fix-teams", Some(("Teams 修復", JobCategory::Troubleshoot)));
+        let mut m = manifest("fix-teams", Some(("Teams 修復", "troubleshoot")));
         if let Some(c) = m.client.as_mut() {
             c.description = Some("重いとき用".into());
             c.icon = Some("brush-cleaning".into());
@@ -959,9 +956,9 @@ mod tests {
     #[test]
     fn items_sorted_by_display_name() {
         let manifests = [
-            manifest("z", Some(("Zebra", JobCategory::Catalog))),
-            manifest("a", Some(("Apple", JobCategory::Catalog))),
-            manifest("m", Some(("Mango", JobCategory::Catalog))),
+            manifest("z", Some(("Zebra", "catalog"))),
+            manifest("a", Some(("Apple", "catalog"))),
+            manifest("m", Some(("Mango", "catalog"))),
         ];
         let result = build_job_list(&manifests, None);
         let names: Vec<&str> = result
@@ -976,7 +973,7 @@ mod tests {
 
     #[test]
     fn build_command_maps_manifest_fields() {
-        let mut m = manifest("fix-teams", Some(("Teams 修復", JobCategory::Troubleshoot)));
+        let mut m = manifest("fix-teams", Some(("Teams 修復", "troubleshoot")));
         m.execute.run_as = RunAs::User;
         m.execute.cwd = Some("C:/temp".into());
         m.execute.timeout = "90s".into();
@@ -998,7 +995,7 @@ mod tests {
 
     #[test]
     fn build_command_rejects_script_object() {
-        let mut m = manifest("obj-job", Some(("Obj", JobCategory::Catalog)));
+        let mut m = manifest("obj-job", Some(("Obj", "catalog")));
         m.execute.script = None;
         m.execute.script_object = Some("cleanup/1.0.0".into());
         let err = build_command(&m, "r1", "req-1").expect_err("script_object unsupported");
@@ -1007,7 +1004,7 @@ mod tests {
 
     #[test]
     fn build_command_rejects_missing_inline_script() {
-        let mut m = manifest("empty", Some(("Empty", JobCategory::Catalog)));
+        let mut m = manifest("empty", Some(("Empty", "catalog")));
         m.execute.script = None;
         let err = build_command(&m, "r1", "req-1").expect_err("no script");
         let data = err.data.unwrap();
@@ -1017,7 +1014,7 @@ mod tests {
 
     #[test]
     fn build_command_rejects_bad_timeout() {
-        let mut m = manifest("bad", Some(("Bad", JobCategory::Catalog)));
+        let mut m = manifest("bad", Some(("Bad", "catalog")));
         m.execute.timeout = "not-a-duration".into();
         let err = build_command(&m, "r1", "req-1").expect_err("bad timeout");
         let data = err.data.unwrap();
@@ -1029,7 +1026,7 @@ mod tests {
     fn build_command_floors_subsecond_timeout_to_one() {
         // `500ms`.as_secs() == 0, which is an ambiguous timeout to the
         // run path — floor any positive duration at 1s.
-        let mut m = manifest("ms", Some(("Ms", JobCategory::Catalog)));
+        let mut m = manifest("ms", Some(("Ms", "catalog")));
         m.execute.timeout = "500ms".into();
         let cmd = build_command(&m, "r1", "req-1").expect("build");
         assert_eq!(cmd.timeout_secs, 1);
@@ -1222,7 +1219,7 @@ mod tests {
     // ---------- build_exec_result (#478 operator visibility) ----------
 
     fn cmd_fixture(id: &str) -> Command {
-        let m = manifest(id, Some(("Job", JobCategory::Catalog)));
+        let m = manifest(id, Some(("Job", "catalog")));
         build_command(&m, "run-1", "req-1").expect("build_command")
     }
 
