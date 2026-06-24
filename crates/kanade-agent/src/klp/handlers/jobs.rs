@@ -52,6 +52,9 @@ use kanade_shared::kv::BUCKET_JOBS;
 use kanade_shared::manifest::Manifest;
 use kanade_shared::wire::Command;
 use kanade_shared::{ExecResult, default_paths, subject};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 use uuid::Uuid;
@@ -411,9 +414,72 @@ async fn run_job(
     )
     .await;
 
+    // #806: stream stdout/stderr to the Client App as it's produced, so
+    // the user sees the job is actually working instead of a silent
+    // "実行中…" until the one-shot terminal push. We reuse the LiveTail
+    // ring — the very buffer the NATS `job.tail` path fills — and poll it,
+    // pushing only the delta since the last tick as a `Running` progress.
+    // The terminal push below still carries the full output and the client
+    // REPLACES on a terminal status, so a dropped / duplicated live delta
+    // self-heals. `LiveTail` is capped at 128 KiB, so a delta is always
+    // well under the KLP frame limit.
+    let live_handle = crate::live_tail::register(&run_id);
+    let stop = Arc::new(AtomicBool::new(false));
+    let poller = {
+        let tail = live_handle.tail();
+        let push_tx = push_tx.clone();
+        let run_id = run_id.clone();
+        let stop = stop.clone();
+        tokio::spawn(async move {
+            let (mut last_out, mut last_err) = (String::new(), String::new());
+            loop {
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                // Client gone → stop streaming (the run itself continues);
+                // no point polling for the rest of a long job.
+                if push_tx.is_closed() {
+                    break;
+                }
+                // Read the stop flag BEFORE snapshotting so the final
+                // iteration still flushes whatever landed after the run
+                // returned, then breaks.
+                let done = stop.load(Ordering::Relaxed);
+                let snap = tail.snapshot();
+                let out_delta = tail_delta(&last_out, &snap.stdout);
+                let err_delta = tail_delta(&last_err, &snap.stderr);
+                last_out = snap.stdout;
+                last_err = snap.stderr;
+                if !out_delta.is_empty() || !err_delta.is_empty() {
+                    // Best-effort: never await here — a backpressured
+                    // channel would stall the poller, which `run_job`
+                    // awaits, delaying the terminal push.
+                    try_push_progress(
+                        &push_tx,
+                        JobProgress {
+                            run_id: run_id.clone(),
+                            status: RunStatus::Running,
+                            stdout_chunk: (!out_delta.is_empty()).then_some(out_delta),
+                            stderr_chunk: (!err_delta.is_empty()).then_some(err_delta),
+                            exit_code: None,
+                        },
+                    );
+                }
+                // `!snap.running` also breaks us out if the parent task died
+                // and dropped the LiveHandle before ever setting `stop`.
+                if done || !snap.running {
+                    break;
+                }
+            }
+        })
+    };
+
     let started_at = Utc::now();
-    let outcome = run_command_with_kill(&client, &cmd, None).await;
+    let outcome = run_command_with_kill(&client, &cmd, Some(live_handle.tail())).await;
     let finished_at = Utc::now();
+
+    // Stop the streamer and let its final tick flush before the terminal
+    // push (which the client treats as the authoritative full output).
+    stop.store(true, Ordering::Relaxed);
+    let _ = poller.await;
 
     // Derive both the client progress AND the (exit_code, stdout,
     // stderr) the ExecResult records — for the ran case AND the
@@ -579,6 +645,35 @@ fn with_note(stderr: &str, note: &str) -> String {
     }
 }
 
+/// New suffix of a live-tail snapshot beyond what was already streamed
+/// (`prev`). When the 128 KiB ring has wrapped (output outran the buffer)
+/// `current` no longer starts with `prev`; fall back to sending the whole
+/// current tail — a rare large-output case where a little duplication
+/// beats a gap, and the authoritative terminal push corrects it anyway.
+fn tail_delta(prev: &str, current: &str) -> String {
+    if let Some(rest) = current.strip_prefix(prev) {
+        return rest.to_string();
+    }
+    // The 128 KiB ring wrapped (output outran the buffer since the last
+    // tick), so `current` no longer starts with `prev`. Re-anchor on the
+    // tail of `prev` (its last ~256 bytes) and emit only the genuinely-new
+    // suffix, instead of resending the whole 128 KiB tail as a duplicate.
+    let mut start = prev.len().saturating_sub(256);
+    while start < prev.len() && !prev.is_char_boundary(start) {
+        start += 1;
+    }
+    if start < prev.len() {
+        let sig = &prev[start..];
+        if let Some(pos) = current.rfind(sig) {
+            return current[pos + sig.len()..].to_string();
+        }
+    }
+    // No anchor found (the whole window churned) — fall back to the full
+    // tail; a little duplication beats a gap, and the authoritative
+    // terminal push self-heals it anyway.
+    current.to_string()
+}
+
 /// Per-chunk cap on a terminal progress push's stdout/stderr. The KLP
 /// framing layer rejects frames over 1 MiB (SPEC §2.12.2); a job that
 /// dumps megabytes of output would otherwise produce a frame the
@@ -669,27 +764,60 @@ fn cap_chunk(s: &str) -> String {
     format!("{}\n…[truncated: output exceeded 256 KiB]", &s[..end])
 }
 
-/// Encode a `jobs.progress` notification and push it on the
-/// connection's writer channel. Best-effort: a serialise failure is
-/// logged and dropped, and a closed channel (client disconnected)
-/// just means progress stops — the run itself is unaffected.
-async fn push_progress(push_tx: &mpsc::Sender<Vec<u8>>, progress: JobProgress) {
-    let notif = match RpcNotification::new(method::JOBS_PROGRESS, &progress) {
+/// Encode a `jobs.progress` notification to its wire frame. A
+/// serialise failure is logged and yields `None` (the push is dropped);
+/// shared by the awaited [`push_progress`] and the best-effort
+/// [`try_push_progress`].
+fn encode_progress(progress: &JobProgress) -> Option<Vec<u8>> {
+    let notif = match RpcNotification::new(method::JOBS_PROGRESS, progress) {
         Ok(n) => n,
         Err(e) => {
             warn!(error = %e, "jobs.progress: failed to encode notification");
-            return;
+            return None;
         }
     };
-    let body = match serde_json::to_vec(&notif) {
-        Ok(b) => b,
+    match serde_json::to_vec(&notif) {
+        Ok(b) => Some(b),
         Err(e) => {
             warn!(error = %e, "jobs.progress: failed to serialise frame");
-            return;
+            None
         }
+    }
+}
+
+/// Push a `jobs.progress` notification on the connection's writer
+/// channel, awaiting backpressure. Used for the milestone pushes
+/// (`Running` start, terminal status) that must not be dropped. A closed
+/// channel (client disconnected) just means progress stops — the run
+/// itself is unaffected.
+async fn push_progress(push_tx: &mpsc::Sender<Vec<u8>>, progress: JobProgress) {
+    let Some(body) = encode_progress(&progress) else {
+        return;
     };
     if push_tx.send(body).await.is_err() {
         debug!("jobs.progress: push channel closed (client gone)");
+    }
+}
+
+/// Best-effort `jobs.progress` push for the #806 live-delta stream: a
+/// full-but-open channel DROPS the delta rather than awaiting, because
+/// `run_job` awaits the poller — a stall here would delay the terminal
+/// push and result recording (CodeRabbit). The authoritative terminal
+/// push (awaited) carries the full output, so a dropped delta self-heals
+/// on the client.
+fn try_push_progress(push_tx: &mpsc::Sender<Vec<u8>>, progress: JobProgress) {
+    let Some(body) = encode_progress(&progress) else {
+        return;
+    };
+    use tokio::sync::mpsc::error::TrySendError;
+    match push_tx.try_send(body) {
+        Ok(()) => {}
+        Err(TrySendError::Full(_)) => {
+            debug!("jobs.progress: live delta dropped (channel full)");
+        }
+        Err(TrySendError::Closed(_)) => {
+            debug!("jobs.progress: live delta dropped (client gone)");
+        }
     }
 }
 
@@ -1165,5 +1293,30 @@ mod tests {
         // Trailing newline is trimmed so there's no blank line before
         // the note.
         assert_eq!(with_note("out\n", "x"), "out\n[KLP] x");
+    }
+
+    #[test]
+    fn tail_delta_emits_only_the_new_suffix() {
+        // Steady state: current extends prev → just the appended part.
+        assert_eq!(tail_delta("abc", "abcdef"), "def");
+        // Nothing new since the last tick.
+        assert_eq!(tail_delta("abc", "abc"), "");
+        // First tick (no prior output).
+        assert_eq!(tail_delta("", "hello"), "hello");
+    }
+
+    #[test]
+    fn tail_delta_reanchors_after_ring_wrap() {
+        // The re-anchor only kicks in once `prev` exceeds the 256-byte
+        // signature window, so build a realistic >256-byte overlap. The
+        // ring dropped its head ("DROPPED_HEAD"); `current` shares the
+        // 300-byte body and adds a new tail — we want only that tail.
+        let body: String = (0..300).map(|i| (b'a' + (i % 26) as u8) as char).collect();
+        let prev = format!("DROPPED_HEAD{body}");
+        let current = format!("{body}_NEW_TAIL");
+        assert_eq!(tail_delta(&prev, &current), "_NEW_TAIL");
+        // No overlap at all (even with a long prev) → fall back to the
+        // full tail; a little duplication beats a gap.
+        assert_eq!(tail_delta(&"z".repeat(300), "qqqq"), "qqqq");
     }
 }
