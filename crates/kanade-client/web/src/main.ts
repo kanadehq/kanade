@@ -386,11 +386,46 @@ function updateRunsActiveBadge(): void {
   badge.textContent = `実行中 ${active}`;
 }
 
+// #793: sentinel lines fencing an inventory JSON payload inside an
+// otherwise human-readable job stdout. The backend projector parses the
+// fenced region; here we strip it so the user only sees the message. Must
+// mirror kanade_shared::manifest::INVENTORY_BLOCK_{BEGIN,END} (Rust source
+// of truth) — keep both in sync.
+const INVENTORY_BLOCK_BEGIN = "#KANADE-INVENTORY-BEGIN";
+const INVENTORY_BLOCK_END = "#KANADE-INVENTORY-END";
+
+// Find a marker only where it begins a line (start of string or right
+// after a "\n"), mirroring kanade_shared::manifest::find_line_marker — so a
+// sentinel echoed mid-message can't false-trigger the strip.
+function findLineMarker(hay: string, needle: string): number {
+  if (hay.startsWith(needle)) return 0;
+  const p = hay.indexOf("\n" + needle);
+  return p === -1 ? -1 : p + 1;
+}
+
+// Remove the inventory JSON block from job output before showing it to the
+// user. An unterminated fence (closing marker not yet streamed in, #806)
+// hides everything from the opener onward, so the raw JSON never flashes
+// mid-stream. No fence → returned unchanged.
+function stripInventoryBlock(s: string): string {
+  const begin = findLineMarker(s, INVENTORY_BLOCK_BEGIN);
+  if (begin === -1) return s;
+  const afterBegin = begin + INVENTORY_BLOCK_BEGIN.length;
+  const endRel = findLineMarker(s.slice(afterBegin), INVENTORY_BLOCK_END);
+  const cut =
+    endRel === -1 ? s.length : afterBegin + endRel + INVENTORY_BLOCK_END.length;
+  // `\r?\n` so the collapse also works on Windows (CRLF) job output.
+  return (s.slice(0, begin) + s.slice(cut)).replace(/(?:\r?\n){3,}/g, "\n\n").trim();
+}
+
 function renderRun(r: Run): string {
   const icon = RUN_STATUS_ICON[r.status] ?? "⏳";
   const label = RUN_STATUS_LABEL[r.status] ?? r.status;
   const active = !isTerminal(r.status);
-  const hasOutput = !!r.output.trim();
+  // Show the human-readable part only — the inventory JSON block (if any)
+  // is for the projector, not the user.
+  const shown = stripInventoryBlock(r.output);
+  const hasOutput = !!shown.trim();
   // Running rows always show output; completed rows collapse it behind a
   // chevron and only render it when the user has expanded the row.
   const collapsible = !active && hasOutput;
@@ -408,7 +443,7 @@ function renderRun(r: Run): string {
     : "";
   const output =
     hasOutput && expanded
-      ? `<pre class="run-output">${escapeHtml(r.output.slice(-4000))}</pre>`
+      ? `<pre class="run-output">${escapeHtml(shown.slice(-4000))}</pre>`
       : "";
 
   return `

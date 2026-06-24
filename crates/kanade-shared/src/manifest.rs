@@ -212,6 +212,51 @@ pub struct FanoutPlan {
     pub deadline_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// Sentinel lines that fence an inventory JSON payload inside an
+/// otherwise human-readable job stdout (#793).
+///
+/// A user-invokable (`client:`) job can't put both a friendly message
+/// and a JSON inventory object on its single stdout stream — the Client
+/// App renders stdout verbatim, while the projector needs it to be JSON.
+/// The convention: print a readable message for the user, then wrap the
+/// inventory JSON object between these two marker lines. The projector
+/// parses the fenced region (see [`inventory_payload`]) and the Client
+/// App strips it from what it shows the user. A plain inventory job (no
+/// `client:`) needs no fence — its whole stdout is the JSON.
+pub const INVENTORY_BLOCK_BEGIN: &str = "#KANADE-INVENTORY-BEGIN";
+/// Closing marker — see [`INVENTORY_BLOCK_BEGIN`].
+pub const INVENTORY_BLOCK_END: &str = "#KANADE-INVENTORY-END";
+
+/// Extract the inventory JSON payload from a job's stdout: the text
+/// between [`INVENTORY_BLOCK_BEGIN`] and [`INVENTORY_BLOCK_END`] when the
+/// fence is present, else the whole stdout (back-compat — a pure-JSON
+/// inventory job has no fence). An unterminated fence (the closing marker
+/// missing, e.g. truncated output) takes everything after the opener.
+/// The result is trimmed so surrounding message text / whitespace never
+/// reaches the JSON parser.
+pub fn inventory_payload(stdout: &str) -> &str {
+    let Some(begin) = find_line_marker(stdout, INVENTORY_BLOCK_BEGIN) else {
+        return stdout.trim();
+    };
+    let after = &stdout[begin + INVENTORY_BLOCK_BEGIN.len()..];
+    let inner = match find_line_marker(after, INVENTORY_BLOCK_END) {
+        Some(end) => &after[..end],
+        None => after,
+    };
+    inner.trim()
+}
+
+/// Find `needle` only where it begins a line (start of `hay` or right
+/// after a `\n`). Anchoring to line start means a script echoing the
+/// literal sentinel mid-message (e.g. printing a command name) can't
+/// false-trigger the fence (Claude #793).
+fn find_line_marker(hay: &str, needle: &str) -> Option<usize> {
+    if hay.starts_with(needle) {
+        return Some(0);
+    }
+    hay.find(&format!("\n{needle}")).map(|p| p + 1)
+}
+
 /// Manifest sub-section: how the SPA should render the inventory
 /// facts this job produces. Each field name (`field`) is a top-level
 /// key in the stdout JSON, e.g. `hostname`, `ram_gb`.
@@ -1422,6 +1467,41 @@ impl From<ExecuteShell> for Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inventory_payload_extracts_fenced_block() {
+        // Readable message + fenced JSON → only the JSON, trimmed.
+        let stdout = "Wi-Fi 設定を適用しました。\n\
+            #KANADE-INVENTORY-BEGIN\n\
+            {\"applied\": true}\n\
+            #KANADE-INVENTORY-END\n";
+        assert_eq!(inventory_payload(stdout), "{\"applied\": true}");
+    }
+
+    #[test]
+    fn inventory_payload_falls_back_to_whole_stdout() {
+        // No fence (a plain inventory job) → whole stdout, trimmed.
+        assert_eq!(
+            inventory_payload("  {\"ram_gb\": 16}\n"),
+            "{\"ram_gb\": 16}"
+        );
+    }
+
+    #[test]
+    fn inventory_payload_handles_unterminated_fence() {
+        // Closing marker missing (e.g. truncated) → everything after the
+        // opener, trimmed.
+        let stdout = "msg\n#KANADE-INVENTORY-BEGIN\n{\"a\": 1}";
+        assert_eq!(inventory_payload(stdout), "{\"a\": 1}");
+    }
+
+    #[test]
+    fn inventory_payload_ignores_mid_line_sentinel() {
+        // The marker echoed mid-line (not at a line start) must NOT be
+        // treated as a fence — fall back to the whole stdout.
+        let stdout = "see #KANADE-INVENTORY-BEGIN in the docs\nnot json";
+        assert_eq!(inventory_payload(stdout), stdout.trim());
+    }
 
     /// The example check-job + schedule YAMLs shipped under `configs/`
     /// must stay valid as the schema evolves (#290 PR-C). `include_str!`

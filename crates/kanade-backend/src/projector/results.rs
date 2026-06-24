@@ -5,7 +5,7 @@ use async_nats::jetstream::{self, consumer::pull::Config as PullConfig};
 use futures::StreamExt;
 use kanade_shared::ExecResult;
 use kanade_shared::kv::{BUCKET_JOBS, OBJECT_RESULT_OUTPUT, STREAM_RESULTS};
-use kanade_shared::manifest::{CheckHint, InventoryHint, Manifest};
+use kanade_shared::manifest::{CheckHint, InventoryHint, Manifest, inventory_payload};
 use sqlx::SqlitePool;
 use tokio::io::AsyncReadExt;
 use tracing::{debug, info, warn};
@@ -663,8 +663,12 @@ async fn upsert_inventory(
     recorded_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<()> {
     // Validate the stdout is JSON before we store it — saves the
-    // SPA from parsing garbage later.
-    let facts: serde_json::Value = serde_json::from_str(&r.stdout)
+    // SPA from parsing garbage later. #793: a user-invokable job mixes a
+    // human-readable message with its inventory JSON, fencing the JSON
+    // between sentinel markers; `inventory_payload` returns the fenced
+    // region (or the whole stdout for a plain, unfenced inventory job).
+    let payload = inventory_payload(&r.stdout);
+    let facts: serde_json::Value = serde_json::from_str(payload)
         .with_context(|| format!("manifest '{manifest_id}' stdout was not JSON"))?;
     let display_json = serde_json::to_string(&hint.display)?;
     let summary_json = hint
@@ -712,7 +716,10 @@ async fn upsert_inventory(
     )
     .bind(&r.pc_id)
     .bind(manifest_id)
-    .bind(&r.stdout)
+    // Store the extracted JSON payload — NOT the raw stdout, which for a
+    // fenced (message + JSON) job would persist the human message + markers
+    // into facts_json and break SPA parsing + diff_scalars (Gemini #793).
+    .bind(payload)
     .bind(display_json)
     .bind(summary_json)
     .bind(r.finished_at)
