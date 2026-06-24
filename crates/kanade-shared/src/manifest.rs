@@ -623,6 +623,20 @@ pub struct ClientHint {
     /// category's icon. Surfaced verbatim in `jobs.list[].icon`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
+    /// Optional visibility scope for the end-user Client App (#816).
+    ///
+    /// `None` ⇒ visible to every PC (current behavior). When set, only
+    /// agents whose `pc_id` / group membership match the [`Target`] list
+    /// the job in `jobs.list` and may run it via KLP `jobs.execute`.
+    ///
+    /// This gates the END-USER surface ONLY. Operators are unaffected:
+    /// `POST /api/exec/{job_id}` (SPA / `kanade exec`) is a separate path
+    /// that never consults `client:`, so an operator can still run the
+    /// job on any PC regardless of `visible_to`. Reuses the schedule
+    /// `Target` shape (`all` / `groups` / `pcs`); a present-but-empty
+    /// target is rejected by [`Manifest::validate`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_to: Option<Target>,
 }
 
 /// #720 — one widget on the SPA **Analytics** page: a declarative
@@ -1200,6 +1214,17 @@ impl Target {
     pub fn is_specified(&self) -> bool {
         self.all || !self.groups.is_empty() || !self.pcs.is_empty()
     }
+
+    /// Whether a PC (its `pc_id` + group membership) falls in this target:
+    /// `all`, or the pc is listed, or it belongs to a listed group. Used
+    /// by the agent to scope `client.visible_to` (#816). An unspecified
+    /// target matches nobody (callers should treat "no target" as
+    /// "visible to all" before calling this).
+    pub fn matches(&self, pc_id: &str, groups: &[String]) -> bool {
+        self.all
+            || self.pcs.iter().any(|p| p == pc_id)
+            || self.groups.iter().any(|g| groups.contains(g))
+    }
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
@@ -1427,6 +1452,18 @@ impl Manifest {
                     if v.trim().is_empty() {
                         return Err(format!("{label} must not be empty when set"));
                     }
+                }
+            }
+            // #816: a present-but-empty `visible_to` (no all/groups/pcs)
+            // would hide the job from everyone in the Client App — almost
+            // certainly a mistake. Require at least one selector; omit the
+            // whole block to mean "visible to all".
+            if let Some(t) = &client.visible_to {
+                if !t.is_specified() {
+                    return Err(
+                        "client.visible_to must set at least one of all / groups / pcs (omit it for all PCs)"
+                            .to_string(),
+                    );
                 }
             }
         }
@@ -2378,6 +2415,72 @@ client:
         let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
         let err = m.validate().expect_err("blank category must fail");
         assert!(err.contains("client.category"), "err: {err}");
+    }
+
+    #[test]
+    fn target_matches_pc_group_and_all() {
+        // #816: pc match, group match, all, and the no-match case.
+        let by_pc = Target {
+            pcs: vec!["PC1".into()],
+            ..Default::default()
+        };
+        assert!(by_pc.matches("PC1", &[]));
+        assert!(!by_pc.matches("PC2", &["g1".into()]));
+
+        let by_group = Target {
+            groups: vec!["g1".into()],
+            ..Default::default()
+        };
+        assert!(by_group.matches("PC2", &["g1".into()]));
+        assert!(!by_group.matches("PC2", &["g2".into()]));
+
+        let all = Target {
+            all: true,
+            ..Default::default()
+        };
+        assert!(all.matches("anyPC", &[]));
+    }
+
+    #[test]
+    fn manifest_client_rejects_empty_visible_to() {
+        // #816: a present-but-empty visible_to (no all/groups/pcs) would
+        // hide the job from everyone — validate() must reject it.
+        let yaml = r#"
+id: j
+version: 1.0.0
+execute:
+  shell: powershell
+  script: "echo x"
+  timeout: 30s
+client:
+  name: "A job"
+  category: troubleshoot
+  visible_to: {}
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        let err = m.validate().expect_err("empty visible_to must fail");
+        assert!(err.contains("client.visible_to"), "err: {err}");
+    }
+
+    #[test]
+    fn manifest_client_accepts_visible_to_groups() {
+        let yaml = r#"
+id: j
+version: 1.0.0
+execute:
+  shell: powershell
+  script: "echo x"
+  timeout: 30s
+client:
+  name: "A job"
+  category: settings
+  visible_to:
+    groups: [wifi-affected]
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        m.validate().expect("visible_to with a group validates");
+        let vt = m.client.unwrap().visible_to.unwrap();
+        assert_eq!(vt.groups, vec!["wifi-affected".to_string()]);
     }
 
     #[test]

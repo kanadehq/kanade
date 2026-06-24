@@ -49,7 +49,7 @@ use kanade_shared::ipc::jobs::{
     JobsListParams, JobsListResult, RunStatus, UserInvokableJob,
 };
 use kanade_shared::ipc::method;
-use kanade_shared::kv::BUCKET_JOBS;
+use kanade_shared::kv::{BUCKET_AGENT_GROUPS, BUCKET_JOBS};
 use kanade_shared::manifest::Manifest;
 use kanade_shared::wire::Command;
 use kanade_shared::{ExecResult, default_paths, subject};
@@ -151,18 +151,74 @@ pub async fn handle_jobs_list(
     .flatten()
     .collect();
 
-    Ok(build_job_list(&manifests, params.category))
+    // #816: scope `client.visible_to` to this agent. pc_id is the agent's
+    // own (trusted); groups come from the agent_groups KV read here on the
+    // cold list path.
+    let groups = pc_groups(client, &conn.pc_id).await;
+    Ok(build_job_list(
+        &manifests,
+        params.category,
+        &conn.pc_id,
+        &groups,
+    ))
+}
+
+/// Resolve this agent's group membership from the `agent_groups.{pc_id}`
+/// KV row. Best-effort on the cold `jobs.*` paths (one extra KV read,
+/// immaterial here — see module docs): any miss / decode failure yields
+/// no groups, so a `visible_to` that targets only groups simply won't
+/// match (fails closed — better to hide than wrongly show).
+async fn pc_groups(client: &async_nats::Client, pc_id: &str) -> Vec<String> {
+    let js = async_nats::jetstream::new(client.clone());
+    let kv = match js.get_key_value(BUCKET_AGENT_GROUPS).await {
+        Ok(kv) => kv,
+        Err(e) => {
+            warn!(error = %e, "jobs: open BUCKET_AGENT_GROUPS for visibility failed");
+            return Vec::new();
+        }
+    };
+    // Reuse the one AgentGroups decoder (shared with maintenance) instead of
+    // re-deserializing here. A KV read error is logged, not silently
+    // swallowed, so a "why isn't my group-targeted job visible?" can be
+    // traced (Gemini #816).
+    match kv.get(pc_id).await {
+        Ok(Some(bytes)) => crate::groups::parse_groups(&bytes),
+        Ok(None) => Vec::new(),
+        Err(e) => {
+            warn!(pc_id = %pc_id, error = %e, "jobs: read agent groups for visibility failed");
+            Vec::new()
+        }
+    }
+}
+
+/// Whether a manifest is visible to the asking agent (#816): a job with
+/// no `client.visible_to` is visible to everyone; otherwise the agent's
+/// `pc_id` / `groups` must match the target. A manifest without a
+/// `client:` block is "visible" here (it's dropped later by
+/// [`manifest_to_job`] as operator-only).
+fn job_visible(m: &Manifest, pc_id: &str, groups: &[String]) -> bool {
+    match m.client.as_ref().and_then(|c| c.visible_to.as_ref()) {
+        None => true,
+        Some(t) => t.matches(pc_id, groups),
+    }
 }
 
 /// Pure mapping + filtering: manifests → the `jobs.list` wire result.
 ///
-/// Keeps only manifests carrying a `client:` block, maps each to a
+/// Keeps only manifests carrying a `client:` block, drops any whose
+/// `visible_to` excludes this agent (#816), maps each to a
 /// [`UserInvokableJob`], applies the optional category filter, and
 /// sorts by display name so the catalog renders in a stable order
 /// regardless of KV key iteration order.
-pub fn build_job_list(manifests: &[Manifest], filter: Option<String>) -> JobsListResult {
+pub fn build_job_list(
+    manifests: &[Manifest],
+    filter: Option<String>,
+    pc_id: &str,
+    groups: &[String],
+) -> JobsListResult {
     let mut items: Vec<UserInvokableJob> = manifests
         .iter()
+        .filter(|m| job_visible(m, pc_id, groups))
         .filter_map(manifest_to_job)
         .filter(|j| filter.as_deref().is_none_or(|c| j.category == c))
         .collect();
@@ -233,7 +289,7 @@ pub async fn handle_jobs_execute(
     // from the Client App. An operator-only job → Unauthorized, never
     // MethodNotFound (the method exists; this caller just can't run
     // THAT job).
-    if manifest.client.is_none() {
+    let Some(client_hint) = manifest.client.as_ref() else {
         return Err(RpcError::new(
             ErrorKind::Unauthorized,
             format!(
@@ -241,6 +297,20 @@ pub async fn handle_jobs_execute(
                 params.id
             ),
         ));
+    };
+
+    // #816: enforce `visible_to` on the run path too — not just the
+    // listing — so a job hidden from this PC can't be run by guessing its
+    // id. The operator SPA path (`POST /api/exec`) is separate and stays
+    // unrestricted. pc_id is the agent's own; groups come from KV.
+    if let Some(target) = client_hint.visible_to.as_ref() {
+        let groups = pc_groups(&client, &conn.pc_id).await;
+        if !target.matches(&conn.pc_id, &groups) {
+            return Err(RpcError::new(
+                ErrorKind::Unauthorized,
+                format!("job '{}' is not available on this PC", params.id),
+            ));
+        }
     }
 
     let run_id = Uuid::new_v4().to_string();
@@ -864,7 +934,7 @@ pub async fn handle_jobs_kill(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kanade_shared::manifest::{ClientHint, Execute, ExecuteShell};
+    use kanade_shared::manifest::{ClientHint, Execute, ExecuteShell, Target};
     use kanade_shared::wire::{RunAs, Staleness};
 
     /// Build a manifest fixture. Pass `client: Some((name, category_key))`
@@ -898,6 +968,7 @@ mod tests {
                 category_icon: None,
                 category_order: None,
                 icon: None,
+                visible_to: None,
             }),
             tags: Vec::new(),
             origin: None,
@@ -911,7 +982,7 @@ mod tests {
             manifest("chrome-update", Some(("Chrome を更新", "software_update"))),
             manifest("check-bitlocker", None),
         ];
-        let result = build_job_list(&manifests, None);
+        let result = build_job_list(&manifests, None, "PC1", &[]);
         assert_eq!(result.items.len(), 1);
         assert_eq!(result.items[0].id, "chrome-update");
         assert_eq!(result.items[0].display_name, "Chrome を更新");
@@ -926,7 +997,8 @@ mod tests {
             manifest("fix-teams", Some(("Teams 修復", "troubleshoot"))),
             manifest("install-slack", Some(("Slack", "catalog"))),
         ];
-        let only_troubleshoot = build_job_list(&manifests, Some("troubleshoot".to_string()));
+        let only_troubleshoot =
+            build_job_list(&manifests, Some("troubleshoot".to_string()), "PC1", &[]);
         assert_eq!(only_troubleshoot.items.len(), 1);
         assert_eq!(only_troubleshoot.items[0].id, "fix-teams");
     }
@@ -934,8 +1006,43 @@ mod tests {
     #[test]
     fn empty_when_no_client_jobs() {
         let manifests = [manifest("inv-hw", None), manifest("inv-sw", None)];
-        let result = build_job_list(&manifests, None);
+        let result = build_job_list(&manifests, None, "PC1", &[]);
         assert!(result.items.is_empty());
+    }
+
+    #[test]
+    fn visible_to_filters_by_pc_and_group() {
+        // #816: one job visible to all, one scoped to group "wave1", one
+        // scoped to pc "PC2".
+        let public = manifest("public", Some(("Public", "catalog")));
+        let mut grouped = manifest("grouped", Some(("Grouped", "settings")));
+        grouped.client.as_mut().unwrap().visible_to = Some(Target {
+            groups: vec!["wave1".into()],
+            ..Default::default()
+        });
+        let mut pc_only = manifest("pc-only", Some(("PcOnly", "settings")));
+        pc_only.client.as_mut().unwrap().visible_to = Some(Target {
+            pcs: vec!["PC2".into()],
+            ..Default::default()
+        });
+        let manifests = [public, grouped, pc_only];
+
+        // PC1 in no groups → only the public job.
+        let r = build_job_list(&manifests, None, "PC1", &[]);
+        let ids: Vec<_> = r.items.iter().map(|j| j.id.as_str()).collect();
+        assert_eq!(ids, vec!["public"]);
+
+        // PC1 in wave1 → public + grouped.
+        let r = build_job_list(&manifests, None, "PC1", &["wave1".to_string()]);
+        let mut ids: Vec<_> = r.items.iter().map(|j| j.id.clone()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["grouped", "public"]);
+
+        // PC2 (no groups) → public + pc-only.
+        let r = build_job_list(&manifests, None, "PC2", &[]);
+        let mut ids: Vec<_> = r.items.iter().map(|j| j.id.clone()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["pc-only", "public"]);
     }
 
     #[test]
@@ -946,7 +1053,7 @@ mod tests {
             c.description = Some("重いとき用".into());
             c.icon = Some("brush-cleaning".into());
         }
-        let result = build_job_list(std::slice::from_ref(&m), None);
+        let result = build_job_list(std::slice::from_ref(&m), None, "PC1", &[]);
         let row = &result.items[0];
         assert_eq!(row.display_description.as_deref(), Some("重いとき用"));
         assert_eq!(row.icon.as_deref(), Some("brush-cleaning"));
@@ -960,7 +1067,7 @@ mod tests {
             manifest("a", Some(("Apple", "catalog"))),
             manifest("m", Some(("Mango", "catalog"))),
         ];
-        let result = build_job_list(&manifests, None);
+        let result = build_job_list(&manifests, None, "PC1", &[]);
         let names: Vec<&str> = result
             .items
             .iter()

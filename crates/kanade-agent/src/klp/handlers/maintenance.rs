@@ -378,6 +378,7 @@ mod tests {
                 category_icon: None,
                 category_order: None,
                 icon: None,
+                visible_to: None,
             }),
             tags: Vec::new(),
             origin: None,
