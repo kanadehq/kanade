@@ -27,7 +27,7 @@
 //! Both are gated on this feature actually being exercised in the
 //! field; ship the minimum that's useful today.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -642,16 +642,27 @@ async fn run(
                                 },
                                 None => None,
                             };
-                            let mut s = state.lock().await;
-                            s.jobs.insert(
-                                entry.key.clone(),
-                                ResolvedJob { manifest: m, script_object_sha256: sha },
-                            );
+                            let active_slugs = {
+                                let mut s = state.lock().await;
+                                s.jobs.insert(
+                                    entry.key.clone(),
+                                    ResolvedJob { manifest: m, script_object_sha256: sha },
+                                );
+                                active_check_slugs(&s.jobs)
+                            };
+                            check_sink.set_active_slugs(active_slugs);
                             debug!(job_id = %entry.key, "local_scheduler: cached job manifest");
                         }
                         Operation::Delete | Operation::Purge => {
-                            let mut s = state.lock().await;
-                            s.jobs.remove(&entry.key);
+                            // Keep the Health tab in step with the delete:
+                            // recompute the live check-slug set so the
+                            // gone job's cached check stops showing.
+                            let active_slugs = {
+                                let mut s = state.lock().await;
+                                s.jobs.remove(&entry.key);
+                                active_check_slugs(&s.jobs)
+                            };
+                            check_sink.set_active_slugs(active_slugs);
                         }
                     }
                 }
@@ -660,6 +671,24 @@ async fn run(
         warn!(dropped, "local_scheduler watch ended; reopening");
         nats_retry::reopen_pause().await;
     }
+}
+
+/// The set of `check:` hint slugs across every job currently in
+/// `BUCKET_JOBS`. The local scheduler publishes this to the
+/// [`crate::check_cache::CheckSink`] after every jobs change so a check
+/// whose job was **deleted** drops off the client's Health tab — once a
+/// `check:` job stops running, nothing ever overwrites its cached
+/// result, so without this it lingers forever.
+///
+/// Keyed on plain job existence (not schedule targeting): a delete is
+/// the trigger, and including a slug whose check this PC never ran is a
+/// harmless no-op — the read-time filter in `checks()` only ever
+/// *removes* cached rows, never adds them.
+fn active_check_slugs(jobs: &HashMap<String, ResolvedJob>) -> HashSet<String> {
+    jobs.values()
+        .filter_map(|j| j.manifest.check.as_ref())
+        .map(|c| c.name.clone())
+        .collect()
 }
 
 /// Walk `BUCKET_JOBS` into a fresh in-memory map. Returns `Err(())`
@@ -783,10 +812,16 @@ async fn apply_resync(
     // Swap the jobs map atomically — under the lock so `local_tick`
     // sees either the old map in full or the new map in full, never
     // a half-cleared one.
-    {
+    let active_slugs = {
         let mut st = state.lock().await;
         st.jobs = resolved;
-    }
+        // Recompute the live check-slug set while we hold the lock so it
+        // can't drift from `st.jobs`. Publishing it prunes the client's
+        // Health tab of checks whose job an operator deleted (see
+        // [`check_cache::CheckSink::set_active_slugs`]).
+        active_check_slugs(&st.jobs)
+    };
+    check_sink.set_active_slugs(active_slugs);
 
     // Find schedules that vanished from KV → unregister them. Done
     // before the reconciliations so the diff is unambiguous.
