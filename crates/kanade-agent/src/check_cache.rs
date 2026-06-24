@@ -41,6 +41,24 @@ struct Inner {
     /// atomically-replaced JSON file is the right store (no SQLite;
     /// same pattern as `local_completions.json` / the outboxes).
     path: Option<PathBuf>,
+    /// Check slugs whose defining job currently exists in `BUCKET_JOBS`,
+    /// kept fresh by the local scheduler (see
+    /// [`CheckSink::set_active_slugs`]). `checks()` filters its cached
+    /// results to this set so a check whose job an operator **deleted**
+    /// stops appearing on the client's Health tab — deleting a `check:`
+    /// job otherwise leaves its last result stranded in the cache
+    /// forever (no new result ever overwrites it).
+    ///
+    /// `None` (the initial value, before the scheduler's first resync)
+    /// means "active set unknown — don't filter": a broker-down boot
+    /// can't enumerate the live jobs, so we show the last-known checks
+    /// rather than blanking the tab. Self-heals to `Some(..)` on the
+    /// first successful resync.
+    ///
+    /// Wrapped in `Arc` so `checks()` (called every evaluator tick) reads
+    /// it with a refcount bump instead of cloning the whole set on the
+    /// read path.
+    active_slugs: Mutex<Option<Arc<HashSet<String>>>>,
 }
 
 impl CheckSink {
@@ -75,6 +93,11 @@ impl CheckSink {
                 results: Mutex::new(results),
                 updated: Notify::new(),
                 path,
+                // Unknown until the scheduler's first resync — see the
+                // field doc. Filtering stays off (show everything) until
+                // then so a boot before the jobs KV is reachable doesn't
+                // wipe the Health tab.
+                active_slugs: Mutex::new(None),
             }),
         }
     }
@@ -130,11 +153,60 @@ impl CheckSink {
         }
     }
 
-    /// Current cached checks. Cheap clone of the small map's values;
-    /// order is unspecified (the snapshot builder positions them).
+    /// Replace the set of check slugs whose defining job currently lives
+    /// in `BUCKET_JOBS`. Called by the local scheduler whenever its jobs
+    /// snapshot changes (resync + per-key watch events) so a **deleted**
+    /// `check:` job's stale result drops off the Health tab instead of
+    /// lingering forever (nothing ever overwrites a cached check once
+    /// its job stops running). Wakes the evaluator so the prune lands on
+    /// the next push rather than waiting up to the 30 s tick.
+    ///
+    /// Note this filters at read time only — `record`/`persist` still
+    /// keep every result on disk, so a transient empty/stale active set
+    /// (or a job that comes back) can never destroy the last-known data;
+    /// the row simply reappears once its slug is active again.
+    ///
+    /// Not `#[cfg]`-gated: `local_scheduler` calls this on every platform
+    /// (it has no Windows guard), so the function is live everywhere —
+    /// unlike `checks()`, whose only caller is the Windows-only KLP
+    /// evaluator.
+    pub fn set_active_slugs(&self, slugs: HashSet<String>) {
+        {
+            let mut active = self
+                .inner
+                .active_slugs
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *active = Some(Arc::new(slugs));
+        }
+        self.inner.updated.notify_one();
+    }
+
+    /// Current cached checks, filtered to those whose job is still live
+    /// (see [`set_active_slugs`](Self::set_active_slugs)). Cheap clone of
+    /// the small map's values; order is unspecified (the snapshot builder
+    /// positions them). When the active set is still unknown (`None`,
+    /// pre-first-resync) nothing is filtered.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub fn checks(&self) -> Vec<Check> {
-        self.guarded(|map| map.values().cloned().collect())
+        // Snapshot the active set first (and release its lock) so we
+        // never hold both mutexes at once — `set_active_slugs` only ever
+        // takes the active-set lock, so this ordering can't deadlock.
+        let active = self
+            .inner
+            .active_slugs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        self.guarded(|map| {
+            map.values()
+                .filter(|c| match &active {
+                    Some(set) => set.contains(c.name.as_str()),
+                    None => true,
+                })
+                .cloned()
+                .collect()
+        })
     }
 
     /// Resolves the next time a check result is recorded.
@@ -424,6 +496,58 @@ mod tests {
         assert_eq!(checks.len(), 1);
         assert_eq!(checks[0].name, "bitlocker");
         assert_eq!(checks[0].status, CheckStatus::Ok);
+    }
+
+    // ---- active-slug filtering (deleted-job prune) ----
+
+    #[test]
+    fn checks_unfiltered_until_active_set_is_known() {
+        // Before the scheduler's first resync the active set is `None`,
+        // so every cached check shows — a broker-down boot must not
+        // blank the Health tab.
+        let sink = CheckSink::new();
+        sink.record(build_check(&hint("bitlocker"), r#"{"status":"ok"}"#));
+        sink.record(build_check(&hint("av_signature"), r#"{"status":"ok"}"#));
+        assert_eq!(sink.checks().len(), 2);
+    }
+
+    #[test]
+    fn active_slugs_prunes_checks_whose_job_was_deleted() {
+        let sink = CheckSink::new();
+        sink.record(build_check(&hint("bitlocker"), r#"{"status":"ok"}"#));
+        sink.record(build_check(&hint("av_signature"), r#"{"status":"warn"}"#));
+
+        // Job behind `av_signature` deleted → only `bitlocker` is still
+        // a live job, so the tab shows just that one.
+        sink.set_active_slugs(HashSet::from(["bitlocker".to_string()]));
+        let names: Vec<String> = sink.checks().into_iter().map(|c| c.name).collect();
+        assert_eq!(names, vec!["bitlocker".to_string()]);
+    }
+
+    #[test]
+    fn active_slugs_empty_hides_all_but_keeps_data() {
+        // Every check job deleted → nothing shows, but the cache still
+        // holds the results (read-time filter, not a delete): restoring
+        // the active set brings the rows back, no re-run needed.
+        let sink = CheckSink::new();
+        sink.record(build_check(&hint("bitlocker"), r#"{"status":"ok"}"#));
+        sink.set_active_slugs(HashSet::new());
+        assert!(sink.checks().is_empty());
+
+        sink.set_active_slugs(HashSet::from(["bitlocker".to_string()]));
+        assert_eq!(sink.checks().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn set_active_slugs_wakes_the_evaluator() {
+        // A deletion must prune promptly (next push), not wait for the
+        // 30 s tick — set_active_slugs stores a notify permit just like
+        // record().
+        let sink = CheckSink::new();
+        sink.set_active_slugs(HashSet::new());
+        tokio::time::timeout(std::time::Duration::from_secs(1), sink.wait())
+            .await
+            .expect("set_active_slugs must wake the evaluator");
     }
 
     #[tokio::test]
