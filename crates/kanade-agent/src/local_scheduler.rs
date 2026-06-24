@@ -351,17 +351,9 @@ fn should_fire_startup(
 /// with the KLP `maintenance.list` handler so its upcoming-fire
 /// preview applies exactly the same targeting the live tick does.
 pub(crate) fn target_includes(schedule: &Schedule, pc_id: &str, my_groups: &[String]) -> bool {
-    let t = &schedule.plan.target;
-    if t.all {
-        return true;
-    }
-    if t.pcs.iter().any(|p| p == pc_id) {
-        return true;
-    }
-    if t.groups.iter().any(|g| my_groups.iter().any(|m| m == g)) {
-        return true;
-    }
-    false
+    // #816: same all / pcs / group-overlap rule as `client.visible_to`, so
+    // both share the one canonical `Target::matches` implementation.
+    schedule.plan.target.matches(pc_id, my_groups)
 }
 
 pub fn spawn(

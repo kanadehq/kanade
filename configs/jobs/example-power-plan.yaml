@@ -55,6 +55,13 @@ client:
   category_icon: sliders-horizontal
   category_order: 15
   icon: zap
+  # #816: omit `visible_to` to show this to every PC's Client App (the
+  # default). To scope it to only some end users — e.g. an opt-in tweak
+  # for an affected wave — set a target (same shape as a schedule's):
+  #   visible_to:
+  #     groups: [wifi-affected]   # and/or  pcs: [PC1234]   /   all: true
+  # Operators can still run it on ANY PC from the SPA (POST /api/exec) —
+  # visible_to only gates the end-user Client App.
 inventory:
   display:
     - field: active_plan

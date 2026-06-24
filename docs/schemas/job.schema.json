@@ -535,6 +535,17 @@
         "name": {
           "description": "End-user-facing title for the job row. The operator-internal\n`Manifest::id` slug is rarely what an end user should read, so\nthis is required (and validated non-empty by\n[`Manifest::validate`]). Maps to `UserInvokableJob::display_name`.",
           "type": "string"
+        },
+        "visible_to": {
+          "description": "Optional visibility scope for the end-user Client App (#816).\n\n`None` ⇒ visible to every PC (current behavior). When set, only\nagents whose `pc_id` / group membership match the [`Target`] list\nthe job in `jobs.list` and may run it via KLP `jobs.execute`.\n\nThis gates the END-USER surface ONLY. Operators are unaffected:\n`POST /api/exec/{job_id}` (SPA / `kanade exec`) is a separate path\nthat never consults `client:`, so an operator can still run the\njob on any PC regardless of `visible_to`. Reuses the schedule\n`Target` shape (`all` / `groups` / `pcs`); a present-but-empty\ntarget is rejected by [`Manifest::validate`].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Target"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -925,6 +936,29 @@
           ]
         }
       ]
+    },
+    "Target": {
+      "type": "object",
+      "properties": {
+        "all": {
+          "type": "boolean",
+          "default": false
+        },
+        "groups": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "pcs": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      }
     }
   }
 }
