@@ -294,7 +294,7 @@ async fn run(
                     // THIS KEY is a duplicate, not a new operator change.
                     // Republishing it would feed self-update a stale
                     // target_version and flap the binary backward
-                    // (#downgrade-flap). The mark is per-key, not bucket-wide:
+                    // (#828). The mark is per-key, not bucket-wide:
                     // NATS revisions are globally ordered, so a single mark
                     // would let one key's high revision permanently mask a
                     // lower-revision key that a transient error skipped during
@@ -359,7 +359,7 @@ async fn run(
 /// membership) through the watch, and those replayed entries carry
 /// revisions we have already applied. Without the gate the supervisor
 /// re-publishes stale config and self-update flaps the binary backward
-/// (#downgrade-flap).
+/// (#828).
 ///
 /// agent_config's mark is **per key** (`BTreeMap<key, revision>`), not a
 /// single bucket-wide number. NATS revisions are globally ordered, so one
