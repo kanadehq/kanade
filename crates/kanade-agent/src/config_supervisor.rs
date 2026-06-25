@@ -15,8 +15,8 @@ use std::collections::BTreeMap;
 use async_nats::jetstream;
 use futures::StreamExt;
 use kanade_shared::kv::{
-    BUCKET_AGENT_CONFIG, BUCKET_AGENT_GROUPS, KEY_AGENT_CONFIG_GLOBAL,
-    parse_agent_config_group_key, parse_agent_config_pc_key,
+    BUCKET_AGENT_CONFIG, BUCKET_AGENT_GROUPS, KEY_AGENT_CONFIG_GLOBAL, agent_config_group_key,
+    agent_config_pc_key, parse_agent_config_group_key, parse_agent_config_pc_key,
 };
 use kanade_shared::wire::{AgentGroups, ConfigScope, EffectiveConfig, ResolutionWarning, resolve};
 use tokio::sync::watch;
@@ -51,6 +51,26 @@ fn classify_cfg_key<'a>(key: &'a str, my_pc_id: &str) -> CfgKeyKind<'a> {
     } else {
         CfgKeyKind::Unknown
     }
+}
+
+/// The exact `agent_config` keys this agent needs to watch / fetch:
+/// `global`, its own `pcs.<self>`, and `groups.<g>` for each group it
+/// belongs to. Sorted + deduped so the result is a stable identity we
+/// can compare across membership flips (mirrors `command_replay`'s
+/// `filter_subjects`). Replacing `watch_all` with `watch_many(this)` is
+/// what stops a per-PC config write fanning out to the whole fleet and
+/// turns the reconnect re-sync from an O(N) bucket walk into O(3..5)
+/// direct gets (#512).
+fn build_watch_keys(pc_id: &str, my_groups: &[String]) -> Vec<String> {
+    let mut keys = Vec::with_capacity(2 + my_groups.len());
+    keys.push(KEY_AGENT_CONFIG_GLOBAL.to_string());
+    keys.push(agent_config_pc_key(pc_id));
+    for g in my_groups {
+        keys.push(agent_config_group_key(g));
+    }
+    keys.sort();
+    keys.dedup();
+    keys
 }
 
 #[derive(Default, Debug, Clone)]
@@ -259,13 +279,19 @@ async fn run(
         state = new_state;
         publish(&tx, &state);
 
-        // Watch both buckets concurrently. watch_all on agent_config
-        // surfaces every key change; watch(pc_id) on agent_groups
-        // surfaces our membership flips.
-        let mut cfg_watch = match cfg_kv.watch_all().await {
+        // Watch both buckets concurrently. Instead of `watch_all` on
+        // agent_config (which delivers every PC's write to every agent,
+        // O(N) fan-out per write at fleet scale), watch only the keys
+        // that resolve into *our* EffectiveConfig — global, our own
+        // pcs.<self>, and groups.<g> for each group we're in (#512).
+        // `watch(pc_id)` on agent_groups surfaces our membership flips;
+        // when those change the key set, we break out and reopen the
+        // agent_config watch against the new set (see the groups arm).
+        let watch_keys = build_watch_keys(&pc_id, &state.my_groups);
+        let mut cfg_watch = match cfg_kv.watch_many(&watch_keys).await {
             Ok(w) => w,
             Err(e) => {
-                warn!(error = %e, "watch_all agent_config failed; reopening");
+                warn!(error = %e, "watch_many agent_config failed; reopening");
                 nats_retry::reopen_pause().await;
                 continue;
             }
@@ -278,6 +304,11 @@ async fn run(
                 continue;
             }
         };
+
+        // Set when a membership change moved the watched key set: the
+        // outer loop must reopen the agent_config watch (not a connection
+        // failure, so we skip the warn + backoff pause below).
+        let mut membership_changed = false;
 
         // Inner watch loop. `break` (instead of `return`) on either
         // watch dropping so the outer reconnect loop reopens both.
@@ -338,21 +369,53 @@ async fn run(
                     );
                     if state.apply_groups_change(&entry.value, is_delete) == ChangeOutcome::Touched {
                         publish(&tx, &state);
+                        // Membership drives which agent_config keys we
+                        // watch. If the set actually changed, reopen the
+                        // watch against it so a newly-joined group's keys
+                        // start flowing (and a left group's stop). Compare
+                        // the sorted/deduped sets, so a reorder that
+                        // resolves to the same keys doesn't churn the
+                        // watch. The outer loop's `initial_sync` re-runs a
+                        // direct get *before* the new watch opens, so a
+                        // value put on a group key before we joined is
+                        // picked up — no gap.
+                        if build_watch_keys(&pc_id, &state.my_groups) != watch_keys {
+                            info!(
+                                groups = ?state.my_groups,
+                                "agent_config membership changed; reopening key-filtered watch"
+                            );
+                            membership_changed = true;
+                            break 'inner "membership";
+                        }
                     }
                 }
             }
         };
+        if membership_changed {
+            // Expected, operator-paced reopen — no backoff, no warn.
+            continue;
+        }
         warn!(dropped, "config_supervisor watch ended; reopening");
         nats_retry::reopen_pause().await;
     }
 }
 
-/// Walk both KV buckets into `state`. Returns `Err(())` if either
-/// `kv.keys()` or `groups_kv.get(pc_id)` fails — caller must NOT swap
-/// the result into the live state, because a partial walk would
-/// silently drop config rows. Per-row decode / get failures inside
-/// the keys() walk are logged but tolerated (they're row-level
-/// problems, not connectivity-level).
+/// Seed `state` from both KV buckets by directly getting only the keys
+/// that apply to this agent. Returns `Err(())` if `groups_kv.get(pc_id)`
+/// fails — caller must NOT swap the result into the live state, because a
+/// connectivity failure would silently drop config rows. The groups get
+/// runs first and doubles as the connectivity gate (it shares the broker
+/// connection with the config gets); once it succeeds, a per-key
+/// agent_config get failure is genuinely row-level and is tolerated
+/// (logged, left at mark 0 to self-heal from the watch).
+///
+/// **Groups are read first** because the agent_config key set we fetch /
+/// watch is derived from membership — see [`build_watch_keys`]. We read
+/// `global`, `pcs.<self>`, and `groups.<g>` for each of our groups via
+/// direct `entry()` gets rather than a `kv.keys()` bucket walk: at fleet
+/// scale the old walk was O(N) keys per agent × N agents = O(N²) on every
+/// reconnect; this is O(3..5) gets (#512).
+///
 /// On success returns the KV revision high-water marks the caller hands
 /// to the watch loop, which drops any entry at or below them: a broker
 /// reconnect replays the bucket history (old `target_version`s, old group
@@ -371,6 +434,11 @@ async fn run(
 /// intermediate the replay walks through on the way is caught by
 /// self-update's downgrade settle guard. agent_groups is a single key, so
 /// its mark stays a plain `u64`.
+///
+/// The returned `cfg_hwms` is built fresh on every call (the outer loop
+/// rebinds it). It MUST NOT be carried across reopens: a key dropped on a
+/// group-leave then re-added would otherwise retain a stale-high mark and
+/// mask a real edit.
 async fn initial_sync(
     cfg_kv: &jetstream::kv::Store,
     groups_kv: &jetstream::kv::Store,
@@ -379,46 +447,8 @@ async fn initial_sync(
 ) -> Result<(BTreeMap<String, u64>, u64), ()> {
     use async_nats::jetstream::kv::Operation;
 
-    // Walk every current row in agent_config and apply it, recording each
-    // key's revision (`entry()` carries the revision; `get()` does not,
-    // which is why we switched off it here). A key whose `entry()` errors
-    // is left out of the map entirely (mark 0) so the watch replay can
-    // self-heal it.
-    let mut cfg_hwms: BTreeMap<String, u64> = BTreeMap::new();
-    let mut keys = match cfg_kv.keys().await {
-        Ok(k) => k,
-        Err(e) => {
-            warn!(error = %e, "agent_config keys() initial sync failed");
-            return Err(());
-        }
-    };
-    while let Some(k) = keys.next().await {
-        let key = match k {
-            Ok(k) => k,
-            Err(e) => {
-                warn!(error = %e, "agent_config keys() entry");
-                continue;
-            }
-        };
-        match cfg_kv.entry(&key).await {
-            Ok(Some(entry)) => {
-                cfg_hwms.insert(entry.key.clone(), entry.revision);
-                let is_delete = matches!(entry.operation, Operation::Delete | Operation::Purge);
-                state.apply_cfg_change(&entry.key, &entry.value, is_delete, pc_id);
-            }
-            // Key vanished between keys() and entry() — nothing to apply.
-            Ok(None) => {}
-            // Transient per-row error: log it and, crucially, do NOT record a
-            // revision for this key. Left at the default 0, the watch replay
-            // re-applies it (self-heals) instead of the gap silently
-            // persisting until the next operator write to that key.
-            Err(e) => {
-                warn!(error = %e, key, "agent_config entry() during initial sync; key left to self-heal from watch replay");
-            }
-        }
-    }
-
-    // Read our own groups row.
+    // Read our own groups row FIRST — the agent_config key set is derived
+    // from membership, and this get is also the connectivity gate.
     let mut groups_hwm = 0u64;
     match groups_kv.entry(pc_id).await {
         Ok(Some(entry)) => {
@@ -437,6 +467,29 @@ async fn initial_sync(
             return Err(());
         }
     }
+
+    // Direct-get only the keys that resolve into our EffectiveConfig,
+    // recording each key's revision (`entry()` carries the revision;
+    // `get()` does not). A key with no row yet (e.g. a pc/group with no
+    // override) returns `Ok(None)` — nothing to apply, left at mark 0 so a
+    // later put self-heals. A transient get error is likewise left at
+    // mark 0 (the groups get above already proved connectivity, so this is
+    // row-level, not a partial-walk-on-outage).
+    let mut cfg_hwms: BTreeMap<String, u64> = BTreeMap::new();
+    for key in build_watch_keys(pc_id, &state.my_groups) {
+        match cfg_kv.entry(&key).await {
+            Ok(Some(entry)) => {
+                cfg_hwms.insert(entry.key.clone(), entry.revision);
+                let is_delete = matches!(entry.operation, Operation::Delete | Operation::Purge);
+                state.apply_cfg_change(&entry.key, &entry.value, is_delete, pc_id);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warn!(error = %e, key, "agent_config entry() during initial sync; key left to self-heal from watch replay");
+            }
+        }
+    }
+
     Ok((cfg_hwms, groups_hwm))
 }
 
@@ -620,6 +673,58 @@ mod tests {
         };
         assert_eq!(s.apply_groups_change(b"", true), ChangeOutcome::Touched);
         assert!(s.my_groups.is_empty());
+    }
+
+    #[test]
+    fn build_watch_keys_no_groups_is_global_plus_self() {
+        // Always at least global + our own pcs.<self>; sorted ('g' < 'p').
+        assert_eq!(
+            build_watch_keys("PC-01", &[]),
+            vec!["global".to_string(), "pcs.PC-01".to_string()],
+        );
+    }
+
+    #[test]
+    fn build_watch_keys_includes_groups_sorted() {
+        let keys = build_watch_keys("PC-01", &["wave1".into(), "canary".into()]);
+        assert_eq!(
+            keys,
+            vec![
+                "global".to_string(),
+                "groups.canary".to_string(),
+                "groups.wave1".to_string(),
+                "pcs.PC-01".to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn build_watch_keys_dedups_repeated_group() {
+        let keys = build_watch_keys("PC-01", &["canary".into(), "canary".into()]);
+        assert_eq!(
+            keys,
+            vec![
+                "global".to_string(),
+                "groups.canary".to_string(),
+                "pcs.PC-01".to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn build_watch_keys_is_stable_identity_for_membership_compare() {
+        // The watch-reopen decision compares these sets; order of the
+        // input membership must NOT matter (else a reorder churns the
+        // watch), but a real add/remove must.
+        let a = build_watch_keys("PC-01", &["canary".into(), "wave1".into()]);
+        let b = build_watch_keys("PC-01", &["wave1".into(), "canary".into()]);
+        assert_eq!(a, b, "reordered membership must yield the same key set");
+
+        let joined = build_watch_keys("PC-01", &["canary".into(), "wave1".into(), "wave2".into()]);
+        assert_ne!(a, joined, "a real group join must change the key set");
+
+        let left = build_watch_keys("PC-01", &["canary".into()]);
+        assert_ne!(a, left, "a real group leave must change the key set");
     }
 
     #[test]
