@@ -239,16 +239,23 @@ async fn run(
         // which preserves heartbeat / inventory cadences during a
         // transient KV-walk failure (Gemini #147 review).
         let mut new_state = State::default();
-        if initial_sync(&cfg_kv, &groups_kv, &pc_id, &mut new_state)
-            .await
-            .is_err()
+        let (mut cfg_hwms, mut groups_hwm) = match initial_sync(
+            &cfg_kv,
+            &groups_kv,
+            &pc_id,
+            &mut new_state,
+        )
+        .await
         {
-            warn!(
-                "config_supervisor: initial_sync incomplete; keeping previous EffectiveConfig and reopening"
-            );
-            nats_retry::reopen_pause().await;
-            continue;
-        }
+            Ok(hwm) => hwm,
+            Err(()) => {
+                warn!(
+                    "config_supervisor: initial_sync incomplete; keeping previous EffectiveConfig and reopening"
+                );
+                nats_retry::reopen_pause().await;
+                continue;
+            }
+        };
         state = new_state;
         publish(&tx, &state);
 
@@ -282,6 +289,24 @@ async fn run(
                         Ok(e) => e,
                         Err(e) => { warn!(error = %e, "agent_config watch entry"); continue; }
                     };
+                    // Drop history the broker replayed on reconnect: a
+                    // revision at or below what we've already applied FOR
+                    // THIS KEY is a duplicate, not a new operator change.
+                    // Republishing it would feed self-update a stale
+                    // target_version and flap the binary backward
+                    // (#downgrade-flap). The mark is per-key, not bucket-wide:
+                    // NATS revisions are globally ordered, so a single mark
+                    // would let one key's high revision permanently mask a
+                    // lower-revision key that a transient error skipped during
+                    // initial_sync — the replay would never re-apply it. A
+                    // per-key mark defaults to 0 for an un-synced key, so the
+                    // replay self-heals it (and any stale intermediate it
+                    // replays on the way is caught by self-update's downgrade
+                    // settle guard).
+                    if entry.revision <= cfg_hwms.get(&entry.key).copied().unwrap_or(0) {
+                        continue;
+                    }
+                    cfg_hwms.insert(entry.key.clone(), entry.revision);
                     let is_delete = matches!(
                         entry.operation,
                         async_nats::jetstream::kv::Operation::Delete
@@ -299,6 +324,13 @@ async fn run(
                         Ok(e) => e,
                         Err(e) => { warn!(error = %e, "agent_groups watch entry"); continue; }
                     };
+                    // Same replay gate as agent_config above — a reconnect
+                    // also replays this PC's group-membership history, which
+                    // would otherwise churn every subscription on each blip.
+                    if entry.revision <= groups_hwm {
+                        continue;
+                    }
+                    groups_hwm = entry.revision;
                     let is_delete = matches!(
                         entry.operation,
                         async_nats::jetstream::kv::Operation::Delete
@@ -321,13 +353,38 @@ async fn run(
 /// silently drop config rows. Per-row decode / get failures inside
 /// the keys() walk are logged but tolerated (they're row-level
 /// problems, not connectivity-level).
+/// On success returns the KV revision high-water marks the caller hands
+/// to the watch loop, which drops any entry at or below them: a broker
+/// reconnect replays the bucket history (old `target_version`s, old group
+/// membership) through the watch, and those replayed entries carry
+/// revisions we have already applied. Without the gate the supervisor
+/// re-publishes stale config and self-update flaps the binary backward
+/// (#downgrade-flap).
+///
+/// agent_config's mark is **per key** (`BTreeMap<key, revision>`), not a
+/// single bucket-wide number. NATS revisions are globally ordered, so one
+/// shared mark would let a high-revision key (say `pcs.<id>` at rev 20)
+/// permanently mask a lower-revision key (`global` at rev 10) that a
+/// transient per-row error skipped here — the watch replay would see
+/// `10 <= 20` and never re-apply `global`. A per-key map leaves an
+/// un-synced key at the default 0, so the replay self-heals it; any stale
+/// intermediate the replay walks through on the way is caught by
+/// self-update's downgrade settle guard. agent_groups is a single key, so
+/// its mark stays a plain `u64`.
 async fn initial_sync(
     cfg_kv: &jetstream::kv::Store,
     groups_kv: &jetstream::kv::Store,
     pc_id: &str,
     state: &mut State,
-) -> Result<(), ()> {
-    // Walk every current row in agent_config and apply it.
+) -> Result<(BTreeMap<String, u64>, u64), ()> {
+    use async_nats::jetstream::kv::Operation;
+
+    // Walk every current row in agent_config and apply it, recording each
+    // key's revision (`entry()` carries the revision; `get()` does not,
+    // which is why we switched off it here). A key whose `entry()` errors
+    // is left out of the map entirely (mark 0) so the watch replay can
+    // self-heal it.
+    let mut cfg_hwms: BTreeMap<String, u64> = BTreeMap::new();
     let mut keys = match cfg_kv.keys().await {
         Ok(k) => k,
         Err(e) => {
@@ -343,15 +400,31 @@ async fn initial_sync(
                 continue;
             }
         };
-        if let Ok(Some(bytes)) = cfg_kv.get(&key).await {
-            state.apply_cfg_change(&key, &bytes, false, pc_id);
+        match cfg_kv.entry(&key).await {
+            Ok(Some(entry)) => {
+                cfg_hwms.insert(entry.key.clone(), entry.revision);
+                let is_delete = matches!(entry.operation, Operation::Delete | Operation::Purge);
+                state.apply_cfg_change(&entry.key, &entry.value, is_delete, pc_id);
+            }
+            // Key vanished between keys() and entry() — nothing to apply.
+            Ok(None) => {}
+            // Transient per-row error: log it and, crucially, do NOT record a
+            // revision for this key. Left at the default 0, the watch replay
+            // re-applies it (self-heals) instead of the gap silently
+            // persisting until the next operator write to that key.
+            Err(e) => {
+                warn!(error = %e, key, "agent_config entry() during initial sync; key left to self-heal from watch replay");
+            }
         }
     }
 
     // Read our own groups row.
-    match groups_kv.get(pc_id).await {
-        Ok(Some(bytes)) => {
-            state.apply_groups_change(&bytes, false);
+    let mut groups_hwm = 0u64;
+    match groups_kv.entry(pc_id).await {
+        Ok(Some(entry)) => {
+            groups_hwm = entry.revision;
+            let is_delete = matches!(entry.operation, Operation::Delete | Operation::Purge);
+            state.apply_groups_change(&entry.value, is_delete);
         }
         Ok(None) => {
             info!(
@@ -364,7 +437,7 @@ async fn initial_sync(
             return Err(());
         }
     }
-    Ok(())
+    Ok((cfg_hwms, groups_hwm))
 }
 
 fn publish(tx: &watch::Sender<EffectiveConfig>, state: &State) {

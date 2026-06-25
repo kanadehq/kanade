@@ -131,7 +131,7 @@ pub async fn run(
                  Refusing to swap again. The binary under this label has a label/version mismatch; \
                  republish it or clear target_version (`kanade config unset target_version`)."
             );
-        } else {
+        } else if confirm_swap(&cfg_rx, target, &running_version).await {
             sleep_jitter(jitter).await;
             if let Err(e) = attempt_swap(&store, target, &running_version).await {
                 warn!(error = %e, target, "initial self-update fetch failed");
@@ -186,9 +186,11 @@ pub async fn run(
                 );
                 continue;
             }
-            sleep_jitter(jitter).await;
-            if let Err(e) = attempt_swap(&store, target, &running_version).await {
-                warn!(error = %e, target, "self-update fetch failed");
+            if confirm_swap(&cfg_rx, target, &running_version).await {
+                sleep_jitter(jitter).await;
+                if let Err(e) = attempt_swap(&store, target, &running_version).await {
+                    warn!(error = %e, target, "self-update fetch failed");
+                }
             }
         }
     }
@@ -223,6 +225,92 @@ fn is_loop(last: &Option<LastSwap>, target: &str, running: &str) -> bool {
     last.as_ref()
         .map(|p| p.target == target && p.running_before == running)
         .unwrap_or(false)
+}
+
+/// How long an OLDER-than-running target must persist before the agent
+/// acts on it.
+///
+/// Why this exists: a KV watch re-delivers past revisions when the
+/// broker reconnects (laptops sleep / roam between networks constantly,
+/// and each reconnect replays the `agent_config` history — global's old
+/// `.41` / `.69` / `.74` — through the watch). The supervisor republishes
+/// each as the effective `target_version`, and self-update used to swap
+/// the binary backward to every one, exit(64), restart, then re-upgrade
+/// — flapping many times a day across most of the fleet. The replayed
+/// values are superseded by the real target within milliseconds, so they
+/// never survive this window; a deliberate operator rollback does. 60 s
+/// is comfortably longer than a reconnect's replay burst and short
+/// enough not to meaningfully delay an intentional rollback.
+const DOWNGRADE_SETTLE: Duration = Duration::from_secs(60);
+
+/// Parse an `X.Y.Z` agent version into comparable parts. Returns `None`
+/// for anything that isn't exactly three dotted integers, so the caller
+/// fails OPEN (treats it as "not a downgrade") rather than blocking a
+/// swap on a label it can't reason about.
+fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
+    let mut it = v.split('.');
+    let major = it.next()?.parse().ok()?;
+    let minor = it.next()?.parse().ok()?;
+    let patch = it.next()?.parse().ok()?;
+    if it.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
+}
+
+/// True iff `target` is strictly OLDER than `running` (a downgrade).
+/// Unparseable versions fail open (→ `false`) so a non-semver label
+/// still updates normally.
+fn is_downgrade(target: &str, running: &str) -> bool {
+    match (parse_version(target), parse_version(running)) {
+        (Some(t), Some(r)) => t < r,
+        _ => false,
+    }
+}
+
+/// Gate a swap whose `target` is older than `running`. Forward updates
+/// (and unparseable labels) pass straight through. A downgrade is held
+/// for [`DOWNGRADE_SETTLE`] and then re-checked against the freshest
+/// resolved target: if it still stands it's a deliberate rollback and we
+/// proceed; if it was superseded it was a reconnect replay transient and
+/// we skip. Returns `true` to proceed with the swap.
+async fn confirm_swap(
+    cfg_rx: &watch::Receiver<EffectiveConfig>,
+    target: &str,
+    running: &str,
+) -> bool {
+    if !is_downgrade(target, running) {
+        return true;
+    }
+    warn!(
+        target,
+        running,
+        settle_secs = DOWNGRADE_SETTLE.as_secs(),
+        "self-update: target is OLDER than the running version — holding to confirm it's a \
+         deliberate rollback and not a broker-reconnect history-replay transient",
+    );
+    tokio::time::sleep(DOWNGRADE_SETTLE).await;
+    // borrow() (not changed().await): read the freshest target WITHOUT
+    // consuming the watch's "changed" notification. run()'s own
+    // cfg_rx.changed() then still fires immediately after we return if the
+    // value moved during the settle, so a superseding update isn't missed.
+    let latest = cfg_rx.borrow().target_version.clone();
+    if latest.as_deref() == Some(target) {
+        info!(
+            target,
+            "self-update: downgrade target persisted past the settle window — treating as a \
+             deliberate rollback and proceeding",
+        );
+        true
+    } else {
+        info!(
+            superseded_by = ?latest,
+            ignored_target = target,
+            "self-update: older target was superseded within the settle window — ignoring it as \
+             a broker-reconnect history-replay transient",
+        );
+        false
+    }
 }
 
 /// #582: true if `target` was rolled back after a failed boot (it
@@ -605,6 +693,72 @@ fn digest_matches(expected: &str, actual: &[u8]) -> bool {
 mod tests {
     use super::*;
     use base64::engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD};
+
+    fn cfg_with_target(v: Option<&str>) -> EffectiveConfig {
+        EffectiveConfig {
+            target_version: v.map(String::from),
+            ..EffectiveConfig::builtin_defaults()
+        }
+    }
+
+    #[test]
+    fn parse_version_accepts_xyz_and_rejects_others() {
+        assert_eq!(parse_version("0.43.41"), Some((0, 43, 41)));
+        assert_eq!(parse_version("1.0.0"), Some((1, 0, 0)));
+        assert_eq!(parse_version("0.43"), None); // too few
+        assert_eq!(parse_version("0.43.41.2"), None); // too many
+        assert_eq!(parse_version("0.43.x"), None); // non-numeric
+        assert_eq!(parse_version("v0.43.41"), None); // prefix
+    }
+
+    #[test]
+    fn is_downgrade_compares_semver_and_fails_open() {
+        assert!(is_downgrade("0.43.41", "0.43.88")); // older patch
+        assert!(is_downgrade("0.42.99", "0.43.0")); // older minor
+        assert!(!is_downgrade("0.43.88", "0.43.41")); // newer
+        assert!(!is_downgrade("0.43.88", "0.43.88")); // equal
+        // Unparseable on either side → not treated as a downgrade.
+        assert!(!is_downgrade("weird", "0.43.88"));
+        assert!(!is_downgrade("0.43.41", "weird"));
+    }
+
+    #[tokio::test]
+    async fn confirm_swap_passes_forward_updates_immediately() {
+        let (_tx, rx) = watch::channel(cfg_with_target(Some("0.43.88")));
+        // Forward (newer) target — no settle, returns true at once.
+        assert!(confirm_swap(&rx, "0.43.88", "0.43.74").await);
+        // Unparseable label also passes (fail open).
+        assert!(confirm_swap(&rx, "nightly", "0.43.74").await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn confirm_swap_skips_downgrade_superseded_within_settle() {
+        // Running .88; a reconnect replays the stale .41. Before the
+        // settle window elapses the real target (.88) lands again.
+        let (tx, rx) = watch::channel(cfg_with_target(Some("0.43.41")));
+        let rx2 = rx.clone();
+        let handle = tokio::spawn(async move { confirm_swap(&rx2, "0.43.41", "0.43.88").await });
+        tokio::time::advance(Duration::from_secs(30)).await;
+        tx.send(cfg_with_target(Some("0.43.88"))).unwrap(); // superseded
+        tokio::time::advance(DOWNGRADE_SETTLE).await;
+        assert!(
+            !handle.await.unwrap(),
+            "transient downgrade must be ignored"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn confirm_swap_honors_downgrade_that_persists() {
+        // A deliberate operator rollback to .41 stays put past the window.
+        let (_tx, rx) = watch::channel(cfg_with_target(Some("0.43.41")));
+        let rx2 = rx.clone();
+        let handle = tokio::spawn(async move { confirm_swap(&rx2, "0.43.41", "0.43.88").await });
+        tokio::time::advance(DOWNGRADE_SETTLE + Duration::from_secs(1)).await;
+        assert!(
+            handle.await.unwrap(),
+            "persisted downgrade is a real rollback"
+        );
+    }
 
     // A 32-byte SHA-256 digest with a high bit set so its base64
     // encoding exercises a url-safe character (`-`/`_`).
