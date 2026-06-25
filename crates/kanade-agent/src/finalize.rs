@@ -18,20 +18,24 @@ use tracing::{info, warn};
 use crate::process::{ExecOutcome, run_command_with_kill};
 
 /// Build the `KANADE_COLLECT_RESULT` JSON for a collect job's finalize
-/// hook. `collected` is `Some((key, files))` when a bundle uploaded,
-/// `None` when there was no collect hint or the upload failed — in which
-/// case `bundles` is empty and `ok` is `false`, so a hook that only acts
-/// on `uploaded` files touches nothing. The single-element `bundles`
-/// array is forward-compatible with the planned multi-bundle output.
-pub fn collect_result_json(collected: &Option<(String, Vec<String>)>) -> String {
-    let (ok, bundles) = match collected {
-        Some((key, files)) => (
-            true,
-            vec![json!({ "key": key, "uploaded": true, "files": files })],
-        ),
-        None => (false, vec![]),
-    };
-    json!({ "ok": ok, "bundles": bundles }).to_string()
+/// hook from the uploaded bundles. Each entry carries its `label` (None
+/// for the single-bundle form), Object Store `key`, and the `files`
+/// actually packed. An empty slice (no collect hint, or every upload
+/// failed) yields `{ "ok": false, "bundles": [] }`, so a hook that only
+/// acts on `uploaded` files touches nothing.
+pub fn collect_result_json(bundles: &[crate::collect::BundleResult]) -> String {
+    let arr: Vec<_> = bundles
+        .iter()
+        .map(|b| {
+            json!({
+                "label": b.label,
+                "key": b.key,
+                "uploaded": true,
+                "files": b.files,
+            })
+        })
+        .collect();
+    json!({ "ok": !arr.is_empty(), "bundles": arr }).to_string()
 }
 
 /// Build the PowerShell prelude that injects `result_json` as
@@ -126,13 +130,23 @@ mod tests {
 
     #[test]
     fn result_json_marks_uploaded_when_collected() {
-        let json = collect_result_json(&Some((
-            "pc/job/ts.zip".into(),
-            vec!["C:/a.png".into(), "C:/b.png".into()],
-        )));
+        let json = collect_result_json(&[
+            crate::collect::BundleResult {
+                label: Some("20260101".into()),
+                key: "pc/job/20260101__ts.zip".into(),
+                files: vec!["C:/a.png".into(), "C:/b.png".into()],
+            },
+            crate::collect::BundleResult {
+                label: Some("20260102".into()),
+                key: "pc/job/20260102__ts.zip".into(),
+                files: vec!["C:/c.png".into()],
+            },
+        ]);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["ok"], true);
-        assert_eq!(v["bundles"][0]["key"], "pc/job/ts.zip");
+        assert_eq!(v["bundles"].as_array().unwrap().len(), 2);
+        assert_eq!(v["bundles"][0]["label"], "20260101");
+        assert_eq!(v["bundles"][0]["key"], "pc/job/20260101__ts.zip");
         assert_eq!(v["bundles"][0]["uploaded"], true);
         assert_eq!(v["bundles"][0]["files"].as_array().unwrap().len(), 2);
     }
@@ -157,7 +171,7 @@ mod tests {
 
     #[test]
     fn result_json_is_empty_when_nothing_collected() {
-        let json = collect_result_json(&None);
+        let json = collect_result_json(&[]);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["ok"], false);
         assert_eq!(v["bundles"].as_array().unwrap().len(), 0);

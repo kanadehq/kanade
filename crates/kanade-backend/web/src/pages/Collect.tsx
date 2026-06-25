@@ -20,6 +20,9 @@ type BundleRow = {
   pc_id: string;
   job_id: string;
   collected_at: string | null;
+  // Present when a run produced multiple bundles (e.g. a per-day label
+  // like "20260101"); null for the single-bundle form.
+  label: string | null;
   size: number;
   digest: string | null;
   name: string | null;
@@ -127,7 +130,14 @@ export function Collect() {
                 {rows.map((r) => (
                   <TableRow key={r.key}>
                     <TableCell>
-                      <div className="text-sm">{r.name ?? r.job_id}</div>
+                      <div className="text-sm">
+                        {r.name ?? r.job_id}
+                        {r.label && (
+                          <span className="ml-2 rounded bg-muted/40 px-1.5 py-0.5 text-xs text-muted">
+                            {r.label}
+                          </span>
+                        )}
+                      </div>
                       {r.description && (
                         <div className="text-xs text-muted">{r.description}</div>
                       )}

@@ -525,27 +525,28 @@ pub async fn handle_command(
     // emit branch below never blanks a collect job's stdout — but we read
     // it here first regardless. Best-effort: on any failure the result
     // still publishes with `collect_object = None`.
-    let collected = if exit_code == 0 && cmd.collect.is_some() {
+    let bundles = if exit_code == 0 && cmd.collect.is_some() {
         let js = async_nats::jetstream::new(client.clone());
         crate::collect::maybe_collect(&js, &cmd, &pc_id, &stdout, finished_at).await
     } else {
-        None
+        Vec::new()
     };
 
-    // Build the finalize payload now, while `collected` is still in
-    // scope. The hook itself runs LATER — after the ExecResult is
-    // enqueued — so a slow cleanup hook (up to its own timeout) never
-    // holds the Activity row in "pending" after the main script already
-    // finished cleanly. Only a `collect:` job gets a payload; a
-    // non-collect finalize hook runs with no `KANADE_COLLECT_RESULT`.
+    // Build the finalize payload now, while `bundles` is still in scope.
+    // The hook itself runs LATER — after the ExecResult is enqueued — so a
+    // slow cleanup hook (up to its own timeout) never holds the Activity
+    // row in "pending" after the main script already finished cleanly.
+    // Only a `collect:` job gets a payload; a non-collect finalize hook
+    // runs with no `KANADE_COLLECT_RESULT`.
     let finalize_json = cmd
         .collect
         .as_ref()
-        .map(|_| crate::finalize::collect_result_json(&collected));
+        .map(|_| crate::finalize::collect_result_json(&bundles));
 
-    // The ExecResult records only the bundle key; the file list was for
-    // the finalize hook.
-    let collect_object = collected.map(|(key, _files)| key);
+    // The ExecResult records one representative bundle key (the first);
+    // the SPA Collect page enumerates the Object Store bucket for the full
+    // per-run set, and the file lists were for the finalize hook.
+    let collect_object = bundles.first().map(|b| b.key.clone());
 
     // Issue #246: if the manifest is an event emitter, parse stdout
     // as NDJSON `ObsEvent` and route each line to obs_outbox.

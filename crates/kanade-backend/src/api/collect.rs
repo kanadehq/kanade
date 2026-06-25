@@ -51,6 +51,9 @@ pub struct BundleRow {
     /// (`<ts>` without the `.zip` suffix). Falls back to the object's
     /// `modified` time when the key isn't in the expected shape.
     pub collected_at: Option<String>,
+    /// The bundle's label when the run produced multiple bundles (e.g. a
+    /// per-day `"20260101"`); `None` for the single-bundle form.
+    pub label: Option<String>,
     pub size: u64,
     pub digest: Option<String>,
     /// `collect.name` from the producing manifest, when still present.
@@ -59,11 +62,13 @@ pub struct BundleRow {
     pub description: Option<String>,
 }
 
-/// Split a bundle key `<pc_id>/<job_id>/<ts>.zip` into its parts.
-/// Returns `None` when the key doesn't have the three expected
-/// slash-separated segments (a stray / hand-uploaded object) so the
-/// caller can skip it rather than render a garbage row.
-fn parse_bundle_key(key: &str) -> Option<(String, String, String)> {
+/// Split a bundle key into its parts: `(pc_id, job_id, ts, label)`. The
+/// filename is `<ts>.zip` (unlabeled, single-bundle form) or
+/// `<label>__<ts>.zip` (one of a run's multiple labeled bundles, e.g. one
+/// zip per day). Returns `None` when the key doesn't have the three
+/// expected slash-separated segments (a stray / hand-uploaded object) so
+/// the caller can skip it rather than render a garbage row.
+fn parse_bundle_key(key: &str) -> Option<(String, String, String, Option<String>)> {
     let mut it = key.split('/');
     let pc_id = it.next()?;
     let job_id = it.next()?;
@@ -74,15 +79,19 @@ fn parse_bundle_key(key: &str) -> Option<(String, String, String)> {
     if pc_id.is_empty() || job_id.is_empty() || it.next().is_some() {
         return None;
     }
-    let collected_at = filename.strip_suffix(".zip")?;
-    if collected_at.is_empty() {
+    let stem = filename.strip_suffix(".zip")?;
+    if stem.is_empty() {
         return None;
     }
-    Some((
-        pc_id.to_string(),
-        job_id.to_string(),
-        collected_at.to_string(),
-    ))
+    // `<label>__<ts>` when a label prefix is present (the agent sanitizes
+    // labels so they never contain `__`, and the timestamp has none), else
+    // the whole stem is the timestamp. Split on the LAST `__` so a stray
+    // double-underscore can't shadow the real separator.
+    let (label, ts) = match stem.rsplit_once("__") {
+        Some((l, t)) if !l.is_empty() && !t.is_empty() => (Some(l.to_string()), t.to_string()),
+        _ => (None, stem.to_string()),
+    };
+    Some((pc_id.to_string(), job_id.to_string(), ts, label))
 }
 
 /// Best-effort map of `job_id → (collect.name, collect.description)`
@@ -162,8 +171,8 @@ pub async fn list_bundles(
                 format!("list bundles: {e}"),
             )
         })?;
-        let Some((pc_id, job_id, collected_at)) = parse_bundle_key(&meta.name) else {
-            warn!(key = %meta.name, "collect.list: object key not <pc_id>/<job_id>/<ts>.zip — skipping");
+        let Some((pc_id, job_id, collected_at, label)) = parse_bundle_key(&meta.name) else {
+            warn!(key = %meta.name, "collect.list: object key not <pc_id>/<job_id>/[<label>__]<ts>.zip — skipping");
             continue;
         };
         let modified = meta
@@ -181,6 +190,7 @@ pub async fn list_bundles(
             // Prefer the key's own timestamp; fall back to the object's
             // modified time only when the filename wasn't a timestamp.
             collected_at: Some(collected_at).filter(|s| !s.is_empty()).or(modified),
+            label,
             size: meta.size as u64,
             digest: meta.digest,
             name,
@@ -328,12 +338,39 @@ mod tests {
 
     #[test]
     fn parse_bundle_key_splits_three_segments() {
+        // Unlabeled (single-bundle) form: label is None.
         assert_eq!(
             parse_bundle_key("PC001/collect-diagnostics/20260615T220000Z.zip"),
             Some((
                 "PC001".to_string(),
                 "collect-diagnostics".to_string(),
                 "20260615T220000Z".to_string(),
+                None,
+            )),
+        );
+    }
+
+    #[test]
+    fn parse_bundle_key_extracts_label_from_multi_bundle_filename() {
+        // Labeled (multi-bundle) form: `<label>__<ts>.zip`.
+        assert_eq!(
+            parse_bundle_key("PC001/screenshot-collect/20260101__20260625T220000.123Z.zip"),
+            Some((
+                "PC001".to_string(),
+                "screenshot-collect".to_string(),
+                "20260625T220000.123Z".to_string(),
+                Some("20260101".to_string()),
+            )),
+        );
+        // A leading/trailing empty half around `__` is not a real label —
+        // treat the whole stem as the timestamp.
+        assert_eq!(
+            parse_bundle_key("pc/job/__ts.zip"),
+            Some((
+                "pc".to_string(),
+                "job".to_string(),
+                "__ts".to_string(),
+                None
             )),
         );
     }
