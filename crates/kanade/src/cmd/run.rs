@@ -85,6 +85,8 @@ pub async fn execute(client: async_nats::Client, args: RunArgs) -> Result<()> {
         collect: None,
         // #418 Phase 4: ad-hoc run has no schedule → no retry policy.
         retry: None,
+        // Ad-hoc inline run has no manifest → no finalize hook.
+        finalize: None,
     };
 
     let result_subj = subject::results(&request_id);

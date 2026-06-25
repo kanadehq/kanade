@@ -1788,6 +1788,9 @@ async fn local_tick(
         // the Command so handle_command re-runs a failed script
         // in-process even on the offline (`runs_on: agent`) path.
         retry: schedule.on_failure.lowered_retry(),
+        // Forward the finalize hook so an agent-scheduled job runs it
+        // after the collect step even on the offline path.
+        finalize: manifest.finalize.as_ref().map(|f| f.lower()),
     };
 
     let js = async_nats::jetstream::new(client.clone());

@@ -74,6 +74,17 @@
     "execute": {
       "$ref": "#/$defs/Execute"
     },
+    "finalize": {
+      "description": "Job-generic post-step hook. When set, the agent runs this script\nAFTER the main `execute:` script exits cleanly (and, for a\n`collect:` job, after the bundle finishes uploading), so the\noperator can delete / move / notify based on what the step\nproduced. Best-effort: a finalize failure is logged but never\nfails the run — the upload (if any) already succeeded.\n\nFor `collect:` jobs the agent injects the environment variable\n`KANADE_COLLECT_RESULT` — a JSON object\n`{ \"ok\": true, \"bundles\": [ { \"key\", \"uploaded\", \"files\": [...] } ] }`\n— so the hook acts on exactly the files that were bundled and\nuploaded (e.g. deletes only the `uploaded` ones). Composes with\nevery hint. New field ⇒ #492 wire rule (`default` +\n`skip_serializing_if`).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FinalizeSpec"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "id": {
       "type": "string"
     },
@@ -767,6 +778,40 @@
         "table",
         "primary_key",
         "columns"
+      ]
+    },
+    "FinalizeSpec": {
+      "description": "Job-generic post-step hook (see [`Manifest::finalize`]). Runs after\nthe main `execute:` script (and the collect upload) on a clean exit,\nwith the step's structured result injected via an environment\nvariable. P1 supports an inline `script:` only — `script_file:` /\n`script_object:` are follow-ups.",
+      "type": "object",
+      "properties": {
+        "cwd": {
+          "description": "Working directory for the hook child, like [`Execute::cwd`].",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "run_as": {
+          "description": "Token + session combination, like [`Execute::run_as`]. Defaults\nto [`RunAs::System`].",
+          "$ref": "#/$defs/RunAs",
+          "default": "system"
+        },
+        "script": {
+          "description": "Inline script body (required; inline-only in P1).",
+          "type": "string"
+        },
+        "shell": {
+          "$ref": "#/$defs/ExecuteShell"
+        },
+        "timeout": {
+          "description": "humantime duration string (e.g. `\"60s\"`, `\"5m\"`). Defaults to\n`60s` when unset.",
+          "type": "string",
+          "default": "60s"
+        }
+      },
+      "required": [
+        "shell",
+        "script"
       ]
     },
     "InventoryHint": {
