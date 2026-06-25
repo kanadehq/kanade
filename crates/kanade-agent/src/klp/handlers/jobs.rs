@@ -590,23 +590,25 @@ async fn run_job(
     // helper the NATS path uses, so a Client-App-triggered collection
     // produces a bundle too. Read `&stdout` before build_exec_result
     // moves it. Best-effort: failure leaves `collect_object = None`.
-    let collected = if exit_code == 0 && cmd.collect.is_some() {
+    let bundles = if exit_code == 0 && cmd.collect.is_some() {
         let js = async_nats::jetstream::new(client.clone());
         crate::collect::maybe_collect(&js, &cmd, &pc_id, &stdout, finished_at).await
     } else {
-        None
+        Vec::new()
     };
 
-    // Build the finalize payload while `collected` is still in scope; the
+    // Build the finalize payload while `bundles` is still in scope; the
     // hook runs AFTER the result is enqueued (below) so a slow cleanup
     // never holds the Activity row pending. Only a `collect:` job gets a
     // payload (non-collect finalize hooks see no `KANADE_COLLECT_RESULT`).
     let finalize_json = cmd
         .collect
         .as_ref()
-        .map(|_| crate::finalize::collect_result_json(&collected));
+        .map(|_| crate::finalize::collect_result_json(&bundles));
 
-    let collect_object = collected.map(|(key, _files)| key);
+    // First bundle's key as the representative; the SPA enumerates the
+    // bucket for the full per-run set.
+    let collect_object = bundles.first().map(|b| b.key.clone());
 
     // #478: record the run on the backend so operators see
     // user-initiated jobs on the Activity page (audit trail), via the

@@ -229,8 +229,10 @@ pub const OBJECT_RESULT_OUTPUT: &str = "result_output";
 /// paths on stdout; the agent zips them and uploads the archive here,
 /// recording the key in [`crate::wire::ExecResult::collect_object`].
 /// The SPA Collect page lists / downloads bundles straight from this
-/// bucket. Object keys follow `<pc_id>/<job_id>/<rfc3339>.zip` so a
-/// listing groups by host then job. Per-bucket retention is 30 days
+/// bucket. Object keys follow `<pc_id>/<job_id>/<rfc3339>.zip`, or
+/// `<pc_id>/<job_id>/<label>__<rfc3339>.zip` when a run emits multiple
+/// labeled bundles (e.g. one zip per day), so a listing groups by host
+/// then job. Per-bucket retention is 30 days
 /// (bundles are debugging/audit artifacts, not curated config like
 /// `app_packages` / `scripts`, so they auto-expire) — see
 /// `kanade-shared::bootstrap`.
