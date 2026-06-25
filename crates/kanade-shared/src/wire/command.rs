@@ -118,6 +118,32 @@ pub struct Command {
     /// Pre-Phase-4 wire omits this; `#[serde(default)]` → `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<RetrySpec>,
+    /// Job-generic post-step hook lowered from `Manifest.finalize`. When
+    /// `Some` and the main script exits cleanly, the agent runs this hook
+    /// after the collect step (injecting `KANADE_COLLECT_RESULT` for a
+    /// `collect:` job) so the operator can delete / move / notify.
+    /// Best-effort — a finalize failure is logged, never published as the
+    /// run's outcome. Pre-finalize wire omits this; `#[serde(default)]` →
+    /// `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalize: Option<FinalizeCommand>,
+}
+
+/// Lowered, engine-vocabulary form of [`crate::manifest::FinalizeSpec`]
+/// — the post-step hook stamped onto a [`Command`]. The operator-facing
+/// humantime `timeout` is reduced to whole seconds at build time
+/// (mirrors `timeout_secs`), and the manifest `ExecuteShell` to the wire
+/// [`Shell`], so the agent's fire path does no parsing.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
+pub struct FinalizeCommand {
+    pub shell: Shell,
+    /// Inline script body (inline-only in P1).
+    pub script: String,
+    pub timeout_secs: u64,
+    #[serde(default)]
+    pub run_as: RunAs,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
 }
 
 /// Lowered, engine-vocabulary form of [`crate::manifest::Retry`] — a
@@ -200,6 +226,7 @@ mod tests {
             check: None,
             collect: None,
             retry: None,
+            finalize: None,
         }
     }
 
@@ -404,5 +431,33 @@ mod tests {
         assert_eq!(c.name, "diag");
         assert_eq!(c.max_size.as_deref(), Some("50MB"));
         assert_eq!(c.files_field, "files");
+    }
+
+    #[test]
+    fn command_finalize_round_trips_and_omits_when_absent() {
+        // Off the wire when None (skip_serializing_if), so pre-finalize
+        // readers don't trip over it...
+        let json = serde_json::to_string(&sample_command()).unwrap();
+        assert!(
+            !json.contains("finalize"),
+            "finalize must be absent when None: {json}"
+        );
+        // ...and a forwarded FinalizeCommand survives the round-trip.
+        let cmd = Command {
+            finalize: Some(FinalizeCommand {
+                shell: Shell::Powershell,
+                script: "Remove-Item $env:FILE".into(),
+                timeout_secs: 30,
+                run_as: RunAs::System,
+                cwd: None,
+            }),
+            ..sample_command()
+        };
+        let back: Command = serde_json::from_str(&serde_json::to_string(&cmd).unwrap()).unwrap();
+        let f = back.finalize.expect("finalize survived round-trip");
+        assert_eq!(f.shell, Shell::Powershell);
+        assert_eq!(f.script, "Remove-Item $env:FILE");
+        assert_eq!(f.timeout_secs, 30);
+        assert_eq!(f.run_as, RunAs::System);
     }
 }

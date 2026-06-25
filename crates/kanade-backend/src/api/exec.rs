@@ -66,14 +66,14 @@ pub async fn exec_manifest(
     // Defensive — the write paths (`POST /api/jobs`, `kanade job
     // create`) already gate every manifest through
     // `Manifest::validate()` before it lands in BUCKET_JOBS, so by
-    // the time exec_manifest sees one we expect exactly one of
-    // script / script_file / script_object to be set. Re-check
-    // here so a hypothetical write path that bypassed validation
-    // (direct NATS KV poke, downgrade-then-upgrade) bails with a
-    // clear 400 instead of crashing the unwrap below.
+    // the time exec_manifest sees one we expect a valid manifest.
+    // Re-run the FULL validation here so a hypothetical write path
+    // that bypassed it (direct NATS KV poke, downgrade-then-upgrade)
+    // bails with a clear 400 instead of crashing the unwrap below or
+    // lowering an invalid finalize hook (blank script / cmd shell /
+    // unparseable timeout) into a runnable Command.
     manifest
-        .execute
-        .validate_script_source()
+        .validate()
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     // Resolve the manifest's script source into the wire shape the
     // agent expects:
@@ -136,6 +136,9 @@ pub async fn exec_manifest(
         // #418 Phase 4: the schedule's retry policy (None for ad-hoc
         // exec). Copy is cheap — RetrySpec is Copy.
         retry,
+        // Forward the manifest's finalize hook (lowered to wire form) so
+        // the agent runs it after the collect step (no manifest re-fetch).
+        finalize: manifest.finalize.as_ref().map(|f| f.lower()),
     };
 
     let mut subjects: Vec<String> = Vec::new();

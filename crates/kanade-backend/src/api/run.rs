@@ -116,6 +116,8 @@ pub async fn run(
         collect: None,
         // #418 Phase 4: ad-hoc runs have no schedule → no retry policy.
         retry: None,
+        // Ad-hoc runs have no manifest → no finalize hook.
+        finalize: None,
     };
 
     let result_subj = subject::results(&request_id);

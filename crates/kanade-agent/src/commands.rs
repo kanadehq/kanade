@@ -525,12 +525,27 @@ pub async fn handle_command(
     // emit branch below never blanks a collect job's stdout — but we read
     // it here first regardless. Best-effort: on any failure the result
     // still publishes with `collect_object = None`.
-    let collect_object = if exit_code == 0 && cmd.collect.is_some() {
+    let collected = if exit_code == 0 && cmd.collect.is_some() {
         let js = async_nats::jetstream::new(client.clone());
         crate::collect::maybe_collect(&js, &cmd, &pc_id, &stdout, finished_at).await
     } else {
         None
     };
+
+    // Build the finalize payload now, while `collected` is still in
+    // scope. The hook itself runs LATER — after the ExecResult is
+    // enqueued — so a slow cleanup hook (up to its own timeout) never
+    // holds the Activity row in "pending" after the main script already
+    // finished cleanly. Only a `collect:` job gets a payload; a
+    // non-collect finalize hook runs with no `KANADE_COLLECT_RESULT`.
+    let finalize_json = cmd
+        .collect
+        .as_ref()
+        .map(|_| crate::finalize::collect_result_json(&collected));
+
+    // The ExecResult records only the bundle key; the file list was for
+    // the finalize hook.
+    let collect_object = collected.map(|(key, _files)| key);
 
     // Issue #246: if the manifest is an event emitter, parse stdout
     // as NDJSON `ObsEvent` and route each line to obs_outbox.
@@ -601,9 +616,20 @@ pub async fn handle_command(
         outbox = %path.display(),
         "result enqueued to outbox (drain task delivers via JetStream)",
     );
-    // `client` is now unused on the happy path; suppress the warning
-    // — we keep it in the signature so future hooks (audit, kill
-    // ack, etc.) have it available.
+
+    // Job-generic `finalize:` hook — runs AFTER the result is enqueued
+    // (so a long-running cleanup never keeps the row pending) with the
+    // collect outcome injected as `KANADE_COLLECT_RESULT`. Best-effort:
+    // failures are logged inside `run_finalize`, never the run's result.
+    if exit_code == 0
+        && let Some(fin) = cmd.finalize.as_ref()
+    {
+        crate::finalize::run_finalize(&client, &cmd, fin, finalize_json.as_deref()).await;
+    }
+
+    // `client` was used above only when a finalize hook ran; suppress the
+    // unused warning on the no-hook happy path — we keep it in the
+    // signature so future hooks (audit, kill ack, etc.) have it available.
     let _ = client;
     Ok(())
 }

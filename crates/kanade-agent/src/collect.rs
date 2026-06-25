@@ -25,22 +25,27 @@ use kanade_shared::wire::Command;
 use tracing::{info, warn};
 
 /// If `cmd` carries a `collect:` hint, build + upload the bundle and
-/// return its Object Store key. Best-effort: any failure is logged and
-/// returns `None` so the run's `ExecResult` still publishes (a missing
-/// bundle must never wedge the result pipeline). Caller should only
-/// invoke this on a clean (`exit_code == 0`) run.
+/// return its Object Store key plus the input paths actually bundled.
+/// Best-effort: any failure is logged and returns `None` so the run's
+/// `ExecResult` still publishes (a missing bundle must never wedge the
+/// result pipeline). Caller should only invoke this on a clean
+/// (`exit_code == 0`) run.
+///
+/// The returned file list lets the finalize hook act on exactly the
+/// uploaded files (e.g. delete only what was bundled). On `None` (no
+/// hint, or a failed upload) the caller must treat nothing as uploaded.
 pub async fn maybe_collect(
     js: &async_nats::jetstream::Context,
     cmd: &Command,
     pc_id: &str,
     stdout: &str,
     now: chrono::DateTime<chrono::Utc>,
-) -> Option<String> {
+) -> Option<(String, Vec<String>)> {
     let hint = cmd.collect.as_ref()?;
     match collect_and_upload(js, cmd, hint, pc_id, stdout, now).await {
-        Ok(key) => {
-            info!(job = %cmd.id, %pc_id, key, "collect: bundle uploaded");
-            Some(key)
+        Ok((key, files)) => {
+            info!(job = %cmd.id, %pc_id, key, files = files.len(), "collect: bundle uploaded");
+            Some((key, files))
         }
         Err(e) => {
             warn!(error = %e, job = %cmd.id, %pc_id, "collect: bundle failed; publishing result without a bundle");
@@ -77,7 +82,11 @@ fn parse_file_list(stdout: &str, files_field: &str) -> Result<Vec<String>> {
 /// with a warning (a partial bundle is more useful than none); the cap
 /// counts bytes actually added. Errors only on "no readable files" or a
 /// genuine zip-writer failure. Pure/blocking — run under spawn_blocking.
-fn build_zip(files: Vec<String>, max_bytes: u64) -> Result<Vec<u8>> {
+///
+/// Returns the zip bytes plus the list of input paths actually packed
+/// (skipped files excluded) so the finalize hook can act on exactly what
+/// was bundled — e.g. delete only the files that made it into the upload.
+fn build_zip(files: Vec<String>, max_bytes: u64) -> Result<(Vec<u8>, Vec<String>)> {
     use zip::write::SimpleFileOptions;
 
     let mut zw = zip::ZipWriter::new(std::io::Cursor::new(Vec::<u8>::new()));
@@ -85,6 +94,7 @@ fn build_zip(files: Vec<String>, max_bytes: u64) -> Result<Vec<u8>> {
 
     let mut total: u64 = 0;
     let mut added = 0usize;
+    let mut added_paths: Vec<String> = Vec::new();
     let mut used_names: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for path in &files {
@@ -135,13 +145,14 @@ fn build_zip(files: Vec<String>, max_bytes: u64) -> Result<Vec<u8>> {
         zw.write_all(&bytes)
             .with_context(|| format!("collect: zip write {name}"))?;
         added += 1;
+        added_paths.push(path.clone());
     }
 
     if added == 0 {
         bail!("collect: no readable files to bundle");
     }
     let cursor = zw.finish().context("collect: zip finish")?;
-    Ok(cursor.into_inner())
+    Ok((cursor.into_inner(), added_paths))
 }
 
 async fn collect_and_upload(
@@ -151,7 +162,7 @@ async fn collect_and_upload(
     pc_id: &str,
     stdout: &str,
     now: chrono::DateTime<chrono::Utc>,
-) -> Result<String> {
+) -> Result<(String, Vec<String>)> {
     let files = parse_file_list(stdout, &hint.files_field)?;
     if files.is_empty() {
         bail!("collect: '{}' file list is empty", hint.files_field);
@@ -159,8 +170,10 @@ async fn collect_and_upload(
     let max_bytes = hint.max_size_bytes();
 
     // File reads + zip compression are blocking; keep them off the async
-    // worker threads.
-    let zip_bytes = tokio::task::spawn_blocking(move || build_zip(files, max_bytes))
+    // worker threads. `bundled` is the subset actually packed (skipped /
+    // unreadable inputs excluded) — forwarded so finalize touches only
+    // what was uploaded.
+    let (zip_bytes, bundled) = tokio::task::spawn_blocking(move || build_zip(files, max_bytes))
         .await
         .context("collect: zip task join")??;
 
@@ -193,7 +206,7 @@ async fn collect_and_upload(
         bytes = bytes_len,
         "collect: uploaded bundle to OBJECT_COLLECTIONS"
     );
-    Ok(key)
+    Ok((key, bundled))
 }
 
 #[cfg(test)]
@@ -235,7 +248,9 @@ mod tests {
             a.to_string_lossy().into_owned(),
             b.to_string_lossy().into_owned(),
         ];
-        let zip = build_zip(files, 1_000_000).unwrap();
+        let (zip, packed) = build_zip(files, 1_000_000).unwrap();
+        // Both inputs were packed, so both come back in the bundled list.
+        assert_eq!(packed.len(), 2);
         // Re-open the archive and confirm both entries survived under
         // distinct names.
         let reader = zip::ZipArchive::new(std::io::Cursor::new(zip)).unwrap();

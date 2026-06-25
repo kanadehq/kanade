@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::wire::{RunAs, Shell, Staleness};
+use crate::wire::{FinalizeCommand, RunAs, Shell, Staleness};
 
 /// YAML job manifest (= registered "what to run", v0.18.0+).
 ///
@@ -155,6 +155,22 @@ pub struct Manifest {
     /// field ⇒ #492 wire rule (`default` + `skip_serializing_if`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<RepoOrigin>,
+    /// Job-generic post-step hook. When set, the agent runs this script
+    /// AFTER the main `execute:` script exits cleanly (and, for a
+    /// `collect:` job, after the bundle finishes uploading), so the
+    /// operator can delete / move / notify based on what the step
+    /// produced. Best-effort: a finalize failure is logged but never
+    /// fails the run — the upload (if any) already succeeded.
+    ///
+    /// For `collect:` jobs the agent injects the environment variable
+    /// `KANADE_COLLECT_RESULT` — a JSON object
+    /// `{ "ok": true, "bundles": [ { "key", "uploaded", "files": [...] } ] }`
+    /// — so the hook acts on exactly the files that were bundled and
+    /// uploaded (e.g. deletes only the `uploaded` ones). Composes with
+    /// every hint. New field ⇒ #492 wire rule (`default` +
+    /// `skip_serializing_if`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalize: Option<FinalizeSpec>,
 }
 
 /// GitOps provenance for a repo-managed YAML artifact — a [`Manifest`]
@@ -1324,6 +1340,55 @@ impl Execute {
     }
 }
 
+/// Job-generic post-step hook (see [`Manifest::finalize`]). Runs after
+/// the main `execute:` script (and the collect upload) on a clean exit,
+/// with the step's structured result injected via an environment
+/// variable. P1 supports an inline `script:` only — `script_file:` /
+/// `script_object:` are follow-ups.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
+pub struct FinalizeSpec {
+    pub shell: ExecuteShell,
+    /// Inline script body (required; inline-only in P1).
+    pub script: String,
+    /// humantime duration string (e.g. `"60s"`, `"5m"`). Defaults to
+    /// `60s` when unset.
+    #[serde(default = "default_finalize_timeout")]
+    pub timeout: String,
+    /// Token + session combination, like [`Execute::run_as`]. Defaults
+    /// to [`RunAs::System`].
+    #[serde(default)]
+    pub run_as: RunAs,
+    /// Working directory for the hook child, like [`Execute::cwd`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+}
+
+/// Default `finalize.timeout` when the operator omits it.
+fn default_finalize_timeout() -> String {
+    "60s".to_string()
+}
+
+impl FinalizeSpec {
+    /// Lower to the wire form forwarded onto a [`Command`]. The timeout
+    /// parse falls back to 60s — [`Manifest::validate`] already rejects
+    /// an unparseable value at create time, so the fire path uses a safe
+    /// default rather than failing (mirrors
+    /// [`CollectHint::max_size_bytes`]). A sub-second timeout floors at
+    /// 1s for the same reason `build_command` does.
+    pub fn lower(&self) -> FinalizeCommand {
+        let timeout_secs = humantime::parse_duration(&self.timeout)
+            .map(|d| d.as_secs().max(1))
+            .unwrap_or(60);
+        FinalizeCommand {
+            shell: self.shell.into(),
+            script: self.script.clone(),
+            timeout_secs,
+            run_as: self.run_as,
+            cwd: self.cwd.clone(),
+        }
+    }
+}
+
 impl Manifest {
     /// Cross-field semantic checks that don't fit into pure serde
     /// derive. Currently delegates to
@@ -1331,6 +1396,38 @@ impl Manifest {
     /// docs for the rationale on which call sites should run this.
     pub fn validate(&self) -> Result<(), String> {
         self.execute.validate_script_source()?;
+        // A present-but-empty finalize script is an invisible no-op
+        // (the hook would run an empty body); reject it at the write
+        // boundary. Inline-only in P1, so `script` is the sole source.
+        if let Some(finalize) = &self.finalize {
+            if finalize.script.trim().is_empty() {
+                return Err("finalize.script must not be empty".to_string());
+            }
+            // Reject an unparseable timeout at the write boundary so the
+            // operator sees the error at `job create` rather than getting
+            // a silent fire-time fallback (`FinalizeSpec::lower` floors to
+            // 60s, which would otherwise mask a typo).
+            if humantime::parse_duration(&finalize.timeout).is_err() {
+                return Err(format!(
+                    "finalize.timeout '{}' is not a valid duration",
+                    finalize.timeout
+                ));
+            }
+            // Disallow cmd for finalize: the agent injects the result JSON
+            // into the hook's environment, and cmd.exe quoting doesn't
+            // nest — JSON's `"` plus shell metacharacters in a collected
+            // path/key could break out into command injection at the
+            // agent's (often LocalSystem) privilege. PowerShell's
+            // single-quote escaping is safe, and finalize hooks are
+            // PowerShell by convention anyway.
+            if finalize.shell == ExecuteShell::Cmd {
+                return Err(
+                    "finalize.shell: cmd is not supported for finalize hooks (shell-injection \
+                     risk when the result JSON is injected into the environment); use powershell"
+                        .to_string(),
+                );
+            }
+        }
         // Stdout-format compatibility. `inventory:` and `check:` both
         // consume the SAME single JSON object — they COMPOSE: a check
         // can extract `status`/`detail` for the Health tab while the
@@ -2019,6 +2116,75 @@ collect:
         assert_eq!(c.files_field, "files"); // default
         assert_eq!(c.max_size_bytes(), 50_000_000);
         m.validate().expect("collect-only manifest validates");
+    }
+
+    #[test]
+    fn manifest_finalize_powershell_validates_and_lowers() {
+        let yaml = r#"
+id: collect-fin
+version: 0.1.0
+execute:
+  shell: powershell
+  timeout: 120s
+  script: |
+    @{ files = @() } | ConvertTo-Json
+collect:
+  name: "diag"
+  max_size: 50MB
+finalize:
+  shell: powershell
+  timeout: 30s
+  run_as: system
+  script: |
+    Write-Output "cleanup"
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        m.validate().expect("powershell finalize validates");
+        let lowered = m.finalize.as_ref().expect("finalize present").lower();
+        assert_eq!(lowered.timeout_secs, 30);
+        assert!(matches!(lowered.shell, Shell::Powershell));
+    }
+
+    #[test]
+    fn manifest_finalize_rejects_cmd_shell() {
+        // cmd finalize is an injection risk (the agent injects JSON into
+        // the hook's env; cmd.exe quoting doesn't nest) — validate must
+        // reject it.
+        let yaml = r#"
+id: collect-fin-cmd
+version: 0.1.0
+execute:
+  shell: powershell
+  timeout: 120s
+  script: |
+    @{ files = @() } | ConvertTo-Json
+finalize:
+  shell: cmd
+  script: |
+    echo hi
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        let err = m.validate().expect_err("cmd finalize rejected");
+        assert!(err.contains("finalize.shell"), "got: {err}");
+    }
+
+    #[test]
+    fn manifest_finalize_rejects_empty_script() {
+        let yaml = r#"
+id: collect-fin-empty
+version: 0.1.0
+execute:
+  shell: powershell
+  timeout: 120s
+  script: |
+    @{ files = @() } | ConvertTo-Json
+finalize:
+  shell: powershell
+  script: "   "
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        let err = m.validate().expect_err("empty finalize script rejected");
+        assert!(err.contains("finalize.script"), "got: {err}");
     }
 
     #[test]

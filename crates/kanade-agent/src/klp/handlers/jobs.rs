@@ -459,6 +459,9 @@ pub fn build_command(
         // #418 Phase 4: a KLP-fired one-shot has no schedule behind it,
         // so no on_failure.retry policy — the user re-runs from the app.
         retry: None,
+        // Forward the finalize hook so a `collect:` + `client:` job
+        // triggered from the Client App runs its cleanup hook too.
+        finalize: manifest.finalize.as_ref().map(|f| f.lower()),
     })
 }
 
@@ -587,12 +590,23 @@ async fn run_job(
     // helper the NATS path uses, so a Client-App-triggered collection
     // produces a bundle too. Read `&stdout` before build_exec_result
     // moves it. Best-effort: failure leaves `collect_object = None`.
-    let collect_object = if exit_code == 0 && cmd.collect.is_some() {
+    let collected = if exit_code == 0 && cmd.collect.is_some() {
         let js = async_nats::jetstream::new(client.clone());
         crate::collect::maybe_collect(&js, &cmd, &pc_id, &stdout, finished_at).await
     } else {
         None
     };
+
+    // Build the finalize payload while `collected` is still in scope; the
+    // hook runs AFTER the result is enqueued (below) so a slow cleanup
+    // never holds the Activity row pending. Only a `collect:` job gets a
+    // payload (non-collect finalize hooks see no `KANADE_COLLECT_RESULT`).
+    let finalize_json = cmd
+        .collect
+        .as_ref()
+        .map(|_| crate::finalize::collect_result_json(&collected));
+
+    let collect_object = collected.map(|(key, _files)| key);
 
     // #478: record the run on the backend so operators see
     // user-initiated jobs on the Activity page (audit trail), via the
@@ -608,6 +622,14 @@ async fn run_job(
     );
     result.collect_object = collect_object;
     enqueue_exec_result(result);
+
+    // Job-generic `finalize:` hook — same as the NATS path, AFTER the
+    // result is enqueued. Best-effort.
+    if exit_code == 0
+        && let Some(fin) = cmd.finalize.as_ref()
+    {
+        crate::finalize::run_finalize(&client, &cmd, fin, finalize_json.as_deref()).await;
+    }
 }
 
 /// Map a finished outcome to the `(exit_code, stdout, stderr)` the
@@ -972,6 +994,7 @@ mod tests {
             }),
             tags: Vec::new(),
             origin: None,
+            finalize: None,
         }
     }
 
