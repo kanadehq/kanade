@@ -265,7 +265,16 @@ pub fn merge_checks(base: Vec<Check>, extra: &[Check]) -> Vec<Check> {
 /// [`CheckStatus::Unknown`] with a diagnostic detail — everything else
 /// is up to the operator's PowerShell.
 pub fn build_check(hint: &CheckHint, stdout: &str) -> Check {
-    let value: serde_json::Value = match serde_json::from_str(stdout.trim()) {
+    // #821: read check's own fenced block so a job can compose check with
+    // inventory / collect (and/or a user message) on one stdout. No fence
+    // ⇒ the whole stdout (back-compat for a check-only job). `fenced_
+    // payload` already trims.
+    let payload = kanade_shared::manifest::fenced_payload(
+        stdout,
+        kanade_shared::manifest::CHECK_BLOCK_BEGIN,
+        kanade_shared::manifest::CHECK_BLOCK_END,
+    );
+    let value: serde_json::Value = match serde_json::from_str(payload) {
         Ok(v) => v,
         Err(e) => return unknown(hint, format!("check stdout was not JSON: {e}")),
     };

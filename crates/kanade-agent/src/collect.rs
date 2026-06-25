@@ -163,7 +163,15 @@ async fn collect_and_upload(
     stdout: &str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(String, Vec<String>)> {
-    let files = parse_file_list(stdout, &hint.files_field)?;
+    // #821: read collect's own fenced block so a job can also carry a
+    // user message and/or other hints' blocks on the same stdout. No
+    // fence ⇒ the whole stdout (back-compat for a collect-only job).
+    let payload = kanade_shared::manifest::fenced_payload(
+        stdout,
+        kanade_shared::manifest::COLLECT_BLOCK_BEGIN,
+        kanade_shared::manifest::COLLECT_BLOCK_END,
+    );
+    let files = parse_file_list(payload, &hint.files_field)?;
     if files.is_empty() {
         bail!("collect: '{}' file list is empty", hint.files_field);
     }

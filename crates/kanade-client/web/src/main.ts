@@ -420,8 +420,13 @@ function updateRunsActiveBadge(): void {
 // fenced region; here we strip it so the user only sees the message. Must
 // mirror kanade_shared::manifest::INVENTORY_BLOCK_{BEGIN,END} (Rust source
 // of truth) — keep both in sync.
-const INVENTORY_BLOCK_BEGIN = "#KANADE-INVENTORY-BEGIN";
-const INVENTORY_BLOCK_END = "#KANADE-INVENTORY-END";
+// One pair per fenced hint (#821) — keep in sync with
+// kanade_shared::manifest::{INVENTORY,CHECK,COLLECT}_BLOCK_{BEGIN,END}.
+const HINT_BLOCKS: ReadonlyArray<readonly [string, string]> = [
+  ["#KANADE-INVENTORY-BEGIN", "#KANADE-INVENTORY-END"],
+  ["#KANADE-CHECK-BEGIN", "#KANADE-CHECK-END"],
+  ["#KANADE-COLLECT-BEGIN", "#KANADE-COLLECT-END"],
+];
 
 // Find a marker only where it begins a line (start of string or right
 // after a "\n"), mirroring kanade_shared::manifest::find_line_marker — so a
@@ -432,28 +437,35 @@ function findLineMarker(hay: string, needle: string): number {
   return p === -1 ? -1 : p + 1;
 }
 
-// Remove the inventory JSON block from job output before showing it to the
-// user. An unterminated fence (closing marker not yet streamed in, #806)
-// hides everything from the opener onward, so the raw JSON never flashes
-// mid-stream. No fence → returned unchanged.
-function stripInventoryBlock(s: string): string {
-  const begin = findLineMarker(s, INVENTORY_BLOCK_BEGIN);
-  if (begin === -1) return s;
-  const afterBegin = begin + INVENTORY_BLOCK_BEGIN.length;
-  const endRel = findLineMarker(s.slice(afterBegin), INVENTORY_BLOCK_END);
-  const cut =
-    endRel === -1 ? s.length : afterBegin + endRel + INVENTORY_BLOCK_END.length;
+// Remove one fenced block. An unterminated fence (closing marker not yet
+// streamed in, #806) hides everything from the opener onward, so the raw
+// JSON never flashes mid-stream. No fence → returned unchanged.
+function stripOneBlock(s: string, begin: string, end: string): string {
+  const b = findLineMarker(s, begin);
+  if (b === -1) return s;
+  const afterBegin = b + begin.length;
+  const endRel = findLineMarker(s.slice(afterBegin), end);
+  const cut = endRel === -1 ? s.length : afterBegin + endRel + end.length;
+  return s.slice(0, b) + s.slice(cut);
+}
+
+// Strip every hint JSON block from job output before showing it to the
+// user — the blocks are for the projector / agent, not the human. #821:
+// a single job may carry inventory, check, AND collect blocks at once.
+function stripHintBlocks(s: string): string {
+  let out = s;
+  for (const [begin, end] of HINT_BLOCKS) out = stripOneBlock(out, begin, end);
   // `\r?\n` so the collapse also works on Windows (CRLF) job output.
-  return (s.slice(0, begin) + s.slice(cut)).replace(/(?:\r?\n){3,}/g, "\n\n").trim();
+  return out.replace(/(?:\r?\n){3,}/g, "\n\n").trim();
 }
 
 function renderRun(r: Run): string {
   const icon = RUN_STATUS_ICON[r.status] ?? "⏳";
   const label = RUN_STATUS_LABEL[r.status] ?? r.status;
   const active = !isTerminal(r.status);
-  // Show the human-readable part only — the inventory JSON block (if any)
-  // is for the projector, not the user.
-  const shown = stripInventoryBlock(r.output);
+  // Show the human-readable part only — the fenced JSON blocks (if any)
+  // are for the projector / agent, not the user.
+  const shown = stripHintBlocks(r.output);
   const hasOutput = !!shown.trim();
   // Running rows always show output; completed rows collapse it behind a
   // chevron and only render it when the user has expanded the row.
