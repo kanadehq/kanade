@@ -271,9 +271,14 @@ pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
 
     // agent_config — Sprint 6 layered scopes (global / groups.* /
     // pcs.*) plus the legacy target_version key.
+    // history: 1 — agents only ever read the current value (the watch is
+    // DeliverPolicy::New + an initial_sync get(), never kv.history()).
+    // Retained old revisions only fed reconnect history-replay, which
+    // flapped self-update backward (#828). Operator change-history lives
+    // in the audit log, so keeping one revision loses nothing. (#830)
     js.create_or_update_key_value(KvConfig {
         bucket: BUCKET_AGENT_CONFIG.into(),
-        history: 5,
+        history: 1,
         ..Default::default()
     })
     .await
@@ -281,9 +286,13 @@ pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
     info!(bucket = BUCKET_AGENT_CONFIG, "ready");
 
     // agent_groups — Sprint 5 per-pc group membership.
+    // history: 1 — same reasoning as agent_config above: agents only need
+    // the current membership; replayed history just churned subscriptions
+    // through stale sets on every reconnect (a transient wrong membership,
+    // #830). One revision makes that replay material non-existent. (#830)
     js.create_or_update_key_value(KvConfig {
         bucket: BUCKET_AGENT_GROUPS.into(),
-        history: 5,
+        history: 1,
         ..Default::default()
     })
     .await
