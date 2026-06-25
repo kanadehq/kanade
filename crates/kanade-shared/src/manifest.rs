@@ -60,11 +60,12 @@ pub struct Manifest {
     /// into a [`crate::ipc::state::Check`] named `check.name`.
     /// Cadence / windows / conditions come from
     /// the job's Schedule (exactly like inventory) — there is
-    /// deliberately no interval here. **Composes with `inventory:`**:
-    /// the script's stdout is one JSON object, so a check can also
-    /// carry an `inventory:` block to project the rest of that object
-    /// (incl. `explode` sub-tables) for SPA fleet-querying. Only
-    /// `emit:` (NDJSON stdout) is incompatible.
+    /// deliberately no interval here. **Composes with `inventory:` and
+    /// `collect:`** (#821): each reads its own `#KANADE-<KIND>`-fenced
+    /// stdout block, so one job can drive a check, project inventory
+    /// facts, and collect files in a single run. Only `emit:` (NDJSON
+    /// stdout) is incompatible. A check-only job may skip the fence
+    /// (whole stdout is the JSON); a multi-hint job fences each block.
     #[serde(default)]
     pub check: Option<CheckHint>,
     /// #219: opt-in marker that this job COLLECTS files into a bundle.
@@ -77,12 +78,14 @@ pub struct Manifest {
     /// key in [`crate::wire::ExecResult::collect_object`]. The operator
     /// downloads bundles from the SPA Collect page.
     ///
-    /// Like `inventory:` / `check:` this reads a JSON object from stdout,
-    /// but it consumes that stdout for its OWN contract (a `files`
-    /// list), so it is mutually exclusive with `inventory:` / `check:` /
-    /// `emit:` (enforced in [`Manifest::validate`]). It composes with
-    /// `client:` — a `collect:` + `client:` job lets an end user trigger
-    /// a collection from the Client App (the same-host agent runs it).
+    /// Like `inventory:` / `check:` this reads a JSON object from stdout.
+    /// #821: it reads its own `#KANADE-COLLECT-BEGIN/END`-fenced block,
+    /// so it **composes with `inventory:` / `check:`** (and a user
+    /// message) on one stdout — only `emit:` (NDJSON) is incompatible
+    /// (enforced in [`Manifest::validate`]). A collect-only job may skip
+    /// the fence. It also composes with `client:` — a `collect:` +
+    /// `client:` job lets an end user trigger a collection from the
+    /// Client App (the same-host agent runs it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collect: Option<CollectHint>,
     /// #720: opt-in declarative aggregation over `obs_events` that drives
@@ -227,38 +230,87 @@ pub struct FanoutPlan {
     pub deadline_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-/// Sentinel lines that fence an inventory JSON payload inside an
-/// otherwise human-readable job stdout (#793).
+/// Sentinel lines that fence a hint's structured JSON payload inside an
+/// otherwise human-readable job stdout. Each stdout-reading hint
+/// (`inventory:` / `check:` / `collect:`) has its OWN `#KANADE-<KIND>-
+/// BEGIN`/`-END` pair, so one job can carry several of them at once
+/// (and/or a user-facing message) on its single stdout stream — every
+/// consumer extracts only its own block via [`fenced_payload`].
 ///
-/// A user-invokable (`client:`) job can't put both a friendly message
-/// and a JSON inventory object on its single stdout stream — the Client
-/// App renders stdout verbatim, while the projector needs it to be JSON.
-/// The convention: print a readable message for the user, then wrap the
-/// inventory JSON object between these two marker lines. The projector
-/// parses the fenced region (see [`inventory_payload`]) and the Client
-/// App strips it from what it shows the user. A plain inventory job (no
-/// `client:`) needs no fence — its whole stdout is the JSON.
+/// Originated for inventory (#793): a `client:` job couldn't put both a
+/// friendly message and a JSON object on one stdout (the Client App
+/// renders stdout verbatim, the projector needs JSON). #821 generalised
+/// it so inventory / check / collect can coexist. `emit:` is the
+/// exception — its stdout is line-delimited NDJSON consumed whole, so it
+/// never fences and never coexists with the others.
+///
+/// A job carrying a SINGLE hint may still skip the fence —
+/// [`fenced_payload`] falls back to the whole stdout — but a job
+/// COMBINING hints must fence each block (else every consumer would try
+/// to parse the same whole stdout).
 pub const INVENTORY_BLOCK_BEGIN: &str = "#KANADE-INVENTORY-BEGIN";
 /// Closing marker — see [`INVENTORY_BLOCK_BEGIN`].
 pub const INVENTORY_BLOCK_END: &str = "#KANADE-INVENTORY-END";
+/// Check-payload opening marker — see [`INVENTORY_BLOCK_BEGIN`].
+pub const CHECK_BLOCK_BEGIN: &str = "#KANADE-CHECK-BEGIN";
+/// Check-payload closing marker.
+pub const CHECK_BLOCK_END: &str = "#KANADE-CHECK-END";
+/// Collect-payload opening marker — see [`INVENTORY_BLOCK_BEGIN`].
+pub const COLLECT_BLOCK_BEGIN: &str = "#KANADE-COLLECT-BEGIN";
+/// Collect-payload closing marker.
+pub const COLLECT_BLOCK_END: &str = "#KANADE-COLLECT-END";
 
-/// Extract the inventory JSON payload from a job's stdout: the text
-/// between [`INVENTORY_BLOCK_BEGIN`] and [`INVENTORY_BLOCK_END`] when the
-/// fence is present, else the whole stdout (back-compat — a pure-JSON
-/// inventory job has no fence). An unterminated fence (the closing marker
-/// missing, e.g. truncated output) takes everything after the opener.
-/// The result is trimmed so surrounding message text / whitespace never
-/// reaches the JSON parser.
-pub fn inventory_payload(stdout: &str) -> &str {
-    let Some(begin) = find_line_marker(stdout, INVENTORY_BLOCK_BEGIN) else {
-        return stdout.trim();
-    };
-    let after = &stdout[begin + INVENTORY_BLOCK_BEGIN.len()..];
-    let inner = match find_line_marker(after, INVENTORY_BLOCK_END) {
-        Some(end) => &after[..end],
+/// Extract a hint's fenced block when the `begin` marker is present, else
+/// `None`. An unterminated fence (closing marker missing, e.g. truncated
+/// output) takes everything after the opener. Trimmed so surrounding
+/// message text / whitespace never reaches the JSON parser.
+pub fn fenced_payload_if_present<'a>(stdout: &'a str, begin: &str, end: &str) -> Option<&'a str> {
+    let b = find_line_marker(stdout, begin)?;
+    let after = &stdout[b + begin.len()..];
+    let inner = match find_line_marker(after, end) {
+        Some(e) => &after[..e],
         None => after,
     };
-    inner.trim()
+    Some(inner.trim())
+}
+
+/// True if stdout carries ANY `#KANADE-<KIND>-BEGIN` fence at a line
+/// start — i.e. the script opted into fenced output. Used to decide
+/// whether a missing fence means "single-hint, use the whole stdout" or
+/// "multi-hint author error / truncation, this hint just has no block".
+pub fn has_any_hint_fence(stdout: &str) -> bool {
+    [
+        INVENTORY_BLOCK_BEGIN,
+        CHECK_BLOCK_BEGIN,
+        COLLECT_BLOCK_BEGIN,
+    ]
+    .iter()
+    .any(|m| find_line_marker(stdout, m).is_some())
+}
+
+/// Extract one hint's JSON payload from a job's stdout. When the hint's
+/// own `#KANADE-<KIND>` fence is present, return that block. When it's
+/// absent, fall back to the WHOLE stdout only for an unfenced (single-
+/// hint) job; if any OTHER hint's fence is present (#821 multi-hint
+/// output) return `""` instead — the script opted into fences but this
+/// block is missing (author error or truncation), so this consumer must
+/// NOT grab a sibling hint's block. An empty payload fails the consumer's
+/// JSON parse and degrades to "no data for this hint", never cross-parse.
+pub fn fenced_payload<'a>(stdout: &'a str, begin: &str, end: &str) -> &'a str {
+    if let Some(p) = fenced_payload_if_present(stdout, begin, end) {
+        return p;
+    }
+    if has_any_hint_fence(stdout) {
+        ""
+    } else {
+        stdout.trim()
+    }
+}
+
+/// Inventory's fenced payload — [`fenced_payload`] with the inventory
+/// markers. Kept as a named helper for the projector call site.
+pub fn inventory_payload(stdout: &str) -> &str {
+    fenced_payload(stdout, INVENTORY_BLOCK_BEGIN, INVENTORY_BLOCK_END)
 }
 
 /// Find `needle` only where it begins a line (start of `hay` or right
@@ -1428,30 +1480,23 @@ impl Manifest {
                 );
             }
         }
-        // Stdout-format compatibility. `inventory:` and `check:` both
-        // consume the SAME single JSON object — they COMPOSE: a check
-        // can extract `status`/`detail` for the Health tab while the
-        // projector explodes the rest into SPA sub-tables. `emit:` is
-        // different — its stdout is NDJSON and the agent omits it from
-        // the result entirely — so it can't be paired with either.
-        if self.emit.is_some() && (self.inventory.is_some() || self.check.is_some()) {
-            return Err(
-                "`emit:` is incompatible with `inventory:` / `check:` — emit's stdout is NDJSON \
-                 timeline events (and omitted from the result), while inventory/check read a \
-                 single JSON object from stdout"
-                    .to_string(),
-            );
-        }
-        // `collect:` consumes stdout for its OWN contract (a JSON object
-        // carrying a `files` array), so unlike the inventory+check pair it
-        // can't share stdout with another stdout-reading hint. It composes
-        // only with `client:` (which doesn't touch stdout).
-        if self.collect.is_some()
-            && (self.inventory.is_some() || self.check.is_some() || self.emit.is_some())
+        // Stdout-format compatibility (#821). `inventory:` / `check:` /
+        // `collect:` now COMPOSE: each reads its own `#KANADE-<KIND>-
+        // BEGIN/END`-fenced JSON block from stdout, so a single job can
+        // project inventory facts, drive a Health-tab check, AND collect
+        // files in one run. (A single-hint job may still skip the fence;
+        // a multi-hint job must fence each block.)
+        //
+        // `emit:` remains the exception — its stdout is line-delimited
+        // NDJSON consumed whole and then omitted from the result — so it
+        // can't share stdout with any fenced hint.
+        if self.emit.is_some()
+            && (self.inventory.is_some() || self.check.is_some() || self.collect.is_some())
         {
             return Err(
-                "`collect:` is incompatible with `inventory:` / `check:` / `emit:` — collect \
-                 reads its own `files` JSON object from stdout. (It composes with `client:`.)"
+                "`emit:` is incompatible with `inventory:` / `check:` / `collect:` — emit's \
+                 stdout is NDJSON timeline events (consumed whole and omitted from the result), \
+                 while the others read fenced JSON blocks from stdout"
                     .to_string(),
             );
         }
@@ -1658,6 +1703,72 @@ mod tests {
         // treated as a fence — fall back to the whole stdout.
         let stdout = "see #KANADE-INVENTORY-BEGIN in the docs\nnot json";
         assert_eq!(inventory_payload(stdout), stdout.trim());
+    }
+
+    #[test]
+    fn fenced_payload_extracts_each_hint_block_independently() {
+        // #821: one stdout carrying a user message + all three fenced
+        // blocks — every consumer pulls only its own.
+        let stdout = "\
+done!
+#KANADE-INVENTORY-BEGIN
+{\"os\":\"win\"}
+#KANADE-INVENTORY-END
+#KANADE-CHECK-BEGIN
+{\"status\":\"ok\"}
+#KANADE-CHECK-END
+#KANADE-COLLECT-BEGIN
+{\"files\":[\"a\"]}
+#KANADE-COLLECT-END
+";
+        assert_eq!(
+            fenced_payload(stdout, INVENTORY_BLOCK_BEGIN, INVENTORY_BLOCK_END),
+            "{\"os\":\"win\"}"
+        );
+        assert_eq!(
+            fenced_payload(stdout, CHECK_BLOCK_BEGIN, CHECK_BLOCK_END),
+            "{\"status\":\"ok\"}"
+        );
+        assert_eq!(
+            fenced_payload(stdout, COLLECT_BLOCK_BEGIN, COLLECT_BLOCK_END),
+            "{\"files\":[\"a\"]}"
+        );
+    }
+
+    #[test]
+    fn fenced_payload_falls_back_to_whole_stdout_without_fence() {
+        // A single-hint job needs no fence — the whole (trimmed) stdout is
+        // the payload.
+        let stdout = "  {\"files\":[\"a\"]}  ";
+        assert_eq!(
+            fenced_payload(stdout, COLLECT_BLOCK_BEGIN, COLLECT_BLOCK_END),
+            "{\"files\":[\"a\"]}"
+        );
+    }
+
+    #[test]
+    fn fenced_payload_returns_empty_when_other_fences_present_but_mine_missing() {
+        // Multi-hint output (inventory + check fenced) but the COLLECT
+        // fence is missing — collect must NOT fall back to the whole
+        // stdout (which holds the inventory/check blocks) and cross-parse
+        // a sibling block; it gets "" → its JSON parse fails → no data.
+        let stdout = "\
+#KANADE-INVENTORY-BEGIN
+{\"os\":\"win\"}
+#KANADE-INVENTORY-END
+#KANADE-CHECK-BEGIN
+{\"status\":\"ok\"}
+#KANADE-CHECK-END
+";
+        assert_eq!(
+            fenced_payload(stdout, COLLECT_BLOCK_BEGIN, COLLECT_BLOCK_END),
+            ""
+        );
+        // ...while the hints that DID fence still extract correctly.
+        assert_eq!(
+            fenced_payload(stdout, INVENTORY_BLOCK_BEGIN, INVENTORY_BLOCK_END),
+            "{\"os\":\"win\"}"
+        );
     }
 
     /// The example check-job + schedule YAMLs shipped under `configs/`
@@ -2231,43 +2342,47 @@ client:
     }
 
     #[test]
-    fn manifest_rejects_collect_combined_with_inventory() {
-        // collect consumes stdout for its own `files` contract → can't
-        // share with inventory/check/emit.
+    fn manifest_allows_inventory_check_collect_coexistence() {
+        // #821: the three fenced hints now COMPOSE — each reads its own
+        // `#KANADE-<KIND>` stdout block, so one job can do all three.
         let yaml = r#"
-id: bad-collect-mix
+id: multi-hint
 version: 0.1.0
 execute:
   shell: powershell
   script: "echo x"
   timeout: 10s
-collect:
-  name: diag
 inventory:
   display:
     - { field: status, label: Status }
+check:
+  name: health
+collect:
+  name: diag
 "#;
         let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
-        let err = m
-            .validate()
-            .expect_err("collect + inventory must be rejected");
-        assert!(err.contains("collect"), "error mentions collect: {err}");
+        m.validate()
+            .expect("inventory + check + collect coexist after #821");
     }
 
     #[test]
-    fn manifest_rejects_collect_combined_with_check_or_emit() {
-        // collect is exclusive with every stdout-consuming hint, not
-        // just inventory — guard the check + emit branches too.
-        for extra in ["check:\n  name: health\n", "emit:\n  type: events\n"] {
+    fn manifest_rejects_emit_combined_with_fenced_hints() {
+        // `emit:` consumes stdout as NDJSON (and blanks it), so it still
+        // can't share with any fenced hint — inventory, check, OR collect.
+        for extra in [
+            "inventory:\n  display:\n    - { field: s, label: S }\n",
+            "check:\n  name: health\n",
+            "collect:\n  name: diag\n",
+        ] {
             let yaml = format!(
-                "id: bad-collect-mix\nversion: 0.1.0\nexecute:\n  shell: powershell\n  \
-                 script: \"echo x\"\n  timeout: 10s\ncollect:\n  name: diag\n{extra}"
+                "id: bad-emit-mix\nversion: 0.1.0\nexecute:\n  shell: powershell\n  \
+                 script: \"echo x\"\n  timeout: 10s\nemit:\n  type: events\n{extra}"
             );
             let m: Manifest = serde_yaml::from_str(&yaml).expect("parse");
             let err = m
                 .validate()
-                .expect_err("collect + stdout-consuming hint must fail");
-            assert!(err.contains("collect"), "error mentions collect: {err}");
+                .expect_err("emit + fenced hint must be rejected");
+            assert!(err.contains("emit"), "error mentions emit: {err}");
         }
     }
 
