@@ -18,8 +18,14 @@ pub struct StateSnapshotParams {}
 /// tab. SPEC §2.12.8's complete-conversation example pins the
 /// shape:
 ///
+/// There is deliberately no dedicated `vpn` field: VPN posture is
+/// probe-able from the box and site-specific, so it belongs in
+/// [`checks`](StateSnapshot::checks) as an operator-defined `check:`
+/// job (same path as `disk_free` / `bitlocker`), not as a hard-coded
+/// snapshot field. A site that wants it ships a `check-vpn.yaml`.
+///
 /// ```jsonc
-/// {"pc_id":"PC1234","online":true,"vpn":"connected",
+/// {"pc_id":"PC1234","online":true,
 ///  "checks":[{"name":"bitlocker","status":"ok"}],
 ///  "agent_version":"0.4.0","target_version":"0.4.0"}
 /// ```
@@ -33,12 +39,6 @@ pub struct StateSnapshot {
     /// Distinct from the OS-level network state — operators care
     /// about "is fleet management reachable" specifically.
     pub online: bool,
-    /// VPN posture. Free-form string today (`"connected"` /
-    /// `"disconnected"` / `"unknown"` / a vendor-specific status)
-    /// because SPEC §2.1's compliance checks are
-    /// site-specific. Future SPEC version may tighten this into an
-    /// enum.
-    pub vpn: String,
     /// Ordered list of compliance check results. Each [`Check`]
     /// item is rendered as a row on the Health tab; failing rows
     /// surface a "修復する" button per SPEC §2.1.
@@ -128,8 +128,8 @@ pub struct StateUnsubscribeParams {
 // ---------- state.changed (push) ----------
 
 /// Push payload for `state.changed`. Pushed by the agent when one
-/// or more compliance checks flip status, or when `online` / `vpn`
-/// / `agent_version` change. A full [`StateSnapshot`] is included
+/// or more compliance checks flip status, or when `online` /
+/// `agent_version` change. A full [`StateSnapshot`] is included
 /// so the client doesn't need a second round-trip — the push is
 /// strictly idempotent: applying a `state.changed` payload onto the
 /// client's cached snapshot is a no-op replace, not a diff merge.
@@ -167,7 +167,7 @@ mod tests {
         // SPEC §2.12.8 — pinned so a rename can't drift the
         // documented contract.
         let wire = r#"{
-            "pc_id":"PC1234","online":true,"vpn":"connected",
+            "pc_id":"PC1234","online":true,
             "checks":[{"name":"bitlocker","status":"ok"},
                       {"name":"av_signature","status":"warn","detail":"3 日前"}],
             "agent_version":"0.4.0","target_version":"0.4.0"
@@ -175,7 +175,6 @@ mod tests {
         let s: StateSnapshot = serde_json::from_str(wire).expect("decode");
         assert_eq!(s.pc_id, "PC1234");
         assert!(s.online);
-        assert_eq!(s.vpn, "connected");
         assert_eq!(s.checks.len(), 2);
         assert_eq!(s.checks[0].name, "bitlocker");
         assert_eq!(s.checks[0].status, CheckStatus::Ok);
@@ -246,7 +245,6 @@ mod tests {
             snapshot: StateSnapshot {
                 pc_id: "PC1234".into(),
                 online: true,
-                vpn: "connected".into(),
                 checks: vec![],
                 agent_version: "0.4.0".into(),
                 target_version: "0.4.0".into(),

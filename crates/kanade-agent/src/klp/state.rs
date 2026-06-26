@@ -82,11 +82,11 @@ pub fn eval_once(
         // Real broker-connection state, sampled by the caller (see
         // `client_online`) so this stays unit-testable (#288).
         online,
-        // VPN posture is site-specific and needs a custom
-        // integration per organisation. Default to "unknown"
-        // until the check is implemented — SPEC §2.12.5 explicitly
-        // calls out the field is free-form text.
-        vpn: "unknown".to_string(),
+        // VPN posture is intentionally NOT a snapshot field — it is
+        // site-specific and probe-able from the box, so a site that
+        // wants it ships an operator-defined `check:` (e.g.
+        // `check-vpn.yaml`) and it flows in via `extra_checks`, same
+        // as disk_free / bitlocker. See `StateSnapshot` docs.
         checks,
         agent_version: agent_version.to_string(),
         target_version: cfg
@@ -208,7 +208,6 @@ mod tests {
         let snap = eval_once("PC1234", "0.41.0", &cfg_with(None), true, &[]);
         assert_eq!(snap.pc_id, "PC1234");
         assert!(snap.online);
-        assert_eq!(snap.vpn, "unknown");
         assert_eq!(snap.agent_version, "0.41.0");
         assert_eq!(snap.target_version, "0.41.0"); // target unset → falls back
         // With no operator checks, only the single intrinsic one (#290).

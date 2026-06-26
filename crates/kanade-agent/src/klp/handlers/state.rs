@@ -139,7 +139,6 @@ mod tests {
         StateSnapshot {
             pc_id: "PC1234".into(),
             online: true,
-            vpn: "unknown".into(),
             checks: vec![],
             agent_version: version.into(),
             target_version: version.into(),
