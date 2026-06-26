@@ -126,9 +126,14 @@ const RESURFACE_EVENT: &str = "klp-resurface";
 /// WebView reveals the window and scrolls to / flashes that notification.
 const FOCUS_NOTIFICATION_EVENT: &str = "klp-focus-notification";
 
-/// The `show?id=` form of the `kanade-client://` protocol the emergency toast's
-/// `launch` carries (#647). Registered to the client exe by the installer.
-const PROTOCOL_SHOW_PREFIX: &str = "kanade-client://show?id=";
+/// The `kanade-client://` custom scheme the emergency toast's `launch`
+/// carries (#647). Registered to the client exe by the installer. The full
+/// launch URI is `kanade-client://show?id=<id>`, but Windows protocol
+/// activation may canonicalise it before handing it back as `%1` (notably it
+/// inserts a slash after the authority when there is no path, so
+/// `…show?id=` arrives as `…show/?id=`). [`parse_protocol_show`] therefore
+/// matches on the scheme + the `id` query param rather than a fixed prefix.
+const PROTOCOL_SCHEME_PREFIX: &str = "kanade-client://";
 /// Tauri-managed shared state. `Arc<Mutex<…>>` instead of plain
 /// `Mutex<…>` so the spawned setup task can hold its own clone
 /// while the `invoke` commands hold theirs.
@@ -517,17 +522,47 @@ fn has_resurface_flag<I: IntoIterator<Item = String>>(args: I) -> bool {
 
 /// Parse the notification id out of a `kanade-client://show?id=<id>` protocol
 /// argument (#647 toast-click). The protocol handler passes the whole URI as
-/// one arg; a launch may append a trailing slash/fragment, so take just the
-/// id token (`[A-Za-z0-9_.-]`, the validated notification-id charset). Shared
-/// by the startup parse and the single-instance handler.
+/// one arg, but Windows canonicalises it first, so the exact shape is NOT
+/// guaranteed: a launch may insert a slash after the authority
+/// (`kanade-client://show/?id=<id>`) or append a trailing slash/fragment. So
+/// match on the scheme + the `id` query param wherever it lands rather than a
+/// fixed `…show?id=` prefix (the old strict prefix missed the slash-inserted
+/// form, so the window opened but never navigated to the notification). Take
+/// just the id token (`[A-Za-z0-9_.-]`, the validated notification-id
+/// charset). Shared by the startup parse and the single-instance handler.
 fn parse_protocol_show<S: AsRef<str>, I: IntoIterator<Item = S>>(args: I) -> Option<String> {
     args.into_iter().find_map(|a| {
-        let rest = a.as_ref().strip_prefix(PROTOCOL_SHOW_PREFIX)?;
-        let id: String = rest
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
-            .collect();
-        (!id.is_empty()).then_some(id)
+        let s = a.as_ref();
+        // Only our own scheme — Windows lowercases the scheme on protocol
+        // activation, so match case-insensitively. Compare the scheme-length
+        // head in place (no `to_ascii_lowercase` allocation); guard the slice
+        // with `is_char_boundary` so a multi-byte first char can't panic.
+        let prefix_len = PROTOCOL_SCHEME_PREFIX.len();
+        if s.len() < prefix_len
+            || !s.is_char_boundary(prefix_len)
+            || !s[..prefix_len].eq_ignore_ascii_case(PROTOCOL_SCHEME_PREFIX)
+        {
+            return None;
+        }
+        // Validate the route is `show` (allowing the Windows-canonicalised
+        // `show/` trailing slash) BEFORE reading the query, so a malformed
+        // `kanade-client://?id=` or a future same-scheme route
+        // (`kanade-client://other?id=`) can't spuriously focus a notification.
+        // Splitting on '?' collapses both the `…show?id=` and the
+        // slash-inserted `…show/?id=` forms to the same `id=<id>[&…]` query.
+        let rest = &s[prefix_len..];
+        let (target, query) = rest.split_once('?')?;
+        if target.trim_end_matches('/') != "show" {
+            return None;
+        }
+        query.split('&').find_map(|pair| {
+            let v = pair.strip_prefix("id=")?;
+            let id: String = v
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+                .collect();
+            (!id.is_empty()).then_some(id)
+        })
     })
 }
 
@@ -654,4 +689,86 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running kanade-client tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_protocol_show_plain_form() {
+        assert_eq!(
+            parse_protocol_show(["kanade-client://show?id=abc123"]),
+            Some("abc123".to_string()),
+        );
+    }
+
+    #[test]
+    fn parse_protocol_show_slash_inserted_form() {
+        // Windows protocol activation inserts a slash after the authority when
+        // there is no path — the regression behind "window opens but the
+        // notification screen doesn't" (#647). Must still parse.
+        assert_eq!(
+            parse_protocol_show(["kanade-client://show/?id=abc123"]),
+            Some("abc123".to_string()),
+        );
+    }
+
+    #[test]
+    fn parse_protocol_show_trailing_slash_after_id() {
+        assert_eq!(
+            parse_protocol_show(["kanade-client://show?id=abc123/"]),
+            Some("abc123".to_string()),
+        );
+    }
+
+    #[test]
+    fn parse_protocol_show_id_charset() {
+        assert_eq!(
+            parse_protocol_show(["kanade-client://show?id=n_1.2-3"]),
+            Some("n_1.2-3".to_string()),
+        );
+    }
+
+    #[test]
+    fn parse_protocol_show_finds_uri_among_other_args() {
+        assert_eq!(
+            parse_protocol_show(["C:\\path\\kanade-client.exe", "kanade-client://show?id=xyz",]),
+            Some("xyz".to_string()),
+        );
+    }
+
+    #[test]
+    fn parse_protocol_show_rejects_non_protocol_args() {
+        assert_eq!(parse_protocol_show(["--show-notification", "abc"]), None,);
+        assert_eq!(parse_protocol_show(["kanade-client.exe"]), None);
+    }
+
+    #[test]
+    fn parse_protocol_show_rejects_missing_or_empty_id() {
+        assert_eq!(parse_protocol_show(["kanade-client://show"]), None);
+        assert_eq!(parse_protocol_show(["kanade-client://show?id="]), None);
+        // A different param without `id` must not match.
+        assert_eq!(parse_protocol_show(["kanade-client://show?foo=bar"]), None);
+    }
+
+    #[test]
+    fn parse_protocol_show_does_not_match_uid_substring() {
+        // `id=` must be a query-param key, not a substring of `uid=`.
+        assert_eq!(parse_protocol_show(["kanade-client://show?uid=abc"]), None);
+    }
+
+    #[test]
+    fn parse_protocol_show_requires_show_route() {
+        // Right scheme + an `id=` param, but NOT the `show` route — must not
+        // focus a notification (malformed / future same-scheme routes).
+        assert_eq!(parse_protocol_show(["kanade-client://?id=abc"]), None);
+        assert_eq!(parse_protocol_show(["kanade-client://other?id=abc"]), None);
+        assert_eq!(parse_protocol_show(["kanade-client://other/?id=abc"]), None);
+        // The canonicalised `show/` form is still the show route.
+        assert_eq!(
+            parse_protocol_show(["kanade-client://show/?id=abc"]),
+            Some("abc".to_string()),
+        );
+    }
 }
