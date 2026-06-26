@@ -28,7 +28,7 @@ pub const STATE_SNAPSHOT: &str = "state.snapshot";
 pub const STATE_SUBSCRIBE: &str = "state.subscribe";
 /// Stop streaming `state.changed` pushes (the matching unsubscribe).
 pub const STATE_UNSUBSCRIBE: &str = "state.unsubscribe";
-/// Push (Agent → Client) when health / vpn / version etc. flips.
+/// Push (Agent → Client) when health / version etc. flips.
 pub const STATE_CHANGED: &str = "state.changed";
 
 // ---- notifications.* ----

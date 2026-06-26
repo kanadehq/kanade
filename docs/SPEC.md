@@ -284,7 +284,7 @@ mgmtctl logs <deploy_id>        # 結果ログ取得
    - 確認操作を Agent → NATS `events.notifications.acked.{pc_id}.{notif_id}` で SPA に流す ⇒ SPA 側で「該当ユーザーが何時何分に確認したか」 を追える
 
 2. **端末ヘルス・状態表示**
-   - ネットワーク / VPN 接続状態 (リアルタイム)
+   - フリート疎通状態 (`online`) をリアルタイム表示。VPN 接続状態などサイト個別の状態は専用フィールドを設けず、operator 定義の `check:` ジョブ (例: `check-vpn.yaml`) として下記コンプライアンスチェックに並べる
    - インストール済ソフトウェアのバージョン (最新? 更新待ち?)
    - 「**コンプライアンスチェック**」 として 5〜10 項目を ✅/⚠️/❌ 表示:
      BitLocker 有効、AV 最新、OS パッチ最新、証明書期限 30 日超、ディスク空き 10% 超、Agent self-update 完了、等
@@ -1729,7 +1729,7 @@ Request の `id` は Client 採番 (**UUID v7 推奨** — 時系列ソート可
 | `system.log_tail` | req-rep | agent.log の末尾 N 行 (サポート問い合わせ用) |
 | `state.snapshot` | req-rep | 端末ヘルス + inventory + コンプライアンスチェックの一括スナップショット |
 | `state.subscribe` | req-rep | `state.changed` 購読開始 |
-| `state.changed` | push (A→C) | health / vpn / version 等の状態変化 |
+| `state.changed` | push (A→C) | health / version 等の状態変化 |
 | `notifications.list` | req-rep | 過去通知一覧 (paginated, filter: unread/all) |
 | `notifications.subscribe` | req-rep | `notifications.new` 購読開始 |
 | `notifications.new` | push (A→C) | 新着通知 (emergency 含む) |
@@ -1796,7 +1796,7 @@ A→C {"jsonrpc":"2.0","id":"u1",
 // state.snapshot (起動時の一括取得)
 C→A {"jsonrpc":"2.0","id":"u2","method":"state.snapshot"}
 A→C {"jsonrpc":"2.0","id":"u2",
-     "result":{"pc_id":"PC1234","online":true,"vpn":"connected",
+     "result":{"pc_id":"PC1234","online":true,
                "checks":[{"name":"bitlocker","status":"ok"},
                          {"name":"av_signature","status":"warn","detail":"3 日前"}],
                "agent_version":"0.4.0","target_version":"0.4.0"}}

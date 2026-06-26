@@ -94,17 +94,31 @@ type Check = {
 type StateSnapshot = {
   pc_id: string;
   online: boolean;
-  vpn: string;
+  // No `vpn` field: VPN posture, when a site wants it, is an
+  // operator-defined `check:` row in `checks` (see kanade_shared
+  // StateSnapshot docs), not a built-in snapshot field.
   checks: Check[];
   agent_version: string;
   target_version: string;
 };
 
+// Lucide `data-lucide` (kebab) icon per check status — hydrated to an
+// SVG by createIcons(). Names verified against the lucide 1.21.0 export
+// map; rendered inside a status-tinted badge (see .check-badge in CSS).
 const STATUS_ICON: Record<CheckStatus, string> = {
-  ok: "✅",
-  warn: "⚠️",
-  fail: "❌",
-  unknown: "❔",
+  ok: "circle-check",
+  warn: "triangle-alert",
+  fail: "circle-x",
+  unknown: "circle-help",
+};
+
+// Short human label per status — used for the hero count chips and the
+// badge's aria-label so color isn't the only signal (a11y).
+const STATUS_LABEL: Record<CheckStatus, string> = {
+  ok: "正常",
+  warn: "注意",
+  fail: "異常",
+  unknown: "不明",
 };
 
 // ---- Jobs / remediation (#291) ----
@@ -1324,9 +1338,15 @@ function renderDashboard(): void {
     } else if (s.checks.length === 0) {
       text = "✅ オンライン";
       level = "ok";
-    } else {
+    } else if (s.checks.every((c) => c.status === "ok")) {
       text = "✅ 全て正常";
       level = "ok";
+    } else {
+      // Some checks couldn't run (all/partly unknown). Don't claim
+      // "全て正常" — surface the unresolved count instead of a false clear.
+      const unknowns = s.checks.filter((c) => c.status === "unknown").length;
+      text = `❔ ${unknowns}件が判定不可`;
+      level = "warn";
     }
     hv.textContent = text;
     card.classList.add(level);
@@ -1364,17 +1384,78 @@ async function renderHealth() {
 function renderSnapshot(s: StateSnapshot): string {
   const restartPending =
     s.target_version !== "" && s.target_version !== s.agent_version;
-  const header = `
-    <p>${s.online ? "✅ オンライン" : "❌ オフライン"} · VPN: ${escapeHtml(s.vpn)}</p>
-    <p class="muted">Agent v${escapeHtml(s.agent_version)}${
-      restartPending
-        ? ` → v${escapeHtml(s.target_version)}（再起動待ち）`
-        : ""
-    }</p>`;
-  const rows = s.checks.length
-    ? `<ul class="checks">${s.checks.map(renderCheck).join("")}</ul>`
-    : `<p class="muted">チェック項目はまだありません</p>`;
-  return header + rows;
+
+  // Defensive: `state.snapshot` always serializes `checks` (a Vec,
+  // never null), but guard against a malformed/partial payload so a
+  // missing field degrades to "no checks" instead of throwing.
+  const checks = Array.isArray(s.checks) ? s.checks : [];
+
+  // Roll the per-check results up into one headline status. Severity
+  // wins: any fail → fail, else any warn → warn, else all-ok → ok.
+  // Everything left — no checks yet, or checks that couldn't run — is
+  // "unknown". Critically, a bucket of all-`unknown` checks must NOT
+  // fall through to "ok": that would be a false all-clear.
+  const fails = checks.filter((c) => c.status === "fail").length;
+  const warns = checks.filter((c) => c.status === "warn").length;
+  const oks = checks.filter((c) => c.status === "ok").length;
+  const unknowns = checks.length - fails - warns - oks;
+  const overall: CheckStatus =
+    fails > 0
+      ? "fail"
+      : warns > 0
+        ? "warn"
+        : oks > 0 && oks === checks.length
+          ? "ok"
+          : "unknown";
+
+  const headline =
+    checks.length === 0
+      ? "チェック項目はまだありません"
+      : fails > 0
+        ? `${fails} 件の対応が必要です`
+        : warns > 0
+          ? `${warns} 件の注意があります`
+          : unknowns > 0
+            ? `${unknowns} 件が判定できません`
+            : "すべて正常です";
+
+  // Count chips — only the non-empty buckets, most-severe first.
+  const chips = [
+    fails > 0 ? statusChip("fail", fails) : "",
+    warns > 0 ? statusChip("warn", warns) : "",
+    unknowns > 0 ? statusChip("unknown", unknowns) : "",
+    oks > 0 ? statusChip("ok", oks) : "",
+  ].join("");
+
+  const restart = restartPending
+    ? ` · 更新 v${escapeHtml(s.target_version)} 適用待ち（再起動）`
+    : "";
+
+  const hero = `
+    <section class="health-hero status-${overall}">
+      <span class="health-badge" aria-hidden="true"><i data-lucide="${STATUS_ICON[overall]}"></i></span>
+      <div class="health-hero-body">
+        <p class="health-hero-title">${escapeHtml(headline)}</p>
+        <p class="health-hero-sub">
+          <span class="health-online ${s.online ? "is-online" : "is-offline"}"><span class="health-online-dot"></span>${
+            s.online ? "オンライン" : "オフライン"
+          }</span>
+          <span class="health-sep">·</span>Agent v${escapeHtml(s.agent_version)}${restart}
+        </p>
+      </div>
+      ${chips ? `<div class="health-stats">${chips}</div>` : ""}
+    </section>`;
+
+  const rows = checks.length
+    ? `<ul class="checks">${checks.map(renderCheck).join("")}</ul>`
+    : "";
+  return hero + rows;
+}
+
+// One pill in the hero's count strip, tinted by status via the
+// `status-*` class (see .health-chip in CSS).
+function statusChip(status: CheckStatus, n: number): string {
+  return `<span class="health-chip status-${status}">${n} ${STATUS_LABEL[status]}</span>`;
 }
 
 function renderCheck(c: Check): string {
@@ -1387,11 +1468,14 @@ function renderCheck(c: Check): string {
     : "";
   // Show the operator's human title when set; fall back to the slug.
   const title = c.label && c.label.trim() ? c.label : c.name;
+  const label = STATUS_LABEL[c.status] ?? STATUS_LABEL.unknown;
   return `
-    <li class="check-row status-${escapeHtml(c.status)}">
-      <span class="check-icon">${icon}</span>
-      <span class="check-name">${escapeHtml(title)}</span>
-      ${detail}
+    <li class="check-card status-${escapeHtml(c.status)}">
+      <span class="check-badge" role="img" aria-label="${escapeHtml(label)}"><i data-lucide="${icon}"></i></span>
+      <div class="check-text">
+        <span class="check-name">${escapeHtml(title)}</span>
+        ${detail}
+      </div>
       ${fix}
     </li>`;
 }

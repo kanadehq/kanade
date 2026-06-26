@@ -364,57 +364,202 @@ button.dash-card:hover {
   color: var(--fail);
 }
 
-/* ---- Health checks (#290) ---- */
-ul.checks {
-  list-style: none;
-  margin: 4px 0 0;
-  padding: 0;
+/* ---- Health checks (#290) ----
+   Every health element (.health-hero, .health-chip, .check-card, the
+   badges) reads its accent from a single `--status` custom property set
+   by the `.status-{ok,warn,fail,unknown}` class. So a row's color is
+   declared once, and the tinted badge / left rail / chip all stay in
+   sync. Soft fills use color-mix over `--status` (WebView2 + WKWebView
+   both ship a recent enough Blink/WebKit for it). */
+.status-ok {
+  --status: var(--ok);
+}
+.status-warn {
+  --status: var(--warn);
+}
+.status-fail {
+  --status: var(--fail);
+}
+.status-unknown {
+  --status: var(--muted);
 }
 
-.check-row {
+/* Hero summary: one prominent roll-up card above the per-check list —
+   status glyph in a tinted disc, headline + online/version sub-line, and
+   a count-chip strip on the right. The left rail is the status color. */
+.health-hero {
   display: flex;
-  align-items: baseline;
-  gap: 8px;
-  padding: 10px 0;
-  border-top: 1px solid var(--border);
+  align-items: center;
+  gap: 14px;
+  margin: 2px 0 16px;
+  padding: 16px 18px;
+  background: linear-gradient(
+    to right,
+    color-mix(in srgb, var(--status) 9%, var(--panel)),
+    var(--panel) 60%
+  );
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--status);
+  border-radius: var(--radius);
 }
 
-.check-row:first-child {
-  border-top: 0;
-}
-
-.check-icon {
+.health-badge {
   flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  color: var(--status);
+  background: color-mix(in srgb, var(--status) 16%, transparent);
 }
 
-.check-name {
-  font-weight: 500;
+.health-badge svg {
+  width: 24px;
+  height: 24px;
 }
 
-.check-detail {
+.health-hero-body {
   flex: 1 1 auto;
+  min-width: 0;
+}
+
+.health-hero-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.health-hero-sub {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 0 0;
+  font-size: 12.5px;
   color: var(--muted);
 }
 
+.health-sep {
+  opacity: 0.5;
+}
+
+/* Online indicator: a small dot + label, green when connected, muted
+   when not. Mirrors the header conn-dot vocabulary at text scale. */
+.health-online {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.health-online-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.health-online.is-online {
+  color: var(--ok);
+}
+
+.health-online.is-online .health-online-dot {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent);
+}
+
+/* Count-chip strip — one pill per non-empty status bucket. */
+.health-stats {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.health-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--status);
+  background: color-mix(in srgb, var(--status) 14%, transparent);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+/* Per-check cards: gapped rounded rows (not hairline-divided) with a
+   status left rail + tinted glyph badge. */
+ul.checks {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+}
+
+.check-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--status);
+  border-radius: 10px;
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.check-card:hover {
+  border-color: color-mix(in srgb, var(--status) 45%, var(--border));
+  box-shadow: 0 2px 12px -6px rgba(0, 0, 0, 0.28);
+}
+
+.check-badge {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  color: var(--status);
+  background: color-mix(in srgb, var(--status) 15%, transparent);
+}
+
+.check-badge svg {
+  width: 18px;
+  height: 18px;
+}
+
+.check-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.check-name {
+  font-weight: 600;
+}
+
+.check-detail {
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .fix-btn {
+  flex: 0 0 auto;
   margin-left: auto;
-  padding: 4px 10px;
+  padding: 5px 14px;
   font-size: 13px;
 }
 
 .fix-btn[disabled] {
   opacity: 0.5;
   cursor: not-allowed;
-}
-
-.status-warn .check-name {
-  color: var(--warn);
-}
-.status-fail .check-name {
-  color: var(--fail);
-}
-.status-unknown .check-name {
-  color: var(--muted);
 }
 
 /* ---- Job list (#291) ---- */

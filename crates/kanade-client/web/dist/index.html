@@ -3,16 +3,44 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Kanade</title>
-    <script type="module" crossorigin src="/assets/index-sekMInFz.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-B75CmY_i.css">
+    <!-- Default product name; main.ts swaps both this and the header
+         brand text to the operator-configured client_display_name once
+         the agent handshake lands. Mirrors the Rust source of truth
+         kanade_shared::DEFAULT_CLIENT_DISPLAY_NAME (and main.ts's
+         DEFAULT_DISPLAY_NAME) — keep all in sync. -->
+    <title>端末管理支援ツール</title>
+    <script type="module" crossorigin src="/assets/index-C-DGZgp0.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-DrIInkzj.css">
   </head>
   <body>
     <div id="app">
       <!-- Slim header: brand + a single connection status dot. No
            session / protocol / pc internals (operator-facing noise). -->
       <header class="app-header">
-        <div class="brand"><span class="brand-mark">奏</span> Kanade</div>
+        <!-- Brand = タクト (baton) mark + the product name. The mark is
+             the same baton-only geometry as the SPA's leftmost icon
+             (no 奏 kanji). The name text defaults to the built-in
+             product name and is replaced by main.ts with the
+             operator-configured client_display_name after handshake. -->
+        <div class="brand">
+          <svg
+            class="brand-mark"
+            xmlns="http://www.w3.org/2000/svg"
+            viewBox="40 30 180 140"
+            role="img"
+            aria-label="baton"
+          >
+            <defs>
+              <linearGradient id="brand-baton" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" stop-color="#5b3a8c" />
+                <stop offset="0.5" stop-color="#d4a017" />
+                <stop offset="1" stop-color="#2a9d8f" />
+              </linearGradient>
+            </defs>
+            <path d="M 54 60 A 12 12 0 1 1 68 41 L 212 162 Z" fill="url(#brand-baton)" />
+          </svg>
+          <span class="brand-name">端末管理支援ツール</span>
+        </div>
         <div class="conn conn-connecting" id="conn" title="エージェント接続状態">
           <span class="conn-dot"></span>
           <span class="conn-label">接続待ち</span>
@@ -46,63 +74,77 @@
           <div class="sidebar-version" id="app-version" title="クライアントのバージョン" hidden></div>
         </nav>
 
-        <main class="content">
-          <!-- Home / dashboard -->
-          <section class="view" id="view-home">
-            <h2 class="view-title">ホーム</h2>
-            <div class="dash-cards">
-              <button class="dash-card" data-view="health" id="card-health">
-                <i class="dash-icon" data-lucide="heart-pulse"></i>
-                <div class="dash-card-body">
-                  <span class="dash-card-label">端末ヘルス</span>
-                  <span class="dash-card-value" id="card-health-value">読み込み中…</span>
-                </div>
-              </button>
-              <button class="dash-card" data-view="notifications" id="card-notif">
-                <i class="dash-icon" data-lucide="bell"></i>
-                <div class="dash-card-body">
-                  <span class="dash-card-label">通知</span>
-                  <span class="dash-card-value" id="card-notif-value">—</span>
-                </div>
-              </button>
-              <div class="dash-card dash-card-static" id="card-runs" hidden>
-                <i class="dash-icon" data-lucide="loader"></i>
-                <div class="dash-card-body">
-                  <span class="dash-card-label">実行中のジョブ</span>
-                  <span class="dash-card-value" id="card-runs-value">—</span>
+        <!-- Content column: the active view scrolls on top, the 実行状況
+             dock is pinned to the bottom as a flex sibling (NOT sticky-in-
+             scroll, which left a gap on short pages and nested scrollbars). -->
+        <div class="main">
+          <main class="content">
+            <!-- Home / dashboard -->
+            <section class="view" id="view-home">
+              <h2 class="view-title">ホーム</h2>
+              <div class="dash-cards">
+                <button class="dash-card" data-view="health" id="card-health">
+                  <i class="dash-icon" data-lucide="heart-pulse"></i>
+                  <div class="dash-card-body">
+                    <span class="dash-card-label">端末ヘルス</span>
+                    <span class="dash-card-value" id="card-health-value">読み込み中…</span>
+                  </div>
+                </button>
+                <button class="dash-card" data-view="notifications" id="card-notif">
+                  <i class="dash-icon" data-lucide="bell"></i>
+                  <div class="dash-card-body">
+                    <span class="dash-card-label">通知</span>
+                    <span class="dash-card-value" id="card-notif-value">—</span>
+                  </div>
+                </button>
+                <div class="dash-card dash-card-static" id="card-runs" hidden>
+                  <i class="dash-icon" data-lucide="loader"></i>
+                  <div class="dash-card-body">
+                    <span class="dash-card-label">実行中のジョブ</span>
+                    <span class="dash-card-value" id="card-runs-value">—</span>
+                  </div>
                 </div>
               </div>
-            </div>
-          </section>
+            </section>
 
-          <!-- Notifications -->
-          <section class="view" id="view-notifications" hidden>
-            <h2 class="view-title">
-              通知 <span class="badge" id="notif-badge" hidden></span>
-            </h2>
-            <div id="notifications"></div>
-          </section>
+            <!-- Notifications -->
+            <section class="view" id="view-notifications" hidden>
+              <h2 class="view-title">
+                通知 <span class="badge" id="notif-badge" hidden></span>
+              </h2>
+              <div id="notifications"></div>
+            </section>
 
-          <!-- Health (check: jobs) -->
-          <section class="view" id="view-health" hidden>
-            <h2 class="view-title">端末ヘルス</h2>
-            <div id="health"><p class="muted">読み込み中…</p></div>
-          </section>
+            <!-- Health (check: jobs) -->
+            <section class="view" id="view-health" hidden>
+              <h2 class="view-title">端末ヘルス</h2>
+              <div id="health"><p class="muted">読み込み中…</p></div>
+            </section>
 
-          <!-- Jobs for the selected category (client: jobs). One view,
-               re-rendered per selected category. -->
-          <section class="view" id="view-jobs" hidden>
-            <h2 class="view-title" id="jobs-view-title">ジョブ</h2>
-            <div id="jobs-list"></div>
-          </section>
+            <!-- Jobs for the selected category (client: jobs). One view,
+                 re-rendered per selected category. -->
+            <section class="view" id="view-jobs" hidden>
+              <h2 class="view-title" id="jobs-view-title">ジョブ</h2>
+              <div id="jobs-list"></div>
+            </section>
 
-          <!-- Persistent run status panel: shows live progress of any
-               jobs.execute regardless of the active view. -->
+          </main>
+
+          <!-- Persistent run status dock: a flex-fixed bottom region (always
+               flush to the window edge, no sticky gap) showing live progress
+               of any jobs.execute regardless of the active view. A fixed
+               header carries the 実行中 count; only the row list below it
+               scrolls — so the dock and the view above each own a single
+               scrollbar instead of nesting. Running rows pin to the top with
+               their output open; completed rows sink below, output collapsed. -->
           <section class="runs-panel" id="runs-section" hidden>
-            <h2 class="view-title">実行状況</h2>
-            <div id="runs"></div>
+            <header class="runs-header">
+              <h2 class="runs-title">実行状況</h2>
+              <span class="badge runs-active-badge" id="runs-active-badge" hidden></span>
+            </header>
+            <div id="runs" class="runs-scroll"></div>
           </section>
-        </main>
+        </div>
       </div>
     </div>
 

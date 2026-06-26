@@ -1291,7 +1291,6 @@ mod tests {
         let snapshot = StateSnapshot {
             pc_id: "PC1".into(),
             online: true,
-            vpn: "unknown".into(),
             checks: vec![],
             agent_version: "0.0.0".into(),
             target_version: "0.0.0".into(),
