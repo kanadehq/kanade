@@ -655,6 +655,11 @@ const notifications = new Map<string, AppNotification>();
 // notification is what marks it read (the user can't have "seen" a body that
 // was never expanded). Survives re-renders.
 const expandedIds = new Set<string>();
+// Ids whose body the user has expanded at least once. An ack-required
+// notification's 確認 stays locked until its body has been opened (read), so
+// the user can't confirm content they never saw. Unlike `expandedIds` this is
+// sticky across a re-collapse — re-hiding the body doesn't re-lock 確認.
+const seenIds = new Set<string>();
 let notifSubscribed = false;
 
 function isExpired(n: AppNotification): boolean {
@@ -692,6 +697,7 @@ async function loadNotifications(): Promise<void> {
         if (!present.has(id) && !isExpired(n)) {
           notifications.delete(id);
           expandedIds.delete(id);
+          seenIds.delete(id);
         }
       }
     }
@@ -881,8 +887,10 @@ function focusNotificationInPanel(id: string): void {
   showView("notifications");
   // Jumping to a notification reveals its body — same as opening it by hand,
   // so mark an ack-optional one read here too (otherwise the unread dot
-  // lingers while the user is looking straight at the body).
+  // lingers while the user is looking straight at the body). `seenIds` too, so
+  // a toast-opened ack-required row can be confirmed straight away.
   expandedIds.add(id);
+  seenIds.add(id);
   const focused = notifications.get(id);
   if (focused && !focused.acked_at && !focused.require_ack) {
     void ackNotification(id).catch(() => {});
@@ -928,6 +936,14 @@ function handleNewNotification(incoming: AppNotification): void {
     if (!ackInvalidated && existing.acked_at) {
       n = { ...incoming, acked_at: existing.acked_at };
     }
+    // A confirmation-reset edit puts the notification back to unread with NEW
+    // content — drop the sticky read/expanded state so 確認 re-locks to
+    // 「開いて確認」 and the user must re-open the edited body before confirming
+    // (otherwise the stale `seenIds` entry would leave 確認 unlocked).
+    if (ackInvalidated) {
+      seenIds.delete(incoming.id);
+      expandedIds.delete(incoming.id);
+    }
   }
 
   notifications.set(n.id, n);
@@ -957,6 +973,7 @@ function handleAmendNotification(a: NotificationAmend): void {
   if (!notifications.has(a.id)) return;
   notifications.delete(a.id);
   expandedIds.delete(a.id);
+  seenIds.delete(a.id);
   renderNotifications();
 }
 
@@ -1024,6 +1041,7 @@ async function resurfaceAllToasts(): Promise<void> {
         if (!present.has(id) && !isExpired(n)) {
           notifications.delete(id);
           expandedIds.delete(id);
+          seenIds.delete(id);
         }
       }
     }
@@ -1099,6 +1117,7 @@ function evictOldNotifications(): void {
     if (isExpired(n)) {
       notifications.delete(id);
       expandedIds.delete(id);
+      seenIds.delete(id);
     }
   }
   if (notifications.size <= MAX_NOTIFICATIONS) return;
@@ -1107,14 +1126,30 @@ function evictOldNotifications(): void {
     if (n.acked_at) {
       notifications.delete(id);
       expandedIds.delete(id);
+      seenIds.delete(id);
     }
   }
+}
+
+// One-line body preview (~120 chars) for the collapsed state — single source
+// of truth for "this notification has a body, click to read it". Returns "" for
+// an empty body. The CSS clamps it to one line + ellipsis; the slice just keeps
+// the DOM small for a very long body.
+function notifPreview(body: string): string {
+  const flat = body.replace(/\s+/g, " ").trim();
+  if (!flat) return "";
+  // Slice by Unicode code points (`Array.from`) — `String.slice` cuts UTF-16
+  // code units and would split a surrogate pair (emoji / rare kanji) at the
+  // boundary, leaving a broken glyph.
+  const sliced = Array.from(flat).slice(0, 120).join("");
+  return escapeHtml(sliced);
 }
 
 function renderNotification(n: AppNotification): string {
   const icon = PRIORITY_ICON[n.priority] ?? PRIORITY_ICON.unknown;
   const acked = !!n.acked_at;
   const expanded = expandedIds.has(n.id);
+  const id = escapeHtml(n.id);
   const meta = [
     n.issued_by ? `送信元: ${escapeHtml(n.issued_by)}` : "",
     fmtTime(n.issued_at),
@@ -1123,16 +1158,27 @@ function renderNotification(n: AppNotification): string {
     .join(" · ");
   // Ack-required notifications clear their unread state via the explicit
   // 確認 button; ack-optional ones clear it by being opened (read). So only
-  // require_ack carries an action control here.
-  const ackCtl =
-    n.require_ack && !acked
-      ? `<button class="notif-ack-btn" data-notif-id="${escapeHtml(n.id)}">確認</button>`
-      : n.require_ack && acked
-        ? `<span class="notif-acked muted">✓ 確認済み</span>`
-        : "";
+  // require_ack carries an action control here. The 確認 button is GATED on
+  // having opened the body: until then it's a 「開いて確認」 button that just
+  // expands the row (data-notif-toggle), so the user can't confirm content
+  // they never read. Once read it becomes the real 確認 (data-notif-id → ack).
+  const seen = seenIds.has(n.id);
+  const ackCtl = !n.require_ack
+    ? ""
+    : acked
+      ? `<span class="notif-acked muted">✓ 確認済み</span>`
+      : seen
+        ? `<button class="notif-ack-btn" data-notif-id="${id}">確認</button>`
+        : `<button class="notif-ack-btn notif-ack-locked" data-notif-toggle="${id}" title="本文を開いて内容をご確認ください">開いて確認</button>`;
   // An unread dot makes the badge count legible per-row; it clears the
   // moment the notification is read/acked.
   const unreadDot = acked ? "" : `<span class="notif-dot" aria-hidden="true"></span>`;
+  // Collapsed preview: makes it unmistakable that there IS a body to read and
+  // that the row expands. Hidden via CSS once expanded (the full text shows).
+  const preview = notifPreview(n.body);
+  const previewEl = preview
+    ? `<p class="notif-preview notif-toggle" data-notif-toggle="${id}">${preview}</p>`
+    : "";
   const classes = [
     "notif-row",
     `priority-${escapeHtml(n.priority)}`,
@@ -1142,15 +1188,16 @@ function renderNotification(n: AppNotification): string {
     .filter(Boolean)
     .join(" ");
   return `
-    <div id="cnotif-${escapeHtml(n.id)}" class="${classes}">
+    <div id="cnotif-${id}" class="${classes}">
       <span class="notif-icon">${icon}</span>
       <div class="notif-main">
-        <div class="notif-head notif-toggle" data-notif-toggle="${escapeHtml(n.id)}" role="button" tabindex="0" aria-expanded="${expanded}">
+        <div class="notif-head notif-toggle" data-notif-toggle="${id}" role="button" tabindex="0" aria-expanded="${expanded}">
           ${unreadDot}
           <span class="notif-title">${escapeHtml(n.title)}</span>
           <span class="notif-prio muted">${escapeHtml(PRIORITY_LABEL[n.priority] ?? PRIORITY_LABEL.unknown)}</span>
           <span class="notif-chevron" aria-hidden="true">▸</span>
         </div>
+        ${previewEl}
         <div class="notif-collapse">
           <p class="notif-text">${escapeHtml(n.body)}</p>
           <p class="notif-meta muted">${meta}</p>
@@ -1169,6 +1216,9 @@ function toggleNotification(id: string): void {
     expandedIds.delete(id);
   } else {
     expandedIds.add(id);
+    // Sticky "the user has read this" flag — unlocks 確認 for ack-required
+    // rows even after a later re-collapse.
+    seenIds.add(id);
     const n = notifications.get(id);
     if (n && !n.acked_at && !n.require_ack) {
       void ackNotification(id).catch(() => {});
@@ -1515,6 +1565,10 @@ window.addEventListener("DOMContentLoaded", () => {
     if (!(e.target instanceof Element)) return;
     const toggle = e.target.closest<HTMLElement>("[data-notif-toggle]");
     if (toggle?.dataset.notifToggle) {
+      // A native <button> toggle (the "開いて確認" control) already emits its
+      // own click on Enter/Space — synthesizing one here too would toggle
+      // twice (net no-op). Only the role="button" head needs this shim.
+      if (toggle.tagName === "BUTTON") return;
       e.preventDefault();
       toggleNotification(toggle.dataset.notifToggle);
       return;

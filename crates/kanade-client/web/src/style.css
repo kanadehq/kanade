@@ -659,6 +659,17 @@ ul.checks {
   user-select: none;
 }
 
+/* Hover feedback so the row visibly reads as "click to expand". */
+.notif-toggle:hover .notif-chevron {
+  color: var(--accent);
+}
+
+.notif-head.notif-toggle:hover .notif-title {
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
 /* Unread marker — a small dot before the title; cleared once read/acked. */
 .notif-dot {
   flex: 0 0 auto;
@@ -690,13 +701,32 @@ ul.checks {
   margin-left: auto;
   flex: 0 0 auto;
   align-self: center;
-  font-size: 12px;
+  font-size: 14px;
   color: var(--muted);
-  transition: transform 0.15s ease;
+  transition:
+    transform 0.15s ease,
+    color 0.15s ease;
 }
 
 .notif-row.expanded .notif-chevron {
   transform: rotate(90deg);
+}
+
+/* Collapsed one-line body preview — the at-a-glance signal that this
+   notification HAS a body and that the row expands to show it. Clipped to a
+   single line; hidden once the full text is revealed. */
+.notif-preview {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.notif-row.expanded .notif-preview {
+  display: none;
 }
 
 /* Body + meta collapse away until the row is expanded. */
@@ -749,6 +779,16 @@ ul.checks {
   flex: 0 0 auto;
   padding: 4px 12px;
   font-size: 13px;
+}
+
+/* 確認 is GATED on reading the body: until the row is opened it renders as a
+   softer secondary "開いて確認" button (it just expands the row), so it never
+   looks like the real confirm action. Once read it becomes the solid 確認. */
+.notif-ack-locked,
+.notif-ack-locked:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
 }
 
 .notif-acked {
