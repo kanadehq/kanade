@@ -28,6 +28,7 @@
   "timeline": {
     "active": "active",
     "idle": "idle",
+    "count": "count",
     "noData": "no samples"
   }
 }

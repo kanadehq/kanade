@@ -88,6 +88,16 @@ pub struct HourBucket {
     pub active: i64,
 }
 
+/// One raw operational event for an `op_timeline` widget. The SPA folds a
+/// window's worth of these into lane spans (power/session/sleep), so the
+/// span-reconstruction logic lives in one place (shared with the Events
+/// page strip) rather than being duplicated in Rust.
+#[derive(Serialize)]
+pub struct OpEvent {
+    pub at: DateTime<Utc>,
+    pub kind: String,
+}
+
 /// The render-specific payload. Tagged by `render` so the SPA picks the
 /// matching widget component; flattened into [`WidgetResult`].
 #[derive(Serialize)]
@@ -108,12 +118,35 @@ pub enum WidgetData {
         last: Option<DateTime<Utc>>,
     },
     Timeline {
+        /// `"ratio"` when the widget declares a `bool_path` (per-hour
+        /// active/total proportion — a presence strip); `"count"` for
+        /// a pure volume timeline (e.g. boot / logon counts, where
+        /// `active = total`). The SPA needs this to render correctly:
+        /// a count strip must scale each bar's HEIGHT by its hour's
+        /// magnitude and label it "count", whereas the ratio strip
+        /// fills each populated hour by its active proportion and
+        /// labels it "active / idle". Without the discriminator the
+        /// SPA filled every populated hour to full height and called
+        /// it "active / idle" — flattening all magnitude (every busy
+        /// hour looked identical, the source of the "different days,
+        /// same max" confusion) and mislabelling volume as presence.
+        metric: &'static str,
         buckets: Vec<HourBucket>,
     },
     Stat {
         value: i64,
         #[serde(skip_serializing_if = "Option::is_none")]
         est_minutes: Option<i64>,
+    },
+    /// A per-PC operational swimlane. Carries the query window plus the raw
+    /// operational events in it; the SPA reconstructs the power/session/sleep
+    /// lane spans (clamping open intervals to `[from, to]`). Serialized with
+    /// `render: "op_timeline"`.
+    #[serde(rename = "op_timeline")]
+    OpTimeline {
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+        events: Vec<OpEvent>,
     },
 }
 
@@ -250,12 +283,19 @@ async fn compute_widget(ctx: &Ctx<'_>, w: &AggregateWidget) -> anyhow::Result<Op
     // variant this build can't execute) — across every enum field, not
     // just agg/render, so a future `transform`/`time_bucket` is dropped
     // cleanly rather than silently misrouted.
-    if matches!(w.agg, AggregateAgg::Unknown)
+    if matches!(w.agg, Some(AggregateAgg::Unknown))
         || matches!(w.render, AggregateRender::Unknown)
         || matches!(w.transform, Some(AggregateTransform::Unknown))
         || matches!(w.time_bucket, Some(AggregateTimeBucket::Unknown))
     {
         return Ok(None);
+    }
+
+    // `op_timeline` performs no rollup — it returns the window's raw
+    // operational events for the SPA to fold into lane spans. Handled before
+    // the agg dispatch because it reads neither `kind` nor `agg`.
+    if matches!(w.render, AggregateRender::OpTimeline) {
+        return Ok(Some(op_timeline(ctx).await?));
     }
     let exclude_json = if w.exclude.is_empty() {
         None
@@ -271,11 +311,11 @@ async fn compute_widget(ctx: &Ctx<'_>, w: &AggregateWidget) -> anyhow::Result<Op
     }
 
     let data = match w.agg {
-        AggregateAgg::Ratio => gauge(ctx, w, sample).await?,
+        Some(AggregateAgg::Ratio) => gauge(ctx, w, sample).await?,
         // pc_id ranking is matched before the host transform so a stored
         // `group_by: pc_id` + `transform: host` (nonsense, and rejected at
         // create time) can't misroute into bar_host("pc_id").
-        AggregateAgg::Count => match &w.group_by {
+        Some(AggregateAgg::Count) => match &w.group_by {
             Some(gb) if gb == "pc_id" => bar_count_pc(ctx, w, exclude_json, limit, sample).await?,
             Some(gb) if matches!(w.transform, Some(AggregateTransform::Host)) => {
                 bar_host(ctx, w, gb, limit, sample).await?
@@ -283,7 +323,7 @@ async fn compute_widget(ctx: &Ctx<'_>, w: &AggregateWidget) -> anyhow::Result<Op
             Some(gb) => bar_count_path(ctx, w, gb, exclude_json, limit, sample).await?,
             None => stat_count(ctx, w, sample).await?,
         },
-        AggregateAgg::Sum => {
+        Some(AggregateAgg::Sum) => {
             let vp = w.value_path.as_deref().unwrap_or_default();
             match &w.group_by {
                 Some(gb) if gb == "pc_id" => sum_bar_pc(ctx, w, vp, exclude_json, limit).await?,
@@ -291,7 +331,8 @@ async fn compute_widget(ctx: &Ctx<'_>, w: &AggregateWidget) -> anyhow::Result<Op
                 None => sum_stat(ctx, w, vp).await?,
             }
         }
-        // Unknown (handled above) + any future #[non_exhaustive] variant.
+        // `None` (op_timeline, handled above; or a malformed stored widget
+        // missing `agg`), Unknown (handled above), + any future variant.
         _ => return Ok(None),
     };
     Ok(Some(data))
@@ -317,7 +358,7 @@ async fn bar_count_path(
          GROUP BY json_extract(payload, '$.' || ?6) ORDER BY n DESC LIMIT ?8",
     )
     .bind(ctx.pc_id)
-    .bind(&w.kind)
+    .bind(w.kind.as_deref())
     .bind(w.source.as_deref())
     .bind(ctx.from)
     .bind(ctx.to)
@@ -351,7 +392,7 @@ async fn bar_count_pc(
          GROUP BY pc_id ORDER BY n DESC LIMIT ?7",
     )
     .bind(ctx.pc_id)
-    .bind(&w.kind)
+    .bind(w.kind.as_deref())
     .bind(w.source.as_deref())
     .bind(ctx.from)
     .bind(ctx.to)
@@ -386,7 +427,7 @@ async fn bar_host(
          ORDER BY at DESC LIMIT ?7",
     )
     .bind(ctx.pc_id)
-    .bind(&w.kind)
+    .bind(w.kind.as_deref())
     .bind(w.source.as_deref())
     .bind(ctx.from)
     .bind(ctx.to)
@@ -433,7 +474,7 @@ async fn stat_count(
            AND at >= ?4 AND at < ?5",
     )
     .bind(ctx.pc_id)
-    .bind(&w.kind)
+    .bind(w.kind.as_deref())
     .bind(w.source.as_deref())
     .bind(ctx.from)
     .bind(ctx.to)
@@ -463,7 +504,7 @@ async fn gauge(
            AND at >= ?4 AND at < ?5",
     )
     .bind(ctx.pc_id)
-    .bind(&w.kind)
+    .bind(w.kind.as_deref())
     .bind(w.source.as_deref())
     .bind(ctx.from)
     .bind(ctx.to)
@@ -511,7 +552,7 @@ async fn timeline(ctx: &Ctx<'_>, w: &AggregateWidget) -> anyhow::Result<WidgetDa
             )
             .bind(ctx.tz_mod)
             .bind(ctx.pc_id)
-            .bind(&w.kind)
+            .bind(w.kind.as_deref())
             .bind(w.source.as_deref())
             .bind(ctx.from)
             .bind(ctx.to)
@@ -530,13 +571,21 @@ async fn timeline(ctx: &Ctx<'_>, w: &AggregateWidget) -> anyhow::Result<WidgetDa
             )
             .bind(ctx.tz_mod)
             .bind(ctx.pc_id)
-            .bind(&w.kind)
+            .bind(w.kind.as_deref())
             .bind(w.source.as_deref())
             .bind(ctx.from)
             .bind(ctx.to)
             .fetch_all(ctx.pool)
             .await?
         }
+    };
+    // A `bool_path` makes `active` a real active/total ratio (presence);
+    // without one the SQL set `active = total`, so the strip is pure volume
+    // and the SPA must read bar HEIGHT as the hour's count, not a fill.
+    let metric = if w.bool_path.is_some() {
+        "ratio"
+    } else {
+        "count"
     };
     let buckets = rows
         .into_iter()
@@ -551,7 +600,72 @@ async fn timeline(ctx: &Ctx<'_>, w: &AggregateWidget) -> anyhow::Result<WidgetDa
             })
         })
         .collect();
-    Ok(WidgetData::Timeline { buckets })
+    Ok(WidgetData::Timeline { metric, buckets })
+}
+
+/// `render: op_timeline` → the per-PC operational events for the SPA to fold
+/// into power / session / sleep lane spans. No rollup, but NOT a naive
+/// `[from, to)` slice: a PC that booted (or logged on) before the window and
+/// stayed up for the whole window emits no event inside it, so a plain slice
+/// would render an empty lane — indistinguishable from "powered off". To let
+/// the SPA reconstruct the boundary state, each lane is also seeded with its
+/// single latest event *before* `from`. The window function partitions the
+/// pre-window events by lane and keeps the newest per lane; everything is
+/// merged and returned ascending so the SPA walks start/end pairs in one pass.
+///
+/// Per-PC: the widget validates `scope: pc`, so this is only reached with a
+/// `pc_id` — enforce it (a missing pc_id mustn't become a full-fleet scan).
+/// The kind/lane lists are literal `IN (…)` / `CASE` so the SQL stays static
+/// (no dynamic assembly) and must stay aligned with `OP_TIMELINE_KINDS` /
+/// `OP_LANES` in the SPA's `OperationalTimeline.tsx` — see
+/// [`tests::op_timeline_kind_set_is_stable`].
+async fn op_timeline(ctx: &Ctx<'_>) -> anyhow::Result<WidgetData> {
+    let pc_id = ctx
+        .pc_id
+        .ok_or_else(|| anyhow::anyhow!("op_timeline requires a pc_id"))?;
+    let rows = sqlx::query(
+        "WITH op AS ( \
+           SELECT at, kind, \
+                  CASE \
+                    WHEN kind IN ('boot', 'shutdown', 'unexpected_shutdown', \
+                                  'log_service_started', 'log_service_stopped') THEN 'power' \
+                    WHEN kind IN ('logon', 'logoff') THEN 'session' \
+                    WHEN kind IN ('sleep', 'resume') THEN 'sleep' \
+                  END AS lane \
+           FROM obs_events \
+           WHERE pc_id = ?1 \
+             AND kind IN ('boot', 'shutdown', 'unexpected_shutdown', \
+                          'log_service_started', 'log_service_stopped', \
+                          'logon', 'logoff', 'sleep', 'resume') \
+             AND at < ?3 \
+         ), seeded AS ( \
+           SELECT at, kind FROM op WHERE at >= ?2 \
+           UNION ALL \
+           SELECT at, kind FROM ( \
+             SELECT at, kind, ROW_NUMBER() OVER (PARTITION BY lane ORDER BY at DESC) AS rn \
+             FROM op WHERE at < ?2 \
+           ) WHERE rn = 1 \
+         ) \
+         SELECT at, kind FROM seeded ORDER BY at",
+    )
+    .bind(pc_id)
+    .bind(ctx.from)
+    .bind(ctx.to)
+    .fetch_all(ctx.pool)
+    .await?;
+    let events = rows
+        .into_iter()
+        .filter_map(|r| {
+            let at: DateTime<Utc> = r.try_get("at").ok()?;
+            let kind: String = r.try_get("kind").ok()?;
+            Some(OpEvent { at, kind })
+        })
+        .collect();
+    Ok(WidgetData::OpTimeline {
+        from: ctx.from,
+        to: ctx.to,
+        events,
+    })
 }
 
 /// `agg: sum` + `group_by: <json path>` → top-N bars by summed value.
@@ -574,7 +688,7 @@ async fn sum_bar_path(
          GROUP BY json_extract(payload, '$.' || ?6) ORDER BY s DESC LIMIT ?9",
     )
     .bind(ctx.pc_id)
-    .bind(&w.kind)
+    .bind(w.kind.as_deref())
     .bind(w.source.as_deref())
     .bind(ctx.from)
     .bind(ctx.to)
@@ -606,7 +720,7 @@ async fn sum_bar_pc(
          GROUP BY pc_id ORDER BY s DESC LIMIT ?8",
     )
     .bind(ctx.pc_id)
-    .bind(&w.kind)
+    .bind(w.kind.as_deref())
     .bind(w.source.as_deref())
     .bind(ctx.from)
     .bind(ctx.to)
@@ -632,7 +746,7 @@ async fn sum_stat(
            AND at >= ?4 AND at < ?5",
     )
     .bind(ctx.pc_id)
-    .bind(&w.kind)
+    .bind(w.kind.as_deref())
     .bind(w.source.as_deref())
     .bind(ctx.from)
     .bind(ctx.to)
@@ -831,9 +945,9 @@ mod tests {
             description: None,
             order: None,
             scope: AggregateScope::Pc,
-            kind: kind.into(),
+            kind: Some(kind.into()),
             source: None,
-            agg,
+            agg: Some(agg),
             group_by: None,
             bool_path: None,
             value_path: None,
@@ -1003,14 +1117,40 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let WidgetData::Timeline { buckets } = data else {
+        let WidgetData::Timeline { metric, buckets } = data else {
             panic!("expected timeline")
         };
+        // A bool_path widget is a presence ratio strip.
+        assert_eq!(metric, "ratio");
         // Hours 9 & 10 active, 11 & 12 inactive — one bucket each (UTC).
         let h9 = buckets.iter().find(|b| b.hour == 9).unwrap();
         assert_eq!((h9.total, h9.active), (1, 1));
         let h11 = buckets.iter().find(|b| b.hour == 11).unwrap();
         assert_eq!((h11.total, h11.active), (1, 0));
+    }
+
+    #[tokio::test]
+    async fn count_timeline_reports_volume_metric() {
+        // No bool_path → the SQL sets active = total, so the strip is pure
+        // volume: metric must be "count" so the SPA scales bar height by the
+        // hour's magnitude rather than mislabelling it active/idle.
+        let pool = seeded_pool().await;
+        let mut w = widget("app_sample", AggregateAgg::Count, AggregateRender::Timeline);
+        w.time_bucket = Some(AggregateTimeBucket::Hour);
+        let data = compute_widget(&ctx(&pool, Some("p1")), &w)
+            .await
+            .unwrap()
+            .unwrap();
+        let WidgetData::Timeline { metric, buckets } = data else {
+            panic!("expected timeline")
+        };
+        assert_eq!(metric, "count");
+        // Volume mode mirrors active into total (active = total per hour).
+        assert!(buckets.iter().all(|b| b.active == b.total));
+        // p1 has one app_sample per hour at 9..13, so each populated hour
+        // carries a real count the SPA can scale by.
+        let h9 = buckets.iter().find(|b| b.hour == 9).unwrap();
+        assert_eq!(h9.total, 1);
     }
 
     #[tokio::test]
@@ -1025,11 +1165,201 @@ mod tests {
         w.bool_path = Some("active".into());
         w.time_bucket = Some(AggregateTimeBucket::Hour);
         let data = compute_widget(&c, &w).await.unwrap().unwrap();
-        let WidgetData::Timeline { buckets } = data else {
+        let WidgetData::Timeline { buckets, .. } = data else {
             panic!("expected timeline")
         };
         // UTC 09:00 (+9h) → local 18:00; nothing left in UTC-hour 9.
         assert!(buckets.iter().any(|b| b.hour == 18 && b.active == 1));
         assert!(buckets.iter().all(|b| b.hour != 9));
+    }
+
+    #[tokio::test]
+    async fn op_timeline_returns_operational_events_in_window() {
+        // op_timeline returns the window's operational events for the chosen
+        // PC, ascending — non-operational kinds (app_sample) and other PCs are
+        // filtered out, and the query window is echoed back for the SPA to
+        // clamp open spans against.
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE obs_events ( \
+               id INTEGER PRIMARY KEY AUTOINCREMENT, pc_id TEXT NOT NULL, \
+               at TIMESTAMP NOT NULL, kind TEXT NOT NULL, source TEXT NOT NULL, \
+               event_record_id TEXT, payload TEXT )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let at = |h: u32| Utc.with_ymd_and_hms(2026, 6, 17, h, 0, 0).unwrap();
+        for (pc, t, kind) in [
+            ("p1", at(8), "boot"),
+            ("p1", at(9), "logon"),
+            ("p1", at(12), "sleep"),
+            ("p1", at(13), "resume"),
+            ("p1", at(18), "logoff"),
+            ("p1", at(19), "shutdown"),
+            ("p1", at(10), "app_sample"), // non-operational → excluded
+            ("p2", at(9), "boot"),        // other PC → excluded by pc filter
+        ] {
+            sqlx::query(
+                "INSERT INTO obs_events (pc_id, at, kind, source, payload) VALUES (?,?,?,?,?)",
+            )
+            .bind(pc)
+            .bind(t)
+            .bind(kind)
+            .bind("test")
+            .bind("{}")
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        // op_timeline ignores kind/agg; a real spec leaves them unset.
+        let mut w = widget("ignored", AggregateAgg::Count, AggregateRender::OpTimeline);
+        w.kind = None;
+        w.agg = None;
+        let data = compute_widget(&ctx(&pool, Some("p1")), &w)
+            .await
+            .unwrap()
+            .unwrap();
+        let WidgetData::OpTimeline { from, to, events } = data else {
+            panic!("expected op_timeline")
+        };
+        assert_eq!(from, Utc.with_ymd_and_hms(2026, 6, 17, 0, 0, 0).unwrap());
+        assert_eq!(to, Utc.with_ymd_and_hms(2026, 6, 18, 0, 0, 0).unwrap());
+        let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            ["boot", "logon", "sleep", "resume", "logoff", "shutdown"]
+        );
+    }
+
+    #[tokio::test]
+    async fn op_timeline_requires_pc_id() {
+        // op_timeline is per-PC; a ctx with no pc_id is a misuse and must
+        // error rather than silently scan the whole fleet.
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE obs_events ( \
+               id INTEGER PRIMARY KEY AUTOINCREMENT, pc_id TEXT NOT NULL, \
+               at TIMESTAMP NOT NULL, kind TEXT NOT NULL, source TEXT NOT NULL, \
+               event_record_id TEXT, payload TEXT )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut w = widget("ignored", AggregateAgg::Count, AggregateRender::OpTimeline);
+        w.kind = None;
+        w.agg = None;
+        // `WidgetData` isn't `Debug`, so match rather than `unwrap_err()`.
+        match compute_widget(&ctx(&pool, None), &w).await {
+            Ok(_) => panic!("op_timeline must error without a pc_id"),
+            Err(e) => assert!(e.to_string().contains("requires a pc_id"), "err: {e}"),
+        }
+    }
+
+    // A bare obs_events table for the op_timeline queries (the seeded_pool
+    // above carries presence/app_sample/web_visit, not operational kinds).
+    async fn op_pool() -> SqlitePool {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE obs_events ( \
+               id INTEGER PRIMARY KEY AUTOINCREMENT, pc_id TEXT NOT NULL, \
+               at TIMESTAMP NOT NULL, kind TEXT NOT NULL, source TEXT NOT NULL, \
+               event_record_id TEXT, payload TEXT )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool
+    }
+
+    async fn insert_op(pool: &SqlitePool, pc: &str, at: DateTime<Utc>, kind: &str) {
+        sqlx::query("INSERT INTO obs_events (pc_id, at, kind, source, payload) VALUES (?,?,?,?,?)")
+            .bind(pc)
+            .bind(at)
+            .bind(kind)
+            .bind("test")
+            .bind("{}")
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn op_timeline_kind_set_is_stable() {
+        // The op_timeline IN-list must stay aligned with OP_TIMELINE_KINDS /
+        // OP_LANES in the SPA's OperationalTimeline.tsx — a lane added on one
+        // side but not the other silently drops events. This pins the backend
+        // half: every operational kind round-trips and a non-operational kind
+        // (app_sample) is excluded. If you change the set, change it in the
+        // SPA too.
+        let pool = op_pool().await;
+        let mut want = [
+            "boot",
+            "shutdown",
+            "unexpected_shutdown",
+            "log_service_started",
+            "log_service_stopped",
+            "logon",
+            "logoff",
+            "sleep",
+            "resume",
+        ];
+        let at = |h: u32| Utc.with_ymd_and_hms(2026, 6, 17, h, 0, 0).unwrap();
+        for (i, k) in want.iter().enumerate() {
+            insert_op(&pool, "p1", at(i as u32), k).await;
+        }
+        insert_op(&pool, "p1", at(20), "app_sample").await;
+        let mut w = widget("ignored", AggregateAgg::Count, AggregateRender::OpTimeline);
+        w.kind = None;
+        w.agg = None;
+        let data = compute_widget(&ctx(&pool, Some("p1")), &w)
+            .await
+            .unwrap()
+            .unwrap();
+        let WidgetData::OpTimeline { events, .. } = data else {
+            panic!("expected op_timeline")
+        };
+        let mut got: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+        got.sort_unstable();
+        want.sort_unstable();
+        assert_eq!(got, want);
+    }
+
+    #[tokio::test]
+    async fn op_timeline_seeds_last_pre_window_event_per_lane() {
+        // A PC that booted / logged on before the window and stayed up emits
+        // nothing inside it — without a boundary seed the lane would render
+        // empty (looks powered-off). The query seeds the single latest
+        // pre-`from` event per lane; an older pre-window event is dropped.
+        let pool = op_pool().await;
+        let at = |d: u32, h: u32| Utc.with_ymd_and_hms(2026, 6, d, h, 0, 0).unwrap();
+        // Window is 6/17 all day (ctx default). Pre-window power events:
+        insert_op(&pool, "p1", at(15, 9), "boot").await; // older → dropped
+        insert_op(&pool, "p1", at(16, 9), "shutdown").await; // latest power → seeded
+        insert_op(&pool, "p1", at(16, 10), "logon").await; // latest session → seeded
+        // In-window event:
+        insert_op(&pool, "p1", at(17, 12), "logoff").await;
+        let mut w = widget("ignored", AggregateAgg::Count, AggregateRender::OpTimeline);
+        w.kind = None;
+        w.agg = None;
+        let data = compute_widget(&ctx(&pool, Some("p1")), &w)
+            .await
+            .unwrap()
+            .unwrap();
+        let WidgetData::OpTimeline { events, .. } = data else {
+            panic!("expected op_timeline")
+        };
+        let pairs: Vec<(DateTime<Utc>, &str)> =
+            events.iter().map(|e| (e.at, e.kind.as_str())).collect();
+        // Latest pre-window event per lane (shutdown, logon) + the in-window
+        // logoff, ascending. The 6/15 boot is the older power event → dropped.
+        assert_eq!(
+            pairs,
+            [
+                (at(16, 9), "shutdown"),
+                (at(16, 10), "logon"),
+                (at(17, 12), "logoff"),
+            ]
+        );
     }
 }

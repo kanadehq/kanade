@@ -188,6 +188,11 @@
           "const": "stat"
         },
         {
+          "description": "Per-PC operational swimlane (power / session / sleep) reconstructed\nfrom a fixed multi-kind event set. Unlike the aggregation renders it\nreads no single `kind`/`agg`: the backend returns the raw events in\nthe window and the SPA folds them into lane spans (shared with the\nEvents page strip). Per-PC only (`scope: pc`).",
+          "type": "string",
+          "const": "op_timeline"
+        },
+        {
           "title": "492 forward-compat catch-all (see [`AggregateScope::Unknown`]).",
           "type": "string",
           "const": "unknown"
@@ -251,8 +256,15 @@
       "type": "object",
       "properties": {
         "agg": {
-          "description": "How to roll the matching events up. See [`AggregateAgg`].",
-          "$ref": "#/$defs/AggregateAgg"
+          "description": "How to roll the matching events up. See [`AggregateAgg`]. Required\nfor every aggregation render; rejected for `op_timeline` (which\nperforms no rollup — it returns the raw operational events and the\nSPA folds them into lane spans).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AggregateAgg"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "bool_path": {
           "description": "Dotted JSON path to a boolean for `agg: ratio` (e.g. `active`):\nthe widget reports `true_count / total`. Required when `agg: ratio`.",
@@ -287,8 +299,11 @@
           ]
         },
         "kind": {
-          "description": "`obs_events.kind` this widget reads (e.g. `app_sample`,\n`presence`, `unexpected_shutdown`). Required.",
-          "type": "string"
+          "description": "`obs_events.kind` this widget reads (e.g. `app_sample`,\n`presence`, `unexpected_shutdown`). Required for every aggregation\nrender (`bar`/`gauge`/`timeline`/`stat`); rejected for\n`op_timeline`, which reconstructs a fixed multi-kind operational\nswimlane (power/session/sleep) baked into the SPA and so reads no\nsingle `kind`.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "limit": {
           "description": "Top-N cap for grouped renders (`bar`). Defaults to 10 when unset.",
@@ -369,8 +384,6 @@
       "required": [
         "dashboard",
         "title",
-        "kind",
-        "agg",
         "render"
       ]
     },
