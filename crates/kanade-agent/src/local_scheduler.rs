@@ -1192,10 +1192,15 @@ fn spawn_freeze_watch_task(
                 Ok(None) => state.lock().await.freeze = None,
                 Err(e) => warn!(error = %e, "freeze watch: re-seed get failed; keeping last-known"),
             }
-            let mut watch = match kv.watch_all().await {
+            // `fleet_config` holds only KEY_FREEZE, so a single-key watch
+            // is equivalent to the old `watch_all()` + client-side
+            // `entry.key != KEY_FREEZE` filter — and #512: it scopes the
+            // server-side consumer to the one key the scheduler cares
+            // about instead of the whole bucket.
+            let mut watch = match kv.watch(KEY_FREEZE).await {
                 Ok(w) => w,
                 Err(e) => {
-                    warn!(error = %e, "freeze watch: watch_all failed; reopening");
+                    warn!(error = %e, "freeze watch: watch failed; reopening");
                     nats_retry::reopen_pause().await;
                     continue;
                 }
@@ -1208,9 +1213,6 @@ fn spawn_freeze_watch_task(
                         break;
                     }
                 };
-                if entry.key != KEY_FREEZE {
-                    continue;
-                }
                 let next = match entry.operation {
                     Operation::Put => Some(parse_freeze_or_safe(&entry.value)),
                     Operation::Delete | Operation::Purge => None,
