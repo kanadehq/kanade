@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { ErrorCard } from '@/components/ErrorCard';
+import { OperationalTimeline, type OpEvent } from '@/components/OperationalTimeline';
 import { PcPicker } from '@/components/PcPicker';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -33,8 +34,9 @@ type Widget = {
       first?: string;
       last?: string;
     }
-  | { render: 'timeline'; buckets: HourBucket[] }
+  | { render: 'timeline'; metric: 'ratio' | 'count'; buckets: HourBucket[] }
   | { render: 'stat'; value: number; est_minutes?: number }
+  | { render: 'op_timeline'; from: string; to: string; events: OpEvent[] }
 );
 
 type Scope = 'fleet' | 'pc';
@@ -257,8 +259,11 @@ export function Analytics() {
 }
 
 function WidgetCard({ w, t }: { w: Widget; t: (k: string) => string }) {
-  // Timeline and bar read better full-width.
-  const span = w.render === 'timeline' || w.render === 'bar' ? 'lg:col-span-2' : '';
+  // Timeline, bar and the operational swimlane read better full-width.
+  const span =
+    w.render === 'timeline' || w.render === 'bar' || w.render === 'op_timeline'
+      ? 'lg:col-span-2'
+      : '';
   return (
     <Card className={span}>
       <CardHeader>
@@ -270,9 +275,11 @@ function WidgetCard({ w, t }: { w: Widget; t: (k: string) => string }) {
         {w.render === 'gauge' && <Gauge w={w} t={t} />}
         {w.render === 'timeline' && (
           <TimelineStrip
+            metric={w.metric}
             buckets={w.buckets}
             activeLabel={t('timeline.active')}
             idleLabel={t('timeline.idle')}
+            countLabel={t('timeline.count')}
             noDataLabel={t('timeline.noData')}
           />
         )}
@@ -283,6 +290,9 @@ function WidgetCard({ w, t }: { w: Widget; t: (k: string) => string }) {
               <div className="text-muted text-xs">≈ {fmtMinutes(w.est_minutes)}</div>
             )}
           </div>
+        )}
+        {w.render === 'op_timeline' && (
+          <OperationalTimeline events={w.events} from={w.from} to={w.to} />
         )}
       </CardContent>
     </Card>
@@ -347,21 +357,35 @@ function Stat({ label, value }: { label: string; value: string }) {
   );
 }
 
-// 24-hour strip. Each hour's violet fill is the active proportion of that
-// hour's samples; hours with no samples render as an empty dashed slot.
+// 24-hour strip with two modes (driven by the backend `metric`):
+//   - `ratio` (presence): each hour's bar is full height, the violet fill is
+//     the active proportion of that hour's samples (active / total).
+//   - `count` (volume, e.g. boot / logon): each hour's bar HEIGHT is scaled
+//     by that hour's count relative to the busiest hour, so magnitude is
+//     visible instead of every populated hour filling to the top — the old
+//     strip mislabelled these as "active/idle" and flattened all magnitude.
+// Hours with no samples render as an empty dashed slot either way, so "no
+// data" (PC off / asleep) stays distinct from a real zero/idle hour.
 function TimelineStrip({
+  metric,
   buckets,
   activeLabel,
   idleLabel,
+  countLabel,
   noDataLabel,
 }: {
+  metric: 'ratio' | 'count';
   buckets: HourBucket[];
   activeLabel: string;
   idleLabel: string;
+  countLabel: string;
   noDataLabel: string;
 }) {
   const byHour = new Map(buckets.map((b) => [b.hour, b]));
   const hours = Array.from({ length: 24 }, (_, h) => h);
+  // Count mode normalises bar height to the busiest hour (≥1 so an empty
+  // strip doesn't divide by zero). Unused in ratio mode.
+  const maxTotal = Math.max(...buckets.map((b) => b.total), 1);
   return (
     <div>
       <div className="flex h-24 items-end gap-[2px]">
@@ -369,14 +393,28 @@ function TimelineStrip({
           const b = byHour.get(h);
           const total = b?.total ?? 0;
           const active = b?.active ?? 0;
-          const activePct = total > 0 ? (active / total) * 100 : 0;
+          // ratio → fill height is the active proportion; count → fill height
+          // is the hour's magnitude relative to the busiest hour.
+          const fillPct =
+            metric === 'ratio'
+              ? total > 0
+                ? (active / total) * 100
+                : 0
+              : (total / maxTotal) * 100;
           const title =
-            total > 0 ? `${h}:00 — ${activeLabel} ${active}/${total}` : `${h}:00 — ${noDataLabel}`;
+            total === 0
+              ? `${h}:00 — ${noDataLabel}`
+              : metric === 'ratio'
+                ? `${h}:00 — ${activeLabel} ${active}/${total}`
+                : `${h}:00 — ${countLabel} ${total}`;
           return (
             <div key={h} className="flex h-full flex-1 flex-col justify-end" title={title}>
               {total > 0 ? (
                 <div className="flex h-full w-full flex-col justify-end overflow-hidden rounded-sm bg-muted/20">
-                  <div className="w-full bg-violet/60" style={{ height: `${activePct}%` }} />
+                  <div
+                    className="w-full bg-violet/60"
+                    style={{ height: `${Math.max(fillPct, metric === 'count' ? 4 : 0)}%` }}
+                  />
                 </div>
               ) : (
                 <div className="h-full w-full rounded-sm border border-dashed border-border/40" />
@@ -393,14 +431,23 @@ function TimelineStrip({
         ))}
       </div>
       <div className="mt-2 flex gap-4 text-[10px] text-muted">
-        <span className="flex items-center gap-1">
-          <span className="inline-block size-2 rounded-sm bg-violet/60" />
-          {activeLabel}
-        </span>
-        <span className="flex items-center gap-1">
-          <span className="inline-block size-2 rounded-sm bg-muted/20" />
-          {idleLabel}
-        </span>
+        {metric === 'ratio' ? (
+          <>
+            <span className="flex items-center gap-1">
+              <span className="inline-block size-2 rounded-sm bg-violet/60" />
+              {activeLabel}
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="inline-block size-2 rounded-sm bg-muted/20" />
+              {idleLabel}
+            </span>
+          </>
+        ) : (
+          <span className="flex items-center gap-1">
+            <span className="inline-block size-2 rounded-sm bg-violet/60" />
+            {countLabel}
+          </span>
+        )}
       </div>
     </div>
   );

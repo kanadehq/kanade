@@ -20,6 +20,21 @@ description: "Fleet analytics: reliability / access / agent health"
 tags: [dashboards]
 
 widgets:
+  # ── Uptime ───────────────────────────────────────────────────────
+  # Per-PC operational swimlane reconstructed from the power / session /
+  # sleep events collect-winlog-events already emits (boot / shutdown /
+  # log_service_*, logon / logoff, sleep / resume). Unlike the aggregation
+  # widgets it reads no single `kind`/`agg`: the backend returns the raw
+  # events in the window and the SPA folds them into lane spans (the same
+  # strip the Events page renders). Per-PC only — pick a PC in the
+  # Analytics scope to see it. `order: -10` pulls the Uptime tab first.
+  - dashboard: Uptime
+    title: Operational state
+    description: Power / session / sleep intervals reconstructed from events
+    order: -10
+    scope: pc
+    render: op_timeline
+
   # ── Reliability ──────────────────────────────────────────────────
   - dashboard: Reliability
     title: Unexpected shutdowns by PC

@@ -745,14 +745,23 @@ pub struct AggregateWidget {
     #[serde(default)]
     pub scope: AggregateScope,
     /// `obs_events.kind` this widget reads (e.g. `app_sample`,
-    /// `presence`, `unexpected_shutdown`). Required.
-    pub kind: String,
+    /// `presence`, `unexpected_shutdown`). Required for every aggregation
+    /// render (`bar`/`gauge`/`timeline`/`stat`); rejected for
+    /// `op_timeline`, which reconstructs a fixed multi-kind operational
+    /// swimlane (power/session/sleep) baked into the SPA and so reads no
+    /// single `kind`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     /// Optional `obs_events.source` filter, when one `kind` is emitted by
     /// more than one collector.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
-    /// How to roll the matching events up. See [`AggregateAgg`].
-    pub agg: AggregateAgg,
+    /// How to roll the matching events up. See [`AggregateAgg`]. Required
+    /// for every aggregation render; rejected for `op_timeline` (which
+    /// performs no rollup — it returns the raw operational events and the
+    /// SPA folds them into lane spans).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agg: Option<AggregateAgg>,
     /// Dotted JSON path (no `$.` prefix) to group by for `agg: count` /
     /// `sum` — e.g. `foreground.app`. The literal `pc_id` is special:
     /// it groups by the `pc_id` column (fleet ranking), not a payload
@@ -868,6 +877,13 @@ pub enum AggregateRender {
     Timeline,
     /// A single headline number (an ungrouped total).
     Stat,
+    /// Per-PC operational swimlane (power / session / sleep) reconstructed
+    /// from a fixed multi-kind event set. Unlike the aggregation renders it
+    /// reads no single `kind`/`agg`: the backend returns the raw events in
+    /// the window and the SPA folds them into lane spans (shared with the
+    /// Events page strip). Per-PC only (`scope: pc`).
+    #[serde(rename = "op_timeline")]
+    OpTimeline,
     /// #492 forward-compat catch-all (see [`AggregateScope::Unknown`]).
     #[serde(other)]
     Unknown,
@@ -892,13 +908,15 @@ fn is_valid_json_path(p: &str) -> bool {
 /// [`View`] resource (#743) so the two can't diverge. `field` names the
 /// containing key for error messages (`"aggregate"` or `"widgets"`).
 ///
-/// Enforces: non-empty list; non-empty dashboard/title/kind; a
-/// blank-when-set `source`; rejection of any #492 `Unknown` enum
-/// (an operator typo at create time); safe dotted JSON paths; the value
-/// path each `agg` needs (and rejection of mis-paired ones); `pc_id`
-/// grouping only in `fleet` scope; `transform`/`limit`/`exclude` only with
-/// a `group_by`; positive `limit`/`sample_minutes`; `gauge`⇔`ratio`; and
-/// `timeline`⇔`time_bucket`.
+/// Enforces: non-empty list; non-empty dashboard/title (and `kind`/`agg`
+/// for every aggregation render); a blank-when-set `source`; rejection of
+/// any #492 `Unknown` enum (an operator typo at create time); safe dotted
+/// JSON paths; the value path each `agg` needs (and rejection of mis-paired
+/// ones); `pc_id` grouping only in `fleet` scope; `transform`/`limit`/
+/// `exclude` only with a `group_by`; positive `limit`/`sample_minutes`;
+/// `gauge`⇔`ratio`; and `timeline`⇔`time_bucket`. A `render: op_timeline`
+/// widget is validated separately (per-PC, no aggregation knobs) — see
+/// [`validate_op_timeline_widget`].
 pub fn validate_aggregate_widgets(widgets: &[AggregateWidget], field: &str) -> Result<(), String> {
     if widgets.is_empty() {
         return Err(format!(
@@ -907,20 +925,9 @@ pub fn validate_aggregate_widgets(widgets: &[AggregateWidget], field: &str) -> R
     }
     for (i, w) in widgets.iter().enumerate() {
         let at = format!("{field}[{i}]");
-        for (label, value) in [
-            ("dashboard", &w.dashboard),
-            ("title", &w.title),
-            ("kind", &w.kind),
-        ] {
+        for (label, value) in [("dashboard", &w.dashboard), ("title", &w.title)] {
             if value.trim().is_empty() {
                 return Err(format!("{at}.{label} must not be empty"));
-            }
-        }
-        // A present-but-blank `source` is a no-op filter — reject like the
-        // other blank-when-set guards.
-        if let Some(source) = &w.source {
-            if source.trim().is_empty() {
-                return Err(format!("{at}.source must not be empty when set"));
             }
         }
         // A present-but-blank `description` renders an empty muted line —
@@ -937,15 +944,38 @@ pub fn validate_aggregate_widgets(widgets: &[AggregateWidget], field: &str) -> R
         if w.scope == AggregateScope::Unknown {
             return Err(format!("{at}.scope is not a known value (pc | fleet)"));
         }
-        if w.agg == AggregateAgg::Unknown {
-            return Err(format!(
-                "{at}.agg is not a known value (count | ratio | sum)"
-            ));
-        }
         if w.render == AggregateRender::Unknown {
             return Err(format!(
-                "{at}.render is not a known value (bar | gauge | timeline | stat)"
+                "{at}.render is not a known value (bar | gauge | timeline | stat | op_timeline)"
             ));
+        }
+        // `op_timeline` reconstructs a fixed per-PC operational swimlane
+        // (power/session/sleep) from a baked-in multi-kind set — it uses none
+        // of the aggregation knobs, so validate it on its own terms (per-PC,
+        // no `kind`/`agg`/grouping) and skip the rollup rules below.
+        if w.render == AggregateRender::OpTimeline {
+            validate_op_timeline_widget(w, &at)?;
+            continue;
+        }
+        // Every other render is an aggregation over a single `kind`.
+        if w.kind.as_deref().map(str::trim).unwrap_or("").is_empty() {
+            return Err(format!("{at}.kind must not be empty"));
+        }
+        let agg = match w.agg {
+            Some(AggregateAgg::Unknown) => {
+                return Err(format!(
+                    "{at}.agg is not a known value (count | ratio | sum)"
+                ));
+            }
+            Some(agg) => agg,
+            None => return Err(format!("{at}.agg is required")),
+        };
+        // A present-but-blank `source` is a no-op filter — reject like the
+        // other blank-when-set guards.
+        if let Some(source) = &w.source {
+            if source.trim().is_empty() {
+                return Err(format!("{at}.source must not be empty when set"));
+            }
         }
         if w.transform == Some(AggregateTransform::Unknown) {
             return Err(format!("{at}.transform is not a known value (host)"));
@@ -968,7 +998,7 @@ pub fn validate_aggregate_widgets(widgets: &[AggregateWidget], field: &str) -> R
         }
         // Each agg uses exactly one value path; reject a mis-paired path so
         // a typo fails at create rather than being ignored.
-        match w.agg {
+        match agg {
             // count: grouped → ranking, ungrouped → grand total.
             AggregateAgg::Count => {
                 for (label, path) in [("bool_path", &w.bool_path), ("value_path", &w.value_path)] {
@@ -1034,7 +1064,7 @@ pub fn validate_aggregate_widgets(widgets: &[AggregateWidget], field: &str) -> R
             }
         }
         // A gauge draws a single ratio dial — only meaningful for agg: ratio.
-        if w.render == AggregateRender::Gauge && w.agg != AggregateAgg::Ratio {
+        if w.render == AggregateRender::Gauge && agg != AggregateAgg::Ratio {
             return Err(format!("{at}.render=gauge is only valid with agg: ratio"));
         }
         // A timeline needs a bucket; a bucket on any other render is a no-op
@@ -1049,6 +1079,48 @@ pub fn validate_aggregate_widgets(widgets: &[AggregateWidget], field: &str) -> R
                 ));
             }
             _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Validate a `render: op_timeline` widget. It draws a fixed per-PC
+/// operational swimlane (power / session / sleep) reconstructed by the SPA
+/// from a baked-in multi-kind event set, so it uses none of the aggregation
+/// knobs: require `scope: pc` and reject every field that only makes sense
+/// for a rollup (`kind`/`source`/`agg`/`group_by`/`bool_path`/`value_path`/
+/// `transform`/`sample_minutes`/`exclude`/`time_bucket`/`limit`). Rejecting
+/// the unused fields (rather than ignoring them) keeps an operator typo from
+/// silently doing nothing, matching the rest of this validator.
+fn validate_op_timeline_widget(w: &AggregateWidget, at: &str) -> Result<(), String> {
+    // Per-PC only: a fleet-wide swimlane of every PC's spans is unbounded
+    // and unreadable, and the backend only computes it in per-PC scope.
+    if w.scope != AggregateScope::Pc {
+        return Err(format!("{at}.render=op_timeline requires scope: pc"));
+    }
+    // Each unused field, with the name the operator wrote, so the error
+    // points at exactly what to delete.
+    if w.kind.is_some() {
+        return Err(format!("{at}.render=op_timeline does not use `kind`"));
+    }
+    if w.source.is_some() {
+        return Err(format!("{at}.render=op_timeline does not use `source`"));
+    }
+    if w.agg.is_some() {
+        return Err(format!("{at}.render=op_timeline does not use `agg`"));
+    }
+    for (label, set) in [
+        ("group_by", w.group_by.is_some()),
+        ("bool_path", w.bool_path.is_some()),
+        ("value_path", w.value_path.is_some()),
+        ("transform", w.transform.is_some()),
+        ("sample_minutes", w.sample_minutes.is_some()),
+        ("time_bucket", w.time_bucket.is_some()),
+        ("limit", w.limit.is_some()),
+        ("exclude", !w.exclude.is_empty()),
+    ] {
+        if set {
+            return Err(format!("{at}.render=op_timeline does not use `{label}`"));
         }
     }
     Ok(())
@@ -3149,6 +3221,58 @@ tags: [ok, "   "]
         m.validate().expect("order is a valid optional field");
         let w = &m.aggregate.as_ref().unwrap()[0];
         assert_eq!(w.order, Some(-5));
+    }
+
+    #[test]
+    fn aggregate_accepts_minimal_op_timeline() {
+        // op_timeline needs no kind/agg — it reconstructs a fixed multi-kind
+        // swimlane. A bare per-PC spec is valid, and `kind`/`agg` stay None.
+        let m = manifest_with_aggregate(
+            "aggregate:\n- { dashboard: Uptime, title: Operational state, scope: pc, render: op_timeline }\n",
+        );
+        m.validate().expect("minimal op_timeline is valid");
+        let w = &m.aggregate.as_ref().unwrap()[0];
+        assert_eq!(w.render, AggregateRender::OpTimeline);
+        assert!(w.kind.is_none());
+        assert!(w.agg.is_none());
+    }
+
+    #[test]
+    fn aggregate_rejects_op_timeline_with_fleet_scope() {
+        let m = manifest_with_aggregate(
+            "aggregate:\n- { dashboard: Uptime, title: T, scope: fleet, render: op_timeline }\n",
+        );
+        let err = m.validate().expect_err("op_timeline must be per-PC");
+        assert!(
+            err.contains("render=op_timeline requires scope: pc"),
+            "err: {err}"
+        );
+    }
+
+    #[test]
+    fn aggregate_rejects_op_timeline_with_aggregation_fields() {
+        // Each aggregation knob the operator might paste in is rejected
+        // (rather than silently ignored), pointing at the field to delete.
+        for (block, field) in [
+            ("kind: boot", "kind"),
+            ("agg: count", "agg"),
+            ("source: winlog:Security", "source"),
+            ("group_by: pc_id", "group_by"),
+            ("bool_path: active", "bool_path"),
+            ("time_bucket: hour", "time_bucket"),
+            ("limit: 5", "limit"),
+        ] {
+            let m = manifest_with_aggregate(&format!(
+                "aggregate:\n- {{ dashboard: Uptime, title: T, scope: pc, {block}, render: op_timeline }}\n"
+            ));
+            let err = m
+                .validate()
+                .expect_err(&format!("op_timeline must reject {field}"));
+            assert!(
+                err.contains(&format!("render=op_timeline does not use `{field}`")),
+                "field {field}: {err}"
+            );
+        }
     }
 
     // ── #743 View resource ───────────────────────────────────────────

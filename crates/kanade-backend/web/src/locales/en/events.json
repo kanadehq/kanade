@@ -54,6 +54,22 @@
   "chart": {
     "title": "Per-PC timeline"
   },
+  "opTimeline": {
+    "title": "Operational state",
+    "subtitle": "reconstructed from power / session / sleep events — gaps in a lane mean no event of that kind (e.g. powered off)",
+    "lanes": {
+      "power": "Power",
+      "session": "Session",
+      "sleep": "Sleep",
+      "active": "Active / Idle"
+    },
+    "activePending": "needs an idle sampler (not collected yet)",
+    "openStart": "started before this window",
+    "openEnd": "still open at window end",
+    "spanTooltip": "{{lane}}: {{from}} → {{to}}",
+    "markerTooltip": "{{kind}} at {{at}}",
+    "empty": "No power / session / sleep events in this window for this PC."
+  },
   "heatmap": {
     "title": "PC × time activity",
     "bucketHint": "(bucket: {{bucket}})",

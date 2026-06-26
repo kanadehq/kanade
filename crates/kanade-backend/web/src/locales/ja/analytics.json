@@ -28,6 +28,7 @@
   "timeline": {
     "active": "アクティブ",
     "idle": "アイドル",
+    "count": "件数",
     "noData": "サンプルなし"
   }
 }

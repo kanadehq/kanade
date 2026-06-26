@@ -15,6 +15,11 @@ import {
 } from 'recharts';
 
 import { ErrorCard } from '@/components/ErrorCard';
+import {
+  OperationalTimeline,
+  OP_TIMELINE_KINDS,
+  type OpEvent,
+} from '@/components/OperationalTimeline';
 import { PcPicker } from '@/components/PcPicker';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -147,6 +152,9 @@ function useDebouncedValue<T>(value: T, delay: number): T {
 // cells (1.2M divs). Top-N by event count keeps the charts readable
 // AND bounded; the table below still carries every event.
 const CHART_MAX_PCS = 40;
+
+// The operational kinds the swimlane reads, as a set for fast row filtering.
+const OP_TIMELINE_KIND_SET = new Set(OP_TIMELINE_KINDS);
 
 function topPcsByEventCount(
   events: EventRow[],
@@ -531,6 +539,7 @@ export function Events() {
         </Card>
       ) : (
         <>
+          <EventsOperational events={visible} />
           <EventsTimeline events={visible} />
           <EventsHeatmap events={visible} />
           <Table>
@@ -568,6 +577,87 @@ export function Events() {
         </>
       )}
     </div>
+  );
+}
+
+/**
+ * Per-PC operational swimlane section. Reconstructs power / session /
+ * sleep intervals from the visible events and stacks one strip per PC
+ * (capped to the busiest CHART_MAX_PCS, same as the other charts). All
+ * strips share one time window so their axes line up. The span logic
+ * lives in the shared `OperationalTimeline` component, so the Analytics
+ * `op_timeline` widget renders identically.
+ */
+function EventsOperational({ events }: { events: EventRow[] }) {
+  const { t } = useTranslation('events');
+
+  // Only the operational kinds feed the swimlane; everything else (the
+  // table's full event set) is ignored here.
+  const opEvents = useMemo(
+    () => events.filter((e) => OP_TIMELINE_KIND_SET.has(e.kind)),
+    [events],
+  );
+
+  const { pcs, totalPcs } = useMemo(
+    () => topPcsByEventCount(opEvents, CHART_MAX_PCS),
+    [opEvents],
+  );
+
+  // One shared [from, to] across all strips (from the rendered top-N PCs)
+  // so every PC's lanes read on the same axis. Padded 2% like the scatter.
+  const [from, to] = useMemo<[string | undefined, string | undefined]>(() => {
+    const kept = new Set(pcs);
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const e of opEvents) {
+      if (!kept.has(e.pc_id)) continue;
+      const ts = Date.parse(e.at);
+      if (Number.isNaN(ts)) continue;
+      if (ts < lo) lo = ts;
+      if (ts > hi) hi = ts;
+    }
+    if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi <= lo) return [undefined, undefined];
+    const pad = Math.max(60_000, (hi - lo) * 0.02);
+    return [new Date(lo - pad).toISOString(), new Date(hi + pad).toISOString()];
+  }, [opEvents, pcs]);
+
+  // Group the kept PCs' events into the shape the strip wants.
+  const byPc = useMemo(() => {
+    const kept = new Set(pcs);
+    const out = new Map<string, OpEvent[]>();
+    for (const e of opEvents) {
+      if (!kept.has(e.pc_id)) continue;
+      const arr = out.get(e.pc_id);
+      if (arr) arr.push({ at: e.at, kind: e.kind });
+      else out.set(e.pc_id, [{ at: e.at, kind: e.kind }]);
+    }
+    return out;
+  }, [opEvents, pcs]);
+
+  if (pcs.length === 0) return null;
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm">
+          {t('opTimeline.title')}
+          {totalPcs > pcs.length && (
+            <span className="ml-2 text-xs text-muted font-normal">
+              {t('chartPcCap', { shown: pcs.length, total: totalPcs })}
+            </span>
+          )}
+        </CardTitle>
+        <p className="mt-1 text-muted text-xs">{t('opTimeline.subtitle')}</p>
+      </CardHeader>
+      <CardContent className="space-y-4 pt-0">
+        {pcs.map((pc) => (
+          <div key={pc} className="space-y-1">
+            <code className="text-[11px] text-muted">{pc}</code>
+            <OperationalTimeline events={byPc.get(pc) ?? []} from={from} to={to} />
+          </div>
+        ))}
+      </CardContent>
+    </Card>
   );
 }
 
