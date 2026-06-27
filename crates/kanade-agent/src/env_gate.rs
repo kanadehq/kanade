@@ -14,7 +14,9 @@
 //! internally and a non-Windows build returns "allow" (documented gap —
 //! all kanade agents are Windows; decision K capability matrix).
 
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 use kanade_shared::manifest::Require;
 
@@ -41,6 +43,35 @@ pub fn set_system_cpu(pct: Option<f32>) {
 fn system_cpu() -> Option<f64> {
     let v = f32::from_bits(LATEST_SYSTEM_CPU.load(Ordering::Relaxed));
     if v.is_nan() { None } else { Some(v as f64) }
+}
+
+/// #855: latest console idle reported by the in-session `session-agent`
+/// (`--session-agent` child), which reads `GetLastInputInfo` *inside* the
+/// user session. The SYSTEM agent can't read truthful per-session idle
+/// (WTS `LastInputTime` is stale for an active console session, and
+/// `GetLastInputInfo` is session-affine), so it consumes this cache instead.
+/// `(set_at, idle)`; `console_idle()` returns it while fresh, else MAX.
+static LATEST_CONSOLE_IDLE: Mutex<Option<(Instant, Duration)>> = Mutex::new(None);
+
+/// How often the session-agent samples idle in-session (also the child's
+/// stdout cadence). Shared so the freshness window below stays in step.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) const SESSION_IDLE_SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
+
+/// A cached idle older than this is stale (session-agent down / no console
+/// user) → `console_idle()` falls back to `Duration::MAX` (= idle, fail-safe).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+const SESSION_IDLE_STALE_AFTER: Duration = Duration::from_secs(35); // ~3.5× sample
+
+/// Publish the latest in-session idle, called by the session supervisor as it
+/// reads the session-agent's stdout. `None` clears it (no session / agent
+/// down) so `console_idle()` falls back to MAX (treat as idle).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn set_console_idle(idle: Option<Duration>) {
+    let mut g = LATEST_CONSOLE_IDLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    *g = idle.map(|d| (Instant::now(), d));
 }
 
 /// Fire-time env gate. An empty `require` short-circuits to `true` with
@@ -133,74 +164,30 @@ fn sense_windows() -> (bool, Option<std::time::Duration>, bool) {
     (ac_online, idle, network_up)
 }
 
-/// Time since the last user input on the physical console.
-/// `Some(Duration::MAX)` when there's no interactive console user (headless /
-/// logged out); `Some(d)` for a real idle duration; `None` when it can't be
-/// read. Factored out of [`sense_windows`] so the idle sampler (#841) can read
-/// JUST idle each tick without the AC-power / network syscalls — and so the
-/// fire-time gate keeps the exact same behaviour.
+/// Time since the last user input on the active console session.
+///
+/// #855: reads the cache fed by the in-session `session-agent` (which calls
+/// `GetLastInputInfo` *inside* the user session — the only truthful source).
+/// It does NOT read WTS `LastInputTime` anymore: that value is stale for an
+/// active console session (a working user reads as days-idle), which froze the
+/// #841 active lane and broke the #418 idle gate.
+///
+/// `Some(d)` while the cache is fresh; otherwise `Some(Duration::MAX)` —
+/// stale (session-agent down), no console user, or not yet sampled all map to
+/// "idle". This keeps both consumers (the idle sampler and the require gate)
+/// on the idle side (fail-safe) and matches the prior headless contract
+/// ("don't run while the user is working" is vacuously true with no one there).
+/// Never returns `None`: a `None` would split semantics between the gate
+/// (fail-closed) and `idle_sampler::step` (holds state), so MAX is used for
+/// every unknown.
 #[cfg(target_os = "windows")]
 pub(crate) fn console_idle() -> Option<std::time::Duration> {
-    use std::time::Duration;
-    use windows::Win32::System::RemoteDesktop::{
-        WTS_CURRENT_SERVER_HANDLE, WTS_INFO_CLASS, WTSFreeMemory, WTSGetActiveConsoleSessionId,
-        WTSINFOW, WTSQuerySessionInformationW, WTSSessionInfo,
-    };
-    use windows::core::PWSTR;
-
-    // SAFETY: no arguments; returns the physical console session id, or
-    // 0xFFFFFFFF when no session is attached to the console.
-    let session = unsafe { WTSGetActiveConsoleSessionId() };
-    if session == 0xFFFF_FFFF {
-        // Headless / no console user → idle is vacuously satisfied.
-        return Some(Duration::MAX);
-    }
-    let mut buf = PWSTR::null();
-    let mut bytes: u32 = 0;
-    // SAFETY: `WTSSessionInfo` returns a heap WTSINFOW into `buf` (size into
-    // `bytes`). We read it through a `*const WTSINFOW` only after confirming
-    // the byte count, then free it with `WTSFreeMemory`. `buf`/`bytes` are
-    // valid out-params.
-    unsafe {
-        match WTSQuerySessionInformationW(
-            Some(WTS_CURRENT_SERVER_HANDLE),
-            session,
-            WTS_INFO_CLASS(WTSSessionInfo.0),
-            &mut buf,
-            &mut bytes,
-        ) {
-            Ok(()) if (bytes as usize) >= std::mem::size_of::<WTSINFOW>() && !buf.is_null() => {
-                let info = &*(buf.0 as *const WTSINFOW);
-                // FILETIME 100ns ticks; idle = now - last input. saturating_sub
-                // so an anomalous (e.g. clock-skew) ordering can't
-                // overflow-panic in debug builds.
-                let delta_100ns = info.CurrentTime.saturating_sub(info.LastInputTime);
-                let d = if delta_100ns > 0 {
-                    Duration::from_nanos((delta_100ns as u64).saturating_mul(100))
-                } else {
-                    Duration::ZERO
-                };
-                WTSFreeMemory(buf.0 as *mut core::ffi::c_void);
-                Some(d)
-            }
-            Ok(()) => {
-                // Short/empty buffer — free it if any, report unknown.
-                if !buf.is_null() {
-                    WTSFreeMemory(buf.0 as *mut core::ffi::c_void);
-                }
-                None
-            }
-            Err(_) => {
-                // In practice `buf` is still the null we initialised it to, so
-                // this is a no-op — but the docs don't guarantee a failed call
-                // leaves `ppBuffer` untouched, so mirror the Ok-arm free for
-                // symmetry rather than assume.
-                if !buf.is_null() {
-                    WTSFreeMemory(buf.0 as *mut core::ffi::c_void);
-                }
-                None
-            }
-        }
+    let g = LATEST_CONSOLE_IDLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    match *g {
+        Some((set_at, idle)) if set_at.elapsed() <= SESSION_IDLE_STALE_AFTER => Some(idle),
+        _ => Some(Duration::MAX),
     }
 }
 
@@ -238,5 +225,18 @@ mod tests {
         assert_eq!(system_cpu(), Some(42.5));
         set_system_cpu(None);
         assert!(system_cpu().is_none());
+    }
+
+    // #855: console_idle reads the session-agent cache, and an absent / cleared
+    // value falls back to MAX (idle) rather than None. (The stale-by-age branch
+    // is time-based and not exercised here.)
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn console_idle_returns_fresh_cache_then_max_when_cleared() {
+        use std::time::Duration;
+        set_console_idle(Some(Duration::from_secs(3)));
+        assert_eq!(console_idle(), Some(Duration::from_secs(3)));
+        set_console_idle(None);
+        assert_eq!(console_idle(), Some(Duration::MAX));
     }
 }

@@ -117,6 +117,11 @@ windows = { version = "0.62.2", features = [
     # translation can gate domain-SID lookups on DC reachability.
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
+    # #855 session-agent: GetLastInputInfo / LASTINPUTINFO — the in-session
+    # idle read the resident session-agent does (WTS LastInputTime, read by a
+    # SYSTEM service, is stale for an active console session; GetLastInputInfo
+    # is session-affine and only truthful inside the user's session).
+    "Win32_UI_Input_KeyboardAndMouse",
 ] }
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
