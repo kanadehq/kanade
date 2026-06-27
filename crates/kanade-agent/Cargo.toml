@@ -44,7 +44,7 @@ zip        = { version = "2.4.2", default-features = false, features = ["deflate
 # is far simpler and less error-prone for that than quick-xml's pull API;
 # it's pure-Rust with no transitive deps. Kept out of the windows-only block
 # so the parse/shape helpers stay unit-testable on every platform.
-roxmltree  = "0.20.0"
+roxmltree  = "0.21.1"
 
 [dev-dependencies]
 tempfile = "3.27.0"
