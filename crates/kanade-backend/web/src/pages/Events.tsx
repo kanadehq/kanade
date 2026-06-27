@@ -559,7 +559,21 @@ export function Events() {
                 <TableCell className="text-muted text-xs">{fmtIsoLocal(e.at)}</TableCell>
                 <TableCell><code className="text-xs">{e.pc_id}</code></TableCell>
                 <TableCell>
-                  <Badge variant={kindVariant(e.kind)}>{e.kind}</Badge>
+                  {/* Click a row's kind badge to cycle the same include →
+                      exclude → off filter as the chips above (e.g. mute the
+                      noisy web_visit / presence rows). Wrapped in a real
+                      <button> (not a bare onClick on the Badge span) so it
+                      stays keyboard-reachable + screen-reader-narrated, like
+                      FilterChip. */}
+                  <button
+                    type="button"
+                    onClick={() => cycleChip(e.kind, kindsInc, kindsExc, setKindsInc, setKindsExc)}
+                    aria-label={`${e.kind}: ${t(`filters.chipStates.${chipState(e.kind, kindsInc, kindsExc)}`)}`}
+                    title={t('filters.chipHint')}
+                    className="cursor-pointer rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    <Badge variant={kindVariant(e.kind)}>{e.kind}</Badge>
+                  </button>
                 </TableCell>
                 <TableCell><code className="text-xs">{e.source}</code></TableCell>
                 <TableCell>

@@ -61,7 +61,7 @@
       "power": "Power",
       "session": "Session",
       "sleep": "Sleep",
-      "active": "Active / Idle"
+      "active": "Active"
     },
     "openStart": "started before this window",
     "openEnd": "still open at window end",
