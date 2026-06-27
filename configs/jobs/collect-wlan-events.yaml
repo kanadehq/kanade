@@ -4,7 +4,7 @@
 # WLAN-AutoConfig connection history for the affected PC so the
 # disconnect cause and the failed auto-reconnect attempt land on
 # the per-PC Activity timeline next to the boot / sleep / resume
-# rows already collected by `collect-winlog-events`.
+# rows the agent's native Event Log reader (#841) already collects.
 #
 # Where the logs land: the obs_events timeline (`emit.type=events`),
 # same destination as the other `collect-winlog-*` jobs — NOT a

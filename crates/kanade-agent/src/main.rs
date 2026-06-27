@@ -36,6 +36,7 @@ mod obs_outbox;
 mod outbox;
 mod script_cache;
 mod staleness;
+mod winlog;
 
 #[cfg(target_os = "windows")]
 mod client_shortcut;
@@ -437,6 +438,10 @@ pub(crate) async fn run_agent() -> Result<()> {
     // the Event Log. Emits `active`/`idle` ObsEvents to the same outbox on
     // debounced transitions; the drain above publishes them.
     tokio::spawn(idle_sampler::run(pc_id.clone(), obs_outbox_dir.clone()));
+    // #841 PR2: native Windows Event Log reader — power/session/sleep lanes
+    // straight from the log via EvtQuery, replacing the collect-winlog-events
+    // PowerShell job. Enqueues to the same outbox; the drain publishes them.
+    tokio::spawn(winlog::run(pc_id.clone(), obs_outbox_dir.clone()));
     // v0.23: schedules marked `runs_on: agent` tick locally so the
     // agent keeps firing even when the broker is unreachable. See
     // `crates/kanade-agent/src/local_scheduler.rs` for the flow.

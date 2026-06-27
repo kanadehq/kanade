@@ -38,6 +38,13 @@ sysinfo    = { workspace = true }
 # uploading to OBJECT_COLLECTIONS. Minimal feature set (deflate only) —
 # no bzip2/zstd/aes — keeps the build lean.
 zip        = { version = "2.4.2", default-features = false, features = ["deflate"] }
+# #841 PR2: the native Windows Event Log reader renders each record to XML
+# (EvtRender) and plucks specific nested elements/attributes out of it
+# (System/EventRecordID, EventData/Data[@Name]). A read-only DOM (roxmltree)
+# is far simpler and less error-prone for that than quick-xml's pull API;
+# it's pure-Rust with no transitive deps. Kept out of the windows-only block
+# so the parse/shape helpers stay unit-testable on every platform.
+roxmltree  = "0.20.0"
 
 [dev-dependencies]
 tempfile = "3.27.0"
@@ -87,6 +94,10 @@ windows = { version = "0.62.2", features = [
     "Win32_Networking_WinSock",
     "Win32_Storage_FileSystem",
     "Win32_System_Environment",
+    # #841 PR2: native Windows Event Log reader (EvtQuery / EvtNext /
+    # EvtRender / EvtClose) replacing the collect-winlog-events PowerShell
+    # job — drops the per-tick Get-WinEvent process spawn.
+    "Win32_System_EventLog",
     "Win32_System_IO",
     # v0.43: Job Objects so a kill/timeout tears down the whole
     # process tree (host + descendants), not just the immediate
