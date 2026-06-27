@@ -75,18 +75,19 @@ pub async fn run(exe: PathBuf) {
 /// (the caller then backs off before respawning).
 async fn pump_one(exe: &Path, session: u32) -> bool {
     let exe_owned = exe.to_path_buf();
-    let mut child =
-        match tokio::task::spawn_blocking(move || spawn_session_agent_child(&exe_owned)).await {
-            Ok(Ok(c)) => c,
-            Ok(Err(e)) => {
-                warn!(target: "kanade_agent::session_supervisor", error = %e, "spawn session-agent failed");
-                return false;
-            }
-            Err(e) => {
-                warn!(target: "kanade_agent::session_supervisor", error = %e, "spawn join failed");
-                return false;
-            }
-        };
+    let mut child = match tokio::task::spawn_blocking(move || spawn_session_agent_child(&exe_owned))
+        .await
+    {
+        Ok(Ok(c)) => c,
+        Ok(Err(e)) => {
+            warn!(target: "kanade_agent::session_supervisor", error = %e, "spawn session-agent failed");
+            return false;
+        }
+        Err(e) => {
+            warn!(target: "kanade_agent::session_supervisor", error = %e, "spawn join failed");
+            return false;
+        }
+    };
     info!(target: "kanade_agent::session_supervisor", session, "session-agent started");
 
     // Reader thread: stdout lines → channel. read_lines blocks on ReadFile;

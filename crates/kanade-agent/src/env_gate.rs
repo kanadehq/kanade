@@ -68,7 +68,9 @@ const SESSION_IDLE_STALE_AFTER: Duration = Duration::from_secs(35); // ~3.5× sa
 /// down) so `console_idle()` falls back to MAX (treat as idle).
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn set_console_idle(idle: Option<Duration>) {
-    let mut g = LATEST_CONSOLE_IDLE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut g = LATEST_CONSOLE_IDLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     *g = idle.map(|d| (Instant::now(), d));
 }
 
@@ -180,7 +182,9 @@ fn sense_windows() -> (bool, Option<std::time::Duration>, bool) {
 /// every unknown.
 #[cfg(target_os = "windows")]
 pub(crate) fn console_idle() -> Option<std::time::Duration> {
-    let g = LATEST_CONSOLE_IDLE.lock().unwrap_or_else(|e| e.into_inner());
+    let g = LATEST_CONSOLE_IDLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     match *g {
         Some((set_at, idle)) if set_at.elapsed() <= SESSION_IDLE_STALE_AFTER => Some(idle),
         _ => Some(Duration::MAX),
