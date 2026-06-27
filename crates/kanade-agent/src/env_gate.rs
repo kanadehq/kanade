@@ -88,17 +88,11 @@ pub fn require_satisfied(req: &Require) -> bool {
 /// vacuously true with no one at the console.
 #[cfg(target_os = "windows")]
 fn sense_windows() -> (bool, Option<std::time::Duration>, bool) {
-    use std::time::Duration;
     use windows::Win32::NetworkManagement::IpHelper::GetNetworkConnectivityHint;
     use windows::Win32::Networking::WinSock::{
         NL_NETWORK_CONNECTIVITY_HINT, NetworkConnectivityLevelHintInternetAccess,
     };
     use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
-    use windows::Win32::System::RemoteDesktop::{
-        WTS_CURRENT_SERVER_HANDLE, WTS_INFO_CLASS, WTSFreeMemory, WTSGetActiveConsoleSessionId,
-        WTSINFOW, WTSQuerySessionInformationW, WTSSessionInfo,
-    };
-    use windows::core::PWSTR;
 
     // ---- AC power ----
     // SAFETY: `st` is a valid, properly-aligned SYSTEM_POWER_STATUS; the
@@ -113,57 +107,7 @@ fn sense_windows() -> (bool, Option<std::time::Duration>, bool) {
     };
 
     // ---- console idle ----
-    let idle = {
-        // SAFETY: no arguments; returns the physical console session id,
-        // or 0xFFFFFFFF when no session is attached to the console.
-        let session = unsafe { WTSGetActiveConsoleSessionId() };
-        if session == 0xFFFF_FFFF {
-            // Headless / no console user → idle is vacuously satisfied.
-            Some(Duration::MAX)
-        } else {
-            let mut buf = PWSTR::null();
-            let mut bytes: u32 = 0;
-            // SAFETY: `WTSSessionInfo` returns a heap WTSINFOW into `buf`
-            // (size into `bytes`). We read it through a `*const WTSINFOW`
-            // only after confirming the byte count, then free it with
-            // `WTSFreeMemory`. `buf`/`bytes` are valid out-params.
-            unsafe {
-                match WTSQuerySessionInformationW(
-                    Some(WTS_CURRENT_SERVER_HANDLE),
-                    session,
-                    WTS_INFO_CLASS(WTSSessionInfo.0),
-                    &mut buf,
-                    &mut bytes,
-                ) {
-                    Ok(())
-                        if (bytes as usize) >= std::mem::size_of::<WTSINFOW>()
-                            && !buf.is_null() =>
-                    {
-                        let info = &*(buf.0 as *const WTSINFOW);
-                        // FILETIME 100ns ticks; idle = now - last input.
-                        // saturating_sub so an anomalous (e.g. clock-skew)
-                        // ordering can't overflow-panic in debug builds.
-                        let delta_100ns = info.CurrentTime.saturating_sub(info.LastInputTime);
-                        let d = if delta_100ns > 0 {
-                            Duration::from_nanos((delta_100ns as u64).saturating_mul(100))
-                        } else {
-                            Duration::ZERO
-                        };
-                        WTSFreeMemory(buf.0 as *mut core::ffi::c_void);
-                        Some(d)
-                    }
-                    Ok(()) => {
-                        // Short/empty buffer — free it if any, report unknown.
-                        if !buf.is_null() {
-                            WTSFreeMemory(buf.0 as *mut core::ffi::c_void);
-                        }
-                        None
-                    }
-                    Err(_) => None,
-                }
-            }
-        }
-    };
+    let idle = console_idle();
 
     // ---- network (internet connectivity) ----
     // SAFETY: `hint` is a valid, properly-aligned out-param the call only
@@ -187,6 +131,77 @@ fn sense_windows() -> (bool, Option<std::time::Duration>, bool) {
     };
 
     (ac_online, idle, network_up)
+}
+
+/// Time since the last user input on the physical console.
+/// `Some(Duration::MAX)` when there's no interactive console user (headless /
+/// logged out); `Some(d)` for a real idle duration; `None` when it can't be
+/// read. Factored out of [`sense_windows`] so the idle sampler (#841) can read
+/// JUST idle each tick without the AC-power / network syscalls — and so the
+/// fire-time gate keeps the exact same behaviour.
+#[cfg(target_os = "windows")]
+pub(crate) fn console_idle() -> Option<std::time::Duration> {
+    use std::time::Duration;
+    use windows::Win32::System::RemoteDesktop::{
+        WTS_CURRENT_SERVER_HANDLE, WTS_INFO_CLASS, WTSFreeMemory, WTSGetActiveConsoleSessionId,
+        WTSINFOW, WTSQuerySessionInformationW, WTSSessionInfo,
+    };
+    use windows::core::PWSTR;
+
+    // SAFETY: no arguments; returns the physical console session id, or
+    // 0xFFFFFFFF when no session is attached to the console.
+    let session = unsafe { WTSGetActiveConsoleSessionId() };
+    if session == 0xFFFF_FFFF {
+        // Headless / no console user → idle is vacuously satisfied.
+        return Some(Duration::MAX);
+    }
+    let mut buf = PWSTR::null();
+    let mut bytes: u32 = 0;
+    // SAFETY: `WTSSessionInfo` returns a heap WTSINFOW into `buf` (size into
+    // `bytes`). We read it through a `*const WTSINFOW` only after confirming
+    // the byte count, then free it with `WTSFreeMemory`. `buf`/`bytes` are
+    // valid out-params.
+    unsafe {
+        match WTSQuerySessionInformationW(
+            Some(WTS_CURRENT_SERVER_HANDLE),
+            session,
+            WTS_INFO_CLASS(WTSSessionInfo.0),
+            &mut buf,
+            &mut bytes,
+        ) {
+            Ok(()) if (bytes as usize) >= std::mem::size_of::<WTSINFOW>() && !buf.is_null() => {
+                let info = &*(buf.0 as *const WTSINFOW);
+                // FILETIME 100ns ticks; idle = now - last input. saturating_sub
+                // so an anomalous (e.g. clock-skew) ordering can't
+                // overflow-panic in debug builds.
+                let delta_100ns = info.CurrentTime.saturating_sub(info.LastInputTime);
+                let d = if delta_100ns > 0 {
+                    Duration::from_nanos((delta_100ns as u64).saturating_mul(100))
+                } else {
+                    Duration::ZERO
+                };
+                WTSFreeMemory(buf.0 as *mut core::ffi::c_void);
+                Some(d)
+            }
+            Ok(()) => {
+                // Short/empty buffer — free it if any, report unknown.
+                if !buf.is_null() {
+                    WTSFreeMemory(buf.0 as *mut core::ffi::c_void);
+                }
+                None
+            }
+            Err(_) => {
+                // In practice `buf` is still the null we initialised it to, so
+                // this is a no-op — but the docs don't guarantee a failed call
+                // leaves `ppBuffer` untouched, so mirror the Ok-arm free for
+                // symmetry rather than assume.
+                if !buf.is_null() {
+                    WTSFreeMemory(buf.0 as *mut core::ffi::c_void);
+                }
+                None
+            }
+        }
+    }
 }
 
 #[cfg(test)]

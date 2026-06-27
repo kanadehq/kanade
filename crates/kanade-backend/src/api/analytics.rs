@@ -604,7 +604,7 @@ async fn timeline(ctx: &Ctx<'_>, w: &AggregateWidget) -> anyhow::Result<WidgetDa
 }
 
 /// `render: op_timeline` → the per-PC operational events for the SPA to fold
-/// into power / session / sleep lane spans. No rollup, but NOT a naive
+/// into power / session / sleep / active lane spans. No rollup, but NOT a naive
 /// `[from, to)` slice: a PC that booted (or logged on) before the window and
 /// stayed up for the whole window emits no event inside it, so a plain slice
 /// would render an empty lane — indistinguishable from "powered off". To let
@@ -631,12 +631,14 @@ async fn op_timeline(ctx: &Ctx<'_>) -> anyhow::Result<WidgetData> {
                                   'log_service_started', 'log_service_stopped') THEN 'power' \
                     WHEN kind IN ('logon', 'logoff') THEN 'session' \
                     WHEN kind IN ('sleep', 'resume') THEN 'sleep' \
+                    WHEN kind IN ('active', 'idle') THEN 'active' \
                   END AS lane \
            FROM obs_events \
            WHERE pc_id = ?1 \
              AND kind IN ('boot', 'shutdown', 'unexpected_shutdown', \
                           'log_service_started', 'log_service_stopped', \
-                          'logon', 'logoff', 'sleep', 'resume') \
+                          'logon', 'logoff', 'sleep', 'resume', \
+                          'active', 'idle') \
              AND at < ?3 \
          ), seeded AS ( \
            SELECT at, kind FROM op WHERE at >= ?2 \
@@ -1303,6 +1305,8 @@ mod tests {
             "logoff",
             "sleep",
             "resume",
+            "active",
+            "idle",
         ];
         let at = |h: u32| Utc.with_ymd_and_hms(2026, 6, 17, h, 0, 0).unwrap();
         for (i, k) in want.iter().enumerate() {
