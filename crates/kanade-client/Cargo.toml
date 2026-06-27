@@ -59,6 +59,10 @@ tauri-plugin-single-instance = "2.4.2"
 # OR button click opens the client, no COM activator needed (#647).
 windows = { version = "0.62.2", features = [
     "Win32_UI_Shell",
+    # `ShellExecuteW` + `SW_SHOWNORMAL` (`open_external_url`): open a link found
+    # in a notification body in the default browser, instead of letting the
+    # WebView navigate to it and replace the embedded app page.
+    "Win32_UI_WindowsAndMessaging",
     "UI_Notifications",
     "Data_Xml_Dom",
 ] }

@@ -313,6 +313,58 @@ fn show_main_window(app: tauri::AppHandle) {
     }
 }
 
+/// Open an `http(s)` URL in the user's default browser. Called from the
+/// WebView when the user clicks a link auto-detected in a notification body
+/// (the panel renders bare URLs as `<a class="notif-link">`). The WebView
+/// can't just navigate an `<a href>` — that would replace the embedded app
+/// page with the remote site — so link clicks are routed here to launch the
+/// OS default handler instead.
+///
+/// Only `http://` / `https://` are honoured: a notification body is
+/// operator-authored content rendered in a *privileged* WebView (it can
+/// `invoke` agent commands), so we refuse `file:`, `javascript:`,
+/// `kanade-client:` and every other scheme rather than hand an arbitrary URI
+/// to `ShellExecuteW`. The WebView validates the scheme too; this is the
+/// defence-in-depth backstop. Best-effort: a launch failure is logged, not
+/// surfaced (the user can still copy the visible URL text).
+///
+/// `async` so Tauri runs it off the UI (main) thread: a synchronous command
+/// runs on the main thread, and `ShellExecuteW` can block briefly (DDE
+/// timeout, cold browser start) which would freeze the WebView for that window.
+#[tauri::command]
+async fn open_external_url(url: String) {
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        warn!(%url, "open_external_url: refusing non-http(s) scheme");
+        return;
+    }
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::core::{HSTRING, PCWSTR, w};
+    // ShellExecuteW with the "open" verb hands the URL straight to the
+    // registered protocol handler (the default browser) — no shell, so no
+    // command-injection surface even before the scheme gate above.
+    let url_h = HSTRING::from(&url);
+    // SAFETY: all pointers are valid for the call; we ignore the returned
+    // pseudo-HINSTANCE (only meaningful as a >32 success sentinel here).
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            w!("open"),
+            &url_h,
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    // ShellExecute returns a value <= 32 on failure.
+    if result.0 as isize <= 32 {
+        warn!(%url, code = result.0 as isize, "open_external_url: ShellExecuteW failed");
+    } else {
+        info!(%url, "open_external_url: opened in default browser");
+    }
+}
+
 /// Escape the five XML metacharacters so a title/body/URI is safe inside the
 /// toast XML (both element text and double-quoted attributes).
 fn xml_escape(s: &str) -> String {
@@ -660,7 +712,8 @@ pub fn run() {
             get_launch_focus,
             app_version,
             show_main_window,
-            show_emergency_toast
+            show_emergency_toast,
+            open_external_url
         ])
         .setup(move |app| {
             // Supervise the KLP connection for the app's lifetime:
