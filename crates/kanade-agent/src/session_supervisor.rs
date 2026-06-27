@@ -106,11 +106,11 @@ async fn pump_one(exe: &Path, session: u32) -> bool {
     loop {
         tokio::select! {
             line = rx.recv() => match line {
-                Some(l) => {
-                    if let Some(ms) = parse_idle_ms(&l) {
-                        set_console_idle(Some(Duration::from_millis(ms)));
-                    }
-                }
+                // Forward the reading unconditionally — including a `null`
+                // (GetLastInputInfo failed → unparseable), which clears the
+                // cache so console_idle() falls back to MAX immediately
+                // instead of holding the last value fresh for ~35s.
+                Some(l) => set_console_idle(parse_idle_ms(&l).map(Duration::from_millis)),
                 None => break, // reader EOF → child died (unexpected)
             },
             _ = tokio::time::sleep(POLL_INTERVAL) => {

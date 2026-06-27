@@ -820,12 +820,9 @@ pub(crate) fn spawn_session_agent_child(exe: &std::path::Path) -> Result<Session
             &si,
             &mut pi,
         )
-        .map_err(|e| {
-            anyhow!(
-                "CreateProcessAsUserW(session-agent) failed: {e:?} (Win32 {:?})",
-                GetLastError(),
-            )
-        })?;
+        // The `windows` crate already captured GetLastError() into `e` at the
+        // failure point; calling it again here could read a stale TLS slot.
+        .map_err(|e| anyhow!("CreateProcessAsUserW(session-agent) failed: {e:?}"))?;
 
         // KILL_ON_JOB_CLOSE so the child can never outlive this agent process
         // (self-update swaps the binary then exits; a plain assign would leak
