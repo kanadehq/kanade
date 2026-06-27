@@ -34,7 +34,9 @@ mod imp {
     use tracing::warn;
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, TerminateJobObject,
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, TerminateJobObject,
     };
     use windows::core::PCWSTR;
 
@@ -75,6 +77,33 @@ mod imp {
                 // Wrap immediately so an early return below still
                 // closes the handle via Drop.
                 let job = JobObject { handle };
+                AssignProcessToJobObject(handle, process)
+                    .map_err(|e| anyhow!("AssignProcessToJobObject: {e:?}"))?;
+                Ok(job)
+            }
+        }
+
+        /// Like [`assign_handle`] but the Job is `KILL_ON_JOB_CLOSE`: when this
+        /// `JobObject` handle is dropped — including the agent process exiting
+        /// or crashing, which closes all its handles — the OS kills the whole
+        /// assigned tree. Used for the supervised session-agent child (#855) so
+        /// it can never outlive its parent agent (no orphan across self-update /
+        /// shutdown / crash). Unlike the plain `assign_handle`, here KILL is the
+        /// point, so the limit flag is deliberate.
+        pub fn assign_handle_kill_on_close(process: HANDLE) -> Result<Self> {
+            unsafe {
+                let handle = CreateJobObjectW(None, PCWSTR::null())
+                    .map_err(|e| anyhow!("CreateJobObjectW: {e:?}"))?;
+                let job = JobObject { handle };
+                let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                SetInformationJobObject(
+                    handle,
+                    JobObjectExtendedLimitInformation,
+                    &info as *const _ as *const core::ffi::c_void,
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                )
+                .map_err(|e| anyhow!("SetInformationJobObject(KILL_ON_JOB_CLOSE): {e:?}"))?;
                 AssignProcessToJobObject(handle, process)
                     .map_err(|e| anyhow!("AssignProcessToJobObject: {e:?}"))?;
                 Ok(job)

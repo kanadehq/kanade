@@ -46,6 +46,10 @@ mod cwd_expand;
 mod process_as_user;
 #[cfg(target_os = "windows")]
 mod service;
+// #855: SYSTEM-side supervisor that keeps a `--session-agent` child alive in
+// the user session and feeds its in-session idle into env_gate's cache.
+#[cfg(target_os = "windows")]
+mod session_supervisor;
 
 use std::path::{Path, PathBuf};
 
@@ -71,6 +75,13 @@ struct Cli {
     /// kanade_shared::default_paths::config_dir).
     #[arg(long)]
     config: Option<PathBuf>,
+
+    /// #855 internal: run as the in-session idle sensor instead of the agent.
+    /// Launched by the agent's session supervisor inside the logged-in user's
+    /// console session (it reads GetLastInputInfo, truthful only in-session,
+    /// and prints `{"idle_ms":N}` lines to stdout). Not for manual use.
+    #[arg(long, hide = true)]
+    session_agent: bool,
 }
 
 /// Top-level entry point.
@@ -84,6 +95,14 @@ struct Cli {
 ///
 /// On non-Windows targets we always run in console mode.
 fn main() -> Result<()> {
+    // #855: the `--session-agent` child is a plain in-session idle sensor.
+    // It must NOT run the boot sentinel (it would corrupt the service's
+    // rollback attempt counter in the shared data dir) and must NOT attach to
+    // the SCM — so branch out before either. It reads its own argv only.
+    if Cli::parse().session_agent {
+        return run_session_agent();
+    }
+
     // #582: boot sentinel is the VERY first thing — before the service
     // dispatcher, config, tracing, or NATS — so a binary that
     // crash-loops on boot (the failure mode that took the backend down
@@ -120,6 +139,55 @@ fn main() -> Result<()> {
         .build()
         .context("build tokio runtime")?;
     runtime.block_on(run_agent())
+}
+
+/// #855: the `--session-agent` child. Runs INSIDE the user's console session
+/// (spawned by `session_supervisor` via the `RunAs::User` token dance), reads
+/// `GetLastInputInfo` — truthful only in-session — and prints the idle as one
+/// `{"idle_ms":N}` NDJSON line per sample to stdout, which the supervisor reads
+/// back into `env_gate`'s console-idle cache. No service, no NATS, no config:
+/// the lightest possible resident sensor. Exits when stdout breaks (the parent
+/// agent is gone) or when killed.
+fn run_session_agent() -> Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::io::Write;
+        use windows::Win32::System::SystemInformation::GetTickCount;
+        use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+
+        let mut out = std::io::stdout();
+        loop {
+            // SAFETY: `lii` is a valid, correctly-sized LASTINPUTINFO out-param;
+            // GetTickCount takes no args. GetLastInputInfo reads the input
+            // desktop of THIS process's session — truthful because we run in
+            // the user's session (a SYSTEM/session-0 caller could not).
+            let line = unsafe {
+                let mut lii = LASTINPUTINFO {
+                    cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+                    dwTime: 0,
+                };
+                if GetLastInputInfo(&mut lii).as_bool() {
+                    // Both are DWORD ms since boot; wrapping_sub handles the
+                    // ~49.7-day GetTickCount wrap (idle is always far below it).
+                    let idle_ms = GetTickCount().wrapping_sub(lii.dwTime);
+                    format!("{{\"idle_ms\":{idle_ms}}}\n")
+                } else {
+                    "{\"idle_ms\":null}\n".to_string()
+                }
+            };
+            // A broken stdout (parent closed its read end / agent gone) → stop.
+            if out.write_all(line.as_bytes()).is_err() || out.flush().is_err() {
+                break;
+            }
+            std::thread::sleep(env_gate::SESSION_IDLE_SAMPLE_INTERVAL);
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // No in-session idle off Windows; the fleet is all-Windows and this
+        // child is only ever spawned by the Windows session supervisor.
+    }
+    Ok(())
 }
 
 /// Run the agent's tokio main loop. Called either from console
@@ -438,6 +506,14 @@ pub(crate) async fn run_agent() -> Result<()> {
     // the Event Log. Emits `active`/`idle` ObsEvents to the same outbox on
     // debounced transitions; the drain above publishes them.
     tokio::spawn(idle_sampler::run(pc_id.clone(), obs_outbox_dir.clone()));
+    // #855: keep a `--session-agent` child alive in the user's console session
+    // and feed its in-session GetLastInputInfo idle into env_gate's cache, so
+    // console_idle() — and thus both idle_sampler above and the #418 require
+    // gate — reads truthful idle instead of the stale WTS LastInputTime.
+    #[cfg(target_os = "windows")]
+    if let Ok(self_exe) = std::env::current_exe() {
+        tokio::spawn(session_supervisor::run(self_exe));
+    }
     // #841 PR2: native Windows Event Log reader — power/session/sleep lanes
     // straight from the log via EvtQuery, replacing the collect-winlog-events
     // PowerShell job. Enqueues to the same outbox; the drain publishes them.

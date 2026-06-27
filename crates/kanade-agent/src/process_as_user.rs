@@ -723,6 +723,187 @@ fn push_quoted_arg(cmd: &mut String, arg: &str) {
     cmd.push('"');
 }
 
+// ── #855 session-agent: spawn the resident in-session idle reader ──────────
+
+/// A spawned `--session-agent` child running in the user's console session.
+/// The Job is `KILL_ON_JOB_CLOSE`, so when this struct (and thus the agent
+/// process) drops, the child dies with it — no orphan across self-update /
+/// crash. `terminate()` kills it eagerly (logoff / session switch).
+pub(crate) struct SessionAgentChild {
+    process: SafeHandle,
+    job: Option<JobObject>,
+    stdout_read: Option<OwnedHandle>,
+}
+
+impl SessionAgentChild {
+    /// Take the child's stdout handle to hand to a blocking line reader.
+    pub(crate) fn take_stdout(&mut self) -> Option<OwnedHandle> {
+        self.stdout_read.take()
+    }
+    /// Kill the child (whole tree) eagerly — used on logoff / session switch.
+    pub(crate) fn terminate(&self) {
+        terminate_tree(&self.job, self.process.raw());
+    }
+}
+
+/// The active physical console session id, or `None` when none is attached
+/// (headless / logged out). The session supervisor (#855) polls this as the
+/// source of truth for whether a session-agent should be running.
+pub(crate) fn active_console_session() -> Option<u32> {
+    // SAFETY: no args; returns the console session id, or u32::MAX for none.
+    let s = unsafe { WTSGetActiveConsoleSessionId() };
+    if s == u32::MAX { None } else { Some(s) }
+}
+
+/// Spawn `"<exe>" --session-agent` as the logged-in user, capturing its stdout.
+/// Reuses the `RunAs::User` token / env-block / `CreateProcessAsUserW` dance,
+/// but: only stdout is piped, the Job is `KILL_ON_JOB_CLOSE`, and there is no
+/// timeout/script — it's a long-lived sensor read by [`read_lines`].
+pub(crate) fn spawn_session_agent_child(exe: &std::path::Path) -> Result<SessionAgentChild> {
+    unsafe {
+        let session = WTSGetActiveConsoleSessionId();
+        if session == u32::MAX {
+            bail!("no active console session — session-agent needs a logged-in user");
+        }
+        let token = acquire_token(RunAs::User, session)?;
+
+        let (stdout_read, stdout_write) = make_inheritable_pipe()?;
+
+        let mut env_block: *mut core::ffi::c_void = std::ptr::null_mut();
+        let env_ok = CreateEnvironmentBlock(&mut env_block, Some(token.raw()), false).is_ok();
+        if !env_ok {
+            warn!(
+                target: "kanade_agent::process_as_user",
+                "CreateEnvironmentBlock failed; session-agent inherits the agent's env",
+            );
+        }
+        let env_guard = EnvBlockGuard(if env_ok {
+            env_block
+        } else {
+            std::ptr::null_mut()
+        });
+
+        // Command line: the current exe + `--session-agent`. push_quoted_arg
+        // handles the exe path quoting; the flag is a plain literal.
+        let mut cmd = String::new();
+        push_quoted_arg(&mut cmd, &exe.to_string_lossy());
+        cmd.push_str(" --session-agent");
+        let mut cmd_buf: Vec<u16> = cmd.encode_utf16().collect();
+        cmd_buf.push(0);
+
+        let mut si: STARTUPINFOW = std::mem::zeroed();
+        si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        si.dwFlags = STARTF_USESTDHANDLES;
+        si.hStdOutput = HANDLE(stdout_write.as_raw_handle_value());
+        // The child only writes stdout (NDJSON idle lines); no stdin/stderr.
+        si.hStdError = HANDLE::default();
+        si.hStdInput = HANDLE::default();
+
+        let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
+        let flags = CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW | CREATE_SUSPENDED;
+        let env_ptr = if env_guard.0.is_null() {
+            None
+        } else {
+            Some(env_guard.0 as *const _ as _)
+        };
+
+        CreateProcessAsUserW(
+            Some(token.raw()),
+            PWSTR::null(),
+            Some(PWSTR(cmd_buf.as_mut_ptr())),
+            None,
+            None,
+            true, // bInheritHandles — the stdout pipe write end
+            flags,
+            env_ptr,
+            PWSTR::null(),
+            &si,
+            &mut pi,
+        )
+        .map_err(|e| {
+            anyhow!(
+                "CreateProcessAsUserW(session-agent) failed: {e:?} (Win32 {:?})",
+                GetLastError(),
+            )
+        })?;
+
+        // KILL_ON_JOB_CLOSE so the child can never outlive this agent process
+        // (self-update swaps the binary then exits; a plain assign would leak
+        // the old session-agent). Assigned while suspended → race-free capture.
+        let job = match JobObject::assign_handle_kill_on_close(pi.hProcess) {
+            Ok(j) => Some(j),
+            Err(e) => {
+                warn!(
+                    target: "kanade_agent::process_as_user",
+                    error = %e,
+                    "session-agent job assign failed; kill falls back to single-process terminate",
+                );
+                None
+            }
+        };
+
+        if ResumeThread(pi.hThread) == u32::MAX {
+            let err = GetLastError();
+            let _ = CloseHandle(pi.hThread);
+            if let Some(j) = &job {
+                j.terminate();
+            } else {
+                let _ = TerminateProcess(pi.hProcess, 1);
+            }
+            let _ = CloseHandle(pi.hProcess);
+            bail!("ResumeThread(session-agent) failed (Win32 err {err:?})");
+        }
+        let _ = CloseHandle(pi.hThread);
+        drop(stdout_write); // child holds the only write end now → EOF on exit
+
+        Ok(SessionAgentChild {
+            process: SafeHandle::new(pi.hProcess),
+            job,
+            stdout_read: Some(stdout_read),
+        })
+    }
+}
+
+/// Blocking read loop over the session-agent's stdout: split into lines
+/// (handling `\r\n` and chunk boundaries) and call `on_line` per complete
+/// line. Returns when the pipe hits EOF / breaks (child exited / was killed).
+/// Run on a `spawn_blocking` thread — Win32 anonymous pipes are blocking-only.
+pub(crate) fn read_lines(handle: OwnedHandle, mut on_line: impl FnMut(&str)) {
+    const MAX_LINE: usize = 64 * 1024; // guard a misbehaving child
+    let raw = handle.as_raw_handle_value();
+    let mut chunk = [0u8; 4096];
+    let mut line = Vec::<u8>::new();
+    loop {
+        let mut read: u32 = 0;
+        let ok = unsafe { ReadFile(HANDLE(raw), Some(&mut chunk), Some(&mut read), None) };
+        // Err (incl. ERROR_BROKEN_PIPE) or 0 bytes = EOF: the child is gone.
+        if ok.is_err() || read == 0 {
+            break;
+        }
+        for &b in &chunk[..read as usize] {
+            if b == b'\n' {
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+                on_line(String::from_utf8_lossy(&line).as_ref());
+                line.clear();
+            } else {
+                line.push(b);
+                if line.len() > MAX_LINE {
+                    line.clear(); // drop the runaway partial; resync at next \n
+                }
+            }
+        }
+    }
+    // Best-effort flush of a trailing newline-less line.
+    if !line.is_empty() {
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        on_line(String::from_utf8_lossy(&line).as_ref());
+    }
+}
+
 #[cfg(test)]
 mod launch_tests {
     use super::push_quoted_arg;
