@@ -7,6 +7,7 @@ mod finalize;
 mod groups;
 mod heartbeat;
 mod host_perf;
+mod idle_sampler;
 mod job_object;
 mod job_tail;
 mod live_tail;
@@ -432,6 +433,10 @@ pub(crate) async fn run_agent() -> Result<()> {
     // `ObsEvent`s a script emits via `emit.type: events` manifests.
     let obs_outbox_dir = default_paths::data_dir().join("obs-outbox");
     let _obs_outbox_handle = obs_outbox::spawn_drain(client.clone(), obs_outbox_dir.clone());
+    // #841: agent-native idle/active sampler — the one swimlane signal not in
+    // the Event Log. Emits `active`/`idle` ObsEvents to the same outbox on
+    // debounced transitions; the drain above publishes them.
+    tokio::spawn(idle_sampler::run(pc_id.clone(), obs_outbox_dir.clone()));
     // v0.23: schedules marked `runs_on: agent` tick locally so the
     // agent keeps firing even when the broker is unreachable. See
     // `crates/kanade-agent/src/local_scheduler.rs` for the flow.

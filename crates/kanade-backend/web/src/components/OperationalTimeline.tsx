@@ -18,8 +18,12 @@ type Span = { from: number; to: number; openStart: boolean; openEnd: boolean };
 //   power   — agent/host is up (boot / service-start → shutdown / service-stop)
 //   session — a user is signed in (logon → logoff)
 //   sleep   — the host is suspended (sleep → resume)
+//   active  — an interactive user is actually using the box (active → idle);
+//             a filled span = present, a gap = idle. Fed by the agent-native
+//             idle sampler (#841), the one signal not in the Event Log.
 // The kinds line up with the backend `op_timeline` query's IN-list and the
-// collect-winlog-events emitter.
+// emitters (collect-winlog-events for the log-sourced lanes, the idle
+// sampler for active/idle).
 const OP_LANES = [
   {
     key: 'power',
@@ -38,6 +42,12 @@ const OP_LANES = [
     starts: ['sleep'],
     ends: ['resume'],
     color: '#f59e0b', // amber-500
+  },
+  {
+    key: 'active',
+    starts: ['active'],
+    ends: ['idle'],
+    color: '#0ea5e9', // sky-500
   },
 ] as const;
 
@@ -141,8 +151,8 @@ function axisTicks(t0: number, t1: number): { ts: number; label: string }[] {
  * glance: when the host was up, who was signed in, when it slept. Shared by
  * the Analytics `op_timeline` widget (which receives a server-computed
  * window) and the Events page strip (which derives the window from the
- * rendered events). The active/idle lane is shown as pending — it needs an
- * idle sampler that isn't collected yet.
+ * rendered events). The active/idle lane is fed by the agent-native idle
+ * sampler (#841); a filled span = active, a gap = idle.
  *
  * `from` / `to` bound the window; when omitted they fall back to the
  * earliest / latest event so the Events page can use it without a window.
@@ -258,19 +268,6 @@ export function OperationalTimeline({
           </div>
         </div>
       ))}
-
-      {/* Active / idle lane — reconstructed nowhere yet; an idle sampler
-          would feed it. Rendered (greyed) so its absence is explicit rather
-          than a silently missing row. */}
-      <div className="flex items-center gap-2">
-        <div className="flex w-28 shrink-0 items-center gap-1.5 text-xs text-muted">
-          <span className="inline-block size-2 shrink-0 rounded-sm bg-muted/40" />
-          <span className="truncate">{t('opTimeline.lanes.active')}</span>
-        </div>
-        <div className="flex h-6 flex-1 items-center justify-center rounded-sm border border-dashed border-border/50 text-[10px] text-muted">
-          {t('opTimeline.activePending')}
-        </div>
-      </div>
 
       {/* Time axis. */}
       <div className="relative ml-[120px] h-4 text-[9px] text-muted">
