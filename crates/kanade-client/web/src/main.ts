@@ -24,6 +24,13 @@ import {
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
+import { marked } from "marked";
+import createDOMPurify from "dompurify";
+
+// Our own DOMPurify instance, NOT the shared default export: the link-rewriting
+// `afterSanitizeAttributes` hook below is instance-global, so an isolated
+// instance keeps it from leaking onto any other sanitize in the app.
+const DOMPurify = createDOMPurify(window);
 
 // ---- Lucide icon helpers ----------------------------------------------
 
@@ -1213,7 +1220,7 @@ function renderNotification(n: AppNotification): string {
         </div>
         ${previewEl}
         <div class="notif-collapse">
-          <p class="notif-text">${linkifyHtml(n.body)}</p>
+          <div class="notif-text notif-md">${renderMarkdown(n.body)}</div>
           <p class="notif-meta muted">${meta}</p>
         </div>
       </div>
@@ -1553,38 +1560,70 @@ function escapeHtml(s: string): string {
     .replace(/'/g, "&#039;");
 }
 
-// Bare http(s) URL matcher for notification bodies. Stops at whitespace and
-// the few chars that can't appear in a URL but would break out of the anchor
-// (`< > " '`). Trailing sentence punctuation is trimmed separately below.
-const NOTIF_URL_RE = /https?:\/\/[^\s<>"']+/g;
+// ---- Notification body: Markdown rendering (#850) ----
+//
+// Operator-authored bodies are Markdown. We render them to a SANITIZED HTML
+// subset — NOT raw HTML: the panel is a privileged WebView (it can `invoke`
+// agent commands), so unrestricted HTML would be an XSS → job-execution hole.
+// `marked` (GFM: tables, strikethrough, bare-URL autolink) produces the HTML;
+// `DOMPurify` then strips everything outside the allowlist below (no `<img>`,
+// no `<script>`, no event handlers, no `javascript:`).
+//
+// Options are passed per-call (below) rather than via `marked.setOptions`, so
+// we don't mutate the shared `marked` singleton's global state.
+const MARKED_OPTS = { async: false, gfm: true, breaks: true } as const;
 
-// Render a notification body to HTML, turning bare http(s) URLs into clickable
-// links. Every span is HTML-escaped — the exact same XSS guard as a plain
-// `escapeHtml(body)` — and only the URL runs become `<a class="notif-link">`.
-// The raw (escaped) URL rides in `data-href`; the delegated click handler
-// reads it and opens it in the OS browser via the `open_external_url` command,
-// because letting the WebView actually navigate an `<a href>` would replace the
-// embedded app page with the remote site. (#850 — autolink only; richer
-// Markdown formatting is tracked separately.)
-function linkifyHtml(text: string): string {
-  let out = "";
-  let last = 0;
-  for (const m of text.matchAll(NOTIF_URL_RE)) {
-    const start = m.index ?? 0;
-    // Trailing punctuation is almost never part of the link (a period ending
-    // the sentence, a paren wrapped around the URL) — leave it in the plain
-    // run so `https://x).` links `https://x` and renders `).` as text.
-    const url = m[0].replace(/[.,;:!?)\]}'"]+$/, "");
-    out += escapeHtml(text.slice(last, start));
-    const safe = escapeHtml(url);
-    // `href="#"` makes the anchor natively focusable + Enter-activatable (an
-    // `<a>` with no href isn't); the click handler preventDefault()s, so `#`
-    // never navigates. The real target rides in `data-href`.
-    out += `<a class="notif-link" href="#" data-href="${safe}">${safe}</a>`;
-    last = start + url.length;
+// The only tags an operator can produce. GFM tables are allowed (no script
+// surface); images / headings / raw HTML are not.
+const NOTIF_MD_ALLOWED_TAGS = [
+  "p", "br", "strong", "em", "del", "code", "pre", "blockquote",
+  "ul", "ol", "li", "a",
+  "table", "thead", "tbody", "tr", "th", "td",
+];
+// `data-href` + `class` are added by the link hook below; `align` is what GFM
+// emits for column alignment.
+const NOTIF_MD_ALLOWED_ATTR = ["href", "data-href", "class", "align"];
+
+// Route every http(s) link through the OS browser instead of letting the
+// WebView navigate (which would replace the embedded app page): rewrite each
+// `<a href>` into the same `<a class="notif-link" href="#" data-href>` shape
+// the delegated click handler already understands (→ `open_external_url`).
+// Anchors with any other scheme are made inert (DOMPurify already drops
+// `javascript:` etc.; this also neutralises `mailto:` and the like, which the
+// OS-open command wouldn't honour anyway).
+DOMPurify.addHook("afterSanitizeAttributes", (node) => {
+  if (node.nodeName !== "A") return;
+  const href = node.getAttribute("href") ?? "";
+  if (/^https?:\/\//i.test(href)) {
+    node.setAttribute("data-href", href);
+    node.setAttribute("href", "#");
+    node.setAttribute("class", "notif-link");
+  } else {
+    node.removeAttribute("href");
   }
-  out += escapeHtml(text.slice(last));
-  return out;
+});
+
+// Cache rendered HTML by body so re-renders (a notification panel re-renders
+// on every push / toggle) don't re-parse+sanitize unchanged bodies. Bounded so
+// a churn of distinct bodies (e.g. the SPA-side live preview pattern) can't
+// grow it without limit; clearing wholesale is fine — it just re-warms.
+const MD_RENDER_CACHE = new Map<string, string>();
+const MD_RENDER_CACHE_MAX = 256;
+
+// Markdown body → sanitized HTML. (Replaces the autolink-only `linkifyHtml`
+// from #851; GFM autolinking now covers bare URLs.)
+function renderMarkdown(body: string): string {
+  const cached = MD_RENDER_CACHE.get(body);
+  if (cached !== undefined) return cached;
+  // `{ async: false }` picks marked's synchronous overload → returns `string`.
+  const html = marked.parse(body, MARKED_OPTS);
+  const safe = DOMPurify.sanitize(html, {
+    ALLOWED_TAGS: NOTIF_MD_ALLOWED_TAGS,
+    ALLOWED_ATTR: NOTIF_MD_ALLOWED_ATTR,
+  });
+  if (MD_RENDER_CACHE.size >= MD_RENDER_CACHE_MAX) MD_RENDER_CACHE.clear();
+  MD_RENDER_CACHE.set(body, safe);
+  return safe;
 }
 
 window.addEventListener("DOMContentLoaded", () => {
