@@ -151,8 +151,8 @@ function axisTicks(t0: number, t1: number): { ts: number; label: string }[] {
  * glance: when the host was up, who was signed in, when it slept. Shared by
  * the Analytics `op_timeline` widget (which receives a server-computed
  * window) and the Events page strip (which derives the window from the
- * rendered events). The active/idle lane is shown as pending — it needs an
- * idle sampler that isn't collected yet.
+ * rendered events). The active/idle lane is fed by the agent-native idle
+ * sampler (#841); a filled span = active, a gap = idle.
  *
  * `from` / `to` bound the window; when omitted they fall back to the
  * earliest / latest event so the Events page can use it without a window.
