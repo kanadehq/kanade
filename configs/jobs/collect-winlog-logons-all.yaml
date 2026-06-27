@@ -1,8 +1,9 @@
 # Issue #366 — on-demand UNFILTERED logon/logoff collection.
 #
-# The scheduled `collect-winlog-events` job keeps the Events
-# timeline human-shaped: it drops non-interactive logon types and
-# noise principals (SYSTEM / DWM-* / UMFD-* / machine accounts).
+# The agent's native Event Log reader (#841) keeps the Events
+# timeline human-shaped: Winlogon 7001/7002 fire once per real
+# interactive session, so the default timeline carries none of
+# Security 4624's token-level noise.
 # This companion job is the forensic escape hatch — it captures
 # EVERY Security 4624 / 4634 with no LogonType or account filter,
 # so an operator investigating "what touched this box?" can pull
@@ -16,9 +17,9 @@
 #
 #     kanade exec collect-winlog-logons-all --pcs <pc-id>
 #
-# Mechanics mirror `collect-winlog-events` (watermark per (log,
-# kind), 24h bootstrap/rolling window, NDJSON `ObsEvent` on stdout,
-# `emit.type=events`) with two deltas:
+# Mechanics: watermark per (log, kind), 24h bootstrap/rolling
+# window, NDJSON `ObsEvent` on stdout, `emit.type=events` — the same
+# pattern the native reader uses, with two deltas:
 #
 #   - Separate watermark file (`winlog-logons-all-watermark.txt`)
 #     so this job's progress never interferes with the scheduled

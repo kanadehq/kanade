@@ -1,7 +1,7 @@
 # Issue #378 — fires `enable-session-audit` once per PC so lock /
-# unlock (Security 4800 / 4801) start flowing into the
-# `collect-winlog-events` timeline. Same lifecycle pattern as
-# `kitting-once`:
+# unlock (Security 4800 / 4801) start flowing into the obs_events
+# timeline (read by the agent's native Event Log reader, #841).
+# Same lifecycle pattern as `kitting-once`:
 #
 #   * each internal poll (every minute) enumerates alive agents
 #   * a PC that completed with exit 0 is skipped forever
@@ -12,8 +12,8 @@
 # semantics for a one-shot policy enable, while replacement / newly
 # imaged PCs keep getting caught forever. A new PC missing
 # lock/unlock events for a minute or two after first heartbeat is
-# fine — the collect-winlog-events bootstrap window (24 h) will
-# backfill the gap on its next tick anyway.
+# fine — the native reader's bootstrap window (24 h) will backfill
+# the gap on its next poll anyway.
 #
 # Install:
 #

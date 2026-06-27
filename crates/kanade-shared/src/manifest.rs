@@ -1990,10 +1990,11 @@ done!
     #[test]
     fn example_event_collector_job_yamls_parse_and_validate() {
         let jobs = [
-            (
-                "collect-winlog-events",
-                include_str!("../../../configs/jobs/collect-winlog-events.yaml"),
-            ),
+            // collect-winlog-events was retired in #841 PR2 — the scheduled
+            // human-session / power timeline is now read natively by the
+            // agent (kanade-agent `winlog` module via EvtQuery), no
+            // PowerShell job. collect-winlog-logons-all stays as the
+            // on-demand forensic all-token-logons companion.
             (
                 "collect-winlog-logons-all",
                 include_str!("../../../configs/jobs/collect-winlog-logons-all.yaml"),

@@ -3,10 +3,10 @@
 #
 # Security 4800 / 4801 (workstation lock / unlock) only exist when
 # the "Other Logon/Logoff Events" audit subcategory is enabled,
-# and stock Windows ships with it DISABLED. The
-# `collect-winlog-events` collector is deliberately read-only
-# (collectors collect; they don't reconfigure the box), so the
-# enable lives here as its own job, fired exactly once per PC by
+# and stock Windows ships with it DISABLED. The agent's native
+# Event Log reader (#841) is deliberately read-only (it collects;
+# it doesn't reconfigure the box), so the enable lives here as its
+# own job, fired exactly once per PC by
 # the `enable-session-audit` schedule
 # (configs/schedules/enable-session-audit.yaml, `when:
 # per_pc: once` — exit 0 marks the PC done forever, a failure

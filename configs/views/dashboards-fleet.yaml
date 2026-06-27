@@ -1,7 +1,8 @@
 # Fleet analytics dashboards (#743) — a `view`: a standalone declarative
 # read/aggregation over obs_events the fleet ALREADY emits (logon / boot /
-# unexpected_shutdown from collect-winlog-events, agent_started /
-# agent_self_update from the agent). No new collector.
+# unexpected_shutdown from the agent's native Event Log reader, idle / active
+# from the idle sampler, agent_started / agent_self_update from the agent).
+# No new collector.
 #
 # This replaces the old definition-only JOB carrier (configs/jobs/
 # dashboards-fleet.yaml) that needed a noop `execute:` just to host these
@@ -22,8 +23,9 @@ tags: [dashboards]
 widgets:
   # ── Uptime ───────────────────────────────────────────────────────
   # Per-PC operational swimlane reconstructed from the power / session /
-  # sleep events collect-winlog-events already emits (boot / shutdown /
-  # log_service_*, logon / logoff, sleep / resume). Unlike the aggregation
+  # sleep events the agent's native Event Log reader emits (boot / shutdown /
+  # log_service_*, logon / logoff, sleep / resume) plus active / idle from the
+  # idle sampler. Unlike the aggregation
   # widgets it reads no single `kind`/`agg`: the backend returns the raw
   # events in the window and the SPA folds them into lane spans (the same
   # strip the Events page renders). Per-PC only — pick a PC in the
@@ -69,13 +71,14 @@ widgets:
     render: timeline
 
   # ── Access / Security ────────────────────────────────────────────
-  # NB on logon payloads: the SCHEDULED collect-winlog-events emits
-  # `logon` from Winlogon 7001 (source winlog:System) with `user` (a SID
-  # leaf name) but NO `logon_type`. `logon_type` only exists on the
-  # Security 4624 events from the on-demand collect-winlog-logons-all
-  # (source winlog:Security) — so the by-type widget is source-pinned to
-  # it and stays empty until that job is run. `user` exists on both, so
-  # the top-users / by-hour widgets work on the default fleet.
+  # NB on logon payloads: the agent's native Event Log reader emits
+  # `logon` from Winlogon 7001 (source winlog:System) with `user` (the
+  # SID — #841 PR2b resolves it to a leaf name) but NO `logon_type`.
+  # `logon_type` only exists on the Security 4624 events from the on-demand
+  # collect-winlog-logons-all (source winlog:Security) — so the by-type
+  # widget is source-pinned to it and stays empty until that job is run.
+  # `user` exists on both, so the top-users / by-hour widgets work on the
+  # default fleet.
   - dashboard: Access
     title: Logons by type (Security 4624)
     description: Needs the on-demand collect-winlog-logons-all job
