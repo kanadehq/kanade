@@ -114,25 +114,29 @@ kanade exec collect-broker-health --pcs <backend-host-id>
 The job (`configs/jobs/collect-broker-health.yaml`) samples the broker
 over ~3 minutes and uploads a bundle to `OBJECT_COLLECTIONS`; download it
 from the SPA **Collect** page (or hand the zip to your reviewer). It is
-read-only. Tune the window with `KANADE_BH_SAMPLES` /
-`KANADE_BH_INTERVAL_SEC` on the target if needed.
+read-only and needs **zero pre-setup**: it reads NATS' unauthenticated
+HTTP monitoring port (default 8222 — the same `/jsz` endpoint kanade
+already curls for `jetstream status`), so no `nats` CLI on the SYSTEM
+PATH and no token are required. Tune the window with `KANADE_BH_SAMPLES` /
+`KANADE_BH_INTERVAL_SEC` (and `KANADE_BH_MON_PORT` if the broker's
+`http_port` differs) on the target if needed.
 
 The bundle contains:
 
-- **Time series** (`conn-*.txt`, `js-*.txt`) — connection count and
-  JetStream consumer count per sample. A spike here at the herd moment is
-  the splay signal.
-- **Consumer footprint** (`consumers-*.txt`, `streams.txt`) — per-KV-stream
-  consumer counts; confirms the ~7N total and which streams hold them.
-- **Server health/resources** (`srv-health.txt`, `srv-cpu.txt`,
-  `srv-mem.txt`, `js-check.txt`) — JetStream API health, CPU, memory.
+- **Time series** (`connz-*.json`, `jsz-*.json`) — connection count
+  (`/connz`) and JetStream consumer count (`/jsz`) per sample. A spike
+  here at the herd moment is the splay signal.
+- **Consumer footprint** (`jsz-full.json`) — `/jsz?consumers=true&streams=true`:
+  the full consumer list; confirms the ~7N total and which streams hold them.
+- **Server health/resources** (`varz.json`, `healthz.json`) — `/varz`
+  (memory, CPU, connections, slow consumers) and `/healthz` status.
 - **Log tails** (redacted) — backend and nats-server.
 
 ### What to look for
 
 - **Smooth** consumer/connection counts across the samples, healthy
-  `js-check`, head-room on mem/cpu → the broker absorbed the event; **no
-  splay needed**, just keep sizing ahead of N.
+  `/healthz`, head-room on mem/cpu in `/varz` → the broker absorbed the
+  event; **no splay needed**, just keep sizing ahead of N.
 - **Spiky** connection backlog or consumer-create latency at the event,
   JetStream API errors, or mem/cpu pegged → the herd is real → add the
   startup splay (lever 2) and/or grow the broker.

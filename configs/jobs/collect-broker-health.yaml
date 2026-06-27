@@ -8,14 +8,18 @@
 #
 #   kanade exec collect-broker-health --pcs <backend-host-id>
 #
-# The script samples the broker over a few minutes (connections +
-# JetStream consumer footprint), grabs static reports + log tails, writes
-# everything to a temp dir, and prints a single JSON `{files:[...]}` on
-# stdout. The agent zips those files and uploads to OBJECT_COLLECTIONS;
-# download from the SPA Collect page (or hand the zip to your reviewer).
+# Zero pre-setup: it reads NATS' unauthenticated HTTP monitoring port
+# (default 8222 — /jsz /connz /varz /healthz), so it needs NO `nats` CLI
+# on the SYSTEM PATH and NO token. The script samples the broker over a
+# few minutes (connections + JetStream consumer footprint), grabs static
+# snapshots + log tails, writes everything to a temp dir, and prints a
+# single JSON `{files:[...]}` on stdout. The agent zips those files and
+# uploads to OBJECT_COLLECTIONS; download from the SPA Collect page (or
+# hand the zip to your reviewer).
 #
 # Tunable via env on the target (optional): KANADE_BH_SAMPLES (default 12),
-# KANADE_BH_INTERVAL_SEC (default 15) → ~3 min window by default.
+# KANADE_BH_INTERVAL_SEC (default 15) → ~3 min window; KANADE_BH_MON_PORT
+# (default 8222) if the broker's http_port differs.
 #
 # stdout MUST be a single pure JSON object. ALL progress / diagnostics go
 # to stderr via [Console]::Error.WriteLine — never Write-Host (it would
@@ -23,99 +27,89 @@
 
 id: collect-broker-health
 tags: [infra, nats, scaling]
-version: 0.1.0
+version: 0.2.0
 description: "Capture NATS/JetStream health (consumer footprint, connections, logs) for fleet-scaling analysis"
 
 execute:
   shell: powershell
-  # SYSTEM so it can read the NATS token from the hardened registry key
-  # and the SYSTEM-owned nats-server logs.
+  # SYSTEM so it can read the SYSTEM-owned nats/backend logs. (The metrics
+  # come from the localhost HTTP monitoring port, which needs no privilege
+  # and no token.)
   run_as: system
-  timeout: 300s
+  # 600s comfortably exceeds the worst-case sampling window + HTTP budget
+  # (12 samples x 15s sleeps + per-call timeouts) so the script always
+  # reaches its final JSON even if some monitoring calls stall.
+  timeout: 600s
   script: |
     $ErrorActionPreference = 'Stop'
     function Note($m) { [Console]::Error.WriteLine($m) }
 
-    $dir = Join-Path $env:TEMP 'kanade-broker-health'
-    if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
-    New-Item -ItemType Directory -Path $dir | Out-Null
+    # Unique per-run dir: avoids a Remove-Item that would throw (Stop) when a
+    # prior run's dir is locked by an AV scanner / hung session.
+    $dir = Join-Path $env:TEMP ('kanade-broker-health-' + (Get-Date -Format 'yyyyMMddHHmmss') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
     $files = New-Object System.Collections.Generic.List[string]
     function Add-Artifact($p) { if (Test-Path $p) { $files.Add((Resolve-Path $p).Path) } }
-    # Strip anything token/secret-looking from captured text (logs can
-    # carry connection strings); metrics reports don't, but be safe.
+    # Strip anything token/secret-looking from captured text (logs can carry
+    # connection strings); the monitoring JSON doesn't, but be safe.
     function Redact($s) { $s -replace '(?i)(token|secret|password|nkey|bearer)["'':=\s]+\S+', '$1=<redacted>' }
 
-    # --- resolve nats CLI + token + url -----------------------------------
-    $nats = (Get-Command nats -ErrorAction SilentlyContinue).Source
-    if (-not $nats) { Note 'nats CLI not on PATH — metrics will be skipped' }
-
-    $token = $env:KANADE_NATS_TOKEN
-    if (-not $token) {
-      try { $token = (Get-ItemProperty 'HKLM:\SOFTWARE\kanade\agent' -ErrorAction Stop).NatsToken } catch {}
-    }
-    # Parse nats_url from agent.toml (fallback to the default local broker).
-    $url = 'nats://127.0.0.1:4222'
-    $cfg = Join-Path $env:ProgramData 'Kanade\config\agent.toml'
-    if (Test-Path $cfg) {
-      $m = Select-String -Path $cfg -Pattern "nats_url\s*=\s*'([^']+)'" | Select-Object -First 1
-      if ($m) { $url = $m.Matches[0].Groups[1].Value }
-    }
-    $natsArgs = @('--server', $url)
-    if ($token) { $natsArgs += @('--token', $token) }
-
-    function Nats($argline, $outfile) {
-      if (-not $nats) { return }
+    # --- NATS monitoring endpoint (no CLI, no token, no env required) -----
+    # nats-server exposes an unauthenticated HTTP monitoring port (kanade's
+    # nats-server.conf sets http_port: 8222) with /jsz /connz /varz /healthz.
+    # Using it means the job runs with ZERO pre-setup on the backend host.
+    $port = $env:KANADE_BH_MON_PORT -as [int]; if (-not $port -or $port -lt 1 -or $port -gt 65535) { $port = 8222 }
+    $base = "http://127.0.0.1:$port"
+    function Mon($path, $outfile) {
       try {
-        $out = & $nats @natsArgs @argline 2>&1 | Out-String
-        Redact($out) | Out-File -FilePath $outfile -Encoding utf8
+        $raw = Invoke-WebRequest -UseBasicParsing -Uri "$base/$path" -TimeoutSec 5 -ErrorAction Stop
+        Redact($raw.Content) | Out-File -FilePath $outfile -Encoding utf8
         Add-Artifact $outfile
-      } catch { Note "nats $($argline -join ' ') failed: $_" }
+      } catch { Note "GET $base/$path failed: $_" }
     }
 
     $meta = @{
-      captured_at = (Get-Date).ToUniversalTime().ToString('o')
+      captured_at = [DateTime]::UtcNow.ToString('o')
       host        = $env:COMPUTERNAME
-      nats_url    = $url
-      nats_cli    = [bool]$nats
-      token_found = [bool]$token
+      mon_base    = $base
     }
     ($meta | ConvertTo-Json) | Out-File (Join-Path $dir 'capture-meta.json') -Encoding utf8
     Add-Artifact (Join-Path $dir 'capture-meta.json')
 
     # --- time series over the herd window ---------------------------------
-    $samples  = if ($env:KANADE_BH_SAMPLES)      { [int]$env:KANADE_BH_SAMPLES }      else { 12 }
-    $interval = if ($env:KANADE_BH_INTERVAL_SEC) { [int]$env:KANADE_BH_INTERVAL_SEC } else { 15 }
-    Note "sampling $samples x ${interval}s (~$([int]($samples*$interval/60)) min)"
+    # `-as [int]` yields $null on a non-integer instead of throwing.
+    $samples  = $env:KANADE_BH_SAMPLES  -as [int]; if (-not $samples  -or $samples  -lt 1) { $samples  = 12 }
+    $interval = $env:KANADE_BH_INTERVAL_SEC -as [int]; if (-not $interval -or $interval -lt 1) { $interval = 15 }
+    Note "sampling $samples x ${interval}s (~$([int]($samples*$interval/60)) min) from $base"
     for ($i = 1; $i -le $samples; $i++) {
-      $ts = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
-      $tag = '{0:000}-{1}' -f $i, $ts
+      $tag = '{0:000}-{1}' -f $i, [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
       # The two herd signals: connection churn and JetStream consumer count.
-      Nats @('server','report','connections')                 (Join-Path $dir "conn-$tag.txt")
-      Nats @('server','report','jetstream')                   (Join-Path $dir "js-$tag.txt")
+      Mon 'connz'  (Join-Path $dir "connz-$tag.json")
+      Mon 'jsz'    (Join-Path $dir "jsz-$tag.json")
       if ($i -lt $samples) { Start-Sleep -Seconds $interval }
     }
 
-    # --- static one-shot reports ------------------------------------------
-    Nats @('server','report','health')        (Join-Path $dir 'srv-health.txt')
-    Nats @('server','report','cpu')           (Join-Path $dir 'srv-cpu.txt')
-    Nats @('server','report','mem')           (Join-Path $dir 'srv-mem.txt')
-    Nats @('server','check','jetstream')      (Join-Path $dir 'js-check.txt')
-    Nats @('stream','report')                 (Join-Path $dir 'streams.txt')
-    # Per-KV-stream consumer counts = the ~7-per-agent watch footprint.
-    foreach ($kv in 'agent_config','agent_groups','fleet_config','schedules','jobs') {
-      Nats @('consumer','report',"KV_$kv")    (Join-Path $dir "consumers-$kv.txt")
-    }
-    Nats @('consumer','report','EXEC')        (Join-Path $dir 'consumers-EXEC.txt')
+    # --- static one-shot snapshots ----------------------------------------
+    Mon 'varz'                            (Join-Path $dir 'varz.json')      # mem / cpu / conns / slow consumers
+    Mon 'healthz'                         (Join-Path $dir 'healthz.json')   # health status
+    Mon 'jsz?consumers=true&streams=true' (Join-Path $dir 'jsz-full.json')  # full ~7N consumer footprint
 
     # --- log tails (redacted) ---------------------------------------------
     $logDir = Join-Path $env:ProgramData 'Kanade\logs'
     if (Test-Path $logDir) {
-      Get-ChildItem -Path $logDir -Filter 'backend.*.log' |
+      # -ErrorAction SilentlyContinue: a failed enumeration yields nothing
+      # instead of throwing (Stop) and aborting before the final JSON.
+      Get-ChildItem -Path $logDir -Filter 'backend.*.log' -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTime -Descending | Select-Object -First 2 |
         ForEach-Object {
-          $dst = Join-Path $dir ("log-" + $_.Name)
-          Redact((Get-Content $_.FullName -Tail 2000 | Out-String)) | Out-File $dst -Encoding utf8
-          Add-Artifact $dst
+          # try/catch: a locked/unreadable log must NOT kill the script
+          # before it emits the final JSON (ErrorActionPreference=Stop).
+          $f = $_
+          try {
+            $dst = Join-Path $dir ("log-" + $f.Name)
+            Redact((Get-Content $f.FullName -Tail 2000 -ErrorAction Stop | Out-String)) | Out-File $dst -Encoding utf8
+            Add-Artifact $dst
+          } catch { Note "skip log $($f.Name): $_" }
         }
     }
     # nats-server log/dir (location varies; grab what exists).
@@ -129,18 +123,18 @@ execute:
       Get-ChildItem $natsDir -Filter '*.log' -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTime -Descending | Select-Object -First 1 |
         ForEach-Object {
-          $dst = Join-Path $dir ("nats-" + $_.Name)
-          Redact((Get-Content $_.FullName -Tail 2000 | Out-String)) | Out-File $dst -Encoding utf8
-          Add-Artifact $dst
+          $f = $_
+          try {
+            $dst = Join-Path $dir ("nats-" + $f.Name)
+            Redact((Get-Content $f.FullName -Tail 2000 -ErrorAction Stop | Out-String)) | Out-File $dst -Encoding utf8
+            Add-Artifact $dst
+          } catch { Note "skip nats log $($f.Name): $_" }
         }
     }
 
-    if ($files.Count -eq 0) {
-      Note 'no artifacts captured (nats CLI absent and no logs?) — emitting a marker'
-      $marker = Join-Path $dir 'EMPTY.txt'
-      'no broker-health artifacts captured; see capture-meta.json' | Out-File $marker -Encoding utf8
-      Add-Artifact $marker
-    }
+    # capture-meta.json is always written + bundled above, so the list is
+    # never empty even if every metric/log capture failed (each failure is
+    # noted to stderr). The bundle therefore always documents the run.
 
     # The ONLY thing on stdout: the JSON file list the agent bundles.
     @{ files = @($files) } | ConvertTo-Json -Compress
