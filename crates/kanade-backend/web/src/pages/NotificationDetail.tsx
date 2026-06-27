@@ -6,6 +6,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
 
 import { ErrorCard } from '@/components/ErrorCard';
+import { NotificationMarkdown } from '@/components/NotificationMarkdown';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -272,9 +273,11 @@ export function NotificationDetail() {
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-3 text-sm">
-          <pre className="whitespace-pre-wrap break-words bg-muted/5 p-3 rounded text-sm">
-            {n.body || t('detail.emptyBody')}
-          </pre>
+          {n.body ? (
+            <NotificationMarkdown body={n.body} className="bg-muted/5 p-3 rounded" />
+          ) : (
+            <p className="text-muted text-sm">{t('detail.emptyBody')}</p>
+          )}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-y-2 gap-x-6">
             <Field label={t('history.issuedBy')} value={n.issued_by || '—'} />
             <Field label={t('history.issuedAt')} value={fmtIsoLocal(n.issued_at)} />
@@ -448,6 +451,18 @@ export function NotificationDetail() {
             <div className="space-y-1">
               <Label htmlFor="edit-body">{t('compose.body')}</Label>
               <Textarea id="edit-body" value={eBody} onChange={(e) => setEBody(e.target.value)} />
+              <p className="text-xs text-muted">{t('compose.markdownHint')}</p>
+            </div>
+            <div className="space-y-1">
+              <Label>{t('compose.preview')}</Label>
+              {eBody.trim() ? (
+                <NotificationMarkdown
+                  body={eBody}
+                  className="rounded border border-border bg-muted/5 p-3"
+                />
+              ) : (
+                <p className="text-xs text-muted">{t('compose.previewEmpty')}</p>
+              )}
             </div>
             <div className="space-y-1">
               <Label htmlFor="edit-expires">{t('compose.expiresAt')}</Label>

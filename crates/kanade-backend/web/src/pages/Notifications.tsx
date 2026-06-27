@@ -14,6 +14,7 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 
 import { ErrorCard } from '@/components/ErrorCard';
+import { NotificationMarkdown } from '@/components/NotificationMarkdown';
 import { PcPicker } from '@/components/PcPicker';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -218,6 +219,19 @@ export function Notifications() {
                 onChange={(e) => setBody(e.target.value)}
                 placeholder={t('compose.bodyPlaceholder')}
               />
+              <p className="text-xs text-muted">{t('compose.markdownHint')}</p>
+            </div>
+
+            <div className="space-y-1">
+              <Label>{t('compose.preview')}</Label>
+              {body.trim() ? (
+                <NotificationMarkdown
+                  body={body}
+                  className="rounded border border-border bg-muted/5 p-3"
+                />
+              ) : (
+                <p className="text-xs text-muted">{t('compose.previewEmpty')}</p>
+              )}
             </div>
 
             <div className="grid gap-4 sm:grid-cols-2">
