@@ -112,6 +112,10 @@ windows = { version = "0.62.2", features = [
     "Win32_System_Power",
     "Win32_System_RemoteDesktop",
     "Win32_System_StationsAndDesktops",
+    # #841 PR2b: GetComputerNameExW(ComputerNameDnsDomain) — detect whether
+    # the box is domain-joined (and its domain) so the winlog SID→name
+    # translation can gate domain-SID lookups on DC reachability.
+    "Win32_System_SystemInformation",
     "Win32_System_Threading",
 ] }
 

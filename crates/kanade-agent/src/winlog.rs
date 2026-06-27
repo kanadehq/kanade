@@ -26,9 +26,13 @@
 //! the rolling window; the backend's `UNIQUE(pc_id, source, event_record_id)`
 //! absorbs any re-send). An agent offline > 24h misses events older than 24h
 //! before reconnect — the same trade the PowerShell job made (the timeline is
-//! "what's happening now", not a forensic archive). #841 PR2b adds logon SID →
-//! name translation; a future `collector` resource will make the source matrix
-//! and cadence operator-tunable.
+//! "what's happening now", not a forensic archive).
+//!
+//! Winlogon logon/logoff carry the user as a SID; [`SidResolver`] translates
+//! it to a leaf account name, gated on domain reachability so an off-network
+//! box doesn't stall on an unreachable DC (see [`should_translate`]). A future
+//! `collector` resource (#841) will make the source matrix and cadence
+//! operator-tunable.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -265,20 +269,22 @@ enum Shaped {
 }
 
 /// Shape the per-kind payload, mirroring the PowerShell collector's matrix.
-/// PR2a emits the logon/logoff user as the RAW SID; #841 PR2b adds the
-/// SID → leaf-name translation (the part that needs careful LSA/domain
-/// gating).
-fn shape(s: &Source, ev: &ParsedEvent) -> Shaped {
+/// `resolve_user` turns a Winlogon SID into a display name (a leaf account
+/// name when it can be looked up, else the raw SID); it's only invoked for
+/// logon/logoff, the one kind whose user is a SID rather than a name.
+fn shape(s: &Source, ev: &ParsedEvent, mut resolve_user: impl FnMut(&str) -> String) -> Shaped {
     match s.id {
         // Winlogon 7001/7002: positional Data — [0] = TSId (session),
-        // [1] = UserSid. PR2a keeps `user` as the raw SID.
+        // [1] = UserSid. `user` is the resolved name; `sid` keeps the raw SID
+        // for forensics regardless of whether translation succeeded.
         7001 | 7002 => {
             let sid = ev.positional.get(1).map(String::as_str);
+            let user = sid.map(&mut resolve_user);
             let session_id = ev
                 .positional
                 .first()
                 .and_then(|v| v.trim().parse::<i64>().ok());
-            Shaped::Emit(json!({ "user": sid, "sid": sid, "session_id": session_id }))
+            Shaped::Emit(json!({ "user": user, "sid": sid, "session_id": session_id }))
         }
         // Security 4800/4801: named Data — TargetUserName is already a name.
         4800 | 4801 => {
@@ -322,6 +328,235 @@ fn shape(s: &Source, ev: &ParsedEvent) -> Shaped {
     }
 }
 
+/// Host context that decides whether a SID is safe to translate without
+/// risking a slow LSA round-trip to an unreachable domain controller.
+#[derive(Clone, Copy, Default)]
+struct DomainCtx {
+    /// The box is joined to an AD domain (vs a workgroup).
+    domain_joined: bool,
+    /// The domain's DNS name currently resolves (a cheap proxy for "a DC is
+    /// reachable" — recomputed each poll, so a laptop that comes back on-net
+    /// starts resolving domain users again).
+    domain_reachable: bool,
+}
+
+/// `true` for a domain-style account SID (`S-1-5-21-…`) — as opposed to a
+/// well-known / built-in SID (`S-1-5-18` LocalSystem, `S-1-5-19/20`, …) which
+/// always resolves via a purely local lookup.
+fn is_account_sid(sid: &str) -> bool {
+    sid.starts_with("S-1-5-21-")
+}
+
+/// Whether to attempt an LSA translation for `sid`. A well-known SID, or any
+/// account SID on a workgroup box (all such are local), resolves locally and
+/// is always safe. A domain account SID needs the DC, so it's only attempted
+/// when the domain currently resolves — otherwise the lookup could block for
+/// tens of seconds on an off-network machine.
+///
+/// Trade-off vs the old PowerShell collector: it also translated *local*
+/// accounts on a domain-joined box while offline (by comparing against the
+/// machine's account-domain SID prefix). We skip that LSA-policy lookup; the
+/// only regression is a local-account logon on a domain box *while the DC is
+/// unreachable*, which keeps its raw SID — rare, and it resolves on the next
+/// poll once the machine is back on-network.
+fn should_translate(sid: &str, ctx: DomainCtx) -> bool {
+    if !is_account_sid(sid) {
+        return true; // well-known / built-in → local
+    }
+    if !ctx.domain_joined {
+        return true; // workgroup → every account SID is local
+    }
+    ctx.domain_reachable // domain account → only when the DC is reachable
+}
+
+/// Resolves Winlogon SIDs to account names, caching successful lookups across
+/// polls (a fleet logs the same handful of users in repeatedly). A failed or
+/// gated lookup falls back to the raw SID and is NOT cached, so it's retried
+/// on a later poll (e.g. once an off-network laptop reconnects).
+#[derive(Default)]
+struct SidResolver {
+    cache: HashMap<String, String>,
+}
+
+impl SidResolver {
+    fn resolve(&mut self, sid: &str, ctx: DomainCtx) -> String {
+        if let Some(name) = self.cache.get(sid) {
+            return name.clone();
+        }
+        if should_translate(sid, ctx) {
+            if let Some(name) = translate_sid(sid) {
+                self.cache.insert(sid.to_string(), name.clone());
+                return name;
+            }
+        }
+        sid.to_string()
+    }
+}
+
+/// Probe the current host's domain context. Windows only; elsewhere reports
+/// "not domain-joined" so the resolver treats every SID as locally resolvable
+/// (and `translate_sid` is itself a no-op off Windows anyway).
+#[cfg(target_os = "windows")]
+fn domain_ctx() -> DomainCtx {
+    match dns_domain() {
+        Some(domain) if !domain.is_empty() => DomainCtx {
+            domain_joined: true,
+            domain_reachable: domain_reachable(&domain),
+        },
+        _ => DomainCtx::default(),
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn domain_ctx() -> DomainCtx {
+    DomainCtx::default()
+}
+
+/// The box's AD DNS domain via `GetComputerNameExW(ComputerNameDnsDomain)`,
+/// or `None` (empty) on a workgroup machine.
+#[cfg(target_os = "windows")]
+fn dns_domain() -> Option<String> {
+    use windows::Win32::System::SystemInformation::{ComputerNameDnsDomain, GetComputerNameExW};
+    use windows::core::PWSTR;
+
+    let mut len: u32 = 0;
+    // First call sizes the buffer (fails with ERROR_MORE_DATA, sets `len` to
+    // the needed char count INCLUDING the NUL — so even a workgroup box's empty
+    // domain reports len = 1, not 0).
+    // SAFETY: null buffer + size 0 is the documented size-probe form.
+    unsafe {
+        let _ = GetComputerNameExW(ComputerNameDnsDomain, None, &mut len);
+    }
+    if len == 0 {
+        // `len` left untouched → an unexpected failure, not the workgroup case
+        // (which reports len = 1). Treat as no-domain either way.
+        return Some(String::new());
+    }
+    let mut buf = vec![0u16; len as usize];
+    // SAFETY: `buf` holds `len` chars; the call fills it with a NUL-terminated
+    // string and writes the char count (excluding NUL) back into `len`.
+    unsafe {
+        GetComputerNameExW(
+            ComputerNameDnsDomain,
+            Some(PWSTR(buf.as_mut_ptr())),
+            &mut len,
+        )
+    }
+    .ok()?;
+    Some(String::from_utf16_lossy(&buf[..len as usize]))
+}
+
+/// A cheap, bounded check that the AD domain currently resolves — a proxy for
+/// "a DC is reachable". Runs the blocking `getaddrinfo` on a throwaway thread
+/// with a 2s budget so an unreachable domain can't stall the poll (a lingering
+/// thread finishes on its own once the OS resolver gives up).
+///
+/// Resolves the domain APEX, which in standard AD-integrated DNS carries an
+/// A/AAAA record per DC (the same records `ping <domain>` / `\\<domain>\sysvol`
+/// rely on) — a fast, dependency-free proxy. The proper AD-aware checks are
+/// heavier: `DsGetDcNameW` itself blocks on discovery (the stall we're
+/// avoiding), and SRV lookup (`_ldap._tcp.dc._msdcs.<domain>`) needs a real DNS
+/// resolver. A false negative (healthy DC SRV but no apex host record — a
+/// non-standard setup) just keeps the logon `user` as the raw SID, retried each
+/// poll; switch to SRV discovery here if a real environment hits that.
+// Only reached from the Windows `domain_ctx`; the platform-neutral body would
+// otherwise be flagged dead off Windows.
+#[cfg(target_os = "windows")]
+fn domain_reachable(domain: &str) -> bool {
+    use std::net::ToSocketAddrs;
+    use std::sync::mpsc;
+
+    // ToSocketAddrs needs a port; the value is irrelevant — we only care that
+    // the name resolves.
+    let target = format!("{domain}:0");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let resolved = target
+            .as_str()
+            .to_socket_addrs()
+            .map(|mut addrs| addrs.next().is_some())
+            .unwrap_or(false);
+        let _ = tx.send(resolved);
+    });
+    rx.recv_timeout(Duration::from_secs(2)).unwrap_or(false)
+}
+
+/// Translate a string SID to its leaf account name (just the name, no
+/// `DOMAIN\` prefix) via `ConvertStringSidToSidW` + `LookupAccountSidW`.
+/// `None` on any failure — an unresolvable SID, or a domain SID whose DC the
+/// caller didn't gate out and which then couldn't be reached. Windows only.
+#[cfg(target_os = "windows")]
+fn translate_sid(sid: &str) -> Option<String> {
+    use windows::Win32::Foundation::{HLOCAL, LocalFree};
+    use windows::Win32::Security::Authorization::ConvertStringSidToSidW;
+    use windows::Win32::Security::{LookupAccountSidW, PSID, SidTypeUser};
+    use windows::core::{HSTRING, PWSTR};
+
+    let wide = HSTRING::from(sid);
+    let mut psid = PSID::default();
+    // SAFETY: ConvertStringSidToSidW LocalAllocs the PSID; we LocalFree it on
+    // every path below. `wide` outlives the call.
+    if unsafe { ConvertStringSidToSidW(&wide, &mut psid) }.is_err() || psid.is_invalid() {
+        return None;
+    }
+    // Inner closure so the LocalFree below runs on every return path.
+    let lookup = || {
+        let mut name_len: u32 = 0;
+        let mut domain_len: u32 = 0;
+        let mut sid_use = SidTypeUser;
+        // First call sizes name + domain (fails with insufficient buffer).
+        // SAFETY: null buffers with zero sizes is the documented probe form.
+        unsafe {
+            let _ = LookupAccountSidW(
+                None,
+                psid,
+                None,
+                &mut name_len,
+                None,
+                &mut domain_len,
+                &mut sid_use,
+            );
+        }
+        if name_len == 0 {
+            return None;
+        }
+        let mut name = vec![0u16; name_len as usize];
+        let mut domain = vec![0u16; domain_len.max(1) as usize];
+        // SAFETY: buffers sized by the probe above; the call fills `name` and
+        // writes the (NUL-excluded) char count back into `name_len`.
+        unsafe {
+            LookupAccountSidW(
+                None,
+                psid,
+                Some(PWSTR(name.as_mut_ptr())),
+                &mut name_len,
+                Some(PWSTR(domain.as_mut_ptr())),
+                &mut domain_len,
+                &mut sid_use,
+            )
+        }
+        .ok()?;
+        let leaf = String::from_utf16_lossy(&name[..name_len as usize]);
+        let leaf = leaf.trim_end_matches('\0');
+        if leaf.is_empty() {
+            None
+        } else {
+            Some(leaf.to_string())
+        }
+    };
+    let result = lookup();
+    // SAFETY: psid was LocalAlloc'd by ConvertStringSidToSidW above.
+    unsafe {
+        let _ = LocalFree(Some(HLOCAL(psid.0)));
+    }
+    result
+}
+
+#[cfg(not(target_os = "windows"))]
+fn translate_sid(_sid: &str) -> Option<String> {
+    None
+}
+
 fn load_watermarks(path: &Path) -> Watermarks {
     match std::fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
@@ -355,12 +590,19 @@ fn save_watermarks(path: &Path, w: &Watermarks) {
     }
 }
 
-/// One poll over every source. Takes ownership of the watermark map and
-/// returns it updated, so the caller can run this under `spawn_blocking`
-/// (the `EvtQuery` FFI + render is synchronous and shouldn't block the async
-/// runtime).
-fn poll_once(pc_id: &str, dir: &Path, mut watermarks: Watermarks) -> Watermarks {
+/// One poll over every source. Takes ownership of the watermark map and SID
+/// resolver and returns them updated, so the caller can run this under
+/// `spawn_blocking` (the `EvtQuery`/LSA FFI is synchronous and shouldn't block
+/// the async runtime) while the resolver's cache persists across polls.
+fn poll_once(
+    pc_id: &str,
+    dir: &Path,
+    mut watermarks: Watermarks,
+    mut resolver: SidResolver,
+) -> (Watermarks, SidResolver) {
     let since = Utc::now() - chrono::Duration::hours(BOOTSTRAP_HOURS);
+    // Domain reachability is probed once per poll, not per SID.
+    let ctx = domain_ctx();
     for s in SOURCES {
         let key = source_key(s);
         let cutoff = watermarks.get(&key).copied();
@@ -387,7 +629,7 @@ fn poll_once(pc_id: &str, dir: &Path, mut watermarks: Watermarks) -> Watermarks 
             if cutoff.is_some_and(|c| ev.record_id <= c) {
                 continue; // already emitted on an earlier poll
             }
-            let payload = match shape(s, ev) {
+            let payload = match shape(s, ev, |sid| resolver.resolve(sid, ctx)) {
                 Shaped::Emit(p) => p,
                 Shaped::Skip => {
                     // Deliberately ignored (e.g. a non-hibernate Kernel-Boot
@@ -416,7 +658,7 @@ fn poll_once(pc_id: &str, dir: &Path, mut watermarks: Watermarks) -> Watermarks 
             }
         }
     }
-    watermarks
+    (watermarks, resolver)
 }
 
 /// Long-lived reader: poll every [`POLL_INTERVAL`], persisting the watermark
@@ -428,6 +670,9 @@ pub async fn run(pc_id: String, obs_outbox_dir: PathBuf) {
     let watermark_path =
         kanade_shared::default_paths::data_dir().join("winlog-reader-watermark.json");
     let mut watermarks = load_watermarks(&watermark_path);
+    // The SID→name cache persists across polls so a recurring user is only
+    // looked up once.
+    let mut resolver = SidResolver::default();
     let mut tick = tokio::time::interval(POLL_INTERVAL);
     // Skip, not Burst: a suspend/resume shouldn't fire catch-up polls
     // back-to-back — one poll on resume, then the normal cadence.
@@ -438,19 +683,24 @@ pub async fn run(pc_id: String, obs_outbox_dir: PathBuf) {
         let dir = obs_outbox_dir.clone();
         let wpath = watermark_path.clone();
         let wm = std::mem::take(&mut watermarks);
-        watermarks = match tokio::task::spawn_blocking(move || {
-            let wm = poll_once(&pc, &dir, wm);
+        let res = std::mem::take(&mut resolver);
+        match tokio::task::spawn_blocking(move || {
+            let (wm, res) = poll_once(&pc, &dir, wm, res);
             save_watermarks(&wpath, &wm);
-            wm
+            (wm, res)
         })
         .await
         {
-            Ok(wm) => wm,
+            Ok((wm, res)) => {
+                watermarks = wm;
+                resolver = res;
+            }
             Err(e) => {
                 // A panic in the blocking poll shouldn't kill the reader;
-                // reload the watermark from disk and carry on next tick.
+                // reload the watermark from disk and carry on next tick (the
+                // resolver starts empty — it just re-warms).
                 warn!(error = %e, "winlog: poll task failed");
-                load_watermarks(&watermark_path)
+                watermarks = load_watermarks(&watermark_path);
             }
         };
     }
@@ -639,20 +889,94 @@ mod tests {
         parse_event_xml(&ev_xml(system_extra, event_data)).expect("parse")
     }
 
+    /// Identity user-resolver for the shape tests that don't exercise SID
+    /// translation (it leaves the SID as-is, the raw-fallback behaviour).
+    fn raw_user(sid: &str) -> String {
+        sid.to_string()
+    }
+
     #[test]
-    fn shape_logon_uses_positional_sid_and_session() {
+    fn shape_logon_resolves_user_and_keeps_raw_sid() {
         let s = &SOURCES[0]; // 7001 logon
         let ev = parse(
             "",
             "<EventData><Data>2</Data><Data>S-1-5-21-1-2-3-1001</Data></EventData>",
         );
-        let Shaped::Emit(p) = shape(s, &ev) else {
+        // A resolver that turns the SID into a name → `user` is the name, but
+        // `sid` keeps the raw value for forensics.
+        let Shaped::Emit(p) = shape(s, &ev, |sid| {
+            assert_eq!(sid, "S-1-5-21-1-2-3-1001");
+            "alice".to_string()
+        }) else {
             panic!("expected emit")
         };
         assert_eq!(p["session_id"], json!(2));
         assert_eq!(p["sid"], json!("S-1-5-21-1-2-3-1001"));
-        // PR2a: user is the raw SID until PR2b's translation.
+        assert_eq!(p["user"], json!("alice"));
+        // When the resolver can't translate it falls back to the raw SID.
+        let Shaped::Emit(p) = shape(s, &ev, raw_user) else {
+            panic!("expected emit")
+        };
         assert_eq!(p["user"], json!("S-1-5-21-1-2-3-1001"));
+
+        // No UserSid in the event data (positional[1] absent) → user and sid
+        // are both null; the resolver is never called.
+        let ev_nosid = parse("", "<EventData><Data>5</Data></EventData>");
+        let Shaped::Emit(p) = shape(s, &ev_nosid, |_| {
+            panic!("resolver must not run with no SID")
+        }) else {
+            panic!("expected emit")
+        };
+        assert_eq!(p["user"], json!(null));
+        assert_eq!(p["sid"], json!(null));
+        assert_eq!(p["session_id"], json!(5));
+    }
+
+    #[test]
+    fn should_translate_gates_domain_sids_on_reachability() {
+        let reachable = DomainCtx {
+            domain_joined: true,
+            domain_reachable: true,
+        };
+        let offline = DomainCtx {
+            domain_joined: true,
+            domain_reachable: false,
+        };
+        let workgroup = DomainCtx {
+            domain_joined: false,
+            domain_reachable: false,
+        };
+
+        // Well-known / built-in SIDs are always local → always translate.
+        assert!(should_translate("S-1-5-18", offline));
+        assert!(!is_account_sid("S-1-5-18"));
+
+        // A domain account SID only translates when the DC is reachable.
+        let dom = "S-1-5-21-9-9-9-1001";
+        assert!(is_account_sid(dom));
+        assert!(should_translate(dom, reachable));
+        assert!(!should_translate(dom, offline));
+
+        // On a workgroup box every account SID is local → always translate,
+        // even though it's S-1-5-21-shaped.
+        assert!(should_translate(dom, workgroup));
+    }
+
+    #[test]
+    fn resolver_caches_hits_and_falls_back_to_raw() {
+        let mut r = SidResolver::default();
+        // A pre-seeded cache entry is returned without a lookup.
+        r.cache.insert("S-1-5-21-1-2-3-1001".into(), "alice".into());
+        let ctx = DomainCtx {
+            domain_joined: true,
+            domain_reachable: true,
+        };
+        assert_eq!(r.resolve("S-1-5-21-1-2-3-1001", ctx), "alice");
+        // An uncached SID: translate_sid is a no-op off Windows (and unresolved
+        // on it for this fake SID), so it falls back to the raw SID and is NOT
+        // cached (so a later poll can retry).
+        assert_eq!(r.resolve("S-1-5-21-7-7-7-2002", ctx), "S-1-5-21-7-7-7-2002");
+        assert!(!r.cache.contains_key("S-1-5-21-7-7-7-2002"));
     }
 
     #[test]
@@ -662,7 +986,7 @@ mod tests {
             "",
             "<EventData><Data Name='TargetUserName'>bob</Data><Data Name='SessionId'>1</Data></EventData>",
         );
-        let Shaped::Emit(p) = shape(s, &ev) else {
+        let Shaped::Emit(p) = shape(s, &ev, raw_user) else {
             panic!("expected emit")
         };
         assert_eq!(p["user"], json!("bob"));
@@ -673,7 +997,7 @@ mod tests {
     fn shape_modern_standby_flags_payload() {
         let s = &SOURCES[9]; // 506 sleep (modern standby)
         let ev = parse("", "");
-        let Shaped::Emit(p) = shape(s, &ev) else {
+        let Shaped::Emit(p) = shape(s, &ev, raw_user) else {
             panic!("expected emit")
         };
         assert_eq!(p, json!({ "standby": "modern" }));
@@ -684,17 +1008,25 @@ mod tests {
         let s = &SOURCES[11]; // 27 resume (hibernate gate)
         // BootType 0x2 → resume from hibernate.
         let hib = parse("", "<EventData><Data>2</Data></EventData>");
-        let Shaped::Emit(p) = shape(s, &hib) else {
+        let Shaped::Emit(p) = shape(s, &hib, raw_user) else {
             panic!("expected emit")
         };
         assert_eq!(p, json!({ "from": "hibernate" }));
         // BootType 0x0 (cold) / 0x1 (fast startup) → skip (covered by `boot`).
         assert!(matches!(
-            shape(s, &parse("", "<EventData><Data>0</Data></EventData>")),
+            shape(
+                s,
+                &parse("", "<EventData><Data>0</Data></EventData>"),
+                raw_user
+            ),
             Shaped::Skip
         ));
         assert!(matches!(
-            shape(s, &parse("", "<EventData><Data>1</Data></EventData>")),
+            shape(
+                s,
+                &parse("", "<EventData><Data>1</Data></EventData>"),
+                raw_user
+            ),
             Shaped::Skip
         ));
     }
@@ -708,7 +1040,7 @@ mod tests {
                         <Data Name='WakeTime'>2026-06-27T01:00:00Z</Data>\
                         <Data Name='WakeSourceType'>5</Data></EventData>",
         );
-        let Shaped::Emit(p) = shape(s, &ev) else {
+        let Shaped::Emit(p) = shape(s, &ev, raw_user) else {
             panic!("expected emit")
         };
         assert_eq!(p["sleep_start"], json!("2026-06-27T00:00:00Z"));
@@ -720,7 +1052,7 @@ mod tests {
     #[test]
     fn shape_bare_presence_is_null_payload() {
         let s = &SOURCES[4]; // 12 boot
-        let Shaped::Emit(p) = shape(s, &parse("", "")) else {
+        let Shaped::Emit(p) = shape(s, &parse("", ""), raw_user) else {
             panic!("expected emit")
         };
         assert_eq!(p, Value::Null);

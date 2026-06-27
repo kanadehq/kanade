@@ -72,8 +72,9 @@ widgets:
 
   # ── Access / Security ────────────────────────────────────────────
   # NB on logon payloads: the agent's native Event Log reader emits
-  # `logon` from Winlogon 7001 (source winlog:System) with `user` (the
-  # SID — #841 PR2b resolves it to a leaf name) but NO `logon_type`.
+  # `logon` from Winlogon 7001 (source winlog:System) with `user` (a leaf
+  # account name, resolved from the SID; `sid` keeps the raw value) but NO
+  # `logon_type`.
   # `logon_type` only exists on the Security 4624 events from the on-demand
   # collect-winlog-logons-all (source winlog:Security) — so the by-type
   # widget is source-pinned to it and stays empty until that job is run.
