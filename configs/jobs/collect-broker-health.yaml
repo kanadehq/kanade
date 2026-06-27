@@ -1,0 +1,155 @@
+# #512 broker-sizing companion: capture NATS/JetStream health for a
+# retro-analysis of fleet scaling (e.g. the 500→3000 PC ramp).
+#
+# Run this ON THE BACKEND / NATS HOST, ideally DURING or right after a
+# synchronised reconnect event (broker restart, the morning power-on
+# wave) — that herd moment is what decides whether a startup splay or a
+# bigger broker is needed (see book/src/operations/broker-sizing.md).
+#
+#   kanade exec collect-broker-health --pcs <backend-host-id>
+#
+# The script samples the broker over a few minutes (connections +
+# JetStream consumer footprint), grabs static reports + log tails, writes
+# everything to a temp dir, and prints a single JSON `{files:[...]}` on
+# stdout. The agent zips those files and uploads to OBJECT_COLLECTIONS;
+# download from the SPA Collect page (or hand the zip to your reviewer).
+#
+# Tunable via env on the target (optional): KANADE_BH_SAMPLES (default 12),
+# KANADE_BH_INTERVAL_SEC (default 15) → ~3 min window by default.
+#
+# stdout MUST be a single pure JSON object. ALL progress / diagnostics go
+# to stderr via [Console]::Error.WriteLine — never Write-Host (it would
+# corrupt the JSON the agent parses).
+
+id: collect-broker-health
+tags: [infra, nats, scaling]
+version: 0.1.0
+description: "Capture NATS/JetStream health (consumer footprint, connections, logs) for fleet-scaling analysis"
+
+execute:
+  shell: powershell
+  # SYSTEM so it can read the NATS token from the hardened registry key
+  # and the SYSTEM-owned nats-server logs.
+  run_as: system
+  timeout: 300s
+  script: |
+    $ErrorActionPreference = 'Stop'
+    function Note($m) { [Console]::Error.WriteLine($m) }
+
+    $dir = Join-Path $env:TEMP 'kanade-broker-health'
+    if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
+    New-Item -ItemType Directory -Path $dir | Out-Null
+    $files = New-Object System.Collections.Generic.List[string]
+    function Add-Artifact($p) { if (Test-Path $p) { $files.Add((Resolve-Path $p).Path) } }
+    # Strip anything token/secret-looking from captured text (logs can
+    # carry connection strings); metrics reports don't, but be safe.
+    function Redact($s) { $s -replace '(?i)(token|secret|password|nkey|bearer)["'':=\s]+\S+', '$1=<redacted>' }
+
+    # --- resolve nats CLI + token + url -----------------------------------
+    $nats = (Get-Command nats -ErrorAction SilentlyContinue).Source
+    if (-not $nats) { Note 'nats CLI not on PATH — metrics will be skipped' }
+
+    $token = $env:KANADE_NATS_TOKEN
+    if (-not $token) {
+      try { $token = (Get-ItemProperty 'HKLM:\SOFTWARE\kanade\agent' -ErrorAction Stop).NatsToken } catch {}
+    }
+    # Parse nats_url from agent.toml (fallback to the default local broker).
+    $url = 'nats://127.0.0.1:4222'
+    $cfg = Join-Path $env:ProgramData 'Kanade\config\agent.toml'
+    if (Test-Path $cfg) {
+      $m = Select-String -Path $cfg -Pattern "nats_url\s*=\s*'([^']+)'" | Select-Object -First 1
+      if ($m) { $url = $m.Matches[0].Groups[1].Value }
+    }
+    $natsArgs = @('--server', $url)
+    if ($token) { $natsArgs += @('--token', $token) }
+
+    function Nats($argline, $outfile) {
+      if (-not $nats) { return }
+      try {
+        $out = & $nats @natsArgs @argline 2>&1 | Out-String
+        Redact($out) | Out-File -FilePath $outfile -Encoding utf8
+        Add-Artifact $outfile
+      } catch { Note "nats $($argline -join ' ') failed: $_" }
+    }
+
+    $meta = @{
+      captured_at = (Get-Date).ToUniversalTime().ToString('o')
+      host        = $env:COMPUTERNAME
+      nats_url    = $url
+      nats_cli    = [bool]$nats
+      token_found = [bool]$token
+    }
+    ($meta | ConvertTo-Json) | Out-File (Join-Path $dir 'capture-meta.json') -Encoding utf8
+    Add-Artifact (Join-Path $dir 'capture-meta.json')
+
+    # --- time series over the herd window ---------------------------------
+    $samples  = if ($env:KANADE_BH_SAMPLES)      { [int]$env:KANADE_BH_SAMPLES }      else { 12 }
+    $interval = if ($env:KANADE_BH_INTERVAL_SEC) { [int]$env:KANADE_BH_INTERVAL_SEC } else { 15 }
+    Note "sampling $samples x ${interval}s (~$([int]($samples*$interval/60)) min)"
+    for ($i = 1; $i -le $samples; $i++) {
+      $ts = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
+      $tag = '{0:000}-{1}' -f $i, $ts
+      # The two herd signals: connection churn and JetStream consumer count.
+      Nats @('server','report','connections')                 (Join-Path $dir "conn-$tag.txt")
+      Nats @('server','report','jetstream')                   (Join-Path $dir "js-$tag.txt")
+      if ($i -lt $samples) { Start-Sleep -Seconds $interval }
+    }
+
+    # --- static one-shot reports ------------------------------------------
+    Nats @('server','report','health')        (Join-Path $dir 'srv-health.txt')
+    Nats @('server','report','cpu')           (Join-Path $dir 'srv-cpu.txt')
+    Nats @('server','report','mem')           (Join-Path $dir 'srv-mem.txt')
+    Nats @('server','check','jetstream')      (Join-Path $dir 'js-check.txt')
+    Nats @('stream','report')                 (Join-Path $dir 'streams.txt')
+    # Per-KV-stream consumer counts = the ~7-per-agent watch footprint.
+    foreach ($kv in 'agent_config','agent_groups','fleet_config','schedules','jobs') {
+      Nats @('consumer','report',"KV_$kv")    (Join-Path $dir "consumers-$kv.txt")
+    }
+    Nats @('consumer','report','EXEC')        (Join-Path $dir 'consumers-EXEC.txt')
+
+    # --- log tails (redacted) ---------------------------------------------
+    $logDir = Join-Path $env:ProgramData 'Kanade\logs'
+    if (Test-Path $logDir) {
+      Get-ChildItem -Path $logDir -Filter 'backend.*.log' |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 2 |
+        ForEach-Object {
+          $dst = Join-Path $dir ("log-" + $_.Name)
+          Redact((Get-Content $_.FullName -Tail 2000 | Out-String)) | Out-File $dst -Encoding utf8
+          Add-Artifact $dst
+        }
+    }
+    # nats-server log/dir (location varies; grab what exists).
+    $natsDir = Join-Path $env:ProgramData 'Kanade\nats'
+    if (Test-Path $natsDir) {
+      $nl = Join-Path $dir 'nats-dir-listing.txt'
+      Get-ChildItem $natsDir -Recurse -File -ErrorAction SilentlyContinue |
+        Select-Object FullName, Length, LastWriteTime | Format-Table -AutoSize | Out-String |
+        Out-File $nl -Encoding utf8
+      Add-Artifact $nl
+      Get-ChildItem $natsDir -Filter '*.log' -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1 |
+        ForEach-Object {
+          $dst = Join-Path $dir ("nats-" + $_.Name)
+          Redact((Get-Content $_.FullName -Tail 2000 | Out-String)) | Out-File $dst -Encoding utf8
+          Add-Artifact $dst
+        }
+    }
+
+    if ($files.Count -eq 0) {
+      Note 'no artifacts captured (nats CLI absent and no logs?) — emitting a marker'
+      $marker = Join-Path $dir 'EMPTY.txt'
+      'no broker-health artifacts captured; see capture-meta.json' | Out-File $marker -Encoding utf8
+      Add-Artifact $marker
+    }
+
+    # The ONLY thing on stdout: the JSON file list the agent bundles.
+    @{ files = @($files) } | ConvertTo-Json -Compress
+
+collect:
+  name: "ブローカー健全性の採取"
+  description: "NATS/JetStream の consumer 数・接続・ログを採取（フリート増強の後追い分析用）"
+  max_size: 50MB
+
+# Read-only diagnostics that an operator fires deliberately during a
+# time-sensitive herd event — no approval gate so it isn't delayed.
+require_approval: false

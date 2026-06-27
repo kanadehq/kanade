@@ -17,6 +17,7 @@
     - [Updating NATS server](./operations/agent-mediated-updates/nats.md)
     - [Updating kanade-agent itself](./operations/agent-mediated-updates/agent-self.md)
 - [Removing kanade (undeploy)](./operations/undeploy.md)
+- [Broker sizing & scaling](./operations/broker-sizing.md)
 
 # 3. Developer Guide
 
