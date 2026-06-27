@@ -889,6 +889,21 @@ ul.checks {
   overflow-wrap: break-word;
 }
 
+/* A bare URL auto-detected in a notification body. Opens in the OS browser
+   via `open_external_url` (the click is intercepted in main.ts) — not a real
+   navigation, so no `href`. `break-all` keeps a long link from overflowing
+   the panel. */
+.notif-link {
+  color: var(--accent);
+  text-decoration: underline;
+  cursor: pointer;
+  word-break: break-all;
+}
+
+.notif-link:hover {
+  text-decoration: none;
+}
+
 .notif-meta {
   margin: 4px 0 0;
   font-size: 12px;

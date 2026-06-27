@@ -1213,7 +1213,7 @@ function renderNotification(n: AppNotification): string {
         </div>
         ${previewEl}
         <div class="notif-collapse">
-          <p class="notif-text">${escapeHtml(n.body)}</p>
+          <p class="notif-text">${linkifyHtml(n.body)}</p>
           <p class="notif-meta muted">${meta}</p>
         </div>
       </div>
@@ -1553,6 +1553,40 @@ function escapeHtml(s: string): string {
     .replace(/'/g, "&#039;");
 }
 
+// Bare http(s) URL matcher for notification bodies. Stops at whitespace and
+// the few chars that can't appear in a URL but would break out of the anchor
+// (`< > " '`). Trailing sentence punctuation is trimmed separately below.
+const NOTIF_URL_RE = /https?:\/\/[^\s<>"']+/g;
+
+// Render a notification body to HTML, turning bare http(s) URLs into clickable
+// links. Every span is HTML-escaped — the exact same XSS guard as a plain
+// `escapeHtml(body)` — and only the URL runs become `<a class="notif-link">`.
+// The raw (escaped) URL rides in `data-href`; the delegated click handler
+// reads it and opens it in the OS browser via the `open_external_url` command,
+// because letting the WebView actually navigate an `<a href>` would replace the
+// embedded app page with the remote site. (#850 — autolink only; richer
+// Markdown formatting is tracked separately.)
+function linkifyHtml(text: string): string {
+  let out = "";
+  let last = 0;
+  for (const m of text.matchAll(NOTIF_URL_RE)) {
+    const start = m.index ?? 0;
+    // Trailing punctuation is almost never part of the link (a period ending
+    // the sentence, a paren wrapped around the URL) — leave it in the plain
+    // run so `https://x).` links `https://x` and renders `).` as text.
+    const url = m[0].replace(/[.,;:!?)\]}'"]+$/, "");
+    out += escapeHtml(text.slice(last, start));
+    const safe = escapeHtml(url);
+    // `href="#"` makes the anchor natively focusable + Enter-activatable (an
+    // `<a>` with no href isn't); the click handler preventDefault()s, so `#`
+    // never navigates. The real target rides in `data-href`.
+    out += `<a class="notif-link" href="#" data-href="${safe}">${safe}</a>`;
+    last = start + url.length;
+  }
+  out += escapeHtml(text.slice(last));
+  return out;
+}
+
 window.addEventListener("DOMContentLoaded", () => {
   // Hydrate the static sidebar / dashboard icons once.
   hydrateIcons();
@@ -1607,6 +1641,23 @@ window.addEventListener("DOMContentLoaded", () => {
     const runToggle = t.closest<HTMLElement>("[data-run-toggle]");
     if (runToggle?.dataset.runToggle) {
       toggleRun(runToggle.dataset.runToggle);
+      return;
+    }
+    // A link auto-detected in a notification body → open it in the OS
+    // default browser, NEVER navigate the WebView (that would replace the
+    // embedded app page). Checked before the toggle so clicking a link inside
+    // an expanded body doesn't also collapse the row. The scheme is
+    // re-validated here even though the Rust command gates it too.
+    const extLink = t.closest<HTMLElement>("a.notif-link[data-href]");
+    if (extLink) {
+      e.preventDefault();
+      e.stopPropagation();
+      const url = extLink.dataset.href ?? "";
+      if (/^https?:\/\//i.test(url)) {
+        void invoke("open_external_url", { url }).catch((err) =>
+          console.error("open_external_url failed", err),
+        );
+      }
       return;
     }
     // Notification title clicked → expand/collapse its body (and mark an
