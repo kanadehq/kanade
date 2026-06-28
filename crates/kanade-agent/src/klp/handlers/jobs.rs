@@ -261,7 +261,7 @@ fn manifest_to_job(m: &Manifest) -> Option<UserInvokableJob> {
         // time, so this only fails on a pre-validation legacy entry.
         timeout_secs: humantime::parse_duration(&m.execute.timeout)
             .ok()
-            .map(|d| d.as_secs().max(1)),
+            .map(|d| d.as_secs().max(1)), // truncates sub-second; floors < 1s to 1
         // Per-user run history is minted by `jobs.execute` (a
         // follow-up PR); until then every row is "never run by you".
         last_run: None,
