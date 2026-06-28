@@ -366,11 +366,34 @@ export function NotificationDetail() {
                       <TableCell>
                         {p.confirmed ? (
                           <Badge variant="success">{t('audience.confirmed')}</Badge>
+                        ) : p.unacked_at ? (
+                          // 取消済み: confirmed once, then retracted. Distinct
+                          // from never-confirmed pending so the operator can
+                          // see "they DID see it, then took the ack back".
+                          <Badge variant="amber" title={fmtIsoLocal(p.unacked_at)}>
+                            {t('audience.revoked')}
+                          </Badge>
                         ) : (
                           <Badge variant="amber">{t('audience.pending')}</Badge>
                         )}
                       </TableCell>
-                      <TableCell>{p.acked_at ? fmtIsoLocal(p.acked_at) : '—'}</TableCell>
+                      <TableCell>
+                        {p.acked_at ? (
+                          <span>
+                            {fmtIsoLocal(p.acked_at)}
+                            {p.unacked_at && !p.confirmed && (
+                              <span className="text-muted text-xs">
+                                {' → '}
+                                {t('audience.revokedAt', {
+                                  at: fmtIsoLocal(p.unacked_at),
+                                })}
+                              </span>
+                            )}
+                          </span>
+                        ) : (
+                          '—'
+                        )}
+                      </TableCell>
                     </TableRow>
                   );
                 })}
@@ -414,7 +437,23 @@ export function NotificationDetail() {
                           <code className="text-xs">{a.user_sid}</code>
                         )}
                       </TableCell>
-                      <TableCell>{fmtIsoLocal(a.acked_at)}</TableCell>
+                      <TableCell>
+                        {fmtIsoLocal(a.acked_at)}
+                        {a.unacked_at && (
+                          // Retracted: without this, a confirmed-then-revoked
+                          // user is indistinguishable from a standing
+                          // confirmation in this table (it shows only acked_at).
+                          <Badge
+                            variant="amber"
+                            className="ml-2"
+                            title={t('audience.revokedAt', {
+                              at: fmtIsoLocal(a.unacked_at),
+                            })}
+                          >
+                            {t('audience.revoked')}
+                          </Badge>
+                        )}
+                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>

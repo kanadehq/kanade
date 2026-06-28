@@ -72,6 +72,22 @@ pub fn events_notifications_acked(pc_id: &str, user_sid: &str, notif_id: &str) -
     format!("events.notifications.acked.{pc_id}.{user_sid}.{notif_id}")
 }
 
+/// `events.notifications.unacked.{pc_id}.{user_sid}.{notif_id}` — the
+/// agent publishes this when a user *retracts* a prior "確認" (the
+/// read↔unread toggle). Mirror of [`events_notifications_acked`]; the
+/// backend's notification-acks projector consumes it on the same
+/// consumer (see [`EVENTS_NOTIFICATIONS_FILTER`]) so ack and unack for
+/// one recipient stay strictly ordered on the `EVENTS` stream. Layer
+/// split: the **agent** tombstones the `notifications_read` KV (so the
+/// user's own `notifications.list` goes back to unread); this event is
+/// the **projector's** half — it stamps `unacked_at` on the read-model
+/// row and appends the revoke to the audit log. Same retention caveat as
+/// the acked subject: the durable source of truth is SQLite, the stream
+/// only bounds re-projection after a `-WipeDb`.
+pub fn events_notifications_unacked(pc_id: &str, user_sid: &str, notif_id: &str) -> String {
+    format!("events.notifications.unacked.{pc_id}.{user_sid}.{notif_id}")
+}
+
 // `commands_exec` (subject `commands.exec.<job_id>`) was removed in
 // v0.22.1. The STREAM_EXEC stream now catches the existing
 // `commands.{all,group.X,pc.Y}` subjects directly, so the dedicated
@@ -157,7 +173,23 @@ pub const EVENTS_STARTED_FILTER: &str = "events.started.>";
 /// than the whole `events.>` so the projector only wakes for ack
 /// events and not the high-volume `events.started.*` lifecycle
 /// traffic (which the events projector handles separately).
+/// NOTE: since unack landed, the backend projector consumes the broader
+/// [`EVENTS_NOTIFICATIONS_FILTER`] (ack + unack on one ordered consumer), so
+/// this narrower `acked.>` filter is **no longer the active consumer filter**.
+/// Kept as a named constant for the ack-only subject shape (docs + tests).
 pub const EVENTS_NOTIFICATIONS_ACKED_FILTER: &str = "events.notifications.acked.>";
+
+/// Wildcard the backend notification-acks projector consumes on
+/// `STREAM_EVENTS` once it handles both ack **and** unack. Broader than
+/// [`EVENTS_NOTIFICATIONS_ACKED_FILTER`] (`acked.>`) so a single durable
+/// consumer sees both `events.notifications.acked.*` and
+/// `events.notifications.unacked.*` in stream-sequence order — the only
+/// way `ack → unack → re-ack` stays correctly serialised (a second
+/// consumer would race the DELETE past a later INSERT). Still a strict
+/// subset of `events.>` so STREAM_EVENTS retains it without a config
+/// change, and still narrower than the high-volume `events.started.*`
+/// traffic the events projector owns.
+pub const EVENTS_NOTIFICATIONS_FILTER: &str = "events.notifications.>";
 
 pub const INVENTORY_HW: &str = "hw";
 pub const INVENTORY_SW: &str = "sw";
@@ -264,6 +296,27 @@ mod tests {
         // Must stay a strict subset of the EVENTS stream's `events.>`
         // subjects so STREAM_EVENTS retains it without a config change.
         assert!(EVENTS_NOTIFICATIONS_ACKED_FILTER.starts_with("events."));
+    }
+
+    #[test]
+    fn events_notifications_unacked_formats_all_segments() {
+        assert_eq!(
+            events_notifications_unacked("PC1234", "S-1-5-21-1001", "notif-9f3a"),
+            "events.notifications.unacked.PC1234.S-1-5-21-1001.notif-9f3a"
+        );
+    }
+
+    #[test]
+    fn events_notifications_filter_covers_acked_and_unacked() {
+        assert_eq!(EVENTS_NOTIFICATIONS_FILTER, "events.notifications.>");
+        // The broadened filter must subsume both the acked and unacked
+        // subjects so one durable consumer serialises them in order.
+        let acked = events_notifications_acked("PC1", "S-1", "n1");
+        let unacked = events_notifications_unacked("PC1", "S-1", "n1");
+        assert!(acked.starts_with("events.notifications."));
+        assert!(unacked.starts_with("events.notifications."));
+        // Still a subset of the EVENTS stream's retained subjects.
+        assert!(EVENTS_NOTIFICATIONS_FILTER.starts_with("events."));
     }
 
     #[test]

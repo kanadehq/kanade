@@ -214,14 +214,20 @@ async fn fetch_acks(
     pool: &SqlitePool,
     id: &str,
 ) -> Result<Vec<NotificationAckEntry>, (StatusCode, String)> {
-    let rows: Vec<(
+    // (pc_id, user_sid, acked_at, account, unacked_at) — one notification_acks
+    // row joined with its agent's logon fallback. Aliased to keep clippy's
+    // type_complexity lint happy.
+    type AckRow = (
         String,
         String,
         chrono::DateTime<chrono::Utc>,
         Option<String>,
-    )> = sqlx::query_as(
+        Option<chrono::DateTime<chrono::Utc>>,
+    );
+    let rows: Vec<AckRow> = sqlx::query_as(
         "SELECT na.pc_id, na.user_sid, na.acked_at,
-                    COALESCE(na.account, a.last_logon_display_name, a.last_logon_user)
+                    COALESCE(na.account, a.last_logon_display_name, a.last_logon_user),
+                    na.unacked_at
                FROM notification_acks na
                LEFT JOIN agents a ON a.pc_id = na.pc_id
               WHERE na.notification_id = ?
@@ -240,11 +246,12 @@ async fn fetch_acks(
     Ok(rows
         .into_iter()
         .map(
-            |(pc_id, user_sid, acked_at, account)| NotificationAckEntry {
+            |(pc_id, user_sid, acked_at, account, unacked_at)| NotificationAckEntry {
                 pc_id,
                 user_sid,
                 acked_at,
                 account,
+                unacked_at,
             },
         )
         .collect())
@@ -848,35 +855,77 @@ fn assemble_roster(
         }
     }
 
-    // Fold acks to PC granularity (confirmed + earliest ack), and make sure
-    // every acked PC is in the roster even if it's since fallen out of the
+    // Fold acks to PC granularity (tri-state), and make sure every PC with
+    // any ack history is in the roster even if it's since fallen out of the
     // resolved audience (a group membership change after the send).
-    let mut acked: HashMap<&str, chrono::DateTime<chrono::Utc>> = HashMap::new();
+    //
+    // A PC is **confirmed** if *any* of its users has a STANDING ack
+    // (unacked_at NULL); a single still-standing confirmation outweighs
+    // another user's retract. Only when *no* user is standing but at least
+    // one once confirmed-then-retracted is the PC **revoked** (取消済み).
+    // No ack rows at all ⇒ **pending** (未確認).
+    //
+    // `acked_at` on the result is the PC's **earliest ack across all rows**
+    // (the documented "first time this PC acknowledged"), independent of the
+    // confirmed/revoked decision — a since-revoked earlier ack must not be
+    // hidden behind a later standing one, or the audit trail loses when the PC
+    // first saw it.
+    #[derive(Default)]
+    struct PcFold {
+        acked_min: Option<chrono::DateTime<chrono::Utc>>,
+        standing_min: Option<chrono::DateTime<chrono::Utc>>,
+        revoked_unacked_max: Option<chrono::DateTime<chrono::Utc>>,
+    }
+    fn min_with(
+        slot: &mut Option<chrono::DateTime<chrono::Utc>>,
+        v: chrono::DateTime<chrono::Utc>,
+    ) {
+        *slot = Some(slot.map_or(v, |cur| cur.min(v)));
+    }
+    fn max_with(
+        slot: &mut Option<chrono::DateTime<chrono::Utc>>,
+        v: chrono::DateTime<chrono::Utc>,
+    ) {
+        *slot = Some(slot.map_or(v, |cur| cur.max(v)));
+    }
+    let mut folds: HashMap<&str, PcFold> = HashMap::new();
     for a in acks {
-        acked
-            .entry(a.pc_id.as_str())
-            .and_modify(|t| {
-                if a.acked_at < *t {
-                    *t = a.acked_at;
-                }
-            })
-            .or_insert(a.acked_at);
+        let f = folds.entry(a.pc_id.as_str()).or_default();
+        min_with(&mut f.acked_min, a.acked_at);
+        match a.unacked_at {
+            None => min_with(&mut f.standing_min, a.acked_at),
+            Some(un) => max_with(&mut f.revoked_unacked_max, un),
+        }
         expected.insert(a.pc_id.clone());
     }
 
     // Materialise, sorted pending-first then by pc_id so "who hasn't
-    // confirmed" surfaces at the top.
+    // confirmed" surfaces at the top. A revoked PC is also "not confirmed",
+    // so it sorts alongside pending — exactly where an operator chasing
+    // unconfirmed recipients wants it.
     let mut roster: Vec<AudiencePc> = expected
         .into_iter()
         .map(|pc_id| {
-            let acked_at = acked.get(pc_id.as_str()).copied();
             let (last_logon_user, last_logon_display_name) =
                 logon.get(pc_id.as_str()).cloned().unwrap_or((None, None));
+            let (confirmed, acked_at, unacked_at) = match folds.get(pc_id.as_str()) {
+                // Standing confirmation wins — acked_at is the PC's earliest
+                // ack (not the earliest *standing* one).
+                Some(f) if f.standing_min.is_some() => (true, f.acked_min, None),
+                // Confirmed then retracted ⇒ 取消済み (earliest ack + latest
+                // retract).
+                Some(f) if f.revoked_unacked_max.is_some() => {
+                    (false, f.acked_min, f.revoked_unacked_max)
+                }
+                // No ack history ⇒ pending.
+                _ => (false, None, None),
+            };
             AudiencePc {
                 last_logon_user,
                 last_logon_display_name,
-                confirmed: acked_at.is_some(),
+                confirmed,
                 acked_at,
+                unacked_at,
                 pc_id,
             }
         })
@@ -1114,6 +1163,19 @@ mod tests {
             user_sid: sid.into(),
             acked_at: at(secs),
             account: None,
+            unacked_at: None,
+        }
+    }
+
+    /// A confirmed-then-retracted entry (取消済み): acked at `secs`, then
+    /// unacked at `un_secs`.
+    fn revoked(pc: &str, sid: &str, secs: i64, un_secs: i64) -> NotificationAckEntry {
+        NotificationAckEntry {
+            pc_id: pc.into(),
+            user_sid: sid.into(),
+            acked_at: at(secs),
+            account: None,
+            unacked_at: Some(at(un_secs)),
         }
     }
 
@@ -1233,5 +1295,51 @@ mod tests {
         );
         assert_eq!(roster.len(), 1);
         assert_eq!(roster[0].acked_at, Some(at(5)), "earliest ack per PC");
+    }
+
+    #[test]
+    fn roster_revoked_pc_is_not_confirmed_but_keeps_both_instants() {
+        // PC1's only user confirmed then retracted ⇒ 取消済み: not confirmed
+        // (sorts with pending), but acked_at + unacked_at both surface so the
+        // operator sees they HAD confirmed.
+        let agents = vec![agent("PC1", None, None)];
+        let roster = assemble_roster(
+            &["notifications.pc.PC1".to_string()],
+            &agents,
+            &HashMap::new(),
+            &[revoked("PC1", "S-a", 5, 30)],
+        );
+        assert_eq!(roster.len(), 1);
+        assert!(!roster[0].confirmed, "retracted ⇒ not confirmed");
+        assert_eq!(roster[0].acked_at, Some(at(5)), "original ack retained");
+        assert_eq!(roster[0].unacked_at, Some(at(30)), "retract instant shown");
+    }
+
+    #[test]
+    fn roster_standing_ack_outweighs_another_users_retract() {
+        // On a shared PC, user A retracted but user B still stands ⇒ the PC is
+        // confirmed (a single standing confirmation wins), with unacked_at
+        // cleared.
+        let agents = vec![agent("PC1", None, None)];
+        let roster = assemble_roster(
+            &["notifications.pc.PC1".to_string()],
+            &agents,
+            &HashMap::new(),
+            &[revoked("PC1", "S-a", 5, 30), ack("PC1", "S-b", 20)],
+        );
+        assert_eq!(roster.len(), 1);
+        assert!(
+            roster[0].confirmed,
+            "B's standing ack keeps the PC confirmed"
+        );
+        assert_eq!(
+            roster[0].acked_at,
+            Some(at(5)),
+            "earliest ack across all rows (A's since-revoked ack at 5), not B's standing 20"
+        );
+        assert_eq!(
+            roster[0].unacked_at, None,
+            "no revoke surfaced when standing"
+        );
     }
 }

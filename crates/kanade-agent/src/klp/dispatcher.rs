@@ -37,7 +37,7 @@ use kanade_shared::ipc::maintenance::MaintenanceListParams;
 use kanade_shared::ipc::method;
 use kanade_shared::ipc::notifications::{
     NotificationsAckParams, NotificationsListParams, NotificationsSubscribeParams,
-    NotificationsUnsubscribeParams,
+    NotificationsUnackParams, NotificationsUnsubscribeParams,
 };
 use kanade_shared::ipc::state::{
     StateSnapshotParams, StateSubscribeParams, StateUnsubscribeParams,
@@ -198,6 +198,14 @@ async fn dispatch_inner(
             let params: NotificationsAckParams =
                 serde_json::from_value(req.params.clone()).map_err(invalid_params)?;
             let result = handlers::notifications::handle_notifications_ack(conn, params).await?;
+            serde_json::to_value(&result).map_err(internal)
+        }
+        method::NOTIFICATIONS_UNACK => {
+            // Mirror of NOTIFICATIONS_ACK: the required `id` routes through
+            // serde so a missing id is InvalidParams.
+            let params: NotificationsUnackParams =
+                serde_json::from_value(req.params.clone()).map_err(invalid_params)?;
+            let result = handlers::notifications::handle_notifications_unack(conn, params).await?;
             serde_json::to_value(&result).map_err(internal)
         }
         // Every other v1 method is reserved but not implemented

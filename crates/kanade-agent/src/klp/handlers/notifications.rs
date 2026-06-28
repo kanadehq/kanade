@@ -35,9 +35,10 @@ use kanade_shared::ipc::error::{ErrorKind, RpcError};
 use kanade_shared::ipc::method;
 use kanade_shared::ipc::notifications::{
     Notification, NotificationAcked, NotificationAmend, NotificationAmendedParams,
-    NotificationNewParams, NotificationsAckParams, NotificationsAckResult, NotificationsFilter,
-    NotificationsListParams, NotificationsListResult, NotificationsSubscribeParams,
-    NotificationsSubscribeResult, NotificationsUnsubscribeParams,
+    NotificationNewParams, NotificationUnacked, NotificationsAckParams, NotificationsAckResult,
+    NotificationsFilter, NotificationsListParams, NotificationsListResult,
+    NotificationsSubscribeParams, NotificationsSubscribeResult, NotificationsUnackParams,
+    NotificationsUnackResult, NotificationsUnsubscribeParams,
 };
 use kanade_shared::kv::{
     BUCKET_AGENT_GROUPS, BUCKET_NOTIFICATIONS_READ, STREAM_NOTIFICATIONS, notifications_read_key,
@@ -232,6 +233,110 @@ pub async fn handle_notifications_ack(
         "notification acked",
     );
     Ok(NotificationsAckResult { acked_at })
+}
+
+/// `notifications.unack` — retract the caller's prior confirmation (the
+/// read↔unread toggle: the user clicked "確認" by mistake and wants it
+/// back as unread). The exact inverse of [`handle_notifications_ack`],
+/// with the same SID-from-the-OS / id-charset guards:
+///
+/// 1. **Delete** the per-user read mark from the `notifications_read` KV.
+///    A KV delete writes an empty-payload tombstone, which
+///    [`read_user_acks`] already treats as "unread", so the next
+///    `notifications.list` returns this notification to the unread set —
+///    no agent restart, no special-casing. Deleting a key that isn't
+///    there is a no-op, so a double-unack is harmless (idempotent).
+/// 2. Publish `events.notifications.unacked.{pc_id}.{user_sid}.{notif_id}`
+///    (acknowledged JetStream publish) so the backend's notification-acks
+///    projector — on the *same* consumer as the acked events, hence
+///    strictly ordered against them — records the revoke as an audit
+///    event and flips the SPA roster back to "未確認".
+///
+/// Note we delete the read mark unconditionally rather than checking it
+/// exists first: the client only shows "取り消す" on an acked
+/// notification, and the tombstone-as-unread semantics make a redundant
+/// delete + unacked event benign (the projector's UPDATE no-ops when
+/// there's no standing ack row).
+pub async fn handle_notifications_unack(
+    conn: &ConnectionState,
+    params: NotificationsUnackParams,
+) -> HandlerResult<NotificationsUnackResult> {
+    let user_sid = conn.peer.user_sid.as_str();
+    if user_sid.is_empty() || user_sid == "<unknown>" {
+        return Err(RpcError::new(
+            ErrorKind::Unauthorized,
+            "caller SID could not be resolved; cannot record unack",
+        ));
+    }
+    let notif_id = params.id.trim();
+    if !valid_notification_id(notif_id) {
+        return Err(RpcError::new(
+            ErrorKind::InvalidParams,
+            "notification id must be non-empty and contain only [A-Za-z0-9_.-]",
+        ));
+    }
+    let client = conn.nats.as_ref().ok_or_else(|| {
+        RpcError::new(
+            ErrorKind::InternalError,
+            "NATS client not available on this agent build",
+        )
+    })?;
+    let pc_id = conn.pc_id.as_str();
+    let unacked_at = Utc::now();
+
+    let js = async_nats::jetstream::new(client.clone());
+
+    // 1. Delete the per-user read mark (tombstone ⇒ unread again).
+    let kv = js
+        .get_key_value(BUCKET_NOTIFICATIONS_READ)
+        .await
+        .map_err(|e| {
+            RpcError::new(
+                ErrorKind::InternalError,
+                format!("open {BUCKET_NOTIFICATIONS_READ} KV: {e}"),
+            )
+        })?;
+    let key = notifications_read_key(pc_id, user_sid, notif_id);
+    kv.delete(key).await.map_err(|e| {
+        RpcError::new(
+            ErrorKind::InternalError,
+            format!("delete {BUCKET_NOTIFICATIONS_READ}: {e}"),
+        )
+    })?;
+
+    // 2. Publish the unack event (acknowledged publish, mirroring ack).
+    let account = {
+        let u = conn.peer.user.as_str();
+        (!u.is_empty() && u != "<unknown>").then(|| u.to_string())
+    };
+    let event = NotificationUnacked {
+        notification_id: notif_id.to_string(),
+        pc_id: pc_id.to_string(),
+        user_sid: user_sid.to_string(),
+        unacked_at,
+        account,
+    };
+    let payload = serde_json::to_vec(&event)
+        .map_err(|e| RpcError::new(ErrorKind::InternalError, e.to_string()))?;
+    let subj = subject::events_notifications_unacked(pc_id, user_sid, notif_id);
+    let ack = js
+        .publish(subj.clone(), payload.into())
+        .await
+        .map_err(|e| RpcError::new(ErrorKind::InternalError, format!("publish {subj}: {e}")))?;
+    ack.await.map_err(|e| {
+        RpcError::new(
+            ErrorKind::InternalError,
+            format!("ack publish to {subj} not confirmed: {e}"),
+        )
+    })?;
+
+    info!(
+        pc_id = %pc_id,
+        user_sid = %user_sid,
+        notification_id = %notif_id,
+        "notification unacked",
+    );
+    Ok(NotificationsUnackResult { unacked_at })
 }
 
 /// `notifications.list` — paginated history of the notifications this
@@ -988,6 +1093,52 @@ mod tests {
         let err = handle_notifications_ack(
             &conn,
             NotificationsAckParams {
+                id: "notif-1".into(),
+            },
+        )
+        .await
+        .expect_err("missing NATS client must error");
+        assert_eq!(err.data.expect("data").kind, ErrorKind::InternalError);
+    }
+
+    #[tokio::test]
+    async fn unack_blank_or_unsafe_id_returns_invalid_params() {
+        let conn = conn_for_ack("S-1-5-21-1001");
+        for bad in ["  ", "bad id", "wild*"] {
+            let err =
+                handle_notifications_unack(&conn, NotificationsUnackParams { id: bad.into() })
+                    .await
+                    .expect_err("bad id must error");
+            assert_eq!(
+                err.data.expect("data").kind,
+                ErrorKind::InvalidParams,
+                "id {bad:?}",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unack_unknown_sid_is_rejected() {
+        let conn = conn_for_ack("<unknown>");
+        let err = handle_notifications_unack(
+            &conn,
+            NotificationsUnackParams {
+                id: "notif-1".into(),
+            },
+        )
+        .await
+        .expect_err("unknown SID must error");
+        let data = err.data.expect("data");
+        assert_eq!(data.kind, ErrorKind::Unauthorized);
+        assert!(data.detail.contains("SID"), "detail: {}", data.detail);
+    }
+
+    #[tokio::test]
+    async fn unack_without_nats_client_errors_internal() {
+        let conn = conn_for_ack("S-1-5-21-1001");
+        let err = handle_notifications_unack(
+            &conn,
+            NotificationsUnackParams {
                 id: "notif-1".into(),
             },
         )

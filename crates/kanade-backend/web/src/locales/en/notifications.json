@@ -100,6 +100,8 @@
     "status": "Status",
     "confirmed": "Confirmed",
     "pending": "Pending",
+    "revoked": "Revoked",
+    "revokedAt": "revoked at {{at}}",
     "empty": "No target PCs could be resolved (the targeted group may have no current members, or the targeted PC isn't registered)."
   },
   "ack": {

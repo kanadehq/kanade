@@ -44,6 +44,13 @@ pub const NOTIFICATIONS_NEW: &str = "notifications.new";
 /// Mark a notification read for this user — agent publishes
 /// `events.notifications.acked.>` on NATS with the OS-derived SID.
 pub const NOTIFICATIONS_ACK: &str = "notifications.ack";
+/// Undo a prior ack (read↔unread toggle) for this user — agent deletes
+/// the `notifications_read` KV entry and publishes
+/// `events.notifications.unacked.>` so the backend records the revoke
+/// as an audit event and flips the SPA roster back to "未確認". The
+/// `notification_ack_events` log keeps the original ack, so the operator
+/// can still see the user *had* confirmed before retracting.
+pub const NOTIFICATIONS_UNACK: &str = "notifications.unack";
 /// Push (Agent → Client) carrying a post-send amendment to a notification
 /// the client may be showing — currently a recall (delete it from screen).
 pub const NOTIFICATIONS_AMENDED: &str = "notifications.amended";
@@ -101,6 +108,7 @@ mod tests {
         assert_eq!(NOTIFICATIONS_UNSUBSCRIBE, "notifications.unsubscribe");
         assert_eq!(NOTIFICATIONS_NEW, "notifications.new");
         assert_eq!(NOTIFICATIONS_ACK, "notifications.ack");
+        assert_eq!(NOTIFICATIONS_UNACK, "notifications.unack");
         assert_eq!(NOTIFICATIONS_AMENDED, "notifications.amended");
 
         assert_eq!(JOBS_LIST, "jobs.list");

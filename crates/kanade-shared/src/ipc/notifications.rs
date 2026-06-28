@@ -216,6 +216,28 @@ pub struct NotificationsAckResult {
     pub acked_at: chrono::DateTime<chrono::Utc>,
 }
 
+// ---------- notifications.unack ----------
+
+/// `notifications.unack` params — retract this user's prior ack (the
+/// read↔unread toggle): the user clicked "確認" by mistake and wants the
+/// notification back as unread. Same SID-from-the-OS / audience guard as
+/// [`NotificationsAckParams`]; a user may only unack their own
+/// confirmation.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
+pub struct NotificationsUnackParams {
+    pub id: String,
+}
+
+/// `notifications.unack` response — confirms the agent deleted the
+/// `notifications_read` KV entry and published
+/// `events.notifications.unacked.>`. Carries the instant the revoke was
+/// recorded (the agent's wall clock), so the operator's audit view can
+/// show "confirmed at X, retracted at Y".
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
+pub struct NotificationsUnackResult {
+    pub unacked_at: chrono::DateTime<chrono::Utc>,
+}
+
 // ---------- backend HTTP compose (POST /api/notifications) ----------
 
 /// Operator-facing request body for `POST /api/notifications` (and the
@@ -323,6 +345,31 @@ pub struct NotificationAcked {
     pub account: Option<String>,
 }
 
+// ---------- unack event (Agent → NATS → backend projector) --------
+
+/// Body of the
+/// `events.notifications.unacked.{pc_id}.{user_sid}.{notif_id}` event the
+/// agent publishes when a user *retracts* a confirmation. Mirror of
+/// [`NotificationAcked`]; the projector reads these body fields (not the
+/// subject) and, in the same stream-ordered consumer, appends a
+/// `kind = 'unacked'` row to `notification_ack_events` and stamps
+/// `notification_acks.unacked_at` so the SPA roster flips the recipient
+/// from confirmed back to "未確認" while the audit log keeps the original
+/// ack.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
+pub struct NotificationUnacked {
+    pub notification_id: String,
+    pub pc_id: String,
+    pub user_sid: String,
+    pub unacked_at: chrono::DateTime<chrono::Utc>,
+    /// The retracting user's login name — same provenance and fallback
+    /// semantics as [`NotificationAcked::account`]. Carried for audit
+    /// symmetry (the projector's DELETE/UPDATE keys on the SID, not the
+    /// account).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+}
+
 // ---------- ack status (GET /api/notifications/{id}/ack_status) ----
 
 /// One recipient's confirmation record for a notification.
@@ -337,6 +384,15 @@ pub struct NotificationAckEntry {
     /// neither is available, in which case the SPA shows the `user_sid`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    /// When this user *retracted* their confirmation (the read↔unread
+    /// toggle). `Some` ⇒ they confirmed at `acked_at` then later took it
+    /// back at this instant — the SPA renders this recipient as "取消済み"
+    /// (confirmed→revoked), distinct from both "確認済み" and a
+    /// never-confirmed "未確認". `None` ⇒ the confirmation still stands.
+    /// Additive + optional so a pre-unack backend's `ack_status` still
+    /// decodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unacked_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Response of `GET /api/notifications/{id}/ack_status` — every
@@ -415,10 +471,25 @@ pub struct AudiencePc {
     pub last_logon_user: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_logon_display_name: Option<String>,
+    /// `true` when this PC currently has a *standing* confirmation — at
+    /// least one user acked and has not since retracted it. A PC whose
+    /// only ack was later revoked is `confirmed = false` with
+    /// `unacked_at = Some` (the "取消済み" state), so the operator's
+    /// "who hasn't confirmed" roster counts it as not-confirmed while
+    /// still surfacing that it once was.
     pub confirmed: bool,
     /// Earliest ack instant recorded for this PC; `None` while pending.
+    /// Retained even after a revoke so the audit view can show
+    /// "confirmed at X → retracted at Y".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acked_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// When this PC's confirmation was retracted (the latest revoke
+    /// across its users). `Some` with `confirmed = false` ⇒ "取消済み"
+    /// (was confirmed, then taken back); `None` ⇒ never retracted (either
+    /// still confirmed or never confirmed — disambiguated by `confirmed`
+    /// / `acked_at`). Additive + optional for pre-unack decode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unacked_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 // ---------- amend (post-send operations) -------------------------
@@ -691,6 +762,61 @@ mod tests {
         let json = serde_json::to_string(&r).unwrap();
         let back: NotificationsAckResult = serde_json::from_str(&json).unwrap();
         assert_eq!(back.acked_at, t);
+    }
+
+    #[test]
+    fn unack_result_round_trips() {
+        let t = chrono::Utc.with_ymd_and_hms(2026, 5, 20, 12, 5, 0).unwrap();
+        let r = NotificationsUnackResult { unacked_at: t };
+        let json = serde_json::to_string(&r).unwrap();
+        let back: NotificationsUnackResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.unacked_at, t);
+    }
+
+    #[test]
+    fn notification_unacked_round_trips_and_account_optional() {
+        let t = chrono::Utc.with_ymd_and_hms(2026, 5, 20, 12, 5, 0).unwrap();
+        let u = NotificationUnacked {
+            notification_id: "notif-9f3a".into(),
+            pc_id: "PC1234".into(),
+            user_sid: "S-1-5-21-1001".into(),
+            unacked_at: t,
+            account: Some("EXAMPLE\\taro".into()),
+        };
+        let json = serde_json::to_string(&u).unwrap();
+        let back: NotificationUnacked = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.notification_id, u.notification_id);
+        assert_eq!(back.pc_id, u.pc_id);
+        assert_eq!(back.user_sid, u.user_sid);
+        assert_eq!(back.unacked_at, t);
+        assert_eq!(back.account.as_deref(), Some("EXAMPLE\\taro"));
+
+        // account omitted ⇒ decodes None and is left off the wire.
+        let wire = r#"{
+            "notification_id":"n1","pc_id":"PC1","user_sid":"S-1-5-21-1",
+            "unacked_at":"2026-05-20T12:05:00Z"
+        }"#;
+        let u: NotificationUnacked = serde_json::from_str(wire).expect("decode without account");
+        assert_eq!(u.account, None);
+        let v = serde_json::to_value(&u).unwrap();
+        assert!(v.get("account").is_none(), "None account omitted: {v:?}");
+    }
+
+    #[test]
+    fn ack_entry_unacked_at_optional_and_skipped_when_none() {
+        // A pre-unack backend emits an ack entry with no unacked_at; it
+        // must decode (None) and a None value is omitted on the wire.
+        let wire = r#"{
+            "pc_id":"PC1","user_sid":"S-1-5-21-1","acked_at":"2026-05-20T12:00:05Z"
+        }"#;
+        let e: NotificationAckEntry =
+            serde_json::from_str(wire).expect("decode without unacked_at");
+        assert_eq!(e.unacked_at, None);
+        let v = serde_json::to_value(&e).unwrap();
+        assert!(
+            v.get("unacked_at").is_none(),
+            "None unacked_at omitted: {v:?}"
+        );
     }
 
     #[test]
