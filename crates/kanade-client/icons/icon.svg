@@ -1,31 +1,72 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="client app icon (baton)">
-  <title>baton — client app icon</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="client app icon (laptop + baton light)">
+  <title>laptop + baton — client app icon</title>
 
   <!--
     SOURCE for crates/kanade-client/icons/icon.ico (the exe-embedded /
-    taskbar / Start-Menu-shortcut icon). The client is branded per
-    customer, so the icon is the タクト (baton) MARK ONLY — no 奏 kanji,
-    no wordmark — the same baton geometry as the SPA's leftmost icon
-    (crates/kanade-backend/web/public/icon.svg), just centred + scaled
-    to fill a square canvas.
+    taskbar / Start-Menu-shortcut icon the END USER sees). The client is
+    the only general-user-facing surface, so its icon reads as a device-
+    management tool: a ノートPC (laptop) with the brand タクト (baton) +
+    its light trail (光) sweeping out of the screen.
 
-    Regenerate the .ico after editing this file (ImageMagick w/ rsvg):
+    Brand triad rides the baton: violet handle → amber midline → teal tip
+    (same gradient as the SPA mark + assets/icon.svg). No 奏 kanji / no
+    wordmark here, so this icon is font-independent (unlike assets/
+    icon-app.svg, the agent/cli/backend EXE icon, which keeps 奏).
+
+    Regenerate the .ico after editing this file (ImageMagick):
       magick -background none icon.svg -define icon:auto-resize=256,128,64,48,32,24,16 icon.ico
 
-    The baton path is the canonical mark's baton (assets/icon.svg); the
-    transform centres its bbox (~x[49,212] y[38,162], centre ~(130.5,100))
-    on the 256 canvas and scales it up to ~1.35 so the thin baton still
-    reads at small sizes.
+    Uses only fills + radial/linear gradients (NO SVG filters / text), so
+    ImageMagick's built-in SVG renderer rasterizes it faithfully at every
+    size without external libraries or fonts.
   -->
+
   <defs>
-    <linearGradient id="g-baton" x1="0" y1="0" x2="1" y2="1">
+    <linearGradient id="g-baton" x1="0" y1="1" x2="1" y2="0">
       <stop offset="0"   stop-color="#5b3a8c"/>
       <stop offset="0.5" stop-color="#d4a017"/>
       <stop offset="1"   stop-color="#2a9d8f"/>
     </linearGradient>
+    <radialGradient id="g-glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0"    stop-color="#ffd76a" stop-opacity="0.85"/>
+      <stop offset="0.45" stop-color="#f0b429" stop-opacity="0.35"/>
+      <stop offset="1"    stop-color="#f0b429" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="g-trail" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0"   stop-color="#2a9d8f" stop-opacity="0"/>
+      <stop offset="0.6" stop-color="#d4a017" stop-opacity="0.30"/>
+      <stop offset="1"   stop-color="#ffd76a" stop-opacity="0.55"/>
+    </linearGradient>
   </defs>
 
-  <g transform="translate(128 128) scale(1.35) translate(-130.5 -100)">
-    <path d="M 54 60 A 12 12 0 1 1 68 41 L 212 162 Z" fill="url(#g-baton)"/>
+  <!-- ===== Laptop ===== -->
+  <!-- Keyboard deck: a trapezoid (slight perspective) under the screen. -->
+  <path d="M 60 162 L 196 162 L 224 194 A 6 6 0 0 1 219 198 L 37 198 A 6 6 0 0 1 32 194 Z"
+        fill="#353d4d"/>
+  <!-- Trackpad hint -->
+  <rect x="112" y="176" width="32" height="9" rx="3" fill="#4a5568"/>
+
+  <!-- Screen bezel -->
+  <rect x="60" y="66" width="136" height="98" rx="14" fill="#4a5568"/>
+  <!-- Screen panel (cream so the baton's colour triad pops against it) -->
+  <rect x="73" y="79" width="110" height="72" rx="7" fill="#f5f0e6"/>
+
+  <!-- ===== Baton + light trail (光) ===== -->
+  <!-- Soft light trail widening toward the tip, sweeping out top-right. -->
+  <path d="M 99 142 L 214 38 L 232 58 L 112 152 Z" fill="url(#g-trail)"/>
+  <!-- Tip glow -->
+  <circle cx="200" cy="52" r="26" fill="url(#g-glow)"/>
+  <!-- The baton: round handle/tip ball at upper-right, tapering to a
+       point inside the screen — the brand mark "conducting" the device.
+       Arc radius 14 (not 13): the cap endpoints are ~26.9 apart, so a
+       radius below 13.46 would force renderers to implicitly scale it up
+       (SVG spec) — strict rasterizers (older ImageMagick MSVG / RSVG) can
+       mis-render that. 14 keeps the diameter safely above the span. -->
+  <path d="M 191 42 A 14 14 0 1 1 209 62 L 99 145 Z" fill="url(#g-baton)"/>
+  <!-- Spark rays off the tip -->
+  <g stroke="#ffd76a" stroke-width="4" stroke-linecap="round" opacity="0.9">
+    <line x1="216" y1="34" x2="226" y2="24"/>
+    <line x1="222" y1="56" x2="236" y2="56"/>
+    <line x1="206" y1="28" x2="210" y2="14"/>
   </g>
 </svg>
