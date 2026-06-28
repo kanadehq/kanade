@@ -251,6 +251,17 @@ fn manifest_to_job(m: &Manifest) -> Option<UserInvokableJob> {
         category_icon: client.category_icon.clone(),
         category_order: client.category_order,
         version: m.version.clone(),
+        // #865: surface the manifest's run deadline so the Client App's
+        // stuck-run watchdog can honor it instead of a fixed 15 min. A
+        // long, near-silent job (Office repair, Teams reinstall) is no
+        // longer falsely flagged failed while still running. Best-effort
+        // parse: an unparseable timeout yields `None` (the client falls
+        // back to its fixed watchdog) rather than dropping the row —
+        // `Manifest::validate` already rejects a bad timeout at write
+        // time, so this only fails on a pre-validation legacy entry.
+        timeout_secs: humantime::parse_duration(&m.execute.timeout)
+            .ok()
+            .map(|d| d.as_secs().max(1)),
         // Per-user run history is minted by `jobs.execute` (a
         // follow-up PR); until then every row is "never run by you".
         last_run: None,
@@ -1083,6 +1094,30 @@ mod tests {
         assert_eq!(row.display_description.as_deref(), Some("重いとき用"));
         assert_eq!(row.icon.as_deref(), Some("brush-cleaning"));
         assert_eq!(row.version, "1.0.0");
+        // #865: the manifest's 30s timeout is lowered onto the row so the
+        // client's stuck-run watchdog can honor it.
+        assert_eq!(row.timeout_secs, Some(30));
+    }
+
+    #[test]
+    fn timeout_secs_surfaced_and_floored() {
+        // A long timeout passes through verbatim; a sub-second one floors
+        // to 1s (same convention as build_command) so the client never
+        // sees an ambiguous 0.
+        let mut long = manifest("office-repair", Some(("Office 修復", "troubleshoot")));
+        long.execute.timeout = "1h".into();
+        let mut sub = manifest("blip", Some(("Blip", "catalog")));
+        sub.execute.timeout = "500ms".into();
+        let result = build_job_list(&[long, sub], None, "PC1", &[]);
+        let by_id = |id: &str| {
+            result
+                .items
+                .iter()
+                .find(|j| j.id == id)
+                .unwrap_or_else(|| panic!("{id} missing"))
+        };
+        assert_eq!(by_id("office-repair").timeout_secs, Some(3600));
+        assert_eq!(by_id("blip").timeout_secs, Some(1));
     }
 
     #[test]

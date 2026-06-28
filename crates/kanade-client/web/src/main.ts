@@ -157,6 +157,11 @@ type UserInvokableJob = {
   category_icon?: string | null;
   category_order?: number | null;
   version: string;
+  // #865: the manifest's execute.timeout in whole seconds. The agent
+  // kills the run at this deadline, so the stuck-run watchdog uses it
+  // (+ grace) instead of a fixed 15 min. Absent from an older agent ⇒
+  // the watchdog falls back to WATCHDOG_MS.
+  timeout_secs?: number | null;
 };
 
 type JobsListResult = { items: UserInvokableJob[] };
@@ -223,6 +228,12 @@ type Run = {
   status: RunStatus;
   output: string;
   updatedAt: number;
+  // #865: the agent's run deadline (manifest execute.timeout) in ms,
+  // captured at launch from the job catalog. The stuck-run watchdog
+  // honors this instead of the fixed WATCHDOG_MS. Undefined for a run we
+  // didn't launch ourselves (e.g. one reconstructed from a progress push
+  // after a reload) or whose job predates the wire field ⇒ fall back.
+  timeoutMs?: number;
 };
 
 const runs = new Map<string, Run>();
@@ -260,16 +271,42 @@ function toggleRun(id: string): void {
   renderRuns();
 }
 
-// Stuck-run watchdog (see #465): jobs.execute streams no intermediate
-// progress, so flag a still-non-terminal run as unresponsive only after
-// a deadline safely above any realistic job.
+// Stuck-run watchdog (see #465): a Running run whose `updatedAt` stops
+// advancing is flagged unresponsive once its deadline passes.
+//
+// #865: the deadline is now per-run. The agent kills a run at its
+// manifest `execute.timeout` and pushes a terminal status, so a healthy
+// run can only stay non-terminal up to that timeout plus the time for
+// the terminal push to arrive. We therefore wait `timeoutMs + grace`
+// before declaring it stuck — past that, the agent really is gone or
+// wedged. A near-silent long job (Office repair, Teams reinstall) no
+// longer trips the old fixed 15 min while it's legitimately still
+// running.
+//
+// WATCHDOG_MS is the fallback when we don't know the run's timeout: a
+// run reconstructed from a progress push after a reload, or a job whose
+// (older) agent didn't send `timeout_secs`. Kept at the historical 15
+// min so behavior is unchanged in that case.
 const WATCHDOG_MS = 15 * 60 * 1000;
+
+// Slack added on top of a known per-run timeout before the watchdog
+// fires: covers the agent's kill-and-capture latency plus the terminal
+// jobs.progress push crossing the wire. Generous on purpose — the cost
+// of waiting a bit longer is only a delayed "unresponsive" label,
+// whereas firing early reintroduces the false-failure this fixes.
+const WATCHDOG_GRACE_MS = 2 * 60 * 1000;
+
+// The silence budget for one run before the watchdog flags it: its known
+// per-run deadline + grace, else the fixed fallback.
+function watchdogMsFor(r: Run): number {
+  return r.timeoutMs !== undefined ? r.timeoutMs + WATCHDOG_GRACE_MS : WATCHDOG_MS;
+}
 
 function checkStuckRuns(): void {
   const now = Date.now();
   let changed = false;
   for (const r of runs.values()) {
-    if (!isTerminal(r.status) && now - r.updatedAt > WATCHDOG_MS) {
+    if (!isTerminal(r.status) && now - r.updatedAt > watchdogMsFor(r)) {
       r.status = "failed";
       r.output +=
         (r.output ? "\n" : "") +
@@ -367,13 +404,30 @@ function confirmDialog(opts: {
   });
 }
 
+// #865: the job's run deadline in ms (manifest execute.timeout), looked
+// up from the catalog so the stuck-run watchdog can honor it. Returns
+// undefined when the job isn't in the catalog or an older agent didn't
+// send the field — the watchdog then falls back to WATCHDOG_MS.
+function jobTimeoutMs(jobId: string): number | undefined {
+  for (const list of jobsByCategory.values()) {
+    const job = list.find((j) => j.id === jobId);
+    if (job) {
+      const secs = job.timeout_secs;
+      return typeof secs === "number" && secs > 0 ? secs * 1000 : undefined;
+    }
+  }
+  return undefined;
+}
+
 async function executeJob(jobId: string, label: string): Promise<void> {
   try {
     const r = await invoke<JobsExecuteResult>("jobs_execute", { id: jobId });
+    const timeoutMs = jobTimeoutMs(jobId);
     const existing = runs.get(r.run_id);
     if (existing) {
       existing.label = label;
       existing.updatedAt = Date.now();
+      existing.timeoutMs = timeoutMs;
     } else {
       runs.set(r.run_id, {
         runId: r.run_id,
@@ -381,6 +435,7 @@ async function executeJob(jobId: string, label: string): Promise<void> {
         status: "running",
         output: "",
         updatedAt: Date.now(),
+        timeoutMs,
       });
     }
     renderRuns();

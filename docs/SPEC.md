@@ -1880,6 +1880,7 @@ pub struct UserInvokableJob {
     pub icon: Option<String>,
     pub category: JobCategory,
     pub version: String,
+    pub timeout_secs: Option<u64>,           // #865: manifest execute.timeout in secs; client watchdog honors it
     pub last_run: Option<JobRun>,
 }
 
