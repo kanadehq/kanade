@@ -103,6 +103,16 @@ pub struct UserInvokableJob {
     /// Pinned version string from the manifest. Same field as
     /// `Manifest.version`.
     pub version: String,
+    /// `Manifest.execute.timeout` lowered to whole seconds (#865). The
+    /// agent kills the run at this deadline, so the Client App's
+    /// stuck-run watchdog uses `timeout_secs + grace` instead of a fixed
+    /// 15 min — a near-silent job (e.g. Office repair) is no longer
+    /// falsely marked failed while it's still running. `None` from an
+    /// older agent that predates this field ⇒ the client falls back to
+    /// the fixed watchdog (#492 wire rule: `serde(default)` +
+    /// `skip_serializing_if`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
     /// Snapshot of the last KLP-driven run of this job FOR THIS
     /// USER. `None` until they've executed it at least once.
     /// Backend keeps the cross-user / cross-PC history separately
@@ -288,6 +298,37 @@ mod tests {
         assert!(j.display_description.is_none());
         assert!(j.icon.is_none());
         assert!(j.last_run.is_none());
+        // #865: an older agent omits timeout_secs ⇒ None (client falls
+        // back to its fixed watchdog).
+        assert!(j.timeout_secs.is_none());
+    }
+
+    #[test]
+    fn user_invokable_job_timeout_secs_round_trips() {
+        // #865: present on the wire ⇒ carried through; absent ⇒ omitted
+        // from the encoded form (not `null`), per the #492 wire rule.
+        let wire = r#"{
+            "id":"office-repair","display_name":"Office 修復",
+            "category":"troubleshoot","version":"1.0.0","timeout_secs":3600
+        }"#;
+        let j: UserInvokableJob = serde_json::from_str(wire).unwrap();
+        assert_eq!(j.timeout_secs, Some(3600));
+
+        let v = serde_json::to_value(UserInvokableJob {
+            id: "x".into(),
+            display_name: "X".into(),
+            display_description: None,
+            icon: None,
+            category: "catalog".into(),
+            category_label: None,
+            category_icon: None,
+            category_order: None,
+            version: "1.0.0".into(),
+            timeout_secs: None,
+            last_run: None,
+        })
+        .unwrap();
+        assert!(v.get("timeout_secs").is_none(), "wire: {v:?}");
     }
 
     #[test]
