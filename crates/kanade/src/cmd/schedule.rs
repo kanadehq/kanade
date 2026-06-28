@@ -30,6 +30,27 @@ pub enum ScheduleSub {
         #[arg(required = true, num_args = 1..)]
         paths: Vec<PathBuf>,
     },
+    /// Validate one or more schedule manifests WITHOUT submitting them.
+    ///
+    /// Runs the exact client-side checks `create` does — strict YAML
+    /// parse (#492) + `Schedule::validate()` (when/runs_on combos, cron +
+    /// humantime parsing, active-window / constraints checks) — but never
+    /// contacts the backend. Two caveats, both shared with `create` (so
+    /// validate has parity, not a weaker check): the referenced `job_id`
+    /// existence is a backend-side check and is NOT verified here; and
+    /// unknown *top-level* keys are NOT rejected, because `Schedule`
+    /// flattens `FanoutPlan` and serde's `flatten` defeats the strict
+    /// parser's unknown-key detection (nested unknown keys still are).
+    /// Built for CI / pre-commit hooks: `kanade schedule validate
+    /// configs/schedules/*.yaml`. Accepts files, directories, and globs
+    /// like `create`; exits non-zero if any file fails.
+    Validate {
+        /// Schedule YAML paths to check. Globs / directories are expanded
+        /// CLI-side, so quote a glob to keep your shell from expanding it
+        /// first.
+        #[arg(required = true, num_args = 1..)]
+        paths: Vec<PathBuf>,
+    },
     /// Export registered schedule YAML (the comment-preserving mirror).
     ///
     /// `kanade schedule export <id>` prints to stdout; with `--out-dir`
@@ -126,6 +147,8 @@ pub async fn execute(backend_url: &str, args: ScheduleArgs) -> Result<()> {
     let base = backend_url.trim_end_matches('/');
     match args.sub {
         ScheduleSub::Create { paths } => create_all(base, paths).await,
+        // Offline check — no backend round-trip, so `base` is unused here.
+        ScheduleSub::Validate { paths } => validate_all(paths),
         ScheduleSub::Export { id, all, out_dir } => {
             crate::cmd::bulk::export(base, "schedules", id, all, out_dir).await
         }
@@ -306,6 +329,50 @@ async fn create_all(base: &str, paths: Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+/// Expand the operator's `validate` arguments (files / dirs / globs) and
+/// check each schedule without submitting it. Fail-soft per file so one
+/// bad manifest in a batch doesn't hide the rest; exits non-zero if any
+/// file failed so the command gates CI.
+fn validate_all(paths: Vec<PathBuf>) -> Result<()> {
+    let files = crate::cmd::bulk::expand_manifest_paths(&paths)?;
+    let mut failures = 0usize;
+    for f in &files {
+        if let Err(e) = validate_one(f) {
+            eprintln!("✗ {}: {e:#}", f.display());
+            failures += 1;
+        }
+    }
+    if failures > 0 {
+        anyhow::bail!(
+            "{failures}/{} schedule manifest(s) failed validation",
+            files.len(),
+        );
+    }
+    Ok(())
+}
+
+/// Parse + validate one schedule manifest WITHOUT submitting it. Mirrors
+/// the client-side checks `create_one` runs up to (but not including)
+/// the HTTP POST: strict parse → `Schedule::validate()`. The `job_id`
+/// existence check is backend-owned and intentionally not done here.
+fn validate_one(yaml: &std::path::Path) -> Result<()> {
+    let body = std::fs::read_to_string(yaml).with_context(|| format!("read {yaml:?}"))?;
+    // #492: strict parse so unknown keys (operator typos) are rejected
+    // with their paths, exactly as `create` would reject them.
+    let schedule: Schedule = kanade_shared::strict::from_yaml_str(&body)
+        .map_err(|e| anyhow::anyhow!("parse {yaml:?}: {e}"))?;
+    schedule
+        .validate()
+        .map_err(|e| anyhow::anyhow!("invalid schedule {yaml:?}: {e}"))?;
+    println!(
+        "✓ {} → schedule '{}' ({}) (valid)",
+        yaml.display(),
+        schedule.id,
+        schedule.when,
+    );
+    Ok(())
+}
+
 async fn create_one(base: &str, yaml: &std::path::Path) -> Result<()> {
     // `mut` because the #695 provenance step below appends an `origin:`
     // block to the raw YAML before it is shipped.
@@ -429,4 +496,50 @@ async fn delete(base: &str, id: &str) -> Result<()> {
     }
     println!("deleted: {id}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Repo root two levels up from `crates/kanade`. The real-config
+    /// test skips in a sourceless sandbox.
+    fn repo_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("crates/kanade has a repo root two levels up")
+            .to_path_buf()
+    }
+
+    #[test]
+    fn validate_one_accepts_a_real_schedule() {
+        let yaml = repo_root().join("configs/schedules/check-av-signature.yaml");
+        if !yaml.exists() {
+            return;
+        }
+        validate_one(&yaml).expect("real schedule validates offline");
+    }
+
+    #[test]
+    fn validate_one_rejects_semantic_failure() {
+        // Parses cleanly but fails `Schedule::validate()` — a bad
+        // humantime `jitter` — so this proves validate runs the semantic
+        // layer offline, not just the YAML parse. (Unknown top-level keys
+        // are NOT a reliable negative here: `Schedule` flattens
+        // `FanoutPlan`, and serde flatten defeats the strict parser's
+        // serde_ignored unknown-key detection — same gap `create` has.)
+        let dir = tempfile::tempdir().expect("mk temp dir");
+        let yaml_path = dir.path().join("schedule.yaml");
+        std::fs::write(
+            &yaml_path,
+            "id: s\nwhen:\n  per_pc: { every: 2h }\njob_id: j\nenabled: true\njitter: 5x\n",
+        )
+        .expect("write temp schedule");
+        let err = validate_one(&yaml_path).expect_err("bad jitter must fail validate");
+        assert!(
+            format!("{err:#}").contains("jitter"),
+            "expected a jitter validation error, got: {err:#}",
+        );
+    }
 }
