@@ -291,6 +291,82 @@ function flashRunsPanel(): void {
   section.classList.add("runs-flash");
 }
 
+// Only one confirm dialog at a time. The 実行 button disables itself while its
+// own dialog is open, but two *different* job buttons clicked in quick
+// succession would otherwise stack overlays; a second request while one is
+// open resolves to false (treated as "not confirmed") rather than piling up.
+let confirmDialogOpen = false;
+
+// Modal confirmation before a destructive/heavy action. client: ジョブの
+// 「実行」は再インストール等の重い操作を含みうるので、誤クリックで即発火させない
+// ための関所。クライアントは通知では意図的にブロッキングモーダルを持たない設計
+// (#102/#635) だが、ジョブ実行だけは明示確認が安全なのでこの一点に限りオーバーレイ
+// を動的生成する。Promise を返し、実行=true / キャンセル=false。
+function confirmDialog(opts: {
+  title: string;
+  confirmLabel?: string;
+  cancelLabel?: string;
+}): Promise<boolean> {
+  if (confirmDialogOpen) return Promise.resolve(false);
+  confirmDialogOpen = true;
+  return new Promise((resolve) => {
+    const titleId = `confirm-title-${runs.size}-${performance.now()}`;
+    const overlay = document.createElement("div");
+    overlay.className = "confirm-overlay";
+    overlay.innerHTML = `
+      <div class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="${titleId}">
+        <p class="confirm-title" id="${titleId}">${escapeHtml(opts.title)}</p>
+        <div class="confirm-actions">
+          <button class="confirm-cancel" type="button">${escapeHtml(opts.cancelLabel ?? "キャンセル")}</button>
+          <button class="confirm-ok" type="button">${escapeHtml(opts.confirmLabel ?? "実行")}</button>
+        </div>
+      </div>`;
+
+    const cancelBtn = overlay.querySelector<HTMLButtonElement>(
+      ".confirm-cancel",
+    )!;
+    const okBtn = overlay.querySelector<HTMLButtonElement>(".confirm-ok")!;
+
+    const close = (result: boolean): void => {
+      document.removeEventListener("keydown", onKey);
+      overlay.remove();
+      confirmDialogOpen = false;
+      resolve(result);
+    };
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") {
+        close(false);
+        return;
+      }
+      // Focus trap: with only two buttons, keep Tab / Shift+Tab cycling
+      // between them so focus never escapes the modal onto the job list
+      // behind it (where Enter could fire a second job).
+      if (e.key === "Tab") {
+        if (e.shiftKey && document.activeElement === cancelBtn) {
+          okBtn.focus();
+          e.preventDefault();
+        } else if (!e.shiftKey && document.activeElement === okBtn) {
+          cancelBtn.focus();
+          e.preventDefault();
+        }
+      }
+    };
+
+    // Backdrop click cancels; clicks inside the dialog stay (the inner
+    // box is a separate target, so they don't reach the overlay).
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) close(false);
+    });
+    cancelBtn.addEventListener("click", () => close(false));
+    okBtn.addEventListener("click", () => close(true));
+
+    document.addEventListener("keydown", onKey);
+    document.body.appendChild(overlay);
+    // Focus キャンセル so a stray Enter dismisses rather than fires the job.
+    cancelBtn.focus();
+  });
+}
+
 async function executeJob(jobId: string, label: string): Promise<void> {
   try {
     const r = await invoke<JobsExecuteResult>("jobs_execute", { id: jobId });
@@ -1752,16 +1828,23 @@ window.addEventListener("DOMContentLoaded", () => {
       });
       return;
     }
-    // Job run button.
+    // Job run button — confirm before firing so a mis-click can't launch a
+    // heavy/destructive client job (e.g. a reinstall) with no second chance.
     const runBtn = t.closest<HTMLButtonElement>(".job-run-btn");
     if (runBtn?.dataset.jobId) {
+      const jobId = runBtn.dataset.jobId;
+      const label = runBtn.dataset.label ?? jobId;
+      // Disable while the dialog is open so it can't stack a second prompt.
       runBtn.disabled = true;
-      void executeJob(
-        runBtn.dataset.jobId,
-        runBtn.dataset.label ?? runBtn.dataset.jobId,
-      ).finally(() => {
-        runBtn.disabled = false;
-      });
+      void confirmDialog({
+        title: `「${label}」を実行しますか？`,
+        confirmLabel: "実行",
+        cancelLabel: "キャンセル",
+      })
+        .then((ok) => (ok ? executeJob(jobId, label) : undefined))
+        .finally(() => {
+          runBtn.disabled = false;
+        });
       return;
     }
   });
