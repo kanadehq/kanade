@@ -64,14 +64,17 @@ export const OP_TIMELINE_KINDS: readonly string[] = OP_LANES.flatMap((l) => [
 // Walk the lane's start/end events in ascending time and pair them into
 // spans, clamped to [t0, t1]. An end with no open start began before the
 // window (`openStart`); a start still open at the end of the stream runs to
-// the window edge (`openEnd`). A second start while already open is ignored
-// (a missed end shouldn't fragment the interval).
+// the window edge — but no further than `now`, so a window that extends into
+// the future (e.g. "today" before midnight) doesn't paint an ongoing state
+// across hours that haven't happened yet (`openEnd`). A second start while
+// already open is ignored (a missed end shouldn't fragment the interval).
 function buildSpans(
   events: OpEvent[],
   starts: readonly string[],
   ends: readonly string[],
   t0: number,
   t1: number,
+  now: number,
 ): Span[] {
   const startSet = new Set(starts);
   const endSet = new Set(ends);
@@ -103,7 +106,11 @@ function buildSpans(
     }
   }
   if (open !== null) {
-    spans.push({ from: open, to: t1, openStart: open < t0, openEnd: true });
+    // The live edge: an open interval is only known up to `now`, never past
+    // it. Clamp to min(t1, now) so a future-extending window stops the strip
+    // at the present instead of the selected day's end. The square `openEnd`
+    // edge still reads as "ongoing".
+    spans.push({ from: open, to: Math.min(t1, now), openStart: open < t0, openEnd: true });
   }
   // Clamp to the window and drop anything that collapses to zero width.
   return spans
@@ -192,10 +199,13 @@ export function OperationalTimeline({
 
   const lanes = useMemo(() => {
     if (t1 <= t0) return [];
+    // Snapshot "now" once per render so open intervals don't paint past the
+    // present when the window runs into the future (today before midnight).
+    const now = Date.now();
     return OP_LANES.map((lane) => ({
       key: lane.key as LaneKey,
       color: lane.color,
-      spans: buildSpans(events, lane.starts, lane.ends, t0, t1),
+      spans: buildSpans(events, lane.starts, lane.ends, t0, t1, now),
       markers: laneMarkers(events, lane.starts, lane.ends, t0, t1),
     }));
   }, [events, t0, t1]);
