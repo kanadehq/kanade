@@ -237,6 +237,8 @@ export type NotificationAckEntry = {
   user_sid: string;
   acked_at: string;
   account?: string;
+  // Set when this recipient retracted the confirmation (取消済み).
+  unacked_at?: string;
 };
 
 export type NotificationAckStatus = {
@@ -286,8 +288,13 @@ export type AudiencePc = {
   pc_id: string;
   last_logon_user?: string;
   last_logon_display_name?: string;
+  // Standing confirmation: acked_at set AND not since retracted.
   confirmed: boolean;
   acked_at?: string;
+  // Set when this PC's confirmation was retracted (取消済み): confirmed=false
+  // with acked_at + unacked_at both present means "had confirmed, then took
+  // it back". Absent ⇒ never retracted (still confirmed, or never confirmed).
+  unacked_at?: string;
 };
 
 // The original send target (where it was addressed), reconstructed from

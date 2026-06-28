@@ -43,6 +43,7 @@ use kanade_shared::ipc::method;
 use kanade_shared::ipc::notifications::{
     NotificationsAckParams, NotificationsAckResult, NotificationsListParams,
     NotificationsListResult, NotificationsSubscribeParams, NotificationsSubscribeResult,
+    NotificationsUnackParams, NotificationsUnackResult,
 };
 use kanade_shared::ipc::state::{StateSnapshot, StateSnapshotParams};
 use kanade_shared::ipc::system::{PingParams, PingResult};
@@ -340,6 +341,19 @@ impl KlpClient {
         self.request::<NotificationsAckParams, NotificationsAckResult>(
             method::NOTIFICATIONS_ACK,
             &NotificationsAckParams { id: id.to_string() },
+        )
+        .await
+    }
+
+    /// `notifications.unack` — retract the caller's prior ack (the
+    /// read↔unread toggle). Inverse of [`Self::notifications_ack`]: the
+    /// agent deletes the `notifications_read` KV entry and publishes
+    /// `events.notifications.unacked.>` so the SPA roster flips back to
+    /// "未確認" while the audit log keeps the original confirmation.
+    pub async fn notifications_unack(&self, id: &str) -> Result<NotificationsUnackResult> {
+        self.request::<NotificationsUnackParams, NotificationsUnackResult>(
+            method::NOTIFICATIONS_UNACK,
+            &NotificationsUnackParams { id: id.to_string() },
         )
         .await
     }

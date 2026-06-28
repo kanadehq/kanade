@@ -1036,6 +1036,30 @@ ul.checks {
   font-size: 12px;
 }
 
+/* 取り消す — a quiet, link-like undo next to "✓ 確認済み". Deliberately
+   understated (text button, no fill) so it reads as a recovery affordance,
+   not a primary action competing with 確認. */
+.notif-unack-btn {
+  flex: 0 0 auto;
+  margin-left: 8px;
+  padding: 2px 6px;
+  font-size: 12px;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.notif-unack-btn:hover {
+  color: var(--accent);
+}
+
+.notif-unack-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* All notifications surface as native OS toasts (#102/#635) — no in-app
    toast or blocking-modal styles live here anymore. */
 

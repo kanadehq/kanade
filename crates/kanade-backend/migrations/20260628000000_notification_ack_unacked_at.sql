@@ -1,0 +1,17 @@
+-- Unack (確認取り消し / read↔unread toggle): a user may retract a
+-- confirmation they made by mistake. `notification_acks` is the
+-- *current-state* read model — so instead of deleting the row (which
+-- would erase that they ever confirmed), the unacked projector stamps
+-- `unacked_at`. Tri-state per recipient:
+--
+--   * acked_at set,   unacked_at NULL  → 確認済み (standing confirmation)
+--   * acked_at set,   unacked_at set   → 取消済み (confirmed, then revoked)
+--   * no row                            → 未確認 (never confirmed)
+--
+-- `confirmed` in the SPA roster therefore means "acked_at set AND
+-- unacked_at NULL". The full ack/unack timeline lives in the separate
+-- append-only `notification_ack_events` audit log.
+--
+-- NULL for every pre-unack row (they were never retracted). A later
+-- re-ack clears it back to NULL (the projector's UPSERT resets it).
+ALTER TABLE notification_acks ADD COLUMN unacked_at TIMESTAMP;

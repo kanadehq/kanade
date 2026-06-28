@@ -31,7 +31,7 @@ use kanade_shared::ipc::handshake::HandshakeResult;
 use kanade_shared::ipc::jobs::{JobsExecuteResult, JobsKillResult, JobsListParams, JobsListResult};
 use kanade_shared::ipc::notifications::{
     NotificationsAckResult, NotificationsFilter, NotificationsListParams, NotificationsListResult,
-    NotificationsSubscribeResult,
+    NotificationsSubscribeResult, NotificationsUnackResult,
 };
 use kanade_shared::ipc::state::StateSnapshot;
 use kanade_shared::ipc::system::PingResult;
@@ -266,6 +266,22 @@ async fn notifications_ack(
     let client = connected_client(&state).await?;
     client
         .notifications_ack(&id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// `notifications.unack` — retract a confirmation the user made by
+/// mistake (the read↔unread toggle). Inverse of [`notifications_ack`]:
+/// the agent deletes the read mark + emits `events.notifications.unacked.>`
+/// so the SPA roster reverts to "未確認" while keeping the audit trail.
+#[tauri::command]
+async fn notifications_unack(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<NotificationsUnackResult, String> {
+    let client = connected_client(&state).await?;
+    client
+        .notifications_unack(&id)
         .await
         .map_err(|e| e.to_string())
 }
@@ -708,6 +724,7 @@ pub fn run() {
             notifications_subscribe,
             notifications_list,
             notifications_ack,
+            notifications_unack,
             get_launch_notification,
             get_launch_focus,
             app_version,

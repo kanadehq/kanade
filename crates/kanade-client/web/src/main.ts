@@ -648,6 +648,8 @@ type NotificationsListResult = {
 
 type NotificationsAckResult = { acked_at: string };
 
+type NotificationsUnackResult = { unacked_at: string };
+
 // `notifications.amended` push: a post-send operation on a notification this
 // client may be showing. Currently only `recall` (the operator deleted it) —
 // the `op.kind` tag leaves room for a future `update`.
@@ -1091,6 +1093,25 @@ async function ackNotification(id: string): Promise<void> {
   }
 }
 
+// Inverse of ackNotification: the user clicked 確認 by mistake and wants the
+// notification back as unread. The agent deletes the read mark + emits the
+// unacked event (so the operator's roster reverts), and locally we clear
+// acked_at so the row returns to its unread/確認-button state. Re-acking is
+// just pressing 確認 again — a true read↔unread toggle.
+async function unackNotification(id: string): Promise<void> {
+  try {
+    await invoke<NotificationsUnackResult>("notifications_unack", { id });
+    const n = notifications.get(id);
+    // Back to unread. seenIds still holds this id, so the row shows the live
+    // 確認 button (not the gated 開いて確認) — the user already read it once.
+    if (n) n.acked_at = null;
+    renderNotifications();
+  } catch (err) {
+    console.error("notifications_unack failed", err);
+    throw err;
+  }
+}
+
 // Count unread, non-expired notifications (drives the sidebar badge +
 // dashboard card).
 function unreadCount(): number {
@@ -1184,10 +1205,15 @@ function renderNotification(n: AppNotification): string {
   // expands the row (data-notif-toggle), so the user can't confirm content
   // they never read. Once read it becomes the real 確認 (data-notif-id → ack).
   const seen = seenIds.has(n.id);
+  // The 確認済み state carries a 取り消す affordance: pressing 確認 by mistake
+  // is recoverable — undo returns the row to unread and lets you re-confirm
+  // (read↔unread toggle). The operator still sees you had confirmed (the
+  // backend keeps an audit trail), so this is a UX convenience, not a way to
+  // hide that you saw it.
   const ackCtl = !n.require_ack
     ? ""
     : acked
-      ? `<span class="notif-acked muted">✓ 確認済み</span>`
+      ? `<span class="notif-acked muted">✓ 確認済み</span><button class="notif-unack-btn" data-notif-unack="${id}" title="確認を取り消して未確認に戻す">取り消す</button>`
       : seen
         ? `<button class="notif-ack-btn" data-notif-id="${id}">確認</button>`
         : `<button class="notif-ack-btn notif-ack-locked" data-notif-toggle="${id}" title="本文を開いて内容をご確認ください">開いて確認</button>`;
@@ -1713,6 +1739,16 @@ window.addEventListener("DOMContentLoaded", () => {
       ackBtn.disabled = true;
       ackNotification(ackBtn.dataset.notifId).catch(() => {
         ackBtn.disabled = false;
+      });
+      return;
+    }
+    // Notification unack — the 取り消す button on already-confirmed rows
+    // (undo a mistaken 確認). Mirror of the ack arm.
+    const unackBtn = t.closest<HTMLButtonElement>(".notif-unack-btn");
+    if (unackBtn?.dataset.notifUnack) {
+      unackBtn.disabled = true;
+      unackNotification(unackBtn.dataset.notifUnack).catch(() => {
+        unackBtn.disabled = false;
       });
       return;
     }
