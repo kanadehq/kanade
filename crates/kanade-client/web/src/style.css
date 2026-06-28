@@ -1101,6 +1101,61 @@ button.nav-item.active:hover {
   background: var(--accent-soft);
 }
 
+/* ---- Confirm dialog (client: ジョブ実行の関所) ----
+   The only blocking modal in the client: a mis-click on 実行 must not fire a
+   heavy/destructive job (e.g. a reinstall) with no second chance. Built
+   on-demand by main.ts's confirmDialog(); uses theme vars so it follows the
+   dark palette without an explicit override block. */
+.confirm-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.confirm-dialog {
+  width: 100%;
+  max-width: 360px;
+  padding: 20px;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
+}
+
+.confirm-title {
+  margin: 0 0 18px;
+  font-size: 15px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+/* キャンセル is the safe default (focused on open): a quiet outlined button so
+   実行 stays the visually primary affordance without inviting a reflex press.
+   The explicit base overrides the global filled `button` style; hover gets a
+   faint fill so it still reads as interactive without competing with 実行. */
+.confirm-cancel {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+.confirm-cancel:hover {
+  background: var(--panel-2);
+  color: var(--text);
+}
+
 /* ---- Dark theme ---- */
 @media (prefers-color-scheme: dark) {
   :root {
