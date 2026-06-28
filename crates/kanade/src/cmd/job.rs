@@ -36,6 +36,23 @@ pub enum JobSub {
         #[arg(required = true, num_args = 1..)]
         paths: Vec<PathBuf>,
     },
+    /// Validate one or more job manifests WITHOUT submitting them.
+    ///
+    /// Runs the exact client-side checks `create` does — strict YAML
+    /// parse (unknown keys rejected with their paths, #492),
+    /// `Manifest::validate()` semantic checks (SPEC §2.4.1 exclusivity,
+    /// shell limits, finalize/check/collect blocks), and a `script_file:`
+    /// existence check — but never contacts the backend. Built for CI /
+    /// pre-commit hooks: `kanade job validate configs/jobs/*.yaml`.
+    /// Accepts files, directories, and globs like `create`; exits
+    /// non-zero if any file fails so it gates a pipeline.
+    Validate {
+        /// Job YAML paths to check. Globs / directories are expanded
+        /// CLI-side, so quote a glob to keep your shell from expanding it
+        /// first.
+        #[arg(required = true, num_args = 1..)]
+        paths: Vec<PathBuf>,
+    },
     /// Export registered job YAML (the comment-preserving mirror).
     ///
     /// `kanade job export <id>` prints to stdout; with `--out-dir` it
@@ -68,6 +85,8 @@ pub async fn execute(backend_url: &str, args: JobArgs) -> Result<()> {
     let base = backend_url.trim_end_matches('/');
     match args.sub {
         JobSub::Create { paths } => create_all(base, paths).await,
+        // Offline check — no backend round-trip, so `base` is unused here.
+        JobSub::Validate { paths } => validate_all(paths),
         JobSub::Export { id, all, out_dir } => {
             crate::cmd::bulk::export(base, "jobs", id, all, out_dir).await
         }
@@ -235,6 +254,68 @@ async fn create_one(base: &str, yaml: &std::path::Path) -> Result<()> {
         .and_then(|v| v.as_str())
         .unwrap_or("?");
     println!("✓ {} → job '{id}' v{version}", yaml.display());
+    Ok(())
+}
+
+/// Expand the operator's `validate` arguments (files / dirs / globs) and
+/// check each manifest without submitting it. Fail-soft per file so one
+/// bad manifest in a batch doesn't hide the rest; exits non-zero if any
+/// file failed so the command gates CI.
+fn validate_all(paths: Vec<PathBuf>) -> Result<()> {
+    let files = crate::cmd::bulk::expand_manifest_paths(&paths)?;
+    let mut failures = 0usize;
+    for f in &files {
+        if let Err(e) = validate_one(f) {
+            eprintln!("✗ {}: {e:#}", f.display());
+            failures += 1;
+        }
+    }
+    if failures > 0 {
+        anyhow::bail!(
+            "{failures}/{} job manifest(s) failed validation",
+            files.len()
+        );
+    }
+    Ok(())
+}
+
+/// Parse + validate one job manifest WITHOUT submitting it. Mirrors the
+/// client-side checks `create_one` runs up to (but not including) the
+/// HTTP POST: strict parse → `Manifest::validate()` → `script_file:`
+/// resolves to a real file. No GitOps provenance / inlining happens —
+/// validation must not mutate the operator's tree.
+fn validate_one(yaml: &std::path::Path) -> Result<()> {
+    let raw = std::fs::read_to_string(yaml).with_context(|| format!("read {yaml:?}"))?;
+    // #492: strict parse so unknown keys (operator typos) are rejected
+    // with their paths, exactly as `create` would reject them.
+    let job: Manifest = kanade_shared::strict::from_yaml_str(&raw)
+        .map_err(|e| anyhow::anyhow!("parse {yaml:?}: {e}"))?;
+    // SPEC §2.4.1 exclusivity + the rest of the semantic checks.
+    if let Err(e) = job.validate() {
+        anyhow::bail!("{yaml:?}: {e}");
+    }
+    // `script_file:` is operator-side sugar the CLI inlines at create
+    // time (#210); a missing file is a create-time failure, so surface
+    // it here too rather than letting validate pass on a manifest that
+    // `create` would reject. `is_file()` (not `exists()`): an empty path
+    // or a directory satisfies `exists()` but `create`'s
+    // `read_to_string` would still choke on it — so green-lighting it
+    // here would diverge from what `create` accepts (gemini / CodeRabbit).
+    if let Some(path) = job.execute.script_file.as_deref() {
+        let file_path = resolve_script_file_path(yaml, path);
+        if !file_path.is_file() {
+            anyhow::bail!(
+                "{yaml:?}: script_file {} not found or is not a file",
+                file_path.display(),
+            );
+        }
+    }
+    println!(
+        "✓ {} → job '{}' v{} (valid)",
+        yaml.display(),
+        job.id,
+        job.version,
+    );
     Ok(())
 }
 
@@ -473,6 +554,69 @@ execute:
         );
         let back: Manifest = serde_yaml::from_str(&yaml).expect("re-parse");
         assert_eq!(back.execute.script.as_deref(), Some(script));
+    }
+
+    /// Repo root two levels up from `crates/kanade` — shared by the
+    /// real-config tests, which skip in a sourceless sandbox.
+    fn repo_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("crates/kanade has a repo root two levels up")
+            .to_path_buf()
+    }
+
+    #[test]
+    fn validate_one_accepts_a_real_script_file_job() {
+        // End-to-end on the real artifact: the installer manifest uses
+        // `script_file:`, so this exercises both `Manifest::validate()`
+        // and the script_file existence branch.
+        let yaml = repo_root().join("configs/jobs/installers/install-kanade-client.yaml");
+        if !yaml.exists() {
+            return;
+        }
+        validate_one(&yaml).expect("real script_file job validates offline");
+    }
+
+    #[test]
+    fn validate_one_rejects_missing_script_file() {
+        // A manifest whose `script_file:` points nowhere must fail
+        // validate — otherwise `create` would later reject a manifest
+        // `validate` had blessed. A unique temp dir (so the relative
+        // script path resolves to a definitely-absent file) keeps
+        // concurrent test runs from racing on a shared path (claude bot).
+        let dir = tempfile::tempdir().expect("mk temp dir");
+        let yaml_path = dir.path().join("job.yaml");
+        std::fs::write(
+            &yaml_path,
+            "id: j\nversion: 1.0.0\nexecute:\n  shell: powershell\n  script_file: does-not-exist.ps1\n  timeout: 30s\n",
+        )
+        .expect("write temp manifest");
+        let err = validate_one(&yaml_path).expect_err("missing script_file must fail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("script_file") && msg.contains("not found"),
+            "expected a missing-script_file error, got: {msg}",
+        );
+    }
+
+    #[test]
+    fn validate_one_rejects_unknown_key() {
+        // #492 parity: a typo'd top-level key is a strict-parse failure.
+        // (Jobs have no flattened field, so unknown top-level keys ARE
+        // rejected — unlike `Schedule`, see its test.)
+        let dir = tempfile::tempdir().expect("mk temp dir");
+        let yaml_path = dir.path().join("job.yaml");
+        std::fs::write(
+            &yaml_path,
+            "id: j\nversion: 1.0.0\nexecute:\n  shell: powershell\n  script: x\n  timeout: 30s\nbogus_key: 1\n",
+        )
+        .expect("write temp manifest");
+        let err = validate_one(&yaml_path).expect_err("unknown key must fail");
+        assert!(
+            format!("{err:#}").contains("bogus_key"),
+            "expected the unknown key in the error, got: {err:#}",
+        );
     }
 
     #[test]
