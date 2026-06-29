@@ -60,6 +60,24 @@ pub const BUCKET_VIEWS_YAML: &str = "views_yaml";
 /// both the backend scheduler and every agent's local scheduler watch.
 pub const BUCKET_FLEET_CONFIG: &str = "fleet_config";
 
+/// Backend-side, operator-editable server settings that aren't per-agent
+/// (so they don't belong in `agent_config`'s layered scopes) and aren't a
+/// fleet-wide switch every agent watches (so they don't belong in
+/// `fleet_config`). A single JSON document under [`KEY_SERVER_SETTINGS`]
+/// holding [`crate::wire::ServerSettings`], managed via the SPA Settings
+/// page's "server settings" tab. Deliberately generic: future server-side
+/// knobs join the same document rather than spawning a bucket each. First
+/// consumer is the cleanup task's dead-agent prune window
+/// (`ServerSettings::agent_prune_days`). `history: 1` — only the current
+/// state matters; nothing replays its history.
+pub const BUCKET_SERVER_SETTINGS: &str = "server_settings";
+
+/// Singleton key in [`BUCKET_SERVER_SETTINGS`] holding the JSON-encoded
+/// [`crate::wire::ServerSettings`]. **Key absent ⇒ all-default settings**
+/// (e.g. `agent_prune_days = 0`, pruning disabled), so a fresh deployment
+/// behaves exactly as it did before the bucket existed.
+pub const KEY_SERVER_SETTINGS: &str = "current";
+
 /// `notifications_read` — per-user read/ack state for end-user
 /// notifications (SPEC §2.3.2 / Phase E). Key shape
 /// `{pc_id}.{user_sid}.{notification_id}`, value JSON
@@ -337,6 +355,7 @@ mod tests {
             BUCKET_VIEWS,
             BUCKET_VIEWS_YAML,
             BUCKET_FLEET_CONFIG,
+            BUCKET_SERVER_SETTINGS,
             BUCKET_NOTIFICATIONS_READ,
             BUCKET_SCHEDULER_DISPATCH,
             OBJECT_AGENT_RELEASES,

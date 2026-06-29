@@ -29,6 +29,7 @@ pub mod schedules;
 pub mod schemas;
 pub mod script_objects;
 pub mod scripts;
+pub mod server_settings;
 pub mod views;
 pub mod yaml_body;
 
@@ -235,6 +236,17 @@ pub fn router(state: AppState) -> Router {
         .route("/api/audit", get(audit::list))
         .route("/api/schedules", get(schedules::list))
         .route("/api/freeze", get(freeze::get))
+        // Operator-editable backend server settings (viewer-readable; PUT
+        // is operator-gated below). Drives the Settings page "server
+        // settings" tab. The `/defaults` sibling returns the compiled-in
+        // floor the SPA renders as faint placeholders (mirrors
+        // /api/config/defaults); different segment counts, so it can't
+        // collide with the bare route.
+        .route("/api/server-settings", get(server_settings::get))
+        .route(
+            "/api/server-settings/defaults",
+            get(server_settings::defaults),
+        )
         .route("/api/scripts/status", get(scripts::list_status))
         .route("/api/jobs", get(jobs::list))
         .route("/api/jobs/{id}/yaml", get(jobs::get_yaml))
@@ -362,6 +374,8 @@ pub fn router(state: AppState) -> Router {
             "/api/groups/{name}/email",
             put(group_contacts::put_contacts),
         )
+        // Replace the backend server-settings document (operator+).
+        .route("/api/server-settings", put(server_settings::put))
         .route(
             "/api/pcs/{pc_id}/config",
             put(agent_config::put_pc).delete(agent_config::delete_pc),

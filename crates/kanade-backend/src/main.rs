@@ -845,7 +845,7 @@ pub(crate) async fn run_backend() -> Result<()> {
     // no console session, agent died mid-script) pile up in the
     // Jobs page live chip indefinitely. 5 min cadence; the function
     // body details the policy.
-    let _cleanup_handle = cleanup::spawn(pool.clone());
+    let _cleanup_handle = cleanup::spawn(pool.clone(), jetstream.clone());
 
     // v0.35 / #88: prewarm + watcher for the explode-spec / manifest
     // cache constructed above (before the projector spawns). Prewarm
