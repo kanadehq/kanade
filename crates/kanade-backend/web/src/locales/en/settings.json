@@ -1,6 +1,14 @@
 {
   "title": "Settings",
-  "description": "Operator preferences. Stored locally — they don't sync across browsers or devices.",
+  "description": "Personal preferences (this browser) and shared server settings.",
+  "tabs": {
+    "label": "Settings sections",
+    "personal": "Personal",
+    "server": "Server"
+  },
+  "personal": {
+    "scopeNote": "These are stored in this browser only — they don't sync across browsers or devices, and don't affect other users."
+  },
   "language": {
     "title": "Language",
     "label": "UI language",
@@ -15,5 +23,19 @@
       "dark": "Dark"
     },
     "persistedHint": "Saved to localStorage; takes effect immediately."
+  },
+  "server": {
+    "scopeNote": "These are saved on the server and shared by everyone. Changes take effect for the whole deployment.",
+    "save": "Save",
+    "saving": "Saving…",
+    "saved": "Server settings saved.",
+    "agentPrune": {
+      "title": "Dead agent pruning",
+      "description": "Automatically remove agents (PCs) that stopped sending heartbeats this long ago. Offline machines that come back reappear on their next heartbeat, so only genuinely-retired ones stay gone.",
+      "label": "Prune after no heartbeat for",
+      "unit": "days",
+      "unsetPlaceholder": "unset (off)",
+      "blankHint": "Leave blank to use the default (shown faintly). With no default, blank means pruning is off — dead agents are kept forever."
+    }
   }
 }

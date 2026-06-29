@@ -29,9 +29,9 @@ use crate::kv::{
     BUCKET_AGENT_CONFIG, BUCKET_AGENT_GROUPS, BUCKET_AGENTS_STATE, BUCKET_FLEET_CONFIG,
     BUCKET_GROUP_CONTACTS, BUCKET_JOBS, BUCKET_JOBS_YAML, BUCKET_NOTIFICATIONS_READ,
     BUCKET_SCHEDULES, BUCKET_SCHEDULES_YAML, BUCKET_SCRIPT_CURRENT, BUCKET_SCRIPT_STATUS,
-    OBJECT_AGENT_RELEASES, OBJECT_APP_PACKAGES, OBJECT_COLLECTIONS, OBJECT_RESULT_OUTPUT,
-    OBJECT_SCRIPTS, STREAM_AUDIT, STREAM_EVENTS, STREAM_EXEC, STREAM_INVENTORY,
-    STREAM_NOTIFICATIONS, STREAM_OBS_EVENTS, STREAM_RESULTS,
+    BUCKET_SERVER_SETTINGS, OBJECT_AGENT_RELEASES, OBJECT_APP_PACKAGES, OBJECT_COLLECTIONS,
+    OBJECT_RESULT_OUTPUT, OBJECT_SCRIPTS, STREAM_AUDIT, STREAM_EVENTS, STREAM_EXEC,
+    STREAM_INVENTORY, STREAM_NOTIFICATIONS, STREAM_OBS_EVENTS, STREAM_RESULTS,
 };
 
 /// Create-or-update an Object Store, but never let it wedge backend
@@ -345,6 +345,20 @@ pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
     .await
     .with_context(|| format!("create_or_update_key_value {BUCKET_FLEET_CONFIG}"))?;
     info!(bucket = BUCKET_FLEET_CONFIG, "ready");
+
+    // server_settings — backend-side operator-editable settings (SPA
+    // Settings page "server settings" tab). A single JSON document under
+    // KEY_SERVER_SETTINGS; history: 1 since only the current state
+    // matters. First consumer is the cleanup task's dead-agent prune
+    // window.
+    js.create_or_update_key_value(KvConfig {
+        bucket: BUCKET_SERVER_SETTINGS.into(),
+        history: 1,
+        ..Default::default()
+    })
+    .await
+    .with_context(|| format!("create_or_update_key_value {BUCKET_SERVER_SETTINGS}"))?;
+    info!(bucket = BUCKET_SERVER_SETTINGS, "ready");
 
     // notifications_read — per-(pc, user, notification) read/ack state
     // (SPEC §2.3.2 / Phase E). The agent writes here on KLP

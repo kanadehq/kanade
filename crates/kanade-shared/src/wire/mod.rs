@@ -11,6 +11,7 @@ mod logs;
 mod obs_event;
 mod process_perf;
 mod result;
+mod server_settings;
 mod staleness;
 
 pub use agent_config::{ConfigScope, EffectiveConfig, ResolutionWarning, resolve};
@@ -26,4 +27,5 @@ pub use logs::LogsRequest;
 pub use obs_event::ObsEvent;
 pub use process_perf::{ProcessPerf, ProcessSnapshot};
 pub use result::ExecResult;
+pub use server_settings::{MAX_AGENT_PRUNE_DAYS, ServerSettings};
 pub use staleness::Staleness;

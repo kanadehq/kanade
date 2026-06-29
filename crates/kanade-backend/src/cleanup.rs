@@ -28,6 +28,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use kanade_shared::kv::{BUCKET_SERVER_SETTINGS, KEY_SERVER_SETTINGS};
+use kanade_shared::wire::ServerSettings;
 use sqlx::SqlitePool;
 use tracing::{info, warn};
 
@@ -165,7 +167,15 @@ const RETENTION_MAX_BATCHES_PER_TICK: u32 = 10;
 /// task is fire-and-forget — the returned handle is for the
 /// caller to (optionally) hold so the runtime keeps the task
 /// alive.
-pub fn spawn(pool: SqlitePool) -> tokio::task::JoinHandle<()> {
+///
+/// Takes a JetStream handle (not just the pool) because the dead-agent
+/// prune window is config-driven: each tick reads
+/// [`ServerSettings::agent_prune_days`] from the `server_settings` KV so
+/// an operator can change it from the SPA without restarting the backend.
+pub fn spawn(
+    pool: SqlitePool,
+    jetstream: async_nats::jetstream::Context,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         info!(
             interval_secs = CLEANUP_INTERVAL.as_secs(),
@@ -308,8 +318,75 @@ pub fn spawn(pool: SqlitePool) -> tokio::task::JoinHandle<()> {
                 Ok(_) => {}
                 Err(e) => warn!(error = %e, "audit_log retention failed"),
             }
+            // Dead-agent prune — config-driven (`server_settings` KV).
+            // Disabled (a no-op) unless the operator set a positive
+            // `agent_prune_days`; reading the KV every tick lets that knob
+            // change live from the SPA without a backend restart. A KV
+            // read error just skips the prune this tick (logged) — the
+            // other sweeps above already ran.
+            match effective_agent_prune_days(&jetstream).await {
+                Ok(days) if days > 0 => {
+                    let cutoff = now - chrono::Duration::days(days as i64);
+                    match prune_stale_agents(&pool, cutoff).await {
+                        Ok(n) if n > 0 => info!(
+                            deleted = n,
+                            "agents cleanup: pruned {n} dead agents with no heartbeat for {days}d",
+                        ),
+                        Ok(_) => {}
+                        Err(e) => warn!(error = %e, "agents prune failed"),
+                    }
+                }
+                Ok(_) => {} // 0 = pruning disabled
+                Err(e) => warn!(error = %e, "agents prune: read server_settings failed; skipping"),
+            }
         }
     })
+}
+
+/// Read the effective dead-agent prune window (in days) from the
+/// `server_settings` KV: the stored `agent_prune_days` if set, else the
+/// built-in default, else `0` (= disabled). See
+/// [`ServerSettings::effective_agent_prune_days`]. A missing bucket / key
+/// (never configured) reads as all-default. Only a genuine broker/decode
+/// failure is an `Err`, which the caller logs and treats as "skip the
+/// prune this tick" rather than guessing a threshold.
+async fn effective_agent_prune_days(jetstream: &async_nats::jetstream::Context) -> Result<u32> {
+    let kv = jetstream
+        .get_key_value(BUCKET_SERVER_SETTINGS)
+        .await
+        .context("open server_settings KV")?;
+    let settings = match kv
+        .get(KEY_SERVER_SETTINGS)
+        .await
+        .context("get server_settings")?
+    {
+        Some(bytes) => serde_json::from_slice(&bytes).context("decode server_settings")?,
+        None => ServerSettings::default(),
+    };
+    Ok(settings.effective_agent_prune_days())
+}
+
+/// Delete `agents` rows whose `last_heartbeat` predates the cutoff —
+/// genuinely-retired machines that haven't checked in for
+/// `agent_prune_days`. Rows with a NULL `last_heartbeat` (registered but
+/// never heartbeated) are left alone: there's no age to judge them by, and
+/// a live agent will stamp one on its next beat. `idx_agents_heartbeat`
+/// covers the `last_heartbeat` range scan.
+///
+/// Idempotent and self-healing: the row is a projection of the heartbeat
+/// stream, so if a pruned machine comes back its next heartbeat
+/// re-INSERTs it (see `projector::heartbeat::upsert_baseline`).
+async fn prune_stale_agents(pool: &SqlitePool, cutoff: DateTime<Utc>) -> Result<u64> {
+    let rows = sqlx::query(
+        "DELETE FROM agents
+          WHERE last_heartbeat IS NOT NULL
+            AND last_heartbeat < ?",
+    )
+    .bind(cutoff)
+    .execute(pool)
+    .await
+    .context("DELETE agents dead-agent prune")?;
+    Ok(rows.rows_affected())
 }
 
 /// #486: delete `execution_results` rows whose `recorded_at`
@@ -1128,5 +1205,89 @@ mod tests {
             .unwrap();
         assert_eq!(first, 1);
         assert_eq!(second, 0);
+    }
+
+    /// Insert an `agents` row with a chosen `last_heartbeat` offset in
+    /// minutes from now (negative = past), bound through chrono (RFC 3339)
+    /// like the heartbeat projector. `None` offset = NULL last_heartbeat
+    /// (registered but never heartbeated).
+    async fn insert_agent(pool: &SqlitePool, pc_id: &str, offset_minutes: Option<i64>) {
+        let hb = offset_minutes.map(|m| Utc::now() + chrono::Duration::minutes(m));
+        sqlx::query("INSERT INTO agents (pc_id, last_heartbeat) VALUES (?, ?)")
+            .bind(pc_id)
+            .bind(hb)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    async fn agent_exists(pool: &SqlitePool, pc_id: &str) -> bool {
+        let n: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM agents WHERE pc_id = ?")
+            .bind(pc_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        n.0 > 0
+    }
+
+    #[tokio::test]
+    async fn dead_agent_older_than_cutoff_is_pruned() {
+        let pool = fresh_pool().await;
+        // 30d prune window; this agent last beat 40d ago.
+        insert_agent(&pool, "pc-dead", Some(-40 * 24 * 60)).await;
+        let cutoff = Utc::now() - chrono::Duration::days(30);
+        let n = prune_stale_agents(&pool, cutoff).await.unwrap();
+        assert_eq!(n, 1);
+        assert!(!agent_exists(&pool, "pc-dead").await);
+    }
+
+    #[tokio::test]
+    async fn live_agent_within_cutoff_is_kept() {
+        let pool = fresh_pool().await;
+        // Beat 5 min ago — nowhere near a 30d window.
+        insert_agent(&pool, "pc-live", Some(-5)).await;
+        let cutoff = Utc::now() - chrono::Duration::days(30);
+        let n = prune_stale_agents(&pool, cutoff).await.unwrap();
+        assert_eq!(n, 0);
+        assert!(agent_exists(&pool, "pc-live").await);
+    }
+
+    #[tokio::test]
+    async fn null_heartbeat_agent_is_never_pruned() {
+        // A registered-but-never-heartbeated row has no age to judge by;
+        // the NOT NULL guard must spare it regardless of cutoff.
+        let pool = fresh_pool().await;
+        insert_agent(&pool, "pc-null", None).await;
+        let cutoff = Utc::now() + chrono::Duration::days(3650); // far future
+        let n = prune_stale_agents(&pool, cutoff).await.unwrap();
+        assert_eq!(n, 0, "NULL last_heartbeat must never be pruned");
+        assert!(agent_exists(&pool, "pc-null").await);
+    }
+
+    #[tokio::test]
+    async fn agent_exactly_at_cutoff_is_kept() {
+        // Strict `<` boundary, mirroring the other cutoff boundary tests:
+        // an agent whose last_heartbeat equals the cutoff exactly survives.
+        let pool = fresh_pool().await;
+        let stamp = Utc::now() - chrono::Duration::days(30);
+        sqlx::query("INSERT INTO agents (pc_id, last_heartbeat) VALUES ('pc-edge', ?)")
+            .bind(stamp)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let n = prune_stale_agents(&pool, stamp).await.unwrap();
+        assert_eq!(n, 0, "row exactly at the cutoff is at the boundary");
+        assert!(agent_exists(&pool, "pc-edge").await);
+    }
+
+    #[tokio::test]
+    async fn agent_prune_is_idempotent() {
+        let pool = fresh_pool().await;
+        insert_agent(&pool, "pc-dead", Some(-40 * 24 * 60)).await;
+        let cutoff = Utc::now() - chrono::Duration::days(30);
+        let first = prune_stale_agents(&pool, cutoff).await.unwrap();
+        let second = prune_stale_agents(&pool, cutoff).await.unwrap();
+        assert_eq!(first, 1);
+        assert_eq!(second, 0, "the row is gone after the first prune");
     }
 }
