@@ -1,0 +1,17 @@
+# Schedule for the show_when detector (part 1). Runs the `myapp-up-to-date`
+# check per-PC daily so the update button (part 2) appears on machines that
+# fall behind and disappears once they catch up — even if the catch-up
+# happened outside kanade. The button-press run freshens the check
+# instantly; this schedule is the background safety net / baseline.
+#
+# Install (after `kanade job create configs/jobs/example-show-when/detect-myapp-version.yaml`):
+#   kanade schedule create configs/jobs/example-show-when/detect-myapp-version.schedule.yaml
+id: myapp-up-to-date
+when:
+  per_pc: { every: 24h }
+enabled: true
+job_id: myapp-up-to-date
+target:
+  all: true
+jitter: 30m
+tags: [software_update, check]
