@@ -13,6 +13,13 @@
     wordmark here, so this icon is font-independent (unlike assets/
     icon-app.svg, the agent/cli/backend EXE icon, which keeps 奏).
 
+    A Tauri bundle / Start-Menu-shortcut icon is baked into the artifact
+    and does NOT switch with the OS light/dark theme, so the old fully
+    transparent laptop (dark grey body) vanished on a dark desktop. Like
+    assets/icon-app.svg, this variant sits the whole device on a rounded
+    cream tile so it owns its own background and stays legible on any
+    desktop — dark OR light — at every size.
+
     Regenerate the .ico after editing this file (ImageMagick):
       magick -background none icon.svg -define icon:auto-resize=256,128,64,48,32,24,16 icon.ico
 
@@ -38,6 +45,11 @@
       <stop offset="1"   stop-color="#ffd76a" stop-opacity="0.55"/>
     </linearGradient>
   </defs>
+
+  <!-- Cream tile so the icon owns its background regardless of OS theme
+       (mirrors assets/icon-app.svg). Dark laptop body now contrasts on a
+       dark desktop; the subtle border outlines the tile on a light one. -->
+  <rect x="6" y="6" width="244" height="244" rx="46" fill="#f5f0e6" stroke="#d9d2c4" stroke-width="3"/>
 
   <!-- ===== Laptop ===== -->
   <!-- Keyboard deck: a trapezoid (slight perspective) under the screen. -->
