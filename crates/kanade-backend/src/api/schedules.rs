@@ -52,6 +52,101 @@ pub async fn list(State(s): State<AppState>) -> Result<Json<Vec<Schedule>>, (Sta
     Ok(Json(out))
 }
 
+/// Query params for [`upcoming`].
+#[derive(Deserialize)]
+pub struct UpcomingQuery {
+    /// How many soonest fires to return. Defaults to 5; clamped to
+    /// `1..=50` so a huge `limit` can't make the backend walk croner for
+    /// every schedule needlessly.
+    #[serde(default = "default_upcoming_limit")]
+    pub limit: usize,
+}
+
+fn default_upcoming_limit() -> usize {
+    5
+}
+
+/// One row of the Dashboard's "upcoming schedules" card: an enabled
+/// calendar schedule and its soonest next fire.
+#[derive(Serialize)]
+pub struct UpcomingFire {
+    pub id: String,
+    pub job_id: String,
+    /// `When`'s Display — `at 09:00 [mon-fri]`, … — so the card can show
+    /// the cadence without re-deriving it client-side.
+    pub when: String,
+    /// Soonest upcoming fire, RFC3339 UTC.
+    pub next_run: String,
+}
+
+/// GET /api/schedules/upcoming?limit=N — the N soonest upcoming fires
+/// across every *enabled, calendar* schedule, soonest first. Powers the
+/// Dashboard's "what runs next" card. Reconcile-shaped schedules
+/// (per_pc / every-N) have no discrete fire time so they're skipped —
+/// the same rule `preview` applies. Read-only.
+pub async fn upcoming(
+    State(s): State<AppState>,
+    Query(q): Query<UpcomingQuery>,
+) -> Result<Json<Vec<UpcomingFire>>, (StatusCode, String)> {
+    let limit = q.limit.clamp(1, 50);
+    let kv = match s.jetstream.get_key_value(BUCKET_SCHEDULES).await {
+        Ok(k) => k,
+        // No bucket yet (fresh fleet) → no upcoming fires, not an error.
+        Err(_) => return Ok(Json(Vec::new())),
+    };
+    let keys: Vec<String> = kv
+        .keys()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("kv keys: {e}")))?
+        .try_collect()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("kv keys: {e}")))?;
+    let now = chrono::Utc::now();
+    // Concurrent KV fetch (gemini #883) — a sequential get-per-key adds
+    // up across a large schedule catalog. Mirrors the `coverage_summary`
+    // pattern below. `preview_fires` is pure CPU, so the per-schedule
+    // fire computation stays in the synchronous fold afterward.
+    use futures::StreamExt;
+    let schedules: Vec<Schedule> = futures::stream::iter(keys)
+        .map(|k| {
+            let kv = kv.clone();
+            async move {
+                kv.get(&k)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|bytes| serde_json::from_slice::<Schedule>(&bytes).ok())
+            }
+        })
+        .buffer_unordered(16)
+        .filter_map(|s| async move { s })
+        .collect()
+        .await;
+    // (instant, row) pairs so we sort on the real DateTime rather than a
+    // formatted string — they coincide for RFC3339-UTC, but sorting the
+    // typed value is unambiguous.
+    let mut fires: Vec<(chrono::DateTime<chrono::Utc>, UpcomingFire)> = Vec::new();
+    for sched in schedules {
+        if !sched.enabled {
+            continue;
+        }
+        if let Some(next) = sched.preview_fires(now, 1).into_iter().next() {
+            fires.push((
+                next,
+                UpcomingFire {
+                    id: sched.id,
+                    job_id: sched.job_id,
+                    when: sched.when.to_string(),
+                    next_run: next.to_rfc3339(),
+                },
+            ));
+        }
+    }
+    fires.sort_by_key(|(at, _)| *at);
+    fires.truncate(limit);
+    Ok(Json(fires.into_iter().map(|(_, row)| row).collect()))
+}
+
 /// Query params for [`preview`].
 #[derive(Deserialize, Debug)]
 pub struct PreviewQuery {

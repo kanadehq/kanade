@@ -414,6 +414,76 @@ fn row_to_agent(r: sqlx::sqlite::SqliteRow) -> AgentRow {
     }
 }
 
+/// One bucket of the fleet's agent-version histogram. `active` is the
+/// subset of `total` whose last heartbeat is within [`ALIVE_THRESHOLD`],
+/// so the Dashboard's "version distribution" card reads as rollout
+/// coverage (how many of each build are actually live right now), not
+/// just an all-time tally that counts long-dead hosts.
+#[derive(Serialize)]
+pub struct VersionCount {
+    /// The reported `agent_version`; `None` for rows that never reported
+    /// one (pre-handshake / legacy), surfaced as an "unknown" bucket.
+    pub version: Option<String>,
+    pub total: i64,
+    pub active: i64,
+}
+
+/// `GET /api/agents/versions` — agent-version histogram for the whole
+/// fleet, busiest build first. The agents table is one row per PC
+/// (bounded even at multi-thousand-host scale), so this aggregates in
+/// memory rather than leaning on SQLite datetime arithmetic for the
+/// liveness cut — the exact same `last_heartbeat >= cutoff` rule the
+/// list endpoint applies in Rust, kept consistent on purpose.
+pub async fn versions(
+    State(pool): State<SqlitePool>,
+) -> Result<Json<Vec<VersionCount>>, StatusCode> {
+    let rows = sqlx::query("SELECT agent_version, last_heartbeat FROM agents")
+        .fetch_all(&pool)
+        .await
+        .map_err(|e| {
+            warn!(error = %e, "agent versions");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    let cutoff = chrono::Utc::now() - ALIVE_THRESHOLD;
+    // Key on the raw version string ("" = unknown) so the bucket is
+    // Ord-friendly; map "" back to None on the way out.
+    let mut buckets: std::collections::HashMap<String, (i64, i64)> =
+        std::collections::HashMap::new();
+    for r in rows {
+        let version: String = r
+            .try_get::<Option<String>, _>("agent_version")
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let alive = r
+            .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_heartbeat")
+            .ok()
+            .flatten()
+            .is_some_and(|hb| hb >= cutoff);
+        let entry = buckets.entry(version).or_insert((0, 0));
+        entry.0 += 1;
+        if alive {
+            entry.1 += 1;
+        }
+    }
+    let mut out: Vec<VersionCount> = buckets
+        .into_iter()
+        .map(|(version, (total, active))| VersionCount {
+            version: (!version.is_empty()).then_some(version),
+            total,
+            active,
+        })
+        .collect();
+    // Busiest build first; ties broken by version so the order is stable
+    // poll-to-poll (a HashMap iterates arbitrarily otherwise).
+    out.sort_by(|a, b| {
+        b.total
+            .cmp(&a.total)
+            .then_with(|| a.version.cmp(&b.version))
+    });
+    Ok(Json(out))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

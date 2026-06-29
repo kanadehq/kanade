@@ -143,6 +143,10 @@ pub fn router(state: AppState) -> Router {
             post(password_setup::forgot_password),
         )
         .route("/api/agents", get(agents::list))
+        // Dashboard "version distribution" card — agent-version histogram
+        // for the whole fleet. Static segment, so it resolves ahead of
+        // the `{pc_id}` route below.
+        .route("/api/agents/versions", get(agents::versions))
         .route("/api/agents/{pc_id}", get(agents::detail))
         // v0.40 Part 1: per-PC host-wide perf time-series. Bucketed
         // server-side via `?from=&to=&step=` so the SPA chart can
@@ -234,6 +238,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/executions/{exec_id}", get(executions::detail))
         .route("/api/audit", get(audit::list))
         .route("/api/schedules", get(schedules::list))
+        // Dashboard "upcoming schedules" card — soonest fires across all
+        // enabled calendar schedules. Static segment, ahead of `{id}/*`.
+        .route("/api/schedules/upcoming", get(schedules::upcoming))
         .route("/api/freeze", get(freeze::get))
         .route("/api/scripts/status", get(scripts::list_status))
         .route("/api/jobs", get(jobs::list))

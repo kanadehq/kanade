@@ -10,11 +10,7 @@
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
-use kanade_shared::kv::{
-    BUCKET_AGENT_CONFIG, BUCKET_AGENT_GROUPS, BUCKET_AGENTS_STATE, BUCKET_SCHEDULES,
-    BUCKET_SCRIPT_CURRENT, BUCKET_SCRIPT_STATUS, OBJECT_AGENT_RELEASES, STREAM_AUDIT,
-    STREAM_EVENTS, STREAM_EXEC, STREAM_INVENTORY, STREAM_RESULTS,
-};
+use kanade_shared::kv::{ALL_KV_BUCKETS, ALL_OBJECT_STORES, ALL_STREAMS};
 use serde::Serialize;
 
 use super::AppState;
@@ -41,39 +37,31 @@ pub async fn status(
         object_stores: Vec::new(),
     };
 
-    for name in [
-        STREAM_INVENTORY,
-        STREAM_RESULTS,
-        STREAM_EXEC,
-        STREAM_EVENTS,
-        STREAM_AUDIT,
-    ] {
-        let exists = state.jetstream.get_stream(name).await.is_ok();
+    // Probe the full bootstrap contract from the canonical lists in
+    // `kanade_shared::kv` (the same source the health rollup uses). This
+    // page used to list a hand-maintained subset — most visibly only
+    // 1 of the 5 object stores — so the SPA's "Resource detail" looked
+    // suspiciously sparse next to what bootstrap actually creates.
+    for name in ALL_STREAMS {
+        let exists = state.jetstream.get_stream(*name).await.is_ok();
         snap.streams.push(ResourceProbe {
-            name: name.to_string(),
+            name: (*name).to_string(),
             exists,
         });
     }
 
-    for name in [
-        BUCKET_SCRIPT_CURRENT,
-        BUCKET_SCRIPT_STATUS,
-        BUCKET_AGENTS_STATE,
-        BUCKET_AGENT_CONFIG,
-        BUCKET_AGENT_GROUPS,
-        BUCKET_SCHEDULES,
-    ] {
-        let exists = state.jetstream.get_key_value(name).await.is_ok();
+    for name in ALL_KV_BUCKETS {
+        let exists = state.jetstream.get_key_value(*name).await.is_ok();
         snap.kv_buckets.push(ResourceProbe {
-            name: name.to_string(),
+            name: (*name).to_string(),
             exists,
         });
     }
 
-    for name in [OBJECT_AGENT_RELEASES] {
-        let exists = state.jetstream.get_object_store(name).await.is_ok();
+    for name in ALL_OBJECT_STORES {
+        let exists = state.jetstream.get_object_store(*name).await.is_ok();
         snap.object_stores.push(ResourceProbe {
-            name: name.to_string(),
+            name: (*name).to_string(),
             exists,
         });
     }

@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query';
 import {
   Activity,
   AlertTriangle,
+  CalendarClock,
   CheckCircle2,
   Clock,
   Cpu,
@@ -10,8 +11,8 @@ import {
   LineChart as LineChartIcon,
   MemoryStick,
   Search,
-  Server,
-  Users,
+  ShieldCheck,
+  Tags,
   Wifi,
   XCircle,
 } from 'lucide-react';
@@ -33,10 +34,9 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { ApiError, apiFetch, formatError } from '@/lib/api';
-import { cn, isAgentOnline } from '@/lib/utils';
+import { cn } from '@/lib/utils';
 import type {
   ActiveInvestigationsResponse,
-  AgentRow,
   FleetPerfResponse,
   JetstreamSnapshot,
   TopPerfResponse,
@@ -77,11 +77,50 @@ type FleetHealth = {
 };
 
 type ResultRow = {
+  /** v0.29 detail-route key — distinct from request_id and what the
+   *  "recent results" rows deep-link to (`/activity/{result_id}`). */
+  result_id: string;
   request_id: string;
+  /** The manifest id this run executed, when it came from a registered
+   *  job (scheduled or fleet-dispatched). Null for ad-hoc `kanade run`
+   *  output. Shown as the human-readable label so the card reads
+   *  "app-usage · minipc" instead of an opaque request hash. */
+  job_id: string | null;
   pc_id: string;
   exit_code: number;
   started_at: string | null;
   finished_at: string | null;
+};
+
+/** One per-check fleet rollup from `GET /api/checks` (`counts`). The
+ *  attention rows are omitted on the dashboard — only the tallies feed
+ *  the compliance-summary card. */
+type CheckCounts = {
+  check_name: string;
+  label: string | null;
+  ok: number;
+  warn: number;
+  fail: number;
+  unknown: number;
+};
+type ChecksResponse = { counts: CheckCounts[]; rows: unknown[] };
+
+/** `GET /api/agents/versions` — agent-version histogram, busiest first.
+ *  `active` is the live subset (heartbeat < 2 min) so the card doubles
+ *  as a rollout-coverage read. */
+type VersionCount = {
+  version: string | null;
+  total: number;
+  active: number;
+};
+
+/** `GET /api/schedules/upcoming` — soonest fires across enabled calendar
+ *  schedules, soonest first. */
+type UpcomingFire = {
+  id: string;
+  job_id: string;
+  when: string;
+  next_run: string;
 };
 
 type AuditRow = {
@@ -105,6 +144,23 @@ function fmtRelative(iso: string | null): string {
   const hr = Math.floor(min / 60);
   if (hr < 24) return `${hr}h ago`;
   return `${Math.floor(hr / 24)}d ago`;
+}
+
+/** Forward-looking sibling of {@link fmtRelative} for the upcoming-
+ *  schedules card — "in 2h" rather than "2h ago". A non-positive delta
+ *  (a fire that just passed between fetch and render) reads as "now". */
+function fmtUntil(iso: string): string {
+  const ts = new Date(iso).getTime();
+  if (isNaN(ts)) return iso;
+  const delta = ts - Date.now();
+  if (delta <= 0) return 'now';
+  const sec = Math.floor(delta / 1000);
+  if (sec < 60) return `in ${sec}s`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `in ${min}m`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `in ${hr}h`;
+  return `in ${Math.floor(hr / 24)}d`;
 }
 
 function fmtBytes(v: number | null | undefined): string {
@@ -195,11 +251,6 @@ function StatBlock({
 
 export function Dashboard() {
   const { t } = useTranslation('dashboard');
-  const agentsQ = useQuery({
-    queryKey: ['agents'],
-    queryFn: () => apiFetch<AgentRow[]>('/api/agents'),
-    refetchInterval: REFRESH_INTERVAL_MS,
-  });
   const jsQ = useQuery({
     queryKey: ['jetstream-status'],
     queryFn: () => apiFetch<JetstreamSnapshot>('/api/jetstream/status'),
@@ -213,6 +264,27 @@ export function Dashboard() {
   const auditQ = useQuery({
     queryKey: ['audit-recent'],
     queryFn: () => apiFetch<AuditRow[]>('/api/audit?limit=8'),
+    refetchInterval: REFRESH_INTERVAL_MS,
+  });
+  // Compliance summary card — reuses the Compliance page's `/api/checks`
+  // rollup (its `counts` carry fleet-true ok/warn/fail/unknown per check,
+  // so we never fetch the heavy per-PC rows here).
+  const checksQ = useQuery({
+    queryKey: ['checks-summary'],
+    queryFn: () => apiFetch<ChecksResponse>('/api/checks'),
+    refetchInterval: REFRESH_INTERVAL_MS,
+  });
+  // Version-distribution card — fleet-wide agent-version histogram.
+  const versionsQ = useQuery({
+    queryKey: ['agent-versions'],
+    queryFn: () => apiFetch<VersionCount[]>('/api/agents/versions'),
+    refetchInterval: REFRESH_INTERVAL_MS,
+  });
+  // Upcoming-schedules card — the soonest fires across enabled calendar
+  // schedules.
+  const upcomingQ = useQuery({
+    queryKey: ['schedules-upcoming'],
+    queryFn: () => apiFetch<UpcomingFire[]>('/api/schedules/upcoming?limit=6'),
     refetchInterval: REFRESH_INTERVAL_MS,
   });
   // /api/health/fleet returns 503 when degraded so we have to peel
@@ -281,19 +353,36 @@ export function Dashboard() {
     refetchInterval: REFRESH_INTERVAL_MS,
   });
 
-  const agents = agentsQ.data ?? [];
-  // Same 2-min heartbeat threshold the Agents page uses for its
-  // online/offline badge — keeps "active / known" here in lockstep
-  // with the per-row status there, and the tile deep-links across.
-  const active = agents.filter((a) => isAgentOnline(a.last_heartbeat)).length;
-
+  // `js` still backs the "resource detail" card at the bottom; the old
+  // Fleet / JetStream summary cards (and their agents/jsRows derivations)
+  // were dropped as duplicates of the fleet-health rollup up top.
   const js = jsQ.data;
-  const jsRows = js ? [...js.streams, ...js.kv_buckets, ...js.object_stores] : [];
-  const jsOk = jsRows.filter((r) => r.exists).length;
-  const jsAllOk = js !== undefined && jsRows.every((r) => r.exists);
 
   const recentFail = (resultsQ.data ?? []).filter((r) => r.exit_code !== 0).length;
   const recentTotal = (resultsQ.data ?? []).length;
+
+  // Compliance rollup: fold the per-check counts into a single
+  // attention-vs-ok read. `attention` = any check with at least one
+  // warn / fail / unknown PC; the card lists those first.
+  const checkCounts = checksQ.data?.counts ?? [];
+  const checksAttention = checkCounts.filter(
+    (c) => c.fail > 0 || c.warn > 0 || c.unknown > 0,
+  ).length;
+  // Attention checks (any warn/fail/unknown) float to the top, then
+  // alphabetical for a stable order. Sorted on a fresh copy here — the
+  // JSX must not `.sort()` `checkCounts` in place, since that aliases
+  // the TanStack Query cache (claude #883).
+  const checkCountsSorted = [...checkCounts].sort((a, b) => {
+    const aAtt = a.fail + a.warn + a.unknown > 0 ? 1 : 0;
+    const bAtt = b.fail + b.warn + b.unknown > 0 ? 1 : 0;
+    if (aAtt !== bAtt) return bAtt - aAtt;
+    return a.check_name.localeCompare(b.check_name);
+  });
+
+  const versions = versionsQ.data ?? [];
+  // Longest bar = busiest build; floor at 1 so an all-zero histogram
+  // (shouldn't happen) doesn't divide by zero.
+  const maxVersionTotal = Math.max(...versions.map((v) => v.total), 1);
 
   // #522: errors used to coalesce into `?? []` / conditional
   // rendering, so an API outage rendered as a healthy-looking idle
@@ -302,11 +391,13 @@ export function Dashboard() {
   // known data.
   const failedQueries: Array<[string, Error]> = (
     [
-      ['agents', agentsQ.error],
       ['jetstream', jsQ.error],
       ['results', resultsQ.error],
       ['audit', auditQ.error],
       ['health', healthQ.error],
+      ['checks', checksQ.error],
+      ['versions', versionsQ.error],
+      ['upcoming', upcomingQ.error],
       ['fleetCpu', fleetCpuQ.error],
       ['fleetMem', fleetMemQ.error],
       ['topCpu', topCpuQ.error],
@@ -388,11 +479,12 @@ export function Dashboard() {
             </CardDescription>
           </CardHeader>
           <CardContent className="grid grid-cols-2 md:grid-cols-4 gap-6">
-            {/* Deep-link to the Agents list, pre-filtered to the
-                offline hosts when any are stale — answers "the N that
-                aren't connected, which are they?" in one click. */}
+            {/* The "active / known" tile is about the ACTIVE hosts, so it
+                deep-links to the online filter — the count you clicked is
+                exactly the list you land on. (The stale tile next to it
+                owns the offline drill-down.) */}
             <Link
-              to={health.agents.stale > 0 ? '/agents?status=offline' : '/agents'}
+              to="/agents?status=online"
               className="rounded-md -m-1 p-1 transition-colors hover:bg-muted/10"
               title={t('fleetHealth.stats.agents.linkTitle')}
             >
@@ -466,78 +558,9 @@ export function Dashboard() {
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Users className="size-5 text-violet" />
-              {t('fleet.title')}
-            </CardTitle>
-            <CardDescription>
-              <Trans
-                ns="dashboard"
-                i18nKey="fleet.description"
-                components={{ code: <code /> }}
-              />
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="flex gap-8 items-end">
-            <Link
-              to="/agents"
-              className="rounded-md -m-1 p-1 transition-colors hover:bg-muted/10"
-              title={t('fleet.stats.linkTitle')}
-            >
-              <StatBlock label={t('fleet.stats.known')} value={agents.length} />
-            </Link>
-            <Link
-              to={active < agents.length ? '/agents?status=offline' : '/agents'}
-              className="rounded-md -m-1 p-1 transition-colors hover:bg-muted/10"
-              title={t('fleet.stats.linkTitle')}
-            >
-              <StatBlock
-                label={t('fleet.stats.activeLabel')}
-                value={active}
-                tone={active === agents.length && agents.length > 0 ? 'success' : 'default'}
-                hint={t('fleet.stats.activeHint')}
-              />
-            </Link>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Server className="size-5 text-violet" />
-              {t('jetstream.title')}
-            </CardTitle>
-            <CardDescription>
-              <Trans
-                ns="dashboard"
-                i18nKey="jetstream.description"
-                components={{ code: <code /> }}
-              />
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="flex gap-8 items-end">
-            <StatBlock
-              label={t('jetstream.resources.label')}
-              value={js ? `${jsOk} / ${jsRows.length}` : '—'}
-              tone={jsAllOk ? 'success' : js ? 'danger' : 'default'}
-              hint={t('jetstream.resources.hint')}
-            />
-            {js && (
-              <div className="flex flex-col gap-1">
-                {jsAllOk ? (
-                  <Badge variant="success">{t('jetstream.allHealthy')}</Badge>
-                ) : (
-                  <Badge variant="danger">
-                    {t('jetstream.missing', { count: jsRows.length - jsOk })}
-                  </Badge>
-                )}
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
+        {/* Recent results — the latest job runs across the fleet. Shows
+            the JOB NAME (not the opaque request hash it used to), and
+            each row deep-links to that run's detail page. */}
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
@@ -550,19 +573,33 @@ export function Dashboard() {
                 : t('recentResults.descriptionAllGreen', { count: recentTotal })}
             </CardDescription>
           </CardHeader>
-          <CardContent className="space-y-2">
+          <CardContent className="space-y-1">
             {(resultsQ.data ?? []).map((r) => (
-              <div key={r.request_id} className="flex items-center gap-3 text-sm">
+              <Link
+                key={r.result_id}
+                to={`/activity/${encodeURIComponent(r.result_id)}`}
+                className="flex items-center gap-3 text-sm rounded-md -mx-1 px-1 py-1 transition-colors hover:bg-muted/10"
+                title={t('recentResults.rowTitle')}
+              >
                 {r.exit_code === 0 ? (
                   <CheckCircle2 className="size-4 text-success shrink-0" />
                 ) : (
                   <XCircle className="size-4 text-danger shrink-0" />
                 )}
-                <code className="text-xs">{r.request_id.slice(0, 8)}</code>
+                {/* Job name is the human-readable label; ad-hoc `kanade
+                    run` output has no job_id, so fall back to the short
+                    request hash. */}
+                {r.job_id ? (
+                  <span className="font-medium truncate">{r.job_id}</span>
+                ) : (
+                  <code className="text-xs">{r.request_id.slice(0, 8)}</code>
+                )}
                 <span className="text-muted">·</span>
-                <code className="text-xs">{r.pc_id}</code>
-                <span className="text-muted text-xs ml-auto">{fmtRelative(r.finished_at)}</span>
-              </div>
+                <code className="text-xs text-muted">{r.pc_id}</code>
+                <span className="text-muted text-xs ml-auto whitespace-nowrap">
+                  {fmtRelative(r.finished_at)}
+                </span>
+              </Link>
             ))}
             {(resultsQ.data ?? []).length === 0 && (
               <div className="text-muted text-sm">{t('recentResults.empty')}</div>
@@ -570,6 +607,9 @@ export function Dashboard() {
           </CardContent>
         </Card>
 
+        {/* Recent activity — the audit feed. Each row deep-links: exec
+            events to that job's runs, everything else to the full audit
+            log. */}
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
@@ -578,9 +618,18 @@ export function Dashboard() {
             </CardTitle>
             <CardDescription>{t('recentActivity.description')}</CardDescription>
           </CardHeader>
-          <CardContent className="space-y-2">
+          <CardContent className="space-y-1">
             {(auditQ.data ?? []).map((e) => (
-              <div key={e.id} className="flex items-center gap-3 text-sm">
+              <Link
+                key={e.id}
+                to={
+                  e.action === 'exec' && e.target
+                    ? `/activity?job_id=${encodeURIComponent(e.target)}`
+                    : '/audit'
+                }
+                className="flex items-center gap-3 text-sm rounded-md -mx-1 px-1 py-1 transition-colors hover:bg-muted/10"
+                title={t('recentActivity.rowTitle')}
+              >
                 <Badge
                   variant={e.actor === 'scheduler' ? 'violet' : 'amber'}
                   className="shrink-0"
@@ -592,10 +641,134 @@ export function Dashboard() {
                 <span className="text-muted text-xs ml-auto whitespace-nowrap">
                   {fmtRelative(e.occurred_at)}
                 </span>
-              </div>
+              </Link>
             ))}
             {(auditQ.data ?? []).length === 0 && (
               <div className="text-muted text-sm">{t('recentActivity.empty')}</div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Compliance summary — fleet-wide health-check rollup, attention
+            checks first. Reuses the Compliance page's `/api/checks`
+            counts; the whole card deep-links there. */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <ShieldCheck className="size-5 text-violet" />
+              {t('compliance.title')}
+            </CardTitle>
+            <CardDescription>
+              {checkCounts.length === 0
+                ? t('compliance.descriptionEmpty')
+                : checksAttention > 0
+                  ? t('compliance.descriptionAttention', {
+                      attention: checksAttention,
+                      total: checkCounts.length,
+                    })
+                  : t('compliance.descriptionAllGreen', { total: checkCounts.length })}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-1">
+            {checkCountsSorted
+              .slice(0, 6)
+              .map((c) => (
+                <Link
+                  key={c.check_name}
+                  to="/compliance"
+                  className="flex items-center gap-2 text-sm rounded-md -mx-1 px-1 py-1 transition-colors hover:bg-muted/10"
+                  title={t('compliance.rowTitle')}
+                >
+                  {c.fail + c.warn + c.unknown === 0 ? (
+                    <CheckCircle2 className="size-4 text-success shrink-0" />
+                  ) : (
+                    <AlertTriangle className="size-4 text-danger shrink-0" />
+                  )}
+                  <span className="truncate">{c.label ?? c.check_name}</span>
+                  <span className="ml-auto flex items-center gap-1 shrink-0 tabular-nums">
+                    {c.fail > 0 && <Badge variant="danger">{t('compliance.fail', { n: c.fail })}</Badge>}
+                    {c.warn > 0 && <Badge variant="amber">{t('compliance.warn', { n: c.warn })}</Badge>}
+                    {c.unknown > 0 && <Badge variant="default">{t('compliance.unknown', { n: c.unknown })}</Badge>}
+                    <span className="text-muted text-xs">{t('compliance.ok', { n: c.ok })}</span>
+                  </span>
+                </Link>
+              ))}
+            {checkCounts.length === 0 && (
+              <div className="text-muted text-sm">{t('compliance.empty')}</div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Upcoming schedules — the soonest fires across enabled calendar
+            schedules. "What runs next." Deep-links to the Schedules page. */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <CalendarClock className="size-5 text-violet" />
+              {t('upcoming.title')}
+            </CardTitle>
+            <CardDescription>{t('upcoming.description')}</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-1">
+            {(upcomingQ.data ?? []).map((u) => (
+              <Link
+                key={`${u.id}/${u.next_run}`}
+                to="/schedules"
+                className="flex items-center gap-3 text-sm rounded-md -mx-1 px-1 py-1 transition-colors hover:bg-muted/10"
+                title={t('upcoming.rowTitle')}
+              >
+                <span className="font-medium truncate">{u.job_id}</span>
+                <code className="text-muted text-[10px] truncate">{u.when}</code>
+                <span
+                  className="text-muted text-xs ml-auto whitespace-nowrap"
+                  title={fmtAxisTime(u.next_run)}
+                >
+                  {fmtUntil(u.next_run)}
+                </span>
+              </Link>
+            ))}
+            {(upcomingQ.data ?? []).length === 0 && (
+              <div className="text-muted text-sm">{t('upcoming.empty')}</div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Version distribution — agent-version histogram, busiest build
+            first. The bar reads as rollout coverage at a glance; click
+            through to the Rollout page for the per-version drill-down. */}
+        <Card className="md:col-span-2">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Tags className="size-5 text-violet" />
+              {t('versions.title')}
+            </CardTitle>
+            <CardDescription>{t('versions.description')}</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {versions.length === 0 ? (
+              <div className="text-muted text-sm">{t('versions.empty')}</div>
+            ) : (
+              versions.map((v) => (
+                <Link
+                  key={v.version ?? '__unknown__'}
+                  to="/rollout"
+                  className="flex items-center gap-3 text-sm rounded-md -mx-1 px-1 py-1 transition-colors hover:bg-muted/10"
+                  title={t('versions.rowTitle')}
+                >
+                  <code className="w-28 shrink-0 text-xs truncate">
+                    {v.version ?? t('versions.unknown')}
+                  </code>
+                  <div className="flex-1 h-2 rounded-full bg-muted/20 overflow-hidden">
+                    <div
+                      className="h-full rounded-full bg-violet"
+                      style={{ width: `${(v.total / maxVersionTotal) * 100}%` }}
+                    />
+                  </div>
+                  <span className="w-28 shrink-0 text-right text-xs text-muted tabular-nums">
+                    {t('versions.activeOfTotal', { active: v.active, total: v.total })}
+                  </span>
+                </Link>
+              ))
             )}
           </CardContent>
         </Card>

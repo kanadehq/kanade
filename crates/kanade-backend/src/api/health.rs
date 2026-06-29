@@ -33,11 +33,7 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use chrono::{DateTime, Duration, Utc};
-use kanade_shared::kv::{
-    BUCKET_AGENT_CONFIG, BUCKET_AGENT_GROUPS, BUCKET_AGENTS_STATE, BUCKET_SCHEDULES,
-    BUCKET_SCRIPT_CURRENT, BUCKET_SCRIPT_STATUS, OBJECT_AGENT_RELEASES, STREAM_AUDIT,
-    STREAM_EVENTS, STREAM_EXEC, STREAM_INVENTORY, STREAM_RESULTS,
-};
+use kanade_shared::kv::{ALL_KV_BUCKETS, ALL_OBJECT_STORES, ALL_STREAMS};
 use serde::Serialize;
 use sqlx::Row;
 use tracing::warn;
@@ -174,35 +170,27 @@ async fn jetstream_health(js: &async_nats::jetstream::Context) -> JetstreamHealt
     let mut missing = Vec::new();
     let mut total = 0usize;
 
-    for name in [
-        STREAM_INVENTORY,
-        STREAM_RESULTS,
-        STREAM_EXEC,
-        STREAM_EVENTS,
-        STREAM_AUDIT,
-    ] {
+    // The probe set is the full bootstrap contract (ALL_STREAMS /
+    // ALL_KV_BUCKETS / ALL_OBJECT_STORES) — see `kanade_shared::kv`.
+    // Previously this listed a hand-maintained subset that drifted
+    // behind bootstrap, so the rollup reported e.g. "12 / 12 healthy"
+    // while silently ignoring half the streams and 4 of 5 object stores.
+    for name in ALL_STREAMS {
         total += 1;
-        if js.get_stream(name).await.is_err() {
-            missing.push(name.to_string());
+        if js.get_stream(*name).await.is_err() {
+            missing.push((*name).to_string());
         }
     }
-    for name in [
-        BUCKET_SCRIPT_CURRENT,
-        BUCKET_SCRIPT_STATUS,
-        BUCKET_AGENTS_STATE,
-        BUCKET_AGENT_CONFIG,
-        BUCKET_AGENT_GROUPS,
-        BUCKET_SCHEDULES,
-    ] {
+    for name in ALL_KV_BUCKETS {
         total += 1;
-        if js.get_key_value(name).await.is_err() {
-            missing.push(name.to_string());
+        if js.get_key_value(*name).await.is_err() {
+            missing.push((*name).to_string());
         }
     }
-    for name in [OBJECT_AGENT_RELEASES] {
+    for name in ALL_OBJECT_STORES {
         total += 1;
-        if js.get_object_store(name).await.is_err() {
-            missing.push(name.to_string());
+        if js.get_object_store(*name).await.is_err() {
+            missing.push((*name).to_string());
         }
     }
 
