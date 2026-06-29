@@ -41,37 +41,44 @@
       }
     }
   },
-  "fleet": {
-    "title": "Fleet",
-    "description": "Snapshot from <code>/api/agents</code>",
-    "stats": {
-      "known": "known",
-      "activeLabel": "active (heartbeat < 2m)",
-      "activeHint": "based on last heartbeat (~30s cadence)",
-      "linkTitle": "View the agent list"
-    }
-  },
-  "jetstream": {
-    "title": "JetStream",
-    "description": "From <code>/api/jetstream/status</code>",
-    "resources": {
-      "label": "resources",
-      "hint": "streams + KV + object stores"
-    },
-    "allHealthy": "all healthy",
-    "missing_one": "{{count}} missing",
-    "missing_other": "{{count}} missing"
-  },
   "recentResults": {
-    "title": "Recent results",
-    "descriptionAllGreen": "Last {{count}} · all green",
-    "descriptionFailed": "Last {{count}} · {{failed}} failed",
+    "title": "Recent job results",
+    "descriptionAllGreen": "Results of jobs run on each PC · last {{count}} all green",
+    "descriptionFailed": "Results of jobs run on each PC · {{failed}} of last {{count}} failed",
+    "rowTitle": "Open this run's detail",
     "empty": "No results yet."
   },
   "recentActivity": {
     "title": "Recent activity",
-    "description": "Audit feed",
+    "description": "Audit feed (scheduled runs & operator actions)",
+    "rowTitle": "Open the related runs / audit log",
     "empty": "No audit events yet."
+  },
+  "compliance": {
+    "title": "Compliance",
+    "descriptionAllGreen": "All {{total}} checks healthy",
+    "descriptionAttention": "{{attention}} of {{total}} checks need attention",
+    "descriptionEmpty": "No fleet checks configured yet",
+    "rowTitle": "Open the Compliance page",
+    "fail": "fail {{n}}",
+    "warn": "warn {{n}}",
+    "unknown": "unknown {{n}}",
+    "ok": "ok {{n}}",
+    "empty": "No checks yet."
+  },
+  "upcoming": {
+    "title": "Upcoming schedules",
+    "description": "Soonest fires across enabled calendar schedules",
+    "rowTitle": "Open the Schedules page",
+    "empty": "Nothing scheduled to run."
+  },
+  "versions": {
+    "title": "Version distribution",
+    "description": "Agent count per version (bar = count, right = active/total). A quick read on rollout coverage.",
+    "rowTitle": "Open the Rollout page",
+    "unknown": "(unknown)",
+    "activeOfTotal": "{{active}}/{{total}} active",
+    "empty": "No agent version data yet."
   },
   "scanDuration": {
     "title": "Scan duration (last 24 h, slowest first)",
@@ -132,11 +139,13 @@
     "title_other": "Dashboard data unavailable ({{count}} sources)",
     "description": "These queries are failing - the numbers below may be stale or incomplete, not a quiet fleet.",
     "sources": {
-      "agents": "Agents list",
       "jetstream": "JetStream status",
       "results": "Recent results",
       "audit": "Recent audit",
       "health": "Fleet health",
+      "checks": "Compliance checks",
+      "versions": "Version distribution",
+      "upcoming": "Upcoming schedules",
       "fleetCpu": "Fleet CPU history",
       "fleetMem": "Fleet memory history",
       "topCpu": "Top CPU consumers",

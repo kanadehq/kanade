@@ -314,6 +314,61 @@ pub const STREAM_NOTIFICATIONS: &str = "NOTIFICATIONS";
 /// already-emitted events.
 pub const STREAM_OBS_EVENTS: &str = "OBS_EVENTS";
 
+/// Canonical list of every JetStream resource
+/// [`crate::bootstrap::ensure_jetstream_resources`] creates. The health
+/// rollup (`/api/health/fleet`) and the status snapshot
+/// (`/api/jetstream/status`) both iterate these so the dashboard reports
+/// the *complete* resource set — previously each kept its own hand-
+/// maintained subset that drifted behind bootstrap (e.g. only 1 of the 5
+/// object stores showed up). Keep in lockstep with `bootstrap.rs`: a new
+/// stream / bucket / store added there must be appended here too. The
+/// `canonical_resource_lists_are_sane` test below guards the easy
+/// mistakes (dots, dupes, empties); keeping the *set* aligned with
+/// bootstrap stays a manual discipline (bootstrap needs per-resource
+/// config, so it can't be derived from a name list alone).
+pub const ALL_STREAMS: &[&str] = &[
+    STREAM_INVENTORY,
+    STREAM_RESULTS,
+    STREAM_EXEC,
+    STREAM_EVENTS,
+    STREAM_AUDIT,
+    STREAM_OBS_EVENTS,
+    STREAM_NOTIFICATIONS,
+];
+
+/// Every KV bucket `ensure_jetstream_resources` creates. The `*_yaml`
+/// source-of-truth buckets and the operator-managed singletons
+/// (`fleet_config`, `group_contacts`) are included — they're part of the
+/// bootstrap contract, so a missing one is a genuine degradation. Lazily-
+/// created buckets that bootstrap does NOT guarantee (e.g. `views`,
+/// `scheduler_dispatch`) are deliberately excluded so a fresh fleet that
+/// never used them doesn't read as degraded.
+pub const ALL_KV_BUCKETS: &[&str] = &[
+    BUCKET_SCRIPT_CURRENT,
+    BUCKET_SCRIPT_STATUS,
+    BUCKET_AGENTS_STATE,
+    BUCKET_AGENT_CONFIG,
+    BUCKET_AGENT_GROUPS,
+    BUCKET_GROUP_CONTACTS,
+    BUCKET_SCHEDULES,
+    BUCKET_JOBS,
+    BUCKET_FLEET_CONFIG,
+    BUCKET_NOTIFICATIONS_READ,
+    BUCKET_JOBS_YAML,
+    BUCKET_SCHEDULES_YAML,
+];
+
+/// Every Object Store `ensure_jetstream_resources` creates. The status
+/// probe used to list only `agent_releases`, which is why the dashboard's
+/// "Object stores" column looked suspiciously empty.
+pub const ALL_OBJECT_STORES: &[&str] = &[
+    OBJECT_AGENT_RELEASES,
+    OBJECT_APP_PACKAGES,
+    OBJECT_SCRIPTS,
+    OBJECT_RESULT_OUTPUT,
+    OBJECT_COLLECTIONS,
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,6 +431,36 @@ mod tests {
             names.len(),
             "stream constants collide: {names:?}"
         );
+    }
+
+    /// The canonical lists the health + status probes iterate must be
+    /// non-empty, dup-free, and domain-safe (the same charset rule the
+    /// broker enforces). Catches a copy-paste dupe or a stray `.` before
+    /// it turns into a phantom "missing resource" on the dashboard.
+    #[test]
+    fn canonical_resource_lists_are_sane() {
+        for (label, list) in [
+            ("ALL_STREAMS", ALL_STREAMS),
+            ("ALL_KV_BUCKETS", ALL_KV_BUCKETS),
+            ("ALL_OBJECT_STORES", ALL_OBJECT_STORES),
+        ] {
+            assert!(!list.is_empty(), "{label} is empty");
+            let mut deduped = list.to_vec();
+            deduped.sort_unstable();
+            deduped.dedup();
+            assert_eq!(
+                deduped.len(),
+                list.len(),
+                "{label} has duplicates: {list:?}"
+            );
+            for name in list {
+                assert!(
+                    name.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+                    "{label} entry {name:?} has non-domain-safe characters"
+                );
+            }
+        }
     }
 
     #[test]

@@ -41,37 +41,44 @@
       }
     }
   },
-  "fleet": {
-    "title": "フリート",
-    "description": "<code>/api/agents</code> のスナップショット",
-    "stats": {
-      "known": "登録済",
-      "activeLabel": "アクティブ (ハートビート < 2分)",
-      "activeHint": "直近ハートビート基準 (約30秒間隔)",
-      "linkTitle": "エージェント一覧を開く"
-    }
-  },
-  "jetstream": {
-    "title": "JetStream",
-    "description": "<code>/api/jetstream/status</code> より",
-    "resources": {
-      "label": "リソース",
-      "hint": "ストリーム + KV + オブジェクトストア"
-    },
-    "allHealthy": "すべて正常",
-    "missing_one": "{{count}} 件欠落",
-    "missing_other": "{{count}} 件欠落"
-  },
   "recentResults": {
-    "title": "最近の結果",
-    "descriptionAllGreen": "直近 {{count}} 件 · すべて正常",
-    "descriptionFailed": "直近 {{count}} 件 · {{failed}} 件失敗",
+    "title": "最近のジョブ実行結果",
+    "descriptionAllGreen": "各PCで実行されたジョブの結果 · 直近 {{count}} 件すべて正常",
+    "descriptionFailed": "各PCで実行されたジョブの結果 · 直近 {{count}} 件中 {{failed}} 件失敗",
+    "rowTitle": "この実行の詳細を開く",
     "empty": "結果はまだありません。"
   },
   "recentActivity": {
     "title": "最近のアクティビティ",
-    "description": "監査フィード",
+    "description": "監査フィード(スケジュール実行・操作ログ)",
+    "rowTitle": "関連する実行 / 監査ログを開く",
     "empty": "監査イベントはまだありません。"
+  },
+  "compliance": {
+    "title": "コンプライアンス概要",
+    "descriptionAllGreen": "{{total}} 件のチェックすべて正常",
+    "descriptionAttention": "{{total}} 件中 {{attention}} 件が要対応",
+    "descriptionEmpty": "フリート対象のチェックはまだありません",
+    "rowTitle": "コンプライアンス画面を開く",
+    "fail": "失敗 {{n}}",
+    "warn": "警告 {{n}}",
+    "unknown": "不明 {{n}}",
+    "ok": "正常 {{n}}",
+    "empty": "チェックはまだありません。"
+  },
+  "upcoming": {
+    "title": "次回スケジュール",
+    "description": "有効なカレンダースケジュールの直近の実行予定",
+    "rowTitle": "スケジュール一覧を開く",
+    "empty": "予定されている実行はありません。"
+  },
+  "versions": {
+    "title": "バージョン分布",
+    "description": "エージェントのバージョン別台数(バーは台数、右は稼働中/合計)。ロールアウトの進捗確認に。",
+    "rowTitle": "ロールアウト画面を開く",
+    "unknown": "(不明)",
+    "activeOfTotal": "{{active}}/{{total}} 稼働",
+    "empty": "エージェントのバージョン情報はまだありません。"
   },
   "scanDuration": {
     "title": "スキャン所要時間 (直近 24時間、遅い順)",
@@ -132,11 +139,13 @@
     "title_other": "ダッシュボードのデータを取得できません（{{count}}件）",
     "description": "以下のクエリが失敗しています。下のカードの数値は古いか不完全な可能性があります（フリートが静かなわけではありません）。",
     "sources": {
-      "agents": "エージェント一覧",
       "jetstream": "JetStream ステータス",
       "results": "最近の実行結果",
       "audit": "最近の監査ログ",
       "health": "フリートヘルス",
+      "checks": "コンプライアンスチェック",
+      "versions": "バージョン分布",
+      "upcoming": "次回スケジュール",
       "fleetCpu": "フリート CPU 履歴",
       "fleetMem": "フリートメモリ履歴",
       "topCpu": "CPU 上位",
