@@ -476,6 +476,19 @@ function handleProgress(p: JobProgress): void {
     output: "",
     updatedAt: Date.now(),
   };
+  // A run going terminal would otherwise collapse its output the instant it
+  // finishes — hiding exactly the completion message the user wants to read
+  // (e.g. intel-wireless-driver-update's "再起動が必要です"). Auto-expand it on
+  // the *transition* to terminal so the output stays open; the chevron still
+  // lets the user collapse it. Gate on a run WE were already tracking as
+  // non-terminal — that's the user's own launch finishing (executeJob seeds it
+  // as "running" synchronously, so `existing` is present by the terminal push).
+  // Requiring `existing` skips runs that first arrive already terminal
+  // (background / other-client runs, or a reconnect replay): those show only a
+  // bare run-id label, so popping them open would just be noise (#877 review).
+  if (existing && !isTerminal(existing.status) && isTerminal(p.status)) {
+    expandedRunIds.add(p.run_id);
+  }
   run.status = p.status;
   run.updatedAt = Date.now();
   // #806: a Running push carries an incremental delta — append it for the
