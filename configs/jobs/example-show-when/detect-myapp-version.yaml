@@ -1,0 +1,52 @@
+# Example show_when pattern — part 1 of 2: the DETECTOR (baseline check).
+#
+# `client.show_when` gates the update button (part 2) on the result of a
+# `check:` named `myapp-up-to-date`. This job IS that check. It runs on a
+# SCHEDULE (operator-defined cadence) and reports:
+#   * ok   → MyApp is at/above the target version (button hidden)
+#   * fail → MyApp is stale or missing      (button shown)
+#
+# Why a SEPARATE job and not just the update job's own check: the update
+# button is `show_when: { check: myapp-up-to-date, is: [fail] }`, and an
+# ABSENT check fails closed (hidden). Without this detector establishing
+# the baseline, a stale machine would never see the button — it can't run
+# the (hidden) update job to flip its own check. So this detector is what
+# makes the button appear in the first place; the update job's own check
+# (part 2) only freshens the result INSTANTLY after a successful run.
+#
+# Create + schedule (cadence is yours — hourly/daily as fits the risk):
+#   kanade job create     configs/jobs/example-show-when/detect-myapp-version.yaml
+#   kanade schedule create configs/jobs/example-show-when/detect-myapp-version.schedule.yaml
+id: myapp-up-to-date
+version: 0.1.0
+description: Report whether MyApp is at the target version (drives show_when)
+tags: [check, software_update]
+execute:
+  shell: powershell
+  run_as: system
+  timeout: 60s
+  script: |
+    $ErrorActionPreference = 'Stop'
+    # The version every machine should be at or above. Bump this (and
+    # re-create the job) when you ship a new MyApp build to roll the button
+    # back out fleet-wide.
+    $target = [version]'2.4.0'
+
+    $installed = $null
+    try {
+      $p = 'HKLM:\SOFTWARE\Example\MyApp'
+      if (Test-Path $p) { $installed = [version](Get-ItemProperty $p).Version }
+    } catch { $installed = $null }
+
+    $upToDate = $installed -ne $null -and $installed -ge $target
+    $status = if ($upToDate) { 'ok' } else { 'fail' }
+    $detail = if ($installed) { "installed $installed / target $target" }
+              else            { "MyApp not found / target $target" }
+
+    # check: reads the whole stdout as JSON here (no other hint shares it).
+    @{ status = $status; detail = $detail } | ConvertTo-Json -Compress | Write-Output
+check:
+  name: myapp-up-to-date
+  label: "MyApp のバージョン"
+  # fleet: true (default) surfaces it on the operator SPA Compliance page
+  # too — handy to see fleet-wide rollout coverage of the update.

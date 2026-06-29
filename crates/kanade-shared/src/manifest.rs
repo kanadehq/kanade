@@ -705,6 +705,73 @@ pub struct ClientHint {
     /// target is rejected by [`Manifest::validate`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_to: Option<Target>,
+    /// Optional **dynamic display gate** keyed on a health check's result.
+    ///
+    /// `None` ⇒ always listed (current behavior). When set, the agent
+    /// lists the job in `jobs.list` ONLY while the named [`check:`] slug's
+    /// latest result is one of [`ShowWhen::is`]. The canonical use is an
+    /// update action that hides itself once the machine is already current:
+    /// pair the update job with a `check:` that reports `ok` when up to
+    /// date and gate on `is: [fail]`.
+    ///
+    /// Evaluated agent-side at `jobs.list` time against the live
+    /// `StateSnapshot.checks`, which is **keyed by check name** — so the
+    /// detector `check:` and this job may live in *different* manifests and
+    /// still share one slug. Distinct from [`visible_to`](ClientHint::visible_to):
+    /// that gates BOTH listing and `jobs.execute` (an authorization
+    /// boundary); `show_when` gates listing ONLY (a UX hint), so it can't
+    /// cause a list/execute race. New field ⇒ #492 wire rule.
+    ///
+    /// [`check:`]: crate::manifest::CheckHint
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_when: Option<ShowWhen>,
+}
+
+/// Dynamic display gate for a [`ClientHint`] — see
+/// [`ClientHint::show_when`]. Shows the job only while the named check's
+/// latest status is one of [`is`](ShowWhen::is).
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
+pub struct ShowWhen {
+    /// The `check:` slug (a [`CheckHint::name`](crate::manifest::CheckHint::name))
+    /// whose latest status gates this job. May be defined by a *different*
+    /// manifest: checks are keyed by name in the agent's snapshot, so a
+    /// standalone detector job and this one can share a slug. A check that
+    /// has never run (absent from the snapshot) does NOT match — the job
+    /// stays hidden until the detector first reports (fails closed, like
+    /// `visible_to`).
+    pub check: String,
+    /// The check status(es) in which the job is SHOWN. Accepts a single
+    /// status (`is: fail`) or a list (`is: [fail, unknown]`); both
+    /// deserialize to a `Vec`. The `length(min = 1)` schema constraint +
+    /// [`Manifest::validate`] both reject an empty set (it would match
+    /// nothing and silently hide the job) so schema-driven tooling and the
+    /// write path agree.
+    #[serde(deserialize_with = "de_one_or_many_check_status")]
+    #[schemars(length(min = 1))]
+    pub is: Vec<crate::ipc::state::CheckStatus>,
+}
+
+/// Accept either a single `CheckStatus` (`is: fail`) or a sequence
+/// (`is: [fail, unknown]`) for [`ShowWhen::is`], normalising to a `Vec`.
+/// The scalar form is purely author ergonomics; the JSON schema advertises
+/// the canonical array form (`#[schemars(with = ...)]`).
+fn de_one_or_many_check_status<'de, D>(
+    d: D,
+) -> Result<Vec<crate::ipc::state::CheckStatus>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use crate::ipc::state::CheckStatus;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(CheckStatus),
+        Many(Vec<CheckStatus>),
+    }
+    Ok(match OneOrMany::deserialize(d)? {
+        OneOrMany::One(c) => vec![c],
+        OneOrMany::Many(v) => v,
+    })
 }
 
 /// #720 — one widget on the SPA **Analytics** page: a declarative
@@ -1677,6 +1744,31 @@ impl Manifest {
                     return Err(
                         "client.visible_to must set at least one of all / groups / pcs (omit it for all PCs)"
                             .to_string(),
+                    );
+                }
+            }
+            // show_when: a dynamic display gate keyed on a check result. A
+            // malformed check slug matches nothing and an empty status list
+            // matches nothing — both would silently hide the job forever,
+            // so reject them at create time rather than at a confused
+            // "why isn't my job showing?" later. The slug must be a clean
+            // resource id (same charset checks/jobs use): a typo with spaces
+            // or punctuation can never match a real check name, so catch it
+            // here instead of failing closed at runtime. (Whether the slug
+            // names a check that actually EXISTS can't be checked here —
+            // checks are keyed by name across manifests — so a valid-but-
+            // unknown slug stays a runtime miss = hidden, the documented
+            // fail-closed behavior.)
+            if let Some(sw) = &client.show_when {
+                if !is_valid_resource_id(sw.check.trim()) {
+                    return Err(
+                        "client.show_when.check must be a non-empty check slug ([A-Za-z0-9._-])"
+                            .to_string(),
+                    );
+                }
+                if sw.is.is_empty() {
+                    return Err(
+                        "client.show_when.is must list at least one check status".to_string()
                     );
                 }
             }
@@ -2835,6 +2927,82 @@ client:
         m.validate().expect("visible_to with a group validates");
         let vt = m.client.unwrap().visible_to.unwrap();
         assert_eq!(vt.groups, vec!["wifi-affected".to_string()]);
+    }
+
+    #[test]
+    fn manifest_client_show_when_accepts_scalar_and_seq() {
+        use crate::ipc::state::CheckStatus;
+        // `is:` accepts a single status (author ergonomics) ...
+        let scalar = r#"
+id: office-update
+version: 1.0.0
+execute:
+  shell: powershell
+  script: "echo x"
+  timeout: 30s
+client:
+  name: "Office を最新に更新"
+  category: software_update
+  show_when:
+    check: office-up-to-date
+    is: fail
+"#;
+        let m: Manifest = serde_yaml::from_str(scalar).expect("parse scalar");
+        m.validate().expect("scalar show_when validates");
+        let sw = m.client.unwrap().show_when.unwrap();
+        assert_eq!(sw.check, "office-up-to-date");
+        assert_eq!(sw.is, vec![CheckStatus::Fail]);
+
+        // ... and a list (e.g. fail-open on a not-yet-run check).
+        let seq = scalar.replace("is: fail", "is: [fail, unknown]");
+        let m: Manifest = serde_yaml::from_str(&seq).expect("parse seq");
+        m.validate().expect("seq show_when validates");
+        assert_eq!(
+            m.client.unwrap().show_when.unwrap().is,
+            vec![CheckStatus::Fail, CheckStatus::Unknown]
+        );
+    }
+
+    #[test]
+    fn manifest_client_show_when_rejects_empty() {
+        // A malformed check slug (here: internal spaces — a typo that could
+        // never match a real check name) or an empty status list would
+        // silently hide the job forever — validate() must reject both.
+        let bad_check = r#"
+id: j
+version: 1.0.0
+execute:
+  shell: powershell
+  script: "echo x"
+  timeout: 30s
+client:
+  name: "A job"
+  category: software_update
+  show_when:
+    check: "office up to date"
+    is: fail
+"#;
+        let m: Manifest = serde_yaml::from_str(bad_check).expect("parse");
+        let err = m.validate().expect_err("malformed check slug must fail");
+        assert!(err.contains("client.show_when.check"), "err: {err}");
+
+        let empty_is = r#"
+id: j
+version: 1.0.0
+execute:
+  shell: powershell
+  script: "echo x"
+  timeout: 30s
+client:
+  name: "A job"
+  category: software_update
+  show_when:
+    check: office-up-to-date
+    is: []
+"#;
+        let m: Manifest = serde_yaml::from_str(empty_is).expect("parse");
+        let err = m.validate().expect_err("empty is[] must fail");
+        assert!(err.contains("client.show_when.is"), "err: {err}");
     }
 
     #[test]

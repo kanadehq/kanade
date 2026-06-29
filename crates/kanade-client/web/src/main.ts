@@ -469,6 +469,10 @@ async function killRun(runId: string): Promise<void> {
 
 function handleProgress(p: JobProgress): void {
   const existing = runs.get(p.run_id);
+  // Was this run ALREADY terminal before this push? A duplicate / late
+  // terminal progress (the agent can re-push, or two messages race) must
+  // not trigger a second catalog reload — only the FIRST terminal does.
+  const wasTerminal = existing ? isTerminal(existing.status) : false;
   const run: Run = existing ?? {
     runId: p.run_id,
     label: p.run_id,
@@ -514,6 +518,13 @@ function handleProgress(p: JobProgress): void {
   }
   runs.set(p.run_id, run);
   renderRuns();
+  // A finished run can flip a `show_when` display gate agent-side (e.g. an
+  // update job re-emits its own `check:` as ok on completion), so re-pull
+  // the catalog to drop/add the affected rows. Only on the FIRST terminal
+  // push (`!wasTerminal`) so a duplicate/late terminal doesn't reload again.
+  // Fire-and-forget — the gate change is eventually consistent and a
+  // failure keeps the current list.
+  if (isTerminal(p.status) && !wasTerminal) void loadJobs(true);
 }
 
 function activeRunCount(): number {
@@ -673,8 +684,13 @@ const jobsByCategory = new Map<JobCategory, UserInvokableJob[]>();
 let activeJobsTab: JobCategory = "";
 let jobsLoaded = false;
 
-async function loadJobs(): Promise<void> {
-  if (jobsLoaded) return;
+// `force` re-fetches even after the first load: a run completing can flip
+// a `show_when` display gate agent-side (e.g. an update job re-emits its
+// own `check:` as ok), so we re-pull the catalog to drop/add the affected
+// rows. The first connect calls it without `force` (the guard makes a
+// reconnect storm cheap); `handleProgress` passes `force` on a terminal run.
+async function loadJobs(force = false): Promise<void> {
+  if (jobsLoaded && !force) return;
   jobsLoaded = true;
   try {
     // `category: null` → every tab's jobs in one round-trip; group locally.
@@ -690,9 +706,14 @@ async function loadJobs(): Promise<void> {
     if (activeView === "jobs") renderJobsList();
   } catch (err) {
     jobsLoaded = false; // let a later (re)connect retry
-    $("nav-categories").innerHTML =
-      `<p class="nav-error error">ジョブ一覧を取得できません</p>`;
     console.error("jobs_list failed", err);
+    // Only surface the error on the INITIAL load. A forced post-run
+    // refresh that hiccups must not wipe an already-rendered nav with an
+    // error — keep the last-good list; the next connect/run retries.
+    if (!force) {
+      $("nav-categories").innerHTML =
+        `<p class="nav-error error">ジョブ一覧を取得できません</p>`;
+    }
   }
 }
 

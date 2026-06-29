@@ -49,10 +49,12 @@ use kanade_shared::ipc::jobs::{
     JobsListParams, JobsListResult, RunStatus, UserInvokableJob,
 };
 use kanade_shared::ipc::method;
+use kanade_shared::ipc::state::CheckStatus;
 use kanade_shared::kv::{BUCKET_AGENT_GROUPS, BUCKET_JOBS};
 use kanade_shared::manifest::Manifest;
 use kanade_shared::wire::Command;
 use kanade_shared::{ExecResult, default_paths, subject};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -155,11 +157,26 @@ pub async fn handle_jobs_list(
     // own (trusted); groups come from the agent_groups KV read here on the
     // cold list path.
     let groups = pc_groups(client, &conn.pc_id).await;
+    // `client.show_when` gates a job on a health check's latest result.
+    // Snapshot the live checks (name → status) the state evaluator keeps
+    // fresh — `check_cache::record` re-publishes immediately after a check
+    // runs (no 30 s tick), so a button-press run that re-emits its own
+    // check flips the gate by the next list refresh. Snapshot into an owned
+    // map so we don't hold the watch borrow (no await follows, but this
+    // keeps the borrow scope trivial and the build pure).
+    let checks: HashMap<String, CheckStatus> = conn
+        .state_rx
+        .borrow()
+        .checks
+        .iter()
+        .map(|c| (c.name.clone(), c.status))
+        .collect();
     Ok(build_job_list(
         &manifests,
         params.category,
         &conn.pc_id,
         &groups,
+        &checks,
     ))
 }
 
@@ -203,10 +220,28 @@ fn job_visible(m: &Manifest, pc_id: &str, groups: &[String]) -> bool {
     }
 }
 
+/// Whether a manifest's `client.show_when` display gate is satisfied by
+/// the current check results. A job with no `show_when` always shows;
+/// otherwise the named check's latest status must be one of `is`. A check
+/// that has never run (absent from `checks`) does NOT match — the job
+/// stays hidden until the detector first reports (fails closed, matching
+/// the `show_when` doc + `job_visible`'s "better to hide than wrongly
+/// show"). A `client:`-less manifest is "satisfied" here (dropped later by
+/// [`manifest_to_job`] as operator-only).
+fn job_show_when_satisfied(m: &Manifest, checks: &HashMap<String, CheckStatus>) -> bool {
+    match m.client.as_ref().and_then(|c| c.show_when.as_ref()) {
+        None => true,
+        Some(sw) => checks
+            .get(&sw.check)
+            .is_some_and(|status| sw.is.contains(status)),
+    }
+}
+
 /// Pure mapping + filtering: manifests → the `jobs.list` wire result.
 ///
 /// Keeps only manifests carrying a `client:` block, drops any whose
-/// `visible_to` excludes this agent (#816), maps each to a
+/// `visible_to` excludes this agent (#816) or whose `show_when` gate the
+/// current check results don't satisfy, maps each to a
 /// [`UserInvokableJob`], applies the optional category filter, and
 /// sorts by display name so the catalog renders in a stable order
 /// regardless of KV key iteration order.
@@ -215,10 +250,12 @@ pub fn build_job_list(
     filter: Option<String>,
     pc_id: &str,
     groups: &[String],
+    checks: &HashMap<String, CheckStatus>,
 ) -> JobsListResult {
     let mut items: Vec<UserInvokableJob> = manifests
         .iter()
         .filter(|m| job_visible(m, pc_id, groups))
+        .filter(|m| job_show_when_satisfied(m, checks))
         .filter_map(manifest_to_job)
         .filter(|j| filter.as_deref().is_none_or(|c| j.category == c))
         .collect();
@@ -457,11 +494,19 @@ pub fn build_command(
         cwd: manifest.execute.cwd.clone(),
         deadline_at: None,
         staleness: manifest.staleness.clone(),
-        // A user-invokable action's stdout drives the progress display,
-        // not inventory/check/emit projection — don't forward those
-        // hints (the run path would otherwise try to project them).
+        // A user-invokable action's stdout drives the progress display.
+        // `emit:` (NDJSON) is NOT forwarded — the run path blanks stdout to
+        // route events to the timeline, which would wipe the progress view.
+        // `check:` IS forwarded (like `collect:` below): the run path reads
+        // stdout to record the check WITHOUT blanking it (commands.rs), so
+        // the progress display is unaffected. This is the linchpin of the
+        // `show_when` display gate — an update job that re-emits its own
+        // `check:` on completion flips the gate immediately (check_cache's
+        // record() re-publishes the snapshot at once), so the button
+        // disappears on the client's next jobs.list instead of waiting for
+        // the detector job's next scheduled run.
         emit: None,
-        check: None,
+        check: manifest.check.clone(),
         // #219: collect IS forwarded (unlike emit/check) — a
         // `collect:` + `client:` job exists precisely so an end user can
         // trigger a collection from the Client App; `run_job` bundles +
@@ -969,8 +1014,15 @@ pub async fn handle_jobs_kill(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kanade_shared::manifest::{ClientHint, Execute, ExecuteShell, Target};
+    use kanade_shared::ipc::state::CheckStatus;
+    use kanade_shared::manifest::{ClientHint, Execute, ExecuteShell, ShowWhen, Target};
     use kanade_shared::wire::{RunAs, Staleness};
+
+    /// No-checks map for the visibility/projection tests that don't
+    /// exercise `show_when` (an empty snapshot gates nothing).
+    fn no_checks() -> HashMap<String, CheckStatus> {
+        HashMap::new()
+    }
 
     /// Build a manifest fixture. Pass `client: Some((name, category_key))`
     /// for a user-invokable job, `None` for an operator-only one.
@@ -1004,6 +1056,7 @@ mod tests {
                 category_order: None,
                 icon: None,
                 visible_to: None,
+                show_when: None,
             }),
             tags: Vec::new(),
             origin: None,
@@ -1018,7 +1071,7 @@ mod tests {
             manifest("chrome-update", Some(("Chrome を更新", "software_update"))),
             manifest("check-bitlocker", None),
         ];
-        let result = build_job_list(&manifests, None, "PC1", &[]);
+        let result = build_job_list(&manifests, None, "PC1", &[], &no_checks());
         assert_eq!(result.items.len(), 1);
         assert_eq!(result.items[0].id, "chrome-update");
         assert_eq!(result.items[0].display_name, "Chrome を更新");
@@ -1033,8 +1086,13 @@ mod tests {
             manifest("fix-teams", Some(("Teams 修復", "troubleshoot"))),
             manifest("install-slack", Some(("Slack", "catalog"))),
         ];
-        let only_troubleshoot =
-            build_job_list(&manifests, Some("troubleshoot".to_string()), "PC1", &[]);
+        let only_troubleshoot = build_job_list(
+            &manifests,
+            Some("troubleshoot".to_string()),
+            "PC1",
+            &[],
+            &no_checks(),
+        );
         assert_eq!(only_troubleshoot.items.len(), 1);
         assert_eq!(only_troubleshoot.items[0].id, "fix-teams");
     }
@@ -1042,7 +1100,7 @@ mod tests {
     #[test]
     fn empty_when_no_client_jobs() {
         let manifests = [manifest("inv-hw", None), manifest("inv-sw", None)];
-        let result = build_job_list(&manifests, None, "PC1", &[]);
+        let result = build_job_list(&manifests, None, "PC1", &[], &no_checks());
         assert!(result.items.is_empty());
     }
 
@@ -1064,21 +1122,69 @@ mod tests {
         let manifests = [public, grouped, pc_only];
 
         // PC1 in no groups → only the public job.
-        let r = build_job_list(&manifests, None, "PC1", &[]);
+        let r = build_job_list(&manifests, None, "PC1", &[], &no_checks());
         let ids: Vec<_> = r.items.iter().map(|j| j.id.as_str()).collect();
         assert_eq!(ids, vec!["public"]);
 
         // PC1 in wave1 → public + grouped.
-        let r = build_job_list(&manifests, None, "PC1", &["wave1".to_string()]);
+        let r = build_job_list(
+            &manifests,
+            None,
+            "PC1",
+            &["wave1".to_string()],
+            &no_checks(),
+        );
         let mut ids: Vec<_> = r.items.iter().map(|j| j.id.clone()).collect();
         ids.sort();
         assert_eq!(ids, vec!["grouped", "public"]);
 
         // PC2 (no groups) → public + pc-only.
-        let r = build_job_list(&manifests, None, "PC2", &[]);
+        let r = build_job_list(&manifests, None, "PC2", &[], &no_checks());
         let mut ids: Vec<_> = r.items.iter().map(|j| j.id.clone()).collect();
         ids.sort();
         assert_eq!(ids, vec!["pc-only", "public"]);
+    }
+
+    #[test]
+    fn show_when_gates_on_check_result() {
+        // An update job gated on `office-up-to-date == fail`: shown while
+        // the check fails (not yet updated), hidden once it's ok, and
+        // hidden when the check has never run (absent ⇒ fails closed).
+        let mut update = manifest("office-update", Some(("Office を更新", "software_update")));
+        update.client.as_mut().unwrap().show_when = Some(ShowWhen {
+            check: "office-up-to-date".into(),
+            is: vec![CheckStatus::Fail],
+        });
+        let manifests = std::slice::from_ref(&update);
+
+        let shown = |checks: &HashMap<String, CheckStatus>| {
+            !build_job_list(manifests, None, "PC1", &[], checks)
+                .items
+                .is_empty()
+        };
+
+        // Check failing → not yet updated → button shown.
+        let mut failing = HashMap::new();
+        failing.insert("office-up-to-date".to_string(), CheckStatus::Fail);
+        assert!(shown(&failing), "should show while check fails");
+
+        // Check ok → already updated → button hidden.
+        let mut ok = HashMap::new();
+        ok.insert("office-up-to-date".to_string(), CheckStatus::Ok);
+        assert!(!shown(&ok), "should hide once check is ok");
+
+        // Check never ran (absent) → hidden (fails closed).
+        assert!(!shown(&no_checks()), "absent check must hide the job");
+    }
+
+    #[test]
+    fn show_when_absent_always_shows() {
+        // A job with no show_when is unaffected by check state.
+        let job = manifest("plain", Some(("Plain", "catalog")));
+        let mut checks = HashMap::new();
+        checks.insert("whatever".to_string(), CheckStatus::Fail);
+        let r = build_job_list(std::slice::from_ref(&job), None, "PC1", &[], &checks);
+        assert_eq!(r.items.len(), 1);
     }
 
     #[test]
@@ -1089,7 +1195,7 @@ mod tests {
             c.description = Some("重いとき用".into());
             c.icon = Some("brush-cleaning".into());
         }
-        let result = build_job_list(std::slice::from_ref(&m), None, "PC1", &[]);
+        let result = build_job_list(std::slice::from_ref(&m), None, "PC1", &[], &no_checks());
         let row = &result.items[0];
         assert_eq!(row.display_description.as_deref(), Some("重いとき用"));
         assert_eq!(row.icon.as_deref(), Some("brush-cleaning"));
@@ -1108,7 +1214,7 @@ mod tests {
         long.execute.timeout = "1h".into();
         let mut sub = manifest("blip", Some(("Blip", "catalog")));
         sub.execute.timeout = "500ms".into();
-        let result = build_job_list(&[long, sub], None, "PC1", &[]);
+        let result = build_job_list(&[long, sub], None, "PC1", &[], &no_checks());
         let by_id = |id: &str| {
             result
                 .items
@@ -1127,7 +1233,7 @@ mod tests {
             manifest("a", Some(("Apple", "catalog"))),
             manifest("m", Some(("Mango", "catalog"))),
         ];
-        let result = build_job_list(&manifests, None, "PC1", &[]);
+        let result = build_job_list(&manifests, None, "PC1", &[], &no_checks());
         let names: Vec<&str> = result
             .items
             .iter()
@@ -1155,9 +1261,37 @@ mod tests {
         assert_eq!(cmd.cwd.as_deref(), Some("C:/temp"));
         assert!(cmd.jitter_secs.is_none());
         assert!(cmd.deadline_at.is_none());
-        // A user-invokable action isn't an inventory/check/emit producer.
+        // `emit:` is never forwarded (it would blank the progress stdout).
+        // This fixture has no `check:`, so check stays None here — see
+        // `build_command_forwards_check` for the forwarded case.
         assert!(cmd.emit.is_none() && cmd.check.is_none());
         assert!(cmd.script_object.is_none());
+    }
+
+    #[test]
+    fn build_command_forwards_check() {
+        // A `client:` + `check:` job (the show_when "self-freshen" pattern)
+        // forwards its check hint so a button-press run records the check
+        // on completion — like `collect:`, the run path reads stdout for it
+        // without blanking the progress display.
+        use kanade_shared::manifest::CheckHint;
+        let mut m = manifest("office-update", Some(("Office を更新", "software_update")));
+        m.check = Some(CheckHint {
+            name: "office-up-to-date".into(),
+            label: None,
+            status_field: "status".into(),
+            detail_field: "detail".into(),
+            troubleshoot: None,
+            fleet: true,
+            alert: None,
+        });
+        let cmd = build_command(&m, "run-1", "req-1").expect("build");
+        assert_eq!(
+            cmd.check.expect("check forwarded").name,
+            "office-up-to-date"
+        );
+        // emit is still never forwarded.
+        assert!(cmd.emit.is_none());
     }
 
     #[test]

@@ -1734,7 +1734,7 @@ Request の `id` は Client 採番 (**UUID v7 推奨** — 時系列ソート可
 | `notifications.subscribe` | req-rep | `notifications.new` 購読開始 |
 | `notifications.new` | push (A→C) | 新着通知 (emergency 含む) |
 | `notifications.ack` | req-rep | 既読化 (Agent → NATS `events.notifications.acked.>` publish) |
-| `jobs.list` | req-rep | `user_invokable: true` な manifest 一覧 (filter: category) |
+| `jobs.list` | req-rep | `client:` ブロックを持つ manifest 一覧 (filter: category)。`client.visible_to` で pc/group 静的スコープ、`client.show_when` で check 結果による動的表示ゲート |
 | `jobs.execute` | req-rep | 実行依頼。返り値は `run_id` |
 | `jobs.subscribe` | req-rep | `jobs.progress` 購読開始 |
 | `jobs.progress` | push (A→C) | stdout chunk / exit code / status 変化 |
@@ -1742,6 +1742,25 @@ Request の `id` は Client 採番 (**UUID v7 推奨** — 時系列ソート可
 | `support.upload_diagnostics` | req-rep | サポート問い合わせ用 zip を Object Store にアップロード |
 | `maintenance.list` | req-rep | 今後 N 日に予定された自端末向け job 一覧 |
 | `maintenance.defer` | req-rep | 配信された再起動の延期申請 (15m/30m/1h) |
+
+#### `client.show_when` — check 結果による動的表示ゲート
+
+`client:` ジョブは `show_when: { check: <slug>, is: <status|[status…]> }` で、
+**指定 check の最新結果が `is` のいずれかである間だけ** `jobs.list` に出る。
+代表例は「アップデート済みなら更新ボタンを出さない」: 最新なら `ok` を返す
+check を用意し、更新ジョブを `is: [fail]` でゲートする。
+
+- **評価は Agent 側** `jobs.list` 時。`StateSnapshot.checks` を参照する。checks は
+  **check 名でキー**されるため、検査用 `check:` ジョブと表示対象ジョブは別 manifest で
+  よく、同じ slug を共有できる。
+- **未実行 check (snapshot 不在) は不一致** → 検査が一度走るまでジョブは出ない
+  (`visible_to` と同じ fail-closed)。
+- `visible_to` が listing と `jobs.execute` の両方を縛る認可境界なのに対し、
+  `show_when` は **listing のみ**の UX ゲート (execute は縛らない → list/execute レース無し)。
+- **即時反映**: `jobs.execute` 経由の run も manifest の `check:` を実行・記録するため
+  (`emit:` と違い stdout を消さない)、更新ジョブに `check:` を同梱して完了時に同名 check を
+  `ok` で emit すれば、検査ジョブのスケジュールを待たず即フリップする。Client は run 完了
+  (terminal `jobs.progress`) で `jobs.list` を再取得し、消えたジョブを反映する。
 
 ### 2.12.6 Handshake (接続後最初に必ず呼ぶ)
 

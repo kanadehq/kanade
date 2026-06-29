@@ -512,6 +512,31 @@
         "name"
       ]
     },
+    "CheckStatus": {
+      "description": "Four-state result mirroring the SPA's color palette: ok = green,\nwarn = yellow, fail = red, unknown = grey. Wire-encoded as\nsnake_case (`\"ok\"` / `\"warn\"` / `\"fail\"` / `\"unknown\"`) — the\nPascalCase convention is reserved for [`super::error::ErrorKind`]\nwhere SPEC §2.12.9 specifically pins it.",
+      "oneOf": [
+        {
+          "description": "Check passed.",
+          "type": "string",
+          "const": "ok"
+        },
+        {
+          "description": "Non-blocking finding. SPA renders yellow; user can ignore.",
+          "type": "string",
+          "const": "warn"
+        },
+        {
+          "description": "Failed — SPA renders red. If a `troubleshoot` manifest is\ndeclared, the \"修復する\" button is enabled.",
+          "type": "string",
+          "const": "fail"
+        },
+        {
+          "description": "Check couldn't run (agent timed out, WMI hang, …). SPA\nrenders grey \"Unknown\" — operator should investigate via\n`system.log_tail`.",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
+    },
     "ClientHint": {
       "description": "Manifest sub-section (#291): marks a job as **user-invokable**\nfrom the Client App and carries how it presents to the end user.\nParallel to [`InventoryHint`] / [`CheckHint`] / `EmitConfig` —\nthe block's presence is the opt-in (no separate boolean), and its\nrequired fields (`name`, `category`) are enforced by serde at\nparse time, so a half-filled catalog entry fails\n`kanade job create` instead of rendering a nameless / tab-less row.\n\nThe agent maps this 1:1 into the KLP\n[`UserInvokableJob`](crate::ipc::jobs::UserInvokableJob) wire shape\nthat `jobs.list` returns; the Client App renders one row per job in\nthe tab named by `category`.",
       "type": "object",
@@ -559,6 +584,17 @@
         "name": {
           "description": "End-user-facing title for the job row. The operator-internal\n`Manifest::id` slug is rarely what an end user should read, so\nthis is required (and validated non-empty by\n[`Manifest::validate`]). Maps to `UserInvokableJob::display_name`.",
           "type": "string"
+        },
+        "show_when": {
+          "description": "Optional **dynamic display gate** keyed on a health check's result.\n\n`None` ⇒ always listed (current behavior). When set, the agent\nlists the job in `jobs.list` ONLY while the named [`check:`] slug's\nlatest result is one of [`ShowWhen::is`]. The canonical use is an\nupdate action that hides itself once the machine is already current:\npair the update job with a `check:` that reports `ok` when up to\ndate and gate on `is: [fail]`.\n\nEvaluated agent-side at `jobs.list` time against the live\n`StateSnapshot.checks`, which is **keyed by check name** — so the\ndetector `check:` and this job may live in *different* manifests and\nstill share one slug. Distinct from [`visible_to`](ClientHint::visible_to):\nthat gates BOTH listing and `jobs.execute` (an authorization\nboundary); `show_when` gates listing ONLY (a UX hint), so it can't\ncause a list/execute race. New field ⇒ #492 wire rule.\n\n[`check:`]: crate::manifest::CheckHint",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ShowWhen"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "visible_to": {
           "description": "Optional visibility scope for the end-user Client App (#816).\n\n`None` ⇒ visible to every PC (current behavior). When set, only\nagents whose `pc_id` / group membership match the [`Target`] list\nthe job in `jobs.list` and may run it via KLP `jobs.execute`.\n\nThis gates the END-USER surface ONLY. Operators are unaffected:\n`POST /api/exec/{job_id}` (SPA / `kanade exec`) is a separate path\nthat never consults `client:`, so an operator can still run the\njob on any PC regardless of `visible_to`. Reuses the schedule\n`Target` shape (`all` / `groups` / `pcs`); a present-but-empty\ntarget is rejected by [`Manifest::validate`].",
@@ -944,6 +980,28 @@
           "type": "string",
           "const": "system_gui"
         }
+      ]
+    },
+    "ShowWhen": {
+      "description": "Dynamic display gate for a [`ClientHint`] — see\n[`ClientHint::show_when`]. Shows the job only while the named check's\nlatest status is one of [`is`](ShowWhen::is).",
+      "type": "object",
+      "properties": {
+        "check": {
+          "description": "The `check:` slug (a [`CheckHint::name`](crate::manifest::CheckHint::name))\nwhose latest status gates this job. May be defined by a *different*\nmanifest: checks are keyed by name in the agent's snapshot, so a\nstandalone detector job and this one can share a slug. A check that\nhas never run (absent from the snapshot) does NOT match — the job\nstays hidden until the detector first reports (fails closed, like\n`visible_to`).",
+          "type": "string"
+        },
+        "is": {
+          "description": "The check status(es) in which the job is SHOWN. Accepts a single\nstatus (`is: fail`) or a list (`is: [fail, unknown]`); both\ndeserialize to a `Vec`. The `length(min = 1)` schema constraint +\n[`Manifest::validate`] both reject an empty set (it would match\nnothing and silently hide the job) so schema-driven tooling and the\nwrite path agree.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CheckStatus"
+          },
+          "minItems": 1
+        }
+      },
+      "required": [
+        "check",
+        "is"
       ]
     },
     "Staleness": {
