@@ -23,6 +23,7 @@ pub mod notifications;
 pub mod obs_events;
 pub mod password_setup;
 pub mod process_perf;
+pub mod query;
 pub mod results;
 pub mod run;
 pub mod schedules;
@@ -83,6 +84,11 @@ const SCRIPT_OBJECT_BODY_LIMIT: usize = 4 * 1024 * 1024;
 #[derive(Clone)]
 pub struct AppState {
     pub pool: SqlitePool,
+    /// Dedicated **read-only** pool over the same SQLite file, opened with
+    /// `SQLITE_OPEN_READONLY`. Only the admin ad-hoc `POST /api/query`
+    /// endpoint uses it, so a stray write in operator SQL fails at the
+    /// SQLite layer rather than by convention. See `api::query`.
+    pub query_pool: SqlitePool,
     pub nats: async_nats::Client,
     pub jetstream: async_nats::jetstream::Context,
     /// v0.35 / #88: explode-spec lookup cache, kept fresh by a KV
@@ -476,6 +482,11 @@ pub fn router(state: AppState) -> Router {
             "/api/accounts/{username}/reset-link",
             post(accounts::reset_link),
         )
+        // Ad-hoc read-only SQL over the projector DB. Admin-only: raw SQL
+        // can read every projected table (emails, audit, …), so it sits in
+        // the highest tier even though it only ever reads. The handler
+        // runs on the read-only `query_pool`. See `api::query`.
+        .route("/api/query", post(query::execute))
         .route_layer(axum::middleware::from_fn(crate::auth::require_admin));
 
     base.merge(operator)
