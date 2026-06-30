@@ -30,12 +30,12 @@
     "saving": "Saving…",
     "saved": "Server settings saved.",
     "agentPrune": {
-      "title": "Dead agent pruning",
+      "title": "Long-offline agent cleanup",
       "description": "Automatically remove agents (PCs) that stopped sending heartbeats this long ago. Offline machines that come back reappear on their next heartbeat, so only genuinely-retired ones stay gone.",
       "label": "Prune after no heartbeat for",
       "unit": "days",
       "unsetPlaceholder": "unset (off)",
-      "blankHint": "Leave blank to use the default (shown faintly). With no default, blank means pruning is off — dead agents are kept forever."
+      "blankHint": "Leave blank to use the default (shown faintly). With no default, blank means cleanup is off — long-offline agents are kept forever."
     }
   }
 }
