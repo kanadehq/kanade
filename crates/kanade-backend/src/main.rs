@@ -2,6 +2,7 @@ mod api;
 mod audit;
 mod auth;
 mod cleanup;
+mod controller;
 mod mail;
 mod projector;
 mod scheduler;

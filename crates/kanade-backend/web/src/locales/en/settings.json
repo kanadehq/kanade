@@ -36,6 +36,13 @@
       "unit": "days",
       "unsetPlaceholder": "unset (off)",
       "blankHint": "Leave blank to use the default (shown faintly). With no default, blank means cleanup is off — long-offline agents are kept forever."
+    },
+    "controllerGroup": {
+      "title": "Controller group (trusted runners)",
+      "description": "The agent group whose members may run `tier: controller` jobs (e.g. a `feed:` job that fetches an external URL). These jobs are never dispatched to employee endpoints — only to members of this group.",
+      "label": "Controller group name",
+      "unsetPlaceholder": "unset (runs nowhere)",
+      "blankHint": "Leave blank and controller-tier jobs run nowhere (fail-safe) — the safe default so an external fetch never lands on an endpoint by accident."
     }
   }
 }
