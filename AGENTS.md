@@ -351,6 +351,18 @@ macOS/Linux host `cargo build -p kanade-client` compiles the
 exit-fast shim and does NOT touch the file; edit the `version`
 field in `tauri.conf.json` by hand there instead.
 
+**Minor / major bumps need a FOURTH edit** — the internal
+`kanade-shared` version pin. `Cargo.toml`'s `[workspace.dependencies]`
+declares `kanade-shared = { path = ..., version = "X.Y.Z" }`, and that
+requirement is a caret (`^0.43.99` = `>=0.43.99, <0.44.0`). A patch bump
+stays inside the range, so the three-file flow above just works — which
+is why this is easy to forget. But a bump that crosses the minor (or
+major) boundary, e.g. `0.43.x → 0.44.0`, falls OUTSIDE `^0.43.99`, so
+`cargo update --workspace` fails with `failed to select a version for the
+requirement kanade-shared = "^0.43.99"`. Bump that pin to the new version
+too (it sits a few lines below `[workspace.package].version` in the same
+`Cargo.toml`, so the release PR stays small).
+
 If a previous release missed the sync (file lags by one version),
 the catch-up diff will appear as churn in unrelated worktrees after
 any build — `jj restore` it there and fold it into the **next**
