@@ -153,6 +153,12 @@ function useDebouncedValue<T>(value: T, delay: number): T {
 // AND bounded; the table below still carries every event.
 const CHART_MAX_PCS = 40;
 
+// The four analysis views, shown one at a time via the tab bar (order =
+// display order). 'operational' is the default. Kept as a const tuple so the
+// type and the URL round-trip stay in sync.
+const EVENTS_TABS = ['operational', 'chart', 'heatmap', 'table'] as const;
+type EventsTab = (typeof EVENTS_TABS)[number];
+
 // The operational kinds the swimlane reads, as a set for fast row filtering.
 const OP_TIMELINE_KIND_SET = new Set(OP_TIMELINE_KINDS);
 
@@ -274,6 +280,15 @@ export function Events() {
   const [dedupe, setDedupe] = useState(search.get('dedupe') !== '0');
   const [since, setSince] = useState(search.get('since') ?? '24h');
   const [limit, setLimit] = useState(Number(search.get('limit')) || 200);
+  // Which analysis view is on screen. The four sections (operational
+  // swimlanes, per-PC timeline, activity heatmap, raw event table) used to
+  // stack vertically, so a fleet with many PCs buried the table under
+  // screens of swimlanes. They're tabs now — only one renders at a time.
+  const [tab, setTab] = useState<EventsTab>(
+    EVENTS_TABS.includes(search.get('tab') as EventsTab)
+      ? (search.get('tab') as EventsTab)
+      : 'operational',
+  );
 
   // #519: only the preset's window LENGTH is derived in render — the
   // actual `from` lower bound is computed inside queryFn (the
@@ -308,9 +323,10 @@ export function Events() {
     if (!dedupe) next.set('dedupe', '0');
     if (since && since !== '24h') next.set('since', since);
     if (limit && limit !== 200)   next.set('limit', String(limit));
+    if (tab !== 'operational') next.set('tab', tab);
     setSearch(next, { replace: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dPcId, kindsInc, kindsExc, sourcesInc, sourcesExc, dPayloadKey, dPayloadValue, dedupe, since, limit]);
+  }, [dPcId, kindsInc, kindsExc, sourcesInc, sourcesExc, dPayloadKey, dPayloadValue, dedupe, since, limit, tab]);
 
   const queryString = useMemo(() => {
     const sp = new URLSearchParams();
@@ -539,9 +555,55 @@ export function Events() {
         </Card>
       ) : (
         <>
-          <EventsOperational events={visible} />
-          <EventsTimeline events={visible} />
-          <EventsHeatmap events={visible} />
+          {/* The four analysis views share one filtered set (`visible`);
+              switching tabs just changes which one renders, so a many-PC
+              fleet no longer buries the table under screens of swimlanes. */}
+          <div
+            role="tablist"
+            aria-label={t('title')}
+            className="inline-flex rounded-md border border-border bg-card text-sm overflow-hidden"
+          >
+            {EVENTS_TABS.map((k) => (
+              <button
+                key={k}
+                type="button"
+                role="tab"
+                aria-selected={tab === k}
+                // Roving tabindex: only the active tab sits in the Tab order
+                // (WAI-ARIA Tabs pattern), matching the Config page tabs.
+                tabIndex={tab === k ? 0 : -1}
+                onClick={() => setTab(k)}
+                // Arrow / Home / End move between tabs with automatic
+                // activation, the other half of the WAI-ARIA Tabs pattern —
+                // roving tabindex alone would otherwise strand keyboard users
+                // on the active tab. Move DOM focus to the newly selected tab
+                // so the roving index follows the selection.
+                onKeyDown={(e) => {
+                  const last = EVENTS_TABS.length - 1;
+                  const idx = EVENTS_TABS.indexOf(k);
+                  let next = idx;
+                  if (e.key === 'ArrowRight') next = idx === last ? 0 : idx + 1;
+                  else if (e.key === 'ArrowLeft') next = idx === 0 ? last : idx - 1;
+                  else if (e.key === 'Home') next = 0;
+                  else if (e.key === 'End') next = last;
+                  else return;
+                  e.preventDefault();
+                  setTab(EVENTS_TABS[next]);
+                  e.currentTarget.parentElement
+                    ?.querySelectorAll<HTMLButtonElement>('[role="tab"]')
+                    [next]?.focus();
+                }}
+                className={tab === k ? 'px-4 h-9 bg-accent/15 text-accent' : 'px-4 h-9 hover:bg-accent/5'}
+              >
+                {t(`tabs.${k}`)}
+              </button>
+            ))}
+          </div>
+
+          {tab === 'operational' && <EventsOperational events={visible} />}
+          {tab === 'chart' && <EventsTimeline events={visible} />}
+          {tab === 'heatmap' && <EventsHeatmap events={visible} />}
+          {tab === 'table' && (
           <Table>
           <TableHeader>
             <TableRow>
@@ -588,6 +650,7 @@ export function Events() {
             ))}
           </TableBody>
         </Table>
+          )}
         </>
       )}
     </div>
