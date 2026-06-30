@@ -3,7 +3,10 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use serde::{Deserialize, Serialize};
 use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
-use tracing::warn;
+use tracing::{info, warn};
+
+use crate::api::AppState;
+use crate::audit::{self, Caller};
 
 /// v0.14: the agents table is now baseline-only. The fields are
 /// populated by the heartbeat projector — pc_id / hostname /
@@ -372,6 +375,56 @@ pub async fn detail(
         Some(r) => Ok(Json(row_to_agent(r))),
         None => Err(StatusCode::NOT_FOUND),
     }
+}
+
+/// `DELETE /api/agents/{pc_id}` — remove an agent from the registry
+/// (operator). Audited.
+///
+/// The `agents` table is a projection of the heartbeat stream, so this is
+/// a "drop it from the list now" action, NOT a permanent tombstone: a
+/// still-alive agent re-registers (via the heartbeat projector's upsert)
+/// on its next heartbeat (~30s). It's therefore only meaningful for
+/// genuinely-retired machines — the SPA's confirm dialog says as much.
+/// Same self-healing property the config-driven dead-agent prune relies
+/// on (#886).
+///
+/// Idempotent: always returns 204, whether or not a row was present. A
+/// repeat delete — or one that races the config-driven auto-prune (#886)
+/// having already removed the row — still yields the desired end state
+/// (agent absent), so the SPA reports success rather than a spurious
+/// "not found" error. The audit event fires only when a row is actually
+/// removed, so a no-op delete doesn't litter the trail.
+pub async fn delete(
+    State(s): State<AppState>,
+    caller: Caller,
+    Path(pc_id): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let res = sqlx::query("DELETE FROM agents WHERE pc_id = ?")
+        .bind(&pc_id)
+        .execute(&s.pool)
+        .await
+        .map_err(|e| {
+            warn!(error = %e, pc_id = %pc_id, "delete agent");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("delete agent {pc_id}: {e}"),
+            )
+        })?;
+    // Only a real deletion is worth an info line + audit row; a no-op
+    // (already gone) is a silent success.
+    if res.rows_affected() > 0 {
+        info!(pc_id = %pc_id, "agent deleted from registry");
+        audit::record(
+            &s.nats,
+            "operator",
+            "agent_delete",
+            Some(&pc_id),
+            Some(&caller),
+            serde_json::json!({ "pc_id": pc_id }),
+        )
+        .await;
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 fn row_to_agent(r: sqlx::sqlite::SqliteRow) -> AgentRow {

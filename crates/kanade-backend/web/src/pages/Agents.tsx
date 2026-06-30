@@ -1,18 +1,21 @@
-import { keepPreviousData, useMutation, useQuery } from '@tanstack/react-query';
-import { Activity, AlertTriangle, Loader2, ScrollText, Server, Settings2, Users } from 'lucide-react';
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Activity, AlertTriangle, Loader2, ScrollText, Server, Settings2, Trash2, Users } from 'lucide-react';
 import { useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 import { Link, useSearchParams } from 'react-router-dom';
+import { toast } from 'sonner';
 
 import { ErrorCard } from '@/components/ErrorCard';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { useConfirm } from '@/components/ui/confirm-dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { JsonOutput } from '@/components/ui/json-output';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { apiFetch, apiFetchPaged } from '@/lib/api';
+import { apiFetch, apiFetchPaged, formatError } from '@/lib/api';
+import { useAuth } from '@/lib/auth';
 import { useDebouncedValue } from '@/lib/hooks';
 import type { AgentGroups, AgentRow, EffectiveConfigResponse, Heartbeat } from '@/lib/types';
 import { cn, fmtIsoLocal, isAgentOnline, unresolvedQuarantine } from '@/lib/utils';
@@ -63,6 +66,10 @@ function fmtBytes(v: number | null): string {
 
 export function Agents() {
   const { t } = useTranslation('agents');
+  const queryClient = useQueryClient();
+  const confirm = useConfirm();
+  const { hasRole } = useAuth();
+  const canOperate = hasRole('operator');
   const [q, setQ] = useState('');
   const [user, setUser] = useState('');
   const [version, setVersion] = useState('');
@@ -188,6 +195,10 @@ export function Agents() {
         body: JSON.stringify({ groups }),
       }),
   });
+  const del = useMutation({
+    mutationFn: (pcId: string) =>
+      apiFetch(`/api/agents/${encodeURIComponent(pcId)}`, { method: 'DELETE' }),
+  });
 
   const doPing = async (pcId: string) => {
     setResult({ pc_id: pcId, action: 'ping', value: '…' });
@@ -209,6 +220,28 @@ export function Agents() {
       setResult({ pc_id: pcId, action: 'effective', value: r });
     } catch (e) {
       setResult({ pc_id: pcId, action: 'effective', value: (e as Error).message });
+    } finally {
+      markPending(pcId, false);
+    }
+  };
+  const doDelete = async (pcId: string) => {
+    const ok = await confirm({
+      title: t('delete.confirmTitle', { pcId }),
+      description: t('delete.confirmDescription'),
+      confirmLabel: t('delete.confirmButton'),
+      danger: true,
+    });
+    if (!ok) return;
+    markPending(pcId, true);
+    try {
+      await del.mutateAsync(pcId);
+      toast.success(t('delete.success', { pcId }));
+      // Drop it from the rendered list immediately rather than waiting
+      // for the 30s poll. Partial key matches every paged/​filtered
+      // ['agents', …] query.
+      void queryClient.invalidateQueries({ queryKey: ['agents'] });
+    } catch (e) {
+      toast.error(formatError(e));
     } finally {
       markPending(pcId, false);
     }
@@ -529,6 +562,15 @@ export function Agents() {
                   </Button>
                   <Button variant="secondary" size="sm" onClick={() => doEffective(a.pc_id)} disabled={pendingPcs.has(a.pc_id)}>
                     <Settings2 className="size-3.5" />{t('actions.effective')}
+                  </Button>
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    onClick={() => doDelete(a.pc_id)}
+                    disabled={!canOperate || pendingPcs.has(a.pc_id)}
+                    title={canOperate ? undefined : t('rbac.operatorRequired', { ns: 'common' })}
+                  >
+                    <Trash2 className="size-3.5" />{t('actions.delete')}
                   </Button>
                 </div>
               </TableCell>
