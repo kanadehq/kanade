@@ -41,6 +41,10 @@
       }
     }
   },
+  "pinned": {
+    "title": "ピン留めウィジェット",
+    "linkAll": "Analytics を開く →"
+  },
   "recentResults": {
     "title": "最近のジョブ実行結果",
     "descriptionAllGreen": "各PCで実行されたジョブの結果 · 直近 {{count}} 件すべて正常",
@@ -146,6 +150,7 @@
       "checks": "コンプライアンスチェック",
       "versions": "バージョン分布",
       "upcoming": "次回スケジュール",
+      "pinned": "ピン留めウィジェット",
       "fleetCpu": "フリート CPU 履歴",
       "fleetMem": "フリートメモリ履歴",
       "topCpu": "CPU 上位",

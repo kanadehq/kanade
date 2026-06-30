@@ -10,6 +10,7 @@ import {
   HelpCircle,
   LineChart as LineChartIcon,
   MemoryStick,
+  Pin,
   Search,
   ShieldCheck,
   Tags,
@@ -31,6 +32,7 @@ import {
 
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 
+import { WidgetCard, type Widget } from '@/components/AnalyticsWidget';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { ApiError, apiFetch, formatError } from '@/lib/api';
@@ -193,6 +195,24 @@ function fleetPerfUrl(metric: string): string {
   return `/api/perf/fleet?metric=${metric}&agg=avg&from=${encodeURIComponent(from)}&step=15m`;
 }
 
+// Pinned Analytics widgets over the trailing 24 h, fleet scope. Built at
+// fetch time (same sliding-window reason as fleetPerfUrl) so the queryKey
+// stays stable. No `pc_id` ⇒ fleet widgets; `pinned=true` ⇒ only the ones
+// an operator promoted with `pin_dashboard: true`.
+function pinnedAnalyticsUrl(): string {
+  const from = new Date(
+    Date.now() - FLEET_PERF_WINDOW_HOURS * 60 * 60 * 1000,
+  ).toISOString();
+  const tzOffset = -new Date().getTimezoneOffset();
+  const params = new URLSearchParams({
+    pinned: 'true',
+    from,
+    to: new Date().toISOString(),
+    tz_offset_minutes: String(tzOffset),
+  });
+  return `/api/analytics?${params.toString()}`;
+}
+
 function fmtAxisTime(iso: string): string {
   const d = new Date(iso);
   if (isNaN(d.getTime())) return iso;
@@ -251,6 +271,19 @@ function StatBlock({
 
 export function Dashboard() {
   const { t } = useTranslation('dashboard');
+  // The pinned-widget cards reuse the Analytics renderer, which labels its
+  // sub-parts from the `analytics` namespace (gauge.ratio, timeline.active…).
+  const { t: tw } = useTranslation('analytics');
+  // Pinned Analytics widgets (`pin_dashboard: true`), fleet scope, 24 h.
+  // Empty/absent ⇒ the section doesn't render, so a fleet that pins nothing
+  // sees no change.
+  const pinnedQ = useQuery({
+    // Static key; the URL is rebuilt with a fresh sliding 24h window inside
+    // queryFn on each refetch — same pattern as the fleet-perf queries.
+    queryKey: ['analytics-pinned'],
+    queryFn: () => apiFetch<Widget[]>(pinnedAnalyticsUrl()),
+    refetchInterval: REFRESH_INTERVAL_MS,
+  });
   const jsQ = useQuery({
     queryKey: ['jetstream-status'],
     queryFn: () => apiFetch<JetstreamSnapshot>('/api/jetstream/status'),
@@ -398,6 +431,7 @@ export function Dashboard() {
       ['checks', checksQ.error],
       ['versions', versionsQ.error],
       ['upcoming', upcomingQ.error],
+      ['pinned', pinnedQ.error],
       ['fleetCpu', fleetCpuQ.error],
       ['fleetMem', fleetMemQ.error],
       ['topCpu', topCpuQ.error],
@@ -555,6 +589,31 @@ export function Dashboard() {
             </Link>
           </CardContent>
         </Card>
+      )}
+
+      {/* Pinned Analytics widgets — any operator view flagged
+          `pin_dashboard: true` surfaces here, rendered with the same
+          components as the Analytics page. This is how a config-driven
+          dashboard (e.g. a future vulnerability rollup) reaches the home
+          page without a bespoke card. Hidden entirely when nothing is
+          pinned. */}
+      {(pinnedQ.data?.length ?? 0) > 0 && (
+        <div className="space-y-3">
+          <div className="flex items-baseline justify-between">
+            <h3 className="text-lg flex items-center gap-2">
+              <Pin className="size-4 text-violet" />
+              {t('pinned.title')}
+            </h3>
+            <Link to="/analytics" className="text-xs text-muted hover:underline">
+              {t('pinned.linkAll')}
+            </Link>
+          </div>
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+            {(pinnedQ.data ?? []).map((w, i) => (
+              <WidgetCard key={`${w.dashboard}:${w.title}:${i}`} w={w} t={tw} />
+            ))}
+          </div>
+        </div>
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
