@@ -76,7 +76,7 @@ pub async fn defaults() -> Json<ServerSettings> {
 pub async fn put(
     State(s): State<AppState>,
     caller: Caller,
-    Json(settings): Json<ServerSettings>,
+    Json(mut settings): Json<ServerSettings>,
 ) -> Result<Json<ServerSettings>, (StatusCode, String)> {
     if let Some(days) = settings.agent_prune_days {
         if days == 0 {
@@ -92,6 +92,24 @@ pub async fn put(
                 format!("agent_prune_days must be <= {MAX_AGENT_PRUNE_DAYS} (100 years)"),
             ));
         }
+    }
+    // A present-but-blank controller_group would round-trip as "set but
+    // empty", which the dispatch guard treats as unset anyway — reject it so
+    // the stored document is unambiguous (omit / null to unset).
+    if let Some(g) = settings.controller_group.as_deref()
+        && g.trim().is_empty()
+    {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "controller_group must be a non-empty group name; omit it or send null to unset"
+                .to_string(),
+        ));
+    }
+    // Store the trimmed group name so the canonical stored value matches the
+    // SPA's trimmed draft (no spurious "dirty" on reload) and the dispatch
+    // guard's `effective_controller_group()` (which also trims).
+    if let Some(g) = settings.controller_group.as_mut() {
+        *g = g.trim().to_string();
     }
     let kv = open_bucket(&s).await?;
     let body = serde_json::to_vec(&settings).map_err(|e| {
@@ -126,6 +144,28 @@ pub async fn put(
     )
     .await;
     Ok(Json(settings))
+}
+
+/// Read the stored [`ServerSettings`] backend-side (cleanup task,
+/// controller-tier dispatch guard, …). A missing key ⇒ all-default; a
+/// broker/decode failure is an `Err` so a security-sensitive caller (the
+/// controller guard) can fail **closed** rather than acting on a guessed
+/// default.
+pub(crate) async fn load(s: &AppState) -> anyhow::Result<ServerSettings> {
+    use anyhow::Context;
+    let kv = s
+        .jetstream
+        .get_key_value(BUCKET_SERVER_SETTINGS)
+        .await
+        .context("open server_settings KV")?;
+    match kv
+        .get(KEY_SERVER_SETTINGS)
+        .await
+        .context("get server_settings")?
+    {
+        Some(bytes) => serde_json::from_slice(&bytes).context("decode server_settings"),
+        None => Ok(ServerSettings::default()),
+    }
 }
 
 /// Attach to the `server_settings` bucket. It's provisioned once at

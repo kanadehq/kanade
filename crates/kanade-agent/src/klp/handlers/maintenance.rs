@@ -384,6 +384,7 @@ mod tests {
             tags: Vec::new(),
             origin: None,
             finalize: None,
+            tier: None,
         }
     }
 

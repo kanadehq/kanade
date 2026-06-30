@@ -3,7 +3,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use base64::Engine as _;
 use kanade_shared::kv::{BUCKET_SCRIPT_CURRENT, OBJECT_SCRIPTS};
-use kanade_shared::manifest::{FanoutPlan, Manifest};
+use kanade_shared::manifest::{FanoutPlan, Manifest, Target};
 use kanade_shared::subject;
 use kanade_shared::wire::Command;
 use serde::Serialize;
@@ -41,7 +41,7 @@ pub struct ExecResponse {
 pub async fn exec_manifest(
     s: &AppState,
     manifest: Manifest,
-    plan: FanoutPlan,
+    mut plan: FanoutPlan,
     actor: &str,
     caller: Option<&Caller>,
     // #418 Phase 4: the schedule's lowered on_failure.retry, stamped
@@ -75,6 +75,70 @@ pub async fn exec_manifest(
     manifest
         .validate()
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    // Execution-tier guard (#vuln-roadmap): a `tier: controller` job may
+    // run ONLY on the trusted `controller_group` runners. Constrain the
+    // requested target to those members (intersecting, so `all` means "all
+    // controller runners") and refuse outright if the group is unset — all
+    // BEFORE we resolve a target_count or publish anything. Fail closed.
+    if crate::controller::requires_controller(&manifest) {
+        if has_rollout {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "tier: controller jobs can't use rollout waves — the controller tier \
+                 targets trusted runners, not a fleet rollout"
+                    .into(),
+            ));
+        }
+        let members = crate::controller::member_set(s).await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("controller group resolve failed: {e}"),
+            )
+        })?;
+        // `all` ⇒ the controller runners ARE the effective target, so skip
+        // the whole-fleet `resolve_expected_pcs` and use the (already
+        // resolved) members directly — only a narrowed target needs the
+        // fleet resolution (gemini #905). When the group is unset we don't
+        // resolve at all (constrain returns GroupUnset regardless).
+        let requested: Vec<String> = match (&members, plan.target.all) {
+            (None, _) => Vec::new(),
+            (Some(m), true) => m.iter().cloned().collect(),
+            (Some(_), false) => crate::scheduler::resolve_expected_pcs(s, &plan.target)
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("resolve controller target: {e}"),
+                    )
+                })?,
+        };
+        match crate::controller::constrain(requested, &members) {
+            crate::controller::Constrained::Pcs(pcs) => {
+                plan.target = Target {
+                    all: false,
+                    groups: Vec::new(),
+                    pcs,
+                };
+            }
+            crate::controller::Constrained::GroupUnset => {
+                return Err((
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "tier: controller but no controller_group is configured \
+                     (Settings -> server settings) — refusing to dispatch (fail-safe)"
+                        .into(),
+                ));
+            }
+            crate::controller::Constrained::NoMember => {
+                return Err((
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "no online controller_group member matches this target — a \
+                     tier: controller job needs a live controller runner"
+                        .into(),
+                ));
+            }
+        }
+    }
     // Resolve the manifest's script source into the wire shape the
     // agent expects:
     //   - inline `script:`     → Command { script: <body>,

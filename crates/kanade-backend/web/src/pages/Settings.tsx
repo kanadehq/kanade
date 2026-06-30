@@ -28,6 +28,7 @@ const MAX_AGENT_PRUNE_DAYS = 36_500;
 /// those built-in defaults (rendered as faint placeholders).
 interface ServerSettings {
   agent_prune_days: number | null;
+  controller_group: string | null;
 }
 
 /// Settings page. Two distinct kinds of settings, split into tabs so it's
@@ -188,9 +189,15 @@ function ServerTab() {
   // unset (null), distinct from an explicit number. Seeded once the
   // stored value lands.
   const [pruneDays, setPruneDays] = useState('');
+  // Trusted runner group for `tier: controller` jobs. Blank = unset
+  // (controller-tier jobs run nowhere — fail-safe).
+  const [controllerGroup, setControllerGroup] = useState('');
   useEffect(() => {
     if (settings.data) {
       setPruneDays(settings.data.agent_prune_days == null ? '' : String(settings.data.agent_prune_days));
+      // Trim on seed so an unedited reload of a stored value with stray
+      // whitespace doesn't read as dirty (the draft is compared trimmed).
+      setControllerGroup((settings.data.controller_group ?? '').trim());
     }
   }, [settings.data]);
 
@@ -212,11 +219,27 @@ function ServerTab() {
   // agent older than now" — to disable, clear the field instead.
   const trimmed = pruneDays.trim();
   const parsed = Number(trimmed);
-  const nextValue: number | null = trimmed === '' ? null : parsed;
-  const valid =
+  const pruneValue: number | null = trimmed === '' ? null : parsed;
+  const pruneValid =
     trimmed === '' ||
     (Number.isInteger(parsed) && parsed >= 1 && parsed <= MAX_AGENT_PRUNE_DAYS);
-  const dirty = settings.data != null && nextValue !== settings.data.agent_prune_days;
+
+  // controller_group: blank → unset (null). Any non-blank group name is
+  // valid here; the backend resolves membership at dispatch time.
+  const cgTrimmed = controllerGroup.trim();
+  const controllerValue: string | null = cgTrimmed === '' ? null : cgTrimmed;
+
+  // One save for the whole document (the PUT is a full replace). `dirty`
+  // if either field diverges from the stored doc.
+  const valid = pruneValid;
+  const dirty =
+    settings.data != null &&
+    (pruneValue !== settings.data.agent_prune_days ||
+      controllerValue !== (settings.data.controller_group ?? null));
+  const doc: ServerSettings = {
+    agent_prune_days: pruneValue,
+    controller_group: controllerValue,
+  };
 
   // Faint placeholder = what a blank field resolves to: the built-in
   // default if one exists, else a localised "(unset)" — mirrors the agent
@@ -263,23 +286,46 @@ function ServerTab() {
             </div>
             <p className="text-muted text-xs">{t('server.agentPrune.blankHint')}</p>
           </div>
-          <div className="flex items-center gap-3">
-            <Button
-              type="button"
-              disabled={!canOperate || !valid || !dirty || save.isPending}
-              title={canOperate ? undefined : t('rbac.operatorRequired', { ns: 'common' })}
-              onClick={() => save.mutate({ agent_prune_days: nextValue })}
-            >
-              {save.isPending ? t('server.saving') : t('server.save')}
-            </Button>
-            {!canOperate && (
-              <span className="text-xs text-muted">
-                {t('rbac.operatorRequired', { ns: 'common' })}
-              </span>
-            )}
+        </CardContent>
+      </Card>
+
+      <Card className="max-w-xl">
+        <CardHeader>
+          <CardTitle>{t('server.controllerGroup.title')}</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <p className="text-muted text-sm">{t('server.controllerGroup.description')}</p>
+          <div className="space-y-1">
+            <Label htmlFor="controller-group">{t('server.controllerGroup.label')}</Label>
+            <Input
+              id="controller-group"
+              type="text"
+              value={controllerGroup}
+              placeholder={t('server.controllerGroup.unsetPlaceholder')}
+              disabled={!canOperate || settings.isLoading}
+              onChange={(e) => setControllerGroup(e.target.value)}
+              className="w-64"
+            />
+            <p className="text-muted text-xs">{t('server.controllerGroup.blankHint')}</p>
           </div>
         </CardContent>
       </Card>
+
+      <div className="flex items-center gap-3">
+        <Button
+          type="button"
+          disabled={!canOperate || !valid || !dirty || save.isPending}
+          title={canOperate ? undefined : t('rbac.operatorRequired', { ns: 'common' })}
+          onClick={() => save.mutate(doc)}
+        >
+          {save.isPending ? t('server.saving') : t('server.save')}
+        </Button>
+        {!canOperate && (
+          <span className="text-xs text-muted">
+            {t('rbac.operatorRequired', { ns: 'common' })}
+          </span>
+        )}
+      </div>
     </div>
   );
 }

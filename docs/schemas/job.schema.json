@@ -129,6 +129,17 @@
         "type": "string"
       }
     },
+    "tier": {
+      "description": "Execution tier (#vuln-roadmap). `None` / `endpoint` (default) ⇒ the\njob dispatches to the targeted fleet agents like any job. `controller`\n⇒ it may run ONLY on trusted infra hosts — the backend constrains\ndispatch to members of the operator-configured `controller_group`\n(`server_settings` KV), and refuses to run anywhere if that group is\nunset (fail-safe). This keeps `feed:` (external-fetch) and future\nprivileged hints off employee endpoints. The `feed:` hint implies\n`controller`; it can also be set explicitly. New field ⇒ #492 wire\nrule (`default` + `skip_serializing_if`).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Tier"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "version": {
       "type": "string"
     }
@@ -1084,6 +1095,26 @@
           }
         }
       }
+    },
+    "Tier": {
+      "description": "Execution tier for a [`Manifest`] — see [`Manifest::tier`]. `endpoint`\nis the default (a normal fleet job); `controller` restricts dispatch to\nthe trusted `controller_group`. `Unknown` is the #492 forward-compat\ncatch-all: an older reader still *decodes* a job that names a future\ntier (so it doesn't fail the whole document), but `Manifest::validate()`\n**rejects** it — for a security field we fail closed rather than fall\nback to unrestricted `endpoint` dispatch (a future tier is presumably\n*more* restrictive, and a typo'd `controller` must not silently widen).",
+      "oneOf": [
+        {
+          "description": "Dispatch to the targeted fleet agents (the default).",
+          "type": "string",
+          "const": "endpoint"
+        },
+        {
+          "description": "Dispatch only to members of the configured `controller_group`.",
+          "type": "string",
+          "const": "controller"
+        },
+        {
+          "title": "492 forward-compat catch-all (a future tier this build can't act on).",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
     }
   }
 }

@@ -48,6 +48,16 @@ pub struct ServerSettings {
     /// genuinely-retired machines stay gone.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_prune_days: Option<u32>,
+
+    /// Agent group whose members are the trusted **controller-tier**
+    /// runners. A job with `tier: controller` (e.g. a `feed:` job that
+    /// fetches an external URL) is dispatched ONLY to members of this group;
+    /// `None` (unset) means controller-tier jobs run **nowhere** (fail-safe,
+    /// so an external fetch never lands on an employee endpoint by accident).
+    /// See `crate::manifest::Tier`. `None` ⇒ no controller runners
+    /// configured, which is the safe default for a fresh deployment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub controller_group: Option<String>,
 }
 
 impl ServerSettings {
@@ -64,7 +74,17 @@ impl ServerSettings {
     pub fn defaults() -> Self {
         Self {
             agent_prune_days: None,
+            controller_group: None,
         }
+    }
+
+    /// The configured controller-tier runner group, trimmed, or `None` when
+    /// unset / blank. `None` ⇒ controller-tier jobs run nowhere (fail-safe).
+    pub fn effective_controller_group(&self) -> Option<&str> {
+        self.controller_group
+            .as_deref()
+            .map(str::trim)
+            .filter(|g| !g.is_empty())
     }
 
     /// The effective dead-agent prune window in days: the stored value if
@@ -103,6 +123,7 @@ mod tests {
     fn stored_value_wins_over_default() {
         let s = ServerSettings {
             agent_prune_days: Some(30),
+            ..Default::default()
         };
         assert_eq!(s.effective_agent_prune_days(), 30);
     }
@@ -113,6 +134,7 @@ mod tests {
         // the cleanup task unclamped (else its DateTime subtraction panics).
         let s = ServerSettings {
             agent_prune_days: Some(u32::MAX),
+            ..Default::default()
         };
         assert_eq!(s.effective_agent_prune_days(), MAX_AGENT_PRUNE_DAYS);
     }
@@ -121,6 +143,7 @@ mod tests {
     fn round_trips_through_json() {
         let s = ServerSettings {
             agent_prune_days: Some(30),
+            ..Default::default()
         };
         let json = serde_json::to_string(&s).unwrap();
         assert_eq!(json, r#"{"agent_prune_days":30}"#);
@@ -152,6 +175,38 @@ mod tests {
         // behaviour, not fail to decode.
         let s: ServerSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(s, ServerSettings::default());
+    }
+
+    #[test]
+    fn controller_group_effective_trims_and_blank_is_unset() {
+        assert_eq!(ServerSettings::default().effective_controller_group(), None);
+        let s = ServerSettings {
+            controller_group: Some("  feed-runners ".into()),
+            ..Default::default()
+        };
+        assert_eq!(s.effective_controller_group(), Some("feed-runners"));
+        // A blank/whitespace value reads as unset (fail-safe: no runner).
+        let blank = ServerSettings {
+            controller_group: Some("   ".into()),
+            ..Default::default()
+        };
+        assert_eq!(blank.effective_controller_group(), None);
+    }
+
+    #[test]
+    fn controller_group_round_trips_and_omits_when_unset() {
+        let s = ServerSettings {
+            controller_group: Some("infra".into()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert_eq!(json, r#"{"controller_group":"infra"}"#);
+        assert_eq!(serde_json::from_str::<ServerSettings>(&json).unwrap(), s);
+        // Unset controller_group is omitted (skip_serializing_if).
+        assert_eq!(
+            serde_json::to_string(&ServerSettings::default()).unwrap(),
+            "{}"
+        );
     }
 
     #[test]

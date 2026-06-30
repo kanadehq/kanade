@@ -174,6 +174,41 @@ pub struct Manifest {
     /// `skip_serializing_if`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finalize: Option<FinalizeSpec>,
+    /// Execution tier (#vuln-roadmap). `None` / `endpoint` (default) ⇒ the
+    /// job dispatches to the targeted fleet agents like any job. `controller`
+    /// ⇒ it may run ONLY on trusted infra hosts — the backend constrains
+    /// dispatch to members of the operator-configured `controller_group`
+    /// (`server_settings` KV), and refuses to run anywhere if that group is
+    /// unset (fail-safe). This keeps `feed:` (external-fetch) and future
+    /// privileged hints off employee endpoints. The `feed:` hint implies
+    /// `controller`; it can also be set explicitly. New field ⇒ #492 wire
+    /// rule (`default` + `skip_serializing_if`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<Tier>,
+}
+
+/// Execution tier for a [`Manifest`] — see [`Manifest::tier`]. `endpoint`
+/// is the default (a normal fleet job); `controller` restricts dispatch to
+/// the trusted `controller_group`. `Unknown` is the #492 forward-compat
+/// catch-all: an older reader still *decodes* a job that names a future
+/// tier (so it doesn't fail the whole document), but `Manifest::validate()`
+/// **rejects** it — for a security field we fail closed rather than fall
+/// back to unrestricted `endpoint` dispatch (a future tier is presumably
+/// *more* restrictive, and a typo'd `controller` must not silently widen).
+#[derive(
+    Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Default,
+)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Tier {
+    /// Dispatch to the targeted fleet agents (the default).
+    #[default]
+    Endpoint,
+    /// Dispatch only to members of the configured `controller_group`.
+    Controller,
+    /// #492 forward-compat catch-all (a future tier this build can't act on).
+    #[serde(other)]
+    Unknown,
 }
 
 /// GitOps provenance for a repo-managed YAML artifact — a [`Manifest`]
@@ -1611,6 +1646,22 @@ impl Manifest {
     /// docs for the rationale on which call sites should run this.
     pub fn validate(&self) -> Result<(), String> {
         self.execute.validate_script_source()?;
+        // Fail CLOSED on an unrecognised execution tier. `#[serde(other)]`
+        // turns a typo (`tier: controler`) or a future tier into
+        // `Tier::Unknown`; without this check the controller gate would
+        // fall back to normal endpoint dispatch, so an operator who *meant*
+        // to confine a job to the controller tier would silently get
+        // fleet-wide dispatch (CodeRabbit #905). Rejecting it at the write
+        // boundary surfaces the typo at `job create`, and — since
+        // `exec_manifest` re-validates — a hand-poked KV manifest can't slip
+        // a controller-tier job onto endpoints either.
+        if matches!(self.tier, Some(Tier::Unknown)) {
+            return Err(
+                "tier: unrecognised execution tier — use `endpoint` or `controller` \
+                 (this is a typo, or a tier a newer kanade supports that this backend does not)"
+                    .to_string(),
+            );
+        }
         // A present-but-empty finalize script is an invisible no-op
         // (the hook would run an empty body); reject it at the write
         // boundary. Inline-only in P1, so `script` is the sole source.
@@ -3137,6 +3188,27 @@ tags: [ok, "   "]
         let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
         let err = m.validate().expect_err("blank tag must fail");
         assert!(err.contains("tags must not contain empty"), "err: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_unknown_tier_and_accepts_known() {
+        let base =
+            "id: t\nversion: 0.0.1\nexecute:\n  shell: powershell\n  script: x\n  timeout: 30s\n";
+        // A typo / future tier decodes to Tier::Unknown (#[serde(other)]) and
+        // must FAIL CLOSED — never fall back to unrestricted endpoint dispatch.
+        let bogus: Manifest =
+            serde_yaml::from_str(&format!("{base}tier: controler\n")).expect("parse");
+        let err = bogus.validate().expect_err("unknown tier must be rejected");
+        assert!(err.contains("tier"), "err: {err}");
+        // The two known tiers pass.
+        serde_yaml::from_str::<Manifest>(&format!("{base}tier: controller\n"))
+            .unwrap()
+            .validate()
+            .expect("controller tier is valid");
+        serde_yaml::from_str::<Manifest>(&format!("{base}tier: endpoint\n"))
+            .unwrap()
+            .validate()
+            .expect("endpoint tier is valid");
     }
 
     // #720 — wrap an `aggregate:` YAML block (already indented as a
