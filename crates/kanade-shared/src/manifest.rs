@@ -436,7 +436,7 @@ pub struct CheckHint {
     /// operator SPA gets a fleet-wide compliance view for free — no
     /// `inventory:` block needed. Set `fleet: false` for a client-only
     /// check the operator doesn't want surfaced across the fleet.
-    #[serde(default = "default_fleet")]
+    #[serde(default = "default_true")]
     pub fleet: bool,
     /// When `true` (default), this check is shown on the Client App's
     /// Health tab (the end user sees its ok/warn/fail row). Set
@@ -451,7 +451,7 @@ pub struct CheckHint {
     /// so a pure gate detector typically sets neither (`fleet: false` +
     /// `health: false`) to stay invisible everywhere while still driving
     /// the gate.
-    #[serde(default = "default_fleet")]
+    #[serde(default = "default_true")]
     pub health: bool,
     /// Optional auto-notification on a compliance transition. When set, the
     /// backend publishes an end-user notification the moment this check
@@ -554,10 +554,6 @@ fn default_status_field() -> String {
 
 fn default_detail_field() -> String {
     "detail".to_string()
-}
-
-fn default_fleet() -> bool {
-    true
 }
 
 fn default_files_field() -> String {
@@ -7187,6 +7183,9 @@ impl Schedule {
     }
 }
 
+/// Shared `serde(default)` for `bool` fields that default to `true`
+/// (e.g. `CheckHint::fleet` / `CheckHint::health`). Generic name so it
+/// doesn't read as "fleet" when reused for `health`.
 fn default_true() -> bool {
     true
 }

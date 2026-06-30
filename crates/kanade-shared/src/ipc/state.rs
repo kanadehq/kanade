@@ -90,8 +90,16 @@ pub struct Check {
     /// *rendering* skips it. New field ⇒ #492 wire rule: `default` (absent
     /// ⇒ `false` ⇒ shown, unchanged for old readers) + `skip_serializing_if`
     /// so the overwhelmingly-common shown case stays off the wire.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub health_hidden: bool,
+}
+
+/// `skip_serializing_if` predicate for a `bool` that defaults to `false`:
+/// keep the field off the wire in the common (`false`) case. Clearer than
+/// the equivalent `std::ops::Not::not` (which only type-checks via the
+/// blanket `impl Not for &bool`).
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Four-state result mirroring the SPA's color palette: ok = green,
