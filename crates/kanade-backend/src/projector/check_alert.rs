@@ -255,6 +255,7 @@ mod tests {
             detail_field: "detail".into(),
             troubleshoot: None,
             fleet: true,
+            health: true,
             alert: None,
         }
     }

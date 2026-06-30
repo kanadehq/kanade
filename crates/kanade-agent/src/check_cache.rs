@@ -305,6 +305,9 @@ pub fn build_check(hint: &CheckHint, stdout: &str) -> Check {
         status,
         detail,
         troubleshoot: hint.troubleshoot.clone(),
+        // gate-only checks (`health: false`) stay in the snapshot for
+        // show_when but are hidden from the Client App's Health tab.
+        health_hidden: !hint.health,
     }
 }
 
@@ -330,6 +333,9 @@ fn unknown(hint: &CheckHint, detail: String) -> Check {
         status: CheckStatus::Unknown,
         detail: Some(detail),
         troubleshoot: hint.troubleshoot.clone(),
+        // gate-only checks (`health: false`) stay in the snapshot for
+        // show_when but are hidden from the Client App's Health tab.
+        health_hidden: !hint.health,
     }
 }
 
@@ -362,6 +368,7 @@ mod tests {
             detail_field: "detail".into(),
             troubleshoot: None,
             fleet: true,
+            health: true,
             alert: None,
         }
     }
@@ -386,6 +393,7 @@ mod tests {
             detail_field: "summary".into(),
             troubleshoot: Some("fix-patch".into()),
             fleet: true,
+            health: true,
             alert: None,
         };
         let c = build_check(
@@ -429,6 +437,20 @@ mod tests {
     }
 
     #[test]
+    fn build_check_sets_health_hidden_from_hint() {
+        // Default hint (health = true) → shown on the Health tab.
+        let shown = build_check(&hint("bitlocker"), r#"{"status":"ok"}"#);
+        assert!(!shown.health_hidden);
+
+        // A gate-only check (health = false) → recorded but hidden from
+        // the Health tab; a crashed run (build_check_failed) keeps the flag.
+        let mut h = hint("myapp-up-to-date");
+        h.health = false;
+        assert!(build_check(&h, r#"{"status":"fail"}"#).health_hidden);
+        assert!(build_check_failed(&h, 1, "boom").health_hidden);
+    }
+
+    #[test]
     fn merge_checks_overrides_builtin_by_name() {
         let base = vec![Check {
             name: "agent_self_update".into(),
@@ -436,6 +458,7 @@ mod tests {
             status: CheckStatus::Ok,
             detail: None,
             troubleshoot: None,
+            health_hidden: false,
         }];
         let extra = vec![
             // operator's own check named like the built-in replaces it
@@ -445,6 +468,7 @@ mod tests {
                 status: CheckStatus::Warn,
                 detail: Some("override".into()),
                 troubleshoot: None,
+                health_hidden: false,
             },
             Check {
                 name: "disk_space".into(),
@@ -452,6 +476,7 @@ mod tests {
                 status: CheckStatus::Warn,
                 detail: Some("8% free".into()),
                 troubleshoot: None,
+                health_hidden: false,
             },
             Check {
                 name: "bitlocker".into(),
@@ -459,6 +484,7 @@ mod tests {
                 status: CheckStatus::Ok,
                 detail: None,
                 troubleshoot: None,
+                health_hidden: false,
             },
         ];
         let merged = merge_checks(base, &extra);

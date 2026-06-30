@@ -80,6 +80,18 @@ pub struct Check {
     /// the button is clicked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub troubleshoot: Option<String>,
+    /// When `true`, the Client App must NOT render this check on its
+    /// Health tab (nor count it in the health summary). Set by the agent
+    /// from a `check:` job's [`CheckHint.health`](crate::manifest::CheckHint::health)
+    /// `== false` — a **gate-only** check that exists purely to drive a
+    /// `client.show_when` display gate. The check is STILL carried in the
+    /// snapshot (so `show_when` evaluation, which reads the same
+    /// `StateSnapshot.checks`, keeps working); only the end-user Health
+    /// *rendering* skips it. New field ⇒ #492 wire rule: `default` (absent
+    /// ⇒ `false` ⇒ shown, unchanged for old readers) + `skip_serializing_if`
+    /// so the overwhelmingly-common shown case stays off the wire.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub health_hidden: bool,
 }
 
 /// Four-state result mirroring the SPA's color palette: ok = green,
@@ -193,6 +205,7 @@ mod tests {
             status: CheckStatus::Fail,
             detail: Some("Signatures > 7 days old".into()),
             troubleshoot: Some("update-av-signatures".into()),
+            health_hidden: false,
         };
         let json = serde_json::to_string(&c).unwrap();
         let back: Check = serde_json::from_str(&json).unwrap();
@@ -214,11 +227,14 @@ mod tests {
             status: CheckStatus::Ok,
             detail: None,
             troubleshoot: None,
+            health_hidden: false,
         };
         let v = serde_json::to_value(&c).unwrap();
         assert!(v.get("label").is_none(), "wire: {v:?}");
         assert!(v.get("detail").is_none(), "wire: {v:?}");
         assert!(v.get("troubleshoot").is_none(), "wire: {v:?}");
+        // health_hidden = false is the common case → absent on the wire.
+        assert!(v.get("health_hidden").is_none(), "wire: {v:?}");
     }
 
     #[test]

@@ -1761,6 +1761,13 @@ check を用意し、更新ジョブを `is: [fail]` でゲートする。
   (`emit:` と違い stdout を消さない)、更新ジョブに `check:` を同梱して完了時に同名 check を
   `ok` で emit すれば、検査ジョブのスケジュールを待たず即フリップする。Client は run 完了
   (terminal `jobs.progress`) で `jobs.list` を再取得し、消えたジョブを反映する。
+- **ゲート専用 check を Health から隠す**: `check.health: false`(既定 true、`fleet` と対称)で、
+  その check を **Client App の Health タブに出さない**(健全性サマリのカウントからも除外)。
+  ゲート駆動だけが目的の `myapp-up-to-date` のような検査がエンドユーザーの Health 画面を
+  汚さない。check は引き続き `StateSnapshot.checks` に載るので show_when は動く;
+  Client は wire の `Check.health_hidden`(agent が `!health` をセット)で描画時に除外する。
+  `fleet`(SPA フリート集計軸)と `health`(Client Health 軸)は直交し、純粋なゲート検査は
+  両方 off にすればどこにも出ずゲートだけ駆動する。
 
 ### 2.12.6 Handshake (接続後最初に必ず呼ぶ)
 

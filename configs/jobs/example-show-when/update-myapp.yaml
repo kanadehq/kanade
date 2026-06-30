@@ -69,3 +69,4 @@ client:
 check:
   name: myapp-up-to-date     # SAME slug as the detector → shared entry
   label: "MyApp のバージョン"
+  health: false              # gate-only, like the detector — not a Health row

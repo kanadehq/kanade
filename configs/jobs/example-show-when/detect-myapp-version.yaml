@@ -48,5 +48,12 @@ execute:
 check:
   name: myapp-up-to-date
   label: "MyApp のバージョン"
-  # fleet: true (default) surfaces it on the operator SPA Compliance page
-  # too — handy to see fleet-wide rollout coverage of the update.
+  # health: false — this is a GATE-ONLY check: it exists to drive the
+  # update button's show_when, not to be shown as a Health-tab row to the
+  # end user (who just wants the button to appear/disappear). The agent
+  # still records it into the snapshot, so show_when keeps working; only
+  # the Client App's Health rendering skips it.
+  health: false
+  # fleet: true (default) still surfaces it on the operator SPA Compliance
+  # page — handy to see fleet-wide rollout coverage of the update. Set
+  # fleet: false too for a check that should be invisible everywhere.

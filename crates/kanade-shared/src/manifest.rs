@@ -438,6 +438,21 @@ pub struct CheckHint {
     /// check the operator doesn't want surfaced across the fleet.
     #[serde(default = "default_fleet")]
     pub fleet: bool,
+    /// When `true` (default), this check is shown on the Client App's
+    /// Health tab (the end user sees its ok/warn/fail row). Set
+    /// `health: false` for a **gate-only** check — one that exists purely
+    /// to drive a `client.show_when` display gate (e.g. `myapp-up-to-date`)
+    /// and would just be noise as a Health row. The agent still records it
+    /// into `StateSnapshot.checks` (so `show_when` can read it and the gate
+    /// keeps working); only the Client App's Health *rendering* skips it,
+    /// via the [`Check.health_hidden`](crate::ipc::state::Check::health_hidden)
+    /// wire flag. Orthogonal to [`fleet`](CheckHint::fleet): `fleet` gates
+    /// the operator SPA fleet view, `health` gates the end-user Health tab,
+    /// so a pure gate detector typically sets neither (`fleet: false` +
+    /// `health: false`) to stay invisible everywhere while still driving
+    /// the gate.
+    #[serde(default = "default_fleet")]
+    pub health: bool,
     /// Optional auto-notification on a compliance transition. When set, the
     /// backend publishes an end-user notification the moment this check
     /// transitions *into* one of [`CheckAlert::on`] (e.g. ok → fail) — to

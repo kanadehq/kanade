@@ -96,6 +96,10 @@ type Check = {
   status: CheckStatus;
   detail?: string | null;
   troubleshoot?: string | null;
+  // When true, a gate-only check (`check.health: false`) that drives a
+  // `show_when` display gate but must NOT appear on the Health tab nor
+  // count toward the health summary. Absent ⇒ false ⇒ shown.
+  health_hidden?: boolean;
 };
 
 type StateSnapshot = {
@@ -1520,8 +1524,11 @@ function renderDashboard(): void {
     hv.textContent = "読み込み中…";
   } else {
     const s = lastSnapshot;
-    const fails = s.checks.filter((c) => c.status === "fail").length;
-    const warns = s.checks.filter((c) => c.status === "warn").length;
+    // Gate-only checks (`health_hidden`) drive `show_when` but must not
+    // colour the user's health summary — exclude them everywhere here.
+    const checks = s.checks.filter((c) => !c.health_hidden);
+    const fails = checks.filter((c) => c.status === "fail").length;
+    const warns = checks.filter((c) => c.status === "warn").length;
     let text: string;
     let level: "ok" | "warn" | "fail";
     if (!s.online) {
@@ -1533,16 +1540,16 @@ function renderDashboard(): void {
     } else if (warns > 0) {
       text = `⚠️ ${warns}件の注意`;
       level = "warn";
-    } else if (s.checks.length === 0) {
+    } else if (checks.length === 0) {
       text = "✅ オンライン";
       level = "ok";
-    } else if (s.checks.every((c) => c.status === "ok")) {
+    } else if (checks.every((c) => c.status === "ok")) {
       text = "✅ 全て正常";
       level = "ok";
     } else {
       // Some checks couldn't run (all/partly unknown). Don't claim
       // "全て正常" — surface the unresolved count instead of a false clear.
-      const unknowns = s.checks.filter((c) => c.status === "unknown").length;
+      const unknowns = checks.filter((c) => c.status === "unknown").length;
       text = `❔ ${unknowns}件が判定不可`;
       level = "warn";
     }
@@ -1586,7 +1593,11 @@ function renderSnapshot(s: StateSnapshot): string {
   // Defensive: `state.snapshot` always serializes `checks` (a Vec,
   // never null), but guard against a malformed/partial payload so a
   // missing field degrades to "no checks" instead of throwing.
-  const checks = Array.isArray(s.checks) ? s.checks : [];
+  // Drop gate-only checks (`health_hidden`): they exist to drive a
+  // `show_when` display gate, not to be shown on the Health tab.
+  const checks = (Array.isArray(s.checks) ? s.checks : []).filter(
+    (c) => !c.health_hidden,
+  );
 
   // Roll the per-check results up into one headline status. Severity
   // wins: any fail → fail, else any warn → warn, else all-ok → ok.
