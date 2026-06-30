@@ -31,7 +31,7 @@ use kanade_shared::manifest::{
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::AppState;
 
@@ -55,6 +55,10 @@ pub struct AnalyticsQuery {
     /// When set, compute the `scope: pc` widgets for this PC. When
     /// omitted, compute the `scope: fleet` widgets across all PCs.
     pub pc_id: Option<String>,
+    /// When `true`, return only widgets flagged `pin_dashboard: true` — the
+    /// subset the main Dashboard promotes. Absent / `false` ⇒ every widget
+    /// (the Analytics page's behaviour).
+    pub pinned: Option<bool>,
 }
 
 /// The shared query context for one request — the pieces every widget
@@ -159,6 +163,10 @@ pub struct WidgetResult {
     pub description: Option<String>,
     /// `"pc"` or `"fleet"` — the scope this result was computed at.
     pub scope: &'static str,
+    /// Whether this widget is pinned to the main Dashboard. Carried so the
+    /// Analytics page can show a "pinned" affordance; the Dashboard fetches
+    /// with `?pinned=true` and only ever sees `true` here.
+    pub pin_dashboard: bool,
     #[serde(flatten)]
     pub data: WidgetData,
 }
@@ -195,9 +203,27 @@ pub async fn get(
     // front means the compute loop preserves it (one bad/skipped widget
     // keeps the rest in order) and the SPA derives tab order from it.
     widgets.sort_by(|a, b| widget_sort_key(a).cmp(&widget_sort_key(b)));
+    let only_pinned = q.pinned.unwrap_or(false);
     let mut out = Vec::new();
     for w in widgets {
         if w.scope != want_scope {
+            // A pinned widget that's the wrong scope for this request would
+            // otherwise vanish without a trace — the Dashboard fetches fleet
+            // scope, so a `pin_dashboard: true` + `scope: pc` widget is dropped
+            // here. Leave a debug breadcrumb (not warn — this handler polls
+            // every ~30s) so a misconfigured pin is diagnosable; the field doc
+            // also tells operators to pin fleet-scope widgets.
+            if only_pinned && w.pin_dashboard {
+                debug!(
+                    dashboard = %w.dashboard, title = %w.title,
+                    "analytics: pinned widget skipped — pin a fleet-scope widget for the Dashboard",
+                );
+            }
+            continue;
+        }
+        // Dashboard pinned section asks for `?pinned=true` and gets only the
+        // promoted widgets; the Analytics page omits the param and gets all.
+        if only_pinned && !w.pin_dashboard {
             continue;
         }
         match compute_widget(&ctx, &w).await {
@@ -206,6 +232,7 @@ pub async fn get(
                 title: w.title,
                 description: w.description,
                 scope: scope_str,
+                pin_dashboard: w.pin_dashboard,
                 data,
             }),
             // A widget whose enums fell through to the #492 Unknown
@@ -946,6 +973,7 @@ mod tests {
             title: "T".into(),
             description: None,
             order: None,
+            pin_dashboard: false,
             scope: AggregateScope::Pc,
             kind: Some(kind.into()),
             source: None,

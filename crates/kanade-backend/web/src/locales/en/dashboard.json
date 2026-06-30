@@ -41,6 +41,10 @@
       }
     }
   },
+  "pinned": {
+    "title": "Pinned widgets",
+    "linkAll": "Open Analytics →"
+  },
   "recentResults": {
     "title": "Recent job results",
     "descriptionAllGreen": "Results of jobs run on each PC · last {{count}} all green",
@@ -146,6 +150,7 @@
       "checks": "Compliance checks",
       "versions": "Version distribution",
       "upcoming": "Upcoming schedules",
+      "pinned": "Pinned widgets",
       "fleetCpu": "Fleet CPU history",
       "fleetMem": "Fleet memory history",
       "topCpu": "Top CPU consumers",

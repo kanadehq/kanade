@@ -322,6 +322,10 @@
           ],
           "format": "int32"
         },
+        "pin_dashboard": {
+          "description": "Promote this widget to the main Dashboard, not just the Analytics\npage (#vuln-roadmap PR3). The Dashboard fetches the pinned subset\n(`/api/analytics?pinned=true`, fleet scope) and renders it with the\nsame widget components. Operator-controlled, so any config-driven\nview (e.g. a future vulnerability rollup) can surface up front\nwithout a bespoke card. Defaults to `false`. Pin a `scope: fleet`\nwidget — a `pc`-scoped one needs a selected PC and won't render on\nthe fleet Dashboard.",
+          "type": "boolean"
+        },
         "render": {
           "description": "Which widget the SPA draws. See [`AggregateRender`].",
           "$ref": "#/$defs/AggregateRender"

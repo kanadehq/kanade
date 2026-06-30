@@ -53,6 +53,10 @@ widgets:
     kind: unexpected_shutdown
     agg: count
     render: stat
+    # Promote this headline number to the main Dashboard's "Pinned
+    # widgets" section. Any fleet-scope widget can opt in this way; it
+    # renders there with the same component as on the Analytics page.
+    pin_dashboard: true
   - dashboard: Reliability
     title: Reboots by hour (fleet)
     description: Boot events bucketed by local hour

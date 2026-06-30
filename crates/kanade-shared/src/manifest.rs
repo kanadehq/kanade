@@ -817,6 +817,19 @@ pub struct AggregateWidget {
     /// applies it.)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order: Option<i32>,
+    /// Promote this widget to the main Dashboard, not just the Analytics
+    /// page (#vuln-roadmap PR3). The Dashboard fetches the pinned subset
+    /// (`/api/analytics?pinned=true`, fleet scope) and renders it with the
+    /// same widget components. Operator-controlled, so any config-driven
+    /// view (e.g. a future vulnerability rollup) can surface up front
+    /// without a bespoke card. Defaults to `false`. Pin a `scope: fleet`
+    /// widget — a `pc`-scoped one needs a selected PC and won't render on
+    /// the fleet Dashboard.
+    // `Not::not` is `!self`, so this skips serializing the field when it's
+    // `false` — keeps `pin_dashboard: false` out of the stored job/view JSON,
+    // matching how the optional fields above omit their defaults.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pin_dashboard: bool,
     /// `pc` rolls up a single selected PC; `fleet` rolls up all PCs
     /// (and unlocks `group_by: pc_id` to rank PCs against each other).
     /// Defaults to `pc`.
