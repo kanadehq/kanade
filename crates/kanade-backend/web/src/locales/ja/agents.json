@@ -40,7 +40,14 @@
     "facts": "facts",
     "ping": "ping",
     "groups": "グループ",
-    "effective": "有効設定"
+    "effective": "有効設定",
+    "delete": "削除"
+  },
+  "delete": {
+    "confirmTitle": "エージェント {{pcId}} を削除しますか?",
+    "confirmDescription": "このエージェントを一覧から今すぐ削除します。 一覧はハートビートから作られるため、 端末がまだ稼働していれば次のハートビート (約30秒以内) で再登録されます。 消えたままになるのは本当に廃棄された端末だけです。",
+    "confirmButton": "削除",
+    "success": "エージェント {{pcId}} を削除しました"
   },
   "groupsPrompt": "{{pcId}} のグループ名 (カンマ区切り、 現在: {{current}})",
   "groupsNone": "(なし)",

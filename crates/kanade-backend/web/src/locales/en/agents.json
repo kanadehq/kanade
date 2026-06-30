@@ -40,7 +40,14 @@
     "facts": "facts",
     "ping": "ping",
     "groups": "groups",
-    "effective": "effective"
+    "effective": "effective",
+    "delete": "delete"
+  },
+  "delete": {
+    "confirmTitle": "Delete agent {{pcId}}?",
+    "confirmDescription": "Removes this agent from the list now. The agents list is built from heartbeats, so if this machine is still running it will reappear on its next heartbeat (within ~30s). This only stays gone for a genuinely retired machine.",
+    "confirmButton": "Delete",
+    "success": "Deleted agent {{pcId}}"
   },
   "groupsPrompt": "Comma-separated group names for {{pcId}} (current: {{current}})",
   "groupsNone": "(none)",

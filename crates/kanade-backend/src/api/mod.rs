@@ -364,6 +364,11 @@ pub fn router(state: AppState) -> Router {
 
     // Fleet mutations — operator+ only.
     let operator = Router::new()
+        // Manually drop an agent from the registry (GET detail lives on
+        // the viewer router; same path, different method, like the
+        // /groups routes below). A live agent re-registers on its next
+        // heartbeat — see agents::delete.
+        .route("/api/agents/{pc_id}", delete(agents::delete))
         .route(
             "/api/agents/{pc_id}/groups",
             put(agent_groups::set_groups).post(agent_groups::add_group),
