@@ -1526,7 +1526,11 @@ function renderDashboard(): void {
     const s = lastSnapshot;
     // Gate-only checks (`health_hidden`) drive `show_when` but must not
     // colour the user's health summary — exclude them everywhere here.
-    const checks = s.checks.filter((c) => !c.health_hidden);
+    // The `Array.isArray` guard mirrors `renderSnapshot`: a malformed /
+    // partial payload degrades to "no checks" instead of throwing.
+    const checks = (Array.isArray(s.checks) ? s.checks : []).filter(
+      (c) => !c.health_hidden,
+    );
     const fails = checks.filter((c) => c.status === "fail").length;
     const warns = checks.filter((c) => c.status === "warn").length;
     let text: string;
