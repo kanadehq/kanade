@@ -118,6 +118,36 @@ function buildSpans(
     .filter((s) => s.to > s.from);
 }
 
+// Intersect a subordinate lane's spans with the power lane's ON intervals.
+// The active / session / sleep lanes are reconstructed independently of
+// power, but a host can't be in any of those states while it's switched
+// off — and their state often isn't closed cleanly across a power cycle:
+// the idle sampler emits no `idle` on shutdown (an unexpected power loss
+// emits nothing at all), so a stale `active` seeded from before the window
+// would otherwise paint straight across a powered-off gap (#841 follow-up).
+// Clipping to the power ON spans drops those phantom segments. A boundary
+// that the clip introduces (mid-span, where power toggled) is a hard edge,
+// so it clears the `openStart` / `openEnd` "continues beyond" hint; an
+// original window edge keeps it.
+function clipToOn(spans: Span[], on: { from: number; to: number }[]): Span[] {
+  const out: Span[] = [];
+  for (const s of spans) {
+    for (const iv of on) {
+      const from = Math.max(s.from, iv.from);
+      const to = Math.min(s.to, iv.to);
+      if (to > from) {
+        out.push({
+          from,
+          to,
+          openStart: s.openStart && from === s.from,
+          openEnd: s.openEnd && to === s.to,
+        });
+      }
+    }
+  }
+  return out;
+}
+
 // Point markers for the lane's events (instantaneous boot/logon/… ticks),
 // so a lone event with no pair still shows even when it forms no span.
 function laneMarkers(
@@ -159,7 +189,9 @@ function axisTicks(t0: number, t1: number): { ts: number; label: string }[] {
  * the Analytics `op_timeline` widget (which receives a server-computed
  * window) and the Events page strip (which derives the window from the
  * rendered events). The active/idle lane is fed by the agent-native idle
- * sampler (#841); a filled span = active, a gap = idle.
+ * sampler (#841); a filled span = active, a gap = idle. The active /
+ * session / sleep lanes are clipped to the power lane's ON spans so a state
+ * left open across a power cycle can't paint over a powered-off gap.
  *
  * `from` / `to` bound the window; when omitted they fall back to the
  * earliest / latest event so the Events page can use it without a window.
@@ -202,12 +234,29 @@ export function OperationalTimeline({
     // Snapshot "now" once per render so open intervals don't paint past the
     // present when the window runs into the future (today before midnight).
     const now = Date.now();
-    return OP_LANES.map((lane) => ({
-      key: lane.key as LaneKey,
-      color: lane.color,
-      spans: buildSpans(events, lane.starts, lane.ends, t0, t1, now),
-      markers: laneMarkers(events, lane.starts, lane.ends, t0, t1),
-    }));
+    // Reconstruct the power lane first: it's the ground truth for "the host
+    // was up", and the subordinate lanes get clipped to its ON spans below.
+    const power = OP_LANES.find((l) => l.key === 'power')!;
+    const powerSpans = buildSpans(events, power.starts, power.ends, t0, t1, now);
+    const onIntervals = powerSpans.map((s) => ({ from: s.from, to: s.to }));
+    // Only clip when we actually have power events — a PC that reports just
+    // active/idle (no winlog power lane) has no ON spans, and clipping to an
+    // empty set would erase its only signal.
+    const powerKinds = new Set<string>([...power.starts, ...power.ends]);
+    const hasPower = events.some((e) => powerKinds.has(e.kind));
+    return OP_LANES.map((lane) => {
+      let spans =
+        lane.key === 'power'
+          ? powerSpans
+          : buildSpans(events, lane.starts, lane.ends, t0, t1, now);
+      if (lane.key !== 'power' && hasPower) spans = clipToOn(spans, onIntervals);
+      return {
+        key: lane.key as LaneKey,
+        color: lane.color,
+        spans,
+        markers: laneMarkers(events, lane.starts, lane.ends, t0, t1),
+      };
+    });
   }, [events, t0, t1]);
 
   const ticks = useMemo(() => axisTicks(t0, t1), [t0, t1]);

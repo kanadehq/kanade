@@ -75,5 +75,11 @@
     "cellTooltip_one": "{{count}} event",
     "cellTooltip_other": "{{count}} events"
   },
-  "chartPcCap": "showing busiest {{shown}} of {{total}} PCs — narrow the filters for the rest"
+  "chartPcCap": "showing busiest {{shown}} of {{total}} PCs — narrow the filters for the rest",
+  "tabs": {
+    "operational": "Operational",
+    "chart": "Timeline",
+    "heatmap": "Activity",
+    "table": "Event list"
+  }
 }
