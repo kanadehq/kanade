@@ -69,6 +69,9 @@ enum SubCmd {
     Login(cmd::login::LoginArgs),
     /// Admin-only RBAC account management (create / role / disable / …).
     Account(cmd::account::AccountArgs),
+    /// Run an ad-hoc read-only SQL query against the projector DB
+    /// (admin-only, SELECT/WITH only). Prints a table or `--json`.
+    Query(cmd::query::QueryArgs),
     /// Update the kanade CLI itself from GitHub Releases (kaishin).
     /// Background behaviour on ordinary runs is configured in the
     /// per-user config (`[update] mode = off|notify|install`, default
@@ -116,6 +119,8 @@ async fn dispatch(server: String, backend_url: String, command: SubCmd) -> Resul
         return cmd::login::execute(&backend_url, args).await;
     } else if let SubCmd::Account(args) = command {
         return cmd::account::execute(&backend_url, args).await;
+    } else if let SubCmd::Query(args) = command {
+        return cmd::query::execute(&backend_url, args).await;
     } else if let SubCmd::SelfUpdate(args) = command {
         return cmd::self_update::execute(args).await;
     }
@@ -145,6 +150,7 @@ async fn dispatch(server: String, backend_url: String, command: SubCmd) -> Resul
         | SubCmd::Freeze(_)
         | SubCmd::Login(_)
         | SubCmd::Account(_)
+        | SubCmd::Query(_)
         | SubCmd::SelfUpdate(_) => {
             unreachable!("handled above")
         }

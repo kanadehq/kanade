@@ -597,6 +597,24 @@ pub(crate) async fn run_backend() -> Result<()> {
         .context("run migrations")?;
     info!("sqlite migrations applied");
 
+    // Dedicated read-only pool over the SAME db file (opened after
+    // migrations so the file exists — `read_only(true)` can't create it).
+    // Only the admin `POST /api/query` endpoint uses it, so any write in
+    // operator-supplied SQL fails at the SQLite layer (SQLITE_OPEN_READONLY)
+    // rather than relying on statement validation alone. WAL lets it read
+    // concurrently with the writer pool above. Fewer connections — this is
+    // an occasional operator tool, not a hot path.
+    let query_pool_opts =
+        SqliteConnectOptions::from_str(&format!("sqlite://{}", cfg.db.sqlite_path))
+            .with_context(|| format!("parse sqlite read-only path {}", cfg.db.sqlite_path))?
+            .read_only(true)
+            .busy_timeout(std::time::Duration::from_secs(30));
+    let query_pool = SqlitePoolOptions::new()
+        .max_connections(4)
+        .connect_with(query_pool_opts)
+        .await
+        .context("open sqlite read-only pool")?;
+
     // RBAC bootstrap: seed the first admin account if the users table
     // is empty (chicken-and-egg). Reads the password registry-first
     // (HKLM\SOFTWARE\kanade\backend\BootstrapAdminPassword) /
@@ -870,6 +888,7 @@ pub(crate) async fn run_backend() -> Result<()> {
 
     let app_state = api::AppState {
         pool: pool.clone(),
+        query_pool,
         nats,
         jetstream,
         explode_spec_cache,

@@ -126,6 +126,7 @@ pub mod login;
 pub mod ping;
 pub mod provenance;
 pub mod publish_verify;
+pub mod query;
 pub mod revoke;
 pub mod run;
 pub mod schedule;
