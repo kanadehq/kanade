@@ -40,7 +40,7 @@ anyhow = { workspace = true }
 # be enabled here. (Trade-off: `cargo tauri dev` no longer hot-reloads
 # from the Vite server for this crate — this repo embeds at build time
 # and never uses the dev-server flow, so that's fine.)
-tauri = { version = "2.11.3", features = ["custom-protocol"] }
+tauri = { version = "2.11.4", features = ["custom-protocol"] }
 # Native OS toast notifications — used for info/warn toasts. Emergencies are
 # built as raw WinRT toasts in `app.rs` (the plugin can't persist a toast nor
 # carry the click-to-open `launch`).
