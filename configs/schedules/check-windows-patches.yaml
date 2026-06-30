@@ -1,0 +1,17 @@
+# Fires the registered `check-windows-patches` job per-PC once a day.
+# Pending-update state changes slowly (a daily Windows Update sync), so a
+# daily tick keeps the fleet compliance view current without hammering
+# the WU stack. Jitter spreads the COM searches so a whole fleet doesn't
+# hit a WSUS server at the same instant.
+#
+# Install (after `kanade job create configs/jobs/check-windows-patches.yaml`):
+#   kanade schedule create configs/schedules/check-windows-patches.yaml
+id: check-windows-patches
+when:
+  per_pc: { every: 24h }
+enabled: true
+job_id: check-windows-patches
+target:
+  all: true
+jitter: 30m
+tags: [health-check, patching, security]
