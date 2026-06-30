@@ -484,6 +484,11 @@
           "type": "boolean",
           "default": true
         },
+        "health": {
+          "description": "When `true` (default), this check is shown on the Client App's\nHealth tab (the end user sees its ok/warn/fail row). Set\n`health: false` for a **gate-only** check — one that exists purely\nto drive a `client.show_when` display gate (e.g. `myapp-up-to-date`)\nand would just be noise as a Health row. The agent still records it\ninto `StateSnapshot.checks` (so `show_when` can read it and the gate\nkeeps working); only the Client App's Health *rendering* skips it,\nvia the [`Check.health_hidden`](crate::ipc::state::Check::health_hidden)\nwire flag. Orthogonal to [`fleet`](CheckHint::fleet): `fleet` gates\nthe operator SPA fleet view, `health` gates the end-user Health tab,\nso a pure gate detector typically sets neither (`fleet: false` +\n`health: false`) to stay invisible everywhere while still driving\nthe gate.",
+          "type": "boolean",
+          "default": true
+        },
         "label": {
           "description": "Optional human-facing display title →\n[`Check.label`](crate::ipc::state::Check). The Client App's\nHealth tab and the operator SPA's Compliance page render this\ninstead of the [`name`](CheckHint::name) slug when set\n(`\"ウイルス対策のリアルタイム保護\"` reads better than\n`defender_rtp`). Falls back to the slug when absent, so it's\npurely additive. Author it in the check's language — there's no\nper-locale variant; checks are operator-defined per fleet.",
           "type": [

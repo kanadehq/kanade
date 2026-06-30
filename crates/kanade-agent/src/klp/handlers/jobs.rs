@@ -1283,6 +1283,7 @@ mod tests {
             detail_field: "detail".into(),
             troubleshoot: None,
             fleet: true,
+            health: true,
             alert: None,
         });
         let cmd = build_command(&m, "run-1", "req-1").expect("build");

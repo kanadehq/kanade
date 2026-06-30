@@ -168,6 +168,7 @@ fn agent_self_update_check(running: &str, target: Option<&str>) -> Check {
             status: CheckStatus::Ok,
             detail: Some(format!("running {running} (target matches)")),
             troubleshoot: None,
+            health_hidden: false,
         }
     } else {
         Check {
@@ -181,6 +182,7 @@ fn agent_self_update_check(running: &str, target: Option<&str>) -> Check {
             // self_update background task handles this without
             // user action.
             troubleshoot: None,
+            health_hidden: false,
         }
     }
 }
@@ -226,6 +228,7 @@ mod tests {
                 status: CheckStatus::Warn,
                 detail: Some("C: 8% free".into()),
                 troubleshoot: None,
+                health_hidden: false,
             },
             // Same name as the intrinsic check → must override, not
             // duplicate.
@@ -235,6 +238,7 @@ mod tests {
                 status: CheckStatus::Fail,
                 detail: Some("operator override".into()),
                 troubleshoot: None,
+                health_hidden: false,
             },
         ];
         let snap = eval_once("PC1234", "0.41.0", &cfg_with(None), true, &extra);
