@@ -31,6 +31,7 @@ pub mod schemas;
 pub mod script_objects;
 pub mod scripts;
 pub mod server_settings;
+pub mod view_sql;
 pub mod views;
 pub mod yaml_body;
 
@@ -96,6 +97,12 @@ pub struct AppState {
     /// hot path hits this instead of a NATS round-trip per request.
     /// `Clone` is cheap (Arc).
     pub explode_spec_cache: crate::projector::spec_cache::ExplodeSpecCache,
+    /// #vuln-roadmap PR3: in-memory materialization cache for SQL-backed
+    /// `view:` widgets, keyed per `(view_id, widget index)`. A derived cache
+    /// (recomputed from the read-only query on the widget's `refresh`
+    /// cadence), so it needs no durability — `Arc` keeps `AppState`'s `Clone`
+    /// cheap and shares the map across requests. See `api::view_sql`.
+    pub sql_view_cache: view_sql::SqlViewCache,
     /// Outbound SMTP relay, built from the `[mail]` config when present.
     /// `None` ⇒ email features are no-ops. `Arc` so `AppState`'s `Clone`
     /// (one per request) stays cheap and the relay's connection pool is

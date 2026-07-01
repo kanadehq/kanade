@@ -27,13 +27,14 @@ use futures::StreamExt;
 use kanade_shared::kv::{BUCKET_JOBS, BUCKET_VIEWS};
 use kanade_shared::manifest::{
     AggregateAgg, AggregateRender, AggregateScope, AggregateTimeBucket, AggregateTransform,
-    AggregateWidget, Manifest, View,
+    AggregateWidget, Manifest, SqlWidget, View,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use tracing::{debug, warn};
 
 use super::AppState;
+use super::view_sql;
 
 /// Default top-N for grouped (`bar`) widgets when the spec omits `limit`.
 const DEFAULT_LIMIT: i64 = 10;
@@ -75,7 +76,7 @@ struct Ctx<'a> {
     tz_mod: &'a str,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone, Debug)]
 pub struct BarRow {
     pub label: String,
     pub value: i64,
@@ -85,7 +86,7 @@ pub struct BarRow {
 }
 
 /// One local hour-of-day bucket for a `timeline` widget.
-#[derive(Serialize)]
+#[derive(Serialize, Clone, Debug)]
 pub struct HourBucket {
     pub hour: i64,
     pub total: i64,
@@ -96,7 +97,7 @@ pub struct HourBucket {
 /// window's worth of these into lane spans (power/session/sleep), so the
 /// span-reconstruction logic lives in one place (shared with the Events
 /// page strip) rather than being duplicated in Rust.
-#[derive(Serialize)]
+#[derive(Serialize, Clone, Debug)]
 pub struct OpEvent {
     pub at: DateTime<Utc>,
     pub kind: String,
@@ -104,9 +105,23 @@ pub struct OpEvent {
 
 /// The render-specific payload. Tagged by `render` so the SPA picks the
 /// matching widget component; flattened into [`WidgetResult`].
-#[derive(Serialize)]
+#[derive(Serialize, Clone, Debug)]
 #[serde(tag = "render", rename_all = "lowercase")]
 pub enum WidgetData {
+    /// #vuln-roadmap PR3: the full result grid of a SQL-backed `view:` widget.
+    /// `columns` is the (optionally relabelled) header; each `rows` entry is a
+    /// row of JSON cells aligned to it. New renderer on the SPA.
+    Table {
+        columns: Vec<String>,
+        rows: Vec<Vec<serde_json::Value>>,
+    },
+    /// #vuln-roadmap PR3: parts-of-a-whole for a SQL-backed `view:` widget.
+    /// Reuses [`BarRow`] (label + value); `donut` asks the SPA for a hole with
+    /// the total in the centre. New renderer on the SPA (recharts).
+    Pie {
+        rows: Vec<BarRow>,
+        donut: bool,
+    },
     Bar {
         rows: Vec<BarRow>,
     },
@@ -245,6 +260,35 @@ pub async fn get(
             }
         }
     }
+    // SQL-backed view widgets (#vuln-roadmap PR3) are global/fleet — they
+    // query the projector tables directly (inventory / feeds / …), not a
+    // per-PC parameterized `obs_events` slice, so they're computed only for
+    // the fleet scope (pc_id absent), never the per-PC Analytics view. Each is
+    // served from the materialization cache (recomputed on its `refresh`
+    // cadence), so an expensive correlation join doesn't re-run on every
+    // ~30s poll. Appended after the obs_events widgets; the SPA groups by tab.
+    if want_scope == AggregateScope::Fleet {
+        for (view_id, idx, w) in load_sql_widgets(&state.jetstream).await {
+            if only_pinned && !w.placement.is_pinned() {
+                continue;
+            }
+            match view_sql::compute_cached(&state, &view_id, idx, &w).await {
+                Ok(data) => out.push(WidgetResult {
+                    dashboard: w.placement.tab().to_string(),
+                    title: w.title,
+                    description: w.description,
+                    scope: "fleet",
+                    pin_dashboard: w.placement.is_pinned(),
+                    data,
+                }),
+                // One bad view widget (a query error, a missing column)
+                // shouldn't 500 the page — log and drop, like the obs path.
+                Err(e) => {
+                    warn!(error = %e, view = %view_id, title = %w.title, "analytics: sql widget compute")
+                }
+            }
+        }
+    }
     // `widgets` was pre-sorted, so `out` is already in render order.
     Ok(Json(out))
 }
@@ -297,6 +341,33 @@ async fn load_widgets(jetstream: &async_nats::jetstream::Context) -> Vec<Aggrega
             };
             if let Ok(view) = serde_json::from_slice::<View>(&entry) {
                 out.extend(view.widgets);
+            }
+        }
+    }
+    out
+}
+
+/// Collect every SQL-backed widget across the standalone view resources in
+/// `BUCKET_VIEWS`, tagged with its `(view_id, index)` so the materialization
+/// cache can key each one. An unreadable entry / bucket is skipped, not fatal
+/// (mirrors [`load_widgets`]).
+async fn load_sql_widgets(
+    jetstream: &async_nats::jetstream::Context,
+) -> Vec<(String, usize, SqlWidget)> {
+    let mut out = Vec::new();
+    if let Ok(kv) = jetstream.get_key_value(BUCKET_VIEWS).await
+        && let Ok(mut keys) = kv.keys().await
+    {
+        while let Some(key) = keys.next().await {
+            let Ok(key) = key else { continue };
+            let Some(entry) = kv.get(&key).await.unwrap_or(None) else {
+                continue;
+            };
+            if let Ok(view) = serde_json::from_slice::<View>(&entry) {
+                let id = view.id;
+                for (i, w) in view.sql_widgets.into_iter().enumerate() {
+                    out.push((id.clone(), i, w));
+                }
             }
         }
     }

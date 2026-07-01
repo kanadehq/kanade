@@ -26,6 +26,14 @@
         }
       ]
     },
+    "sql_widgets": {
+      "title": "vuln-roadmap PR3: SQL-backed, materialized widgets — raw read-only SQL",
+      "description": "over the projector tables (inventory/feeds/…) mapped to a visual. This\nis how a correlation dashboard (vulnerability / EOL / license) is\nexpressed as config. See [`SqlWidget`].",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SqlWidget"
+      }
+    },
     "tags": {
       "description": "Free-form operator taxonomy (same role as [`Manifest::tags`]).",
       "type": "array",
@@ -34,7 +42,7 @@
       }
     },
     "widgets": {
-      "description": "The widgets this view contributes to the Analytics page.",
+      "description": "The `obs_events` aggregate widgets this view contributes to the\nAnalytics page. Optional since PR3 — a view may instead (or also)\ncarry [`sql_widgets`](View::sql_widgets); a view must have at least one\nwidget across the two lists.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/AggregateWidget"
@@ -42,8 +50,7 @@
     }
   },
   "required": [
-    "id",
-    "widgets"
+    "id"
   ],
   "$defs": {
     "AggregateAgg": {
@@ -298,6 +305,153 @@
         "render"
       ]
     },
+    "DashboardPlacement": {
+      "description": "The `placement.dashboard` block — see [`Placement::dashboard`].",
+      "type": "object",
+      "properties": {
+        "pin": {
+          "description": "Pin this widget to the main Dashboard's promoted section.",
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "Placement": {
+      "description": "Where a [`SqlWidget`] surfaces in the SPA. Mirrors the placement an\n[`AggregateWidget`] expresses via `dashboard` + `pin_dashboard`, but as an\nexplicit block since a SQL widget lives on a standalone view.",
+      "type": "object",
+      "properties": {
+        "analytics": {
+          "description": "The Analytics tab this widget groups under (the `AggregateWidget`\n`dashboard` analogue). Absent ⇒ not shown on the Analytics page.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dashboard": {
+          "description": "Promote to the main Dashboard (reuses #900's pinned section). Absent ⇒\nnot pinned.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DashboardPlacement"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "RenderKind": {
+      "description": "The chart kind for a [`RenderSpec`]. `table` and `pie` are new in PR3; the\nrest reuse the existing `obs_events` widget renderers.",
+      "oneOf": [
+        {
+          "description": "The full result grid (new renderer). The universal default.",
+          "type": "string",
+          "const": "table"
+        },
+        {
+          "description": "A single headline number from the first row's `value` cell.",
+          "type": "string",
+          "const": "stat"
+        },
+        {
+          "description": "Ranked horizontal bars — `label` + `value` per row, optional top-N.",
+          "type": "string",
+          "const": "bar"
+        },
+        {
+          "description": "Parts-of-a-whole (new renderer) — `label` + `value` per row.",
+          "type": "string",
+          "const": "pie"
+        },
+        {
+          "description": "A ratio dial — a `value` ratio, or a `num`/`den` pair.",
+          "type": "string",
+          "const": "gauge"
+        },
+        {
+          "title": "492 forward-compat catch-all (see [`AggregateScope::Unknown`]).",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
+    },
+    "RenderSpec": {
+      "description": "How a [`SqlWidget`]'s SQL result columns map onto a visual. A `kind` names\nthe chart; the channel fields (`value`, `label`, `columns`, …) name which\nresult columns feed it. Only the channels a `kind` uses are read; the\nbackend validates the named columns exist in the result. New chart types\nare \"one renderer + the same mapping\", so this stays a flat, additive shape.",
+      "type": "object",
+      "properties": {
+        "columns": {
+          "description": "`table` only: the columns to show, in order. Absent ⇒ every result\ncolumn (the universal default).",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "den": {
+          "description": "`gauge` only: the denominator column (paired with `num`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "donut": {
+          "description": "`pie` only: render as a donut (a hole with the total in the centre).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "kind": {
+          "description": "Which visual to render the result as.",
+          "$ref": "#/$defs/RenderKind"
+        },
+        "label": {
+          "description": "`bar` / `pie`: the result column holding each row's category label.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "labels": {
+          "description": "`table` only: optional per-column header relabelling (result column →\ndisplay name). Columns not listed keep their SQL name.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "limit": {
+          "description": "`bar` / `pie`: keep only the top-N rows (by value). Absent ⇒ all rows.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "num": {
+          "description": "`gauge` only: the numerator column (paired with `den`). Alternative to\na precomputed `value` ratio.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": {
+          "description": "`stat` / `bar` / `pie` / `gauge`: the result column holding the numeric\nvalue (`stat`/`gauge` read the first row; `bar`/`pie` read every row).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind"
+      ]
+    },
     "RepoOrigin": {
       "description": "GitOps provenance for a repo-managed YAML artifact — a [`Manifest`]\n(#678) or a [`Schedule`] (#695). Populated by `kanade job create` /\n`kanade schedule create` from the Git context of the source YAML;\nthe SPA reads it to render Git-managed entries read-only and link\nthe operator back at the repo. Never consulted by the runtime.",
       "type": "object",
@@ -323,6 +477,49 @@
       },
       "required": [
         "path"
+      ]
+    },
+    "SqlWidget": {
+      "title": "vuln-roadmap PR3: a **SQL-backed, materialized** widget on a [`View`].",
+      "description": "Where an [`AggregateWidget`] encodes an `obs_events` rollup in structured\nYAML fields, a `SqlWidget` carries a raw read-only `SELECT`/`WITH` over the\nprojector's tables (inventory `explode:` tables, `feeds`, `check_status`,\n…) — the correlation that powers a vulnerability / EOL / license dashboard\nis just a `JOIN`, far more expressive than a YAML DSL. The backend runs the\nquery in the read-only sandbox (`api::query`), caches the result on the\n`refresh` cadence, and maps it to the same render-ready shape the existing\nwidget components consume, via [`RenderSpec`]. See [`View::sql_widgets`].",
+      "type": "object",
+      "properties": {
+        "description": {
+          "description": "Optional muted subtitle (a unit, a caveat). Rejected if present-blank.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "placement": {
+          "description": "Where the widget surfaces — an Analytics tab and/or a pinned Dashboard\ncard. At least one must be set (else it renders nowhere).",
+          "$ref": "#/$defs/Placement"
+        },
+        "query": {
+          "description": "The read-only SQL. Executed in the `api::query` sandbox: a single\n`SELECT`/`WITH` on a `SQLITE_OPEN_READONLY` connection, row-capped and\ntime-bounded. The backend validates it read-only at `view create` and\nagain at run time; a write verb / stacked statement is rejected.",
+          "type": "string"
+        },
+        "refresh": {
+          "description": "Materialization cadence as a humantime duration (`\"6h\"`, `\"30m\"`).\nAbsent ⇒ [`DEFAULT_VIEW_REFRESH`]. The backend re-runs the query at\nmost this often; reads in between hit the cache.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "render": {
+          "description": "How the query's result columns map to a visual — see [`RenderSpec`].",
+          "$ref": "#/$defs/RenderSpec"
+        },
+        "title": {
+          "description": "Widget heading. Required, validated non-empty.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "query",
+        "render",
+        "placement"
       ]
     }
   }
