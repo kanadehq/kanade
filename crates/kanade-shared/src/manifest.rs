@@ -174,6 +174,20 @@ pub struct Manifest {
     /// `skip_serializing_if`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finalize: Option<FinalizeSpec>,
+    /// #vuln-roadmap: declarative **external-data feeds**. Each entry fetches
+    /// global reference data (a vulnerability catalog, an EOL table, a license
+    /// roster) and projects it into the shared `feeds` table keyed
+    /// `(feed_id, item_id)` — fleet-wide, with no `pc_id`, unlike the per-PC
+    /// inventory [`ExplodeSpec`]. The job's script (run on the trusted
+    /// controller tier) fetches + shapes the data and prints the array under
+    /// each spec's [`field`](FeedSpec::field) inside a
+    /// `#KANADE-FEED-BEGIN/END` fence; the projector replaces that feed's rows
+    /// wholesale. A non-empty `feed:` **implies** `tier: controller` (the
+    /// dispatch guard treats it as such), so an external fetch never lands on
+    /// an employee endpoint. Composes with the other fenced hints. New field ⇒
+    /// #492 wire rule (`default` + `skip_serializing_if`). See [`FeedSpec`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub feed: Vec<FeedSpec>,
     /// Execution tier (#vuln-roadmap). `None` / `endpoint` (default) ⇒ the
     /// job dispatches to the targeted fleet agents like any job. `controller`
     /// ⇒ it may run ONLY on trusted infra hosts — the backend constrains
@@ -294,6 +308,10 @@ pub const CHECK_BLOCK_END: &str = "#KANADE-CHECK-END";
 pub const COLLECT_BLOCK_BEGIN: &str = "#KANADE-COLLECT-BEGIN";
 /// Collect-payload closing marker.
 pub const COLLECT_BLOCK_END: &str = "#KANADE-COLLECT-END";
+/// Feed-payload opening marker — see [`INVENTORY_BLOCK_BEGIN`].
+pub const FEED_BLOCK_BEGIN: &str = "#KANADE-FEED-BEGIN";
+/// Feed-payload closing marker.
+pub const FEED_BLOCK_END: &str = "#KANADE-FEED-END";
 
 /// Extract a hint's fenced block when the `begin` marker is present, else
 /// `None`. An unterminated fence (closing marker missing, e.g. truncated
@@ -318,6 +336,7 @@ pub fn has_any_hint_fence(stdout: &str) -> bool {
         INVENTORY_BLOCK_BEGIN,
         CHECK_BLOCK_BEGIN,
         COLLECT_BLOCK_BEGIN,
+        FEED_BLOCK_BEGIN,
     ]
     .iter()
     .any(|m| find_line_marker(stdout, m).is_some())
@@ -346,6 +365,12 @@ pub fn fenced_payload<'a>(stdout: &'a str, begin: &str, end: &str) -> &'a str {
 /// markers. Kept as a named helper for the projector call site.
 pub fn inventory_payload(stdout: &str) -> &str {
     fenced_payload(stdout, INVENTORY_BLOCK_BEGIN, INVENTORY_BLOCK_END)
+}
+
+/// Feed's fenced payload — [`fenced_payload`] with the feed markers. Kept as
+/// a named helper for the projector call site.
+pub fn feed_payload(stdout: &str) -> &str {
+    fenced_payload(stdout, FEED_BLOCK_BEGIN, FEED_BLOCK_END)
 }
 
 /// Find `needle` only where it begins a line (start of `hay` or right
@@ -1414,6 +1439,34 @@ pub struct ExplodeColumn {
     pub index: bool,
 }
 
+/// #vuln-roadmap: one declarative **external-data feed** on a `feed:`
+/// manifest — see [`Manifest::feed`]. Unlike inventory [`ExplodeSpec`]
+/// (keyed per `(pc_id, job_id)`), a feed is GLOBAL fleet-wide reference
+/// data: the controller-tier job's script fetches + shapes it, prints the
+/// array under [`field`](FeedSpec::field) inside a `#KANADE-FEED-BEGIN/END`
+/// fence, and the projector REPLACES that feed's rows wholesale in the
+/// shared `feeds` table keyed `(feed_id, item_id)`. The full element JSON
+/// lands in a `data` column, so a `view:` SQL `json_extract`s whatever
+/// shape the feed carries — no per-feed schema, no dynamic DDL. One
+/// manifest may declare several feeds.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
+pub struct FeedSpec {
+    /// Stable feed identifier — the `feed_id` partition in the shared
+    /// `feeds` table. Operators choose this; namespace it (`cisa-kev`,
+    /// `endoflife-windows`) so feeds don't collide. A new result for the
+    /// same id replaces that partition wholesale.
+    pub id: String,
+    /// JSON array key under the (fenced) payload to ingest. E.g.
+    /// `"vulnerabilities"` for `{ vulnerabilities: [{...}, {...}] }`.
+    pub field: String,
+    /// Element-level field(s) whose values uniquely identify an item
+    /// within the feed — they form the `item_id` key (joined for a
+    /// composite key). Required: operators must think about uniqueness
+    /// (e.g. `["cveID"]` for CISA KEV). An element missing any of these is
+    /// skipped (it has no stable identity).
+    pub primary_key: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
 pub struct DisplayField {
     /// Top-level key in the stdout JSON.
@@ -1662,6 +1715,53 @@ impl Manifest {
                     .to_string(),
             );
         }
+        // #vuln-roadmap: a `feed:` spec drives the global `feeds`
+        // projection. id / item_id are stored as *values* (the `feeds`
+        // table is fixed-schema — no identifier splicing), but blank
+        // values are silent projection bugs: a blank id collides every
+        // feed under "", a blank field never matches the payload array,
+        // and an empty primary_key yields no item_id (every row dropped).
+        // Reject them at the write boundary so `kanade job create` surfaces
+        // the typo instead of producing an empty/garbled feed at run time.
+        let mut seen_feed_ids: Vec<&str> = Vec::new();
+        for spec in &self.feed {
+            let id = spec.id.trim();
+            if id.is_empty() {
+                return Err("feed.id must not be empty".to_string());
+            }
+            if spec.field.trim().is_empty() {
+                return Err(format!("feed '{id}' field must not be empty"));
+            }
+            if spec.primary_key.is_empty() {
+                return Err(format!("feed '{id}' needs at least one primary_key field"));
+            }
+            if spec.primary_key.iter().any(|k| k.trim().is_empty()) {
+                return Err(format!(
+                    "feed '{id}' primary_key must not contain blank entries"
+                ));
+            }
+            // Two specs sharing an id both target the same `feeds`
+            // partition and would clobber each other on every run —
+            // reject the ambiguity rather than let last-write-wins.
+            if seen_feed_ids.contains(&id) {
+                return Err(format!("feed id '{id}' is declared more than once"));
+            }
+            seen_feed_ids.push(id);
+        }
+        // A `feed:` job fetches external data and MUST run on the trusted
+        // controller tier — the dispatch guard (`requires_controller`) treats
+        // a non-empty `feed:` as implying `controller`. An explicit
+        // `tier: endpoint` contradicts that intent; reject it rather than
+        // silently overriding, so the operator can't believe a feed runs on
+        // endpoints. Omitting `tier:` (the default) is fine — the implication
+        // confines it; `tier: controller` is the redundant-but-explicit form.
+        if !self.feed.is_empty() && matches!(self.tier, Some(Tier::Endpoint)) {
+            return Err(
+                "feed: requires the controller tier — remove `tier: endpoint` (a feed: job \
+                 fetches external data and is confined to the controller_group)"
+                    .to_string(),
+            );
+        }
         // A present-but-empty finalize script is an invisible no-op
         // (the hook would run an empty body); reject it at the write
         // boundary. Inline-only in P1, so `script` is the sole source.
@@ -1703,14 +1803,20 @@ impl Manifest {
         //
         // `emit:` remains the exception — its stdout is line-delimited
         // NDJSON consumed whole and then omitted from the result — so it
-        // can't share stdout with any fenced hint.
+        // can't share stdout with any fenced hint. `feed:` is another fenced
+        // stdout consumer (`#KANADE-FEED`), so it belongs in this exclusion
+        // too: with `emit:` present the projector never sees the feed's fence
+        // (CodeRabbit).
         if self.emit.is_some()
-            && (self.inventory.is_some() || self.check.is_some() || self.collect.is_some())
+            && (self.inventory.is_some()
+                || self.check.is_some()
+                || self.collect.is_some()
+                || !self.feed.is_empty())
         {
             return Err(
-                "`emit:` is incompatible with `inventory:` / `check:` / `collect:` — emit's \
-                 stdout is NDJSON timeline events (consumed whole and omitted from the result), \
-                 while the others read fenced JSON blocks from stdout"
+                "`emit:` is incompatible with `inventory:` / `check:` / `collect:` / `feed:` — \
+                 emit's stdout is NDJSON timeline events (consumed whole and omitted from the \
+                 result), while the others read fenced JSON blocks from stdout"
                     .to_string(),
             );
         }
@@ -3209,6 +3315,65 @@ tags: [ok, "   "]
             .unwrap()
             .validate()
             .expect("endpoint tier is valid");
+    }
+
+    #[test]
+    fn feed_payload_extracts_fenced_block() {
+        let stdout = "fetched 1500 KEV entries\n\
+            #KANADE-FEED-BEGIN\n\
+            {\"vulnerabilities\": []}\n\
+            #KANADE-FEED-END\n";
+        assert_eq!(feed_payload(stdout), "{\"vulnerabilities\": []}");
+    }
+
+    #[test]
+    fn validate_feed_rules() {
+        let base =
+            "id: f\nversion: 0.0.1\nexecute:\n  shell: powershell\n  script: x\n  timeout: 30s\n";
+        // A well-formed feed (controller implied; no explicit tier) passes.
+        serde_yaml::from_str::<Manifest>(&format!(
+            "{base}feed:\n  - id: cisa-kev\n    field: vulnerabilities\n    primary_key: [cveID]\n"
+        ))
+        .unwrap()
+        .validate()
+        .expect("a well-formed feed is valid");
+
+        // Empty primary_key is rejected (no item_id → every row dropped).
+        let err = serde_yaml::from_str::<Manifest>(&format!(
+            "{base}feed:\n  - id: cisa-kev\n    field: vulnerabilities\n    primary_key: []\n"
+        ))
+        .unwrap()
+        .validate()
+        .expect_err("empty primary_key must be rejected");
+        assert!(err.contains("primary_key"), "err: {err}");
+
+        // A duplicate feed id clobbers a partition — rejected.
+        let err = serde_yaml::from_str::<Manifest>(&format!(
+            "{base}feed:\n  - id: dup\n    field: a\n    primary_key: [k]\n  - id: dup\n    field: b\n    primary_key: [k]\n"
+        ))
+        .unwrap()
+        .validate()
+        .expect_err("duplicate feed id must be rejected");
+        assert!(err.contains("more than once"), "err: {err}");
+
+        // `feed:` + explicit `tier: endpoint` is contradictory — rejected.
+        let err = serde_yaml::from_str::<Manifest>(&format!(
+            "{base}tier: endpoint\nfeed:\n  - id: cisa-kev\n    field: vulnerabilities\n    primary_key: [cveID]\n"
+        ))
+        .unwrap()
+        .validate()
+        .expect_err("feed + tier: endpoint must be rejected");
+        assert!(err.contains("controller tier"), "err: {err}");
+
+        // `feed:` + `emit:` is incompatible — emit consumes stdout whole, so
+        // the feed's fence never reaches the projector.
+        let err = serde_yaml::from_str::<Manifest>(&format!(
+            "{base}emit:\n  type: events\nfeed:\n  - id: cisa-kev\n    field: vulnerabilities\n    primary_key: [cveID]\n"
+        ))
+        .unwrap()
+        .validate()
+        .expect_err("feed + emit must be rejected");
+        assert!(err.contains("emit"), "err: {err}");
     }
 
     // #720 — wrap an `aggregate:` YAML block (already indented as a

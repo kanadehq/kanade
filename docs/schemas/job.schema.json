@@ -74,6 +74,14 @@
     "execute": {
       "$ref": "#/$defs/Execute"
     },
+    "feed": {
+      "title": "vuln-roadmap: declarative **external-data feeds**. Each entry fetches",
+      "description": "global reference data (a vulnerability catalog, an EOL table, a license\nroster) and projects it into the shared `feeds` table keyed\n`(feed_id, item_id)` — fleet-wide, with no `pc_id`, unlike the per-PC\ninventory [`ExplodeSpec`]. The job's script (run on the trusted\ncontroller tier) fetches + shapes the data and prints the array under\neach spec's [`field`](FeedSpec::field) inside a\n`#KANADE-FEED-BEGIN/END` fence; the projector replaces that feed's rows\nwholesale. A non-empty `feed:` **implies** `tier: controller` (the\ndispatch guard treats it as such), so an external fetch never lands on\nan employee endpoint. Composes with the other fenced hints. New field ⇒\n#492 wire rule (`default` + `skip_serializing_if`). See [`FeedSpec`].",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/FeedSpec"
+      }
+    },
     "finalize": {
       "description": "Job-generic post-step hook. When set, the agent runs this script\nAFTER the main `execute:` script exits cleanly (and, for a\n`collect:` job, after the bundle finishes uploading), so the\noperator can delete / move / notify based on what the step\nproduced. Best-effort: a finalize failure is logged but never\nfails the run — the upload (if any) already succeeded.\n\nFor `collect:` jobs the agent injects the environment variable\n`KANADE_COLLECT_RESULT` — a JSON object\n`{ \"ok\": true, \"bundles\": [ { \"key\", \"uploaded\", \"files\": [...] } ] }`\n— so the hook acts on exactly the files that were bundled and\nuploaded (e.g. deletes only the `uploaded` ones). Composes with\nevery hint. New field ⇒ #492 wire rule (`default` +\n`skip_serializing_if`).",
       "anyOf": [
@@ -847,6 +855,33 @@
         "table",
         "primary_key",
         "columns"
+      ]
+    },
+    "FeedSpec": {
+      "title": "vuln-roadmap: one declarative **external-data feed** on a `feed:`",
+      "description": "manifest — see [`Manifest::feed`]. Unlike inventory [`ExplodeSpec`]\n(keyed per `(pc_id, job_id)`), a feed is GLOBAL fleet-wide reference\ndata: the controller-tier job's script fetches + shapes it, prints the\narray under [`field`](FeedSpec::field) inside a `#KANADE-FEED-BEGIN/END`\nfence, and the projector REPLACES that feed's rows wholesale in the\nshared `feeds` table keyed `(feed_id, item_id)`. The full element JSON\nlands in a `data` column, so a `view:` SQL `json_extract`s whatever\nshape the feed carries — no per-feed schema, no dynamic DDL. One\nmanifest may declare several feeds.",
+      "type": "object",
+      "properties": {
+        "field": {
+          "description": "JSON array key under the (fenced) payload to ingest. E.g.\n`\"vulnerabilities\"` for `{ vulnerabilities: [{...}, {...}] }`.",
+          "type": "string"
+        },
+        "id": {
+          "description": "Stable feed identifier — the `feed_id` partition in the shared\n`feeds` table. Operators choose this; namespace it (`cisa-kev`,\n`endoflife-windows`) so feeds don't collide. A new result for the\nsame id replaces that partition wholesale.",
+          "type": "string"
+        },
+        "primary_key": {
+          "description": "Element-level field(s) whose values uniquely identify an item\nwithin the feed — they form the `item_id` key (joined for a\ncomposite key). Required: operators must think about uniqueness\n(e.g. `[\"cveID\"]` for CISA KEV). An element missing any of these is\nskipped (it has no stable identity).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "field",
+        "primary_key"
       ]
     },
     "FinalizeSpec": {
