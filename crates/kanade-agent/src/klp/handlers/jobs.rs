@@ -1061,6 +1061,7 @@ mod tests {
             tags: Vec::new(),
             origin: None,
             finalize: None,
+            feed: Vec::new(),
             tier: None,
         }
     }

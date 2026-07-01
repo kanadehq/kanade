@@ -5,7 +5,9 @@ use async_nats::jetstream::{self, consumer::pull::Config as PullConfig};
 use futures::StreamExt;
 use kanade_shared::ExecResult;
 use kanade_shared::kv::{BUCKET_JOBS, OBJECT_RESULT_OUTPUT, STREAM_RESULTS};
-use kanade_shared::manifest::{CheckHint, InventoryHint, Manifest, inventory_payload};
+use kanade_shared::manifest::{
+    CheckHint, InventoryHint, Manifest, feed_payload, inventory_payload,
+};
 use sqlx::SqlitePool;
 use tokio::io::AsyncReadExt;
 use tracing::{debug, info, warn};
@@ -157,6 +159,15 @@ pub async fn run(
                         maybe_project_inventory(&pool, &jobs_cache, &jobs_kv, &r, recorded_at).await
                     {
                         warn!(error = ?e, result_id = %resolved_id, "inventory fact projection failed");
+                    }
+                    // #vuln-roadmap: a `feed:` job projects global reference
+                    // data into the shared `feeds` table. Clean-exit-only
+                    // (like inventory) — a crashed fetch must not wipe the
+                    // last-good catalog with an empty payload.
+                    if let Err(e) =
+                        maybe_project_feeds(&pool, &jobs_cache, &jobs_kv, &r, recorded_at).await
+                    {
+                        warn!(error = ?e, result_id = %resolved_id, "feed projection failed");
                     }
                 }
                 // #290 PR-E: a `check:` job (fleet != false) projects a
@@ -476,6 +487,48 @@ async fn maybe_project_inventory(
     };
     if let Some(hint) = job.inventory.as_ref() {
         return upsert_inventory(pool, r, manifest_id, hint, recorded_at).await;
+    }
+    Ok(())
+}
+
+/// #vuln-roadmap: look up `r.manifest_id`; if its manifest declares any
+/// `feed:` specs, parse the `#KANADE-FEED`-fenced stdout as JSON and replace
+/// each feed's rows in the shared global `feeds` table. Same "no hint =
+/// nothing to do" non-error contract as inventory. A single stdout parse is
+/// shared across all specs (they read different array fields of one payload).
+async fn maybe_project_feeds(
+    pool: &SqlitePool,
+    cache: &ExplodeSpecCache,
+    jobs_kv: &async_nats::jetstream::kv::Store,
+    r: &ExecResult,
+    recorded_at: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    let Some(manifest_id) = r.manifest_id.as_deref() else {
+        return Ok(());
+    };
+    let Some(job) = lookup_manifest(cache, jobs_kv, manifest_id).await? else {
+        return Ok(());
+    };
+    if job.feed.is_empty() {
+        return Ok(());
+    }
+    // One parse of the fenced payload, reused for every spec.
+    let payload = feed_payload(&r.stdout);
+    let value: serde_json::Value = serde_json::from_str(payload)
+        .with_context(|| format!("feed job '{manifest_id}' stdout was not JSON"))?;
+    for spec in &job.feed {
+        if let Err(e) =
+            super::feeds::replace_feed_rows(pool, spec, Some(r.finished_at), recorded_at, &value)
+                .await
+        {
+            // One bad feed shouldn't take its siblings down — log and continue.
+            warn!(
+                error = %e,
+                manifest_id,
+                feed_id = %spec.id,
+                "feed: replace_rows failed for this result",
+            );
+        }
     }
     Ok(())
 }

@@ -17,17 +17,19 @@ use crate::api::AppState;
 /// both the operator and scheduler paths), so any condition that should
 /// force controller-tier dispatch MUST be added here.
 ///
-/// Today that's only an explicit `tier: controller` — an unrecognised
-/// tier (`Tier::Unknown`) never reaches here because `Manifest::validate()`
-/// already rejects it (fail closed).
+/// Two conditions force confinement:
+///   1. an explicit `tier: controller`, and
+///   2. a non-empty `feed:` block — feeds fetch external URLs and must never
+///      run on an employee endpoint, so the hint *implies* the controller
+///      tier (`Manifest::validate()` already rejects the contradictory
+///      `feed:` + `tier: endpoint`).
 ///
-/// **PR2 (the `feed:` hint, #901) MUST extend this** to also return `true`
-/// when the manifest carries a `feed:` block — feeds fetch external URLs and
-/// must never run on endpoints. It can't be added yet (no `feed` field
-/// exists in this PR), but the contract lives here so that change is a
-/// one-liner at the single gate, not a scattered audit.
+/// An unrecognised tier (`Tier::Unknown`) never reaches here because
+/// `Manifest::validate()` already rejects it (fail closed). Any future
+/// privileged hint that must be confined adds its condition HERE — this is
+/// the sole gate, not a scattered audit.
 pub fn requires_controller(m: &Manifest) -> bool {
-    matches!(m.tier, Some(Tier::Controller))
+    matches!(m.tier, Some(Tier::Controller)) || !m.feed.is_empty()
 }
 
 /// The set of **alive** controller-tier runner pc_ids, or `None` when
@@ -94,6 +96,26 @@ mod tests {
 
     fn set(items: &[&str]) -> HashSet<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn manifest(extra: &str) -> Manifest {
+        serde_yaml::from_str(&format!(
+            "id: j\nversion: 0.0.1\nexecute:\n  shell: powershell\n  script: x\n  timeout: 30s\n{extra}"
+        ))
+        .expect("manifest parse")
+    }
+
+    #[test]
+    fn requires_controller_for_tier_and_feed() {
+        // A plain endpoint job is unconfined.
+        assert!(!requires_controller(&manifest("")));
+        // An explicit controller tier confines it.
+        assert!(requires_controller(&manifest("tier: controller\n")));
+        // A `feed:` block confines it even with no explicit tier (the
+        // hint implies controller — the single gate enforces it).
+        assert!(requires_controller(&manifest(
+            "feed:\n  - id: cisa-kev\n    field: vulnerabilities\n    primary_key: [cveID]\n"
+        )));
     }
 
     #[test]
