@@ -298,7 +298,16 @@ async fn reconcile_registrations(
             Ok(Some(b)) => b,
             Ok(None) => continue,
             Err(e) => {
-                warn!(error = %e, key = %k, "reconcile kv get");
+                // #916: a transient get failure must NOT drop the
+                // schedule from `seen` — the stale-sweep below
+                // unregisters anything not in `seen`, so a broker hiccup
+                // on one key would otherwise unregister a live schedule.
+                // The KV key IS the schedule id (`kv.put(&schedule.id,…)`),
+                // so mark it seen to keep its existing registration
+                // untouched; a later reconcile with a healthy broker
+                // re-reads and reconciles it.
+                warn!(error = %e, key = %k, "reconcile kv get; keeping existing registration");
+                seen.insert(k.clone());
                 continue;
             }
         };
