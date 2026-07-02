@@ -282,19 +282,36 @@ impl std::fmt::Display for ReadOnlyError {
 /// validating it first and bounding it by row cap + wall-clock timeout. Shared
 /// by the ad-hoc `POST /api/query` endpoint and the materialized `view:`
 /// widgets, so both get the identical safety envelope.
+///
+/// `pc_id` binds the query's `:pc_id` token for a per-PC `view:` widget.
+/// sqlx-sqlite only binds POSITIONAL `?` (not `:name`), so we rewrite every
+/// `:pc_id` occurrence to `?` and bind the value once per occurrence — the
+/// value only ever reaches SQLite through `.bind()`, never spliced into the
+/// text, so a per-PC widget can't be an injection vector. `None` leaves the
+/// query as-is (the fleet widgets and the ad-hoc `/api/query` endpoint).
 pub(crate) async fn run_read_only(
     pool: &SqlitePool,
     sql: &str,
     limit: usize,
+    pc_id: Option<&str>,
 ) -> Result<ReadOnlyResult, ReadOnlyError> {
     validate_read_only(sql).map_err(ReadOnlyError::Rejected)?;
     let limit = limit.clamp(1, MAX_LIMIT);
+    // Rewrite the per-PC token to positional placeholders. `bind_count` is the
+    // number of `?` we must bind `pc_id` to. The shared, literal-aware scanner
+    // only rewrites real `:pc_id` tokens (not ones inside a string literal /
+    // comment), so `bind_count` matches what SQLite sees. When `pc_id` is None
+    // the SQL is untouched (bind_count 0).
+    let (effective_sql, bind_count) = match pc_id {
+        Some(_) => kanade_shared::manifest::rewrite_pc_id_param(sql),
+        None => (sql.to_string(), 0),
+    };
     let fetch = async {
         // Column names from `describe` (prepares without running), so a
         // zero-row result still reports its columns instead of an empty
         // header (claude #899).
         let described = pool
-            .describe(AssertSqlSafe(sql.to_string()).into_sql_str())
+            .describe(AssertSqlSafe(effective_sql.clone()).into_sql_str())
             .await?;
         let columns: Vec<String> = described
             .columns()
@@ -304,7 +321,13 @@ pub(crate) async fn run_read_only(
 
         // Stream + cap so a huge result set can't be materialised whole.
         // Pull one past `limit` to detect (and flag) truncation.
-        let mut stream = sqlx::query(AssertSqlSafe(sql.to_string())).fetch(pool);
+        let mut q = sqlx::query(AssertSqlSafe(effective_sql.clone()));
+        if let Some(pc) = pc_id {
+            for _ in 0..bind_count {
+                q = q.bind(pc.to_string());
+            }
+        }
+        let mut stream = q.fetch(pool);
         let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
         let mut truncated = false;
         while let Some(row) = stream.try_next().await? {
@@ -342,7 +365,7 @@ pub async fn execute(
 ) -> Result<Json<QueryResponse>, (StatusCode, String)> {
     let started = Instant::now();
     let limit = req.limit.unwrap_or(DEFAULT_LIMIT);
-    let result = run_read_only(&state.query_pool, &req.sql, limit)
+    let result = run_read_only(&state.query_pool, &req.sql, limit, None)
         .await
         .map_err(|e| {
             let status = match e {

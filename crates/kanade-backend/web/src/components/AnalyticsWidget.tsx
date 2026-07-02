@@ -3,7 +3,7 @@
 // "pinned" section (a `pin_dashboard: true` widget surfaces up front). The
 // page owns scope/date controls; this module owns the per-widget visuals.
 
-import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from 'recharts';
+import { Cell, Legend, Pie, PieChart, ResponsiveContainer, Tooltip } from 'recharts';
 
 import { OperationalTimeline, type OpEvent } from '@/components/OperationalTimeline';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -194,18 +194,21 @@ const PIE_COLORS = ['#8b5cf6', '#a78bfa', '#c4b5fd', '#7c3aed', '#6d28d9', '#ddd
 function PieWidget({ rows, donut, empty }: { rows: BarRow[]; donut?: boolean; empty: string }) {
   if (rows.length === 0) return <div className="text-muted text-sm">{empty}</div>;
   const total = rows.reduce((sum, r) => sum + r.value, 0);
+  // The pie sits in the upper area; the legend takes the bottom band. `cy` is
+  // the pie centre in px so the donut centre-total overlay can align to it.
+  const pieCy = 105;
   return (
     <div className="relative">
-      <ResponsiveContainer width="100%" height={220}>
+      <ResponsiveContainer width="100%" height={280}>
         <PieChart>
           <Pie
             data={rows}
             dataKey="value"
             nameKey="label"
             cx="50%"
-            cy="50%"
-            outerRadius={90}
-            innerRadius={donut ? 55 : 0}
+            cy={pieCy}
+            outerRadius={85}
+            innerRadius={donut ? 52 : 0}
             paddingAngle={rows.length > 1 ? 2 : 0}
           >
             {rows.map((r, i) => (
@@ -218,13 +221,28 @@ function PieWidget({ rows, donut, empty }: { rows: BarRow[]; donut?: boolean; em
             formatter={(value, name) => [Number(value).toLocaleString(), String(name)]}
             contentStyle={{ fontSize: '12px' }}
           />
+          {/* Legend maps each slice colour to its label + value + share, so a
+              reader can tell slices apart without hovering. */}
+          <Legend
+            verticalAlign="bottom"
+            iconType="circle"
+            wrapperStyle={{ fontSize: '11px', paddingTop: '8px' }}
+            formatter={(value, entry) => {
+              const v = Number((entry?.payload as { value?: number } | undefined)?.value ?? 0);
+              const pct = total > 0 ? Math.round((v / total) * 100) : 0;
+              return `${value} — ${v.toLocaleString()} (${pct}%)`;
+            }}
+          />
         </PieChart>
       </ResponsiveContainer>
       {donut && (
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-          <div className="text-center">
-            <div className="text-lg font-semibold">{total.toLocaleString()}</div>
-          </div>
+        // Centre total, aligned to the pie centre (not the whole box, which
+        // now includes the legend band below).
+        <div
+          className="pointer-events-none absolute inset-x-0 top-0 flex items-center justify-center"
+          style={{ height: pieCy * 2 }}
+        >
+          <div className="text-lg font-semibold">{total.toLocaleString()}</div>
         </div>
       )}
     </div>

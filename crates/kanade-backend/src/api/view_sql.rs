@@ -48,6 +48,20 @@ pub fn new_cache() -> SqlViewCache {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
+/// True when this widget is **per-PC**: its query binds the `:pc_id` parameter,
+/// so it renders in the per-PC Analytics scope (bound to the selected PC)
+/// instead of the fleet scope. A widget without it is fleet-global (the
+/// default). The token's mere presence is the declaration — no separate field.
+///
+/// Uses the shared, literal-aware [`rewrite_pc_id_param`] scanner (count > 0)
+/// rather than a naive substring check, so a `:pc_id` sitting inside a string
+/// literal doesn't misclassify a fleet widget as per-PC (claude review) — and
+/// so this agrees exactly with the backend's bind path, which rewrites via the
+/// same scanner.
+pub fn is_per_pc(widget: &SqlWidget) -> bool {
+    kanade_shared::manifest::rewrite_pc_id_param(&widget.query).1 > 0
+}
+
 /// Fingerprint the parts of a widget whose change should invalidate the cache
 /// (the query and how it renders — not the title/description/placement, which
 /// don't affect the computed data).
@@ -70,8 +84,12 @@ pub async fn compute_cached(
     view_id: &str,
     idx: usize,
     widget: &SqlWidget,
+    pc_id: Option<&str>,
 ) -> Result<WidgetData, String> {
-    let key = format!("{view_id}\u{1f}{idx}");
+    // A per-PC widget's result depends on the bound PC, so the cache key
+    // includes it — pc:X and pc:Y are distinct materializations of the same
+    // widget. Fleet widgets key on the empty pc segment.
+    let key = format!("{view_id}\u{1f}{idx}\u{1f}{}", pc_id.unwrap_or(""));
     let hash = widget_hash(widget);
     let ttl = widget.refresh_interval();
     {
@@ -84,7 +102,7 @@ pub async fn compute_cached(
     }
     // Recompute outside the lock (the query awaits). A concurrent duplicate
     // recompute is harmless — both write the same key, last wins.
-    let result = compute(&state.query_pool, widget).await;
+    let result = compute(&state.query_pool, widget, pc_id).await;
     let mut cache = state.sql_view_cache.lock().expect("sql_view_cache mutex");
     cache.insert(
         key,
@@ -98,9 +116,14 @@ pub async fn compute_cached(
 }
 
 /// Run the widget's query and map the result to a [`WidgetData`]. Kept
-/// separate from the cache so it's unit-testable with a bare pool.
-pub async fn compute(pool: &sqlx::SqlitePool, widget: &SqlWidget) -> Result<WidgetData, String> {
-    let res = run_read_only(pool, &widget.query, VIEW_ROW_LIMIT)
+/// separate from the cache so it's unit-testable with a bare pool. `pc_id`
+/// binds the `:pc_id` parameter of a per-PC widget (see [`is_per_pc`]).
+pub async fn compute(
+    pool: &sqlx::SqlitePool,
+    widget: &SqlWidget,
+    pc_id: Option<&str>,
+) -> Result<WidgetData, String> {
+    let res = run_read_only(pool, &widget.query, VIEW_ROW_LIMIT, pc_id)
         .await
         .map_err(|e: ReadOnlyError| e.to_string())?;
     map_widget_data(&widget.render, &res.columns, &res.rows)
@@ -478,7 +501,7 @@ placement: { analytics: X }
 ",
         )
         .unwrap();
-        match compute(&pool, &w).await.unwrap() {
+        match compute(&pool, &w, None).await.unwrap() {
             WidgetData::Bar { rows } => {
                 assert_eq!(rows.len(), 2);
                 assert_eq!(rows[0].label, "a");
@@ -496,7 +519,67 @@ placement: { analytics: X }
 ",
         )
         .unwrap();
-        let err = compute(&pool, &bad).await.unwrap_err();
+        let err = compute(&pool, &bad, None).await.unwrap_err();
         assert!(err.to_lowercase().contains("read-only"), "err: {err}");
+    }
+
+    #[test]
+    fn is_per_pc_detects_the_bind_token() {
+        let per_pc: SqlWidget = serde_yaml::from_str(
+            "title: T
+query: \"SELECT n FROM t WHERE pc_id = :pc_id\"
+render: { kind: table }
+placement: { analytics: X }
+",
+        )
+        .unwrap();
+        let fleet: SqlWidget = serde_yaml::from_str(
+            "title: T
+query: \"SELECT n FROM t\"
+render: { kind: table }
+placement: { analytics: X }
+",
+        )
+        .unwrap();
+        assert!(is_per_pc(&per_pc));
+        assert!(!is_per_pc(&fleet));
+    }
+
+    #[tokio::test]
+    async fn compute_binds_pc_id_for_per_pc_widget() {
+        use sqlx::sqlite::SqlitePoolOptions;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE t (pc_id TEXT, n INTEGER)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO t VALUES ('pc-1', 3), ('pc-1', 4), ('pc-2', 9)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        // `:pc_id` appears twice; SQLite reuses one bound value across both.
+        let w: SqlWidget = serde_yaml::from_str(
+            "title: T
+query: |
+  SELECT count(*) AS rows_for_pc FROM t
+  WHERE pc_id = :pc_id AND (:pc_id IS NOT NULL)
+render: { kind: stat, value: rows_for_pc }
+placement: { analytics: X }
+",
+        )
+        .unwrap();
+        assert!(is_per_pc(&w));
+        match compute(&pool, &w, Some("pc-1")).await.unwrap() {
+            WidgetData::Stat { value, .. } => assert_eq!(value, 2, "only pc-1's rows"),
+            other => panic!("expected stat, got {other:?}"),
+        }
+        match compute(&pool, &w, Some("pc-2")).await.unwrap() {
+            WidgetData::Stat { value, .. } => assert_eq!(value, 1),
+            other => panic!("expected stat, got {other:?}"),
+        }
     }
 }

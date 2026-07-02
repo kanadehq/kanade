@@ -260,32 +260,58 @@ pub async fn get(
             }
         }
     }
-    // SQL-backed view widgets (#vuln-roadmap PR3) are global/fleet — they
-    // query the projector tables directly (inventory / feeds / …), not a
-    // per-PC parameterized `obs_events` slice, so they're computed only for
-    // the fleet scope (pc_id absent), never the per-PC Analytics view. Each is
-    // served from the materialization cache (recomputed on its `refresh`
-    // cadence), so an expensive correlation join doesn't re-run on every
-    // ~30s poll. Appended after the obs_events widgets; the SPA groups by tab.
-    if want_scope == AggregateScope::Fleet {
-        for (view_id, idx, w) in load_sql_widgets(&state.jetstream).await {
-            if only_pinned && !w.placement.is_pinned() {
-                continue;
+    // SQL-backed view widgets (#vuln-roadmap PR3) query the projector tables
+    // directly (inventory / feeds / …). Each widget is fleet-global OR per-PC:
+    // a per-PC widget's query binds `:pc_id` (see `view_sql::is_per_pc`) and
+    // renders only in the per-PC scope, bound to the selected PC; a fleet
+    // widget renders only in the fleet scope. So the widget's scope must match
+    // the request scope — exactly like the obs_events widgets above. Each is
+    // served from the materialization cache (keyed by pc for per-PC widgets),
+    // so an expensive correlation join doesn't re-run on every ~30s poll.
+    for (view_id, idx, w) in load_sql_widgets(&state.jetstream).await {
+        let widget_scope = if view_sql::is_per_pc(&w) {
+            AggregateScope::Pc
+        } else {
+            AggregateScope::Fleet
+        };
+        if widget_scope != want_scope {
+            // `validate_sql_widgets` rejects a pinned per-PC widget at create
+            // time, but a hand-poked KV entry could still carry one — leave the
+            // same diagnostic breadcrumb the obs_events path does (not warn:
+            // this handler polls ~30s) so a dead pin is at least traceable.
+            if only_pinned && w.placement.is_pinned() && widget_scope == AggregateScope::Pc {
+                debug!(
+                    view = %view_id, title = %w.title,
+                    "analytics: pinned per-PC sql widget skipped — the Dashboard is fleet-scope",
+                );
             }
-            match view_sql::compute_cached(&state, &view_id, idx, &w).await {
-                Ok(data) => out.push(WidgetResult {
-                    dashboard: w.placement.tab().to_string(),
-                    title: w.title,
-                    description: w.description,
-                    scope: "fleet",
-                    pin_dashboard: w.placement.is_pinned(),
-                    data,
-                }),
-                // One bad view widget (a query error, a missing column)
-                // shouldn't 500 the page — log and drop, like the obs path.
-                Err(e) => {
-                    warn!(error = %e, view = %view_id, title = %w.title, "analytics: sql widget compute")
-                }
+            continue;
+        }
+        // A per-PC widget can't pin to the fleet Dashboard (it needs a selected
+        // PC), so `?pinned=true` (Dashboard, fleet scope) only ever reaches
+        // fleet widgets here — the scope guard above already dropped per-PC
+        // ones. The pinned filter still applies to fleet widgets.
+        if only_pinned && !w.placement.is_pinned() {
+            continue;
+        }
+        let bound_pc = if widget_scope == AggregateScope::Pc {
+            q.pc_id.as_deref()
+        } else {
+            None
+        };
+        match view_sql::compute_cached(&state, &view_id, idx, &w, bound_pc).await {
+            Ok(data) => out.push(WidgetResult {
+                dashboard: w.placement.tab().to_string(),
+                title: w.title,
+                description: w.description,
+                scope: scope_str,
+                pin_dashboard: w.placement.is_pinned(),
+                data,
+            }),
+            // One bad view widget (a query error, a missing column) shouldn't
+            // 500 the page — log and drop, like the obs path.
+            Err(e) => {
+                warn!(error = %e, view = %view_id, title = %w.title, "analytics: sql widget compute")
             }
         }
     }
