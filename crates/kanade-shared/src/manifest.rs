@@ -5298,6 +5298,138 @@ target: { all: true }
         }
     }
 
+    /// A Schedule with every top-level field populated so each one
+    /// actually serialises (the optional ones are `skip_serializing_if`).
+    fn fully_populated_schedule() -> Schedule {
+        let mut s = schedule_with(
+            When::PerPc(PerPolicy::Once(OnceLiteral::Once)),
+            RunsOn::Backend,
+        );
+        s.plan.rollout = Some(Rollout {
+            strategy: RolloutStrategy::Wave,
+            waves: vec![Wave {
+                group: "canary".into(),
+                delay: "0s".into(),
+            }],
+        });
+        s.plan.jitter = Some("5m".into());
+        s.plan.deadline_at = Some(chrono::Utc::now());
+        s.active = Active {
+            from: Some("2026-01-01 00:00".into()),
+            until: Some("2026-12-31 00:00".into()),
+        };
+        s.constraints = Constraints {
+            window: Some("09:00-17:00".into()),
+            ..Constraints::default()
+        };
+        s.on_failure = OnFailure {
+            retry: Some(Retry {
+                max: 1,
+                backoff: "10s".into(),
+            }),
+        };
+        s.starting_deadline = Some("30m".into());
+        s.tags = vec!["health".into()];
+        s.origin = Some(RepoOrigin {
+            path: "configs/schedules/x.yaml".into(),
+            repo: None,
+            script_file: None,
+        });
+        s
+    }
+
+    #[test]
+    fn schedule_top_level_keys_cover_serialized_fields() {
+        // #924 drift guard: the hand-maintained TOP_LEVEL_KEYS list must
+        // match exactly what a fully-populated Schedule serialises — so a
+        // future field added to Schedule or FanoutPlan can't slip past
+        // the flatten-aware strict guard by being forgotten here.
+        let s = fully_populated_schedule();
+        let value = serde_json::to_value(&s).expect("serialize schedule");
+        let serialized: std::collections::BTreeSet<String> = value
+            .as_object()
+            .expect("schedule serialises to an object")
+            .keys()
+            .cloned()
+            .collect();
+        let listed: std::collections::BTreeSet<String> = Schedule::TOP_LEVEL_KEYS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            serialized, listed,
+            "TOP_LEVEL_KEYS is out of sync with Schedule's serialized fields \
+             (flatten-aware strict guard would miss a real field or reject a valid one)"
+        );
+    }
+
+    #[test]
+    fn strict_rejects_flatten_hidden_top_level_typo() {
+        // #924: a top-level typo on a flattening type (jiter / enabledd)
+        // is buffered into the flatten target by serde and hidden from
+        // serde_ignored — the top-level guard must catch it. Verified on
+        // both the YAML and JSON strict boundaries.
+        let yaml = "\
+id: s1
+job_id: j1
+when:
+  per_pc: once
+target:
+  all: true
+jiter: 5m
+";
+        let err = crate::strict::from_yaml_str::<Schedule>(yaml).unwrap_err();
+        assert!(err.contains("jiter"), "got: {err}");
+
+        let json = serde_json::json!({
+            "id": "s1",
+            "job_id": "j1",
+            "when": { "per_pc": "once" },
+            "target": { "all": true },
+            "enabledd": false,
+        });
+        let err = crate::strict::from_json_slice::<Schedule>(&serde_json::to_vec(&json).unwrap())
+            .unwrap_err();
+        assert!(err.contains("enabledd"), "got: {err}");
+    }
+
+    #[test]
+    fn strict_accepts_all_valid_schedule_top_level_keys() {
+        // The guard must not reject any legitimate key — round-trip a
+        // fully-populated schedule through the strict YAML boundary.
+        let s = fully_populated_schedule();
+        let yaml = serde_yaml::to_string(&s).expect("serialize");
+        crate::strict::from_yaml_str::<Schedule>(&yaml)
+            .expect("every serialized key must be accepted by the strict guard");
+    }
+
+    #[test]
+    fn strict_rejects_non_string_top_level_yaml_key() {
+        // #924 (gemini #945): a YAML key isn't always a string — an
+        // unquoted `true:` parses as a boolean, `123:` as a number. A
+        // `filter_map` on `as_str()` would drop these and let them slip
+        // past the flatten guard; `yaml_key_label` renders them so they
+        // are still rejected. (serde_yaml is YAML 1.2, so `on:` stays a
+        // *string* "on" — also rejected, just via the string path.)
+        let base = "\
+id: s1
+job_id: j1
+when:
+  per_pc: once
+target:
+  all: true
+";
+        for (extra, needle) in [
+            ("true: x\n", "true"),
+            ("123: x\n", "123"),
+            ("on: y\n", "on"),
+        ] {
+            let yaml = format!("{base}{extra}");
+            let err = crate::strict::from_yaml_str::<Schedule>(&yaml).unwrap_err();
+            assert!(err.contains(needle), "for '{extra}', got: {err}");
+        }
+    }
+
     #[test]
     fn validate_accepts_waves_instead_of_target_on_backend() {
         // #917 (1): the exec boundary accepts rollout-only plans
@@ -6583,6 +6715,51 @@ pub struct Schedule {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<RepoOrigin>,
 }
+
+impl Schedule {
+    /// Every valid top-level key on a Schedule YAML/JSON document —
+    /// this struct's own fields PLUS the fields of the
+    /// `#[serde(flatten)] plan: FanoutPlan`. The strict create
+    /// boundary needs this because serde's flatten buffering hides
+    /// unknown top-level keys from `serde_ignored`, so a typo like
+    /// `jiter:` or `enabledd:` would otherwise be silently dropped
+    /// (#924). Kept in sync with the field list by
+    /// `schedule_top_level_keys_cover_serialized_fields`.
+    pub const TOP_LEVEL_KEYS: &'static [&'static str] = &[
+        // Schedule's own fields:
+        "id",
+        "when",
+        "job_id",
+        "active",
+        "constraints",
+        "on_failure",
+        "tz",
+        "starting_deadline",
+        "runs_on",
+        "enabled",
+        "tags",
+        "origin",
+        // flattened FanoutPlan:
+        "target",
+        "rollout",
+        "jitter",
+        "deadline_at",
+    ];
+}
+
+impl crate::strict::StrictSchema for Schedule {
+    fn strict_top_level_keys() -> Option<&'static [&'static str]> {
+        Some(Self::TOP_LEVEL_KEYS)
+    }
+}
+
+/// Manifest has no `#[serde(flatten)]` field, so `serde_ignored`
+/// already catches every top-level typo — the default (`None`) is
+/// correct.
+impl crate::strict::StrictSchema for Manifest {}
+
+/// View likewise has no flattened field.
+impl crate::strict::StrictSchema for View {}
 
 /// v0.23 — where the cron tick fires from.
 #[derive(
