@@ -1880,13 +1880,10 @@ async fn local_tick(
     )
     .await
     {
-        Ok(()) => {
-            // 5) Release the in-flight slot AND record the completion
-            //    (#445). handle_command publishes a result to NATS, but
-            //    we don't know its exit_code here — accept "no error =
-            //    the run finished, take that as a successful tick" for
-            //    v0.23 MVP. The operator's source of truth for actual
-            //    exit codes remains the Results page once results flush.
+        Ok(outcome) if outcome.is_success() => {
+            // 5) The script actually ran and succeeded — release the
+            //    in-flight slot AND record the completion (#445). For a
+            //    `per_pc: once` schedule this is what marks the pc done.
             state.lock().await.finish_fire(
                 &schedule.id,
                 &job_id_for_completion,
@@ -1897,6 +1894,25 @@ async fn local_tick(
                 schedule_id = %schedule.id,
                 %request_id,
                 "local_scheduler: completion recorded",
+            );
+        }
+        Ok(outcome) => {
+            // #910: the script ran but exited non-zero, OR the command
+            // was gated before running (staleness / version-pin / revoke
+            // / deadline skip). Neither is a success, so release the slot
+            // WITHOUT recording a completion — a `per_pc: once` schedule
+            // must keep re-firing "until that pc succeeds" rather than be
+            // consumed forever by a skip during a version-pin lag. This
+            // matches the backend dedup, which only counts `exit_code = 0`.
+            state
+                .lock()
+                .await
+                .finish_fire(&schedule.id, &job_id_for_completion, deadline, None);
+            debug!(
+                schedule_id = %schedule.id,
+                %request_id,
+                ?outcome,
+                "local_scheduler: run did not succeed — not recording completion (will retry)",
             );
         }
         Err(e) => {
