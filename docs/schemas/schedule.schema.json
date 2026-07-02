@@ -14,7 +14,7 @@
       "$ref": "#/$defs/Constraints"
     },
     "deadline_at": {
-      "description": "Absolute time the scheduler stamps on each emitted Command\nwhen this exec was driven by a [`Schedule`] with\n`starting_deadline`. Agents receiving a Command after this\ninstant publish a synthetic skipped-result instead of\nrunning the script. `None` (default) = no deadline / catch\nup whenever delivered. Operators don't usually set this\ndirectly — the scheduler computes it from `tick_at +\nstarting_deadline`.",
+      "description": "Absolute time the scheduler stamps on each emitted Command\nwhen this exec was driven by a [`Schedule`] with\n`starting_deadline`. Agents receiving a Command after this\ninstant publish a synthetic skipped-result instead of\nrunning the script. `None` (default) = no deadline / catch\nup whenever delivered. Computed by the scheduler from\n`tick_at + starting_deadline` and overwritten on every fire —\non a Schedule, setting it by hand is rejected at create time\n(#917, use `starting_deadline`); it remains settable on an\nad-hoc POST /api/exec body.",
       "type": [
         "string",
         "null"

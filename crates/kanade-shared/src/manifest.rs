@@ -272,9 +272,11 @@ pub struct FanoutPlan {
     /// `starting_deadline`. Agents receiving a Command after this
     /// instant publish a synthetic skipped-result instead of
     /// running the script. `None` (default) = no deadline / catch
-    /// up whenever delivered. Operators don't usually set this
-    /// directly — the scheduler computes it from `tick_at +
-    /// starting_deadline`.
+    /// up whenever delivered. Computed by the scheduler from
+    /// `tick_at + starting_deadline` and overwritten on every fire —
+    /// on a Schedule, setting it by hand is rejected at create time
+    /// (#917, use `starting_deadline`); it remains settable on an
+    /// ad-hoc POST /api/exec body.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline_at: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -4656,7 +4658,16 @@ target: { all: true }
             id: "x".into(),
             when,
             job_id: "y".into(),
-            plan: FanoutPlan::default(),
+            // #917: validate() now rejects a target that dispatches
+            // nothing, so the baseline helper carries the simplest
+            // specified target.
+            plan: FanoutPlan {
+                target: Target {
+                    all: true,
+                    ..Target::default()
+                },
+                ..FanoutPlan::default()
+            },
             active: Active::default(),
             constraints: Constraints::default(),
             on_failure: OnFailure::default(),
@@ -5272,6 +5283,156 @@ target: { all: true }
         s.starting_deadline = Some("soon".into());
         let err = s.validate().unwrap_err();
         assert!(err.contains("starting_deadline"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_unspecified_target() {
+        // #917 (1): an all-default target never dispatches anywhere —
+        // runs_on: agent silently never fires, runs_on: backend
+        // warn-fails every tick at the exec boundary. Both rejected.
+        for runs_on in [RunsOn::Backend, RunsOn::Agent] {
+            let mut s = schedule_with(When::PerPc(PerPolicy::Once(OnceLiteral::Once)), runs_on);
+            s.plan.target = Target::default();
+            let err = s.validate().unwrap_err();
+            assert!(err.contains("target"), "for {runs_on:?}, got: {err}");
+        }
+    }
+
+    #[test]
+    fn validate_accepts_waves_instead_of_target_on_backend() {
+        // #917 (1): the exec boundary accepts rollout-only plans
+        // (target then just labels the audit row) — so does validate.
+        let mut s = schedule_with(
+            When::PerPc(PerPolicy::Once(OnceLiteral::Once)),
+            RunsOn::Backend,
+        );
+        s.plan.target = Target::default();
+        s.plan.rollout = Some(Rollout {
+            strategy: RolloutStrategy::Wave,
+            waves: vec![Wave {
+                group: "canary".into(),
+                delay: "0s".into(),
+            }],
+        });
+        s.validate().expect("rollout-only plan should validate");
+    }
+
+    #[test]
+    fn validate_rejects_rollout_on_agent() {
+        // #917 (1): rollout waves are backend-published; a runs_on:
+        // agent schedule never reads them, so the combination is a
+        // silent no-op — reject like max_concurrent-on-agent.
+        let mut s = schedule_with(
+            When::PerPc(PerPolicy::Once(OnceLiteral::Once)),
+            RunsOn::Agent,
+        );
+        s.plan.rollout = Some(Rollout {
+            strategy: RolloutStrategy::Wave,
+            waves: vec![Wave {
+                group: "canary".into(),
+                delay: "0s".into(),
+            }],
+        });
+        let err = s.validate().unwrap_err();
+        assert!(err.contains("rollout"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_bad_waves() {
+        // #917 (2): empty waves, blank group, unparseable delay — all
+        // previously accepted and failed (or no-opped) at every fire.
+        let base = || {
+            schedule_with(
+                When::PerPc(PerPolicy::Once(OnceLiteral::Once)),
+                RunsOn::Backend,
+            )
+        };
+
+        let mut s = base();
+        s.plan.rollout = Some(Rollout {
+            strategy: RolloutStrategy::Wave,
+            waves: vec![],
+        });
+        let err = s.validate().unwrap_err();
+        assert!(err.contains("at least one wave"), "got: {err}");
+
+        let mut s = base();
+        s.plan.rollout = Some(Rollout {
+            strategy: RolloutStrategy::Wave,
+            waves: vec![Wave {
+                group: "  ".into(),
+                delay: "0s".into(),
+            }],
+        });
+        let err = s.validate().unwrap_err();
+        assert!(err.contains("waves[0].group"), "got: {err}");
+
+        let mut s = base();
+        s.plan.rollout = Some(Rollout {
+            strategy: RolloutStrategy::Wave,
+            waves: vec![
+                Wave {
+                    group: "canary".into(),
+                    delay: "0s".into(),
+                },
+                Wave {
+                    group: "wave1".into(),
+                    delay: "5 minuts".into(),
+                },
+            ],
+        });
+        let err = s.validate().unwrap_err();
+        assert!(err.contains("waves[1].delay"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_wave_delay_at_or_past_starting_deadline() {
+        // #917 (3): the deadline is stamped once at tick time, so a
+        // wave sleeping >= starting_deadline publishes already-expired
+        // Commands — dead on arrival, every fire.
+        let mut s = schedule_with(
+            When::PerPc(PerPolicy::Once(OnceLiteral::Once)),
+            RunsOn::Backend,
+        );
+        s.starting_deadline = Some("30m".into());
+        s.plan.rollout = Some(Rollout {
+            strategy: RolloutStrategy::Wave,
+            waves: vec![
+                Wave {
+                    group: "canary".into(),
+                    delay: "0s".into(),
+                },
+                Wave {
+                    group: "wave1".into(),
+                    delay: "30m".into(),
+                },
+            ],
+        });
+        let err = s.validate().unwrap_err();
+        assert!(
+            err.contains("waves[1].delay") && err.contains("starting_deadline"),
+            "got: {err}"
+        );
+
+        // Strictly shorter is fine.
+        s.plan.rollout.as_mut().unwrap().waves[1].delay = "29m".into();
+        s.validate().expect("delay < deadline should validate");
+    }
+
+    #[test]
+    fn validate_rejects_operator_set_deadline_at() {
+        // #917 (4): machine-stamped field — the scheduler overwrites it
+        // on every fire, so a hand-set value is silently discarded.
+        let mut s = schedule_with(
+            When::PerPc(PerPolicy::Once(OnceLiteral::Once)),
+            RunsOn::Backend,
+        );
+        s.plan.deadline_at = Some(chrono::Utc::now());
+        let err = s.validate().unwrap_err();
+        assert!(
+            err.contains("deadline_at") && err.contains("starting_deadline"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -7708,6 +7869,103 @@ impl Schedule {
         if let Some(sd) = &self.starting_deadline {
             humantime::parse_duration(sd)
                 .map_err(|e| format!("starting_deadline: invalid duration '{sd}': {e}"))?;
+        }
+        // #917: the plan side got almost no create-time checks, so
+        // several never-fires / fails-every-tick shapes were accepted
+        // and only surfaced at dispatch time — or never:
+        //
+        // (1) a target that dispatches nothing. A runs_on: agent
+        // schedule matches each agent against `target` (rollout waves
+        // are backend-published and never reach that path), so an
+        // unspecified target silently never fires; a runs_on: backend
+        // one warn-fails every tick at the exec boundary, which
+        // rejects the same shape with the same message.
+        let has_waves = self
+            .plan
+            .rollout
+            .as_ref()
+            .is_some_and(|r| !r.waves.is_empty());
+        if matches!(self.runs_on, RunsOn::Agent) {
+            if !self.plan.target.is_specified() {
+                return Err(
+                    "target must specify at least one of `all` / `groups` / `pcs` — a \
+                     runs_on: agent schedule matches each agent against `target`, so an \
+                     unspecified target never fires anywhere"
+                        .into(),
+                );
+            }
+            if self.plan.rollout.is_some() {
+                return Err(
+                    "rollout waves are published by the backend and are ignored by \
+                     runs_on: agent schedules (each agent self-schedules from `target`); \
+                     drop `rollout:` or use runs_on: backend"
+                        .into(),
+                );
+            }
+        } else if !has_waves && !self.plan.target.is_specified() {
+            return Err(
+                "target must specify at least one of `all` / `groups` / `pcs` \
+                 (or set `rollout.waves`) — the exec boundary rejects an \
+                 unspecified target, so the schedule would fail every tick"
+                    .into(),
+            );
+        }
+        // (2) rollout waves were never validated: a blank group or an
+        // unparseable delay failed at EVERY fire (the CLI doesn't even
+        // expose waves, so the failure was always deferred to dispatch)
+        // and an empty list dispatched nothing. (3) A wave delayed to
+        // or past starting_deadline is dead on arrival: the deadline is
+        // stamped once at tick time and the Command is serialised
+        // before the wave sleep, so agents receive it already expired
+        // (a synthetic exit-125 skip on every fire).
+        if let Some(rollout) = &self.plan.rollout {
+            if rollout.waves.is_empty() {
+                return Err(
+                    "rollout.waves must list at least one wave; omit `rollout:` for a \
+                     one-shot fan-out of `target`"
+                        .into(),
+                );
+            }
+            let deadline = self
+                .starting_deadline
+                .as_deref()
+                .and_then(|sd| humantime::parse_duration(sd).ok());
+            for (i, wave) in rollout.waves.iter().enumerate() {
+                if wave.group.trim().is_empty() {
+                    return Err(format!("rollout.waves[{i}].group must not be blank"));
+                }
+                let delay = humantime::parse_duration(&wave.delay).map_err(|e| {
+                    format!(
+                        "rollout.waves[{i}].delay: invalid duration '{}': {e}",
+                        wave.delay
+                    )
+                })?;
+                if let Some(deadline) = deadline
+                    && delay >= deadline
+                {
+                    return Err(format!(
+                        "rollout.waves[{i}].delay ('{}') must be shorter than \
+                         starting_deadline ('{}'): the deadline is stamped at tick time, \
+                         so this wave's Commands would already be expired when published \
+                         (skipped by every agent, every fire)",
+                        wave.delay,
+                        self.starting_deadline.as_deref().unwrap_or_default(),
+                    ));
+                }
+            }
+        }
+        // (4) deadline_at is machine-stamped: the scheduler overwrites
+        // it from `tick + starting_deadline` on every fire, so an
+        // operator-set value is silently discarded — reject it and
+        // point at the knob that does what they meant. (Ad-hoc POST
+        // /api/exec bodies are a different write path and may still
+        // carry it.)
+        if self.plan.deadline_at.is_some() {
+            return Err(
+                "deadline_at is computed by the scheduler (tick time + starting_deadline) \
+                 and overwritten on every fire — set `starting_deadline` instead"
+                    .into(),
+            );
         }
         let from = self
             .active
