@@ -3,15 +3,26 @@
 // "pinned" section (a `pin_dashboard: true` widget surfaces up front). The
 // page owns scope/date controls; this module owns the per-widget visuals.
 
+import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from 'recharts';
+
 import { OperationalTimeline, type OpEvent } from '@/components/OperationalTimeline';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Table, TableBody, TableCell, TableRow } from '@/components/ui/table';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table';
 import { fmtIsoLocal } from '@/lib/utils';
 
 // Mirrors the backend `WidgetResult` (api/analytics.rs): every job's /
 // view's `aggregate:` widgets, computed per scope, tagged by `render`.
 export type BarRow = { label: string; value: number; est_minutes?: number };
 export type HourBucket = { hour: number; total: number; active: number };
+/** One cell of a `table` widget — a JSON scalar from the SQL result. */
+export type CellValue = string | number | boolean | null;
 export type Widget = {
   dashboard: string;
   title: string;
@@ -33,6 +44,10 @@ export type Widget = {
   | { render: 'timeline'; metric: 'ratio' | 'count'; buckets: HourBucket[] }
   | { render: 'stat'; value: number; est_minutes?: number }
   | { render: 'op_timeline'; from: string; to: string; events: OpEvent[] }
+  // #vuln-roadmap PR3: SQL-backed `view:` widgets. The backend maps the SQL
+  // result onto these two new shapes; the others reuse the existing renderers.
+  | { render: 'table'; columns: string[]; rows: CellValue[][] }
+  | { render: 'pie'; rows: BarRow[]; donut?: boolean }
 );
 
 export function fmtMinutes(min: number): string {
@@ -44,9 +59,13 @@ export function fmtMinutes(min: number): string {
 }
 
 export function WidgetCard({ w, t }: { w: Widget; t: (k: string) => string }) {
-  // Timeline, bar and the operational swimlane read better full-width.
+  // Timeline, bar, the operational swimlane and the (often wide) SQL table
+  // read better full-width.
   const span =
-    w.render === 'timeline' || w.render === 'bar' || w.render === 'op_timeline'
+    w.render === 'timeline' ||
+    w.render === 'bar' ||
+    w.render === 'op_timeline' ||
+    w.render === 'table'
       ? 'lg:col-span-2'
       : '';
   return (
@@ -57,6 +76,10 @@ export function WidgetCard({ w, t }: { w: Widget; t: (k: string) => string }) {
       </CardHeader>
       <CardContent>
         {w.render === 'bar' && <BarTable rows={w.rows} empty={t('noData')} />}
+        {w.render === 'table' && (
+          <ResultTable columns={w.columns} rows={w.rows} empty={t('noData')} />
+        )}
+        {w.render === 'pie' && <PieWidget rows={w.rows} donut={w.donut} empty={t('noData')} />}
         {w.render === 'gauge' && <Gauge w={w} t={t} />}
         {w.render === 'timeline' && (
           <TimelineStrip
@@ -111,6 +134,100 @@ function BarTable({ rows, empty }: { rows: BarRow[]; empty: string }) {
         ))}
       </TableBody>
     </Table>
+  );
+}
+
+// #vuln-roadmap PR3: the full result grid of a SQL-backed `view:` widget. The
+// backend already selected + relabelled the columns; we just render the cells.
+function ResultTable({
+  columns,
+  rows,
+  empty,
+}: {
+  columns: string[];
+  rows: CellValue[][];
+  empty: string;
+}) {
+  if (rows.length === 0) return <div className="text-muted text-sm">{empty}</div>;
+  return (
+    <div className="overflow-x-auto">
+      <Table>
+        <TableHeader>
+          <TableRow>
+            {columns.map((c, ci) => (
+              // Index-qualified: a SQL result can repeat a column name
+              // (e.g. `SELECT a, a` or a join) — keep keys unique.
+              <TableHead key={`${c}-${ci}`} className="text-xs">
+                {c}
+              </TableHead>
+            ))}
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((row, ri) => (
+            // Row order is the query's; index is a stable key within one result.
+            <TableRow key={ri}>
+              {row.map((cell, ci) => (
+                <TableCell key={ci} className="text-xs">
+                  {cell === null ? (
+                    <span className="text-muted">—</span>
+                  ) : typeof cell === 'number' ? (
+                    cell.toLocaleString()
+                  ) : (
+                    String(cell)
+                  )}
+                </TableCell>
+              ))}
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
+// #vuln-roadmap PR3: parts-of-a-whole for a SQL-backed `view:` widget. `donut`
+// leaves a hole with the total in the centre. Palette cycles a small violet
+// ramp so slices stay on-theme and legible.
+const PIE_COLORS = ['#8b5cf6', '#a78bfa', '#c4b5fd', '#7c3aed', '#6d28d9', '#ddd6fe'];
+
+function PieWidget({ rows, donut, empty }: { rows: BarRow[]; donut?: boolean; empty: string }) {
+  if (rows.length === 0) return <div className="text-muted text-sm">{empty}</div>;
+  const total = rows.reduce((sum, r) => sum + r.value, 0);
+  return (
+    <div className="relative">
+      <ResponsiveContainer width="100%" height={220}>
+        <PieChart>
+          <Pie
+            data={rows}
+            dataKey="value"
+            nameKey="label"
+            cx="50%"
+            cy="50%"
+            outerRadius={90}
+            innerRadius={donut ? 55 : 0}
+            paddingAngle={rows.length > 1 ? 2 : 0}
+          >
+            {rows.map((r, i) => (
+              // Label-qualified by index: multiple rows can share a label
+              // (e.g. several NULL groups rendered as "—").
+              <Cell key={`${r.label}-${i}`} fill={PIE_COLORS[i % PIE_COLORS.length]} />
+            ))}
+          </Pie>
+          <Tooltip
+            formatter={(value, name) => [Number(value).toLocaleString(), String(name)]}
+            contentStyle={{ fontSize: '12px' }}
+          />
+        </PieChart>
+      </ResponsiveContainer>
+      {donut && (
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+          <div className="text-center">
+            <div className="text-lg font-semibold">{total.toLocaleString()}</div>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 

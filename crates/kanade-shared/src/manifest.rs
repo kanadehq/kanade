@@ -1277,6 +1277,272 @@ fn validate_op_timeline_widget(w: &AggregateWidget, at: &str) -> Result<(), Stri
     Ok(())
 }
 
+/// Default materialization cadence for a [`SqlWidget`] whose `refresh` is
+/// unset — 1 hour. A view over feed/inventory tables changes only as fast as
+/// its underlying feed refresh (often daily), so an hour is fresh enough while
+/// keeping an expensive correlation join off the ~30s Dashboard poll path.
+pub const DEFAULT_VIEW_REFRESH: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// #vuln-roadmap PR3: a **SQL-backed, materialized** widget on a [`View`].
+///
+/// Where an [`AggregateWidget`] encodes an `obs_events` rollup in structured
+/// YAML fields, a `SqlWidget` carries a raw read-only `SELECT`/`WITH` over the
+/// projector's tables (inventory `explode:` tables, `feeds`, `check_status`,
+/// …) — the correlation that powers a vulnerability / EOL / license dashboard
+/// is just a `JOIN`, far more expressive than a YAML DSL. The backend runs the
+/// query in the read-only sandbox (`api::query`), caches the result on the
+/// `refresh` cadence, and maps it to the same render-ready shape the existing
+/// widget components consume, via [`RenderSpec`]. See [`View::sql_widgets`].
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
+pub struct SqlWidget {
+    /// Widget heading. Required, validated non-empty.
+    pub title: String,
+    /// Optional muted subtitle (a unit, a caveat). Rejected if present-blank.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The read-only SQL. Executed in the `api::query` sandbox: a single
+    /// `SELECT`/`WITH` on a `SQLITE_OPEN_READONLY` connection, row-capped and
+    /// time-bounded. The backend validates it read-only at `view create` and
+    /// again at run time; a write verb / stacked statement is rejected.
+    pub query: String,
+    /// How the query's result columns map to a visual — see [`RenderSpec`].
+    pub render: RenderSpec,
+    /// Materialization cadence as a humantime duration (`"6h"`, `"30m"`).
+    /// Absent ⇒ [`DEFAULT_VIEW_REFRESH`]. The backend re-runs the query at
+    /// most this often; reads in between hit the cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh: Option<String>,
+    /// Where the widget surfaces — an Analytics tab and/or a pinned Dashboard
+    /// card. At least one must be set (else it renders nowhere).
+    pub placement: Placement,
+}
+
+impl SqlWidget {
+    /// The effective refresh cadence — the parsed `refresh` or
+    /// [`DEFAULT_VIEW_REFRESH`]. Falls back to the default on an unparseable
+    /// value rather than panicking on the read path (validation already
+    /// rejected a bad value at `view create`).
+    pub fn refresh_interval(&self) -> std::time::Duration {
+        self.refresh
+            .as_deref()
+            .and_then(|s| humantime::parse_duration(s).ok())
+            .unwrap_or(DEFAULT_VIEW_REFRESH)
+    }
+}
+
+/// How a [`SqlWidget`]'s SQL result columns map onto a visual. A `kind` names
+/// the chart; the channel fields (`value`, `label`, `columns`, …) name which
+/// result columns feed it. Only the channels a `kind` uses are read; the
+/// backend validates the named columns exist in the result. New chart types
+/// are "one renderer + the same mapping", so this stays a flat, additive shape.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Hash)]
+pub struct RenderSpec {
+    /// Which visual to render the result as.
+    pub kind: RenderKind,
+    /// `table` only: the columns to show, in order. Absent ⇒ every result
+    /// column (the universal default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub columns: Option<Vec<String>>,
+    /// `table` only: optional per-column header relabelling (result column →
+    /// display name). Columns not listed keep their SQL name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<std::collections::BTreeMap<String, String>>,
+    /// `stat` / `bar` / `pie` / `gauge`: the result column holding the numeric
+    /// value (`stat`/`gauge` read the first row; `bar`/`pie` read every row).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// `bar` / `pie`: the result column holding each row's category label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// `bar` / `pie`: keep only the top-N rows (by value). Absent ⇒ all rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    /// `pie` only: render as a donut (a hole with the total in the centre).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub donut: Option<bool>,
+    /// `gauge` only: the numerator column (paired with `den`). Alternative to
+    /// a precomputed `value` ratio.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num: Option<String>,
+    /// `gauge` only: the denominator column (paired with `num`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub den: Option<String>,
+}
+
+/// The chart kind for a [`RenderSpec`]. `table` and `pie` are new in PR3; the
+/// rest reuse the existing `obs_events` widget renderers.
+#[derive(
+    Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash, Default,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum RenderKind {
+    /// The full result grid (new renderer). The universal default.
+    #[default]
+    Table,
+    /// A single headline number from the first row's `value` cell.
+    Stat,
+    /// Ranked horizontal bars — `label` + `value` per row, optional top-N.
+    Bar,
+    /// Parts-of-a-whole (new renderer) — `label` + `value` per row.
+    Pie,
+    /// A ratio dial — a `value` ratio, or a `num`/`den` pair.
+    Gauge,
+    /// #492 forward-compat catch-all (see [`AggregateScope::Unknown`]).
+    #[serde(other)]
+    Unknown,
+}
+
+/// Where a [`SqlWidget`] surfaces in the SPA. Mirrors the placement an
+/// [`AggregateWidget`] expresses via `dashboard` + `pin_dashboard`, but as an
+/// explicit block since a SQL widget lives on a standalone view.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
+pub struct Placement {
+    /// The Analytics tab this widget groups under (the `AggregateWidget`
+    /// `dashboard` analogue). Absent ⇒ not shown on the Analytics page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analytics: Option<String>,
+    /// Promote to the main Dashboard (reuses #900's pinned section). Absent ⇒
+    /// not pinned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dashboard: Option<DashboardPlacement>,
+}
+
+impl Placement {
+    /// True when the widget is pinned to the main Dashboard.
+    pub fn is_pinned(&self) -> bool {
+        self.dashboard.as_ref().is_some_and(|d| d.pin)
+    }
+    /// The Analytics tab name, or a fallback so a dashboard-only widget still
+    /// carries a group label for the shared widget list.
+    pub fn tab(&self) -> &str {
+        self.analytics.as_deref().unwrap_or("Dashboard")
+    }
+}
+
+/// The `placement.dashboard` block — see [`Placement::dashboard`].
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
+pub struct DashboardPlacement {
+    /// Pin this widget to the main Dashboard's promoted section.
+    #[serde(default)]
+    pub pin: bool,
+}
+
+/// Per-widget validation for a list of [`SqlWidget`]s — shared by the
+/// [`View`] resource so authoring errors surface at `view create`. `field`
+/// names the containing key for error messages. The read-only SQL check is
+/// NOT here (it lives in the backend `api::query` sandbox, which kanade-shared
+/// can't depend on) — this validates structure: non-empty title/query, a
+/// known `kind`, the channels each `kind` needs, a real placement, and a
+/// parseable `refresh`.
+pub fn validate_sql_widgets(widgets: &[SqlWidget], field: &str) -> Result<(), String> {
+    for (i, w) in widgets.iter().enumerate() {
+        let at = format!("{field}[{i}]");
+        if w.title.trim().is_empty() {
+            return Err(format!("{at}.title must not be empty"));
+        }
+        if w.query.trim().is_empty() {
+            return Err(format!("{at}.query must not be empty"));
+        }
+        if let Some(description) = &w.description {
+            if description.trim().is_empty() {
+                return Err(format!("{at}.description must not be empty when set"));
+            }
+        }
+        if let Some(refresh) = &w.refresh {
+            humantime::parse_duration(refresh)
+                .map_err(|e| format!("{at}.refresh '{refresh}' is not a valid duration: {e}"))?;
+        }
+        // A widget that surfaces nowhere is an invisible no-op. A
+        // `dashboard:` block with `pin: false` doesn't count — it pins
+        // nowhere — so gate on the effective pin, not the block's presence
+        // (Gemini / CodeRabbit).
+        if w.placement.analytics.is_none() && !w.placement.is_pinned() {
+            return Err(format!(
+                "{at}.placement must set `analytics` and/or pin to `dashboard` (else the widget renders nowhere)"
+            ));
+        }
+        if let Some(tab) = &w.placement.analytics {
+            if tab.trim().is_empty() {
+                return Err(format!(
+                    "{at}.placement.analytics must not be empty when set"
+                ));
+            }
+        }
+        validate_render_spec(&w.render, &at)?;
+    }
+    Ok(())
+}
+
+/// Validate a [`RenderSpec`]: reject the #492 `Unknown` catch-all (an operator
+/// typo at create time) and require the channel columns each `kind` reads.
+fn validate_render_spec(r: &RenderSpec, at: &str) -> Result<(), String> {
+    // A channel column is "given" when present and non-blank.
+    let given = |v: &Option<String>| v.as_deref().map(str::trim).is_some_and(|s| !s.is_empty());
+    match r.kind {
+        RenderKind::Unknown => {
+            return Err(format!(
+                "{at}.render.kind is not a known value (table | stat | bar | pie | gauge)"
+            ));
+        }
+        RenderKind::Table => {
+            // `columns` optional; if given, each name must be non-blank.
+            if let Some(cols) = &r.columns {
+                if cols.iter().any(|c| c.trim().is_empty()) {
+                    return Err(format!("{at}.render.columns must not contain blank names"));
+                }
+            }
+            if let Some(labels) = &r.labels {
+                for (k, v) in labels {
+                    if k.trim().is_empty() || v.trim().is_empty() {
+                        return Err(format!(
+                            "{at}.render.labels keys and values must be non-empty"
+                        ));
+                    }
+                }
+            }
+        }
+        RenderKind::Stat => {
+            if !given(&r.value) {
+                return Err(format!("{at}.render.value is required for kind=stat"));
+            }
+        }
+        RenderKind::Bar | RenderKind::Pie => {
+            let kind = if r.kind == RenderKind::Bar {
+                "bar"
+            } else {
+                "pie"
+            };
+            if !given(&r.label) {
+                return Err(format!("{at}.render.label is required for kind={kind}"));
+            }
+            if !given(&r.value) {
+                return Err(format!("{at}.render.value is required for kind={kind}"));
+            }
+            // `limit: 0` truncates to no rows — an invisible widget, almost
+            // certainly a typo. Omit `limit` for "all rows" (CodeRabbit).
+            if r.limit == Some(0) {
+                return Err(format!(
+                    "{at}.render.limit must be >= 1 (omit it to keep all rows)"
+                ));
+            }
+        }
+        RenderKind::Gauge => {
+            // Either a precomputed `value` ratio, or a `num`/`den` pair —
+            // exactly one of the two forms.
+            match (given(&r.value), given(&r.num), given(&r.den)) {
+                (true, false, false) => {}
+                (false, true, true) => {}
+                _ => {
+                    return Err(format!(
+                        "{at}.render for kind=gauge needs either `value` (a ratio) or both `num` and `den`"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// A standalone declarative read/aggregation for the Analytics page (#743).
 ///
 /// A **view** aggregates stored fleet data (`obs_events`, …) without an
@@ -1295,8 +1561,18 @@ pub struct View {
     /// Optional human description shown on the Views admin page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// The widgets this view contributes to the Analytics page.
+    /// The `obs_events` aggregate widgets this view contributes to the
+    /// Analytics page. Optional since PR3 — a view may instead (or also)
+    /// carry [`sql_widgets`](View::sql_widgets); a view must have at least one
+    /// widget across the two lists.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub widgets: Vec<AggregateWidget>,
+    /// #vuln-roadmap PR3: SQL-backed, materialized widgets — raw read-only SQL
+    /// over the projector tables (inventory/feeds/…) mapped to a visual. This
+    /// is how a correlation dashboard (vulnerability / EOL / license) is
+    /// expressed as config. See [`SqlWidget`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sql_widgets: Vec<SqlWidget>,
     /// Free-form operator taxonomy (same role as [`Manifest::tags`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
@@ -1327,7 +1603,20 @@ impl View {
                     .to_string(),
             );
         }
-        validate_aggregate_widgets(&self.widgets, "widgets")?;
+        // A view must contribute at least one widget across the two lists;
+        // `validate_aggregate_widgets` rejects an empty `widgets` on its own,
+        // so only call it when that list is non-empty (a pure-SQL view is
+        // valid with an empty `widgets`).
+        if self.widgets.is_empty() && self.sql_widgets.is_empty() {
+            return Err(
+                "view must declare at least one widget (`widgets:` and/or `sql_widgets:`)"
+                    .to_string(),
+            );
+        }
+        if !self.widgets.is_empty() {
+            validate_aggregate_widgets(&self.widgets, "widgets")?;
+        }
+        validate_sql_widgets(&self.sql_widgets, "sql_widgets")?;
         for tag in &self.tags {
             if tag.trim().is_empty() {
                 return Err("tags must not contain empty entries".to_string());
@@ -3764,6 +4053,123 @@ tags: [ok, "   "]
             err.contains("widgets[0].agg=ratio requires `bool_path`"),
             "err: {err}"
         );
+    }
+
+    // ── #vuln-roadmap PR3 SQL-backed views ───────────────────────────
+    #[test]
+    fn view_accepts_pure_sql_widgets() {
+        // A view with only sql_widgets (no obs_events aggregate widgets) is
+        // valid — the vulnerability-dashboard shape.
+        let v = view_from(
+            "sql_widgets:
+  - title: KEV-affected hosts
+    query: \"SELECT pc_id, 1 AS cves FROM inventory_sw_apps\"
+    refresh: 6h
+    render: { kind: table, columns: [pc_id, cves], labels: { cves: CVE count } }
+    placement: { analytics: Security, dashboard: { pin: true } }
+",
+        );
+        v.validate().expect("valid sql view");
+        // refresh parses; pin/tab helpers read the placement.
+        let w = &v.sql_widgets[0];
+        assert_eq!(
+            w.refresh_interval(),
+            std::time::Duration::from_secs(6 * 3600)
+        );
+        assert!(w.placement.is_pinned());
+        assert_eq!(w.placement.tab(), "Security");
+    }
+
+    #[test]
+    fn sql_widget_defaults_and_mix() {
+        // No refresh ⇒ default; a view can mix aggregate + sql widgets.
+        let v = view_from(
+            "widgets:
+  - { dashboard: D, title: T, kind: k, agg: count, render: stat }
+sql_widgets:
+  - title: N affected
+    query: \"SELECT count(*) AS n FROM feeds\"
+    render: { kind: stat, value: n }
+    placement: { dashboard: { pin: true } }
+",
+        );
+        v.validate().expect("mixed view is valid");
+        assert_eq!(v.sql_widgets[0].refresh_interval(), DEFAULT_VIEW_REFRESH);
+        // dashboard-only placement (no analytics tab) falls back to a label.
+        assert_eq!(v.sql_widgets[0].placement.tab(), "Dashboard");
+    }
+
+    #[test]
+    fn sql_widget_validation_rules() {
+        // helper: build a view with one sql_widget from an inline render+placement
+        let mk = |render: &str, placement: &str| -> Result<(), String> {
+            view_from(&format!(
+                "sql_widgets:
+  - title: W
+    query: \"SELECT 1 AS a\"
+    render: {render}
+    placement: {placement}
+"
+            ))
+            .validate()
+        };
+        // bar needs label + value
+        let err = mk("{ kind: bar, value: a }", "{ analytics: T }").unwrap_err();
+        assert!(
+            err.contains("render.label is required for kind=bar"),
+            "err: {err}"
+        );
+        // pie needs value
+        let err = mk("{ kind: pie, label: a }", "{ analytics: T }").unwrap_err();
+        assert!(
+            err.contains("render.value is required for kind=pie"),
+            "err: {err}"
+        );
+        // stat needs value
+        let err = mk("{ kind: stat }", "{ analytics: T }").unwrap_err();
+        assert!(
+            err.contains("render.value is required for kind=stat"),
+            "err: {err}"
+        );
+        // gauge needs value XOR num+den
+        let err = mk("{ kind: gauge, num: a }", "{ analytics: T }").unwrap_err();
+        assert!(err.contains("needs either `value`"), "err: {err}");
+        mk("{ kind: gauge, value: a }", "{ analytics: T }").expect("gauge value ok");
+        mk("{ kind: gauge, num: a, den: a }", "{ analytics: T }").expect("gauge num/den ok");
+        // unknown kind rejected
+        let err = mk("{ kind: sunburst }", "{ analytics: T }").unwrap_err();
+        assert!(
+            err.contains("render.kind is not a known value"),
+            "err: {err}"
+        );
+        // placement must surface somewhere
+        let err = mk("{ kind: table }", "{}").unwrap_err();
+        assert!(err.contains("placement must set"), "err: {err}");
+        // a `dashboard: { pin: false }` block still surfaces nowhere.
+        let err = mk("{ kind: table }", "{ dashboard: { pin: false } }").unwrap_err();
+        assert!(err.contains("placement must set"), "err: {err}");
+        mk("{ kind: table }", "{ dashboard: { pin: true } }").expect("pinned dashboard ok");
+        // limit: 0 on a bar/pie is an invisible widget — rejected.
+        let err = mk(
+            "{ kind: bar, label: a, value: a, limit: 0 }",
+            "{ analytics: T }",
+        )
+        .unwrap_err();
+        assert!(err.contains("limit must be >= 1"), "err: {err}");
+        // bad refresh duration rejected
+        let err = view_from(
+            "sql_widgets:
+  - { title: W, query: \"SELECT 1\", refresh: \"6 sidereal days\", render: { kind: table }, placement: { analytics: T } }
+",
+        )
+        .validate()
+        .unwrap_err();
+        assert!(
+            err.contains("refresh") && err.contains("not a valid duration"),
+            "err: {err}"
+        );
+        // table is fine with no channels
+        mk("{ kind: table }", "{ analytics: T }").expect("bare table ok");
     }
 
     fn execute_with(

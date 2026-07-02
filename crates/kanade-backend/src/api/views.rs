@@ -84,6 +84,20 @@ pub async fn create(
     if let Err(e) = view.validate() {
         return Err((StatusCode::BAD_REQUEST, format!("invalid view: {e}")));
     }
+    // #vuln-roadmap PR3: a SQL-backed widget's `query` runs in the read-only
+    // sandbox (`api::query`). The RO connection enforces it at run time too,
+    // but rejecting a write / DDL / stacked statement HERE means the operator
+    // learns at `view create` instead of watching a widget silently fail on
+    // every refresh. `View::validate` (kanade-shared) can't do this — it can't
+    // depend on the backend sandbox — so it lives at this write boundary.
+    for (i, w) in view.sql_widgets.iter().enumerate() {
+        if let Err(e) = crate::api::query::validate_read_only(&w.query) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("invalid view: sql_widgets[{i}].query is not a read-only query: {e}"),
+            ));
+        }
+    }
 
     let kv = s
         .jetstream
@@ -112,21 +126,24 @@ pub async fn create(
         warn!(error = %e, view_id = %view.id, "views: YAML mirror put failed; JSON catalog is current");
     }
 
-    info!(view_id = %view.id, widgets = view.widgets.len(), "view upserted");
+    // Count both widget lists so a SQL-only view isn't logged/audited as 0
+    // widgets (CodeRabbit).
+    let widget_count = view.widgets.len() + view.sql_widgets.len();
+    info!(view_id = %view.id, widgets = widget_count, "view upserted");
     audit::record(
         &s.nats,
         "operator",
         "view_upsert",
         Some(&view.id),
         Some(&caller),
-        serde_json::json!({ "widgets": view.widgets.len() }),
+        serde_json::json!({ "widgets": widget_count }),
     )
     .await;
 
     Ok(Json(ViewSummary {
         id: view.id,
         description: view.description,
-        widget_count: view.widgets.len(),
+        widget_count: view.widgets.len() + view.sql_widgets.len(),
         tags: view.tags,
     }))
 }

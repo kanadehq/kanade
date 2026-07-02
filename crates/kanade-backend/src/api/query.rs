@@ -40,7 +40,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
-use sqlx::{AssertSqlSafe, Column, Executor, Row, SqlSafeStr, TypeInfo, ValueRef};
+use sqlx::{AssertSqlSafe, Column, Executor, Row, SqlSafeStr, SqlitePool, TypeInfo, ValueRef};
 use tracing::warn;
 
 use super::AppState;
@@ -245,21 +245,56 @@ fn decode_cell(row: &sqlx::sqlite::SqliteRow, i: usize) -> serde_json::Value {
     }
 }
 
-pub async fn execute(
-    State(state): State<AppState>,
-    Json(req): Json<QueryRequest>,
-) -> Result<Json<QueryResponse>, (StatusCode, String)> {
-    validate_read_only(&req.sql).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    let limit = req.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+/// A completed read-only query — columns (from `describe`, so present even at
+/// zero rows), row-major cells, and whether the result was capped.
+pub(crate) struct ReadOnlyResult {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<serde_json::Value>>,
+    pub truncated: bool,
+}
 
-    let started = Instant::now();
+/// Why a [`run_read_only`] failed — kept structured so each caller maps it to
+/// its own surface (HTTP status for `/api/query`, a per-widget error string
+/// for the materialized views).
+pub(crate) enum ReadOnlyError {
+    /// The SQL failed [`validate_read_only`] (not a read-only SELECT/WITH).
+    Rejected(String),
+    /// The fetch exceeded [`QUERY_TIMEOUT`].
+    Timeout,
+    /// A SQLite error at run time (syntax, unknown table, or a write attempt
+    /// caught by the read-only connection).
+    Sql(String),
+}
+
+impl std::fmt::Display for ReadOnlyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReadOnlyError::Rejected(m) => write!(f, "{m}"),
+            ReadOnlyError::Timeout => {
+                write!(f, "query exceeded the {}s budget", QUERY_TIMEOUT.as_secs())
+            }
+            ReadOnlyError::Sql(m) => write!(f, "query failed: {m}"),
+        }
+    }
+}
+
+/// Run one read-only query on the dedicated `SQLITE_OPEN_READONLY` pool,
+/// validating it first and bounding it by row cap + wall-clock timeout. Shared
+/// by the ad-hoc `POST /api/query` endpoint and the materialized `view:`
+/// widgets, so both get the identical safety envelope.
+pub(crate) async fn run_read_only(
+    pool: &SqlitePool,
+    sql: &str,
+    limit: usize,
+) -> Result<ReadOnlyResult, ReadOnlyError> {
+    validate_read_only(sql).map_err(ReadOnlyError::Rejected)?;
+    let limit = limit.clamp(1, MAX_LIMIT);
     let fetch = async {
         // Column names from `describe` (prepares without running), so a
         // zero-row result still reports its columns instead of an empty
         // header (claude #899).
-        let described = state
-            .query_pool
-            .describe(AssertSqlSafe(req.sql.clone()).into_sql_str())
+        let described = pool
+            .describe(AssertSqlSafe(sql.to_string()).into_sql_str())
             .await?;
         let columns: Vec<String> = described
             .columns()
@@ -269,7 +304,7 @@ pub async fn execute(
 
         // Stream + cap so a huge result set can't be materialised whole.
         // Pull one past `limit` to detect (and flag) truncation.
-        let mut stream = sqlx::query(AssertSqlSafe(req.sql.clone())).fetch(&state.query_pool);
+        let mut stream = sqlx::query(AssertSqlSafe(sql.to_string())).fetch(pool);
         let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
         let mut truncated = false;
         while let Some(row) = stream.try_next().await? {
@@ -282,31 +317,48 @@ pub async fn execute(
                 .collect();
             rows.push(cells);
         }
-        Ok::<_, sqlx::Error>((columns, rows, truncated))
+        Ok::<_, sqlx::Error>(ReadOnlyResult {
+            columns,
+            rows,
+            truncated,
+        })
     };
 
-    let (columns, rows, truncated) = match tokio::time::timeout(QUERY_TIMEOUT, fetch).await {
-        Err(_) => {
-            return Err((
-                StatusCode::REQUEST_TIMEOUT,
-                format!("query exceeded the {}s budget", QUERY_TIMEOUT.as_secs()),
-            ));
-        }
+    match tokio::time::timeout(QUERY_TIMEOUT, fetch).await {
+        Err(_) => Err(ReadOnlyError::Timeout),
         Ok(Err(e)) => {
             // A write attempt on the read-only connection lands here as a
             // SQLite error, as do syntax errors and unknown tables.
             warn!(error = %e, "read-only query failed");
-            return Err((StatusCode::BAD_REQUEST, format!("query failed: {e}")));
+            Err(ReadOnlyError::Sql(e.to_string()))
         }
-        Ok(Ok(v)) => v,
-    };
+        Ok(Ok(v)) => Ok(v),
+    }
+}
 
-    let row_count = rows.len();
+pub async fn execute(
+    State(state): State<AppState>,
+    Json(req): Json<QueryRequest>,
+) -> Result<Json<QueryResponse>, (StatusCode, String)> {
+    let started = Instant::now();
+    let limit = req.limit.unwrap_or(DEFAULT_LIMIT);
+    let result = run_read_only(&state.query_pool, &req.sql, limit)
+        .await
+        .map_err(|e| {
+            let status = match e {
+                ReadOnlyError::Rejected(_) => StatusCode::BAD_REQUEST,
+                ReadOnlyError::Timeout => StatusCode::REQUEST_TIMEOUT,
+                ReadOnlyError::Sql(_) => StatusCode::BAD_REQUEST,
+            };
+            (status, e.to_string())
+        })?;
+
+    let row_count = result.rows.len();
     Ok(Json(QueryResponse {
-        columns,
-        rows,
+        columns: result.columns,
+        rows: result.rows,
         row_count,
-        truncated,
+        truncated: result.truncated,
         elapsed_ms: started.elapsed().as_millis(),
     }))
 }
