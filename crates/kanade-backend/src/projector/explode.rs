@@ -248,9 +248,11 @@ pub async fn ensure_tables_for_jobs(
 /// Replace this PC's rows in `spec.table` with the elements of
 /// `payload[spec.field]`. Transactional — DELETE-then-INSERT
 /// happens atomically so concurrent readers always see a coherent
-/// snapshot. Skips silently when the payload doesn't contain an
-/// array at the expected field (operator typo / pre-`explode`
-/// manifest data).
+/// snapshot. A missing / non-array field is treated as an empty
+/// array (operator typo / pre-`explode` manifest data / the script
+/// omitting the field this run): any prior rows are removed — and,
+/// under `track_history`, recorded as `removed` events in the same
+/// transaction (#929) — rather than silently skipped.
 pub async fn replace_rows(
     pool: &SqlitePool,
     spec: &ExplodeSpec,
@@ -268,15 +270,45 @@ pub async fn replace_rows(
     for col in &spec.columns {
         validate_ident(&col.field)?;
     }
-    let Some(arr) = payload.get(&spec.field).and_then(|v| v.as_array()) else {
-        // Not an error — manifest declared explode but this PC's
-        // result payload didn't include the field (legacy data, or
-        // the script chose to omit on this run). Idempotent: clear
-        // any stale rows for (pc_id, job_id) so the operator never
-        // sees a ghost. Returns 0 — no rows inserted.
-        delete_rows(pool, &spec.table, pc_id, job_id).await?;
-        return Ok(0);
-    };
+    // A missing / non-array field means "no rows this run" (legacy
+    // data, or the script chose to omit the field). #929: treat it as
+    // an empty array and flow through the SAME transactional
+    // diff → events → delete path below, instead of a bare delete_rows()
+    // that wiped the table WITHOUT emitting `removed` history events.
+    // That early delete destroyed removal timestamps, so the next run
+    // that DID carry the field diffed against an empty table and
+    // re-emitted `added` for everything — a phantom "everything just
+    // appeared" storm. As an empty array, disappearance is recorded as
+    // `removed` and a later reappearance is a legitimate `added` matched
+    // by that prior `removed`.
+    let arr: &[JsonValue] = payload
+        .get(&spec.field)
+        .and_then(|v| v.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+
+    // gemini #951: steady-state short-circuit. A PC that *consistently*
+    // lacks an optional field would otherwise open a write transaction
+    // (SELECT + DELETE + commit — serialized fsync'd I/O) on every scan
+    // for nothing. When there's nothing incoming AND no prior rows to
+    // remove, there's nothing to do — and no `removed` event to emit —
+    // so skip the transaction entirely. The check is a single indexed
+    // count on the (pc_id, job_id) PK prefix, and only runs when `arr`
+    // is empty (a non-empty payload always has inserts to do).
+    if arr.is_empty() {
+        let existing: (i64,) = sqlx::query_as(AssertSqlSafe(format!(
+            "SELECT COUNT(*) FROM \"{}\" WHERE pc_id = ? AND job_id = ?",
+            spec.table
+        )))
+        .bind(pc_id)
+        .bind(job_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| anyhow!("count prior rows in {}: {e}", spec.table))?;
+        if existing.0 == 0 {
+            return Ok(0);
+        }
+    }
 
     let mut tx: Transaction<'_, Sqlite> = pool.begin().await?;
 
@@ -342,18 +374,6 @@ pub async fn replace_rows(
     }
     tx.commit().await?;
     Ok(inserted)
-}
-
-async fn delete_rows(pool: &SqlitePool, table: &str, pc_id: &str, job_id: &str) -> Result<()> {
-    sqlx::query(AssertSqlSafe(format!(
-        "DELETE FROM \"{table}\" WHERE pc_id = ? AND job_id = ?"
-    )))
-    .bind(pc_id)
-    .bind(job_id)
-    .execute(pool)
-    .await
-    .map_err(|e| anyhow!("delete rows in {table}: {e}"))?;
-    Ok(())
 }
 
 /// Pull `element[col.field]` and bind it to the query with the
@@ -571,5 +591,97 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count.0, 0, "stale rows cleared even when field absent");
+    }
+
+    #[tokio::test]
+    async fn missing_field_records_removed_not_phantom_added() {
+        // #929: with track_history, a transient missing field must record
+        // `removed` events (not silently wipe the rows). Before the fix,
+        // the missing-field branch deleted rows OUTSIDE the history diff,
+        // so the disappearance left no `removed` events and the next run
+        // that carried the field again re-emitted `added` for everything
+        // — a phantom "everything just appeared" storm.
+        use sqlx::sqlite::SqlitePoolOptions;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        // migrations create `inventory_history`; ensure_table the explode table.
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let mut spec = sample_apps_spec();
+        spec.track_history = true;
+        ensure_table(&pool, &spec).await.unwrap();
+
+        let payload = serde_json::json!({
+            "apps": [
+                {"source": "x64", "name": "Chrome", "version": "120", "publisher": "Google"},
+                {"source": "x64", "name": "Firefox", "version": "122", "publisher": "Mozilla"},
+            ]
+        });
+
+        // 1) First scan: two apps → two `added`.
+        replace_rows(&pool, &spec, "pc-01", "inventory-sw", None, &payload)
+            .await
+            .unwrap();
+
+        // 2) Field missing this run → rows cleared AND two `removed` events.
+        let no_field = serde_json::json!({ "hostname": "pc-01" });
+        let n = replace_rows(&pool, &spec, "pc-01", "inventory-sw", None, &no_field)
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+        let removed: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM inventory_history WHERE change_kind = 'removed'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            removed.0, 2,
+            "disappearance must be recorded as `removed`, not a silent wipe (#929)"
+        );
+
+        // 3) Field reappears → two more `added`. Every `added` now has a
+        //    matching prior `removed`: 4 added total (2 initial + 2
+        //    reappearance) against 2 removed — no phantom, the reappearance
+        //    is legitimate because the disappearance was recorded.
+        replace_rows(&pool, &spec, "pc-01", "inventory-sw", None, &payload)
+            .await
+            .unwrap();
+        let added: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM inventory_history WHERE change_kind = 'added'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(added.0, 4);
+    }
+
+    #[tokio::test]
+    async fn missing_field_on_fresh_pc_is_a_noop() {
+        // gemini #951 steady-state short-circuit: a PC that has no prior
+        // rows and no field this run does nothing — returns 0 and emits
+        // no history events (no spurious `removed` for rows that never
+        // existed).
+        use sqlx::sqlite::SqlitePoolOptions;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let mut spec = sample_apps_spec();
+        spec.track_history = true;
+        ensure_table(&pool, &spec).await.unwrap();
+
+        let no_field = serde_json::json!({ "hostname": "pc-01" });
+        let n = replace_rows(&pool, &spec, "pc-01", "inventory-sw", None, &no_field)
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+        let events: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM inventory_history")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(events.0, 0, "no rows existed, so nothing to remove");
     }
 }
