@@ -203,6 +203,33 @@ async fn wait_or_killed(
     }
 }
 
+/// What a [`handle_command`] call actually did, so a caller that
+/// records per-PC scheduler completions (`local_scheduler::local_tick`)
+/// can distinguish a genuine successful run from a run that skipped or
+/// failed. The live-NATS / replay callers ignore this — they only care
+/// about the `Result`'s `Err` arm for logging.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandOutcome {
+    /// The script ran to completion (or was killed / timed out) with
+    /// this exit code. `0` = success; anything else is a real failure.
+    Ran { exit_code: i32 },
+    /// The command was gated before the script ran — a staleness /
+    /// version-pin / revoke / deadline skip (synthetic exit 124-127).
+    /// It carries no evidence the job succeeded, so a `per_pc: once`
+    /// schedule must NOT count it as done (#910).
+    Skipped,
+}
+
+impl CommandOutcome {
+    /// The single rule a per-PC scheduler uses to decide whether a fire
+    /// counts as done: only a script that actually ran and exited `0`.
+    /// A non-zero exit or a pre-run skip must re-fire "until that pc
+    /// succeeds" (#910), matching the backend dedup's `exit_code = 0`.
+    pub fn is_success(self) -> bool {
+        matches!(self, CommandOutcome::Ran { exit_code: 0 })
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_command(
     client: async_nats::Client,
@@ -213,7 +240,7 @@ pub async fn handle_command(
     staleness: Tracker,
     script_cache: ScriptCache,
     check_sink: crate::check_cache::CheckSink,
-) -> Result<()> {
+) -> Result<CommandOutcome> {
     // Spec §2.6 Layer 2: version-pinning + revoke check + v0.26
     // staleness policy. The order matters:
     //   1. staleness gate first — if the policy is `strict` and the
@@ -232,7 +259,8 @@ pub async fn handle_command(
                 allowed_s = allowed.as_secs(),
                 "skip: staleness policy (mode=strict) exceeded — broker view too old",
             );
-            return publish_staleness_skipped(&pc_id, &cmd, observed, allowed).await;
+            publish_staleness_skipped(&pc_id, &cmd, observed, allowed).await?;
+            return Ok(CommandOutcome::Skipped);
         }
     }
 
@@ -253,7 +281,8 @@ pub async fn handle_command(
             // out of `pending` rather than rotting forever and
             // inflating the /api/jobs `実行中` counter. Same shape
             // as the Layer 1 staleness / deadline-expired skips.
-            return publish_version_mismatch_skipped(&pc_id, &cmd, &expected).await;
+            publish_version_mismatch_skipped(&pc_id, &cmd, &expected).await?;
+            return Ok(CommandOutcome::Skipped);
         }
     }
     if let Some(sta) = &script_status
@@ -269,7 +298,8 @@ pub async fn handle_command(
             // #271: same fix as the version-mismatch path — emit a
             // synthetic result so the executions row can reach
             // `completed` instead of stranding `pending`.
-            return publish_revoked_skipped(&pc_id, &cmd).await;
+            publish_revoked_skipped(&pc_id, &cmd).await?;
+            return Ok(CommandOutcome::Skipped);
         }
     }
 
@@ -288,7 +318,8 @@ pub async fn handle_command(
                 %now,
                 "skip: starting deadline expired",
             );
-            return publish_skipped(&client, &pc_id, &cmd, deadline, now).await;
+            publish_skipped(&client, &pc_id, &cmd, deadline, now).await?;
+            return Ok(CommandOutcome::Skipped);
         }
     }
 
@@ -634,7 +665,7 @@ pub async fn handle_command(
     // unused warning on the no-hook happy path — we keep it in the
     // signature so future hooks (audit, kill ack, etc.) have it available.
     let _ = client;
-    Ok(())
+    Ok(CommandOutcome::Ran { exit_code })
 }
 
 /// Issue #246 — parse each non-empty stdout line as `ObsEvent`
@@ -928,6 +959,16 @@ mod tests {
             .timestamp_opt(1_700_000_000 + secs, 0)
             .single()
             .unwrap()
+    }
+
+    #[test]
+    fn command_outcome_is_success_only_for_clean_run() {
+        // #910: the per-PC scheduler records a completion only when this
+        // is true. A non-zero exit and every skip must re-fire.
+        assert!(CommandOutcome::Ran { exit_code: 0 }.is_success());
+        assert!(!CommandOutcome::Ran { exit_code: 1 }.is_success());
+        assert!(!CommandOutcome::Ran { exit_code: 124 }.is_success());
+        assert!(!CommandOutcome::Skipped.is_success());
     }
 
     #[test]
