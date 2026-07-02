@@ -573,7 +573,31 @@ async fn tick(state: &AppState, schedule: Schedule, freeze: &FreezeMirror) {
         }
     };
 
-    let action = decide_fire(lowered.mode, cooldown, &expected, &completions, now);
+    // #912: OncePerTarget dedup counts completions from any target
+    // MEMBER (alive or not), so a member that succeeded and then went
+    // offline keeps the target muted instead of re-firing the whole
+    // target. Resolve the full roster only for that mode — the other
+    // modes never read it, and this is an extra DB round-trip.
+    let target_roster = if matches!(lowered.mode, ExecMode::OncePerTarget) {
+        match resolve_roster(state, &schedule.plan.target, false).await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(%schedule_id, error = ?e, "scheduler fire failed: target roster resolve");
+                return;
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    let action = decide_fire(
+        lowered.mode,
+        cooldown,
+        &expected,
+        &target_roster,
+        &completions,
+        now,
+    );
 
     // Layer bounded in-flight suppression on top of the completion-
     // based decision: a PC (or the whole target) we already dispatched
