@@ -1,8 +1,8 @@
-//! `kanade view` — manage [`View`] resources (#743): standalone
-//! declarative dashboards over `obs_events` for the Analytics page. Same
-//! REST shape as `kanade job` / `kanade schedule` (HTTP to the backend);
-//! a view has no `execute` and no schedule, so this is just
-//! create / list / export / delete.
+//! `kanade view` — manage [`View`] resources (#743): standalone declarative
+//! dashboards (obs_events `aggregate:` widgets and SQL-backed `sql_widgets:`)
+//! for the Analytics page. Same REST shape as `kanade job` / `kanade
+//! schedule` (HTTP to the backend); a view has no `execute` and no schedule,
+//! so this is create / validate / list / export / delete.
 
 use std::path::PathBuf;
 
@@ -32,6 +32,23 @@ pub enum ViewSub {
         #[arg(required = true, num_args = 1..)]
         paths: Vec<PathBuf>,
     },
+    /// Validate one or more view manifests WITHOUT submitting them.
+    ///
+    /// Runs the exact client-side checks `create` does — strict YAML parse
+    /// (#492) + `View::validate()` (id charset, per-widget rules for both
+    /// `widgets:` and `sql_widgets:`) — but never contacts the backend. One
+    /// caveat, shared with `create`: a `sql_widgets[].query` is only checked
+    /// read-only at the backend sandbox, so that specific check isn't run
+    /// here (structure / placement / render channels ARE). Built for CI /
+    /// pre-commit: `kanade view validate configs/views/*.yaml`. Accepts
+    /// files, directories, and globs like `create`; exits non-zero if any
+    /// file fails.
+    Validate {
+        /// View YAML paths to check. Globs / directories are expanded
+        /// CLI-side, so quote a glob to keep your shell from expanding it.
+        #[arg(required = true, num_args = 1..)]
+        paths: Vec<PathBuf>,
+    },
     /// Export registered view YAML (the comment-preserving mirror).
     ///
     /// `kanade view export <id>` prints to stdout; with `--out-dir` it
@@ -58,6 +75,8 @@ pub async fn execute(backend_url: &str, args: ViewArgs) -> Result<()> {
     let base = backend_url.trim_end_matches('/');
     match args.sub {
         ViewSub::Create { paths } => create_all(base, paths).await,
+        // Offline check — no backend round-trip, so `base` is unused here.
+        ViewSub::Validate { paths } => validate_all(paths),
         ViewSub::Export { id, all, out_dir } => {
             crate::cmd::bulk::export(base, "views", id, all, out_dir).await
         }
@@ -78,6 +97,43 @@ async fn create_all(base: &str, paths: Vec<PathBuf>) -> Result<()> {
     if failures > 0 {
         anyhow::bail!("{failures}/{} view manifest(s) failed", files.len());
     }
+    Ok(())
+}
+
+/// Expand the operator's `validate` arguments (files / dirs / globs) and
+/// check each view without submitting it. Fail-soft per file so one bad view
+/// in a batch doesn't hide the rest; exits non-zero if any file failed so the
+/// command gates CI. Mirrors `kanade job/schedule validate`.
+fn validate_all(paths: Vec<PathBuf>) -> Result<()> {
+    let files = crate::cmd::bulk::expand_manifest_paths(&paths)?;
+    let mut failures = 0usize;
+    for f in &files {
+        if let Err(e) = validate_one(f) {
+            eprintln!("✗ {}: {e:#}", f.display());
+            failures += 1;
+        } else {
+            println!("✓ {}", f.display());
+        }
+    }
+    if failures > 0 {
+        anyhow::bail!(
+            "{failures}/{} view manifest(s) failed validation",
+            files.len()
+        );
+    }
+    Ok(())
+}
+
+/// Parse + validate one view manifest WITHOUT submitting it. Mirrors the
+/// client-side checks `create_one` runs up to (but not including) the HTTP
+/// POST: strict parse (#492) → `View::validate()`. No GitOps provenance is
+/// appended — validation must not mutate the operator's tree.
+fn validate_one(yaml: &std::path::Path) -> Result<()> {
+    let raw = std::fs::read_to_string(yaml).with_context(|| format!("read {yaml:?}"))?;
+    let view: View = kanade_shared::strict::from_yaml_str(&raw)
+        .map_err(|e| anyhow::anyhow!("parse {yaml:?}: {e}"))?;
+    view.validate()
+        .map_err(|e| anyhow::anyhow!("invalid view {yaml:?}: {e}"))?;
     Ok(())
 }
 

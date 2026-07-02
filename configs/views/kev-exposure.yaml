@@ -1,0 +1,84 @@
+# KEV exposure — the vulnerability dashboard, expressed as pure config (#901).
+#
+# Correlates the CISA KEV catalog (`feed-kev` job → feeds table, feed_id=kev)
+# against installed software (`inventory-sw` job → inventory_sw_apps table) and
+# surfaces hosts running a product family that has actively-exploited CVEs.
+# Zero bespoke Rust: `sql_widgets` are raw read-only SELECTs (run in the
+# #899 sandbox), mapped to visuals and materialized on the `refresh` cadence.
+#
+#   kanade view validate configs/views/kev-exposure.yaml   # offline check
+#   kanade view create   configs/views/kev-exposure.yaml
+#
+# Prereqs: the `feed-kev` and `inventory-sw` jobs must have run at least once
+# (so `feeds` has feed_id=kev rows and `inventory_sw_apps` exists). Until then
+# each widget's query errors and the widget is skipped (logged, not fatal).
+#
+# The match is a substring test: the KEV `product` name appears inside the
+# installed app's DisplayName (e.g. KEV "Chrome" ⊂ "Google Chrome"). KEV has
+# no version ranges, so this is a coarse but high-signal "prioritize patching"
+# signal — a product family with known-exploited CVEs is present — NOT proof
+# that the specific installed build is vulnerable. Prototype/tune the match
+# with `kanade query` before trusting it fleet-wide.
+
+id: kev-exposure
+description: "Hosts running software families with actively-exploited (CISA KEV) CVEs"
+tags: [security, vulnerability, dashboards]
+
+sql_widgets:
+  # ── Pinned headline: how many hosts are exposed ──────────────────
+  # A single number promoted to the main Dashboard (#900 pinned section) AND
+  # shown on the Security Analytics tab. `stat` reads the first row's `hosts`.
+  - title: KEV-exposed hosts
+    description: Hosts running a product family with actively-exploited CVEs
+    query: |
+      SELECT count(DISTINCT i.pc_id) AS hosts
+      FROM inventory_sw_apps i
+      JOIN feeds f
+        ON f.feed_id = 'kev'
+       AND json_extract(f.data, '$.product') <> ''
+       AND lower(i.name) LIKE '%' || lower(json_extract(f.data, '$.product')) || '%'
+    refresh: 6h
+    render: { kind: stat, value: hosts }
+    placement: { analytics: Security, dashboard: { pin: true } }
+
+  # ── Per-host breakdown (full table on the Security tab) ──────────
+  # One row per exposed host: how many distinct KEV CVEs its installed
+  # software matches, and how many distinct apps triggered a match.
+  - title: Per-host KEV exposure
+    description: Distinct KEV CVEs and matched apps, by host
+    query: |
+      SELECT i.pc_id AS pc_id,
+             count(DISTINCT json_extract(f.data, '$.cveID')) AS cves,
+             count(DISTINCT i.name) AS apps
+      FROM inventory_sw_apps i
+      JOIN feeds f
+        ON f.feed_id = 'kev'
+       AND json_extract(f.data, '$.product') <> ''
+       AND lower(i.name) LIKE '%' || lower(json_extract(f.data, '$.product')) || '%'
+      GROUP BY i.pc_id
+      ORDER BY cves DESC
+    refresh: 6h
+    render:
+      kind: table
+      columns: [pc_id, cves, apps]
+      labels: { cves: "KEV CVEs", apps: "Matched apps" }
+    placement: { analytics: Security }
+
+  # ── Most-exposed products (ranked bars on the Security tab) ───────
+  # Which KEV product families account for the most exposed hosts — the
+  # patch-priority shortlist. `limit: 10` keeps the top-N by host count.
+  - title: Most-exposed products
+    description: KEV product families present on the most hosts
+    query: |
+      SELECT json_extract(f.data, '$.product') AS product,
+             count(DISTINCT i.pc_id) AS hosts
+      FROM inventory_sw_apps i
+      JOIN feeds f
+        ON f.feed_id = 'kev'
+       AND json_extract(f.data, '$.product') <> ''
+       AND lower(i.name) LIKE '%' || lower(json_extract(f.data, '$.product')) || '%'
+      GROUP BY product
+      ORDER BY hosts DESC
+    refresh: 6h
+    render: { kind: bar, label: product, value: hosts, limit: 10 }
+    placement: { analytics: Security }

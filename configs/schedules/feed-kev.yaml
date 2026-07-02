@@ -1,0 +1,22 @@
+# Refresh the CISA KEV feed daily. KEV updates roughly daily on business days,
+# so a 24h tick keeps the `kev-exposure` view current without hammering CISA.
+# The `kev-exposure` view materializes on its own (6h) cadence off whatever the
+# last refresh stored, so display latency is decoupled from this fetch.
+#
+# Install (after `kanade job create configs/jobs/feed-kev.yaml`):
+#   kanade schedule create configs/schedules/feed-kev.yaml
+#
+# `target: all` is intersected with the `controller_group` by the dispatch
+# guard (feed-kev is `tier: controller`), so this effectively fires on the
+# trusted controller host(s) only — never an employee endpoint. A feed is
+# fleet-global data; if the group has more than one host they each re-fetch
+# (idempotent, just redundant). Jitter spreads the fetch if so.
+id: feed-kev
+when:
+  per_pc: { every: 24h }
+enabled: true
+job_id: feed-kev
+target:
+  all: true
+jitter: 30m
+tags: [feed, security, vulnerability]
