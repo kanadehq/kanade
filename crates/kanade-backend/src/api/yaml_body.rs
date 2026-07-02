@@ -60,7 +60,7 @@ pub struct YamlOrJson<T> {
 impl<S, T> FromRequest<S> for YamlOrJson<T>
 where
     S: Send + Sync,
-    T: DeserializeOwned,
+    T: DeserializeOwned + kanade_shared::strict::StrictSchema,
 {
     type Rejection = (StatusCode, String);
 
