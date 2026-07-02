@@ -121,7 +121,8 @@ pub async fn run(state: AppState) -> Result<()> {
     // per-fire KV get (gemini #472). The seed is synchronous so the
     // first ticks already see a freeze set before this boot. A seed-
     // read failure is logged (NOT silently treated as "not frozen" —
-    // coderabbit #472); the watch re-seeds from its initial delivery.
+    // coderabbit #472); the watcher re-seeds with its own `kv.get` on
+    // every (re)open (#911 — `watch_all` has no initial delivery).
     let initial_freeze = match load_freeze(&state.jetstream).await {
         Ok(v) => v,
         Err(e) => {
@@ -734,6 +735,17 @@ async fn load_freeze(js: &async_nats::jetstream::Context) -> Result<Option<Freez
 /// transient broker hiccup doesn't leave the mirror permanently stale.
 /// This replaces a per-tick `get_key_value` on the hot path (gemini
 /// #472) — `tick` only reads the in-memory Arc.
+///
+/// Every (re)open re-seeds the mirror with an explicit `kv.get`
+/// (#911): async-nats's plain `watch_all` delivers only *new* updates
+/// (no initial value — that's the `*_with_history` variants), so a
+/// freeze set or lifted while the watch was down would otherwise stay
+/// invisible until the operator's next write, and the scheduler would
+/// dispatch straight through an active fleet freeze. The get runs
+/// AFTER the watch is opened so a write landing in between is covered
+/// from both sides (the get returns it, or the watch delivers it —
+/// the watch's copy is applied later and is never older). The agent's
+/// local scheduler uses the same reconnect-re-seed pattern.
 fn spawn_freeze_watcher(js: async_nats::jetstream::Context, freeze: FreezeMirror) {
     tokio::spawn(async move {
         loop {
@@ -753,6 +765,23 @@ fn spawn_freeze_watcher(js: async_nats::jetstream::Context, freeze: FreezeMirror
                     continue;
                 }
             };
+            // Re-seed before consuming the watch. A get failure means
+            // broker trouble — retry the whole open rather than tail a
+            // watch on top of a possibly-stale mirror (proceeding
+            // without the re-seed is exactly the #911 bug).
+            match kv.get(KEY_FREEZE).await {
+                Ok(bytes) => {
+                    let next = bytes.map(|b| parse_freeze_or_safe(&b));
+                    let frozen = next.is_some();
+                    *freeze.write().await = next;
+                    info!(frozen, "fleet change-freeze mirror re-seeded");
+                }
+                Err(e) => {
+                    warn!(error = %e, "freeze watcher: re-seed read failed; retrying");
+                    tokio::time::sleep(StdDuration::from_secs(5)).await;
+                    continue;
+                }
+            }
             while let Some(entry) = watch.next().await {
                 let entry = match entry {
                     Ok(e) => e,
