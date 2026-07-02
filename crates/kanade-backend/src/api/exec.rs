@@ -329,11 +329,27 @@ pub async fn exec_manifest(
             subjects.push(subject::commands_pc(pc));
         }
 
+        // #913: ONE Command (hence one request_id) for the whole exec,
+        // published verbatim to every subject. These subjects can
+        // overlap on a single PC — `target: {groups:[a,b]}` with a PC
+        // in both, or `{all:true, pcs:[x]}` — and the agent dedups by
+        // request_id (commands.rs), so minting a fresh id per subject
+        // (the old `make_cmd()`-in-the-loop) made that PC run the
+        // script once per matching subject. Sharing one id lets the
+        // agent's dedup cache absorb the redundant deliveries, matching
+        // how a single `commands.all` broadcast already shares one
+        // request_id across every PC. The Command is otherwise
+        // identical across subjects, so build + serialise it once, into
+        // a `Bytes` so each per-subject publish is a cheap refcount
+        // clone rather than a fresh copy of the payload (gemini/claude
+        // #946).
+        let cmd = make_cmd();
+        let payload = bytes::Bytes::from(
+            serde_json::to_vec(&cmd)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialize: {e}")))?,
+        );
         for subj in &subjects {
-            let cmd = make_cmd();
-            let payload = serde_json::to_vec(&cmd)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialize: {e}")))?;
-            if let Err(e) = s.nats.publish(subj.clone(), payload.into()).await {
+            if let Err(e) = s.nats.publish(subj.clone(), payload.clone()).await {
                 warn!(error = %e, subject = %subj, "publish failed");
                 return Err((StatusCode::BAD_GATEWAY, format!("publish to {subj}: {e}")));
             }
