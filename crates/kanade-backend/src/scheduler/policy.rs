@@ -51,17 +51,24 @@ pub enum FireAction {
 /// Pure policy decision. All inputs are caller-resolved snapshots;
 /// the function is free of IO so its behavior is locked down by the
 /// unit tests below.
+/// `expected_pcs` is the ALIVE dispatch set (who to fire at now);
+/// `target_roster` is the FULL target membership (alive or not), used
+/// only by `OncePerTarget` to decide whether the target has already
+/// completed (#912). Other modes ignore `target_roster`.
 pub fn decide_fire(
     mode: ExecMode,
     cooldown: Option<ChronoDuration>,
     expected_pcs: &[String],
+    target_roster: &[String],
     completions: &[Completion],
     now: DateTime<Utc>,
 ) -> FireAction {
     match mode {
         ExecMode::EveryTick => FireAction::FireWholeTarget,
         ExecMode::OncePerPc => decide_once_per_pc(cooldown, expected_pcs, completions, now),
-        ExecMode::OncePerTarget => decide_once_per_target(cooldown, expected_pcs, completions, now),
+        ExecMode::OncePerTarget => {
+            decide_once_per_target(cooldown, expected_pcs, target_roster, completions, now)
+        }
         // Event triggers (`when: { on }`) are agent-only — fired by the
         // agent's OS event source, never by the backend scheduler
         // (`Schedule::validate` rejects them on `runs_on: backend`).
@@ -116,16 +123,24 @@ fn decide_once_per_pc(
 fn decide_once_per_target(
     cooldown: Option<ChronoDuration>,
     expected_pcs: &[String],
+    target_roster: &[String],
     completions: &[Completion],
     now: DateTime<Utc>,
 ) -> FireAction {
-    // Only count completions from pcs that are currently in the
-    // expected set — a decommissioned PC's old success shouldn't
-    // permanently mute a `target.all` once_per_target schedule.
-    let expected: HashSet<&str> = expected_pcs.iter().map(String::as_str).collect();
+    // #912: count completions from any pc that is a MEMBER of the
+    // target, whether or not it's currently alive. `once_per_target`
+    // means "the target completed once", so a member that succeeded and
+    // then went offline must keep the target muted — filtering on the
+    // *alive* set (the old behaviour) discarded that completion the
+    // moment the completing PC dropped below ALIVE_THRESHOLD and
+    // re-fired the whole target. A truly-decommissioned host is removed
+    // from the roster by agent pruning, which correctly re-arms the
+    // schedule; that's the intended escape hatch the alive-filter was
+    // reaching for.
+    let members: HashSet<&str> = target_roster.iter().map(String::as_str).collect();
     let latest = completions
         .iter()
-        .filter(|c| expected.contains(c.pc_id.as_str()))
+        .filter(|c| members.contains(c.pc_id.as_str()))
         .map(|c| c.finished_at)
         .max();
 
@@ -135,6 +150,13 @@ fn decide_once_per_target(
         (Some(t), Some(cd)) => now.signed_duration_since(t) >= cd,
     };
 
+    // The fire GUARD stays on the ALIVE set (gemini #950): firing when
+    // no member is currently alive would still publish and record a
+    // whole-target dispatch mark, which `suppress_dispatched` then uses
+    // to mute the schedule — but nobody actually ran. Wait until at
+    // least one member is alive; the completion-membership check above
+    // (roster-based) is what keeps a completed-then-offline target from
+    // re-arming in the meantime.
     if armed && !expected_pcs.is_empty() {
         return FireAction::FireWholeTarget;
     }
@@ -200,6 +222,20 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
 
+    // Most cases don't distinguish the alive *dispatch* set from the
+    // full target *roster*, so this shim passes one set as both. The
+    // #912 tests that DO distinguish (a completed member that later went
+    // offline) call `decide_fire` directly with a distinct roster.
+    fn decide_fire_same(
+        mode: ExecMode,
+        cooldown: Option<ChronoDuration>,
+        pcs: &[String],
+        completions: &[Completion],
+        now: DateTime<Utc>,
+    ) -> FireAction {
+        decide_fire(mode, cooldown, pcs, pcs, completions, now)
+    }
+
     fn t(secs: i64) -> DateTime<Utc> {
         Utc.timestamp_opt(1_700_000_000 + secs, 0).single().unwrap()
     }
@@ -219,7 +255,7 @@ mod tests {
 
     #[test]
     fn every_tick_always_fires_whole_target() {
-        let action = decide_fire(
+        let action = decide_fire_same(
             ExecMode::EveryTick,
             None,
             &pcs(&["a", "b"]),
@@ -233,7 +269,7 @@ mod tests {
     fn every_tick_ignores_empty_expected() {
         // EveryTick fires at original target subjects regardless of
         // expected_pcs enumeration — the broker handles fan-out.
-        let action = decide_fire(ExecMode::EveryTick, None, &[], &[], t(0));
+        let action = decide_fire_same(ExecMode::EveryTick, None, &[], &[], t(0));
         assert_eq!(action, FireAction::FireWholeTarget);
     }
 
@@ -241,13 +277,13 @@ mod tests {
 
     #[test]
     fn once_per_pc_no_completions_fires_every_pc() {
-        let action = decide_fire(ExecMode::OncePerPc, None, &pcs(&["a", "b", "c"]), &[], t(0));
+        let action = decide_fire_same(ExecMode::OncePerPc, None, &pcs(&["a", "b", "c"]), &[], t(0));
         assert_eq!(action, FireAction::FirePcs(pcs(&["a", "b", "c"])));
     }
 
     #[test]
     fn once_per_pc_partial_completion_fires_remainder() {
-        let action = decide_fire(
+        let action = decide_fire_same(
             ExecMode::OncePerPc,
             None,
             &pcs(&["a", "b", "c"]),
@@ -259,7 +295,7 @@ mod tests {
 
     #[test]
     fn once_per_pc_all_completed_skips() {
-        let action = decide_fire(
+        let action = decide_fire_same(
             ExecMode::OncePerPc,
             None,
             &pcs(&["a", "b"]),
@@ -273,7 +309,7 @@ mod tests {
     fn once_per_pc_empty_expected_skips() {
         // Empty target (nobody alive / heartbeating yet) — nothing
         // to fire; the next tick re-evaluates a fresh roster.
-        let action = decide_fire(ExecMode::OncePerPc, None, &[], &[], t(0));
+        let action = decide_fire_same(ExecMode::OncePerPc, None, &[], &[], t(0));
         assert_eq!(action, FireAction::Skip);
     }
 
@@ -283,7 +319,7 @@ mod tests {
     fn once_per_pc_cooldown_recent_excluded() {
         // Finished at t=100, now=110, cooldown=60s → 10s elapsed →
         // not yet re-armed.
-        let action = decide_fire(
+        let action = decide_fire_same(
             ExecMode::OncePerPc,
             Some(ChronoDuration::seconds(60)),
             &pcs(&["a"]),
@@ -296,7 +332,7 @@ mod tests {
     #[test]
     fn once_per_pc_cooldown_exactly_at_boundary_rearmed() {
         // Boundary policy: elapsed >= cooldown re-arms.
-        let action = decide_fire(
+        let action = decide_fire_same(
             ExecMode::OncePerPc,
             Some(ChronoDuration::seconds(60)),
             &pcs(&["a"]),
@@ -308,7 +344,7 @@ mod tests {
 
     #[test]
     fn once_per_pc_cooldown_one_second_before_boundary_excluded() {
-        let action = decide_fire(
+        let action = decide_fire_same(
             ExecMode::OncePerPc,
             Some(ChronoDuration::seconds(60)),
             &pcs(&["a"]),
@@ -320,7 +356,7 @@ mod tests {
 
     #[test]
     fn once_per_pc_cooldown_past_boundary_rearmed() {
-        let action = decide_fire(
+        let action = decide_fire_same(
             ExecMode::OncePerPc,
             Some(ChronoDuration::seconds(60)),
             &pcs(&["a", "b"]),
@@ -332,7 +368,7 @@ mod tests {
 
     #[test]
     fn once_per_pc_cooldown_mix_one_armed_one_not() {
-        let action = decide_fire(
+        let action = decide_fire_same(
             ExecMode::OncePerPc,
             Some(ChronoDuration::seconds(60)),
             &pcs(&["a", "b"]),
@@ -347,7 +383,7 @@ mod tests {
         // Multiple completion records for the same pc — only the
         // newest counts (so an old success doesn't outlast its
         // cooldown when a fresh one has reset it).
-        let action = decide_fire(
+        let action = decide_fire_same(
             ExecMode::OncePerPc,
             Some(ChronoDuration::seconds(60)),
             &pcs(&["a"]),
@@ -363,7 +399,7 @@ mod tests {
     fn once_per_pc_decommissioned_pc_completion_ignored() {
         // Old success from a pc that's no longer in the target —
         // doesn't shrink the eligible set.
-        let action = decide_fire(
+        let action = decide_fire_same(
             ExecMode::OncePerPc,
             None,
             &pcs(&["a", "b"]),
@@ -377,13 +413,13 @@ mod tests {
 
     #[test]
     fn once_per_target_no_success_fires_whole_target() {
-        let action = decide_fire(ExecMode::OncePerTarget, None, &pcs(&["a", "b"]), &[], t(0));
+        let action = decide_fire_same(ExecMode::OncePerTarget, None, &pcs(&["a", "b"]), &[], t(0));
         assert_eq!(action, FireAction::FireWholeTarget);
     }
 
     #[test]
     fn once_per_target_any_in_scope_success_skips() {
-        let action = decide_fire(
+        let action = decide_fire_same(
             ExecMode::OncePerTarget,
             None,
             &pcs(&["a", "b"]),
@@ -395,9 +431,10 @@ mod tests {
 
     #[test]
     fn once_per_target_out_of_scope_success_does_not_count() {
-        // Success exists, but the only pc that did it was
-        // decommissioned (no longer in expected). Still armed.
-        let action = decide_fire(
+        // Success exists, but the only pc that did it is not in the
+        // roster (pruned / decommissioned). Still armed — a member
+        // removed from the roster must not permanently mute the target.
+        let action = decide_fire_same(
             ExecMode::OncePerTarget,
             None,
             &pcs(&["a", "b"]),
@@ -408,8 +445,54 @@ mod tests {
     }
 
     #[test]
+    fn once_per_target_offline_member_completion_still_mutes() {
+        // #912: the pc that completed ("a") is a MEMBER of the target
+        // (in the roster) but is NOT currently alive. "b" IS alive, so
+        // the fire guard is satisfied — the ONLY reason to Skip is that
+        // "a"'s completion mutes the target. The old alive-only filter
+        // discarded "a"'s completion the moment it dropped offline and
+        // re-fired the whole target.
+        let action = decide_fire(
+            ExecMode::OncePerTarget,
+            None,
+            &pcs(&["b"]),      // b is alive (guard satisfied)
+            &pcs(&["a", "b"]), // full roster (a + b are members)
+            &[done("a", 0)],   // a completed, then went offline
+            t(100),
+        );
+        assert_eq!(action, FireAction::Skip);
+    }
+
+    #[test]
+    fn once_per_target_cooldown_rearms_offline_member() {
+        // With a cooldown, an offline member's completion still gates
+        // the cooldown window (not discarded), and re-arms once elapsed.
+        // "b" is alive throughout so the fire guard never masks the
+        // cooldown decision.
+        let recent = decide_fire(
+            ExecMode::OncePerTarget,
+            Some(ChronoDuration::seconds(60)),
+            &pcs(&["b"]),
+            &pcs(&["a", "b"]),
+            &[done("a", 100)],
+            t(110), // 10s < 60s
+        );
+        assert_eq!(recent, FireAction::Skip);
+
+        let elapsed = decide_fire(
+            ExecMode::OncePerTarget,
+            Some(ChronoDuration::seconds(60)),
+            &pcs(&["b"]),
+            &pcs(&["a", "b"]),
+            &[done("a", 100)],
+            t(160), // exactly 60s → re-armed
+        );
+        assert_eq!(elapsed, FireAction::FireWholeTarget);
+    }
+
+    #[test]
     fn once_per_target_empty_expected_no_completion_skips() {
-        let action = decide_fire(ExecMode::OncePerTarget, None, &[], &[], t(0));
+        let action = decide_fire_same(ExecMode::OncePerTarget, None, &[], &[], t(0));
         assert_eq!(action, FireAction::Skip);
     }
 
@@ -417,7 +500,7 @@ mod tests {
 
     #[test]
     fn once_per_target_cooldown_recent_skipped() {
-        let action = decide_fire(
+        let action = decide_fire_same(
             ExecMode::OncePerTarget,
             Some(ChronoDuration::seconds(60)),
             &pcs(&["a", "b"]),
@@ -429,7 +512,7 @@ mod tests {
 
     #[test]
     fn once_per_target_cooldown_exactly_at_boundary_rearmed() {
-        let action = decide_fire(
+        let action = decide_fire_same(
             ExecMode::OncePerTarget,
             Some(ChronoDuration::seconds(60)),
             &pcs(&["a", "b"]),
@@ -441,7 +524,7 @@ mod tests {
 
     #[test]
     fn once_per_target_cooldown_one_second_before_boundary_skipped() {
-        let action = decide_fire(
+        let action = decide_fire_same(
             ExecMode::OncePerTarget,
             Some(ChronoDuration::seconds(60)),
             &pcs(&["a", "b"]),
@@ -455,7 +538,7 @@ mod tests {
     fn once_per_target_uses_most_recent_completion() {
         // Two completions across the target; the most recent gates
         // the cooldown calc.
-        let action = decide_fire(
+        let action = decide_fire_same(
             ExecMode::OncePerTarget,
             Some(ChronoDuration::seconds(60)),
             &pcs(&["a", "b"]),
