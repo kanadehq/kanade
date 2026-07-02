@@ -705,13 +705,41 @@ async fn collect_jobs(
             return Err(());
         }
     };
-    let keys: Vec<String> = keys.try_collect().await.unwrap_or_default();
+    // #916: propagate a mid-stream enumeration fault instead of
+    // truncating to the keys collected so far — `unwrap_or_default()`
+    // turned a broker flap into an empty-but-Ok list, which made
+    // apply_resync unregister every schedule (defeating the
+    // "keep previous state on a partial walk" invariant above).
+    let keys: Vec<String> = match keys.try_collect().await {
+        Ok(k) => k,
+        Err(e) => {
+            warn!(error = %e, "local_scheduler: jobs_kv key stream faulted mid-walk");
+            return Err(());
+        }
+    };
     let mut out = HashMap::with_capacity(keys.len());
     for k in keys {
-        if let Ok(Some(bytes)) = jobs_kv.get(&k).await
-            && let Ok(m) = serde_json::from_slice::<Manifest>(&bytes)
-        {
-            out.insert(k, m);
+        match jobs_kv.get(&k).await {
+            Ok(Some(bytes)) => {
+                // A decode failure is permanently-bad stored data, not a
+                // transient error — skip that one job (we can't run what
+                // we can't parse) rather than aborting the whole resync.
+                if let Ok(m) = serde_json::from_slice::<Manifest>(&bytes) {
+                    out.insert(k, m);
+                } else {
+                    warn!(key = %k, "local_scheduler: undecodable job blob; skipping");
+                }
+            }
+            // Key vanished between keys() and get() — a benign delete
+            // race; it's genuinely absent now, so leave it out.
+            Ok(None) => {}
+            Err(e) => {
+                // #916: a transient get failure must abort the walk, not
+                // drop the job — dropping it would unregister its
+                // schedules on a broker hiccup.
+                warn!(key = %k, error = %e, "local_scheduler: jobs_kv.get() failed mid-walk");
+                return Err(());
+            }
         }
     }
     Ok(out)
@@ -729,13 +757,31 @@ async fn collect_schedules(
             return Err(());
         }
     };
-    let keys: Vec<String> = keys.try_collect().await.unwrap_or_default();
+    // #916: propagate a mid-stream enumeration fault (see collect_jobs).
+    let keys: Vec<String> = match keys.try_collect().await {
+        Ok(k) => k,
+        Err(e) => {
+            warn!(error = %e, "local_scheduler: schedules_kv key stream faulted mid-walk");
+            return Err(());
+        }
+    };
     let mut out = Vec::with_capacity(keys.len());
     for k in keys {
-        if let Ok(Some(bytes)) = schedules_kv.get(&k).await
-            && let Ok(s) = serde_json::from_slice::<Schedule>(&bytes)
-        {
-            out.push(s);
+        match schedules_kv.get(&k).await {
+            Ok(Some(bytes)) => {
+                if let Ok(s) = serde_json::from_slice::<Schedule>(&bytes) {
+                    out.push(s);
+                } else {
+                    warn!(key = %k, "local_scheduler: undecodable schedule blob; skipping");
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                // #916: transient get failure aborts the walk rather than
+                // dropping (and thus unregistering) the schedule.
+                warn!(key = %k, error = %e, "local_scheduler: schedules_kv.get() failed mid-walk");
+                return Err(());
+            }
         }
     }
     Ok(out)
