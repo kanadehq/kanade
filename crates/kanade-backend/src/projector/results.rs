@@ -171,11 +171,13 @@ pub async fn run(
                     }
                 }
                 // #290 PR-E: a `check:` job (fleet != false) projects a
-                // fleet-wide compliance row on EVERY exit — a clean run
-                // carries the reported status, a crash projects
-                // `unknown` (mirrors the agent's Health-tab behaviour),
-                // so the SPA never shows a stale green for a check that
-                // has started failing.
+                // fleet-wide compliance row on every *real* exit — a
+                // clean run carries the reported status, a crash
+                // projects `unknown` (mirrors the agent's Health-tab
+                // behaviour), so the SPA never shows a stale green for
+                // a check that has started failing. Synthetic skip
+                // results (exit 124–127) are filtered inside — the
+                // script never ran, so they carry no evidence (#909).
                 if let Err(e) = maybe_project_check_status(
                     &js,
                     &pool,
@@ -550,6 +552,16 @@ async fn maybe_project_check_status(
     let Some(manifest_id) = r.manifest_id.as_deref() else {
         return Ok(());
     };
+    // #909: a synthetic skip result (version-pin mismatch, deadline
+    // passed, revoked, staleness) is published *instead of* running the
+    // script — it says nothing about the check itself. Projecting it
+    // flipped fleet checks to `unknown` on every version bump, and for
+    // a persistently-failing check the fail → unknown(skip) → fail hop
+    // looked like a fresh transition and re-fired the alert on each
+    // bump. The agent's Health tab deliberately skips these too.
+    if kanade_shared::wire::is_synthetic_skip(r.exit_code) {
+        return Ok(());
+    }
     let Some(job) = lookup_manifest(cache, jobs_kv, manifest_id).await? else {
         return Ok(());
     };
@@ -617,35 +629,22 @@ async fn upsert_check_status(
     hint: &CheckHint,
     recorded_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<CheckProjection> {
-    // Derive (status, detail) the same way the agent's `build_check` /
-    // `build_check_failed` do, so the SPA compliance view and the
-    // Client App's Health tab never disagree. (A future refactor can
-    // hoist this into `kanade-shared` and share it with the agent.)
-    let (status, detail): (&str, Option<String>) = if r.exit_code == 0 {
-        let facts: serde_json::Value = serde_json::from_str(&r.stdout)
-            .with_context(|| format!("check '{}' stdout was not JSON", hint.name))?;
-        // Return the `'static` literal (not the slice borrowed from
-        // `facts`) so `status` outlives the parsed value; anything
-        // outside the four known states normalises to `unknown`.
-        let status = match facts.get(&hint.status_field).and_then(|v| v.as_str()) {
-            Some("ok") => "ok",
-            Some("warn") => "warn",
-            Some("fail") => "fail",
-            _ => "unknown",
-        };
-        let detail = facts.get(&hint.detail_field).and_then(json_to_detail);
-        (status, detail)
+    // Derive (status, detail) via the shared `check_eval` helpers — the
+    // byte-identical code path the agent's Health tab uses — so the SPA
+    // compliance view and the Client App can never disagree (#908).
+    // That buys two behaviours the previous hand-rolled copy lacked:
+    // the check's own `#KANADE-CHECK` fenced block is extracted first
+    // (a composed job's stdout carries inventory / user-message noise,
+    // #821), and non-JSON stdout degrades to `unknown` with a
+    // diagnostic detail instead of erroring out and leaving the
+    // previous row stale.
+    let check = if r.exit_code == 0 {
+        kanade_shared::check_eval::build_check(hint, &r.stdout)
     } else {
-        // Crashed before it could report — `unknown`, with the exit
-        // code + a stderr snippet (mirrors `build_check_failed`).
-        let snippet: String = r.stderr.trim().chars().take(200).collect();
-        let detail = if snippet.is_empty() {
-            format!("check script exited {}", r.exit_code)
-        } else {
-            format!("check script exited {}: {snippet}", r.exit_code)
-        };
-        ("unknown", Some(detail))
+        kanade_shared::check_eval::build_check_failed(hint, r.exit_code, &r.stderr)
     };
+    let status = check.status.as_str();
+    let detail = check.detail;
 
     // Read the prior projected state BEFORE the upsert so a compliance
     // alert can fire on a *transition* (e.g. ok → fail), not on every
@@ -692,20 +691,6 @@ async fn upsert_check_status(
         detail,
         prior,
     })
-}
-
-/// Render a check `detail` field value as a string, mirroring the
-/// agent's `check_cache::json_to_detail`: pass non-empty strings,
-/// stringify scalars, compact-JSON arrays/objects, drop null/empty.
-fn json_to_detail(v: &serde_json::Value) -> Option<String> {
-    match v {
-        serde_json::Value::Null => None,
-        serde_json::Value::String(s) if s.is_empty() => None,
-        serde_json::Value::String(s) => Some(s.clone()),
-        serde_json::Value::Number(n) => Some(n.to_string()),
-        serde_json::Value::Bool(b) => Some(b.to_string()),
-        other => Some(other.to_string()),
-    }
 }
 
 async fn upsert_inventory(
@@ -1310,8 +1295,10 @@ mod tests {
         let pool = fresh_pool().await;
         let hint = check_hint("patch", "compliance");
         let mut r = sample("res-c2", "req-c2", "pc-2", None);
-        // Unrecognised status value → stored as `unknown`; the operator's
-        // custom status/detail field names are honoured.
+        // Unrecognised status value → stored as `unknown` with the
+        // shared `check_eval` diagnostic detail (naming the bad value),
+        // exactly what the agent's Health tab shows for the same run
+        // (#908); the operator's custom status field name is honoured.
         r.stdout = r#"{"compliance":"green","summary":"12 patched"}"#.into();
         let hint = CheckHint {
             detail_field: "summary".into(),
@@ -1325,7 +1312,9 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(row, ("unknown".into(), Some("12 patched".into())));
+        assert_eq!(row.0, "unknown");
+        let detail = row.1.unwrap();
+        assert!(detail.contains("green"), "detail: {detail}");
     }
 
     #[tokio::test]
@@ -1452,5 +1441,57 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(row, ("warn".into(), Some(r#"["C:","D:"]"#.into())));
+    }
+
+    #[tokio::test]
+    async fn check_status_reads_fenced_stdout_of_composed_job() {
+        // #908: an #821-composed job (check + inventory / user message)
+        // fences each hint's payload. The projector must read check's
+        // own block — parsing the whole stdout fails and used to leave
+        // the Compliance page frozen while the Health tab kept working.
+        let pool = fresh_pool().await;
+        let hint = check_hint("bitlocker", "status");
+        let mut r = sample("res-f1", "req-f1", "pc-f", None);
+        r.stdout = "updating volume info...\n\
+                    #KANADE-CHECK-BEGIN\n\
+                    {\"status\":\"fail\",\"detail\":\"D: unprotected\"}\n\
+                    #KANADE-CHECK-END\n\
+                    all done.\n"
+            .into();
+        let proj = upsert_check_status(&pool, &r, &hint, chrono::Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(proj.status, "fail");
+        let row: (String, Option<String>) =
+            sqlx::query_as("SELECT status, detail FROM check_status WHERE pc_id = 'pc-f'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(row, ("fail".into(), Some("D: unprotected".into())));
+    }
+
+    #[tokio::test]
+    async fn check_status_degrades_to_unknown_on_non_json_stdout() {
+        // #908: non-JSON stdout on a clean exit degrades to `unknown`
+        // with a diagnostic detail (mirroring the agent), instead of
+        // erroring out and leaving the previous row stale.
+        let pool = fresh_pool().await;
+        let hint = check_hint("bitlocker", "status");
+        let mut r = sample("res-nj1", "req-nj1", "pc-nj", None);
+        r.stdout = "PS> unexpected human output".into();
+        let proj = upsert_check_status(&pool, &r, &hint, chrono::Utc::now())
+            .await
+            .expect("non-JSON stdout must project, not error");
+        assert_eq!(proj.status, "unknown");
+        let row: (String, Option<String>) =
+            sqlx::query_as("SELECT status, detail FROM check_status WHERE pc_id = 'pc-nj'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(row.0, "unknown");
+        assert!(
+            row.1.unwrap().contains("not JSON"),
+            "detail should say why the status is unknown"
+        );
     }
 }
