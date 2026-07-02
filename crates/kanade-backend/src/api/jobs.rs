@@ -246,6 +246,23 @@ pub async fn create(
     // script_object must be set. Enforce at the write boundary
     // so the JOBS KV never stores ambiguous manifests.
     job.validate().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    // #918: `script_file` is CLI-side sugar — `kanade job create`
+    // reads the repo-local file and inlines it into `script` before
+    // POSTing, so a manifest that reaches this handler still carrying
+    // `script_file` came in through the raw API / SPA editor, where no
+    // filesystem resolution ever happens. Storing it would 400 at
+    // every exec (`resolve_script_source`), so reject it here with an
+    // actionable message rather than accepting a job that can never
+    // run.
+    if job.execute.script_file.is_some() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "execute.script_file is resolved CLI-side by `kanade job create` and cannot be \
+             stored via the API — inline the script into `execute.script`, or publish it as a \
+             `script_object`"
+                .to_string(),
+        ));
+    }
     let kv = s
         .jetstream
         .create_key_value(KvConfig {

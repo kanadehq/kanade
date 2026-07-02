@@ -1859,12 +1859,13 @@ pub struct Execute {
     /// POSTing — so the backend / agents never see `script_file`
     /// in stored manifests. SPEC §2.4.1.
     ///
-    /// Resolver lands in a follow-up PR
-    /// (yukimemi/kanade#210); today this field passes parse-time
-    /// validation but the operator-side CLI bails with "not yet
-    /// implemented" until the resolver ships, so manifests that
-    /// reach the backend with `script_file` set are treated as a
-    /// schema-bug.
+    /// The resolver shipped with #210: `kanade job create` /
+    /// `kanade job validate` inline this field end-to-end. Because
+    /// resolution is CLI-side (it needs the operator's filesystem),
+    /// `POST /api/jobs` rejects a manifest that still carries it
+    /// (#918) — a stored `script_file` job would 400 at every exec.
+    /// Inline the script or use `script_object` when writing through
+    /// the API / SPA editor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script_file: Option<String>,
     /// Object Store reference (`<name>/<version>`) into the
@@ -1902,11 +1903,14 @@ pub struct Execute {
 }
 
 impl Execute {
-    /// Treat an empty `script:` body as "intentionally unset". Operators
-    /// commenting out a block-scalar tend to leave the key behind, and
-    /// failing the validator on `script: ""` would surprise them.
+    /// Treat an empty — or whitespace-only (#918) — `script:` body as
+    /// "intentionally unset". Operators commenting out a block-scalar
+    /// tend to leave the key behind, and failing the validator on
+    /// `script: ""` would surprise them; a body of blank lines can't
+    /// be a real script either, only a commented-out one, and letting
+    /// it count as "set" shipped a validated do-nothing job.
     fn has_inline_script(&self) -> bool {
-        matches!(&self.script, Some(s) if !s.is_empty())
+        matches!(&self.script, Some(s) if !s.trim().is_empty())
     }
 
     /// Enforce that exactly one of `script` / `script_file` /
@@ -1917,18 +1921,65 @@ impl Execute {
     /// scheduler, list endpoints) skip this check — they only ever
     /// see what the write path already validated.
     pub fn validate_script_source(&self) -> Result<(), String> {
+        // #918: a blank-but-present alternate source is a typo, not a
+        // choice — `script_file: ""` used to count as "set", pass the
+        // exactly-one check, and only fail at use time (the CLI reads
+        // a file named ""; a stored blank script_object 404s on every
+        // exec). Reject it with the field named. Inline `script` keeps
+        // its documented empty-means-unset semantics instead — see
+        // `has_inline_script`.
+        if matches!(&self.script_file, Some(s) if s.trim().is_empty()) {
+            return Err(
+                "execute.script_file must not be blank when set (drop the key to use \
+                 another source)"
+                    .into(),
+            );
+        }
+        if matches!(&self.script_object, Some(s) if s.trim().is_empty()) {
+            return Err(
+                "execute.script_object must not be blank when set (drop the key to use \
+                 another source)"
+                    .into(),
+            );
+        }
         let inline = self.has_inline_script();
         let file = self.script_file.is_some();
         let obj = self.script_object.is_some();
         let set = [inline, file, obj].into_iter().filter(|b| *b).count();
         match set {
-            1 => Ok(()),
-            0 => Err("execute: one of `script`, `script_file`, `script_object` must be set".into()),
-            _ => Err(format!(
-                "execute: only one of `script` / `script_file` / `script_object` may be set \
-                 (got script={inline}, script_file={file}, script_object={obj})"
-            )),
+            1 => {}
+            0 => {
+                return Err(
+                    "execute: one of `script`, `script_file`, `script_object` must be set".into(),
+                );
+            }
+            _ => {
+                return Err(format!(
+                    "execute: only one of `script` / `script_file` / `script_object` may be set \
+                     (got script={inline}, script_file={file}, script_object={obj})"
+                ));
+            }
         }
+        // #918: a script_object ref is `<name>/<version>` — the agent
+        // fetches the body via `/api/script-objects/{name}/{version}`
+        // and the backend uses the ref *verbatim* as the Object Store
+        // key (`resolve_script_source`), so each half must be a
+        // well-formed resource id: exactly one slash, and both halves
+        // [A-Za-z0-9._-]. `is_valid_resource_id` also rejects a half
+        // that's blank OR merely whitespace-padded (`"foo/bar "`) —
+        // padding survives a JSON POST body (unlike a YAML plain
+        // scalar) and would 404 on every exec (gemini/claude #943).
+        if let Some(obj_ref) = self.script_object.as_deref() {
+            let parts: Vec<&str> = obj_ref.split('/').collect();
+            if parts.len() != 2 || parts.iter().any(|p| !is_valid_resource_id(p)) {
+                return Err(format!(
+                    "execute.script_object must be `<name>/<version>` with each half \
+                     [A-Za-z0-9._-] (got '{obj_ref}'); publish bodies with \
+                     `kanade script publish <name> <version>`"
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -4259,6 +4310,58 @@ sql_widgets:
         );
         let err = e.validate_script_source().unwrap_err();
         assert!(err.contains("only one of"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_blank_script_file() {
+        // #918: a blank `script_file` used to count as "set" and pass
+        // the exactly-one check, then fail at use time (the CLI reads
+        // a file named "").
+        for blank in ["", "   "] {
+            let e = execute_with(None, Some(blank), None);
+            let err = e.validate_script_source().unwrap_err();
+            assert!(err.contains("script_file must not be blank"), "got: {err}");
+        }
+    }
+
+    #[test]
+    fn validate_rejects_blank_script_object() {
+        // #918: same for a blank `script_object` (would 404 every exec).
+        for blank in ["", "   "] {
+            let e = execute_with(None, None, Some(blank));
+            let err = e.validate_script_source().unwrap_err();
+            assert!(
+                err.contains("script_object must not be blank"),
+                "got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_treats_whitespace_inline_script_as_unset() {
+        // #918: a whitespace-only inline body is a commented-out block,
+        // not a real script — with no other source it's "zero sources".
+        let e = execute_with(Some("   \n  "), None, None);
+        let err = e.validate_script_source().unwrap_err();
+        assert!(err.contains("must be set"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_malformed_script_object_ref() {
+        // #918: the ref must be `<name>/<version>`; a missing slash,
+        // extra slash, blank half, or whitespace-padded half (the last
+        // survives a JSON POST body and 404s at exec — gemini/claude
+        // #943) can never resolve.
+        for bad in [
+            "no-slash", "a/b/c", "/1.0.0", "cleanup/", " / ", "foo/bar ", " foo/bar", "foo /bar",
+        ] {
+            let e = execute_with(None, None, Some(bad));
+            let err = e.validate_script_source().unwrap_err();
+            assert!(
+                err.contains("must be `<name>/<version>`"),
+                "for '{bad}', got: {err}"
+            );
+        }
     }
 
     #[test]

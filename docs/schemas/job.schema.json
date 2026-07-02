@@ -760,7 +760,7 @@
           ]
         },
         "script_file": {
-          "description": "Repo-local file path resolved by the operator-side CLI at\n`kanade job create` time. The CLI reads the file, slots its\ncontents into `script`, and clears this field before\nPOSTing — so the backend / agents never see `script_file`\nin stored manifests. SPEC §2.4.1.\n\nResolver lands in a follow-up PR\n(yukimemi/kanade#210); today this field passes parse-time\nvalidation but the operator-side CLI bails with \"not yet\nimplemented\" until the resolver ships, so manifests that\nreach the backend with `script_file` set are treated as a\nschema-bug.",
+          "description": "Repo-local file path resolved by the operator-side CLI at\n`kanade job create` time. The CLI reads the file, slots its\ncontents into `script`, and clears this field before\nPOSTing — so the backend / agents never see `script_file`\nin stored manifests. SPEC §2.4.1.\n\nThe resolver shipped with #210: `kanade job create` /\n`kanade job validate` inline this field end-to-end. Because\nresolution is CLI-side (it needs the operator's filesystem),\n`POST /api/jobs` rejects a manifest that still carries it\n(#918) — a stored `script_file` job would 400 at every exec.\nInline the script or use `script_object` when writing through\nthe API / SPA editor.",
           "type": [
             "string",
             "null"
