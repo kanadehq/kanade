@@ -50,7 +50,9 @@ use kanade_shared::ipc::jobs::{
 };
 use kanade_shared::ipc::method;
 use kanade_shared::ipc::state::CheckStatus;
-use kanade_shared::kv::{BUCKET_AGENT_GROUPS, BUCKET_JOBS};
+use kanade_shared::kv::{
+    BUCKET_AGENT_GROUPS, BUCKET_JOBS, BUCKET_SCRIPT_STATUS, SCRIPT_STATUS_REVOKED,
+};
 use kanade_shared::manifest::Manifest;
 use kanade_shared::wire::Command;
 use kanade_shared::{ExecResult, default_paths, subject};
@@ -361,6 +363,21 @@ pub async fn handle_jobs_execute(
         }
     }
 
+    // #927: honour the operator's revoke gate on the KLP path too. The
+    // NATS command path refuses REVOKED scripts (`commands.rs`), but a
+    // user could still fire the same job from the Client App — an
+    // operator who revoked a job that turned out to be dangerous
+    // believes it is fleet-stopped. Same best-effort read as the NATS
+    // path (a KV hiccup must not brick every client job), but a
+    // *positive* REVOKED answer is a hard refusal.
+    if job_is_revoked(&client, &params.id).await {
+        warn!(job_id = %params.id, "jobs.execute: refusing revoked job");
+        return Err(RpcError::new(
+            ErrorKind::Unauthorized,
+            format!("job '{}' has been revoked by the operator", params.id),
+        ));
+    }
+
     let run_id = Uuid::new_v4().to_string();
     let request_id = Uuid::new_v4().to_string();
     let cmd = build_command(&manifest, &run_id, &request_id)?;
@@ -375,6 +392,30 @@ pub async fn handle_jobs_execute(
     tokio::spawn(run_job(client, cmd, spawned_run_id, push_tx, pc_id));
 
     Ok(JobsExecuteResult { run_id })
+}
+
+/// `true` when `BUCKET_SCRIPT_STATUS[job_id]` is REVOKED (#927).
+/// Best-effort, mirroring the NATS command path's gate in
+/// `commands.rs`: a missing bucket / key / read error reads as "not
+/// revoked" (warn-logged) — the gate exists to stop a *known-bad*
+/// script, not to make every client job depend on one more KV read.
+async fn job_is_revoked(client: &async_nats::Client, job_id: &str) -> bool {
+    let js = async_nats::jetstream::new(client.clone());
+    let kv = match js.get_key_value(BUCKET_SCRIPT_STATUS).await {
+        Ok(kv) => kv,
+        Err(e) => {
+            warn!(error = %e, "jobs.execute: failed to open script_status; treating as not revoked");
+            return false;
+        }
+    };
+    match kv.get(job_id).await {
+        Ok(Some(entry)) => String::from_utf8_lossy(&entry) == SCRIPT_STATUS_REVOKED,
+        Ok(None) => false,
+        Err(e) => {
+            warn!(job_id = %job_id, error = %e, "jobs.execute: script_status read failed; treating as not revoked");
+            false
+        }
+    }
 }
 
 /// Fetch one manifest from `BUCKET_JOBS` by id. `InvalidParams` when
