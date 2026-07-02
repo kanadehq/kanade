@@ -123,6 +123,20 @@ pub enum CheckStatus {
     Unknown,
 }
 
+impl CheckStatus {
+    /// The wire-encoded snake_case name — the exact string the serde
+    /// encoding above produces and what the backend's `check_status`
+    /// SQLite column stores.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CheckStatus::Ok => "ok",
+            CheckStatus::Warn => "warn",
+            CheckStatus::Fail => "fail",
+            CheckStatus::Unknown => "unknown",
+        }
+    }
+}
+
 // ---------- state.subscribe ----------
 
 /// `state.subscribe` takes no params.

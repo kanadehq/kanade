@@ -26,6 +26,9 @@ pub use jobtail::{JobTailReply, JobTailRequest};
 pub use logs::LogsRequest;
 pub use obs_event::ObsEvent;
 pub use process_perf::{ProcessPerf, ProcessSnapshot};
-pub use result::ExecResult;
+pub use result::{
+    EXIT_SKIP_DEADLINE, EXIT_SKIP_REVOKED, EXIT_SKIP_STALENESS, EXIT_SKIP_VERSION_PIN, ExecResult,
+    is_synthetic_skip,
+};
 pub use server_settings::{MAX_AGENT_PRUNE_DAYS, ServerSettings};
 pub use staleness::Staleness;

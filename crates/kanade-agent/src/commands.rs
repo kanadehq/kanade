@@ -7,7 +7,9 @@ use futures::StreamExt;
 use kanade_shared::ExecResult;
 use kanade_shared::default_paths;
 use kanade_shared::kv::{BUCKET_SCRIPT_CURRENT, BUCKET_SCRIPT_STATUS, SCRIPT_STATUS_REVOKED};
-use kanade_shared::wire::Command;
+use kanade_shared::wire::{
+    Command, EXIT_SKIP_DEADLINE, EXIT_SKIP_REVOKED, EXIT_SKIP_STALENESS, EXIT_SKIP_VERSION_PIN,
+};
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -756,7 +758,7 @@ async fn publish_staleness_skipped(
         request_id: cmd.request_id.clone(),
         exec_id: cmd.exec_id.clone(),
         pc_id: pc_id.to_string(),
-        exit_code: 127,
+        exit_code: EXIT_SKIP_STALENESS,
         stdout: String::new(),
         stderr,
         started_at: now,
@@ -806,7 +808,7 @@ async fn publish_skipped(
         request_id: cmd.request_id.clone(),
         exec_id: cmd.exec_id.clone(),
         pc_id: pc_id.to_string(),
-        exit_code: 125,
+        exit_code: EXIT_SKIP_DEADLINE,
         stdout: String::new(),
         stderr,
         started_at: now,
@@ -853,7 +855,7 @@ async fn publish_version_mismatch_skipped(
         request_id: cmd.request_id.clone(),
         exec_id: cmd.exec_id.clone(),
         pc_id: pc_id.to_string(),
-        exit_code: 124,
+        exit_code: EXIT_SKIP_VERSION_PIN,
         stdout: String::new(),
         stderr,
         started_at: now,
@@ -894,7 +896,7 @@ async fn publish_revoked_skipped(pc_id: &str, cmd: &Command) -> Result<()> {
         request_id: cmd.request_id.clone(),
         exec_id: cmd.exec_id.clone(),
         pc_id: pc_id.to_string(),
-        exit_code: 126,
+        exit_code: EXIT_SKIP_REVOKED,
         stdout: String::new(),
         stderr,
         started_at: now,

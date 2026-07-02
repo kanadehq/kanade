@@ -80,6 +80,31 @@ pub struct ExecResult {
     pub collect_object: Option<String>,
 }
 
+/// Synthetic exit code for a run the agent skipped because the
+/// Command's `version` didn't match the `script_current` pin. One of
+/// the four reserved skip codes (124–127): the agent publishes a
+/// normal [`ExecResult`] so the operator can see *why* nothing ran,
+/// but the script itself never executed — consumers that derive state
+/// from a run's output (e.g. the backend's `check_status` projection)
+/// must treat these as "no new evidence", not as a run (#909).
+pub const EXIT_SKIP_VERSION_PIN: i32 = 124;
+/// Synthetic exit code: `deadline_at` passed before the agent could
+/// fire. See [`EXIT_SKIP_VERSION_PIN`] for the shared contract.
+pub const EXIT_SKIP_DEADLINE: i32 = 125;
+/// Synthetic exit code: the script is revoked in
+/// `BUCKET_SCRIPT_STATUS`. See [`EXIT_SKIP_VERSION_PIN`].
+pub const EXIT_SKIP_REVOKED: i32 = 126;
+/// Synthetic exit code: the `staleness.mode: strict` policy suppressed
+/// the fire. See [`EXIT_SKIP_VERSION_PIN`].
+pub const EXIT_SKIP_STALENESS: i32 = 127;
+
+/// True when `exit_code` is one of the reserved synthetic skip codes
+/// (124–127) — the agent published this result *instead of* running
+/// the script, so it carries no evidence about the script's outcome.
+pub fn is_synthetic_skip(exit_code: i32) -> bool {
+    (EXIT_SKIP_VERSION_PIN..=EXIT_SKIP_STALENESS).contains(&exit_code)
+}
+
 impl ExecResult {
     /// Return the `result_id` if the agent supplied one (v0.29+
     /// payloads always do), otherwise derive a stable UUIDv5 from
@@ -104,6 +129,21 @@ impl ExecResult {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn synthetic_skip_covers_exactly_the_reserved_codes() {
+        for code in [
+            EXIT_SKIP_VERSION_PIN,
+            EXIT_SKIP_DEADLINE,
+            EXIT_SKIP_REVOKED,
+            EXIT_SKIP_STALENESS,
+        ] {
+            assert!(is_synthetic_skip(code), "{code} is a reserved skip code");
+        }
+        for code in [0, 1, -1, 123, 128, 255] {
+            assert!(!is_synthetic_skip(code), "{code} is a real exit code");
+        }
+    }
 
     #[test]
     fn exec_result_round_trips_through_json() {
