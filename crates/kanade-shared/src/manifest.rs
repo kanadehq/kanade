@@ -1470,9 +1470,112 @@ pub fn validate_sql_widgets(widgets: &[SqlWidget], field: &str) -> Result<(), St
                 ));
             }
         }
+        // A per-PC widget (its query binds `:pc_id`) renders only in the
+        // per-PC Analytics scope, bound to the selected PC. The Dashboard's
+        // pinned section is fleet-scope and never sends a PC, so a pinned
+        // per-PC widget would be silently dropped on every request — reject
+        // the contradiction at create time rather than let it vanish (claude
+        // review). Literal-aware so a `:pc_id` inside a string literal doesn't
+        // trip it (see [`rewrite_pc_id_param`]).
+        if w.placement.is_pinned() && rewrite_pc_id_param(&w.query).1 > 0 {
+            return Err(format!(
+                "{at}: a per-PC widget (its query binds `:pc_id`) cannot pin to the Dashboard \
+                 (the Dashboard is fleet-scope, it never selects a PC) — use `analytics` placement only"
+            ));
+        }
         validate_render_spec(&w.render, &at)?;
     }
     Ok(())
+}
+
+/// The named parameter a per-PC [`SqlWidget`] binds to the selected PC. Its
+/// presence in a widget's query is what makes the widget per-PC.
+pub const PC_ID_PARAM: &str = ":pc_id";
+
+/// Rewrite every *real* `:pc_id` parameter in a widget query to a positional
+/// `?`, returning `(rewritten_sql, count)`. "Real" = OUTSIDE string literals,
+/// quoted identifiers and comments, and a whole token (the char after `:pc_id`
+/// isn't a word char, so `:pc_idx` is left alone). One scanner shared by three
+/// call sites so they can't disagree on how many `?` SQLite will actually see:
+///   * per-PC scope detection (`count > 0` ⇒ the widget is per-PC),
+///   * the backend's bind path (sqlx-sqlite binds POSITIONAL `?` only, not
+///     `:name`, so the token must be rewritten and bound once per occurrence),
+///   * and `validate_sql_widgets`' pinned-per-PC rejection above.
+///
+/// The literal/comment skipping mirrors the read-only sandbox's
+/// `strip_sql_noise`, so a `:pc_id` inside `SELECT 'see :pc_id docs'` is copied
+/// verbatim and NOT counted — it would otherwise be miscounted (a bind-count
+/// mismatch → `SQLITE_RANGE`) and misclassify the widget's scope (Gemini /
+/// claude review).
+pub fn rewrite_pc_id_param(sql: &str) -> (String, usize) {
+    let mut out = String::with_capacity(sql.len());
+    let mut count = 0usize;
+    let mut chars = sql.char_indices().peekable();
+    while let Some((idx, c)) = chars.next() {
+        match c {
+            // String literal / quoted identifier — copy verbatim, honouring the
+            // doubled-quote escape (`''` / `""` stays inside).
+            '\'' | '"' => {
+                out.push(c);
+                let quote = c;
+                while let Some((_, d)) = chars.next() {
+                    out.push(d);
+                    if d == quote {
+                        if chars.peek().map(|&(_, e)| e) == Some(quote) {
+                            let (_, e) = chars.next().unwrap();
+                            out.push(e);
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+            // Line comment — copy to end of line.
+            '-' if chars.peek().map(|&(_, e)| e) == Some('-') => {
+                out.push(c);
+                for (_, d) in chars.by_ref() {
+                    out.push(d);
+                    if d == '\n' {
+                        break;
+                    }
+                }
+            }
+            // Block comment — copy to `*/`.
+            '/' if chars.peek().map(|&(_, e)| e) == Some('*') => {
+                out.push(c);
+                let (_, star) = chars.next().unwrap();
+                out.push(star);
+                let mut prev = ' ';
+                for (_, d) in chars.by_ref() {
+                    out.push(d);
+                    if prev == '*' && d == '/' {
+                        break;
+                    }
+                    prev = d;
+                }
+            }
+            // A `:pc_id` token outside any literal/comment — rewrite if it's a
+            // whole token (not the prefix of `:pc_idx`).
+            ':' if sql[idx..].starts_with(PC_ID_PARAM) => {
+                let after = idx + PC_ID_PARAM.len();
+                let next_is_word = sql[after..]
+                    .chars()
+                    .next()
+                    .is_some_and(|w| w.is_alphanumeric() || w == '_');
+                if next_is_word {
+                    out.push(c);
+                } else {
+                    out.push('?');
+                    count += 1;
+                    for _ in 0..PC_ID_PARAM.chars().count() - 1 {
+                        chars.next();
+                    }
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    (out, count)
 }
 
 /// Validate a [`RenderSpec`]: reject the #492 `Unknown` catch-all (an operator
@@ -4223,6 +4326,59 @@ sql_widgets:
         );
         // table is fine with no channels
         mk("{ kind: table }", "{ analytics: T }").expect("bare table ok");
+    }
+
+    #[test]
+    fn rewrite_pc_id_param_is_literal_and_boundary_aware() {
+        // A real param outside any literal is rewritten + counted.
+        let (sql, n) = rewrite_pc_id_param("SELECT * FROM t WHERE pc_id = :pc_id");
+        assert_eq!(n, 1);
+        assert!(sql.ends_with("pc_id = ?"), "sql: {sql}");
+        // Appearing twice → two `?`, count 2 (one bind each — the caller binds
+        // pc_id per occurrence since sqlx-sqlite has no named params).
+        let (sql, n) = rewrite_pc_id_param("WHERE a = :pc_id AND (:pc_id IS NOT NULL)");
+        assert_eq!(n, 2);
+        assert_eq!(sql, "WHERE a = ? AND (? IS NOT NULL)");
+        // Inside a string literal → copied verbatim, NOT counted (would else be
+        // a bind-count mismatch → SQLITE_RANGE, and misclassify scope).
+        let (sql, n) = rewrite_pc_id_param("SELECT 'see :pc_id docs' AS hint");
+        assert_eq!(n, 0);
+        assert_eq!(sql, "SELECT 'see :pc_id docs' AS hint");
+        // Inside a comment → left alone.
+        let (_, n) = rewrite_pc_id_param("SELECT 1 -- filter by :pc_id\n");
+        assert_eq!(n, 0);
+        // A longer identifier prefix (`:pc_idx`) is not our token.
+        let (sql, n) = rewrite_pc_id_param("WHERE x = :pc_idx");
+        assert_eq!(n, 0);
+        assert_eq!(sql, "WHERE x = :pc_idx");
+    }
+
+    #[test]
+    fn validate_rejects_pinned_per_pc_widget() {
+        // A per-PC widget (binds :pc_id) that also pins to the Dashboard is a
+        // create-time contradiction (Dashboard is fleet-scope) — rejected.
+        let err = view_from(
+            "sql_widgets:
+  - title: W
+    query: \"SELECT count(*) AS n FROM inventory_sw_apps WHERE pc_id = :pc_id\"
+    render: { kind: stat, value: n }
+    placement: { analytics: Security, dashboard: { pin: true } }
+",
+        )
+        .validate()
+        .unwrap_err();
+        assert!(err.contains("per-PC widget"), "err: {err}");
+        // The same widget WITHOUT the pin is fine (per-PC, analytics only).
+        view_from(
+            "sql_widgets:
+  - title: W
+    query: \"SELECT count(*) AS n FROM inventory_sw_apps WHERE pc_id = :pc_id\"
+    render: { kind: stat, value: n }
+    placement: { analytics: Security }
+",
+        )
+        .validate()
+        .expect("per-PC analytics-only widget is valid");
     }
 
     fn execute_with(
