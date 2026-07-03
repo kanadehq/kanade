@@ -187,9 +187,23 @@ function ResultTable({
 }
 
 // #vuln-roadmap PR3: parts-of-a-whole for a SQL-backed `view:` widget. `donut`
-// leaves a hole with the total in the centre. Palette cycles a small violet
-// ramp so slices stay on-theme and legible.
-const PIE_COLORS = ['#8b5cf6', '#a78bfa', '#c4b5fd', '#7c3aed', '#6d28d9', '#ddd6fe'];
+// leaves a hole with the total in the centre. Categorical palette: distinct
+// HUES (not a single-hue lightness ramp) so adjacent slices are told apart at
+// a glance — a violet ramp made every slice look the same. Violet stays first
+// to keep the app accent as the lead colour; Tailwind-500-ish tones harmonise
+// on the cream/dark themes.
+const PIE_COLORS = [
+  '#8b5cf6', // violet (app accent)
+  '#06b6d4', // cyan
+  '#f59e0b', // amber
+  '#ec4899', // pink
+  '#10b981', // emerald
+  '#3b82f6', // blue
+  '#f97316', // orange
+  '#a855f7', // purple
+  '#14b8a6', // teal
+  '#ef4444', // red
+];
 
 function PieWidget({ rows, donut, empty }: { rows: BarRow[]; donut?: boolean; empty: string }) {
   if (rows.length === 0) return <div className="text-muted text-sm">{empty}</div>;
@@ -230,7 +244,13 @@ function PieWidget({ rows, donut, empty }: { rows: BarRow[]; donut?: boolean; em
             formatter={(value, entry) => {
               const v = Number((entry?.payload as { value?: number } | undefined)?.value ?? 0);
               const pct = total > 0 ? Math.round((v / total) * 100) : 0;
-              return `${value} — ${v.toLocaleString()} (${pct}%)`;
+              // Keep the label text at the theme foreground colour — recharts
+              // otherwise tints it with the slice colour, which is unreadable
+              // for the light tones in the categorical palette. The coloured
+              // circle icon still carries the slice identity.
+              return (
+                <span className="text-fg">{`${value} — ${v.toLocaleString()} (${pct}%)`}</span>
+              );
             }}
           />
         </PieChart>
