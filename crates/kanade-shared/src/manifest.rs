@@ -798,6 +798,88 @@ pub struct ClientHint {
     /// [`check:`]: crate::manifest::CheckHint
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_when: Option<ShowWhen>,
+    /// Optional **confirmation-dialog** config for the Client App's 実行
+    /// button.
+    ///
+    /// `None` ⇒ the historical default: the client shows a modal
+    /// confirmation with a built-in 「「{name}」を実行しますか？」 message
+    /// before firing the job (a mis-click guard for a possibly heavy /
+    /// destructive action). When set, the operator controls it:
+    /// - a bare bool — `confirm: false` runs immediately with **no** prompt;
+    ///   `confirm: true` is the same as omitting the block (default message);
+    /// - a struct — `confirm: { message: "…" }` shows the dialog with a
+    ///   custom message (and, redundantly with the scalar, `enabled: false`
+    ///   to suppress it).
+    ///
+    /// Gates the END-USER Client App surface only — the operator `POST
+    /// /api/exec` path never consults `client:`, so an operator-driven run
+    /// is unaffected. New field ⇒ #492 wire rule (`serde(default)` +
+    /// `skip_serializing_if`). Deserializes from bool-or-struct via
+    /// [`de_confirm`]; the JSON schema advertises the struct form (the
+    /// scalar is author ergonomics, like [`ShowWhen::is`]).
+    #[serde(
+        default,
+        deserialize_with = "de_confirm",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub confirm: Option<ConfirmHint>,
+}
+
+/// Confirmation-dialog config for a [`ClientHint`] — see
+/// [`ClientHint::confirm`]. Controls the Client App's pre-run modal:
+/// whether it appears at all (`enabled`) and what it says (`message`).
+///
+/// Authored as either a bare bool (`confirm: false` / `true`) or a struct
+/// (`confirm: { message: "…" }`); both normalise here via [`de_confirm`].
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
+pub struct ConfirmHint {
+    /// Whether the Client App shows the confirmation dialog before running.
+    /// `false` fires the job immediately with no prompt. Defaults to `true`
+    /// (so an author who only sets `message` still gets the dialog, and the
+    /// struct form never accidentally suppresses it).
+    #[serde(default = "default_confirm_enabled")]
+    pub enabled: bool,
+    /// Custom dialog message. `None` ⇒ the client's built-in
+    /// 「「{name}」を実行しますか？」. Only meaningful while `enabled`;
+    /// rejected if present-but-blank by [`Manifest::validate`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// `enabled` defaults to `true`: the historical behaviour is "always
+/// confirm", so a struct form that omits `enabled` (e.g. sets only
+/// `message`) still shows the dialog.
+fn default_confirm_enabled() -> bool {
+    true
+}
+
+/// Accept either a bare bool (`confirm: false` / `confirm: true`) or a
+/// struct (`confirm: { message: "…" }`) for [`ClientHint::confirm`],
+/// normalising to a [`ConfirmHint`]. The bool is pure author ergonomics —
+/// `false` ⇒ suppress the dialog, `true` ⇒ default message — while the
+/// struct carries a custom message. Called only when the key is present
+/// (absence is handled by `serde(default)` ⇒ `None`). An explicit
+/// `confirm: null` — which the generated schema permits (the field is
+/// `Option`) — maps to `None` too, so it can't produce a parse error;
+/// deserializing through `Option<BoolOrHint>` handles that cleanly (Gemini
+/// #960).
+fn de_confirm<'de, D>(d: D) -> Result<Option<ConfirmHint>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum BoolOrHint {
+        Bool(bool),
+        Hint(ConfirmHint),
+    }
+    Ok(Option::<BoolOrHint>::deserialize(d)?.map(|b| match b {
+        BoolOrHint::Bool(enabled) => ConfirmHint {
+            enabled,
+            message: None,
+        },
+        BoolOrHint::Hint(h) => h,
+    }))
 }
 
 /// Dynamic display gate for a [`ClientHint`] — see
@@ -2398,6 +2480,17 @@ impl Manifest {
                     );
                 }
             }
+            // confirm: a present-but-blank custom message would render an
+            // empty dialog title — reject it like the other display fields.
+            // (A `confirm: false` / `enabled: false` with no message is fine:
+            // the dialog is suppressed, so there's nothing to render.)
+            if let Some(c) = &client.confirm {
+                if let Some(msg) = &c.message {
+                    if msg.trim().is_empty() {
+                        return Err("client.confirm.message must not be empty when set".to_string());
+                    }
+                }
+            }
         }
         // #219: a `collect:` job's `name` heads the bundle on the SPA
         // Collect page (and the Client App row when paired with
@@ -3629,6 +3722,83 @@ client:
         let m: Manifest = serde_yaml::from_str(empty_is).expect("parse");
         let err = m.validate().expect_err("empty is[] must fail");
         assert!(err.contains("client.show_when.is"), "err: {err}");
+    }
+
+    #[test]
+    fn manifest_client_confirm_accepts_bool_and_struct() {
+        // `confirm:` deserializes from a bare bool or a struct. A bool
+        // sets `enabled` (message stays default); a struct carries a custom
+        // message and defaults `enabled` to true.
+        let base = r#"
+id: j
+version: 1.0.0
+execute:
+  shell: powershell
+  script: "echo x"
+  timeout: 30s
+client:
+  name: "Wi-Fi 省電力を切る"
+  category: settings
+"#;
+        // `confirm: false` ⇒ dialog suppressed.
+        let off: Manifest =
+            serde_yaml::from_str(&format!("{base}  confirm: false\n")).expect("parse false");
+        off.validate().expect("confirm: false validates");
+        let c = off.client.unwrap().confirm.unwrap();
+        assert!(!c.enabled);
+        assert!(c.message.is_none());
+
+        // `confirm: true` ⇒ same as omitting (dialog shown, default message).
+        let on: Manifest =
+            serde_yaml::from_str(&format!("{base}  confirm: true\n")).expect("parse true");
+        let c = on.client.unwrap().confirm.unwrap();
+        assert!(c.enabled);
+        assert!(c.message.is_none());
+
+        // Struct with only a message ⇒ enabled defaults true, custom text.
+        let msg: Manifest = serde_yaml::from_str(&format!(
+            "{base}  confirm:\n    message: \"再インストールには数分かかります。よろしいですか？\"\n"
+        ))
+        .expect("parse struct");
+        msg.validate().expect("confirm message validates");
+        let c = msg.client.unwrap().confirm.unwrap();
+        assert!(c.enabled);
+        assert_eq!(
+            c.message.as_deref(),
+            Some("再インストールには数分かかります。よろしいですか？")
+        );
+
+        // Absent ⇒ None (historical default handled by the client).
+        let none: Manifest = serde_yaml::from_str(base).expect("parse none");
+        assert!(none.client.unwrap().confirm.is_none());
+
+        // Explicit `confirm: null` is schema-valid (the field is Option) and
+        // must map to None, not a parse error (Gemini #960).
+        let null: Manifest =
+            serde_yaml::from_str(&format!("{base}  confirm: null\n")).expect("parse null");
+        assert!(null.client.unwrap().confirm.is_none());
+    }
+
+    #[test]
+    fn manifest_client_confirm_rejects_blank_message() {
+        // A present-but-blank custom message would render an empty dialog
+        // title — validate() must reject it, like the other display fields.
+        let yaml = r#"
+id: j
+version: 1.0.0
+execute:
+  shell: powershell
+  script: "echo x"
+  timeout: 30s
+client:
+  name: "A job"
+  category: settings
+  confirm:
+    message: "   "
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        let err = m.validate().expect_err("blank confirm.message must fail");
+        assert!(err.contains("client.confirm.message"), "err: {err}");
     }
 
     #[test]

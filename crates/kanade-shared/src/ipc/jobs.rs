@@ -113,12 +113,36 @@ pub struct UserInvokableJob {
     /// `skip_serializing_if`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+    /// Confirmation-dialog config projected from the manifest's
+    /// `client.confirm` block. `None` ⇒ the manifest specified nothing (or
+    /// an older agent predates this field), so the Client App keeps its
+    /// historical behaviour: show the modal with the built-in message. When
+    /// present, `enabled: false` suppresses the dialog and `message`
+    /// overrides its text. (#492 wire rule: `serde(default)` +
+    /// `skip_serializing_if`.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm: Option<JobConfirm>,
     /// Snapshot of the last KLP-driven run of this job FOR THIS
     /// USER. `None` until they've executed it at least once.
     /// Backend keeps the cross-user / cross-PC history separately
     /// (operator-only `executions` table).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run: Option<JobRun>,
+}
+
+/// Confirmation-dialog config for a [`UserInvokableJob`], projected 1:1
+/// from the manifest's `client.confirm` block. Kept self-contained in the
+/// wire layer (not a re-export of the manifest's `ConfirmHint`) so the KLP
+/// contract doesn't depend on the manifest module.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
+pub struct JobConfirm {
+    /// Whether the Client App shows the confirmation dialog before running.
+    /// `false` fires the job immediately with no prompt.
+    pub enabled: bool,
+    /// Custom dialog message. `None` ⇒ the client's built-in
+    /// 「「{name}」を実行しますか？」.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 /// Compact summary of a past run — what the Client App shows next
@@ -325,10 +349,44 @@ mod tests {
             category_order: None,
             version: "1.0.0".into(),
             timeout_secs: None,
+            confirm: None,
             last_run: None,
         })
         .unwrap();
         assert!(v.get("timeout_secs").is_none(), "wire: {v:?}");
+        // confirm is None ⇒ omitted (not `null`), so an older client that
+        // predates the field keeps its historical always-confirm default.
+        assert!(v.get("confirm").is_none(), "wire: {v:?}");
+    }
+
+    #[test]
+    fn user_invokable_job_confirm_round_trips() {
+        // A job carrying a confirm config surfaces it on the wire; the
+        // client reads `enabled` / `message` to suppress or reword the modal.
+        let wire = r#"{
+            "id":"wifi-tweak","display_name":"Wi-Fi 省電力を切る",
+            "category":"settings","version":"1.0.0",
+            "confirm":{"enabled":false}
+        }"#;
+        let j: UserInvokableJob = serde_json::from_str(wire).unwrap();
+        let c = j.confirm.expect("confirm present");
+        assert!(!c.enabled);
+        assert!(c.message.is_none());
+
+        // Round-trip a message-carrying confirm; message omitted when None.
+        let v = serde_json::to_value(JobConfirm {
+            enabled: true,
+            message: Some("よろしいですか？".into()),
+        })
+        .unwrap();
+        assert_eq!(v["enabled"], true);
+        assert_eq!(v["message"], "よろしいですか？");
+        let v = serde_json::to_value(JobConfirm {
+            enabled: true,
+            message: None,
+        })
+        .unwrap();
+        assert!(v.get("message").is_none(), "wire: {v:?}");
     }
 
     #[test]

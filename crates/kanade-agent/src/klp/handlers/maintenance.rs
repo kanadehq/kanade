@@ -380,6 +380,7 @@ mod tests {
                 icon: None,
                 visible_to: None,
                 show_when: None,
+                confirm: None,
             }),
             tags: Vec::new(),
             origin: None,
