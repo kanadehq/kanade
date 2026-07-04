@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::config::MailSection;
+
 /// Upper bound on [`ServerSettings::agent_prune_days`] (100 years). A
 /// value this large already means "effectively never", and it keeps the
 /// cleanup task's `now - Duration::days(n)` subtraction comfortably inside
@@ -58,6 +60,23 @@ pub struct ServerSettings {
     /// configured, which is the safe default for a fresh deployment.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub controller_group: Option<String>,
+
+    /// Non-secret SMTP relay settings for outbound email (compliance-alert
+    /// notifications, account setup links, …). Lives here (#884) rather than
+    /// in `backend.toml` so an operator can edit it from the SPA without
+    /// shell access to the host.
+    ///
+    /// `None` (unset) ⇒ no relay configured, email is a no-op — the in-app
+    /// / NATS notification path is unaffected. The SMTP **password is
+    /// deliberately not here** (KV is
+    /// readable over NATS): it stays sourced from the `MailPassword`
+    /// registry secret / `$KANADE_MAIL_PASSWORD` and is combined with these
+    /// settings when the backend builds its `Mailer`. Changes take effect on
+    /// the **next backend restart** (the backend builds the `Mailer` once at
+    /// startup — no live rebuild), which is acceptable per the #884
+    /// discussion.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mail: Option<MailSection>,
 }
 
 impl ServerSettings {
@@ -75,6 +94,7 @@ impl ServerSettings {
         Self {
             agent_prune_days: None,
             controller_group: None,
+            mail: None,
         }
     }
 
@@ -207,6 +227,44 @@ mod tests {
             serde_json::to_string(&ServerSettings::default()).unwrap(),
             "{}"
         );
+    }
+
+    #[test]
+    fn mail_round_trips_and_omits_when_unset() {
+        use crate::config::{MailEncryption, MailSection};
+
+        // Unset mail is omitted (skip_serializing_if) — a mail-less doc
+        // stays minimal and decodes back to `None`.
+        assert_eq!(
+            serde_json::to_string(&ServerSettings::default()).unwrap(),
+            "{}"
+        );
+
+        let s = ServerSettings {
+            mail: Some(MailSection {
+                host: "smtp.example.com".into(),
+                port: 587,
+                encryption: MailEncryption::Starttls,
+                from: "kanade-noreply@example.com".into(),
+                username: Some("kanade-noreply".into()),
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        // Encryption serialises lowercase; the password is never present.
+        assert!(json.contains(r#""encryption":"starttls""#), "json: {json}");
+        assert!(!json.contains("password"), "password must never serialise");
+        assert_eq!(serde_json::from_str::<ServerSettings>(&json).unwrap(), s);
+    }
+
+    #[test]
+    fn mail_defaults_to_unset() {
+        assert_eq!(ServerSettings::default().mail, None);
+        // A doc written before this field existed (no `mail` key) decodes
+        // to `None` — email stays a no-op, the pre-feature behaviour.
+        let s: ServerSettings = serde_json::from_str(r#"{"agent_prune_days":7}"#).unwrap();
+        assert_eq!(s.mail, None);
+        assert_eq!(s.agent_prune_days, Some(7));
     }
 
     #[test]

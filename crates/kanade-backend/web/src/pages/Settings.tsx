@@ -21,6 +21,21 @@ type Tab = (typeof TABS)[number];
 // enforces the same bound, this just gives immediate client-side feedback.
 const MAX_AGENT_PRUNE_DAYS = 36_500;
 
+/// SMTP transport security — mirrors `kanade_shared::config::MailEncryption`
+/// (serialised lowercase).
+type MailEncryption = 'starttls' | 'tls' | 'none';
+
+/// Non-secret SMTP relay settings — mirrors `kanade_shared::config::
+/// MailSection`. The password is NOT here: it stays a server-side secret
+/// (`MailPassword` registry value / `$KANADE_MAIL_PASSWORD`).
+interface MailSettings {
+  host: string;
+  port: number;
+  encryption: MailEncryption;
+  from: string;
+  username: string | null;
+}
+
 /// Backend-side server settings document (`server_settings` KV). Mirrors
 /// `kanade_shared::wire::ServerSettings`: every field is nullable, where
 /// `null` (or absent) means "unset — fall back to the built-in default".
@@ -29,6 +44,7 @@ const MAX_AGENT_PRUNE_DAYS = 36_500;
 interface ServerSettings {
   agent_prune_days: number | null;
   controller_group: string | null;
+  mail: MailSettings | null;
 }
 
 /// Settings page. Two distinct kinds of settings, split into tabs so it's
@@ -192,12 +208,27 @@ function ServerTab() {
   // Trusted runner group for `tier: controller` jobs. Blank = unset
   // (controller-tier jobs run nowhere — fail-safe).
   const [controllerGroup, setControllerGroup] = useState('');
+  // Mail (SMTP) settings, kept as separate string fields so each can be
+  // blank. Mail is "configured" once host + from are filled; clearing them
+  // unsets it (email becomes a no-op). Changes apply on the next backend
+  // restart — the banner in the card says so.
+  const [mailHost, setMailHost] = useState('');
+  const [mailPort, setMailPort] = useState('');
+  const [mailEncryption, setMailEncryption] = useState<MailEncryption>('starttls');
+  const [mailFrom, setMailFrom] = useState('');
+  const [mailUsername, setMailUsername] = useState('');
   useEffect(() => {
     if (settings.data) {
       setPruneDays(settings.data.agent_prune_days == null ? '' : String(settings.data.agent_prune_days));
       // Trim on seed so an unedited reload of a stored value with stray
       // whitespace doesn't read as dirty (the draft is compared trimmed).
       setControllerGroup((settings.data.controller_group ?? '').trim());
+      const m = settings.data.mail;
+      setMailHost((m?.host ?? '').trim());
+      setMailPort(m == null ? '' : String(m.port));
+      setMailEncryption(m?.encryption ?? 'starttls');
+      setMailFrom((m?.from ?? '').trim());
+      setMailUsername((m?.username ?? '').trim());
     }
   }, [settings.data]);
 
@@ -229,16 +260,60 @@ function ServerTab() {
   const cgTrimmed = controllerGroup.trim();
   const controllerValue: string | null = cgTrimmed === '' ? null : cgTrimmed;
 
-  // One save for the whole document (the PUT is a full replace). `dirty`
-  // if either field diverges from the stored doc.
-  const valid = pruneValid;
+  // mail: "configured" once host OR from is filled; both blank → unset
+  // (null). A partially-filled config is invalid — the Save button stays
+  // disabled until it's either complete or fully cleared.
+  const mailHostTrimmed = mailHost.trim();
+  const mailFromTrimmed = mailFrom.trim();
+  const mailUserTrimmed = mailUsername.trim();
+  const mailPortTrimmed = mailPort.trim();
+  const mailConfigured = mailHostTrimmed !== '' || mailFromTrimmed !== '';
+  const mailPortNum = Number(mailPortTrimmed);
+  const mailValue: MailSettings | null = mailConfigured
+    ? {
+        host: mailHostTrimmed,
+        port: mailPortNum,
+        encryption: mailEncryption,
+        from: mailFromTrimmed,
+        username: mailUserTrimmed === '' ? null : mailUserTrimmed,
+      }
+    : null;
+  // Valid when unset, or when host + a plausible from-address + an in-range
+  // port are all present. The backend re-validates `from` with the real
+  // parser; this just gives immediate feedback.
+  const mailPortValid =
+    mailPortTrimmed !== '' &&
+    Number.isInteger(mailPortNum) &&
+    mailPortNum >= 1 &&
+    mailPortNum <= 65535;
+  const mailValid =
+    !mailConfigured ||
+    (mailHostTrimmed !== '' && mailFromTrimmed.includes('@') && mailPortValid);
+
+  const storedMail = settings.data?.mail ?? null;
+  const mailDirty =
+    (mailValue === null) !== (storedMail === null) ||
+    (mailValue !== null &&
+      storedMail !== null &&
+      (mailValue.host !== storedMail.host ||
+        mailValue.port !== storedMail.port ||
+        mailValue.encryption !== storedMail.encryption ||
+        mailValue.from !== storedMail.from ||
+        (mailValue.username ?? null) !== (storedMail.username ?? null)));
+
+  // One save for the whole document. The PUT merges per-field, but the SPA
+  // always sends every field it knows, so an unchanged one is re-sent
+  // as-is. `dirty` if any field diverges from the stored doc.
+  const valid = pruneValid && mailValid;
   const dirty =
     settings.data != null &&
     (pruneValue !== settings.data.agent_prune_days ||
-      controllerValue !== (settings.data.controller_group ?? null));
+      controllerValue !== (settings.data.controller_group ?? null) ||
+      mailDirty);
   const doc: ServerSettings = {
     agent_prune_days: pruneValue,
     controller_group: controllerValue,
+    mail: mailValue,
   };
 
   // Faint placeholder = what a blank field resolves to: the built-in
@@ -308,6 +383,87 @@ function ServerTab() {
             />
             <p className="text-muted text-xs">{t('server.controllerGroup.blankHint')}</p>
           </div>
+        </CardContent>
+      </Card>
+
+      <Card className="max-w-xl">
+        <CardHeader>
+          <CardTitle>{t('server.mail.title')}</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <p className="text-muted text-sm">{t('server.mail.description')}</p>
+          <p className="text-muted text-xs rounded-md border border-border bg-card px-3 py-2">
+            {t('server.mail.restartHint')}
+          </p>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-1">
+              <Label htmlFor="mail-host">{t('server.mail.host')}</Label>
+              <Input
+                id="mail-host"
+                type="text"
+                value={mailHost}
+                placeholder="smtp.example.com"
+                disabled={!canOperate || settings.isLoading}
+                onChange={(e) => setMailHost(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="mail-port">{t('server.mail.port')}</Label>
+              <Input
+                id="mail-port"
+                type="number"
+                min={1}
+                max={65535}
+                step={1}
+                inputMode="numeric"
+                value={mailPort}
+                placeholder="587"
+                disabled={!canOperate || settings.isLoading}
+                onChange={(e) => setMailPort(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="mail-encryption">{t('server.mail.encryption')}</Label>
+              <Select
+                id="mail-encryption"
+                value={mailEncryption}
+                disabled={!canOperate || settings.isLoading}
+                onChange={(e) => setMailEncryption(e.target.value as MailEncryption)}
+              >
+                <option value="starttls">{t('server.mail.encryptionOptions.starttls')}</option>
+                <option value="tls">{t('server.mail.encryptionOptions.tls')}</option>
+                <option value="none">{t('server.mail.encryptionOptions.none')}</option>
+              </Select>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="mail-from">{t('server.mail.from')}</Label>
+              <Input
+                id="mail-from"
+                type="email"
+                value={mailFrom}
+                placeholder="kanade-noreply@example.com"
+                disabled={!canOperate || settings.isLoading}
+                onChange={(e) => setMailFrom(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1 sm:col-span-2">
+              <Label htmlFor="mail-username">{t('server.mail.username')}</Label>
+              <Input
+                id="mail-username"
+                type="text"
+                value={mailUsername}
+                placeholder={t('server.mail.usernamePlaceholder')}
+                disabled={!canOperate || settings.isLoading}
+                onChange={(e) => setMailUsername(e.target.value)}
+                autoComplete="off"
+              />
+            </div>
+          </div>
+          <p className="text-muted text-xs">{t('server.mail.passwordHint')}</p>
+          <p className="text-muted text-xs">{t('server.mail.blankHint')}</p>
+          {mailConfigured && !mailValid && (
+            <p className="text-red-500 text-xs">{t('server.mail.invalid')}</p>
+          )}
         </CardContent>
       </Card>
 
