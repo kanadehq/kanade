@@ -5,6 +5,7 @@ import { toast } from 'sonner';
 
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { useConfirm } from '@/components/ui/confirm-dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
@@ -180,6 +181,17 @@ function ServerTab() {
   const { hasRole } = useAuth();
   const canOperate = hasRole('operator');
   const queryClient = useQueryClient();
+  const confirm = useConfirm();
+  // Pending "reload once the backend is back" poll timer, tracked so it can
+  // be cancelled if this tab unmounts mid-restart (else the reload would fire
+  // later and blow away whatever the user navigated to).
+  const restartTimer = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (restartTimer.current != null) window.clearTimeout(restartTimer.current);
+    },
+    [],
+  );
 
   // Stored document (nullable fields) + the compiled-in defaults rendered
   // as faint placeholders — same pattern as the agent layered-config page
@@ -244,6 +256,48 @@ function ServerTab() {
     },
     onError: (err) => toast.error(formatError(err)),
   });
+
+  // Restart the backend service (operator). The server exits and its SCM
+  // recovery actions relaunch it (~5 s), so the API is briefly unavailable.
+  // Rather than a blind timed reload (which could land on a dead server if
+  // startup runs long), poll the public `/health` liveness probe and reload
+  // the moment it answers — capped so a dev/console backend that doesn't
+  // auto-restart doesn't poll forever.
+  const restart = useMutation({
+    mutationFn: () => apiFetch<{ status: string }>('/api/server/restart', { method: 'POST' }),
+    onSuccess: () => {
+      toast.success(t('server.restart.toast'));
+      let attempts = 0;
+      const maxAttempts = 60; // ~1 min of retries after the process exits
+      const poll = () => {
+        fetch('/health', { cache: 'no-store' })
+          .then((res) => {
+            if (res.ok) window.location.reload();
+            else if (attempts++ < maxAttempts) restartTimer.current = window.setTimeout(poll, 1000);
+          })
+          .catch(() => {
+            // Server still down (connection refused) — keep waiting.
+            if (attempts++ < maxAttempts) restartTimer.current = window.setTimeout(poll, 1000);
+          });
+      };
+      // Wait past the handler's exit grace before the first probe. Tracked in
+      // restartTimer so the unmount cleanup above can cancel a pending reload.
+      restartTimer.current = window.setTimeout(poll, 2000);
+    },
+    onError: (err) => toast.error(formatError(err)),
+  });
+  const onRestartClick = async () => {
+    if (
+      await confirm({
+        title: t('server.restart.confirmTitle'),
+        description: t('server.restart.confirmDescription'),
+        confirmLabel: t('server.restart.confirmLabel'),
+        danger: true,
+      })
+    ) {
+      restart.mutate();
+    }
+  };
 
   // Blank → unset (null). A non-blank value must be a whole number ≥ 1:
   // 0 / negatives are disallowed because "0 days" would mean "prune every
@@ -482,6 +536,31 @@ function ServerTab() {
           </span>
         )}
       </div>
+
+      <Card className="max-w-xl border-danger/40">
+        <CardHeader>
+          <CardTitle>{t('server.restart.title')}</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <p className="text-muted text-sm">{t('server.restart.description')}</p>
+          <div className="flex items-center gap-3">
+            <Button
+              type="button"
+              variant="danger"
+              // Stay disabled through `isSuccess` too: after the mutation
+              // resolves the process is exiting and we're polling to reload,
+              // so the button must not flash back to clickable (double-submit).
+              disabled={!canOperate || restart.isPending || restart.isSuccess}
+              title={canOperate ? undefined : t('rbac.operatorRequired', { ns: 'common' })}
+              onClick={onRestartClick}
+            >
+              {restart.isPending || restart.isSuccess
+                ? t('server.restart.restarting')
+                : t('server.restart.button')}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
     </div>
   );
 }

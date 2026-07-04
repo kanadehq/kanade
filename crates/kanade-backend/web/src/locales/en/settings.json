@@ -62,6 +62,16 @@
       "passwordHint": "The SMTP password is not set here — it's a server-side secret (the MailPassword registry value or the KANADE_MAIL_PASSWORD environment variable).",
       "blankHint": "Fill in the host and from-address to enable email; clear them both to disable it (email becomes a no-op).",
       "invalid": "Enter a host, a valid from-address (with @), and a port between 1 and 65535 — or clear the host and from-address to disable email."
+    },
+    "restart": {
+      "title": "Restart backend",
+      "description": "Restart the backend service to apply settings that only take effect at startup (e.g. the mail relay). The API is unavailable for a few seconds while it comes back, and this page reloads automatically.",
+      "button": "Restart backend",
+      "restarting": "Restarting…",
+      "confirmTitle": "Restart the backend?",
+      "confirmDescription": "The backend service will restart and the API will be unavailable for a few seconds. In-flight requests may fail. This page reloads once it's back.",
+      "confirmLabel": "Restart",
+      "toast": "Backend is restarting — this page will reload shortly."
     }
   }
 }

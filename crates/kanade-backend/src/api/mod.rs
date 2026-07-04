@@ -30,6 +30,7 @@ pub mod schedules;
 pub mod schemas;
 pub mod script_objects;
 pub mod scripts;
+pub mod server;
 pub mod server_settings;
 pub mod view_sql;
 pub mod views;
@@ -401,6 +402,11 @@ pub fn router(state: AppState) -> Router {
         )
         // Replace the backend server-settings document (operator+).
         .route("/api/server-settings", put(server_settings::put))
+        // Restart the backend service (operator+). The backend exits
+        // non-zero and the SCM's failure-recovery actions relaunch it —
+        // used to apply a server_settings change (e.g. SMTP) that's only
+        // read at startup (#962).
+        .route("/api/server/restart", post(server::restart))
         .route(
             "/api/pcs/{pc_id}/config",
             put(agent_config::put_pc).delete(agent_config::delete_pc),
