@@ -26,6 +26,14 @@ type TailResponse = {
 const LIVE_POLL_MS = 5_000;
 const LIVE_TAIL_KB = 128;
 
+/** #955: a `<job>__finalize` row spawned by this run (reverse link). */
+type FinalizeChild = {
+  result_id: string;
+  job_id: string | null;
+  exit_code: number | null;
+  finished_at: string | null;
+};
+
 type ResultDetailRow = {
   result_id: string;
   request_id: string;
@@ -41,6 +49,16 @@ type ResultDetailRow = {
   job_id: string | null;
   /** v0.30 / PR α' unified: pinned manifest version. */
   version: string | null;
+  /**
+   * #955: for a `<job>__finalize` row, the parent run's result_id
+   * (absent on ordinary runs — the field is skipped on the wire).
+   */
+  parent_result_id?: string | null;
+  /**
+   * #955: the finalize row(s) this run spawned. Populated only by the
+   * detail endpoint; absent (empty) on ordinary runs.
+   */
+  finalize_children?: FinalizeChild[];
 };
 
 /**
@@ -164,6 +182,45 @@ export function ResultDetail() {
               </span>
             }
           />
+          {/* #955: run <-> finalize links. A finalize row points back to
+              its parent run; a run points forward to the finalize row(s)
+              its collect-cleanup hook produced. */}
+          {data.parent_result_id ? (
+            <Field
+              label={t('fields.parentRun')}
+              value={
+                <Link
+                  to={`/activity/${encodeURIComponent(data.parent_result_id)}`}
+                  className="text-accent hover:underline"
+                >
+                  <code className="text-xs">{data.parent_result_id.slice(0, 8)}</code>
+                </Link>
+              }
+            />
+          ) : null}
+          {data.finalize_children && data.finalize_children.length > 0 ? (
+            <Field
+              label={t('fields.finalize')}
+              value={
+                <span className="inline-flex flex-wrap items-center gap-2">
+                  {data.finalize_children.map((c) => (
+                    <Link
+                      key={c.result_id}
+                      to={`/activity/${encodeURIComponent(c.result_id)}`}
+                      className="inline-flex items-center gap-1 text-accent hover:underline"
+                    >
+                      <code className="text-xs">{c.job_id ?? c.result_id.slice(0, 8)}</code>
+                      {c.exit_code !== null ? (
+                        <Badge variant={c.exit_code === 0 ? 'success' : 'danger'}>
+                          {c.exit_code}
+                        </Badge>
+                      ) : null}
+                    </Link>
+                  ))}
+                </span>
+              }
+            />
+          ) : null}
         </CardContent>
       </Card>
 

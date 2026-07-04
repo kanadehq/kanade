@@ -17,7 +17,9 @@
     "resultId": "result_id",
     "version": "version",
     "startedAt": "started_at",
-    "finishedAt": "finished_at"
+    "finishedAt": "finished_at",
+    "parentRun": "parent run",
+    "finalize": "finalize"
   },
   "values": {
     "running": "running",

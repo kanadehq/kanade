@@ -291,6 +291,7 @@ mod tests {
             result_id: uuid::Uuid::new_v4().to_string(),
             request_id: rid.into(),
             exec_id: None,
+            parent_result_id: None,
             pc_id: "pc-01".into(),
             exit_code: 0,
             stdout: "ok".into(),

@@ -35,6 +35,14 @@ pub struct ExecResult {
     /// pre-v0.29 agents (decoded via `serde(default)`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec_id: Option<String>,
+    /// #955: back-link to the parent run's `result_id` for a
+    /// `finalize:` hook's own result row. Set by the agent to the
+    /// triggering run's `result_id` so the SPA can link the
+    /// `<job>__finalize` row to (and from) the run whose collect it
+    /// cleaned up. `None` for every ordinary run and every pre-#955
+    /// payload (`serde(default)` keeps older results decodable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_result_id: Option<String>,
     pub pc_id: String,
     pub exit_code: i32,
     /// stdout. Empty string when [`Self::stdout_object`] is set — the
@@ -153,6 +161,7 @@ mod tests {
             result_id: "result-uuid-1".into(),
             request_id: "req-1".into(),
             exec_id: Some("exec-uuid-1".into()),
+            parent_result_id: None,
             pc_id: "pc-01".into(),
             exit_code: 0,
             stdout: "hello\n".into(),
@@ -263,6 +272,7 @@ mod tests {
             result_id: "agent-minted-uuid".into(),
             request_id: "r".into(),
             exec_id: None,
+            parent_result_id: None,
             pc_id: "x".into(),
             exit_code: 0,
             stdout: String::new(),
@@ -286,6 +296,7 @@ mod tests {
             result_id: "r1".into(),
             request_id: "req".into(),
             exec_id: None,
+            parent_result_id: None,
             pc_id: "PC1".into(),
             exit_code: 0,
             stdout: String::new(),
@@ -309,5 +320,37 @@ mod tests {
             back.collect_object.as_deref(),
             Some("PC1/collect-diagnostics/20260615T000000Z.zip"),
         );
+    }
+
+    #[test]
+    fn exec_result_parent_result_id_round_trips_and_omits_when_absent() {
+        // #955: a finalize row carries `parent_result_id`; ordinary runs
+        // leave it None, and it stays off the wire so pre-#955 readers
+        // are unaffected (skip_serializing_if).
+        let t0 = chrono::Utc.with_ymd_and_hms(2026, 7, 4, 0, 0, 0).unwrap();
+        let mut r = ExecResult {
+            result_id: "fin-1".into(),
+            request_id: "req__finalize".into(),
+            exec_id: None,
+            parent_result_id: None,
+            pc_id: "PC1".into(),
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            started_at: t0,
+            finished_at: t0,
+            stdout_object: None,
+            stderr_object: None,
+            manifest_id: Some("screenshot-collect__finalize".into()),
+            collect_object: None,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(
+            !json.contains("parent_result_id"),
+            "parent_result_id must be absent when None: {json}"
+        );
+        r.parent_result_id = Some("parent-run-uuid".into());
+        let back: ExecResult = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+        assert_eq!(back.parent_result_id.as_deref(), Some("parent-run-uuid"));
     }
 }

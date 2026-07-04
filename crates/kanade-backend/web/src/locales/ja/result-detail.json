@@ -17,7 +17,9 @@
     "resultId": "result_id",
     "version": "version",
     "startedAt": "started_at",
-    "finishedAt": "finished_at"
+    "finishedAt": "finished_at",
+    "parentRun": "親の実行",
+    "finalize": "finalize"
   },
   "values": {
     "running": "実行中",
