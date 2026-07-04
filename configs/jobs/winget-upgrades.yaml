@@ -1,0 +1,145 @@
+# Pending-upgrade inventory — the "is this app current, or is a fix
+# waiting?" signal the KEV exposure dashboard needs to move from
+# "product family is in the catalog" to "THIS app has an update".
+#
+# Read-only companion to the ACTION job `winget-upgrade-all.yaml`
+# (which actually installs upgrades). This one only *reports* what
+# `winget upgrade` would do, and projects it into a queryable table
+# so `configs/views/kev-exposure.yaml` can cross-reference installed
+# apps against the CISA KEV catalog and show, per app:
+#
+#   * update available  → a fix is published and NOT yet applied
+#                         (= still exposed to any already-fixed CVE)
+#   * no update         → on the latest release (known fixes applied)
+#
+# Register + schedule:
+#   kanade job create      configs/jobs/winget-upgrades.yaml
+#   kanade schedule create configs/schedules/winget-upgrades.yaml
+#
+# ── Why run_as: user (NOT system) ──────────────────────────────────
+# winget is the Microsoft.DesktopAppInstaller *appx*, provisioned
+# per-user. Under LocalSystem there is no winget.exe on PATH and the
+# Microsoft.WinGet.Client module is absent — verified on the fleet:
+# `run_as: system` returns "'winget.exe' is not recognized". The
+# appx alias only resolves inside a real user context, so the probe
+# must impersonate the console user. This needs an interactive
+# session present at fire time (fine for desk machines; a headless
+# server with nobody logged on simply yields no rows that cycle).
+#
+# ── Why parse the table, not the COM module ────────────────────────
+# `Get-WinGetPackage` (Microsoft.WinGet.Client) returns clean objects
+# but the module lives in the user's (often OneDrive-redirected)
+# Documents\PowerShell\Modules, which the impersonated non-interactive
+# process does not have on PSModulePath — Import-Module fails. The
+# appx alias `%LOCALAPPDATA%\Microsoft\WindowsApps\winget.exe` DOES
+# resolve, so we call it and parse. Splitting each row on runs of 2+
+# spaces (`-split '\s{2,}'`) is robust to the CJK-width column
+# misalignment that breaks fixed-offset slicing when app names are
+# Japanese — the ID / version / source cells never contain a double
+# space, so the split lands cleanly regardless of the Name column.
+id: winget-upgrades
+tags: [inventory, security]   # operator taxonomy for the SPA tag filter
+version: 0.1.0
+description: Pending winget upgrades per PC (feeds the KEV "update available?" status)
+execute:
+  shell: powershell
+  # Must impersonate the logged-on user — winget is a per-user appx
+  # and is invisible to LocalSystem (see header).
+  run_as: user
+  # winget hits its remote source on first use in a session; 180s
+  # gives the source refresh + full upgrade evaluation headroom.
+  timeout: 180s
+  script: |
+    $ErrorActionPreference = 'Stop'
+
+    # The appx alias — resolves in a user context, absent under SYSTEM.
+    $exe = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe'
+    if (-not (Test-Path $exe)) {
+        # No winget for this user → emit an empty (but valid) snapshot
+        # so the projector replaces stale rows rather than erroring.
+        [pscustomobject]@{ hostname = $env:COMPUTERNAME; apps = @() } |
+            ConvertTo-Json -Compress -Depth 5
+        return
+    }
+
+    # `winget upgrade` lists ONLY apps with a newer version available —
+    # exactly the "update waiting" set. --disable-interactivity keeps
+    # the progress spinner (control chars) out of the captured output.
+    $raw = & $exe upgrade --accept-source-agreements --disable-interactivity 2>$null | Out-String
+
+    # Distinguish "nothing to upgrade" from a real failure. winget exits
+    # non-zero (0x8A15002B / -1978335189) when there are simply no
+    # applicable upgrades — that is success (an empty snapshot). Any
+    # OTHER non-zero (network timeout, source init error, CDN blip)
+    # means the output is untrustworthy, so throw: a non-zero exit makes
+    # the clean-exit-only projector SKIP this result, preserving the
+    # PC's last-good rows instead of blanking them with a bad scan.
+    if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {
+        throw "winget upgrade failed (exit $LASTEXITCODE) — refusing to publish a possibly-truncated snapshot"
+    }
+
+    # Parse the main results table. A data row splits into >=5 cells on
+    # runs of 2+ spaces and ends in a known source; the header
+    # ("... ソース" / "... Source"), the dashed separator, and the
+    # "N upgrades available" footer all fail that test and drop out —
+    # so this is locale-independent (no reliance on English headers).
+    #
+    # Index from the RIGHT (Name | Id | Version | Available | Source):
+    # the four trailing cells are single-token, but an app Name can
+    # itself contain a run of 2+ spaces and split into several cells.
+    # Right-anchored indices keep Id/version/source correct regardless,
+    # and Name is the rejoined remainder.
+    $rows = foreach ($line in ($raw -split "`r?`n")) {
+        $f = ($line.Trim()) -split '\s{2,}'
+        if ($f.Count -ge 5 -and $f[-1] -in @('winget', 'msstore')) {
+            [pscustomobject]@{
+                # `key` = the winget package Id (e.g. Google.Chrome) —
+                # stable across versions, the history/identity anchor.
+                key       = [string]$f[-4]
+                name      = [string]($f[0..($f.Count - 5)] -join ' ')
+                installed = [string]$f[-3]
+                available = [string]$f[-2]
+                origin    = [string]$f[-1]   # winget | msstore
+            }
+        }
+    }
+
+    # Null-filter (an empty table yields a single $null) + deterministic
+    # order so an unchanged box produces byte-identical payloads.
+    $apps = @($rows | Where-Object { $_ -ne $null } | Sort-Object key)
+
+    [pscustomobject]@{
+        hostname = $env:COMPUTERNAME
+        apps     = @($apps)
+    } | ConvertTo-Json -Compress -Depth 5
+
+inventory:
+  display:
+    - { field: hostname, label: Hostname }
+    - field: apps
+      label: Pending upgrades
+      type: table
+      columns:
+        - { field: name,      label: App       }
+        - { field: installed, label: Installed  }
+        - { field: available, label: Available  }
+        - { field: origin,    label: Source     }
+        - { field: key,       label: Package Id }
+  summary:
+    - { field: hostname, label: Hostname }
+  # Flatten apps[] into a real table so the KEV view can LEFT JOIN
+  # installed software against "has a pending upgrade". Identity = the
+  # winget package Id (unique per app, stable across versions), so
+  # track_history records exactly when an upgrade appeared (a fix
+  # shipped) and when it cleared (the box got patched).
+  explode:
+    - field: apps
+      table: inventory_winget_upgrades
+      primary_key: [key]
+      track_history: true
+      columns:
+        - { field: key,       type: text, index: true }
+        - { field: name,      type: text, index: true }
+        - { field: installed, type: text }
+        - { field: available, type: text }
+        - { field: origin,    type: text }
