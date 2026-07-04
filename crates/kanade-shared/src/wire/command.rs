@@ -144,6 +144,13 @@ pub struct FinalizeCommand {
     pub run_as: RunAs,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// #965: for a `collect:` job, run this hook once per uploaded
+    /// bundle (single-bundle `KANADE_COLLECT_RESULT`) as each bundle
+    /// uploads, instead of once after the whole set — so an interrupted
+    /// collect still cleans up the days it managed to ship. `false`
+    /// (default, pre-#965 wire) keeps the one-call-after-all contract.
+    #[serde(default)]
+    pub on_each_bundle: bool,
 }
 
 /// Lowered, engine-vocabulary form of [`crate::manifest::Retry`] — a
@@ -450,6 +457,7 @@ mod tests {
                 timeout_secs: 30,
                 run_as: RunAs::System,
                 cwd: None,
+                on_each_bundle: false,
             }),
             ..sample_command()
         };

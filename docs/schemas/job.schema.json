@@ -924,6 +924,12 @@
             "null"
           ]
         },
+        "on_each_bundle": {
+          "title": "965: for a `collect:` job, run this hook once per uploaded",
+          "description": "bundle (with a single-bundle `KANADE_COLLECT_RESULT`) as each\nbundle uploads, instead of once after the whole set. Lets an\ninterrupted collect still clean up the days it managed to\nupload (partial progress sticks), breaking the\noffline-before-finalize backlog spiral.\n\n**Opt-in** (default `false` = one call after all bundles, the\nestablished contract) because per-bundle changes the hook's\npayload (all → one) and invocation count (1 → N), which would\nbreak a hook written for the all-at-once assumption (cross-bundle\naggregation, once-only side effects, all-or-nothing). Only valid\nwith a `collect:` hint — [`Manifest::validate`] rejects it\notherwise, since a non-collect finalize has no bundles to iterate.",
+          "type": "boolean",
+          "default": false
+        },
         "run_as": {
           "description": "Token + session combination, like [`Execute::run_as`]. Defaults\nto [`RunAs::System`].",
           "$ref": "#/$defs/RunAs",
