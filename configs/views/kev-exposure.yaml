@@ -18,6 +18,19 @@
 # KEV vendor to appear in the app's publisher AND product length >= 5) to cut
 # the worst false positives, but it stays a "review these" signal, NOT proof a
 # specific installed build is vulnerable.
+#
+# To make the per-PC exposure ACTIONABLE rather than a wall of noise, the
+# machine-scoped widgets deliberately narrow to *independently-updatable
+# third-party apps*:
+#   1. source <> 'appx' — drop Windows Store / OS component packages
+#      (Microsoft.Windows.*), which aren't patched app-by-app.
+#   2. Exclude umbrella `product` families (Windows, Microsoft, Office,
+#      .NET, DirectX, …). A KEV entry named literally "Microsoft" or "Windows"
+#      substring-matches every Microsoft-published component (.NET SDK, VC++,
+#      Visual Studio) and drowns the signal. Those are the OS/Office patch
+#      lane (Windows Update), tracked by compliance checks — NOT a per-app
+#      "update this program" action. What survives is the real shortlist
+#      (Chrome, Acrobat, …): named apps an operator can actually go update.
 
 id: kev-exposure
 description: "CISA KEV: catalog analytics (fleet) + per-PC exposure"
@@ -26,9 +39,11 @@ tags: [security, vulnerability, dashboards]
 sql_widgets:
   # ═══ FLEET: KEV catalog analytics (clean data) ═══════════════════
 
-  # Pinned headline: how many hosts run something in the KEV catalog.
+  # Pinned headline: hosts running an updatable third-party app in the KEV
+  # catalog. Umbrella families (Windows/Office/…) and Store components are
+  # excluded so this counts real exposure, not "every host has Windows".
   - title: KEV-exposed hosts
-    description: Hosts running a product family present in CISA KEV (coarse match)
+    description: Hosts running an updatable third-party app present in CISA KEV
     query: |
       SELECT count(DISTINCT i.pc_id) AS hosts
       FROM inventory_sw_apps i
@@ -38,6 +53,11 @@ sql_widgets:
        AND json_extract(f.data, '$.vendorProject') <> ''
        AND lower(i.name) LIKE '%' || lower(json_extract(f.data, '$.product')) || '%'
        AND lower(i.publisher) LIKE '%' || lower(json_extract(f.data, '$.vendorProject')) || '%'
+      WHERE i.source <> 'appx'
+        AND trim(lower(json_extract(f.data, '$.product'))) NOT IN
+            ('windows', 'microsoft', 'office', 'directx', '.net',
+             '.net framework', 'visual studio', 'sharepoint',
+             'exchange server', 'sql server')
     refresh: 6h
     render: { kind: stat, value: hosts }
     placement: { analytics: Security, dashboard: { pin: true } }
@@ -92,16 +112,26 @@ sql_widgets:
   # These render on the PC別 Analytics tab for the selected host — pick a PC
   # in the scope control to see them. `:pc_id` is bound to that PC.
 
-  # The star: which KEV product families this PC's software matches, and how
-  # many distinct KEV CVEs + installed apps each accounts for. Distinctive
-  # products (Chrome, Acrobat) are real signal; review generic ones.
-  - title: KEV-matched products on this PC
-    description: KEV product families found in this host's installed software
+  # These cross-reference the KEV-matched third-party apps against the
+  # `winget upgrade` snapshot (inventory_winget_upgrades, collected by
+  # configs/jobs/winget-upgrades.yaml). That turns "is in a KEV family"
+  # into the question the operator actually asked: "am I still exposed,
+  # or is this already fixed on the box?" —
+  #   * a pending winget upgrade ⇒ a newer (fixed) release exists and is
+  #     NOT applied ⇒ ACT: update this app.
+  #   * no pending upgrade ⇒ on the latest available release ⇒ any
+  #     already-published fix is in place. (Honest caveat: the upgrade
+  #     snapshot only lists apps that HAVE an update, so "no pending
+  #     update" also covers the rare app winget doesn't track — it is
+  #     "nothing to do via winget", not a hard "provably safe". EOL
+  #     products, where no fix will ever ship, need a separate feed.)
+
+  # Headline: the sharp actionable number — KEV-family apps on THIS PC
+  # that have an update waiting. This is what to act on today (0 = good).
+  - title: KEV apps needing update on this PC
+    description: KEV-family third-party apps with a pending winget upgrade (act on these)
     query: |
-      SELECT json_extract(f.data, '$.product')       AS product,
-             json_extract(f.data, '$.vendorProject') AS vendor,
-             count(DISTINCT json_extract(f.data, '$.cveID')) AS cves,
-             count(DISTINCT i.name)                    AS apps
+      SELECT count(DISTINCT i.name) AS apps
       FROM inventory_sw_apps i
       JOIN feeds f
         ON f.feed_id = 'kev'
@@ -109,24 +139,36 @@ sql_widgets:
        AND json_extract(f.data, '$.vendorProject') <> ''
        AND lower(i.name) LIKE '%' || lower(json_extract(f.data, '$.product')) || '%'
        AND lower(i.publisher) LIKE '%' || lower(json_extract(f.data, '$.vendorProject')) || '%'
+      JOIN inventory_winget_upgrades w
+        ON w.pc_id = :pc_id
+       AND (lower(i.name) = lower(w.name)
+            OR lower(i.name) LIKE lower(w.name) || ' %'
+            OR lower(i.name) LIKE lower(w.name) || ' (%')
       WHERE i.pc_id = :pc_id
-      GROUP BY product, vendor
-      ORDER BY cves DESC
+        AND i.source <> 'appx'
+        AND trim(lower(json_extract(f.data, '$.product'))) NOT IN
+            ('windows', 'microsoft', 'office', 'directx', '.net',
+             '.net framework', 'visual studio', 'sharepoint',
+             'exchange server', 'sql server')
     refresh: 6h
-    render:
-      kind: table
-      columns: [product, vendor, cves, apps]
-      labels: { product: "KEV product", vendor: Vendor, cves: "KEV CVEs", apps: "Matched apps" }
+    render: { kind: stat, value: apps }
     placement: { analytics: Security }
 
-  # Detail: the specific installed app that triggered each match on this PC,
-  # so the operator can eyeball match quality (Acrobat = real, Runtime = noise).
-  - title: Matched apps on this PC
-    description: The installed app behind each KEV product match on this host
+  # The star (actionable): every KEV-family app on this PC with its
+  # installed version, the version winget would move it to (blank when
+  # already current), and a status — so "update-available" rows are the
+  # concrete to-do and "no pending update" rows are the ones already
+  # covered. Replaces the old 170-CVE-per-"Windows" wall entirely.
+  - title: KEV apps update status on this PC
+    description: Installed vs available (winget); "update available" = act, "no pending update" = current
     query: |
-      SELECT json_extract(f.data, '$.product') AS kev_product,
-             i.name                             AS installed_app,
-             count(DISTINCT json_extract(f.data, '$.cveID')) AS cves
+      SELECT CASE WHEN max(w.key) IS NOT NULL
+                  THEN 'update available' ELSE 'no pending update' END AS status,
+             i.name                                   AS app,
+             i.version                                AS installed,
+             max(w.available)                         AS available,
+             json_extract(f.data, '$.product')        AS kev_product,
+             max(json_extract(f.data, '$.dateAdded')) AS latest_kev
       FROM inventory_sw_apps i
       JOIN feeds f
         ON f.feed_id = 'kev'
@@ -134,12 +176,24 @@ sql_widgets:
        AND json_extract(f.data, '$.vendorProject') <> ''
        AND lower(i.name) LIKE '%' || lower(json_extract(f.data, '$.product')) || '%'
        AND lower(i.publisher) LIKE '%' || lower(json_extract(f.data, '$.vendorProject')) || '%'
+      LEFT JOIN inventory_winget_upgrades w
+        ON w.pc_id = :pc_id
+       AND (lower(i.name) = lower(w.name)
+            OR lower(i.name) LIKE lower(w.name) || ' %'
+            OR lower(i.name) LIKE lower(w.name) || ' (%')
       WHERE i.pc_id = :pc_id
-      GROUP BY kev_product, installed_app
-      ORDER BY cves DESC, kev_product LIMIT 100
+        AND i.source <> 'appx'
+        AND trim(lower(json_extract(f.data, '$.product'))) NOT IN
+            ('windows', 'microsoft', 'office', 'directx', '.net',
+             '.net framework', 'visual studio', 'sharepoint',
+             'exchange server', 'sql server')
+      GROUP BY i.name, i.version, kev_product
+      ORDER BY CASE WHEN max(w.key) IS NOT NULL THEN 0 ELSE 1 END,
+               latest_kev DESC, app
+      LIMIT 100
     refresh: 6h
     render:
       kind: table
-      columns: [kev_product, installed_app, cves]
-      labels: { kev_product: "KEV product", installed_app: "Installed app", cves: "KEV CVEs" }
+      columns: [status, app, installed, available, kev_product, latest_kev]
+      labels: { status: Status, app: "App", installed: Installed, available: Available, kev_product: "KEV product", latest_kev: "Latest KEV" }
     placement: { analytics: Security }

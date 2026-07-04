@@ -1,0 +1,17 @@
+# Fires the `feed-eol` fetch (configs/jobs/feed-eol.yaml). Daily is
+# plenty — endoflife.date cycle dates change on the order of months.
+# `job_id: feed-eol` is `tier: controller`, so the dispatch guard
+# intersects this `all` target with the operator's controller_group;
+# an unset group means it runs nowhere (fail-safe). Set controller_group
+# before scheduling (same requirement as feed-kev).
+#
+#   kanade schedule create configs/schedules/feed-eol.yaml
+id: feed-eol
+when:
+  per_pc: { every: 24h }
+enabled: true
+job_id: feed-eol
+target:
+  all: true
+jitter: 30m
+tags: [feed, security, lifecycle]

@@ -1,0 +1,89 @@
+# endoflife.date feed — the "no fix will EVER ship" signal that the
+# winget "update available?" status can't see. An app on its newest
+# release still isn't safe if that whole product line is past
+# end-of-life (Windows 10, an old .NET, a dead Office). This job pulls
+# endoflife.date's release-cycle data for a curated product set into
+# the global `feeds` table (feed_id=eol); companion view
+# `eol-exposure.yaml` joins it against each host's OS / frameworks.
+#
+#   kanade job create      configs/jobs/feed-eol.yaml
+#   kanade schedule create configs/schedules/feed-eol.yaml
+#   kanade view create     configs/views/eol-exposure.yaml
+#
+# Like feed-kev, this is `tier: controller` (implied by `feed:`): an
+# external network fetch must run only on trusted infrastructure in the
+# operator's `controller_group`, never on an employee endpoint.
+#
+# Honest limitation: matching an installed version to an endoflife.date
+# release CYCLE is per-product (OS display version, framework major,
+# …), so coverage grows one product at a time. This first cut carries a
+# high-value curated set; the OS match is wired in eol-exposure.yaml and
+# the rest are ready for their own widgets.
+id: feed-eol
+version: 0.1.0
+description: endoflife.date release-cycle EOL dates → feeds table (feed_id=eol)
+tags: [feed, security, lifecycle]
+
+tier: controller
+
+execute:
+  shell: powershell
+  run_as: system
+  timeout: 180s
+  script: |
+    $ErrorActionPreference = 'Stop'
+
+    # Curated endoflife.date product slugs. Each returns an array of
+    # release cycles with `eol` / `support` (a date, or a bool when the
+    # product uses coarse states) and `latest`. Extend this list as new
+    # match widgets are added; a slug that 404s is skipped, not fatal.
+    $products = @(
+      'windows', 'windows-server', 'dotnet', 'dotnetfx',
+      'powershell', 'python', 'nodejs'
+    )
+
+    Add-Type -AssemblyName System.Web.Extensions
+    $ser = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+    $ser.MaxJsonLength = [int]::MaxValue
+
+    $cycles = @(foreach ($p in $products) {
+      try {
+        $resp = Invoke-WebRequest -Uri "https://endoflife.date/api/$p.json" `
+                  -UseBasicParsing -TimeoutSec 60
+      } catch {
+        [Console]::Error.WriteLine("skip ${p}: $($_.Exception.Message)")
+        continue
+      }
+      $arr = $ser.DeserializeObject($resp.Content)
+      foreach ($c in $arr) {
+        @{
+          # Composite identity: one product has many cycles.
+          product = [string]$p
+          cycle   = [string]$c['cycle']
+          # eol / support may be a date string OR a JSON bool — ToString
+          # normalises both ("True"/"False"/"2025-10-14") for the view's
+          # CASE (date() of a non-date is NULL → treated as supported).
+          eol     = "$($c['eol'])"
+          support = "$($c['support'])"
+          latest  = [string]$c['latest']
+        }
+      }
+    })
+
+    # Guard: refuse to publish an empty feed (would wipe feed_id=eol on
+    # the projector's wholesale partition replace). A total failure of
+    # every fetch throws → non-zero exit → projector skips → last-good
+    # partition survives.
+    if ($cycles.Count -eq 0) {
+      throw "endoflife.date returned no cycles for any product — refusing to publish an empty feed (fetch/parse failure?)"
+    }
+
+    $payload = $ser.Serialize(@{ cycles = $cycles })
+    Write-Output '#KANADE-FEED-BEGIN'
+    Write-Output $payload
+    Write-Output '#KANADE-FEED-END'
+
+feed:
+  - id: eol
+    field: cycles
+    primary_key: [product, cycle]

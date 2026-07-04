@@ -1,0 +1,25 @@
+# Fires the `winget-upgrades` probe (configs/jobs/winget-upgrades.yaml).
+#
+# Daily, not the 6h inventory cadence: pending-upgrade state changes at
+# vendor-release granularity (days), and the probe needs a logged-on
+# user (run_as: user) — a daytime daily slot maximises the chance a
+# session is present. A machine with nobody logged on simply produces
+# no fresh snapshot until someone signs in.
+#
+# Register (after the job):
+#   kanade schedule create configs/schedules/winget-upgrades.yaml
+id: winget-upgrades
+tags: [inventory, security]
+when:
+  # 13:00 local daily — mid-day, a session is most likely present.
+  # `days` omitted = every day (CalendarSpec default).
+  calendar:
+    at: "13:00"
+tz: local
+enabled: true
+job_id: winget-upgrades
+target:
+  all: true
+# Spread the winget source refresh so a large fleet doesn't stampede
+# the CDN at the same instant.
+jitter: 10m
