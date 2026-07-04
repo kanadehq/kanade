@@ -61,6 +61,44 @@ pub fn shared_dedup_cache() -> Arc<Mutex<DedupCache>> {
     Arc::new(Mutex::new(DedupCache::new(1024)))
 }
 
+/// Enqueue a finished (or synthetic-skip) run's `ExecResult` to the
+/// outbox off the async runtime. `outbox::enqueue` does synchronous file
+/// I/O (`create_dir_all` / `write` / `rename`) that would otherwise block
+/// a Tokio worker thread; offload it to the blocking pool — the same
+/// pattern the KLP path (`enqueue_exec_result`) and the finalize hook
+/// already use, so all three agent enqueue paths now behave alike.
+///
+/// Fire-and-forget + best-effort: an enqueue failure is logged, never
+/// propagated. Each site previously used `?`, which bubbled the error up
+/// to be logged as "command handler failed" — but a failed write loses
+/// the result either way (no file lands for the drain task), so making it
+/// best-effort changes nothing observable except that it no longer stalls
+/// the executor. `note` is the per-site success breadcrumb.
+fn enqueue_result_best_effort(result: ExecResult, note: &'static str) {
+    tokio::task::spawn_blocking(move || {
+        let outbox_dir = default_paths::data_dir().join("outbox");
+        // `enqueue` only borrows `result`, so after it returns `result` is
+        // still owned here — read its fields directly rather than cloning
+        // request_id / copying exit_code out before the move (gemini).
+        match outbox::enqueue(&outbox_dir, &result) {
+            Ok(path) => debug!(
+                request_id = %result.request_id,
+                exit_code = result.exit_code,
+                outbox = %path.display(),
+                "{note}",
+            ),
+            // Don't fold `note` (a success-phrased breadcrumb) into the
+            // failure line — it would read "failed ... : ... enqueued"
+            // (claude). request_id + error already identify the site.
+            Err(e) => warn!(
+                request_id = %result.request_id,
+                error = %e,
+                "outbox enqueue failed (run still completed)",
+            ),
+        }
+    });
+}
+
 pub async fn command_loop(
     client: async_nats::Client,
     pc_id: String,
@@ -645,12 +683,8 @@ pub async fn handle_command(
         // this job carried a `collect:` hint and the run succeeded).
         collect_object,
     };
-    let outbox_dir = default_paths::data_dir().join("outbox");
-    let path = outbox::enqueue(&outbox_dir, &result)?;
-    debug!(
-        request_id = %cmd.request_id,
-        exit_code,
-        outbox = %path.display(),
+    enqueue_result_best_effort(
+        result,
         "result enqueued to outbox (drain task delivers via JetStream)",
     );
 
@@ -829,14 +863,7 @@ async fn publish_staleness_skipped(
         // #219: skip results never collect.
         collect_object: None,
     };
-    let outbox_dir = default_paths::data_dir().join("outbox");
-    let path = outbox::enqueue(&outbox_dir, &result)?;
-    info!(
-        request_id = %cmd.request_id,
-        exit_code = 127,
-        outbox = %path.display(),
-        "staleness-skip result enqueued to outbox",
-    );
+    enqueue_result_best_effort(result, "staleness-skip result enqueued to outbox");
     Ok(())
 }
 
@@ -881,14 +908,7 @@ async fn publish_skipped(
         // #219: skip results never collect.
         collect_object: None,
     };
-    let outbox_dir = default_paths::data_dir().join("outbox");
-    let path = outbox::enqueue(&outbox_dir, &result)?;
-    info!(
-        request_id = %cmd.request_id,
-        exit_code = 125,
-        outbox = %path.display(),
-        "synthetic skipped-result enqueued to outbox",
-    );
+    enqueue_result_best_effort(result, "synthetic skipped-result enqueued to outbox");
     Ok(())
 }
 
@@ -930,14 +950,7 @@ async fn publish_version_mismatch_skipped(
         // #219: skip results never collect.
         collect_object: None,
     };
-    let outbox_dir = default_paths::data_dir().join("outbox");
-    let path = outbox::enqueue(&outbox_dir, &result)?;
-    info!(
-        request_id = %cmd.request_id,
-        exit_code = 124,
-        outbox = %path.display(),
-        "version-mismatch skip result enqueued to outbox",
-    );
+    enqueue_result_best_effort(result, "version-mismatch skip result enqueued to outbox");
     Ok(())
 }
 
@@ -973,14 +986,7 @@ async fn publish_revoked_skipped(pc_id: &str, cmd: &Command) -> Result<()> {
         // #219: skip results never collect.
         collect_object: None,
     };
-    let outbox_dir = default_paths::data_dir().join("outbox");
-    let path = outbox::enqueue(&outbox_dir, &result)?;
-    info!(
-        request_id = %cmd.request_id,
-        exit_code = 126,
-        outbox = %path.display(),
-        "revoked skip result enqueued to outbox",
-    );
+    enqueue_result_best_effort(result, "revoked skip result enqueued to outbox");
     Ok(())
 }
 
