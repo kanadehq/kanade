@@ -2191,6 +2191,22 @@ pub struct FinalizeSpec {
     /// Working directory for the hook child, like [`Execute::cwd`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// #965: for a `collect:` job, run this hook once per uploaded
+    /// bundle (with a single-bundle `KANADE_COLLECT_RESULT`) as each
+    /// bundle uploads, instead of once after the whole set. Lets an
+    /// interrupted collect still clean up the days it managed to
+    /// upload (partial progress sticks), breaking the
+    /// offline-before-finalize backlog spiral.
+    ///
+    /// **Opt-in** (default `false` = one call after all bundles, the
+    /// established contract) because per-bundle changes the hook's
+    /// payload (all → one) and invocation count (1 → N), which would
+    /// break a hook written for the all-at-once assumption (cross-bundle
+    /// aggregation, once-only side effects, all-or-nothing). Only valid
+    /// with a `collect:` hint — [`Manifest::validate`] rejects it
+    /// otherwise, since a non-collect finalize has no bundles to iterate.
+    #[serde(default)]
+    pub on_each_bundle: bool,
 }
 
 /// Default `finalize.timeout` when the operator omits it.
@@ -2215,6 +2231,7 @@ impl FinalizeSpec {
             timeout_secs,
             run_as: self.run_as,
             cwd: self.cwd.clone(),
+            on_each_bundle: self.on_each_bundle,
         }
     }
 }
@@ -2317,6 +2334,18 @@ impl Manifest {
                 return Err(
                     "finalize.shell: cmd is not supported for finalize hooks (shell-injection \
                      risk when the result JSON is injected into the environment); use powershell"
+                        .to_string(),
+                );
+            }
+            // #965: per-bundle finalize only means anything for a
+            // collect: job — a non-collect finalize has no bundles to
+            // iterate (it runs once after the script). Reject the
+            // combination at the write boundary so a confused operator
+            // is told rather than silently getting a no-op.
+            if finalize.on_each_bundle && self.collect.is_none() {
+                return Err(
+                    "finalize.on_each_bundle: true requires a collect: hint — a non-collect \
+                     finalize has no bundles to iterate (it runs once after the script)"
                         .to_string(),
                 );
             }
@@ -3138,6 +3167,62 @@ finalize:
         let lowered = m.finalize.as_ref().expect("finalize present").lower();
         assert_eq!(lowered.timeout_secs, 30);
         assert!(matches!(lowered.shell, Shell::Powershell));
+        // #965: default is the one-call-after-all contract.
+        assert!(!lowered.on_each_bundle);
+    }
+
+    #[test]
+    fn manifest_finalize_on_each_bundle_validates_with_collect_and_lowers() {
+        // #965: on_each_bundle + a collect hint is the intended
+        // combination — validates, and the flag survives lowering.
+        let yaml = r#"
+id: collect-fin-each
+version: 0.1.0
+execute:
+  shell: powershell
+  timeout: 120s
+  script: |
+    @{ files = @() } | ConvertTo-Json
+collect:
+  name: "diag"
+  max_size: 50MB
+finalize:
+  shell: powershell
+  on_each_bundle: true
+  script: |
+    Write-Output "cleanup"
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        m.validate().expect("on_each_bundle + collect validates");
+        let lowered = m.finalize.as_ref().expect("finalize present").lower();
+        assert!(lowered.on_each_bundle, "flag survives lowering");
+    }
+
+    #[test]
+    fn manifest_finalize_on_each_bundle_without_collect_rejected() {
+        // #965: a non-collect finalize has no bundles to iterate, so
+        // on_each_bundle is a no-op — reject it at the write boundary so
+        // the operator is told rather than silently getting nothing.
+        let yaml = r#"
+id: fin-each-no-collect
+version: 0.1.0
+execute:
+  shell: powershell
+  timeout: 120s
+  script: |
+    Write-Output "hi"
+finalize:
+  shell: powershell
+  on_each_bundle: true
+  script: |
+    Write-Output "cleanup"
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        let err = m
+            .validate()
+            .expect_err("on_each_bundle without collect rejected");
+        assert!(err.contains("on_each_bundle"), "got: {err}");
+        assert!(err.contains("collect"), "got: {err}");
     }
 
     #[test]

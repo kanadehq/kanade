@@ -560,7 +560,8 @@ pub async fn handle_command(
     // still publishes with `collect_object = None`.
     let bundles = if exit_code == 0 && cmd.collect.is_some() {
         let js = async_nats::jetstream::new(client.clone());
-        crate::collect::maybe_collect(&js, &cmd, &pc_id, &stdout, finished_at).await
+        crate::collect::maybe_collect(&js, &client, &cmd, &pc_id, &result_id, &stdout, finished_at)
+            .await
     } else {
         Vec::new()
     };
@@ -657,8 +658,23 @@ pub async fn handle_command(
     // (so a long-running cleanup never keeps the row pending) with the
     // collect outcome injected as `KANADE_COLLECT_RESULT`. Best-effort:
     // failures are logged inside `run_finalize`, never the run's result.
+    // #965: when `on_each_bundle` is set the hook already ran per bundle
+    // inside `maybe_collect`; skip the aggregate call so cleanup isn't
+    // run twice. Otherwise (the default, and every non-collect finalize)
+    // run the single post-collect hook as before.
+    //
+    // Design trade-off (claude): the per-bundle hooks run INSIDE
+    // `maybe_collect`, i.e. BEFORE this ExecResult is enqueued — which
+    // deliberately reverses the "finalize runs after enqueue so a slow
+    // cleanup never holds the row pending" principle above. It has to:
+    // interrupt-resilience requires cleanup to interleave with the (slow)
+    // upload, so an offline-mid-collect run still deletes what it shipped.
+    // The parent row therefore stays pending across the per-bundle
+    // cleanups — an accepted cost of the opt-in, scoped to jobs that ask
+    // for it.
     if exit_code == 0
         && let Some(fin) = cmd.finalize.as_ref()
+        && !fin.on_each_bundle
     {
         crate::finalize::run_finalize(
             &client,
@@ -666,6 +682,7 @@ pub async fn handle_command(
             fin,
             &pc_id,
             &result_id,
+            None,
             finalize_json.as_deref(),
         )
         .await;

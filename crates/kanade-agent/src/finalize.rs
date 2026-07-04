@@ -82,12 +82,22 @@ fn with_finalize_note(stderr: &str, note: &str) -> String {
 /// outcome is published as its own [`ExecResult`] row (#955) so the
 /// delete-after-collect step is observable from the backend / SPA, not
 /// only in the agent's local log.
+/// `disc` is a per-bundle discriminator (#966): when the per-bundle
+/// finalize path calls this once per uploaded bundle it passes a value
+/// unique within the run (the bundle index) so each finalize row gets a
+/// distinct synthetic `request_id` — and thus a distinct outbox filename
+/// (`<request_id>.json`). Without it every per-bundle call would reuse
+/// `<parent>__finalize`, and two hooks finishing inside the ~1s drain
+/// window would clobber each other's not-yet-drained outbox file, losing
+/// a finalize row. `None` (the single aggregate call) keeps the plain
+/// `<parent>__finalize` id — one call per run, so no collision.
 pub async fn run_finalize(
     client: &Client,
     parent: &Command,
     fin: &FinalizeCommand,
     pc_id: &str,
     parent_result_id: &str,
+    disc: Option<&str>,
     result_json: Option<&str>,
 ) {
     // Defense in depth: `Manifest::validate` already rejects a cmd
@@ -197,6 +207,7 @@ pub async fn run_finalize(
         &fin_cmd,
         pc_id,
         parent_result_id,
+        disc,
         exit_code,
         stdout,
         stderr,
@@ -247,15 +258,25 @@ fn build_finalize_result(
     fin_cmd: &Command,
     pc_id: &str,
     parent_result_id: &str,
+    disc: Option<&str>,
     exit_code: i32,
     stdout: String,
     stderr: String,
     started_at: chrono::DateTime<chrono::Utc>,
     finished_at: chrono::DateTime<chrono::Utc>,
 ) -> ExecResult {
+    // #966: the discriminator makes the synthetic request_id — and thus
+    // the outbox filename — unique per bundle within a run, so per-bundle
+    // finalize rows can't clobber each other on disk before the drain
+    // task publishes them. The aggregate call (`None`) keeps the plain
+    // `<parent>__finalize` id.
+    let request_id = match disc {
+        Some(d) => format!("{}__finalize-{d}", parent.request_id),
+        None => format!("{}__finalize", parent.request_id),
+    };
     ExecResult {
         result_id: uuid::Uuid::new_v4().to_string(),
-        request_id: format!("{}__finalize", parent.request_id),
+        request_id,
         exec_id: None,
         parent_result_id: Some(parent_result_id.to_string()),
         pc_id: pc_id.to_string(),
@@ -318,6 +339,7 @@ mod tests {
             &fin_cmd,
             "pc-9",
             "parent-run-uuid",
+            None,
             1,
             "out".into(),
             "err".into(),
@@ -337,6 +359,40 @@ mod tests {
         assert_eq!(r.pc_id, "pc-9");
         assert_eq!(r.exit_code, 1);
         assert!(!r.result_id.is_empty(), "result_id minted");
+    }
+
+    #[test]
+    fn per_bundle_finalize_request_ids_are_distinct() {
+        // #966 (claude): the outbox file is keyed on request_id, so two
+        // per-bundle finalize rows in the SAME run must NOT share one — a
+        // second enqueue would overwrite the first's not-yet-drained file
+        // and silently lose that row. The discriminator (bundle index)
+        // keeps them distinct; `None` (the aggregate call) is the plain id.
+        let parent = parent_fixture("screenshot-collect", "req-123");
+        let fin_cmd = parent_fixture("screenshot-collect__finalize", "req-123");
+        let now = chrono::Utc::now();
+        let mk = |disc: Option<&str>| {
+            build_finalize_result(
+                &parent,
+                &fin_cmd,
+                "pc-9",
+                "parent-run-uuid",
+                disc,
+                0,
+                String::new(),
+                String::new(),
+                now,
+                now,
+            )
+            .request_id
+        };
+        assert_eq!(mk(None), "req-123__finalize");
+        assert_eq!(mk(Some("0")), "req-123__finalize-0");
+        assert_ne!(
+            mk(Some("0")),
+            mk(Some("1")),
+            "per-bundle finalize rows must have distinct request_ids (outbox filename)",
+        );
     }
 
     #[test]

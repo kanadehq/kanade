@@ -48,15 +48,17 @@ pub struct BundleResult {
 /// hint, total failure) means nothing was uploaded.
 pub async fn maybe_collect(
     js: &async_nats::jetstream::Context,
+    client: &async_nats::Client,
     cmd: &Command,
     pc_id: &str,
+    parent_result_id: &str,
     stdout: &str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Vec<BundleResult> {
     let Some(hint) = cmd.collect.as_ref() else {
         return Vec::new();
     };
-    match collect_and_upload(js, cmd, hint, pc_id, stdout, now).await {
+    match collect_and_upload(js, client, cmd, hint, pc_id, parent_result_id, stdout, now).await {
         Ok(bundles) => {
             info!(job = %cmd.id, %pc_id, bundles = bundles.len(), "collect: bundle(s) uploaded");
             bundles
@@ -246,11 +248,14 @@ fn build_zip(files: Vec<String>, max_bytes: u64) -> Result<(Vec<u8>, Vec<String>
     Ok((cursor.into_inner(), added_paths))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn collect_and_upload(
     js: &async_nats::jetstream::Context,
+    client: &async_nats::Client,
     cmd: &Command,
     hint: &CollectHint,
     pc_id: &str,
+    parent_result_id: &str,
     stdout: &str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Vec<BundleResult>> {
@@ -290,7 +295,7 @@ async fn collect_and_upload(
     // other's zip (claude).
     let mut used_labels: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    for b in requested {
+    for (bundle_idx, b) in requested.into_iter().enumerate() {
         if b.files.is_empty() {
             continue;
         }
@@ -337,11 +342,41 @@ async fn collect_and_upload(
             bytes = bytes_len,
             "collect: uploaded bundle to OBJECT_COLLECTIONS"
         );
-        out.push(BundleResult {
+        let bundle = BundleResult {
             label,
             key,
             files: packed,
-        });
+        };
+
+        // #965: per-bundle finalize. Run the cleanup hook for THIS bundle
+        // the instant its zip is safely uploaded — so if collect is cut
+        // off later (the endpoint sleeps / disconnects), the days already
+        // shipped are still cleaned up (partial progress sticks), instead
+        // of the whole run's cleanup being lost because the one aggregate
+        // hook after the full set never ran. Opt-in via
+        // `finalize.on_each_bundle`; when off, the caller runs the single
+        // aggregate hook after collect returns (the established contract).
+        if let Some(fin) = cmd.finalize.as_ref()
+            && fin.on_each_bundle
+        {
+            let one = crate::finalize::collect_result_json(std::slice::from_ref(&bundle));
+            // #966: the bundle index discriminates the finalize row's
+            // synthetic request_id (→ outbox filename) so per-bundle rows
+            // don't clobber each other on disk before the drain publishes.
+            let disc = bundle_idx.to_string();
+            crate::finalize::run_finalize(
+                client,
+                cmd,
+                fin,
+                pc_id,
+                parent_result_id,
+                Some(&disc),
+                Some(one.as_str()),
+            )
+            .await;
+        }
+
+        out.push(bundle);
     }
 
     if out.is_empty() {

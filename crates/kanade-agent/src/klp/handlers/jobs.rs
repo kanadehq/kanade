@@ -695,9 +695,24 @@ async fn run_job(
     // helper the NATS path uses, so a Client-App-triggered collection
     // produces a bundle too. Read `&stdout` before build_exec_result
     // moves it. Best-effort: failure leaves `collect_object = None`.
+    // Mint the parent run's result_id up front (#965): per-bundle
+    // finalize runs INSIDE `maybe_collect` and back-links its own rows to
+    // this id, so it must exist before collect — not minted later in
+    // `build_exec_result`. The same id is handed to `build_exec_result`
+    // below so the run's row and its finalize children agree.
+    let parent_result_id = Uuid::new_v4().to_string();
     let bundles = if exit_code == 0 && cmd.collect.is_some() {
         let js = async_nats::jetstream::new(client.clone());
-        crate::collect::maybe_collect(&js, &cmd, &pc_id, &stdout, finished_at).await
+        crate::collect::maybe_collect(
+            &js,
+            &client,
+            &cmd,
+            &pc_id,
+            &parent_result_id,
+            &stdout,
+            finished_at,
+        )
+        .await
     } else {
         Vec::new()
     };
@@ -720,6 +735,7 @@ async fn run_job(
     // same outbox → JetStream path a normal NATS-driven run uses.
     let mut result = build_exec_result(
         &cmd,
+        parent_result_id.clone(),
         &pc_id,
         exit_code,
         stdout,
@@ -728,15 +744,15 @@ async fn run_job(
         finished_at,
     );
     result.collect_object = collect_object;
-    // Capture the parent run's result_id before the move so the finalize
-    // hook's own row can back-link to it (#955).
-    let parent_result_id = result.result_id.clone();
     enqueue_exec_result(result);
 
     // Job-generic `finalize:` hook — same as the NATS path, AFTER the
-    // result is enqueued. Best-effort.
+    // result is enqueued. Best-effort. #965: when `on_each_bundle` is set
+    // the hook already ran per bundle inside `maybe_collect`; skip the
+    // aggregate call so cleanup isn't run twice.
     if exit_code == 0
         && let Some(fin) = cmd.finalize.as_ref()
+        && !fin.on_each_bundle
     {
         crate::finalize::run_finalize(
             &client,
@@ -744,6 +760,7 @@ async fn run_job(
             fin,
             &pc_id,
             &parent_result_id,
+            None,
             finalize_json.as_deref(),
         )
         .await;
@@ -781,10 +798,13 @@ fn outcome_to_result_parts(cmd: &Command, outcome: &ExecOutcome) -> (i32, String
 /// `run_id` as an `exec_id` — that would point the backend's
 /// `executions`-aggregate projector at a row that doesn't exist
 /// (#478). `cmd.exec_id` stays `Some(run_id)` for `jobs.kill`; only the
-/// RESULT decouples. (`result_id` is a fresh per-result UUID — the only
-/// non-deterministic field, and not asserted in tests.)
+/// RESULT decouples. `result_id` is supplied by the caller (#966: minted
+/// before collect so per-bundle finalize rows can back-link to it) and
+/// asserted in tests.
+#[allow(clippy::too_many_arguments)]
 fn build_exec_result(
     cmd: &Command,
+    result_id: String,
     pc_id: &str,
     exit_code: i32,
     stdout: String,
@@ -793,7 +813,7 @@ fn build_exec_result(
     finished_at: chrono::DateTime<Utc>,
 ) -> ExecResult {
     ExecResult {
-        result_id: Uuid::new_v4().to_string(),
+        result_id,
         request_id: cmd.request_id.clone(),
         exec_id: None,
         // A KLP-initiated run is itself a parent, never a finalize row (#955).
@@ -1620,13 +1640,22 @@ mod tests {
         // `executions` aggregate row keyed by exec_id (#478).
         let cmd = cmd_fixture("fix-teams");
         let now = Utc::now();
-        let r = build_exec_result(&cmd, "PC1", 0, "ok".into(), String::new(), now, now);
+        let r = build_exec_result(
+            &cmd,
+            "rid-1".into(),
+            "PC1",
+            0,
+            "ok".into(),
+            String::new(),
+            now,
+            now,
+        );
         assert!(r.exec_id.is_none(), "KLP run must be ad-hoc (exec_id None)");
         assert_eq!(r.manifest_id.as_deref(), Some("fix-teams"));
         assert_eq!(r.pc_id, "PC1");
         assert_eq!(r.exit_code, 0);
         assert_eq!(r.stdout, "ok");
-        assert!(!r.result_id.is_empty(), "result_id minted");
+        assert_eq!(r.result_id, "rid-1", "caller-supplied result_id is used");
     }
 
     #[test]
