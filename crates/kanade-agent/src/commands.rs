@@ -619,6 +619,8 @@ pub async fn handle_command(
         // `failure_count` and the upcoming /api/executions endpoint
         // can list per-PC results for one deployment.
         exec_id: cmd.exec_id.clone(),
+        // Ordinary runs have no parent finalize link (#955).
+        parent_result_id: None,
         pc_id: pc_id.clone(),
         exit_code,
         stdout,
@@ -658,7 +660,15 @@ pub async fn handle_command(
     if exit_code == 0
         && let Some(fin) = cmd.finalize.as_ref()
     {
-        crate::finalize::run_finalize(&client, &cmd, fin, finalize_json.as_deref()).await;
+        crate::finalize::run_finalize(
+            &client,
+            &cmd,
+            fin,
+            &pc_id,
+            &result_id,
+            finalize_json.as_deref(),
+        )
+        .await;
     }
 
     // `client` was used above only when a finalize hook ran; suppress the
@@ -788,6 +798,8 @@ async fn publish_staleness_skipped(
         result_id: Uuid::new_v4().to_string(),
         request_id: cmd.request_id.clone(),
         exec_id: cmd.exec_id.clone(),
+        // Synthetic skip results have no parent finalize link (#955).
+        parent_result_id: None,
         pc_id: pc_id.to_string(),
         exit_code: EXIT_SKIP_STALENESS,
         stdout: String::new(),
@@ -838,6 +850,8 @@ async fn publish_skipped(
         result_id: Uuid::new_v4().to_string(),
         request_id: cmd.request_id.clone(),
         exec_id: cmd.exec_id.clone(),
+        // Synthetic skip results have no parent finalize link (#955).
+        parent_result_id: None,
         pc_id: pc_id.to_string(),
         exit_code: EXIT_SKIP_DEADLINE,
         stdout: String::new(),
@@ -885,6 +899,8 @@ async fn publish_version_mismatch_skipped(
         result_id: Uuid::new_v4().to_string(),
         request_id: cmd.request_id.clone(),
         exec_id: cmd.exec_id.clone(),
+        // Synthetic skip results have no parent finalize link (#955).
+        parent_result_id: None,
         pc_id: pc_id.to_string(),
         exit_code: EXIT_SKIP_VERSION_PIN,
         stdout: String::new(),
@@ -926,6 +942,8 @@ async fn publish_revoked_skipped(pc_id: &str, cmd: &Command) -> Result<()> {
         result_id: Uuid::new_v4().to_string(),
         request_id: cmd.request_id.clone(),
         exec_id: cmd.exec_id.clone(),
+        // Synthetic skip results have no parent finalize link (#955).
+        parent_result_id: None,
         pc_id: pc_id.to_string(),
         exit_code: EXIT_SKIP_REVOKED,
         stdout: String::new(),

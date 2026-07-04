@@ -308,8 +308,8 @@ where
         "INSERT INTO execution_results (
              result_id, request_id, exec_id, pc_id, exit_code,
              stdout, stderr, started_at, finished_at, job_id,
-             recorded_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             parent_result_id, recorded_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(result_id) DO UPDATE SET
              exit_code   = excluded.exit_code,
              stdout      = excluded.stdout,
@@ -331,6 +331,7 @@ where
     .bind(r.started_at)
     .bind(r.finished_at)
     .bind(&r.manifest_id)
+    .bind(&r.parent_result_id)
     .bind(recorded_at)
     .execute(executor)
     .await?;
@@ -896,6 +897,7 @@ mod tests {
             result_id: result_id.into(),
             request_id: request_id.into(),
             exec_id: exec_id.map(str::to_string),
+            parent_result_id: None,
             pc_id: pc_id.into(),
             exit_code: 0,
             stdout: String::new(),

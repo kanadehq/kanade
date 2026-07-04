@@ -728,6 +728,9 @@ async fn run_job(
         finished_at,
     );
     result.collect_object = collect_object;
+    // Capture the parent run's result_id before the move so the finalize
+    // hook's own row can back-link to it (#955).
+    let parent_result_id = result.result_id.clone();
     enqueue_exec_result(result);
 
     // Job-generic `finalize:` hook — same as the NATS path, AFTER the
@@ -735,7 +738,15 @@ async fn run_job(
     if exit_code == 0
         && let Some(fin) = cmd.finalize.as_ref()
     {
-        crate::finalize::run_finalize(&client, &cmd, fin, finalize_json.as_deref()).await;
+        crate::finalize::run_finalize(
+            &client,
+            &cmd,
+            fin,
+            &pc_id,
+            &parent_result_id,
+            finalize_json.as_deref(),
+        )
+        .await;
     }
 }
 
@@ -785,6 +796,8 @@ fn build_exec_result(
         result_id: Uuid::new_v4().to_string(),
         request_id: cmd.request_id.clone(),
         exec_id: None,
+        // A KLP-initiated run is itself a parent, never a finalize row (#955).
+        parent_result_id: None,
         pc_id: pc_id.to_string(),
         exit_code,
         stdout,

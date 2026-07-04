@@ -1,9 +1,19 @@
 //! Job-generic post-step hook (`finalize:`). Runs AFTER the main script
 //! (and, for a `collect:` job, after the bundle upload) on a clean exit,
 //! with the step's structured result injected as an environment variable
-//! so the hook can delete / move / notify. Best-effort: any failure is
-//! logged and never published as the run's outcome — the upload, if any,
-//! already succeeded.
+//! so the hook can delete / move / notify. Best-effort: a hook failure
+//! never becomes the *parent run's* outcome — the upload, if any, already
+//! succeeded.
+//!
+//! Observability (#955): the hook's own outcome is published as a
+//! **separate `ExecResult` row** — its own `result_id` / `request_id`,
+//! `exec_id = None` (so it can't double-count the parent deployment's
+//! Issue #19 counters), and `manifest_id = "<job>__finalize"` (not a
+//! catalog entry, so no inventory/feed/check projection fires). This
+//! surfaces "did the delete-after-collect step actually run / succeed?"
+//! on the backend and SPA Activity page, instead of only in the agent's
+//! local rolling log (which is unreachable in fleets where `logs.fetch`
+//! has no responders).
 //!
 //! The result is injected by **prepending a shell assignment** to the
 //! hook body rather than threading an env var through the spawn paths.
@@ -11,9 +21,10 @@
 //! makes the var available identically regardless of `run_as`.
 
 use async_nats::Client;
-use kanade_shared::wire::{Command, FinalizeCommand, Shell};
+use kanade_shared::default_paths;
+use kanade_shared::wire::{Command, ExecResult, FinalizeCommand, Shell};
 use serde_json::json;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::process::{ExecOutcome, run_command_with_kill};
 
@@ -51,13 +62,32 @@ fn powershell_prelude(result_json: &str) -> String {
     )
 }
 
+/// Append a `finalize: <note>` line to a captured stderr (or use it alone
+/// when stderr is blank), so an operator seeing exit `-1` on the finalize
+/// row knows whether the hook was killed / timed out / failed to spawn.
+/// Trailing whitespace is trimmed first so a trailing newline doesn't
+/// produce a blank line before the note.
+fn with_finalize_note(stderr: &str, note: &str) -> String {
+    let trimmed = stderr.trim_end();
+    if trimmed.is_empty() {
+        note.to_string()
+    } else {
+        format!("{trimmed}\n{note}")
+    }
+}
+
 /// Run the `finalize:` hook best-effort. `result_json` is injected as
 /// `KANADE_COLLECT_RESULT`. Reuses [`run_command_with_kill`] — the same
-/// staging / kill / timeout machinery the main script uses.
+/// staging / kill / timeout machinery the main script uses. The hook's
+/// outcome is published as its own [`ExecResult`] row (#955) so the
+/// delete-after-collect step is observable from the backend / SPA, not
+/// only in the agent's local log.
 pub async fn run_finalize(
     client: &Client,
     parent: &Command,
     fin: &FinalizeCommand,
+    pc_id: &str,
+    parent_result_id: &str,
     result_json: Option<&str>,
 ) {
     // Defense in depth: `Manifest::validate` already rejects a cmd
@@ -103,30 +133,211 @@ pub async fn run_finalize(
         finalize: None,
     };
 
-    match run_command_with_kill(client, &fin_cmd, None).await {
-        Ok(ExecOutcome::Completed { exit_code: 0, .. }) => {
+    // Stamp around the run so the finalize row carries a real duration.
+    let started_at = chrono::Utc::now();
+    let outcome = run_command_with_kill(client, &fin_cmd, None).await;
+    let finished_at = chrono::Utc::now();
+
+    // Map the outcome to the (exit_code, stdout, stderr) recorded on the
+    // finalize row, mirroring the main script's convention: a synthetic
+    // kill / timeout / spawn-failure carries exit `-1` with a note in
+    // stderr so `-1` on the Activity page is self-explanatory. The
+    // local-log breadcrumbs are kept for a fleet that CAN reach the log.
+    let (exit_code, stdout, stderr) = match outcome {
+        Ok(ExecOutcome::Completed {
+            exit_code: 0,
+            stdout,
+            stderr,
+        }) => {
             info!(job = %parent.id, "finalize: hook completed");
+            (0, stdout, stderr)
         }
         Ok(ExecOutcome::Completed {
-            exit_code, stderr, ..
+            exit_code,
+            stdout,
+            stderr,
         }) => {
             warn!(job = %parent.id, exit_code, stderr = %stderr, "finalize: hook exited non-zero (ignored)");
+            (exit_code, stdout, stderr)
         }
-        Ok(ExecOutcome::Killed { .. }) => {
+        Ok(ExecOutcome::Killed { stdout, stderr }) => {
             warn!(job = %parent.id, "finalize: hook killed (ignored)");
+            (
+                -1,
+                stdout,
+                with_finalize_note(&stderr, "finalize: hook killed"),
+            )
         }
-        Ok(ExecOutcome::Timeout { .. }) => {
+        Ok(ExecOutcome::Timeout { stdout, stderr }) => {
             warn!(job = %parent.id, "finalize: hook timed out (ignored)");
+            (
+                -1,
+                stdout,
+                with_finalize_note(
+                    &stderr,
+                    &format!("finalize: hook timed out after {}s", fin.timeout_secs),
+                ),
+            )
         }
         Err(e) => {
             warn!(job = %parent.id, error = %e, "finalize: hook spawn failed (ignored)");
+            (
+                -1,
+                String::new(),
+                format!("finalize: hook spawn failed: {e}"),
+            )
         }
+    };
+
+    // #955: publish a dedicated ExecResult row so the hook's outcome is
+    // queryable from the backend / SPA. Best-effort: an enqueue failure is
+    // logged, never propagated (the hook already ran).
+    let result = build_finalize_result(
+        parent,
+        &fin_cmd,
+        pc_id,
+        parent_result_id,
+        exit_code,
+        stdout,
+        stderr,
+        started_at,
+        finished_at,
+    );
+    // `outbox::enqueue` does synchronous file I/O (create_dir_all / write
+    // / rename); offload it to the blocking pool so it never stalls an
+    // async worker thread — same pattern as the KLP path's
+    // `enqueue_exec_result` (gemini). Fire-and-forget + best-effort.
+    let outbox_dir = default_paths::data_dir().join("outbox");
+    let job = parent.id.clone();
+    let pc = pc_id.to_string();
+    tokio::task::spawn_blocking(move || match crate::outbox::enqueue(&outbox_dir, &result) {
+        Ok(path) => debug!(
+            %job,
+            pc_id = %pc,
+            exit_code,
+            outbox = %path.display(),
+            "finalize: outcome enqueued to outbox (#955 observability)",
+        ),
+        Err(e) => warn!(
+            %job,
+            pc_id = %pc,
+            error = %e,
+            "finalize: outcome enqueue failed (hook still ran)",
+        ),
+    });
+}
+
+/// Build the finalize hook's own [`ExecResult`] row (#955). Pure — no
+/// I/O — so the row-shape invariants below are unit-tested without
+/// spawning a process or a NATS client. A fresh `result_id` + a distinct
+/// `request_id` (`__finalize` suffix) keep the outbox file (keyed by
+/// `request_id`) and the `results.<request_id>` subject from colliding
+/// with the parent's. `exec_id = None` avoids double-incrementing the
+/// parent deployment's Issue #19 success/failure counters (the projector's
+/// bump is gated on `result_id` freshness, not `exec_id`, so a fresh row
+/// carrying the parent `exec_id` would count twice). `manifest_id` is the
+/// synthetic `<job>__finalize` id (`fin_cmd.id`) — not a catalog entry, so
+/// no inventory/feed/check projection fires, and it reads as its own
+/// "<job>__finalize" line on the Activity page. `parent_result_id`
+/// back-links to the triggering run so the SPA can navigate run <->
+/// finalize in both directions.
+#[allow(clippy::too_many_arguments)]
+fn build_finalize_result(
+    parent: &Command,
+    fin_cmd: &Command,
+    pc_id: &str,
+    parent_result_id: &str,
+    exit_code: i32,
+    stdout: String,
+    stderr: String,
+    started_at: chrono::DateTime<chrono::Utc>,
+    finished_at: chrono::DateTime<chrono::Utc>,
+) -> ExecResult {
+    ExecResult {
+        result_id: uuid::Uuid::new_v4().to_string(),
+        request_id: format!("{}__finalize", parent.request_id),
+        exec_id: None,
+        parent_result_id: Some(parent_result_id.to_string()),
+        pc_id: pc_id.to_string(),
+        exit_code,
+        stdout,
+        stderr,
+        started_at,
+        finished_at,
+        // The outbox drain offloads oversized output to the object store
+        // on its own; None at enqueue keeps the full bytes on disk (#227).
+        stdout_object: None,
+        stderr_object: None,
+        manifest_id: Some(fin_cmd.id.clone()),
+        collect_object: None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Minimal parent `Command` with the identity fields the finalize row
+    /// derives from; everything else is default/None.
+    fn parent_fixture(id: &str, request_id: &str) -> Command {
+        Command {
+            id: id.into(),
+            version: "1".into(),
+            request_id: request_id.into(),
+            exec_id: Some("exec-uuid".into()),
+            shell: Shell::Powershell,
+            script: String::new(),
+            script_object: None,
+            script_object_sha256: None,
+            timeout_secs: 60,
+            jitter_secs: None,
+            run_as: Default::default(),
+            cwd: None,
+            deadline_at: None,
+            staleness: Default::default(),
+            emit: None,
+            check: None,
+            collect: None,
+            retry: None,
+            finalize: None,
+        }
+    }
+
+    #[test]
+    fn finalize_result_row_holds_its_invariants() {
+        // #955: the finalize row must (a) carry exec_id = None so it can't
+        // double-count the parent's Issue #19 counters, (b) use a distinct
+        // `__finalize`-suffixed request_id so its outbox file / subject
+        // don't collide with the parent, (c) set manifest_id to the
+        // synthetic `<job>__finalize` id, and (d) back-link the parent run.
+        let parent = parent_fixture("screenshot-collect", "req-123");
+        let fin_cmd = parent_fixture("screenshot-collect__finalize", "req-123");
+        let now = chrono::Utc::now();
+        let r = build_finalize_result(
+            &parent,
+            &fin_cmd,
+            "pc-9",
+            "parent-run-uuid",
+            1,
+            "out".into(),
+            "err".into(),
+            now,
+            now,
+        );
+        assert!(
+            r.exec_id.is_none(),
+            "finalize row must be ad-hoc (no #19 bump)"
+        );
+        assert_eq!(r.request_id, "req-123__finalize");
+        assert_eq!(
+            r.manifest_id.as_deref(),
+            Some("screenshot-collect__finalize")
+        );
+        assert_eq!(r.parent_result_id.as_deref(), Some("parent-run-uuid"));
+        assert_eq!(r.pc_id, "pc-9");
+        assert_eq!(r.exit_code, 1);
+        assert!(!r.result_id.is_empty(), "result_id minted");
+    }
 
     #[test]
     fn result_json_marks_uploaded_when_collected() {
@@ -167,6 +378,24 @@ mod tests {
             .trim_start_matches("$env:KANADE_COLLECT_RESULT = '")
             .trim_end_matches("'\n");
         assert!(!inner.contains('\'') || inner.contains("''"));
+    }
+
+    #[test]
+    fn finalize_note_appends_or_stands_alone() {
+        // Blank stderr → the note is the whole stderr (no leading newline).
+        assert_eq!(
+            with_finalize_note("", "finalize: hook killed"),
+            "finalize: hook killed"
+        );
+        // Existing stderr → the note is appended on its own line, with the
+        // captured stream's trailing whitespace trimmed first.
+        assert_eq!(
+            with_finalize_note(
+                "Remove-Item: denied\n",
+                "finalize: hook timed out after 30s"
+            ),
+            "Remove-Item: denied\nfinalize: hook timed out after 30s"
+        );
     }
 
     #[test]

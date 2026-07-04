@@ -39,6 +39,11 @@ pub struct ResultRow {
     /// for ad-hoc `kanade run` rows and for rows that pre-date the
     /// migration.
     pub exec_id: Option<String>,
+    /// #955: for a `<job>__finalize` row, the `result_id` of the run
+    /// whose `finalize:` hook produced it. `None` for every ordinary
+    /// run. Lets the SPA link a finalize row back to its parent run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_result_id: Option<String>,
     pub pc_id: String,
     /// v0.30 / PR α' unified: NULL while the run is in-flight (the
     /// row was created by events.started, ExecResult hasn't landed
@@ -78,6 +83,24 @@ pub struct ResultRow {
     pub stdout_match: Option<MatchSnippet>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stderr_match: Option<MatchSnippet>,
+    /// #955: the `finalize:` hook rows this run spawned (the reverse of
+    /// `parent_result_id`). Populated ONLY by the detail endpoint — the
+    /// listing leaves it empty (skipped on the wire) to avoid an N+1
+    /// query per row. Lets the SPA link a run forward to its finalize
+    /// row(s).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub finalize_children: Vec<FinalizeChild>,
+}
+
+/// #955: a compact reference to a `<job>__finalize` result row, returned
+/// on the parent run's detail so the SPA can render a "→ finalize" link
+/// without a second fetch.
+#[derive(Serialize)]
+pub struct FinalizeChild {
+    pub result_id: String,
+    pub job_id: Option<String>,
+    pub exit_code: Option<i64>,
+    pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Optional `status` filter on the results listing. `success` keeps
@@ -156,8 +179,7 @@ const MAX_FETCH_WITH_OUTPUT: i64 = 1_000;
 /// sync with `row_to_result` — a column read there but missing here
 /// silently returns its zero-value on every metadata-regex call
 /// (guarded by `metadata_regex_projection_matches_full_row`).
-const META_COLUMNS: &str =
-    "result_id, request_id, exec_id, pc_id, exit_code, started_at, finished_at, job_id, version";
+const META_COLUMNS: &str = "result_id, request_id, exec_id, parent_result_id, pc_id, exit_code, started_at, finished_at, job_id, version";
 
 /// SQLite's default bind-parameter ceiling is 999; the blob
 /// re-hydration `IN (...)` chunks its ids well under it so an
@@ -405,10 +427,42 @@ pub async fn detail(
             warn!(error = %e, "detail result");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-    match row {
-        Some(r) => Ok(Json(row_to_result(r))),
-        None => Err(StatusCode::NOT_FOUND),
+    let Some(r) = row else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    let mut out = row_to_result(r);
+
+    // #955: hydrate the reverse `finalize:` link — the `<job>__finalize`
+    // row(s) this run spawned (a run normally has 0 or 1). Served by the
+    // partial index `idx_execution_results_parent_result_id`. A failure
+    // here is non-fatal: the run detail still renders, just without the
+    // forward link.
+    match sqlx::query(
+        "SELECT result_id, job_id, exit_code, finished_at \
+         FROM execution_results WHERE parent_result_id = ? \
+         ORDER BY started_at ASC",
+    )
+    .bind(&out.result_id)
+    .fetch_all(&pool)
+    .await
+    {
+        Ok(children) => {
+            out.finalize_children = children
+                .iter()
+                .map(|c| FinalizeChild {
+                    result_id: c.try_get("result_id").unwrap_or_default(),
+                    job_id: c.try_get::<Option<String>, _>("job_id").unwrap_or(None),
+                    exit_code: c.try_get::<Option<i64>, _>("exit_code").unwrap_or(None),
+                    finished_at: c
+                        .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("finished_at")
+                        .unwrap_or(None),
+                })
+                .collect();
+        }
+        Err(e) => warn!(error = %e, result_id = %out.result_id, "detail: finalize children lookup"),
     }
+
+    Ok(Json(out))
 }
 
 /// Live-tail response for `GET /api/results/{result_id}/tail`.
@@ -626,6 +680,11 @@ fn build_row(
         // (legacy DB pre-migration 0002) to None. (#590; same fix as #589's
         // schedule_run_stats.)
         exec_id: r.try_get::<Option<String>, _>("exec_id").unwrap_or(None),
+        // #955: NULL for ordinary rows and for a DB that pre-dates the
+        // migration (`unwrap_or(None)` folds the absent column to None).
+        parent_result_id: r
+            .try_get::<Option<String>, _>("parent_result_id")
+            .unwrap_or(None),
         pc_id: r.try_get("pc_id").unwrap_or_default(),
         exit_code: r.try_get::<Option<i64>, _>("exit_code").unwrap_or(None),
         stdout,
@@ -642,6 +701,9 @@ fn build_row(
         stderr_truncated,
         stdout_match,
         stderr_match,
+        // #955: filled only by the detail endpoint (see `detail`); the
+        // listing leaves it empty so it's skipped on the wire.
+        finalize_children: Vec::new(),
     }
 }
 
@@ -700,6 +762,51 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+    }
+
+    /// #955: a `<job>__finalize` row carries `parent_result_id`; the
+    /// detail endpoint links the two directions — the parent run surfaces
+    /// its finalize child, and the finalize row surfaces its parent.
+    #[tokio::test]
+    async fn detail_links_run_and_finalize_bidirectionally() {
+        let pool = fresh_pool().await;
+        insert_row(&pool, "parent-1").await;
+        // A finalize row: exec_id NULL, its own job_id, and
+        // parent_result_id pointing at the run it cleaned up.
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO execution_results
+                (result_id, request_id, pc_id, exit_code, stdout, stderr,
+                 started_at, finished_at, recorded_at, job_id, parent_result_id)
+             VALUES ('fin-1', 'req__finalize', 'pc-1', 1, '', 'Remove-Item: denied',
+                     ?, ?, ?, 'screenshot-collect__finalize', 'parent-1')",
+        )
+        .bind(now - Duration::minutes(8))
+        .bind(now - Duration::minutes(7))
+        .bind(now - Duration::minutes(7))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Parent detail → forward link to the finalize child.
+        let parent = detail(State(pool.clone()), Path("parent-1".into()))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(parent.parent_result_id, None);
+        assert_eq!(parent.finalize_children.len(), 1);
+        assert_eq!(parent.finalize_children[0].result_id, "fin-1");
+        assert_eq!(
+            parent.finalize_children[0].job_id.as_deref(),
+            Some("screenshot-collect__finalize"),
+        );
+        assert_eq!(parent.finalize_children[0].exit_code, Some(1));
+
+        // Finalize detail → back-link to the parent, and no children of
+        // its own.
+        let fin = detail(State(pool), Path("fin-1".into())).await.unwrap().0;
+        assert_eq!(fin.parent_result_id.as_deref(), Some("parent-1"));
+        assert!(fin.finalize_children.is_empty());
     }
 
     /// #390 regression (filter axis updated to `started_at` by #399):
