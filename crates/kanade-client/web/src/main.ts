@@ -166,6 +166,16 @@ type UserInvokableJob = {
   // (+ grace) instead of a fixed 15 min. Absent from an older agent ⇒
   // the watchdog falls back to WATCHDOG_MS.
   timeout_secs?: number | null;
+  // Operator's confirmation-dialog config (manifest client.confirm).
+  // Absent ⇒ historical default: show the modal with the built-in
+  // message. `enabled: false` runs immediately with no prompt; `message`
+  // overrides the dialog text.
+  confirm?: JobConfirm | null;
+};
+
+type JobConfirm = {
+  enabled: boolean;
+  message?: string | null;
 };
 
 type JobsListResult = { items: UserInvokableJob[] };
@@ -419,6 +429,18 @@ function jobTimeoutMs(jobId: string): number | undefined {
       const secs = job.timeout_secs;
       return typeof secs === "number" && secs > 0 ? secs * 1000 : undefined;
     }
+  }
+  return undefined;
+}
+
+// The operator's confirmation-dialog config for a job, looked up from the
+// catalog (mirrors jobTimeoutMs). `undefined` ⇒ the job isn't in the
+// catalog or the agent didn't send `confirm` ⇒ the caller keeps the
+// historical default (show the dialog with the built-in message).
+function jobConfirm(jobId: string): JobConfirm | undefined {
+  for (const list of jobsByCategory.values()) {
+    const job = list.find((j) => j.id === jobId);
+    if (job) return job.confirm ?? undefined;
   }
   return undefined;
 }
@@ -1934,14 +1956,30 @@ window.addEventListener("DOMContentLoaded", () => {
     }
     // Job run button — confirm before firing so a mis-click can't launch a
     // heavy/destructive client job (e.g. a reinstall) with no second chance.
+    // The operator can tune this per job via the manifest's `client.confirm`
+    // (surfaced as `UserInvokableJob.confirm`): suppress the dialog entirely
+    // (`enabled: false`) for a trivial one-tap action, or override its text.
     const runBtn = t.closest<HTMLButtonElement>(".job-run-btn");
     if (runBtn?.dataset.jobId) {
       const jobId = runBtn.dataset.jobId;
       const label = runBtn.dataset.label ?? jobId;
-      // Disable while the dialog is open so it can't stack a second prompt.
+      const cfg = jobConfirm(jobId);
+      // Disable while running / prompting so it can't stack a second run.
       runBtn.disabled = true;
+      // `enabled: false` skips the confirmation gate and runs immediately.
+      // Any other state (absent config, or enabled) keeps the confirmation,
+      // with the operator's custom message when set.
+      if (cfg?.enabled === false) {
+        void executeJob(jobId, label).finally(() => {
+          runBtn.disabled = false;
+        });
+        return;
+      }
+      const title = cfg?.message?.trim()
+        ? cfg.message.trim()
+        : `「${label}」を実行しますか？`;
       void confirmDialog({
-        title: `「${label}」を実行しますか？`,
+        title,
         confirmLabel: "実行",
         cancelLabel: "キャンセル",
       })

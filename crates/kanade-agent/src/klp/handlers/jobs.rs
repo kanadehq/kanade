@@ -45,7 +45,7 @@ use futures::TryStreamExt;
 use kanade_shared::ipc::envelope::RpcNotification;
 use kanade_shared::ipc::error::{ErrorKind, RpcError};
 use kanade_shared::ipc::jobs::{
-    JobProgress, JobsExecuteParams, JobsExecuteResult, JobsKillParams, JobsKillResult,
+    JobConfirm, JobProgress, JobsExecuteParams, JobsExecuteResult, JobsKillParams, JobsKillResult,
     JobsListParams, JobsListResult, RunStatus, UserInvokableJob,
 };
 use kanade_shared::ipc::method;
@@ -301,6 +301,14 @@ fn manifest_to_job(m: &Manifest) -> Option<UserInvokableJob> {
         timeout_secs: humantime::parse_duration(&m.execute.timeout)
             .ok()
             .map(|d| d.as_secs().max(1)), // truncates sub-second; floors < 1s to 1
+        // Surface the operator's confirmation-dialog config so the Client
+        // App can suppress the modal (`enabled: false`) or show a custom
+        // message. `None` here keeps the client's historical default
+        // (always confirm, built-in message).
+        confirm: client.confirm.as_ref().map(|c| JobConfirm {
+            enabled: c.enabled,
+            message: c.message.clone(),
+        }),
         // Per-user run history is minted by `jobs.execute` (a
         // follow-up PR); until then every row is "never run by you".
         last_run: None,
@@ -1056,7 +1064,9 @@ pub async fn handle_jobs_kill(
 mod tests {
     use super::*;
     use kanade_shared::ipc::state::CheckStatus;
-    use kanade_shared::manifest::{ClientHint, Execute, ExecuteShell, ShowWhen, Target};
+    use kanade_shared::manifest::{
+        ClientHint, ConfirmHint, Execute, ExecuteShell, ShowWhen, Target,
+    };
     use kanade_shared::wire::{RunAs, Staleness};
 
     /// No-checks map for the visibility/projection tests that don't
@@ -1098,6 +1108,7 @@ mod tests {
                 icon: None,
                 visible_to: None,
                 show_when: None,
+                confirm: None,
             }),
             tags: Vec::new(),
             origin: None,
@@ -1246,6 +1257,28 @@ mod tests {
         // #865: the manifest's 30s timeout is lowered onto the row so the
         // client's stuck-run watchdog can honor it.
         assert_eq!(row.timeout_secs, Some(30));
+    }
+
+    #[test]
+    fn maps_confirm_config() {
+        // A manifest's `client.confirm` projects 1:1 onto the row so the
+        // Client App can suppress the modal or reword it. Absent ⇒ None
+        // (client keeps its always-confirm default).
+        let plain = manifest("plain", Some(("Plain", "catalog")));
+        let plain_row =
+            &build_job_list(std::slice::from_ref(&plain), None, "PC1", &[], &no_checks()).items[0];
+        assert!(plain_row.confirm.is_none());
+
+        let mut m = manifest("wifi-tweak", Some(("Wi-Fi 省電力を切る", "settings")));
+        m.client.as_mut().unwrap().confirm = Some(ConfirmHint {
+            enabled: false,
+            message: Some("すぐ実行します".into()),
+        });
+        let row =
+            &build_job_list(std::slice::from_ref(&m), None, "PC1", &[], &no_checks()).items[0];
+        let c = row.confirm.as_ref().expect("confirm projected");
+        assert!(!c.enabled);
+        assert_eq!(c.message.as_deref(), Some("すぐ実行します"));
     }
 
     #[test]

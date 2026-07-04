@@ -595,6 +595,17 @@
           ],
           "format": "int64"
         },
+        "confirm": {
+          "description": "Optional **confirmation-dialog** config for the Client App's 実行\nbutton.\n\n`None` ⇒ the historical default: the client shows a modal\nconfirmation with a built-in 「「{name}」を実行しますか？」 message\nbefore firing the job (a mis-click guard for a possibly heavy /\ndestructive action). When set, the operator controls it:\n- a bare bool — `confirm: false` runs immediately with **no** prompt;\n  `confirm: true` is the same as omitting the block (default message);\n- a struct — `confirm: { message: \"…\" }` shows the dialog with a\n  custom message (and, redundantly with the scalar, `enabled: false`\n  to suppress it).\n\nGates the END-USER Client App surface only — the operator `POST\n/api/exec` path never consults `client:`, so an operator-driven run\nis unaffected. New field ⇒ #492 wire rule (`serde(default)` +\n`skip_serializing_if`). Deserializes from bool-or-struct via\n[`de_confirm`]; the JSON schema advertises the struct form (the\nscalar is author ergonomics, like [`ShowWhen::is`]).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConfirmHint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "description": {
           "description": "Optional one-line subtitle under `name` in the Client App.\nDistinct from the operator-facing top-level\n[`Manifest::description`] — this one is written for the end\nuser. Maps to `UserInvokableJob::display_description`.",
           "type": [
@@ -672,6 +683,24 @@
       "required": [
         "name"
       ]
+    },
+    "ConfirmHint": {
+      "description": "Confirmation-dialog config for a [`ClientHint`] — see\n[`ClientHint::confirm`]. Controls the Client App's pre-run modal:\nwhether it appears at all (`enabled`) and what it says (`message`).\n\nAuthored as either a bare bool (`confirm: false` / `true`) or a struct\n(`confirm: { message: \"…\" }`); both normalise here via [`de_confirm`].",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Whether the Client App shows the confirmation dialog before running.\n`false` fires the job immediately with no prompt. Defaults to `true`\n(so an author who only sets `message` still gets the dialog, and the\nstruct form never accidentally suppresses it).",
+          "type": "boolean",
+          "default": true
+        },
+        "message": {
+          "description": "Custom dialog message. `None` ⇒ the client's built-in\n「「{name}」を実行しますか？」. Only meaningful while `enabled`;\nrejected if present-but-blank by [`Manifest::validate`].",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
     },
     "DisplayField": {
       "type": "object",
