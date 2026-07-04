@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 // ─── Agent config ────────────────────────────────────────────────────
 
@@ -49,19 +49,16 @@ pub struct BackendConfig {
     pub nats: NatsSection,
     pub db: DbSection,
     pub log: LogSection,
-    /// Outbound SMTP relay for compliance-alert + generic email.
-    /// Absent ⇒ email features are no-ops (the in-app/NATS notification
-    /// path is unaffected), so an existing deploy keeps working with no
-    /// config change. Holds only the *non-secret* connection settings —
-    /// the SMTP password is NOT here, it comes from the `MailPassword`
-    /// registry secret (or `$KANADE_MAIL_PASSWORD`), the same way
-    /// `JwtSecret` / `StaticToken` are resolved (kanade keeps secrets out
-    /// of the un-ACL'd `backend.toml`).
-    #[serde(default)]
-    pub mail: Option<MailSection>,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+/// Non-secret SMTP connection settings. Lives here (rather than in `wire`)
+/// because it's the shape `mail::Mailer::from_config` builds from, but it's
+/// carried operator-editably in the `server_settings` KV bucket
+/// (`wire::ServerSettings::mail` / SPA), **not** in `backend.toml` (#884).
+/// `Serialize` is derived for the KV / API path; the SMTP password is never
+/// a field here — it comes from the `MailPassword` registry secret (or
+/// `$KANADE_MAIL_PASSWORD`), keeping secrets out of the KV.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct MailSection {
     /// SMTP relay host (e.g. an internal mail relay).
     pub host: String,
@@ -78,7 +75,7 @@ pub struct MailSection {
 }
 
 /// Transport security for the SMTP connection.
-#[derive(Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum MailEncryption {
     /// Upgrade a plaintext connection via STARTTLS (port 587). Default.

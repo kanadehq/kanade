@@ -43,6 +43,25 @@
       "label": "Controller group name",
       "unsetPlaceholder": "unset (runs nowhere)",
       "blankHint": "Leave blank and controller-tier jobs run nowhere (fail-safe) — the safe default so an external fetch never lands on an endpoint by accident."
+    },
+    "mail": {
+      "title": "Email (SMTP) settings",
+      "description": "The outbound SMTP relay used for compliance-alert notifications and account setup links. Non-secret connection settings only.",
+      "restartHint": "Changes take effect after the backend restarts — the backend builds its mailer once at startup.",
+      "host": "SMTP host",
+      "port": "Port",
+      "encryption": "Encryption",
+      "encryptionOptions": {
+        "starttls": "STARTTLS (587)",
+        "tls": "Implicit TLS (465)",
+        "none": "None (plaintext)"
+      },
+      "from": "From address",
+      "username": "Username (optional)",
+      "usernamePlaceholder": "leave blank for an unauthenticated relay",
+      "passwordHint": "The SMTP password is not set here — it's a server-side secret (the MailPassword registry value or the KANADE_MAIL_PASSWORD environment variable).",
+      "blankHint": "Fill in the host and from-address to enable email; clear them both to disable it (email becomes a no-op).",
+      "invalid": "Enter a host, a valid from-address (with @), and a port between 1 and 65535 — or clear the host and from-address to disable email."
     }
   }
 }

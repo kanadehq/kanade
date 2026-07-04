@@ -732,12 +732,27 @@ pub(crate) async fn run_backend() -> Result<()> {
     let explode_spec_cache = projector::spec_cache::ExplodeSpecCache::new();
 
     // Optional outbound SMTP relay (compliance-alert + generic email).
-    // Built once here from the `[mail]` config and the `MailPassword`
-    // registry secret (env fallback), then shared (Arc) with the results
-    // projector and AppState. `None` when `[mail]` is absent or the build
-    // fails — email becomes a no-op, the in-app/NATS path is unaffected,
-    // and the backend still starts (a mail misconfig must not gate boot).
-    let mailer: Option<std::sync::Arc<mail::Mailer>> = cfg.mail.as_ref().and_then(|m| {
+    // Built once here (no live rebuild), then shared (Arc) with the results
+    // projector and AppState. `None` when no mail config is present or the
+    // build fails — email becomes a no-op, the in-app/NATS path is
+    // unaffected, and the backend still starts (a mail misconfig must not
+    // gate boot).
+    //
+    // #884: the non-secret SMTP settings live in the `server_settings` KV
+    // (SPA-editable), not `backend.toml`. The SMTP password is NOT in the KV:
+    // it's always the `MailPassword` registry secret / `$KANADE_MAIL_PASSWORD`.
+    // Editing the KV takes effect on the next backend restart (this build runs
+    // the mailer once). A missing / unreadable config ⇒ email off this boot.
+    let mail_cfg: Option<kanade_shared::config::MailSection> = api::server_settings::load_from_js(
+        &jetstream,
+    )
+    .await
+    .unwrap_or_else(|e| {
+        warn!(error = %format!("{e:#}"), "read server_settings at startup — email off this boot");
+        kanade_shared::wire::ServerSettings::default()
+    })
+    .mail;
+    let mailer: Option<std::sync::Arc<mail::Mailer>> = mail_cfg.as_ref().and_then(|m| {
         let password = kanade_shared::secrets::read_hklm_value(r"SOFTWARE\kanade\backend", "MailPassword")
             .or_else(|| std::env::var("KANADE_MAIL_PASSWORD").ok().filter(|s| !s.is_empty()));
         match mail::Mailer::from_config(m, password) {
@@ -746,7 +761,7 @@ pub(crate) async fn run_backend() -> Result<()> {
                 Some(std::sync::Arc::new(mx))
             }
             Err(e) => {
-                warn!(error = %format!("{e:#}"), "[mail] present but Mailer build failed — email disabled");
+                warn!(error = %format!("{e:#}"), "mail config present but Mailer build failed — email disabled");
                 None
             }
         }
