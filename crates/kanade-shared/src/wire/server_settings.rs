@@ -12,6 +12,24 @@ use crate::config::MailSection;
 /// hand-written KV value can never panic the cleanup task.
 pub const MAX_AGENT_PRUNE_DAYS: u32 = 36_500;
 
+/// Built-in retention window (days) for the `collections` Object Store —
+/// the file bundles a `collect:` job uploads (#219). This is the value the
+/// bootstrap creates a fresh bucket with, and the fallback
+/// [`ServerSettings::effective_collect_retention_days`] resolves to when the
+/// operator hasn't overridden it. Kept here (not just in `bootstrap`) so the
+/// wire default and the bucket's initial `max_age` share one source of truth.
+pub const DEFAULT_COLLECT_RETENTION_DAYS: u32 = 30;
+
+/// Upper bound on [`ServerSettings::collect_retention_days`] (10 years).
+/// Bundles are debugging / audit artifacts, so an operator has no reason to
+/// keep them longer than this; the ceiling stops a fat-fingered value from
+/// pushing the `collections` Object Store's `max_age` to something absurd.
+/// (The bucket's `max_bytes` cap still bounds actual disk regardless.)
+/// Enforced by the PUT handler and clamped in
+/// [`ServerSettings::effective_collect_retention_days`] so even a
+/// hand-written KV value stays sane.
+pub const MAX_COLLECT_RETENTION_DAYS: u32 = 3650;
+
 /// Value stored in the `server_settings` KV bucket under the single key
 /// [`crate::kv::KEY_SERVER_SETTINGS`]. Operator-editable, backend-side
 /// server configuration that isn't per-agent (so it doesn't belong in
@@ -77,24 +95,43 @@ pub struct ServerSettings {
     /// discussion.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mail: Option<MailSection>,
+
+    /// Retention window (days) for collected file bundles — the `collect:`
+    /// job archives uploaded to the `collections` Object Store (#219).
+    ///
+    /// Unlike the other fields, this one has a **real built-in default**
+    /// ([`DEFAULT_COLLECT_RETENTION_DAYS`], 30 d): `None` (unset) falls back
+    /// to it, so a blank field preserves the historical behaviour rather than
+    /// disabling retention. A positive value tells the backend to reconcile
+    /// the Object Store's `max_age` to that many days (see
+    /// `bootstrap::reconcile_collect_retention`), applied at boot and again
+    /// whenever this document is saved from the SPA. Clamped to
+    /// [`MAX_COLLECT_RETENTION_DAYS`]. The bucket's `max_bytes` cap is
+    /// untouched, so extending the window can't make the store grow unbounded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collect_retention_days: Option<u32>,
 }
 
 impl ServerSettings {
     /// Built-in defaults applied when a field is unset (`None`) in the
-    /// stored document. Currently every field is `None`: there's no
-    /// fleet-meaningful default prune window, so leaving it blank means
-    /// "disabled" rather than some arbitrary number of days.
+    /// stored document. Most fields default to `None` (no fleet-meaningful
+    /// default — a blank prune window means "disabled" rather than some
+    /// arbitrary number of days), the exception being
+    /// [`collect_retention_days`](Self::collect_retention_days), which carries
+    /// a real default ([`DEFAULT_COLLECT_RETENTION_DAYS`]) so a blank field
+    /// preserves the historical 30-day retention.
     ///
     /// Exposed via `GET /api/server-settings/defaults` so the SPA renders
     /// these as faint placeholders (mirroring the agent layered-config
-    /// page's built-in floor). Introducing a real default later is a
-    /// one-line change here that automatically shows up in the UI and
-    /// applies to every deployment that hasn't overridden the field.
+    /// page's built-in floor). Introducing a real default is a one-line
+    /// change here that automatically shows up in the UI and applies to
+    /// every deployment that hasn't overridden the field.
     pub fn defaults() -> Self {
         Self {
             agent_prune_days: None,
             controller_group: None,
             mail: None,
+            collect_retention_days: Some(DEFAULT_COLLECT_RETENTION_DAYS),
         }
     }
 
@@ -121,6 +158,23 @@ impl ServerSettings {
             .or(Self::defaults().agent_prune_days)
             .unwrap_or(0)
             .min(MAX_AGENT_PRUNE_DAYS)
+    }
+
+    /// The effective collect-bundle retention window in days: the stored
+    /// value if set, else the built-in default ([`DEFAULT_COLLECT_RETENTION_DAYS`]).
+    /// Floored at 1 and clamped to [`MAX_COLLECT_RETENTION_DAYS`] so an
+    /// out-of-band KV write can't reach the Object Store `max_age` unsanitised.
+    /// The floor matters specifically because NATS treats `max_age: 0` as
+    /// **unlimited** retention, not "evict immediately": a stray `0` would
+    /// silently make bundles never expire (defeating the auto-expire intent),
+    /// so we coerce it to the shortest real window (1 day) instead. The PUT
+    /// handler already rejects `0` / over-cap, so this is the belt-and-braces
+    /// path for a hand-edited KV value.
+    pub fn effective_collect_retention_days(&self) -> u32 {
+        self.collect_retention_days
+            .or(Self::defaults().collect_retention_days)
+            .unwrap_or(DEFAULT_COLLECT_RETENTION_DAYS)
+            .clamp(1, MAX_COLLECT_RETENTION_DAYS)
     }
 }
 
@@ -265,6 +319,68 @@ mod tests {
         let s: ServerSettings = serde_json::from_str(r#"{"agent_prune_days":7}"#).unwrap();
         assert_eq!(s.mail, None);
         assert_eq!(s.agent_prune_days, Some(7));
+    }
+
+    #[test]
+    fn collect_retention_unset_resolves_to_builtin_default() {
+        // Blank (the derived Default) must preserve the historical 30-day
+        // window, not disable retention.
+        assert_eq!(ServerSettings::default().collect_retention_days, None);
+        assert_eq!(
+            ServerSettings::default().effective_collect_retention_days(),
+            DEFAULT_COLLECT_RETENTION_DAYS,
+        );
+        // The defaults() document surfaces the real default so the SPA can
+        // render it as a placeholder.
+        assert_eq!(
+            ServerSettings::defaults().collect_retention_days,
+            Some(DEFAULT_COLLECT_RETENTION_DAYS),
+        );
+    }
+
+    #[test]
+    fn collect_retention_stored_value_wins() {
+        let s = ServerSettings {
+            collect_retention_days: Some(90),
+            ..Default::default()
+        };
+        assert_eq!(s.effective_collect_retention_days(), 90);
+    }
+
+    #[test]
+    fn collect_retention_effective_clamps_out_of_band_writes() {
+        // A hand-written KV value past the PUT cap (or 0) must be clamped so
+        // the reconciled Object Store max_age stays sane.
+        let big = ServerSettings {
+            collect_retention_days: Some(u32::MAX),
+            ..Default::default()
+        };
+        assert_eq!(
+            big.effective_collect_retention_days(),
+            MAX_COLLECT_RETENTION_DAYS,
+        );
+        let zero = ServerSettings {
+            collect_retention_days: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(zero.effective_collect_retention_days(), 1);
+    }
+
+    #[test]
+    fn collect_retention_round_trips_and_omits_when_unset() {
+        let s = ServerSettings {
+            collect_retention_days: Some(90),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert_eq!(json, r#"{"collect_retention_days":90}"#);
+        assert_eq!(serde_json::from_str::<ServerSettings>(&json).unwrap(), s);
+        // Unset is omitted so a blank doc stays minimal.
+        assert!(
+            !serde_json::to_string(&ServerSettings::default())
+                .unwrap()
+                .contains("collect_retention_days")
+        );
     }
 
     #[test]

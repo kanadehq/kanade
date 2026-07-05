@@ -9,7 +9,9 @@
 //! [`KEY_SERVER_SETTINGS`]) holds the current [`ServerSettings`]. Unlike
 //! `fleet_config` (every agent watches it) this is read backend-side only
 //! — the cleanup task (dead-agent prune window), the controller-tier
-//! dispatch guard, and the startup `Mailer` build (SMTP config, #884). A
+//! dispatch guard, the startup `Mailer` build (SMTP config, #884), and the
+//! collect-bundle retention reconcile (the `collections` Object Store's
+//! `max_age`, applied at boot and on save). A
 //! deliberately generic document so future server knobs join the same key
 //! and Settings tab rather than spawning a bucket each. A missing key ⇒
 //! all-default (e.g. pruning disabled, email off), so a fresh deployment
@@ -21,7 +23,7 @@ use axum::http::StatusCode;
 use kanade_shared::config::MailSection;
 use kanade_shared::kv::{BUCKET_SERVER_SETTINGS, KEY_SERVER_SETTINGS};
 use kanade_shared::kv_cas;
-use kanade_shared::wire::{MAX_AGENT_PRUNE_DAYS, ServerSettings};
+use kanade_shared::wire::{MAX_AGENT_PRUNE_DAYS, MAX_COLLECT_RETENTION_DAYS, ServerSettings};
 use lettre::message::Mailbox;
 use serde_json::{Map, Value};
 use tracing::{info, warn};
@@ -123,6 +125,7 @@ pub async fn put(
     // Precompute the normalised JSON values once (outside the CAS closure,
     // which may re-run on a revision conflict and can't be fallible).
     let prune_value = typed.agent_prune_days.map(Value::from);
+    let collect_value = typed.collect_retention_days.map(Value::from);
     let controller_value = typed.controller_group.clone().map(Value::String);
     let mail_value = match typed.mail.as_ref() {
         Some(m) => Some(serde_json::to_value(m).map_err(|e| {
@@ -135,6 +138,13 @@ pub async fn put(
     };
 
     let kv = open_bucket(&s).await?;
+    // Whether the merge actually changed `collect_retention_days` — set inside
+    // the CAS closure so it reflects the *committed* attempt (the closure is
+    // re-run on a revision conflict; its last invocation is the one that
+    // sticks). Gates the Object Store reconcile below so a save that merely
+    // re-sends an unchanged value (the SPA always sends the full document)
+    // doesn't pay a stream round-trip.
+    let mut collect_changed = false;
     // Merge under optimistic concurrency: read the current document (raw, so
     // unknown fields survive), apply only the addressed keys, and CAS-write —
     // retrying the whole round on a revision conflict. `read_modify_write`
@@ -143,6 +153,13 @@ pub async fn put(
         kv_cas::read_modify_write::<Map<String, Value>, _>(&kv, KEY_SERVER_SETTINGS, |obj| {
             let mut changed = false;
             changed |= merge_field(obj, &incoming, "agent_prune_days", prune_value.clone());
+            collect_changed = merge_field(
+                obj,
+                &incoming,
+                "collect_retention_days",
+                collect_value.clone(),
+            );
+            changed |= collect_changed;
             changed |= merge_field(obj, &incoming, "controller_group", controller_value.clone());
             changed |= merge_field(obj, &incoming, "mail", mail_value.clone());
             changed
@@ -168,10 +185,34 @@ pub async fn put(
     })?;
     info!(
         agent_prune_days = ?merged.agent_prune_days,
+        collect_retention_days = ?merged.collect_retention_days,
         controller_group = ?merged.controller_group,
         mail_configured = merged.mail.is_some(),
         "server_settings merged",
     );
+    // Apply a collect-retention change to the live `collections` Object Store
+    // right away (the bucket's max_age is broker-side, not re-read per request),
+    // so the operator doesn't have to wait for a restart. Only when the merge
+    // actually changed the value — reconcile is idempotent, but gating on the
+    // real change avoids a stream round-trip on every unrelated save (mail,
+    // prune, …), which matters because the SPA always sends the full document.
+    // Best-effort: a failure is logged, not surfaced — the value is persisted
+    // and the boot reconcile re-applies it on the next restart.
+    if collect_changed {
+        let days = merged.effective_collect_retention_days();
+        match kanade_shared::bootstrap::reconcile_collect_retention(&s.jetstream, days).await {
+            Ok(true) => info!(
+                collect_retention_days = days,
+                "collect retention applied to Object Store"
+            ),
+            Ok(false) => {}
+            Err(e) => warn!(
+                error = %format!("{e:#}"), collect_retention_days = days,
+                "collect retention: applied to KV but reconcile of the Object Store max_age failed; \
+                 will be applied on the next backend restart",
+            ),
+        }
+    }
     audit::record(
         &s.nats,
         "operator",
@@ -234,6 +275,26 @@ fn validate(s: &ServerSettings) -> Result<(), (StatusCode, String)> {
             return Err((
                 StatusCode::UNPROCESSABLE_ENTITY,
                 format!("agent_prune_days must be <= {MAX_AGENT_PRUNE_DAYS} (100 years)"),
+            ));
+        }
+    }
+    if let Some(days) = s.collect_retention_days {
+        // `Some(0)` is rejected for the same reason as agent_prune_days: it
+        // would round-trip and wedge the SPA's `min=1` field. Omit / `null`
+        // to fall back to the built-in default instead.
+        if days == 0 {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "collect_retention_days must be >= 1; omit it or send null to use the default"
+                    .to_string(),
+            ));
+        }
+        if days > MAX_COLLECT_RETENTION_DAYS {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!(
+                    "collect_retention_days must be <= {MAX_COLLECT_RETENTION_DAYS} (10 years)"
+                ),
             ));
         }
     }
@@ -443,6 +504,33 @@ mod tests {
             ..Default::default()
         };
         assert!(validate(&s).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_zero_or_oversize_collect_retention() {
+        use kanade_shared::wire::MAX_COLLECT_RETENTION_DAYS;
+        assert!(
+            validate(&ServerSettings {
+                collect_retention_days: Some(0),
+                ..Default::default()
+            })
+            .is_err()
+        );
+        assert!(
+            validate(&ServerSettings {
+                collect_retention_days: Some(MAX_COLLECT_RETENTION_DAYS + 1),
+                ..Default::default()
+            })
+            .is_err()
+        );
+        // A value inside the range passes.
+        assert!(
+            validate(&ServerSettings {
+                collect_retention_days: Some(90),
+                ..Default::default()
+            })
+            .is_ok()
+        );
     }
 
     #[test]

@@ -33,6 +33,7 @@ use crate::kv::{
     OBJECT_RESULT_OUTPUT, OBJECT_SCRIPTS, STREAM_AUDIT, STREAM_EVENTS, STREAM_EXEC,
     STREAM_INVENTORY, STREAM_NOTIFICATIONS, STREAM_OBS_EVENTS, STREAM_RESULTS,
 };
+use crate::wire::DEFAULT_COLLECT_RETENTION_DAYS;
 
 /// Create-or-update an Object Store, but never let it wedge backend
 /// startup. `create_object_store` neither reconciles an existing
@@ -466,16 +467,21 @@ pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
     // #219: collected file bundles. A `collect:` job's agent zips the
     // script's listed files and uploads the archive here under
     // `<pc_id>/<job_id>/<rfc3339>.zip`; the SPA Collect page lists /
-    // downloads them. 30-day max_age — bundles are debugging / audit
-    // artifacts (not curated config like app_packages / scripts), so
-    // they auto-expire and the bucket doesn't grow unbounded. Capped
-    // at 5 GiB (DiscardPolicy::Old evicts oldest first) so a fleet's
-    // worth of bundles can't fill the file store.
+    // downloads them. Default max_age = DEFAULT_COLLECT_RETENTION_DAYS —
+    // bundles are debugging / audit artifacts (not curated config like
+    // app_packages / scripts), so they auto-expire and the bucket doesn't
+    // grow unbounded. Capped at 5 GiB (DiscardPolicy::Old evicts oldest
+    // first) so a fleet's worth of bundles can't fill the file store.
+    //
+    // This is only the value a FRESH bucket is born with; the window is
+    // operator-tunable from the SPA (`ServerSettings::collect_retention_days`)
+    // and the backend reconciles the live bucket's max_age to the configured
+    // value at boot and on save — see [`reconcile_collect_retention`].
     ensure_object_store(
         js,
         ObjectStoreConfig {
             bucket: OBJECT_COLLECTIONS.into(),
-            max_age: Duration::from_secs(SECS_PER_DAY * 30),
+            max_age: Duration::from_secs(SECS_PER_DAY * DEFAULT_COLLECT_RETENTION_DAYS as u64),
             max_bytes: 5 * GIB,
             ..Default::default()
         },
@@ -483,6 +489,70 @@ pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
     .await?;
 
     Ok(())
+}
+
+/// NATS names the stream backing an Object Store `OBJ_<bucket>` (mirroring
+/// `KV_<bucket>` for key-value stores). We reconcile the collect bucket's
+/// retention through this stream because async-nats 0.49 has no
+/// create-or-update / reconcile form for Object Stores themselves (the same
+/// gap [`ensure_object_store`] works around) — but the underlying stream
+/// *does* support `update_stream`.
+fn object_store_stream_name(bucket: &str) -> String {
+    format!("OBJ_{bucket}")
+}
+
+/// Reconcile the `collections` Object Store's retention window to
+/// `retention_days` by updating the `max_age` on its backing stream.
+///
+/// Why this exists: the bucket is created once (at bootstrap) with the
+/// built-in default, and `create_object_store` neither has a
+/// create-or-update form nor reconciles config in async-nats 0.49. So to
+/// honour an operator's `ServerSettings::collect_retention_days` change on an
+/// already-provisioned bucket, we read the backing stream's config, patch
+/// **only** `max_age` (a read-modify-write that leaves every object-store-
+/// specific stream setting untouched), and `update_stream`. `max_bytes`
+/// and the discard policy are deliberately left as-is, so extending the
+/// window never lifts the 5 GiB disk ceiling.
+///
+/// Idempotent: if the stream's `max_age` already matches, it's a no-op
+/// (skips the update round-trip and returns `false`). A missing stream (the
+/// bucket was never provisioned — e.g. a broker that predates this feature
+/// and hasn't run bootstrap) is a soft error the caller can log-and-continue:
+/// bootstrap runs before this on the backend boot path, so in practice the
+/// stream is always present.
+///
+/// Returns `Ok(true)` when it actually changed the stream, `Ok(false)` when
+/// already in sync.
+pub async fn reconcile_collect_retention(
+    js: &jetstream::Context,
+    retention_days: u32,
+) -> Result<bool> {
+    const SECS_PER_DAY: u64 = 24 * 60 * 60;
+    let desired = Duration::from_secs(SECS_PER_DAY * retention_days as u64);
+    let stream_name = object_store_stream_name(OBJECT_COLLECTIONS);
+
+    let mut stream = js
+        .get_stream(&stream_name)
+        .await
+        .with_context(|| format!("get_stream {stream_name} for collect-retention reconcile"))?;
+    let info = stream
+        .info()
+        .await
+        .with_context(|| format!("stream info {stream_name}"))?;
+    if info.config.max_age == desired {
+        return Ok(false);
+    }
+    let mut cfg = info.config.clone();
+    cfg.max_age = desired;
+    js.update_stream(cfg)
+        .await
+        .with_context(|| format!("update_stream {stream_name} max_age"))?;
+    info!(
+        stream = %stream_name,
+        retention_days,
+        "collect retention: reconciled Object Store max_age",
+    );
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -613,6 +683,63 @@ mod tests {
             err.to_string()
                 .contains("no existing store to fall back to"),
             "unexpected error: {err:#}",
+        );
+    }
+
+    /// `reconcile_collect_retention` must change the live bucket's `max_age`
+    /// (broker-side retention) without disturbing the other stream config —
+    /// the mechanism the SPA relies on to extend collect retention past the
+    /// 30-day default. Also asserts the idempotent no-op path (`Ok(false)`
+    /// when already in sync) and that `max_bytes` survives the update.
+    #[tokio::test]
+    #[ignore = "requires nats-server in PATH; cargo test -- --ignored"]
+    async fn reconcile_collect_retention_updates_max_age() {
+        use crate::kv::OBJECT_COLLECTIONS;
+        const SECS_PER_DAY: u64 = 24 * 60 * 60;
+        let b = spawn_broker().await;
+
+        // Provision the collections bucket the way bootstrap does: 30-day
+        // default max_age, 5 GiB cap.
+        ensure_object_store(
+            &b.js,
+            ObjectStoreConfig {
+                bucket: OBJECT_COLLECTIONS.into(),
+                max_age: Duration::from_secs(SECS_PER_DAY * 30),
+                max_bytes: 5 * 1024 * 1024 * 1024,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("fresh collections bucket");
+
+        let stream_name = object_store_stream_name(OBJECT_COLLECTIONS);
+
+        // Extend to 90 days — first call changes the stream.
+        assert!(
+            reconcile_collect_retention(&b.js, 90)
+                .await
+                .expect("reconcile to 90d"),
+            "first reconcile should report a change",
+        );
+        let mut stream = b.js.get_stream(&stream_name).await.expect("stream");
+        let info = stream.info().await.expect("info");
+        assert_eq!(
+            info.config.max_age,
+            Duration::from_secs(SECS_PER_DAY * 90),
+            "max_age must be extended to 90 days",
+        );
+        assert_eq!(
+            info.config.max_bytes,
+            5 * 1024 * 1024 * 1024,
+            "the size cap must survive the max_age-only update",
+        );
+
+        // Re-applying the same value is a no-op (no revision-bumping update).
+        assert!(
+            !reconcile_collect_retention(&b.js, 90)
+                .await
+                .expect("idempotent reconcile"),
+            "second reconcile with the same value should be a no-op",
         );
     }
 }

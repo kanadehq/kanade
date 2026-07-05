@@ -37,6 +37,14 @@
       "unsetPlaceholder": "unset (off)",
       "blankHint": "Leave blank to use the default (shown faintly). With no default, blank means cleanup is off — long-offline agents are kept forever."
     },
+    "collectRetention": {
+      "title": "Collected-bundle retention",
+      "description": "How long collected file bundles (from `collect:` jobs, shown on the Collect page) are kept before they auto-expire. Applied to the storage bucket immediately on save — no restart needed. Total disk stays capped regardless, so older bundles are also dropped once the bucket fills.",
+      "label": "Keep bundles for",
+      "unit": "days",
+      "unsetPlaceholder": "default",
+      "blankHint": "Leave blank to use the default (shown faintly, currently 30 days). Extending this keeps bundles longer; the bucket's size cap still bounds total disk."
+    },
     "controllerGroup": {
       "title": "Controller group (trusted runners)",
       "description": "The agent group whose members may run `tier: controller` jobs (e.g. a `feed:` job that fetches an external URL). These jobs are never dispatched to employee endpoints — only to members of this group.",
