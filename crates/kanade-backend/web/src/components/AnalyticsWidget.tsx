@@ -43,7 +43,15 @@ export type Widget = {
     }
   | { render: 'timeline'; metric: 'ratio' | 'count'; buckets: HourBucket[] }
   | { render: 'stat'; value: number; est_minutes?: number }
-  | { render: 'op_timeline'; from: string; to: string; events: OpEvent[] }
+  | {
+      render: 'op_timeline';
+      from: string;
+      to: string;
+      events: OpEvent[];
+      // Omitted by the backend when the PC has no agents row; the strip then
+      // paints without the offline-tail gate.
+      last_heartbeat?: string | null;
+    }
   // #vuln-roadmap PR3: SQL-backed `view:` widgets. The backend maps the SQL
   // result onto these two new shapes; the others reuse the existing renderers.
   | { render: 'table'; columns: string[]; rows: CellValue[][] }
@@ -100,7 +108,12 @@ export function WidgetCard({ w, t }: { w: Widget; t: (k: string) => string }) {
           </div>
         )}
         {w.render === 'op_timeline' && (
-          <OperationalTimeline events={w.events} from={w.from} to={w.to} />
+          <OperationalTimeline
+            events={w.events}
+            from={w.from}
+            to={w.to}
+            lastHeartbeat={w.last_heartbeat}
+          />
         )}
       </CardContent>
     </Card>
