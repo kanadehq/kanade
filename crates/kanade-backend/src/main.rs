@@ -643,6 +643,32 @@ pub(crate) async fn run_backend() -> Result<()> {
         .context("ensure_jetstream_resources")?;
     info!("jetstream resources ready");
 
+    // Reconcile the collect-bundle Object Store retention to the
+    // operator-configured window (`ServerSettings::collect_retention_days`).
+    // bootstrap just created the bucket with the built-in default; this
+    // applies any SPA override to the live bucket (max_age is broker-side, so
+    // a changed value only takes hold once something updates the stream).
+    // Non-fatal — a failure leaves the previous max_age in place and the next
+    // save / restart retries.
+    match api::server_settings::load_from_js(&jetstream).await {
+        Ok(settings) => {
+            let days = settings.effective_collect_retention_days();
+            match kanade_shared::bootstrap::reconcile_collect_retention(&jetstream, days).await {
+                Ok(true) => info!(
+                    collect_retention_days = days,
+                    "collect retention reconciled at boot"
+                ),
+                Ok(false) => {}
+                Err(e) => {
+                    warn!(error = %format!("{e:#}"), "collect retention reconcile at boot failed")
+                }
+            }
+        }
+        Err(e) => {
+            warn!(error = %format!("{e:#}"), "collect retention: read server_settings failed; skipping boot reconcile")
+        }
+    }
+
     // #389: a wiped projection DB (deploy -WipeDb, manual recovery)
     // leaves the projectors' durable consumers parked at the end of
     // their streams, so the spawn block below would silently resume

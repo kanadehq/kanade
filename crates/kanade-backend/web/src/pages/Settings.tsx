@@ -22,6 +22,11 @@ type Tab = (typeof TABS)[number];
 // enforces the same bound, this just gives immediate client-side feedback.
 const MAX_AGENT_PRUNE_DAYS = 36_500;
 
+// Mirrors `MAX_COLLECT_RETENTION_DAYS` (kanade_shared::wire::server_settings):
+// 10 years. The backend PUT enforces the same bound; this is client-side
+// feedback only.
+const MAX_COLLECT_RETENTION_DAYS = 3650;
+
 /// SMTP transport security — mirrors `kanade_shared::config::MailEncryption`
 /// (serialised lowercase).
 type MailEncryption = 'starttls' | 'tls' | 'none';
@@ -44,6 +49,7 @@ interface MailSettings {
 /// those built-in defaults (rendered as faint placeholders).
 interface ServerSettings {
   agent_prune_days: number | null;
+  collect_retention_days: number | null;
   controller_group: string | null;
   mail: MailSettings | null;
 }
@@ -217,6 +223,10 @@ function ServerTab() {
   // unset (null), distinct from an explicit number. Seeded once the
   // stored value lands.
   const [pruneDays, setPruneDays] = useState('');
+  // Collect-bundle retention window (days). Blank = unset, which falls back
+  // to the built-in default (30 d, shown as the placeholder) — unlike the
+  // prune field, blank here does NOT disable retention.
+  const [collectDays, setCollectDays] = useState('');
   // Trusted runner group for `tier: controller` jobs. Blank = unset
   // (controller-tier jobs run nowhere — fail-safe).
   const [controllerGroup, setControllerGroup] = useState('');
@@ -232,6 +242,11 @@ function ServerTab() {
   useEffect(() => {
     if (settings.data) {
       setPruneDays(settings.data.agent_prune_days == null ? '' : String(settings.data.agent_prune_days));
+      setCollectDays(
+        settings.data.collect_retention_days == null
+          ? ''
+          : String(settings.data.collect_retention_days),
+      );
       // Trim on seed so an unedited reload of a stored value with stray
       // whitespace doesn't read as dirty (the draft is compared trimmed).
       setControllerGroup((settings.data.controller_group ?? '').trim());
@@ -309,6 +324,17 @@ function ServerTab() {
     trimmed === '' ||
     (Number.isInteger(parsed) && parsed >= 1 && parsed <= MAX_AGENT_PRUNE_DAYS);
 
+  // collect_retention_days: blank → unset (null → built-in default). A
+  // non-blank value must be a whole number in [1, MAX_COLLECT_RETENTION_DAYS].
+  const collectTrimmed = collectDays.trim();
+  const collectParsed = Number(collectTrimmed);
+  const collectValue: number | null = collectTrimmed === '' ? null : collectParsed;
+  const collectValid =
+    collectTrimmed === '' ||
+    (Number.isInteger(collectParsed) &&
+      collectParsed >= 1 &&
+      collectParsed <= MAX_COLLECT_RETENTION_DAYS);
+
   // controller_group: blank → unset (null). Any non-blank group name is
   // valid here; the backend resolves membership at dispatch time.
   const cgTrimmed = controllerGroup.trim();
@@ -358,14 +384,16 @@ function ServerTab() {
   // One save for the whole document. The PUT merges per-field, but the SPA
   // always sends every field it knows, so an unchanged one is re-sent
   // as-is. `dirty` if any field diverges from the stored doc.
-  const valid = pruneValid && mailValid;
+  const valid = pruneValid && collectValid && mailValid;
   const dirty =
     settings.data != null &&
     (pruneValue !== settings.data.agent_prune_days ||
+      collectValue !== settings.data.collect_retention_days ||
       controllerValue !== (settings.data.controller_group ?? null) ||
       mailDirty);
   const doc: ServerSettings = {
     agent_prune_days: pruneValue,
+    collect_retention_days: collectValue,
     controller_group: controllerValue,
     mail: mailValue,
   };
@@ -378,6 +406,12 @@ function ServerTab() {
     defaults.data && defaults.data.agent_prune_days != null
       ? String(defaults.data.agent_prune_days)
       : t('server.agentPrune.unsetPlaceholder');
+  // collect_retention_days has a real built-in default (30 d), so the
+  // placeholder always shows a number — a blank field resolves to it.
+  const collectPlaceholder =
+    defaults.data && defaults.data.collect_retention_days != null
+      ? String(defaults.data.collect_retention_days)
+      : t('server.collectRetention.unsetPlaceholder');
 
   return (
     <div className="space-y-4">
@@ -414,6 +448,35 @@ function ServerTab() {
               <span className="text-muted text-sm">{t('server.agentPrune.unit')}</span>
             </div>
             <p className="text-muted text-xs">{t('server.agentPrune.blankHint')}</p>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="max-w-xl">
+        <CardHeader>
+          <CardTitle>{t('server.collectRetention.title')}</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <p className="text-muted text-sm">{t('server.collectRetention.description')}</p>
+          <div className="space-y-1">
+            <Label htmlFor="collect-retention-days">{t('server.collectRetention.label')}</Label>
+            <div className="flex items-center gap-2">
+              <Input
+                id="collect-retention-days"
+                type="number"
+                min={1}
+                max={MAX_COLLECT_RETENTION_DAYS}
+                step={1}
+                inputMode="numeric"
+                value={collectDays}
+                placeholder={collectPlaceholder}
+                disabled={!canOperate || settings.isLoading}
+                onChange={(e) => setCollectDays(e.target.value)}
+                className="w-32"
+              />
+              <span className="text-muted text-sm">{t('server.collectRetention.unit')}</span>
+            </div>
+            <p className="text-muted text-xs">{t('server.collectRetention.blankHint')}</p>
           </div>
         </CardContent>
       </Card>

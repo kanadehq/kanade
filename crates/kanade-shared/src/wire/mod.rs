@@ -30,5 +30,8 @@ pub use result::{
     EXIT_SKIP_DEADLINE, EXIT_SKIP_REVOKED, EXIT_SKIP_STALENESS, EXIT_SKIP_VERSION_PIN, ExecResult,
     is_synthetic_skip,
 };
-pub use server_settings::{MAX_AGENT_PRUNE_DAYS, ServerSettings};
+pub use server_settings::{
+    DEFAULT_COLLECT_RETENTION_DAYS, MAX_AGENT_PRUNE_DAYS, MAX_COLLECT_RETENTION_DAYS,
+    ServerSettings,
+};
 pub use staleness::Staleness;
