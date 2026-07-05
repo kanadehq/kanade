@@ -166,6 +166,17 @@ pub enum WidgetData {
         from: DateTime<Utc>,
         to: DateTime<Utc>,
         events: Vec<OpEvent>,
+        /// The agent's `agents.last_heartbeat` (None when the PC has no
+        /// agents row yet). The SPA uses it to gate the live edge of the
+        /// lanes: state *after* the last heartbeat is unconfirmed — the
+        /// agent is offline / unreachable, and an unexpected power loss
+        /// emits nothing — so the strip renders that tail as uncertain
+        /// (hatched) instead of painting an assumed-ON span straight to
+        /// "now". Self-healing on reconnect: fresh heartbeats advance the
+        /// boundary and any backfilled winlog (shutdown / boot) repaints
+        /// the gap definitively.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        last_heartbeat: Option<DateTime<Utc>>,
     },
 }
 
@@ -787,10 +798,31 @@ async fn op_timeline(ctx: &Ctx<'_>) -> anyhow::Result<WidgetData> {
             Some(OpEvent { at, kind })
         })
         .collect();
+    // Best-effort read of the agent's last heartbeat so the SPA can gate the
+    // live edge (state after it is unconfirmed). A missing agents row (never
+    // heartbeated) or a read hiccup degrades to None — the SPA then paints as
+    // before rather than the whole widget failing over a soft signal. `.ok()`
+    // + double-`flatten` folds Err / no-row / SQL-NULL all to None. Log the Err
+    // path first so a real regression (e.g. a renamed column / missing agents
+    // table after a bad migration) stays observable instead of hiding behind
+    // the benign "no agents row yet" case that degrades identically.
+    let last_heartbeat = sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
+        "SELECT last_heartbeat FROM agents WHERE pc_id = ?1",
+    )
+    .bind(pc_id)
+    .fetch_optional(ctx.pool)
+    .await
+    .inspect_err(
+        |e| debug!(pc_id = %pc_id, error = %e, "op_timeline: last_heartbeat read failed; live-edge gating disabled"),
+    )
+    .ok()
+    .flatten()
+    .flatten();
     Ok(WidgetData::OpTimeline {
         from: ctx.from,
         to: ctx.to,
         events,
+        last_heartbeat,
     })
 }
 
@@ -1347,7 +1379,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let WidgetData::OpTimeline { from, to, events } = data else {
+        let WidgetData::OpTimeline {
+            from, to, events, ..
+        } = data
+        else {
             panic!("expected op_timeline")
         };
         assert_eq!(from, Utc.with_ymd_and_hms(2026, 6, 17, 0, 0, 0).unwrap());
@@ -1409,6 +1444,45 @@ mod tests {
             .execute(pool)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn op_timeline_carries_last_heartbeat_from_agents_row() {
+        // Happy path: when the PC has an agents row, its last_heartbeat rides
+        // along on the widget so the SPA can gate the live edge. The other
+        // op_timeline tests stand up only obs_events, which exercises the
+        // graceful degrade-to-None branch (no agents table → read errors →
+        // None); this pins the populated case so a regression there is caught.
+        let pool = op_pool().await;
+        sqlx::query("CREATE TABLE agents (pc_id TEXT PRIMARY KEY, last_heartbeat TIMESTAMP)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let hb = Utc.with_ymd_and_hms(2026, 6, 17, 12, 0, 0).unwrap();
+        sqlx::query("INSERT INTO agents (pc_id, last_heartbeat) VALUES (?, ?)")
+            .bind("p1")
+            .bind(hb)
+            .execute(&pool)
+            .await
+            .unwrap();
+        insert_op(
+            &pool,
+            "p1",
+            Utc.with_ymd_and_hms(2026, 6, 17, 8, 0, 0).unwrap(),
+            "boot",
+        )
+        .await;
+        let mut w = widget("ignored", AggregateAgg::Count, AggregateRender::OpTimeline);
+        w.kind = None;
+        w.agg = None;
+        let data = compute_widget(&ctx(&pool, Some("p1")), &w)
+            .await
+            .unwrap()
+            .unwrap();
+        let WidgetData::OpTimeline { last_heartbeat, .. } = data else {
+            panic!("expected op_timeline")
+        };
+        assert_eq!(last_heartbeat, Some(hb));
     }
 
     #[tokio::test]

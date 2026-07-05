@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { fmtIsoLocal } from '@/lib/utils';
+import { AGENT_ACTIVE_THRESHOLD_MS, fmtIsoLocal } from '@/lib/utils';
 
 // One raw operational event. Mirrors the backend `OpEvent`
 // (api/analytics.rs) and the per-PC rows the Events page already holds.
@@ -10,8 +10,22 @@ export type OpEvent = { at: string; kind: string };
 // A reconstructed lane interval. `openStart` / `openEnd` mark a span that
 // began before the window or is still open at its end (the matching
 // start/end event falls outside [t0, t1]), so the strip can hint that the
-// state continues beyond what's shown.
-type Span = { from: number; to: number; openStart: boolean; openEnd: boolean };
+// state continues beyond what's shown. `uncertain` marks the tail past the
+// agent's last heartbeat — the state is asserted but unconfirmed (the agent
+// is offline), so the strip hatches it instead of painting it solid.
+type Span = {
+  from: number;
+  to: number;
+  openStart: boolean;
+  openEnd: boolean;
+  uncertain?: boolean;
+  // The confirmed head of a heartbeat split — it abuts the hatched uncertain
+  // tail, so its right edge must be square (not the usual rounded 2px) to read
+  // as continuous with the tail. Kept separate from `openEnd` so the tooltip's
+  // "still open at window end" note stays off (the head is a hard cut, not an
+  // ongoing state running off the window edge).
+  cutByHeartbeat?: boolean;
+};
 
 // The fixed operational lanes. Each is reconstructed from a START kind that
 // opens the interval and an END kind that closes it:
@@ -148,6 +162,43 @@ function clipToOn(spans: Span[], on: { from: number; to: number }[]): Span[] {
   return out;
 }
 
+// Split a lane's spans at the "last confirmed" boundary. Everything a lane
+// asserts *after* the agent's last heartbeat is unconfirmed: an unexpected
+// power loss emits no shutdown and the idle sampler stops, so the open span
+// would otherwise paint an assumed-ON strip straight to `now` even though the
+// host may be dark. `certainEdge` is the newest instant we still trust —
+// min(liveEdge, lastHeartbeat + grace). An open (ongoing) span that reaches
+// past it is cut there: the head stays solid, the tail becomes an `uncertain`
+// span the strip hatches. Closed historical spans (a real start/end pair) are
+// left untouched — they're confirmed regardless of the current heartbeat. It
+// self-corrects on reconnect: a fresh heartbeat pushes certainEdge to `now`
+// (un-hatching), and backfilled winlog closes/reopens the power span so a
+// real powered-off gap ends up unpainted instead of hatched.
+function gateToHeartbeat(spans: Span[], certainEdge: number, liveEdge: number): Span[] {
+  // certainEdge >= liveEdge → agent online, or no heartbeat info (the Events
+  // page): nothing to gate, keep the solid strips exactly as before.
+  if (certainEdge >= liveEdge) return spans;
+  const out: Span[] = [];
+  for (const s of spans) {
+    if (!s.openEnd || s.to <= certainEdge) {
+      out.push(s); // closed span, or one already ending inside the trusted region
+    } else if (s.from >= certainEdge) {
+      out.push({ ...s, uncertain: true }); // wholly in the unconfirmed tail
+    } else {
+      // Straddles the boundary: solid head, hatched tail.
+      out.push({
+        from: s.from,
+        to: certainEdge,
+        openStart: s.openStart,
+        openEnd: false,
+        cutByHeartbeat: true,
+      });
+      out.push({ from: certainEdge, to: s.to, openStart: false, openEnd: true, uncertain: true });
+    }
+  }
+  return out;
+}
+
 // Point markers for the lane's events (instantaneous boot/logon/… ticks),
 // so a lone event with no pair still shows even when it forms no span.
 function laneMarkers(
@@ -200,10 +251,16 @@ export function OperationalTimeline({
   events,
   from,
   to,
+  lastHeartbeat,
 }: {
   events: OpEvent[];
   from?: string;
   to?: string;
+  // The agent's last heartbeat (ISO). When present, the strip stops painting a
+  // lane's ongoing state past `lastHeartbeat + grace` and hatches that tail as
+  // unconfirmed — the agent is offline, so we can't vouch for the current
+  // state. Omitted (Events page) → no gating, solid strips as before.
+  lastHeartbeat?: string | null;
 }) {
   const { t } = useTranslation('events');
 
@@ -234,6 +291,17 @@ export function OperationalTimeline({
     // Snapshot "now" once per render so open intervals don't paint past the
     // present when the window runs into the future (today before midnight).
     const now = Date.now();
+    // The live edge an open span clamps to, and the newest instant we still
+    // trust. When the agent is offline, `lastHeartbeat + grace` falls before
+    // the live edge, so any ongoing state after it is hatched as unconfirmed
+    // (see `gateToHeartbeat`). No `lastHeartbeat` → certainEdge == liveEdge →
+    // no gating. `grace` = the fleet-wide online/offline threshold, so a
+    // single missed beat on a healthy agent doesn't fray the strip's tail.
+    const liveEdge = Math.min(t1, now);
+    const hbMs = lastHeartbeat ? Date.parse(lastHeartbeat) : NaN;
+    const certainEdge = Number.isNaN(hbMs)
+      ? liveEdge
+      : Math.min(liveEdge, hbMs + AGENT_ACTIVE_THRESHOLD_MS);
     // Reconstruct the power lane first: it's the ground truth for "the host
     // was up", and the subordinate lanes get clipped to its ON spans below.
     const power = OP_LANES.find((l) => l.key === 'power')!;
@@ -250,6 +318,8 @@ export function OperationalTimeline({
           ? powerSpans
           : buildSpans(events, lane.starts, lane.ends, t0, t1, now);
       if (lane.key !== 'power' && hasPower) spans = clipToOn(spans, onIntervals);
+      // Hatch any ongoing state past the agent's last heartbeat as unconfirmed.
+      spans = gateToHeartbeat(spans, certainEdge, liveEdge);
       return {
         key: lane.key as LaneKey,
         color: lane.color,
@@ -257,7 +327,7 @@ export function OperationalTimeline({
         markers: laneMarkers(events, lane.starts, lane.ends, t0, t1),
       };
     });
-  }, [events, t0, t1]);
+  }, [events, t0, t1, lastHeartbeat]);
 
   const ticks = useMemo(() => axisTicks(t0, t1), [t0, t1]);
 
@@ -281,6 +351,30 @@ export function OperationalTimeline({
           </div>
           <div className="relative h-6 flex-1 overflow-hidden rounded-sm bg-muted/10">
             {lane.spans.map((s, i) => {
+              const laneName = t(`opTimeline.lanes.${lane.key}`);
+              const from = fmtIsoLocal(new Date(s.from).toISOString());
+              const to = fmtIsoLocal(new Date(s.to).toISOString());
+              // Unconfirmed tail (agent offline): hatch it instead of a solid
+              // fill so it reads as "believed, not verified", never a claim
+              // the host was definitely up.
+              if (s.uncertain) {
+                return (
+                  <div
+                    key={i}
+                    className="absolute top-0 h-full"
+                    style={{
+                      left: `${pct(s.from)}%`,
+                      width: `${Math.max(pct(s.to) - pct(s.from), 0.4)}%`,
+                      backgroundImage: `repeating-linear-gradient(45deg, ${lane.color}59 0, ${lane.color}59 3px, transparent 3px, transparent 6px)`,
+                      borderTopLeftRadius: 0,
+                      borderBottomLeftRadius: 0,
+                      borderTopRightRadius: s.openEnd ? 0 : 2,
+                      borderBottomRightRadius: s.openEnd ? 0 : 2,
+                    }}
+                    title={t('opTimeline.uncertainTooltip', { lane: laneName, from, to })}
+                  />
+                );
+              }
               const note = [
                 s.openStart ? t('opTimeline.openStart') : '',
                 s.openEnd ? t('opTimeline.openEnd') : '',
@@ -288,11 +382,8 @@ export function OperationalTimeline({
                 .filter(Boolean)
                 .join(' · ');
               const title =
-                t('opTimeline.spanTooltip', {
-                  lane: t(`opTimeline.lanes.${lane.key}`),
-                  from: fmtIsoLocal(new Date(s.from).toISOString()),
-                  to: fmtIsoLocal(new Date(s.to).toISOString()),
-                }) + (note ? ` (${note})` : '');
+                t('opTimeline.spanTooltip', { lane: laneName, from, to }) +
+                (note ? ` (${note})` : '');
               return (
                 <div
                   key={i}
@@ -303,11 +394,13 @@ export function OperationalTimeline({
                     backgroundColor: lane.color,
                     opacity: 0.65,
                     // Soften the edge that continues beyond the window so an
-                    // open span reads as "ongoing", not a hard boundary.
+                    // open span reads as "ongoing", not a hard boundary. A
+                    // heartbeat-split head keeps a square right edge so it
+                    // abuts its hatched tail seamlessly.
                     borderTopLeftRadius: s.openStart ? 0 : 2,
                     borderBottomLeftRadius: s.openStart ? 0 : 2,
-                    borderTopRightRadius: s.openEnd ? 0 : 2,
-                    borderBottomRightRadius: s.openEnd ? 0 : 2,
+                    borderTopRightRadius: s.openEnd || s.cutByHeartbeat ? 0 : 2,
+                    borderBottomRightRadius: s.openEnd || s.cutByHeartbeat ? 0 : 2,
                   }}
                   title={title}
                 />

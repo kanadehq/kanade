@@ -66,6 +66,7 @@
     "openStart": "この期間より前から継続",
     "openEnd": "期間終了時点で継続中",
     "spanTooltip": "{{lane}}: {{from}} → {{to}}",
+    "uncertainTooltip": "{{lane}}: {{from}} → {{to}} (不確定 · エージェント オフライン)",
     "markerTooltip": "{{kind}} ({{at}})",
     "empty": "この期間にこの PC の 電源 / セッション / スリープ / アクティブ イベントはありません。"
   },

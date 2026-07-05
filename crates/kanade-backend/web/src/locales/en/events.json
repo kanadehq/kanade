@@ -66,6 +66,7 @@
     "openStart": "started before this window",
     "openEnd": "still open at window end",
     "spanTooltip": "{{lane}}: {{from}} → {{to}}",
+    "uncertainTooltip": "{{lane}}: {{from}} → {{to}} (unconfirmed · agent offline)",
     "markerTooltip": "{{kind}} at {{at}}",
     "empty": "No power / session / sleep / active events in this window for this PC."
   },
