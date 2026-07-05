@@ -25,16 +25,16 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use futures::StreamExt;
-use kanade_shared::kv::{BUCKET_JOBS, OBJECT_COLLECTIONS};
-use kanade_shared::manifest::Manifest;
+use kanade_shared::kv::OBJECT_COLLECTIONS;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tokio_util::io::ReaderStream;
 use tracing::warn;
 
 use super::AppState;
 use crate::audit;
 use crate::audit::Caller;
+use crate::projector::spec_cache::ExplodeSpecCache;
 
 /// One collected bundle, as the SPA Collect page renders it. The
 /// `name` / `description` are resolved from the producing job's
@@ -94,42 +94,32 @@ fn parse_bundle_key(key: &str) -> Option<(String, String, String, Option<String>
     Some((pc_id.to_string(), job_id.to_string(), ts, label))
 }
 
-/// Best-effort map of `job_id → (collect.name, collect.description)`
-/// by walking `BUCKET_JOBS` once. Used to label bundles with their
-/// producing job's human-facing hint. A KV miss / parse error just
-/// leaves a bundle unlabelled rather than failing the whole listing.
-async fn collect_job_meta(state: &AppState) -> HashMap<String, (String, Option<String>)> {
+/// Best-effort map of `job_id → (collect.name, collect.description)` for
+/// the jobs that actually produced bundles. Reads the backend's
+/// in-memory `BUCKET_JOBS` cache (kept fresh by a `watch_all()` watcher —
+/// see [`ExplodeSpecCache`]) instead of a per-job `kv.get`. The old KV
+/// walk was an N+1 broker round-trip whose latency grew with the *total*
+/// job count, dominating the SPA Collect page's first paint on a large
+/// fleet; the cache read is an in-memory lock acquisition per distinct
+/// job, so the listing is essentially free. A cache miss (job
+/// unregistered, or created within the watcher's ~1 s sync window) just
+/// leaves that bundle unlabelled — same best-effort contract the KV walk
+/// had.
+async fn collect_job_meta(
+    cache: &ExplodeSpecCache,
+    job_ids: &HashSet<&str>,
+) -> HashMap<String, (String, Option<String>)> {
     let mut map = HashMap::new();
-    let Ok(kv) = state.jetstream.get_key_value(BUCKET_JOBS).await else {
-        return map;
-    };
-    let Ok(mut keys) = kv.keys().await else {
-        return map;
-    };
-    // Collect the keys first, then fetch concurrently — a sequential
-    // `kv.get` per job is an N+1 round-trip that scales latency with the
-    // job count (gemini). PR3 can replace this with a tap into the
-    // in-memory BUCKET_JOBS watch the backend already keeps, making the
-    // listing essentially free.
-    let mut key_list = Vec::new();
-    while let Some(key) = keys.next().await {
-        if let Ok(key) = key {
-            key_list.push(key);
-        }
-    }
-    let fetched = futures::future::join_all(key_list.into_iter().map(|key| {
-        let kv = kv.clone();
-        async move {
-            match kv.get(&key).await {
-                Ok(Some(entry)) => serde_json::from_slice::<Manifest>(&entry).ok(),
-                _ => None,
-            }
-        }
-    }))
-    .await;
-    for job in fetched.into_iter().flatten() {
-        if let Some(hint) = job.collect {
-            map.insert(job.id, (hint.name, hint.description));
+    for &job_id in job_ids {
+        let Some(manifest) = cache.manifest(job_id).await else {
+            continue;
+        };
+        if let Some(hint) = &manifest.collect {
+            // Only allocate the owned key for jobs that actually resolve.
+            map.insert(
+                job_id.to_string(),
+                (hint.name.clone(), hint.description.clone()),
+            );
         }
     }
     map
@@ -158,8 +148,10 @@ pub async fn list_bundles(
         (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
     })?;
 
-    let job_meta = collect_job_meta(&state).await;
-
+    // First pass: parse every object key into a row skeleton. The
+    // distinct producing job_ids are gathered from `rows` afterwards so
+    // we can resolve their `collect:` labels from the in-memory jobs
+    // cache in one shot (below) rather than a KV round-trip per job.
     let mut rows = Vec::new();
     while let Some(item) = list.next().await {
         // Propagate stream errors rather than truncating — a partial
@@ -179,10 +171,6 @@ pub async fn list_bundles(
             .modified
             .and_then(|t| chrono::DateTime::from_timestamp(t.unix_timestamp(), t.nanosecond()))
             .map(|d| d.to_rfc3339());
-        let (name, description) = match job_meta.get(&job_id) {
-            Some((n, d)) => (Some(n.clone()), d.clone()),
-            None => (None, None),
-        };
         rows.push(BundleRow {
             key: meta.name,
             pc_id,
@@ -193,10 +181,27 @@ pub async fn list_bundles(
             label,
             size: meta.size as u64,
             digest: meta.digest,
-            name,
-            description,
+            // Filled in from the jobs cache in the second pass, once we
+            // know every job_id that appears in the listing.
+            name: None,
+            description: None,
         });
     }
+
+    // Second pass: label each bundle from its producing job's `collect:`
+    // hint, read straight from the in-memory cache (no KV round-trip).
+    // Borrow the distinct job_ids straight out of `rows` — no per-bundle
+    // String clone; only the jobs that actually resolve get an owned key
+    // (gemini).
+    let job_ids: HashSet<&str> = rows.iter().map(|row| row.job_id.as_str()).collect();
+    let job_meta = collect_job_meta(&state.explode_spec_cache, &job_ids).await;
+    for row in &mut rows {
+        if let Some((name, description)) = job_meta.get(&row.job_id) {
+            row.name = Some(name.clone());
+            row.description = description.clone();
+        }
+    }
+
     // Newest first, then by key for a deterministic tie-break.
     rows.sort_by(|a, b| {
         b.collected_at
@@ -335,6 +340,76 @@ pub async fn delete_bundle(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kanade_shared::manifest::Manifest;
+
+    /// Minimal valid manifest, optionally carrying a `collect:` hint.
+    /// Pass `serde_json::Value::Null` for `collect` to model a job that
+    /// produced a bundle-shaped key but has no collect hint.
+    fn manifest(id: &str, collect: serde_json::Value) -> Manifest {
+        let mut base = serde_json::json!({
+            "id": id,
+            "version": "0.0.1",
+            "execute": {
+                "shell": "powershell",
+                "script": "echo '{}'",
+                "timeout": "30s",
+            },
+        });
+        if !collect.is_null() {
+            base.as_object_mut()
+                .expect("object")
+                .insert("collect".into(), collect);
+        }
+        serde_json::from_value(base).expect("fixture manifest parses")
+    }
+
+    #[tokio::test]
+    async fn collect_job_meta_resolves_hits_skips_miss_and_no_hint() {
+        let cache = ExplodeSpecCache::new();
+        // Full collect hint (name + description).
+        cache
+            .insert_manifest(manifest(
+                "collect-logs",
+                serde_json::json!({ "name": "Logs", "description": "app logs" }),
+            ))
+            .await;
+        // Collect hint with no description.
+        cache
+            .insert_manifest(manifest(
+                "collect-min",
+                serde_json::json!({ "name": "Minimal" }),
+            ))
+            .await;
+        // Cached but WITHOUT a collect hint — must not be labelled.
+        cache
+            .insert_manifest(manifest("plain-job", serde_json::Value::Null))
+            .await;
+
+        // "ghost" is in the listing but not the cache (unregistered job,
+        // or created within the watcher's sync window) — a silent miss.
+        let job_ids: HashSet<&str> = ["collect-logs", "collect-min", "plain-job", "ghost"]
+            .into_iter()
+            .collect();
+        let meta = collect_job_meta(&cache, &job_ids).await;
+
+        assert_eq!(
+            meta.get("collect-logs"),
+            Some(&("Logs".to_string(), Some("app logs".to_string())))
+        );
+        assert_eq!(
+            meta.get("collect-min"),
+            Some(&("Minimal".to_string(), None))
+        );
+        assert!(
+            !meta.contains_key("plain-job"),
+            "job without a collect hint stays unlabelled"
+        );
+        assert!(
+            !meta.contains_key("ghost"),
+            "cache miss stays unlabelled (best-effort)"
+        );
+        assert_eq!(meta.len(), 2);
+    }
 
     #[test]
     fn parse_bundle_key_splits_three_segments() {
