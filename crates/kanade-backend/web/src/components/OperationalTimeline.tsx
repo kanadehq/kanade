@@ -244,8 +244,9 @@ function axisTicks(t0: number, t1: number): { ts: number; label: string }[] {
  * session / sleep lanes are clipped to the power lane's ON spans so a state
  * left open across a power cycle can't paint over a powered-off gap. When a
  * PC has no winlog power events at all, the power and session lanes are
- * instead backfilled from the active spans — a real user input proves the
- * host was up and signed in (#970).
+ * instead backfilled from the active/idle presence envelope — the sampler
+ * running (active OR idle) proves the host was up and signed in, so those
+ * lanes stay filled across idle stretches (#970).
  *
  * `from` / `to` bound the window; when omitted they fall back to the
  * earliest / latest event so the Events page can use it without a window.
@@ -320,31 +321,41 @@ export function OperationalTimeline({
     const session = OP_LANES.find((l) => l.key === 'session')!;
     const sessionKinds = new Set<string>([...session.starts, ...session.ends]);
     const hasSession = events.some((e) => sessionKinds.has(e.kind));
-    // The active lane (agent idle sampler), built once — reused as the lane's
-    // own spans and as the backfill source below.
+    // The active lane (agent idle sampler): a filled span = active, a gap =
+    // idle. Built once and shown as-is on its own lane.
     const active = OP_LANES.find((l) => l.key === 'active')!;
     const activeSpans = buildSpans(events, active.starts, active.ends, t0, t1, now);
     // #970 backfill: when the PC reports NO winlog power events at all (the
-    // winlog collector isn't running on that host), a real `active` sample
-    // still proves the host was powered on with a user signed in. Paint the
-    // power and session lanes from the active spans so the "active ⇒ power &
-    // session" invariant holds, instead of leaving those lanes blank while
-    // active alone fills. Scoped to the absent-winlog case on purpose: once
-    // winlog exists it stays authoritative — including its OFF gaps — so a
-    // stale open `active` carried across a power cycle can't union its way over
-    // a powered-off span (#841). The clip-to-power path is unchanged there, and
-    // a trailing open `active` on a currently-offline agent is already trimmed
-    // by the heartbeat gate below. Power and session gate on their OWN kinds
-    // (not just power's) so a partial winlog feed — e.g. logon/logoff logged
-    // while the boot/shutdown listener isn't — keeps its genuine session spans
-    // (which also back the lane's markers) rather than being overwritten by the
-    // active proxy.
+    // winlog collector isn't running on that host), the idle sampler is the
+    // only signal that the host was up. Paint the power and session lanes from
+    // it so those lanes aren't blank while active fills, keeping the
+    // "active ⇒ power & session" invariant.
+    //
+    // Backfill from the *presence envelope*, NOT the active spans: an `idle`
+    // event still means the agent was sampling, i.e. the host was powered on
+    // and the user signed in — just not typing. Painting power/session from the
+    // active spans directly made them drop out during every idle stretch, as if
+    // the box powered off or logged out the moment the user paused (the minipc
+    // report that surfaced this). Treating `active` AND `idle` as "on" collapses
+    // the sampler's whole run into one continuous band across the idle gaps; the
+    // active lane keeps showing the gaps. The band runs to the live edge and is
+    // trimmed / hatched there by the heartbeat gate below when the agent is
+    // offline (an unexpected loss emits nothing, so we can't vouch past the last
+    // heartbeat). The active lane itself still shows the idle gaps.
+    const presenceSpans = buildSpans(events, [...active.starts, ...active.ends], [], t0, t1, now);
+    // Scoped to the absent-winlog case on purpose: once winlog exists it stays
+    // authoritative — including its OFF gaps — so a stale open `active` carried
+    // across a power cycle can't union its way over a powered-off span (#841).
+    // The clip-to-power path is unchanged there. Power and session gate on their
+    // OWN kinds (not just power's) so a partial winlog feed — e.g. logon/logoff
+    // logged while the boot/shutdown listener isn't — keeps its genuine session
+    // spans (which also back the lane's markers) rather than being overwritten.
     return OP_LANES.map((lane) => {
       let spans: Span[];
       if (lane.key === 'power') {
-        spans = hasPower ? powerSpans : activeSpans;
+        spans = hasPower ? powerSpans : presenceSpans;
       } else if (lane.key === 'session' && !hasPower && !hasSession) {
-        spans = activeSpans;
+        spans = presenceSpans;
       } else if (lane.key === 'active') {
         // Reuse the pre-built active spans; still clip to power ON when winlog
         // exists so a stale open span can't paint across a powered-off gap.
