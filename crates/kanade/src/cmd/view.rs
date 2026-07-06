@@ -53,15 +53,21 @@ pub enum ViewSub {
     ///
     /// `kanade view export <id>` prints to stdout; with `--out-dir` it
     /// writes `<dir>/<id>.yaml`. `--all --out-dir <dir>` dumps every
-    /// registered view. Round-trips with `create`.
+    /// registered view as one file per id; `--all` *without* `--out-dir`
+    /// streams them all to stdout as a single `---`-separated bundle
+    /// (`kanade view export --all > views.yaml`) — easy to diff and
+    /// re-appliable with `create`. Round-trips with `create`.
     Export {
         /// View id to export. Omit only with `--all`.
         #[arg(required_unless_present = "all")]
         id: Option<String>,
-        /// Export every registered view (requires `--out-dir`).
-        #[arg(long, conflicts_with = "id", requires = "out_dir")]
+        /// Export every registered view. With `--out-dir`, one file per id;
+        /// without it, a `---`-separated bundle on stdout.
+        #[arg(long, conflicts_with = "id")]
         all: bool,
-        /// Directory to write `<id>.yaml` into.
+        /// Directory to write `<id>.yaml` into. With `--all`, omit it to
+        /// stream a bundle to stdout; for a single id, omit it to print to
+        /// stdout instead.
         #[arg(long)]
         out_dir: Option<PathBuf>,
     },
@@ -108,11 +114,12 @@ fn validate_all(paths: Vec<PathBuf>) -> Result<()> {
     let files = crate::cmd::bulk::expand_manifest_paths(&paths)?;
     let mut failures = 0usize;
     for f in &files {
+        // Success lines are printed per-document inside `validate_one_doc`
+        // (parity with job/schedule validate and view's own create path), so
+        // this loop only surfaces file-level failures.
         if let Err(e) = validate_one(f) {
             eprintln!("✗ {}: {e:#}", f.display());
             failures += 1;
-        } else {
-            println!("✓ {}", f.display());
         }
     }
     if failures > 0 {
@@ -130,16 +137,80 @@ fn validate_all(paths: Vec<PathBuf>) -> Result<()> {
 /// appended — validation must not mutate the operator's tree.
 fn validate_one(yaml: &std::path::Path) -> Result<()> {
     let raw = std::fs::read_to_string(yaml).with_context(|| format!("read {yaml:?}"))?;
-    let view: View = kanade_shared::strict::from_yaml_str(&raw)
+    // Validate every document in a possibly multi-doc file (a bundle from
+    // `export --all`); single-doc files keep their exact prior behavior.
+    let docs = crate::cmd::bulk::split_yaml_documents(&raw);
+    match docs.as_slice() {
+        [] => anyhow::bail!("{yaml:?}: no YAML documents found"),
+        [only] => return validate_one_doc(yaml, only),
+        _ => {}
+    }
+    let mut failures = 0usize;
+    for (i, doc) in docs.iter().enumerate() {
+        if let Err(e) = validate_one_doc(yaml, doc) {
+            eprintln!("✗ {} [doc {}]: {e:#}", yaml.display(), i + 1);
+            failures += 1;
+        }
+    }
+    if failures > 0 {
+        anyhow::bail!(
+            "{failures}/{} document(s) in {yaml:?} failed validation",
+            docs.len()
+        );
+    }
+    Ok(())
+}
+
+/// Parse + validate one view document (one entry of a possibly
+/// multi-document file) without submitting it.
+fn validate_one_doc(yaml: &std::path::Path, raw: &str) -> Result<()> {
+    let view: View = kanade_shared::strict::from_yaml_str(raw)
         .map_err(|e| anyhow::anyhow!("parse {yaml:?}: {e}"))?;
     view.validate()
         .map_err(|e| anyhow::anyhow!("invalid view {yaml:?}: {e}"))?;
+    // Per-document success line, matching job/schedule validate and this
+    // file's create path, so every document in a bundle is acknowledged
+    // (not just the failing ones).
+    println!(
+        "✓ {} → view '{}' ({} widget(s)) (valid)",
+        yaml.display(),
+        view.id,
+        view.widgets.len(),
+    );
     Ok(())
 }
 
 async fn create_one(base: &str, yaml: &std::path::Path) -> Result<()> {
+    let raw = std::fs::read_to_string(yaml).with_context(|| format!("read {yaml:?}"))?;
+    // A file may bundle several views as a `---`-separated multi-doc stream
+    // (`kanade view export --all > views.yaml`); apply each one
+    // independently. A single-document file takes the fast path so its raw
+    // bytes and error messages are exactly as before multi-doc support.
+    let docs = crate::cmd::bulk::split_yaml_documents(&raw);
+    match docs.as_slice() {
+        [] => anyhow::bail!("{yaml:?}: no YAML documents found"),
+        [only] => return create_one_doc(base, yaml, only).await,
+        _ => {}
+    }
+    let mut failures = 0usize;
+    for (i, doc) in docs.iter().enumerate() {
+        if let Err(e) = create_one_doc(base, yaml, doc).await {
+            eprintln!("✗ {} [doc {}]: {e:#}", yaml.display(), i + 1);
+            failures += 1;
+        }
+    }
+    if failures > 0 {
+        anyhow::bail!("{failures}/{} document(s) in {yaml:?} failed", docs.len());
+    }
+    Ok(())
+}
+
+/// Parse + submit one view document — one entry of a possibly
+/// multi-document file. `raw` is that document's exact source text, shipped
+/// verbatim so the backend's comment-preserving mirror stays faithful.
+async fn create_one_doc(base: &str, yaml: &std::path::Path, raw: &str) -> Result<()> {
     // `mut` because the provenance step below appends an `origin:` block.
-    let mut body = std::fs::read_to_string(yaml).with_context(|| format!("read {yaml:?}"))?;
+    let mut body = raw.to_string();
     // Parse + validate client-side first so a malformed view errors at the
     // operator's shell rather than as the backend's 400; then ship the raw
     // YAML so the backend's BUCKET_VIEWS_YAML mirror keeps comments. #492:

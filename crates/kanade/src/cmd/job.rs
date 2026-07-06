@@ -57,17 +57,23 @@ pub enum JobSub {
     ///
     /// `kanade job export <id>` prints to stdout; with `--out-dir` it
     /// writes `<dir>/<id>.yaml`. `--all --out-dir <dir>` dumps every
-    /// registered job. Round-trips with `create`: `kanade job export
-    /// foo > foo.yaml` → edit → `kanade job create foo.yaml`.
+    /// registered job as one file per id; `--all` *without* `--out-dir`
+    /// streams them all to stdout as a single `---`-separated bundle
+    /// (`kanade job export --all > jobs.yaml`) — easy to diff against the
+    /// repo and re-appliable with `create`. Round-trips with `create`:
+    /// `kanade job export foo > foo.yaml` → edit → `kanade job create
+    /// foo.yaml`.
     Export {
         /// Job id to export. Omit only with `--all`.
         #[arg(required_unless_present = "all")]
         id: Option<String>,
-        /// Export every registered job (requires `--out-dir`).
-        #[arg(long, conflicts_with = "id", requires = "out_dir")]
+        /// Export every registered job. With `--out-dir`, one file per id;
+        /// without it, a `---`-separated bundle on stdout.
+        #[arg(long, conflicts_with = "id")]
         all: bool,
-        /// Directory to write `<id>.yaml` into. Required with `--all`;
-        /// for a single id, omit it to print to stdout instead.
+        /// Directory to write `<id>.yaml` into. With `--all`, omit it to
+        /// stream a bundle to stdout; for a single id, omit it to print to
+        /// stdout instead.
         #[arg(long)]
         out_dir: Option<PathBuf>,
     },
@@ -116,13 +122,41 @@ async fn create_all(base: &str, paths: Vec<PathBuf>) -> Result<()> {
 
 async fn create_one(base: &str, yaml: &std::path::Path) -> Result<()> {
     let raw = std::fs::read_to_string(yaml).with_context(|| format!("read {yaml:?}"))?;
+    // A file may bundle several manifests as a `---`-separated multi-doc
+    // stream (e.g. `kanade job export --all > jobs.yaml`); apply each one
+    // independently. A single-document file takes the fast path so its raw
+    // bytes and error messages are byte-for-byte what they were before
+    // multi-doc support.
+    let docs = crate::cmd::bulk::split_yaml_documents(&raw);
+    match docs.as_slice() {
+        [] => anyhow::bail!("{yaml:?}: no YAML documents found"),
+        [only] => return create_one_doc(base, yaml, only).await,
+        _ => {}
+    }
+    let mut failures = 0usize;
+    for (i, doc) in docs.iter().enumerate() {
+        if let Err(e) = create_one_doc(base, yaml, doc).await {
+            eprintln!("✗ {} [doc {}]: {e:#}", yaml.display(), i + 1);
+            failures += 1;
+        }
+    }
+    if failures > 0 {
+        anyhow::bail!("{failures}/{} document(s) in {yaml:?} failed", docs.len());
+    }
+    Ok(())
+}
+
+/// Parse + submit one manifest document — one entry of a possibly
+/// multi-document file. `raw` is that document's exact source text, kept
+/// verbatim so the backend's comment-preserving YAML mirror stays faithful.
+async fn create_one_doc(base: &str, yaml: &std::path::Path, raw: &str) -> Result<()> {
     // Parse client-side so a malformed YAML errors before any HTTP
     // round-trip — keeps the original error site obvious in operator
     // shells. #492: strict parse — unknown keys are typos at this
     // boundary and are rejected with their paths (the deny_unknown_
     // fields attribute moved off the types so fleet reads stay
     // tolerant).
-    let mut job: Manifest = kanade_shared::strict::from_yaml_str(&raw)
+    let mut job: Manifest = kanade_shared::strict::from_yaml_str(raw)
         .map_err(|e| anyhow::anyhow!("parse {yaml:?}: {e}"))?;
 
     // SPEC §2.4.1: exactly-one-of script / script_file / script_object.
@@ -197,7 +231,7 @@ async fn create_one(base: &str, yaml: &std::path::Path) -> Result<()> {
         // backends only understood JSON content-type, but
         // `application/yaml` is parsed identically on v0.31+, so the
         // CLI sends YAML unconditionally.
-        let mut out = raw.clone();
+        let mut out = raw.to_string();
         // #678: append GitOps provenance without disturbing the
         // operator's formatting. If the YAML already declares a top-level
         // `origin:` (operator hand-wrote one, or this is a previously
@@ -286,9 +320,36 @@ fn validate_all(paths: Vec<PathBuf>) -> Result<()> {
 /// validation must not mutate the operator's tree.
 fn validate_one(yaml: &std::path::Path) -> Result<()> {
     let raw = std::fs::read_to_string(yaml).with_context(|| format!("read {yaml:?}"))?;
+    // Validate every document in a possibly multi-doc file (a bundle from
+    // `export --all`); single-doc files keep their exact prior behavior.
+    let docs = crate::cmd::bulk::split_yaml_documents(&raw);
+    match docs.as_slice() {
+        [] => anyhow::bail!("{yaml:?}: no YAML documents found"),
+        [only] => return validate_one_doc(yaml, only),
+        _ => {}
+    }
+    let mut failures = 0usize;
+    for (i, doc) in docs.iter().enumerate() {
+        if let Err(e) = validate_one_doc(yaml, doc) {
+            eprintln!("✗ {} [doc {}]: {e:#}", yaml.display(), i + 1);
+            failures += 1;
+        }
+    }
+    if failures > 0 {
+        anyhow::bail!(
+            "{failures}/{} document(s) in {yaml:?} failed validation",
+            docs.len()
+        );
+    }
+    Ok(())
+}
+
+/// Parse + validate one manifest document (one entry of a possibly
+/// multi-document file) without submitting it.
+fn validate_one_doc(yaml: &std::path::Path, raw: &str) -> Result<()> {
     // #492: strict parse so unknown keys (operator typos) are rejected
     // with their paths, exactly as `create` would reject them.
-    let job: Manifest = kanade_shared::strict::from_yaml_str(&raw)
+    let job: Manifest = kanade_shared::strict::from_yaml_str(raw)
         .map_err(|e| anyhow::anyhow!("parse {yaml:?}: {e}"))?;
     // SPEC §2.4.1 exclusivity + the rest of the semantic checks.
     if let Err(e) = job.validate() {

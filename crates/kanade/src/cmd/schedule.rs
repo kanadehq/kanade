@@ -55,16 +55,21 @@ pub enum ScheduleSub {
     ///
     /// `kanade schedule export <id>` prints to stdout; with `--out-dir`
     /// it writes `<dir>/<id>.yaml`. `--all --out-dir <dir>` dumps every
-    /// registered schedule. Round-trips with `create`.
+    /// registered schedule as one file per id; `--all` *without*
+    /// `--out-dir` streams them all to stdout as a single `---`-separated
+    /// bundle (`kanade schedule export --all > schedules.yaml`) — easy to
+    /// diff and re-appliable with `create`. Round-trips with `create`.
     Export {
         /// Schedule id to export. Omit only with `--all`.
         #[arg(required_unless_present = "all")]
         id: Option<String>,
-        /// Export every registered schedule (requires `--out-dir`).
-        #[arg(long, conflicts_with = "id", requires = "out_dir")]
+        /// Export every registered schedule. With `--out-dir`, one file per
+        /// id; without it, a `---`-separated bundle on stdout.
+        #[arg(long, conflicts_with = "id")]
         all: bool,
-        /// Directory to write `<id>.yaml` into. Required with `--all`;
-        /// for a single id, omit it to print to stdout instead.
+        /// Directory to write `<id>.yaml` into. With `--all`, omit it to
+        /// stream a bundle to stdout; for a single id, omit it to print to
+        /// stdout instead.
         #[arg(long)]
         out_dir: Option<PathBuf>,
     },
@@ -356,10 +361,37 @@ fn validate_all(paths: Vec<PathBuf>) -> Result<()> {
 /// the HTTP POST: strict parse → `Schedule::validate()`. The `job_id`
 /// existence check is backend-owned and intentionally not done here.
 fn validate_one(yaml: &std::path::Path) -> Result<()> {
-    let body = std::fs::read_to_string(yaml).with_context(|| format!("read {yaml:?}"))?;
+    let raw = std::fs::read_to_string(yaml).with_context(|| format!("read {yaml:?}"))?;
+    // Validate every document in a possibly multi-doc file (a bundle from
+    // `export --all`); single-doc files keep their exact prior behavior.
+    let docs = crate::cmd::bulk::split_yaml_documents(&raw);
+    match docs.as_slice() {
+        [] => anyhow::bail!("{yaml:?}: no YAML documents found"),
+        [only] => return validate_one_doc(yaml, only),
+        _ => {}
+    }
+    let mut failures = 0usize;
+    for (i, doc) in docs.iter().enumerate() {
+        if let Err(e) = validate_one_doc(yaml, doc) {
+            eprintln!("✗ {} [doc {}]: {e:#}", yaml.display(), i + 1);
+            failures += 1;
+        }
+    }
+    if failures > 0 {
+        anyhow::bail!(
+            "{failures}/{} document(s) in {yaml:?} failed validation",
+            docs.len()
+        );
+    }
+    Ok(())
+}
+
+/// Parse + validate one schedule document (one entry of a possibly
+/// multi-document file) without submitting it.
+fn validate_one_doc(yaml: &std::path::Path, raw: &str) -> Result<()> {
     // #492: strict parse so unknown keys (operator typos) are rejected
     // with their paths, exactly as `create` would reject them.
-    let schedule: Schedule = kanade_shared::strict::from_yaml_str(&body)
+    let schedule: Schedule = kanade_shared::strict::from_yaml_str(raw)
         .map_err(|e| anyhow::anyhow!("parse {yaml:?}: {e}"))?;
     schedule
         .validate()
@@ -374,9 +406,37 @@ fn validate_one(yaml: &std::path::Path) -> Result<()> {
 }
 
 async fn create_one(base: &str, yaml: &std::path::Path) -> Result<()> {
+    let raw = std::fs::read_to_string(yaml).with_context(|| format!("read {yaml:?}"))?;
+    // A file may bundle several schedules as a `---`-separated multi-doc
+    // stream (`kanade schedule export --all > schedules.yaml`); apply each
+    // one independently. A single-document file takes the fast path so its
+    // raw bytes and error messages are exactly as before multi-doc support.
+    let docs = crate::cmd::bulk::split_yaml_documents(&raw);
+    match docs.as_slice() {
+        [] => anyhow::bail!("{yaml:?}: no YAML documents found"),
+        [only] => return create_one_doc(base, yaml, only).await,
+        _ => {}
+    }
+    let mut failures = 0usize;
+    for (i, doc) in docs.iter().enumerate() {
+        if let Err(e) = create_one_doc(base, yaml, doc).await {
+            eprintln!("✗ {} [doc {}]: {e:#}", yaml.display(), i + 1);
+            failures += 1;
+        }
+    }
+    if failures > 0 {
+        anyhow::bail!("{failures}/{} document(s) in {yaml:?} failed", docs.len());
+    }
+    Ok(())
+}
+
+/// Parse + submit one schedule document — one entry of a possibly
+/// multi-document file. `raw` is that document's exact source text, shipped
+/// verbatim so the backend's comment-preserving mirror stays faithful.
+async fn create_one_doc(base: &str, yaml: &std::path::Path, raw: &str) -> Result<()> {
     // `mut` because the #695 provenance step below appends an `origin:`
     // block to the raw YAML before it is shipped.
-    let mut body = std::fs::read_to_string(yaml).with_context(|| format!("read {yaml:?}"))?;
+    let mut body = raw.to_string();
     // Parse client-side first so a malformed YAML errors at the
     // operator's shell rather than via the backend's 400 — keeps the
     // error site obvious. Then ship the raw YAML body so the
