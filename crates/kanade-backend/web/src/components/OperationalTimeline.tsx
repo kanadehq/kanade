@@ -132,6 +132,40 @@ function buildSpans(
     .filter((s) => s.to > s.from);
 }
 
+// Coalesce overlapping / touching spans into one. Used to build the presence
+// envelope (active ∪ idle spans) for the winlog-less backfill: unioning the
+// two directions keeps buildSpans' carry-in at *both* edges (a leading `idle`
+// implies the host was active right up to it; a leading `active` implies it was
+// idle-but-on before), so the envelope covers the window edge instead of
+// starting at the first raw event and leaving a sliver where the active lane's
+// own carry-in already paints. Assumes `spans` are within [t0, t1]. The merged
+// span keeps the earliest contributor's `openStart` and, when a later span
+// extends the end, that span's `openEnd`.
+function mergeSpans(spans: Span[]): Span[] {
+  const sorted = [...spans].sort((a, b) => a.from - b.from);
+  const out: Span[] = [];
+  for (const s of sorted) {
+    const last = out[out.length - 1];
+    if (last && s.from <= last.to) {
+      // Coincident boundaries must OR the "continues beyond" flags, not drop
+      // them: two spans sharing `from` (both carried in to t0) keep openStart
+      // if either has it, and two sharing the end keep openEnd if either is
+      // open — otherwise the flag of a same-boundary sibling sorted first wins
+      // and silently clears it.
+      if (s.from === last.from) last.openStart = last.openStart || s.openStart;
+      if (s.to > last.to) {
+        last.to = s.to;
+        last.openEnd = s.openEnd;
+      } else if (s.to === last.to) {
+        last.openEnd = last.openEnd || s.openEnd;
+      }
+    } else {
+      out.push({ ...s });
+    }
+  }
+  return out;
+}
+
 // Intersect a subordinate lane's spans with the power lane's ON intervals.
 // The active / session / sleep lanes are reconstructed independently of
 // power, but a host can't be in any of those states while it's switched
@@ -336,13 +370,17 @@ export function OperationalTimeline({
     // and the user signed in — just not typing. Painting power/session from the
     // active spans directly made them drop out during every idle stretch, as if
     // the box powered off or logged out the moment the user paused (the minipc
-    // report that surfaced this). Treating `active` AND `idle` as "on" collapses
-    // the sampler's whole run into one continuous band across the idle gaps; the
-    // active lane keeps showing the gaps. The band runs to the live edge and is
-    // trimmed / hatched there by the heartbeat gate below when the agent is
-    // offline (an unexpected loss emits nothing, so we can't vouch past the last
-    // heartbeat). The active lane itself still shows the idle gaps.
-    const presenceSpans = buildSpans(events, [...active.starts, ...active.ends], [], t0, t1, now);
+    // report that surfaced this). Union the active spans (active→idle) with the
+    // idle spans (idle→active) and coalesce: that collapses the sampler's whole
+    // run into one continuous band across the idle gaps while keeping
+    // buildSpans' carry-in at both window edges, so the envelope reaches the
+    // edge instead of starting at the first raw event and leaving a sliver where
+    // the active lane's own carry-in already paints (power/session ⊇ active,
+    // exactly). The band runs to the live edge and is trimmed / hatched there by
+    // the heartbeat gate below when the agent is offline. The active lane itself
+    // still shows the idle gaps.
+    const idleSpans = buildSpans(events, active.ends, active.starts, t0, t1, now);
+    const presenceSpans = mergeSpans([...activeSpans, ...idleSpans]);
     // Scoped to the absent-winlog case on purpose: once winlog exists it stays
     // authoritative — including its OFF gaps — so a stale open `active` carried
     // across a power cycle can't union its way over a powered-off span (#841).
