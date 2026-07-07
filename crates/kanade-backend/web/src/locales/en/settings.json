@@ -45,6 +45,14 @@
       "unsetPlaceholder": "default",
       "blankHint": "Leave blank to use the default (shown faintly, currently 30 days). Extending this keeps bundles longer; the bucket's size cap still bounds total disk."
     },
+    "sessionTtl": {
+      "title": "Login session lifetime",
+      "description": "How long a SPA / CLI login stays valid before you have to sign in again. Applies to tokens minted after the change, not already-issued sessions. Disabling an account still takes effect immediately, regardless of this window.",
+      "label": "Expire login after",
+      "unit": "hours",
+      "unsetPlaceholder": "default",
+      "blankHint": "Leave blank to use the default (shown faintly, currently 24 hours). Allowed range is 1–8760 hours (up to 365 days)."
+    },
     "controllerGroup": {
       "title": "Controller group (trusted runners)",
       "description": "The agent group whose members may run `tier: controller` jobs (e.g. a `feed:` job that fetches an external URL). These jobs are never dispatched to employee endpoints — only to members of this group.",

@@ -30,6 +30,22 @@ pub const DEFAULT_COLLECT_RETENTION_DAYS: u32 = 30;
 /// hand-written KV value stays sane.
 pub const MAX_COLLECT_RETENTION_DAYS: u32 = 3650;
 
+/// Built-in default for [`ServerSettings::session_ttl_hours`] — how long a
+/// freshly-minted SPA/CLI login token stays valid when the operator hasn't
+/// overridden it. 24h balances "don't re-auth mid-workday" against a
+/// bounded window for a leaked token (the DB row is re-checked every
+/// request, so `disable` still takes effect immediately regardless).
+pub const DEFAULT_SESSION_TTL_HOURS: u32 = 24;
+
+/// Upper bound on [`ServerSettings::session_ttl_hours`] (365 days). Keeps
+/// login's `Utc::now() + Duration::hours(n)` comfortably inside `chrono`'s
+/// representable range (its nanosecond `i64` caps out ~292 years, so an
+/// unclamped `u32` of hours could overflow) and stops an operator pinning a
+/// practically-immortal session. Enforced by the PUT handler and clamped in
+/// [`ServerSettings::effective_session_ttl_hours`] so even a hand-written
+/// KV value stays bounded.
+pub const MAX_SESSION_TTL_HOURS: u32 = 8_760;
+
 /// Value stored in the `server_settings` KV bucket under the single key
 /// [`crate::kv::KEY_SERVER_SETTINGS`]. Operator-editable, backend-side
 /// server configuration that isn't per-agent (so it doesn't belong in
@@ -110,16 +126,32 @@ pub struct ServerSettings {
     /// untouched, so extending the window can't make the store grow unbounded.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub collect_retention_days: Option<u32>,
+
+    /// How many hours a freshly-minted login token (SPA / CLI) stays valid
+    /// before the caller must re-authenticate. Read backend-side by the
+    /// login handler when it mints the JWT `exp`; changing it affects
+    /// **tokens minted after the change**, not already-issued ones.
+    ///
+    /// Like [`collect_retention_days`](Self::collect_retention_days) this
+    /// carries a **real built-in default** ([`DEFAULT_SESSION_TTL_HOURS`],
+    /// 24h): `None` (unset) falls back to it, so a blank field resolves to a
+    /// usable window rather than an instantly-expired token. Clamped to
+    /// `1..=`[`MAX_SESSION_TTL_HOURS`]. The SPA renders `24` as a faint
+    /// placeholder on a blank field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_ttl_hours: Option<u32>,
 }
 
 impl ServerSettings {
     /// Built-in defaults applied when a field is unset (`None`) in the
     /// stored document. Most fields default to `None` (no fleet-meaningful
     /// default — a blank prune window means "disabled" rather than some
-    /// arbitrary number of days), the exception being
-    /// [`collect_retention_days`](Self::collect_retention_days), which carries
-    /// a real default ([`DEFAULT_COLLECT_RETENTION_DAYS`]) so a blank field
-    /// preserves the historical 30-day retention.
+    /// arbitrary number of days). The exceptions carry real defaults so a
+    /// blank field still resolves to a sensible value:
+    /// [`collect_retention_days`](Self::collect_retention_days)
+    /// ([`DEFAULT_COLLECT_RETENTION_DAYS`], preserving the historical 30-day
+    /// retention) and [`session_ttl_hours`](Self::session_ttl_hours)
+    /// ([`DEFAULT_SESSION_TTL_HOURS`], 24h).
     ///
     /// Exposed via `GET /api/server-settings/defaults` so the SPA renders
     /// these as faint placeholders (mirroring the agent layered-config
@@ -132,6 +164,7 @@ impl ServerSettings {
             controller_group: None,
             mail: None,
             collect_retention_days: Some(DEFAULT_COLLECT_RETENTION_DAYS),
+            session_ttl_hours: Some(DEFAULT_SESSION_TTL_HOURS),
         }
     }
 
@@ -175,6 +208,19 @@ impl ServerSettings {
             .or(Self::defaults().collect_retention_days)
             .unwrap_or(DEFAULT_COLLECT_RETENTION_DAYS)
             .clamp(1, MAX_COLLECT_RETENTION_DAYS)
+    }
+
+    /// The effective login-token lifetime in hours: the stored value if
+    /// set, else the built-in [`DEFAULT_SESSION_TTL_HOURS`]. Floored at 1
+    /// and clamped to [`MAX_SESSION_TTL_HOURS`] so a zero/absent/out-of-band
+    /// value can never mint an already-expired or overflow-inducing token.
+    /// The PUT handler already rejects `0` / over-cap, so this is the
+    /// belt-and-braces path for a hand-edited KV value.
+    pub fn effective_session_ttl_hours(&self) -> u32 {
+        self.session_ttl_hours
+            .or(Self::defaults().session_ttl_hours)
+            .unwrap_or(DEFAULT_SESSION_TTL_HOURS)
+            .clamp(1, MAX_SESSION_TTL_HOURS)
     }
 }
 
@@ -380,6 +426,66 @@ mod tests {
             !serde_json::to_string(&ServerSettings::default())
                 .unwrap()
                 .contains("collect_retention_days")
+        );
+    }
+
+    #[test]
+    fn session_ttl_unset_resolves_to_builtin_default() {
+        // Blank (the derived Default) must resolve to the 24h default rather
+        // than 0 (which would mint already-expired tokens).
+        assert_eq!(ServerSettings::default().session_ttl_hours, None);
+        assert_eq!(
+            ServerSettings::default().effective_session_ttl_hours(),
+            DEFAULT_SESSION_TTL_HOURS,
+        );
+        // The defaults() document surfaces the real default so the SPA can
+        // render it as a placeholder.
+        assert_eq!(
+            ServerSettings::defaults().session_ttl_hours,
+            Some(DEFAULT_SESSION_TTL_HOURS),
+        );
+    }
+
+    #[test]
+    fn session_ttl_stored_value_wins() {
+        let s = ServerSettings {
+            session_ttl_hours: Some(72),
+            ..Default::default()
+        };
+        assert_eq!(s.effective_session_ttl_hours(), 72);
+    }
+
+    #[test]
+    fn session_ttl_effective_clamps_out_of_band_writes() {
+        // An out-of-band 0 must floor to 1 (else `now + 0h` is an
+        // instantly-expired token); a value past the cap clamps down so
+        // login's date math can't overflow.
+        let zero = ServerSettings {
+            session_ttl_hours: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(zero.effective_session_ttl_hours(), 1);
+        let huge = ServerSettings {
+            session_ttl_hours: Some(u32::MAX),
+            ..Default::default()
+        };
+        assert_eq!(huge.effective_session_ttl_hours(), MAX_SESSION_TTL_HOURS);
+    }
+
+    #[test]
+    fn session_ttl_round_trips_and_omits_when_unset() {
+        let s = ServerSettings {
+            session_ttl_hours: Some(48),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert_eq!(json, r#"{"session_ttl_hours":48}"#);
+        assert_eq!(serde_json::from_str::<ServerSettings>(&json).unwrap(), s);
+        // Unset is omitted so a blank doc stays minimal.
+        assert!(
+            !serde_json::to_string(&ServerSettings::default())
+                .unwrap()
+                .contains("session_ttl_hours")
         );
     }
 

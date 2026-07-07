@@ -27,11 +27,12 @@ use crate::api::password_setup::{self, PURPOSE_RESET, PURPOSE_SETUP};
 use crate::audit::{self, Caller};
 use crate::auth::{Claims, EXPECTED_AUDIENCE, Role, signing_secret};
 
-/// Token lifetime. The DB row is re-checked on every request (see
-/// [`crate::auth::verify`]), so this only bounds how long a token stays
-/// valid after the user record is *deleted* — `disable` takes effect
-/// immediately regardless.
-const TOKEN_TTL_HOURS: i64 = 12;
+// Token lifetime is operator-configurable via `server_settings`
+// (`session_ttl_hours`, default 24h — see
+// `kanade_shared::wire::ServerSettings`). The DB row is re-checked on every
+// request (see [`crate::auth::verify`]), so this window only bounds how
+// long a token stays valid after the user record is *deleted* — `disable`
+// takes effect immediately regardless.
 /// Shared with [`crate::api::password_setup`] so the link-based set/reset
 /// path enforces the same minimum as login-managed changes.
 pub(crate) const MIN_PASSWORD_LEN: usize = 8;
@@ -92,10 +93,12 @@ async fn verify_password_async(pw: String, phc: String) -> bool {
 
 // ---- JWT minting ---------------------------------------------------
 
-/// Mint a signed HS256 token. `None` on a signing failure (logged) —
-/// the caller maps that to a 500.
-fn mint_jwt(sub: &str, role: Role) -> Option<(String, i64)> {
-    let exp = (Utc::now() + Duration::hours(TOKEN_TTL_HOURS)).timestamp();
+/// Mint a signed HS256 token valid for `ttl_hours` hours. `None` on a
+/// signing failure (logged) — the caller maps that to a 500. `ttl_hours`
+/// is the operator-configured session window, already clamped to a sane
+/// range by [`kanade_shared::wire::ServerSettings::effective_session_ttl_hours`].
+fn mint_jwt(sub: &str, role: Role, ttl_hours: i64) -> Option<(String, i64)> {
+    let exp = (Utc::now() + Duration::hours(ttl_hours)).timestamp();
     let claims = Claims {
         sub: sub.to_string(),
         exp,
@@ -170,7 +173,19 @@ pub async fn login(
         return Err(err(StatusCode::INTERNAL_SERVER_ERROR, "corrupt role"));
     };
 
-    let (token, exp) = mint_jwt(&req.username, role)
+    // Operator-configured session window (default 24h). A broker hiccup
+    // reading the KV must not block login — fall back to the built-in
+    // default rather than 500ing an otherwise-valid sign-in. Log the error
+    // (mirroring the sqlx failure above) so a persistent KV/broker outage is
+    // observable rather than silently degrading every login to the default.
+    let ttl_hours = match super::server_settings::load(&state).await {
+        Ok(s) => s.effective_session_ttl_hours(),
+        Err(e) => {
+            warn!(error = %format!("{e:#}"), "server_settings load failed at login; using default session TTL");
+            kanade_shared::wire::DEFAULT_SESSION_TTL_HOURS
+        }
+    } as i64;
+    let (token, exp) = mint_jwt(&req.username, role, ttl_hours)
         .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "token mint failed"))?;
     Ok(Json(LoginResp {
         token,

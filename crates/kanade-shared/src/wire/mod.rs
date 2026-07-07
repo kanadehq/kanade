@@ -31,7 +31,7 @@ pub use result::{
     is_synthetic_skip,
 };
 pub use server_settings::{
-    DEFAULT_COLLECT_RETENTION_DAYS, MAX_AGENT_PRUNE_DAYS, MAX_COLLECT_RETENTION_DAYS,
-    ServerSettings,
+    DEFAULT_COLLECT_RETENTION_DAYS, DEFAULT_SESSION_TTL_HOURS, MAX_AGENT_PRUNE_DAYS,
+    MAX_COLLECT_RETENTION_DAYS, MAX_SESSION_TTL_HOURS, ServerSettings,
 };
 pub use staleness::Staleness;
