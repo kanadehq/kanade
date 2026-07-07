@@ -23,7 +23,9 @@ use axum::http::StatusCode;
 use kanade_shared::config::MailSection;
 use kanade_shared::kv::{BUCKET_SERVER_SETTINGS, KEY_SERVER_SETTINGS};
 use kanade_shared::kv_cas;
-use kanade_shared::wire::{MAX_AGENT_PRUNE_DAYS, MAX_COLLECT_RETENTION_DAYS, ServerSettings};
+use kanade_shared::wire::{
+    MAX_AGENT_PRUNE_DAYS, MAX_COLLECT_RETENTION_DAYS, MAX_SESSION_TTL_HOURS, ServerSettings,
+};
 use lettre::message::Mailbox;
 use serde_json::{Map, Value};
 use tracing::{info, warn};
@@ -89,6 +91,10 @@ pub async fn defaults() -> Json<ServerSettings> {
 /// - `agent_prune_days`: `Some(0)` rejected (omit / `null` to disable — a
 ///   stored `0` would round-trip and wedge the SPA's `min=1` field); over
 ///   [`MAX_AGENT_PRUNE_DAYS`] rejected (signals a client bug).
+/// - `collect_retention_days`: `Some(0)` rejected (omit / `null` to fall back
+///   to the built-in default); over [`MAX_COLLECT_RETENTION_DAYS`] rejected.
+/// - `session_ttl_hours`: `Some(0)` rejected (omit / `null` to fall back to
+///   the built-in default); over [`MAX_SESSION_TTL_HOURS`] rejected.
 /// - `controller_group`: present-but-blank rejected (unambiguous stored doc).
 /// - `mail`: host non-empty, port in 1..=65535, `from` a parseable address
 ///   (the same parser `Mailer` uses at boot, so a bad address is caught here
@@ -126,6 +132,7 @@ pub async fn put(
     // which may re-run on a revision conflict and can't be fallible).
     let prune_value = typed.agent_prune_days.map(Value::from);
     let collect_value = typed.collect_retention_days.map(Value::from);
+    let session_ttl_value = typed.session_ttl_hours.map(Value::from);
     let controller_value = typed.controller_group.clone().map(Value::String);
     let mail_value = match typed.mail.as_ref() {
         Some(m) => Some(serde_json::to_value(m).map_err(|e| {
@@ -160,6 +167,12 @@ pub async fn put(
                 collect_value.clone(),
             );
             changed |= collect_changed;
+            changed |= merge_field(
+                obj,
+                &incoming,
+                "session_ttl_hours",
+                session_ttl_value.clone(),
+            );
             changed |= merge_field(obj, &incoming, "controller_group", controller_value.clone());
             changed |= merge_field(obj, &incoming, "mail", mail_value.clone());
             changed
@@ -186,6 +199,7 @@ pub async fn put(
     info!(
         agent_prune_days = ?merged.agent_prune_days,
         collect_retention_days = ?merged.collect_retention_days,
+        session_ttl_hours = ?merged.session_ttl_hours,
         controller_group = ?merged.controller_group,
         mail_configured = merged.mail.is_some(),
         "server_settings merged",
@@ -295,6 +309,25 @@ fn validate(s: &ServerSettings) -> Result<(), (StatusCode, String)> {
                 format!(
                     "collect_retention_days must be <= {MAX_COLLECT_RETENTION_DAYS} (10 years)"
                 ),
+            ));
+        }
+    }
+    if let Some(hours) = s.session_ttl_hours {
+        // `Some(0)` is rejected like the other numeric knobs: it would
+        // round-trip and wedge the SPA's `min=1` field, and a 0-hour token is
+        // expired the instant it's minted. Omit / `null` to fall back to the
+        // built-in 24h default instead.
+        if hours == 0 {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "session_ttl_hours must be >= 1; omit it or send null to use the default"
+                    .to_string(),
+            ));
+        }
+        if hours > MAX_SESSION_TTL_HOURS {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("session_ttl_hours must be <= {MAX_SESSION_TTL_HOURS} (365 days)"),
             ));
         }
     }

@@ -27,6 +27,11 @@ const MAX_AGENT_PRUNE_DAYS = 36_500;
 // feedback only.
 const MAX_COLLECT_RETENTION_DAYS = 3650;
 
+// Mirrors `MAX_SESSION_TTL_HOURS` (kanade_shared::wire::server_settings):
+// 365 days. The backend PUT enforces the same bound; this is client-side
+// feedback only.
+const MAX_SESSION_TTL_HOURS = 8_760;
+
 /// SMTP transport security — mirrors `kanade_shared::config::MailEncryption`
 /// (serialised lowercase).
 type MailEncryption = 'starttls' | 'tls' | 'none';
@@ -50,6 +55,7 @@ interface MailSettings {
 interface ServerSettings {
   agent_prune_days: number | null;
   collect_retention_days: number | null;
+  session_ttl_hours: number | null;
   controller_group: string | null;
   mail: MailSettings | null;
 }
@@ -227,6 +233,10 @@ function ServerTab() {
   // to the built-in default (30 d, shown as the placeholder) — unlike the
   // prune field, blank here does NOT disable retention.
   const [collectDays, setCollectDays] = useState('');
+  // Login-token lifetime (hours). Blank = unset, which falls back to the
+  // built-in default (24 h, shown as the placeholder) — like collect
+  // retention, blank does NOT disable sessions.
+  const [sessionTtl, setSessionTtl] = useState('');
   // Trusted runner group for `tier: controller` jobs. Blank = unset
   // (controller-tier jobs run nowhere — fail-safe).
   const [controllerGroup, setControllerGroup] = useState('');
@@ -246,6 +256,9 @@ function ServerTab() {
         settings.data.collect_retention_days == null
           ? ''
           : String(settings.data.collect_retention_days),
+      );
+      setSessionTtl(
+        settings.data.session_ttl_hours == null ? '' : String(settings.data.session_ttl_hours),
       );
       // Trim on seed so an unedited reload of a stored value with stray
       // whitespace doesn't read as dirty (the draft is compared trimmed).
@@ -335,6 +348,17 @@ function ServerTab() {
       collectParsed >= 1 &&
       collectParsed <= MAX_COLLECT_RETENTION_DAYS);
 
+  // session_ttl_hours: blank → unset (null → built-in 24h default). A
+  // non-blank value must be a whole number in [1, MAX_SESSION_TTL_HOURS].
+  const sessionTtlTrimmed = sessionTtl.trim();
+  const sessionTtlParsed = Number(sessionTtlTrimmed);
+  const sessionTtlValue: number | null = sessionTtlTrimmed === '' ? null : sessionTtlParsed;
+  const sessionTtlValid =
+    sessionTtlTrimmed === '' ||
+    (Number.isInteger(sessionTtlParsed) &&
+      sessionTtlParsed >= 1 &&
+      sessionTtlParsed <= MAX_SESSION_TTL_HOURS);
+
   // controller_group: blank → unset (null). Any non-blank group name is
   // valid here; the backend resolves membership at dispatch time.
   const cgTrimmed = controllerGroup.trim();
@@ -384,16 +408,18 @@ function ServerTab() {
   // One save for the whole document. The PUT merges per-field, but the SPA
   // always sends every field it knows, so an unchanged one is re-sent
   // as-is. `dirty` if any field diverges from the stored doc.
-  const valid = pruneValid && collectValid && mailValid;
+  const valid = pruneValid && collectValid && sessionTtlValid && mailValid;
   const dirty =
     settings.data != null &&
     (pruneValue !== settings.data.agent_prune_days ||
       collectValue !== settings.data.collect_retention_days ||
+      sessionTtlValue !== settings.data.session_ttl_hours ||
       controllerValue !== (settings.data.controller_group ?? null) ||
       mailDirty);
   const doc: ServerSettings = {
     agent_prune_days: pruneValue,
     collect_retention_days: collectValue,
+    session_ttl_hours: sessionTtlValue,
     controller_group: controllerValue,
     mail: mailValue,
   };
@@ -412,6 +438,12 @@ function ServerTab() {
     defaults.data && defaults.data.collect_retention_days != null
       ? String(defaults.data.collect_retention_days)
       : t('server.collectRetention.unsetPlaceholder');
+  // session_ttl_hours also has a real built-in default (24h), so the
+  // placeholder shows that number; a blank field resolves to it.
+  const sessionTtlPlaceholder =
+    defaults.data && defaults.data.session_ttl_hours != null
+      ? String(defaults.data.session_ttl_hours)
+      : t('server.sessionTtl.unsetPlaceholder');
 
   return (
     <div className="space-y-4">
@@ -477,6 +509,35 @@ function ServerTab() {
               <span className="text-muted text-sm">{t('server.collectRetention.unit')}</span>
             </div>
             <p className="text-muted text-xs">{t('server.collectRetention.blankHint')}</p>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="max-w-xl">
+        <CardHeader>
+          <CardTitle>{t('server.sessionTtl.title')}</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <p className="text-muted text-sm">{t('server.sessionTtl.description')}</p>
+          <div className="space-y-1">
+            <Label htmlFor="session-ttl-hours">{t('server.sessionTtl.label')}</Label>
+            <div className="flex items-center gap-2">
+              <Input
+                id="session-ttl-hours"
+                type="number"
+                min={1}
+                max={MAX_SESSION_TTL_HOURS}
+                step={1}
+                inputMode="numeric"
+                value={sessionTtl}
+                placeholder={sessionTtlPlaceholder}
+                disabled={!canOperate || settings.isLoading}
+                onChange={(e) => setSessionTtl(e.target.value)}
+                className="w-32"
+              />
+              <span className="text-muted text-sm">{t('server.sessionTtl.unit')}</span>
+            </div>
+            <p className="text-muted text-xs">{t('server.sessionTtl.blankHint')}</p>
           </div>
         </CardContent>
       </Card>
