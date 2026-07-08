@@ -80,7 +80,7 @@ lettre             = { version = "0.11.22", default-features = false, features =
 # platform (Win/macOS/Linux), no cfg gating needed.
 rpassword          = "7.5.4"
 tokio-cron-scheduler = "0.15.1"
-rust-embed         = "8.11.0"
+rust-embed         = "8.12.0"
 mime_guess         = "2.0.5"
 # jsonwebtoken 10.x routes HS256 through a rustls-style CryptoProvider and
 # panics at runtime ("Could not automatically determine the process-level
