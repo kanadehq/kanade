@@ -159,6 +159,7 @@ pub async fn command_loop(
                 staleness,
                 script_cache,
                 check_sink,
+                CommandSource::Nats,
             )
             .await
             {
@@ -268,6 +269,37 @@ impl CommandOutcome {
     }
 }
 
+/// Where a [`handle_command`] invocation originated. This gates the
+/// Layer-2 **version-pin** check (§2.6.4): that gate exists to reject a
+/// broker-queued Command whose pinned `version` has since gone stale, so
+/// it only makes sense for commands that actually travelled over NATS.
+///
+/// An agent-local `local_scheduler` fire is different: it builds
+/// `cmd.version` from `manifest.version` in the SAME freshly-reconciled
+/// `BUCKET_JOBS` snapshot it read the manifest from (that snapshot is the
+/// authoritative version source for `runs_on: agent` — refreshed by the
+/// jobs KV watch while online and by a full `collect_jobs` resync on
+/// reconnect). There is no independent, newer authority to check it
+/// against. `script_current` is maintained ONLY by the backend fire /
+/// exec path (`kanade-backend/src/api/exec.rs`), never by an agent-local
+/// fire, so for a `runs_on: agent` job it lags one version bump behind
+/// and the pin gate self-rejects every tick with exit 124
+/// (`version-pin mismatch`) until someone runs a backend `kanade exec`.
+/// `LocalScheduler` therefore skips the pin gate; `Nats` keeps it. The
+/// revoke kill-switch (§2.6.4 (b)) is deliberately NOT gated on source —
+/// a revoked script must stay revoked no matter who fires it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandSource {
+    /// Delivered over NATS — the live core subscription or a JetStream
+    /// replay of a missed command. Both may carry a stale pinned version,
+    /// so both keep the version-pin gate.
+    Nats,
+    /// Synthesised by the agent's own `local_scheduler` for a
+    /// `runs_on: agent` schedule tick. `cmd.version` is authoritative by
+    /// construction, so the version-pin gate is skipped.
+    LocalScheduler,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_command(
     client: async_nats::Client,
@@ -278,6 +310,7 @@ pub async fn handle_command(
     staleness: Tracker,
     script_cache: ScriptCache,
     check_sink: crate::check_cache::CheckSink,
+    source: CommandSource,
 ) -> Result<CommandOutcome> {
     // Spec §2.6 Layer 2: version-pinning + revoke check + v0.26
     // staleness policy. The order matters:
@@ -302,11 +335,17 @@ pub async fn handle_command(
         }
     }
 
-    if let Some(cur) = &script_current
+    // Version-pin gate (§2.6.4): only NATS-delivered commands can carry a
+    // stale broker-queued version. An agent-local fire builds cmd.version
+    // from the same authoritative BUCKET_JOBS snapshot, so gating it
+    // against the backend-only `script_current` KV would self-reject every
+    // `runs_on: agent` tick after a bump (exit 124). See [`CommandSource`].
+    if source == CommandSource::Nats
+        && let Some(cur) = &script_current
         && let Ok(Some(entry)) = cur.get(&cmd.id).await
     {
         let expected = String::from_utf8_lossy(&entry).to_string();
-        if expected != cmd.version {
+        if version_pin_rejects(source, Some(&expected), &cmd.version) {
             warn!(
                 cmd_id = %cmd.id,
                 expected = %expected,
@@ -817,6 +856,19 @@ fn should_skip_for_deadline(
     now > deadline
 }
 
+/// Pure decision for the Layer-2 version-pin gate (§2.6.2): does the pin
+/// reject this command? Kept as a free function so the `version_pin_*`
+/// unit tests below can assert the source-gating + mismatch semantics
+/// without a live KV `Store`. `pinned` is the `script_current.<id>` value
+/// the agent read (None when the source isn't gated, the key is absent, or
+/// the read failed). Only a NATS-delivered command whose pinned version
+/// disagrees is rejected; an agent-local fire (`CommandSource::LocalScheduler`)
+/// is always allowed because its `cmd.version` is authoritative by
+/// construction — see [`CommandSource`].
+fn version_pin_rejects(source: CommandSource, pinned: Option<&str>, cmd_version: &str) -> bool {
+    source == CommandSource::Nats && matches!(pinned, Some(p) if p != cmd_version)
+}
+
 /// v0.26: Synthesise an ExecResult for "Layer 2 strict staleness
 /// exceeded — agent couldn't verify it's running the latest version
 /// because the broker view is too old." Exit code 127 is reserved
@@ -1010,6 +1062,56 @@ mod tests {
         assert!(!CommandOutcome::Ran { exit_code: 1 }.is_success());
         assert!(!CommandOutcome::Ran { exit_code: 124 }.is_success());
         assert!(!CommandOutcome::Skipped.is_success());
+    }
+
+    #[test]
+    fn version_pin_rejects_stale_nats_command() {
+        // The bug this PR fixes: a NATS-delivered command whose pinned
+        // version disagrees with `script_current` is rejected (exit 124).
+        assert!(version_pin_rejects(
+            CommandSource::Nats,
+            Some("0.2.0"),
+            "0.2.1"
+        ));
+    }
+
+    #[test]
+    fn version_pin_allows_matching_nats_command() {
+        assert!(!version_pin_rejects(
+            CommandSource::Nats,
+            Some("0.2.1"),
+            "0.2.1"
+        ));
+    }
+
+    #[test]
+    fn version_pin_allows_nats_command_with_no_kv_entry() {
+        // No `script_current.<id>` value → nothing to disagree with, so the
+        // gate stays open (matches the `if let Ok(Some(_))` guard).
+        assert!(!version_pin_rejects(CommandSource::Nats, None, "0.2.1"));
+    }
+
+    #[test]
+    fn version_pin_never_rejects_local_scheduler_fire() {
+        // The heart of the fix: an agent-local fire is authoritative by
+        // construction, so it is allowed even when `script_current` lags —
+        // the exact condition that used to self-reject every tick.
+        assert!(!version_pin_rejects(
+            CommandSource::LocalScheduler,
+            Some("0.2.0"),
+            "0.2.1"
+        ));
+        // ...and also when it happens to match, and when there is no entry.
+        assert!(!version_pin_rejects(
+            CommandSource::LocalScheduler,
+            Some("0.2.1"),
+            "0.2.1"
+        ));
+        assert!(!version_pin_rejects(
+            CommandSource::LocalScheduler,
+            None,
+            "0.2.1"
+        ));
     }
 
     #[test]

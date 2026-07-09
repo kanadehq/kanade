@@ -18,7 +18,8 @@ use axum::http::StatusCode;
 use axum::http::header::HeaderMap;
 use futures::TryStreamExt;
 use kanade_shared::kv::{
-    BUCKET_JOBS, BUCKET_JOBS_YAML, BUCKET_SCHEDULES, BUCKET_SCRIPT_STATUS, SCRIPT_STATUS_REVOKED,
+    BUCKET_JOBS, BUCKET_JOBS_YAML, BUCKET_SCHEDULES, BUCKET_SCRIPT_CURRENT, BUCKET_SCRIPT_STATUS,
+    SCRIPT_STATUS_REVOKED,
 };
 use kanade_shared::manifest::{Manifest, Schedule};
 use kanade_shared::subject;
@@ -277,6 +278,37 @@ pub async fn create(
     kv.put(&job.id, body_bytes.into())
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("KV put: {e}")))?;
+
+    // Keep `script_current` in lockstep with the catalog on every upsert,
+    // NOT just on `kanade exec` (exec.rs #258). `script_current.<id>` is
+    // the canonical "current version" the agent's Layer 2 version-pin gate
+    // (§2.6.2) checks against. Previously only the exec / backend-fire path
+    // wrote it, so a `runs_on: agent` job — which fires from its own
+    // BUCKET_JOBS cache and never routes through exec_manifest — left the
+    // KV frozen at whatever version was last exec'd. After a version bump
+    // the KV lagged the catalog until someone ran a manual exec, and the
+    // agent's own fresh fires got self-rejected (exit 124, version-pin
+    // mismatch). Writing it here means the pin baseline tracks the catalog
+    // regardless of `runs_on`. Best-effort: a failure must not roll back
+    // the catalog write above (the agent-local path no longer depends on
+    // this KV — see CommandSource::LocalScheduler — and the backend-fire
+    // path re-pins it in exec_manifest anyway), so warn and continue.
+    match s.jetstream.get_key_value(BUCKET_SCRIPT_CURRENT).await {
+        Ok(cur) => {
+            if let Err(e) = cur
+                .put(
+                    &job.id,
+                    bytes::Bytes::from(job.version.clone().into_bytes()),
+                )
+                .await
+            {
+                warn!(error = %e, job_id = %job.id, "jobs: script_current put failed; catalog is current");
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "jobs: script_current KV missing; skipping version-pin refresh")
+        }
+    }
 
     // Operator-facing YAML mirror — best-effort. A failure here doesn't
     // roll back the JSON catalog (which the scheduler / agents read)
