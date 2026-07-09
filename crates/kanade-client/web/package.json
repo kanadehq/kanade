@@ -13,7 +13,7 @@
     "@tauri-apps/plugin-notification": "^2.3.3",
     "dompurify": "^3.4.11",
     "lucide": "^1.24.0",
-    "marked": "^18.0.5"
+    "marked": "^18.0.6"
   },
   "devDependencies": {
     "typescript": "^6.0.3",
