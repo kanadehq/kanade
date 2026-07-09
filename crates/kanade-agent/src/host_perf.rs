@@ -122,7 +122,7 @@ pub async fn host_perf_loop(
                 } else {
                     let mut rx_bytes: u64 = 0;
                     let mut tx_bytes: u64 = 0;
-                    for (_name, data) in networks.iter() {
+                    for data in networks.values() {
                         rx_bytes = rx_bytes.saturating_add(data.received());
                         tx_bytes = tx_bytes.saturating_add(data.transmitted());
                     }
