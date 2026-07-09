@@ -103,5 +103,5 @@ pelite             = "0.10"
 # (Win32) / /proc (Linux). v0.40 Part 1: add `disk` + `network`
 # features for the host-wide perf loop (Disks / Networks). Still
 # avoid `multithread` since we refresh on a 30–60 s cadence.
-sysinfo            = { version = "0.39.5", default-features = false, features = ["system", "disk", "network"] }
+sysinfo            = { version = "0.39.6", default-features = false, features = ["system", "disk", "network"] }
 winres             = "0.1.12"
