@@ -29,7 +29,7 @@ use kanade_shared::wire::Command;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
-use crate::commands::{DedupCache, handle_command};
+use crate::commands::{CommandSource, DedupCache, handle_command};
 use crate::nats_retry;
 use crate::script_cache::ScriptCache;
 
@@ -301,8 +301,18 @@ async fn run(
                 "replay: handling missed command",
             );
             tokio::spawn(async move {
-                if let Err(e) =
-                    handle_command(client_for_task, pc_for_task, cmd, cur, sta, stl, sc, cs).await
+                if let Err(e) = handle_command(
+                    client_for_task,
+                    pc_for_task,
+                    cmd,
+                    cur,
+                    sta,
+                    stl,
+                    sc,
+                    cs,
+                    CommandSource::Nats,
+                )
+                .await
                 {
                     error!(error = %e, "replay command handler failed");
                 }

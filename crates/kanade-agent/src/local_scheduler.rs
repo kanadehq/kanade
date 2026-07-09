@@ -48,7 +48,7 @@ use tokio_cron_scheduler::{Job, JobScheduler};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use crate::commands::handle_command;
+use crate::commands::{CommandSource, handle_command};
 use crate::nats_retry;
 use crate::script_cache::ScriptCache;
 
@@ -1923,6 +1923,11 @@ async fn local_tick(
         staleness.clone(),
         script_cache.clone(),
         check_sink.clone(),
+        // Agent-local fire: cmd.version is authoritative (from the same
+        // BUCKET_JOBS snapshot), so skip the version-pin gate that would
+        // otherwise self-reject every tick after a bump. Revoke still
+        // applies. See [`CommandSource`].
+        CommandSource::LocalScheduler,
     )
     .await
     {

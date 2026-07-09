@@ -159,6 +159,7 @@ pub async fn command_loop(
                 staleness,
                 script_cache,
                 check_sink,
+                CommandSource::Nats,
             )
             .await
             {
@@ -268,6 +269,37 @@ impl CommandOutcome {
     }
 }
 
+/// Where a [`handle_command`] invocation originated. This gates the
+/// Layer-2 **version-pin** check (§2.6.4): that gate exists to reject a
+/// broker-queued Command whose pinned `version` has since gone stale, so
+/// it only makes sense for commands that actually travelled over NATS.
+///
+/// An agent-local `local_scheduler` fire is different: it builds
+/// `cmd.version` from `manifest.version` in the SAME freshly-reconciled
+/// `BUCKET_JOBS` snapshot it read the manifest from (that snapshot is the
+/// authoritative version source for `runs_on: agent` — refreshed by the
+/// jobs KV watch while online and by a full `collect_jobs` resync on
+/// reconnect). There is no independent, newer authority to check it
+/// against. `script_current` is maintained ONLY by the backend fire /
+/// exec path (`kanade-backend/src/api/exec.rs`), never by an agent-local
+/// fire, so for a `runs_on: agent` job it lags one version bump behind
+/// and the pin gate self-rejects every tick with exit 124
+/// (`version-pin mismatch`) until someone runs a backend `kanade exec`.
+/// `LocalScheduler` therefore skips the pin gate; `Nats` keeps it. The
+/// revoke kill-switch (§2.6.4 (b)) is deliberately NOT gated on source —
+/// a revoked script must stay revoked no matter who fires it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandSource {
+    /// Delivered over NATS — the live core subscription or a JetStream
+    /// replay of a missed command. Both may carry a stale pinned version,
+    /// so both keep the version-pin gate.
+    Nats,
+    /// Synthesised by the agent's own `local_scheduler` for a
+    /// `runs_on: agent` schedule tick. `cmd.version` is authoritative by
+    /// construction, so the version-pin gate is skipped.
+    LocalScheduler,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_command(
     client: async_nats::Client,
@@ -278,6 +310,7 @@ pub async fn handle_command(
     staleness: Tracker,
     script_cache: ScriptCache,
     check_sink: crate::check_cache::CheckSink,
+    source: CommandSource,
 ) -> Result<CommandOutcome> {
     // Spec §2.6 Layer 2: version-pinning + revoke check + v0.26
     // staleness policy. The order matters:
@@ -302,7 +335,13 @@ pub async fn handle_command(
         }
     }
 
-    if let Some(cur) = &script_current
+    // Version-pin gate (§2.6.4): only NATS-delivered commands can carry a
+    // stale broker-queued version. An agent-local fire builds cmd.version
+    // from the same authoritative BUCKET_JOBS snapshot, so gating it
+    // against the backend-only `script_current` KV would self-reject every
+    // `runs_on: agent` tick after a bump (exit 124). See [`CommandSource`].
+    if source == CommandSource::Nats
+        && let Some(cur) = &script_current
         && let Ok(Some(entry)) = cur.get(&cmd.id).await
     {
         let expected = String::from_utf8_lossy(&entry).to_string();
