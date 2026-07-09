@@ -36,8 +36,7 @@ use async_nats::jetstream::kv::Operation;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures::{StreamExt, TryStreamExt};
 use kanade_shared::kv::{
-    BUCKET_FLEET_CONFIG, BUCKET_JOBS, BUCKET_SCHEDULES, BUCKET_SCRIPT_CURRENT,
-    BUCKET_SCRIPT_STATUS, KEY_FREEZE,
+    BUCKET_FLEET_CONFIG, BUCKET_JOBS, BUCKET_SCHEDULES, BUCKET_SCRIPT_STATUS, KEY_FREEZE,
 };
 use kanade_shared::manifest::{
     ExecMode, Freeze, Manifest, OnTrigger, RunsOn, Schedule, ScheduleTz, When,
@@ -1842,7 +1841,10 @@ async fn local_tick(
     };
 
     let js = async_nats::jetstream::new(client.clone());
-    let script_current = js.get_key_value(BUCKET_SCRIPT_CURRENT).await.ok();
+    // No `script_current` fetch here: an agent-local fire skips the
+    // version-pin gate (CommandSource::LocalScheduler), so pulling that KV
+    // would be a wasted NATS round-trip on every tick, fleet-wide. The
+    // revoke kill-switch still applies, so `script_status` is still read.
     let script_status = js.get_key_value(BUCKET_SCRIPT_STATUS).await.ok();
 
     // #445: claim the in-flight slot atomically right before firing.
@@ -1918,7 +1920,10 @@ async fn local_tick(
         client.clone(),
         pc_id.to_string(),
         cmd,
-        script_current,
+        // `None`: the version-pin gate is skipped for LocalScheduler, so
+        // script_current is never consulted on this path (and no longer
+        // fetched above).
+        None,
         script_status,
         staleness.clone(),
         script_cache.clone(),
