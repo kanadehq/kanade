@@ -7770,9 +7770,10 @@ impl std::fmt::Display for ScheduleTz {
     }
 }
 
-/// `once` vs `{ every: <humantime> }` — shared by `per_pc` /
-/// `per_target`. Untagged so the YAML stays the bare keyword or a
-/// one-key map, nothing more ceremonial.
+/// `once` / `once_per_version` / `{ every: <humantime> }` — shared by
+/// `per_pc` / `per_target`. Untagged so the YAML stays the bare keyword
+/// or a one-key map, nothing more ceremonial. `once_per_version` is
+/// per_pc + backend only (see the variant doc and `Schedule::validate`).
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum PerPolicy {

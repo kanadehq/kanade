@@ -265,7 +265,7 @@
       ]
     },
     "PerPolicy": {
-      "description": "`once` vs `{ every: <humantime> }` — shared by `per_pc` /\n`per_target`. Untagged so the YAML stays the bare keyword or a\none-key map, nothing more ceremonial.",
+      "description": "`once` / `once_per_version` / `{ every: <humantime> }` — shared by\n`per_pc` / `per_target`. Untagged so the YAML stays the bare keyword\nor a one-key map, nothing more ceremonial. `once_per_version` is\nper_pc + backend only (see the variant doc and `Schedule::validate`).",
       "anyOf": [
         {
           "description": "The bare string `once`: succeed once, then skip permanently\n(cooldown = infinity), version-blind.",

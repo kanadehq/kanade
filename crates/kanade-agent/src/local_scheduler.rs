@@ -174,20 +174,17 @@ impl State {
             // dedup (startup once-per-boot) is the caller's job; here we
             // only gate concurrent double-claims via `in_flight`.
             ExecMode::EveryTick | ExecMode::Event => true,
-            // OncePerPcVersion is backend-only — `validate()` rejects it
-            // on runs_on: agent (the agent has no version-aware
-            // completion history to dedup against). It can't reach here;
-            // if a hand-edited blob slips one through, degrade to
-            // version-blind kitting-once rather than crash. Defensive.
-            ExecMode::OncePerPc | ExecMode::OncePerPcVersion => {
-                match self.completions.get(&Self::key(schedule_id, job_id)) {
-                    None => true,
-                    Some(last) => cooldown.is_some_and(|cd| (now - *last) >= cd),
-                }
-            }
-            // Unreachable: the caller warns + returns on OncePerTarget
-            // for runs_on: agent (validate() rejects it). Defensive.
-            ExecMode::OncePerTarget => false,
+            ExecMode::OncePerPc => match self.completions.get(&Self::key(schedule_id, job_id)) {
+                None => true,
+                Some(last) => cooldown.is_some_and(|cd| (now - *last) >= cd),
+            },
+            // Both are backend-only — validate() rejects them for
+            // runs_on: agent (per_target needs fleet-wide completion data;
+            // once_per_version needs the backend's per-version completion
+            // history). Unreachable except via a hand-edited KV blob;
+            // fail CLOSED (don't claim) rather than run with the wrong
+            // semantics. local_tick's match warns + skips these loudly.
+            ExecMode::OncePerTarget | ExecMode::OncePerPcVersion => false,
         };
         if !should {
             return (false, false);
@@ -1741,13 +1738,22 @@ async fn local_tick(
             );
             return;
         }
-        // OncePerPcVersion is backend-only (validate() rejects it for
+        // once_per_version is backend-only too (validate() rejects it for
         // runs_on: agent — version-aware dedup needs the backend's
         // execution_results.version history, which the agent's local
-        // completion map has no equivalent of). Unreachable here except
-        // via a hand-edited blob; fold into the version-blind per_pc
-        // path defensively rather than crash.
-        ExecMode::OncePerPc | ExecMode::OncePerPcVersion => {
+        // completion map has no equivalent of). Reachable only via a
+        // hand-edited KV blob; fail CLOSED — skip loudly rather than
+        // degrade to version-blind per_pc, which would run the job with
+        // the wrong semantics (coderabbit #1003).
+        ExecMode::OncePerPcVersion => {
+            warn!(
+                schedule_id = %schedule.id,
+                "local_scheduler: when.per_pc: once_per_version is backend-only \
+                 (validate() rejects it for runs_on: agent); skipping tick",
+            );
+            return;
+        }
+        ExecMode::OncePerPc => {
             let st = state.lock().await;
             let key = State::key(&schedule.id, &schedule.job_id);
             match st.completions.get(&key) {
