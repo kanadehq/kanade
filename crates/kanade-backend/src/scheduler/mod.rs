@@ -577,7 +577,7 @@ async fn tick(state: &AppState, schedule: Schedule, freeze: &FreezeMirror) {
         None
     };
     let completions =
-        match recent_completions(state, &job_id, completion_cutoff, version_filter).await {
+        match recent_completions(&state.pool, &job_id, completion_cutoff, version_filter).await {
             Ok(v) => v,
             Err(e) => {
                 warn!(%schedule_id, error = ?e, "scheduler fire failed: completion lookup");
@@ -1113,7 +1113,7 @@ fn parse_starting_deadline(
 /// completion aged out — acceptable for the idempotent
 /// kitting-once jobs that mode exists for.
 async fn recent_completions(
-    state: &AppState,
+    pool: &sqlx::SqlitePool,
     job_id: &str,
     cutoff: Option<DateTime<Utc>>,
     version: Option<&str>,
@@ -1149,13 +1149,15 @@ async fn recent_completions(
     // surface.
     let mut query = sqlx::query(sqlx::AssertSqlSafe(sql)).bind(job_id);
     if let Some(v) = version {
-        query = query.bind(v.to_string());
+        // Bind the borrow directly (like `job_id` above) — it outlives
+        // the query, so `.to_string()` would just be a wasted alloc.
+        query = query.bind(v);
     }
     if let Some(cutoff) = cutoff {
         query = query.bind(cutoff);
     }
     let rows = query
-        .fetch_all(&state.pool)
+        .fetch_all(pool)
         .await
         .context("execution_results dedup query")?;
     let mut out = Vec::with_capacity(rows.len());
@@ -1323,6 +1325,73 @@ mod tests {
             "id: s\nwhen:\n  per_pc: {{ every: 6h }}\njob_id: j\ntarget: {{ all: true }}\n{extra}"
         ))
         .expect("schedule parse")
+    }
+
+    async fn fresh_pool() -> sqlx::SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("run migrations");
+        pool
+    }
+
+    async fn insert_result(pool: &sqlx::SqlitePool, pc: &str, version: &str, exit: i32) {
+        sqlx::query(
+            "INSERT INTO execution_results \
+             (result_id, request_id, pc_id, exit_code, started_at, finished_at, job_id, version) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(Uuid::new_v4().to_string())
+        .bind(pc)
+        .bind(exit)
+        .bind(Utc::now())
+        .bind(Utc::now())
+        .bind("install-kanade-client")
+        .bind(version)
+        .execute(pool)
+        .await
+        .expect("insert execution_results row");
+    }
+
+    fn sorted_pcs(cs: &[Completion]) -> Vec<String> {
+        let mut v: Vec<String> = cs.iter().map(|c| c.pc_id.clone()).collect();
+        v.sort();
+        v
+    }
+
+    // The heart of `once_per_version`: the version filter must make a pc
+    // whose only success is at an OLDER manifest version re-fire, while a
+    // pc that succeeded at the CURRENT version stays suppressed.
+    #[tokio::test]
+    async fn recent_completions_version_filter_scopes_to_current_version() {
+        let pool = fresh_pool().await;
+        insert_result(&pool, "a", "0.2.1", 0).await; // current version, success
+        insert_result(&pool, "b", "0.2.0", 0).await; // OLD version, success
+        insert_result(&pool, "c", "0.2.1", 1).await; // current version, FAILED
+
+        // Version-blind (plain `once` path): every exit-0 pc counts, so a
+        // and b are both "done" (c failed so never counts).
+        let blind = recent_completions(&pool, "install-kanade-client", None, None)
+            .await
+            .unwrap();
+        assert_eq!(sorted_pcs(&blind), vec!["a", "b"]);
+
+        // Version-scoped to 0.2.1 (`once_per_version` path): only `a`
+        // suppresses; `b` (old version) is absent → it re-fires. `c`
+        // failed, so it never counted in either case.
+        let scoped = recent_completions(&pool, "install-kanade-client", None, Some("0.2.1"))
+            .await
+            .unwrap();
+        assert_eq!(
+            sorted_pcs(&scoped),
+            vec!["a"],
+            "only a current-version success should suppress a pc",
+        );
     }
 
     #[test]
