@@ -565,13 +565,25 @@ async fn tick(state: &AppState, schedule: Schedule, freeze: &FreezeMirror) {
     // the unbounded scan: any historical completion matters there,
     // and the #486 retention now caps the table at 90 d anyway.
     let completion_cutoff = cooldown.map(|cd| now - cd);
-    let completions = match recent_completions(state, &job_id, completion_cutoff).await {
-        Ok(v) => v,
-        Err(e) => {
-            warn!(%schedule_id, error = ?e, "scheduler fire failed: completion lookup");
-            return;
-        }
+    // `once_per_version` (OncePerPcVersion) scopes the "already
+    // succeeded" set to the CURRENT manifest version, so a pc that only
+    // succeeded at an older version re-fires. Every other mode is
+    // version-blind. Borrowing `manifest.version` here is fine — the
+    // manifest isn't moved into `dispatch` until well below, and this
+    // borrow ends when the await returns.
+    let version_filter = if matches!(lowered.mode, ExecMode::OncePerPcVersion) {
+        Some(manifest.version.as_str())
+    } else {
+        None
     };
+    let completions =
+        match recent_completions(&state.pool, &job_id, completion_cutoff, version_filter).await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(%schedule_id, error = ?e, "scheduler fire failed: completion lookup");
+                return;
+            }
+        };
 
     // #912: OncePerTarget dedup counts completions from any target
     // MEMBER (alive or not), so a member that succeeded and then went
@@ -1101,34 +1113,51 @@ fn parse_starting_deadline(
 /// completion aged out — acceptable for the idempotent
 /// kitting-once jobs that mode exists for.
 async fn recent_completions(
-    state: &AppState,
+    pool: &sqlx::SqlitePool,
     job_id: &str,
     cutoff: Option<DateTime<Utc>>,
+    version: Option<&str>,
 ) -> Result<Vec<Completion>> {
-    // Branched queries instead of `(? IS NULL OR ...)` — the OR form
-    // can stop SQLite driving an index from the bound column, and
-    // this runs every poll minute per schedule (PR #557 review,
-    // gemini).
-    let query = if let Some(cutoff) = cutoff {
-        sqlx::query(
-            "SELECT pc_id, MAX(finished_at) AS finished_at
-             FROM execution_results
-             WHERE job_id = ? AND exit_code = 0 AND finished_at >= ?
-             GROUP BY pc_id",
-        )
-        .bind(job_id)
-        .bind(cutoff)
-    } else {
-        sqlx::query(
-            "SELECT pc_id, MAX(finished_at) AS finished_at
-             FROM execution_results
-             WHERE job_id = ? AND exit_code = 0
-             GROUP BY pc_id",
-        )
-        .bind(job_id)
-    };
+    // Build the WHERE from static fragments (never `(? IS NULL OR ...)`,
+    // which can stop SQLite driving the index — PR #557 review, gemini)
+    // and push each bind in `?`-placeholder order. This runs every poll
+    // minute per schedule, so index use matters.
+    //
+    // `version = Some(v)` is the `once_per_version` (OncePerPcVersion)
+    // case: only completions recorded at the CURRENT manifest version
+    // count, so a pc that only succeeded at an older version is absent
+    // from the returned set and thus re-fires. `None` (every other mode)
+    // is version-blind — any successful run counts.
+    let mut sql = String::from(
+        "SELECT pc_id, MAX(finished_at) AS finished_at
+         FROM execution_results
+         WHERE job_id = ? AND exit_code = 0",
+    );
+    if version.is_some() {
+        sql.push_str(" AND version = ?");
+    }
+    if cutoff.is_some() {
+        sql.push_str(" AND finished_at >= ?");
+    }
+    sql.push_str(" GROUP BY pc_id");
+
+    // sqlx 0.9's `query()` takes `impl SqlSafeStr`, auto-implemented only
+    // for `&'static str`; a runtime-built `String` must opt in via
+    // `AssertSqlSafe`. That assertion holds here: `sql` is assembled from
+    // static fragments only — the version/cutoff values are BOUND
+    // parameters below, never interpolated — so there is no injection
+    // surface.
+    let mut query = sqlx::query(sqlx::AssertSqlSafe(sql)).bind(job_id);
+    if let Some(v) = version {
+        // Bind the borrow directly (like `job_id` above) — it outlives
+        // the query, so `.to_string()` would just be a wasted alloc.
+        query = query.bind(v);
+    }
+    if let Some(cutoff) = cutoff {
+        query = query.bind(cutoff);
+    }
     let rows = query
-        .fetch_all(&state.pool)
+        .fetch_all(pool)
         .await
         .context("execution_results dedup query")?;
     let mut out = Vec::with_capacity(rows.len());
@@ -1296,6 +1325,73 @@ mod tests {
             "id: s\nwhen:\n  per_pc: {{ every: 6h }}\njob_id: j\ntarget: {{ all: true }}\n{extra}"
         ))
         .expect("schedule parse")
+    }
+
+    async fn fresh_pool() -> sqlx::SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("run migrations");
+        pool
+    }
+
+    async fn insert_result(pool: &sqlx::SqlitePool, pc: &str, version: &str, exit: i32) {
+        sqlx::query(
+            "INSERT INTO execution_results \
+             (result_id, request_id, pc_id, exit_code, started_at, finished_at, job_id, version) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(Uuid::new_v4().to_string())
+        .bind(pc)
+        .bind(exit)
+        .bind(Utc::now())
+        .bind(Utc::now())
+        .bind("install-kanade-client")
+        .bind(version)
+        .execute(pool)
+        .await
+        .expect("insert execution_results row");
+    }
+
+    fn sorted_pcs(cs: &[Completion]) -> Vec<String> {
+        let mut v: Vec<String> = cs.iter().map(|c| c.pc_id.clone()).collect();
+        v.sort();
+        v
+    }
+
+    // The heart of `once_per_version`: the version filter must make a pc
+    // whose only success is at an OLDER manifest version re-fire, while a
+    // pc that succeeded at the CURRENT version stays suppressed.
+    #[tokio::test]
+    async fn recent_completions_version_filter_scopes_to_current_version() {
+        let pool = fresh_pool().await;
+        insert_result(&pool, "a", "0.2.1", 0).await; // current version, success
+        insert_result(&pool, "b", "0.2.0", 0).await; // OLD version, success
+        insert_result(&pool, "c", "0.2.1", 1).await; // current version, FAILED
+
+        // Version-blind (plain `once` path): every exit-0 pc counts, so a
+        // and b are both "done" (c failed so never counts).
+        let blind = recent_completions(&pool, "install-kanade-client", None, None)
+            .await
+            .unwrap();
+        assert_eq!(sorted_pcs(&blind), vec!["a", "b"]);
+
+        // Version-scoped to 0.2.1 (`once_per_version` path): only `a`
+        // suppresses; `b` (old version) is absent → it re-fires. `c`
+        // failed, so it never counted in either case.
+        let scoped = recent_completions(&pool, "install-kanade-client", None, Some("0.2.1"))
+            .await
+            .unwrap();
+        assert_eq!(
+            sorted_pcs(&scoped),
+            vec!["a"],
+            "only a current-version success should suppress a pc",
+        );
     }
 
     #[test]

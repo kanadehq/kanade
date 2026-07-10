@@ -257,12 +257,23 @@
         "once"
       ]
     },
+    "OncePerVersionLiteral": {
+      "description": "Single-variant enum so serde accepts exactly the string\n`once_per_version` (mirrors [`OnceLiteral`]'s typo-catching). The\ndistinct literal — rather than a bool field on `once` — keeps the\nergonomic bare-string surface (`per_pc: once_per_version`).",
+      "type": "string",
+      "enum": [
+        "once_per_version"
+      ]
+    },
     "PerPolicy": {
-      "description": "`once` vs `{ every: <humantime> }` — shared by `per_pc` /\n`per_target`. Untagged so the YAML stays the bare keyword or a\none-key map, nothing more ceremonial.",
+      "description": "`once` / `once_per_version` / `{ every: <humantime> }` — shared by\n`per_pc` / `per_target`. Untagged so the YAML stays the bare keyword\nor a one-key map, nothing more ceremonial. `once_per_version` is\nper_pc + backend only (see the variant doc and `Schedule::validate`).",
       "anyOf": [
         {
-          "description": "The bare string `once`: succeed once, then skip permanently\n(cooldown = infinity).",
+          "description": "The bare string `once`: succeed once, then skip permanently\n(cooldown = infinity), version-blind.",
           "$ref": "#/$defs/OnceLiteral"
+        },
+        {
+          "description": "The bare string `once_per_version`: succeed once *per manifest\nversion*, then skip until the job's YAML `version` changes. Like\n`once` but re-arms each pc when the version it succeeded at is no\nlonger current — the version-aware redistribution shape. per_pc\nonly (`Schedule::validate` rejects it on `per_target`).",
+          "$ref": "#/$defs/OncePerVersionLiteral"
         },
         {
           "description": "Re-arm after the humantime interval, e.g. `{ every: 6h }`.",

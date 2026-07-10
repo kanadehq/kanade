@@ -65,7 +65,15 @@ pub fn decide_fire(
 ) -> FireAction {
     match mode {
         ExecMode::EveryTick => FireAction::FireWholeTarget,
-        ExecMode::OncePerPc => decide_once_per_pc(cooldown, expected_pcs, completions, now),
+        // OncePerPcVersion shares the per-pc decision: the ONLY
+        // difference from OncePerPc is that its `completions` set was
+        // pre-filtered to the current manifest version by the caller
+        // (`recent_completions` with a version filter), so a pc that
+        // only succeeded at an older version isn't in `completions` and
+        // therefore fires. The dedup arithmetic here is identical.
+        ExecMode::OncePerPc | ExecMode::OncePerPcVersion => {
+            decide_once_per_pc(cooldown, expected_pcs, completions, now)
+        }
         ExecMode::OncePerTarget => {
             decide_once_per_target(cooldown, expected_pcs, target_roster, completions, now)
         }
@@ -285,6 +293,25 @@ mod tests {
     fn once_per_pc_partial_completion_fires_remainder() {
         let action = decide_fire_same(
             ExecMode::OncePerPc,
+            None,
+            &pcs(&["a", "b", "c"]),
+            &[done("a", 0)],
+            t(100),
+        );
+        assert_eq!(action, FireAction::FirePcs(pcs(&["b", "c"])));
+    }
+
+    #[test]
+    fn once_per_pc_version_decides_identically_to_once_per_pc() {
+        // OncePerPcVersion shares the per-pc arithmetic; the version
+        // scoping happens upstream in `recent_completions` (IO, not
+        // covered here) by omitting completions from OTHER versions.
+        // So given the same (already version-filtered) completion set,
+        // it must fire exactly the same remainder as OncePerPc. Here
+        // `a` succeeded AT THE CURRENT VERSION (present), while `b`/`c`
+        // only succeeded at an older version (absent) → they re-fire.
+        let action = decide_fire_same(
+            ExecMode::OncePerPcVersion,
             None,
             &pcs(&["a", "b", "c"]),
             &[done("a", 0)],
