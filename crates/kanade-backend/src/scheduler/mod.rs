@@ -565,13 +565,25 @@ async fn tick(state: &AppState, schedule: Schedule, freeze: &FreezeMirror) {
     // the unbounded scan: any historical completion matters there,
     // and the #486 retention now caps the table at 90 d anyway.
     let completion_cutoff = cooldown.map(|cd| now - cd);
-    let completions = match recent_completions(state, &job_id, completion_cutoff).await {
-        Ok(v) => v,
-        Err(e) => {
-            warn!(%schedule_id, error = ?e, "scheduler fire failed: completion lookup");
-            return;
-        }
+    // `once_per_version` (OncePerPcVersion) scopes the "already
+    // succeeded" set to the CURRENT manifest version, so a pc that only
+    // succeeded at an older version re-fires. Every other mode is
+    // version-blind. Borrowing `manifest.version` here is fine — the
+    // manifest isn't moved into `dispatch` until well below, and this
+    // borrow ends when the await returns.
+    let version_filter = if matches!(lowered.mode, ExecMode::OncePerPcVersion) {
+        Some(manifest.version.as_str())
+    } else {
+        None
     };
+    let completions =
+        match recent_completions(state, &job_id, completion_cutoff, version_filter).await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(%schedule_id, error = ?e, "scheduler fire failed: completion lookup");
+                return;
+            }
+        };
 
     // #912: OncePerTarget dedup counts completions from any target
     // MEMBER (alive or not), so a member that succeeded and then went
@@ -1104,29 +1116,44 @@ async fn recent_completions(
     state: &AppState,
     job_id: &str,
     cutoff: Option<DateTime<Utc>>,
+    version: Option<&str>,
 ) -> Result<Vec<Completion>> {
-    // Branched queries instead of `(? IS NULL OR ...)` — the OR form
-    // can stop SQLite driving an index from the bound column, and
-    // this runs every poll minute per schedule (PR #557 review,
-    // gemini).
-    let query = if let Some(cutoff) = cutoff {
-        sqlx::query(
-            "SELECT pc_id, MAX(finished_at) AS finished_at
-             FROM execution_results
-             WHERE job_id = ? AND exit_code = 0 AND finished_at >= ?
-             GROUP BY pc_id",
-        )
-        .bind(job_id)
-        .bind(cutoff)
-    } else {
-        sqlx::query(
-            "SELECT pc_id, MAX(finished_at) AS finished_at
-             FROM execution_results
-             WHERE job_id = ? AND exit_code = 0
-             GROUP BY pc_id",
-        )
-        .bind(job_id)
-    };
+    // Build the WHERE from static fragments (never `(? IS NULL OR ...)`,
+    // which can stop SQLite driving the index — PR #557 review, gemini)
+    // and push each bind in `?`-placeholder order. This runs every poll
+    // minute per schedule, so index use matters.
+    //
+    // `version = Some(v)` is the `once_per_version` (OncePerPcVersion)
+    // case: only completions recorded at the CURRENT manifest version
+    // count, so a pc that only succeeded at an older version is absent
+    // from the returned set and thus re-fires. `None` (every other mode)
+    // is version-blind — any successful run counts.
+    let mut sql = String::from(
+        "SELECT pc_id, MAX(finished_at) AS finished_at
+         FROM execution_results
+         WHERE job_id = ? AND exit_code = 0",
+    );
+    if version.is_some() {
+        sql.push_str(" AND version = ?");
+    }
+    if cutoff.is_some() {
+        sql.push_str(" AND finished_at >= ?");
+    }
+    sql.push_str(" GROUP BY pc_id");
+
+    // sqlx 0.9's `query()` takes `impl SqlSafeStr`, auto-implemented only
+    // for `&'static str`; a runtime-built `String` must opt in via
+    // `AssertSqlSafe`. That assertion holds here: `sql` is assembled from
+    // static fragments only — the version/cutoff values are BOUND
+    // parameters below, never interpolated — so there is no injection
+    // surface.
+    let mut query = sqlx::query(sqlx::AssertSqlSafe(sql)).bind(job_id);
+    if let Some(v) = version {
+        query = query.bind(v.to_string());
+    }
+    if let Some(cutoff) = cutoff {
+        query = query.bind(cutoff);
+    }
     let rows = query
         .fetch_all(&state.pool)
         .await

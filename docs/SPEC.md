@@ -626,6 +626,22 @@ enabled: true
 ```
 
 ```yaml
+# 版アップ配布: 各 PC は「現在のマニフェスト版で一度成功するまで」発火。
+# job の YAML `version` を上げると、旧版でしか成功していない PC が再び
+# 対象になる（= 版バンプが再配布トリガ）。`once` が版を無視して初回成功で
+# 永久スキップするのに対し、`once_per_version` は版ごとに再アーム。
+# dedup は backend の `execution_results.version` を見るので backend 専用
+# (runs_on: agent / per_target との併用は create 時にエラー)。
+id: install-kanade-client
+when:
+  per_pc: once_per_version
+job_id: install-kanade-client
+target: { groups: [dejisen] }
+runs_on: backend
+enabled: true
+```
+
+```yaml
 # 巡回/棚卸し: 各 PC 6 時間ごと
 id: inventory-hw
 when:

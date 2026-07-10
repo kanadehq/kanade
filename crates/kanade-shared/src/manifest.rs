@@ -4880,6 +4880,97 @@ target: { all: true }
         assert!(s.enabled);
     }
 
+    fn once_per_version_yaml(runs_on: &str, per: &str) -> String {
+        format!(
+            "id: x\nwhen:\n  {per}\njob_id: install-kanade-client\n\
+             target: {{ groups: [dejisen] }}\nruns_on: {runs_on}\n"
+        )
+    }
+
+    #[test]
+    fn per_pc_once_per_version_parses() {
+        let s: Schedule = serde_yaml::from_str(&once_per_version_yaml(
+            "backend",
+            "per_pc: once_per_version",
+        ))
+        .expect("parse");
+        assert_eq!(
+            s.when,
+            When::PerPc(PerPolicy::OncePerVersion(
+                OncePerVersionLiteral::OncePerVersion
+            ))
+        );
+    }
+
+    #[test]
+    fn per_pc_once_per_version_lowers_to_version_mode_no_cooldown() {
+        let s: Schedule = serde_yaml::from_str(&once_per_version_yaml(
+            "backend",
+            "per_pc: once_per_version",
+        ))
+        .expect("parse");
+        let l = s.lowered();
+        assert_eq!(l.mode, ExecMode::OncePerPcVersion);
+        assert_eq!(l.cooldown, None, "version re-arm is not a cooldown");
+    }
+
+    #[test]
+    fn once_per_version_displays_and_serialises() {
+        let w = When::PerPc(PerPolicy::OncePerVersion(
+            OncePerVersionLiteral::OncePerVersion,
+        ));
+        assert_eq!(w.to_string(), "per_pc once_per_version");
+        // serde round-trips through the ergonomic bare string.
+        let json = serde_json::to_value(&w).unwrap();
+        assert_eq!(json, serde_json::json!({ "per_pc": "once_per_version" }));
+    }
+
+    #[test]
+    fn once_per_version_rejects_typo() {
+        // The distinct literal still catches typos (no free-form String).
+        let r: Result<Schedule, _> = serde_yaml::from_str(&once_per_version_yaml(
+            "backend",
+            "per_pc: once_per_verison",
+        ));
+        assert!(r.is_err(), "typo should not parse");
+    }
+
+    #[test]
+    fn validate_accepts_once_per_version_on_backend() {
+        let s: Schedule = serde_yaml::from_str(&once_per_version_yaml(
+            "backend",
+            "per_pc: once_per_version",
+        ))
+        .expect("parse");
+        assert!(s.validate().is_ok(), "got: {:?}", s.validate());
+    }
+
+    #[test]
+    fn validate_rejects_once_per_version_on_agent() {
+        let s: Schedule =
+            serde_yaml::from_str(&once_per_version_yaml("agent", "per_pc: once_per_version"))
+                .expect("parse");
+        let err = s
+            .validate()
+            .expect_err("agent + once_per_version must be rejected");
+        assert!(err.contains("once_per_version"), "got: {err}");
+        assert!(err.contains("backend"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_once_per_version_on_per_target() {
+        let s: Schedule = serde_yaml::from_str(&once_per_version_yaml(
+            "backend",
+            "per_target: once_per_version",
+        ))
+        .expect("parse");
+        let err = s
+            .validate()
+            .expect_err("per_target + once_per_version must be rejected");
+        assert!(err.contains("once_per_version"), "got: {err}");
+        assert!(err.contains("per_pc"), "got: {err}");
+    }
+
     #[test]
     fn schedule_tags_default_empty_and_skip_serialise() {
         let yaml = r#"
@@ -7315,6 +7406,15 @@ pub enum ExecMode {
     /// (or forever if no cooldown). Use for "one delegate is
     /// enough" tasks like license check-in.
     OncePerTarget,
+    /// Like [`OncePerPc`](ExecMode::OncePerPc), but the "already
+    /// succeeded ⇒ skip" check is scoped to the CURRENT manifest
+    /// version: a pc whose only successful run recorded an OLDER
+    /// manifest version re-fires so the new version reaches it. Bumping
+    /// the job's YAML `version` is the redistribution trigger. Plain
+    /// `OncePerPc` (kitting) is version-blind — a pc that ever succeeded
+    /// is skipped forever; this mode re-arms per version. per_pc only —
+    /// `Schedule::validate` rejects `per_target: once_per_version`.
+    OncePerPcVersion,
     /// #418 OS-native event trigger (`when: { on: [...] }`). There is
     /// no cron — the agent fires it from an OS event source (boot /
     /// session-change), not a tick — so the scheduler skips
@@ -7677,8 +7777,14 @@ impl std::fmt::Display for ScheduleTz {
 #[serde(untagged)]
 pub enum PerPolicy {
     /// The bare string `once`: succeed once, then skip permanently
-    /// (cooldown = infinity).
+    /// (cooldown = infinity), version-blind.
     Once(OnceLiteral),
+    /// The bare string `once_per_version`: succeed once *per manifest
+    /// version*, then skip until the job's YAML `version` changes. Like
+    /// `once` but re-arms each pc when the version it succeeded at is no
+    /// longer current — the version-aware redistribution shape. per_pc
+    /// only (`Schedule::validate` rejects it on `per_target`).
+    OncePerVersion(OncePerVersionLiteral),
     /// Re-arm after the humantime interval, e.g. `{ every: 6h }`.
     Every(EverySpec),
 }
@@ -7689,6 +7795,16 @@ pub enum PerPolicy {
 #[serde(rename_all = "snake_case")]
 pub enum OnceLiteral {
     Once,
+}
+
+/// Single-variant enum so serde accepts exactly the string
+/// `once_per_version` (mirrors [`OnceLiteral`]'s typo-catching). The
+/// distinct literal — rather than a bool field on `once` — keeps the
+/// ergonomic bare-string surface (`per_pc: once_per_version`).
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OncePerVersionLiteral {
+    OncePerVersion,
 }
 
 /// `{ every: <humantime> }`. Standalone struct (not an inline
@@ -7709,7 +7825,11 @@ impl PerPolicy {
     /// (permanent skip), `every` = the interval.
     fn cooldown(&self) -> Option<String> {
         match self {
-            PerPolicy::Once(_) => None,
+            // Both `once` shapes lower to "no time-based re-arm". The
+            // version-aware re-arm for `once_per_version` is not a
+            // cooldown — it is the version filter the scheduler applies
+            // to the completion set, so the cooldown stays None here.
+            PerPolicy::Once(_) | PerPolicy::OncePerVersion(_) => None,
             PerPolicy::Every(EverySpec { every }) => Some(every.clone()),
         }
     }
@@ -7722,6 +7842,7 @@ impl std::fmt::Display for When {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let policy = |p: &PerPolicy| match p {
             PerPolicy::Once(_) => "once".to_string(),
+            PerPolicy::OncePerVersion(_) => "once_per_version".to_string(),
             PerPolicy::Every(EverySpec { every }) => format!("every {every}"),
         };
         match self {
@@ -8397,7 +8518,14 @@ impl Schedule {
         match &self.when {
             When::PerPc(p) => Lowered {
                 cron: POLL_CRON.into(),
-                mode: ExecMode::OncePerPc,
+                // `once_per_version` re-arms each pc when the manifest
+                // version changes; the scheduler keys that dedup on
+                // `execution_results.version`. Plain `once` / `every`
+                // stay version-blind.
+                mode: match p {
+                    PerPolicy::OncePerVersion(_) => ExecMode::OncePerPcVersion,
+                    PerPolicy::Once(_) | PerPolicy::Every(_) => ExecMode::OncePerPc,
+                },
                 cooldown: p.cooldown(),
                 tz,
             },
@@ -8509,6 +8637,36 @@ impl Schedule {
                 "when.per_target needs fleet-wide completion data and is backend-only; \
                  it cannot be combined with runs_on: agent (each agent self-schedules, \
                  so per-target dedup would be deduping across a target of 1)"
+                    .into(),
+            );
+        }
+        // `once_per_version` is a per_pc-only shape: it re-arms an
+        // individual pc when the manifest version it succeeded at is no
+        // longer current. "One delegate per version" for a whole target
+        // has no clear meaning, so reject it rather than silently
+        // lowering to plain per_target (version-blind).
+        if matches!(self.when, When::PerTarget(PerPolicy::OncePerVersion(_))) {
+            return Err(
+                "when.per_target: once_per_version is not supported — once_per_version \
+                 re-arms per pc per manifest version, which only makes sense for per_pc. \
+                 Use `per_pc: once_per_version`."
+                    .into(),
+            );
+        }
+        // `once_per_version` keys its dedup on the backend's
+        // `execution_results.version` history. A runs_on: agent schedule
+        // self-schedules from the agent's local completion map, which has
+        // no per-version record, so it is backend-only (symmetric with
+        // per_target). Reject it rather than silently degrade to
+        // version-blind kitting-once on the agent.
+        if matches!(self.runs_on, RunsOn::Agent)
+            && matches!(self.when, When::PerPc(PerPolicy::OncePerVersion(_)))
+        {
+            return Err(
+                "when.per_pc: once_per_version keys its dedup on the backend's per-version \
+                 completion history and is backend-only; it cannot be combined with \
+                 runs_on: agent (the agent self-schedules with no per-version record). \
+                 Use runs_on: backend."
                     .into(),
             );
         }

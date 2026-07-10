@@ -174,10 +174,17 @@ impl State {
             // dedup (startup once-per-boot) is the caller's job; here we
             // only gate concurrent double-claims via `in_flight`.
             ExecMode::EveryTick | ExecMode::Event => true,
-            ExecMode::OncePerPc => match self.completions.get(&Self::key(schedule_id, job_id)) {
-                None => true,
-                Some(last) => cooldown.is_some_and(|cd| (now - *last) >= cd),
-            },
+            // OncePerPcVersion is backend-only — `validate()` rejects it
+            // on runs_on: agent (the agent has no version-aware
+            // completion history to dedup against). It can't reach here;
+            // if a hand-edited blob slips one through, degrade to
+            // version-blind kitting-once rather than crash. Defensive.
+            ExecMode::OncePerPc | ExecMode::OncePerPcVersion => {
+                match self.completions.get(&Self::key(schedule_id, job_id)) {
+                    None => true,
+                    Some(last) => cooldown.is_some_and(|cd| (now - *last) >= cd),
+                }
+            }
             // Unreachable: the caller warns + returns on OncePerTarget
             // for runs_on: agent (validate() rejects it). Defensive.
             ExecMode::OncePerTarget => false,
@@ -1734,7 +1741,13 @@ async fn local_tick(
             );
             return;
         }
-        ExecMode::OncePerPc => {
+        // OncePerPcVersion is backend-only (validate() rejects it for
+        // runs_on: agent — version-aware dedup needs the backend's
+        // execution_results.version history, which the agent's local
+        // completion map has no equivalent of). Unreachable here except
+        // via a hand-edited blob; fold into the version-blind per_pc
+        // path defensively rather than crash.
+        ExecMode::OncePerPc | ExecMode::OncePerPcVersion => {
             let st = state.lock().await;
             let key = State::key(&schedule.id, &schedule.job_id);
             match st.completions.get(&key) {
