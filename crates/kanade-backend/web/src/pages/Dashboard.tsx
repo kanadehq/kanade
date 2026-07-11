@@ -950,7 +950,7 @@ export function Dashboard() {
                 <TableBody>
                   {(topCpuQ.data?.rows ?? []).map((r) => (
                     <TableRow key={r.pc_id}>
-                      <TableCell>
+                      <TableCell label={t('topTable.pcId')}>
                         <Link
                           to={`/agents/${encodeURIComponent(r.pc_id)}`}
                           className="hover:underline"
@@ -958,10 +958,10 @@ export function Dashboard() {
                           <code className="text-xs">{r.pc_id}</code>
                         </Link>
                       </TableCell>
-                      <TableCell className="text-muted text-xs">
+                      <TableCell label={t('topTable.hostname')} className="text-muted text-xs">
                         {r.hostname ?? '—'}
                       </TableCell>
-                      <TableCell className="text-right tabular-nums">
+                      <TableCell label={t('topTable.value')} className="text-right tabular-nums">
                         {r.value.toFixed(1)}%
                       </TableCell>
                     </TableRow>
@@ -1001,7 +1001,7 @@ export function Dashboard() {
                 <TableBody>
                   {(topMemQ.data?.rows ?? []).map((r) => (
                     <TableRow key={r.pc_id}>
-                      <TableCell>
+                      <TableCell label={t('topTable.pcId')}>
                         <Link
                           to={`/agents/${encodeURIComponent(r.pc_id)}`}
                           className="hover:underline"
@@ -1009,10 +1009,10 @@ export function Dashboard() {
                           <code className="text-xs">{r.pc_id}</code>
                         </Link>
                       </TableCell>
-                      <TableCell className="text-muted text-xs">
+                      <TableCell label={t('topTable.hostname')} className="text-muted text-xs">
                         {r.hostname ?? '—'}
                       </TableCell>
-                      <TableCell className="text-right tabular-nums">
+                      <TableCell label={t('topTable.value')} className="text-right tabular-nums">
                         {fmtBytes(r.value)}
                       </TableCell>
                     </TableRow>
@@ -1114,7 +1114,7 @@ export function Dashboard() {
               <TableBody>
                 {(scanDurQ.data ?? []).map((r) => (
                   <TableRow key={r.job_id}>
-                    <TableCell>
+                    <TableCell label={t('scanDuration.table.jobId')}>
                       {/* Deep-link into Activity filtered to this job —
                           one click from "this probe is slow" to its
                           actual runs, the same job_id bridge the Jobs
@@ -1127,11 +1127,11 @@ export function Dashboard() {
                         <code className="text-sm">{r.job_id}</code>
                       </Link>
                     </TableCell>
-                    <TableCell className="text-right text-muted text-xs">{r.count}</TableCell>
-                    <TableCell className="text-right">{fmtMs(r.p50_ms)}</TableCell>
-                    <TableCell className="text-right">{fmtMs(r.p95_ms)}</TableCell>
-                    <TableCell className="text-right">{fmtMs(r.p99_ms)}</TableCell>
-                    <TableCell className="text-right text-muted">
+                    <TableCell label={t('scanDuration.table.count')} className="text-right text-muted text-xs">{r.count}</TableCell>
+                    <TableCell label={t('scanDuration.table.p50')} className="text-right">{fmtMs(r.p50_ms)}</TableCell>
+                    <TableCell label={t('scanDuration.table.p95')} className="text-right">{fmtMs(r.p95_ms)}</TableCell>
+                    <TableCell label={t('scanDuration.table.p99')} className="text-right">{fmtMs(r.p99_ms)}</TableCell>
+                    <TableCell label={t('scanDuration.table.max')} className="text-right text-muted">
                       {/* Deep-link the slowest single run straight to
                           its detail page — "the max one, take me to
                           it". Falls back to plain text for legacy rows

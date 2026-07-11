@@ -249,3 +249,75 @@
 .notif-md th {
   background: color-mix(in srgb, var(--color-accent) 12%, transparent);
 }
+
+/* Responsive data tables (sticky-header work). At `lg` (1024px) and up a
+   table renders normally with a sticky header (see ui/table.tsx). Below
+   `lg`, a dense multi-column table can't fit the viewport without an ugly
+   horizontal scrollbar, and a nested max-height scroll fights the page
+   scroll — so instead each row collapses into a stacked "card": the header
+   row is hidden and every cell shows its column name (from `data-label`,
+   set by <TableCell label=…>) beside its value. Pure page scroll, no
+   horizontal bar, no nested scroll. Scoped to `.kn-table` so only our data
+   tables transform — never the `.notif-md` markdown tables above. */
+@media (max-width: 1023px) {
+  .kn-table > table,
+  .kn-table > table > thead,
+  .kn-table > table > tbody,
+  .kn-table > table > tbody > tr,
+  .kn-table > table > tbody > tr > td {
+    display: block;
+    width: 100%;
+  }
+  .kn-table > table > thead {
+    /* Column names move into each cell's `data-label`; the header row is
+       redundant (and its sticky positioning irrelevant) in card mode. */
+    display: none;
+  }
+  .kn-table > table > tbody > tr {
+    border-bottom: 1px solid var(--color-border);
+    padding: 0.35rem 0;
+  }
+  .kn-table > table > tbody > tr:last-child {
+    border-bottom: 0;
+  }
+  .kn-table > table > tbody > tr > td {
+    padding: 0.3rem 0.75rem;
+  }
+  /* Only *labelled* cells become the "label : value" row. Unlabelled cells —
+     an actions/button column, or a colSpan empty-state row — deliberately
+     stay plain full-width blocks that keep their own text-align, so a
+     centered "no results" message stays centered and action buttons get the
+     whole card width (rather than a higher-specificity rule here silently
+     overriding the page's own utility classes). */
+  .kn-table > table > tbody > tr > td[data-label] {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.15rem 1rem;
+    text-align: right;
+    /* Neutralise desktop-only width tricks (e.g. `w-full max-w-0` used to
+       force truncation in table mode) — in a full-width card they would
+       squeeze the value to ~0 and break it one character per line. */
+    max-width: none;
+  }
+  /* Column label, injected before the value from the header text. */
+  .kn-table > table > tbody > tr > td[data-label]::before {
+    content: attr(data-label);
+    flex: 0 0 auto;
+    text-align: left;
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--color-muted);
+    white-space: nowrap;
+  }
+  /* Let the value side shrink and wrap under the label when it's long
+     (e.g. a stdout preview) instead of forcing the card wide. */
+  .kn-table > table > tbody > tr > td[data-label] > * {
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+  }
+}

@@ -418,10 +418,10 @@ export function Rollout() {
               <TableBody>
                 {(releasesQ.data ?? []).map((r) => (
                   <TableRow key={r.version}>
-                    <TableCell><code className="text-xs">{r.version}</code></TableCell>
-                    <TableCell className="text-muted text-xs">{fmtSize(r.size)}</TableCell>
-                    <TableCell className="text-muted text-xs">{fmtIsoLocal(r.modified)}</TableCell>
-                    <TableCell className="text-muted text-xs">
+                    <TableCell label={t('releases.columns.version')}><code className="text-xs">{r.version}</code></TableCell>
+                    <TableCell label={t('releases.columns.size')} className="text-muted text-xs">{fmtSize(r.size)}</TableCell>
+                    <TableCell label={t('releases.columns.modified')} className="text-muted text-xs">{fmtIsoLocal(r.modified)}</TableCell>
+                    <TableCell label={t('releases.columns.digest')} className="text-muted text-xs">
                       <code>{r.digest?.slice(0, 24) ?? '—'}</code>
                     </TableCell>
                     <TableCell className="text-right">

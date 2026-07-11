@@ -129,7 +129,7 @@ export function Collect() {
               <TableBody>
                 {rows.map((r) => (
                   <TableRow key={r.key}>
-                    <TableCell>
+                    <TableCell label={t('bundles.columns.name')}>
                       <div className="text-sm">
                         {r.name ?? r.job_id}
                         {r.label && (
@@ -142,10 +142,10 @@ export function Collect() {
                         <div className="text-xs text-muted">{r.description}</div>
                       )}
                     </TableCell>
-                    <TableCell><code className="text-xs">{r.pc_id}</code></TableCell>
-                    <TableCell><code className="text-xs break-all">{r.job_id}</code></TableCell>
-                    <TableCell className="text-muted text-xs">{fmtIsoLocal(r.collected_at)}</TableCell>
-                    <TableCell className="text-muted text-xs">{fmtSize(r.size)}</TableCell>
+                    <TableCell label={t('bundles.columns.pc')}><code className="text-xs">{r.pc_id}</code></TableCell>
+                    <TableCell label={t('bundles.columns.job')}><code className="text-xs break-all">{r.job_id}</code></TableCell>
+                    <TableCell label={t('bundles.columns.collectedAt')} className="text-muted text-xs">{fmtIsoLocal(r.collected_at)}</TableCell>
+                    <TableCell label={t('bundles.columns.size')} className="text-muted text-xs">{fmtSize(r.size)}</TableCell>
                     <TableCell className="text-right">
                       <div className="inline-flex gap-2">
                         <Button

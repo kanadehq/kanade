@@ -298,14 +298,14 @@ function CheckTableRow({ row: r }: { row: CheckRow }) {
   const { t } = useTranslation('compliance');
   return (
     <TableRow>
-      <TableCell className="font-medium">{r.pc_id}</TableCell>
-      <TableCell>
+      <TableCell label={t('col.pc')} className="font-medium">{r.pc_id}</TableCell>
+      <TableCell label={t('col.status')}>
         <Badge variant={STATUS_VARIANT[r.status] ?? 'default'}>
           {t(`status.${r.status}`, { defaultValue: r.status })}
         </Badge>
       </TableCell>
-      <TableCell className="text-muted">{r.detail ?? '—'}</TableCell>
-      <TableCell className="whitespace-nowrap text-muted">
+      <TableCell label={t('col.detail')} className="text-muted">{r.detail ?? '—'}</TableCell>
+      <TableCell label={t('col.updated')} className="whitespace-nowrap text-muted">
         {fmtIsoLocal(r.recorded_at)}
       </TableCell>
     </TableRow>

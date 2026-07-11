@@ -213,11 +213,11 @@ function ObjectStoreSection({ ns, queryKey, endpoint, icon, accept }: SectionCon
             <TableBody>
               {(listQ.data ?? []).map((r) => (
                 <TableRow key={`${r.name}/${r.version}`}>
-                  <TableCell><code className="text-xs">{r.name}</code></TableCell>
-                  <TableCell><code className="text-xs">{r.version}</code></TableCell>
-                  <TableCell className="text-muted text-xs">{fmtSize(r.size)}</TableCell>
-                  <TableCell className="text-muted text-xs">{fmtIsoLocal(r.modified)}</TableCell>
-                  <TableCell className="text-muted text-xs">
+                  <TableCell label={t(`${ns}.list.columns.name`)}><code className="text-xs">{r.name}</code></TableCell>
+                  <TableCell label={t(`${ns}.list.columns.version`)}><code className="text-xs">{r.version}</code></TableCell>
+                  <TableCell label={t(`${ns}.list.columns.size`)} className="text-muted text-xs">{fmtSize(r.size)}</TableCell>
+                  <TableCell label={t(`${ns}.list.columns.modified`)} className="text-muted text-xs">{fmtIsoLocal(r.modified)}</TableCell>
+                  <TableCell label={t(`${ns}.list.columns.digest`)} className="text-muted text-xs">
                     <code>{r.digest?.slice(0, 24) ?? '—'}</code>
                   </TableCell>
                   <TableCell className="text-right">

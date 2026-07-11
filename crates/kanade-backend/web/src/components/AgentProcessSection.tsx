@@ -379,22 +379,22 @@ export function AgentProcessSection({ pcId }: { pcId: string }) {
               <TableBody>
                 {rows.map((p) => (
                   <TableRow key={p.pid}>
-                    <TableCell className="text-right text-muted text-xs">
+                    <TableCell label={t('process.columns.pid')} className="text-right text-muted text-xs">
                       {p.pid}
                     </TableCell>
-                    <TableCell className="text-xs">
+                    <TableCell label={t('process.columns.name')} className="text-xs">
                       <code>{p.name}</code>
                     </TableCell>
-                    <TableCell className="text-right text-xs">
+                    <TableCell label={t('process.columns.cpu')} className="text-right text-xs">
                       {p.cpu_pct.toFixed(1)}%
                     </TableCell>
-                    <TableCell className="text-right text-xs">
+                    <TableCell label={t('process.columns.rss')} className="text-right text-xs">
                       {fmtBytes(p.rss_bytes)}
                     </TableCell>
-                    <TableCell className="text-right text-muted text-xs">
+                    <TableCell label={t('process.columns.diskRead')} className="text-right text-muted text-xs">
                       {fmtBytesPerSec(p.disk_read_bytes_per_sec)}
                     </TableCell>
-                    <TableCell className="text-right text-muted text-xs">
+                    <TableCell label={t('process.columns.diskWritten')} className="text-right text-muted text-xs">
                       {fmtBytesPerSec(p.disk_written_bytes_per_sec)}
                     </TableCell>
                   </TableRow>

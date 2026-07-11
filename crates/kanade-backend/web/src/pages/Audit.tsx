@@ -196,13 +196,13 @@ export function Audit() {
           <TableBody>
             {rows.map((e) => (
               <TableRow key={e.id}>
-                <TableCell className="text-muted text-xs">{fmtIsoLocal(e.occurred_at)}</TableCell>
-                <TableCell>
+                <TableCell label={t('columns.when')} className="text-muted text-xs">{fmtIsoLocal(e.occurred_at)}</TableCell>
+                <TableCell label={t('columns.actor')}>
                   <Badge variant={actorVariant(e.actor)}>{e.actor}</Badge>
                 </TableCell>
-                <TableCell><code className="text-xs">{e.action}</code></TableCell>
-                <TableCell><code className="text-xs">{e.target ?? '—'}</code></TableCell>
-                <TableCell>
+                <TableCell label={t('columns.action')}><code className="text-xs">{e.action}</code></TableCell>
+                <TableCell label={t('columns.target')}><code className="text-xs">{e.target ?? '—'}</code></TableCell>
+                <TableCell label={t('columns.payload')}>
                   <details>
                     <summary className="cursor-pointer text-muted text-xs">{t('payload.show')}</summary>
                     <pre className="text-xs whitespace-pre-wrap break-words mt-2 bg-muted/5 p-2 rounded">

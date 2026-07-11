@@ -356,7 +356,7 @@ export function Activity() {
           <TableBody>
             {rows.map((r) => (
               <TableRow key={r.result_id}>
-                <TableCell>
+                <TableCell label={t('columns.resultId')}>
                   {/* result_id (v0.29) is the detail-route key — was
                       request_id pre-v0.29 but that's no longer unique
                       across broadcast Commands. Ctrl/⌘ click opens
@@ -371,18 +371,18 @@ export function Activity() {
                     <ExternalLink className="size-3" />
                   </Link>
                 </TableCell>
-                <TableCell><code className="text-xs">{r.pc_id}</code></TableCell>
-                <TableCell>
+                <TableCell label={t('columns.pcId')}><code className="text-xs">{r.pc_id}</code></TableCell>
+                <TableCell label={t('columns.jobId')}>
                   {r.job_id
                     ? <code className="text-xs">{r.job_id}</code>
                     : <span className="text-muted text-xs">—</span>}
                 </TableCell>
-                <TableCell>
+                <TableCell label={t('columns.execId')}>
                   {r.exec_id
                     ? <code className="text-xs">{r.exec_id.slice(0, ID_PREVIEW_LENGTH)}</code>
                     : <span className="text-muted text-xs">—</span>}
                 </TableCell>
-                <TableCell>
+                <TableCell label={t('columns.exit')}>
                   {/* v0.30 / PR α' unified: exit_code is null while
                       the row is in flight (events.started landed
                       but no ExecResult yet). Show a 'running' badge
@@ -396,15 +396,15 @@ export function Activity() {
                     </Badge>
                   )}
                 </TableCell>
-                <TableCell className="text-muted text-xs">{fmtIsoLocal(r.started_at)}</TableCell>
-                <TableCell className="text-muted text-xs">
+                <TableCell label={t('columns.started')} className="text-muted text-xs">{fmtIsoLocal(r.started_at)}</TableCell>
+                <TableCell label={t('columns.finished')} className="text-muted text-xs">
                   {/* v0.30 / PR α' unified: finished_at null = still
                       running. fmtIsoLocal returns "—" for null
                       which is OK but ambiguous with "no data"; show
                       "running…" explicitly. */}
                   {r.finished_at ? fmtIsoLocal(r.finished_at) : t('status.runningEllipsis')}
                 </TableCell>
-                <TableCell className="max-w-md">
+                <TableCell label={t('columns.stdio')} className="max-w-md">
                   <StdioPreview
                     resultId={r.result_id}
                     stdout={r.stdout}

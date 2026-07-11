@@ -18,8 +18,8 @@ function ProbeTable({ rows }: { rows: { name: string; exists: boolean }[] }) {
       <TableBody>
         {rows.map((r) => (
           <TableRow key={r.name}>
-            <TableCell><code className="text-xs">{r.name}</code></TableCell>
-            <TableCell>
+            <TableCell label={t('columns.name')}><code className="text-xs">{r.name}</code></TableCell>
+            <TableCell label={t('columns.status')}>
               {r.exists
                 ? <span className="inline-flex items-center gap-1 text-success"><CheckCircle2 className="size-4" />{t('status.ok')}</span>
                 : <span className="inline-flex items-center gap-1 text-danger"><XCircle className="size-4" />{t('status.missing')}</span>}
