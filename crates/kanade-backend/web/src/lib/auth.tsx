@@ -10,6 +10,7 @@ import {
 import { useLocation, useNavigate } from 'react-router-dom';
 
 import { apiFetch, AUTH_EXPIRED_EVENT } from '@/lib/api';
+import type { Feature } from '@/lib/features';
 
 const TOKEN_KEY = 'kanade_token';
 
@@ -17,7 +18,16 @@ const TOKEN_KEY = 'kanade_token';
 export type Role = 'viewer' | 'operator' | 'admin';
 const RANK: Record<Role, number> = { viewer: 0, operator: 1, admin: 2 };
 
-type Me = { username: string; role: Role; must_change_pw: boolean };
+type Me = {
+  username: string;
+  role: Role;
+  must_change_pw: boolean;
+  /** Per-account page allow-list (#1008). `null` = unrestricted (every
+   *  page). An array restricts to those feature keys (see `lib/features`).
+   *  Resolved from the DB by the backend; the backend is the real gate — the
+   *  SPA just hides/redirects to match. */
+  allowed_features: string[] | null;
+};
 
 type AuthContextValue = {
   token: string;
@@ -32,6 +42,11 @@ type AuthContextValue = {
   refresh: () => Promise<void>;
   /** True when the signed-in caller's role is at least `min`. */
   hasRole: (min: Role) => boolean;
+  /** True when the caller may see a page's `feature` (#1008). Optimistic
+   *  while identity is still loading (returns `true` — the backend still
+   *  gates the data), `true` for unrestricted accounts, else membership in
+   *  the allow-list. Drives sidebar/route filtering; enforcement is backend. */
+  canSee: (feature: Feature) => boolean;
 };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -126,6 +141,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       mustChangePw: me?.must_change_pw ?? false,
       refresh,
       hasRole: (min: Role) => (me ? RANK[me.role] >= RANK[min] : false),
+      canSee: (feature: Feature) => {
+        // Not loaded yet → optimistic (avoid a redirect flash for
+        // unrestricted users; the backend still 403s a restricted account).
+        if (!me) return true;
+        // Anything that isn't an array (`null`, or a missing/`undefined`
+        // field from an unexpected API shape) means unrestricted — never
+        // fail closed and blank the whole UI on a shape mismatch.
+        if (!Array.isArray(me.allowed_features)) return true;
+        return me.allowed_features.includes(feature);
+      },
     }),
     [token, me, setToken, logout, refresh],
   );
