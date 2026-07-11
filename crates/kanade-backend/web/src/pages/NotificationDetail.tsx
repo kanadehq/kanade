@@ -353,17 +353,17 @@ export function NotificationDetail() {
                   const who = p.last_logon_display_name || p.last_logon_user;
                   return (
                     <TableRow key={p.pc_id}>
-                      <TableCell className="font-medium">
+                      <TableCell label={t('audience.pc')} className="font-medium">
                         <code>{p.pc_id}</code>
                       </TableCell>
-                      <TableCell>
+                      <TableCell label={t('audience.user')}>
                         {who ? (
                           <span title={p.last_logon_user}>{who}</span>
                         ) : (
                           <span className="text-muted text-xs">—</span>
                         )}
                       </TableCell>
-                      <TableCell>
+                      <TableCell label={t('audience.status')}>
                         {p.confirmed ? (
                           <Badge variant="success">{t('audience.confirmed')}</Badge>
                         ) : p.unacked_at ? (
@@ -377,7 +377,7 @@ export function NotificationDetail() {
                           <Badge variant="amber">{t('audience.pending')}</Badge>
                         )}
                       </TableCell>
-                      <TableCell>
+                      <TableCell label={t('ack.ackedAt')}>
                         {p.acked_at ? (
                           <span>
                             {fmtIsoLocal(p.acked_at)}
@@ -424,10 +424,10 @@ export function NotificationDetail() {
                 <TableBody>
                   {data.acks.map((a) => (
                     <TableRow key={`${a.pc_id}::${a.user_sid}`}>
-                      <TableCell className="font-medium">
+                      <TableCell label={t('ack.pc')} className="font-medium">
                         <code>{a.pc_id}</code>
                       </TableCell>
-                      <TableCell>
+                      <TableCell label={t('ack.user')}>
                         {a.account?.trim() ? (
                           // SID kept in a tooltip — the account label is what
                           // an operator actually recognises. `trim()` guards a
@@ -437,7 +437,7 @@ export function NotificationDetail() {
                           <code className="text-xs">{a.user_sid}</code>
                         )}
                       </TableCell>
-                      <TableCell>
+                      <TableCell label={t('ack.ackedAt')}>
                         {fmtIsoLocal(a.acked_at)}
                         {a.unacked_at && (
                           // Retracted: without this, a confirmed-then-revoked

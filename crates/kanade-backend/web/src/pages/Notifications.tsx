@@ -375,8 +375,8 @@ export function Notifications() {
                     const expired = !Number.isNaN(exp) && exp <= Date.now();
                     return (
                       <TableRow key={n.id}>
-                        <TableCell>{t(`priority.${n.priority}`)}</TableCell>
-                        <TableCell className="font-medium">
+                        <TableCell label={t('history.priority')}>{t(`priority.${n.priority}`)}</TableCell>
+                        <TableCell label={t('history.titleCol')} className="font-medium">
                           {n.title}
                           {n.require_ack && (
                             <span className="ml-1 text-xs text-muted">
@@ -394,8 +394,8 @@ export function Notifications() {
                             </span>
                           )}
                         </TableCell>
-                        <TableCell className="text-muted">{n.issued_by ?? '—'}</TableCell>
-                        <TableCell>{fmtIsoLocal(n.issued_at)}</TableCell>
+                        <TableCell label={t('history.issuedBy')} className="text-muted">{n.issued_by ?? '—'}</TableCell>
+                        <TableCell label={t('history.issuedAt')}>{fmtIsoLocal(n.issued_at)}</TableCell>
                         <TableCell className="text-right">
                           <div className="flex items-center justify-end gap-1">
                             <Button

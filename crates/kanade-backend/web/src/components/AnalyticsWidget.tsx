@@ -127,7 +127,10 @@ function BarTable({ rows, empty }: { rows: BarRow[]; empty: string }) {
   const useTime = rows.some((r) => r.est_minutes != null);
   const max = Math.max(...rows.map((r) => r.value), 1);
   return (
-    <Table>
+    // Headerless 2-column bar list (label + value) — already compact and
+    // readable on a phone, and there are no column headers to turn into
+    // card labels, so keep it a plain table at every width.
+    <Table cards={false}>
       <TableBody>
         {rows.map((r) => (
           <TableRow key={r.label}>
@@ -181,7 +184,7 @@ function ResultTable({
             // Row order is the query's; index is a stable key within one result.
             <TableRow key={ri}>
               {row.map((cell, ci) => (
-                <TableCell key={ci} className="text-xs">
+                <TableCell key={ci} label={columns[ci]} className="text-xs">
                   {cell === null ? (
                     <span className="text-muted">—</span>
                   ) : typeof cell === 'number' ? (

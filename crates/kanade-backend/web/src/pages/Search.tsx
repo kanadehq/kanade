@@ -551,7 +551,7 @@ export function InventorySearch() {
                         typeof row.collected_at === 'string' ? row.collected_at : null;
                       return (
                         <TableRow key={rowKey}>
-                          <TableCell>
+                          <TableCell label={t('results.columns.pcId')}>
                             <Link
                               to={`/inventory?pc=${encodeURIComponent(pcId)}`}
                               className="underline hover:text-fg"
@@ -559,17 +559,17 @@ export function InventorySearch() {
                               {pcId}
                             </Link>
                           </TableCell>
-                          <TableCell>
+                          <TableCell label={t('results.columns.lastLogon')}>
                             {fmtAccount(
                               row[ACCOUNT_DISPLAY_NAME_KEY],
                               row[ACCOUNT_USER_KEY],
                             )}
                           </TableCell>
-                          <TableCell className="text-muted text-xs">
+                          <TableCell label={t('results.columns.collectedAt')} className="text-muted text-xs">
                             {fmtIsoLocal(collectedAt)}
                           </TableCell>
                           {columns.map((c) => (
-                            <TableCell key={c.field}>{formatCell(row[c.field])}</TableCell>
+                            <TableCell key={c.field} label={c.field}>{formatCell(row[c.field])}</TableCell>
                           ))}
                         </TableRow>
                       );

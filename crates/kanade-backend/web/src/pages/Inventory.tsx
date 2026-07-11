@@ -167,7 +167,9 @@ function NestedTable({ value, columns }: { value: unknown; columns: DisplayField
   }
   return (
     <Table>
-      <TableHeader>
+      {/* Nested sub-table lives inside another table's cell — a sticky header
+          here would pin to the viewport and fight the outer table's header. */}
+      <TableHeader stickyHeader={false}>
         <TableRow>
           {columns.map((c) => (
             <TableHead key={c.field}>{c.label}</TableHead>
@@ -180,7 +182,7 @@ function NestedTable({ value, columns }: { value: unknown; columns: DisplayField
           return (
             <TableRow key={i}>
               {columns.map((c) => (
-                <TableCell key={c.field}>
+                <TableCell key={c.field} label={c.label}>
                   {/* Gemini #84 medium fix: true recursion. A nested
                       column can itself be `type: 'table'`, so the
                       sub-table renderer must branch the same way
@@ -562,8 +564,8 @@ function FleetProbeTable({
                   className="cursor-pointer hover:bg-muted/5"
                   onClick={() => pickPc(r.pc_id)}
                 >
-                  <TableCell><code className="text-xs">{r.pc_id}</code></TableCell>
-                  <TableCell className="text-xs">
+                  <TableCell label={t('fleet.columns.pcId')}><code className="text-xs">{r.pc_id}</code></TableCell>
+                  <TableCell label={t('fleet.columns.lastLogon')} className="text-xs">
                     {fmtAccount(r.last_logon_display_name, r.last_logon_user)}
                   </TableCell>
                   {columns.map((c) => {
@@ -572,7 +574,7 @@ function FleetProbeTable({
                     // need the `as unknown[]` cast repeated.
                     const val = r.facts[c.field];
                     return (
-                      <TableCell key={c.field}>
+                      <TableCell key={c.field} label={c.label}>
                         {/* v0.30 / #39: fleet summary cells must
                             stay compact (one row per PC, many
                             columns). For `type: table` collapse to
@@ -592,7 +594,7 @@ function FleetProbeTable({
                       </TableCell>
                     );
                   })}
-                  <TableCell className="text-muted text-xs">
+                  <TableCell label={t('fleet.columns.collected')} className="text-muted text-xs">
                     {fmtIsoLocal(r.collected_at)}
                   </TableCell>
                 </TableRow>
@@ -774,8 +776,13 @@ function FactCard({
               </pre>
             </details>
           ) : (
-            <Table>
-              <TableHeader>
+            // Key–value detail: 2 narrow columns already fit a phone, and a
+            // card view would double-label ("field: X" / "value: Y"), so keep
+            // it a plain table at every width (cards={false}).
+            <Table cards={false}>
+              {/* Can host a NestedTable in the value cell; keep this header
+                  non-sticky too so the two don't compete for top:0. */}
+              <TableHeader stickyHeader={false}>
                 <TableRow>
                   <TableHead>{t('detail.columns.field')}</TableHead>
                   <TableHead>{t('detail.columns.value')}</TableHead>

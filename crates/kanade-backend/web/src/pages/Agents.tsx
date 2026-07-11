@@ -477,7 +477,7 @@ export function Agents() {
             const unresolvedVersions = unresolvedQuarantine(a.quarantined_versions, a.agent_version);
             return (
             <TableRow key={a.pc_id}>
-              <TableCell>
+              <TableCell label={t('columns.status')}>
                 <div className="flex flex-col items-start gap-1">
                   <Badge
                     variant={online ? 'success' : 'danger'}
@@ -507,7 +507,7 @@ export function Agents() {
                   )}
                 </div>
               </TableCell>
-              <TableCell>
+              <TableCell label={t('columns.pcId')}>
                 <Link
                   to={`/agents/${encodeURIComponent(a.pc_id)}`}
                   className="hover:underline"
@@ -523,10 +523,10 @@ export function Agents() {
                     <div className="text-muted text-[10px]">{a.hostname}</div>
                   )}
               </TableCell>
-              <TableCell className="text-muted text-xs">{a.os_family ?? '—'}</TableCell>
-              <TableCell className="text-muted text-xs">{a.agent_version ?? '—'}</TableCell>
-              <TableCell className="text-muted text-xs">{fmtIsoLocal(a.last_heartbeat)}</TableCell>
-              <TableCell className="text-xs">
+              <TableCell label={t('columns.os')} className="text-muted text-xs">{a.os_family ?? '—'}</TableCell>
+              <TableCell label={t('columns.agent')} className="text-muted text-xs">{a.agent_version ?? '—'}</TableCell>
+              <TableCell label={t('columns.lastHeartbeat')} className="text-muted text-xs">{fmtIsoLocal(a.last_heartbeat)}</TableCell>
+              <TableCell label={t('columns.lastLogon')} className="text-xs">
                 {a.last_logon_display_name || a.last_logon_user ? (
                   <div className="flex flex-col">
                     {/* Display name as the primary line; fall back to the
@@ -545,8 +545,8 @@ export function Agents() {
                   <span className="text-muted">—</span>
                 )}
               </TableCell>
-              <TableCell className="text-right text-muted text-xs">{fmtPct(a.agent_cpu_pct)}</TableCell>
-              <TableCell className="text-right text-muted text-xs">{fmtBytes(a.agent_rss_bytes)}</TableCell>
+              <TableCell label={t('columns.cpu')} className="text-right text-muted text-xs">{fmtPct(a.agent_cpu_pct)}</TableCell>
+              <TableCell label={t('columns.rss')} className="text-right text-muted text-xs">{fmtBytes(a.agent_rss_bytes)}</TableCell>
               <TableCell>
                 <div className="flex gap-1 flex-wrap">
                   <Button variant="secondary" size="sm" asChild>

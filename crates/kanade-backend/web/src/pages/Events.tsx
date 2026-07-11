@@ -618,9 +618,9 @@ export function Events() {
           <TableBody>
             {visible.map((e) => (
               <TableRow key={e.id}>
-                <TableCell className="text-muted text-xs">{fmtIsoLocal(e.at)}</TableCell>
-                <TableCell><code className="text-xs">{e.pc_id}</code></TableCell>
-                <TableCell>
+                <TableCell label={t('columns.when')} className="text-muted text-xs">{fmtIsoLocal(e.at)}</TableCell>
+                <TableCell label={t('columns.pcId')}><code className="text-xs">{e.pc_id}</code></TableCell>
+                <TableCell label={t('columns.kind')}>
                   {/* Click a row's kind badge to cycle the same include →
                       exclude → off filter as the chips above (e.g. mute the
                       noisy web_visit / presence rows). Wrapped in a real
@@ -637,13 +637,13 @@ export function Events() {
                     <Badge variant={kindVariant(e.kind)}>{e.kind}</Badge>
                   </button>
                 </TableCell>
-                <TableCell><code className="text-xs">{e.source}</code></TableCell>
-                <TableCell>
+                <TableCell label={t('columns.source')}><code className="text-xs">{e.source}</code></TableCell>
+                <TableCell label={t('columns.recordId')}>
                   {e.event_record_id
                     ? <code className="text-xs">{e.event_record_id}</code>
                     : <span className="text-muted text-xs">—</span>}
                 </TableCell>
-                <TableCell>
+                <TableCell label={t('columns.payload')}>
                   <PayloadDetails payload={e.payload} />
                 </TableCell>
               </TableRow>

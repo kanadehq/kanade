@@ -454,7 +454,7 @@ export function Schedules() {
         {/* `w-full max-w-0` — this cell soaks up the leftover
             width and truncates, same as the Jobs id+description
             cell. */}
-        <TableCell className="w-full max-w-0">
+        <TableCell label={t('columns.schedule')} className="w-full max-w-0">
           <div className="flex flex-col gap-0.5">
             <code className="text-xs font-medium">{s.id}</code>
             <span className="block truncate text-xs text-muted" title={s.job_id}>
@@ -500,17 +500,17 @@ export function Schedules() {
             )}
           </div>
         </TableCell>
-        <TableCell><code className="text-xs whitespace-nowrap">{summariseWhen(s.when)}</code></TableCell>
-        <TableCell className="text-xs max-w-48 truncate" title={summariseTarget(s.target, t('target.all'))}>
+        <TableCell label={t('columns.when')}><code className="text-xs whitespace-nowrap">{summariseWhen(s.when)}</code></TableCell>
+        <TableCell label={t('columns.target')} className="text-xs max-w-48 truncate" title={summariseTarget(s.target, t('target.all'))}>
           {summariseTarget(s.target, t('target.all'))}
         </TableCell>
-        <TableCell>
+        <TableCell label={t('columns.coverage')}>
           {(() => {
             const c = coverageById.get(s.id);
             return c ? <CoverageBar {...c} /> : <span className="text-muted text-xs">…</span>;
           })()}
         </TableCell>
-        <TableCell>{enabledBadge(s)}</TableCell>
+        <TableCell label={t('columns.enabled')}>{enabledBadge(s)}</TableCell>
         {/* stopPropagation so action clicks don't also open
             the drawer underneath the confirm dialog. */}
         <TableCell onClick={(e) => e.stopPropagation()}>

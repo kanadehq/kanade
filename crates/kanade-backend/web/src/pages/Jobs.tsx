@@ -452,7 +452,7 @@ export function Jobs() {
             description to fit (same trick the old 11-column
             layout used, now on the merged id+description
             cell). */}
-        <TableCell className="w-full max-w-0">
+        <TableCell label={t('columns.job')} className="w-full max-w-0">
           <div className="flex flex-col gap-0.5">
             <code className="text-xs font-medium">{j.id}</code>
             <span
@@ -501,8 +501,8 @@ export function Jobs() {
             )}
           </div>
         </TableCell>
-        <TableCell>{statusBadge(j.id)}</TableCell>
-        <TableCell>{liveChips(j)}</TableCell>
+        <TableCell label={t('columns.status')}>{statusBadge(j.id)}</TableCell>
+        <TableCell label={t('columns.live')}>{liveChips(j)}</TableCell>
         {/* stopPropagation so clicking an action (or the dead
             space between buttons) doesn't also open the
             drawer underneath the confirm dialog. */}

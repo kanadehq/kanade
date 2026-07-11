@@ -243,15 +243,20 @@ export function Accounts() {
         <TableBody>
           {(accounts.data ?? []).map((a) => (
             <TableRow key={a.username}>
-              <TableCell className="font-medium">
-                {a.username}
-                {a.must_change_pw === 1 && (
-                  <Badge variant="amber" className="ml-2">
-                    {t('mustChange')}
-                  </Badge>
-                )}
+              <TableCell label={t('username')} className="font-medium">
+                {/* Group the name + badge as one flex item so the card view
+                    keeps them together on the value side (not split across
+                    the row by justify-content: space-between). */}
+                <span className="inline-flex items-center">
+                  {a.username}
+                  {a.must_change_pw === 1 && (
+                    <Badge variant="amber" className="ml-2">
+                      {t('mustChange')}
+                    </Badge>
+                  )}
+                </span>
               </TableCell>
-              <TableCell className="text-xs">
+              <TableCell label={t('email')} className="text-xs">
                 {/* Click to edit the stored email (PATCH /api/accounts). */}
                 <button
                   type="button"
@@ -269,7 +274,7 @@ export function Accounts() {
                   )}
                 </button>
               </TableCell>
-              <TableCell>
+              <TableCell label={t('role')}>
                 <Select
                   value={a.role}
                   className="w-32"
@@ -284,14 +289,14 @@ export function Accounts() {
                   ))}
                 </Select>
               </TableCell>
-              <TableCell>
+              <TableCell label={t('status')}>
                 {a.disabled === 1 ? (
                   <Badge variant="danger">{t('disabled')}</Badge>
                 ) : (
                   <Badge variant="success">{t('enabled')}</Badge>
                 )}
               </TableCell>
-              <TableCell className="text-muted text-xs">{a.created_at}</TableCell>
+              <TableCell label={t('created')} className="text-muted text-xs">{a.created_at}</TableCell>
               <TableCell className="text-right space-x-2 whitespace-nowrap">
                 {/* Mail a setup/reset link; only when the account has an
                     email on file. */}

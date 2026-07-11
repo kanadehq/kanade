@@ -253,10 +253,10 @@ export function Groups() {
           <TableBody>
             {groups.map((g) => (
               <TableRow key={g.name}>
-                <TableCell className="font-medium">
+                <TableCell label={t('groupName')} className="font-medium">
                   <code>{g.name}</code>
                 </TableCell>
-                <TableCell>
+                <TableCell label={t('members')}>
                   {g.members.length === 0 ? (
                     <span className="text-muted text-xs">{t('noMembers')}</span>
                   ) : (
@@ -295,7 +295,7 @@ export function Groups() {
                     </div>
                   )}
                 </TableCell>
-                <TableCell>
+                <TableCell label={t('email')}>
                   {editingEmail === g.name ? (
                     <div className="flex items-center gap-1.5">
                       <Input
@@ -360,7 +360,7 @@ export function Groups() {
                     </button>
                   )}
                 </TableCell>
-                <TableCell>
+                <TableCell label={t('config')}>
                   {g.has_config ? (
                     <Link to="/config" title={t('configHint')}>
                       <Badge variant="violet">
