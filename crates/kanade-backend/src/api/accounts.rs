@@ -26,6 +26,78 @@ use crate::api::AppState;
 use crate::api::password_setup::{self, PURPOSE_RESET, PURPOSE_SETUP};
 use crate::audit::{self, Caller};
 use crate::auth::{Claims, EXPECTED_AUDIENCE, Role, signing_secret};
+use kanade_shared::feature::Feature;
+
+// ---- allowed_features (page allow-list) helpers --------------------
+
+/// Validate + canonicalize a submitted page allow-list. Rejects an unknown
+/// key with `400` (so an admin typo surfaces immediately), de-duplicates,
+/// and returns the keys in catalog order so what's stored is stable. An
+/// empty input is valid — it means "commons only" (see the migration).
+///
+/// The `Err` is a small `(status, message)` pair rather than a full
+/// `Response` (which would trip `clippy::result_large_err` on a non-async
+/// helper); call sites convert it via [`err`].
+fn canonical_features(keys: &[String]) -> Result<Vec<String>, (StatusCode, String)> {
+    let mut set: Vec<Feature> = Vec::new();
+    for k in keys {
+        let f = Feature::parse(k)
+            .ok_or_else(|| (StatusCode::BAD_REQUEST, format!("unknown feature: {k}")))?;
+        if !set.contains(&f) {
+            set.push(f);
+        }
+    }
+    Ok(Feature::ALL
+        .iter()
+        .filter(|f| set.contains(f))
+        .map(|f| f.as_str().to_string())
+        .collect())
+}
+
+/// Serialize a validated allow-list to the JSON TEXT stored in
+/// `users.allowed_features`. Same small-`Err` convention as
+/// [`canonical_features`].
+fn features_to_json(keys: &[String]) -> Result<String, (StatusCode, String)> {
+    let canon = canonical_features(keys)?;
+    serde_json::to_string(&canon).map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "serialize features".into(),
+        )
+    })
+}
+
+/// Convert the small helper error into the handler's `Response` error.
+fn feature_err((code, msg): (StatusCode, String)) -> Response {
+    err(code, &msg)
+}
+
+/// Lenient read of the stored allow-list for display: `NULL`/malformed →
+/// `None` (unrestricted), unknown/retired keys dropped. Mirrors
+/// `auth::parse_allowed_features` so the admin list and the enforcement path
+/// agree on what a stored value means.
+fn features_for_display(raw: Option<&str>) -> Option<Vec<String>> {
+    let keys: Vec<String> = serde_json::from_str(raw?).ok()?;
+    Some(
+        keys.iter()
+            .filter_map(|k| Feature::parse(k).map(|f| f.as_str().to_string()))
+            .collect(),
+    )
+}
+
+/// `serde` "double option" for a `PATCH` field that must distinguish three
+/// wire states: **absent** (leave unchanged → `None`), explicit **`null`**
+/// (clear → `Some(None)`), and a **value** (`Some(Some(v))`). Plain
+/// `Option<Option<T>>` can't: serde folds `null` into the outer `None`, same
+/// as absent. `deserialize_with` is only invoked when the key is present, so
+/// routing through it recovers the distinction.
+fn double_option<'de, D, T>(de: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Some(Option::deserialize(de)?))
+}
 
 // Token lifetime is operator-configurable via `server_settings`
 // (`session_ttl_hours`, default 24h — see
@@ -104,6 +176,9 @@ fn mint_jwt(sub: &str, role: Role, ttl_hours: i64) -> Option<(String, i64)> {
         exp,
         aud: Some(EXPECTED_AUDIENCE.to_string()),
         roles: vec![role.as_str().to_string()],
+        // Never minted into the token — the page allow-list is resolved from
+        // the DB on every request (see `auth::verify`), like `roles`.
+        allowed_features: None,
     };
     let secret = signing_secret();
     match encode(
@@ -200,6 +275,10 @@ pub struct MeResp {
     username: String,
     role: Role,
     must_change_pw: bool,
+    /// The caller's page allow-list (`None` = unrestricted — every page).
+    /// Resolved from the DB by [`crate::auth::verify`]; drives the SPA's
+    /// sidebar + route filtering (the hard backend gate is `require_features`).
+    allowed_features: Option<Vec<Feature>>,
 }
 
 /// `GET /api/auth/me` — the caller's own identity + effective role.
@@ -223,6 +302,8 @@ pub async fn me(
         username: claims.sub.clone(),
         role: claims.role(),
         must_change_pw: must_change_pw != 0,
+        // Already resolved from the DB by `verify` — no extra query needed.
+        allowed_features: claims.allowed_features.clone(),
     }))
 }
 
@@ -283,7 +364,21 @@ pub async fn change_password(
 
 // ---- admin CRUD ----------------------------------------------------
 
-#[derive(Serialize, sqlx::FromRow)]
+/// Raw `users` row as stored (JSON `allowed_features` kept as TEXT so the
+/// handler can parse it leniently — the DB has no JSON type).
+#[derive(sqlx::FromRow)]
+struct UserRowDb {
+    username: String,
+    role: String,
+    disabled: i64,
+    must_change_pw: i64,
+    email: Option<String>,
+    allowed_features: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Serialize)]
 pub struct UserRow {
     username: String,
     role: String,
@@ -292,19 +387,36 @@ pub struct UserRow {
     /// Optional contact email (#770) — drives the SPA's email column and
     /// the "send setup/reset link" action. `None` when unset.
     email: Option<String>,
+    /// Page allow-list (`kanade_shared::feature::Feature` keys). `None` =
+    /// unrestricted (every page). Unknown/retired keys are dropped so the
+    /// SPA editor only ever sees valid ones.
+    allowed_features: Option<Vec<String>>,
     created_at: String,
     updated_at: String,
 }
 
 /// `GET /api/accounts` — admin. Never returns password hashes.
 pub async fn list(State(state): State<AppState>) -> Result<Json<Vec<UserRow>>, Response> {
-    let rows = sqlx::query_as::<_, UserRow>(
-        "SELECT username, role, disabled, must_change_pw, email, created_at, updated_at FROM users ORDER BY username",
+    let rows = sqlx::query_as::<_, UserRowDb>(
+        "SELECT username, role, disabled, must_change_pw, email, allowed_features, created_at, updated_at FROM users ORDER BY username",
     )
     .fetch_all(&state.pool)
     .await
     .map_err(db_err)?;
-    Ok(Json(rows))
+    let out = rows
+        .into_iter()
+        .map(|r| UserRow {
+            username: r.username,
+            role: r.role,
+            disabled: r.disabled,
+            must_change_pw: r.must_change_pw,
+            email: r.email,
+            allowed_features: features_for_display(r.allowed_features.as_deref()),
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+        })
+        .collect();
+    Ok(Json(out))
 }
 
 #[derive(Deserialize)]
@@ -320,6 +432,11 @@ pub struct CreateReq {
     /// link is mailed.
     #[serde(default)]
     email: Option<String>,
+    /// Optional page allow-list. Omitted / `null` → unrestricted (every
+    /// page). An array (possibly empty) restricts the account. Unknown keys
+    /// are rejected with `400`.
+    #[serde(default)]
+    allowed_features: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -365,6 +482,13 @@ pub async fn create(
     }
     let password = req.password.as_deref().filter(|p| !p.is_empty());
 
+    // Validate the allow-list up front (before hashing) so an unknown key
+    // fails fast. `None` → stored NULL = unrestricted.
+    let allowed_json: Option<String> = match &req.allowed_features {
+        Some(keys) => Some(features_to_json(keys).map_err(feature_err)?),
+        None => None,
+    };
+
     // Decide the path. The link path needs a mailer; the no-credential
     // case (neither password nor email) is rejected.
     let use_link = match (password, email) {
@@ -401,13 +525,14 @@ pub async fn create(
     .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "hash failed"))?;
 
     let res = sqlx::query(
-        "INSERT INTO users (username, password_hash, role, must_change_pw, email) \
-         VALUES (?, ?, ?, 0, ?)",
+        "INSERT INTO users (username, password_hash, role, must_change_pw, email, allowed_features) \
+         VALUES (?, ?, ?, 0, ?, ?)",
     )
     .bind(username)
     .bind(&hash)
     .bind(role.as_str())
     .bind(email)
+    .bind(allowed_json.as_deref())
     .execute(&state.pool)
     .await;
     match res {
@@ -457,6 +582,7 @@ pub async fn create(
             "role": role.as_str(),
             "has_email": email.is_some(),
             "setup_link_sent": setup_link_sent,
+            "restricted": allowed_json.is_some(),
         }),
     )
     .await;
@@ -523,6 +649,12 @@ pub struct UpdateReq {
     /// clears it; `None` leaves it unchanged. Storing only — never sends.
     #[serde(default)]
     email: Option<String>,
+    /// Set/clear the page allow-list. Absent → unchanged; `null` → clear
+    /// (unrestricted); array (possibly empty) → restrict to those pages.
+    /// The double-option decoder recovers the absent-vs-null distinction
+    /// that plain `Option<Option<_>>` would lose.
+    #[serde(default, deserialize_with = "double_option")]
+    allowed_features: Option<Option<Vec<String>>>,
 }
 
 /// `PATCH /api/accounts/{username}` — admin. Any subset of role /
@@ -567,6 +699,14 @@ pub async fn update(
                 Some(Some(t))
             }
         }
+    };
+
+    // Validate the allow-list up front. `None` = unchanged; `Some(None)` =
+    // clear to NULL (unrestricted); `Some(Some(json))` = set to that list.
+    let new_allowed: Option<Option<String>> = match &req.allowed_features {
+        None => None,
+        Some(None) => Some(None),
+        Some(Some(keys)) => Some(Some(features_to_json(keys).map_err(feature_err)?)),
     };
 
     // 404 if the account is gone. The last-admin guards below live
@@ -646,6 +786,19 @@ pub async fn update(
         .await
         .map_err(db_err)?;
     }
+    if let Some(allowed) = new_allowed {
+        // `allowed` is `Option<String>`: `None` binds SQL NULL (unrestricted),
+        // `Some(json)` binds the validated allow-list. The change takes effect
+        // on the account's next request — `verify` re-reads the row every time.
+        sqlx::query(
+            "UPDATE users SET allowed_features = ?, updated_at = CURRENT_TIMESTAMP WHERE username = ?",
+        )
+        .bind(allowed.as_deref())
+        .bind(&username)
+        .execute(&state.pool)
+        .await
+        .map_err(db_err)?;
+    }
 
     audit::record(
         &state.nats,
@@ -658,6 +811,7 @@ pub async fn update(
             "disabled": req.disabled,
             "password_reset": req.password.is_some(),
             "email_changed": new_email.is_some(),
+            "allowed_features_changed": req.allowed_features.is_some(),
         }),
     )
     .await;
@@ -776,6 +930,45 @@ pub async fn seed_bootstrap_admin(pool: &SqlitePool) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_features_validates_dedupes_orders() {
+        // Unknown key → rejected.
+        assert!(canonical_features(&["bogus".into()]).is_err());
+        // Dedup + catalog order (input scrambled/duplicated).
+        let got =
+            canonical_features(&["compliance".into(), "inventory".into(), "compliance".into()])
+                .unwrap();
+        // Catalog order (Inventory precedes Compliance in `Feature::ALL`),
+        // not input order, and de-duplicated.
+        assert_eq!(got, vec!["inventory".to_string(), "compliance".to_string()]);
+        // Empty is valid (commons-only restriction).
+        assert_eq!(canonical_features(&[]).unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn features_for_display_is_lenient() {
+        assert_eq!(features_for_display(None), None);
+        assert_eq!(features_for_display(Some("garbage")), None); // malformed → unrestricted
+        assert_eq!(
+            features_for_display(Some(r#"["audit","gone"]"#)),
+            Some(vec!["audit".to_string()]) // unknown dropped
+        );
+        assert_eq!(features_for_display(Some("[]")), Some(vec![]));
+    }
+
+    #[test]
+    fn update_req_double_option_tristate() {
+        // Absent → None (leave unchanged).
+        let absent: UpdateReq = serde_json::from_str("{}").unwrap();
+        assert_eq!(absent.allowed_features, None);
+        // Explicit null → Some(None) (clear → unrestricted).
+        let cleared: UpdateReq = serde_json::from_str(r#"{"allowed_features":null}"#).unwrap();
+        assert_eq!(cleared.allowed_features, Some(None));
+        // Array → Some(Some(list)) (restrict).
+        let set: UpdateReq = serde_json::from_str(r#"{"allowed_features":["audit"]}"#).unwrap();
+        assert_eq!(set.allowed_features, Some(Some(vec!["audit".to_string()])));
+    }
 
     #[test]
     fn password_hash_roundtrip() {

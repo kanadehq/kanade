@@ -1,0 +1,18 @@
+-- Per-account page visibility (hard, API-enforced feature allow-list).
+--
+-- `allowed_features` is a JSON array of feature keys (see
+-- `kanade_shared::feature::Feature`), e.g. '["compliance","inventory"]'.
+--
+--   NULL  -> unrestricted: the account may reach every page (the existing
+--            behavior — so this migration is backward-compatible and every
+--            current account keeps full access until an admin opts it into
+--            a restriction).
+--   '[]'  -> restricted to the always-open commons only (login /
+--            self-service routes + the Dashboard landing feed).
+--   '[…]' -> restricted to exactly the listed pages (plus commons).
+--
+-- Stored as TEXT (SQLite has no native JSON type); the backend
+-- (de)serializes it. No CHECK constraint on the contents — the catalog of
+-- valid keys lives in Rust and evolves faster than a SQL constraint should,
+-- and unknown keys are dropped on read rather than rejected at rest.
+ALTER TABLE users ADD COLUMN allowed_features TEXT;
