@@ -40,6 +40,7 @@ use axum::Router;
 use axum::extract::{DefaultBodyLimit, FromRef};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, patch, post, put};
+use kanade_shared::feature::Feature;
 use regex::Regex;
 use sqlx::SqlitePool;
 
@@ -505,10 +506,143 @@ pub fn router(state: AppState) -> Router {
     base.merge(operator)
         .merge(admin)
         .with_state(state)
+        // Per-account PAGE enforcement (horizontal axis), layered over the
+        // whole API. Runs after `auth::verify` (added in `main`, so it has
+        // injected `Claims`) and after routing (so `MatchedPath` is set,
+        // which `feature_for_path` keys off). Unrestricted callers and
+        // commons routes pass straight through — see `auth::require_features`.
+        .layer(axum::middleware::from_fn(crate::auth::require_features))
         // Everything else (`/`, `/assets/...`, hash-router paths) is served
         // from the rust-embed bundle. The fallback runs after the API routes
         // above, so JSON endpoints take precedence.
         .fallback(crate::web::serve)
+}
+
+/// Map a matched route pattern (`MatchedPath`, e.g. `/api/agents/{pc_id}`)
+/// to the page **feature** that owns it, for per-account page enforcement
+/// (`auth::require_features`). `None` = **commons**: a route open to any
+/// authenticated caller regardless of their allow-list — the public /
+/// self-service routes, the Dashboard landing feeds, and the shared fleet
+/// substrate (roster, per-PC detail/perf) that the Dashboard itself surfaces
+/// to everyone.
+///
+/// This is the single, auditable route→feature table. Commons-by-default is
+/// deliberate (most endpoints are shared substrate); a NEW page-specific
+/// endpoint must be added here to become gated.
+///
+/// Note: gating is by path, not method. A page's read and its mutation share
+/// a `MatchedPath`, so both are gated together (the vertical role gate still
+/// separately blocks a viewer's write). Endpoints the Dashboard also consumes
+/// are intentionally left commons so restricting a page never blanks the
+/// always-visible home.
+pub fn feature_for_path(path: &str) -> Option<Feature> {
+    Some(match path {
+        // --- Inventory ---
+        "/api/inventory/jobs"
+        | "/api/inventory/by-job/{manifest_id}"
+        | "/api/inventory/{manifest_id}/search/{field}"
+        | "/api/inventory/{manifest_id}/search-scalars"
+        | "/api/inventory/{manifest_id}/history/pc/{pc_id}"
+        | "/api/inventory/{manifest_id}/history/search"
+        | "/api/inventory/{manifest_id}/history/first_seen"
+        | "/api/inventory/{pc_id}" => Feature::Inventory,
+
+        // --- Compliance ---
+        "/api/checks" | "/api/checks/{check_name}" => Feature::Compliance,
+
+        // --- Analytics ---
+        "/api/analytics" => Feature::Analytics,
+
+        // --- Activity (executions + results) ---
+        "/api/results"
+        | "/api/results/{result_id}"
+        | "/api/results/{result_id}/tail"
+        | "/api/executions"
+        | "/api/executions/{exec_id}" => Feature::Activity,
+
+        // --- Events (obs_events; `recent` stays commons for the dashboard) ---
+        "/api/obs_events" | "/api/obs_events/kinds" | "/api/obs_events/sources" => Feature::Events,
+
+        // --- Audit ---
+        "/api/audit" => Feature::Audit,
+
+        // --- Logs (per-PC log tail page) ---
+        "/api/agents/{pc_id}/logs" => Feature::Logs,
+
+        // --- Collect ---
+        "/api/collect/bundles" | "/api/collect/bundles/{*key}" => Feature::Collect,
+
+        // --- Jobs (incl. the script-command revoke lifecycle, which the
+        //     SPA surfaces on the Jobs page — Jobs.tsx) ---
+        "/api/jobs"
+        | "/api/jobs/{id}/yaml"
+        | "/api/jobs/{id}"
+        | "/api/jobs/{job_id}/kill"
+        | "/api/scripts/status"
+        | "/api/scripts/{cmd_id}/revoke"
+        | "/api/scripts/{cmd_id}/unrevoke" => Feature::Jobs,
+
+        // --- Schedules (upcoming + coverage summary stay commons: dashboard) ---
+        "/api/schedules"
+        | "/api/schedules/{id}/yaml"
+        | "/api/schedules/{id}/preview"
+        | "/api/schedules/{id}/status"
+        | "/api/schedules/{id}/coverage"
+        | "/api/schedules/{id}"
+        | "/api/schedules/{id}/disable"
+        | "/api/schedules/{id}/enable" => Feature::Schedules,
+
+        // --- Views ---
+        "/api/views" | "/api/views/{id}/yaml" | "/api/views/{id}" => Feature::Views,
+
+        // --- Notifications ---
+        "/api/notifications"
+        | "/api/notifications/{id}"
+        | "/api/notifications/{id}/ack_status"
+        | "/api/notifications/{id}/recall" => Feature::Notifications,
+
+        // --- Rollout (agent releases + rollout) ---
+        "/api/agents/releases"
+        | "/api/agents/releases/{version}"
+        | "/api/agents/rollout"
+        | "/api/agents/publish" => Feature::Rollout,
+
+        // --- Apps (app packages + script objects) ---
+        "/api/app-packages"
+        | "/api/app-packages/{name}/{version}"
+        | "/api/script-objects"
+        | "/api/script-objects/{name}/{version}" => Feature::Apps,
+
+        // --- Groups (the Groups page; per-agent membership stays commons) ---
+        "/api/groups" | "/api/groups/{name}/email" => Feature::Groups,
+
+        // --- Config (agent-config editor; `inherited`/`effective`/`defaults`
+        //     stay commons as they back per-PC detail views too) ---
+        "/api/config" | "/api/groups/{name}/config" | "/api/pcs/{pc_id}/config" => Feature::Config,
+
+        // --- JetStream ---
+        "/api/jetstream/status" => Feature::Jetstream,
+
+        // --- Run ---
+        "/api/run" => Feature::Run,
+
+        // --- Exec ---
+        "/api/exec/{job_id}" => Feature::Exec,
+
+        // --- Settings (server settings + backend restart) ---
+        "/api/server-settings" | "/api/server/restart" => Feature::Settings,
+
+        // --- Accounts (also admin-gated; raw SQL lives here too) ---
+        "/api/accounts"
+        | "/api/accounts/{username}"
+        | "/api/accounts/{username}/reset-link"
+        | "/api/query" => Feature::Accounts,
+
+        // Commons: everything else (health, version, auth/*, the fleet
+        // roster + per-PC detail/perf, dashboard feeds, editor schemas,
+        // freeze banner, `*/defaults`, `*/inherited`, ...).
+        _ => return None,
+    })
 }
 
 async fn health() -> &'static str {
@@ -539,5 +673,73 @@ pub(crate) fn compile(opt: Option<&str>) -> Result<Option<Regex>, (StatusCode, S
             .map(Some)
             .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid regex `{s}`: {e}"))),
         None => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod feature_map_tests {
+    use super::*;
+
+    #[test]
+    fn gated_routes_map_to_their_feature() {
+        assert_eq!(
+            feature_for_path("/api/inventory/jobs"),
+            Some(Feature::Inventory)
+        );
+        assert_eq!(feature_for_path("/api/checks"), Some(Feature::Compliance));
+        assert_eq!(
+            feature_for_path("/api/results/{result_id}"),
+            Some(Feature::Activity)
+        );
+        assert_eq!(feature_for_path("/api/audit"), Some(Feature::Audit));
+        assert_eq!(
+            feature_for_path("/api/collect/bundles/{*key}"),
+            Some(Feature::Collect)
+        );
+        assert_eq!(
+            feature_for_path("/api/jetstream/status"),
+            Some(Feature::Jetstream)
+        );
+        assert_eq!(
+            feature_for_path("/api/server-settings"),
+            Some(Feature::Settings)
+        );
+        assert_eq!(feature_for_path("/api/query"), Some(Feature::Accounts));
+        // The script-command revoke lifecycle lives on the Jobs page, so it
+        // gates under Jobs (not Run) — otherwise a Jobs-restricted operator
+        // could revoke/unrevoke scripts (Gemini HIGH on #1009).
+        assert_eq!(feature_for_path("/api/scripts/status"), Some(Feature::Jobs));
+        assert_eq!(
+            feature_for_path("/api/scripts/{cmd_id}/revoke"),
+            Some(Feature::Jobs)
+        );
+        assert_eq!(
+            feature_for_path("/api/scripts/{cmd_id}/unrevoke"),
+            Some(Feature::Jobs)
+        );
+    }
+
+    #[test]
+    fn commons_routes_are_ungated() {
+        // Public / self-service.
+        assert_eq!(feature_for_path("/api/version"), None);
+        assert_eq!(feature_for_path("/api/auth/me"), None);
+        // Shared fleet substrate + dashboard feeds stay open so a page
+        // restriction never blanks the always-visible home.
+        assert_eq!(feature_for_path("/api/agents"), None);
+        assert_eq!(feature_for_path("/api/agents/{pc_id}"), None);
+        assert_eq!(feature_for_path("/api/perf/fleet"), None);
+        assert_eq!(feature_for_path("/api/obs_events/recent"), None);
+        assert_eq!(feature_for_path("/api/schedules/upcoming"), None);
+        assert_eq!(feature_for_path("/api/config/defaults"), None);
+        // An unknown / future path is commons by default.
+        assert_eq!(feature_for_path("/api/something-new"), None);
+    }
+
+    #[test]
+    fn read_and_mutation_share_the_gate() {
+        // `GET` and `PUT` on `/api/config` share a MatchedPath, so both are
+        // gated under Config (the vertical role gate handles read-vs-write).
+        assert_eq!(feature_for_path("/api/config"), Some(Feature::Config));
     }
 }

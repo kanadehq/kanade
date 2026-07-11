@@ -37,11 +37,12 @@
 //! callers are rejected with `403` before the handler runs.
 
 use axum::body::Body;
-use axum::extract::{Request, State};
+use axum::extract::{MatchedPath, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
+use kanade_shared::feature::Feature;
 use kanade_shared::secrets;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -93,6 +94,15 @@ pub struct Claims {
     pub aud: Option<String>,
     #[serde(default)]
     pub roles: Vec<String>,
+    /// Per-account page allow-list, resolved from the DB
+    /// (`users.allowed_features`) by [`verify`] — **not** trusted from the
+    /// token. `None` = unrestricted (every page). `Some(list)` restricts the
+    /// caller to those features plus the always-open commons (see
+    /// [`crate::api::feature_for_path`]). `skip_serializing_if` keeps it out
+    /// of minted JWTs entirely: like `roles`, the DB is authoritative and
+    /// re-read on every request, so a token never carries a stale allow-list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_features: Option<Vec<Feature>>,
 }
 
 impl Claims {
@@ -115,6 +125,10 @@ impl Claims {
             exp: 4_102_444_800, // 2100-01-01
             aud: Some(EXPECTED_AUDIENCE.to_string()),
             roles: vec![Role::Admin.as_str().to_string()],
+            // Service / auth-disabled identities are unrestricted — they are
+            // the escape hatch that can always reach every page (e.g. to
+            // un-restrict an account that locked itself out of `/accounts`).
+            allowed_features: None,
         }
     }
 }
@@ -174,18 +188,49 @@ pub fn signing_secret() -> &'static str {
     })
 }
 
-/// Look up a user's authoritative `(role, disabled)` from SQLite. A row
-/// whose `role` column fails to parse is treated as absent (deny).
-async fn lookup_user(
-    pool: &SqlitePool,
-    username: &str,
-) -> Result<Option<(Role, bool)>, sqlx::Error> {
-    let row =
-        sqlx::query_as::<_, (String, i64)>("SELECT role, disabled FROM users WHERE username = ?")
-            .bind(username)
-            .fetch_optional(pool)
-            .await?;
-    Ok(row.and_then(|(role, disabled)| Role::parse(&role).map(|r| (r, disabled != 0))))
+/// The authoritative account facts [`verify`] re-reads on every request.
+struct UserAuth {
+    role: Role,
+    disabled: bool,
+    /// `None` = unrestricted; `Some(list)` = page allow-list. Unknown /
+    /// retired feature keys in the stored JSON are dropped here (a shrunk
+    /// catalog must not deny access on a key the backend no longer knows).
+    allowed_features: Option<Vec<Feature>>,
+}
+
+/// Look up a user's authoritative `(role, disabled, allowed_features)` from
+/// SQLite. A row whose `role` column fails to parse is treated as absent
+/// (deny).
+async fn lookup_user(pool: &SqlitePool, username: &str) -> Result<Option<UserAuth>, sqlx::Error> {
+    let row = sqlx::query_as::<_, (String, i64, Option<String>)>(
+        "SELECT role, disabled, allowed_features FROM users WHERE username = ?",
+    )
+    .bind(username)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.and_then(|(role, disabled, allowed)| {
+        Role::parse(&role).map(|role| UserAuth {
+            role,
+            disabled: disabled != 0,
+            allowed_features: parse_allowed_features(allowed.as_deref()),
+        })
+    }))
+}
+
+/// Parse the stored `allowed_features` JSON (`NULL`/absent → `None` =
+/// unrestricted). A malformed or non-array value is treated as `None`
+/// (unrestricted) with a warning rather than locking the account out — a
+/// corrupt column should fail *open* for its owner, never silently deny
+/// every page. Individual unknown keys are dropped.
+fn parse_allowed_features(raw: Option<&str>) -> Option<Vec<Feature>> {
+    let raw = raw?;
+    match serde_json::from_str::<Vec<String>>(raw) {
+        Ok(keys) => Some(keys.iter().filter_map(|k| Feature::parse(k)).collect()),
+        Err(e) => {
+            warn!(error = %e, "malformed allowed_features JSON; treating as unrestricted");
+            None
+        }
+    }
 }
 
 pub async fn verify(
@@ -259,15 +304,19 @@ pub async fn verify(
     // DB is authoritative: re-read role + disabled now so account
     // changes apply immediately rather than at the token's exp.
     match lookup_user(&pool, &claims.sub).await {
-        Ok(Some((role, disabled))) => {
-            if disabled {
+        Ok(Some(user)) => {
+            if user.disabled {
                 // 401 (not 403) so the SPA's expired-token path logs the
                 // user out instead of trapping them on a page that spams
                 // permission toasts (Gemini #331).
                 return Err(unauth("account disabled"));
             }
             let mut claims = claims;
-            claims.roles = vec![role.as_str().to_string()];
+            // DB is authoritative for BOTH role and the page allow-list —
+            // overwrite whatever the token carried (the mint path never sets
+            // allowed_features, but a hand-crafted token might).
+            claims.roles = vec![user.role.as_str().to_string()];
+            claims.allowed_features = user.allowed_features;
             let mut req = req;
             req.extensions_mut().insert(claims);
             Ok(next.run(req).await)
@@ -315,6 +364,59 @@ pub async fn require_admin(req: Request, next: Next) -> Result<Response, Respons
         return Err(rejection);
     }
     Ok(next.run(req).await)
+}
+
+/// Per-account **page** enforcement (hard, `403`) — the horizontal axis
+/// orthogonal to the vertical role gates above.
+///
+/// Layered over the whole API router (inside [`crate::api::router`], so it
+/// runs *after* [`verify`] has injected [`Claims`] and *after* routing has
+/// populated [`MatchedPath`]). The decision:
+///
+///   * caller unrestricted (`allowed_features == None`, or no identity /
+///     service token) → allow;
+///   * the matched route is **commons** (`feature_for_path` → `None`:
+///     login, self-service, the Dashboard landing feeds, shared substrate)
+///     → allow;
+///   * otherwise allow iff the caller's allow-list intersects the route's
+///     feature(s); else `403`.
+///
+/// Commons-by-default (an unmapped route is open to any authenticated
+/// caller) is deliberate: most endpoints are shared substrate, and the
+/// sensitive per-page data lives behind the mapped routes. A NEW topical
+/// endpoint must be added to `feature_for_path` to be gated.
+pub async fn require_features(req: Request, next: Next) -> Result<Response, Response> {
+    // Decide entirely within a borrow of `req.extensions()` and yield only
+    // owned data (`Feature::as_str` is `&'static str`), so no borrow — and no
+    // clone of the allow-list — outlives the block. Then `req` is free to move
+    // into `next.run`.
+    let denied: Option<&'static str> = {
+        let ext = req.extensions();
+        match ext
+            .get::<Claims>()
+            .and_then(|c| c.allowed_features.as_ref())
+        {
+            // No authenticated identity (public route) or an unrestricted
+            // caller (service token / NULL allow-list) → nothing to enforce.
+            None => None,
+            Some(allowed) => match ext
+                .get::<MatchedPath>()
+                .and_then(|m| crate::api::feature_for_path(m.as_str()))
+            {
+                // Commons route, or the caller is permitted this page.
+                None => None,
+                Some(feature) if allowed.contains(&feature) => None,
+                Some(feature) => Some(feature.as_str()),
+            },
+        }
+    };
+
+    match denied {
+        None => Ok(next.run(req).await),
+        Some(want) => Err(forbidden(&format!(
+            "account not permitted to access this page (requires {want})"
+        ))),
+    }
 }
 
 /// Length-checked, branch-free byte comparison. Tiny inline impl —
@@ -380,6 +482,7 @@ mod tests {
             exp: 4_102_444_800,
             aud: Some(EXPECTED_AUDIENCE.to_string()),
             roles: vec![Role::Admin.as_str().to_string()],
+            allowed_features: None,
         };
         let key = b"regression-secret";
         let token = encode(
@@ -398,12 +501,27 @@ mod tests {
     }
 
     #[test]
+    fn allowed_features_parse() {
+        // NULL / absent → unrestricted.
+        assert!(parse_allowed_features(None).is_none());
+        // A JSON array → those features, unknown keys dropped.
+        let got = parse_allowed_features(Some(r#"["compliance","inventory","bogus"]"#)).unwrap();
+        assert_eq!(got, vec![Feature::Compliance, Feature::Inventory]);
+        // Empty array is a REAL restriction (commons only) — not None.
+        assert_eq!(parse_allowed_features(Some("[]")), Some(vec![]));
+        // Malformed → fail open (None), never lock the owner out.
+        assert!(parse_allowed_features(Some("not json")).is_none());
+        assert!(parse_allowed_features(Some(r#"{"x":1}"#)).is_none());
+    }
+
+    #[test]
     fn claims_role_picks_highest() {
         let c = Claims {
             sub: "x".into(),
             exp: 0,
             aud: None,
             roles: vec!["viewer".into(), "admin".into()],
+            allowed_features: None,
         };
         assert_eq!(c.role(), Role::Admin);
         let none = Claims {
@@ -411,6 +529,7 @@ mod tests {
             exp: 0,
             aud: None,
             roles: vec![],
+            allowed_features: None,
         };
         assert_eq!(none.role(), Role::Viewer);
     }

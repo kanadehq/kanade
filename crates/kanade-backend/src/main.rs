@@ -204,6 +204,11 @@ struct UserRow {
     /// DB (the column didn't exist yet) — preserved across the wipe so a
     /// migration-driven wipe doesn't drop everyone's address.
     email: Option<String>,
+    /// #1008 page allow-list (raw JSON TEXT). `None` = unrestricted, or an
+    /// account captured from a pre-`allowed_features` DB — preserved across
+    /// the wipe so a migration-driven wipe doesn't silently reset everyone's
+    /// page restriction back to unrestricted.
+    allowed_features: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -323,21 +328,41 @@ async fn snapshot_users(db_path: &str) -> Result<Vec<UserRow>> {
         return Ok(Vec::new());
     }
 
-    // The `email` column (#770) may be absent in a pre-migration DB being
-    // wiped to upgrade. Probe for it and `CAST(NULL AS TEXT)` when missing,
-    // so a single row shape works for both old and new schemas.
-    let has_email = sqlx::query_scalar::<_, String>(
-        "SELECT name FROM pragma_table_info('users') WHERE name = 'email'",
-    )
-    .fetch_optional(&pool)
-    .await
-    .context("probe for users.email column")?
-    .is_some();
-    let select = if has_email {
-        "SELECT username, password_hash, role, disabled, must_change_pw, created_at, updated_at, email FROM users"
-    } else {
-        "SELECT username, password_hash, role, disabled, must_change_pw, created_at, updated_at, CAST(NULL AS TEXT) AS email FROM users"
+    // The `email` (#770) and `allowed_features` (#1008) columns may be
+    // absent in a pre-migration DB being wiped to upgrade. Probe for each and
+    // `CAST(NULL AS TEXT)` when missing, so a single row shape works for both
+    // old and new schemas.
+    let column_exists = |col: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, String>(
+                "SELECT name FROM pragma_table_info('users') WHERE name = ?",
+            )
+            .bind(col)
+            .fetch_optional(&pool)
+            .await
+            .with_context(|| format!("probe for users.{col} column"))
+            .map(|o| o.is_some())
+        }
     };
+    let has_email = column_exists("email").await?;
+    let has_allowed = column_exists("allowed_features").await?;
+    let email_expr = if has_email {
+        "email"
+    } else {
+        "CAST(NULL AS TEXT) AS email"
+    };
+    let allowed_expr = if has_allowed {
+        "allowed_features"
+    } else {
+        "CAST(NULL AS TEXT) AS allowed_features"
+    };
+    // Composed only from hardcoded column literals above (the two `*_expr`
+    // branches are static strings, no user input), so it's injection-safe;
+    // `AssertSqlSafe` is required because the composed string isn't `'static`.
+    let select = format!(
+        "SELECT username, password_hash, role, disabled, must_change_pw, created_at, updated_at, {email_expr}, {allowed_expr} FROM users"
+    );
 
     let rows = sqlx::query_as::<
         _,
@@ -350,8 +375,9 @@ async fn snapshot_users(db_path: &str) -> Result<Vec<UserRow>> {
             String,
             String,
             Option<String>,
+            Option<String>,
         ),
-    >(select)
+    >(sqlx::AssertSqlSafe(select))
     .fetch_all(&pool)
     .await
     .context("select users")?;
@@ -369,6 +395,7 @@ async fn snapshot_users(db_path: &str) -> Result<Vec<UserRow>> {
                 created_at,
                 updated_at,
                 email,
+                allowed_features,
             )| {
                 UserRow {
                     username,
@@ -377,6 +404,7 @@ async fn snapshot_users(db_path: &str) -> Result<Vec<UserRow>> {
                     disabled,
                     must_change_pw,
                     email,
+                    allowed_features,
                     created_at,
                     updated_at,
                 }
@@ -398,8 +426,8 @@ async fn restore_users(pool: &sqlx::SqlitePool, users: &[UserRow]) -> Result<usi
     for u in users {
         sqlx::query(
             "INSERT INTO users \
-             (username, password_hash, role, disabled, must_change_pw, created_at, updated_at, email) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+             (username, password_hash, role, disabled, must_change_pw, created_at, updated_at, email, allowed_features) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&u.username)
         .bind(&u.password_hash)
@@ -409,6 +437,7 @@ async fn restore_users(pool: &sqlx::SqlitePool, users: &[UserRow]) -> Result<usi
         .bind(&u.created_at)
         .bind(&u.updated_at)
         .bind(&u.email)
+        .bind(&u.allowed_features)
         .execute(&mut *tx)
         .await
         .with_context(|| format!("restore user {}", u.username))?;
@@ -1101,8 +1130,8 @@ mod tests {
         let pool = open(&db_path).await;
         sqlx::query(
             "INSERT INTO users \
-             (username, password_hash, role, disabled, must_change_pw, created_at, updated_at) \
-             VALUES ('admin', 'argon2hash', 'admin', 0, 1, '2026-01-02 03:04:05', '2026-01-02 03:04:05')",
+             (username, password_hash, role, disabled, must_change_pw, created_at, updated_at, email, allowed_features) \
+             VALUES ('admin', 'argon2hash', 'admin', 0, 1, '2026-01-02 03:04:05', '2026-01-02 03:04:05', 'a@b.com', '[\"compliance\",\"inventory\"]')",
         )
         .execute(&pool)
         .await
@@ -1123,15 +1152,17 @@ mod tests {
         // left a migrated DB) and assert the split: users kept verbatim,
         // projector table emptied.
         let pool = open(&db_path).await;
-        let (user, hash, role, disabled, must, created): (
+        let (user, hash, role, disabled, must, created, email, allowed): (
             String,
             String,
             String,
             i64,
             i64,
             String,
+            Option<String>,
+            Option<String>,
         ) = sqlx::query_as(
-            "SELECT username, password_hash, role, disabled, must_change_pw, created_at \
+            "SELECT username, password_hash, role, disabled, must_change_pw, created_at, email, allowed_features \
                  FROM users",
         )
         .fetch_one(&pool)
@@ -1143,6 +1174,15 @@ mod tests {
         assert_eq!(disabled, 0);
         assert_eq!(must, 1);
         assert_eq!(created, "2026-01-02 03:04:05", "timestamps round-trip");
+        // #770 email + #1008 page allow-list survive the wipe verbatim — a
+        // migration-driven wipe must not silently drop a contact address or
+        // reset an account's page restriction back to unrestricted.
+        assert_eq!(email.as_deref(), Some("a@b.com"), "email round-trips");
+        assert_eq!(
+            allowed.as_deref(),
+            Some(r#"["compliance","inventory"]"#),
+            "allowed_features round-trips (not reset to NULL/unrestricted)"
+        );
 
         let checks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM check_status")
             .fetch_one(&pool)

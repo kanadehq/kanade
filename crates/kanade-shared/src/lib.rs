@@ -4,6 +4,7 @@ pub mod check_eval;
 pub mod config;
 pub mod default_paths;
 pub mod exe_version;
+pub mod feature;
 pub mod ipc;
 pub mod kv;
 pub mod kv_cas;
