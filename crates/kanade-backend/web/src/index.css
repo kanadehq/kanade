@@ -321,3 +321,24 @@
     overflow-wrap: anywhere;
   }
 }
+
+/* Inventory fact-detail tables must not clip overflow: a nested sub-table
+   (Installed apps, disks[], …) pins its own sticky header, which only resolves
+   against the viewport when no ancestor clips. The outer field/value table
+   keeps `cards={false}` (a compact 2-column table that never collapses into
+   cards on mobile) and uses `kn-table-no-overflow` to drop that wrapper's
+   `overflow-x-auto`. */
+div:has(> table.kn-table-no-overflow) {
+  overflow-x: visible;
+}
+
+/* With no clip anywhere, BOTH the nested sub-table cells AND the outer
+   field/value scalar cells must wrap long unbroken tokens (appx IDs, publisher
+   CN strings, hashes, base64, JSON fallbacks) so a wide/long value stays inside
+   its cell instead of scrolling the whole page sideways. */
+td .kn-table table td,
+td .kn-table table th,
+table.kn-table-no-overflow td,
+table.kn-table-no-overflow th {
+  overflow-wrap: anywhere;
+}
