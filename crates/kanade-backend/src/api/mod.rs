@@ -22,6 +22,7 @@ pub mod jobs;
 pub mod notifications;
 pub mod obs_events;
 pub mod password_setup;
+pub mod permission_groups;
 pub mod process_perf;
 pub mod query;
 pub mod results;
@@ -496,6 +497,16 @@ pub fn router(state: AppState) -> Router {
             "/api/accounts/{username}/reset-link",
             post(accounts::reset_link),
         )
+        // #1008 Phase 3: named permission groups (reusable page allow-lists
+        // shared by many accounts). Admin-only CRUD.
+        .route(
+            "/api/permission-groups",
+            get(permission_groups::list).post(permission_groups::create),
+        )
+        .route(
+            "/api/permission-groups/{name}",
+            patch(permission_groups::update).delete(permission_groups::delete),
+        )
         // Ad-hoc read-only SQL over the projector DB. Admin-only: raw SQL
         // can read every projected table (emails, audit, …), so it sits in
         // the highest tier even though it only ever reads. The handler
@@ -632,10 +643,12 @@ pub fn feature_for_path(path: &str) -> Option<Feature> {
         // --- Settings (server settings + backend restart) ---
         "/api/server-settings" | "/api/server/restart" => Feature::Settings,
 
-        // --- Accounts (also admin-gated; raw SQL lives here too) ---
+        // --- Accounts (also admin-gated; raw SQL + permission groups here) ---
         "/api/accounts"
         | "/api/accounts/{username}"
         | "/api/accounts/{username}/reset-link"
+        | "/api/permission-groups"
+        | "/api/permission-groups/{name}"
         | "/api/query" => Feature::Accounts,
 
         // Commons: everything else (health, version, auth/*, the fleet

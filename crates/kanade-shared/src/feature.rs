@@ -113,6 +113,26 @@ impl Feature {
         })
     }
 
+    /// Validate + canonicalize a submitted list of feature keys: reject the
+    /// first unknown key (returning it as the `Err`), de-duplicate, and return
+    /// the surviving keys in catalog order so what's stored is stable. An
+    /// empty input is valid. Shared by the account allow-list editor and the
+    /// permission-group editor so both agree on what a valid list is.
+    pub fn canonicalize(keys: &[String]) -> Result<Vec<String>, String> {
+        let mut set: Vec<Feature> = Vec::new();
+        for k in keys {
+            let f = Feature::parse(k).ok_or_else(|| k.clone())?;
+            if !set.contains(&f) {
+                set.push(f);
+            }
+        }
+        Ok(Feature::ALL
+            .iter()
+            .filter(|f| set.contains(f))
+            .map(|f| f.as_str().to_string())
+            .collect())
+    }
+
     /// Every feature, in catalog order. Drives the SPA's account editor
     /// checkbox list and lets the backend validate a submitted allow-list
     /// against the full known set.
@@ -184,5 +204,21 @@ mod tests {
     fn unknown_key_is_none() {
         assert_eq!(Feature::parse("nope"), None);
         assert_eq!(Feature::parse("Compliance"), None); // case-sensitive
+    }
+
+    #[test]
+    fn canonicalize_validates_dedupes_orders() {
+        // Unknown key → Err(the offending key).
+        assert_eq!(
+            Feature::canonicalize(&["bogus".into()]),
+            Err("bogus".to_string())
+        );
+        // Dedup + catalog order (Inventory precedes Compliance in ALL).
+        assert_eq!(
+            Feature::canonicalize(&["compliance".into(), "inventory".into(), "compliance".into()]),
+            Ok(vec!["inventory".to_string(), "compliance".to_string()])
+        );
+        // Empty is valid.
+        assert_eq!(Feature::canonicalize(&[]), Ok(vec![]));
     }
 }

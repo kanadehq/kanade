@@ -209,6 +209,21 @@ struct UserRow {
     /// the wipe so a migration-driven wipe doesn't silently reset everyone's
     /// page restriction back to unrestricted.
     allowed_features: Option<String>,
+    /// #1008 Phase 3 permission-group membership. `None` = no group (or an
+    /// account captured from a pre-`permission_group` DB) — preserved so a
+    /// wipe doesn't drop everyone's group assignment.
+    permission_group: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+/// One row of the durable `permission_groups` table (#1008 Phase 3), captured
+/// so a wipe can restore the groups accounts reference. Like `users`, this
+/// table is SQLite-only (not projector-derived from NATS), so a blind wipe
+/// would lose it.
+struct PermGroupRow {
+    name: String,
+    features: String,
     created_at: String,
     updated_at: String,
 }
@@ -245,19 +260,21 @@ fn wipe_projector(config: Option<&Path>) -> Result<()> {
         .enable_all()
         .build()
         .context("build current-thread runtime")?;
-    let restored = runtime.block_on(wipe_projector_at(&db_path))?;
+    let (users, groups) = runtime.block_on(wipe_projector_at(&db_path))?;
     eprintln!(
-        "wipe-projector: wiped projector DB at {db_path}; preserved {restored} user account(s)"
+        "wipe-projector: wiped projector DB at {db_path}; preserved {users} user account(s) and {groups} permission group(s)"
     );
     Ok(())
 }
 
 /// Core of `wipe-projector`, split out so it can be unit-tested against a
-/// throwaway DB path: snapshot `users` → delete the DB + sidecars →
-/// re-create the schema via migrations → restore `users`. Returns the
-/// number of accounts restored.
-async fn wipe_projector_at(db_path: &str) -> Result<usize> {
-    let users = snapshot_users(db_path).await.context("snapshot users")?;
+/// throwaway DB path: snapshot durable tables (`users` + `permission_groups`)
+/// → delete the DB + sidecars → re-create the schema via migrations → restore
+/// them. Returns `(accounts, groups)` restored.
+async fn wipe_projector_at(db_path: &str) -> Result<(usize, usize)> {
+    let (users, groups) = snapshot_durable(db_path)
+        .await
+        .context("snapshot durable tables")?;
     remove_db_files(db_path).context("remove projector DB files")?;
 
     // Re-create with the SAME pragmas the service uses (WAL etc.) so the
@@ -277,20 +294,27 @@ async fn wipe_projector_at(db_path: &str) -> Result<usize> {
         .run(&pool)
         .await
         .context("run migrations on fresh DB")?;
-    let restored = restore_users(&pool, &users)
+    // Restore groups first, then users — no FK is enforced (the pool doesn't
+    // run with `PRAGMA foreign_keys = ON`), but this keeps a member's
+    // `permission_group` pointing at an already-present group.
+    let groups_restored = restore_permission_groups(&pool, &groups)
+        .await
+        .context("restore permission groups")?;
+    let users_restored = restore_users(&pool, &users)
         .await
         .context("restore users")?;
     pool.close().await;
-    Ok(restored)
+    Ok((users_restored, groups_restored))
 }
 
-/// Read every `users` row from an existing projector DB. Tolerates a
-/// missing DB file (fresh box) and a missing `users` table (older /
-/// partially-migrated DB) by returning an empty snapshot — both mean
-/// "no accounts to preserve", not an error.
-async fn snapshot_users(db_path: &str) -> Result<Vec<UserRow>> {
+/// Read every durable (SQLite-only, not projector-derived) row worth
+/// preserving across a wipe: `users` **and** `permission_groups` (#1008
+/// Phase 3), from a single read-only open of the DB. Tolerates a missing DB
+/// file (fresh box) and missing tables (older / partially-migrated DB) by
+/// returning an empty snapshot — both mean "nothing to preserve", not an error.
+async fn snapshot_durable(db_path: &str) -> Result<(Vec<UserRow>, Vec<PermGroupRow>)> {
     if !Path::new(db_path).exists() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     // Open read-only — we only read here, and the file is about to be
     // deleted; no need to create or migrate it.
@@ -325,7 +349,7 @@ async fn snapshot_users(db_path: &str) -> Result<Vec<UserRow>> {
             .context("probe for users table")?;
     if has_users.is_none() {
         pool.close().await;
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
 
     // The `email` (#770) and `allowed_features` (#1008) columns may be
@@ -347,6 +371,7 @@ async fn snapshot_users(db_path: &str) -> Result<Vec<UserRow>> {
     };
     let has_email = column_exists("email").await?;
     let has_allowed = column_exists("allowed_features").await?;
+    let has_group = column_exists("permission_group").await?;
     let email_expr = if has_email {
         "email"
     } else {
@@ -357,11 +382,16 @@ async fn snapshot_users(db_path: &str) -> Result<Vec<UserRow>> {
     } else {
         "CAST(NULL AS TEXT) AS allowed_features"
     };
-    // Composed only from hardcoded column literals above (the two `*_expr`
+    let group_expr = if has_group {
+        "permission_group"
+    } else {
+        "CAST(NULL AS TEXT) AS permission_group"
+    };
+    // Composed only from hardcoded column literals above (the `*_expr`
     // branches are static strings, no user input), so it's injection-safe;
     // `AssertSqlSafe` is required because the composed string isn't `'static`.
     let select = format!(
-        "SELECT username, password_hash, role, disabled, must_change_pw, created_at, updated_at, {email_expr}, {allowed_expr} FROM users"
+        "SELECT username, password_hash, role, disabled, must_change_pw, created_at, updated_at, {email_expr}, {allowed_expr}, {group_expr} FROM users"
     );
 
     let rows = sqlx::query_as::<
@@ -376,14 +406,14 @@ async fn snapshot_users(db_path: &str) -> Result<Vec<UserRow>> {
             String,
             Option<String>,
             Option<String>,
+            Option<String>,
         ),
     >(sqlx::AssertSqlSafe(select))
     .fetch_all(&pool)
     .await
     .context("select users")?;
-    pool.close().await;
 
-    Ok(rows
+    let users: Vec<UserRow> = rows
         .into_iter()
         .map(
             |(
@@ -396,6 +426,7 @@ async fn snapshot_users(db_path: &str) -> Result<Vec<UserRow>> {
                 updated_at,
                 email,
                 allowed_features,
+                permission_group,
             )| {
                 UserRow {
                     username,
@@ -405,12 +436,73 @@ async fn snapshot_users(db_path: &str) -> Result<Vec<UserRow>> {
                     must_change_pw,
                     email,
                     allowed_features,
+                    permission_group,
                     created_at,
                     updated_at,
                 }
             },
         )
+        .collect();
+
+    // Same read-only session captures the groups accounts reference.
+    let groups = snapshot_permission_groups(&pool).await?;
+    pool.close().await;
+    Ok((users, groups))
+}
+
+/// Read every `permission_groups` row (#1008 Phase 3) from an existing
+/// projector DB. Tolerates a missing table (older DB) by returning an empty
+/// snapshot. `pool` is an already-open read-only handle to the DB.
+async fn snapshot_permission_groups(pool: &sqlx::SqlitePool) -> Result<Vec<PermGroupRow>> {
+    let has_table: Option<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='permission_groups'",
+    )
+    .fetch_optional(pool)
+    .await
+    .context("probe for permission_groups table")?;
+    if has_table.is_none() {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query_as::<_, (String, String, String, String)>(
+        "SELECT name, features, created_at, updated_at FROM permission_groups",
+    )
+    .fetch_all(pool)
+    .await
+    .context("select permission_groups")?;
+    Ok(rows
+        .into_iter()
+        .map(|(name, features, created_at, updated_at)| PermGroupRow {
+            name,
+            features,
+            created_at,
+            updated_at,
+        })
         .collect())
+}
+
+/// Re-insert snapshotted permission groups into a freshly-migrated DB,
+/// preserving their original timestamps. Same single-transaction discipline
+/// as [`restore_users`].
+async fn restore_permission_groups(
+    pool: &sqlx::SqlitePool,
+    groups: &[PermGroupRow],
+) -> Result<usize> {
+    let mut tx = pool.begin().await.context("begin group restore")?;
+    for g in groups {
+        sqlx::query(
+            "INSERT INTO permission_groups (name, features, created_at, updated_at) \
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind(&g.name)
+        .bind(&g.features)
+        .bind(&g.created_at)
+        .bind(&g.updated_at)
+        .execute(&mut *tx)
+        .await
+        .with_context(|| format!("restore group {}", g.name))?;
+    }
+    tx.commit().await.context("commit group restore")?;
+    Ok(groups.len())
 }
 
 /// Re-insert the snapshotted accounts into a freshly-migrated DB,
@@ -426,8 +518,8 @@ async fn restore_users(pool: &sqlx::SqlitePool, users: &[UserRow]) -> Result<usi
     for u in users {
         sqlx::query(
             "INSERT INTO users \
-             (username, password_hash, role, disabled, must_change_pw, created_at, updated_at, email, allowed_features) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (username, password_hash, role, disabled, must_change_pw, created_at, updated_at, email, allowed_features, permission_group) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&u.username)
         .bind(&u.password_hash)
@@ -438,6 +530,7 @@ async fn restore_users(pool: &sqlx::SqlitePool, users: &[UserRow]) -> Result<usi
         .bind(&u.updated_at)
         .bind(&u.email)
         .bind(&u.allowed_features)
+        .bind(&u.permission_group)
         .execute(&mut *tx)
         .await
         .with_context(|| format!("restore user {}", u.username))?;
@@ -1126,12 +1219,20 @@ mod tests {
     async fn wipe_preserves_users_and_drops_projector_rows() {
         let db_path = temp_db_path("preserve");
 
-        // Seed a durable account + a projector-derived row.
+        // Seed a durable account + a permission group it belongs to + a
+        // projector-derived row.
         let pool = open(&db_path).await;
         sqlx::query(
+            "INSERT INTO permission_groups (name, features, created_at, updated_at) \
+             VALUES ('sec', '[\"compliance\",\"inventory\"]', '2026-01-02 03:04:05', '2026-01-02 03:04:05')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
             "INSERT INTO users \
-             (username, password_hash, role, disabled, must_change_pw, created_at, updated_at, email, allowed_features) \
-             VALUES ('admin', 'argon2hash', 'admin', 0, 1, '2026-01-02 03:04:05', '2026-01-02 03:04:05', 'a@b.com', '[\"compliance\",\"inventory\"]')",
+             (username, password_hash, role, disabled, must_change_pw, created_at, updated_at, email, allowed_features, permission_group) \
+             VALUES ('admin', 'argon2hash', 'admin', 0, 1, '2026-01-02 03:04:05', '2026-01-02 03:04:05', 'a@b.com', '[\"compliance\",\"inventory\"]', 'sec')",
         )
         .execute(&pool)
         .await
@@ -1145,43 +1246,68 @@ mod tests {
         .unwrap();
         pool.close().await;
 
-        let restored = wipe_projector_at(&db_path).await.unwrap();
-        assert_eq!(restored, 1, "the one admin account is restored");
+        let (users, groups) = wipe_projector_at(&db_path).await.unwrap();
+        assert_eq!(users, 1, "the one admin account is restored");
+        assert_eq!(groups, 1, "the one permission group is restored");
 
         // Reopen WITHOUT migrating (open() migrates, but the wipe already
         // left a migrated DB) and assert the split: users kept verbatim,
         // projector table emptied.
         let pool = open(&db_path).await;
-        let (user, hash, role, disabled, must, created, email, allowed): (
-            String,
-            String,
-            String,
-            i64,
-            i64,
-            String,
-            Option<String>,
-            Option<String>,
-        ) = sqlx::query_as(
-            "SELECT username, password_hash, role, disabled, must_change_pw, created_at, email, allowed_features \
+        // A FromRow struct (rather than a wide tuple) keeps the row shape
+        // readable and out of clippy's type-complexity lint.
+        #[derive(sqlx::FromRow)]
+        struct Preserved {
+            username: String,
+            password_hash: String,
+            role: String,
+            disabled: i64,
+            must_change_pw: i64,
+            created_at: String,
+            email: Option<String>,
+            allowed_features: Option<String>,
+            permission_group: Option<String>,
+        }
+        let u: Preserved = sqlx::query_as(
+            "SELECT username, password_hash, role, disabled, must_change_pw, created_at, email, allowed_features, permission_group \
                  FROM users",
         )
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(user, "admin");
-        assert_eq!(hash, "argon2hash");
-        assert_eq!(role, "admin");
-        assert_eq!(disabled, 0);
-        assert_eq!(must, 1);
-        assert_eq!(created, "2026-01-02 03:04:05", "timestamps round-trip");
-        // #770 email + #1008 page allow-list survive the wipe verbatim — a
-        // migration-driven wipe must not silently drop a contact address or
-        // reset an account's page restriction back to unrestricted.
-        assert_eq!(email.as_deref(), Some("a@b.com"), "email round-trips");
+        assert_eq!(u.username, "admin");
+        assert_eq!(u.password_hash, "argon2hash");
+        assert_eq!(u.role, "admin");
+        assert_eq!(u.disabled, 0);
+        assert_eq!(u.must_change_pw, 1);
+        assert_eq!(u.created_at, "2026-01-02 03:04:05", "timestamps round-trip");
+        // #770 email + #1008 page allow-list + #1008 Phase 3 group membership
+        // survive the wipe verbatim — a migration-driven wipe must not silently
+        // drop a contact address, reset a page restriction to unrestricted, or
+        // detach an account from its permission group.
+        assert_eq!(u.email.as_deref(), Some("a@b.com"), "email round-trips");
         assert_eq!(
-            allowed.as_deref(),
+            u.allowed_features.as_deref(),
             Some(r#"["compliance","inventory"]"#),
             "allowed_features round-trips (not reset to NULL/unrestricted)"
+        );
+        assert_eq!(
+            u.permission_group.as_deref(),
+            Some("sec"),
+            "permission_group membership round-trips"
+        );
+
+        // The referenced group's own row survives (it's SQLite-only, not
+        // projector-derived, so a blind wipe would lose it).
+        let (gname, gfeatures): (String, String) =
+            sqlx::query_as("SELECT name, features FROM permission_groups")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(gname, "sec");
+        assert_eq!(
+            gfeatures, r#"["compliance","inventory"]"#,
+            "group features round-trip"
         );
 
         let checks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM check_status")
@@ -1203,8 +1329,9 @@ mod tests {
         // creates a migrated DB, and zero accounts are restored.
         let db_path = temp_db_path("missing");
         assert!(!Path::new(&db_path).exists());
-        let restored = wipe_projector_at(&db_path).await.unwrap();
-        assert_eq!(restored, 0);
+        let (users, groups) = wipe_projector_at(&db_path).await.unwrap();
+        assert_eq!(users, 0);
+        assert_eq!(groups, 0);
         assert!(Path::new(&db_path).exists(), "schema is (re)created");
 
         let pool = open(&db_path).await;

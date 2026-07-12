@@ -30,28 +30,15 @@ use kanade_shared::feature::Feature;
 
 // ---- allowed_features (page allow-list) helpers --------------------
 
-/// Validate + canonicalize a submitted page allow-list. Rejects an unknown
-/// key with `400` (so an admin typo surfaces immediately), de-duplicates,
-/// and returns the keys in catalog order so what's stored is stable. An
-/// empty input is valid — it means "commons only" (see the migration).
-///
-/// The `Err` is a small `(status, message)` pair rather than a full
-/// `Response` (which would trip `clippy::result_large_err` on a non-async
-/// helper); call sites convert it via [`err`].
+/// Validate + canonicalize a submitted page allow-list, mapping an unknown
+/// key to a `400`. Thin wrapper over the shared [`Feature::canonicalize`]
+/// (single source of truth, also used by the permission-group editor) that
+/// adapts its `Err(bad_key)` to this module's small `(status, message)` error
+/// — a full `Response` here would trip `clippy::result_large_err` on a
+/// non-async helper; call sites convert it via [`err`].
 fn canonical_features(keys: &[String]) -> Result<Vec<String>, (StatusCode, String)> {
-    let mut set: Vec<Feature> = Vec::new();
-    for k in keys {
-        let f = Feature::parse(k)
-            .ok_or_else(|| (StatusCode::BAD_REQUEST, format!("unknown feature: {k}")))?;
-        if !set.contains(&f) {
-            set.push(f);
-        }
-    }
-    Ok(Feature::ALL
-        .iter()
-        .filter(|f| set.contains(f))
-        .map(|f| f.as_str().to_string())
-        .collect())
+    Feature::canonicalize(keys)
+        .map_err(|k| (StatusCode::BAD_REQUEST, format!("unknown feature: {k}")))
 }
 
 /// Serialize a validated allow-list to the JSON TEXT stored in
@@ -374,6 +361,7 @@ struct UserRowDb {
     must_change_pw: i64,
     email: Option<String>,
     allowed_features: Option<String>,
+    permission_group: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -387,10 +375,14 @@ pub struct UserRow {
     /// Optional contact email (#770) — drives the SPA's email column and
     /// the "send setup/reset link" action. `None` when unset.
     email: Option<String>,
-    /// Page allow-list (`kanade_shared::feature::Feature` keys). `None` =
-    /// unrestricted (every page). Unknown/retired keys are dropped so the
-    /// SPA editor only ever sees valid ones.
+    /// The account's own page allow-list (`kanade_shared::feature::Feature`
+    /// keys). `None` = unrestricted. Ignored at enforcement time when
+    /// `permission_group` is set (the group wins — see `auth::lookup_user`),
+    /// but still returned so the SPA can show it when no group is assigned.
     allowed_features: Option<Vec<String>>,
+    /// #1008 Phase 3: the permission group this account belongs to, or `None`.
+    /// When set, the group's feature set is the account's effective access.
+    permission_group: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -398,7 +390,7 @@ pub struct UserRow {
 /// `GET /api/accounts` — admin. Never returns password hashes.
 pub async fn list(State(state): State<AppState>) -> Result<Json<Vec<UserRow>>, Response> {
     let rows = sqlx::query_as::<_, UserRowDb>(
-        "SELECT username, role, disabled, must_change_pw, email, allowed_features, created_at, updated_at FROM users ORDER BY username",
+        "SELECT username, role, disabled, must_change_pw, email, allowed_features, permission_group, created_at, updated_at FROM users ORDER BY username",
     )
     .fetch_all(&state.pool)
     .await
@@ -412,11 +404,32 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<Vec<UserRow>>, R
             must_change_pw: r.must_change_pw,
             email: r.email,
             allowed_features: features_for_display(r.allowed_features.as_deref()),
+            permission_group: r.permission_group,
             created_at: r.created_at,
             updated_at: r.updated_at,
         })
         .collect();
     Ok(Json(out))
+}
+
+/// 404-guard helper: a `permission_group` an account is being assigned must
+/// exist. Returns `Ok(())` for `None` (no assignment). `400` when the named
+/// group is unknown, so a typo can't silently leave the account unrestricted
+/// (a dangling group falls back to the per-user list in `auth`).
+async fn ensure_group_exists(pool: &sqlx::SqlitePool, group: Option<&str>) -> Result<(), Response> {
+    let Some(group) = group else { return Ok(()) };
+    let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM permission_groups WHERE name = ?")
+        .bind(group)
+        .fetch_one(pool)
+        .await
+        .map_err(db_err)?;
+    if exists == 0 {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            &format!("no such permission group: {group}"),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -437,6 +450,11 @@ pub struct CreateReq {
     /// are rejected with `400`.
     #[serde(default)]
     allowed_features: Option<Vec<String>>,
+    /// Optional #1008 Phase 3 permission group. When set, the group governs
+    /// the account's page access (overriding `allowed_features`). `400` if the
+    /// named group doesn't exist.
+    #[serde(default)]
+    permission_group: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -488,6 +506,14 @@ pub async fn create(
         Some(keys) => Some(features_to_json(keys).map_err(feature_err)?),
         None => None,
     };
+    // A named group must exist (else `400`). Trimmed like the update path so
+    // whitespace can't sneak in a name that won't match at join time.
+    let permission_group = req
+        .permission_group
+        .as_deref()
+        .map(str::trim)
+        .filter(|g| !g.is_empty());
+    ensure_group_exists(&state.pool, permission_group).await?;
 
     // Decide the path. The link path needs a mailer; the no-credential
     // case (neither password nor email) is rejected.
@@ -525,14 +551,15 @@ pub async fn create(
     .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "hash failed"))?;
 
     let res = sqlx::query(
-        "INSERT INTO users (username, password_hash, role, must_change_pw, email, allowed_features) \
-         VALUES (?, ?, ?, 0, ?, ?)",
+        "INSERT INTO users (username, password_hash, role, must_change_pw, email, allowed_features, permission_group) \
+         VALUES (?, ?, ?, 0, ?, ?, ?)",
     )
     .bind(username)
     .bind(&hash)
     .bind(role.as_str())
     .bind(email)
     .bind(allowed_json.as_deref())
+    .bind(permission_group)
     .execute(&state.pool)
     .await;
     match res {
@@ -583,6 +610,7 @@ pub async fn create(
             "has_email": email.is_some(),
             "setup_link_sent": setup_link_sent,
             "restricted": allowed_json.is_some(),
+            "permission_group": permission_group,
         }),
     )
     .await;
@@ -655,6 +683,11 @@ pub struct UpdateReq {
     /// that plain `Option<Option<_>>` would lose.
     #[serde(default, deserialize_with = "double_option")]
     allowed_features: Option<Option<Vec<String>>>,
+    /// Set/clear the #1008 Phase 3 permission group. Absent → unchanged;
+    /// `null` → clear (fall back to `allowed_features`); a name → assign (must
+    /// exist, else `400`). Same double-option tri-state as `allowed_features`.
+    #[serde(default, deserialize_with = "double_option")]
+    permission_group: Option<Option<String>>,
 }
 
 /// `PATCH /api/accounts/{username}` — admin. Any subset of role /
@@ -707,6 +740,23 @@ pub async fn update(
         None => None,
         Some(None) => Some(None),
         Some(Some(keys)) => Some(Some(features_to_json(keys).map_err(feature_err)?)),
+    };
+
+    // Validate the permission group up front. `None` = unchanged; `Some(None)`
+    // = clear; `Some(Some(name))` = assign (an empty/whitespace name clears,
+    // and a non-empty one must reference an existing group).
+    let new_group: Option<Option<&str>> = match &req.permission_group {
+        None => None,
+        Some(None) => Some(None),
+        Some(Some(name)) => {
+            let t = name.trim();
+            if t.is_empty() {
+                Some(None)
+            } else {
+                ensure_group_exists(&state.pool, Some(t)).await?;
+                Some(Some(t))
+            }
+        }
     };
 
     // 404 if the account is gone. The last-admin guards below live
@@ -799,6 +849,18 @@ pub async fn update(
         .await
         .map_err(db_err)?;
     }
+    if let Some(group) = new_group {
+        // `group` is `Option<&str>`: `None` binds SQL NULL (leave the group,
+        // fall back to `allowed_features`), `Some(name)` assigns the group.
+        sqlx::query(
+            "UPDATE users SET permission_group = ?, updated_at = CURRENT_TIMESTAMP WHERE username = ?",
+        )
+        .bind(group)
+        .bind(&username)
+        .execute(&state.pool)
+        .await
+        .map_err(db_err)?;
+    }
 
     audit::record(
         &state.nats,
@@ -812,6 +874,7 @@ pub async fn update(
             "password_reset": req.password.is_some(),
             "email_changed": new_email.is_some(),
             "allowed_features_changed": req.allowed_features.is_some(),
+            "permission_group_changed": req.permission_group.is_some(),
         }),
     )
     .await;

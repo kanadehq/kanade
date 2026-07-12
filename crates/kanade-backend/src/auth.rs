@@ -192,29 +192,61 @@ pub fn signing_secret() -> &'static str {
 struct UserAuth {
     role: Role,
     disabled: bool,
-    /// `None` = unrestricted; `Some(list)` = page allow-list. Unknown /
-    /// retired feature keys in the stored JSON are dropped here (a shrunk
-    /// catalog must not deny access on a key the backend no longer knows).
+    /// The account's **effective** page allow-list. `None` = unrestricted;
+    /// `Some(list)` = restricted to those pages. Resolved with the permission
+    /// group taking precedence over the per-user list (see [`lookup_user`]).
+    /// Unknown / retired feature keys are dropped (a shrunk catalog must not
+    /// deny access on a key the backend no longer knows).
     allowed_features: Option<Vec<Feature>>,
 }
 
-/// Look up a user's authoritative `(role, disabled, allowed_features)` from
-/// SQLite. A row whose `role` column fails to parse is treated as absent
+/// Look up a user's authoritative `(role, disabled, effective allow-list)`
+/// from SQLite. A row whose `role` column fails to parse is treated as absent
 /// (deny).
+///
+/// The effective allow-list is the account's **permission group** (#1008
+/// Phase 3, live-referenced via the join) when it has one, otherwise its own
+/// `allowed_features` (whose `NULL` means unrestricted). A group is always a
+/// concrete set (its `'[]'` means "commons only"), so it wins over the
+/// per-user column.
+///
+/// **Fail-closed for a group-assigned account** (Gemini HIGH on #1014): once
+/// an account has a `permission_group`, its effective access can never be
+/// `None`/unrestricted, even if that group is missing or its JSON is corrupt.
+/// A dangling group (which the atomic `DELETE` guard already prevents) resolves
+/// group → per-user list → `Some(Vec::new())` (commons only), never falling
+/// open to every page. Only an account with **no** group falls through to the
+/// per-user `NULL` = unrestricted default.
 async fn lookup_user(pool: &SqlitePool, username: &str) -> Result<Option<UserAuth>, sqlx::Error> {
-    let row = sqlx::query_as::<_, (String, i64, Option<String>)>(
-        "SELECT role, disabled, allowed_features FROM users WHERE username = ?",
+    let row = sqlx::query_as::<_, (String, i64, Option<String>, Option<String>, Option<String>)>(
+        "SELECT u.role, u.disabled, u.allowed_features, g.features, u.permission_group \
+         FROM users u \
+         LEFT JOIN permission_groups g ON u.permission_group = g.name \
+         WHERE u.username = ?",
     )
     .bind(username)
     .fetch_optional(pool)
     .await?;
-    Ok(row.and_then(|(role, disabled, allowed)| {
-        Role::parse(&role).map(|role| UserAuth {
-            role,
-            disabled: disabled != 0,
-            allowed_features: parse_allowed_features(allowed.as_deref()),
-        })
-    }))
+    Ok(row.and_then(
+        |(role, disabled, allowed, group_features, permission_group)| {
+            Role::parse(&role).map(|role| {
+                let allowed_features = if permission_group.is_some() {
+                    // Group intended → never unrestricted. Prefer the group's
+                    // set, then the per-user list, then commons-only.
+                    parse_allowed_features(group_features.as_deref())
+                        .or_else(|| parse_allowed_features(allowed.as_deref()))
+                        .or_else(|| Some(Vec::new()))
+                } else {
+                    parse_allowed_features(allowed.as_deref())
+                };
+                UserAuth {
+                    role,
+                    disabled: disabled != 0,
+                    allowed_features,
+                }
+            })
+        },
+    ))
 }
 
 /// Parse the stored `allowed_features` JSON (`NULL`/absent → `None` =
@@ -512,6 +544,66 @@ mod tests {
         // Malformed → fail open (None), never lock the owner out.
         assert!(parse_allowed_features(Some("not json")).is_none());
         assert!(parse_allowed_features(Some(r#"{"x":1}"#)).is_none());
+    }
+
+    #[tokio::test]
+    async fn effective_features_group_precedence() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO permission_groups (name, features) VALUES ('sec', '[\"compliance\"]')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO permission_groups (name, features) VALUES ('locked', '[]')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let eff = |name: &'static str| {
+            let pool = pool.clone();
+            async move {
+                lookup_user(&pool, name)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .allowed_features
+            }
+        };
+
+        // Group wins over the per-user list.
+        sqlx::query("INSERT INTO users (username, password_hash, role, allowed_features, permission_group) VALUES ('g', 'x', 'viewer', '[\"audit\"]', 'sec')")
+            .execute(&pool).await.unwrap();
+        assert_eq!(eff("g").await, Some(vec![Feature::Compliance]));
+
+        // A group with `[]` restricts to commons only — NOT unrestricted.
+        sqlx::query("INSERT INTO users (username, password_hash, role, permission_group) VALUES ('l', 'x', 'viewer', 'locked')")
+            .execute(&pool).await.unwrap();
+        assert_eq!(eff("l").await, Some(vec![]));
+
+        // No group → fall back to the per-user list.
+        sqlx::query("INSERT INTO users (username, password_hash, role, allowed_features) VALUES ('p', 'x', 'viewer', '[\"audit\"]')")
+            .execute(&pool).await.unwrap();
+        assert_eq!(eff("p").await, Some(vec![Feature::Audit]));
+
+        // Dangling group (references a missing group) → fall back to per-user.
+        sqlx::query("INSERT INTO users (username, password_hash, role, allowed_features, permission_group) VALUES ('d', 'x', 'viewer', '[\"logs\"]', 'ghost')")
+            .execute(&pool).await.unwrap();
+        assert_eq!(eff("d").await, Some(vec![Feature::Logs]));
+
+        // Dangling group with NO per-user list → commons-only, NEVER
+        // unrestricted (fail-closed; a group-assigned account can't escalate).
+        sqlx::query("INSERT INTO users (username, password_hash, role, permission_group) VALUES ('x', 'x', 'admin', 'ghost')")
+            .execute(&pool).await.unwrap();
+        assert_eq!(eff("x").await, Some(vec![]));
+
+        // No group and no per-user list → unrestricted.
+        sqlx::query("INSERT INTO users (username, password_hash, role) VALUES ('u', 'x', 'admin')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(eff("u").await, None);
     }
 
     #[test]
