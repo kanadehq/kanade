@@ -460,30 +460,48 @@ export function Schedules() {
             <span className="block truncate text-xs text-muted" title={s.job_id}>
               {s.job_id}
             </span>
-            {s.origin && (
-              // #695: GitOps provenance marker — this schedule is managed
-              // in Git, so the Edit modal opens read-only. Tooltip carries
-              // the repo-relative .yaml path.
-              <span
-                className="mt-0.5 inline-flex w-fit"
-                title={t('git.badgeTitle', { path: s.origin.path })}
-              >
-                <Badge
-                  variant="default"
-                  className="gap-1 px-1.5 py-0 text-[10px] text-muted"
-                >
-                  <GitBranch className="size-3" />
-                  {t('git.badge')}
-                </Badge>
-              </span>
-            )}
-            {s.tags && s.tags.length > 0 && (
-              <div className="mt-0.5 flex flex-wrap gap-1" onClick={(e) => e.stopPropagation()}>
-                {s.tags.map((tag) => (
+            {/* Git provenance marker (#695) + operator tags share one
+                flex-wrap row so the git badge no longer eats a whole
+                line of its own — the row stays compact when a schedule
+                carries both. The container carries NO onClick: stopping
+                propagation there would turn the git badge + the gap/
+                padding between chips into a dead zone that swallows the
+                row click. Each tag button stops propagation itself, so
+                only a tag toggles the filter without also opening the
+                drawer; everywhere else in the row still opens it. */}
+            {(s.origin || (s.tags && s.tags.length > 0)) && (
+              <div className="mt-0.5 flex flex-wrap items-center gap-1">
+                {s.origin && (
+                  // #695: this schedule is managed in Git, so the Edit
+                  // modal opens read-only. Tooltip carries the
+                  // repo-relative .yaml path.
+                  <span
+                    className="inline-flex"
+                    title={t('git.badgeTitle', { path: s.origin.path })}
+                  >
+                    <Badge
+                      // Amber tint so the read-only Git-provenance marker
+                      // is set apart by hue from the muted tag-filter chips
+                      // it now sits beside (and from the violet an *active*
+                      // tag turns) — same row, distinct role at a glance.
+                      variant="amber"
+                      className="gap-1 px-1.5 py-0 text-[10px]"
+                    >
+                      <GitBranch className="size-3" />
+                      {t('git.badge')}
+                    </Badge>
+                  </span>
+                )}
+                {(s.tags ?? []).map((tag) => (
                   <button
                     key={tag}
                     type="button"
-                    onClick={() => toggleTag(tag)}
+                    onClick={(e) => {
+                      // Stop here (not on the container) so the drawer
+                      // opens everywhere except on a tag chip itself.
+                      e.stopPropagation();
+                      toggleTag(tag);
+                    }}
                     title={t('tags.filterByTitle', { tag })}
                     aria-pressed={activeTags.has(tag)}
                     className="cursor-pointer"
