@@ -2,6 +2,7 @@ import { Navigate, Outlet, useLocation } from 'react-router-dom';
 
 import { Sidebar } from '@/components/Sidebar';
 import { useAuth } from '@/lib/auth';
+import { featureForPathname } from '@/lib/features';
 
 /// Auth gate + chrome for every `/api/*`-driven page. Renders the
 /// left sidebar + an `<Outlet>` for the nested route only when the
@@ -9,7 +10,7 @@ import { useAuth } from '@/lib/auth';
 /// current location stashed in `state.from` so the post-login
 /// navigation can drop them back where they were.
 export function ProtectedLayout() {
-  const { isAuthenticated, mustChangePw } = useAuth();
+  const { isAuthenticated, mustChangePw, canSee } = useAuth();
   const location = useLocation();
 
   if (!isAuthenticated) {
@@ -21,6 +22,16 @@ export function ProtectedLayout() {
   // refuses writes for these accounts, but the SPA gate makes it explicit.
   if (mustChangePw && location.pathname !== '/change-password') {
     return <Navigate to="/change-password" replace />;
+  }
+
+  // Per-account page visibility (#1008): a restricted account that types
+  // (or bookmarks) the URL of a page it isn't allowed gets bounced to the
+  // dashboard. Commons/baseline routes map to `null` and are always allowed;
+  // `canSee` is optimistic while identity loads so unrestricted users don't
+  // flash a redirect. The backend still 403s the underlying data regardless.
+  const feature = featureForPathname(location.pathname);
+  if (feature && !canSee(feature)) {
+    return <Navigate to="/dashboard" replace />;
   }
 
   return (

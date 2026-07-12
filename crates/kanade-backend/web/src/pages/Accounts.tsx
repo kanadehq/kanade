@@ -28,6 +28,7 @@ import {
 } from '@/components/ui/table';
 import { apiFetch, formatError } from '@/lib/api';
 import { useAuth, type Role } from '@/lib/auth';
+import { FEATURE_NAV_KEY, GATEABLE_FEATURES } from '@/lib/features';
 
 type Account = {
   username: string;
@@ -35,6 +36,8 @@ type Account = {
   disabled: number;
   must_change_pw: number;
   email: string | null;
+  /** #1008 page allow-list. `null` = unrestricted (every page). */
+  allowed_features: string[] | null;
   created_at: string;
   updated_at: string;
 };
@@ -44,8 +47,8 @@ type CreateResp = { setup_link_sent: boolean };
 const ROLES: Role[] = ['viewer', 'operator', 'admin'];
 
 export function Accounts() {
-  const { t } = useTranslation('accounts');
-  const { hasRole } = useAuth();
+  const { t } = useTranslation(['accounts', 'common']);
+  const { hasRole, username: selfUsername } = useAuth();
   const qc = useQueryClient();
   const confirm = useConfirm();
 
@@ -66,6 +69,26 @@ export function Accounts() {
   // edit-email dialog
   const [emailFor, setEmailFor] = useState<string | null>(null);
   const [emailVal, setEmailVal] = useState('');
+  // page-access dialog (#1008): `restricted=false` ⇒ unrestricted (NULL);
+  // `restricted=true` ⇒ only the checked features.
+  const [pagesFor, setPagesFor] = useState<string | null>(null);
+  const [pagesRestricted, setPagesRestricted] = useState(false);
+  const [pagesSet, setPagesSet] = useState<Set<string>>(new Set());
+
+  const openPages = (a: Account) => {
+    setPagesFor(a.username);
+    // Restricted iff the backend sent an array; anything else (null, or a
+    // missing field) is unrestricted.
+    setPagesRestricted(Array.isArray(a.allowed_features));
+    setPagesSet(new Set(a.allowed_features ?? []));
+  };
+  const togglePage = (f: string) =>
+    setPagesSet((prev) => {
+      const next = new Set(prev);
+      if (next.has(f)) next.delete(f);
+      else next.add(f);
+      return next;
+    });
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ['accounts'] });
   const onError = (err: unknown) => toast.error(formatError(err));
@@ -236,6 +259,7 @@ export function Accounts() {
             <TableHead>{t('email')}</TableHead>
             <TableHead>{t('role')}</TableHead>
             <TableHead>{t('status')}</TableHead>
+            <TableHead>{t('pageAccess')}</TableHead>
             <TableHead>{t('created')}</TableHead>
             <TableHead className="text-right">{t('actions')}</TableHead>
           </TableRow>
@@ -295,6 +319,23 @@ export function Accounts() {
                 ) : (
                   <Badge variant="success">{t('enabled')}</Badge>
                 )}
+              </TableCell>
+              <TableCell label={t('pageAccess')}>
+                {/* Click to edit which pages this account may see (#1008). */}
+                <button
+                  type="button"
+                  className="text-left hover:underline"
+                  title={t('editPageAccess')}
+                  onClick={() => openPages(a)}
+                >
+                  {Array.isArray(a.allowed_features) ? (
+                    <Badge variant="amber">
+                      {t('pageAccessCount', { count: a.allowed_features.length })}
+                    </Badge>
+                  ) : (
+                    <span className="text-muted">{t('pageAccessAll')}</span>
+                  )}
+                </button>
               </TableCell>
               <TableCell label={t('created')} className="text-muted text-xs">{a.created_at}</TableCell>
               <TableCell className="text-right space-x-2 whitespace-nowrap">
@@ -450,6 +491,81 @@ export function Accounts() {
               </Button>
             </DialogFooter>
           </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={pagesFor !== null} onOpenChange={(o) => !o && setPagesFor(null)}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>{t('pageAccessTitle', { username: pagesFor ?? '' })}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <label className="flex items-center gap-2 text-sm font-medium">
+              <input
+                type="checkbox"
+                className="size-4"
+                checked={pagesRestricted}
+                onChange={(e) => setPagesRestricted(e.target.checked)}
+              />
+              {t('restrictPages')}
+            </label>
+            <p className="text-xs text-muted">{t('pageAccessHint')}</p>
+            {pagesRestricted && (
+              <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 sm:grid-cols-3">
+                {GATEABLE_FEATURES.map((f) => {
+                  // Guard against self-lockout: an admin editing their own
+                  // account can't remove `accounts` (they'd lose the only UI
+                  // that could undo it). The service token remains the last
+                  // resort, but don't make the footgun a click away.
+                  const forced = pagesFor === selfUsername && f === 'accounts';
+                  return (
+                    <label key={f} className="flex items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        className="size-4"
+                        checked={forced || pagesSet.has(f)}
+                        disabled={forced}
+                        title={forced ? t('pageAccessSelfLock') : undefined}
+                        onChange={() => togglePage(f)}
+                      />
+                      {t(FEATURE_NAV_KEY[f], { ns: 'common' })}
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setPagesFor(null)}>
+              {t('cancel')}
+            </Button>
+            <Button
+              disabled={patch.isPending}
+              onClick={() => {
+                if (!pagesFor) return;
+                // Mirror the UI's self-lockout guard in the payload: an admin
+                // restricting their own account keeps `accounts`.
+                const isSelf = pagesFor === selfUsername;
+                const restrictedSet = isSelf ? new Set([...pagesSet, 'accounts']) : pagesSet;
+                patch.mutate(
+                  {
+                    username: pagesFor,
+                    // `null` clears the restriction (unrestricted); an array
+                    // (possibly empty = commons only) restricts.
+                    body: { allowed_features: pagesRestricted ? [...restrictedSet] : null },
+                  },
+                  {
+                    onSuccess: () => {
+                      toast.success(t('toast.pageAccessUpdated', { username: pagesFor }));
+                      setPagesFor(null);
+                    },
+                  },
+                );
+              }}
+            >
+              {t('save')}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

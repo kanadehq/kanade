@@ -7,6 +7,7 @@ import { Link, NavLink, useLocation } from 'react-router-dom';
 import { AuthBar } from '@/components/AuthBar';
 import { apiFetch } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
+import type { Feature } from '@/lib/features';
 import { cn } from '@/lib/utils';
 
 // Sidebar groups: same three semantic clusters introduced in #52,
@@ -18,17 +19,21 @@ import { cn } from '@/lib/utils';
 // logo) and reads visually distinct from the link rows below it.
 // Labels are translation keys (resolved at render time); the
 // structural metadata (path, accent) stays in code.
+// `feature` (when present) is the #1008 page-visibility key: the link is
+// hidden unless the caller's allow-list permits it (`canSee`). Links without
+// a `feature` are baseline/commons and always shown (e.g. Agents — the fleet
+// roster the backend keeps open to everyone). The keys match `lib/features`.
 const groups: {
   labelKey: string;
   accent: string;
-  links: { to: string; labelKey: string; adminOnly?: boolean }[];
+  links: { to: string; labelKey: string; adminOnly?: boolean; feature?: Feature }[];
 }[] = [
   {
     labelKey: 'nav.groups.execute',
     accent: 'text-violet-light',
     links: [
-      { to: '/run', labelKey: 'nav.run' },
-      { to: '/exec', labelKey: 'nav.exec' },
+      { to: '/run', labelKey: 'nav.run', feature: 'run' },
+      { to: '/exec', labelKey: 'nav.exec', feature: 'exec' },
     ],
   },
   {
@@ -41,33 +46,33 @@ const groups: {
       // of inventory, not a peer of it. Keeping it off the sidebar
       // avoids a lone nested entry that would read as inconsistent
       // next to the otherwise-flat list.
-      { to: '/inventory', labelKey: 'nav.inventory' },
-      { to: '/compliance', labelKey: 'nav.compliance' },
-      { to: '/activity', labelKey: 'nav.activity' },
-      { to: '/events', labelKey: 'nav.events' },
-      { to: '/audit', labelKey: 'nav.audit' },
-      { to: '/logs', labelKey: 'nav.logs' },
-      { to: '/collect', labelKey: 'nav.collect' },
-      { to: '/analytics', labelKey: 'nav.analytics' },
+      { to: '/inventory', labelKey: 'nav.inventory', feature: 'inventory' },
+      { to: '/compliance', labelKey: 'nav.compliance', feature: 'compliance' },
+      { to: '/activity', labelKey: 'nav.activity', feature: 'activity' },
+      { to: '/events', labelKey: 'nav.events', feature: 'events' },
+      { to: '/audit', labelKey: 'nav.audit', feature: 'audit' },
+      { to: '/logs', labelKey: 'nav.logs', feature: 'logs' },
+      { to: '/collect', labelKey: 'nav.collect', feature: 'collect' },
+      { to: '/analytics', labelKey: 'nav.analytics', feature: 'analytics' },
     ],
   },
   {
     labelKey: 'nav.groups.manage',
     accent: 'text-teal-light',
     links: [
-      { to: '/jobs', labelKey: 'nav.jobs' },
-      { to: '/schedules', labelKey: 'nav.schedules' },
-      { to: '/views', labelKey: 'nav.views' },
-      { to: '/notifications', labelKey: 'nav.notifications' },
-      { to: '/rollout', labelKey: 'nav.rollout' },
-      { to: '/apps', labelKey: 'nav.apps' },
+      { to: '/jobs', labelKey: 'nav.jobs', feature: 'jobs' },
+      { to: '/schedules', labelKey: 'nav.schedules', feature: 'schedules' },
+      { to: '/views', labelKey: 'nav.views', feature: 'views' },
+      { to: '/notifications', labelKey: 'nav.notifications', feature: 'notifications' },
+      { to: '/rollout', labelKey: 'nav.rollout', feature: 'rollout' },
+      { to: '/apps', labelKey: 'nav.apps', feature: 'apps' },
       // `nav.agentGroups` (not `nav.groups`) — that key is already
       // taken by the sidebar section labels above.
-      { to: '/groups', labelKey: 'nav.agentGroups' },
-      { to: '/config', labelKey: 'nav.config' },
-      { to: '/jetstream', labelKey: 'nav.jetstream' },
-      { to: '/accounts', labelKey: 'nav.accounts', adminOnly: true },
-      { to: '/settings', labelKey: 'nav.settings' },
+      { to: '/groups', labelKey: 'nav.agentGroups', feature: 'groups' },
+      { to: '/config', labelKey: 'nav.config', feature: 'config' },
+      { to: '/jetstream', labelKey: 'nav.jetstream', feature: 'jetstream' },
+      { to: '/accounts', labelKey: 'nav.accounts', adminOnly: true, feature: 'accounts' },
+      { to: '/settings', labelKey: 'nav.settings', feature: 'settings' },
     ],
   },
 ];
@@ -95,7 +100,18 @@ function BackendVersion() {
 
 function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
   const { t } = useTranslation('common');
-  const { hasRole } = useAuth();
+  const { hasRole, canSee } = useAuth();
+  // Resolve each group's visible links once so a group whose links are all
+  // filtered out (by role or page-visibility) doesn't render an empty header
+  // + divider.
+  const visibleGroups = groups
+    .map((g) => ({
+      ...g,
+      links: g.links.filter(
+        (l) => (!l.adminOnly || hasRole('admin')) && (!l.feature || canSee(l.feature)),
+      ),
+    }))
+    .filter((g) => g.links.length > 0);
   return (
     <>
       <Link
@@ -120,7 +136,7 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
       </Link>
 
       <nav className="flex-1 overflow-y-auto px-2 pb-3">
-        {groups.map((g, idx) => (
+        {visibleGroups.map((g, idx) => (
           <div
             key={g.labelKey}
             // Top border + padding between groups (except for the
@@ -143,9 +159,7 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
             >
               {t(g.labelKey)}
             </h3>
-            {g.links
-              .filter((l) => !l.adminOnly || hasRole('admin'))
-              .map((l) => (
+            {g.links.map((l) => (
               <NavLink
                 key={l.to}
                 to={l.to}

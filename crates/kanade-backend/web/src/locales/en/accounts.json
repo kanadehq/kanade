@@ -35,6 +35,15 @@
   "mustChange": "must change password",
   "resetTitle": "Reset password for {{username}}",
   "confirmDelete": "Delete account {{username}}?",
+  "pageAccess": "Pages",
+  "pageAccessAll": "All",
+  "pageAccessCount_one": "{{count}} page",
+  "pageAccessCount_other": "{{count}} pages",
+  "editPageAccess": "Edit page access",
+  "pageAccessTitle": "Page access — {{username}}",
+  "restrictPages": "Restrict to specific pages",
+  "pageAccessHint": "Off = every page (the default). On = only the checked pages; all others are hidden and blocked at the API. Dashboard and Agents stay visible to everyone.",
+  "pageAccessSelfLock": "You can't remove your own access to Accounts.",
   "roles": {
     "viewer": "viewer",
     "operator": "operator",
@@ -47,7 +56,8 @@
     "emailUpdated": "Email updated for {{username}}",
     "emailCleared": "Email cleared for {{username}}",
     "deleted": "Account deleted",
-    "passwordReset": "Password reset — the user must change it on next login"
+    "passwordReset": "Password reset — the user must change it on next login",
+    "pageAccessUpdated": "Page access updated for {{username}}"
   },
   "changePw": {
     "title": "Change password",
