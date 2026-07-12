@@ -353,13 +353,16 @@ table.kn-table-no-overflow th {
    to *fit* by wrapping. `anywhere` (not `break-word`) is the point: it shrinks
    each cell's min-content width so the `w-full` (width: 100%) table can
    actually honor 100% instead of being forced wider by an unbreakable string.
-   The `> table >` child combinators keep this off the nested sub-tables handled
-   above (those wrap at every width); below `lg` the row→card transform already
-   prevents overflow, so this is gated to `lg`+. Scoped to `.kn-table` so it
-   never touches the `.notif-md` markdown tables. */
+   `> table > * > tr >` matches th/td in any row group (thead/tbody/tfoot) of a
+   `.kn-table` table; below `lg` the row→card transform already prevents
+   overflow, so this is gated to `lg`+. A nested inventory sub-table is itself
+   a `.kn-table`, so its cells match here too — harmlessly, since the
+   all-widths `td .kn-table table td` rule above already wraps them to the same
+   value. Scoped to `.kn-table` so it never touches the `.notif-md` markdown
+   tables. */
 @media (min-width: 1024px) {
-  .kn-table > table > thead > tr > th,
-  .kn-table > table > tbody > tr > td {
+  .kn-table > table > * > tr > th,
+  .kn-table > table > * > tr > td {
     overflow-wrap: anywhere;
   }
 }
