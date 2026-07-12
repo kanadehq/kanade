@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { UserPlus } from 'lucide-react';
+import { FolderPlus, UserPlus } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
@@ -36,8 +36,21 @@ type Account = {
   disabled: number;
   must_change_pw: number;
   email: string | null;
-  /** #1008 page allow-list. `null` = unrestricted (every page). */
+  /** #1008 page allow-list. `null` = unrestricted (every page). Ignored when
+   *  `permission_group` is set (the group governs). */
   allowed_features: string[] | null;
+  /** #1008 Phase 3 permission group, or `null`. When set, the group's feature
+   *  set is the account's effective access. */
+  permission_group: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+/** #1008 Phase 3 permission group (a reusable, shared page allow-list). */
+type PermGroup = {
+  name: string;
+  features: string[];
+  member_count: number;
   created_at: string;
   updated_at: string;
 };
@@ -57,6 +70,11 @@ export function Accounts() {
     queryFn: () => apiFetch<Account[]>('/api/accounts'),
     enabled: hasRole('admin'),
   });
+  const groupsQuery = useQuery({
+    queryKey: ['permission-groups'],
+    queryFn: () => apiFetch<PermGroup[]>('/api/permission-groups'),
+    enabled: hasRole('admin'),
+  });
 
   // create form
   const [newUser, setNewUser] = useState('');
@@ -70,10 +88,16 @@ export function Accounts() {
   const [emailFor, setEmailFor] = useState<string | null>(null);
   const [emailVal, setEmailVal] = useState('');
   // page-access dialog (#1008): `restricted=false` ⇒ unrestricted (NULL);
-  // `restricted=true` ⇒ only the checked features.
+  // `restricted=true` ⇒ only the checked features. `pagesGroup` (a group name
+  // or '') overrides the per-user controls when set (the group governs).
   const [pagesFor, setPagesFor] = useState<string | null>(null);
   const [pagesRestricted, setPagesRestricted] = useState(false);
   const [pagesSet, setPagesSet] = useState<Set<string>>(new Set());
+  const [pagesGroup, setPagesGroup] = useState('');
+  // group management (#1008 Phase 3)
+  const [newGroup, setNewGroup] = useState('');
+  const [groupEditFor, setGroupEditFor] = useState<string | null>(null);
+  const [groupEditSet, setGroupEditSet] = useState<Set<string>>(new Set());
 
   const openPages = (a: Account) => {
     setPagesFor(a.username);
@@ -81,7 +105,19 @@ export function Accounts() {
     // missing field) is unrestricted.
     setPagesRestricted(Array.isArray(a.allowed_features));
     setPagesSet(new Set(a.allowed_features ?? []));
+    setPagesGroup(a.permission_group ?? '');
   };
+  const openGroupEdit = (g: PermGroup) => {
+    setGroupEditFor(g.name);
+    setGroupEditSet(new Set(g.features));
+  };
+  const toggleGroupFeature = (f: string) =>
+    setGroupEditSet((prev) => {
+      const next = new Set(prev);
+      if (next.has(f)) next.delete(f);
+      else next.add(f);
+      return next;
+    });
   const togglePage = (f: string) =>
     setPagesSet((prev) => {
       const next = new Set(prev);
@@ -90,8 +126,46 @@ export function Accounts() {
       return next;
     });
 
-  const invalidate = () => qc.invalidateQueries({ queryKey: ['accounts'] });
+  // Refresh BOTH lists after any account or group mutation — they're coupled:
+  // assigning a user to a group changes that group's `member_count`, and
+  // editing/deleting a group changes members' effective access.
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ['accounts'] });
+    qc.invalidateQueries({ queryKey: ['permission-groups'] });
+  };
   const onError = (err: unknown) => toast.error(formatError(err));
+
+  const createGroup = useMutation({
+    mutationFn: (name: string) =>
+      apiFetch('/api/permission-groups', {
+        method: 'POST',
+        body: JSON.stringify({ name, features: [] }),
+      }),
+    onSuccess: (_d, name) => {
+      toast.success(t('group.toast.created', { name }));
+      setNewGroup('');
+      invalidate();
+    },
+    onError,
+  });
+  const updateGroup = useMutation({
+    mutationFn: (v: { name: string; features: string[] }) =>
+      apiFetch(`/api/permission-groups/${encodeURIComponent(v.name)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ features: v.features }),
+      }),
+    onSuccess: () => invalidate(),
+    onError,
+  });
+  const deleteGroup = useMutation({
+    mutationFn: (name: string) =>
+      apiFetch(`/api/permission-groups/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+    onSuccess: (_d, name) => {
+      toast.success(t('group.toast.deleted', { name }));
+      invalidate();
+    },
+    onError,
+  });
 
   const create = useMutation({
     mutationFn: () =>
@@ -160,6 +234,18 @@ export function Accounts() {
   // the input differs from it — used to skip a no-op PATCH on Save.
   const emailOrig = accounts.data?.find((a) => a.username === emailFor)?.email ?? '';
   const emailChanged = emailVal.trim() !== emailOrig;
+
+  // Self-lockout guard for the group path (mirrors the per-user `accounts`
+  // guard below): an admin assigning a group to their OWN account must not
+  // pick one that omits `accounts`, or they'd lose the only UI that could
+  // undo it (the backend enforces the allow-list too — service token /
+  // KANADE_AUTH_DISABLE would be the only escape). The per-user path force-
+  // keeps `accounts`, but a shared group can't be silently mutated, so here
+  // we block the choice instead. `true` for any group lacking `accounts`.
+  const groupLocksSelfOut = (name: string) =>
+    pagesFor === selfUsername &&
+    !(groupsQuery.data ?? []).find((g) => g.name === name)?.features.includes('accounts');
+  const selectedGroupLocksSelfOut = !!pagesGroup && groupLocksSelfOut(pagesGroup);
 
   return (
     <div className="p-4 md:p-6 space-y-6 max-w-5xl">
@@ -328,7 +414,13 @@ export function Accounts() {
                   title={t('editPageAccess')}
                   onClick={() => openPages(a)}
                 >
-                  {Array.isArray(a.allowed_features) ? (
+                  {a.permission_group ? (
+                    // A group governs — show it (distinct violet) rather than
+                    // the ignored per-user list.
+                    <Badge variant="violet">
+                      {t('pageAccessGroup', { name: a.permission_group })}
+                    </Badge>
+                  ) : Array.isArray(a.allowed_features) ? (
                     <Badge variant="amber">
                       {t('pageAccessCount', { count: a.allowed_features.length })}
                     </Badge>
@@ -396,6 +488,104 @@ export function Accounts() {
           ))}
         </TableBody>
       </Table>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">{t('group.title')}</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-sm text-muted">{t('group.subtitle')}</p>
+          <form
+            className="flex flex-wrap items-end gap-3"
+            onSubmit={(e) => {
+              e.preventDefault();
+              const n = newGroup.trim();
+              if (n) createGroup.mutate(n);
+            }}
+          >
+            <div className="space-y-1">
+              <Label htmlFor="new-group">{t('group.name')}</Label>
+              <Input
+                id="new-group"
+                value={newGroup}
+                onChange={(e) => setNewGroup(e.target.value)}
+                className="w-52"
+              />
+            </div>
+            <Button type="submit" disabled={createGroup.isPending || !newGroup.trim()}>
+              <FolderPlus className="size-4 mr-2" />
+              {t('group.create')}
+            </Button>
+          </form>
+          {groupsQuery.isError && (
+            <p className="text-red-500 text-sm">{formatError(groupsQuery.error)}</p>
+          )}
+          {(groupsQuery.data ?? []).length > 0 && (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>{t('group.name')}</TableHead>
+                  <TableHead>{t('group.pages')}</TableHead>
+                  <TableHead>{t('group.members')}</TableHead>
+                  <TableHead className="text-right">{t('actions')}</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {(groupsQuery.data ?? []).map((g) => (
+                  <TableRow key={g.name}>
+                    <TableCell label={t('group.name')} className="font-medium">
+                      {g.name}
+                    </TableCell>
+                    <TableCell label={t('group.pages')}>
+                      <button
+                        type="button"
+                        className="text-left hover:underline"
+                        title={t('group.editPages')}
+                        onClick={() => openGroupEdit(g)}
+                      >
+                        {g.features.length > 0 ? (
+                          <Badge variant="amber">
+                            {t('pageAccessCount', { count: g.features.length })}
+                          </Badge>
+                        ) : (
+                          <span className="text-muted">{t('pageAccessCommonsOnly')}</span>
+                        )}
+                      </button>
+                    </TableCell>
+                    <TableCell label={t('group.members')}>{g.member_count}</TableCell>
+                    <TableCell className="text-right space-x-2 whitespace-nowrap">
+                      <Button variant="secondary" size="sm" onClick={() => openGroupEdit(g)}>
+                        {t('group.editPages')}
+                      </Button>
+                      <Button
+                        variant="danger"
+                        size="sm"
+                        // The backend also refuses (409); disabling here makes
+                        // the "reassign members first" rule obvious.
+                        disabled={g.member_count > 0}
+                        title={g.member_count > 0 ? t('group.deleteBlocked') : undefined}
+                        onClick={async () => {
+                          if (
+                            await confirm({
+                              title: t('group.confirmDelete', { name: g.name }),
+                              confirmLabel: t('delete'),
+                              danger: true,
+                            })
+                          ) {
+                            deleteGroup.mutate(g.name);
+                          }
+                        }}
+                      >
+                        {t('delete')}
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
 
       <Dialog open={resetFor !== null} onOpenChange={(o) => !o && setResetFor(null)}>
         <DialogContent className="max-w-sm">
@@ -500,39 +690,95 @@ export function Accounts() {
             <DialogTitle>{t('pageAccessTitle', { username: pagesFor ?? '' })}</DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
-            <label className="flex items-center gap-2 text-sm font-medium">
-              <input
-                type="checkbox"
-                className="size-4"
-                checked={pagesRestricted}
-                onChange={(e) => setPagesRestricted(e.target.checked)}
-              />
-              {t('restrictPages')}
-            </label>
-            <p className="text-xs text-muted">{t('pageAccessHint')}</p>
-            {pagesRestricted && (
-              <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 sm:grid-cols-3">
-                {GATEABLE_FEATURES.map((f) => {
-                  // Guard against self-lockout: an admin editing their own
-                  // account can't remove `accounts` (they'd lose the only UI
-                  // that could undo it). The service token remains the last
-                  // resort, but don't make the footgun a click away.
-                  const forced = pagesFor === selfUsername && f === 'accounts';
+            {/* Group assignment. A group, when chosen, governs the account's
+                access (overriding the per-user list below), so those controls
+                are disabled while a group is selected. */}
+            <div className="space-y-1">
+              <Label htmlFor="pages-group">{t('group.assign')}</Label>
+              <Select
+                id="pages-group"
+                value={pagesGroup}
+                onChange={(e) => setPagesGroup(e.target.value)}
+                className="w-full"
+              >
+                <option value="">{t('group.none')}</option>
+                {(groupsQuery.data ?? []).map((g) => {
+                  // Disable groups that would lock the admin out of their own
+                  // account (see `groupLocksSelfOut`). A group already assigned
+                  // to someone else is still selectable for them.
+                  const locksOut = groupLocksSelfOut(g.name);
                   return (
-                    <label key={f} className="flex items-center gap-2 text-sm">
-                      <input
-                        type="checkbox"
-                        className="size-4"
-                        checked={forced || pagesSet.has(f)}
-                        disabled={forced}
-                        title={forced ? t('pageAccessSelfLock') : undefined}
-                        onChange={() => togglePage(f)}
-                      />
-                      {t(FEATURE_NAV_KEY[f], { ns: 'common' })}
-                    </label>
+                    <option key={g.name} value={g.name} disabled={locksOut}>
+                      {g.name}
+                      {locksOut ? ` — ${t('group.selfLockOption')}` : ''}
+                    </option>
                   );
                 })}
-              </div>
+              </Select>
+            </div>
+
+            {pagesGroup ? (
+              <>
+                <p className="text-xs text-muted">
+                  {t('group.governedBy', {
+                    name: pagesGroup,
+                    features:
+                      (groupsQuery.data ?? [])
+                        .find((g) => g.name === pagesGroup)
+                        // A group's stored features are backend keys (a superset
+                        // of the SPA's gateable `Feature`), so look the label up
+                        // defensively and fall back to the raw key.
+                        ?.features.map((f) => {
+                          const key = (FEATURE_NAV_KEY as Record<string, string>)[f];
+                          return key ? t(key, { ns: 'common' }) : f;
+                        })
+                        .join(', ') || t('pageAccessCommonsOnly'),
+                  })}
+                </p>
+                {/* A pre-assigned group can survive here even though its option
+                    is disabled — warn and block Save so an admin can't leave
+                    their own account governed by an Accounts-less group. */}
+                {selectedGroupLocksSelfOut && (
+                  <p className="text-xs text-red-500">{t('group.selfLockWarn')}</p>
+                )}
+              </>
+            ) : (
+              <>
+                <label className="flex items-center gap-2 text-sm font-medium">
+                  <input
+                    type="checkbox"
+                    className="size-4"
+                    checked={pagesRestricted}
+                    onChange={(e) => setPagesRestricted(e.target.checked)}
+                  />
+                  {t('restrictPages')}
+                </label>
+                <p className="text-xs text-muted">{t('pageAccessHint')}</p>
+                {pagesRestricted && (
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 sm:grid-cols-3">
+                    {GATEABLE_FEATURES.map((f) => {
+                      // Guard against self-lockout: an admin editing their own
+                      // account can't remove `accounts` (they'd lose the only UI
+                      // that could undo it). The service token remains the last
+                      // resort, but don't make the footgun a click away.
+                      const forced = pagesFor === selfUsername && f === 'accounts';
+                      return (
+                        <label key={f} className="flex items-center gap-2 text-sm">
+                          <input
+                            type="checkbox"
+                            className="size-4"
+                            checked={forced || pagesSet.has(f)}
+                            disabled={forced}
+                            title={forced ? t('pageAccessSelfLock') : undefined}
+                            onChange={() => togglePage(f)}
+                          />
+                          {t(FEATURE_NAV_KEY[f], { ns: 'common' })}
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+              </>
             )}
           </div>
           <DialogFooter>
@@ -540,24 +786,73 @@ export function Accounts() {
               {t('cancel')}
             </Button>
             <Button
-              disabled={patch.isPending}
+              disabled={patch.isPending || selectedGroupLocksSelfOut}
               onClick={() => {
                 if (!pagesFor) return;
-                // Mirror the UI's self-lockout guard in the payload: an admin
-                // restricting their own account keeps `accounts`.
-                const isSelf = pagesFor === selfUsername;
-                const restrictedSet = isSelf ? new Set([...pagesSet, 'accounts']) : pagesSet;
+                // `permission_group`: a name assigns the group, `null` clears
+                // it. The per-user `allowed_features` is only sent when NO group
+                // is chosen (otherwise the group governs and we leave the
+                // per-user list untouched).
+                const body: Record<string, unknown> = { permission_group: pagesGroup || null };
+                if (!pagesGroup) {
+                  // Mirror the UI's self-lockout guard: an admin restricting
+                  // their own account keeps `accounts`.
+                  const isSelf = pagesFor === selfUsername;
+                  const restrictedSet = isSelf ? new Set([...pagesSet, 'accounts']) : pagesSet;
+                  body.allowed_features = pagesRestricted ? [...restrictedSet] : null;
+                }
                 patch.mutate(
-                  {
-                    username: pagesFor,
-                    // `null` clears the restriction (unrestricted); an array
-                    // (possibly empty = commons only) restricts.
-                    body: { allowed_features: pagesRestricted ? [...restrictedSet] : null },
-                  },
+                  { username: pagesFor, body },
                   {
                     onSuccess: () => {
                       toast.success(t('toast.pageAccessUpdated', { username: pagesFor }));
                       setPagesFor(null);
+                    },
+                  },
+                );
+              }}
+            >
+              {t('save')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={groupEditFor !== null} onOpenChange={(o) => !o && setGroupEditFor(null)}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>{t('group.editTitle', { name: groupEditFor ?? '' })}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <p className="text-xs text-muted">{t('group.editHint')}</p>
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 sm:grid-cols-3">
+              {GATEABLE_FEATURES.map((f) => (
+                <label key={f} className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    className="size-4"
+                    checked={groupEditSet.has(f)}
+                    onChange={() => toggleGroupFeature(f)}
+                  />
+                  {t(FEATURE_NAV_KEY[f], { ns: 'common' })}
+                </label>
+              ))}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setGroupEditFor(null)}>
+              {t('cancel')}
+            </Button>
+            <Button
+              disabled={updateGroup.isPending}
+              onClick={() => {
+                if (!groupEditFor) return;
+                updateGroup.mutate(
+                  { name: groupEditFor, features: [...groupEditSet] },
+                  {
+                    onSuccess: () => {
+                      toast.success(t('group.toast.updated', { name: groupEditFor }));
+                      setGroupEditFor(null);
                     },
                   },
                 );

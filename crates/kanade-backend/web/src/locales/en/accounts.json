@@ -44,6 +44,31 @@
   "restrictPages": "Restrict to specific pages",
   "pageAccessHint": "Off = every page (the default). On = only the checked pages; all others are hidden and blocked at the API. Dashboard and Agents stay visible to everyone.",
   "pageAccessSelfLock": "You can't remove your own access to Accounts.",
+  "pageAccessGroup": "Group: {{name}}",
+  "pageAccessCommonsOnly": "Commons only",
+  "group": {
+    "title": "Permission groups",
+    "subtitle": "Reusable page allow-lists. Assign an account to a group and the group governs its page access — edit the group to update every member at once.",
+    "name": "Name",
+    "create": "Create group",
+    "pages": "Pages",
+    "members": "Members",
+    "editPages": "Edit pages",
+    "editTitle": "Pages for group {{name}}",
+    "editHint": "The pages this group grants. Members see exactly these (plus the always-open commons: Dashboard and Agents).",
+    "deleteBlocked": "Reassign its members before deleting.",
+    "confirmDelete": "Delete group {{name}}?",
+    "assign": "Permission group",
+    "none": "— none (use per-user pages below) —",
+    "governedBy": "Access is governed by group \"{{name}}\": {{features}}",
+    "selfLockOption": "no Accounts page",
+    "selfLockWarn": "This group doesn't grant the Accounts page. Assigning it to your own account would lock you out of account management — choose a group that includes Accounts, or add Accounts to this group first.",
+    "toast": {
+      "created": "Group {{name}} created",
+      "updated": "Group {{name}} updated",
+      "deleted": "Group {{name}} deleted"
+    }
+  },
   "roles": {
     "viewer": "viewer",
     "operator": "operator",
