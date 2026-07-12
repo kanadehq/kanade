@@ -342,3 +342,24 @@ table.kn-table-no-overflow td,
 table.kn-table-no-overflow th {
   overflow-wrap: anywhere;
 }
+
+/* Desktop table mode (`lg`, 1024px+): keep a wide, many-column *top-level* data
+   table (e.g. the inventory search results) inside its container by letting
+   long unbreakable tokens (package keys, publisher DNs, file paths) wrap
+   instead of bursting past the viewport's right edge and getting clipped.
+   #1005 deliberately dropped the wrapper's `overflow-x-auto` so the sticky
+   <thead> resolves against the viewport (whole-page scroll, no nested
+   horizontal bar) — with no horizontal scroll to fall back on, the table has
+   to *fit* by wrapping. `anywhere` (not `break-word`) is the point: it shrinks
+   each cell's min-content width so the `w-full` (width: 100%) table can
+   actually honor 100% instead of being forced wider by an unbreakable string.
+   The `> table >` child combinators keep this off the nested sub-tables handled
+   above (those wrap at every width); below `lg` the row→card transform already
+   prevents overflow, so this is gated to `lg`+. Scoped to `.kn-table` so it
+   never touches the `.notif-md` markdown tables. */
+@media (min-width: 1024px) {
+  .kn-table > table > thead > tr > th,
+  .kn-table > table > tbody > tr > td {
+    overflow-wrap: anywhere;
+  }
+}
