@@ -166,7 +166,13 @@ function NestedTable({ value, columns }: { value: unknown; columns: DisplayField
     return <span className="text-muted text-xs">{t('nested.none')}</span>;
   }
   return (
-    <Table>
+    // cards={false}: a nested sub-table (e.g. Installed apps / disks[]) can be
+    // wide (long PUBLISHER strings). Keep it a plain table with its own
+    // overflow-x-auto so it scrolls horizontally *within its cell* — otherwise,
+    // with no clip, a wide nested table overflows and forces the outer field/
+    // value table to scroll (or clips the last column). A card view here would
+    // also nest cards inside the outer table's value cell, which reads oddly.
+    <Table cards={false}>
       {/* Nested sub-table lives inside another table's cell — a sticky header
           here would pin to the viewport and fight the outer table's header. */}
       <TableHeader stickyHeader={false}>
