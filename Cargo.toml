@@ -48,7 +48,7 @@ tracing-appender   = "0.2.5"
 anyhow             = "1.0.103"
 thiserror          = "2.0.18"
 clap               = { version = "4.6.1", features = ["derive", "env"] }
-uuid               = { version = "1.23.4", features = ["v4", "v5", "serde"] }
+uuid               = { version = "1.23.5", features = ["v4", "v5", "serde"] }
 chrono             = { version = "0.4.45", features = ["serde"] }
 futures            = "0.3.32"
 # CLI-side expansion of `job/schedule create` glob/dir arguments (#654).
