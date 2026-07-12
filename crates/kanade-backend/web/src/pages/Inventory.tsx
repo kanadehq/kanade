@@ -167,9 +167,14 @@ function NestedTable({ value, columns }: { value: unknown; columns: DisplayField
   }
   return (
     <Table>
-      {/* Nested sub-table lives inside another table's cell — a sticky header
-          here would pin to the viewport and fight the outer table's header. */}
-      <TableHeader stickyHeader={false}>
+      {/* Sticky header (desktop): a NestedTable can be long (Installed apps
+          has hundreds of rows), so pin its column labels as the page scrolls.
+          This works because the outer field/value table is also a `cards`
+          table (no overflow clip), so this <thead>'s `position: sticky`
+          resolves against the viewport. The outer table's own header stays
+          non-sticky, so the two never stack at top:0. Cells wrap (index.css)
+          so the sub-table fits its cell without a horizontal scrollbar. */}
+      <TableHeader>
         <TableRow>
           {columns.map((c) => (
             <TableHead key={c.field}>{c.label}</TableHead>
@@ -776,12 +781,15 @@ function FactCard({
               </pre>
             </details>
           ) : (
-            // Key–value detail: 2 narrow columns already fit a phone, and a
-            // card view would double-label ("field: X" / "value: Y"), so keep
-            // it a plain table at every width (cards={false}).
-            <Table cards={false}>
-              {/* Can host a NestedTable in the value cell; keep this header
-                  non-sticky too so the two don't compete for top:0. */}
+            // Field/value detail. Stays `cards={false}` so this compact
+            // 2-column key-value table never collapses into cards (it fits
+            // every width as-is). The `kn-table-no-overflow` class drops the
+            // wrapper's overflow-x clip in index.css, so a NestedTable in the
+            // value cell can pin its own sticky header to the viewport on
+            // scroll. This header stays non-sticky (stickyHeader={false}) so
+            // it never stacks with the nested header at top:0, and the trivial
+            // "項目/値" labels aren't worth pinning anyway.
+            <Table cards={false} className="kn-table-no-overflow">
               <TableHeader stickyHeader={false}>
                 <TableRow>
                   <TableHead>{t('detail.columns.field')}</TableHead>
