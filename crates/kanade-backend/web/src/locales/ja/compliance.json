@@ -8,7 +8,7 @@
   "status": {
     "ok": "OK",
     "warn": "警告",
-    "fail": "失敗",
+    "fail": "異常",
     "unknown": "不明"
   },
   "col": {
