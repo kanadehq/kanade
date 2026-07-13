@@ -64,7 +64,7 @@
     "descriptionAttention": "{{total}} 件中 {{attention}} 件が要対応",
     "descriptionEmpty": "フリート対象のチェックはまだありません",
     "rowTitle": "コンプライアンス画面を開く",
-    "fail": "失敗 {{n}}",
+    "fail": "異常 {{n}}",
     "warn": "警告 {{n}}",
     "unknown": "不明 {{n}}",
     "ok": "正常 {{n}}",
