@@ -51,7 +51,7 @@ tauri-plugin-notification = "2.3.3"
 # launch's argv to the running instance and exits it. Also the path a
 # `kanade-client://` toast-click protocol launch takes back to the running
 # instance (#647 reveal-on-click).
-tauri-plugin-single-instance = "2.4.2"
+tauri-plugin-single-instance = "2.4.3"
 # WinRT/Win32: `SetCurrentProcessExplicitAppUserModelID` (AUMID pin so toasts
 # render at all, #102) plus `UI_Notifications` + `Data_Xml_Dom` to build the
 # emergency toast directly — `scenario=Reminder` (persists until dismissed) and
