@@ -60,7 +60,7 @@ kanade-shared = { workspace = true }
 portpicker = "0.1.1"
 # Skip integration tests cleanly when `nats-server` isn't in PATH
 # (developer running `--ignored` on a fresh checkout).
-which = "8.0.4"
+which = "8.0.5"
 # Workspace deps used by integration tests but already in
 # [dependencies] don't need re-declaration; the agent's own
 # integration tests inherit them.
