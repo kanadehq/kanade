@@ -31,6 +31,40 @@ const FILTER_DEBOUNCE_MS = 300;
 // #1051: localStorage key for the operator's chosen agent_meta columns
 // (per-browser; a server-side per-account pref could follow later).
 const META_COLS_KEY = 'agents.metaColumns';
+// Built-in columns an operator can hide from the column picker (persisted
+// per browser). `pc_id` is deliberately absent — it's the row identity +
+// the link to the per-PC page, so it always shows. Order matches the
+// table so the picker reads top-to-bottom like the header row.
+const TOGGLEABLE_COLS = [
+  'status',
+  'os',
+  'agent',
+  'lastHeartbeat',
+  'lastLogon',
+  'cpu',
+  'rss',
+  'actions',
+] as const;
+const HIDDEN_COLS_KEY = 'agents.hiddenColumns';
+
+/** Read a persisted `string[]` from localStorage, tolerating anything
+ *  malformed. `getItem`/`JSON.parse` can throw (blocked storage, bad
+ *  JSON); a valid-JSON but non-array value (a string / object left by
+ *  other code or corruption) would otherwise slip through and crash later
+ *  on `.includes()`. Falls back to `[]` in every failure mode and keeps
+ *  only string entries. */
+function readStringArray(key: string): string[] {
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed.filter((x): x is string => typeof x === 'string');
+    }
+  } catch {
+    /* malformed / unavailable — fall through to the empty default */
+  }
+  return [];
+}
 
 // Liveness filter for the list, shared with the URL `?status=` param
 // so the Dashboard's fleet-health tiles can deep-link straight to the
@@ -88,14 +122,7 @@ export function Agents() {
   const dMetaValue = useDebouncedValue(metaValue, FILTER_DEBOUNCE_MS);
   // #1051: which agent_meta keys render as extra columns (persisted per
   // browser). Seeded from localStorage; kept in sync on every change.
-  const [metaCols, setMetaCols] = useState<string[]>(() => {
-    try {
-      const raw = localStorage.getItem(META_COLS_KEY);
-      return raw ? (JSON.parse(raw) as string[]) : [];
-    } catch {
-      return [];
-    }
-  });
+  const [metaCols, setMetaCols] = useState<string[]>(() => readStringArray(META_COLS_KEY));
   useEffect(() => {
     // setItem can throw (SecurityError under blocked storage / some iframe
     // contexts, or QuotaExceeded) — a throw here would crash the render.
@@ -123,6 +150,19 @@ export function Agents() {
   // `metaCols` (localStorage) is kept intact so the choice returns if the
   // key reappears.
   const activeMetaCols = metaCols.filter((k) => metaKeys.includes(k));
+  // Built-in columns the operator has hidden (persisted per browser). A
+  // column is visible unless its id is in this set; pc_id is never here.
+  const [hiddenCols, setHiddenCols] = useState<string[]>(() => readStringArray(HIDDEN_COLS_KEY));
+  useEffect(() => {
+    try {
+      localStorage.setItem(HIDDEN_COLS_KEY, JSON.stringify(hiddenCols));
+    } catch {
+      /* non-persistent this session; not worth surfacing */
+    }
+  }, [hiddenCols]);
+  const isColVisible = (id: string) => !hiddenCols.includes(id);
+  const toggleCol = (id: string) =>
+    setHiddenCols((prev) => (prev.includes(id) ? prev.filter((c) => c !== id) : [...prev, id]));
   const [searchParams, setSearchParams] = useSearchParams();
   const statusFilter = parseStatusFilter(searchParams.get('status'));
   // #652: the Rollout "quarantined K" drill-down lands here with
@@ -374,6 +414,11 @@ export function Agents() {
     );
   }
 
+  // Visible column count for the empty-state colSpan: pc_id (always) +
+  // the un-hidden built-ins + the active metadata columns.
+  const colCount =
+    1 + TOGGLEABLE_COLS.filter((c) => isColVisible(c)).length + activeMetaCols.length;
+
   return (
     <div className="space-y-4">
       <div className="flex items-baseline justify-between">
@@ -437,43 +482,63 @@ export function Agents() {
             className="h-8 w-40"
           />
         </div>
-        {/* #1051: attribute (agent_meta) search + column picker. Hidden
-            entirely when no metadata exists anywhere in the fleet. */}
+        {/* #1051: attribute (agent_meta) search — only when metadata
+            exists anywhere in the fleet. */}
         {metaKeys.length > 0 && (
-          <>
-            <div className="space-y-1">
-              <Label htmlFor="agents-meta-key">{t('search.attributeLabel')}</Label>
-              <div className="flex gap-1">
-                <Select
-                  id="agents-meta-key"
-                  value={metaKey}
-                  onChange={(e) => setMetaKey(e.target.value)}
-                  className="h-8 w-36"
-                >
-                  <option value="">{t('search.attributeAny')}</option>
-                  {metaKeys.map((k) => (
-                    <option key={k} value={k}>
-                      {k}
-                    </option>
-                  ))}
-                </Select>
-                <Input
-                  value={metaValue}
-                  onChange={(e) => setMetaValue(e.target.value)}
-                  placeholder={t('search.attributeValue')}
-                  className="h-8 w-40"
-                  disabled={!metaKey}
-                />
-              </div>
+          <div className="space-y-1">
+            <Label htmlFor="agents-meta-key">{t('search.attributeLabel')}</Label>
+            <div className="flex gap-1">
+              <Select
+                id="agents-meta-key"
+                value={metaKey}
+                onChange={(e) => setMetaKey(e.target.value)}
+                className="h-8 w-36"
+              >
+                <option value="">{t('search.attributeAny')}</option>
+                {metaKeys.map((k) => (
+                  <option key={k} value={k}>
+                    {k}
+                  </option>
+                ))}
+              </Select>
+              <Input
+                value={metaValue}
+                onChange={(e) => setMetaValue(e.target.value)}
+                placeholder={t('search.attributeValue')}
+                className="h-8 w-40"
+                disabled={!metaKey}
+              />
             </div>
-            <div className="space-y-1">
-              <Label>{t('columns.attributesLabel')}</Label>
-              <details className="relative">
-                <summary className="flex h-8 cursor-pointer list-none items-center gap-1.5 rounded-md border border-border px-2.5 text-sm hover:bg-muted/10">
-                  <SlidersHorizontal className="size-3.5" />
-                  {t('columns.pickAttributes', { count: activeMetaCols.length })}
-                </summary>
-                <div className="absolute z-20 mt-1 max-h-64 w-52 overflow-auto rounded-md border border-border bg-card p-2 shadow-lg">
+          </div>
+        )}
+        {/* Column picker — always available: hide/show the built-in
+            columns (pc_id is always shown), plus check agent_meta keys on
+            as extra columns when any metadata exists. */}
+        <div className="space-y-1">
+          <Label>{t('columns.label')}</Label>
+          <details className="relative">
+            <summary className="flex h-8 cursor-pointer list-none items-center gap-1.5 rounded-md border border-border px-2.5 text-sm hover:bg-muted/10">
+              <SlidersHorizontal className="size-3.5" />
+              {t('columns.pick')}
+            </summary>
+            <div className="absolute right-0 z-20 mt-1 max-h-72 w-56 overflow-auto rounded-md border border-border bg-card p-2 shadow-lg">
+              <div className="px-1 pb-1 text-[10px] font-medium uppercase tracking-wide text-muted">
+                {t('columns.builtinSection')}
+              </div>
+              {TOGGLEABLE_COLS.map((id) => (
+                <label
+                  key={id}
+                  className="flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-sm hover:bg-muted/10"
+                >
+                  <input type="checkbox" checked={isColVisible(id)} onChange={() => toggleCol(id)} />
+                  <span className="truncate">{t(`columns.${id}`)}</span>
+                </label>
+              ))}
+              {metaKeys.length > 0 && (
+                <>
+                  <div className="mt-2 px-1 pb-1 text-[10px] font-medium uppercase tracking-wide text-muted">
+                    {t('columns.attributesLabel')}
+                  </div>
                   {metaKeys.map((k) => (
                     <label
                       key={k}
@@ -487,11 +552,11 @@ export function Agents() {
                       <span className="truncate">{k}</span>
                     </label>
                   ))}
-                </div>
-              </details>
+                </>
+              )}
             </div>
-          </>
-        )}
+          </details>
+        </div>
       </div>
 
       {/* Liveness chips + active quarantine drill-down. */}
@@ -550,15 +615,20 @@ export function Agents() {
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead>{t('columns.status')}</TableHead>
+            {isColVisible('status') && <TableHead>{t('columns.status')}</TableHead>}
             {/* pc_id is usually COMPUTERNAME lower-cased, so a separate
                 hostname column duplicated it. The hostname now rides the
-                pc_id cell, shown only when it genuinely differs. */}
+                pc_id cell, shown only when it genuinely differs. pc_id is
+                the row identity + detail link, so it's never hideable. */}
             <TableHead>{t('columns.pcId')}</TableHead>
-            <TableHead>{t('columns.os')}</TableHead>
-            <TableHead>{t('columns.agent')}</TableHead>
-            <TableHead>{t('columns.lastHeartbeat')}</TableHead>
-            <TableHead title={t('columnTitles.lastLogon')}>{t('columns.lastLogon')}</TableHead>
+            {isColVisible('os') && <TableHead>{t('columns.os')}</TableHead>}
+            {isColVisible('agent') && <TableHead>{t('columns.agent')}</TableHead>}
+            {isColVisible('lastHeartbeat') && (
+              <TableHead>{t('columns.lastHeartbeat')}</TableHead>
+            )}
+            {isColVisible('lastLogon') && (
+              <TableHead title={t('columnTitles.lastLogon')}>{t('columns.lastLogon')}</TableHead>
+            )}
             {/* #1051: operator-selected agent_meta columns. */}
             {activeMetaCols.map((k) => (
               <TableHead key={k} title={t('columnTitles.attribute', { key: k })}>
@@ -570,13 +640,17 @@ export function Agents() {
                 as an em-dash, so the table stays usable during a
                 rolling upgrade. Headers are prefixed "agent" so the
                 columns are clearly the agent process, not the host. */}
-            <TableHead className="text-right" title={t('columnTitles.cpu')}>
-              {t('columns.cpu')}
-            </TableHead>
-            <TableHead className="text-right" title={t('columnTitles.rss')}>
-              {t('columns.rss')}
-            </TableHead>
-            <TableHead>{t('columns.actions')}</TableHead>
+            {isColVisible('cpu') && (
+              <TableHead className="text-right" title={t('columnTitles.cpu')}>
+                {t('columns.cpu')}
+              </TableHead>
+            )}
+            {isColVisible('rss') && (
+              <TableHead className="text-right" title={t('columnTitles.rss')}>
+                {t('columns.rss')}
+              </TableHead>
+            )}
+            {isColVisible('actions') && <TableHead>{t('columns.actions')}</TableHead>}
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -591,36 +665,38 @@ export function Agents() {
             const unresolvedVersions = unresolvedQuarantine(a.quarantined_versions, a.agent_version);
             return (
             <TableRow key={a.pc_id}>
-              <TableCell label={t('columns.status')}>
-                <div className="flex flex-col items-start gap-1">
-                  <Badge
-                    variant={online ? 'success' : 'danger'}
-                    title={t(online ? 'status.onlineTitle' : 'status.offlineTitle')}
-                  >
-                    <span
-                      className={cn(
-                        'mr-1.5 inline-block size-1.5 rounded-full',
-                        online ? 'bg-success' : 'bg-danger',
-                      )}
-                    />
-                    {t(online ? 'status.online' : 'status.offline')}
-                  </Badge>
-                  {/* #652: per-row quarantine badge so the drill-down
-                      list is actionable — the version(s) this host
-                      rolled back show on hover. */}
-                  {unresolvedVersions.length > 0 && (
+              {isColVisible('status') && (
+                <TableCell label={t('columns.status')}>
+                  <div className="flex flex-col items-start gap-1">
                     <Badge
-                      variant="danger"
-                      title={t('quarantinedBadgeTitle', {
-                        versions: unresolvedVersions.join(', '),
-                      })}
+                      variant={online ? 'success' : 'danger'}
+                      title={t(online ? 'status.onlineTitle' : 'status.offlineTitle')}
                     >
-                      <AlertTriangle className="mr-1 size-3" />
-                      {t('quarantinedBadge')}
+                      <span
+                        className={cn(
+                          'mr-1.5 inline-block size-1.5 rounded-full',
+                          online ? 'bg-success' : 'bg-danger',
+                        )}
+                      />
+                      {t(online ? 'status.online' : 'status.offline')}
                     </Badge>
-                  )}
-                </div>
-              </TableCell>
+                    {/* #652: per-row quarantine badge so the drill-down
+                        list is actionable — the version(s) this host
+                        rolled back show on hover. */}
+                    {unresolvedVersions.length > 0 && (
+                      <Badge
+                        variant="danger"
+                        title={t('quarantinedBadgeTitle', {
+                          versions: unresolvedVersions.join(', '),
+                        })}
+                      >
+                        <AlertTriangle className="mr-1 size-3" />
+                        {t('quarantinedBadge')}
+                      </Badge>
+                    )}
+                  </div>
+                </TableCell>
+              )}
               <TableCell label={t('columns.pcId')}>
                 <Link
                   to={`/agents/${encodeURIComponent(a.pc_id)}`}
@@ -637,28 +713,36 @@ export function Agents() {
                     <div className="text-muted text-[10px]">{a.hostname}</div>
                   )}
               </TableCell>
-              <TableCell label={t('columns.os')} className="text-muted text-xs">{a.os_family ?? '—'}</TableCell>
-              <TableCell label={t('columns.agent')} className="text-muted text-xs">{a.agent_version ?? '—'}</TableCell>
-              <TableCell label={t('columns.lastHeartbeat')} className="text-muted text-xs">{fmtIsoLocal(a.last_heartbeat)}</TableCell>
-              <TableCell label={t('columns.lastLogon')} className="text-xs">
-                {a.last_logon_display_name || a.last_logon_user ? (
-                  <div className="flex flex-col">
-                    {/* Display name as the primary line; fall back to the
-                        login name when there's no display name (common for
-                        local / domain accounts where LastLoggedOnDisplayName
-                        is an EMPTY STRING, not null — so `||`, not `??`,
-                        which would render the empty string). Show the login
-                        name as a secondary line only when a display name is
-                        actually present. */}
-                    <span>{a.last_logon_display_name || a.last_logon_user}</span>
-                    {a.last_logon_display_name && a.last_logon_user && (
-                      <code className="text-muted text-[10px]">{a.last_logon_user}</code>
-                    )}
-                  </div>
-                ) : (
-                  <span className="text-muted">—</span>
-                )}
-              </TableCell>
+              {isColVisible('os') && (
+                <TableCell label={t('columns.os')} className="text-muted text-xs">{a.os_family ?? '—'}</TableCell>
+              )}
+              {isColVisible('agent') && (
+                <TableCell label={t('columns.agent')} className="text-muted text-xs">{a.agent_version ?? '—'}</TableCell>
+              )}
+              {isColVisible('lastHeartbeat') && (
+                <TableCell label={t('columns.lastHeartbeat')} className="text-muted text-xs">{fmtIsoLocal(a.last_heartbeat)}</TableCell>
+              )}
+              {isColVisible('lastLogon') && (
+                <TableCell label={t('columns.lastLogon')} className="text-xs">
+                  {a.last_logon_display_name || a.last_logon_user ? (
+                    <div className="flex flex-col">
+                      {/* Display name as the primary line; fall back to the
+                          login name when there's no display name (common for
+                          local / domain accounts where LastLoggedOnDisplayName
+                          is an EMPTY STRING, not null — so `||`, not `??`,
+                          which would render the empty string). Show the login
+                          name as a secondary line only when a display name is
+                          actually present. */}
+                      <span>{a.last_logon_display_name || a.last_logon_user}</span>
+                      {a.last_logon_display_name && a.last_logon_user && (
+                        <code className="text-muted text-[10px]">{a.last_logon_user}</code>
+                      )}
+                    </div>
+                  ) : (
+                    <span className="text-muted">—</span>
+                  )}
+                </TableCell>
+              )}
               {/* #1051: operator-selected agent_meta cells. */}
               {activeMetaCols.map((k) => {
                 const v = metaVal(a, k);
@@ -668,41 +752,47 @@ export function Agents() {
                   </TableCell>
                 );
               })}
-              <TableCell label={t('columns.cpu')} className="text-right text-muted text-xs">{fmtPct(a.agent_cpu_pct)}</TableCell>
-              <TableCell label={t('columns.rss')} className="text-right text-muted text-xs">{fmtBytes(a.agent_rss_bytes)}</TableCell>
-              <TableCell>
-                <div className="flex gap-1 flex-wrap">
-                  <Button variant="secondary" size="sm" asChild>
-                    <Link to={`/inventory?pc=${encodeURIComponent(a.pc_id)}`}>
-                      <ScrollText className="size-3.5" />{t('actions.facts')}
-                    </Link>
-                  </Button>
-                  <Button variant="secondary" size="sm" onClick={() => doPing(a.pc_id)} disabled={pendingPcs.has(a.pc_id)}>
-                    <Activity className="size-3.5" />{t('actions.ping')}
-                  </Button>
-                  <Button variant="secondary" size="sm" onClick={() => doGroups(a.pc_id)} disabled={pendingPcs.has(a.pc_id)}>
-                    <Users className="size-3.5" />{t('actions.groups')}
-                  </Button>
-                  <Button variant="secondary" size="sm" onClick={() => doEffective(a.pc_id)} disabled={pendingPcs.has(a.pc_id)}>
-                    <Settings2 className="size-3.5" />{t('actions.effective')}
-                  </Button>
-                  <Button
-                    variant="danger"
-                    size="sm"
-                    onClick={() => doDelete(a.pc_id)}
-                    disabled={!canOperate || pendingPcs.has(a.pc_id)}
-                    title={canOperate ? undefined : t('rbac.operatorRequired', { ns: 'common' })}
-                  >
-                    <Trash2 className="size-3.5" />{t('actions.delete')}
-                  </Button>
-                </div>
-              </TableCell>
+              {isColVisible('cpu') && (
+                <TableCell label={t('columns.cpu')} className="text-right text-muted text-xs">{fmtPct(a.agent_cpu_pct)}</TableCell>
+              )}
+              {isColVisible('rss') && (
+                <TableCell label={t('columns.rss')} className="text-right text-muted text-xs">{fmtBytes(a.agent_rss_bytes)}</TableCell>
+              )}
+              {isColVisible('actions') && (
+                <TableCell>
+                  <div className="flex gap-1 flex-wrap">
+                    <Button variant="secondary" size="sm" asChild>
+                      <Link to={`/inventory?pc=${encodeURIComponent(a.pc_id)}`}>
+                        <ScrollText className="size-3.5" />{t('actions.facts')}
+                      </Link>
+                    </Button>
+                    <Button variant="secondary" size="sm" onClick={() => doPing(a.pc_id)} disabled={pendingPcs.has(a.pc_id)}>
+                      <Activity className="size-3.5" />{t('actions.ping')}
+                    </Button>
+                    <Button variant="secondary" size="sm" onClick={() => doGroups(a.pc_id)} disabled={pendingPcs.has(a.pc_id)}>
+                      <Users className="size-3.5" />{t('actions.groups')}
+                    </Button>
+                    <Button variant="secondary" size="sm" onClick={() => doEffective(a.pc_id)} disabled={pendingPcs.has(a.pc_id)}>
+                      <Settings2 className="size-3.5" />{t('actions.effective')}
+                    </Button>
+                    <Button
+                      variant="danger"
+                      size="sm"
+                      onClick={() => doDelete(a.pc_id)}
+                      disabled={!canOperate || pendingPcs.has(a.pc_id)}
+                      title={canOperate ? undefined : t('rbac.operatorRequired', { ns: 'common' })}
+                    >
+                      <Trash2 className="size-3.5" />{t('actions.delete')}
+                    </Button>
+                  </div>
+                </TableCell>
+              )}
             </TableRow>
             );
           })}
           {visible.length === 0 && (
             <TableRow>
-              <TableCell colSpan={9 + activeMetaCols.length} className="text-center text-muted text-sm py-6">
+              <TableCell colSpan={colCount} className="text-center text-muted text-sm py-6">
                 {t('filterEmpty')}
               </TableCell>
             </TableRow>
