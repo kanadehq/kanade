@@ -1,6 +1,7 @@
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
+use kanade_shared::wire::MetaEntry;
 use serde::{Deserialize, Serialize};
 use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
 use tracing::{info, warn};
@@ -49,6 +50,13 @@ pub struct AgentRow {
     /// non-Windows agents.
     pub last_logon_user: Option<String>,
     pub last_logon_display_name: Option<String>,
+    /// #1051: operator-managed key/value metadata for this PC, from the
+    /// `agent_meta` projection (source of truth is the KV bucket the SPA
+    /// `PUT`/`kanade meta` write). Decorated onto the returned page so the
+    /// Agents list can render selected keys as columns. Omitted (not `[]`)
+    /// when the PC has no metadata, keeping the common response small.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub meta: Vec<MetaEntry>,
 }
 
 /// Query params for `GET /api/agents`.
@@ -85,6 +93,13 @@ pub struct ListParams {
     /// server-side against [`ALIVE_THRESHOLD`]. Absent / empty → no
     /// filter; anything else → 400.
     pub status: Option<String>,
+    /// #1051: restrict to PCs that have this `agent_meta` key. Blank /
+    /// whitespace-only → no metadata filter. Paired with `meta_value`.
+    pub meta_key: Option<String>,
+    /// #1051: when `meta_key` is set, require the key's value to CONTAIN
+    /// this text (SQLite `LIKE '%…%'`, metacharacters escaped). Blank →
+    /// "has the key with any value". Ignored when `meta_key` is blank.
+    pub meta_value: Option<String>,
 }
 
 /// Heartbeat age past which an agent counts as offline. The single
@@ -113,6 +128,111 @@ fn quarantined_like(version: Option<&str>) -> Option<String> {
             .replace('_', "\\_");
         format!("%\"{escaped}\"%")
     })
+}
+
+/// Wrap `value` as a SQLite `LIKE '%value%'` contains-pattern with the
+/// LIKE metacharacters escaped (ESCAPE '\' is declared at the call site).
+fn contains_like(value: &str) -> String {
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    format!("%{escaped}%")
+}
+
+/// The SQL-expressible pre-filters shared by the count query, the
+/// fast-path row query, and the regex-path prefilter: the quarantine
+/// token LIKE and the #1051 metadata filter. `started` tracks whether a
+/// `WHERE` has been emitted yet so the caller can append its own extra
+/// clauses (the status filter) with the right `WHERE`/`AND` separator.
+///
+/// The metadata filter is a correlated subquery
+/// (`pc_id IN (SELECT pc_id FROM agent_meta WHERE key = ? [AND value LIKE ?])`)
+/// so it composes with paging + the fleet-wide count without pulling the
+/// roster into memory.
+fn push_prefilters(
+    qb: &mut QueryBuilder<Sqlite>,
+    started: &mut bool,
+    quar_like: &Option<String>,
+    meta_filter: &Option<(String, Option<String>)>,
+) {
+    if let Some(p) = quar_like {
+        qb.push(sep(started))
+            .push("quarantined_versions LIKE ")
+            .push_bind(p.clone())
+            .push(" ESCAPE '\\'");
+    }
+    if let Some((key, like)) = meta_filter {
+        qb.push(sep(started))
+            .push("pc_id IN (SELECT pc_id FROM agent_meta WHERE key = ")
+            .push_bind(key.clone());
+        if let Some(l) = like {
+            qb.push(" AND value LIKE ")
+                .push_bind(l.clone())
+                .push(" ESCAPE '\\'");
+        }
+        qb.push(")");
+    }
+}
+
+/// Emit `" WHERE "` for the first clause, `" AND "` thereafter.
+fn sep(started: &mut bool) -> &'static str {
+    if *started {
+        " AND "
+    } else {
+        *started = true;
+        " WHERE "
+    }
+}
+
+/// How many pc_ids to bind per `attach_meta` IN-list query. Kept well
+/// under SQLite's host-parameter cap (999 on older builds, 32766 since
+/// 3.32) so an unbounded `GET /api/agents` (no `limit` → whole fleet)
+/// can't trip `too many SQL variables` on a large roster. (Gemini HIGH.)
+const META_IN_CHUNK: usize = 500;
+
+/// Decorate a page of agents with their `agent_meta` rows, grouped by
+/// pc_id. No-op for an empty page. The page is queried in chunks of
+/// [`META_IN_CHUNK`] so the IN-list can't exceed SQLite's bound-parameter
+/// limit even when the caller asked for the whole (unbounded) fleet. A
+/// metadata read failure is surfaced to the caller rather than silently
+/// dropping columns.
+async fn attach_meta(pool: &SqlitePool, page: &mut [AgentRow]) -> Result<(), (StatusCode, String)> {
+    if page.is_empty() {
+        return Ok(());
+    }
+    let mut by_pc: std::collections::HashMap<String, Vec<MetaEntry>> =
+        std::collections::HashMap::new();
+    for chunk in page.chunks(META_IN_CHUNK) {
+        let mut qb: QueryBuilder<Sqlite> =
+            QueryBuilder::new("SELECT pc_id, key, value FROM agent_meta WHERE pc_id IN (");
+        {
+            let mut list = qb.separated(", ");
+            for a in chunk {
+                list.push_bind(a.pc_id.clone());
+            }
+        }
+        qb.push(") ORDER BY pc_id, key");
+        let rows = qb.build().fetch_all(pool).await.map_err(|e| {
+            warn!(error = %e, "attach agent_meta");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "load agent metadata failed".to_string(),
+            )
+        })?;
+        for r in rows {
+            let pc: String = r.try_get("pc_id").unwrap_or_default();
+            let key: String = r.try_get("key").unwrap_or_default();
+            let value: String = r.try_get("value").unwrap_or_default();
+            by_pc.entry(pc).or_default().push(MetaEntry { key, value });
+        }
+    }
+    for a in page.iter_mut() {
+        if let Some(m) = by_pc.remove(&a.pc_id) {
+            a.meta = m;
+        }
+    }
+    Ok(())
 }
 
 fn is_online(a: &AgentRow, cutoff: chrono::DateTime<chrono::Utc>) -> bool {
@@ -183,6 +303,24 @@ pub async fn list(
     let has_regex = q_re.is_some() || user_re.is_some() || version_re.is_some();
 
     let quar_like = quarantined_like(params.quarantined.as_deref());
+    // #1051: metadata filter — `(key, Some(like))` requires the key's
+    // value to contain `meta_value`; `(key, None)` just requires the key
+    // to be present. Blank key → no metadata filter. SQL-expressible, so
+    // it rides the fast path and doesn't force the regex scan.
+    let meta_filter: Option<(String, Option<String>)> = params
+        .meta_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|key| {
+            let like = params
+                .meta_value
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(contains_like);
+            (key.to_string(), like)
+        });
     let cutoff = chrono::Utc::now() - ALIVE_THRESHOLD;
     let needs_count = params.limit.is_some();
 
@@ -203,11 +341,8 @@ pub async fn list(
             );
             qb.push_bind(cutoff)
                 .push(" THEN 1 ELSE 0 END), 0) AS INTEGER) AS online FROM agents");
-            if let Some(p) = &quar_like {
-                qb.push(" WHERE quarantined_versions LIKE ")
-                    .push_bind(p.clone())
-                    .push(" ESCAPE '\\'");
-            }
+            let mut started = false;
+            push_prefilters(&mut qb, &mut started, &quar_like, &meta_filter);
             let row = qb.build().fetch_one(&pool).await.map_err(|e| {
                 warn!(error = %e, "count agents");
                 (
@@ -222,22 +357,16 @@ pub async fn list(
         };
 
         let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new("SELECT * FROM agents");
-        let mut sep = " WHERE ";
-        if let Some(p) = &quar_like {
-            qb.push(sep)
-                .push("quarantined_versions LIKE ")
-                .push_bind(p.clone())
-                .push(" ESCAPE '\\'");
-            sep = " AND ";
-        }
+        let mut started = false;
+        push_prefilters(&mut qb, &mut started, &quar_like, &meta_filter);
         match status.as_deref() {
             Some("online") => {
-                qb.push(sep)
+                qb.push(sep(&mut started))
                     .push("last_heartbeat IS NOT NULL AND last_heartbeat >= ")
                     .push_bind(cutoff);
             }
             Some("offline") => {
-                qb.push(sep)
+                qb.push(sep(&mut started))
                     .push("(last_heartbeat IS NULL OR last_heartbeat < ")
                     .push_bind(cutoff)
                     .push(")");
@@ -255,7 +384,8 @@ pub async fn list(
                 "list agents failed".to_string(),
             )
         })?;
-        let page: Vec<AgentRow> = rows.into_iter().map(row_to_agent).collect();
+        let mut page: Vec<AgentRow> = rows.into_iter().map(row_to_agent).collect();
+        attach_meta(&pool, &mut page).await?;
         let total = total_count(
             needs_count,
             status.as_deref(),
@@ -274,11 +404,8 @@ pub async fn list(
     // regexes in Rust. The agents table is one row per PC, so this is
     // a few-thousand-row scan at worst.
     let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new("SELECT * FROM agents");
-    if let Some(p) = &quar_like {
-        qb.push(" WHERE quarantined_versions LIKE ")
-            .push_bind(p.clone())
-            .push(" ESCAPE '\\'");
-    }
+    let mut started = false;
+    push_prefilters(&mut qb, &mut started, &quar_like, &meta_filter);
     qb.push(" ORDER BY updated_at DESC LIMIT ")
         .push_bind(MAX_FETCH);
     let rows = qb.build().fetch_all(&pool).await.map_err(|e| {
@@ -335,7 +462,7 @@ pub async fn list(
 
     let offset = params.offset.unwrap_or(0) as usize;
     let take = params.limit.map(|n| n as usize).unwrap_or(usize::MAX);
-    let page: Vec<AgentRow> = matched_rows
+    let mut page: Vec<AgentRow> = matched_rows
         .into_iter()
         .filter(|a| match status.as_deref() {
             Some("online") => is_online(a, cutoff),
@@ -345,6 +472,7 @@ pub async fn list(
         .skip(offset)
         .take(take)
         .collect();
+    attach_meta(&pool, &mut page).await?;
 
     let total = total_count(
         needs_count,
@@ -464,7 +592,29 @@ fn row_to_agent(r: sqlx::sqlite::SqliteRow) -> AgentRow {
             .ok()
             .flatten()
             .filter(|s| !s.is_empty()),
+        // Decorated separately by `attach_meta` after the page is built
+        // (the agents row carries no metadata columns of its own).
+        meta: Vec::new(),
     }
+}
+
+/// `GET /api/agents/meta-keys` — the distinct `agent_meta` keys across the
+/// fleet, sorted. Drives the Agents page column picker and the metadata
+/// search field's key dropdown (#1051). Viewer-readable (commons), like
+/// the rest of the roster substrate.
+pub async fn meta_keys(State(pool): State<SqlitePool>) -> Result<Json<Vec<String>>, StatusCode> {
+    let rows = sqlx::query("SELECT DISTINCT key FROM agent_meta ORDER BY key")
+        .fetch_all(&pool)
+        .await
+        .map_err(|e| {
+            warn!(error = %e, "agent meta keys");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|r| r.try_get::<String, _>("key").unwrap_or_default())
+            .collect(),
+    ))
 }
 
 /// One bucket of the fleet's agent-version histogram. `active` is the
@@ -955,5 +1105,172 @@ mod tests {
             a.last_logon_display_name, None,
             "empty display name must normalise to None"
         );
+    }
+
+    async fn set_meta(pool: &SqlitePool, pc_id: &str, pairs: &[(&str, &str)]) {
+        for (k, v) in pairs {
+            sqlx::query("INSERT INTO agent_meta (pc_id, key, value) VALUES (?, ?, ?)")
+                .bind(pc_id)
+                .bind(k)
+                .bind(v)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn meta_is_decorated_onto_rows() {
+        let pool = seeded_pool().await;
+        set_meta(&pool, "PC001", &[("氏名", "山田"), ("所属", "経理")]).await;
+        let (_h, Json(rows)) = list(State(pool), Query(ListParams::default()))
+            .await
+            .unwrap();
+        let pc001 = rows.iter().find(|r| r.pc_id == "PC001").unwrap();
+        let map: std::collections::HashMap<_, _> = pc001
+            .meta
+            .iter()
+            .map(|e| (e.key.as_str(), e.value.as_str()))
+            .collect();
+        assert_eq!(map.get("氏名"), Some(&"山田"));
+        assert_eq!(map.get("所属"), Some(&"経理"));
+        // A PC with no metadata carries an empty vec (omitted on the wire).
+        assert!(
+            rows.iter()
+                .find(|r| r.pc_id == "PC002")
+                .unwrap()
+                .meta
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn meta_key_filter_requires_the_key() {
+        let pool = seeded_pool().await;
+        set_meta(&pool, "PC001", &[("所属", "経理")]).await;
+        set_meta(&pool, "PC002", &[("氏名", "田中")]).await;
+        let got = ids_of(
+            pool,
+            ListParams {
+                meta_key: Some("所属".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(got, vec!["PC001".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn meta_value_is_a_contains_filter() {
+        let pool = seeded_pool().await;
+        set_meta(&pool, "PC001", &[("氏名", "山田太郎")]).await;
+        set_meta(&pool, "PC002", &[("氏名", "田中花子")]).await;
+        // Substring match on the value.
+        let got = ids_of(
+            pool.clone(),
+            ListParams {
+                meta_key: Some("氏名".into()),
+                meta_value: Some("山田".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(got, vec!["PC001".to_string()]);
+        // A value that matches neither returns nothing.
+        let got = ids_of(
+            pool,
+            ListParams {
+                meta_key: Some("氏名".into()),
+                meta_value: Some("鈴木".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(got.is_empty());
+    }
+
+    #[tokio::test]
+    async fn meta_filter_counts_are_correct_with_paging() {
+        // The metadata filter must flow through the count query so
+        // X-Total-Count reflects it, not the whole fleet.
+        let pool = seeded_pool().await;
+        for pc in ["PC001", "PC002", "WS-9"] {
+            set_meta(&pool, pc, &[("dept", "eng")]).await;
+        }
+        let (headers, Json(rows)) = list(
+            State(pool),
+            Query(ListParams {
+                meta_key: Some("dept".into()),
+                meta_value: Some("eng".into()),
+                limit: Some(2),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 2, "page capped by limit");
+        assert_eq!(
+            get_header(&headers, "X-Total-Count"),
+            3,
+            "count reflects the meta filter"
+        );
+    }
+
+    #[tokio::test]
+    async fn meta_filter_composes_with_regex_path() {
+        // A q regex forces the in-Rust regex path; the metadata filter is
+        // pre-applied in SQL there too.
+        let pool = seeded_pool().await;
+        set_meta(&pool, "PC001", &[("dept", "eng")]).await;
+        set_meta(&pool, "PC002", &[("dept", "sales")]).await;
+        let got = ids_of(
+            pool,
+            ListParams {
+                q: Some("^PC".into()),
+                meta_key: Some("dept".into()),
+                meta_value: Some("eng".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(got, vec!["PC001".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn attach_meta_chunks_past_the_bind_parameter_limit() {
+        // Regression for the Gemini HIGH: an unbounded list over a fleet
+        // larger than META_IN_CHUNK must not trip SQLite's
+        // "too many SQL variables". Seed > one chunk of agents and confirm
+        // the whole page comes back decorated, error-free.
+        let pool = seeded_pool().await;
+        let n = META_IN_CHUNK + 50;
+        for i in 0..n {
+            sqlx::query("INSERT INTO agents (pc_id) VALUES (?)")
+                .bind(format!("BULK-{i:04}"))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        set_meta(&pool, "BULK-0300", &[("dept", "eng")]).await;
+
+        let (_h, Json(rows)) = list(State(pool), Query(ListParams::default()))
+            .await
+            .unwrap();
+        assert!(
+            rows.len() >= n,
+            "whole fleet returned without a bind-limit error"
+        );
+        let bulk = rows.iter().find(|r| r.pc_id == "BULK-0300").unwrap();
+        assert_eq!(bulk.meta.first().map(|e| e.key.as_str()), Some("dept"));
+    }
+
+    #[tokio::test]
+    async fn meta_keys_returns_distinct_sorted_keys() {
+        let pool = seeded_pool().await;
+        set_meta(&pool, "PC001", &[("氏名", "a"), ("所属", "b")]).await;
+        set_meta(&pool, "PC002", &[("氏名", "c"), ("メール", "d")]).await;
+        let Json(keys) = meta_keys(State(pool)).await.unwrap();
+        // Distinct (氏名 once) and sorted by key code point.
+        assert_eq!(keys, vec!["メール", "所属", "氏名"]);
     }
 }
