@@ -1,6 +1,6 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Activity, AlertTriangle, ArrowDown, ArrowUp, Loader2, Plus, ScrollText, Server, Settings2, SlidersHorizontal, Trash2, Users, X } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 import { Link, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -63,6 +63,46 @@ function newId(): string {
   return typeof crypto !== 'undefined' && crypto.randomUUID
     ? crypto.randomUUID()
     : Math.random().toString(36).slice(2);
+}
+
+// #1061 URL state: parse the repeated `meta.<key>.<op>=<value>` params back
+// into condition rows. The param name is split on its LAST `.` (op is a
+// fixed token; the key may itself contain dots), mirroring the backend.
+function parseConditionsFromParams(sp: URLSearchParams): MetaCond[] {
+  const out: MetaCond[] = [];
+  for (const [k, v] of sp.entries()) {
+    if (!k.startsWith('meta.')) continue;
+    const rest = k.slice('meta.'.length);
+    const idx = rest.lastIndexOf('.');
+    if (idx <= 0) continue;
+    const key = rest.slice(0, idx);
+    const op = rest.slice(idx + 1);
+    if (!(META_OPS as string[]).includes(op)) continue;
+    out.push({ id: newId(), key, op: op as MetaOp, value: v });
+  }
+  return out;
+}
+
+/** Set a URL param when the value is non-empty, else remove it. */
+function setOrDelete(p: URLSearchParams, key: string, value: string) {
+  if (value) p.set(key, value);
+  else p.delete(key);
+}
+
+/** The `meta.<key>.<op>` query-param NAME for a condition (raw; callers
+ *  encode as needed). Single source of truth for the naming, shared by the
+ *  query builder and the URL sync so they can't drift. */
+function metaParamName(c: MetaCond): string {
+  return `meta.${c.key.trim()}.${c.op}`;
+}
+
+/** Validate a `?sort=` value against the SPA's sortable fields so a stale
+ *  or hand-edited URL can't push a bogus sort into the very first request
+ *  (the backend would 400 it). `meta:<key>` is accepted for any key. */
+function parseSortField(raw: string | null): string {
+  if (!raw) return '';
+  if (raw.startsWith('meta:') && raw.length > 'meta:'.length) return raw;
+  return Object.values(SORT_FIELDS).includes(raw) ? raw : '';
 }
 
 // #1061: server-side sortable columns → the field token the API expects.
@@ -137,24 +177,33 @@ export function Agents() {
   const confirm = useConfirm();
   const { hasRole } = useAuth();
   const canOperate = hasRole('operator');
-  const [q, setQ] = useState('');
-  const [user, setUser] = useState('');
-  const [version, setVersion] = useState('');
+  const [searchParams, setSearchParams] = useSearchParams();
+  // #1061: seed the whole filter + sort state from the URL once on mount
+  // so a shared / bookmarked search reproduces exactly (mirrors the
+  // Inventory search, #1049). After mount a debounced effect writes the
+  // state back to the URL, one-way (state → URL).
+  const [q, setQ] = useState(() => searchParams.get('q') ?? '');
+  const [user, setUser] = useState(() => searchParams.get('user') ?? '');
+  const [version, setVersion] = useState(() => searchParams.get('version') ?? '');
   const [offset, setOffset] = useState(0);
   const dQ = useDebouncedValue(q, FILTER_DEBOUNCE_MS);
   const dUser = useDebouncedValue(user, FILTER_DEBOUNCE_MS);
   const dVersion = useDebouncedValue(version, FILTER_DEBOUNCE_MS);
   // #1061: metadata conditions — [key][op][value] rows, AND'd. Debounced
   // as a whole so typing a value doesn't fire a request per keystroke.
-  const [conditions, setConditions] = useState<MetaCond[]>([]);
+  const [conditions, setConditions] = useState<MetaCond[]>(() =>
+    parseConditionsFromParams(searchParams),
+  );
   const dConditions = useDebouncedValue(conditions, FILTER_DEBOUNCE_MS);
   // #1061: global attribute search — matches ANY metadata value.
-  const [metaAny, setMetaAny] = useState('');
+  const [metaAny, setMetaAny] = useState(() => searchParams.get('meta_any') ?? '');
   const dMetaAny = useDebouncedValue(metaAny, FILTER_DEBOUNCE_MS);
   // #1061: server-side column sort. Empty field ⇒ backend default
   // (updated_at desc); a header click sets/toggles these.
-  const [sort, setSort] = useState('');
-  const [dir, setDir] = useState<'asc' | 'desc'>('asc');
+  const [sort, setSort] = useState(() => parseSortField(searchParams.get('sort')));
+  const [dir, setDir] = useState<'asc' | 'desc'>(() =>
+    searchParams.get('dir') === 'desc' ? 'desc' : 'asc',
+  );
   // #1051: which agent_meta keys render as extra columns (persisted per
   // browser). Seeded from localStorage; kept in sync on every change.
   const [metaCols, setMetaCols] = useState<string[]>(() => readStringArray(META_COLS_KEY));
@@ -198,12 +247,18 @@ export function Agents() {
   // Serialise the (debounced) conditions to `&meta.<key>.<op>=<value>`
   // params. A row is sent only when it has a key and, for value-ops, a
   // value — an incomplete row shouldn't narrow the fleet to nothing.
-  const condParams = dConditions
-    .filter((c) => c.key.trim() && (!OPS_WITH_VALUE.includes(c.op) || c.value.trim()))
-    .map(
-      (c) =>
-        `&meta.${encodeURIComponent(c.key.trim())}.${c.op}=${encodeURIComponent(c.value.trim())}`,
-    )
+  // The complete rows worth sending — a row needs a key and, for value
+  // ops, a value. Shared by the query builder and the URL sync so the two
+  // can never disagree about which rows are active. Memoised so it's a
+  // stable dep for the URL-sync effect (a fresh filter() each render would
+  // fire it every render).
+  const activeConditions = useMemo(
+    () =>
+      dConditions.filter((c) => c.key.trim() && (!OPS_WITH_VALUE.includes(c.op) || c.value.trim())),
+    [dConditions],
+  );
+  const condParams = activeConditions
+    .map((c) => `&${encodeURIComponent(metaParamName(c))}=${encodeURIComponent(c.value.trim())}`)
     .join('');
 
   // #1061: toggle sort on a header — first click asc, second desc, third
@@ -268,7 +323,65 @@ export function Agents() {
       setDir('asc');
     }
   }, [sortColumnVisible]);
-  const [searchParams, setSearchParams] = useSearchParams();
+  // #1061: mirror the debounced filter + sort state into the URL (one-way:
+  // state → URL, `replace`). Uses the DEBOUNCED values so a fast typist
+  // can't exceed Safari's replaceState rate limit. Only touches its own
+  // keys — `status` / `quarantined` are preserved (managed by their own
+  // setters below), so a Rollout `?quarantined=` deep link survives.
+  useEffect(() => {
+    setSearchParams(
+      (prev) => {
+        const p = new URLSearchParams(prev);
+        setOrDelete(p, 'q', dQ);
+        setOrDelete(p, 'user', dUser);
+        setOrDelete(p, 'version', dVersion);
+        setOrDelete(p, 'meta_any', dMetaAny);
+        setOrDelete(p, 'sort', sort);
+        if (sort) p.set('dir', dir);
+        else p.delete('dir');
+        // Replace every meta.<key>.<op> param with the current conditions.
+        for (const key of Array.from(p.keys())) {
+          if (key.startsWith('meta.')) p.delete(key);
+        }
+        for (const c of activeConditions) {
+          p.append(metaParamName(c), c.value.trim());
+        }
+        return p;
+      },
+      { replace: true },
+    );
+  }, [dQ, dUser, dVersion, dMetaAny, sort, dir, activeConditions, setSearchParams]);
+  // #1061: sync URL → local state for navigation that changes the query
+  // externally — browser back/forward, a sidebar link back to `/agents`
+  // (which clears the params), or a deep link opened while already mounted.
+  // Guarded against the state → URL effect above: each field only updates
+  // when the URL differs from the value that effect would have WRITTEN (the
+  // debounced text, the immediate sort). That both prevents clobbering a
+  // mid-type and stops the two effects ping-ponging. Depends only on
+  // `searchParams` so it runs on URL changes, reading the latest debounced
+  // values from the render closure.
+  useEffect(() => {
+    const uq = searchParams.get('q') ?? '';
+    if (uq !== dQ) setQ(uq);
+    const uu = searchParams.get('user') ?? '';
+    if (uu !== dUser) setUser(uu);
+    const uv = searchParams.get('version') ?? '';
+    if (uv !== dVersion) setVersion(uv);
+    const uany = searchParams.get('meta_any') ?? '';
+    if (uany !== dMetaAny) setMetaAny(uany);
+    const usort = parseSortField(searchParams.get('sort'));
+    if (usort !== sort) setSort(usort);
+    const udir = searchParams.get('dir') === 'desc' ? 'desc' : 'asc';
+    if (udir !== dir) setDir(udir);
+    // Compare the serialised conditions so an identical set (from our own
+    // write) doesn't remount every row — `parseConditionsFromParams` mints
+    // fresh ids each call, which would drop focus otherwise.
+    const serialise = (cs: MetaCond[]) =>
+      cs.map((c) => `${c.key} ${c.op} ${c.value}`).join('');
+    const urlConds = parseConditionsFromParams(searchParams);
+    if (serialise(urlConds) !== serialise(dConditions)) setConditions(urlConds);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
   const statusFilter = parseStatusFilter(searchParams.get('status'));
   // #652: the Rollout "quarantined K" drill-down lands here with
   // `?quarantined=<version>`. Read it from the URL (not local state) so
