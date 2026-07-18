@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Loader2, Search } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 
 import { ErrorCard } from '@/components/ErrorCard';
 import { Button } from '@/components/ui/button';
@@ -59,6 +59,9 @@ type Op = 'eq' | 'contains' | 'prefix' | 'lt' | 'le' | 'gt' | 'ge' | 'ne';
 
 const TEXT_OPS: Op[] = ['eq', 'contains', 'prefix', 'ne'];
 const NUMERIC_OPS: Op[] = ['eq', 'lt', 'le', 'gt', 'ge', 'ne'];
+/** Every op, used to validate an `op` token parsed off the shareable
+ *  URL (`?f=<column>.<op>.<value>`) before trusting it as an `Op`. */
+const ALL_OPS: Op[] = ['eq', 'contains', 'prefix', 'lt', 'le', 'gt', 'ge', 'ne'];
 
 /** Keys the backend injects on every cross-PC search row with the
  *  account last seen on that PC (joined from the `agents` baseline).
@@ -70,6 +73,11 @@ const ACCOUNT_DISPLAY_NAME_KEY = '@account_display_name';
 
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 5000;
+/** Page-size options for the results footer. Also the allow-list a
+ *  `?limit=` URL param is validated against — an off-menu value would
+ *  leave the <Select> with no matching option, so we fall back to
+ *  DEFAULT_LIMIT instead. */
+const PAGE_SIZES = [50, 100, 250, 500, 1000] as const;
 // #523: same debounce the Activity / Events filter inputs use, so a
 // keystroke doesn't fire a fleet-sized exploded-table scan.
 const FILTER_DEBOUNCE_MS = 300;
@@ -115,11 +123,17 @@ type ResultRow = Record<string, unknown> & {
   collected_at?: unknown;
 };
 
-function columnKind(c: ExplodeColumn): 'text' | 'numeric' {
-  return c.type === 'integer' || c.type === 'real' ? 'numeric' : 'text';
+// `c` is optional because a filter row can briefly reference a column
+// the active tab lacks: loading a shared URL whose `manifest` is stale
+// (or not yet resolved) leaves `columns` empty for one render before the
+// manifest-settle effect fixes it, so `columns.find(...) ?? columns[0]`
+// yields `undefined`. Optional chaining keeps that render from throwing
+// (`undefined.type`) and crashing the page — it recovers on the next.
+function columnKind(c: ExplodeColumn | undefined): 'text' | 'numeric' {
+  return c?.type === 'integer' || c?.type === 'real' ? 'numeric' : 'text';
 }
 
-function opsForColumn(c: ExplodeColumn): Op[] {
+function opsForColumn(c: ExplodeColumn | undefined): Op[] {
   return columnKind(c) === 'numeric' ? NUMERIC_OPS : TEXT_OPS;
 }
 
@@ -127,6 +141,35 @@ function filterToParam(f: Filter): [string, string] | null {
   if (!f.column || f.value === '') return null;
   const key = f.op === 'eq' ? f.column : `${f.column}__${f.op}`;
   return [key, f.value];
+}
+
+/** Encode one filter for the shareable URL as `<column>.<op>.<value>`.
+ *  Column names are `[A-Za-z0-9_]` and ops are a fixed word list —
+ *  neither can contain a `.` — so the first two dots always delimit
+ *  the three parts, and a value carrying dots (e.g. `120.0.0`) round-
+ *  trips intact via {@link parseFilterTokens}. */
+function filterToUrlToken(f: Filter): string {
+  return `${f.column}.${f.op}.${f.value}`;
+}
+
+/** Parse `?f=` tokens back into filters. Splits on the first two dots
+ *  only (see {@link filterToUrlToken}); drops any token whose op isn't
+ *  recognised or whose column is empty, so a hand-mangled URL degrades
+ *  to "fewer filters" rather than throwing. `nextUid` hands out the
+ *  same client-side keys the interactive add path uses. */
+function parseFilterTokens(tokens: string[], nextUid: () => number): Filter[] {
+  const out: Filter[] = [];
+  for (const tok of tokens) {
+    const dot1 = tok.indexOf('.');
+    if (dot1 <= 0) continue;
+    const dot2 = tok.indexOf('.', dot1 + 1);
+    if (dot2 < 0) continue;
+    const column = tok.slice(0, dot1);
+    const op = tok.slice(dot1 + 1, dot2) as Op;
+    if (!ALL_OPS.includes(op)) continue;
+    out.push({ uid: nextUid(), column, op, value: tok.slice(dot2 + 1) });
+  }
+  return out;
 }
 
 function formatCell(v: unknown): string {
@@ -167,21 +210,42 @@ export function InventorySearch() {
     [jobsQ.data],
   );
 
-  const [manifestId, setManifestId] = useState<string>('');
-  const [field, setField] = useState<string>('');
-  const [filters, setFilters] = useState<Filter[]>([]);
-  const [limit, setLimit] = useState(DEFAULT_LIMIT);
-  const [offset, setOffset] = useState(0);
+  // The search form is shareable: its whole state lives in the URL
+  // query (`?manifest=&field=&f=&limit=&offset=`). We seed React state
+  // from the URL once, on mount (so pasting a copied link into a fresh
+  // load reproduces the search), then mirror state → URL one-way below.
+  // The interactive controls stay the source of truth after that — the
+  // filter <Input>s are controlled and keyed by a client-side uid, so
+  // deriving them from the URL on every render would churn those keys
+  // and steal focus mid-keystroke.
+  const [search, setSearch] = useSearchParams();
   // Gemini #116 fix: monotonic counter for filter UIDs. `Date.now() +
   // prev.length` collides when two adds happen in the same ms (e.g.
   // operator-paste of many filters or future programmatic adds).
   // A ref-backed counter is fragility-free and survives re-renders.
   const filterUidCounter = useRef(0);
+  const [manifestId, setManifestId] = useState<string>(() => search.get('manifest') ?? '');
+  const [field, setField] = useState<string>(() => search.get('field') ?? '');
+  const [filters, setFilters] = useState<Filter[]>(() =>
+    parseFilterTokens(search.getAll('f'), () => ++filterUidCounter.current),
+  );
+  const [limit, setLimit] = useState(() => {
+    const raw = Number(search.get('limit'));
+    return (PAGE_SIZES as readonly number[]).includes(raw) ? raw : DEFAULT_LIMIT;
+  });
+  const [offset, setOffset] = useState(() => {
+    const raw = Number(search.get('offset'));
+    return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
+  });
 
-  // Auto-pick the first searchable manifest when the jobs list first
-  // lands.
+  // Settle `manifest` once the jobs list lands: pick the first
+  // searchable manifest when none is selected AND correct a stale URL
+  // (a shared link naming a manifest that has since been removed). A
+  // valid URL manifest is left untouched, so its restored filters
+  // survive (switching manifest clears filters via the effect below).
   useEffect(() => {
-    if (!manifestId && searchableJobs.length > 0) {
+    if (searchableJobs.length === 0) return;
+    if (!searchableJobs.some((j) => j.manifest_id === manifestId)) {
       setManifestId(searchableJobs[0].manifest_id);
     }
   }, [manifestId, searchableJobs]);
@@ -219,6 +283,13 @@ export function InventorySearch() {
 
   // Keep `field` pointed at a tab that exists on the current manifest.
   useEffect(() => {
+    // Wait for the manifest to resolve before touching `field`. During
+    // the initial jobs fetch `tabs` is transiently empty; blanking
+    // `field` here would cascade into the reset-on-change effect and
+    // wipe filters restored from a shared URL before they ever render.
+    // `currentJob` is null while loading (and while the manifest-settle
+    // effect above is fixing a stale URL manifest).
+    if (!currentJob) return;
     if (tabs.length === 0) {
       setField('');
       return;
@@ -226,7 +297,7 @@ export function InventorySearch() {
     if (!tabs.some((tab) => tab.key === field)) {
       setField(tabs[0].key);
     }
-  }, [tabs, field]);
+  }, [currentJob, tabs, field]);
 
   // Gemini #669 fix: reset filters + pagination whenever the active
   // manifest OR tab changes. Doing it here (not only when the tab key
@@ -236,7 +307,20 @@ export function InventorySearch() {
   // new tab lacks would otherwise persist and could crash the filter
   // row render. Centralising it also lets the manifest/tab onChange
   // handlers stay purely about navigation.
+  //
+  // Only clear on a *genuine* change of manifest/field, tracked against
+  // the previous values — not with a "skip first run" flag, which
+  // StrictMode's double-invoked mount effect would defeat (its second
+  // pass would wipe filters restored from a shared URL). Seeding the ref
+  // with the mount-time selection means the initial render — and the
+  // manifest/field settling during the jobs load, when they land on the
+  // same URL-seeded values — clears nothing, so the restored search
+  // survives; a later operator switch still clears as intended.
+  const prevSelectionRef = useRef({ manifestId, field });
   useEffect(() => {
+    const prev = prevSelectionRef.current;
+    if (prev.manifestId === manifestId && prev.field === field) return;
+    prevSelectionRef.current = { manifestId, field };
     setFilters([]);
     setOffset(0);
   }, [manifestId, field]);
@@ -246,6 +330,39 @@ export function InventorySearch() {
   // request (a scan over fleet-sized exploded tables / facts_json).
   // Same 300 ms the Activity / Events filters use.
   const dFilters = useDebouncedValue(filters, FILTER_DEBOUNCE_MS);
+
+  // Mirror the form state into the URL query (one-way, `replace`) so a
+  // search is shareable and bookmarkable: adjust the filters, copy the
+  // URL, and loading it later reproduces the same results. `replace`
+  // keeps every keystroke out of the history stack and never fights the
+  // controlled inputs. The reverse direction (URL → state) is the
+  // mount-time seeding above, which covers the intended flow of pasting
+  // a link into a fresh load. Defaults are omitted to keep links tidy;
+  // valueless filters are skipped since they don't affect results.
+  //
+  // Mirror the *debounced* filters, not the live ones: Safari caps
+  // `history.replaceState` at 100 calls / 30 s, and writing per
+  // keystroke would trip it (and double-render via `useSearchParams`).
+  // Empty live filters bypass the debounce so a clear / manifest switch
+  // updates the URL instantly (same rule the search query uses above).
+  // Skip the write when the query string is unchanged so the seeded
+  // mount render — and each debounce settle that yields the same URL —
+  // doesn't call `setSearch` for nothing.
+  useEffect(() => {
+    const next = new URLSearchParams();
+    if (manifestId) next.set('manifest', manifestId);
+    if (field) next.set('field', field);
+    const activeFilters = filters.length === 0 ? filters : dFilters;
+    for (const f of activeFilters) {
+      if (!f.column || f.value === '') continue;
+      next.append('f', filterToUrlToken(f));
+    }
+    if (limit !== DEFAULT_LIMIT) next.set('limit', String(limit));
+    if (offset > 0) next.set('offset', String(offset));
+    if (next.toString() !== search.toString()) {
+      setSearch(next, { replace: true });
+    }
+  }, [manifestId, field, filters, dFilters, limit, offset, search, setSearch]);
 
   // Build the search query URL. `null` when not enough state to fire.
   const searchUrl = useMemo(() => {
@@ -421,6 +538,19 @@ export function InventorySearch() {
                   <div className="space-y-2">
                     {filters.map((f) => {
                       const col = columns.find((c) => c.field === f.column) ?? columns[0];
+                      // Don't render a filter row until its column
+                      // resolves. `columns` is transiently empty on the
+                      // render right after the jobs load — before the
+                      // manifest-settle / field-validity effects run, or
+                      // while a URL-seeded manifest/field is still stale
+                      // — so a filter restored from a shared link would
+                      // otherwise pair with an undefined column (and the
+                      // <Select> below would have no matching option).
+                      // The settle effects clear these filters one tick
+                      // later; skipping the row keeps that tick clean.
+                      // (`opsForColumn` is also undefined-safe, as a
+                      // belt-and-suspenders guard for the same window.)
+                      if (!col) return null;
                       const ops = opsForColumn(col);
                       return (
                         <div key={f.uid} className="flex flex-wrap items-center gap-2">
@@ -589,7 +719,7 @@ export function InventorySearch() {
                     }}
                     className="w-24"
                   >
-                    {[50, 100, 250, 500, 1000].map((n) => (
+                    {PAGE_SIZES.map((n) => (
                       <option key={n} value={n}>
                         {n}
                       </option>
