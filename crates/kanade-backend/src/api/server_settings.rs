@@ -24,7 +24,8 @@ use kanade_shared::config::MailSection;
 use kanade_shared::kv::{BUCKET_SERVER_SETTINGS, KEY_SERVER_SETTINGS};
 use kanade_shared::kv_cas;
 use kanade_shared::wire::{
-    MAX_AGENT_PRUNE_DAYS, MAX_COLLECT_RETENTION_DAYS, MAX_SESSION_TTL_HOURS, ServerSettings,
+    MAX_AGENT_PRUNE_DAYS, MAX_CHECK_STATUS_STALE_DAYS, MAX_COLLECT_RETENTION_DAYS,
+    MAX_SESSION_TTL_HOURS, ServerSettings,
 };
 use lettre::message::Mailbox;
 use serde_json::{Map, Value};
@@ -95,6 +96,8 @@ pub async fn defaults() -> Json<ServerSettings> {
 ///   to the built-in default); over [`MAX_COLLECT_RETENTION_DAYS`] rejected.
 /// - `session_ttl_hours`: `Some(0)` rejected (omit / `null` to fall back to
 ///   the built-in default); over [`MAX_SESSION_TTL_HOURS`] rejected.
+/// - `check_status_stale_days`: `Some(0)` is **valid** (disables staleness —
+///   show every row); only over [`MAX_CHECK_STATUS_STALE_DAYS`] is rejected.
 /// - `controller_group`: present-but-blank rejected (unambiguous stored doc).
 /// - `mail`: host non-empty, port in 1..=65535, `from` a parseable address
 ///   (the same parser `Mailer` uses at boot, so a bad address is caught here
@@ -133,6 +136,7 @@ pub async fn put(
     let prune_value = typed.agent_prune_days.map(Value::from);
     let collect_value = typed.collect_retention_days.map(Value::from);
     let session_ttl_value = typed.session_ttl_hours.map(Value::from);
+    let check_stale_value = typed.check_status_stale_days.map(Value::from);
     let controller_value = typed.controller_group.clone().map(Value::String);
     let mail_value = match typed.mail.as_ref() {
         Some(m) => Some(serde_json::to_value(m).map_err(|e| {
@@ -172,6 +176,12 @@ pub async fn put(
                 &incoming,
                 "session_ttl_hours",
                 session_ttl_value.clone(),
+            );
+            changed |= merge_field(
+                obj,
+                &incoming,
+                "check_status_stale_days",
+                check_stale_value.clone(),
             );
             changed |= merge_field(obj, &incoming, "controller_group", controller_value.clone());
             changed |= merge_field(obj, &incoming, "mail", mail_value.clone());
@@ -328,6 +338,19 @@ fn validate(s: &ServerSettings) -> Result<(), (StatusCode, String)> {
             return Err((
                 StatusCode::UNPROCESSABLE_ENTITY,
                 format!("session_ttl_hours must be <= {MAX_SESSION_TTL_HOURS} (365 days)"),
+            ));
+        }
+    }
+    if let Some(days) = s.check_status_stale_days {
+        // Unlike the other numeric knobs, `0` is VALID here — it disables
+        // staleness (every check_status row is shown). So only the upper cap is
+        // enforced; the SPA field allows 0.
+        if days > MAX_CHECK_STATUS_STALE_DAYS {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!(
+                    "check_status_stale_days must be <= {MAX_CHECK_STATUS_STALE_DAYS} (10 years)"
+                ),
             ));
         }
     }

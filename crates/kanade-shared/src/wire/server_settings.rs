@@ -46,6 +46,24 @@ pub const DEFAULT_SESSION_TTL_HOURS: u32 = 24;
 /// KV value stays bounded.
 pub const MAX_SESSION_TTL_HOURS: u32 = 8_760;
 
+/// Built-in default for [`ServerSettings::check_status_stale_days`] (#1032②) —
+/// how many days a `check_status` row may go without a fresh result before the
+/// Compliance view treats it as **stale** and hides it (a PC that stopped
+/// running a check: excluded from its target via a dynamic group, decommissioned,
+/// or its schedule removed). 30 days is comfortably longer than a typical daily
+/// / weekly compliance cadence, so an in-scope PC is never mistakenly hidden,
+/// while a genuinely out-of-scope PC's frozen row drops out within the month.
+/// A real default (like `collect_retention_days`) so the feature works out of
+/// the box; the operator shortens it for prompter hiding or sets `0` to disable.
+pub const DEFAULT_CHECK_STATUS_STALE_DAYS: u32 = 30;
+
+/// Upper bound on [`ServerSettings::check_status_stale_days`] (10 years).
+/// Staleness is purely a display cutoff (`now - Duration::days(n)` compared to a
+/// row's `recorded_at`), so the ceiling just keeps that subtraction inside
+/// `chrono::DateTime`'s range and stops an absurd value; enforced by the PUT
+/// handler and clamped in [`ServerSettings::effective_check_status_stale_days`].
+pub const MAX_CHECK_STATUS_STALE_DAYS: u32 = 3650;
+
 /// Value stored in the `server_settings` KV bucket under the single key
 /// [`crate::kv::KEY_SERVER_SETTINGS`]. Operator-editable, backend-side
 /// server configuration that isn't per-agent (so it doesn't belong in
@@ -140,6 +158,25 @@ pub struct ServerSettings {
     /// placeholder on a blank field.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_ttl_hours: Option<u32>,
+
+    /// Days a `check_status` row may go without a fresh result before the
+    /// Compliance page treats it as **stale** and hides it (#1032②). A PC that
+    /// stops running a check — excluded from its target via a dynamic group,
+    /// decommissioned, or its schedule removed — stops refreshing its row's
+    /// `recorded_at`; once that timestamp is older than this window the row is
+    /// omitted from the default `/api/checks` view and its counts, so a machine
+    /// no longer in scope stops showing as permanently failing a check it never
+    /// runs.
+    ///
+    /// Like [`collect_retention_days`](Self::collect_retention_days) this carries
+    /// a **real built-in default** ([`DEFAULT_CHECK_STATUS_STALE_DAYS`], 30d), so
+    /// the feature works with no configuration. `0` **disables** staleness
+    /// (every row shown, the pre-feature behaviour); a positive value is the
+    /// cutoff, clamped to [`MAX_CHECK_STATUS_STALE_DAYS`]. The row is never
+    /// deleted — hiding is non-destructive so history and the compliance-alert
+    /// prior-status are preserved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check_status_stale_days: Option<u32>,
 }
 
 impl ServerSettings {
@@ -165,6 +202,7 @@ impl ServerSettings {
             mail: None,
             collect_retention_days: Some(DEFAULT_COLLECT_RETENTION_DAYS),
             session_ttl_hours: Some(DEFAULT_SESSION_TTL_HOURS),
+            check_status_stale_days: Some(DEFAULT_CHECK_STATUS_STALE_DAYS),
         }
     }
 
@@ -221,6 +259,20 @@ impl ServerSettings {
             .or(Self::defaults().session_ttl_hours)
             .unwrap_or(DEFAULT_SESSION_TTL_HOURS)
             .clamp(1, MAX_SESSION_TTL_HOURS)
+    }
+
+    /// The effective check-staleness window in days: the stored value if set,
+    /// else the built-in [`DEFAULT_CHECK_STATUS_STALE_DAYS`]. **`0` means
+    /// disabled** (no row is ever hidden as stale) — deliberately NOT floored to
+    /// 1 (unlike collect/session), because 0 is a meaningful "show everything"
+    /// value here, the same convention as [`agent_prune_days`](Self::agent_prune_days).
+    /// Clamped to [`MAX_CHECK_STATUS_STALE_DAYS`] so an out-of-band KV write
+    /// can't overflow the `now - Duration::days(n)` cutoff math.
+    pub fn effective_check_status_stale_days(&self) -> u32 {
+        self.check_status_stale_days
+            .or(Self::defaults().check_status_stale_days)
+            .unwrap_or(DEFAULT_CHECK_STATUS_STALE_DAYS)
+            .min(MAX_CHECK_STATUS_STALE_DAYS)
     }
 }
 
@@ -486,6 +538,66 @@ mod tests {
             !serde_json::to_string(&ServerSettings::default())
                 .unwrap()
                 .contains("session_ttl_hours")
+        );
+    }
+
+    #[test]
+    fn check_stale_unset_resolves_to_builtin_default() {
+        // Blank (the derived Default) resolves to the 30-day default — ON out
+        // of the box, so the feature works without configuration.
+        assert_eq!(ServerSettings::default().check_status_stale_days, None);
+        assert_eq!(
+            ServerSettings::default().effective_check_status_stale_days(),
+            DEFAULT_CHECK_STATUS_STALE_DAYS,
+        );
+        // defaults() surfaces the real default for the SPA placeholder.
+        assert_eq!(
+            ServerSettings::defaults().check_status_stale_days,
+            Some(DEFAULT_CHECK_STATUS_STALE_DAYS),
+        );
+    }
+
+    #[test]
+    fn check_stale_zero_disables() {
+        // Explicit 0 means "disable staleness" (show everything) — NOT floored
+        // to 1 like collect/session; same convention as agent_prune_days.
+        let s = ServerSettings {
+            check_status_stale_days: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(s.effective_check_status_stale_days(), 0);
+    }
+
+    #[test]
+    fn check_stale_stored_value_wins_and_clamps() {
+        let s = ServerSettings {
+            check_status_stale_days: Some(7),
+            ..Default::default()
+        };
+        assert_eq!(s.effective_check_status_stale_days(), 7);
+        let big = ServerSettings {
+            check_status_stale_days: Some(u32::MAX),
+            ..Default::default()
+        };
+        assert_eq!(
+            big.effective_check_status_stale_days(),
+            MAX_CHECK_STATUS_STALE_DAYS,
+        );
+    }
+
+    #[test]
+    fn check_stale_round_trips_and_omits_when_unset() {
+        let s = ServerSettings {
+            check_status_stale_days: Some(14),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert_eq!(json, r#"{"check_status_stale_days":14}"#);
+        assert_eq!(serde_json::from_str::<ServerSettings>(&json).unwrap(), s);
+        assert!(
+            !serde_json::to_string(&ServerSettings::default())
+                .unwrap()
+                .contains("check_status_stale_days")
         );
     }
 

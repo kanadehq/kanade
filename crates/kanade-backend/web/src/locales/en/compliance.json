@@ -28,5 +28,12 @@
     "cleared_one": "Cleared {{count}} row",
     "cleared_other": "Cleared {{count}} rows",
     "nothingToClear": "Nothing to clear — already gone."
-  }
+  },
+  "staleHidden_one": "{{count}} out-of-scope row hidden (no result in {{days}} days).",
+  "staleHidden_other": "{{count}} out-of-scope rows hidden (no result in {{days}} days).",
+  "staleShown": "Showing out-of-scope (stale) rows.",
+  "showStaleAction": "show",
+  "hideStale": "hide",
+  "staleBadge": "stale",
+  "staleBadgeHint": "No fresh result within the staleness window — this PC has stopped running the check (out of scope via a group, decommissioned, or its schedule was removed)."
 }
