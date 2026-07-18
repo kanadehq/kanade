@@ -1784,9 +1784,16 @@ pub fn is_valid_resource_id(id: &str) -> bool {
 
 impl View {
     pub fn validate(&self) -> Result<(), String> {
-        if !is_valid_resource_id(self.id.trim()) {
+        // Validate the id exactly as stored — no `.trim()`. `views::create`
+        // uses `self.id` verbatim as the KV key and it's the `/api/views/{id}`
+        // URL segment a lookup matches, so a padded id like `" my-view "` that
+        // validated as its trimmed form but was stored raw would silently never
+        // match. The charset excludes whitespace, so checking the untrimmed id
+        // rejects such an id outright.
+        if !is_valid_resource_id(&self.id) {
             return Err(
-                "view.id must be non-empty and only [A-Za-z0-9._-] (it's a KV key + URL segment)"
+                "view.id must be non-empty and only [A-Za-z0-9._-] (it's a KV key + URL segment; \
+                 no surrounding whitespace)"
                     .to_string(),
             );
         }
@@ -4599,6 +4606,19 @@ tags: [ok, "   "]
             assert!(err.contains("[A-Za-z0-9._-]"), "id {bad}: {err}");
         }
         assert!(is_valid_resource_id("dashboards-fleet.v1_2"));
+    }
+
+    #[test]
+    fn view_rejects_untrimmed_id() {
+        // A padded id validated-as-trimmed but stored-raw would be a KV key
+        // (and `/api/views/{id}` segment) nothing matches — reject it outright
+        // (the id is used verbatim).
+        let v: View = serde_yaml::from_str(
+            "id: \" my-view \"\nwidgets:\n- { dashboard: D, title: T, kind: k, agg: count, render: stat }\n",
+        )
+        .expect("parse");
+        let err = v.validate().expect_err("padded id must fail");
+        assert!(err.contains("view.id must"), "err: {err}");
     }
 
     #[test]
