@@ -10,6 +10,17 @@
     "agent": "agent version",
     "lastHeartbeat": "last heartbeat"
   },
+  "customMeta": {
+    "title": "Attributes",
+    "intro": "Operator-managed key/value info for this machine (e.g. primary user, email, department, notes). Editable by operators.",
+    "keyPlaceholder": "Key (e.g. Name)",
+    "valuePlaceholder": "Value",
+    "add": "Add row",
+    "save": "Save",
+    "saved": "Attributes saved",
+    "empty": "No attributes set.",
+    "removeRow": "Remove row"
+  },
   "perf": {
     "title": "Host performance",
     "intro": "Whole-machine CPU / Memory / Disk I/O / Network sampled every {{interval}} by the kanade-agent's host_perf loop. Older agents (< 0.40) don't publish this — the chart will be empty for those until they upgrade.",

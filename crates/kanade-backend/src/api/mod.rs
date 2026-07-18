@@ -2,6 +2,7 @@ pub mod accounts;
 pub mod agent_config;
 pub mod agent_groups;
 pub mod agent_logs;
+pub mod agent_meta;
 pub mod agent_releases;
 pub mod agents;
 pub mod analytics;
@@ -211,6 +212,9 @@ pub fn router(state: AppState) -> Router {
             get(process_perf::timeline),
         )
         .route("/api/agents/{pc_id}/groups", get(agent_groups::list_groups))
+        // Per-PC operator key/value metadata (viewer-readable; PUT is
+        // operator-gated below). Drives the agent detail attributes card.
+        .route("/api/agents/{pc_id}/meta", get(agent_meta::get_meta))
         // Group-centric inverse view — drives the SPA Groups page.
         .route("/api/groups", get(agent_groups::list_all_groups))
         // Per-group notification email addresses (viewer-readable;
@@ -393,6 +397,10 @@ pub fn router(state: AppState) -> Router {
             "/api/agents/{pc_id}/groups/{group}",
             delete(agent_groups::remove_group),
         )
+        // Replace a PC's operator key/value metadata (operator+). GET
+        // lives on the viewer router above; same path, different method,
+        // like the /groups routes.
+        .route("/api/agents/{pc_id}/meta", put(agent_meta::put_meta))
         .route("/api/config", put(agent_config::put_global))
         .route(
             "/api/groups/{name}/config",

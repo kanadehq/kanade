@@ -1,6 +1,6 @@
-import { useQuery } from '@tanstack/react-query';
-import { ArrowLeft, Loader2 } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { ArrowLeft, Loader2, Plus, Save, X } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useParams } from 'react-router-dom';
 import {
@@ -13,6 +13,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
+import { toast } from 'sonner';
 
 import { AgentProcessSection } from '@/components/AgentProcessSection';
 import { ErrorCard } from '@/components/ErrorCard';
@@ -20,7 +21,9 @@ import { TimeRangePicker } from '@/components/TimeRangePicker';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { apiFetch } from '@/lib/api';
+import { Input } from '@/components/ui/input';
+import { apiFetch, formatError } from '@/lib/api';
+import { useAuth } from '@/lib/auth';
 import {
   DEFAULT_STEP_KEYS,
   DEFAULT_STEP_SECS,
@@ -29,7 +32,7 @@ import {
   type StepOption,
   useResolvedRange,
 } from '@/lib/timeRange';
-import type { AgentRow, PerfResponse } from '@/lib/types';
+import type { AgentMeta, AgentRow, MetaEntry, PerfResponse } from '@/lib/types';
 import { fmtIsoLocal } from '@/lib/utils';
 
 // Preset keys exposed by the host_perf range picker. Kept as a const
@@ -350,8 +353,168 @@ export function AgentDetail() {
         </CardContent>
       </Card>
 
+      {/* key={pc_id} remounts the card on an agent switch so its seed-once
+          draft state can't carry over to a different pc_id if in-page
+          agent-to-agent navigation is ever added (defensive; today every
+          path here unmounts first). */}
+      <AgentMetaCard key={agent.pc_id} pcId={agent.pc_id} />
+
       <AgentProcessSection pcId={agent.pc_id} />
     </div>
+  );
+}
+
+/** A draft row in the editor: a `MetaEntry` plus a stable client-side id
+ *  used only as the React key (stripped before the PUT). */
+type DraftRow = MetaEntry & { id: string };
+
+/** Tag server entries with stable ids for use as React keys. */
+const withIds = (entries: MetaEntry[]): DraftRow[] =>
+  entries.map((e, idx) => ({ ...e, id: `srv-${idx}` }));
+
+/** Operator-editable free-form key/value attributes for a machine
+ *  (`agent_meta` KV): primary user's name / email / department, notes.
+ *  Viewers see a read-only list; operators get an inline editor whose
+ *  Save issues a full-replace PUT. */
+function AgentMetaCard({ pcId }: { pcId: string }) {
+  const { t } = useTranslation('agent-detail');
+  const { hasRole } = useAuth();
+  const canOperate = hasRole('operator');
+  const qc = useQueryClient();
+
+  const metaQ = useQuery({
+    queryKey: ['agent-meta', pcId],
+    queryFn: () => apiFetch<AgentMeta>(`/api/agents/${encodeURIComponent(pcId)}/meta`),
+    enabled: !!pcId,
+    // Don't let a background refetch (e.g. window refocus) silently
+    // reset the editable draft out from under an operator mid-edit.
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+  });
+
+  // Editable draft. Each row carries a stable client-side id so React keys
+  // survive add / remove (an array-index key shifts input focus to the
+  // wrong row on delete); the id is stripped before the PUT.
+  const [rows, setRows] = useState<DraftRow[]>([]);
+  // Seed the draft ONCE, on the first successful load — never on later
+  // background refetches. A window refocus (or the AD-sync job upserting a
+  // key on this PC while the page is open) would otherwise re-seed `rows`
+  // and silently discard the operator's unsaved edits. Post-save
+  // re-baselining is handled explicitly in the mutation's onSuccess.
+  // Mirrors Groups.tsx, which seeds its inline editor only on edit-mode entry.
+  const seededRef = useRef(false);
+  useEffect(() => {
+    if (metaQ.data && !seededRef.current) {
+      seededRef.current = true;
+      setRows(withIds(metaQ.data.entries));
+    }
+  }, [metaQ.data]);
+
+  const save = useMutation({
+    mutationFn: (entries: MetaEntry[]) =>
+      apiFetch<AgentMeta>(`/api/agents/${encodeURIComponent(pcId)}/meta`, {
+        method: 'PUT',
+        body: JSON.stringify({ entries }),
+      }),
+    onSuccess: (data) => {
+      toast.success(t('customMeta.saved'));
+      // Adopt the server-normalised result (trimmed / empty-key rows
+      // dropped / deduped) as the new baseline.
+      qc.setQueryData(['agent-meta', pcId], data);
+      setRows(withIds(data.entries));
+    },
+    onError: (err) => toast.error(formatError(err)),
+  });
+
+  const serverEntries = metaQ.data?.entries ?? [];
+  const draftEntries: MetaEntry[] = rows.map(({ key, value }) => ({ key, value }));
+  const dirty = JSON.stringify(draftEntries) !== JSON.stringify(serverEntries);
+
+  const setRow = (i: number, patch: Partial<MetaEntry>) =>
+    setRows((r) => r.map((row, idx) => (idx === i ? { ...row, ...patch } : row)));
+  const addRow = () => setRows((r) => [...r, { id: crypto.randomUUID(), key: '', value: '' }]);
+  const removeRow = (i: number) => setRows((r) => r.filter((_, idx) => idx !== i));
+
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-start justify-between gap-3">
+        <div className="space-y-1">
+          <CardTitle className="text-base">{t('customMeta.title')}</CardTitle>
+          <p className="text-xs text-muted">{t('customMeta.intro')}</p>
+        </div>
+        {canOperate && (
+          <Button
+            size="sm"
+            disabled={!dirty || save.isPending}
+            onClick={() => save.mutate(draftEntries)}
+          >
+            {save.isPending ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
+            <span className="ml-2">{t('customMeta.save')}</span>
+          </Button>
+        )}
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {metaQ.isLoading && (
+          <div className="flex items-center gap-2 text-muted text-sm">
+            <Loader2 className="size-4 animate-spin" />
+            {t('loading')}
+          </div>
+        )}
+        {metaQ.error && <ErrorCard title={t('customMeta.title')} error={metaQ.error} />}
+
+        {!metaQ.isLoading && !metaQ.error && !canOperate && (
+          serverEntries.length === 0 ? (
+            <p className="text-muted text-sm">{t('customMeta.empty')}</p>
+          ) : (
+            <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-sm">
+              {serverEntries.map((e, i) => (
+                <div key={i} className="contents">
+                  <dt className="text-muted">{e.key}</dt>
+                  <dd className="break-all">{e.value || '—'}</dd>
+                </div>
+              ))}
+            </dl>
+          )
+        )}
+
+        {!metaQ.isLoading && !metaQ.error && canOperate && (
+          <div className="space-y-2">
+            {rows.length === 0 && <p className="text-muted text-sm">{t('customMeta.empty')}</p>}
+            {rows.map((row, i) => (
+              <div key={row.id} className="flex items-center gap-2">
+                <Input
+                  value={row.key}
+                  onChange={(e) => setRow(i, { key: e.target.value })}
+                  placeholder={t('customMeta.keyPlaceholder')}
+                  className="w-48"
+                  disabled={save.isPending}
+                />
+                <Input
+                  value={row.value}
+                  onChange={(e) => setRow(i, { value: e.target.value })}
+                  placeholder={t('customMeta.valuePlaceholder')}
+                  className="flex-1"
+                  disabled={save.isPending}
+                />
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  aria-label={t('customMeta.removeRow')}
+                  onClick={() => removeRow(i)}
+                  disabled={save.isPending}
+                >
+                  <X className="size-4" />
+                </Button>
+              </div>
+            ))}
+            <Button variant="ghost" size="sm" onClick={addRow} disabled={save.isPending}>
+              <Plus className="size-4" />
+              <span className="ml-2">{t('customMeta.add')}</span>
+            </Button>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 

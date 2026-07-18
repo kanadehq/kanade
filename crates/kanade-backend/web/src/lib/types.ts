@@ -43,6 +43,12 @@ export type Heartbeat = {
   os_family: string | null;
 };
 
+// Mirror of the backend AgentMeta / MetaEntry (wire/agent_meta.rs):
+// per-PC operator-managed free-form key/value annotations (primary user's
+// name / email / department, an ad-hoc note). Order-preserving list.
+export type MetaEntry = { key: string; value: string };
+export type AgentMeta = { entries: MetaEntry[] };
+
 export type ExecResult = {
   request_id: string;
   pc_id: string;

@@ -65,6 +65,9 @@ enum SubCmd {
     /// Manage groups: list fleet-wide, add/remove PC memberships,
     /// list PCs in a given group.
     Group(cmd::group::GroupArgs),
+    /// Manage per-PC operator metadata (free-form key/value attributes on
+    /// the agent_meta KV bucket). Sibling of `group`; NATS-direct.
+    Meta(cmd::meta::MetaArgs),
     /// Log in with username/password; prints a JWT for KANADE_AUTH_TOKEN.
     Login(cmd::login::LoginArgs),
     /// Admin-only RBAC account management (create / role / disable / …).
@@ -143,6 +146,7 @@ async fn dispatch(server: String, backend_url: String, command: SubCmd) -> Resul
         SubCmd::Script(args) => cmd::script::execute(client, args).await,
         SubCmd::Config(args) => cmd::config::execute(client, args).await,
         SubCmd::Group(args) => cmd::group::execute(client, args).await,
+        SubCmd::Meta(args) => cmd::meta::execute(client, args).await,
         SubCmd::Exec(_)
         | SubCmd::Job(_)
         | SubCmd::Schedule(_)
