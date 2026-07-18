@@ -82,11 +82,15 @@ function ensureMonacoBootstrapped() {
         uri: '/api/schemas/view.json',
         fileMatch: ['view.yaml'],
       },
+      {
+        uri: '/api/schemas/group-def.json',
+        fileMatch: ['group.yaml'],
+      },
     ],
   });
 }
 
-export type YamlEditorKind = 'manifest' | 'schedule' | 'view';
+export type YamlEditorKind = 'manifest' | 'schedule' | 'view' | 'group';
 
 export interface YamlEditorProps {
   value: string;

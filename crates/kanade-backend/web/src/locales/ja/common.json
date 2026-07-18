@@ -25,6 +25,7 @@
     "rollout": "ロールアウト",
     "apps": "アプリ配信",
     "agentGroups": "グループ",
+    "groupDefs": "グループ定義",
     "config": "設定",
     "jetstream": "JetStream",
     "accounts": "アカウント",
