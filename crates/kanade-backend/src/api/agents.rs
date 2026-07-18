@@ -93,13 +93,28 @@ pub struct ListParams {
     /// server-side against [`ALIVE_THRESHOLD`]. Absent / empty → no
     /// filter; anything else → 400.
     pub status: Option<String>,
-    /// #1051: restrict to PCs that have this `agent_meta` key. Blank /
-    /// whitespace-only → no metadata filter. Paired with `meta_value`.
+    /// #1051 (legacy, kept for back-compat): restrict to PCs that have
+    /// this `agent_meta` key. Superseded by the `meta.<key>.<op>` grammar
+    /// (#1061); when set it's folded in as a single `contains` (or `set`
+    /// when `meta_value` is blank) condition.
     pub meta_key: Option<String>,
-    /// #1051: when `meta_key` is set, require the key's value to CONTAIN
-    /// this text (SQLite `LIKE '%…%'`, metacharacters escaped). Blank →
-    /// "has the key with any value". Ignored when `meta_key` is blank.
+    /// #1051 (legacy): the value for `meta_key`'s contains-match.
     pub meta_value: Option<String>,
+    /// #1061: global attribute search — match this text against ANY
+    /// `agent_meta` value (SQLite `LIKE '%…%'`). Blank → no filter.
+    pub meta_any: Option<String>,
+    /// #1061: sort field. One of the built-in columns (`pc_id`,
+    /// `hostname`, `os_family`, `agent_version`, `last_heartbeat`,
+    /// `last_logon_user`, `updated_at`) or `meta:<key>` to sort by an
+    /// `agent_meta` value. Unknown → 400. Absent → `updated_at`.
+    pub sort: Option<String>,
+    /// #1061: sort direction `asc` / `desc`. Absent → `desc` for the
+    /// default `updated_at`, else `asc`. Anything else → 400.
+    pub dir: Option<String>,
+    // NOTE: the repeatable `meta.<key>.<op>=<value>` conditions (#1061)
+    // are NOT declared here — serde_urlencoded can't model dynamic keys.
+    // The handler takes a second `Query<Vec<(String, String)>>` extractor
+    // and parses them via `parse_meta_conditions`.
 }
 
 /// Heartbeat age past which an agent counts as offline. The single
@@ -121,40 +136,180 @@ const MAX_FETCH: i64 = 10_000;
 /// must not hit `0.43.62`). LIKE metacharacters in the version are
 /// escaped (ESCAPE '\' is declared at the call site).
 fn quarantined_like(version: Option<&str>) -> Option<String> {
-    version.map(str::trim).filter(|s| !s.is_empty()).map(|s| {
-        let escaped = s
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
-        format!("%\"{escaped}\"%")
-    })
+    version
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("%\"{}\"%", escape_like(s)))
+}
+
+/// Escape the LIKE metacharacters (`\` `%` `_`) so the string matches
+/// literally under a `LIKE … ESCAPE '\'` clause. The `*_like` wrappers
+/// call this, then add their own `%` framing. Single source of truth for
+/// the escape rule (Claude: three copies had drifted apart-able).
+fn escape_like(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 /// Wrap `value` as a SQLite `LIKE '%value%'` contains-pattern with the
 /// LIKE metacharacters escaped (ESCAPE '\' is declared at the call site).
 fn contains_like(value: &str) -> String {
-    let escaped = value
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_");
-    format!("%{escaped}%")
+    format!("%{}%", escape_like(value))
+}
+
+/// Wrap `value` as a `LIKE 'value%'` starts-with pattern (metachars escaped).
+fn starts_like(value: &str) -> String {
+    format!("{}%", escape_like(value))
+}
+
+/// #1061: one metadata filter operator. `set`/`empty`/`absent` ignore the
+/// value; the rest match against it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MetaOp {
+    Contains,
+    Eq,
+    Neq,
+    Starts,
+    Empty,
+    Set,
+    Absent,
+}
+
+impl MetaOp {
+    fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "contains" => Self::Contains,
+            "eq" => Self::Eq,
+            "neq" => Self::Neq,
+            "starts" => Self::Starts,
+            "empty" => Self::Empty,
+            "set" => Self::Set,
+            "absent" => Self::Absent,
+            _ => return None,
+        })
+    }
+    /// Whether the operator consumes the value (vs presence-only).
+    fn wants_value(self) -> bool {
+        matches!(self, Self::Contains | Self::Eq | Self::Neq | Self::Starts)
+    }
+}
+
+/// One parsed `meta.<key>.<op>=<value>` condition (#1061).
+#[derive(Debug, Clone)]
+struct MetaCond {
+    key: String,
+    op: MetaOp,
+    value: String,
+}
+
+/// Parse the repeatable `meta.<key>.<op>=<value>` conditions out of the
+/// raw query pairs. The param KEY carries `key` + `op`, split on the LAST
+/// `.` so a metadata key that itself contains dots still works. Taking the
+/// raw pairs as an ORDERED `Vec` (not a `HashMap`) preserves duplicate
+/// params — `meta.tag.contains=foo&meta.tag.contains=bar` yields two AND'd
+/// conditions — and keeps the generated SQL's clause order deterministic
+/// (a `HashMap` randomises iteration). A value-consuming op with a blank
+/// value is dropped (an incomplete UI row shouldn't filter to nothing). An
+/// unknown op is a 400.
+fn parse_meta_conditions(raw: &[(String, String)]) -> Result<Vec<MetaCond>, (StatusCode, String)> {
+    let mut out = Vec::new();
+    for (k, v) in raw {
+        let Some(rest) = k.strip_prefix("meta.") else {
+            continue;
+        };
+        let Some((key, op_str)) = rest.rsplit_once('.') else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("malformed meta filter `{k}` — expected meta.<key>.<op>"),
+            ));
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("meta filter `{k}` has an empty key"),
+            ));
+        }
+        let op = MetaOp::parse(op_str).ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("unknown meta filter operator `{op_str}` in `{k}`"),
+            )
+        })?;
+        let value = v.trim().to_string();
+        if op.wants_value() && value.is_empty() {
+            continue; // incomplete condition — skip rather than match nothing
+        }
+        out.push(MetaCond {
+            key: key.to_string(),
+            op,
+            value,
+        });
+    }
+    Ok(out)
+}
+
+/// Append one metadata condition as a correlated `pc_id [NOT] IN (…)`
+/// subquery over `agent_meta`, so it composes with paging + the
+/// fleet-wide count without materialising the roster.
+fn push_meta_cond(qb: &mut QueryBuilder<Sqlite>, started: &mut bool, cond: &MetaCond) {
+    qb.push(sep(started));
+    match cond.op {
+        MetaOp::Absent => {
+            qb.push("pc_id NOT IN (SELECT pc_id FROM agent_meta WHERE key = ")
+                .push_bind(cond.key.clone())
+                .push(")");
+        }
+        MetaOp::Set => {
+            qb.push("pc_id IN (SELECT pc_id FROM agent_meta WHERE key = ")
+                .push_bind(cond.key.clone())
+                .push(")");
+        }
+        MetaOp::Empty => {
+            qb.push("pc_id IN (SELECT pc_id FROM agent_meta WHERE key = ")
+                .push_bind(cond.key.clone())
+                .push(" AND value = '')");
+        }
+        MetaOp::Eq | MetaOp::Neq | MetaOp::Contains | MetaOp::Starts => {
+            qb.push("pc_id IN (SELECT pc_id FROM agent_meta WHERE key = ")
+                .push_bind(cond.key.clone());
+            match cond.op {
+                MetaOp::Eq => {
+                    qb.push(" AND value = ").push_bind(cond.value.clone());
+                }
+                MetaOp::Neq => {
+                    qb.push(" AND value <> ").push_bind(cond.value.clone());
+                }
+                MetaOp::Contains => {
+                    qb.push(" AND value LIKE ")
+                        .push_bind(contains_like(&cond.value))
+                        .push(" ESCAPE '\\'");
+                }
+                MetaOp::Starts => {
+                    qb.push(" AND value LIKE ")
+                        .push_bind(starts_like(&cond.value))
+                        .push(" ESCAPE '\\'");
+                }
+                _ => unreachable!(),
+            }
+            qb.push(")");
+        }
+    }
 }
 
 /// The SQL-expressible pre-filters shared by the count query, the
 /// fast-path row query, and the regex-path prefilter: the quarantine
-/// token LIKE and the #1051 metadata filter. `started` tracks whether a
-/// `WHERE` has been emitted yet so the caller can append its own extra
-/// clauses (the status filter) with the right `WHERE`/`AND` separator.
-///
-/// The metadata filter is a correlated subquery
-/// (`pc_id IN (SELECT pc_id FROM agent_meta WHERE key = ? [AND value LIKE ?])`)
-/// so it composes with paging + the fleet-wide count without pulling the
-/// roster into memory.
-fn push_prefilters(
+/// token LIKE, the #1061 metadata conditions, and the global attribute
+/// search. `started` tracks whether a `WHERE` has been emitted yet so the
+/// caller can append its own extra clauses (the status filter) with the
+/// right `WHERE`/`AND` separator.
+fn push_filters(
     qb: &mut QueryBuilder<Sqlite>,
     started: &mut bool,
     quar_like: &Option<String>,
-    meta_filter: &Option<(String, Option<String>)>,
+    meta_conds: &[MetaCond],
+    meta_any: &Option<String>,
 ) {
     if let Some(p) = quar_like {
         qb.push(sep(started))
@@ -162,16 +317,103 @@ fn push_prefilters(
             .push_bind(p.clone())
             .push(" ESCAPE '\\'");
     }
-    if let Some((key, like)) = meta_filter {
+    for cond in meta_conds {
+        push_meta_cond(qb, started, cond);
+    }
+    if let Some(text) = meta_any {
         qb.push(sep(started))
-            .push("pc_id IN (SELECT pc_id FROM agent_meta WHERE key = ")
-            .push_bind(key.clone());
-        if let Some(l) = like {
-            qb.push(" AND value LIKE ")
-                .push_bind(l.clone())
-                .push(" ESCAPE '\\'");
+            .push("pc_id IN (SELECT pc_id FROM agent_meta WHERE value LIKE ")
+            .push_bind(contains_like(text))
+            .push(" ESCAPE '\\')");
+    }
+}
+
+/// #1061: a validated sort field. Built-in columns map to a fixed column
+/// literal (never operator input, so no ORDER BY injection); `Meta` sorts
+/// by an `agent_meta` value via a correlated subquery.
+#[derive(Debug, Clone)]
+enum SortField {
+    Column(&'static str),
+    Meta(String),
+}
+
+struct SortSpec {
+    field: SortField,
+    desc: bool,
+}
+
+/// Parse `?sort=&dir=` into a validated [`SortSpec`]. Default is
+/// `updated_at DESC` (the historical order). A built-in field must be in
+/// the allow-list; `meta:<key>` sorts by that metadata value. An unknown
+/// field or direction is a 400 (so the ORDER BY can never be injected).
+fn parse_sort(sort: Option<&str>, dir: Option<&str>) -> Result<SortSpec, (StatusCode, String)> {
+    let sort = sort.map(str::trim).filter(|s| !s.is_empty());
+    let field = match sort {
+        None => SortField::Column("updated_at"),
+        Some(s) => {
+            if let Some(key) = s.strip_prefix("meta:") {
+                let key = key.trim();
+                if key.is_empty() {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "sort=meta: requires a key (meta:<key>)".to_string(),
+                    ));
+                }
+                SortField::Meta(key.to_string())
+            } else {
+                let col = match s {
+                    "pc_id" => "pc_id",
+                    "hostname" => "hostname",
+                    "os_family" | "os" => "os_family",
+                    "agent_version" | "agent" => "agent_version",
+                    "last_heartbeat" => "last_heartbeat",
+                    "last_logon_user" | "last_logon" => "last_logon_user",
+                    "updated_at" => "updated_at",
+                    _ => {
+                        return Err((StatusCode::BAD_REQUEST, format!("unknown sort field `{s}`")));
+                    }
+                };
+                SortField::Column(col)
+            }
         }
-        qb.push(")");
+    };
+    let desc = match dir.map(str::trim).filter(|s| !s.is_empty()) {
+        // Default direction: desc for updated_at (whether implicit OR
+        // explicit `sort=updated_at`), asc for everything else.
+        None => matches!(field, SortField::Column("updated_at")),
+        Some("asc") => false,
+        Some("desc") => true,
+        Some(other) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("sort direction must be asc/desc, got `{other}`"),
+            ));
+        }
+    };
+    Ok(SortSpec { field, desc })
+}
+
+/// Append the `ORDER BY` for a validated [`SortSpec`]. NULLs always sort
+/// last (`<expr> IS NULL, <expr>`), so a missing metadata value or a
+/// never-set column lands at the bottom regardless of direction.
+fn push_order_by(qb: &mut QueryBuilder<Sqlite>, spec: &SortSpec) {
+    let dir = if spec.desc { " DESC" } else { " ASC" };
+    qb.push(" ORDER BY ");
+    match &spec.field {
+        SortField::Column(col) => {
+            // `col` is a fixed literal from the parse_sort allow-list.
+            qb.push(col).push(" IS NULL, ").push(col).push(dir);
+        }
+        SortField::Meta(key) => {
+            // Bind the key twice (NULL check + value). COLLATE NOCASE so
+            // the ordering is case-insensitive like the other text cols.
+            qb.push("(SELECT value FROM agent_meta WHERE pc_id = agents.pc_id AND key = ")
+                .push_bind(key.clone())
+                .push(") IS NULL, (SELECT value FROM agent_meta WHERE pc_id = agents.pc_id AND key = ")
+                .push_bind(key.clone())
+                .push(") COLLATE NOCASE")
+                .push(dir);
+        }
     }
 }
 
@@ -280,6 +522,12 @@ fn build_headers(needs_count: bool, total: i64, matched: i64, online: i64) -> He
 pub async fn list(
     State(pool): State<SqlitePool>,
     Query(params): Query<ListParams>,
+    // #1061: a second extractor over the raw query pairs so the dynamic
+    // `meta.<key>.<op>=<value>` conditions (which serde_urlencoded can't
+    // model as struct fields) can be parsed. A `Vec` (not a map) keeps
+    // duplicate params and their order — see `parse_meta_conditions`. Both
+    // extractors read the whole query string; `ListParams` ignores meta.*.
+    Query(raw): Query<Vec<(String, String)>>,
 ) -> Result<(HeaderMap, Json<Vec<AgentRow>>), (StatusCode, String)> {
     // #563: validate the status filter up front — a typo'd value
     // silently meaning "all" would defeat the deep link's purpose.
@@ -303,24 +551,40 @@ pub async fn list(
     let has_regex = q_re.is_some() || user_re.is_some() || version_re.is_some();
 
     let quar_like = quarantined_like(params.quarantined.as_deref());
-    // #1051: metadata filter — `(key, Some(like))` requires the key's
-    // value to contain `meta_value`; `(key, None)` just requires the key
-    // to be present. Blank key → no metadata filter. SQL-expressible, so
-    // it rides the fast path and doesn't force the regex scan.
-    let meta_filter: Option<(String, Option<String>)> = params
+    // #1061: metadata conditions from `meta.<key>.<op>` params, plus the
+    // legacy `meta_key`/`meta_value` folded in as one condition for
+    // back-compat. All SQL-expressible, so they ride the fast path.
+    let mut meta_conds = parse_meta_conditions(&raw)?;
+    if let Some(key) = params
         .meta_key
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(|key| {
-            let like = params
-                .meta_value
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(contains_like);
-            (key.to_string(), like)
+    {
+        let value = params
+            .meta_value
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        meta_conds.push(MetaCond {
+            key: key.to_string(),
+            op: if value.is_some() {
+                MetaOp::Contains
+            } else {
+                MetaOp::Set
+            },
+            value: value.unwrap_or_default().to_string(),
         });
+    }
+    // #1061: global attribute search — any metadata value contains this.
+    let meta_any = params
+        .meta_any
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    // #1061: validated sort (default updated_at DESC).
+    let sort_spec = parse_sort(params.sort.as_deref(), params.dir.as_deref())?;
     let cutoff = chrono::Utc::now() - ALIVE_THRESHOLD;
     let needs_count = params.limit.is_some();
 
@@ -342,7 +606,7 @@ pub async fn list(
             qb.push_bind(cutoff)
                 .push(" THEN 1 ELSE 0 END), 0) AS INTEGER) AS online FROM agents");
             let mut started = false;
-            push_prefilters(&mut qb, &mut started, &quar_like, &meta_filter);
+            push_filters(&mut qb, &mut started, &quar_like, &meta_conds, &meta_any);
             let row = qb.build().fetch_one(&pool).await.map_err(|e| {
                 warn!(error = %e, "count agents");
                 (
@@ -358,7 +622,7 @@ pub async fn list(
 
         let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new("SELECT * FROM agents");
         let mut started = false;
-        push_prefilters(&mut qb, &mut started, &quar_like, &meta_filter);
+        push_filters(&mut qb, &mut started, &quar_like, &meta_conds, &meta_any);
         match status.as_deref() {
             Some("online") => {
                 qb.push(sep(&mut started))
@@ -373,7 +637,8 @@ pub async fn list(
             }
             _ => {}
         }
-        qb.push(" ORDER BY updated_at DESC LIMIT ")
+        push_order_by(&mut qb, &sort_spec);
+        qb.push(" LIMIT ")
             .push_bind(limit)
             .push(" OFFSET ")
             .push_bind(offset);
@@ -405,9 +670,9 @@ pub async fn list(
     // a few-thousand-row scan at worst.
     let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new("SELECT * FROM agents");
     let mut started = false;
-    push_prefilters(&mut qb, &mut started, &quar_like, &meta_filter);
-    qb.push(" ORDER BY updated_at DESC LIMIT ")
-        .push_bind(MAX_FETCH);
+    push_filters(&mut qb, &mut started, &quar_like, &meta_conds, &meta_any);
+    push_order_by(&mut qb, &sort_spec);
+    qb.push(" LIMIT ").push_bind(MAX_FETCH);
     let rows = qb.build().fetch_all(&pool).await.map_err(|e| {
         warn!(error = %e, "list agents");
         (
@@ -715,8 +980,31 @@ mod tests {
         pool
     }
 
+    /// Call the handler with typed params and no dynamic `meta.*`
+    /// conditions (the common case). Mirrors `list(State, Query, Query)`.
+    async fn call(
+        pool: SqlitePool,
+        params: ListParams,
+    ) -> Result<(HeaderMap, Json<Vec<AgentRow>>), (StatusCode, String)> {
+        list(State(pool), Query(params), Query(Vec::new())).await
+    }
+
+    /// As [`call`], but with raw `meta.<key>.<op>=<value>` query params for
+    /// the #1061 metadata-condition / sort tests.
+    async fn call_raw(
+        pool: SqlitePool,
+        params: ListParams,
+        raw: &[(&str, &str)],
+    ) -> Result<(HeaderMap, Json<Vec<AgentRow>>), (StatusCode, String)> {
+        let raw: Vec<(String, String)> = raw
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        list(State(pool), Query(params), Query(raw)).await
+    }
+
     async fn ids_of(pool: SqlitePool, params: ListParams) -> Vec<String> {
-        let (_headers, Json(rows)) = list(State(pool), Query(params)).await.unwrap();
+        let (_headers, Json(rows)) = call(pool, params).await.unwrap();
         rows.into_iter().map(|r| r.pc_id).collect()
     }
 
@@ -752,9 +1040,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (_h, Json(rows)) = list(State(pool), Query(ListParams::default()))
-            .await
-            .unwrap();
+        let (_h, Json(rows)) = call(pool, ListParams::default()).await.unwrap();
         let by_id = |id: &str| {
             rows.iter()
                 .find(|r| r.pc_id == id)
@@ -801,13 +1087,13 @@ mod tests {
         set_heartbeat(&pool, "PC001", true).await;
         set_heartbeat(&pool, "PC002", false).await;
 
-        let (headers, Json(rows)) = list(
-            State(pool),
-            Query(ListParams {
+        let (headers, Json(rows)) = call(
+            pool,
+            ListParams {
                 limit: Some(2),
                 status: Some("offline".into()),
                 ..Default::default()
-            }),
+            },
         )
         .await
         .unwrap();
@@ -826,13 +1112,13 @@ mod tests {
     async fn online_filter_returns_only_live_agents() {
         let pool = seeded_pool().await;
         set_heartbeat(&pool, "PC001", true).await;
-        let (headers, Json(rows)) = list(
-            State(pool),
-            Query(ListParams {
+        let (headers, Json(rows)) = call(
+            pool,
+            ListParams {
                 limit: Some(10),
                 status: Some("online".into()),
                 ..Default::default()
-            }),
+            },
         )
         .await
         .unwrap();
@@ -846,13 +1132,13 @@ mod tests {
     #[tokio::test]
     async fn invalid_status_is_a_bad_request() {
         let pool = seeded_pool().await;
-        match list(
-            State(pool),
-            Query(ListParams {
+        match call(
+            pool,
+            ListParams {
                 limit: Some(10),
                 status: Some("onlin".into()),
                 ..Default::default()
-            }),
+            },
         )
         .await
         {
@@ -864,12 +1150,12 @@ mod tests {
     #[tokio::test]
     async fn invalid_regex_is_a_bad_request() {
         let pool = seeded_pool().await;
-        match list(
-            State(pool),
-            Query(ListParams {
+        match call(
+            pool,
+            ListParams {
                 q: Some("[unterminated".into()),
                 ..Default::default()
-            }),
+            },
         )
         .await
         {
@@ -883,13 +1169,13 @@ mod tests {
         // #495: server-side paging — page 2 skips page 1's rows, and
         // X-Total-Count carries the pre-LIMIT match count.
         let pool = seeded_pool().await;
-        let (headers, Json(page2)) = list(
-            State(pool),
-            Query(ListParams {
+        let (headers, Json(page2)) = call(
+            pool,
+            ListParams {
                 limit: Some(1),
                 offset: Some(1),
                 ..Default::default()
-            }),
+            },
         )
         .await
         .unwrap();
@@ -1058,14 +1344,14 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let (headers, Json(rows)) = list(
-            State(pool),
-            Query(ListParams {
+        let (headers, Json(rows)) = call(
+            pool,
+            ListParams {
                 quarantined: Some("0.43.62".into()),
                 version: Some("0.43.61".into()),
                 limit: Some(10),
                 ..Default::default()
-            }),
+            },
         )
         .await
         .unwrap();
@@ -1096,9 +1382,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        let (_h, Json(rows)) = list(State(pool), Query(ListParams::default()))
-            .await
-            .unwrap();
+        let (_h, Json(rows)) = call(pool, ListParams::default()).await.unwrap();
         let a = rows.iter().find(|r| r.pc_id == "PC001").unwrap();
         assert_eq!(a.last_logon_user.as_deref(), Some(r".\yukimemi"));
         assert_eq!(
@@ -1123,9 +1407,7 @@ mod tests {
     async fn meta_is_decorated_onto_rows() {
         let pool = seeded_pool().await;
         set_meta(&pool, "PC001", &[("氏名", "山田"), ("所属", "経理")]).await;
-        let (_h, Json(rows)) = list(State(pool), Query(ListParams::default()))
-            .await
-            .unwrap();
+        let (_h, Json(rows)) = call(pool, ListParams::default()).await.unwrap();
         let pc001 = rows.iter().find(|r| r.pc_id == "PC001").unwrap();
         let map: std::collections::HashMap<_, _> = pc001
             .meta
@@ -1197,14 +1479,14 @@ mod tests {
         for pc in ["PC001", "PC002", "WS-9"] {
             set_meta(&pool, pc, &[("dept", "eng")]).await;
         }
-        let (headers, Json(rows)) = list(
-            State(pool),
-            Query(ListParams {
+        let (headers, Json(rows)) = call(
+            pool,
+            ListParams {
                 meta_key: Some("dept".into()),
                 meta_value: Some("eng".into()),
                 limit: Some(2),
                 ..Default::default()
-            }),
+            },
         )
         .await
         .unwrap();
@@ -1253,9 +1535,7 @@ mod tests {
         }
         set_meta(&pool, "BULK-0300", &[("dept", "eng")]).await;
 
-        let (_h, Json(rows)) = list(State(pool), Query(ListParams::default()))
-            .await
-            .unwrap();
+        let (_h, Json(rows)) = call(pool, ListParams::default()).await.unwrap();
         assert!(
             rows.len() >= n,
             "whole fleet returned without a bind-limit error"
@@ -1272,5 +1552,230 @@ mod tests {
         let Json(keys) = meta_keys(State(pool)).await.unwrap();
         // Distinct (氏名 once) and sorted by key code point.
         assert_eq!(keys, vec!["メール", "所属", "氏名"]);
+    }
+
+    // ---- #1061: meta.<key>.<op> operators, meta_any, sort ----
+
+    fn pcids(rows: Vec<AgentRow>) -> Vec<String> {
+        rows.into_iter().map(|r| r.pc_id).collect()
+    }
+
+    async fn raw_ids(pool: SqlitePool, raw: &[(&str, &str)]) -> Vec<String> {
+        let (_h, Json(rows)) = call_raw(pool, ListParams::default(), raw).await.unwrap();
+        let mut ids = pcids(rows);
+        ids.sort();
+        ids
+    }
+
+    #[tokio::test]
+    async fn meta_ops_eq_contains_starts_neq() {
+        let pool = seeded_pool().await;
+        set_meta(&pool, "PC001", &[("dept", "Finance")]).await;
+        set_meta(&pool, "PC002", &[("dept", "Engineering")]).await;
+        assert_eq!(
+            raw_ids(pool.clone(), &[("meta.dept.eq", "Finance")]).await,
+            vec!["PC001"]
+        );
+        assert_eq!(
+            raw_ids(pool.clone(), &[("meta.dept.contains", "ineer")]).await,
+            vec!["PC002"]
+        );
+        assert_eq!(
+            raw_ids(pool.clone(), &[("meta.dept.starts", "Fin")]).await,
+            vec!["PC001"]
+        );
+        // neq = has the key, value differs.
+        assert_eq!(
+            raw_ids(pool, &[("meta.dept.neq", "Finance")]).await,
+            vec!["PC002"]
+        );
+    }
+
+    #[tokio::test]
+    async fn meta_ops_set_empty_absent() {
+        let pool = seeded_pool().await;
+        set_meta(&pool, "PC001", &[("dept", "Finance")]).await;
+        set_meta(&pool, "PC002", &[("dept", "")]).await; // present but blank
+        // set = key present (any value) → PC001 + PC002.
+        assert_eq!(
+            raw_ids(pool.clone(), &[("meta.dept.set", "")]).await,
+            vec!["PC001", "PC002"]
+        );
+        // empty = present and blank → PC002 only.
+        assert_eq!(
+            raw_ids(pool.clone(), &[("meta.dept.empty", "")]).await,
+            vec!["PC002"]
+        );
+        // absent = key not present → the two never-set seeded PCs.
+        assert_eq!(
+            raw_ids(pool, &[("meta.dept.absent", "")]).await,
+            vec!["WS-9", "web%01"]
+        );
+    }
+
+    #[tokio::test]
+    async fn multiple_meta_conditions_are_anded() {
+        let pool = seeded_pool().await;
+        set_meta(&pool, "PC001", &[("dept", "eng"), ("site", "tokyo")]).await;
+        set_meta(&pool, "PC002", &[("dept", "eng"), ("site", "osaka")]).await;
+        assert_eq!(
+            raw_ids(pool, &[("meta.dept.eq", "eng"), ("meta.site.eq", "tokyo")]).await,
+            vec!["PC001"]
+        );
+    }
+
+    #[tokio::test]
+    async fn meta_any_matches_any_value() {
+        let pool = seeded_pool().await;
+        set_meta(&pool, "PC001", &[("氏名", "山田太郎")]).await;
+        set_meta(&pool, "PC002", &[("所属", "山田製作所")]).await;
+        set_meta(&pool, "WS-9", &[("メール", "a@example.com")]).await;
+        // "山田" appears in a value on PC001 (name) and PC002 (dept).
+        // meta_any is a ListParams field (parsed by the typed extractor).
+        let (_h, Json(rows)) = call(
+            pool,
+            ListParams {
+                meta_any: Some("山田".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mut got = pcids(rows);
+        got.sort();
+        assert_eq!(got, vec!["PC001", "PC002"]);
+    }
+
+    #[tokio::test]
+    async fn unknown_meta_op_is_a_bad_request() {
+        let pool = seeded_pool().await;
+        match call_raw(pool, ListParams::default(), &[("meta.dept.bogus", "x")]).await {
+            Err((code, _)) => assert_eq!(code, StatusCode::BAD_REQUEST),
+            Ok(_) => panic!("an unknown meta operator must be a 400"),
+        }
+    }
+
+    #[tokio::test]
+    async fn sort_by_column_asc_and_desc() {
+        let pool = seeded_pool().await;
+        for (pc, v) in [("PC001", "0.1"), ("PC002", "0.3"), ("WS-9", "0.2")] {
+            sqlx::query("UPDATE agents SET agent_version = ? WHERE pc_id = ?")
+                .bind(v)
+                .bind(pc)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        // web%01 has NULL agent_version → sorts LAST in both directions.
+        let (_h, Json(rows)) = call(
+            pool.clone(),
+            ListParams {
+                sort: Some("agent_version".into()),
+                dir: Some("asc".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(pcids(rows), vec!["PC001", "WS-9", "PC002", "web%01"]);
+
+        let (_h, Json(rows)) = call(
+            pool,
+            ListParams {
+                sort: Some("agent_version".into()),
+                dir: Some("desc".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(pcids(rows), vec!["PC002", "WS-9", "PC001", "web%01"]);
+    }
+
+    #[tokio::test]
+    async fn sort_by_meta_value_nulls_last() {
+        let pool = seeded_pool().await;
+        set_meta(&pool, "PC001", &[("dept", "beta")]).await;
+        set_meta(&pool, "PC002", &[("dept", "alpha")]).await;
+        // WS-9 / web%01 have no dept → NULL → sort last regardless of dir.
+        let (_h, Json(rows)) = call(
+            pool,
+            ListParams {
+                sort: Some("meta:dept".into()),
+                dir: Some("asc".into()),
+                limit: Some(2),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        // Page of 2: alpha (PC002) then beta (PC001); the NULLs are later.
+        assert_eq!(pcids(rows), vec!["PC002", "PC001"]);
+    }
+
+    #[tokio::test]
+    async fn invalid_sort_field_is_a_bad_request() {
+        let pool = seeded_pool().await;
+        match call(
+            pool,
+            ListParams {
+                sort: Some("drop table".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        {
+            Err((code, _)) => assert_eq!(code, StatusCode::BAD_REQUEST),
+            Ok(_) => panic!("an unknown sort field must be a 400"),
+        }
+    }
+
+    #[tokio::test]
+    async fn duplicate_conditions_on_same_key_are_both_applied() {
+        // Gemini HIGH: raw pairs are a Vec, not a HashMap, so two params
+        // with the SAME key/op both apply (a HashMap would drop one).
+        let pool = seeded_pool().await;
+        set_meta(&pool, "PC001", &[("tag", "alpha-beta")]).await;
+        set_meta(&pool, "PC002", &[("tag", "alpha-only")]).await;
+        let got = raw_ids(
+            pool,
+            &[
+                ("meta.tag.contains", "alpha"),
+                ("meta.tag.contains", "beta"),
+            ],
+        )
+        .await;
+        assert_eq!(got, vec!["PC001"], "both contains must AND, not collapse");
+    }
+
+    #[tokio::test]
+    async fn explicit_updated_at_sort_defaults_desc() {
+        // Gemini medium: `sort=updated_at` with no `dir` must default DESC,
+        // same as the implicit default (not ASC).
+        let pool = seeded_pool().await;
+        for (pc, t) in [
+            ("PC001", "2026-01-01 00:00:00"),
+            ("PC002", "2026-01-03 00:00:00"),
+        ] {
+            sqlx::query("UPDATE agents SET updated_at = ? WHERE pc_id = ?")
+                .bind(t)
+                .bind(pc)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let (_h, Json(rows)) = call(
+            pool,
+            ListParams {
+                sort: Some("updated_at".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let ids = pcids(rows);
+        let p2 = ids.iter().position(|x| x == "PC002").unwrap();
+        let p1 = ids.iter().position(|x| x == "PC001").unwrap();
+        assert!(p2 < p1, "explicit sort=updated_at should default DESC");
     }
 }
