@@ -4,6 +4,7 @@ pub mod consumer_reset;
 pub mod events;
 pub mod explode;
 pub mod feeds;
+pub mod group_materializer;
 pub mod heartbeat;
 pub mod history;
 pub mod host_perf;

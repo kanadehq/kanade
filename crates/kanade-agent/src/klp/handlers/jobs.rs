@@ -51,7 +51,8 @@ use kanade_shared::ipc::jobs::{
 use kanade_shared::ipc::method;
 use kanade_shared::ipc::state::CheckStatus;
 use kanade_shared::kv::{
-    BUCKET_AGENT_GROUPS, BUCKET_JOBS, BUCKET_SCRIPT_STATUS, SCRIPT_STATUS_REVOKED,
+    BUCKET_AGENT_GROUPS, BUCKET_AGENT_GROUPS_DERIVED, BUCKET_JOBS, BUCKET_SCRIPT_STATUS,
+    SCRIPT_STATUS_REVOKED,
 };
 use kanade_shared::manifest::Manifest;
 use kanade_shared::wire::Command;
@@ -189,22 +190,37 @@ pub async fn handle_jobs_list(
 /// match (fails closed — better to hide than wrongly show).
 async fn pc_groups(client: &async_nats::Client, pc_id: &str) -> Vec<String> {
     let js = async_nats::jetstream::new(client.clone());
-    let kv = match js.get_key_value(BUCKET_AGENT_GROUPS).await {
+    // #1032①: effective membership = operator `agent_groups` ∪ materialized
+    // `agent_groups_derived`, so a job made visible via a dynamic group is
+    // listed/run. This cold path re-reads KV directly (not the groups.rs watch
+    // channel), so it must union the derived bucket itself.
+    let manual = read_membership(&js, BUCKET_AGENT_GROUPS, pc_id).await;
+    let derived = read_membership(&js, BUCKET_AGENT_GROUPS_DERIVED, pc_id).await;
+    crate::groups::union_groups(&manual, &derived)
+}
+
+/// Read one membership bucket for `pc_id`. Best-effort on the cold `jobs.*`
+/// paths (see module docs): any miss / decode / KV error yields no groups (a
+/// `visible_to` targeting only groups then fails closed — hide over wrongly
+/// show), logged so "why isn't my group-targeted job visible?" is traceable
+/// (Gemini #816). Reuses the one `AgentGroups` decoder.
+async fn read_membership(
+    js: &async_nats::jetstream::Context,
+    bucket: &'static str,
+    pc_id: &str,
+) -> Vec<String> {
+    let kv = match js.get_key_value(bucket).await {
         Ok(kv) => kv,
         Err(e) => {
-            warn!(error = %e, "jobs: open BUCKET_AGENT_GROUPS for visibility failed");
+            warn!(error = %e, bucket, "jobs: open membership bucket for visibility failed");
             return Vec::new();
         }
     };
-    // Reuse the one AgentGroups decoder (shared with maintenance) instead of
-    // re-deserializing here. A KV read error is logged, not silently
-    // swallowed, so a "why isn't my group-targeted job visible?" can be
-    // traced (Gemini #816).
     match kv.get(pc_id).await {
         Ok(Some(bytes)) => crate::groups::parse_groups(&bytes),
         Ok(None) => Vec::new(),
         Err(e) => {
-            warn!(pc_id = %pc_id, error = %e, "jobs: read agent groups for visibility failed");
+            warn!(pc_id = %pc_id, bucket, error = %e, "jobs: read membership for visibility failed");
             Vec::new()
         }
     }

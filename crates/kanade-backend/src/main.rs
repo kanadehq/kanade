@@ -1073,6 +1073,18 @@ pub(crate) async fn run_backend() -> Result<()> {
         });
     }
 
+    // #1032①: the group materializer reflects declared-group membership
+    // (GroupDefs) into `agent_groups_derived` so dynamic groups reach the
+    // agent-side consumers (exec --groups / group notifications / visible_to).
+    // `run` loops forever and self-recovers from transient errors; it shares
+    // the AppState (query pool + group cache + jetstream).
+    {
+        let s = app_state.clone();
+        tokio::spawn(async move {
+            projector::group_materializer::run(s).await;
+        });
+    }
+
     let app = api::router(app_state)
         // RBAC middleware needs the SQLite pool to re-read the caller's
         // authoritative role / disabled flag on every request.

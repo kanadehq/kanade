@@ -41,8 +41,8 @@ use kanade_shared::ipc::notifications::{
     NotificationsUnackResult, NotificationsUnsubscribeParams,
 };
 use kanade_shared::kv::{
-    BUCKET_AGENT_GROUPS, BUCKET_NOTIFICATIONS_READ, STREAM_NOTIFICATIONS, notifications_read_key,
-    notifications_read_prefix,
+    BUCKET_AGENT_GROUPS, BUCKET_AGENT_GROUPS_DERIVED, BUCKET_NOTIFICATIONS_READ,
+    STREAM_NOTIFICATIONS, notifications_read_key, notifications_read_prefix,
 };
 use kanade_shared::subject;
 use serde::Deserialize;
@@ -391,29 +391,44 @@ pub async fn handle_notifications_list(
     ))
 }
 
-/// Read this PC's group membership from `BUCKET_AGENT_GROUPS` (mirrors
-/// `maintenance.list`). A missing entry → no groups (not an error); a
-/// broker-level failure propagates so the client retries rather than
-/// silently missing every group-targeted notification.
+/// Read this PC's effective group membership — the union of the operator
+/// `agent_groups` and the materialized `agent_groups_derived` (#1032①), so a
+/// notification targeted at a dynamic group replays in this PC's history. This
+/// cold path re-reads KV directly (not the groups.rs watch channel), so it
+/// unions the derived bucket itself. A missing entry → no groups (not an
+/// error); a broker-level failure on either bucket propagates so the client
+/// retries rather than silently missing every group-targeted notification.
 async fn read_my_groups(
     js: &async_nats::jetstream::Context,
     pc_id: &str,
 ) -> HandlerResult<Vec<String>> {
-    let kv = js.get_key_value(BUCKET_AGENT_GROUPS).await.map_err(|e| {
-        warn!(error = %e, "notifications.list: open BUCKET_AGENT_GROUPS failed");
+    let manual = read_membership_bucket(js, BUCKET_AGENT_GROUPS, pc_id).await?;
+    let derived = read_membership_bucket(js, BUCKET_AGENT_GROUPS_DERIVED, pc_id).await?;
+    Ok(crate::groups::union_groups(&manual, &derived))
+}
+
+/// Read one membership bucket for `pc_id`. Absent key → empty; a broker error
+/// propagates (see [`read_my_groups`]).
+async fn read_membership_bucket(
+    js: &async_nats::jetstream::Context,
+    bucket: &'static str,
+    pc_id: &str,
+) -> HandlerResult<Vec<String>> {
+    let kv = js.get_key_value(bucket).await.map_err(|e| {
+        warn!(error = %e, bucket, "notifications.list: open membership bucket failed");
         RpcError::new(
             ErrorKind::InternalError,
-            format!("notifications.list: open group membership: {e}"),
+            format!("notifications.list: open group membership ({bucket}): {e}"),
         )
     })?;
     match kv.get(pc_id).await {
         Ok(Some(bytes)) => Ok(parse_groups(&bytes)),
         Ok(None) => Ok(Vec::new()),
         Err(e) => {
-            warn!(error = %e, "notifications.list: agent_groups read failed");
+            warn!(error = %e, bucket, "notifications.list: membership read failed");
             Err(RpcError::new(
                 ErrorKind::InternalError,
-                format!("notifications.list: read group membership: {e}"),
+                format!("notifications.list: read group membership ({bucket}): {e}"),
             ))
         }
     }
