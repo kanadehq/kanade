@@ -35,7 +35,7 @@ import { apiFetch, apiFetchText, formatError } from '@/lib/api';
 
 const YamlEditor = lazy(() => import('./YamlEditor'));
 
-export type EditorKind = 'manifest' | 'schedule' | 'view';
+export type EditorKind = 'manifest' | 'schedule' | 'view' | 'group';
 export type EditorMode = { type: 'create' } | { type: 'edit'; id: string };
 
 /** GitOps provenance (#678/#695) — mirrors `kanade_shared::manifest::RepoOrigin`. */
@@ -127,6 +127,21 @@ widgets:
     # order: 0              # optional sort weight (lower = earlier)
 `;
 
+const GROUP_TEMPLATE = `# A new declared group (#1032). id + exactly one of members / query.
+# Static — a literal, git-reviewable membership list:
+id: my-group
+members:
+  - PC-A1
+  - LAB-03
+# Dynamic — membership derived from a read-only SQL query returning a
+# \`pc_id\` column (uncomment, and drop \`members:\` above):
+# query: |
+#   SELECT pc_id FROM inventory_facts
+#   WHERE job_id = 'inventory-hw'
+#     AND json_extract(facts_json, '$.os_name') NOT LIKE '%Server%'
+# refresh: 30m   # dynamic-group recompute cadence (default 10m)
+`;
+
 function templateFor(kind: EditorKind): string {
   switch (kind) {
     case 'manifest':
@@ -135,6 +150,8 @@ function templateFor(kind: EditorKind): string {
       return SCHEDULE_TEMPLATE;
     case 'view':
       return VIEW_TEMPLATE;
+    case 'group':
+      return GROUP_TEMPLATE;
   }
 }
 
@@ -146,6 +163,8 @@ function endpointBase(kind: EditorKind): string {
       return '/api/schedules';
     case 'view':
       return '/api/views';
+    case 'group':
+      return '/api/group-defs';
   }
 }
 
@@ -232,7 +251,7 @@ export function YamlEditorDialog({
   });
 
   // Display noun per kind ('manifest' surfaces to operators as "job").
-  const noun = kind === 'manifest' ? 'job' : kind; // job | schedule | view
+  const noun = kind === 'manifest' ? 'job' : kind; // job | schedule | view | group
   const Noun = noun.charAt(0).toUpperCase() + noun.slice(1);
   const title =
     mode.type === 'create'
@@ -244,7 +263,9 @@ export function YamlEditorDialog({
   const repoUrl = repoWebUrl(gitOrigin?.repo);
   // #695: the read-only banner is shared across kinds, so the apply
   // command and the source-path label follow `kind`.
-  const applyCmd = `kanade ${noun} create`;
+  // The CLI verb differs for groups: `kanade group def create` (the plain
+  // `kanade group …` namespace is the imperative membership commands).
+  const applyCmd = kind === 'group' ? 'kanade group def create' : `kanade ${noun} create`;
   // The YAML's source-path label is the manifest's top-level key name.
   const sourceLabel = `${kind === 'manifest' ? 'manifest' : noun}:`;
 

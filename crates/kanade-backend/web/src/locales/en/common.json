@@ -25,6 +25,7 @@
     "rollout": "Rollout",
     "apps": "Apps",
     "agentGroups": "Groups",
+    "groupDefs": "Group definitions",
     "config": "Config",
     "jetstream": "JetStream",
     "accounts": "Accounts",

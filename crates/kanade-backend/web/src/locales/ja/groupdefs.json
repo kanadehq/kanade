@@ -1,0 +1,34 @@
+{
+  "title": "グループ定義",
+  "subtitle": "宣言的なフリートグループ (#1032)。静的なメンバー一覧、または pc_id を返す動的 SQL クエリで定義します。スケジュールの target.groups は、手動のエージェントグループ所属に加えてこれを解決します。",
+  "errorTitle": "グループ定義の読み込みに失敗しました",
+  "loading": "グループ定義を読み込み中…",
+  "empty": "グループ定義がまだありません。ここで作成するか、`kanade group def create` で YAML を適用してください。",
+  "actions": {
+    "new": "新規グループ",
+    "editAria": "グループ {{id}} を編集",
+    "deleteAria": "グループ {{id}} を削除"
+  },
+  "kind": {
+    "static": "静的",
+    "dynamic": "動的"
+  },
+  "staticSummary_other": "メンバー {{count}} 台（静的リスト）",
+  "dynamicSummary": "動的 — メンバーを {{refresh}} ごとに再計算",
+  "defaultRefresh": "10m",
+  "members": {
+    "show": "解決されたメンバー",
+    "hide": "メンバーを隠す",
+    "loading": "解決中…",
+    "count_other": "{{count}} 台"
+  },
+  "confirm": {
+    "deleteTitle": "グループ「{{id}}」を削除しますか？",
+    "deleteDescription": "グループ定義を削除します。これを対象にしているスケジュールは、このグループ経由でのメンバー解決を行わなくなります（手動の agent_groups 所属はそのまま）。",
+    "deleteLabel": "削除"
+  },
+  "toast": {
+    "deleted": "グループを削除しました: {{id}}",
+    "deleteFailed": "削除に失敗しました: {{error}}"
+  }
+}

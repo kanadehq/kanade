@@ -638,13 +638,14 @@ pub fn feature_for_path(path: &str) -> Option<Feature> {
         // --- Views ---
         "/api/views" | "/api/views/{id}/yaml" | "/api/views/{id}" => Feature::Views,
 
-        // --- Group definitions (#1032) — operator-authored schedule-targeting
-        // config, so gated with the Schedules page rather than the
-        // viewer-facing per-PC Groups membership page. ---
+        // --- Group definitions (#1032) — the declarative/dynamic `groups/`
+        // manifest kind. Gated with the Groups page (its own SPA management
+        // page at /group-defs sits alongside the per-PC membership page under
+        // the same `groups` visibility feature). ---
         "/api/group-defs"
         | "/api/group-defs/{id}/yaml"
         | "/api/group-defs/{id}/members"
-        | "/api/group-defs/{id}" => Feature::Schedules,
+        | "/api/group-defs/{id}" => Feature::Groups,
 
         // --- Notifications ---
         "/api/notifications"
@@ -758,14 +759,12 @@ mod feature_map_tests {
             Some(Feature::Settings)
         );
         assert_eq!(feature_for_path("/api/query"), Some(Feature::Accounts));
-        // #1032: group-def routes gate with the Schedules page.
-        assert_eq!(
-            feature_for_path("/api/group-defs"),
-            Some(Feature::Schedules)
-        );
+        // #1032: group-def routes gate with the Groups page (its SPA
+        // management page lives alongside the membership page).
+        assert_eq!(feature_for_path("/api/group-defs"), Some(Feature::Groups));
         assert_eq!(
             feature_for_path("/api/group-defs/{id}/members"),
-            Some(Feature::Schedules)
+            Some(Feature::Groups)
         );
         // The script-command revoke lifecycle lives on the Jobs page, so it
         // gates under Jobs (not Run) — otherwise a Jobs-restricted operator

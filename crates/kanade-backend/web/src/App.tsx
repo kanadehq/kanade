@@ -17,6 +17,7 @@ import { Config } from '@/pages/Config';
 import { Dashboard } from '@/pages/Dashboard';
 import { Events } from '@/pages/Events';
 import { Exec } from '@/pages/Exec';
+import { GroupDefs } from '@/pages/GroupDefs';
 import { Groups } from '@/pages/Groups';
 import { Inventory } from '@/pages/Inventory';
 import { JetStream } from '@/pages/JetStream';
@@ -124,6 +125,7 @@ function AppContent() {
               <Route path="/rollout" element={<Rollout />} />
               <Route path="/apps" element={<Apps />} />
               <Route path="/groups" element={<Groups />} />
+              <Route path="/group-defs" element={<GroupDefs />} />
               <Route path="/notifications" element={<Notifications />} />
               <Route path="/notifications/:id" element={<NotificationDetail />} />
               <Route path="/config" element={<Config />} />
