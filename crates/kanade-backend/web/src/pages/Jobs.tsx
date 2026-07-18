@@ -41,6 +41,7 @@ import {
 } from '@/components/ui/sheet';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { apiFetch, formatError } from '@/lib/api';
+import { useAuth } from '@/lib/auth';
 
 type JobRow = {
   id: string;
@@ -74,6 +75,8 @@ type JobRow = {
 
 export function Jobs() {
   const { t } = useTranslation('jobs');
+  const { hasRole } = useAuth();
+  const canOperate = hasRole('operator');
   const qc = useQueryClient();
   // v0.34.1 (#117) wired in ConfirmDialogProvider but Jobs.tsx
   // only added the import — the hook call itself was missing, so
@@ -308,7 +311,10 @@ export function Jobs() {
   //   * revoke: shown only when active
   //   * unrevoke: shown only when revoked
   //   * delete: always (it's the last-resort op)
+  // Non-operators get a read-only view — none of these write controls
+  // render, matching the backend RBAC that would 403 the writes.
   function renderActions(j: JobRow, withLabels = false) {
+    if (!canOperate) return null;
     const inflight = j.live.running + j.live.pending;
     return (
       <>
@@ -617,14 +623,16 @@ export function Jobs() {
           <CardHeader>
             <div className="flex items-center justify-between">
               <CardTitle>{t('empty.title')}</CardTitle>
-              <Button
-                variant="default"
-                size="sm"
-                onClick={() => setEditor({ type: 'create' })}
-              >
-                <FilePlus2 className="size-3.5" />
-                {t('newJob')}
-              </Button>
+              {canOperate && (
+                <Button
+                  variant="default"
+                  size="sm"
+                  onClick={() => setEditor({ type: 'create' })}
+                >
+                  <FilePlus2 className="size-3.5" />
+                  {t('newJob')}
+                </Button>
+              )}
             </div>
           </CardHeader>
           <CardContent className="text-muted">
@@ -665,15 +673,17 @@ export function Jobs() {
       <div className="flex items-baseline justify-between">
         <h2 className="text-xl">{t('title')}</h2>
         <div className="flex items-center gap-2">
-          <Button
-            variant="default"
-            size="sm"
-            onClick={() => setEditor({ type: 'create' })}
-            title={t('newJobTitle')}
-          >
-            <FilePlus2 className="size-3.5" />
-            {t('newJob')}
-          </Button>
+          {canOperate && (
+            <Button
+              variant="default"
+              size="sm"
+              onClick={() => setEditor({ type: 'create' })}
+              title={t('newJobTitle')}
+            >
+              <FilePlus2 className="size-3.5" />
+              {t('newJob')}
+            </Button>
+          )}
           <Badge variant="violet">
             {filtering ? `${visibleRows.length} / ${rows.length}` : rows.length}
           </Badge>

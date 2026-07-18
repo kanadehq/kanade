@@ -11,6 +11,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { useConfirm } from '@/components/ui/confirm-dialog';
 import { apiFetch, formatError } from '@/lib/api';
+import { useAuth } from '@/lib/auth';
 
 // Mirrors `kanade_shared::manifest::View` (the bits the list renders).
 // `ViewWidget` is a DISPLAY-ONLY subset of the real `AggregateWidget` —
@@ -35,6 +36,8 @@ type ViewRow = {
 
 export function Views() {
   const { t } = useTranslation('views');
+  const { hasRole } = useAuth();
+  const canOperate = hasRole('operator');
   const qc = useQueryClient();
   const confirm = useConfirm();
   const [editor, setEditor] = useState<EditorMode | null>(null);
@@ -61,10 +64,12 @@ export function Views() {
           <h2 className="text-xl">{t('title')}</h2>
           <p className="text-muted text-sm">{t('subtitle')}</p>
         </div>
-        <Button onClick={() => setEditor({ type: 'create' })}>
-          <Plus className="size-4" />
-          {t('actions.new')}
-        </Button>
+        {canOperate && (
+          <Button onClick={() => setEditor({ type: 'create' })}>
+            <Plus className="size-4" />
+            {t('actions.new')}
+          </Button>
+        )}
       </div>
 
       {error ? (
@@ -95,31 +100,33 @@ export function Views() {
                       <p className="mt-1 text-muted text-xs">{v.description}</p>
                     )}
                   </div>
-                  <div className="flex shrink-0 gap-1">
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      onClick={() => setEditor({ type: 'edit', id: v.id })}
-                      aria-label={t('actions.editAria', { id: v.id })}
-                    >
-                      <Pencil className="size-3.5" />
-                    </Button>
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      aria-label={t('actions.deleteAria', { id: v.id })}
-                      onClick={async () => {
-                        const ok = await confirm({
-                          title: t('confirm.deleteTitle', { id: v.id }),
-                          description: t('confirm.deleteDescription'),
-                          confirmLabel: t('confirm.deleteLabel'),
-                        });
-                        if (ok) del.mutate(v.id);
-                      }}
-                    >
-                      <Trash2 className="size-3.5 text-danger" />
-                    </Button>
-                  </div>
+                  {canOperate && (
+                    <div className="flex shrink-0 gap-1">
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => setEditor({ type: 'edit', id: v.id })}
+                        aria-label={t('actions.editAria', { id: v.id })}
+                      >
+                        <Pencil className="size-3.5" />
+                      </Button>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        aria-label={t('actions.deleteAria', { id: v.id })}
+                        onClick={async () => {
+                          const ok = await confirm({
+                            title: t('confirm.deleteTitle', { id: v.id }),
+                            description: t('confirm.deleteDescription'),
+                            confirmLabel: t('confirm.deleteLabel'),
+                          });
+                          if (ok) del.mutate(v.id);
+                        }}
+                      >
+                        <Trash2 className="size-3.5 text-danger" />
+                      </Button>
+                    </div>
+                  )}
                 </CardHeader>
                 <CardContent className="space-y-2">
                   <div className="text-muted text-xs">
