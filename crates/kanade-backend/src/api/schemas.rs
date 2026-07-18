@@ -10,7 +10,7 @@
 
 use axum::Json;
 use axum::http::StatusCode;
-use kanade_shared::manifest::{Manifest, Schedule, View};
+use kanade_shared::manifest::{GroupDef, Manifest, Schedule, View};
 
 pub async fn manifest_schema() -> Result<Json<serde_json::Value>, StatusCode> {
     let schema = schemars::schema_for!(Manifest);
@@ -28,6 +28,13 @@ pub async fn schedule_schema() -> Result<Json<serde_json::Value>, StatusCode> {
 
 pub async fn view_schema() -> Result<Json<serde_json::Value>, StatusCode> {
     let schema = schemars::schema_for!(View);
+    serde_json::to_value(&schema)
+        .map(Json)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+pub async fn group_def_schema() -> Result<Json<serde_json::Value>, StatusCode> {
+    let schema = schemars::schema_for!(GroupDef);
     serde_json::to_value(&schema)
         .map(Json)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)

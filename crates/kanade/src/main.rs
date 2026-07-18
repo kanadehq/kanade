@@ -107,6 +107,17 @@ async fn main() -> Result<()> {
 }
 
 async fn dispatch(server: String, backend_url: String, command: SubCmd) -> Result<()> {
+    // #1032: `kanade group def …` is HTTP manifest CRUD (backend), unlike the
+    // rest of `kanade group` which writes `agent_groups` KV over NATS. Route
+    // it here before the NATS connect below. A non-`Def` group subcommand
+    // doesn't match this pattern and falls through to the NATS path.
+    if let SubCmd::Group(cmd::group::GroupArgs {
+        sub: cmd::group::GroupSub::Def(def),
+    }) = command
+    {
+        return cmd::group::execute_def(&backend_url, def).await;
+    }
+
     // HTTP-only subcommands (no NATS connect required).
     if let SubCmd::Exec(args) = command {
         return cmd::exec::execute(&backend_url, args).await;

@@ -1,0 +1,15 @@
+# Static group (#1032): a hand-curated set — declared and git-reviewable, which
+# is the whole point over hand-editing the imperative `agent_groups` KV. `git
+# log` answers "who added this PC, when, and did anyone review it?"; the KV
+# can't. Use for a pilot/canary ring, a lab bench, an exception list.
+#
+# A static group has `members:` and NO `query:` (the two are mutually
+# exclusive). Replace the placeholder pc_ids with real registered hostnames
+# (case-sensitive — match the exact casing the agent registered with).
+id: pilot-ring
+description: "Early-adopter pilot machines (manually curated)"
+tags: [targeting, rollout]
+members:
+  - PC-A1
+  - LAB-03
+  - DEV-07

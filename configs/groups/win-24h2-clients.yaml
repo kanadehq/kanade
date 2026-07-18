@@ -1,0 +1,15 @@
+# Dynamic group (#1032): composing several facts — client machines STILL on
+# Windows 11 24H2 (build 26100). Exactly the remediation cohort for a 25H2
+# rollout: exclude servers (which share build 26100) AND pin the build. Shows
+# that a group rule is just a SELECT — no fixed-key DSL, join/filter anything
+# the projector DB holds.
+id: win-24h2-clients
+description: "Client machines still on 24H2 (build 26100), for the 25H2 rollout"
+tags: [targeting, os, remediation]
+query: |
+  SELECT pc_id
+  FROM inventory_facts
+  WHERE job_id = 'inventory-hw'
+    AND json_extract(facts_json, '$.os_name')  NOT LIKE '%Server%'
+    AND json_extract(facts_json, '$.os_build') = '26100'
+refresh: 30m

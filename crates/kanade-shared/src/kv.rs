@@ -63,6 +63,21 @@ pub const BUCKET_VIEWS: &str = "views";
 /// `BUCKET_JOBS_YAML`): keeps comments/formatting for the SPA editor.
 pub const BUCKET_VIEWS_YAML: &str = "views_yaml";
 
+/// Group-definition catalog (#1032) — operator-registered
+/// [`GroupDef`](crate::manifest::GroupDef) resources, keyed by `group.id`.
+/// A group definition is a **declared** fleet group: either a static
+/// `members:` list (reviewable, git-tracked membership) or a dynamic
+/// `query:` (a read-only SQL that returns a `pc_id` column, resolved
+/// backend-side against the projector tables). A schedule's `target.groups`
+/// resolves these in addition to the imperative `agent_groups` membership,
+/// so the two coexist — this bucket never touches `agent_groups`. Distinct
+/// from `BUCKET_AGENT_GROUPS` (per-PC imperative membership) and from
+/// `BUCKET_VIEWS` (dashboards).
+pub const BUCKET_GROUP_DEFS: &str = "group_defs";
+/// Operator source-of-truth YAML mirror for `BUCKET_GROUP_DEFS` (same role
+/// as `BUCKET_VIEWS_YAML`): keeps comments/formatting for the SPA editor.
+pub const BUCKET_GROUP_DEFS_YAML: &str = "group_defs_yaml";
+
 /// Fleet-wide singleton settings that aren't per-agent (so they don't
 /// belong in `agent_config`'s layered scopes) and aren't per-schedule
 /// (so they don't belong in `schedules`). First and only key so far is
@@ -421,6 +436,8 @@ mod tests {
             BUCKET_SCHEDULES_YAML,
             BUCKET_VIEWS,
             BUCKET_VIEWS_YAML,
+            BUCKET_GROUP_DEFS,
+            BUCKET_GROUP_DEFS_YAML,
             BUCKET_FLEET_CONFIG,
             BUCKET_SERVER_SETTINGS,
             BUCKET_NOTIFICATIONS_READ,
