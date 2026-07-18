@@ -26,8 +26,8 @@ use async_nats::jetstream::{
 use tracing::{info, warn};
 
 use crate::kv::{
-    BUCKET_AGENT_CONFIG, BUCKET_AGENT_GROUPS, BUCKET_AGENT_META, BUCKET_AGENTS_STATE,
-    BUCKET_FLEET_CONFIG, BUCKET_GROUP_CONTACTS, BUCKET_JOBS, BUCKET_JOBS_YAML,
+    BUCKET_AGENT_CONFIG, BUCKET_AGENT_GROUPS, BUCKET_AGENT_GROUPS_DERIVED, BUCKET_AGENT_META,
+    BUCKET_AGENTS_STATE, BUCKET_FLEET_CONFIG, BUCKET_GROUP_CONTACTS, BUCKET_JOBS, BUCKET_JOBS_YAML,
     BUCKET_NOTIFICATIONS_READ, BUCKET_SCHEDULES, BUCKET_SCHEDULES_YAML, BUCKET_SCRIPT_CURRENT,
     BUCKET_SCRIPT_STATUS, BUCKET_SERVER_SETTINGS, OBJECT_AGENT_RELEASES, OBJECT_APP_PACKAGES,
     OBJECT_COLLECTIONS, OBJECT_RESULT_OUTPUT, OBJECT_SCRIPTS, STREAM_AUDIT, STREAM_EVENTS,
@@ -299,6 +299,21 @@ pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
     .await
     .with_context(|| format!("create_or_update_key_value {BUCKET_AGENT_GROUPS}"))?;
     info!(bucket = BUCKET_AGENT_GROUPS, "ready");
+
+    // agent_groups_derived — #1032①: per-pc DERIVED group membership written by
+    // the backend group-materializer (resolved from GroupDefs). Agents watch it
+    // alongside agent_groups and union. history: 1 for the same reason as
+    // agent_groups (#830 — agents read only the current value; replayed history
+    // churns subscriptions). Separate bucket so the materializer (sole writer
+    // here) never clobbers operator-set membership in agent_groups.
+    js.create_or_update_key_value(KvConfig {
+        bucket: BUCKET_AGENT_GROUPS_DERIVED.into(),
+        history: 1,
+        ..Default::default()
+    })
+    .await
+    .with_context(|| format!("create_or_update_key_value {BUCKET_AGENT_GROUPS_DERIVED}"))?;
+    info!(bucket = BUCKET_AGENT_GROUPS_DERIVED, "ready");
 
     // agent_meta — per-PC operator-managed key/value annotations
     // (edited via the SPA agent detail page / the `kanade meta` CLI, and

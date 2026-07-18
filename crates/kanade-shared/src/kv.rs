@@ -10,6 +10,25 @@ pub const BUCKET_AGENTS_STATE: &str = "agents_state";
 pub const BUCKET_AGENT_CONFIG: &str = "agent_config";
 pub const BUCKET_AGENT_GROUPS: &str = "agent_groups";
 
+/// `agent_groups_derived` — per-PC **derived** group membership (#1032
+/// follow-up ①), keyed by `pc_id`, value JSON
+/// [`AgentGroups`](crate::wire::AgentGroups) (same wire shape as
+/// `BUCKET_AGENT_GROUPS`). This is the machine-owned counterpart to the
+/// operator-owned `agent_groups`: the backend group-materializer resolves each
+/// `GroupDef`'s membership (a static `members:` list or a dynamic `query:`) and
+/// writes, per PC, the set of declared groups that PC belongs to. Agents watch
+/// this key alongside their manual `agent_groups` key and **union** the two, so
+/// a dynamic group reaches the agent-side consumers (`commands.group.<name>`
+/// subscription, `notifications.group.<name>`, `client.visible_to`).
+///
+/// Kept a **separate bucket** from `agent_groups` on purpose: the materializer
+/// is the sole writer here and the operator the sole writer there, so the two
+/// systems never clobber each other's membership (no provenance metadata, no
+/// CAS contention on one hot key) — see the module docs on the materializer.
+/// `history: 1` for the same reason as `agent_groups` (#830 — agents read only
+/// the current value; replayed history churns subscriptions).
+pub const BUCKET_AGENT_GROUPS_DERIVED: &str = "agent_groups_derived";
+
 /// `agent_meta` — per-PC operator-managed free-form key/value
 /// annotations (the primary user's name / email / department, an ad-hoc
 /// note), keyed by `pc_id`, value JSON
@@ -392,6 +411,7 @@ pub const ALL_KV_BUCKETS: &[&str] = &[
     BUCKET_AGENTS_STATE,
     BUCKET_AGENT_CONFIG,
     BUCKET_AGENT_GROUPS,
+    BUCKET_AGENT_GROUPS_DERIVED,
     BUCKET_AGENT_META,
     BUCKET_GROUP_CONTACTS,
     BUCKET_SCHEDULES,
@@ -428,6 +448,7 @@ mod tests {
             BUCKET_AGENTS_STATE,
             BUCKET_AGENT_CONFIG,
             BUCKET_AGENT_GROUPS,
+            BUCKET_AGENT_GROUPS_DERIVED,
             BUCKET_AGENT_META,
             BUCKET_GROUP_CONTACTS,
             BUCKET_SCHEDULES,

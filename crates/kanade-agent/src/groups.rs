@@ -15,7 +15,7 @@ use std::collections::HashMap;
 
 use async_nats::jetstream;
 use futures::StreamExt;
-use kanade_shared::kv::BUCKET_AGENT_GROUPS;
+use kanade_shared::kv::{BUCKET_AGENT_GROUPS, BUCKET_AGENT_GROUPS_DERIVED};
 use kanade_shared::subject;
 use kanade_shared::wire::AgentGroups;
 use tokio::task::JoinHandle;
@@ -101,7 +101,13 @@ async fn manage(
     let mut subs: HashMap<String, JoinHandle<()>> = HashMap::new();
 
     loop {
-        let kv = nats_retry::wait_for_kv(
+        // #1032①: the agent's effective membership is the UNION of two
+        // per-PC buckets — the operator-owned `agent_groups` (manual
+        // `kanade group add`) and the materializer-owned
+        // `agent_groups_derived` (declared/dynamic GroupDefs). A group
+        // reaches this agent via either. wait_for_kv retries until each
+        // bucket is available.
+        let manual_kv = nats_retry::wait_for_kv(
             &js,
             &client,
             &staleness,
@@ -109,50 +115,48 @@ async fn manage(
             "agent_groups",
         )
         .await;
+        let derived_kv = nats_retry::wait_for_kv(
+            &js,
+            &client,
+            &staleness,
+            BUCKET_AGENT_GROUPS_DERIVED,
+            "agent_groups_derived",
+        )
+        .await;
 
-        // Re-prime on every (re)connect: pick up edits that landed
+        // Re-prime both on every (re)connect: pick up edits that landed
         // while we were disconnected.
         //
         // Gemini #147 fix: a transient `kv.get` error must NOT fall
-        // through with `desired = []`, which would diff against
+        // through with an empty set, which would diff against
         // `current=subs.keys()` and abort every per-group SUB the
         // agent is running. Pause + reopen instead so the membership
         // stays intact until the next read succeeds.
-        let desired = match kv.get(&pc_id).await {
-            Ok(Some(bytes)) => parse_groups(&bytes),
-            Ok(None) => {
-                info!(pc_id = %pc_id, "no agent_groups entry — starting with empty membership");
-                Vec::new()
-            }
-            Err(e) => {
-                warn!(error = %e, "initial agent_groups KV read failed; pausing and reopening");
-                nats_retry::reopen_pause().await;
-                continue;
-            }
+        let Some(mut manual) = prime(&manual_kv, &pc_id, "agent_groups").await else {
+            nats_retry::reopen_pause().await;
+            continue;
         };
-        let current: Vec<String> = subs.keys().cloned().collect();
-        let delta = diff_groups(&current, &desired);
-        if !delta.is_empty() {
-            info!(
-                add = ?delta.to_subscribe,
-                drop = ?delta.to_unsubscribe,
-                "agent_groups (re-)prime — reconciling subscriptions",
-            );
-            apply_delta(
-                &delta,
-                &mut subs,
-                &client,
-                &pc_id,
-                &dedup,
-                &staleness,
-                &script_cache,
-                &check_sink,
-            )
-            .await;
-        }
-        let _ = groups_tx.send(desired);
+        let Some(mut derived) = prime(&derived_kv, &pc_id, "agent_groups_derived").await else {
+            nats_retry::reopen_pause().await;
+            continue;
+        };
 
-        let mut watch = match kv.watch(&pc_id).await {
+        reconcile_and_publish(
+            &mut subs,
+            &manual,
+            &derived,
+            &client,
+            &pc_id,
+            &dedup,
+            &staleness,
+            &script_cache,
+            &check_sink,
+            &groups_tx,
+            "prime",
+        )
+        .await;
+
+        let mut manual_watch = match manual_kv.watch(&pc_id).await {
             Ok(w) => w,
             Err(e) => {
                 warn!(error = %e, "watch agent_groups KV key failed; reopening");
@@ -160,44 +164,129 @@ async fn manage(
                 continue;
             }
         };
-        while let Some(entry) = watch.next().await {
-            let bytes = match entry {
-                Ok(e) => e.value,
-                Err(e) => {
-                    warn!(error = %e, "agent_groups watch entry");
-                    continue;
-                }
+        let mut derived_watch = match derived_kv.watch(&pc_id).await {
+            Ok(w) => w,
+            Err(e) => {
+                warn!(error = %e, "watch agent_groups_derived KV key failed; reopening");
+                nats_retry::reopen_pause().await;
+                continue;
+            }
+        };
+
+        // Fold both watch streams. Either stream ending ⇒ break to reopen
+        // BOTH (the reconnect path above re-primes, so no update is lost).
+        // A per-entry error is logged and skipped without reconciling.
+        loop {
+            let changed = tokio::select! {
+                entry = manual_watch.next() => match entry {
+                    Some(Ok(e)) => { manual = decode_entry(&e); true }
+                    Some(Err(e)) => { warn!(error = %e, "agent_groups watch entry"); false }
+                    None => { warn!("agent_groups watch ended; reopening"); break; }
+                },
+                entry = derived_watch.next() => match entry {
+                    Some(Ok(e)) => { derived = decode_entry(&e); true }
+                    Some(Err(e)) => { warn!(error = %e, "agent_groups_derived watch entry"); false }
+                    None => { warn!("agent_groups_derived watch ended; reopening"); break; }
+                },
             };
-            let desired = parse_groups(&bytes);
-            let current: Vec<String> = subs.keys().cloned().collect();
-            let delta = diff_groups(&current, &desired);
-            if !delta.is_empty() {
-                info!(
-                    add = ?delta.to_subscribe,
-                    drop = ?delta.to_unsubscribe,
-                    "agent_groups update — reconciling subscriptions",
-                );
-                apply_delta(
-                    &delta,
+            if changed {
+                reconcile_and_publish(
                     &mut subs,
+                    &manual,
+                    &derived,
                     &client,
                     &pc_id,
                     &dedup,
                     &staleness,
                     &script_cache,
                     &check_sink,
+                    &groups_tx,
+                    "update",
                 )
                 .await;
             }
-            // Always publish — local_scheduler cares about the
-            // membership value itself, not whether *core sub*
-            // subscriptions changed (they can be a no-op when
-            // membership stayed the same modulo ordering).
-            let _ = groups_tx.send(desired);
         }
-        warn!("agent_groups watch ended; reopening");
         nats_retry::reopen_pause().await;
     }
+}
+
+/// Read + decode one PC's membership from a bucket. `None` signals a transient
+/// error (caller should reopen — NOT treat as empty, which would abort live
+/// SUBs, Gemini #147); an absent key resolves to an empty set.
+async fn prime(kv: &jetstream::kv::Store, pc_id: &str, bucket: &str) -> Option<Vec<String>> {
+    match kv.get(pc_id).await {
+        Ok(Some(bytes)) => Some(parse_groups(&bytes)),
+        Ok(None) => Some(Vec::new()),
+        Err(e) => {
+            warn!(error = %e, bucket, "initial membership KV read failed; pausing and reopening");
+            None
+        }
+    }
+}
+
+/// Decode a KV watch entry into a membership list. A `Delete`/`Purge` (the
+/// materializer clearing a PC that left every declared group) reads as an
+/// empty set without a spurious "did not parse" warning.
+fn decode_entry(entry: &jetstream::kv::Entry) -> Vec<String> {
+    use async_nats::jetstream::kv::Operation;
+    match entry.operation {
+        Operation::Put => parse_groups(&entry.value),
+        Operation::Delete | Operation::Purge => Vec::new(),
+    }
+}
+
+/// The agent's effective group set: `manual ∪ derived`, sorted + deduped.
+/// `diff_groups` also dedups, but publishing a clean set on `groups_tx` keeps
+/// every downstream consumer (local_scheduler / notify_bus / command_replay)
+/// on a canonical list.
+pub fn union_groups(manual: &[String], derived: &[String]) -> Vec<String> {
+    let mut v: Vec<String> = manual.iter().chain(derived).cloned().collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// Compute the union, reconcile `commands.group.<name>` subscriptions to it,
+/// and publish the effective set on `groups_tx` (which every other agent
+/// consumer reads). Always publishes — consumers care about the value itself,
+/// not whether the SUB set changed.
+#[allow(clippy::too_many_arguments)]
+async fn reconcile_and_publish(
+    subs: &mut HashMap<String, JoinHandle<()>>,
+    manual: &[String],
+    derived: &[String],
+    client: &async_nats::Client,
+    pc_id: &str,
+    dedup: &std::sync::Arc<tokio::sync::Mutex<crate::commands::DedupCache>>,
+    staleness: &crate::staleness::Tracker,
+    script_cache: &crate::script_cache::ScriptCache,
+    check_sink: &crate::check_cache::CheckSink,
+    groups_tx: &tokio::sync::watch::Sender<Vec<String>>,
+    reason: &str,
+) {
+    let desired = union_groups(manual, derived);
+    let current: Vec<String> = subs.keys().cloned().collect();
+    let delta = diff_groups(&current, &desired);
+    if !delta.is_empty() {
+        info!(
+            add = ?delta.to_subscribe,
+            drop = ?delta.to_unsubscribe,
+            reason,
+            "reconciling group subscriptions (manual ∪ derived)",
+        );
+        apply_delta(
+            &delta,
+            subs,
+            client,
+            pc_id,
+            dedup,
+            staleness,
+            script_cache,
+            check_sink,
+        )
+        .await;
+    }
+    let _ = groups_tx.send(desired);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -289,6 +378,26 @@ pub fn diff_groups<S: AsRef<str>, T: AsRef<str>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn union_merges_dedups_and_sorts() {
+        // manual ∪ derived, with an overlap — a group present in both appears
+        // once, output is sorted.
+        let manual = vec!["pilot-ring".to_string(), "clients".to_string()];
+        let derived = vec!["clients".to_string(), "win-24h2".to_string()];
+        assert_eq!(
+            union_groups(&manual, &derived),
+            vec!["clients", "pilot-ring", "win-24h2"]
+        );
+    }
+
+    #[test]
+    fn union_handles_empty_sides() {
+        let manual = vec!["a".to_string()];
+        assert_eq!(union_groups(&manual, &[]), vec!["a"]);
+        assert_eq!(union_groups(&[], &manual), vec!["a"]);
+        assert!(union_groups(&[], &[]).is_empty());
+    }
 
     #[test]
     fn no_change_when_sets_match() {

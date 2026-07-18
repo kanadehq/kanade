@@ -20,14 +20,70 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use futures::{StreamExt, TryStreamExt};
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use kanade_shared::kv::{BUCKET_AGENT_CONFIG, BUCKET_AGENT_GROUPS, parse_agent_config_group_key};
+use kanade_shared::kv::{
+    BUCKET_AGENT_CONFIG, BUCKET_AGENT_GROUPS, BUCKET_AGENT_GROUPS_DERIVED,
+    parse_agent_config_group_key,
+};
 use kanade_shared::wire::AgentGroups;
 
 use super::AppState;
+
+/// Collect every `pc_id -> AgentGroups` row from one membership bucket,
+/// best-effort (an unopenable bucket or a per-key read error contributes
+/// nothing). Shared by the manual `agent_groups` and materialized
+/// `agent_groups_derived` walks.
+async fn collect_membership_rows(state: &AppState, bucket: &str) -> Vec<(String, AgentGroups)> {
+    let Ok(kv) = state.jetstream.get_key_value(bucket).await else {
+        return Vec::new();
+    };
+    let mut pc_ids: Vec<String> = Vec::new();
+    if let Ok(mut keys) = kv.keys().await {
+        while let Some(k) = keys.next().await {
+            match k {
+                Ok(k) => pc_ids.push(k),
+                Err(e) => warn!(error = %e, bucket, "membership keys()"),
+            }
+        }
+    }
+    // Fetch the per-PC rows concurrently (bounded) — the dominant cost on a
+    // large fleet. A per-PC read error degrades that PC to "no groups".
+    const READ_CONCURRENCY: usize = 16;
+    futures::stream::iter(pc_ids)
+        .map(|pc_id| {
+            let kv = kv.clone();
+            async move {
+                let g = read_or_default(&kv, &pc_id).await.ok()?;
+                Some((pc_id, g))
+            }
+        })
+        .buffer_unordered(READ_CONCURRENCY)
+        .filter_map(|x| async move { x })
+        .collect()
+        .await
+}
+
+/// The fleet's **effective** membership `pc_id -> sorted [group]` — the union of
+/// the operator-owned `agent_groups` and the materializer-owned
+/// `agent_groups_derived` (#1032①). A PC in a dynamic group via the derived
+/// bucket therefore counts in the group overview and the notification audience,
+/// exactly as a manually-assigned PC does. PCs with no groups are present with
+/// an empty list; callers that want only members filter that out.
+async fn effective_membership(state: &AppState) -> HashMap<String, Vec<String>> {
+    let mut merged: HashMap<String, BTreeSet<String>> = HashMap::new();
+    for bucket in [BUCKET_AGENT_GROUPS, BUCKET_AGENT_GROUPS_DERIVED] {
+        for (pc_id, g) in collect_membership_rows(state, bucket).await {
+            merged.entry(pc_id).or_default().extend(g.groups);
+        }
+    }
+    merged
+        .into_iter()
+        .map(|(pc, set)| (pc, set.into_iter().collect()))
+        .collect()
+}
 
 /// One row in the group-centric overview: the inverse view of the
 /// per-PC `agent_groups` KV rows, plus whether a `groups.<name>`
@@ -55,44 +111,13 @@ pub struct GroupsOverview {
 pub async fn list_all_groups(
     State(state): State<AppState>,
 ) -> Result<Json<GroupsOverview>, (StatusCode, String)> {
-    // Pass 1 — membership: walk agent_groups, invert pc -> groups
-    // into group -> [pc_ids].
-    let kv = open_bucket(&state).await?;
-    let mut pc_ids: Vec<String> = Vec::new();
-    match kv.keys().await {
-        Ok(mut keys) => {
-            while let Some(k) = keys.next().await {
-                match k {
-                    Ok(k) => pc_ids.push(k),
-                    Err(e) => warn!(error = %e, "agent_groups keys()"),
-                }
-            }
-        }
-        Err(e) => {
-            // Empty bucket on a fresh broker fails keys() on some
-            // async-nats versions — degrade to "no members".
-            warn!(error = %e, "agent_groups keys() for overview");
-        }
-    }
-
-    // Fetch every per-PC row concurrently (bounded) instead of one
-    // round-trip at a time — the dominant cost on a large fleet.
-    const READ_CONCURRENCY: usize = 16;
-    let rows: Vec<(String, AgentGroups)> = futures::stream::iter(pc_ids)
-        .map(|pc_id| {
-            let kv = kv.clone();
-            async move {
-                let g = read_or_default(&kv, &pc_id).await?;
-                Ok::<_, (StatusCode, String)>((pc_id, g))
-            }
-        })
-        .buffer_unordered(READ_CONCURRENCY)
-        .try_collect()
-        .await?;
-
+    // Pass 1 — membership: the effective (manual ∪ derived, #1032①) map,
+    // inverted pc -> groups into group -> [pc_ids]. Best-effort: an
+    // unavailable bucket degrades to "no members" (the config-only / contacts
+    // passes below still surface those groups).
     let mut by_group: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (pc_id, g) in rows {
-        for name in g.groups {
+    for (pc_id, groups) in effective_membership(&state).await {
+        for name in groups {
             by_group.entry(name).or_default().push(pc_id.clone());
         }
     }
@@ -150,35 +175,14 @@ pub async fn list_all_groups(
 /// explicitly-addressed PCs, which is a safe partial answer for a
 /// read-only confirmation view.
 pub(crate) async fn membership_map(state: &AppState) -> HashMap<String, Vec<String>> {
-    let Ok(kv) = open_bucket(state).await else {
-        return HashMap::new();
-    };
-    let mut pc_ids: Vec<String> = Vec::new();
-    if let Ok(mut keys) = kv.keys().await {
-        while let Some(k) = keys.next().await {
-            match k {
-                Ok(k) => pc_ids.push(k),
-                Err(e) => warn!(error = %e, "membership_map keys()"),
-            }
-        }
-    }
-    // Fetch the per-PC rows concurrently (bounded) rather than one
-    // round-trip at a time — the dominant cost on a large fleet, same as
-    // `list_all_groups`. A per-PC read error degrades that PC to "no
-    // groups" rather than failing the whole map.
-    const READ_CONCURRENCY: usize = 16;
-    futures::stream::iter(pc_ids)
-        .map(|pc_id| {
-            let kv = kv.clone();
-            async move {
-                let g = read_or_default(&kv, &pc_id).await.ok()?;
-                (!g.groups.is_empty()).then_some((pc_id, g.groups))
-            }
-        })
-        .buffer_unordered(READ_CONCURRENCY)
-        .filter_map(|x| async move { x })
-        .collect()
+    // Effective membership (manual ∪ derived, #1032①), dropping PCs with no
+    // groups so a group-targeted notification's audience counts a PC that is a
+    // member only via a dynamic group.
+    effective_membership(state)
         .await
+        .into_iter()
+        .filter(|(_, groups)| !groups.is_empty())
+        .collect()
 }
 
 pub async fn list_groups(
