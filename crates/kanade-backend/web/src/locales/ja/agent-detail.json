@@ -10,6 +10,17 @@
     "agent": "エージェントバージョン",
     "lastHeartbeat": "最終ハートビート"
   },
+  "customMeta": {
+    "title": "付加情報",
+    "intro": "この端末に運用者が付ける任意のキー/値情報（利用者氏名・メール・所属・メモなど）。operator が編集できます。",
+    "keyPlaceholder": "項目名（例: 氏名）",
+    "valuePlaceholder": "値",
+    "add": "行を追加",
+    "save": "保存",
+    "saved": "付加情報を保存しました",
+    "empty": "付加情報は未設定です。",
+    "removeRow": "行を削除"
+  },
   "perf": {
     "title": "ホスト パフォーマンス",
     "intro": "kanade-agent の host_perf ループが {{interval}} ごとに収集する、 PC 全体の CPU / メモリ / ディスク I/O / ネットワーク。 0.40 より前のエージェントは未送信のため、 アップグレードまでチャートは空になります。",

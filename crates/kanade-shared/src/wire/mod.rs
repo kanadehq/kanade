@@ -1,5 +1,6 @@
 mod agent_config;
 mod agent_groups;
+mod agent_meta;
 mod command;
 mod event;
 mod group_contacts;
@@ -16,6 +17,7 @@ mod staleness;
 
 pub use agent_config::{ConfigScope, EffectiveConfig, ResolutionWarning, resolve};
 pub use agent_groups::AgentGroups;
+pub use agent_meta::{AgentMeta, MetaEntry};
 pub use command::{Command, FinalizeCommand, RetrySpec, RunAs, Shell};
 pub use event::EventStarted;
 pub use group_contacts::GroupContacts;

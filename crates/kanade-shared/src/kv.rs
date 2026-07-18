@@ -10,6 +10,16 @@ pub const BUCKET_AGENTS_STATE: &str = "agents_state";
 pub const BUCKET_AGENT_CONFIG: &str = "agent_config";
 pub const BUCKET_AGENT_GROUPS: &str = "agent_groups";
 
+/// `agent_meta` — per-PC operator-managed free-form key/value
+/// annotations (the primary user's name / email / department, an ad-hoc
+/// note), keyed by `pc_id`, value JSON
+/// [`AgentMeta`](crate::wire::AgentMeta). Durable operator metadata —
+/// distinct from the volatile `agents` heartbeat projection and from
+/// `agent_groups` membership. Edited via the SPA agent detail page or the
+/// `kanade meta` CLI (and typically bulk-populated by an operator AD-sync
+/// job that resolves the last-logon user's directory attributes).
+pub const BUCKET_AGENT_META: &str = "agent_meta";
+
 /// `group_contacts` — per-group notification email addresses, keyed by
 /// group name, value JSON [`GroupContacts`](crate::wire::GroupContacts).
 /// Operator-managed via the SPA Groups page. Distinct from
@@ -367,6 +377,7 @@ pub const ALL_KV_BUCKETS: &[&str] = &[
     BUCKET_AGENTS_STATE,
     BUCKET_AGENT_CONFIG,
     BUCKET_AGENT_GROUPS,
+    BUCKET_AGENT_META,
     BUCKET_GROUP_CONTACTS,
     BUCKET_SCHEDULES,
     BUCKET_JOBS,
@@ -402,6 +413,7 @@ mod tests {
             BUCKET_AGENTS_STATE,
             BUCKET_AGENT_CONFIG,
             BUCKET_AGENT_GROUPS,
+            BUCKET_AGENT_META,
             BUCKET_GROUP_CONTACTS,
             BUCKET_SCHEDULES,
             BUCKET_JOBS,
