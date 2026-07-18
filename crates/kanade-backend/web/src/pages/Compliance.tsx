@@ -36,6 +36,9 @@ type CheckRow = {
   status: 'ok' | 'warn' | 'fail' | 'unknown' | string;
   detail: string | null;
   recorded_at: string;
+  // #1032②: true when older than the staleness window (only ever set in the
+  // include_stale response — the default view filters stale rows out).
+  stale?: boolean;
 };
 
 // #497: the API now returns attention rows (status != ok) plus
@@ -56,6 +59,10 @@ type CheckCounts = {
 type ChecksResponse = {
   counts: CheckCounts[];
   rows: CheckRow[];
+  // #1032②: active staleness window in days (0 = disabled).
+  stale_days: number;
+  // #1032②: how many attention rows are stale (hidden from the default view).
+  stale_attention: number;
 };
 
 type BadgeVariant = 'success' | 'amber' | 'danger' | 'default';
@@ -81,12 +88,17 @@ type CheckGroup = {
 // #497: per-card ok-rows expansion. Mounted only after the operator
 // asks for the healthy bulk of one check; the response is the full
 // check (attention + ok) so the table swaps wholesale.
-function OkRows({ check }: { check: string }) {
+function OkRows({ check, showStale }: { check: string; showStale: boolean }) {
   const q = useQuery({
-    queryKey: ['checks', check, 'full'],
+    // #1032②: mirror the page's include_stale so the expansion's ok rows
+    // match the card's `ok` count — with stale revealed, counts.ok includes
+    // stale-but-ok rows, so this fetch must too or "show N ok" over-promises.
+    queryKey: ['checks', check, 'full', showStale],
     queryFn: () =>
       apiFetch<ChecksResponse>(
-        `/api/checks?check=${encodeURIComponent(check)}&include_ok=true`,
+        `/api/checks?check=${encodeURIComponent(check)}&include_ok=true${
+          showStale ? '&include_stale=true' : ''
+        }`,
       ),
     staleTime: 60_000,
   });
@@ -118,9 +130,14 @@ export function Compliance() {
   const { hasRole } = useAuth();
   const qc = useQueryClient();
   const confirm = useConfirm();
+  // #1032②: reveal stale rows (PCs no longer running the check — out of scope
+  // via a dynamic group, decommissioned, …). Hidden by default so they don't
+  // read as "still failing"; the toggle refetches with include_stale=true.
+  const [showStale, setShowStale] = useState(false);
   const q = useQuery({
-    queryKey: ['checks'],
-    queryFn: () => apiFetch<ChecksResponse>('/api/checks'),
+    queryKey: ['checks', showStale],
+    queryFn: () =>
+      apiFetch<ChecksResponse>(`/api/checks${showStale ? '?include_stale=true' : ''}`),
     // Mirror the other live-data views (Inventory: 60s) so a fixed
     // host doesn't keep showing failing until the operator refocuses.
     refetchInterval: 60_000,
@@ -188,6 +205,27 @@ export function Compliance() {
         <Badge variant="violet">{t('checkBadge', { count: groups.length })}</Badge>
       </div>
       <p className="text-sm text-muted">{t('description')}</p>
+
+      {/* #1032②: out-of-scope (stale) rows are hidden by default; let the
+          operator reveal them (greyed). Shown whenever any exist, or while
+          revealed so it can be toggled back off. */}
+      {((q.data?.stale_attention ?? 0) > 0 || showStale) && (
+        <p className="text-sm text-muted">
+          {showStale
+            ? t('staleShown')
+            : t('staleHidden', {
+                count: q.data?.stale_attention ?? 0,
+                days: q.data?.stale_days ?? 0,
+              })}{' '}
+          <button
+            type="button"
+            className="underline"
+            onClick={() => setShowStale((v) => !v)}
+          >
+            {showStale ? t('hideStale') : t('showStaleAction')}
+          </button>
+        </p>
+      )}
 
       {groups.length === 0 ? (
         <Card>
@@ -283,7 +321,9 @@ export function Compliance() {
                       </TableCell>
                     </TableRow>
                   )}
-                  {expanded.has(g.name) && <OkRows check={g.name} />}
+                  {expanded.has(g.name) && (
+                    <OkRows check={g.name} showStale={showStale} />
+                  )}
                 </TableBody>
               </Table>
             </CardContent>
@@ -297,12 +337,21 @@ export function Compliance() {
 function CheckTableRow({ row: r }: { row: CheckRow }) {
   const { t } = useTranslation('compliance');
   return (
-    <TableRow>
+    // #1032②: a stale row (PC no longer running this check) is muted so it
+    // reads as informational history, not a live failure.
+    <TableRow className={r.stale ? 'opacity-60' : undefined}>
       <TableCell label={t('col.pc')} className="font-medium">{r.pc_id}</TableCell>
       <TableCell label={t('col.status')}>
-        <Badge variant={STATUS_VARIANT[r.status] ?? 'default'}>
-          {t(`status.${r.status}`, { defaultValue: r.status })}
-        </Badge>
+        <div className="flex items-center gap-1">
+          <Badge variant={r.stale ? 'default' : (STATUS_VARIANT[r.status] ?? 'default')}>
+            {t(`status.${r.status}`, { defaultValue: r.status })}
+          </Badge>
+          {r.stale && (
+            <Badge variant="default" title={t('staleBadgeHint')}>
+              {t('staleBadge')}
+            </Badge>
+          )}
+        </div>
       </TableCell>
       <TableCell label={t('col.detail')} className="text-muted">{r.detail ?? '—'}</TableCell>
       <TableCell label={t('col.updated')} className="whitespace-nowrap text-muted">

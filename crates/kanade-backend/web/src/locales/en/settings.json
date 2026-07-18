@@ -53,6 +53,14 @@
       "unsetPlaceholder": "default",
       "blankHint": "Leave blank to use the default (shown faintly, currently 24 hours). Allowed range is 1–8760 hours (up to 365 days)."
     },
+    "checkStale": {
+      "title": "Compliance staleness window",
+      "description": "How long a check result may go without a fresh report before the Compliance page treats it as out of scope and hides it (and drops it from the counts). A PC that stops running a check — excluded via a dynamic group, decommissioned, or its schedule removed — drops off after this window instead of showing as permanently failing. The row is never deleted; it's just hidden (revealable on the Compliance page).",
+      "label": "Hide checks with no result for",
+      "unit": "days",
+      "unsetPlaceholder": "default",
+      "blankHint": "Leave blank to use the default (shown faintly, currently 30 days). Set 0 to disable (show every row). Allowed range is 0–3650 days."
+    },
     "controllerGroup": {
       "title": "Controller group (trusted runners)",
       "description": "The agent group whose members may run `tier: controller` jobs (e.g. a `feed:` job that fetches an external URL). These jobs are never dispatched to employee endpoints — only to members of this group.",

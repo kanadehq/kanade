@@ -32,6 +32,11 @@ const MAX_COLLECT_RETENTION_DAYS = 3650;
 // feedback only.
 const MAX_SESSION_TTL_HOURS = 8_760;
 
+// Mirrors `MAX_CHECK_STATUS_STALE_DAYS` (kanade_shared::wire::server_settings):
+// 10 years. The backend PUT enforces the same bound; this is client-side
+// feedback only. Unlike the others, 0 is VALID here (disables staleness).
+const MAX_CHECK_STATUS_STALE_DAYS = 3650;
+
 /// SMTP transport security — mirrors `kanade_shared::config::MailEncryption`
 /// (serialised lowercase).
 type MailEncryption = 'starttls' | 'tls' | 'none';
@@ -56,6 +61,7 @@ interface ServerSettings {
   agent_prune_days: number | null;
   collect_retention_days: number | null;
   session_ttl_hours: number | null;
+  check_status_stale_days: number | null;
   controller_group: string | null;
   mail: MailSettings | null;
 }
@@ -237,6 +243,9 @@ function ServerTab() {
   // built-in default (24 h, shown as the placeholder) — like collect
   // retention, blank does NOT disable sessions.
   const [sessionTtl, setSessionTtl] = useState('');
+  // #1032②: days a check_status row may go stale before the Compliance page
+  // hides it. Blank = unset (built-in 30d default); 0 disables staleness.
+  const [staleDays, setStaleDays] = useState('');
   // Trusted runner group for `tier: controller` jobs. Blank = unset
   // (controller-tier jobs run nowhere — fail-safe).
   const [controllerGroup, setControllerGroup] = useState('');
@@ -259,6 +268,11 @@ function ServerTab() {
       );
       setSessionTtl(
         settings.data.session_ttl_hours == null ? '' : String(settings.data.session_ttl_hours),
+      );
+      setStaleDays(
+        settings.data.check_status_stale_days == null
+          ? ''
+          : String(settings.data.check_status_stale_days),
       );
       // Trim on seed so an unedited reload of a stored value with stray
       // whitespace doesn't read as dirty (the draft is compared trimmed).
@@ -359,6 +373,18 @@ function ServerTab() {
       sessionTtlParsed >= 1 &&
       sessionTtlParsed <= MAX_SESSION_TTL_HOURS);
 
+  // check_status_stale_days: blank → unset (null → built-in 30d default). A
+  // non-blank value must be a whole number in [0, MAX]. Unlike the others, 0
+  // is VALID — it disables staleness (every row shown).
+  const staleTrimmed = staleDays.trim();
+  const staleParsed = Number(staleTrimmed);
+  const staleValue: number | null = staleTrimmed === '' ? null : staleParsed;
+  const staleValid =
+    staleTrimmed === '' ||
+    (Number.isInteger(staleParsed) &&
+      staleParsed >= 0 &&
+      staleParsed <= MAX_CHECK_STATUS_STALE_DAYS);
+
   // controller_group: blank → unset (null). Any non-blank group name is
   // valid here; the backend resolves membership at dispatch time.
   const cgTrimmed = controllerGroup.trim();
@@ -408,18 +434,20 @@ function ServerTab() {
   // One save for the whole document. The PUT merges per-field, but the SPA
   // always sends every field it knows, so an unchanged one is re-sent
   // as-is. `dirty` if any field diverges from the stored doc.
-  const valid = pruneValid && collectValid && sessionTtlValid && mailValid;
+  const valid = pruneValid && collectValid && sessionTtlValid && staleValid && mailValid;
   const dirty =
     settings.data != null &&
     (pruneValue !== settings.data.agent_prune_days ||
       collectValue !== settings.data.collect_retention_days ||
       sessionTtlValue !== settings.data.session_ttl_hours ||
+      staleValue !== settings.data.check_status_stale_days ||
       controllerValue !== (settings.data.controller_group ?? null) ||
       mailDirty);
   const doc: ServerSettings = {
     agent_prune_days: pruneValue,
     collect_retention_days: collectValue,
     session_ttl_hours: sessionTtlValue,
+    check_status_stale_days: staleValue,
     controller_group: controllerValue,
     mail: mailValue,
   };
@@ -444,6 +472,12 @@ function ServerTab() {
     defaults.data && defaults.data.session_ttl_hours != null
       ? String(defaults.data.session_ttl_hours)
       : t('server.sessionTtl.unsetPlaceholder');
+  // check_status_stale_days has a real built-in default (30 d); a blank field
+  // resolves to it.
+  const stalePlaceholder =
+    defaults.data && defaults.data.check_status_stale_days != null
+      ? String(defaults.data.check_status_stale_days)
+      : t('server.checkStale.unsetPlaceholder');
 
   return (
     <div className="space-y-4">
@@ -538,6 +572,35 @@ function ServerTab() {
               <span className="text-muted text-sm">{t('server.sessionTtl.unit')}</span>
             </div>
             <p className="text-muted text-xs">{t('server.sessionTtl.blankHint')}</p>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="max-w-xl">
+        <CardHeader>
+          <CardTitle>{t('server.checkStale.title')}</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <p className="text-muted text-sm">{t('server.checkStale.description')}</p>
+          <div className="space-y-1">
+            <Label htmlFor="check-stale-days">{t('server.checkStale.label')}</Label>
+            <div className="flex items-center gap-2">
+              <Input
+                id="check-stale-days"
+                type="number"
+                min={0}
+                max={MAX_CHECK_STATUS_STALE_DAYS}
+                step={1}
+                inputMode="numeric"
+                value={staleDays}
+                placeholder={stalePlaceholder}
+                disabled={!canOperate || settings.isLoading}
+                onChange={(e) => setStaleDays(e.target.value)}
+                className="w-32"
+              />
+              <span className="text-muted text-sm">{t('server.checkStale.unit')}</span>
+            </div>
+            <p className="text-muted text-xs">{t('server.checkStale.blankHint')}</p>
           </div>
         </CardContent>
       </Card>

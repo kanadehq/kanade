@@ -39,6 +39,16 @@ pub struct CheckRow {
     /// `NOT NULL` in the schema, so a required field — a decode failure
     /// surfaces as a 500 rather than being silently masked to `None`.
     pub recorded_at: DateTime<Utc>,
+    /// #1032②: `true` when this row's `recorded_at` is older than the
+    /// staleness window (`check_status_stale_days`) — the PC stopped running
+    /// this check (out of scope via a dynamic group, decommissioned, schedule
+    /// removed). Computed in the handler, not a DB column (`#[sqlx(default)]`
+    /// so `query_as` doesn't require it). Only ever `true` in the
+    /// `include_stale` response — the default view filters stale rows out — so
+    /// the SPA greys / badges these when the operator chooses to reveal them.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub stale: bool,
 }
 
 /// Per-check fleet rollup — complete regardless of row filtering, so
@@ -59,6 +69,13 @@ pub struct CheckCounts {
 pub struct ChecksResponse {
     pub counts: Vec<CheckCounts>,
     pub rows: Vec<CheckRow>,
+    /// #1032②: the active staleness window in days (`0` = disabled). Lets the
+    /// SPA label the "out of scope" affordance with the current threshold.
+    pub stale_days: u32,
+    /// #1032②: how many **attention** (non-ok) rows are stale — hidden from the
+    /// default view. Drives the SPA's "N out-of-scope (stale) — show" toggle.
+    /// `0` when staleness is disabled.
+    pub stale_attention: usize,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -69,6 +86,12 @@ pub struct ChecksParams {
     /// Include `ok` rows. Default false: the attention rows are the
     /// page's purpose, and the ok bulk dominates a healthy fleet.
     pub include_ok: Option<bool>,
+    /// #1032②: include **stale** rows (older than the staleness window) in
+    /// rows + counts. Default false: a stale row is a PC no longer running the
+    /// check, so the default view hides it (and drops it from the counts) so a
+    /// decommissioned / out-of-scope PC stops showing as failing. The SPA sets
+    /// this when the operator reveals the hidden rows.
+    pub include_stale: Option<bool>,
 }
 
 /// Row query shared verbatim with the unit tests, so the tests can't
@@ -78,6 +101,7 @@ const ROWS_SQL: &str = "SELECT pc_id, check_name, label, status, detail, recorde
          FROM check_status
          WHERE (?1 IS NULL OR check_name = ?1)
            AND (?2 OR status != 'ok')
+           AND (?3 OR ?4 IS NULL OR recorded_at >= ?4)
          ORDER BY check_name, pc_id";
 
 /// Delete query shared with the unit tests (same rationale as
@@ -94,11 +118,26 @@ pub async fn list_all(
     Query(params): Query<ChecksParams>,
 ) -> Result<Json<ChecksResponse>, (StatusCode, String)> {
     let include_ok = params.include_ok.unwrap_or(false);
+    let include_stale = params.include_stale.unwrap_or(false);
     let check = params
         .check
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty());
+
+    // #1032②: the staleness cutoff. `check_status_stale_days` (server_settings,
+    // default 30) is the age past which a row is stale; `0` disables it. A
+    // failure to read settings degrades to disabled (show everything) rather
+    // than hiding data on a transient blip.
+    let stale_days = match crate::api::server_settings::load(&state).await {
+        Ok(s) => s.effective_check_status_stale_days(),
+        Err(e) => {
+            warn!(error = %e, "checks: server_settings load failed; staleness disabled for this response");
+            0
+        }
+    };
+    let cutoff: Option<DateTime<Utc>> =
+        (stale_days > 0).then(|| Utc::now() - chrono::Duration::days(stale_days as i64));
 
     // Counts first: complete per (check, status) regardless of the
     // row filter, so the badges can't drift from reality. Typed
@@ -115,13 +154,19 @@ pub async fn list_all(
         status: String,
         n: i64,
     }
+    // Counts exclude stale rows by the same rule as the row list (unless
+    // `include_stale`), so the badges reflect the IN-SCOPE fleet — a
+    // decommissioned PC frozen at `fail` no longer inflates the fail badge.
     let count_rows: Vec<CountRow> = sqlx::query_as(
         "SELECT check_name, MAX(label) AS label, status, COUNT(*) AS n
          FROM check_status
          WHERE (?1 IS NULL OR check_name = ?1)
+           AND (?2 OR ?3 IS NULL OR recorded_at >= ?3)
          GROUP BY check_name, status",
     )
     .bind(check)
+    .bind(include_stale)
+    .bind(cutoff)
     .fetch_all(&state.pool)
     .await
     .map_err(|e| {
@@ -159,16 +204,53 @@ pub async fn list_all(
     // `query_as` propagates real sqlx decode errors (type mismatch,
     // missing column) instead of the `try_get(...).ok()` idiom that
     // silently defaults them away.
-    let rows: Vec<CheckRow> = sqlx::query_as(ROWS_SQL)
+    let mut rows: Vec<CheckRow> = sqlx::query_as(ROWS_SQL)
         .bind(check)
         .bind(include_ok)
+        .bind(include_stale)
+        .bind(cutoff)
         .fetch_all(&state.pool)
         .await
         .map_err(|e| {
             warn!(error = %e, "check_status query");
             (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
         })?;
-    Ok(Json(ChecksResponse { counts, rows }))
+    // Flag stale rows (only present when `include_stale`) so the SPA can grey /
+    // badge them. `stale` is not a DB column — computed against the cutoff.
+    if let Some(c) = cutoff {
+        for r in &mut rows {
+            r.stale = r.recorded_at < c;
+        }
+    }
+
+    // Count of stale ATTENTION rows — how many non-ok rows the default view
+    // hides. Drives the SPA "N out-of-scope — show" affordance. `0` when
+    // staleness is disabled.
+    let stale_attention: i64 = if let Some(c) = cutoff {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM check_status
+             WHERE (?1 IS NULL OR check_name = ?1)
+               AND status != 'ok'
+               AND recorded_at < ?2",
+        )
+        .bind(check)
+        .bind(c)
+        .fetch_one(&state.pool)
+        .await
+        .map_err(|e| {
+            warn!(error = %e, "check_status stale-count query");
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        })?
+    } else {
+        0
+    };
+
+    Ok(Json(ChecksResponse {
+        counts,
+        rows,
+        stale_days,
+        stale_attention: stale_attention as usize,
+    }))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -278,9 +360,23 @@ mod tests {
     }
 
     async fn rows_for(pool: &SqlitePool, check: Option<&str>, include_ok: bool) -> Vec<CheckRow> {
+        // Staleness disabled (cutoff None) so these pre-existing tests see every
+        // row regardless of age, exactly as before the staleness feature.
+        rows_with_cutoff(pool, check, include_ok, true, None).await
+    }
+
+    async fn rows_with_cutoff(
+        pool: &SqlitePool,
+        check: Option<&str>,
+        include_ok: bool,
+        include_stale: bool,
+        cutoff: Option<DateTime<Utc>>,
+    ) -> Vec<CheckRow> {
         sqlx::query_as(ROWS_SQL)
             .bind(check)
             .bind(include_ok)
+            .bind(include_stale)
+            .bind(cutoff)
             .fetch_all(pool)
             .await
             .unwrap()
@@ -310,6 +406,46 @@ mod tests {
         let rows = rows_for(&pool, Some("bitlocker"), true).await;
         assert_eq!(rows.len(), 3, "all bitlocker rows incl. ok");
         assert!(rows.iter().all(|r| r.check_name == "bitlocker"));
+    }
+
+    #[tokio::test]
+    async fn stale_rows_excluded_by_default_shown_on_demand_and_when_disabled() {
+        let pool = seeded_pool().await;
+        // A fail row for pc-9 far in the past — a PC no longer running the check.
+        let old = Utc::now() - chrono::Duration::days(90);
+        sqlx::query(
+            "INSERT INTO check_status (pc_id, check_name, label, status, recorded_at)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind("pc-9")
+        .bind("bitlocker")
+        .bind(Some("BitLocker 暗号化"))
+        .bind("fail")
+        .bind(old)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let cutoff = Some(Utc::now() - chrono::Duration::days(30));
+
+        // Default view (include_stale = false): the old row is hidden; pc-2's
+        // recent fail still shows.
+        let def = rows_with_cutoff(&pool, Some("bitlocker"), true, false, cutoff).await;
+        assert!(def.iter().all(|r| r.pc_id != "pc-9"), "stale row hidden");
+        assert!(def.iter().any(|r| r.pc_id == "pc-2"), "in-scope fail kept");
+
+        // include_stale = true: the stale row is revealed.
+        let all = rows_with_cutoff(&pool, Some("bitlocker"), true, true, cutoff).await;
+        assert!(
+            all.iter().any(|r| r.pc_id == "pc-9"),
+            "stale row shown on demand"
+        );
+
+        // cutoff None (staleness disabled): every row shows even by default.
+        let disabled = rows_with_cutoff(&pool, Some("bitlocker"), true, false, None).await;
+        assert!(
+            disabled.iter().any(|r| r.pc_id == "pc-9"),
+            "disabled staleness shows all rows"
+        );
     }
 
     #[tokio::test]

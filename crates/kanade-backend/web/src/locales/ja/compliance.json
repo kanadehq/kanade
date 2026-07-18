@@ -26,5 +26,11 @@
   "toast": {
     "cleared_other": "{{count}} 件をクリアしました",
     "nothingToClear": "クリア対象はありませんでした（既に削除済み）。"
-  }
+  },
+  "staleHidden_other": "対象外の行を {{count}} 件隠しています（{{days}} 日間結果なし）。",
+  "staleShown": "対象外（stale）の行を表示中。",
+  "showStaleAction": "表示",
+  "hideStale": "隠す",
+  "staleBadge": "対象外",
+  "staleBadgeHint": "staleness 期間内に新しい結果がありません — この PC はチェックを実行しなくなっています（グループで対象外・退役・スケジュール削除など）。"
 }
