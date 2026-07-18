@@ -29,12 +29,15 @@
     "lastLogon": "last sign-in",
     "cpu": "agent CPU",
     "rss": "agent RSS",
-    "actions": "actions"
+    "actions": "actions",
+    "attributesLabel": "attributes",
+    "pickAttributes": "columns ({{count}})"
   },
   "columnTitles": {
     "cpu": "Agent process CPU % (one core = 100)",
     "rss": "Agent process resident set size (current RAM footprint)",
-    "lastLogon": "Most recent account the Windows sign-in screen used (display name over login name)"
+    "lastLogon": "Most recent account the Windows sign-in screen used (display name over login name)",
+    "attribute": "agent_meta attribute: {{key}}"
   },
   "actions": {
     "facts": "facts",
@@ -60,7 +63,10 @@
     "userLabel": "user",
     "user": "regex — e.g. taro",
     "versionLabel": "version",
-    "version": "regex — e.g. 0.43"
+    "version": "regex — e.g. 0.43",
+    "attributeLabel": "attribute",
+    "attributeAny": "(any attribute)",
+    "attributeValue": "contains…"
   },
   "quarantinedChip": "quarantined: {{version}}",
   "quarantinedChipTitle": "Showing only agents that rolled this version back — click to clear",

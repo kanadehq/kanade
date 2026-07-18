@@ -29,12 +29,15 @@
     "lastLogon": "直近サインイン",
     "cpu": "エージェント CPU",
     "rss": "エージェント RSS",
-    "actions": "操作"
+    "actions": "操作",
+    "attributesLabel": "付加情報",
+    "pickAttributes": "列 ({{count}})"
   },
   "columnTitles": {
     "cpu": "エージェントプロセスの CPU % (1 コア = 100)",
     "rss": "エージェントプロセスの常駐セットサイズ (今この瞬間の RAM 使用量)",
-    "lastLogon": "Windows のサインイン画面が最後に使ったアカウント (表示名＋ログオン名)"
+    "lastLogon": "Windows のサインイン画面が最後に使ったアカウント (表示名＋ログオン名)",
+    "attribute": "付加情報の項目: {{key}}"
   },
   "actions": {
     "facts": "facts",
@@ -60,7 +63,10 @@
     "userLabel": "ユーザー",
     "user": "正規表現 — 例: taro",
     "versionLabel": "バージョン",
-    "version": "正規表現 — 例: 0.43"
+    "version": "正規表現 — 例: 0.43",
+    "attributeLabel": "付加情報",
+    "attributeAny": "(すべて)",
+    "attributeValue": "含む…"
   },
   "quarantinedChip": "隔離: {{version}}",
   "quarantinedChipTitle": "このバージョンをロールバックしたエージェントのみ表示中 — クリックで解除",
