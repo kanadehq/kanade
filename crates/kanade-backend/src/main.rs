@@ -1050,6 +1050,23 @@ pub(crate) async fn run_backend() -> Result<()> {
         });
     }
 
+    // #1051: keep the `agent_meta` query-side table in sync with the KV
+    // bucket. The supervised watcher reconciles the full snapshot after
+    // each (re)attach (async-nats `watch_all` has no initial delivery,
+    // #911) and reopens on stream end, so the projection self-heals
+    // without a backend restart. The list endpoint reads this table for
+    // metadata columns + the `?meta_key=&meta_value=` filter; KV stays the
+    // source of truth (SPA PUT / `kanade meta` write it).
+    {
+        let pool = pool.clone();
+        let js = jetstream.clone();
+        tokio::spawn(async move {
+            if let Err(e) = projector::agent_meta::run(pool, js).await {
+                error!(error = %e, "agent_meta projector exited");
+            }
+        });
+    }
+
     let app_state = api::AppState {
         pool: pool.clone(),
         query_pool,

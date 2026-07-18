@@ -1,3 +1,4 @@
+pub mod agent_meta;
 pub mod audit;
 pub mod check_alert;
 pub mod consumer_reset;
