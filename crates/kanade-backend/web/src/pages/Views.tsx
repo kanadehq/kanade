@@ -20,7 +20,14 @@ type ViewWidget = { dashboard: string; title: string; render: string; scope?: st
 type ViewRow = {
   id: string;
   description?: string | null;
-  widgets: ViewWidget[];
+  /** Optional — the backend omits an EMPTY list (`skip_serializing_if =
+   *  "Vec::is_empty"`), so a SQL-only view carries no `widgets` key at all.
+   *  Must be treated as possibly-undefined or the list crashes on it (#901
+   *  views like kev-exposure / eol-exposure are sql_widgets-only). */
+  widgets?: ViewWidget[];
+  /** SQL-backed widgets (#901). Same omit-when-empty rule; the list only
+   *  needs the count, so the element shape is left minimal. */
+  sql_widgets?: unknown[];
   tags?: string[];
   /** GitOps provenance (#678) — present ⇒ open the editor read-only. */
   origin?: RepoOrigin | null;
@@ -71,7 +78,12 @@ export function Views() {
       ) : (
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
           {data.map((v) => {
-            const dashboards = [...new Set(v.widgets.map((w) => w.dashboard))];
+            // `widgets` / `sql_widgets` are omitted when empty (see the type),
+            // so default them before mapping/counting — a SQL-only view has no
+            // `widgets` key and would otherwise crash the whole page.
+            const widgets = v.widgets ?? [];
+            const widgetCount = widgets.length + (v.sql_widgets?.length ?? 0);
+            const dashboards = [...new Set(widgets.map((w) => w.dashboard))];
             return (
               <Card key={v.id}>
                 <CardHeader className="flex flex-row items-start justify-between gap-2">
@@ -111,7 +123,7 @@ export function Views() {
                 </CardHeader>
                 <CardContent className="space-y-2">
                   <div className="text-muted text-xs">
-                    {t('widgetCount', { count: v.widgets.length })}
+                    {t('widgetCount', { count: widgetCount })}
                   </div>
                   <div className="flex flex-wrap gap-1">
                     {dashboards.map((d) => (
