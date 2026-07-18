@@ -16,13 +16,17 @@
 //! because of a typo) at a glance.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use futures::StreamExt;
 use kanade_shared::kv::{BUCKET_AGENT_CONFIG, BUCKET_AGENT_GROUPS, parse_agent_config_group_key};
+use kanade_shared::manifest::{GroupDef, is_valid_resource_id};
 use kanade_shared::wire::AgentGroups;
-use tracing::info;
+use tracing::{info, warn};
+
+use crate::cmd::provenance::{append_origin_yaml, detect_repo_origin, has_top_level_origin};
 
 #[derive(Args, Debug)]
 pub struct GroupArgs {
@@ -57,6 +61,60 @@ pub enum GroupSub {
         #[arg(trailing_var_arg = true)]
         names: Vec<String>,
     },
+    /// Manage declarative **group definitions** (#1032) — the `groups/`
+    /// manifest kind. Unlike the imperative membership ops above (which
+    /// write `agent_groups` KV directly over NATS), these are HTTP manifest
+    /// CRUD like `kanade view` / `kanade schedule`: a group is defined by a
+    /// static `members:` list or a dynamic `query:` (read-only SQL returning
+    /// a `pc_id` column), and a schedule's `target.groups` resolves it.
+    #[command(subcommand)]
+    Def(GroupDefSub),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum GroupDefSub {
+    /// Upsert one or more group definitions from YAML files.
+    ///
+    /// Accepts multiple files, a directory (its top-level `*.yaml` / `*.yml`),
+    /// and/or glob patterns — e.g. `kanade group def create
+    /// configs/groups/*.yaml`. Each file is registered independently
+    /// (fail-soft per file); exits non-zero if any fails.
+    Create {
+        /// Group YAML paths (`id` + `members:` xor `query:`).
+        #[arg(required = true, num_args = 1..)]
+        paths: Vec<PathBuf>,
+    },
+    /// Validate one or more group manifests WITHOUT submitting them.
+    ///
+    /// Runs the exact client-side checks `create` does — strict YAML parse
+    /// (#492) + `GroupDef::validate()` (id charset, members/query exclusivity,
+    /// refresh parse). One caveat, shared with `create`: a dynamic `query:` is
+    /// only checked read-only at the backend sandbox, so that specific check
+    /// isn't run here. Built for CI / pre-commit. Accepts files, directories,
+    /// and globs; exits non-zero if any file fails.
+    Validate {
+        #[arg(required = true, num_args = 1..)]
+        paths: Vec<PathBuf>,
+    },
+    /// Export registered group YAML (the comment-preserving mirror). Same
+    /// shape as `kanade view export`: `<id>` to stdout, `--out-dir` to write
+    /// files, `--all` to dump every group.
+    Export {
+        #[arg(required_unless_present = "all")]
+        id: Option<String>,
+        #[arg(long, conflicts_with = "id")]
+        all: bool,
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
+    },
+    /// List all group definitions currently registered.
+    List,
+    /// Resolve a group and print the `pc_id`s it currently covers (a dynamic
+    /// group runs its query server-side; a static group prints its members).
+    /// Handy to preview scope before wiring a group into a schedule `target`.
+    Members { id: String },
+    /// Delete a group definition by its id.
+    Delete { id: String },
 }
 
 pub async fn execute(client: async_nats::Client, args: GroupArgs) -> Result<()> {
@@ -75,7 +133,230 @@ pub async fn execute(client: async_nats::Client, args: GroupArgs) -> Result<()> 
         GroupSub::Add { pc_id, name } => add(&groups_kv, &pc_id, &name).await,
         GroupSub::Rm { pc_id, name } => rm(&groups_kv, &pc_id, &name).await,
         GroupSub::Set { pc_id, names } => set(&groups_kv, &pc_id, names).await,
+        // `group def …` is HTTP manifest CRUD, routed to `execute_def` on the
+        // no-NATS dispatch path before we ever connect here.
+        GroupSub::Def(_) => unreachable!("group def is handled on the HTTP dispatch path"),
     }
+}
+
+/// `kanade group def …` — HTTP manifest CRUD for [`GroupDef`] resources
+/// (#1032). Same REST shape as `kanade view` (create / validate / list /
+/// export / delete), plus a `members` preview that resolves the group
+/// server-side. Routed here (not through [`execute`]) because it talks HTTP to
+/// the backend, not NATS KV.
+pub async fn execute_def(backend_url: &str, sub: GroupDefSub) -> Result<()> {
+    let base = backend_url.trim_end_matches('/');
+    match sub {
+        GroupDefSub::Create { paths } => def_create_all(base, paths).await,
+        // Offline check — no backend round-trip.
+        GroupDefSub::Validate { paths } => def_validate_all(paths),
+        GroupDefSub::Export { id, all, out_dir } => {
+            crate::cmd::bulk::export(base, "group-defs", id, all, out_dir).await
+        }
+        GroupDefSub::List => def_list(base).await,
+        GroupDefSub::Members { id } => def_members(base, &id).await,
+        GroupDefSub::Delete { id } => def_delete(base, &id).await,
+    }
+}
+
+async fn def_create_all(base: &str, paths: Vec<PathBuf>) -> Result<()> {
+    let files = crate::cmd::bulk::expand_manifest_paths(&paths)?;
+    let mut failures = 0usize;
+    for f in &files {
+        if let Err(e) = def_create_one(base, f).await {
+            eprintln!("✗ {}: {e:#}", f.display());
+            failures += 1;
+        }
+    }
+    if failures > 0 {
+        anyhow::bail!("{failures}/{} group manifest(s) failed", files.len());
+    }
+    Ok(())
+}
+
+fn def_validate_all(paths: Vec<PathBuf>) -> Result<()> {
+    let files = crate::cmd::bulk::expand_manifest_paths(&paths)?;
+    let mut failures = 0usize;
+    for f in &files {
+        if let Err(e) = def_validate_one(f) {
+            eprintln!("✗ {}: {e:#}", f.display());
+            failures += 1;
+        }
+    }
+    if failures > 0 {
+        anyhow::bail!(
+            "{failures}/{} group manifest(s) failed validation",
+            files.len()
+        );
+    }
+    Ok(())
+}
+
+fn def_validate_one(yaml: &std::path::Path) -> Result<()> {
+    let raw = std::fs::read_to_string(yaml).with_context(|| format!("read {yaml:?}"))?;
+    let docs = crate::cmd::bulk::split_yaml_documents(&raw);
+    match docs.as_slice() {
+        [] => anyhow::bail!("{yaml:?}: no YAML documents found"),
+        [only] => return def_validate_one_doc(yaml, only),
+        _ => {}
+    }
+    let mut failures = 0usize;
+    for (i, doc) in docs.iter().enumerate() {
+        if let Err(e) = def_validate_one_doc(yaml, doc) {
+            eprintln!("✗ {} [doc {}]: {e:#}", yaml.display(), i + 1);
+            failures += 1;
+        }
+    }
+    if failures > 0 {
+        anyhow::bail!(
+            "{failures}/{} document(s) in {yaml:?} failed validation",
+            docs.len()
+        );
+    }
+    Ok(())
+}
+
+fn def_validate_one_doc(yaml: &std::path::Path, raw: &str) -> Result<()> {
+    let group: GroupDef = kanade_shared::strict::from_yaml_str(raw)
+        .map_err(|e| anyhow::anyhow!("parse {yaml:?}: {e}"))?;
+    group
+        .validate()
+        .map_err(|e| anyhow::anyhow!("invalid group {yaml:?}: {e}"))?;
+    let kind = if group.dynamic_query().is_some() {
+        "dynamic"
+    } else {
+        "static"
+    };
+    println!(
+        "✓ {} → group '{}' ({kind}) (valid)",
+        yaml.display(),
+        group.id,
+    );
+    Ok(())
+}
+
+async fn def_create_one(base: &str, yaml: &std::path::Path) -> Result<()> {
+    let raw = std::fs::read_to_string(yaml).with_context(|| format!("read {yaml:?}"))?;
+    let docs = crate::cmd::bulk::split_yaml_documents(&raw);
+    match docs.as_slice() {
+        [] => anyhow::bail!("{yaml:?}: no YAML documents found"),
+        [only] => return def_create_one_doc(base, yaml, only).await,
+        _ => {}
+    }
+    let mut failures = 0usize;
+    for (i, doc) in docs.iter().enumerate() {
+        if let Err(e) = def_create_one_doc(base, yaml, doc).await {
+            eprintln!("✗ {} [doc {}]: {e:#}", yaml.display(), i + 1);
+            failures += 1;
+        }
+    }
+    if failures > 0 {
+        anyhow::bail!("{failures}/{} document(s) in {yaml:?} failed", docs.len());
+    }
+    Ok(())
+}
+
+async fn def_create_one_doc(base: &str, yaml: &std::path::Path, raw: &str) -> Result<()> {
+    let mut body = raw.to_string();
+    // Parse + validate client-side first so a malformed group errors at the
+    // operator's shell rather than as the backend's 400; then ship the raw
+    // YAML so the backend's YAML mirror keeps comments. #492: strict parse.
+    let group: GroupDef = kanade_shared::strict::from_yaml_str(&body)
+        .map_err(|e| anyhow::anyhow!("parse {yaml:?}: {e}"))?;
+    group
+        .validate()
+        .map_err(|e| anyhow::anyhow!("invalid group {yaml:?}: {e}"))?;
+
+    // #678 GitOps provenance — parity with view/job/schedule create. A group
+    // carries no script, so the script_file arg is always `None`.
+    if let Some(origin) = detect_repo_origin(yaml, None) {
+        if has_top_level_origin(&body) {
+            warn!(
+                group_id = %group.id,
+                "origin: already present in source YAML; preserving it",
+            );
+        } else {
+            append_origin_yaml(&mut body, &origin).context("append origin provenance")?;
+        }
+    }
+
+    let url = format!("{base}/api/group-defs");
+    let resp = crate::http_client::authed_client()?
+        .post(&url)
+        .header(reqwest::header::CONTENT_TYPE, "application/yaml")
+        .body(body)
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("create rejected: {status} — {body}");
+    }
+    let payload: serde_json::Value = resp
+        .json()
+        .await
+        .context("parse JSON response from server")?;
+    let id = payload.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+    let kind = payload.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
+    println!("✓ {} → group '{id}' ({kind})", yaml.display());
+    Ok(())
+}
+
+async fn def_list(base: &str) -> Result<()> {
+    let url = format!("{base}/api/group-defs");
+    let resp = crate::http_client::authed_client()?
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("list failed: {status} — {body}");
+    }
+    let payload: serde_json::Value = resp.json().await?;
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+    Ok(())
+}
+
+async fn def_members(base: &str, id: &str) -> Result<()> {
+    if !is_valid_resource_id(id) {
+        anyhow::bail!("invalid group id '{id}' (allowed: [A-Za-z0-9._-])");
+    }
+    let url = format!("{base}/api/group-defs/{id}/members");
+    let resp = crate::http_client::authed_client()?
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("resolve failed: {status} — {body}");
+    }
+    let payload: serde_json::Value = resp.json().await?;
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+    Ok(())
+}
+
+async fn def_delete(base: &str, id: &str) -> Result<()> {
+    if !is_valid_resource_id(id) {
+        anyhow::bail!("invalid group id '{id}' (allowed: [A-Za-z0-9._-])");
+    }
+    let url = format!("{base}/api/group-defs/{id}");
+    let resp = crate::http_client::authed_client()?
+        .delete(&url)
+        .send()
+        .await
+        .with_context(|| format!("DELETE {url}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("delete failed: {status} — {body}");
+    }
+    println!("deleted: {id}");
+    Ok(())
 }
 
 async fn list_pc(kv: &async_nats::jetstream::kv::Store, pc_id: &str) -> Result<()> {

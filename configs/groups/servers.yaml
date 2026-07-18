@@ -1,0 +1,15 @@
+# Dynamic group (#1032): Windows Server SKUs. The complement of `clients` —
+# useful for server-only maintenance windows or excluding servers elsewhere.
+#
+# Two equally valid ways to define "servers"; this one keys off the OS caption
+# from inventory-hw (parallel to clients.yaml). If your fleet instead follows a
+# hostname convention, see hostname-prefix.yaml for the zero-inventory variant.
+id: servers
+description: "Windows Server SKUs"
+tags: [targeting, os]
+query: |
+  SELECT pc_id
+  FROM inventory_facts
+  WHERE job_id = 'inventory-hw'
+    AND json_extract(facts_json, '$.os_name') LIKE '%Server%'
+refresh: 30m

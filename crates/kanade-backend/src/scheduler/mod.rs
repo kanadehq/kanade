@@ -17,11 +17,11 @@ use async_nats::jetstream::kv::Operation;
 use chrono::{DateTime, Duration as ChronoDuration, Local, Utc};
 use futures::{StreamExt, TryStreamExt};
 use kanade_shared::kv::{
-    BUCKET_AGENT_GROUPS, BUCKET_FLEET_CONFIG, BUCKET_SCHEDULER_DISPATCH, BUCKET_SCHEDULES,
-    KEY_FREEZE, dispatch_mark_pc_key, dispatch_mark_target_key,
+    BUCKET_AGENT_GROUPS, BUCKET_FLEET_CONFIG, BUCKET_GROUP_DEFS, BUCKET_SCHEDULER_DISPATCH,
+    BUCKET_SCHEDULES, KEY_FREEZE, dispatch_mark_pc_key, dispatch_mark_target_key,
 };
 use kanade_shared::manifest::{
-    ExecMode, FanoutPlan, Freeze, Manifest, RunsOn, Schedule, ScheduleTz, Target, When,
+    ExecMode, FanoutPlan, Freeze, GroupDef, Manifest, RunsOn, Schedule, ScheduleTz, Target, When,
 };
 use kanade_shared::wire::AgentGroups;
 use sqlx::Row;
@@ -1205,6 +1205,56 @@ pub(crate) async fn resolve_expected_pcs(state: &AppState, target: &Target) -> R
 /// seen), filtered by liveness only when `alive_only`. A host that has
 /// a group assignment but never heartbeated is out of scope either way
 /// (it can't have run anything to cover).
+/// #1032: resolve any declared [`GroupDef`]s among `target.groups` and union
+/// their members (intersected with the candidate roster) into `out`. A target
+/// group name that has no `group_defs` entry is left to the imperative
+/// `agent_groups` path — the two are additive. Best-effort: a missing bucket,
+/// an undecodable entry, or a failing query is logged and skipped so one bad
+/// group can't wedge the whole schedule's dispatch.
+async fn resolve_group_defs(
+    state: &AppState,
+    target: &Target,
+    candidates: &HashSet<String>,
+    out: &mut HashSet<String>,
+) {
+    // No group_defs bucket yet ⇒ nothing declared; fall through to agent_groups.
+    let Ok(kv) = state.jetstream.get_key_value(BUCKET_GROUP_DEFS).await else {
+        return;
+    };
+    for name in &target.groups {
+        let group = match kv.get(name).await {
+            Ok(Some(bytes)) => match serde_json::from_slice::<GroupDef>(&bytes) {
+                Ok(g) => g,
+                Err(e) => {
+                    warn!(group = %name, error = %e, "resolve_roster: undecodable group_def, skipping");
+                    continue;
+                }
+            },
+            // Not a declared group — the agent_groups path handles this name.
+            Ok(None) => continue,
+            Err(e) => {
+                warn!(group = %name, error = %e, "resolve_roster: group_def get failed, skipping");
+                continue;
+            }
+        };
+        match crate::api::group_sql::resolve_group_members(state, &group).await {
+            Ok(ids) => {
+                for id in ids {
+                    // Intersect with the live/full candidate roster so a
+                    // query-invented id (or a member of a decommissioned PC)
+                    // that isn't an actual agent drops out here.
+                    if candidates.contains(&id) {
+                        out.insert(id);
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(group = %name, error = %e, "resolve_roster: group_def resolve failed, skipping")
+            }
+        }
+    }
+}
+
 pub(crate) async fn resolve_roster(
     state: &AppState,
     target: &Target,
@@ -1251,6 +1301,15 @@ pub(crate) async fn resolve_roster(
             .into_iter()
             .filter_map(|r| r.try_get::<String, _>("pc_id").ok())
             .collect();
+
+        // #1032: a target group name may be a declared GroupDef (static
+        // `members:` or a dynamic `query:`) IN ADDITION to imperative
+        // `agent_groups` membership. Resolve those and union them in, so the
+        // two mechanisms coexist and a name resolves via either. Intersect with
+        // the candidate roster (below) so a query-invented id that isn't a live
+        // agent simply drops. Uses the same candidate set as the agent_groups
+        // path, so clone it before the stream below consumes it.
+        resolve_group_defs(state, target, &candidates, &mut out).await;
 
         if let Ok(kv) = state.jetstream.get_key_value(BUCKET_AGENT_GROUPS).await {
             // #487: bounded-concurrency membership reads over the

@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GroupDef",
+  "description": "A **declared fleet group** (#1032): the third manifest kind alongside\n[`Manifest`] (jobs) and [`Schedule`] (schedules), stored in\n`BUCKET_GROUP_DEFS` keyed by [`id`](GroupDef::id).\n\n(The first doc line deliberately does not start with `#NNN` — schemars\ntreats a leading `#` as a Markdown heading and would extract it as the\nschema `title`, garbling it. Same reason [`View`]'s doc leads with prose.)\n\nA group definition names a set of PCs in one of two mutually-exclusive\nways:\n  * **static** — a literal [`members`](GroupDef::members) list. Declared,\n    git-reviewable membership (the auditability win over hand-editing the\n    imperative `agent_groups` KV).\n  * **dynamic** — a read-only SQL [`query`](GroupDef::query) that returns a\n    `pc_id` column. Membership is *derived from the fleet's own facts*\n    (`agents`, `inventory_facts` + `json_extract(facts_json, …)`, `feeds`,\n    `check_status`, `explode:` tables — anything in the projector DB), so\n    \"every client OS\", \"the servers sharing a hostname prefix\", \"machines\n    still on build 26100\" are all just a `SELECT`. The query runs in the\n    backend read-only sandbox (`api::query`), never on the endpoint.\n\nA schedule's `target.groups` resolves a defined group (static or dynamic)\n**in addition to** the imperative `agent_groups` membership, so declared\ngroups and manually-assigned ones coexist and this never mutates\n`agent_groups`.",
+  "type": "object",
+  "properties": {
+    "description": {
+      "description": "Optional human description shown on the groups admin page.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "id": {
+      "description": "Stable identifier (the KV key + URL segment + the name a schedule's\n`target.groups` references). Required; same `[A-Za-z0-9._-]` charset\nas a [`View`] id via [`is_valid_resource_id`].",
+      "type": "string"
+    },
+    "members": {
+      "description": "Static membership — a literal list of `pc_id`s. Mutually exclusive with\n[`query`](GroupDef::query); exactly one of the two must be set\n(enforced by [`GroupDef::validate`]).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "origin": {
+      "description": "GitOps provenance (#678), stamped by `kanade group def create` from the\nsource YAML's Git context — same as [`View::origin`].",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RepoOrigin"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "query": {
+      "description": "Dynamic membership — a read-only `SELECT`/`WITH` returning a `pc_id`\ncolumn. Mutually exclusive with [`members`](GroupDef::members). The\nbackend validates it read-only at `group create` and again at run time;\na write verb / stacked statement is rejected. Empty string is treated\nas unset so an operator can comment the body out to switch to\n`members:` without dropping the key.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "refresh": {
+      "description": "Membership-recompute cadence for a dynamic group as a humantime\nduration (`\"30m\"`, `\"6h\"`). Absent ⇒ [`DEFAULT_GROUP_REFRESH`]. Ignored\nfor a static group.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "tags": {
+      "description": "Free-form operator taxonomy (same role as [`Manifest::tags`]).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "id"
+  ],
+  "$defs": {
+    "RepoOrigin": {
+      "description": "GitOps provenance for a repo-managed YAML artifact — a [`Manifest`]\n(#678) or a [`Schedule`] (#695). Populated by `kanade job create` /\n`kanade schedule create` from the Git context of the source YAML;\nthe SPA reads it to render Git-managed entries read-only and link\nthe operator back at the repo. Never consulted by the runtime.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "description": "Repo-relative path of the source YAML — the primary edit target\nthe SPA surfaces (e.g. `configs/jobs/foo.yaml`). Forward slashes\nregardless of the authoring OS.",
+          "type": "string"
+        },
+        "repo": {
+          "description": "`origin` remote URL, when the repo has one. Lets the SPA turn\n`path` into a clickable link; `None` for remote-less repos.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "script_file": {
+          "description": "Repo-relative path of the `script_file:` a job manifest inlined,\nwhen it used one — a secondary pointer shown beneath `path`.\nAlways `None` for schedules (they carry no script).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path"
+      ]
+    }
+  }
+}

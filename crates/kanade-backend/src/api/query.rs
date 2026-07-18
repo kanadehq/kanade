@@ -48,7 +48,10 @@ use super::AppState;
 /// Default cap on returned rows when the caller doesn't specify one.
 const DEFAULT_LIMIT: usize = 1_000;
 /// Hard ceiling on `limit` — a caller can't ask for an unbounded dump.
-const MAX_LIMIT: usize = 10_000;
+/// `pub(crate)` so callers that want the sandbox's own row cap (e.g. the
+/// dynamic-group resolver in `api::group_sql`) reference it instead of
+/// re-declaring the value and risking drift.
+pub(crate) const MAX_LIMIT: usize = 10_000;
 /// Wall-clock budget for a single query. A read-only connection plus the
 /// row cap bound most damage; this catches a pathological full-table
 /// scan that produces few rows but takes forever.

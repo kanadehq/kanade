@@ -1813,6 +1813,155 @@ impl View {
     }
 }
 
+/// Default membership-recompute cadence for a dynamic [`GroupDef`] whose
+/// `refresh` is unset — 10 minutes. A group's SQL is evaluated lazily (only
+/// when a schedule targeting it fires, or the members preview is requested)
+/// and the result cached for this long, so fleet facts (inventory updates, a
+/// newly-registered PC) reach the group within at most one cadence while an
+/// expensive correlation query stays off the hot scheduler-tick path. A
+/// static `members:` group ignores this (its membership is literal).
+pub const DEFAULT_GROUP_REFRESH: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// A **declared fleet group** (#1032): the third manifest kind alongside
+/// [`Manifest`] (jobs) and [`Schedule`] (schedules), stored in
+/// `BUCKET_GROUP_DEFS` keyed by [`id`](GroupDef::id).
+///
+/// (The first doc line deliberately does not start with `#NNN` — schemars
+/// treats a leading `#` as a Markdown heading and would extract it as the
+/// schema `title`, garbling it. Same reason [`View`]'s doc leads with prose.)
+///
+/// A group definition names a set of PCs in one of two mutually-exclusive
+/// ways:
+///   * **static** — a literal [`members`](GroupDef::members) list. Declared,
+///     git-reviewable membership (the auditability win over hand-editing the
+///     imperative `agent_groups` KV).
+///   * **dynamic** — a read-only SQL [`query`](GroupDef::query) that returns a
+///     `pc_id` column. Membership is *derived from the fleet's own facts*
+///     (`agents`, `inventory_facts` + `json_extract(facts_json, …)`, `feeds`,
+///     `check_status`, `explode:` tables — anything in the projector DB), so
+///     "every client OS", "the servers sharing a hostname prefix", "machines
+///     still on build 26100" are all just a `SELECT`. The query runs in the
+///     backend read-only sandbox (`api::query`), never on the endpoint.
+///
+/// A schedule's `target.groups` resolves a defined group (static or dynamic)
+/// **in addition to** the imperative `agent_groups` membership, so declared
+/// groups and manually-assigned ones coexist and this never mutates
+/// `agent_groups`.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
+pub struct GroupDef {
+    /// Stable identifier (the KV key + URL segment + the name a schedule's
+    /// `target.groups` references). Required; same `[A-Za-z0-9._-]` charset
+    /// as a [`View`] id via [`is_valid_resource_id`].
+    pub id: String,
+    /// Optional human description shown on the groups admin page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Static membership — a literal list of `pc_id`s. Mutually exclusive with
+    /// [`query`](GroupDef::query); exactly one of the two must be set
+    /// (enforced by [`GroupDef::validate`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<String>,
+    /// Dynamic membership — a read-only `SELECT`/`WITH` returning a `pc_id`
+    /// column. Mutually exclusive with [`members`](GroupDef::members). The
+    /// backend validates it read-only at `group create` and again at run time;
+    /// a write verb / stacked statement is rejected. Empty string is treated
+    /// as unset so an operator can comment the body out to switch to
+    /// `members:` without dropping the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    /// Membership-recompute cadence for a dynamic group as a humantime
+    /// duration (`"30m"`, `"6h"`). Absent ⇒ [`DEFAULT_GROUP_REFRESH`]. Ignored
+    /// for a static group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh: Option<String>,
+    /// Free-form operator taxonomy (same role as [`Manifest::tags`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// GitOps provenance (#678), stamped by `kanade group def create` from the
+    /// source YAML's Git context — same as [`View::origin`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<RepoOrigin>,
+}
+
+impl GroupDef {
+    /// The dynamic SQL body if this is a dynamic group — a non-blank `query`.
+    /// (An empty-string `query` reads as unset, mirroring [`Execute::script`].)
+    pub fn dynamic_query(&self) -> Option<&str> {
+        self.query
+            .as_deref()
+            .map(str::trim)
+            .filter(|q| !q.is_empty())
+    }
+
+    /// The effective recompute cadence for a dynamic group — the parsed
+    /// `refresh` or [`DEFAULT_GROUP_REFRESH`]. Falls back to the default on an
+    /// unparseable value rather than panicking on the read path (validation
+    /// already rejected a bad value at create time).
+    pub fn refresh_interval(&self) -> std::time::Duration {
+        self.refresh
+            .as_deref()
+            .and_then(|s| humantime::parse_duration(s).ok())
+            .unwrap_or(DEFAULT_GROUP_REFRESH)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        // Validate the id EXACTLY as stored — no `.trim()`. The id is used
+        // verbatim as the KV key (`group_defs::create` does `kv.put(&group.id,
+        // …)`) and as the name a schedule's `target.groups` matches, so a
+        // padded id like `" clients "` that validated as its trimmed form but
+        // was stored raw would silently never match. The charset excludes
+        // whitespace, so checking the untrimmed id rejects such an id outright.
+        if !is_valid_resource_id(&self.id) {
+            return Err(
+                "group.id must be non-empty and only [A-Za-z0-9._-] (it's a KV key + URL segment; \
+                 no surrounding whitespace)"
+                    .to_string(),
+            );
+        }
+        // Exactly one of members / query. A blank `query` counts as unset so
+        // the "comment the body out" workflow lands on the members branch
+        // rather than a confusing "both set" error.
+        let has_members = !self.members.is_empty();
+        let has_query = self.dynamic_query().is_some();
+        match (has_members, has_query) {
+            (false, false) => {
+                return Err(
+                    "group must declare either a static `members:` list or a dynamic `query:`"
+                        .to_string(),
+                );
+            }
+            (true, true) => {
+                return Err(
+                    "`members:` and `query:` are mutually exclusive — a group is either static or dynamic"
+                        .to_string(),
+                );
+            }
+            _ => {}
+        }
+        for m in &self.members {
+            if m.trim().is_empty() {
+                return Err("members must not contain empty entries".to_string());
+            }
+        }
+        // A dynamic group's refresh must parse (a static group ignores it, but
+        // reject a bad value either way so a later members→query switch can't
+        // surprise the operator).
+        if let Some(r) = &self.refresh
+            && humantime::parse_duration(r).is_err()
+        {
+            return Err(format!(
+                "group.refresh '{r}' is not a valid duration (e.g. '30m', '6h')"
+            ));
+        }
+        for tag in &self.tags {
+            if tag.trim().is_empty() {
+                return Err("tags must not contain empty entries".to_string());
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Issue #246 — `emit:` manifest block for jobs whose stdout is
 /// NDJSON observability events (one `ObsEvent` per line). Parallel
 /// to `inventory:` but for the append-only timeline pipeline; see
@@ -7153,6 +7302,90 @@ inventory:
         assert!(inv.display[0].columns.is_none());
     }
 
+    // ---- GroupDef (#1032 dynamic groups) ----
+
+    fn group_def(yaml: &str) -> Result<GroupDef, String> {
+        let g: GroupDef = crate::strict::from_yaml_str(yaml).map_err(|e| e.to_string())?;
+        g.validate().map(|()| g)
+    }
+
+    #[test]
+    fn group_def_static_members_valid() {
+        let g = group_def("id: pilot\nmembers: [PC-A, PC-B]\n").expect("valid static group");
+        assert_eq!(g.members, vec!["PC-A", "PC-B"]);
+        assert!(g.dynamic_query().is_none());
+    }
+
+    #[test]
+    fn group_def_dynamic_query_valid() {
+        let g = group_def(
+            "id: clients\nquery: \"SELECT pc_id FROM agents WHERE hostname LIKE 'X%'\"\nrefresh: 30m\n",
+        )
+        .expect("valid dynamic group");
+        assert_eq!(
+            g.dynamic_query(),
+            Some("SELECT pc_id FROM agents WHERE hostname LIKE 'X%'")
+        );
+        assert_eq!(g.refresh_interval(), std::time::Duration::from_secs(1800));
+    }
+
+    #[test]
+    fn group_def_refresh_defaults_when_absent() {
+        let g = group_def("id: c\nquery: \"SELECT pc_id FROM agents\"\n").unwrap();
+        assert_eq!(g.refresh_interval(), DEFAULT_GROUP_REFRESH);
+    }
+
+    #[test]
+    fn group_def_rejects_neither_members_nor_query() {
+        let err = group_def("id: empty\n").unwrap_err();
+        assert!(err.contains("either"), "err: {err}");
+    }
+
+    #[test]
+    fn group_def_rejects_both_members_and_query() {
+        let err = group_def("id: both\nmembers: [PC-A]\nquery: \"SELECT pc_id FROM agents\"\n")
+            .unwrap_err();
+        assert!(err.contains("mutually exclusive"), "err: {err}");
+    }
+
+    #[test]
+    fn group_def_blank_query_is_unset_not_both() {
+        // An empty-string query reads as unset, so a members group with a
+        // commented-out (emptied) query is still valid, not a "both set" error.
+        let g =
+            group_def("id: pilot\nmembers: [PC-A]\nquery: \"\"\n").expect("blank query = unset");
+        assert!(g.dynamic_query().is_none());
+    }
+
+    #[test]
+    fn group_def_rejects_bad_id_charset() {
+        let err = group_def("id: bad/id\nmembers: [PC-A]\n").unwrap_err();
+        assert!(err.contains("group.id"), "err: {err}");
+    }
+
+    #[test]
+    fn group_def_rejects_untrimmed_id() {
+        // A padded id validated-as-trimmed but stored-raw would be a KV key
+        // nothing matches — reject it outright (the id is used verbatim).
+        let err = group_def("id: \" clients \"\nmembers: [PC-A]\n").unwrap_err();
+        assert!(err.contains("group.id"), "err: {err}");
+    }
+
+    #[test]
+    fn group_def_rejects_bad_refresh() {
+        let err =
+            group_def("id: c\nquery: \"SELECT pc_id FROM agents\"\nrefresh: soon\n").unwrap_err();
+        assert!(err.contains("refresh"), "err: {err}");
+    }
+
+    #[test]
+    fn group_def_rejects_unknown_key() {
+        // Strict parse (#492) — a typo'd key is an operator error, not silently
+        // dropped.
+        let err = group_def("id: c\nmembers: [PC-A]\nrlue: x\n").unwrap_err();
+        assert!(err.to_lowercase().contains("unknown"), "err: {err}");
+    }
+
     // ---- checked-in JSON Schema freshness (docs/schemas/) ----
 
     /// The JSON Schemas under `docs/schemas/` must match what
@@ -7168,6 +7401,7 @@ inventory:
         assert_schema_file("schedule.schema.json", &schemars::schema_for!(Schedule));
         assert_schema_file("job.schema.json", &schemars::schema_for!(Manifest));
         assert_schema_file("view.schema.json", &schemars::schema_for!(View));
+        assert_schema_file("group-def.schema.json", &schemars::schema_for!(GroupDef));
     }
 
     fn assert_schema_file(name: &str, schema: &schemars::Schema) {
@@ -7365,6 +7599,9 @@ impl crate::strict::StrictSchema for Manifest {}
 
 /// View likewise has no flattened field.
 impl crate::strict::StrictSchema for View {}
+
+/// GroupDef likewise has no flattened field.
+impl crate::strict::StrictSchema for GroupDef {}
 
 /// v0.23 — where the cron tick fires from.
 #[derive(

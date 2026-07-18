@@ -1,0 +1,30 @@
+# Dynamic group (#1032): Windows CLIENT SKUs — every machine that is NOT a
+# Windows Server. This is the group that motivated the feature: a fleet-wide
+# feature-update compliance check (e.g. 24H2 -> 25H2) should target clients
+# only, so the handful of Windows Server boxes never go `fail` for an update
+# that doesn't exist for them.
+#
+#   kanade group def validate configs/groups/clients.yaml
+#   kanade group def create   configs/groups/clients.yaml
+#   kanade group def members  clients     # preview who this resolves to
+#
+# A schedule then targets it with:
+#   target:
+#     groups: [clients]
+# and the job no longer needs a `Win32_OperatingSystem.ProductType` self-guard.
+#
+# How the client/server split works WITHOUT any new fleet-side column: the
+# `inventory-hw` job already records the friendly OS caption (`os_name`, e.g.
+# "Windows 11 Pro" vs "Windows Server 2025"). The build number can't tell them
+# apart (Server 2025 and Win11 24H2 are both 26100), but the caption can —
+# `os_name NOT LIKE '%Server%'`. The query must return a `pc_id` column;
+# everything else is up to you.
+id: clients
+description: "Windows client SKUs (excludes Windows Server)"
+tags: [targeting, os]
+query: |
+  SELECT pc_id
+  FROM inventory_facts
+  WHERE job_id = 'inventory-hw'
+    AND json_extract(facts_json, '$.os_name') NOT LIKE '%Server%'
+refresh: 30m

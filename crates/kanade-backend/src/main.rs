@@ -1057,6 +1057,7 @@ pub(crate) async fn run_backend() -> Result<()> {
         jetstream,
         explode_spec_cache,
         sql_view_cache: api::view_sql::new_cache(),
+        group_cache: api::group_sql::new_cache(),
         mailer,
         public_url: cfg.server.public_url.clone(),
     };

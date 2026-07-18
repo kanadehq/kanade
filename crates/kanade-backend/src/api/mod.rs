@@ -15,6 +15,8 @@ pub mod executions;
 pub mod fleet_perf;
 pub mod freeze;
 pub mod group_contacts;
+pub mod group_defs;
+pub mod group_sql;
 pub mod health;
 pub mod host_perf;
 pub mod inventory;
@@ -107,6 +109,12 @@ pub struct AppState {
     /// cadence), so it needs no durability — `Arc` keeps `AppState`'s `Clone`
     /// cheap and shares the map across requests. See `api::view_sql`.
     pub sql_view_cache: view_sql::SqlViewCache,
+    /// #1032: in-memory membership cache for dynamic (SQL) `group:` defs, keyed
+    /// by group id. Same derived-cache shape as `sql_view_cache` — recomputed
+    /// from the read-only query on the group's `refresh` cadence, so it needs
+    /// no durability and `Arc` keeps `AppState`'s `Clone` cheap. Shared with
+    /// the scheduler (`resolve_roster`). See `api::group_sql`.
+    pub group_cache: group_sql::GroupCache,
     /// Outbound SMTP relay, built from the `[mail]` config when present.
     /// `None` ⇒ email features are no-ops. `Arc` so `AppState`'s `Clone`
     /// (one per request) stays cheap and the relay's connection pool is
@@ -280,6 +288,11 @@ pub fn router(state: AppState) -> Router {
         // #743: standalone view resources (viewer-readable list + YAML).
         .route("/api/views", get(views::list))
         .route("/api/views/{id}/yaml", get(views::get_yaml))
+        // #1032: group-definition resources (viewer-readable list + YAML +
+        // resolved-members preview).
+        .route("/api/group-defs", get(group_defs::list))
+        .route("/api/group-defs/{id}/yaml", get(group_defs::get_yaml))
+        .route("/api/group-defs/{id}/members", get(group_defs::members))
         .route("/api/schedules/{id}/yaml", get(schedules::get_yaml))
         .route("/api/schedules/{id}/preview", get(schedules::preview))
         .route("/api/schedules/{id}/status", get(schedules::status))
@@ -292,6 +305,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/schemas/manifest.json", get(schemas::manifest_schema))
         .route("/api/schemas/schedule.json", get(schemas::schedule_schema))
         .route("/api/schemas/view.json", get(schemas::view_schema))
+        .route(
+            "/api/schemas/group-def.json",
+            get(schemas::group_def_schema),
+        )
         .route("/api/jetstream/status", get(jetstream_status::status))
         .route("/api/health/fleet", get(health::fleet))
         // v0.37 / agent perf: per-job duration aggregates
@@ -439,6 +456,9 @@ pub fn router(state: AppState) -> Router {
         // #743: view create/delete (operator).
         .route("/api/views", post(views::create))
         .route("/api/views/{id}", delete(views::delete))
+        // #1032: group-definition create/delete (operator).
+        .route("/api/group-defs", post(group_defs::create))
+        .route("/api/group-defs/{id}", delete(group_defs::delete))
         .route("/api/schedules/{id}/disable", post(schedules::disable))
         .route("/api/schedules/{id}/enable", post(schedules::enable))
         .route("/api/freeze", put(freeze::set).delete(freeze::clear))
@@ -614,6 +634,14 @@ pub fn feature_for_path(path: &str) -> Option<Feature> {
         // --- Views ---
         "/api/views" | "/api/views/{id}/yaml" | "/api/views/{id}" => Feature::Views,
 
+        // --- Group definitions (#1032) — operator-authored schedule-targeting
+        // config, so gated with the Schedules page rather than the
+        // viewer-facing per-PC Groups membership page. ---
+        "/api/group-defs"
+        | "/api/group-defs/{id}/yaml"
+        | "/api/group-defs/{id}/members"
+        | "/api/group-defs/{id}" => Feature::Schedules,
+
         // --- Notifications ---
         "/api/notifications"
         | "/api/notifications/{id}"
@@ -726,6 +754,15 @@ mod feature_map_tests {
             Some(Feature::Settings)
         );
         assert_eq!(feature_for_path("/api/query"), Some(Feature::Accounts));
+        // #1032: group-def routes gate with the Schedules page.
+        assert_eq!(
+            feature_for_path("/api/group-defs"),
+            Some(Feature::Schedules)
+        );
+        assert_eq!(
+            feature_for_path("/api/group-defs/{id}/members"),
+            Some(Feature::Schedules)
+        );
         // The script-command revoke lifecycle lives on the Jobs page, so it
         // gates under Jobs (not Run) — otherwise a Jobs-restricted operator
         // could revoke/unrevoke scripts (Gemini HIGH on #1009).
