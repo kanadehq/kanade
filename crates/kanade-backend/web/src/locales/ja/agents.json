@@ -30,8 +30,10 @@
     "cpu": "エージェント CPU",
     "rss": "エージェント RSS",
     "actions": "操作",
-    "attributesLabel": "付加情報",
-    "pickAttributes": "列 ({{count}})"
+    "label": "表示列",
+    "pick": "選択",
+    "builtinSection": "標準の列",
+    "attributesLabel": "付加情報"
   },
   "columnTitles": {
     "cpu": "エージェントプロセスの CPU % (1 コア = 100)",

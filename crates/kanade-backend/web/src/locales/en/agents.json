@@ -30,8 +30,10 @@
     "cpu": "agent CPU",
     "rss": "agent RSS",
     "actions": "actions",
-    "attributesLabel": "attributes",
-    "pickAttributes": "columns ({{count}})"
+    "label": "columns",
+    "pick": "choose",
+    "builtinSection": "standard columns",
+    "attributesLabel": "attributes"
   },
   "columnTitles": {
     "cpu": "Agent process CPU % (one core = 100)",
