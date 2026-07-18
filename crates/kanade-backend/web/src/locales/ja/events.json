@@ -30,7 +30,7 @@
     "placeholders": {
       "pcId": "完全一致 — 例: pc-01",
       "payloadKey": "キー — 例: user",
-      "payloadValue": "値 — 例: yukimemi"
+      "payloadValue": "値 — 例: alice"
     },
     "sincePresets": {
       "1h": "直近 1 時間",
