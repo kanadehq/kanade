@@ -43,6 +43,7 @@ import {
 } from '@/components/ui/sheet';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { apiFetch, formatError } from '@/lib/api';
+import { useAuth } from '@/lib/auth';
 
 // #418: the cadence is the single `when` field — a reconcile shape
 // (`per_pc` / `per_target`, either the bare keyword `once` or
@@ -185,6 +186,8 @@ function summariseActive(active: ScheduleRow['active']): string | null {
 
 export function Schedules() {
   const { t } = useTranslation('schedules');
+  const { hasRole } = useAuth();
+  const canOperate = hasRole('operator');
   const qc = useQueryClient();
   const confirm = useConfirm();
   const { data, error, isLoading } = useQuery({
@@ -323,8 +326,11 @@ export function Schedules() {
   }
 
   // One action strip, two render sites: icon-only in the table rows,
-  // icon+label in the drawer footer.
+  // icon+label in the drawer footer. Non-operators get a read-only
+  // view — the write controls (edit / enable-disable / delete) don't
+  // render at all, matching the backend RBAC that would 403 the writes.
   function renderActions(s: ScheduleRow, withLabels = false) {
+    if (!canOperate) return null;
     return (
       <>
         <Button
@@ -618,14 +624,16 @@ export function Schedules() {
           <CardHeader>
             <div className="flex items-center justify-between">
               <CardTitle>{t('empty.title')}</CardTitle>
-              <Button
-                variant="default"
-                size="sm"
-                onClick={() => setEditor({ type: 'create' })}
-              >
-                <FilePlus2 className="size-3.5" />
-                {t('newSchedule')}
-              </Button>
+              {canOperate && (
+                <Button
+                  variant="default"
+                  size="sm"
+                  onClick={() => setEditor({ type: 'create' })}
+                >
+                  <FilePlus2 className="size-3.5" />
+                  {t('newSchedule')}
+                </Button>
+              )}
             </div>
           </CardHeader>
           <CardContent className="text-muted">
@@ -658,15 +666,17 @@ export function Schedules() {
       <div className="flex items-baseline justify-between">
         <h2 className="text-xl">{t('title')}</h2>
         <div className="flex items-center gap-2">
-          <Button
-            variant="default"
-            size="sm"
-            onClick={() => setEditor({ type: 'create' })}
-            title={t('newScheduleTitle')}
-          >
-            <FilePlus2 className="size-3.5" />
-            {t('newSchedule')}
-          </Button>
+          {canOperate && (
+            <Button
+              variant="default"
+              size="sm"
+              onClick={() => setEditor({ type: 'create' })}
+              title={t('newScheduleTitle')}
+            >
+              <FilePlus2 className="size-3.5" />
+              {t('newSchedule')}
+            </Button>
+          )}
           <Badge variant="violet">
             {filtering ? `${visibleRows.length} / ${rows.length}` : rows.length}
           </Badge>
