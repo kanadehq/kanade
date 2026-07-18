@@ -66,9 +66,25 @@
     "user": "正規表現 — 例: taro",
     "versionLabel": "バージョン",
     "version": "正規表現 — 例: 0.43",
-    "attributeLabel": "付加情報",
-    "attributeAny": "(すべて)",
-    "attributeValue": "含む…"
+    "attributeAnyLabel": "付加情報（横断）",
+    "attributeAnyPlaceholder": "いずれかの付加情報に含む…",
+    "conditionKey": "項目",
+    "conditionOp": "演算子",
+    "conditionValue": "値",
+    "conditionRemove": "条件を削除",
+    "addCondition": "付加情報の条件を追加",
+    "ops": {
+      "contains": "含む",
+      "eq": "一致",
+      "neq": "不一致",
+      "starts": "前方一致",
+      "empty": "空",
+      "set": "設定あり",
+      "absent": "未設定"
+    }
+  },
+  "sort": {
+    "hint": "クリックでソート。もう一度で逆順、さらにで解除"
   },
   "quarantinedChip": "隔離: {{version}}",
   "quarantinedChipTitle": "このバージョンをロールバックしたエージェントのみ表示中 — クリックで解除",

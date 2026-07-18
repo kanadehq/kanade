@@ -1,5 +1,5 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Activity, AlertTriangle, Loader2, ScrollText, Server, Settings2, SlidersHorizontal, Trash2, Users } from 'lucide-react';
+import { Activity, AlertTriangle, ArrowDown, ArrowUp, Loader2, Plus, ScrollText, Server, Settings2, SlidersHorizontal, Trash2, Users, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 import { Link, useSearchParams } from 'react-router-dom';
@@ -46,6 +46,35 @@ const TOGGLEABLE_COLS = [
   'actions',
 ] as const;
 const HIDDEN_COLS_KEY = 'agents.hiddenColumns';
+
+// #1061: metadata filter operators (mirror the backend allow-list). The
+// value-less ops (present / blank / absent) hide the value input.
+type MetaOp = 'contains' | 'eq' | 'neq' | 'starts' | 'empty' | 'set' | 'absent';
+const META_OPS: MetaOp[] = ['contains', 'eq', 'neq', 'starts', 'empty', 'set', 'absent'];
+const OPS_WITH_VALUE: MetaOp[] = ['contains', 'eq', 'neq', 'starts'];
+// One metadata condition row. `id` is a stable React key only.
+type MetaCond = { id: string; key: string; op: MetaOp; value: string };
+
+// A unique-enough id for a React key. `crypto.randomUUID` only exists in
+// secure contexts (HTTPS / localhost); kanade is frequently served over
+// plain HTTP on internal networks, where calling it throws — so fall back
+// to a random string (it's only ever a render key).
+function newId(): string {
+  return typeof crypto !== 'undefined' && crypto.randomUUID
+    ? crypto.randomUUID()
+    : Math.random().toString(36).slice(2);
+}
+
+// #1061: server-side sortable columns → the field token the API expects.
+// (Built-in cols not listed here — status / cpu / rss — aren't sortable
+// server-side; metadata columns sort via the `meta:<key>` token.)
+const SORT_FIELDS: Record<string, string> = {
+  pcId: 'pc_id',
+  os: 'os_family',
+  agent: 'agent_version',
+  lastHeartbeat: 'last_heartbeat',
+  lastLogon: 'last_logon_user',
+};
 
 /** Read a persisted `string[]` from localStorage, tolerating anything
  *  malformed. `getItem`/`JSON.parse` can throw (blocked storage, bad
@@ -115,11 +144,17 @@ export function Agents() {
   const dQ = useDebouncedValue(q, FILTER_DEBOUNCE_MS);
   const dUser = useDebouncedValue(user, FILTER_DEBOUNCE_MS);
   const dVersion = useDebouncedValue(version, FILTER_DEBOUNCE_MS);
-  // #1051: attribute (agent_meta) search — a key from the dropdown plus a
-  // contains-value. `meta_value` only means anything with a `meta_key`.
-  const [metaKey, setMetaKey] = useState('');
-  const [metaValue, setMetaValue] = useState('');
-  const dMetaValue = useDebouncedValue(metaValue, FILTER_DEBOUNCE_MS);
+  // #1061: metadata conditions — [key][op][value] rows, AND'd. Debounced
+  // as a whole so typing a value doesn't fire a request per keystroke.
+  const [conditions, setConditions] = useState<MetaCond[]>([]);
+  const dConditions = useDebouncedValue(conditions, FILTER_DEBOUNCE_MS);
+  // #1061: global attribute search — matches ANY metadata value.
+  const [metaAny, setMetaAny] = useState('');
+  const dMetaAny = useDebouncedValue(metaAny, FILTER_DEBOUNCE_MS);
+  // #1061: server-side column sort. Empty field ⇒ backend default
+  // (updated_at desc); a header click sets/toggles these.
+  const [sort, setSort] = useState('');
+  const [dir, setDir] = useState<'asc' | 'desc'>('asc');
   // #1051: which agent_meta keys render as extra columns (persisted per
   // browser). Seeded from localStorage; kept in sync on every change.
   const [metaCols, setMetaCols] = useState<string[]>(() => readStringArray(META_COLS_KEY));
@@ -150,6 +185,61 @@ export function Agents() {
   // `metaCols` (localStorage) is kept intact so the choice returns if the
   // key reappears.
   const activeMetaCols = metaCols.filter((k) => metaKeys.includes(k));
+
+  // #1061 condition-row editing.
+  const addCond = () =>
+    setConditions((c) => [
+      ...c,
+      { id: newId(), key: metaKeys[0] ?? '', op: 'contains', value: '' },
+    ]);
+  const removeCond = (id: string) => setConditions((c) => c.filter((x) => x.id !== id));
+  const updateCond = (id: string, patch: Partial<MetaCond>) =>
+    setConditions((c) => c.map((x) => (x.id === id ? { ...x, ...patch } : x)));
+  // Serialise the (debounced) conditions to `&meta.<key>.<op>=<value>`
+  // params. A row is sent only when it has a key and, for value-ops, a
+  // value — an incomplete row shouldn't narrow the fleet to nothing.
+  const condParams = dConditions
+    .filter((c) => c.key.trim() && (!OPS_WITH_VALUE.includes(c.op) || c.value.trim()))
+    .map(
+      (c) =>
+        `&meta.${encodeURIComponent(c.key.trim())}.${c.op}=${encodeURIComponent(c.value.trim())}`,
+    )
+    .join('');
+
+  // #1061: toggle sort on a header — first click asc, second desc, third
+  // clears back to the default order.
+  const toggleSort = (field: string) => {
+    setOffset(0);
+    if (sort !== field) {
+      setSort(field);
+      setDir('asc');
+    } else if (dir === 'asc') {
+      setDir('desc');
+    } else {
+      setSort('');
+      setDir('asc');
+    }
+  };
+  // A clickable, sortable column header: label + an asc/desc caret when
+  // it's the active sort field. A column's own description `tooltip` is
+  // combined with the sort hint (the button's title would otherwise
+  // shadow the parent TableHead's title, hiding the description).
+  const sortBtn = (field: string, label: React.ReactNode, tooltip?: string) => (
+    <button
+      type="button"
+      onClick={() => toggleSort(field)}
+      className="inline-flex items-center gap-1 hover:text-fg"
+      title={tooltip ? `${tooltip} — ${t('sort.hint')}` : t('sort.hint')}
+    >
+      {label}
+      {sort === field &&
+        (dir === 'asc' ? <ArrowUp className="size-3" /> : <ArrowDown className="size-3" />)}
+    </button>
+  );
+  // a11y: announce the column's current sort state on the header cell.
+  const ariaSort = (field: string): 'ascending' | 'descending' | undefined =>
+    sort === field ? (dir === 'asc' ? 'ascending' : 'descending') : undefined;
+
   // Built-in columns the operator has hidden (persisted per browser). A
   // column is visible unless its id is in this set; pc_id is never here.
   const [hiddenCols, setHiddenCols] = useState<string[]>(() => readStringArray(HIDDEN_COLS_KEY));
@@ -163,6 +253,21 @@ export function Agents() {
   const isColVisible = (id: string) => !hiddenCols.includes(id);
   const toggleCol = (id: string) =>
     setHiddenCols((prev) => (prev.includes(id) ? prev.filter((c) => c !== id) : [...prev, id]));
+  // #1061: if the sorted column is hidden (built-in) or its metadata key
+  // drops out of the active set, the sort would persist invisibly with no
+  // header caret and no way to clear it — reconcile by clearing it.
+  const sortColumnVisible =
+    !sort ||
+    sort === SORT_FIELDS.pcId ||
+    (sort.startsWith('meta:')
+      ? activeMetaCols.includes(sort.slice(5))
+      : isColVisible(Object.entries(SORT_FIELDS).find(([, f]) => f === sort)?.[0] ?? ''));
+  useEffect(() => {
+    if (!sortColumnVisible) {
+      setSort('');
+      setDir('asc');
+    }
+  }, [sortColumnVisible]);
   const [searchParams, setSearchParams] = useSearchParams();
   const statusFilter = parseStatusFilter(searchParams.get('status'));
   // #652: the Rollout "quarantined K" drill-down lands here with
@@ -171,7 +276,19 @@ export function Agents() {
   // chip below.
   const quarantined = searchParams.get('quarantined') ?? '';
   const { data, error, isLoading, isFetching } = useQuery({
-    queryKey: ['agents', dQ, dUser, dVersion, quarantined, offset, statusFilter, metaKey, dMetaValue],
+    queryKey: [
+      'agents',
+      dQ,
+      dUser,
+      dVersion,
+      quarantined,
+      offset,
+      statusFilter,
+      condParams,
+      dMetaAny,
+      sort,
+      dir,
+    ],
     // Match the Dashboard cadence so the per-row online/offline badge
     // ages out a dropped agent within ~30s of the fleet-health tile.
     // #563: the status filter rides to the server, so the Dashboard's
@@ -188,9 +305,10 @@ export function Agents() {
           (dVersion ? `&version=${encodeURIComponent(dVersion)}` : '') +
           (quarantined ? `&quarantined=${encodeURIComponent(quarantined)}` : '') +
           (statusFilter !== 'all' ? `&status=${statusFilter}` : '') +
-          // #1051: attribute filter — value only rides when a key is set.
-          (metaKey ? `&meta_key=${encodeURIComponent(metaKey)}` : '') +
-          (metaKey && dMetaValue ? `&meta_value=${encodeURIComponent(dMetaValue)}` : ''),
+          // #1061: metadata conditions, global attribute search, sort.
+          condParams +
+          (dMetaAny ? `&meta_any=${encodeURIComponent(dMetaAny)}` : '') +
+          (sort ? `&sort=${encodeURIComponent(sort)}&dir=${dir}` : ''),
       ),
     refetchInterval: 30_000,
     // Keep the previous page rendered while a filter keystroke changes
@@ -226,8 +344,8 @@ export function Agents() {
     dVersion,
     quarantined,
     statusFilter,
-    metaKey,
-    dMetaValue,
+    condParams,
+    dMetaAny,
   });
   if (
     prevFilterKey.dQ !== dQ ||
@@ -235,10 +353,10 @@ export function Agents() {
     prevFilterKey.dVersion !== dVersion ||
     prevFilterKey.quarantined !== quarantined ||
     prevFilterKey.statusFilter !== statusFilter ||
-    prevFilterKey.metaKey !== metaKey ||
-    prevFilterKey.dMetaValue !== dMetaValue
+    prevFilterKey.condParams !== condParams ||
+    prevFilterKey.dMetaAny !== dMetaAny
   ) {
-    setPrevFilterKey({ dQ, dUser, dVersion, quarantined, statusFilter, metaKey, dMetaValue });
+    setPrevFilterKey({ dQ, dUser, dVersion, quarantined, statusFilter, condParams, dMetaAny });
     setOffset(0);
   }
 
@@ -400,7 +518,16 @@ export function Agents() {
   // filtered-empty page (search, status chip, or an out-of-range
   // offset) keeps the table chrome so the operator can clear the
   // filter / page back.
-  if (total === 0 && !dQ && !dUser && !dVersion && !quarantined && statusFilter === 'all' && !metaKey) {
+  if (
+    total === 0 &&
+    !dQ &&
+    !dUser &&
+    !dVersion &&
+    !quarantined &&
+    statusFilter === 'all' &&
+    condParams === '' &&
+    !dMetaAny
+  ) {
     return (
       <Card>
         <CardHeader className="items-center text-center">
@@ -482,33 +609,18 @@ export function Agents() {
             className="h-8 w-40"
           />
         </div>
-        {/* #1051: attribute (agent_meta) search — only when metadata
-            exists anywhere in the fleet. */}
+        {/* #1061: global attribute search — matches any metadata value.
+            Only shown when metadata exists anywhere in the fleet. */}
         {metaKeys.length > 0 && (
           <div className="space-y-1">
-            <Label htmlFor="agents-meta-key">{t('search.attributeLabel')}</Label>
-            <div className="flex gap-1">
-              <Select
-                id="agents-meta-key"
-                value={metaKey}
-                onChange={(e) => setMetaKey(e.target.value)}
-                className="h-8 w-36"
-              >
-                <option value="">{t('search.attributeAny')}</option>
-                {metaKeys.map((k) => (
-                  <option key={k} value={k}>
-                    {k}
-                  </option>
-                ))}
-              </Select>
-              <Input
-                value={metaValue}
-                onChange={(e) => setMetaValue(e.target.value)}
-                placeholder={t('search.attributeValue')}
-                className="h-8 w-40"
-                disabled={!metaKey}
-              />
-            </div>
+            <Label htmlFor="agents-meta-any">{t('search.attributeAnyLabel')}</Label>
+            <Input
+              id="agents-meta-any"
+              value={metaAny}
+              onChange={(e) => setMetaAny(e.target.value)}
+              placeholder={t('search.attributeAnyPlaceholder')}
+              className="h-8 w-52"
+            />
           </div>
         )}
         {/* Column picker — always available: hide/show the built-in
@@ -558,6 +670,62 @@ export function Agents() {
           </details>
         </div>
       </div>
+
+      {/* #1061: metadata condition rows — [key][op][value], AND'd. Only
+          when metadata exists; value input hides for presence-only ops. */}
+      {metaKeys.length > 0 && (
+        <div className="space-y-1.5">
+          {conditions.map((c) => (
+            <div key={c.id} className="flex flex-wrap items-center gap-1.5">
+              <Select
+                value={c.key}
+                onChange={(e) => updateCond(c.id, { key: e.target.value })}
+                className="h-8 w-40"
+                aria-label={t('search.conditionKey')}
+              >
+                {metaKeys.map((k) => (
+                  <option key={k} value={k}>
+                    {k}
+                  </option>
+                ))}
+              </Select>
+              <Select
+                value={c.op}
+                onChange={(e) => updateCond(c.id, { op: e.target.value as MetaOp })}
+                className="h-8 w-36"
+                aria-label={t('search.conditionOp')}
+              >
+                {META_OPS.map((op) => (
+                  <option key={op} value={op}>
+                    {t(`search.ops.${op}`)}
+                  </option>
+                ))}
+              </Select>
+              {OPS_WITH_VALUE.includes(c.op) && (
+                <Input
+                  value={c.value}
+                  onChange={(e) => updateCond(c.id, { value: e.target.value })}
+                  placeholder={t('search.conditionValue')}
+                  aria-label={t('search.conditionValue')}
+                  className="h-8 w-44"
+                />
+              )}
+              <Button
+                variant="ghost"
+                size="sm"
+                aria-label={t('search.conditionRemove')}
+                onClick={() => removeCond(c.id)}
+              >
+                <X className="size-4" />
+              </Button>
+            </div>
+          ))}
+          <Button variant="ghost" size="sm" onClick={addCond}>
+            <Plus className="size-4" />
+            <span className="ml-2">{t('search.addCondition')}</span>
+          </Button>
+        </div>
+      )}
 
       {/* Liveness chips + active quarantine drill-down. */}
       <div className="flex flex-wrap items-center gap-2">
@@ -620,19 +788,34 @@ export function Agents() {
                 hostname column duplicated it. The hostname now rides the
                 pc_id cell, shown only when it genuinely differs. pc_id is
                 the row identity + detail link, so it's never hideable. */}
-            <TableHead>{t('columns.pcId')}</TableHead>
-            {isColVisible('os') && <TableHead>{t('columns.os')}</TableHead>}
-            {isColVisible('agent') && <TableHead>{t('columns.agent')}</TableHead>}
+            <TableHead aria-sort={ariaSort(SORT_FIELDS.pcId)}>
+              {sortBtn(SORT_FIELDS.pcId, t('columns.pcId'))}
+            </TableHead>
+            {isColVisible('os') && (
+              <TableHead aria-sort={ariaSort(SORT_FIELDS.os)}>
+                {sortBtn(SORT_FIELDS.os, t('columns.os'))}
+              </TableHead>
+            )}
+            {isColVisible('agent') && (
+              <TableHead aria-sort={ariaSort(SORT_FIELDS.agent)}>
+                {sortBtn(SORT_FIELDS.agent, t('columns.agent'))}
+              </TableHead>
+            )}
             {isColVisible('lastHeartbeat') && (
-              <TableHead>{t('columns.lastHeartbeat')}</TableHead>
+              <TableHead aria-sort={ariaSort(SORT_FIELDS.lastHeartbeat)}>
+                {sortBtn(SORT_FIELDS.lastHeartbeat, t('columns.lastHeartbeat'))}
+              </TableHead>
             )}
             {isColVisible('lastLogon') && (
-              <TableHead title={t('columnTitles.lastLogon')}>{t('columns.lastLogon')}</TableHead>
+              <TableHead aria-sort={ariaSort(SORT_FIELDS.lastLogon)}>
+                {sortBtn(SORT_FIELDS.lastLogon, t('columns.lastLogon'), t('columnTitles.lastLogon'))}
+              </TableHead>
             )}
-            {/* #1051: operator-selected agent_meta columns. */}
+            {/* #1051: operator-selected agent_meta columns (sortable via
+                the `meta:<key>` token). */}
             {activeMetaCols.map((k) => (
-              <TableHead key={k} title={t('columnTitles.attribute', { key: k })}>
-                {k}
+              <TableHead key={k} aria-sort={ariaSort(`meta:${k}`)}>
+                {sortBtn(`meta:${k}`, k, t('columnTitles.attribute', { key: k }))}
               </TableHead>
             ))}
             {/* v0.37 Part 2: agent process self-perf columns. Pre-

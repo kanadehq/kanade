@@ -66,9 +66,25 @@
     "user": "regex — e.g. taro",
     "versionLabel": "version",
     "version": "regex — e.g. 0.43",
-    "attributeLabel": "attribute",
-    "attributeAny": "(any attribute)",
-    "attributeValue": "contains…"
+    "attributeAnyLabel": "attribute (any)",
+    "attributeAnyPlaceholder": "any attribute contains…",
+    "conditionKey": "attribute",
+    "conditionOp": "operator",
+    "conditionValue": "value",
+    "conditionRemove": "remove condition",
+    "addCondition": "add attribute filter",
+    "ops": {
+      "contains": "contains",
+      "eq": "equals",
+      "neq": "not equals",
+      "starts": "starts with",
+      "empty": "is empty",
+      "set": "is set",
+      "absent": "is absent"
+    }
+  },
+  "sort": {
+    "hint": "click to sort; click again to reverse, then clear"
   },
   "quarantinedChip": "quarantined: {{version}}",
   "quarantinedChipTitle": "Showing only agents that rolled this version back — click to clear",
