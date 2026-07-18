@@ -1,6 +1,6 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Activity, AlertTriangle, Loader2, ScrollText, Server, Settings2, Trash2, Users } from 'lucide-react';
-import { useState } from 'react';
+import { Activity, AlertTriangle, Loader2, ScrollText, Server, Settings2, SlidersHorizontal, Trash2, Users } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 import { Link, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -13,6 +13,7 @@ import { useConfirm } from '@/components/ui/confirm-dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { JsonOutput } from '@/components/ui/json-output';
+import { Select } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { apiFetch, apiFetchPaged, formatError } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
@@ -27,6 +28,9 @@ import { cn, fmtIsoLocal, isAgentOnline, unresolvedQuarantine } from '@/lib/util
 const PAGE_SIZE = 50;
 // Same debounce the other list pages use for typed filters.
 const FILTER_DEBOUNCE_MS = 300;
+// #1051: localStorage key for the operator's chosen agent_meta columns
+// (per-browser; a server-side per-account pref could follow later).
+const META_COLS_KEY = 'agents.metaColumns';
 
 // Liveness filter for the list, shared with the URL `?status=` param
 // so the Dashboard's fleet-health tiles can deep-link straight to the
@@ -77,6 +81,48 @@ export function Agents() {
   const dQ = useDebouncedValue(q, FILTER_DEBOUNCE_MS);
   const dUser = useDebouncedValue(user, FILTER_DEBOUNCE_MS);
   const dVersion = useDebouncedValue(version, FILTER_DEBOUNCE_MS);
+  // #1051: attribute (agent_meta) search — a key from the dropdown plus a
+  // contains-value. `meta_value` only means anything with a `meta_key`.
+  const [metaKey, setMetaKey] = useState('');
+  const [metaValue, setMetaValue] = useState('');
+  const dMetaValue = useDebouncedValue(metaValue, FILTER_DEBOUNCE_MS);
+  // #1051: which agent_meta keys render as extra columns (persisted per
+  // browser). Seeded from localStorage; kept in sync on every change.
+  const [metaCols, setMetaCols] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem(META_COLS_KEY);
+      return raw ? (JSON.parse(raw) as string[]) : [];
+    } catch {
+      return [];
+    }
+  });
+  useEffect(() => {
+    // setItem can throw (SecurityError under blocked storage / some iframe
+    // contexts, or QuotaExceeded) — a throw here would crash the render.
+    try {
+      localStorage.setItem(META_COLS_KEY, JSON.stringify(metaCols));
+    } catch {
+      /* non-persistent this session; not worth surfacing */
+    }
+  }, [metaCols]);
+  // Distinct agent_meta keys across the fleet — drives the column picker
+  // and the attribute-search key dropdown. Empty ⇒ no metadata anywhere,
+  // so the controls stay hidden.
+  const metaKeys = useQuery({
+    queryKey: ['agent-meta-keys'],
+    queryFn: () => apiFetch<string[]>('/api/agents/meta-keys'),
+  }).data ?? [];
+  const toggleMetaCol = (key: string) =>
+    setMetaCols((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
+  const metaVal = (a: AgentRow, key: string) =>
+    a.meta?.find((e) => e.key === key)?.value ?? '';
+  // Render only selections that still exist fleet-wide. A key removed from
+  // all PCs (or a transiently-empty key list) drops out of `metaKeys`, so
+  // the picker can no longer offer it — filtering here stops such a
+  // selection rendering a stuck, un-removable blank column. The raw
+  // `metaCols` (localStorage) is kept intact so the choice returns if the
+  // key reappears.
+  const activeMetaCols = metaCols.filter((k) => metaKeys.includes(k));
   const [searchParams, setSearchParams] = useSearchParams();
   const statusFilter = parseStatusFilter(searchParams.get('status'));
   // #652: the Rollout "quarantined K" drill-down lands here with
@@ -85,7 +131,7 @@ export function Agents() {
   // chip below.
   const quarantined = searchParams.get('quarantined') ?? '';
   const { data, error, isLoading, isFetching } = useQuery({
-    queryKey: ['agents', dQ, dUser, dVersion, quarantined, offset, statusFilter],
+    queryKey: ['agents', dQ, dUser, dVersion, quarantined, offset, statusFilter, metaKey, dMetaValue],
     // Match the Dashboard cadence so the per-row online/offline badge
     // ages out a dropped agent within ~30s of the fleet-health tile.
     // #563: the status filter rides to the server, so the Dashboard's
@@ -101,7 +147,10 @@ export function Agents() {
           (dUser ? `&user=${encodeURIComponent(dUser)}` : '') +
           (dVersion ? `&version=${encodeURIComponent(dVersion)}` : '') +
           (quarantined ? `&quarantined=${encodeURIComponent(quarantined)}` : '') +
-          (statusFilter !== 'all' ? `&status=${statusFilter}` : ''),
+          (statusFilter !== 'all' ? `&status=${statusFilter}` : '') +
+          // #1051: attribute filter — value only rides when a key is set.
+          (metaKey ? `&meta_key=${encodeURIComponent(metaKey)}` : '') +
+          (metaKey && dMetaValue ? `&meta_value=${encodeURIComponent(dMetaValue)}` : ''),
       ),
     refetchInterval: 30_000,
     // Keep the previous page rendered while a filter keystroke changes
@@ -137,15 +186,19 @@ export function Agents() {
     dVersion,
     quarantined,
     statusFilter,
+    metaKey,
+    dMetaValue,
   });
   if (
     prevFilterKey.dQ !== dQ ||
     prevFilterKey.dUser !== dUser ||
     prevFilterKey.dVersion !== dVersion ||
     prevFilterKey.quarantined !== quarantined ||
-    prevFilterKey.statusFilter !== statusFilter
+    prevFilterKey.statusFilter !== statusFilter ||
+    prevFilterKey.metaKey !== metaKey ||
+    prevFilterKey.dMetaValue !== dMetaValue
   ) {
-    setPrevFilterKey({ dQ, dUser, dVersion, quarantined, statusFilter });
+    setPrevFilterKey({ dQ, dUser, dVersion, quarantined, statusFilter, metaKey, dMetaValue });
     setOffset(0);
   }
 
@@ -307,7 +360,7 @@ export function Agents() {
   // filtered-empty page (search, status chip, or an out-of-range
   // offset) keeps the table chrome so the operator can clear the
   // filter / page back.
-  if (total === 0 && !dQ && !dUser && !dVersion && !quarantined && statusFilter === 'all') {
+  if (total === 0 && !dQ && !dUser && !dVersion && !quarantined && statusFilter === 'all' && !metaKey) {
     return (
       <Card>
         <CardHeader className="items-center text-center">
@@ -384,6 +437,61 @@ export function Agents() {
             className="h-8 w-40"
           />
         </div>
+        {/* #1051: attribute (agent_meta) search + column picker. Hidden
+            entirely when no metadata exists anywhere in the fleet. */}
+        {metaKeys.length > 0 && (
+          <>
+            <div className="space-y-1">
+              <Label htmlFor="agents-meta-key">{t('search.attributeLabel')}</Label>
+              <div className="flex gap-1">
+                <Select
+                  id="agents-meta-key"
+                  value={metaKey}
+                  onChange={(e) => setMetaKey(e.target.value)}
+                  className="h-8 w-36"
+                >
+                  <option value="">{t('search.attributeAny')}</option>
+                  {metaKeys.map((k) => (
+                    <option key={k} value={k}>
+                      {k}
+                    </option>
+                  ))}
+                </Select>
+                <Input
+                  value={metaValue}
+                  onChange={(e) => setMetaValue(e.target.value)}
+                  placeholder={t('search.attributeValue')}
+                  className="h-8 w-40"
+                  disabled={!metaKey}
+                />
+              </div>
+            </div>
+            <div className="space-y-1">
+              <Label>{t('columns.attributesLabel')}</Label>
+              <details className="relative">
+                <summary className="flex h-8 cursor-pointer list-none items-center gap-1.5 rounded-md border border-border px-2.5 text-sm hover:bg-muted/10">
+                  <SlidersHorizontal className="size-3.5" />
+                  {t('columns.pickAttributes', { count: activeMetaCols.length })}
+                </summary>
+                <div className="absolute z-20 mt-1 max-h-64 w-52 overflow-auto rounded-md border border-border bg-card p-2 shadow-lg">
+                  {metaKeys.map((k) => (
+                    <label
+                      key={k}
+                      className="flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-sm hover:bg-muted/10"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={metaCols.includes(k)}
+                        onChange={() => toggleMetaCol(k)}
+                      />
+                      <span className="truncate">{k}</span>
+                    </label>
+                  ))}
+                </div>
+              </details>
+            </div>
+          </>
+        )}
       </div>
 
       {/* Liveness chips + active quarantine drill-down. */}
@@ -451,6 +559,12 @@ export function Agents() {
             <TableHead>{t('columns.agent')}</TableHead>
             <TableHead>{t('columns.lastHeartbeat')}</TableHead>
             <TableHead title={t('columnTitles.lastLogon')}>{t('columns.lastLogon')}</TableHead>
+            {/* #1051: operator-selected agent_meta columns. */}
+            {activeMetaCols.map((k) => (
+              <TableHead key={k} title={t('columnTitles.attribute', { key: k })}>
+                {k}
+              </TableHead>
+            ))}
             {/* v0.37 Part 2: agent process self-perf columns. Pre-
                 0.37 agents leave these null and the cell renders
                 as an em-dash, so the table stays usable during a
@@ -545,6 +659,15 @@ export function Agents() {
                   <span className="text-muted">—</span>
                 )}
               </TableCell>
+              {/* #1051: operator-selected agent_meta cells. */}
+              {activeMetaCols.map((k) => {
+                const v = metaVal(a, k);
+                return (
+                  <TableCell key={k} label={k} className="text-xs">
+                    {v || <span className="text-muted">—</span>}
+                  </TableCell>
+                );
+              })}
               <TableCell label={t('columns.cpu')} className="text-right text-muted text-xs">{fmtPct(a.agent_cpu_pct)}</TableCell>
               <TableCell label={t('columns.rss')} className="text-right text-muted text-xs">{fmtBytes(a.agent_rss_bytes)}</TableCell>
               <TableCell>
@@ -579,7 +702,7 @@ export function Agents() {
           })}
           {visible.length === 0 && (
             <TableRow>
-              <TableCell colSpan={9} className="text-center text-muted text-sm py-6">
+              <TableCell colSpan={9 + activeMetaCols.length} className="text-center text-muted text-sm py-6">
                 {t('filterEmpty')}
               </TableCell>
             </TableRow>

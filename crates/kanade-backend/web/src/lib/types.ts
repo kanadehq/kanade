@@ -33,6 +33,11 @@ export type AgentRow = {
   // never-signed-in / pre-#655 / non-Windows agents.
   last_logon_user: string | null;
   last_logon_display_name: string | null;
+  // #1051: operator-managed key/value metadata for this PC, decorated
+  // onto the roster by GET /api/agents (from the agent_meta projection).
+  // Omitted when the PC has no metadata. Drives the Agents page's
+  // selectable attribute columns.
+  meta?: MetaEntry[];
 };
 
 export type Heartbeat = {
