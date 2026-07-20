@@ -116,6 +116,18 @@ bun install --frozen-lockfile
 bun run build
 '''
 
+[tasks.web-test]
+description = "Run the kanade-backend SPA unit tests (bun test)."
+# Installs first for the same reason as web-build: CI runs this in a fresh
+# checkout with no node_modules. Only the backend SPA has tests today; add
+# the client WebView here if it ever grows any.
+script_runner = "@shell"
+script = '''
+cd crates/kanade-backend/web
+bun install --frozen-lockfile
+bun test
+'''
+
 [tasks.apm-install-update]
 description = "Refresh APM dependencies to upstream latest. Skipped when apm.yml/apm absent, or when apm.lock.yaml already records the current upstream renri HEAD (kicks in on every cargo make on-add after the first to keep worktree creation fast)."
 script_runner = "@duckscript"

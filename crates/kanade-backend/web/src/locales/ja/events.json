@@ -82,6 +82,16 @@
     "spanTooltip": "{{lane}}: {{from}} → {{to}}",
     "uncertainTooltip": "{{lane}}: {{from}} → {{to}} (不確定 · エージェント オフライン)",
     "markerTooltip": "{{kind}} ({{at}})",
+    "state": {
+      "power": { "on": "オン", "off": "オフ" },
+      "session": { "on": "サインイン中", "off": "サインアウト" },
+      "sleep": { "on": "スリープ中", "off": "動作中" },
+      "active": { "on": "操作中", "off": "アイドル" }
+    },
+    "unconfirmed": "未確認",
+    "noData": "データなし (件数上限で未取得)",
+    "noDataTooltip": "データなし: {{from}} → {{to}} — 件数の上限に達したため、この期間の古い側は取得されていません。件数を増やすと表示されます",
+    "truncated": "件数上限 ({{limit}} 件) に達したため、{{from}} より前は未取得です — レーンの斜線部分はデータが無い区間です",
     "empty": "この期間にこの PC の 電源 / セッション / スリープ / アクティブ イベントはありません。"
   },
   "heatmap": {
