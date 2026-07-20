@@ -415,6 +415,149 @@ export function axisGridlines(t0: number, t1: number): { ts: number; isDay: bool
  * earliest / latest event so the Events page can use it without a window.
  */
 /**
+ * `ranges` minus every interval in `cut`, keeping the leftovers in order.
+ *
+ * The no-evidence band is per lane, not per strip: drawing one band across
+ * all four and letting spans paint over it looked right in principle and
+ * wrong on screen. The unconfirmed hatch is a *gradient with transparent
+ * gaps*, so a band underneath shows through them — the two patterns
+ * interleave into a plaid, and a stretch where the lane does have evidence
+ * ends up asserting "believed on" and "no evidence" in the same pixels.
+ * Subtracting first means every pixel carries exactly one statement.
+ */
+export function subtractRanges<T extends { from: number; to: number }>(
+  ranges: T[],
+  cut: { from: number; to: number }[],
+): T[] {
+  let out = ranges.filter((r) => r.to > r.from);
+  for (const c of cut) {
+    if (c.to <= c.from) continue;
+    const next: T[] = [];
+    for (const r of out) {
+      if (c.to <= r.from || c.from >= r.to) {
+        next.push(r); // disjoint
+        continue;
+      }
+      // Splitting keeps the source range's other fields (its `reason`), so a
+      // leftover sliver still explains itself in the tooltip.
+      if (c.from > r.from) next.push({ ...r, to: c.from });
+      if (c.to < r.to) next.push({ ...r, from: c.to });
+    }
+    out = next;
+  }
+  return out;
+}
+
+/** Why a stretch carries no evidence. */
+export type NoEvidenceReason = 'truncated' | 'offline';
+
+/**
+ * The stretches the strip must not make any claim about. Two causes, one
+ * meaning — "no evidence either way":
+ *
+ *   [t0, coverEdge)          the fetch was truncated before reaching here
+ *   [certainEdge, liveEdge]  the agent stopped reporting
+ *
+ * Returned non-overlapping and in order. Overlap is not hypothetical: the
+ * coverage floor is global across PCs, so a host that went quiet days ago
+ * sits behind a floor set by a busier host's recent events and its
+ * `certainEdge` lands before `coverEdge`; a never-reported agent with no
+ * events puts `certainEdge` at 0 and overlaps outright. Two entries over the
+ * same pixels would stack two elements and leave which `reason` the tooltip
+ * shows to paint order.
+ */
+export function noEvidenceRanges(
+  t0: number,
+  t1: number,
+  now: number,
+  coverEdge: number,
+  lastHeartbeat?: string | null,
+  lastEventTs?: number,
+): { from: number; to: number; reason: NoEvidenceReason }[] {
+  const { certainEdge, liveEdge } = evidenceEdges(t1, now, lastHeartbeat, lastEventTs);
+  const out: { from: number; to: number; reason: NoEvidenceReason }[] = [];
+  if (coverEdge > t0) out.push({ from: t0, to: coverEdge, reason: 'truncated' });
+  // Clamped past the truncated stretch, not merely past the window start.
+  // `coverEdge >= t0` always, so this subsumes the window-start clamp.
+  const from = Math.max(certainEdge, coverEdge);
+  if (liveEdge > from) out.push({ from, to: liveEdge, reason: 'offline' });
+  return out;
+}
+
+/**
+ * Newest parseable event instant, or `undefined` for an empty set. `reduce`
+ * rather than `Math.max(...)`: the spread would blow the call stack on the
+ * unbounded event sets the Analytics query can return.
+ */
+export function newestEventTs(events: OpEvent[]): number | undefined {
+  let hi = -Infinity;
+  for (const e of events) {
+    const ts = Date.parse(e.at);
+    if (!Number.isNaN(ts) && ts > hi) hi = ts;
+  }
+  return Number.isFinite(hi) ? hi : undefined;
+}
+
+/**
+ * The two edges that bound what the strip may assert.
+ *
+ * `liveEdge` is the newest instant that has happened — an open span clamps
+ * there rather than running to a window end in the future. `certainEdge` is
+ * the newest instant the agent has vouched for: past `lastHeartbeat + grace`
+ * we have no evidence of anything, because the agent stopped reporting.
+ *
+ * `grace` is the fleet-wide online/offline threshold, so one missed beat on a
+ * healthy agent doesn't fray the strip's tail. Without a heartbeat the two
+ * edges coincide and nothing is gated.
+ *
+ * Exported because the renderer needs the same edges the lane builder used:
+ * `gateToHeartbeat` can only hatch spans that exist, and the whole point of
+ * the no-evidence band is to cover the lanes that have *no* span there.
+ */
+export function evidenceEdges(
+  t1: number,
+  now: number,
+  lastHeartbeat?: string | null,
+  // Newest event actually received for this PC. Only consulted when the
+  // server has told us the agent has *never* reported a heartbeat (see
+  // below), where it is the only thing that bounds what we can vouch for.
+  lastEventTs?: number,
+): { liveEdge: number; certainEdge: number } {
+  const liveEdge = Math.min(t1, now);
+
+  // `undefined` and `null` are NOT the same thing here, and collapsing them
+  // was a real bug: `undefined` means we haven't been told yet (the
+  // heartbeat query is in flight, or this PC has no agent row) and gating on
+  // that would hatch every healthy strip on each page load; `null` means the
+  // server told us this agent registered and has never once reported.
+  // `agents.last_heartbeat` is genuinely nullable — `cleanup.rs` exempts
+  // exactly those rows from pruning — so this is a reachable state, and it
+  // is precisely the case that most needs the honesty this component is
+  // supposed to provide.
+  if (lastHeartbeat === undefined) return { liveEdge, certainEdge: liveEdge };
+
+  if (lastHeartbeat === null) {
+    // Never reported. Events still prove the host was alive when it sent
+    // them — they arrive over durable JetStream, unlike the lossy heartbeat
+    // — so certainty runs to the newest event we hold and no further.
+    // Extrapolating an open span past that would assert liveness nothing has
+    // ever evidenced. With no events either, the whole window is unknown.
+    return {
+      liveEdge,
+      certainEdge: lastEventTs === undefined ? 0 : Math.min(liveEdge, lastEventTs),
+    };
+  }
+
+  const hbMs = Date.parse(lastHeartbeat);
+  return {
+    liveEdge,
+    certainEdge: Number.isNaN(hbMs)
+      ? liveEdge
+      : Math.min(liveEdge, hbMs + AGENT_ACTIVE_THRESHOLD_MS),
+  };
+}
+
+/**
  * Derive the four lanes from a window of raw operational events.
  *
  * Pure and exported so the lane dependency rules can be tested directly:
@@ -449,17 +592,7 @@ export function buildLanes(
   const t0 =
     coverageFrom === undefined ? windowFrom : Math.min(Math.max(coverageFrom, windowFrom), t1);
   if (t1 <= t0) return [];
-  // The live edge an open span clamps to, and the newest instant we still
-  // trust. When the agent is offline, `lastHeartbeat + grace` falls before
-  // the live edge, so any ongoing state after it is hatched as unconfirmed
-  // (see `gateToHeartbeat`). No `lastHeartbeat` → certainEdge == liveEdge →
-  // no gating. `grace` = the fleet-wide online/offline threshold, so a
-  // single missed beat on a healthy agent doesn't fray the strip's tail.
-  const liveEdge = Math.min(t1, now);
-  const hbMs = lastHeartbeat ? Date.parse(lastHeartbeat) : NaN;
-  const certainEdge = Number.isNaN(hbMs)
-    ? liveEdge
-    : Math.min(liveEdge, hbMs + AGENT_ACTIVE_THRESHOLD_MS);
+  const { liveEdge, certainEdge } = evidenceEdges(t1, now, lastHeartbeat, newestEventTs(events));
   // Reconstruct the power lane first: it's the ground truth for "the host
   // was up", and the subordinate lanes get clipped to its ON spans below.
   const power = OP_LANES.find((l) => l.key === 'power')!;
@@ -610,12 +743,34 @@ export function OperationalTimeline({
     return Number.isNaN(ms) ? t0 : Math.min(Math.max(ms, t0), t1);
   }, [coverageFrom, t0, t1]);
 
+  // Snapshot "now" once per render pass so open intervals don't paint past
+  // the present when the window runs into the future (today before midnight).
+  // Held in a memo on the same deps as the lanes so the band below is drawn
+  // against the identical instant the spans were built from — recomputing
+  // `Date.now()` separately would let the two drift by a render.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the deps are the
+  // inputs whose change should re-anchor "now"; Date.now() has none of its own.
+  const now = useMemo(() => Date.now(), [events, t0, t1, lastHeartbeat, coverEdge]);
+
   const lanes = useMemo(
-    // Snapshot "now" once per render so open intervals don't paint past the
-    // present when the window runs into the future (today before midnight).
-    () => buildLanes(events, t0, t1, Date.now(), lastHeartbeat, coverEdge),
-    [events, t0, t1, lastHeartbeat, coverEdge],
+    () => buildLanes(events, t0, t1, now, lastHeartbeat, coverEdge),
+    [events, t0, t1, now, lastHeartbeat, coverEdge],
   );
+
+  // Stretches the strip must not make any claim about. Two causes, one
+  // meaning — "no evidence either way":
+  //   [t0, coverEdge)          the fetch was truncated before reaching here
+  //   [certainEdge, liveEdge]  the agent stopped reporting
+  // Painted as a neutral band so an *empty* lane in these stretches reads as
+  // unknown rather than as a confident "this state was off". Without it the
+  // absence of a span is indistinguishable from a measured absence — the
+  // asymmetry that made an offline agent's idle lane assert "nobody was
+  // here" for the entire outage (#1086).
+  const noEvidence = useMemo(
+    () => noEvidenceRanges(t0, t1, now, coverEdge, lastHeartbeat, newestEventTs(events)),
+    [events, t0, t1, now, lastHeartbeat, coverEdge],
+  );
+
 
   const ticks = useMemo(() => axisTicks(t0, t1), [t0, t1]);
   const gridlines = useMemo(() => axisGridlines(t0, t1), [t0, t1]);
@@ -653,7 +808,18 @@ export function OperationalTimeline({
       ? null
       : lanes.map((lane) => {
           const s = lane.spans.find((x) => x.from <= hoverTs && hoverTs < x.to);
-          return { key: lane.key, color: lane.color, on: !!s, uncertain: !!s?.uncertain };
+          // No span AND inside a no-evidence stretch → unknown, not "off".
+          // Reporting "off" here is the exact failure this change exists to
+          // remove: an absent span is only meaningful where we were listening.
+          const blind =
+            !s && noEvidence.some((n) => n.from <= hoverTs && hoverTs < n.to);
+          return {
+            key: lane.key,
+            color: lane.color,
+            on: !!s,
+            uncertain: !!s?.uncertain,
+            unknown: blind,
+          };
         });
 
   return (
@@ -675,6 +841,43 @@ export function OperationalTimeline({
             <span className="truncate">{t(`opTimeline.lanes.${lane.key}`)}</span>
           </div>
           <div className="relative h-6 flex-1 overflow-hidden rounded-sm bg-muted/10">
+            {/* No-evidence band, drawn FIRST so spans paint over it: where a
+                lane does have a span here it keeps its own rendering (a
+                lane-coloured hatch, for a state believed but unconfirmed),
+                and only the genuinely blank parts show as unknown.
+
+                Distinguished from the unconfirmed hatch by GEOMETRY, not just
+                colour: opposite angle (135° vs 45°) and a wider period (8px
+                vs 6px). Relying on hue alone would have asked the viewer to
+                tell neutral grey at 28% from sky-blue at 35% — a distinction
+                I could not verify and would not bet a semantic on. The
+                opposing angle also stops the two patterns beating into a
+                moiré where an uncertain span's left edge doesn't align with
+                the band's, which same-angle stripes at different phases do. */}
+            {subtractRanges(noEvidence, lane.spans).map((n, i) => (
+              <div
+                key={`n-${i}`}
+                // No `pointer-events-none`, unlike the gridlines and the
+                // crosshair line: this element carries a `title` explaining
+                // why the stretch is unknown, and a native tooltip needs the
+                // element to actually receive the hover. With pointer events
+                // off the message could never appear — the same reason the
+                // spans and markers below don't disable them either. The
+                // crosshair still works: `onMouseMove` is on the outer
+                // container and mouse events bubble.
+                className="absolute top-0 h-full"
+                style={{
+                  left: `${pct(n.from)}%`,
+                  width: `${Math.max(pct(n.to) - pct(n.from), 0)}%`,
+                  backgroundImage:
+                    'repeating-linear-gradient(135deg, rgb(127 127 127 / 0.3) 0, rgb(127 127 127 / 0.3) 3px, transparent 3px, transparent 8px)',
+                }}
+                title={t(`opTimeline.noEvidence.${n.reason}`, {
+                  from: fmtIsoLocal(new Date(n.from).toISOString()),
+                  to: fmtIsoLocal(new Date(n.to).toISOString()),
+                })}
+              />
+            ))}
             {lane.spans.map((s, i) => {
               const laneName = t(`opTimeline.lanes.${lane.key}`);
               const from = fmtIsoLocal(new Date(s.from).toISOString());
@@ -757,26 +960,6 @@ export function OperationalTimeline({
                 style={{ left: `${pct(g.ts)}%` }}
               />
             ))}
-            {/* Uncovered window: the fetch was truncated before reaching back
-                this far, so nothing here is known either way. Hatched in a
-                neutral grey — distinct from a painted span (state was on),
-                from an empty lane (state was off), and from the lane-coloured
-                heartbeat hatch (state believed but unconfirmed). */}
-            {coverEdge > t0 && (
-              <div
-                className="pointer-events-none absolute top-0 h-full"
-                style={{
-                  left: 0,
-                  width: `${pct(coverEdge)}%`,
-                  backgroundImage:
-                    'repeating-linear-gradient(45deg, rgb(127 127 127 / 0.28) 0, rgb(127 127 127 / 0.28) 3px, transparent 3px, transparent 6px)',
-                }}
-                title={t('opTimeline.noDataTooltip', {
-                  from: fmtIsoLocal(new Date(t0).toISOString()),
-                  to: fmtIsoLocal(new Date(coverEdge).toISOString()),
-                })}
-              />
-            )}
             {hoverTs !== null && (
               <div
                 className="pointer-events-none absolute top-0 h-full w-px bg-fg/80"
@@ -843,25 +1026,26 @@ export function OperationalTimeline({
           <div className="mb-1 font-medium text-fg whitespace-nowrap">
             {fmtIsoLocal(new Date(hoverTs).toISOString())}
           </div>
-          {/* Inside the uncovered window every lane would read "off", which is
-              the one thing we specifically cannot claim here. */}
-          {hoverTs < coverEdge ? (
-            <div className="whitespace-nowrap text-muted">{t('opTimeline.noData')}</div>
-          ) : (
-          at.map((l) => (
+          {at.map((l) => (
             <div key={l.key} className="flex items-center gap-1.5 whitespace-nowrap">
               <span
                 className="inline-block size-2 shrink-0 rounded-sm"
-                style={{ backgroundColor: l.color, opacity: l.on ? 1 : 0.25 }}
+                style={{
+                  backgroundColor: l.color,
+                  // Unknown gets its own weight, between on and off: the dot
+                  // must not read as a confident "off".
+                  opacity: l.on ? 1 : l.unknown ? 0.5 : 0.25,
+                }}
               />
               <span className="text-muted">{t(`opTimeline.lanes.${l.key}`)}</span>
-              <span className={l.on ? 'text-fg' : 'text-muted'}>
-                {t(`opTimeline.state.${l.key}.${l.on ? 'on' : 'off'}`)}
+              <span className={l.on || l.unknown ? 'text-fg' : 'text-muted'}>
+                {l.unknown
+                  ? t('opTimeline.unknown')
+                  : t(`opTimeline.state.${l.key}.${l.on ? 'on' : 'off'}`)}
                 {l.uncertain && ` (${t('opTimeline.unconfirmed')})`}
               </span>
             </div>
-            ))
-          )}
+          ))}
         </div>
       )}
     </div>

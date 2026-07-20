@@ -1,7 +1,14 @@
 import { describe, expect, test } from 'bun:test';
 import { AGENT_ACTIVE_THRESHOLD_MS } from '@/lib/utils';
 
-import { axisGridlines, axisTicks, buildLanes } from './OperationalTimeline';
+import {
+  axisGridlines,
+  axisTicks,
+  buildLanes,
+  evidenceEdges,
+  noEvidenceRanges,
+  subtractRanges,
+} from './OperationalTimeline';
 
 // The lane rules are a small set of interacting invariants that have been
 // fixed four separate times (#841, #972, #981, #983, and the session backfill
@@ -399,6 +406,114 @@ describe('coverage floor (limit-truncated fetch)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// The no-evidence band is subtracted per lane so a stretch never claims two
+// things at once.
+// ---------------------------------------------------------------------------
+
+describe('noEvidenceRanges', () => {
+  const DAY = 86_400_000;
+
+  test('a healthy agent with a complete fetch has no unknown stretches', () => {
+    expect(noEvidenceRanges(T0, T1, H(12), T0, new Date(H(12) - 30_000).toISOString(), H(11)))
+      .toEqual([]);
+  });
+
+  test('truncation alone yields one band at the window start', () => {
+    const out = noEvidenceRanges(T0, T1, H(12), H(6), new Date(H(12) - 30_000).toISOString(), H(11));
+    expect(out).toEqual([{ from: T0, to: H(6), reason: 'truncated' }]);
+  });
+
+  test('a stale agent alone yields one band at the live edge', () => {
+    const out = noEvidenceRanges(T0, T1, H(12), T0, new Date(H(4)).toISOString(), H(4));
+    expect(out).toHaveLength(1);
+    expect(out[0].reason).toBe('offline');
+    expect(out[0].to).toBe(H(12));
+  });
+
+  // The overlap CodeRabbit found. The coverage floor is global across PCs, so
+  // a host quiet since yesterday sits behind a floor set by a busier host's
+  // recent events — `certainEdge` then lands before `coverEdge` and the two
+  // bands would cover the same pixels with different reasons.
+  test('a long-offline agent behind a recent coverage floor produces no overlap', () => {
+    const out = noEvidenceRanges(T0, T1, H(20), H(12), new Date(T0 - DAY).toISOString(), H(13));
+    for (let i = 1; i < out.length; i++) {
+      expect(out[i].from).toBeGreaterThanOrEqual(out[i - 1].to);
+    }
+    expect(out.find((r) => r.reason === 'offline')?.from).toBe(H(12));
+  });
+
+  test('a never-reported agent with no events does not overlap the truncated band', () => {
+    const out = noEvidenceRanges(T0, T1, H(20), H(12), null, undefined);
+    expect(out).toEqual([
+      { from: T0, to: H(12), reason: 'truncated' },
+      { from: H(12), to: H(20), reason: 'offline' },
+    ]);
+  });
+
+  test('bands never overlap across a sweep of floor / heartbeat combinations', () => {
+    for (const cover of [T0, H(2), H(12), H(23)]) {
+      for (const hb of [undefined, null, new Date(T0 - DAY).toISOString(), new Date(H(6)).toISOString()]) {
+        for (const last of [undefined, H(1), H(13)]) {
+          const out = noEvidenceRanges(T0, T1, H(20), cover, hb, last);
+          for (const r of out) expect(r.to).toBeGreaterThan(r.from);
+          for (let i = 1; i < out.length; i++) {
+            expect(out[i].from, `overlap for cover=${cover} hb=${hb} last=${last}`)
+              .toBeGreaterThanOrEqual(out[i - 1].to);
+          }
+        }
+      }
+    }
+  });
+});
+
+describe('subtractRanges', () => {
+  const r = (from: number, to: number) => ({ from, to });
+
+  test('a cut through the middle leaves both ends', () => {
+    expect(subtractRanges([r(0, 10)], [r(4, 6)])).toEqual([r(0, 4), r(6, 10)]);
+  });
+
+  test('a cut covering everything leaves nothing', () => {
+    expect(subtractRanges([r(0, 10)], [r(0, 10)])).toEqual([]);
+    expect(subtractRanges([r(2, 8)], [r(0, 10)])).toEqual([]);
+  });
+
+  test('disjoint and touching cuts leave the range whole', () => {
+    expect(subtractRanges([r(0, 10)], [r(10, 20)])).toEqual([r(0, 10)]);
+    expect(subtractRanges([r(0, 10)], [r(-5, 0)])).toEqual([r(0, 10)]);
+  });
+
+  test('several cuts apply cumulatively', () => {
+    expect(subtractRanges([r(0, 10)], [r(2, 3), r(6, 7)])).toEqual([
+      r(0, 2),
+      r(3, 6),
+      r(7, 10),
+    ]);
+  });
+
+  test('an empty cut is a no-op, and zero-width input is dropped', () => {
+    expect(subtractRanges([r(0, 10)], [])).toEqual([r(0, 10)]);
+    expect(subtractRanges([r(5, 5)], [])).toEqual([]);
+    expect(subtractRanges([r(0, 10)], [r(4, 4)])).toEqual([r(0, 10)]);
+  });
+
+  test('split pieces keep the source range’s other fields', () => {
+    const out = subtractRanges([{ from: 0, to: 10, reason: 'offline' }], [r(4, 6)]);
+    expect(out.map((x) => x.reason)).toEqual(['offline', 'offline']);
+  });
+
+  // The bug this exists to prevent: the unconfirmed hatch is a gradient with
+  // transparent gaps, so a band drawn underneath shows through and the two
+  // patterns interleave — one stretch asserting both "believed on" and "no
+  // evidence". Subtracting the lane's own spans first means the band only
+  // ever covers pixels the lane says nothing about.
+  test('a lane with a span covering the whole band gets no band at all', () => {
+    const band = [{ from: 100, to: 200, reason: 'offline' }];
+    expect(subtractRanges(band, [r(100, 200)])).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // The time axis.
 // ---------------------------------------------------------------------------
 
@@ -560,6 +675,93 @@ describe('live edge and heartbeat gating', () => {
       new Date(justStale).toISOString(),
     );
     expect(lane(lanes, 'power').spans.some((s) => s.uncertain)).toBe(true);
+  });
+
+  // The renderer draws the no-evidence band from these edges while
+  // `buildLanes` gates spans from them, so they have to agree — the band is
+  // what makes an *empty* lane read as unknown instead of as a measured
+  // "off", which spans alone can never express (#1086).
+  describe('evidenceEdges', () => {
+    test('no heartbeat: the edges coincide, so nothing is unknown', () => {
+      const { liveEdge, certainEdge } = evidenceEdges(T1, H(12));
+      expect(liveEdge).toBe(H(12));
+      expect(certainEdge).toBe(liveEdge);
+    });
+
+    test('a fresh heartbeat leaves no unknown stretch', () => {
+      const now = H(12);
+      const { liveEdge, certainEdge } = evidenceEdges(T1, now, new Date(now - 30_000).toISOString());
+      expect(certainEdge).toBe(liveEdge);
+    });
+
+    test('a stale heartbeat opens an unknown stretch ending at the live edge', () => {
+      const now = H(12);
+      const hb = H(4);
+      const { liveEdge, certainEdge } = evidenceEdges(T1, now, new Date(hb).toISOString());
+      expect(certainEdge).toBe(hb + AGENT_ACTIVE_THRESHOLD_MS);
+      expect(liveEdge).toBe(now);
+      expect(liveEdge).toBeGreaterThan(certainEdge);
+    });
+
+    test('the live edge never runs past now, even for a window ending later', () => {
+      const now = H(6);
+      expect(evidenceEdges(T1, now).liveEdge).toBe(now);
+    });
+
+    test('a heartbeat from the future cannot push certainty past the live edge', () => {
+      const now = H(6);
+      const { liveEdge, certainEdge } = evidenceEdges(T1, now, new Date(H(20)).toISOString());
+      expect(certainEdge).toBe(liveEdge);
+    });
+
+    // `undefined` and `null` are different facts and must not collapse:
+    // undefined = "not told yet" (query in flight), null = "the server says
+    // this agent has never reported". `agents.last_heartbeat` is genuinely
+    // nullable, so the second is reachable — and it's the case that most
+    // needs the honesty, which is why treating it as fully trusted was wrong.
+    test('undefined heartbeat leaves the strip ungated (nothing known yet)', () => {
+      const { liveEdge, certainEdge } = evidenceEdges(T1, H(12), undefined, H(3));
+      expect(certainEdge).toBe(liveEdge);
+    });
+
+    test('a null heartbeat trusts only as far as the newest event', () => {
+      const { liveEdge, certainEdge } = evidenceEdges(T1, H(12), null, H(3));
+      expect(certainEdge).toBe(H(3));
+      expect(liveEdge).toBe(H(12));
+    });
+
+    test('a null heartbeat with no events at all trusts nothing', () => {
+      const { certainEdge } = evidenceEdges(T1, H(12), null, undefined);
+      expect(certainEdge).toBe(0);
+    });
+
+    test('a null heartbeat cannot trust past the live edge', () => {
+      // A newest-event stamp in the future (clock skew) must not push
+      // certainty past now.
+      const { liveEdge, certainEdge } = evidenceEdges(T1, H(6), null, H(20));
+      expect(certainEdge).toBe(liveEdge);
+    });
+
+    test('a never-reporting agent gets its open span hatched from the last event', () => {
+      const lanes = buildLanes([ev(h(1), 'boot'), ev(h(3), 'logon')], T0, T1, H(12), null);
+      const spans = lane(lanes, 'power').spans;
+      const solid = spans.filter((s) => !s.uncertain);
+      const hatched = spans.filter((s) => s.uncertain);
+      expect(solid).toHaveLength(1);
+      expect(hatched).toHaveLength(1);
+      // Certainty ends at the newest event (the logon at 3h), not at `now`.
+      expect(solid[0].to).toBe(H(3));
+      expect(hatched[0].from).toBe(H(3));
+    });
+
+    test('the edges match what buildLanes gates on', () => {
+      const now = H(12);
+      const hb = new Date(H(4)).toISOString();
+      const { certainEdge } = evidenceEdges(T1, now, hb);
+      const lanes = buildLanes([ev(h(1), 'boot')], T0, T1, now, hb);
+      const hatched = lane(lanes, 'power').spans.find((s) => s.uncertain)!;
+      expect(hatched.from).toBe(certainEdge);
+    });
   });
 
   test('a closed historical span is never hatched, however stale the agent', () => {
