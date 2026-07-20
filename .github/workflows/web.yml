@@ -32,7 +32,7 @@ jobs:
     name: bun test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@v6.1.0
       - uses: oven-sh/setup-bun@v2
       - name: Install deps
         working-directory: crates/kanade-backend/web
