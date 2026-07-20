@@ -54,9 +54,12 @@
     "confirmButton": "Delete",
     "success": "Deleted agent {{pcId}}"
   },
+  "resultDialog": {
+    "description": "Result of the action you just ran. Close to return to the list.",
+    "close": "Close"
+  },
   "groupsPrompt": "Comma-separated group names for {{pcId}} (current: {{current}})",
   "groupsNone": "(none)",
-  "groupsCancelled": "(cancelled)",
   "groupsLoading": "loading…",
   "rowLinkTitle": "Open per-PC perf charts",
   "search": {

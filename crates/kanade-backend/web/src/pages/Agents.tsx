@@ -10,6 +10,15 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { useConfirm } from '@/components/ui/confirm-dialog';
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { JsonOutput } from '@/components/ui/json-output';
@@ -524,14 +533,29 @@ export function Agents() {
       apiFetch(`/api/agents/${encodeURIComponent(pcId)}`, { method: 'DELETE' }),
   });
 
+  // Land a finished action's value in the dialog — but ONLY if the dialog
+  // is still showing that same action for that same PC. Closing the dialog
+  // sets `result` to null, so an unguarded `setResult` on a request that
+  // was already in flight would pop the dialog back open after the
+  // operator dismissed it. Comparing pc_id + action also covers the case
+  // where a slow first request settles after a second one opened the
+  // dialog for something else — the stale response is dropped instead of
+  // overwriting the newer result.
+  const settleResult = (pcId: string, action: string, value: unknown) =>
+    setResult((prev) =>
+      prev && prev.pc_id === pcId && prev.action === action
+        ? { pc_id: pcId, action, value }
+        : prev,
+    );
+
   const doPing = async (pcId: string) => {
     setResult({ pc_id: pcId, action: 'ping', value: '…' });
     markPending(pcId, true);
     try {
       const r = await ping.mutateAsync(pcId);
-      setResult({ pc_id: pcId, action: 'ping', value: r });
+      settleResult(pcId, 'ping', r);
     } catch (e) {
-      setResult({ pc_id: pcId, action: 'ping', value: (e as Error).message });
+      settleResult(pcId, 'ping', (e as Error).message);
     } finally {
       markPending(pcId, false);
     }
@@ -541,9 +565,9 @@ export function Agents() {
     markPending(pcId, true);
     try {
       const r = await effective.mutateAsync(pcId);
-      setResult({ pc_id: pcId, action: 'effective', value: r });
+      settleResult(pcId, 'effective', r);
     } catch (e) {
-      setResult({ pc_id: pcId, action: 'effective', value: (e as Error).message });
+      settleResult(pcId, 'effective', (e as Error).message);
     } finally {
       markPending(pcId, false);
     }
@@ -571,8 +595,18 @@ export function Agents() {
     }
   };
   const doGroups = async (pcId: string) => {
-    setResult({ pc_id: pcId, action: 'groups', value: t('groupsLoading') });
+    // Unlike ping / effective this opens a native `window.prompt` first,
+    // so the result dialog is deliberately NOT opened up front — an
+    // overlay sitting behind the prompt reads as two stacked modals, and
+    // a cancelled edit would leave a dialog saying "(cancelled)" for no
+    // reason. The button's disabled state covers the (short) fetch.
     markPending(pcId, true);
+    // Whether the dialog was opened during THIS invocation. The initial
+    // groupsGet runs before the dialog exists, so a failure there has to
+    // open it fresh — routing that through `settleResult` (which requires
+    // a matching open result) would swallow the error entirely. Once the
+    // dialog IS open, the dismissal guard applies as it does elsewhere.
+    let opened = false;
     try {
       const current = await groupsGet.mutateAsync(pcId);
       const next = window.prompt(
@@ -582,15 +616,17 @@ export function Agents() {
         }),
         current.groups.join(', '),
       );
-      if (next === null) {
-        setResult({ pc_id: pcId, action: 'groups', value: t('groupsCancelled') });
-        return;
-      }
+      // Cancelled — nothing was changed, so say nothing.
+      if (next === null) return;
+      setResult({ pc_id: pcId, action: 'groups', value: t('groupsLoading') });
+      opened = true;
       const list = next.split(',').map((s) => s.trim()).filter(Boolean);
       const updated = await groupsPut.mutateAsync({ pcId, groups: list });
-      setResult({ pc_id: pcId, action: 'groups', value: updated });
+      settleResult(pcId, 'groups', updated);
     } catch (e) {
-      setResult({ pc_id: pcId, action: 'groups', value: (e as Error).message });
+      const msg = (e as Error).message;
+      if (opened) settleResult(pcId, 'groups', msg);
+      else setResult({ pc_id: pcId, action: 'groups', value: msg });
     } finally {
       markPending(pcId, false);
     }
@@ -1124,19 +1160,49 @@ export function Agents() {
         </div>
       )}
 
-      {result && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">
-              <code className="text-xs mr-2">{result.pc_id}</code>
-              <Badge variant="amber">{result.action}</Badge>
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <JsonOutput value={result.value} />
-          </CardContent>
-        </Card>
-      )}
+      {/* Action result (ping / groups / effective). This used to render as
+          a card appended after the table + pager, i.e. below up to
+          PAGE_SIZE rows — clicking `ping` on the first row produced its
+          feedback entirely off-screen, so the operator had to scroll to
+          the bottom to learn anything happened. A modal puts the result
+          (and the in-flight `…` placeholder, which is the only immediate
+          cue the click registered) in the viewport regardless of scroll
+          position, and still gives the JSON payload room to be read —
+          which a 4s toast would not. `delete` keeps its toast: it has no
+          payload, just a one-line outcome. */}
+      <Dialog
+        open={result !== null}
+        onOpenChange={(open) => {
+          if (!open) setResult(null);
+        }}
+      >
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            {/* Guarded: `result` goes null the instant the dialog starts
+                closing, so an unguarded title would flash an empty <code>
+                and a bare amber Badge through the fade-out. */}
+            <DialogTitle className="flex items-center gap-2 text-base">
+              {result && (
+                <>
+                  <code className="text-xs">{result.pc_id}</code>
+                  <Badge variant="amber">{result.action}</Badge>
+                </>
+              )}
+            </DialogTitle>
+            <DialogDescription>{t('resultDialog.description')}</DialogDescription>
+          </DialogHeader>
+          {/* `result` is null while the dialog animates closed — guard so
+              the last frame doesn't crash on `result.value`. */}
+          {result && <JsonOutput value={result.value} />}
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button variant="secondary" size="sm">
+                {t('resultDialog.close')}
+              </Button>
+            </DialogClose>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
