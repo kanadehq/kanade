@@ -12,6 +12,11 @@
     "title": "No events match",
     "body": "Widen the time window or clear pc / kind / source to see more rows. Agents emit events via the collect-winlog-events manifest; a freshly bootstrapped fleet may still be backfilling."
   },
+  "customRange": {
+    "title": "Range not set yet",
+    "incomplete": "Set both the start and the end of the custom range to run the search. Nothing has been queried yet — this is \"not searched\", not \"zero results\".",
+    "inverted": "The start is at or after the end. Move the start earlier than the end."
+  },
   "filters": {
     "pcId": "pc",
     "kinds": "kind",
@@ -32,12 +37,21 @@
       "payloadKey": "key — eg. user",
       "payloadValue": "value — eg. alice"
     },
+    "customFrom": "from",
+    "customTo": "to",
+    "customHint": "Set both bounds (minute precision; `to` is exclusive).",
+    "customInvalid": "`from` is at or after `to`.",
     "sincePresets": {
       "1h": "last 1h",
-      "24h": "last 24h",
-      "7d": "last 7d",
-      "30d": "last 30d",
-      "all": "all time"
+      "6h": "last 6h",
+      "12h": "last 12h",
+      "1d": "1 day (today 00:00–)",
+      "2d": "2 days (yesterday 00:00–)",
+      "3d": "3 days (from 2 days ago 00:00)",
+      "7d": "7 days (from 6 days ago 00:00)",
+      "30d": "30 days (from 29 days ago 00:00)",
+      "all": "all time",
+      "custom": "custom (absolute range)"
     }
   },
   "columns": {
