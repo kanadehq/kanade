@@ -385,8 +385,14 @@ export function Agents() {
     // Compare the serialised conditions so an identical set (from our own
     // write) doesn't remount every row — `parseConditionsFromParams` mints
     // fresh ids each call, which would drop focus otherwise.
+    // The separators are control characters so they can't collide with a
+    // user-typed key or value (`.` or `,` would: `key="a.b"` and
+    // `key="a", op="b"` serialise identically). Keep them as `\0` / `\x01`
+    // escapes, never literal bytes — a raw NUL in the source makes ripgrep
+    // classify this file as binary and skip it entirely on a recursive
+    // search, so nothing in Agents.tsx is greppable and it fails silently.
     const serialise = (cs: MetaCond[]) =>
-      cs.map((c) => `${c.key} ${c.op} ${c.value}`).join('');
+      cs.map((c) => `${c.key}\0${c.op}\0${c.value}`).join('\x01');
     const urlConds = parseConditionsFromParams(searchParams);
     if (serialise(urlConds) !== serialise(dConditions)) setConditions(urlConds);
     // eslint-disable-next-line react-hooks/exhaustive-deps
