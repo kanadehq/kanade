@@ -782,7 +782,13 @@ export function Agents() {
               <SlidersHorizontal className="size-3.5" />
               {t('columns.pick')}
             </summary>
-            <div className="absolute right-0 z-20 mt-1 max-h-72 w-56 overflow-auto rounded-md border border-border bg-card p-2 shadow-lg">
+            {/* z-50, not z-20: the table's sticky <thead> is `lg:z-20`
+                (ui/table.tsx). At equal z-index the later DOM node wins,
+                and the table comes after this filter row — so the header
+                row painted straight through the open panel once the page
+                was scrolled. Matches PcPicker / GroupPicker, which are
+                z-50 for the same reason. */}
+            <div className="absolute right-0 z-50 mt-1 max-h-72 w-56 overflow-auto rounded-md border border-border bg-card p-2 shadow-lg">
               <div className="px-1 pb-1 text-[10px] font-medium uppercase tracking-wide text-muted">
                 {t('columns.builtinSection')}
               </div>
