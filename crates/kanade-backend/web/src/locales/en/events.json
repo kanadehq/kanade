@@ -92,7 +92,8 @@
     "unknown": "unknown",
     "noEvidence": {
       "truncated": "Unknown: {{from}} → {{to}} — the row limit was reached, so the older end of this period was never fetched. Raise the limit to see it",
-      "offline": "Unknown: {{from}} → {{to}} — the agent stopped reporting, so its state over this stretch isn't known. Events backfill once it reconnects"
+      "offline": "Unknown: {{from}} → {{to}} — the agent stopped reporting, so its state over this stretch isn't known. Events backfill once it reconnects",
+      "noEvents": "Unknown: {{from}} → {{to}} — no power / session / sleep / active events at all for this PC in this period. That means the state isn't known, not that it was off"
     },
     "truncated": "row limit ({{limit}}) reached — nothing before {{from}} was fetched; the hatched part of each lane is window with no data",
     "empty": "No power / session / sleep / active events in this window for this PC."

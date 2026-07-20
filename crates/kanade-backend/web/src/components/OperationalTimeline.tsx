@@ -448,8 +448,65 @@ export function subtractRanges<T extends { from: number; to: number }>(
   return out;
 }
 
+/**
+ * Extent of a set of events, padded 2% (at least a minute) so end markers
+ * aren't flush against the strip edge. `undefined` when there is nothing to
+ * derive a window from.
+ */
+function paddedExtent(
+  events: readonly { at: string }[],
+): [string, string] | undefined {
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const e of events) {
+    const ts = Date.parse(e.at);
+    if (Number.isNaN(ts)) continue;
+    if (ts < lo) lo = ts;
+    if (ts > hi) hi = ts;
+  }
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi <= lo) return undefined;
+  const pad = Math.max(60_000, (hi - lo) * 0.02);
+  return [new Date(lo - pad).toISOString(), new Date(hi + pad).toISOString()];
+}
+
+/**
+ * The window every strip shares, so their axes line up.
+ *
+ * The selected period wins outright when it has a lower bound: deriving the
+ * window from the data instead made the axis lie about the filter (an axis
+ * reading 7/18 23:24 for a period beginning 7/19 00:00), and worse under
+ * `limit` truncation, where the lanes silently showed a few hours of a
+ * multi-day selection.
+ *
+ * Without one (the `all` preset) the extent has to come from the data, and
+ * the fallback order matters. Preferring the kept PCs' operational events is
+ * right when they exist. When they don't — a pinned host that has none — that
+ * path yields no bounds, and the strip then has no axis, trips its own
+ * `t1 <= t0` guard and renders the plain "no events" note instead of the
+ * unknown hatching. That is the pin achieving nothing on precisely the preset
+ * an operator picks to ask "did this host EVER report". So it falls back to
+ * the whole response's extent: other kinds fetched for the same host still
+ * say when it was around, which is a truthful axis to hatch against. Bounds
+ * are never invented — a host with no events of any kind yields none, and the
+ * note is then the correct answer rather than a fallback.
+ */
+export function swimlaneWindow(
+  windowFrom: string | undefined,
+  windowTo: string | undefined,
+  pcs: readonly string[],
+  opEvents: readonly { at: string; pc_id: string }[],
+  allEvents: readonly { at: string }[],
+): [string | undefined, string | undefined] {
+  if (windowFrom) return [windowFrom, windowTo];
+  const kept = new Set(pcs);
+  return (
+    paddedExtent(opEvents.filter((e) => kept.has(e.pc_id))) ??
+    paddedExtent(allEvents) ?? [undefined, undefined]
+  );
+}
+
 /** Why a stretch carries no evidence. */
-export type NoEvidenceReason = 'truncated' | 'offline';
+export type NoEvidenceReason = 'truncated' | 'offline' | 'noEvents';
 
 /**
  * The stretches the strip must not make any claim about. Two causes, one
@@ -475,6 +532,19 @@ export function noEvidenceRanges(
   lastEventTs?: number,
 ): { from: number; to: number; reason: NoEvidenceReason }[] {
   const { certainEdge, liveEdge } = evidenceEdges(t1, now, lastHeartbeat, lastEventTs);
+
+  // No operational events at all: every lane is empty, and an empty lane
+  // means "measured, and it was off". Nothing here was measured. This is
+  // reachable only for a strip that exists without events — a PC the
+  // operator named explicitly — where rendering four blank lanes would state
+  // the machine was off, signed out and idle for the whole window on the
+  // strength of no data whatsoever. A heartbeat doesn't rescue it either: a
+  // live agent proves the host is up *now*, not what any lane was doing
+  // across a window it recorded no transitions in.
+  if (lastEventTs === undefined) {
+    return liveEdge > t0 ? [{ from: t0, to: liveEdge, reason: 'noEvents' }] : [];
+  }
+
   const out: { from: number; to: number; reason: NoEvidenceReason }[] = [];
   if (coverEdge > t0) out.push({ from: t0, to: coverEdge, reason: 'truncated' });
   // Clamped past the truncated stretch, not merely past the window start.
