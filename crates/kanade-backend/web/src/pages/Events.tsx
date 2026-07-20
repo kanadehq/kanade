@@ -26,6 +26,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
+import { localInputToMs, msToLocalInput } from '@/lib/timeRange';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { apiFetch } from '@/lib/api';
 import { fmtIsoLocal } from '@/lib/utils';
@@ -44,13 +45,135 @@ type ListResponse = { events: EventRow[] };
 type KindsResponse = { kinds: string[] };
 type SourcesResponse = { sources: string[] };
 
-const SINCE_PRESETS: Array<{ value: string; ms: number | null }> = [
-  { value: '1h',  ms: 60 * 60 * 1000 },
-  { value: '24h', ms: 24 * 60 * 60 * 1000 },
-  { value: '7d',  ms: 7 * 24 * 60 * 60 * 1000 },
-  { value: '30d', ms: 30 * 24 * 60 * 60 * 1000 },
-  { value: 'all', ms: null },
+// Time-range presets come in four flavours:
+//   rolling  — a fixed-length window ending now (now - ms → now).
+//              Right for sub-day windows where "the last 6 hours"
+//              is what the operator means literally.
+//   calendar — N calendar days back to LOCAL midnight, counting
+//              today as day 1: 1d = today 00:00→now, 2d = yesterday
+//              00:00→now. An incident is remembered as "it happened
+//              yesterday", not "it happened 31 hours ago", so the
+//              day-scale presets snap to day boundaries.
+//   all      — unbounded.
+//   custom   — operator-picked absolute from/to.
+type RangePreset =
+  | { value: string; kind: 'rolling'; ms: number }
+  | { value: string; kind: 'calendar'; days: number }
+  | { value: string; kind: 'all' }
+  | { value: string; kind: 'custom' };
+
+const SINCE_PRESETS: RangePreset[] = [
+  { value: '1h',     kind: 'rolling',  ms: 1 * 60 * 60 * 1000 },
+  { value: '6h',     kind: 'rolling',  ms: 6 * 60 * 60 * 1000 },
+  { value: '12h',    kind: 'rolling',  ms: 12 * 60 * 60 * 1000 },
+  { value: '1d',     kind: 'calendar', days: 1 },
+  { value: '2d',     kind: 'calendar', days: 2 },
+  { value: '3d',     kind: 'calendar', days: 3 },
+  { value: '7d',     kind: 'calendar', days: 7 },
+  { value: '30d',    kind: 'calendar', days: 30 },
+  { value: 'all',    kind: 'all' },
+  { value: 'custom', kind: 'custom' },
 ];
+
+// `2d` (yesterday 00:00 → now) rather than `1d`: at 00:05 a `1d`
+// default would open the page on five minutes of data and read as
+// "the events are gone". `2d` is the smallest calendar default that
+// always covers a full day of history, and it supersets the old
+// rolling-24h default it replaces.
+//
+// Note the asymmetry for the values that kept their names: `7d` and
+// `30d` go the OTHER way and get NARROWER. Rolling `7d` reached back
+// `now - 168h`; calendar `7d` reaches back to midnight six days ago,
+// which is `now - 144h - (elapsed today)` — always at or later than
+// the old bound, by up to 24h. At 09:00 the new `7d` is really 6.4
+// days. That is the point (a day-scale window should start at a day
+// boundary), but an operator with a `?since=7d` bookmark does lose
+// the oldest rows they saw yesterday, so the preset labels spell the
+// anchor out rather than just saying "last 7 days".
+const DEFAULT_SINCE = '2d';
+
+/**
+ * Hydrate the `since` URL param, tolerating links from before the
+ * calendar presets existed. Pre-#1073 URLs carry `24h`, which no
+ * longer exists — map it onto `2d`, its nearest successor, so old
+ * shared links keep resolving to a real window instead of silently
+ * falling back to the default. Anything unrecognised (hand-edited
+ * URL, preset removed later) also lands on the default.
+ */
+function normalizeSince(raw: string | null): string {
+  if (!raw) return DEFAULT_SINCE;
+  if (raw === '24h') return DEFAULT_SINCE;
+  return SINCE_PRESETS.some((p) => p.value === raw) ? raw : DEFAULT_SINCE;
+}
+
+/**
+ * Local midnight `days - 1` days ago — the lower bound of a calendar
+ * preset. Local, not UTC: the operator's "today" is their wall
+ * clock, and JST is +09:00, so a UTC-midnight anchor would cut the
+ * day nine hours early.
+ */
+function calendarStart(days: number, now: Date): Date {
+  const d = new Date(now);
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - (days - 1));
+  return d;
+}
+
+// <input type="datetime-local"> speaks local wall-clock strings
+// ("2026-07-20T09:00"); the URL and the API speak UTC RFC3339.
+// Converting at both boundaries keeps a shared custom-range link
+// pointing at the same instant when it's opened in another timezone.
+// The wall-clock ↔ epoch halves come from lib/timeRange, which the
+// chart pages already use; only the epoch ↔ ISO hop is local, since
+// those pages keep ranges as ms and this one has to put them on a
+// URL and in a query param.
+// Browser-side half of the same guard `msToBoundIso` enforces: keep
+// the picker inside years the fixed-width ISO form can express, so the
+// operator gets a native validation nudge instead of a silently
+// rejected bound. `msToBoundIso` still has to check — `min`/`max` are
+// advisory and a hand-edited URL bypasses them entirely.
+const BOUND_INPUT_RANGE = { min: '1000-01-01T00:00', max: '9999-12-31T23:59' } as const;
+
+function msToBoundIso(ms: number | null): string | null {
+  if (ms === null) return null;
+  const iso = new Date(ms).toISOString();
+  // Reject anything that isn't the fixed-width 24-char form. Past year
+  // 9999 (and before year 0) `toISOString` switches to the expanded
+  // `+YYYYYY-…` / `-YYYYYY-…` notation, and that is not cosmetic: the
+  // backend stores `at` with TEXT affinity, so `at >= ?` / `at < ?`
+  // compare lexicographically. '+' and '-' sort below every digit, so
+  // an expanded-year bound inverts the filter wholesale — the server
+  // answers a "year 10000 onward" window with the entire table, 200 OK,
+  // no warning. A local wall-clock of 9999-12-31T23:59 is already UTC
+  // year 10000 in any negative-offset timezone, so this is reachable by
+  // typing, not just by hand-editing the URL.
+  return iso.length === 24 ? iso : null;
+}
+
+function isoToLocalInput(iso: string | null): string {
+  return iso ? msToLocalInput(new Date(iso).getTime()) : '';
+}
+
+/**
+ * Resolve a preset (plus the custom bounds) into the `from`/`to`
+ * RFC3339 pair the API takes. `now` is injected rather than read
+ * here so the caller controls when the window anchors — see the
+ * #519 note at the useQuery call.
+ */
+function resolveEventsRange(
+  since: string,
+  customFromIso: string | null,
+  customToIso: string | null,
+  now: Date,
+): { from: string | null; to: string | null } {
+  const preset = SINCE_PRESETS.find((p) => p.value === since);
+  if (!preset || preset.kind === 'all') return { from: null, to: null };
+  if (preset.kind === 'custom') return { from: customFromIso, to: customToIso };
+  if (preset.kind === 'rolling') {
+    return { from: new Date(now.getTime() - preset.ms).toISOString(), to: null };
+  }
+  return { from: calendarStart(preset.days, now).toISOString(), to: null };
+}
 
 // Issue #391: payload keys the collectors are known to emit,
 // offered as <datalist> suggestions for the generic payload
@@ -278,7 +401,11 @@ export function Events() {
     search.get('pval') ?? search.get('logon_type') ?? '');
   // Dedupe defaults ON; only the opt-out lands in the URL.
   const [dedupe, setDedupe] = useState(search.get('dedupe') !== '0');
-  const [since, setSince] = useState(search.get('since') ?? '24h');
+  const [since, setSince] = useState(() => normalizeSince(search.get('since')));
+  // Custom absolute range. Held as datetime-local wall-clock strings
+  // (what the inputs bind to); the URL and the API get UTC ISO.
+  const [customFrom, setCustomFrom] = useState(() => isoToLocalInput(search.get('from')));
+  const [customTo,   setCustomTo]   = useState(() => isoToLocalInput(search.get('to')));
   const [limit, setLimit] = useState(Number(search.get('limit')) || 200);
   // Which analysis view is on screen. The four sections (operational
   // swimlanes, per-PC timeline, activity heatmap, raw event table) used to
@@ -290,20 +417,74 @@ export function Events() {
       : 'operational',
   );
 
-  // #519: only the preset's window LENGTH is derived in render — the
-  // actual `from` lower bound is computed inside queryFn (the
-  // HistoryPane pattern) so every refetch re-anchors to Date.now().
-  // The previous render-time ISO froze the window at preset-pick
-  // time: an operator leaving the tab open saw "Last 1h" silently
-  // grow into "since whenever I opened this page".
-  const sinceMs = useMemo(
-    () => SINCE_PRESETS.find((p) => p.value === since)?.ms ?? null,
-    [since],
-  );
-
   const dPcId         = useDebouncedValue(pcId,         FILTER_DEBOUNCE_MS);
   const dPayloadKey   = useDebouncedValue(payloadKey,   FILTER_DEBOUNCE_MS);
   const dPayloadValue = useDebouncedValue(payloadValue, FILTER_DEBOUNCE_MS);
+  // Debounced like the typed-text filters, so nudging one bound from
+  // one complete value to another doesn't fire a fetch per segment.
+  const dCustomFrom = useDebouncedValue(customFrom, FILTER_DEBOUNCE_MS);
+  const dCustomTo   = useDebouncedValue(customTo,   FILTER_DEBOUNCE_MS);
+
+  const customFromMs  = useMemo(() => localInputToMs(dCustomFrom), [dCustomFrom]);
+  const customToMs    = useMemo(() => localInputToMs(dCustomTo),   [dCustomTo]);
+  const customFromIso = useMemo(() => msToBoundIso(customFromMs),  [customFromMs]);
+  const customToIso   = useMemo(() => msToBoundIso(customToMs),    [customToMs]);
+  // A custom range needs BOTH bounds. Treating a missing bound as
+  // "unbounded on that side" reads well but is a trap: `datetime-local`
+  // reports `.value` as "" until every segment is filled, so clearing
+  // the hour to retype it is indistinguishable from asking for an
+  // open-ended range — and the page would answer by fetching the whole
+  // retention window, fleet-wide, mid-edit. Blank bounds are a range
+  // still being typed, not a range that means "everything".
+  const customIncomplete =
+    since === 'custom' && (customFromIso === null || customToIso === null);
+  // Compared as instants, not as ISO text. String order only tracks
+  // chronological order while both operands are the fixed-width form,
+  // and reading `>=` on two strings invites someone to relax
+  // `msToBoundIso` later without noticing this depends on it.
+  const customInverted =
+    since === 'custom'
+    && customFromIso !== null
+    && customToIso !== null
+    && customFromMs !== null
+    && customToMs !== null
+    && customFromMs >= customToMs;
+  // Neither state can produce a meaningful result set, so both gate
+  // the query off — and, crucially, both have to be SHOWN (see the
+  // results branch below). `enabled: false` only decides whether a
+  // request goes out; on its own it leaves the page rendering the
+  // ordinary "no events" card, which is the exact misread this is
+  // meant to prevent.
+  const customUnusable = customIncomplete || customInverted;
+
+  // Calendar presets promise "today" / "yesterday", so the window has
+  // to re-anchor the moment the local date changes. Nothing else would
+  // do it: this query sets no `refetchInterval`, and a tab that stays
+  // focused fires neither `refetchOnWindowFocus` nor a remount — so a
+  // `1d` window opened at 23:50 would still be showing yesterday at
+  // 00:10 while the picker reads "today". Switching the in-page tabs
+  // doesn't help either; they don't remount the query.
+  //
+  // One timeout aimed at the next local midnight, rather than polling:
+  // it costs a single timer and re-anchors exactly on the boundary.
+  // `setHours(24, 0, 0, 0)` normalises to the start of the next day,
+  // including across DST shifts.
+  const [dayEpoch, setDayEpoch] = useState(0);
+  useEffect(() => {
+    const now = new Date();
+    const nextMidnight = new Date(now);
+    nextMidnight.setHours(24, 0, 0, 0);
+    const id = setTimeout(
+      () => setDayEpoch((n) => n + 1),
+      // +1s of slack so the timer never lands a hair before midnight
+      // and re-anchors to the day it was trying to leave.
+      nextMidnight.getTime() - now.getTime() + 1_000,
+    );
+    return () => clearTimeout(id);
+  }, [dayEpoch]);
+
+  const isCalendarPreset =
+    SINCE_PRESETS.find((p) => p.value === since)?.kind === 'calendar';
 
   // Mirror filters into the URL so a timeline drill-down link is
   // shareable / reload-safe (same shape as Logs). Uses the debounced
@@ -321,12 +502,19 @@ export function Events() {
     if (dPayloadKey)   next.set('pkey', dPayloadKey);
     if (dPayloadValue) next.set('pval', dPayloadValue);
     if (!dedupe) next.set('dedupe', '0');
-    if (since && since !== '24h') next.set('since', since);
+    if (since && since !== DEFAULT_SINCE) next.set('since', since);
+    // Absolute bounds only belong in the URL while the custom preset
+    // is selected — leaving them behind on a switch back to `7d`
+    // would make the link look range-bound when it isn't.
+    if (since === 'custom') {
+      if (customFromIso) next.set('from', customFromIso);
+      if (customToIso)   next.set('to',   customToIso);
+    }
     if (limit && limit !== 200)   next.set('limit', String(limit));
     if (tab !== 'operational') next.set('tab', tab);
     setSearch(next, { replace: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dPcId, kindsInc, kindsExc, sourcesInc, sourcesExc, dPayloadKey, dPayloadValue, dedupe, since, limit, tab]);
+  }, [dPcId, kindsInc, kindsExc, sourcesInc, sourcesExc, dPayloadKey, dPayloadValue, dedupe, since, customFromIso, customToIso, limit, tab]);
 
   const queryString = useMemo(() => {
     const sp = new URLSearchParams();
@@ -348,12 +536,37 @@ export function Events() {
   const { data, error, isLoading, isFetching } = useQuery({
     // The preset key (not a computed ISO) partitions the cache per
     // window without invalidating on every millisecond tick (#519).
-    queryKey: ['obs_events', queryString, since],
+    // Custom ranges key on their absolute bounds, which are already
+    // stable — but only while `custom` is selected. Keying on them
+    // unconditionally would fragment the cache: pick a custom range,
+    // switch back to `7d`, and the `7d` key now carries leftover
+    // bounds it doesn't send, forcing a refetch of data already
+    // cached under the original key.
+    queryKey: [
+      'obs_events',
+      queryString,
+      since,
+      since === 'custom' ? customFromIso : null,
+      since === 'custom' ? customToIso : null,
+      // Bumped by the midnight timer above, so a calendar window
+      // re-anchors on the date change instead of serving the cached
+      // "today" that was computed yesterday.
+      isCalendarPreset ? dayEpoch : 0,
+    ],
     queryFn: () => {
       const sp = new URLSearchParams(queryString);
-      if (sinceMs) sp.set('from', new Date(Date.now() - sinceMs).toISOString());
+      // #519: the bounds are resolved HERE, not in render, so every
+      // refetch re-anchors to now. A render-time ISO froze the window
+      // at preset-pick time — an operator leaving the tab open saw
+      // "last 1h" silently grow into "since whenever I opened this
+      // page". Same reasoning covers the calendar presets, which have
+      // to roll over when the clock passes midnight.
+      const { from, to } = resolveEventsRange(since, customFromIso, customToIso, new Date());
+      if (from) sp.set('from', from);
+      if (to)   sp.set('to',   to);
       return apiFetch<ListResponse>(`/api/obs_events?${sp.toString()}`);
     },
+    enabled: !customUnusable,
   });
 
   // Chip vocabularies come from the backend's DISTINCT lists so the
@@ -424,11 +637,16 @@ export function Events() {
               {t('dedupeCollapsed', { count: collapsed })}
             </span>
           )}
-          <Badge variant="violet">
-            {isFetching && !isLoading
-              ? t('countBadgeFetching', { count: visible.length })
-              : t('countBadge', { count: visible.length })}
-          </Badge>
+          {/* No count while the custom range can't produce one — a
+              "0 events" badge over an unfinished range reads as a
+              finding about the fleet. */}
+          {!customUnusable && (
+            <Badge variant="violet">
+              {isFetching && !isLoading
+                ? t('countBadgeFetching', { count: visible.length })
+                : t('countBadge', { count: visible.length })}
+            </Badge>
+          )}
         </div>
       </div>
 
@@ -492,6 +710,38 @@ export function Events() {
                   </option>
                 ))}
               </Select>
+              {since === 'custom' && (
+                <div className="space-y-1 pt-1">
+                  <div className="space-y-0.5">
+                    <Label htmlFor="ev-from" className="mb-0.5 text-xs font-normal normal-case tracking-normal text-muted">
+                      {t('filters.customFrom')}
+                    </Label>
+                    <Input
+                      id="ev-from"
+                      type="datetime-local"
+                      {...BOUND_INPUT_RANGE}
+                      value={customFrom}
+                      onChange={(e) => setCustomFrom(e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-0.5">
+                    <Label htmlFor="ev-to" className="mb-0.5 text-xs font-normal normal-case tracking-normal text-muted">
+                      {t('filters.customTo')}
+                    </Label>
+                    <Input
+                      id="ev-to"
+                      type="datetime-local"
+                      {...BOUND_INPUT_RANGE}
+                      value={customTo}
+                      onChange={(e) => setCustomTo(e.target.value)}
+                    />
+                  </div>
+                  <p className="text-[11px] text-muted">{t('filters.customHint')}</p>
+                  {customInverted && (
+                    <p className="text-[11px] text-red-500">{t('filters.customInvalid')}</p>
+                  )}
+                </div>
+              )}
             </div>
             <div className="space-y-1">
               <Label htmlFor="ev-limit">{t('filters.limit')}</Label>
@@ -540,7 +790,21 @@ export function Events() {
         </CardContent>
       </Card>
 
-      {isLoading ? (
+      {customUnusable ? (
+        /* Must come before the empty-set branch. A disabled query is
+           `pending` + not `fetching`, which makes `isLoading` false and
+           leaves `data` undefined — so without this the page would fall
+           through to "no events found" and blame the fleet for what is
+           really an unfinished range. */
+        <Card>
+          <CardHeader>
+            <CardTitle>{t('customRange.title')}</CardTitle>
+          </CardHeader>
+          <CardContent className="text-muted">
+            {customIncomplete ? t('customRange.incomplete') : t('customRange.inverted')}
+          </CardContent>
+        </Card>
+      ) : isLoading ? (
         <div className="flex items-center gap-2 text-muted">
           <Loader2 className="size-4 animate-spin" />{t('loading')}
         </div>

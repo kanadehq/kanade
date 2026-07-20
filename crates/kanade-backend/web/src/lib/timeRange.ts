@@ -138,8 +138,12 @@ export function msToLocalInput(ms: number): string {
   const d = new Date(ms);
   if (Number.isNaN(d.getTime())) return '';
   const pad = (n: number) => String(n).padStart(2, '0');
+  // The year needs four digits too. Without the pad, anything before
+  // year 1000 emits e.g. "50-06-01T09:18", which is not a valid
+  // `datetime-local` value — the control renders blank and the bound
+  // silently disappears instead of round-tripping.
   return (
-    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
+    `${String(d.getFullYear()).padStart(4, '0')}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
     `T${pad(d.getHours())}:${pad(d.getMinutes())}`
   );
 }
