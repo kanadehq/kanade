@@ -29,7 +29,7 @@ import { Select } from '@/components/ui/select';
 import { localInputToMs, msToLocalInput } from '@/lib/timeRange';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { apiFetch } from '@/lib/api';
-import { fmtIsoLocal } from '@/lib/utils';
+import { escapeRegExp, fmtIsoLocal } from '@/lib/utils';
 
 type EventRow = {
   id: number;
@@ -1044,6 +1044,40 @@ function EventsOperational({
     return [new Date(lo - pad).toISOString(), new Date(hi + pad).toISOString()];
   }, [opEvents, pcs, windowFrom, windowTo]);
 
+  // Heartbeats for the PCs on screen, so each strip can gate what it asserts
+  // on whether its agent is still reporting. Without these the Events page
+  // renders every strip solid to the live edge whatever the agent's state —
+  // an offline host looks identical to a healthy one (#1086).
+  //
+  // One request for the rendered PCs rather than one per strip or the whole
+  // fleet: `q` is a regex over pc_id / hostname, so an anchored alternation
+  // fetches exactly the hosts in view — the same existence-check shape
+  // `PcPicker` uses, down to `escapeRegExp` (a hostname with a regex
+  // metacharacter would otherwise match the wrong rows, or none).
+  //
+  // No chunking here because `CHART_MAX_PCS` (40) is already the batch size
+  // `PcPicker`'s `VALIDATE_CHUNK` picked to keep the URL-encoded pattern
+  // under the ~2 KB request-line limit. That is exactly at the boundary, not
+  // comfortably inside it: raising `CHART_MAX_PCS` means chunking this the
+  // way `PcPicker` does, not just bumping the constant.
+  const hbQ = useQuery({
+    queryKey: ['events-op-heartbeats', pcs],
+    queryFn: () =>
+      apiFetch<{ pc_id: string; last_heartbeat: string | null }[]>(
+        `/api/agents?limit=${pcs.length}&q=${encodeURIComponent(`^(${pcs.map(escapeRegExp).join('|')})$`)}`,
+      ),
+    enabled: pcs.length > 0,
+    // Matches the Agents page cadence, so a strip stops claiming a live edge
+    // within ~30s of the agent list marking the same host offline.
+    refetchInterval: 30_000,
+  });
+
+  const heartbeats = useMemo(() => {
+    const m = new Map<string, string | null>();
+    for (const a of hbQ.data ?? []) m.set(a.pc_id, a.last_heartbeat);
+    return m;
+  }, [hbQ.data]);
+
   // Group the kept PCs' events into the shape the strip wants.
   const byPc = useMemo(() => {
     const kept = new Set(pcs);
@@ -1092,6 +1126,10 @@ function EventsOperational({
               from={from}
               to={to}
               coverageFrom={coverageFrom}
+              // `undefined` while the heartbeat query is still in flight, so
+              // the strip stays ungated rather than briefly hatching a
+              // healthy agent's tail on every page load.
+              lastHeartbeat={heartbeats.get(pc)}
             />
           </div>
         ))}
