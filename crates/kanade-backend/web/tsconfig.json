@@ -3,5 +3,16 @@
   "references": [
     { "path": "./tsconfig.app.json" },
     { "path": "./tsconfig.node.json" }
-  ]
+  ],
+  // `bun test` reads path aliases from this file only — it does not follow
+  // project references — so the `@/*` mapping from tsconfig.app.json has to
+  // be repeated here, or any test importing a component fails to resolve
+  // `@/lib/utils`. tsc ignores it: this is a solution-style config that
+  // compiles no files of its own.
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  }
 }

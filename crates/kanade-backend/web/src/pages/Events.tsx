@@ -533,7 +533,7 @@ export function Events() {
     return sp.toString();
   }, [dPcId, kindsInc, kindsExc, sourcesInc, sourcesExc, dPayloadKey, dPayloadValue, limit]);
 
-  const { data, error, isLoading, isFetching } = useQuery({
+  const { data, error, isLoading, isFetching, dataUpdatedAt } = useQuery({
     // The preset key (not a computed ISO) partitions the cache per
     // window without invalidating on every millisecond tick (#519).
     // Custom ranges key on their absolute bounds, which are already
@@ -568,6 +568,52 @@ export function Events() {
     },
     enabled: !customUnusable,
   });
+
+  // The window the swimlane axis is drawn against — the same bounds the
+  // fetch used, so the strip's edges are the period the operator picked.
+  //
+  // Anchored to `dataUpdatedAt` rather than a fresh `new Date()`: the latter
+  // re-resolves on every render, which would jitter the axis (and rebuild the
+  // memo) continuously. The fetch timestamp is stable between refetches and
+  // is within milliseconds of the `now` the queryFn actually sent, and it
+  // also gives the open right edge an honest meaning — "as of this data".
+  const [windowFrom, windowTo] = useMemo<[string | undefined, string | undefined]>(() => {
+    const anchor = dataUpdatedAt ? new Date(dataUpdatedAt) : new Date();
+    const { from, to } = resolveEventsRange(since, customFromIso, customToIso, anchor);
+    // No lower bound (`all`) → let the strip derive its own window.
+    if (!from) return [undefined, undefined];
+    return [from, to ?? anchor.toISOString()];
+  }, [since, customFromIso, customToIso, dataUpdatedAt]);
+
+  // Oldest instant the fetch actually reached back to, when `limit` truncated
+  // it. The backend orders `at DESC, id DESC` and takes the newest N, so a
+  // truncated response drops the OLD end of the selected period — the window
+  // says two days, the data covers the last few hours. The swimlane has to
+  // know, or `buildSpans`' carry-in extrapolates the oldest surviving event
+  // across the entire uncovered stretch and paints a solid two-day claim.
+  //
+  // `>= limit` rather than `=== limit`: defensive, and the raw response is the
+  // right thing to count — `visible` has been deduped, so it can sit below the
+  // limit on a response that was in fact truncated.
+  const coverageFrom = useMemo(() => {
+    const rows = data?.events ?? [];
+    if (rows.length < limit) return undefined;
+    let lo = Infinity;
+    for (const e of rows) {
+      const ts = Date.parse(e.at);
+      if (!Number.isNaN(ts) && ts < lo) lo = ts;
+    }
+    if (!Number.isFinite(lo)) return undefined;
+    // A full page isn't proof of truncation: a period holding exactly `limit`
+    // events returns a full page having fetched all of it. If the oldest row
+    // reaches the start of the window, coverage is complete whatever the
+    // count — without this the strip would hatch a region that is genuinely,
+    // correctly empty and tell the operator to raise a limit that isn't
+    // costing them anything.
+    const floor = windowFrom ? Date.parse(windowFrom) : NaN;
+    if (!Number.isNaN(floor) && lo <= floor) return undefined;
+    return new Date(lo).toISOString();
+  }, [data, limit, windowFrom]);
 
   // Chip vocabularies come from the backend's DISTINCT lists so the
   // operator picks from what actually exists in the data — no
@@ -864,7 +910,15 @@ export function Events() {
             ))}
           </div>
 
-          {tab === 'operational' && <EventsOperational events={visible} />}
+          {tab === 'operational' && (
+            <EventsOperational
+              events={visible}
+              windowFrom={windowFrom}
+              windowTo={windowTo}
+              coverageFrom={coverageFrom}
+              limit={limit}
+            />
+          )}
           {tab === 'chart' && <EventsTimeline events={visible} />}
           {tab === 'heatmap' && <EventsHeatmap events={visible} />}
           {tab === 'table' && (
@@ -929,7 +983,23 @@ export function Events() {
  * lives in the shared `OperationalTimeline` component, so the Analytics
  * `op_timeline` widget renders identically.
  */
-function EventsOperational({ events }: { events: EventRow[] }) {
+function EventsOperational({
+  events,
+  windowFrom,
+  windowTo,
+  coverageFrom,
+  limit,
+}: {
+  events: EventRow[];
+  // Set when `limit` truncated the fetch: the oldest instant the data reaches.
+  coverageFrom?: string;
+  limit: number;
+  // The selected period, resolved to bounds. When present these drive the
+  // axis directly so "what I picked" and "what I see" are the same window.
+  // Absent (the `all` preset has no lower bound) → fall back to the data.
+  windowFrom?: string;
+  windowTo?: string;
+}) {
   const { t } = useTranslation('events');
 
   // Only the operational kinds feed the swimlane; everything else (the
@@ -944,9 +1014,21 @@ function EventsOperational({ events }: { events: EventRow[] }) {
     [opEvents],
   );
 
-  // One shared [from, to] across all strips (from the rendered top-N PCs)
-  // so every PC's lanes read on the same axis. Padded 2% like the scatter.
+  // One shared [from, to] across all strips so every PC's lanes read on the
+  // same axis.
+  //
+  // Prefer the selected period verbatim: deriving the window from the data
+  // instead made the axis lie about the filter. Pick "2 days (since yesterday
+  // 0:00)" and the strip would start at the oldest event it happened to
+  // receive, minus 2% padding — an axis reading 7/18 23:24 for a window that
+  // begins 7/19 0:00. Worse when `limit` truncates: the lanes silently show a
+  // few hours of a multi-day selection. Anchoring to the period also means an
+  // idle PC's empty left edge is visible as absence, rather than being cropped
+  // away until the strip looks fully covered.
   const [from, to] = useMemo<[string | undefined, string | undefined]>(() => {
+    if (windowFrom) return [windowFrom, windowTo];
+    // `all` (no lower bound): fall back to the data's own extent, padded 2%
+    // like the scatter so end markers aren't flush against the edge.
     const kept = new Set(pcs);
     let lo = Infinity;
     let hi = -Infinity;
@@ -960,7 +1042,7 @@ function EventsOperational({ events }: { events: EventRow[] }) {
     if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi <= lo) return [undefined, undefined];
     const pad = Math.max(60_000, (hi - lo) * 0.02);
     return [new Date(lo - pad).toISOString(), new Date(hi + pad).toISOString()];
-  }, [opEvents, pcs]);
+  }, [opEvents, pcs, windowFrom, windowTo]);
 
   // Group the kept PCs' events into the shape the strip wants.
   const byPc = useMemo(() => {
@@ -989,12 +1071,28 @@ function EventsOperational({ events }: { events: EventRow[] }) {
           )}
         </CardTitle>
         <p className="mt-1 text-muted text-xs">{t('opTimeline.subtitle')}</p>
+        {/* Truncation is silent otherwise: the axis shows the full period, and
+            without this the only clue is hatching an operator has to notice
+            and interpret. Say plainly what's missing and how to get it. */}
+        {coverageFrom && (
+          <p className="mt-1 text-amber text-xs">
+            {t('opTimeline.truncated', {
+              limit,
+              from: fmtIsoLocal(coverageFrom),
+            })}
+          </p>
+        )}
       </CardHeader>
       <CardContent className="space-y-4 pt-0">
         {pcs.map((pc) => (
           <div key={pc} className="space-y-1">
             <code className="text-[11px] text-muted">{pc}</code>
-            <OperationalTimeline events={byPc.get(pc) ?? []} from={from} to={to} />
+            <OperationalTimeline
+              events={byPc.get(pc) ?? []}
+              from={from}
+              to={to}
+              coverageFrom={coverageFrom}
+            />
           </div>
         ))}
       </CardContent>

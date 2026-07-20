@@ -1,0 +1,50 @@
+# SPA unit tests for the kanade-backend frontend.
+#
+# Lives in its own workflow file (not the kata-managed ci.yml) so a future
+# `kata apply` from the upstream preset doesn't clobber it — same reasoning
+# as integration.yml. Triggers match ci.yml: push to main + every PR +
+# manual dispatch.
+#
+# Scoped to the SPA's own directory: the tests cover pure TypeScript
+# (the operational swimlane's lane derivation), so a Rust-only change has
+# no way to affect them and doesn't need to pay for the job.
+
+name: Web
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/kanade-backend/web/**'
+      - '.github/workflows/web.yml'
+  pull_request:
+    paths:
+      - 'crates/kanade-backend/web/**'
+      - '.github/workflows/web.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: bun test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.3
+      - uses: oven-sh/setup-bun@v2
+      - name: Install deps
+        working-directory: crates/kanade-backend/web
+        # --frozen-lockfile: the committed bun.lock pins the tree, so a
+        # transitive bump can't silently change what's under test.
+        run: bun install --frozen-lockfile
+      - name: Unit tests
+        working-directory: crates/kanade-backend/web
+        run: bun test
+      - name: Type-check and build
+        working-directory: crates/kanade-backend/web
+        # `bun run build` is `tsc -b && vite build` — this is the only place
+        # the SPA's types are checked in CI, since ci.yml is Rust-only and
+        # release.yml builds the SPA but only on a tag.
+        run: bun run build

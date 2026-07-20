@@ -20,6 +20,13 @@
     "noFallthroughCasesInSwitch": true,
     "noUncheckedSideEffectImports": true,
 
+    // Explicit, because TS no longer picks `@types/bun` up on its own here
+    // and `*.test.ts` imports `bun:test`. Naming any package switches off
+    // automatic `@types/*` inclusion, which is fine: everything else the SPA
+    // uses (react, react-dom, node) is reached through an import, not an
+    // ambient global.
+    "types": ["bun"],
+
     "baseUrl": ".",
     "paths": {
       "@/*": ["./src/*"]

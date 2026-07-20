@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { type MouseEvent as ReactMouseEvent, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { AGENT_ACTIVE_THRESHOLD_MS, fmtIsoLocal } from '@/lib/utils';
@@ -248,23 +248,152 @@ function laneMarkers(
     .filter((e) => !Number.isNaN(e.ts) && keep.has(e.kind) && e.ts >= t0 && e.ts <= t1);
 }
 
-// ~5 evenly spaced axis ticks across [t0, t1]. Short HH:mm when the window
-// fits in a day, MM/DD HH:mm otherwise (same rule as the Events scatter).
-function axisTicks(t0: number, t1: number): { ts: number; label: string }[] {
+// Geometry of the lane-label column, in px. Four things have to agree on
+// where the tracks start: the label column's own width, the row gap after it,
+// the axis's left margin, and the readout's `left`. They used to agree by
+// arithmetic coincidence — `w-28` + `gap-2` on one side and a literal
+// `ml-[120px]` on the other — which is both easy to desync (a longer
+// translated lane name needing a wider column silently breaks the pointer
+// mapping, with no type error and no failing test) and not actually
+// equivalent: Tailwind's spacing scale is rem-based, so the two only match at
+// a 16px root font size. A user with a larger root font — an ordinary
+// accessibility setting — would scale the column while the literal stayed
+// pinned, throwing the crosshair off the spans it's pointing at. Driving all
+// four from these constants keeps them in px and in step.
+const LANE_LABEL_WIDTH_PX = 112;
+const LANE_LABEL_GAP_PX = 8;
+const TRACK_OFFSET_PX = LANE_LABEL_WIDTH_PX + LANE_LABEL_GAP_PX;
+
+const MINUTE_MS = 60_000;
+const HOUR_MS = 60 * MINUTE_MS;
+const DAY_MS = 24 * HOUR_MS;
+
+// Candidate tick intervals, coarsest-last. Every entry divides evenly into a
+// day (or is a whole number of days) so ticks land on times an operator
+// already thinks in — 0:00 / 6:00 / 12:00 / 18:00, never 10:38.
+const TICK_STEPS_MS = [
+  5 * MINUTE_MS,
+  15 * MINUTE_MS,
+  30 * MINUTE_MS,
+  HOUR_MS,
+  2 * HOUR_MS,
+  3 * HOUR_MS,
+  6 * HOUR_MS,
+  12 * HOUR_MS,
+  DAY_MS,
+  2 * DAY_MS,
+  7 * DAY_MS,
+  14 * DAY_MS,
+  28 * DAY_MS,
+];
+
+// Upper bound on tick intervals; the strip is narrow, so more than this and
+// the labels collide.
+const MAX_TICK_INTERVALS = 6;
+
+/** Local midnight of the day containing `ts`. */
+function localDayStart(ts: number): number {
+  const d = new Date(ts);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+/**
+ * Local midnight of the day after the one containing `ts`. Goes through
+ * `setHours` on a +25h probe rather than adding 86_400_000, so a DST
+ * transition can't drift the anchor by an hour.
+ */
+function nextLocalDayStart(ts: number): number {
+  return localDayStart(localDayStart(ts) + 25 * HOUR_MS);
+}
+
+/**
+ * Coarsest interval that keeps `span` under `maxIntervals` divisions.
+ *
+ * Past the end of the table (a span over ~168 days, reachable from the
+ * Analytics widget, whose `from` has no floor) the table can't satisfy the
+ * bound, so the step is computed instead — rounded up to whole days, which
+ * keeps it midnight-alignable. Falling back to the largest table entry would
+ * silently ignore `maxIntervals` and crowd the strip with hundreds of ticks.
+ */
+function pickStep(span: number, maxIntervals: number): number {
+  const s = TICK_STEPS_MS.find((x) => span / x <= maxIntervals);
+  if (s !== undefined) return s;
+  return Math.ceil(span / maxIntervals / DAY_MS) * DAY_MS;
+}
+
+/**
+ * Round local times at `step`, anchored to local midnight — not to the epoch,
+ * which in a non-UTC zone would put a 6h step on 3:00 / 9:00 / 15:00 / 21:00.
+ */
+function roundTimes(t0: number, t1: number, step: number): number[] {
+  const times: number[] = [];
+  if (step >= DAY_MS) {
+    // Whole-day steps: walk local midnights and keep every k-th, so the ticks
+    // stay on date boundaries instead of drifting into mid-day.
+    const k = Math.max(1, Math.round(step / DAY_MS));
+    let d = localDayStart(t0);
+    if (d < t0) d = nextLocalDayStart(d);
+    let i = 0;
+    while (d <= t1 && times.length < 64) {
+      times.push(d);
+      for (let j = 0; j < k && d <= t1; j++) d = nextLocalDayStart(d);
+      i++;
+      if (i > 400) break;
+    }
+  } else {
+    // Sub-day steps: re-anchor at each local midnight so the pattern restarts
+    // cleanly every day (and a DST day can't shift every later tick).
+    let day = localDayStart(t0);
+    let guard = 0;
+    while (day <= t1 && times.length < 64 && guard++ < 400) {
+      const next = nextLocalDayStart(day);
+      for (let ts = day; ts < next && ts <= t1; ts += step) {
+        if (ts >= t0) times.push(ts);
+      }
+      day = next;
+    }
+  }
+  return times;
+}
+
+/**
+ * Axis ticks on round local times. Ticks that land on midnight are labelled
+ * with the date, the rest with HH:mm, so the day a time belongs to is always
+ * readable from the nearest date tick to its left.
+ */
+export function axisTicks(t0: number, t1: number): { ts: number; label: string; isDay: boolean }[] {
   const span = t1 - t0;
   if (!(span > 0)) return [];
-  const multiDay = span > 24 * 60 * 60 * 1000;
-  const fmt = (ts: number) => {
+  return roundTimes(t0, t1, pickStep(span, MAX_TICK_INTERVALS)).map((ts) => {
     const d = new Date(ts);
+    const isDay = ts === localDayStart(ts);
     const hh = d.getHours().toString().padStart(2, '0');
     const mm = d.getMinutes().toString().padStart(2, '0');
-    return multiDay ? `${d.getMonth() + 1}/${d.getDate()} ${hh}:${mm}` : `${hh}:${mm}`;
-  };
-  const N = 4;
-  return Array.from({ length: N + 1 }, (_, i) => {
-    const ts = t0 + (span * i) / N;
-    return { ts, label: fmt(ts) };
+    return {
+      ts,
+      label: isDay ? `${d.getMonth() + 1}/${d.getDate()}` : `${hh}:${mm}`,
+      isDay,
+    };
   });
+}
+
+/**
+ * Gridlines for the lane tracks. Deliberately finer than the labelled ticks:
+ * labels have to stay sparse enough not to collide, but the lanes have room
+ * for more structure than that, and reading a span's extent off ~5 lines
+ * across two days means eyeballing halves and thirds. Allowing twice as many
+ * intervals picks the next step down from the same table, so the lines stay
+ * on round times and every label still sits on one. Day boundaries are
+ * flagged so the renderer can draw them stronger.
+ */
+export function axisGridlines(t0: number, t1: number): { ts: number; isDay: boolean }[] {
+  const span = t1 - t0;
+  if (!(span > 0)) return [];
+  return roundTimes(t0, t1, pickStep(span, MAX_TICK_INTERVALS * 2)).map((ts) => ({
+    ts,
+    isDay: ts === localDayStart(ts),
+  }));
 }
 
 /**
@@ -272,8 +401,8 @@ function axisTicks(t0: number, t1: number): { ts: number; label: string }[] {
  * (power / session / sleep kinds) into lane spans the operator can read at a
  * glance: when the host was up, who was signed in, when it slept. Shared by
  * the Analytics `op_timeline` widget (which receives a server-computed
- * window) and the Events page strip (which derives the window from the
- * rendered events). The active/idle lane is fed by the agent-native idle
+ * window) and the Events page strip (which passes the selected period).
+ * The active/idle lane is fed by the agent-native idle
  * sampler (#841); a filled span = active, a gap = idle. The active /
  * session / sleep lanes are clipped to the power lane's ON spans so a state
  * left open across a power cycle can't paint over a powered-off gap. When a
@@ -285,15 +414,164 @@ function axisTicks(t0: number, t1: number): { ts: number; label: string }[] {
  * `from` / `to` bound the window; when omitted they fall back to the
  * earliest / latest event so the Events page can use it without a window.
  */
+/**
+ * Derive the four lanes from a window of raw operational events.
+ *
+ * Pure and exported so the lane dependency rules can be tested directly:
+ * the interactions between power, session, sleep and active are subtle
+ * enough that they have been fixed four times (#841, #972, #981, #983, and
+ * the session backfill gate below), each time from a screenshot rather than
+ * a failing test. `now` is a parameter for the same reason.
+ */
+export function buildLanes(
+  events: OpEvent[],
+  windowFrom: number,
+  t1: number,
+  now: number,
+  lastHeartbeat?: string | null,
+  // Oldest instant the event set actually covers. Set when the fetch was
+  // truncated by `limit` (which drops the OLD end of the window — the backend
+  // orders `at DESC`), so the window extends back further than the data does.
+  //
+  // Everything is then reconstructed from this floor rather than from `t0`,
+  // because `buildSpans`' carry-in would otherwise fabricate the uncovered
+  // region wholesale: the oldest surviving event is typically an end with no
+  // matching start, which reads as "this state was already open at t0" and
+  // paints the entire gap. On a 2-day window truncated to the last few hours
+  // that renders as two solid days of "the user was at this machine" — a
+  // stronger and more wrong claim than anything this component is trying to
+  // fix. The caller paints [t0, coverageFrom) as no-data instead.
+  coverageFrom?: number,
+): { key: LaneKey; color: string; spans: Span[]; markers: { ts: number; kind: string }[] }[] {
+  if (t1 <= windowFrom) return [];
+  // Floor for span reconstruction. The axis still spans [windowFrom, t1];
+  // only the spans are held back to what the data can support.
+  const t0 =
+    coverageFrom === undefined ? windowFrom : Math.min(Math.max(coverageFrom, windowFrom), t1);
+  if (t1 <= t0) return [];
+  // The live edge an open span clamps to, and the newest instant we still
+  // trust. When the agent is offline, `lastHeartbeat + grace` falls before
+  // the live edge, so any ongoing state after it is hatched as unconfirmed
+  // (see `gateToHeartbeat`). No `lastHeartbeat` → certainEdge == liveEdge →
+  // no gating. `grace` = the fleet-wide online/offline threshold, so a
+  // single missed beat on a healthy agent doesn't fray the strip's tail.
+  const liveEdge = Math.min(t1, now);
+  const hbMs = lastHeartbeat ? Date.parse(lastHeartbeat) : NaN;
+  const certainEdge = Number.isNaN(hbMs)
+    ? liveEdge
+    : Math.min(liveEdge, hbMs + AGENT_ACTIVE_THRESHOLD_MS);
+  // Reconstruct the power lane first: it's the ground truth for "the host
+  // was up", and the subordinate lanes get clipped to its ON spans below.
+  const power = OP_LANES.find((l) => l.key === 'power')!;
+  const powerSpans = buildSpans(events, power.starts, power.ends, t0, t1, now);
+  const onIntervals = powerSpans.map((s) => ({ from: s.from, to: s.to }));
+  // Only clip when we actually have power events — a PC that reports just
+  // active/idle (no winlog power lane) has no ON spans, and clipping to an
+  // empty set would erase its only signal.
+  const powerKinds = new Set<string>([...power.starts, ...power.ends]);
+  // Note this is kind-membership over whatever `events` holds, which a
+  // truncated fetch can change. If truncation drops every power event for a
+  // host while keeping its recent session/active ones — plausible, since the
+  // last reboot may be days old while sign-in and sampler traffic is
+  // constant — `hasPower` flips false and the covered region silently
+  // switches from winlog reconstruction to the presence-envelope backfill.
+  // That isn't fabrication (the envelope is sampler-evidenced, the same
+  // inference #970 already rests on), but it is a different *method* inside
+  // the region the strip presents as covered, and nothing distinguishes it
+  // from a genuinely winlog-less host. Detecting the difference would need a
+  // second query ("does this PC have power events older than the floor?"),
+  // so it is documented rather than handled.
+  const hasPower = events.some((e) => powerKinds.has(e.kind));
+  const session = OP_LANES.find((l) => l.key === 'session')!;
+  // The active lane (agent idle sampler): a filled span = active, a gap =
+  // idle. Built once and shown as-is on its own lane.
+  const active = OP_LANES.find((l) => l.key === 'active')!;
+  const activeSpans = buildSpans(events, active.starts, active.ends, t0, t1, now);
+  // #970 backfill: when the PC reports NO winlog power events at all (the
+  // winlog collector isn't running on that host), the idle sampler is the
+  // only signal that the host was up. Paint the power and session lanes from
+  // it so those lanes aren't blank while active fills, keeping the
+  // "active ⇒ power & session" invariant.
+  //
+  // Backfill from the *presence envelope*, NOT the active spans: an `idle`
+  // event still means the agent was sampling, i.e. the host was powered on
+  // and the user signed in — just not typing. Painting power/session from the
+  // active spans directly made them drop out during every idle stretch, as if
+  // the box powered off or logged out the moment the user paused (the minipc
+  // report that surfaced this). Union the active spans (active→idle) with the
+  // idle spans (idle→active) and coalesce: that collapses the sampler's whole
+  // run into one continuous band across the idle gaps while keeping
+  // buildSpans' carry-in at both window edges, so the envelope reaches the
+  // edge instead of starting at the first raw event and leaving a sliver where
+  // the active lane's own carry-in already paints (power/session ⊇ active,
+  // exactly). The band runs to the live edge and is trimmed / hatched there by
+  // the heartbeat gate below when the agent is offline. The active lane itself
+  // still shows the idle gaps.
+  const idleSpans = buildSpans(events, active.ends, active.starts, t0, t1, now);
+  const presenceSpans = mergeSpans([...activeSpans, ...idleSpans]);
+  // Scoped to the absent-winlog case on purpose: once winlog exists it stays
+  // authoritative — including its OFF gaps — so a stale open `active` carried
+  // across a power cycle can't union its way over a powered-off span (#841).
+  // The clip-to-power path is unchanged there.
+  //
+  // The session backfill unions the genuine spans with the envelope instead
+  // of choosing one or the other. It used to be gated on
+  // `!hasPower && !hasSession`, which was all-or-nothing on a lane where
+  // partial data is the norm: a single logon anywhere in the window flipped
+  // `hasSession` and disabled the backfill for the *whole* window, leaving
+  // one short span on an otherwise blank lane while power and active were
+  // filled end to end — the "active but no session" report, and a visible
+  // break of the invariant #970 set out to hold. Unioning keeps what that
+  // gate was protecting (genuine spans are never overwritten, and they still
+  // back the lane's logon/logoff markers) while the envelope covers the
+  // stretches winlog says nothing about. Note the envelope subsumes a
+  // genuine logoff gap when the sampler kept running across it — the sampler
+  // runs as the signed-in user, so its output is itself evidence of a
+  // session; the logoff marker stays on the lane either way.
+  const sessionSpans = buildSpans(events, session.starts, session.ends, t0, t1, now);
+  return OP_LANES.map((lane) => {
+    let spans: Span[];
+    if (lane.key === 'power') {
+      spans = hasPower ? powerSpans : presenceSpans;
+    } else if (lane.key === 'session') {
+      // Both session paths in one branch so the generic branch below doesn't
+      // rebuild the spans `sessionSpans` already holds.
+      spans = hasPower
+        ? clipToOn(sessionSpans, onIntervals)
+        : mergeSpans([...sessionSpans, ...presenceSpans]);
+    } else if (lane.key === 'active') {
+      // Reuse the pre-built active spans; still clip to power ON when winlog
+      // exists so a stale open span can't paint across a powered-off gap.
+      spans = hasPower ? clipToOn(activeSpans, onIntervals) : activeSpans;
+    } else {
+      spans = buildSpans(events, lane.starts, lane.ends, t0, t1, now);
+      if (hasPower) spans = clipToOn(spans, onIntervals);
+    }
+    // Hatch any ongoing state past the agent's last heartbeat as unconfirmed.
+    spans = gateToHeartbeat(spans, certainEdge, liveEdge);
+    return {
+      key: lane.key as LaneKey,
+      color: lane.color,
+      spans,
+      markers: laneMarkers(events, lane.starts, lane.ends, t0, t1),
+    };
+  });
+}
+
 export function OperationalTimeline({
   events,
   from,
   to,
   lastHeartbeat,
+  coverageFrom,
 }: {
   events: OpEvent[];
   from?: string;
   to?: string;
+  // Oldest instant the event set actually covers (ISO), when the fetch was
+  // truncated by `limit`. The window before it renders as "no data" instead
+  // of being extrapolated from the oldest surviving event.
+  coverageFrom?: string;
   // The agent's last heartbeat (ISO). When present, the strip stops painting a
   // lane's ongoing state past `lastHeartbeat + grace` and hatches that tail as
   // unconfirmed — the agent is offline, so we can't vouch for the current
@@ -324,96 +602,42 @@ export function OperationalTimeline({
     return [lo, hi];
   }, [events, from, to]);
 
-  const lanes = useMemo(() => {
-    if (t1 <= t0) return [];
+  // Where the data actually starts, clamped into the window. Anything left of
+  // it is uncovered: the fetch was truncated before reaching back this far.
+  const coverEdge = useMemo(() => {
+    if (!coverageFrom) return t0;
+    const ms = Date.parse(coverageFrom);
+    return Number.isNaN(ms) ? t0 : Math.min(Math.max(ms, t0), t1);
+  }, [coverageFrom, t0, t1]);
+
+  const lanes = useMemo(
     // Snapshot "now" once per render so open intervals don't paint past the
     // present when the window runs into the future (today before midnight).
-    const now = Date.now();
-    // The live edge an open span clamps to, and the newest instant we still
-    // trust. When the agent is offline, `lastHeartbeat + grace` falls before
-    // the live edge, so any ongoing state after it is hatched as unconfirmed
-    // (see `gateToHeartbeat`). No `lastHeartbeat` → certainEdge == liveEdge →
-    // no gating. `grace` = the fleet-wide online/offline threshold, so a
-    // single missed beat on a healthy agent doesn't fray the strip's tail.
-    const liveEdge = Math.min(t1, now);
-    const hbMs = lastHeartbeat ? Date.parse(lastHeartbeat) : NaN;
-    const certainEdge = Number.isNaN(hbMs)
-      ? liveEdge
-      : Math.min(liveEdge, hbMs + AGENT_ACTIVE_THRESHOLD_MS);
-    // Reconstruct the power lane first: it's the ground truth for "the host
-    // was up", and the subordinate lanes get clipped to its ON spans below.
-    const power = OP_LANES.find((l) => l.key === 'power')!;
-    const powerSpans = buildSpans(events, power.starts, power.ends, t0, t1, now);
-    const onIntervals = powerSpans.map((s) => ({ from: s.from, to: s.to }));
-    // Only clip when we actually have power events — a PC that reports just
-    // active/idle (no winlog power lane) has no ON spans, and clipping to an
-    // empty set would erase its only signal.
-    const powerKinds = new Set<string>([...power.starts, ...power.ends]);
-    const hasPower = events.some((e) => powerKinds.has(e.kind));
-    // Whether the session lane has genuine winlog events of its own — gates the
-    // session backfill independently of power (see below).
-    const session = OP_LANES.find((l) => l.key === 'session')!;
-    const sessionKinds = new Set<string>([...session.starts, ...session.ends]);
-    const hasSession = events.some((e) => sessionKinds.has(e.kind));
-    // The active lane (agent idle sampler): a filled span = active, a gap =
-    // idle. Built once and shown as-is on its own lane.
-    const active = OP_LANES.find((l) => l.key === 'active')!;
-    const activeSpans = buildSpans(events, active.starts, active.ends, t0, t1, now);
-    // #970 backfill: when the PC reports NO winlog power events at all (the
-    // winlog collector isn't running on that host), the idle sampler is the
-    // only signal that the host was up. Paint the power and session lanes from
-    // it so those lanes aren't blank while active fills, keeping the
-    // "active ⇒ power & session" invariant.
-    //
-    // Backfill from the *presence envelope*, NOT the active spans: an `idle`
-    // event still means the agent was sampling, i.e. the host was powered on
-    // and the user signed in — just not typing. Painting power/session from the
-    // active spans directly made them drop out during every idle stretch, as if
-    // the box powered off or logged out the moment the user paused (the minipc
-    // report that surfaced this). Union the active spans (active→idle) with the
-    // idle spans (idle→active) and coalesce: that collapses the sampler's whole
-    // run into one continuous band across the idle gaps while keeping
-    // buildSpans' carry-in at both window edges, so the envelope reaches the
-    // edge instead of starting at the first raw event and leaving a sliver where
-    // the active lane's own carry-in already paints (power/session ⊇ active,
-    // exactly). The band runs to the live edge and is trimmed / hatched there by
-    // the heartbeat gate below when the agent is offline. The active lane itself
-    // still shows the idle gaps.
-    const idleSpans = buildSpans(events, active.ends, active.starts, t0, t1, now);
-    const presenceSpans = mergeSpans([...activeSpans, ...idleSpans]);
-    // Scoped to the absent-winlog case on purpose: once winlog exists it stays
-    // authoritative — including its OFF gaps — so a stale open `active` carried
-    // across a power cycle can't union its way over a powered-off span (#841).
-    // The clip-to-power path is unchanged there. Power and session gate on their
-    // OWN kinds (not just power's) so a partial winlog feed — e.g. logon/logoff
-    // logged while the boot/shutdown listener isn't — keeps its genuine session
-    // spans (which also back the lane's markers) rather than being overwritten.
-    return OP_LANES.map((lane) => {
-      let spans: Span[];
-      if (lane.key === 'power') {
-        spans = hasPower ? powerSpans : presenceSpans;
-      } else if (lane.key === 'session' && !hasPower && !hasSession) {
-        spans = presenceSpans;
-      } else if (lane.key === 'active') {
-        // Reuse the pre-built active spans; still clip to power ON when winlog
-        // exists so a stale open span can't paint across a powered-off gap.
-        spans = hasPower ? clipToOn(activeSpans, onIntervals) : activeSpans;
-      } else {
-        spans = buildSpans(events, lane.starts, lane.ends, t0, t1, now);
-        if (hasPower) spans = clipToOn(spans, onIntervals);
-      }
-      // Hatch any ongoing state past the agent's last heartbeat as unconfirmed.
-      spans = gateToHeartbeat(spans, certainEdge, liveEdge);
-      return {
-        key: lane.key as LaneKey,
-        color: lane.color,
-        spans,
-        markers: laneMarkers(events, lane.starts, lane.ends, t0, t1),
-      };
-    });
-  }, [events, t0, t1, lastHeartbeat]);
+    () => buildLanes(events, t0, t1, Date.now(), lastHeartbeat, coverEdge),
+    [events, t0, t1, lastHeartbeat, coverEdge],
+  );
 
   const ticks = useMemo(() => axisTicks(t0, t1), [t0, t1]);
+  const gridlines = useMemo(() => axisGridlines(t0, t1), [t0, t1]);
+
+  // Crosshair: the instant under the pointer, or null when it's away. Reading
+  // four lanes at one moment otherwise means eyeballing a vertical line across
+  // four separate tracks and hoping you stayed on the same x.
+  const [hoverTs, setHoverTs] = useState<number | null>(null);
+  // Measures the track column (everything right of the lane labels). The lanes
+  // and the axis share its geometry, so one rect converts pointer x to a time
+  // for all of them.
+  const trackRef = useRef<HTMLDivElement>(null);
+
+  const onMove = (e: ReactMouseEvent<HTMLDivElement>) => {
+    const rect = trackRef.current?.getBoundingClientRect();
+    if (!rect || rect.width <= 0) return;
+    const frac = (e.clientX - rect.left) / rect.width;
+    // Off to the side of the tracks (over the labels, or past the right edge):
+    // no meaningful instant, so drop the crosshair rather than clamp it to an
+    // edge time the pointer isn't actually on.
+    setHoverTs(frac < 0 || frac > 1 ? null : t0 + frac * (t1 - t0));
+  };
 
   if (t1 <= t0) {
     return <div className="text-muted text-sm">{t('opTimeline.empty')}</div>;
@@ -422,11 +646,28 @@ export function OperationalTimeline({
   const span = t1 - t0;
   const pct = (ts: number) => ((ts - t0) / span) * 100;
 
+  // What each lane asserts at the crosshair. `uncertain` propagates so the
+  // readout can't state a hatched (unconfirmed) span as fact.
+  const at =
+    hoverTs === null
+      ? null
+      : lanes.map((lane) => {
+          const s = lane.spans.find((x) => x.from <= hoverTs && hoverTs < x.to);
+          return { key: lane.key, color: lane.color, on: !!s, uncertain: !!s?.uncertain };
+        });
+
   return (
-    <div className="space-y-1.5">
+    <div
+      className="relative space-y-1.5"
+      onMouseMove={onMove}
+      onMouseLeave={() => setHoverTs(null)}
+    >
       {lanes.map((lane) => (
-        <div key={lane.key} className="flex items-center gap-2">
-          <div className="flex w-28 shrink-0 items-center gap-1.5 text-xs text-muted">
+        <div key={lane.key} className="flex items-center" style={{ gap: LANE_LABEL_GAP_PX }}>
+          <div
+            className="flex shrink-0 items-center gap-1.5 text-xs text-muted"
+            style={{ width: LANE_LABEL_WIDTH_PX }}
+          >
             <span
               className="inline-block size-2 shrink-0 rounded-sm"
               style={{ backgroundColor: lane.color }}
@@ -501,30 +742,128 @@ export function OperationalTimeline({
                 })}
               />
             ))}
+            {/* Gridlines on every axis tick, drawn last so they stay visible
+                over a filled span — a lane painted end to end would otherwise
+                swallow them and there'd be nothing to read a position
+                against. Day boundaries are stronger than the hour ticks, so
+                the date structure still reads at a glance without the
+                intermediate lines competing with the spans. */}
+            {gridlines.map((g, i) => (
+              <div
+                key={`g-${i}`}
+                className={`pointer-events-none absolute top-0 h-full w-px ${
+                  g.isDay ? 'bg-fg/40' : 'bg-fg/15'
+                }`}
+                style={{ left: `${pct(g.ts)}%` }}
+              />
+            ))}
+            {/* Uncovered window: the fetch was truncated before reaching back
+                this far, so nothing here is known either way. Hatched in a
+                neutral grey — distinct from a painted span (state was on),
+                from an empty lane (state was off), and from the lane-coloured
+                heartbeat hatch (state believed but unconfirmed). */}
+            {coverEdge > t0 && (
+              <div
+                className="pointer-events-none absolute top-0 h-full"
+                style={{
+                  left: 0,
+                  width: `${pct(coverEdge)}%`,
+                  backgroundImage:
+                    'repeating-linear-gradient(45deg, rgb(127 127 127 / 0.28) 0, rgb(127 127 127 / 0.28) 3px, transparent 3px, transparent 6px)',
+                }}
+                title={t('opTimeline.noDataTooltip', {
+                  from: fmtIsoLocal(new Date(t0).toISOString()),
+                  to: fmtIsoLocal(new Date(coverEdge).toISOString()),
+                })}
+              />
+            )}
+            {hoverTs !== null && (
+              <div
+                className="pointer-events-none absolute top-0 h-full w-px bg-fg/80"
+                style={{ left: `${pct(hoverTs)}%` }}
+              />
+            )}
           </div>
         </div>
       ))}
 
-      {/* Time axis. */}
-      <div className="relative ml-[120px] h-4 text-[9px] text-muted">
-        {ticks.map((tick, i) => (
-          <span
-            key={i}
-            className="absolute -translate-x-1/2 whitespace-nowrap"
-            style={{
-              left: `${pct(tick.ts)}%`,
-              transform:
-                i === 0
-                  ? 'translateX(0)'
-                  : i === ticks.length - 1
-                    ? 'translateX(-100%)'
-                    : 'translateX(-50%)',
-            }}
-          >
-            {tick.label}
-          </span>
-        ))}
+      {/* Time axis. Also the measuring stick for the crosshair: it shares the
+          lanes' left offset and width, so its rect converts pointer x to a
+          time without threading a ref through every lane track. */}
+      <div
+        ref={trackRef}
+        className="relative h-4 text-[9px] text-muted"
+        style={{ marginLeft: TRACK_OFFSET_PX }}
+      >
+        {ticks.map((tick, i) => {
+          const p = pct(tick.ts);
+          return (
+            <span
+              key={i}
+              className={`absolute whitespace-nowrap ${tick.isDay ? 'font-medium text-fg/80' : ''}`}
+              style={{
+                left: `${p}%`,
+                // Centre the label on its tick, except near the edges where a
+                // centred label would spill outside the strip.
+                transform:
+                  p < 4 ? 'translateX(0)' : p > 96 ? 'translateX(-100%)' : 'translateX(-50%)',
+              }}
+            >
+              {tick.label}
+            </span>
+          );
+        })}
       </div>
+
+      {/* Crosshair readout: every lane's state at one instant, so the four
+          tracks can be read as a single moment instead of by eye across four
+          rows. Sits *below* the axis rather than next to the pointer — the
+          lanes are only 24px tall, so a floating box overlaps the very spans
+          the crosshair is asking about. */}
+      {hoverTs !== null && at && (
+        <div
+          className="pointer-events-none absolute top-full z-10 mt-1 rounded-sm border border-border bg-card px-2 py-1.5 text-[10px] shadow-lg"
+          style={{
+            // Positioned against the whole strip, but the tracks start
+            // `TRACK_OFFSET_PX` in, so the fraction applies to the track width
+            // rather than to `100%`. (The crosshair's own `left` is a plain
+            // percentage because it lives *inside* a track, a different
+            // coordinate space that needs no offset.)
+            left: `calc(${TRACK_OFFSET_PX}px + (100% - ${TRACK_OFFSET_PX}px) * ${pct(hoverTs) / 100})`,
+            // Centred on the crosshair, pinned back at the edges so it can't
+            // spill out of the card.
+            transform:
+              pct(hoverTs) < 15
+                ? 'translateX(0)'
+                : pct(hoverTs) > 85
+                  ? 'translateX(-100%)'
+                  : 'translateX(-50%)',
+          }}
+        >
+          <div className="mb-1 font-medium text-fg whitespace-nowrap">
+            {fmtIsoLocal(new Date(hoverTs).toISOString())}
+          </div>
+          {/* Inside the uncovered window every lane would read "off", which is
+              the one thing we specifically cannot claim here. */}
+          {hoverTs < coverEdge ? (
+            <div className="whitespace-nowrap text-muted">{t('opTimeline.noData')}</div>
+          ) : (
+          at.map((l) => (
+            <div key={l.key} className="flex items-center gap-1.5 whitespace-nowrap">
+              <span
+                className="inline-block size-2 shrink-0 rounded-sm"
+                style={{ backgroundColor: l.color, opacity: l.on ? 1 : 0.25 }}
+              />
+              <span className="text-muted">{t(`opTimeline.lanes.${l.key}`)}</span>
+              <span className={l.on ? 'text-fg' : 'text-muted'}>
+                {t(`opTimeline.state.${l.key}.${l.on ? 'on' : 'off'}`)}
+                {l.uncertain && ` (${t('opTimeline.unconfirmed')})`}
+              </span>
+            </div>
+            ))
+          )}
+        </div>
+      )}
     </div>
   );
 }

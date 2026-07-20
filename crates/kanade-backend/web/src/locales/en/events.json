@@ -82,6 +82,16 @@
     "spanTooltip": "{{lane}}: {{from}} → {{to}}",
     "uncertainTooltip": "{{lane}}: {{from}} → {{to}} (unconfirmed · agent offline)",
     "markerTooltip": "{{kind}} at {{at}}",
+    "state": {
+      "power": { "on": "On", "off": "Off" },
+      "session": { "on": "Signed in", "off": "Signed out" },
+      "sleep": { "on": "Asleep", "off": "Awake" },
+      "active": { "on": "Active", "off": "Idle" }
+    },
+    "unconfirmed": "unconfirmed",
+    "noData": "no data (cut off by the row limit)",
+    "noDataTooltip": "No data: {{from}} → {{to}} — the row limit was reached, so the older end of this period was never fetched. Raise the limit to see it",
+    "truncated": "row limit ({{limit}}) reached — nothing before {{from}} was fetched; the hatched part of each lane is window with no data",
     "empty": "No power / session / sleep / active events in this window for this PC."
   },
   "heatmap": {
