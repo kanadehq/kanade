@@ -1,3 +1,4 @@
+mod agent_watchdog;
 mod api;
 mod audit;
 mod auth;

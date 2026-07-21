@@ -189,11 +189,30 @@ pub fn spawn(
         // `tick().await` fires immediately, preserving the
         // run-on-spawn behaviour.
         let mut interval = tokio::time::interval(CLEANUP_INTERVAL);
+        // Rides this timer rather than adding a fourth ticker to the backend.
+        // Detection latency is therefore up to CLEANUP_INTERVAL on top of the
+        // staleness threshold — which only delays when an outage becomes
+        // visible, never what gets recorded: the event is backdated to the
+        // last heartbeat, so the stored boundary is independent of how often
+        // we look. Split it out if that latency ever matters.
+        //
+        // Constructed here, not before the loop's first tick, so
+        // `observed_since` is the moment watching actually began.
+        let mut watchdog = crate::agent_watchdog::AgentWatchdog::new(Utc::now());
         loop {
             interval.tick().await;
             // One `now` per tick: every sweep's cutoff derives from
             // the same instant, so a tick is internally consistent.
             let now = Utc::now();
+            match watchdog.sweep(&pool, &jetstream, now).await {
+                Ok((off, on)) if off > 0 || on > 0 => info!(
+                    went_offline = off,
+                    came_online = on,
+                    "agent watchdog: recorded {off} offline / {on} online transitions",
+                ),
+                Ok(_) => {}
+                Err(e) => warn!(error = %e, "agent watchdog sweep failed"),
+            }
             match expire_stale_pending(&pool, now - chrono::Duration::hours(PENDING_TIMEOUT_HOURS))
                 .await
             {
