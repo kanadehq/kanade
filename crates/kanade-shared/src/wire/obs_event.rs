@@ -39,7 +39,15 @@ use serde::{Deserialize, Serialize};
 /// - `boot` / `shutdown` — System log 12 / 13 (kernel-general)
 /// - `unexpected_shutdown` — System log 41
 /// - `sleep` / `resume` — System log 42 / 107
-/// - `agent_started` / `agent_self_update` — agent-emitted (later)
+/// - `active` / `idle` — agent idle sampler (#841); the one lane
+///   signal with no Event Log source
+/// - `agent_update` — agent self-update milestone
+/// - `agent_online` / `agent_offline` — whether the fleet was being
+///   *observed*, as opposed to what a host was doing. Emitted from
+///   two sides with different `source`s: the agent stamps
+///   `agent:startup` at boot, and the backend infers both from
+///   heartbeat gaps as `backend:heartbeat-watchdog` (#1107). They
+///   drive no lane; they bound what the other lanes may claim.
 /// - `diagnostic` — kanade logs collect bundles (#219)
 ///
 /// New kinds can be added without a wire change; the backend

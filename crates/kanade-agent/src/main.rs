@@ -36,6 +36,7 @@ mod obs_outbox;
 mod outbox;
 mod script_cache;
 mod staleness;
+mod startup_event;
 mod winlog;
 
 #[cfg(target_os = "windows")]
@@ -502,6 +503,13 @@ pub(crate) async fn run_agent() -> Result<()> {
     // `ObsEvent`s a script emits via `emit.type: events` manifests.
     let obs_outbox_dir = default_paths::data_dir().join("obs-outbox");
     let _obs_outbox_handle = obs_outbox::spawn_drain(client.clone(), obs_outbox_dir.clone());
+    // #1089 / #970: record the restart itself. The backend infers outages from
+    // heartbeat gaps, but cannot see a restart shorter than its staleness
+    // threshold, cannot know the true recovery instant (only whatever its
+    // sweep happens to read), and can never describe a window it was down for.
+    // Enqueued rather than published, so it survives a broker that is
+    // unreachable right now and backfills with its real `at`.
+    startup_event::emit(&pc_id, AGENT_VERSION, &obs_outbox_dir);
     // #841: agent-native idle/active sampler — the one swimlane signal not in
     // the Event Log. Emits `active`/`idle` ObsEvents to the same outbox on
     // debounced transitions; the drain above publishes them.
