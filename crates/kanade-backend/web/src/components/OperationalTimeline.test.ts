@@ -8,6 +8,7 @@ import {
   evidenceEdges,
   noEvidenceRanges,
   subtractRanges,
+  swimlaneWindow,
 } from './OperationalTimeline';
 
 // The lane rules are a small set of interacting invariants that have been
@@ -410,6 +411,70 @@ describe('coverage floor (limit-truncated fetch)', () => {
 // things at once.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// The shared window. Lived inline in an Events.tsx `useMemo` until the
+// `all`-preset case below shipped broken.
+// ---------------------------------------------------------------------------
+
+describe('swimlaneWindow', () => {
+  const op = (n: number, pc = 'pc1') => ({ at: h(n), pc_id: pc });
+
+  test('a period with a lower bound wins outright, data or no data', () => {
+    const w = ' 2026-07-19T00:00:00.000Z';
+    expect(swimlaneWindow(w, undefined, ['pc1'], [op(3)], [op(3)])).toEqual([w, undefined]);
+    expect(swimlaneWindow(w, 'X', [], [], [])).toEqual([w, 'X']);
+  });
+
+  test('without a period, the kept PCs’ operational events set the extent', () => {
+    const [f, t] = swimlaneWindow(undefined, undefined, ['pc1'], [op(4), op(8)], []);
+    // Padded outwards, so the bounds sit outside the events.
+    expect(Date.parse(f!)).toBeLessThan(H(4));
+    expect(Date.parse(t!)).toBeGreaterThan(H(8));
+  });
+
+  test('events for PCs that are not rendered do not widen the window', () => {
+    const [f] = swimlaneWindow(undefined, undefined, ['pc1'], [op(4, 'pc2'), op(8), op(9)], []);
+    expect(Date.parse(f!)).toBeGreaterThan(H(4));
+  });
+
+  // The bug this extraction exists for. A pinned host with no operational
+  // events yielded no bounds, so the strip had no axis, tripped its own
+  // `t1 <= t0` guard and rendered the plain "no events" note — the pin
+  // achieving nothing on exactly the preset ("all") used to ask whether a
+  // host ever reported.
+  test('with no operational events it falls back to the whole response', () => {
+    const other = [{ at: h(2) }, { at: h(10) }];
+    const [f, t] = swimlaneWindow(undefined, undefined, ['pc1'], [], other);
+    expect(f).toBeDefined();
+    expect(t).toBeDefined();
+    expect(Date.parse(f!)).toBeLessThan(H(2));
+    expect(Date.parse(t!)).toBeGreaterThan(H(10));
+  });
+
+  test('no events of any kind yields no window rather than an invented one', () => {
+    expect(swimlaneWindow(undefined, undefined, ['pc1'], [], [])).toEqual([undefined, undefined]);
+  });
+
+  test('a single instant yields no window (nothing to span)', () => {
+    expect(swimlaneWindow(undefined, undefined, ['pc1'], [op(4)], [])).toEqual([
+      undefined,
+      undefined,
+    ]);
+  });
+
+  test('unparseable timestamps are ignored, not propagated as NaN bounds', () => {
+    const [f, t] = swimlaneWindow(
+      undefined,
+      undefined,
+      ['pc1'],
+      [{ at: 'not-a-date', pc_id: 'pc1' }, op(4), op(8)],
+      [],
+    );
+    expect(Number.isNaN(Date.parse(f!))).toBe(false);
+    expect(Number.isNaN(Date.parse(t!))).toBe(false);
+  });
+});
+
 describe('noEvidenceRanges', () => {
   const DAY = 86_400_000;
 
@@ -442,12 +507,29 @@ describe('noEvidenceRanges', () => {
     expect(out.find((r) => r.reason === 'offline')?.from).toBe(H(12));
   });
 
-  test('a never-reported agent with no events does not overlap the truncated band', () => {
-    const out = noEvidenceRanges(T0, T1, H(20), H(12), null, undefined);
-    expect(out).toEqual([
-      { from: T0, to: H(12), reason: 'truncated' },
-      { from: H(12), to: H(20), reason: 'offline' },
-    ]);
+  // No operational events at all — reachable only for a strip that exists
+  // without events, i.e. a PC the operator named explicitly. Every lane is
+  // blank, and a blank lane otherwise reads as "measured, and it was off".
+  // Nothing was measured, so the whole window is unknown and `noEvents` is
+  // the reason that actually explains it (it subsumes truncated/offline,
+  // which are true but not the point).
+  test('no events at all: the whole window is unknown, whatever the heartbeat', () => {
+    for (const hb of [undefined, null, new Date(H(4)).toISOString()]) {
+      const out = noEvidenceRanges(T0, T1, H(20), H(12), hb, undefined);
+      expect(out).toEqual([{ from: T0, to: H(20), reason: 'noEvents' }]);
+    }
+  });
+
+  test('no events and a degenerate window yields nothing rather than an inverted range', () => {
+    expect(noEvidenceRanges(T0, T1, T0, T0, null, undefined)).toEqual([]);
+  });
+
+  // A live agent does not rescue it: a heartbeat proves the host is up *now*,
+  // not what any lane was doing across a window with no transitions in it.
+  test('a fresh heartbeat does not make an event-less window certain', () => {
+    const out = noEvidenceRanges(T0, T1, H(20), T0, new Date(H(20) - 30_000).toISOString(), undefined);
+    expect(out).toHaveLength(1);
+    expect(out[0].reason).toBe('noEvents');
   });
 
   test('bands never overlap across a sweep of floor / heartbeat combinations', () => {

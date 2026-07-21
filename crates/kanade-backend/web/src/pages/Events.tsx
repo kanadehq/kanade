@@ -19,6 +19,7 @@ import {
   OperationalTimeline,
   OP_TIMELINE_KINDS,
   type OpEvent,
+  swimlaneWindow,
 } from '@/components/OperationalTimeline';
 import { PcPicker } from '@/components/PcPicker';
 import { Badge } from '@/components/ui/badge';
@@ -418,6 +419,13 @@ export function Events() {
   );
 
   const dPcId         = useDebouncedValue(pcId,         FILTER_DEBOUNCE_MS);
+  // Trimmed once, at the source, and used by every consumer — the API filter,
+  // the shared URL, and the swimlane's pin. The backend filter is an exact
+  // match (`pc_id = ?1`, obs_events.rs), so a pasted name with stray
+  // whitespace matches nothing; with the trim applied in some places and not
+  // others, the swimlane would pin a strip on the trimmed name and report the
+  // host as having no events when the query never asked about it.
+  const dPcIdTrimmed  = dPcId.trim();
   const dPayloadKey   = useDebouncedValue(payloadKey,   FILTER_DEBOUNCE_MS);
   const dPayloadValue = useDebouncedValue(payloadValue, FILTER_DEBOUNCE_MS);
   // Debounced like the typed-text filters, so nudging one bound from
@@ -494,7 +502,7 @@ export function Events() {
   // history is a non-issue — no separate URL→state sync needed.
   useEffect(() => {
     const next = new URLSearchParams();
-    if (dPcId)   next.set('pc', dPcId);
+    if (dPcIdTrimmed) next.set('pc', dPcIdTrimmed);
     if (kindsInc.length)   next.set('kinds', kindsInc.join(','));
     if (kindsExc.length)   next.set('kinds_ex', kindsExc.join(','));
     if (sourcesInc.length) next.set('sources', sourcesInc.join(','));
@@ -514,12 +522,12 @@ export function Events() {
     if (tab !== 'operational') next.set('tab', tab);
     setSearch(next, { replace: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dPcId, kindsInc, kindsExc, sourcesInc, sourcesExc, dPayloadKey, dPayloadValue, dedupe, since, customFromIso, customToIso, limit, tab]);
+  }, [dPcIdTrimmed, kindsInc, kindsExc, sourcesInc, sourcesExc, dPayloadKey, dPayloadValue, dedupe, since, customFromIso, customToIso, limit, tab]);
 
   const queryString = useMemo(() => {
     const sp = new URLSearchParams();
     sp.set('limit', String(limit));
-    if (dPcId)   sp.set('pc_id', dPcId);
+    if (dPcIdTrimmed) sp.set('pc_id', dPcIdTrimmed);
     if (kindsInc.length)   sp.set('kinds', kindsInc.join(','));
     if (kindsExc.length)   sp.set('kinds_ex', kindsExc.join(','));
     if (sourcesInc.length) sp.set('sources', sourcesInc.join(','));
@@ -531,7 +539,7 @@ export function Events() {
       sp.set('payload_value', dPayloadValue);
     }
     return sp.toString();
-  }, [dPcId, kindsInc, kindsExc, sourcesInc, sourcesExc, dPayloadKey, dPayloadValue, limit]);
+  }, [dPcIdTrimmed, kindsInc, kindsExc, sourcesInc, sourcesExc, dPayloadKey, dPayloadValue, limit]);
 
   const { data, error, isLoading, isFetching, dataUpdatedAt } = useQuery({
     // The preset key (not a computed ISO) partitions the cache per
@@ -917,6 +925,9 @@ export function Events() {
               windowTo={windowTo}
               coverageFrom={coverageFrom}
               limit={limit}
+              // Debounced, so the pinned strip appears in step with the query
+              // rather than one keystroke ahead of the data.
+              pinnedPc={dPcIdTrimmed}
             />
           )}
           {tab === 'chart' && <EventsTimeline events={visible} />}
@@ -989,6 +1000,7 @@ function EventsOperational({
   windowTo,
   coverageFrom,
   limit,
+  pinnedPc,
 }: {
   events: EventRow[];
   // Set when `limit` truncated the fetch: the oldest instant the data reaches.
@@ -999,6 +1011,9 @@ function EventsOperational({
   // Absent (the `all` preset has no lower bound) → fall back to the data.
   windowFrom?: string;
   windowTo?: string;
+  // The PC filter, when the operator has named one. That host gets a strip
+  // even with no events in the window — see the `pcs` memo.
+  pinnedPc?: string;
 }) {
   const { t } = useTranslation('events');
 
@@ -1009,40 +1024,34 @@ function EventsOperational({
     [events],
   );
 
-  const { pcs, totalPcs } = useMemo(
-    () => topPcsByEventCount(opEvents, CHART_MAX_PCS),
-    [opEvents],
-  );
-
-  // One shared [from, to] across all strips so every PC's lanes read on the
-  // same axis.
+  // Which strips to draw. Normally derived from the events, which means a PC
+  // with nothing in the window simply isn't drawn — reasonable when the strip
+  // list is "the busiest hosts", and wrong the moment an operator names one:
+  // a host down long enough to have no events in the window then vanishes
+  // instead of reading as unknown, which is the one question they were asking.
   //
-  // Prefer the selected period verbatim: deriving the window from the data
-  // instead made the axis lie about the filter. Pick "2 days (since yesterday
-  // 0:00)" and the strip would start at the oldest event it happened to
-  // receive, minus 2% padding — an axis reading 7/18 23:24 for a window that
-  // begins 7/19 0:00. Worse when `limit` truncates: the lanes silently show a
-  // few hours of a multi-day selection. Anchoring to the period also means an
-  // idle PC's empty left edge is visible as absence, rather than being cropped
-  // away until the strip looks fully covered.
-  const [from, to] = useMemo<[string | undefined, string | undefined]>(() => {
-    if (windowFrom) return [windowFrom, windowTo];
-    // `all` (no lower bound): fall back to the data's own extent, padded 2%
-    // like the scatter so end markers aren't flush against the edge.
-    const kept = new Set(pcs);
-    let lo = Infinity;
-    let hi = -Infinity;
-    for (const e of opEvents) {
-      if (!kept.has(e.pc_id)) continue;
-      const ts = Date.parse(e.at);
-      if (Number.isNaN(ts)) continue;
-      if (ts < lo) lo = ts;
-      if (ts > hi) hi = ts;
-    }
-    if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi <= lo) return [undefined, undefined];
-    const pad = Math.max(60_000, (hi - lo) * 0.02);
-    return [new Date(lo - pad).toISOString(), new Date(hi + pad).toISOString()];
-  }, [opEvents, pcs, windowFrom, windowTo]);
+  // So a named PC is pinned into the list even with zero events. Only a named
+  // one: rendering an empty strip for every known host would bury the signal
+  // under blank lanes for machines nobody asked about.
+  //
+  // And only one that exists (`pinExists`). Pinning on the typed string alone
+  // would invent hosts: a typo, or any half-typed name on the way to a real
+  // one, renders a full "we know nothing about this machine" strip for a
+  // machine that was never in the fleet. Claiming ignorance about a real host
+  // is the point of this change; claiming it about a fictional one is a new
+  // way to mislead. The filter is an exact, case-sensitive match server-side
+  // (`pc_id = ?1` in obs_events.rs), so there is no partial-match case to
+  // reconcile — a name either identifies a host or identifies nothing.
+  const found = useMemo(() => topPcsByEventCount(opEvents, CHART_MAX_PCS), [opEvents]);
+  const pin = pinnedPc?.trim() || undefined;
+  // What the heartbeat query asks about: the hosts with events, plus the
+  // pinned name. Deliberately NOT derived from the pin decision below — that
+  // decision consumes this query's result, so keying the query on it would
+  // close a loop (pin → query → unpin → query → …).
+  const queryPcs = useMemo(
+    () => (pin && !found.pcs.includes(pin) ? [pin, ...found.pcs] : found.pcs),
+    [found, pin],
+  );
 
   // Heartbeats for the PCs on screen, so each strip can gate what it asserts
   // on whether its agent is still reporting. Without these the Events page
@@ -1060,13 +1069,15 @@ function EventsOperational({
   // under the ~2 KB request-line limit. That is exactly at the boundary, not
   // comfortably inside it: raising `CHART_MAX_PCS` means chunking this the
   // way `PcPicker` does, not just bumping the constant.
+  // It doubles as the pin's existence check: the response only contains rows
+  // that matched, so a pinned name absent from it is a name no agent has.
   const hbQ = useQuery({
-    queryKey: ['events-op-heartbeats', pcs],
+    queryKey: ['events-op-heartbeats', queryPcs],
     queryFn: () =>
       apiFetch<{ pc_id: string; last_heartbeat: string | null }[]>(
-        `/api/agents?limit=${pcs.length}&q=${encodeURIComponent(`^(${pcs.map(escapeRegExp).join('|')})$`)}`,
+        `/api/agents?limit=${queryPcs.length}&q=${encodeURIComponent(`^(${queryPcs.map(escapeRegExp).join('|')})$`)}`,
       ),
-    enabled: pcs.length > 0,
+    enabled: queryPcs.length > 0,
     // Matches the Agents page cadence, so a strip stops claiming a live edge
     // within ~30s of the agent list marking the same host offline.
     refetchInterval: 30_000,
@@ -1077,6 +1088,35 @@ function EventsOperational({
     for (const a of hbQ.data ?? []) m.set(a.pc_id, a.last_heartbeat);
     return m;
   }, [hbQ.data]);
+
+  // Pin only a host that exists. Requires the query to have answered — while
+  // it is in flight the pin stays off, so a real host appears a beat late
+  // rather than a fictional one appearing immediately and vanishing.
+  const pinExists = !!pin && hbQ.isSuccess && heartbeats.has(pin);
+
+  const { pcs, totalPcs } = useMemo(() => {
+    if (!pin || !pinExists || found.pcs.includes(pin)) return found;
+    // Prepended, not appended: it's the host the operator asked for, so it
+    // shouldn't sort below busier ones. The cap still holds.
+    //
+    // `totalPcs` only grows when the pin isn't in the data at all. A pin that
+    // has events but fell below the cap is already counted, and adding one
+    // would make the "showing N of M" note claim a host that doesn't exist.
+    const inData = opEvents.some((e) => e.pc_id === pin);
+    return {
+      pcs: [pin, ...found.pcs].slice(0, CHART_MAX_PCS),
+      totalPcs: found.totalPcs + (inData ? 0 : 1),
+    };
+  }, [opEvents, found, pin, pinExists]);
+
+  // One shared window across all strips so every PC's lanes read on the same
+  // axis. Pure and tested in OperationalTimeline.test.ts — this used to live
+  // inline here, which is how the `all`-preset case (a pinned host with no
+  // operational events losing its strip entirely) went unnoticed.
+  const [from, to] = useMemo(
+    () => swimlaneWindow(windowFrom, windowTo, pcs, opEvents, events),
+    [events, opEvents, pcs, windowFrom, windowTo],
+  );
 
   // Group the kept PCs' events into the shape the strip wants.
   const byPc = useMemo(() => {
