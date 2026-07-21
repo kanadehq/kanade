@@ -67,13 +67,31 @@ const OP_LANES = [
 
 type LaneKey = (typeof OP_LANES)[number]['key'];
 
-// Every kind any lane reads — the Events page filters its rows down to these
-// before handing them to the strip, and it matches the backend
-// `op_timeline` query's IN-list.
-export const OP_TIMELINE_KINDS: readonly string[] = OP_LANES.flatMap((l) => [
-  ...l.starts,
-  ...l.ends,
-]);
+// Kinds that describe whether the fleet was being *observed*, as opposed to
+// what a host was doing. They drive no lane — there is no "the agent was
+// running" row — but they bound what every other lane may claim, so the strip
+// needs them alongside the lane kinds.
+//
+// `agent_offline` is written by the backend when a host's heartbeats stop
+// (backdated to the first beat that failed to arrive). Unlike the live-edge
+// gate, which can only ever describe *now*, these are durable events with a
+// real `at`, so a stretch that has since become history still reads as
+// unknown instead of reverting to a confident-looking gap.
+// `agent_online` carries no range of its own — it exists to close the one
+// `agent_offline` opened. Without it the stretch would run to the next event
+// of any kind, and obs_events are transition-driven, so a recovered host that
+// simply stays idle produces none for a long while and the outage would read
+// as far longer than it was.
+const OP_OBSERVATION_KINDS = ['agent_offline', 'agent_online'] as const;
+const OP_OBSERVATION_KIND_SET: ReadonlySet<string> = new Set(OP_OBSERVATION_KINDS);
+
+// Every kind the strip reads — the Events page filters its rows down to these
+// before handing them over, and it matches the backend `op_timeline` query's
+// IN-list.
+export const OP_TIMELINE_KINDS: readonly string[] = [
+  ...OP_LANES.flatMap((l) => [...l.starts, ...l.ends]),
+  ...OP_OBSERVATION_KINDS,
+];
 
 // Walk the lane's start/end events in ascending time and pair them into
 // spans, clamped to [t0, t1]. An end with no open start began before the
@@ -506,7 +524,78 @@ export function swimlaneWindow(
 }
 
 /** Why a stretch carries no evidence. */
-export type NoEvidenceReason = 'truncated' | 'offline' | 'noEvents';
+export type NoEvidenceReason = 'truncated' | 'offline' | 'noEvents' | 'agentDown';
+
+/**
+ * Unknown stretches recorded by `agent_offline` events.
+ *
+ * These answer the question the live-edge gate structurally cannot: it can
+ * only say "I do not know about *now*", because a heartbeat is a single
+ * overwritten column with no history. An `agent_offline` event is durable and
+ * carries a real `at`, so an outage that has since become history still reads
+ * as unknown rather than reverting to a gap indistinguishable from measured
+ * idle — the #1089 asymmetry.
+ *
+ * Each event opens a stretch that closes at **the next event of any kind from
+ * that host**: receiving anything is proof the agent was running again. That
+ * is why no `agent_online` is needed to make this useful — an online event
+ * would only sharpen the closing edge, since the first event after a restart
+ * may lag the restart itself.
+ *
+ * `events` must be the host's events, and is not assumed sorted.
+ */
+export function agentDownRanges(
+  events: OpEvent[],
+  t0: number,
+  t1: number,
+  liveEdge: number,
+): { from: number; to: number; reason: NoEvidenceReason }[] {
+  const sorted = events
+    .map((e) => ({ ts: Date.parse(e.at), kind: e.kind }))
+    .filter((e) => !Number.isNaN(e.ts))
+    .sort((a, b) => a.ts - b.ts);
+
+  const out: { from: number; to: number; reason: NoEvidenceReason }[] = [];
+  for (let i = 0; i < sorted.length; i++) {
+    if (sorted[i].kind !== 'agent_offline') continue;
+    // The next event of ANY kind — including a later `agent_offline`, which
+    // would mean the agent came back and dropped again, so this stretch has
+    // to close there rather than swallowing the interval between them.
+    //
+    // Forward scan rather than `slice(i + 1).find(...)`: the slice allocated
+    // a copy of the tail on every offline event. The array is sorted, so the
+    // first entry past `i` with a strictly greater timestamp is the answer —
+    // strictly, to step over events sharing this instant (the recovery and
+    // re-drop pair the backend emits when an agent dies again inside one
+    // sweep both carry the same `at`).
+    let next: { ts: number } | undefined;
+    for (let j = i + 1; j < sorted.length; j++) {
+      if (sorted[j].ts > sorted[i].ts) {
+        next = sorted[j];
+        break;
+      }
+    }
+    const from = Math.max(sorted[i].ts, t0);
+    const to = Math.min(next ? next.ts : liveEdge, t1);
+    if (to > from) out.push({ from, to, reason: 'agentDown' });
+  }
+  return mergeRanges(out);
+}
+
+/** Coalesce overlapping / touching ranges, keeping the first one's fields. */
+function mergeRanges<T extends { from: number; to: number }>(ranges: T[]): T[] {
+  const sorted = [...ranges].sort((a, b) => a.from - b.from);
+  const out: T[] = [];
+  for (const r of sorted) {
+    const last = out[out.length - 1];
+    if (last && r.from <= last.to) {
+      if (r.to > last.to) last.to = r.to;
+    } else {
+      out.push({ ...r });
+    }
+  }
+  return out;
+}
 
 /**
  * The stretches the strip must not make any claim about. Two causes, one
@@ -530,6 +619,9 @@ export function noEvidenceRanges(
   coverEdge: number,
   lastHeartbeat?: string | null,
   lastEventTs?: number,
+  // The host's events, so recorded `agent_offline` outages can be folded in
+  // alongside the live-edge and truncation stretches.
+  events: OpEvent[] = [],
 ): { from: number; to: number; reason: NoEvidenceReason }[] {
   const { certainEdge, liveEdge } = evidenceEdges(t1, now, lastHeartbeat, lastEventTs);
 
@@ -541,7 +633,17 @@ export function noEvidenceRanges(
   // strength of no data whatsoever. A heartbeat doesn't rescue it either: a
   // live agent proves the host is up *now*, not what any lane was doing
   // across a window it recorded no transitions in.
-  if (lastEventTs === undefined) {
+  //
+  // Judged on LANE events only. Observation events (`agent_offline` /
+  // `agent_online`) say when we were listening, never what any lane was
+  // doing — a host with nothing but those still has four blank lanes and
+  // still knows nothing about them. Counting them as evidence would put the
+  // "four blank lanes asserting off" bug straight back for exactly the hosts
+  // this feature exists to describe.
+  const hasLaneEvidence = events.length
+    ? events.some((e) => !OP_OBSERVATION_KIND_SET.has(e.kind))
+    : lastEventTs !== undefined;
+  if (!hasLaneEvidence) {
     return liveEdge > t0 ? [{ from: t0, to: liveEdge, reason: 'noEvents' }] : [];
   }
 
@@ -551,7 +653,18 @@ export function noEvidenceRanges(
   // `coverEdge >= t0` always, so this subsumes the window-start clamp.
   const from = Math.max(certainEdge, coverEdge);
   if (liveEdge > from) out.push({ from, to: liveEdge, reason: 'offline' });
-  return out;
+
+  // Recorded outages, then the whole set is made disjoint. A recorded outage
+  // can overlap either of the above — an agent that dropped and never came
+  // back has both an `agent_offline` event and a stale live edge — and
+  // overlapping ranges would stack elements and leave the displayed reason to
+  // paint order. Earlier entries win, so the live-edge and truncation
+  // stretches keep their more specific reasons where they coincide.
+  const recorded = agentDownRanges(events, t0, t1, liveEdge);
+  for (const r of recorded) {
+    for (const piece of subtractRanges([r], out)) out.push(piece);
+  }
+  return out.sort((a, b) => a.from - b.from);
 }
 
 /**
@@ -837,7 +950,7 @@ export function OperationalTimeline({
   // asymmetry that made an offline agent's idle lane assert "nobody was
   // here" for the entire outage (#1086).
   const noEvidence = useMemo(
-    () => noEvidenceRanges(t0, t1, now, coverEdge, lastHeartbeat, newestEventTs(events)),
+    () => noEvidenceRanges(t0, t1, now, coverEdge, lastHeartbeat, newestEventTs(events), events),
     [events, t0, t1, now, lastHeartbeat, coverEdge],
   );
 

@@ -773,7 +773,8 @@ async fn op_timeline(ctx: &Ctx<'_>) -> anyhow::Result<WidgetData> {
              AND kind IN ('boot', 'shutdown', 'unexpected_shutdown', \
                           'log_service_started', 'log_service_stopped', \
                           'logon', 'logoff', 'sleep', 'resume', \
-                          'active', 'idle') \
+                          'active', 'idle', \
+                          'agent_offline', 'agent_online') \
              AND at < ?3 \
          ), seeded AS ( \
            SELECT at, kind FROM op WHERE at >= ?2 \
@@ -1506,6 +1507,11 @@ mod tests {
             "resume",
             "active",
             "idle",
+            // Observation kinds: they drive no lane (the CASE leaves their
+            // lane NULL) but the strip needs them to know when nobody was
+            // watching, so they must survive the fetch.
+            "agent_offline",
+            "agent_online",
         ];
         let at = |h: u32| Utc.with_ymd_and_hms(2026, 6, 17, h, 0, 0).unwrap();
         for (i, k) in want.iter().enumerate() {

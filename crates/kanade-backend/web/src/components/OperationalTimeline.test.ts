@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { AGENT_ACTIVE_THRESHOLD_MS } from '@/lib/utils';
 
 import {
+  agentDownRanges,
   axisGridlines,
   axisTicks,
   buildLanes,
@@ -545,6 +546,149 @@ describe('noEvidenceRanges', () => {
         }
       }
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Recorded outages (#1089). The live-edge gate can only describe "now";
+// these describe a stretch that has since become history.
+// ---------------------------------------------------------------------------
+
+describe('agentDownRanges', () => {
+  const LIVE = H(24);
+
+  test('an outage closes at the recovery event', () => {
+    const out = agentDownRanges(
+      [ev(h(4), 'agent_offline'), ev(h(9), 'agent_online')],
+      T0,
+      T1,
+      LIVE,
+    );
+    expect(out).toEqual([{ from: H(4), to: H(9), reason: 'agentDown' }]);
+  });
+
+  // The recovery marker is a convenience, not a requirement: anything arriving
+  // from that host proves the agent was running again.
+  test('any later event closes it, not just agent_online', () => {
+    const out = agentDownRanges([ev(h(4), 'agent_offline'), ev(h(7), 'boot')], T0, T1, LIVE);
+    expect(out).toEqual([{ from: H(4), to: H(7), reason: 'agentDown' }]);
+  });
+
+  test('an outage with nothing after it runs to the live edge', () => {
+    const out = agentDownRanges([ev(h(4), 'agent_offline')], T0, T1, H(20));
+    expect(out).toEqual([{ from: H(4), to: H(20), reason: 'agentDown' }]);
+  });
+
+  // Two outages must not merge into one long stretch across the interval
+  // where the host was demonstrably back.
+  test('separate outages stay separate', () => {
+    const out = agentDownRanges(
+      [
+        ev(h(2), 'agent_offline'),
+        ev(h(4), 'agent_online'),
+        ev(h(8), 'agent_offline'),
+        ev(h(10), 'agent_online'),
+      ],
+      T0,
+      T1,
+      LIVE,
+    );
+    expect(out).toEqual([
+      { from: H(2), to: H(4), reason: 'agentDown' },
+      { from: H(8), to: H(10), reason: 'agentDown' },
+    ]);
+  });
+
+  // A missed recovery marker (backend restarted mid-outage, say) must not
+  // swallow the second outage's start.
+  test('a second offline with no recovery between closes the first', () => {
+    const out = agentDownRanges(
+      [ev(h(2), 'agent_offline'), ev(h(8), 'agent_offline')],
+      T0,
+      T1,
+      H(20),
+    );
+    expect(out).toEqual([{ from: H(2), to: H(20), reason: 'agentDown' }]);
+  });
+
+  // The backend emits a recovery and a re-drop at the same instant when an
+  // agent dies again inside one sweep interval. The pair must not make the
+  // scan stall on its own timestamp — the second outage still has to close at
+  // whatever comes after it.
+  test('a recovery and re-drop sharing an instant do not stall the scan', () => {
+    const out = agentDownRanges(
+      [
+        ev(h(2), 'agent_offline'),
+        ev(h(6), 'agent_online'),
+        ev(h(6), 'agent_offline'),
+        ev(h(9), 'boot'),
+      ],
+      T0,
+      T1,
+      LIVE,
+    );
+    // [2,6] and [6,9] touch, so they coalesce — there is no measurable
+    // uptime to draw between them. What matters is that the range ends at
+    // the boot, not that it runs to the live edge.
+    expect(out).toEqual([{ from: H(2), to: H(9), reason: 'agentDown' }]);
+  });
+
+  test('input order does not matter', () => {
+    const shuffled = agentDownRanges(
+      [ev(h(9), 'agent_online'), ev(h(4), 'agent_offline')],
+      T0,
+      T1,
+      LIVE,
+    );
+    expect(shuffled).toEqual([{ from: H(4), to: H(9), reason: 'agentDown' }]);
+  });
+
+  test('an outage is clipped to the window', () => {
+    const out = agentDownRanges([ev(h(-5), 'agent_offline')], T0, T1, H(30));
+    expect(out[0].from).toBe(T0);
+    expect(out[0].to).toBe(T1);
+  });
+
+  test('no offline events yields nothing', () => {
+    expect(agentDownRanges([ev(h(4), 'boot'), ev(h(5), 'logon')], T0, T1, LIVE)).toEqual([]);
+  });
+});
+
+describe('recorded outages inside noEvidenceRanges', () => {
+  const laneEvents = [ev(h(1), 'boot'), ev(h(20), 'shutdown')];
+
+  test('a recorded outage becomes an unknown stretch', () => {
+    const out = noEvidenceRanges(T0, T1, H(23), T0, new Date(H(23)).toISOString(), H(20), [
+      ...laneEvents,
+      ev(h(5), 'agent_offline'),
+      ev(h(8), 'agent_online'),
+    ]);
+    const down = out.filter((r) => r.reason === 'agentDown');
+    expect(down).toEqual([{ from: H(5), to: H(8), reason: 'agentDown' }]);
+  });
+
+  // An agent that dropped and never returned has BOTH a recorded outage and
+  // a stale live edge. Overlapping entries would stack two elements and leave
+  // the displayed reason to paint order.
+  test('a recorded outage overlapping the live-edge stretch stays disjoint', () => {
+    const out = noEvidenceRanges(T0, T1, H(23), T0, new Date(H(6)).toISOString(), H(6), [
+      ...laneEvents,
+      ev(h(6), 'agent_offline'),
+    ]);
+    for (let i = 1; i < out.length; i++) {
+      expect(out[i].from).toBeGreaterThanOrEqual(out[i - 1].to);
+    }
+    for (const r of out) expect(r.to).toBeGreaterThan(r.from);
+  });
+
+  // Observation events say when we were listening, never what a lane was
+  // doing — so a host with only those still has no lane evidence.
+  test('observation events alone do not count as lane evidence', () => {
+    const out = noEvidenceRanges(T0, T1, H(23), T0, new Date(H(23)).toISOString(), H(8), [
+      ev(h(5), 'agent_offline'),
+      ev(h(8), 'agent_online'),
+    ]);
+    expect(out).toEqual([{ from: T0, to: H(23), reason: 'noEvents' }]);
   });
 });
 
