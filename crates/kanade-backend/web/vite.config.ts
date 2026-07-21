@@ -9,6 +9,36 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
+      // monaco-editor 0.56 added an `exports` map:
+      //
+      //   "./*.js": "./esm/vs/*.js",
+      //   "./*":    "./esm/vs/*.js"
+      //
+      // so the deep specifier `monaco-editor/esm/vs/...` now expands to
+      // `./esm/vs/esm/vs/...` — the prefix is applied twice and the path
+      // doesn't exist. `monaco-worker-manager` (a dependency of monaco-yaml)
+      // still imports the pre-0.56 form, which fails the bundle outright:
+      //
+      //   Rolldown failed to resolve import
+      //   "monaco-editor/esm/vs/editor/editor.worker.js"
+      //   from "node_modules/monaco-worker-manager/worker.js"
+      //
+      // Rewrite that one specifier to the 0.56 public form, which resolves
+      // to exactly the same file. Aliased to a package specifier rather than
+      // an absolute path so it doesn't depend on where the package is
+      // hoisted to.
+      //
+      // Pinning monaco-editor back to 0.55 was the first attempt and does
+      // not hold: renovate treats an exact pin as an outdated one and opens
+      // a PR to move it forward again (it did, within minutes — #1101).
+      // Fixing the incompatibility is the version that survives.
+      //
+      // Remove once monaco-worker-manager ships a build using the new form.
+      // `monaco-worker-manager@2.0.1` is the version this was written for,
+      // and it has exactly one such import — verified by grepping the
+      // package, so this alias is not hiding others.
+      'monaco-editor/esm/vs/editor/editor.worker.js':
+        'monaco-editor/editor/editor.worker.js',
     },
   },
   build: {

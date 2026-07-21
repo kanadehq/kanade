@@ -28,7 +28,11 @@ import { useEffect, useState } from 'react';
 // Anything else (raw `new Worker(new URL(...))` against a package
 // path, dynamic import) trips Rollup's static-resolution pass and
 // fails the build.
-import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
+// `monaco-editor/editor/...`, not the pre-0.56 `monaco-editor/esm/vs/...`:
+// 0.56 added an `exports` map (`"./*": "./esm/vs/*.js"`) that prepends the
+// `esm/vs` segment itself, so the old deep path expands to `esm/vs/esm/vs/…`
+// and no longer resolves. Same file, current spelling.
+import EditorWorker from 'monaco-editor/editor/editor.worker?worker';
 import { configureMonacoYaml } from 'monaco-yaml';
 import YamlWorker from 'monaco-yaml/yaml.worker?worker';
 
