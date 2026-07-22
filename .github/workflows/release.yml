@@ -214,6 +214,61 @@ jobs:
             exit 1
           fi
 
+          # Version-assert (windows only): the hard-verify above proves each
+          # bin EXISTS; this proves it is the RIGHT one. build.rs embeds
+          # CARGO_PKG_VERSION into the PE VERSIONINFO (FileVersion +
+          # ProductVersion) via winres, so a correctly-built exe reads back
+          # exactly the tag. Nothing else checks this, and a mismatch is
+          # dangerous here rather than cosmetic: `extract_pe_version` derives
+          # Object Store keys from the PE version on publish (the
+          # "infinite self-update to 1.0.0" incident class), and the
+          # check-quarantine / boot-sentinel gates are keyed by version
+          # string — a mislabeled binary flaps self-update and never engages
+          # rollback for the version actually running.
+          #
+          # It closes the deps-recovery hole specifically: "newest match
+          # wins" (line 172) picks by mtime, and a fresh build can emit
+          # several `deps/<stem>-<hash>.exe` feature-unification variants for
+          # one bin, so the newest is not guaranteed to be the artifact cargo
+          # would have uplifted. Asserting the embedded version makes that
+          # (and any future cache/self-hosted-runner regression that keeps a
+          # stale winres resource) fail loudly instead of shipping mislabeled.
+          #
+          # Windows-only because VERSIONINFO is a PE concept; the winres
+          # embedding doesn't apply to the linux/macos legs. Reads the
+          # StringFileInfo FileVersion (".VersionInfo.FileVersion" = "0.44.30",
+          # not the 4-part fixed-info "0.44.30.0"), which winres sets verbatim
+          # from CARGO_PKG_VERSION.
+          #
+          # Only when the ref IS a tag. The build job also runs on
+          # `workflow_dispatch` (line 60), which can target a branch — there
+          # `GITHUB_REF_NAME` is e.g. "main", not a version, and asserting
+          # against it would fail every windows bin with a nonsensical "tag is
+          # 'main'". The `release`/`publish` jobs already gate on
+          # `startsWith(github.ref, 'refs/tags/')`; a dispatch build that never
+          # reaches those jobs has no tag to check against, so it skips the
+          # assert and keeps its pre-existing existence-only behaviour.
+          if [[ "$TARGET" == *windows* && "$GITHUB_REF" == refs/tags/* ]]; then
+            want_ver="${GITHUB_REF_NAME#v}"
+            mismatch=0
+            while IFS=$'\t' read -r pkg bin; do
+              [[ -z "$pkg" ]] && continue
+              exe="target/$TARGET/release/${bin}${ext}"
+              got_ver=$(powershell.exe -NoProfile -Command \
+                "[Console]::Out.Write((Get-Item -LiteralPath '$exe').VersionInfo.FileVersion)" \
+                | tr -d '\r')
+              if [[ "$got_ver" != "$want_ver" ]]; then
+                mismatch=$((mismatch + 1))
+                echo "::error::$exe embeds VERSIONINFO FileVersion '$got_ver' but the tag is '$want_ver' — refusing to ship a mislabeled binary (#1118)"
+              fi
+            done <<< "$bins_list"
+            if [[ "$mismatch" -gt 0 ]]; then
+              echo "::error::$mismatch bin(s) have a VERSIONINFO that disagrees with the tag; failing the build step"
+              exit 1
+            fi
+            echo "::notice::version-assert: all windows bins embed VERSIONINFO $want_ver"
+          fi
+
       - name: Stage release artifacts
         shell: bash
         env:
