@@ -107,6 +107,28 @@ function normalizeSince(raw: string | null): string {
   return SINCE_PRESETS.some((p) => p.value === raw) ? raw : DEFAULT_SINCE;
 }
 
+// The row-limit choices the <Select> offers, and the default. Single
+// source of truth so the control and `normalizeLimit` can't drift.
+export const LIMIT_OPTIONS = [50, 200, 1000, 5000] as const;
+export const DEFAULT_LIMIT = 200;
+
+/**
+ * Hydrate the `limit` URL param, clamping to the four values the
+ * <Select> actually offers (Issue #1077). The old `Number(raw) || 200`
+ * accepted anything numeric-ish — `1e9`, `-5`, `200.5` all sailed
+ * through to the request, which the backend 400s (its own limits are
+ * `DEFAULT_LIMIT` 200 / `MAX_LIMIT` 5000). Worse, the URL-mirror effect
+ * wrote the bad value straight back, so the error state survived a
+ * reload and the blank <Select> (no matching option) offered no way
+ * out. Same shape as `normalizeSince`: an out-of-range or unparseable
+ * bound lands on the default, and the result is always a value the
+ * <Select> can represent.
+ */
+export function normalizeLimit(raw: string | null): number {
+  const n = Number(raw);
+  return (LIMIT_OPTIONS as readonly number[]).includes(n) ? n : DEFAULT_LIMIT;
+}
+
 /**
  * Local midnight `days - 1` days ago — the lower bound of a calendar
  * preset. Local, not UTC: the operator's "today" is their wall
@@ -407,7 +429,7 @@ export function Events() {
   // (what the inputs bind to); the URL and the API get UTC ISO.
   const [customFrom, setCustomFrom] = useState(() => isoToLocalInput(search.get('from')));
   const [customTo,   setCustomTo]   = useState(() => isoToLocalInput(search.get('to')));
-  const [limit, setLimit] = useState(Number(search.get('limit')) || 200);
+  const [limit, setLimit] = useState(() => normalizeLimit(search.get('limit')));
   // Which analysis view is on screen. The four sections (operational
   // swimlanes, per-PC timeline, activity heatmap, raw event table) used to
   // stack vertically, so a fleet with many PCs buried the table under
@@ -518,7 +540,7 @@ export function Events() {
       if (customFromIso) next.set('from', customFromIso);
       if (customToIso)   next.set('to',   customToIso);
     }
-    if (limit && limit !== 200)   next.set('limit', String(limit));
+    if (limit !== DEFAULT_LIMIT)   next.set('limit', String(limit));
     if (tab !== 'operational') next.set('tab', tab);
     setSearch(next, { replace: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -804,10 +826,9 @@ export function Events() {
                 value={String(limit)}
                 onChange={(e) => setLimit(Number(e.target.value))}
               >
-                <option value="50">50</option>
-                <option value="200">200</option>
-                <option value="1000">1000</option>
-                <option value="5000">5000</option>
+                {LIMIT_OPTIONS.map((n) => (
+                  <option key={n} value={n}>{n}</option>
+                ))}
               </Select>
             </div>
           </div>
