@@ -176,6 +176,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# #1117: set true once we've confirmed the service is Stopped and are in the
+# swap window. The trap reads it to guarantee a restart on any failure there.
+$script:BackendStopped = $false
+
 # === Agent-mode knobs (yukimemi/kanade#210 follow-up) =====================
 # When this script is uploaded to OBJECT_SCRIPTS via
 # `kanade script publish deploy-backend <v> <edited-copy>` and a
@@ -253,6 +257,28 @@ $AgentStaging = $null
 # `break` re-throws the original error after cleanup — don't
 # swallow.
 trap {
+    # #1117: if we stopped the service and are failing before it was
+    # restarted, bring it back on whatever binary is currently installed —
+    # the new one if the swap got that far, the old one if not. Either beats
+    # leaving the fleet with a dead backend until a human notices. Wrapped so
+    # a restart failure can't mask the original error, and skipped under
+    # -NoStart (the caller explicitly doesn't want it running) or when the
+    # service no longer exists (e.g. after -Recreate's delete).
+    if ($script:BackendStopped -and -not $NoStart) {
+        $s = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        if ($s -and $s.Status -ne 'Running') {
+            Write-Warning ("deploy-backend FAILED mid-swap; restarting $ServiceName so the box " +
+                "isn't left with a stopped backend (#1117).")
+            try {
+                Start-Service -Name $ServiceName -ErrorAction Stop
+                (Get-Service -Name $ServiceName).WaitForStatus('Running', '00:00:30')
+                Write-Warning "$ServiceName is back up on the currently-installed binary; the deploy still failed."
+            } catch {
+                Write-Warning ("Could not restart $ServiceName after the failed deploy: " +
+                    "$($_.Exception.Message). MANUAL 'Start-Service $ServiceName' REQUIRED.")
+            }
+        }
+    }
     if ($AgentStaging -and (Test-Path $AgentStaging)) {
         Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $AgentStaging
     }
@@ -376,6 +402,93 @@ function Set-KanadeRegistrySecret {
     Write-Host "Wrote $ValueName to HKLM:\$subkeyPath (SYSTEM + Administrators only)."
 }
 
+# Swap the installed binary the way the agent's own self-update does
+# (`crates/kanade-agent/src/self_update.rs`, `swap_and_restart`): stage a
+# copy alongside the target, rename the outgoing binary out of the way, then
+# rename the new one in. This replaced a bare `Copy-Item -Force` overwrite
+# that took the backend down on `gmcnws11` (#1117): SCM reports a service
+# Stopped when it calls SetServiceStatus(SERVICE_STOPPED), which can precede
+# the process actually releasing its handle on the exe — and AV scanning a
+# just-fetched binary can hold a transient handle too. A single-shot
+# overwrite throws `IOException: the file is being used by another process`
+# on that race; under $ErrorActionPreference='Stop' the script then aborted
+# BEFORE Start-Service, leaving the box with no backend at all.
+#
+# A rename tolerates a lingering handle far better than an overwrite, and the
+# retry loop absorbs the rest of the teardown/AV window. If the second rename
+# fails, the outgoing binary is put back so the service still has something
+# to start.
+function Install-BackendBinaryAtomic {
+    param(
+        [Parameter(Mandatory)][string]$Source,      # staged, verified new exe
+        [Parameter(Mandatory)][string]$Destination, # installed path (same volume)
+        [int]$TimeoutSeconds = 30,
+        [int]$PollMs = 250
+    )
+
+    $leaf = [System.IO.Path]::GetFileName($Destination)
+    $new  = "$Destination.new"
+    $old  = "$Destination.old"
+
+    # Sweep leftovers from a prior interrupted swap. `.new`/`.old` don't end
+    # in `.exe`, so nothing that globs `*.exe` (nor arm-for-swap's separate
+    # `.last-good` snapshot) is touched.
+    foreach ($stale in @($new, $old)) {
+        if (Test-Path -LiteralPath $stale) {
+            Remove-Item -LiteralPath $stale -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    # Stage beside the target so the renames below are metadata-only on the
+    # same NTFS volume — no chance of a half-written destination.
+    Copy-Item -LiteralPath $Source -Destination $new -Force
+
+    # Rename with the same retry both ends need: the outgoing binary can be
+    # held by SCM teardown lag, and the freshly-copied `$new` can be held by
+    # AV scanning it — both transient, both worth polling through rather than
+    # failing the deploy on. A single deadline is shared across both renames
+    # so the whole swap is bounded by `$TimeoutSeconds`, not 2x it.
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $renameWithRetry = {
+        param($from, $toLeaf, $what)
+        while ($true) {
+            try {
+                Rename-Item -LiteralPath $from -NewName $toLeaf -ErrorAction Stop
+                return
+            } catch {
+                if ((Get-Date) -ge $deadline) {
+                    throw ("Install-BackendBinaryAtomic: $what — '$from' still locked at the " +
+                        "${TimeoutSeconds}s deadline. Last error: $($_.Exception.Message)")
+                }
+                Start-Sleep -Milliseconds $PollMs
+            }
+        }
+    }
+
+    if (-not (Test-Path -LiteralPath $Destination)) {
+        # Fresh install: nothing to move out of the way.
+        & $renameWithRetry $new $leaf 'staging the fresh binary'
+        return
+    }
+
+    # Move the outgoing binary aside.
+    & $renameWithRetry $Destination "$leaf.old" 'renaming the outgoing binary aside'
+
+    # Move the new binary into place. If this fails even after the retry
+    # window, restore the old one so the service still has a binary — a failed
+    # upgrade, not a dead box.
+    try {
+        & $renameWithRetry $new $leaf 'moving the new binary into place'
+    } catch {
+        Rename-Item -LiteralPath $old -NewName $leaf -ErrorAction SilentlyContinue
+        throw
+    }
+
+    # Outgoing binary is redundant now; best-effort delete (a lingering
+    # handle just defers it to the next deploy's leftover sweep above).
+    Remove-Item -LiteralPath $old -Force -ErrorAction SilentlyContinue
+}
+
 $binDir    = Join-Path $env:ProgramFiles 'Kanade'
 $dataRoot  = Join-Path $env:ProgramData  'Kanade'
 $configDir = Join-Path $dataRoot 'config'
@@ -450,10 +563,27 @@ if ($stagedVersion) {
 }
 
 $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-if ($svc -and $svc.Status -ne 'Stopped') {
-    Write-Host "Stopping $ServiceName..."
-    Stop-Service -Name $ServiceName -Force
-    $svc.WaitForStatus('Stopped', '00:00:30')
+if ($svc) {
+    # #1117: from here until Start-Service the box has NO running backend.
+    # Any throw in this window (a locked swap, a bad config copy, an sc.exe
+    # hiccup) would otherwise leave it stopped indefinitely — strictly worse
+    # than a failed upgrade, and not something SCM's crash-restart actions
+    # cover, since a clean stop isn't a crash. The trap reads this flag to
+    # bring the service back on whatever binary is currently installed.
+    #
+    # Set it whenever the service EXISTS, not only when this run stopped it:
+    # the incident's own recovery path is re-running the deploy after a prior
+    # attempt failed mid-swap and left the service already Stopped. If that
+    # retry fails too, the service is sitting stopped for exactly the reason
+    # we're here to fix — the restart guarantee has to cover it just the same.
+    $script:BackendStopped = $true
+    if ($svc.Status -ne 'Stopped') {
+        Write-Host "Stopping $ServiceName..."
+        Stop-Service -Name $ServiceName -Force
+        $svc.WaitForStatus('Stopped', '00:00:30')
+    } else {
+        Write-Host "$ServiceName already stopped."
+    }
 }
 
 # -Recreate: drop the existing service entirely so the New-Service
@@ -548,7 +678,7 @@ if ($stagedVersion -and (Test-Path $exeDst)) {
 }
 
 Write-Host "Installing $exeName -> $exeDst"
-Copy-Item -Path $exeSrc -Destination $exeDst -Force
+Install-BackendBinaryAtomic -Source $exeSrc -Destination $exeDst
 
 if ($ForceConfig -or -not (Test-Path $configDst)) {
     $verb = if (Test-Path $configDst) { 'Overwriting' } else { 'Seeding' }
