@@ -1,26 +1,31 @@
-# SPA unit tests for the kanade-backend frontend.
+# SPA unit tests + build/type-check for the kanade-backend frontend.
 #
 # Lives in its own workflow file (not the kata-managed ci.yml) so a future
 # `kata apply` from the upstream preset doesn't clobber it — same reasoning
-# as integration.yml. Triggers match ci.yml: push to main + every PR +
-# manual dispatch.
+# as integration.yml.
 #
-# Scoped to the SPA's own directory: the tests cover pure TypeScript
-# (the operational swimlane's lane derivation), so a Rust-only change has
-# no way to affect them and doesn't need to pay for the job.
+# Runs on EVERY pull request, not just ones touching the SPA. It used to be
+# path-filtered to `crates/kanade-backend/web/**`, which is cheaper on a
+# Rust-only PR but makes the check un-requireable: a required status check
+# that never runs on a given PR is reported as forever-pending and blocks the
+# merge. Because it was advisory rather than required, #1096 and #1101 both
+# auto-merged with this job RED, breaking `main`'s SPA build and producing two
+# tagged releases (v0.44.27, v0.44.28) with no binaries — the builds died at
+# `cargo make web-build`. Running unconditionally is the price of the job
+# being able to block a merge (#1100).
+#
+# Deliberately NOT conditionally skipped on non-SPA changes. A skip needs
+# change-detection logic, and a bug in THAT would let a red frontend through
+# again — reintroducing the exact failure this exists to prevent. For a gate,
+# "cannot be skipped" is the safety property; the ~40s on a Rust-only PR is a
+# fair price for it.
 
 name: Web
 
 on:
   push:
     branches: [main]
-    paths:
-      - 'crates/kanade-backend/web/**'
-      - '.github/workflows/web.yml'
   pull_request:
-    paths:
-      - 'crates/kanade-backend/web/**'
-      - '.github/workflows/web.yml'
   workflow_dispatch:
 
 concurrency:
