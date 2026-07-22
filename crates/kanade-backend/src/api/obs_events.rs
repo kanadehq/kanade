@@ -23,7 +23,7 @@
 use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, SqlitePool};
@@ -117,6 +117,32 @@ pub struct ListResponse {
     pub events: Vec<EventRow>,
 }
 
+/// Issue #1076: is a `from`/`to` bound safe to compare against the
+/// `at` column?
+///
+/// `obs_events.at` is declared `TIMESTAMP`. That declared type contains
+/// none of SQLite's affinity keywords (`INT`, `CHAR`/`CLOB`/`TEXT`,
+/// `BLOB`, `REAL`/`FLOA`/`DOUB`), so by the rule-5 fallback it gets
+/// NUMERIC affinity — but that's a no-op here: sqlx encodes
+/// `DateTime<Utc>` as an RFC3339 string, which isn't a losslessly-
+/// convertible numeric literal, so SQLite keeps both the stored value
+/// and the bound parameter in the TEXT storage class and compares them
+/// with BINARY collation. So the `at >= ?` / `at < ?` gates in `list`
+/// are *byte-wise string* comparisons in practice. That
+/// tracks chronological order only while both operands render as the
+/// fixed-width 4-digit-year form. chrono accepts years up to ±262143
+/// and renders anything outside `0..=9999` sign-prefixed
+/// (`+010000-01-01T…`); `'+'` (0x2B) and `'-'` (0x2D) sort below every
+/// digit, so such a bound compares "less than" every stored row and
+/// inverts the filter wholesale — the endpoint answers a "year 10000
+/// onward" window with the entire table, 200 OK, no warning. Every real
+/// event `at` is a 4-digit year, so rejecting out-of-range bounds turns
+/// away only inputs no honest caller wants — and a wrong result is worse
+/// than a 400.
+fn bound_in_range(dt: DateTime<Utc>) -> bool {
+    (0..=9999).contains(&dt.year())
+}
+
 /// `GET /api/obs_events`.
 pub async fn list(
     State(pool): State<SqlitePool>,
@@ -127,6 +153,16 @@ pub async fn list(
         Some(n) if n > 0 && n <= MAX_LIMIT => n,
         _ => return Err(StatusCode::BAD_REQUEST),
     };
+
+    // Issue #1076: reject any lexically-uncomparable date bound before it
+    // reaches the string-compared `at` gates below (see `bound_in_range`).
+    if [q.from, q.to]
+        .into_iter()
+        .flatten()
+        .any(|b| !bound_in_range(b))
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     // Issue #391: payload key allow-list — the key is interpolated
     // into a JSONPath via `'$.' || ?`, so anything beyond
@@ -366,4 +402,109 @@ pub async fn recent(
         })
         .collect();
     Ok(Json(ListResponse { events }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::extract::{Query, State};
+    use axum::http::StatusCode;
+    use chrono::{TimeZone, Utc};
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn fresh_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        // One ordinary row so a query that ISN'T rejected returns
+        // something — that's what makes the "inverted filter dumps the
+        // whole table" bug observable in the `Ok`-path assertions.
+        sqlx::query(
+            "INSERT INTO obs_events (pc_id, at, kind, source, event_record_id, payload)
+             VALUES ('pc-01', ?, 'logon', 'winlog:Security', '1', '{}')",
+        )
+        .bind(Utc.with_ymd_and_hms(2026, 5, 28, 10, 41, 0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool
+    }
+
+    /// A `ListQuery` with only the two date bounds set — every other
+    /// filter absent. Keeps the handler tests focused on #1076.
+    fn bounds_query(from: Option<DateTime<Utc>>, to: Option<DateTime<Utc>>) -> ListQuery {
+        ListQuery {
+            pc_id: None,
+            from,
+            to,
+            kind: None,
+            source: None,
+            logon_type: None,
+            kinds: None,
+            kinds_ex: None,
+            sources: None,
+            sources_ex: None,
+            payload_key: None,
+            payload_value: None,
+            limit: None,
+        }
+    }
+
+    #[test]
+    fn bound_in_range_accepts_four_digit_years_only() {
+        let at = |y| Utc.with_ymd_and_hms(y, 1, 1, 0, 0, 0).unwrap();
+        // In range: the whole fixed-width-year span, endpoints included.
+        assert!(bound_in_range(at(2026)));
+        assert!(bound_in_range(at(0))); // renders `0000-…`
+        assert!(bound_in_range(at(9999)));
+        // Out of range: chrono sign-prefixes these, breaking lexical order.
+        assert!(!bound_in_range(at(10000)));
+        assert!(!bound_in_range(at(-1)));
+    }
+
+    #[tokio::test]
+    async fn list_rejects_expanded_year_from_bound() {
+        // The exact failure the issue reports: a year-10000 lower bound
+        // used to sort below every row and return the whole table. It
+        // must now 400 instead of silently dumping everything.
+        let pool = fresh_pool().await;
+        let q = bounds_query(
+            Some(Utc.with_ymd_and_hms(10000, 1, 1, 0, 0, 0).unwrap()),
+            None,
+        );
+        let res = list(State(pool), Query(q)).await;
+        assert!(matches!(res, Err(StatusCode::BAD_REQUEST)));
+    }
+
+    #[tokio::test]
+    async fn list_rejects_expanded_year_to_bound() {
+        // The `to` side inverts the other way (answered 0 rows), equally
+        // wrong — reject it too.
+        let pool = fresh_pool().await;
+        let q = bounds_query(
+            None,
+            Some(Utc.with_ymd_and_hms(10000, 1, 1, 0, 0, 0).unwrap()),
+        );
+        let res = list(State(pool), Query(q)).await;
+        assert!(matches!(res, Err(StatusCode::BAD_REQUEST)));
+    }
+
+    #[tokio::test]
+    async fn list_accepts_in_range_bounds() {
+        // Control: an ordinary window straddling the seeded row is
+        // accepted and returns it — proves the guard doesn't reject
+        // legitimate bounds.
+        let pool = fresh_pool().await;
+        let q = bounds_query(
+            Some(Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()),
+            Some(Utc.with_ymd_and_hms(2027, 1, 1, 0, 0, 0).unwrap()),
+        );
+        let res = list(State(pool), Query(q))
+            .await
+            .expect("in-range bounds must be accepted");
+        assert_eq!(res.0.events.len(), 1);
+    }
 }
