@@ -22,6 +22,12 @@ test-results/
 playwright-report/
 blob-report/
 
+# Screenshot baselines are per-platform. Only the CI platform's (`-linux`)
+# are committed; a dev generating on win32/darwin must never commit those —
+# they'd never match the Linux CI run. See playwright-ct.config.ts.
+src/__screenshots__/*-win32.png
+src/__screenshots__/*-darwin.png
+
 # Editor / OS noise
 .vscode/
 .idea/

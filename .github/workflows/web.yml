@@ -28,6 +28,11 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      update_snapshots:
+        description: 'Regenerate the CT screenshot baselines and upload them as an artifact (Linux). Download + commit the artifact; never generate baselines on a dev machine — a win32/darwin render never matches the CI run.'
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -70,10 +75,22 @@ jobs:
         # Pinned to the version the installed @playwright/experimental-ct-react
         # ships, so the browser can't drift from the runner independently.
         run: bunx playwright install --with-deps chromium
-      - name: Component tests (hit-testing)
+      - name: Component tests (hit-testing, non-overlap, screenshots)
         working-directory: crates/kanade-backend/web
         # Browser-level coverage for what jsdom can't see — layout, stacking,
-        # hit-testing (Issue #1094). CI=1 switches the reporter to `line`.
+        # hit-testing, and screenshot baselines (Issue #1094). CI=1 switches
+        # the reporter to `line`. On a `workflow_dispatch` with
+        # `update_snapshots`, regenerate the baselines instead of comparing —
+        # the upload step below then hands them back to be committed.
         env:
           CI: '1'
-        run: bun run test:ct
+        run: >-
+          bun run test:ct
+          ${{ (github.event_name == 'workflow_dispatch' && inputs.update_snapshots) && '-- --update-snapshots' || '' }}
+      - name: Upload regenerated screenshot baselines
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.update_snapshots }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ct-screenshots-linux
+          path: crates/kanade-backend/web/src/__screenshots__/
+          if-no-files-found: error
