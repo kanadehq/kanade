@@ -1,0 +1,15 @@
+/* CT stylesheet. Pulls in the app's real Tailwind entry (`src/index.css`
+   supplies `@import "tailwindcss"` plus the `@theme` tokens) and then,
+   crucially, declares the component sources explicitly.
+
+   Tailwind v4 auto-detects which files to scan for class names relative to
+   its own base directory. Under Playwright CT the Vite build roots at the
+   `playwright/` host dir, not the app root, so auto-detection misses
+   `src/**` and generates none of the utilities the swimlane relies on
+   (`absolute`, `flex-1`, `w-px`, `pointer-events-none`, …). Locally a warm
+   `.cache` hid this; a cold CI build shipped an unstyled tree where nothing
+   was absolutely positioned and `pointer-events-none` was inert — making
+   the hit-testing assertion meaningless. `@source` pins the scan to the
+   component tree so the classes are always generated. */
+@import '../src/index.css';
+@source '../src';

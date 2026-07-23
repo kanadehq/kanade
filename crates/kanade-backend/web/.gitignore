@@ -13,6 +13,15 @@ bun.lockb.bak
 # present on every cargo build / cargo publish. CI / `cargo make
 # web-build` regenerates it before committing.
 
+# Playwright component-test output. `playwright/index.html` + `index.tsx`
+# are the mount host (tracked source); everything below is regenerated per
+# run: `.cache/` is CT's Vite bundle of the components under test, and the
+# result/report dirs are the run artifacts.
+playwright/.cache/
+test-results/
+playwright-report/
+blob-report/
+
 # Editor / OS noise
 .vscode/
 .idea/

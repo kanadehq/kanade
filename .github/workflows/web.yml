@@ -1,4 +1,5 @@
-# SPA unit tests + build/type-check for the kanade-backend frontend.
+# SPA unit tests + build/type-check + browser component tests for the
+# kanade-backend frontend.
 #
 # Lives in its own workflow file (not the kata-managed ci.yml) so a future
 # `kata apply` from the upstream preset doesn't clobber it — same reasoning
@@ -53,3 +54,26 @@ jobs:
         # the SPA's types are checked in CI, since ci.yml is Rust-only and
         # release.yml builds the SPA but only on a tag.
         run: bun run build
+
+  component:
+    name: playwright ct
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.1.0
+      - uses: oven-sh/setup-bun@v2
+      - name: Install deps
+        working-directory: crates/kanade-backend/web
+        run: bun install --frozen-lockfile
+      - name: Install Playwright browser
+        working-directory: crates/kanade-backend/web
+        # Chromium only (matches playwright-ct.config.ts) with its OS libs.
+        # Pinned to the version the installed @playwright/experimental-ct-react
+        # ships, so the browser can't drift from the runner independently.
+        run: bunx playwright install --with-deps chromium
+      - name: Component tests (hit-testing)
+        working-directory: crates/kanade-backend/web
+        # Browser-level coverage for what jsdom can't see — layout, stacking,
+        # hit-testing (Issue #1094). CI=1 switches the reporter to `line`.
+        env:
+          CI: '1'
+        run: bun run test:ct
