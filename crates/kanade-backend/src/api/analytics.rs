@@ -34,6 +34,7 @@ use sqlx::{Row, SqlitePool};
 use tracing::{debug, warn};
 
 use super::AppState;
+use super::time_bounds::bounds_in_range;
 use super::view_sql;
 
 /// Default top-N for grouped (`bar`) widgets when the spec omits `limit`.
@@ -201,6 +202,12 @@ pub async fn get(
     State(state): State<AppState>,
     Query(q): Query<AnalyticsQuery>,
 ) -> Result<Json<Vec<WidgetResult>>, StatusCode> {
+    // Issue #1126: `from`/`to` gate the string-stored `at` column via
+    // byte-wise comparison, so an expanded-year bound would invert the
+    // window instead of narrowing it. Reject before defaults are applied.
+    if !bounds_in_range([q.from, q.to]) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let to = q.to.unwrap_or_else(Utc::now);
     let from = q.from.unwrap_or(to - Duration::hours(24));
     if from >= to {

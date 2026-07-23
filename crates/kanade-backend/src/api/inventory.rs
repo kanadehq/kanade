@@ -24,6 +24,7 @@ use tracing::warn;
 use crate::projector::explode::validate_ident;
 
 use super::AppState;
+use super::time_bounds::bounds_in_range;
 
 #[derive(Serialize)]
 pub struct InventoryFact {
@@ -1005,6 +1006,15 @@ pub async fn history_for_pc(
     Path((manifest_id, pc_id)): Path<(String, String)>,
     Query(params): Query<HistoryParams>,
 ) -> Result<Json<Vec<HistoryEventRow>>, (StatusCode, String)> {
+    // Issue #1126: `observed_at` is a string-stored timestamp compared
+    // byte-wise, so an expanded-year `since` would sort below every row
+    // and match the whole table instead of a window. Reject it.
+    if !bounds_in_range([params.since]) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "since: year out of range (must be 0..=9999)".into(),
+        ));
+    }
     let limit = params.limit.unwrap_or(500).min(5000);
     let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
         "SELECT id, pc_id, job_id, field_path, identity_json, \
@@ -1142,6 +1152,21 @@ pub async fn fleet_history_search(
                 .map_err(|e| (StatusCode::BAD_REQUEST, format!("until: {e}")))
         })
         .transpose()?;
+    // Issue #1126: `observed_at` is a string-stored timestamp compared
+    // byte-wise below, so an expanded-year bound would invert the window
+    // instead of narrowing it. Reject before building the query.
+    if !bounds_in_range([since]) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "since: year out of range (must be 0..=9999)".into(),
+        ));
+    }
+    if !bounds_in_range([until]) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "until: year out of range (must be 0..=9999)".into(),
+        ));
+    }
     let field = params.get("field").filter(|s| !s.is_empty());
     let identity_filters = parse_identity_filters(&params)?;
 
@@ -1254,6 +1279,15 @@ pub async fn first_seen(
                 .map_err(|e| (StatusCode::BAD_REQUEST, format!("since: {e}")))
         })
         .transpose()?;
+    // Issue #1126: `observed_at` is a string-stored timestamp compared
+    // byte-wise below, so an expanded-year `since` would sort below every
+    // row and match the whole table instead of a window. Reject it.
+    if !bounds_in_range([since]) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "since: year out of range (must be 0..=9999)".into(),
+        ));
+    }
     let identity_filters = parse_identity_filters(&params)?;
 
     let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
