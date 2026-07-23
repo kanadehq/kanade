@@ -4,9 +4,13 @@ import { OperationalTimeline } from './OperationalTimeline';
 
 // Issue #1094: three bugs shipped past a green `bun test` suite across
 // #1084 / #1088 / #1093 because they were layout / hit-testing / perception,
-// which jsdom (no layout engine, no `elementFromPoint`) structurally cannot
-// see. This is the cheap first step of the proposed browser coverage: the
-// hit-testing assertion, no screenshot baselines.
+// which jsdom (no layout engine, no `elementFromPoint`, no compositing)
+// structurally cannot see. This file grows the browser coverage the issue
+// proposes, one assertion class per describe:
+//   - hit-testing: every `title` element can actually receive a hover
+//   - non-overlap: no lane paints a no-evidence band over a span (the plaid)
+// Still deferred to a later PR: screenshot baselines for the perceptual
+// distinctions (sub-pixel bands, grey-vs-blue hatch at low alpha).
 //
 // The window is anchored to the current instant, NOT a fixed calendar date.
 // `OperationalTimeline` reads `Date.now()` internally (the live / evidence
@@ -116,5 +120,74 @@ test.describe('OperationalTimeline hit-testing', () => {
       return bad;
     });
     expect(unreachable, 'these titled elements cannot receive a hover').toEqual([]);
+  });
+});
+
+test.describe('OperationalTimeline non-overlap (no plaid)', () => {
+  test('no lane paints a no-evidence band over a span', async ({ mount, page }) => {
+    await mount(
+      <div style={{ width: 900 }}>
+        <OperationalTimeline
+          events={EVENTS}
+          from={FROM}
+          to={TO}
+          coverageFrom={COVERAGE_FROM}
+          lastHeartbeat={LAST_HEARTBEAT}
+        />
+      </div>,
+    );
+
+    // Issue #1088's plaid: the no-evidence band (135° grey hatch, transparent
+    // gaps) drawn UNDER an unconfirmed span (45° coloured hatch, also gapped)
+    // — where they share an x-range, each shows through the other's gaps and
+    // the stretch asserts two meanings at once ("unknown" AND "believed on").
+    // The fix is `subtractRanges(noEvidence, lane.spans)`: the band is only
+    // drawn in the gaps a lane's spans leave, so band and span never coincide.
+    // No DOM assertion in jsdom can see a compositing overlap — this needs a
+    // laid-out browser, which is the whole reason this file exists.
+    //
+    // The invariant, per lane track: no 135° band's x-range may overlap any
+    // fill span's (solid OR 45° hatch). Markers are excluded — they are 1px
+    // transition lines that legitimately sit over a span, not a conflicting
+    // fill. The fixture's power/session lanes each have an unconfirmed hatch
+    // tail in the same stretch the offline band would cover, so dropping the
+    // subtraction brings the plaid straight back here.
+    const conflicts = await page.evaluate(() => {
+      const classify = (el: HTMLElement): 'band' | 'hatch' | 'marker' | 'solid' => {
+        const bg = getComputedStyle(el).backgroundImage;
+        if (bg.includes('135deg')) return 'band';
+        if (bg.includes('45deg')) return 'hatch';
+        return el.getBoundingClientRect().width <= 2 ? 'marker' : 'solid';
+      };
+      // Lane tracks are the parents of the titled span/band/marker elements.
+      const tracks = new Set<HTMLElement>();
+      for (const el of Array.from(document.querySelectorAll<HTMLElement>('[title]'))) {
+        if (el.parentElement) tracks.add(el.parentElement);
+      }
+      const bad: { band: string; fill: string; overlapPx: number }[] = [];
+      for (const track of tracks) {
+        const kids = Array.from(track.children).filter(
+          (el): el is HTMLElement => el instanceof HTMLElement && el.hasAttribute('title'),
+        );
+        const items = kids.map((el) => ({ el, kind: classify(el), r: el.getBoundingClientRect() }));
+        const bands = items.filter((i) => i.kind === 'band');
+        const fills = items.filter((i) => i.kind === 'solid' || i.kind === 'hatch');
+        for (const b of bands) {
+          for (const f of fills) {
+            // >1px, so touching edges / sub-pixel anti-aliasing aren't flagged.
+            const overlap = Math.min(b.r.right, f.r.right) - Math.max(b.r.left, f.r.left);
+            if (overlap > 1) {
+              bad.push({
+                band: (b.el.getAttribute('title') ?? '').slice(0, 40),
+                fill: (f.el.getAttribute('title') ?? '').slice(0, 40),
+                overlapPx: Math.round(overlap),
+              });
+            }
+          }
+        }
+      }
+      return bad;
+    });
+    expect(conflicts, 'a no-evidence band overlaps a span (the #1088 plaid)').toEqual([]);
   });
 });
