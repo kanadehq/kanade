@@ -34,9 +34,29 @@ export default defineConfig({
     },
   },
   // Chromium only: hit-testing and stacking are engine-agnostic here, and a
-  // single pinned engine keeps CI fast and the (future) screenshot baselines
-  // stable. Widen if a cross-engine rendering difference ever needs guarding.
+  // single pinned engine keeps CI fast and the screenshot baselines stable.
+  // Widen if a cross-engine rendering difference ever needs guarding.
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+  // Screenshot baselines. The `{platform}` segment is load-bearing: font
+  // hinting and AA differ per OS, so a Linux baseline can't be matched on
+  // win32/darwin. Only the CI platform's (`-linux`) baselines are committed;
+  // they are generated in CI (via the `Web` workflow's update path), never
+  // locally, since a dev's win32/darwin render would never match the CI run.
+  snapshotPathTemplate: '{testDir}/__screenshots__/{arg}-{projectName}-{platform}{ext}',
+  expect: {
+    // Baseline and comparison run on the SAME pinned CI image (same chromium,
+    // same fonts), so an unchanged render diffs to ~zero — the tolerance only
+    // has to absorb the odd stray pixel from a runner-image patch bump, not
+    // run-to-run noise. So it's kept tight, not generous: `maxDiffPixelRatio`
+    // 0.002 still catches a change as small as a single lane's band (a lane is
+    // ~15% of the frame, far above 0.2%), and `threshold` 0.1 (down from the
+    // 0.2 default) lets a low-alpha hatch-colour shift count — exactly the
+    // perceptual regression class this baseline exists to surface (Issue
+    // #1094). Lowering the per-pixel threshold is safe here precisely because
+    // identical renders produce zero diff regardless of it. If a legitimate
+    // runner-image change ever trips this, re-baseline (see web.yml dispatch).
+    toHaveScreenshot: { maxDiffPixelRatio: 0.002, threshold: 0.1 },
+  },
   // Local runs surface the HTML report; CI just needs the pass/fail line.
   reporter: process.env.CI ? 'line' : 'html',
 });
