@@ -23,6 +23,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use tracing::warn;
 
+use super::time_bounds::bounds_in_range;
+
 /// One-hour default window mirrors `/api/agents/{pc_id}/perf`. The
 /// Dashboard's "24h sparkline" sends `from=` explicitly so it
 /// doesn't ride this default — the default is there for curl
@@ -154,6 +156,13 @@ pub async fn fleet(
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     let agg = Aggregate::from_str(q.agg.as_deref().unwrap_or("avg"))
         .map_err(|_| StatusCode::BAD_REQUEST)?;
+    // Issue #1126: `from`/`to` gate the string-stored `at` column
+    // byte-wise; an expanded-year bound would invert the window. Reject
+    // before defaults are applied. (The MAX_BUCKETS ceiling below only
+    // catches wide windows, not a narrow one anchored at a huge year.)
+    if !bounds_in_range([q.from, q.to]) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let to = q.to.unwrap_or_else(Utc::now);
     let from = q
         .from
@@ -367,4 +376,78 @@ pub async fn active_investigations(
         window_seconds: ACTIVE_INVESTIGATION_WINDOW_SECS,
         rows,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::TimeZone;
+
+    use super::*;
+
+    fn bounds_query(from: Option<DateTime<Utc>>, to: Option<DateTime<Utc>>) -> FleetPerfQuery {
+        FleetPerfQuery {
+            metric: None,
+            agg: None,
+            from,
+            to,
+            step: None,
+        }
+    }
+
+    // A bare `host_perf_samples` so the in-range control query runs for
+    // real against a live DB — the string-compared `at` gate and the
+    // strftime bucketing only execute there.
+    async fn seeded_pool() -> SqlitePool {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE host_perf_samples ( \
+               id INTEGER PRIMARY KEY AUTOINCREMENT, pc_id TEXT NOT NULL, \
+               at TIMESTAMP NOT NULL, cpu_pct REAL )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO host_perf_samples (pc_id, at, cpu_pct) VALUES (?, ?, ?)")
+            .bind("p1")
+            .bind(Utc.with_ymd_and_hms(2026, 6, 17, 10, 0, 0).unwrap())
+            .bind(50.0_f64)
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool
+    }
+
+    // Issue #1126: an expanded-year *upper* bound is the silently-wrong
+    // case here — a too-large `from` is already caught by the `from >= to`
+    // ordering check, but a year-10000 `to` sorts below every stored row
+    // and used to answer an empty window as `200 OK`. It must now 400. (An
+    // empty pool suffices: the guard fires before the query, so neutralising
+    // it would fall through to a table-missing 500 — a clean mutation signal.)
+    #[tokio::test]
+    async fn fleet_rejects_expanded_year_to_bound() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let q = bounds_query(
+            None,
+            Some(Utc.with_ymd_and_hms(10000, 1, 1, 0, 0, 0).unwrap()),
+        );
+        let res = fleet(State(pool), Query(q)).await;
+        assert!(matches!(res, Err(StatusCode::BAD_REQUEST)));
+    }
+
+    // Control: an ordinary window straddling the seeded row is accepted and
+    // returns it — proves the guard doesn't reject legitimate bounds.
+    #[tokio::test]
+    async fn fleet_accepts_in_range_bounds() {
+        let pool = seeded_pool().await;
+        // A narrow window straddling the 10:00 row (wide windows trip the
+        // MAX_BUCKETS ceiling, an unrelated 400).
+        let q = bounds_query(
+            Some(Utc.with_ymd_and_hms(2026, 6, 17, 9, 0, 0).unwrap()),
+            Some(Utc.with_ymd_and_hms(2026, 6, 17, 11, 0, 0).unwrap()),
+        );
+        let res = fleet(State(pool), Query(q))
+            .await
+            .expect("in-range bounds must be accepted");
+        assert_eq!(res.0.points.len(), 1);
+    }
 }

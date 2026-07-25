@@ -23,7 +23,9 @@
 use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
-use chrono::{DateTime, Datelike, Utc};
+use chrono::{DateTime, Utc};
+
+use super::time_bounds::bounds_in_range;
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, SqlitePool};
@@ -117,32 +119,6 @@ pub struct ListResponse {
     pub events: Vec<EventRow>,
 }
 
-/// Issue #1076: is a `from`/`to` bound safe to compare against the
-/// `at` column?
-///
-/// `obs_events.at` is declared `TIMESTAMP`. That declared type contains
-/// none of SQLite's affinity keywords (`INT`, `CHAR`/`CLOB`/`TEXT`,
-/// `BLOB`, `REAL`/`FLOA`/`DOUB`), so by the rule-5 fallback it gets
-/// NUMERIC affinity — but that's a no-op here: sqlx encodes
-/// `DateTime<Utc>` as an RFC3339 string, which isn't a losslessly-
-/// convertible numeric literal, so SQLite keeps both the stored value
-/// and the bound parameter in the TEXT storage class and compares them
-/// with BINARY collation. So the `at >= ?` / `at < ?` gates in `list`
-/// are *byte-wise string* comparisons in practice. That
-/// tracks chronological order only while both operands render as the
-/// fixed-width 4-digit-year form. chrono accepts years up to ±262143
-/// and renders anything outside `0..=9999` sign-prefixed
-/// (`+010000-01-01T…`); `'+'` (0x2B) and `'-'` (0x2D) sort below every
-/// digit, so such a bound compares "less than" every stored row and
-/// inverts the filter wholesale — the endpoint answers a "year 10000
-/// onward" window with the entire table, 200 OK, no warning. Every real
-/// event `at` is a 4-digit year, so rejecting out-of-range bounds turns
-/// away only inputs no honest caller wants — and a wrong result is worse
-/// than a 400.
-fn bound_in_range(dt: DateTime<Utc>) -> bool {
-    (0..=9999).contains(&dt.year())
-}
-
 /// `GET /api/obs_events`.
 pub async fn list(
     State(pool): State<SqlitePool>,
@@ -154,13 +130,10 @@ pub async fn list(
         _ => return Err(StatusCode::BAD_REQUEST),
     };
 
-    // Issue #1076: reject any lexically-uncomparable date bound before it
-    // reaches the string-compared `at` gates below (see `bound_in_range`).
-    if [q.from, q.to]
-        .into_iter()
-        .flatten()
-        .any(|b| !bound_in_range(b))
-    {
+    // Issue #1076/#1126: reject any lexically-uncomparable date bound
+    // before it reaches the string-compared `at` gates below (see
+    // `time_bounds`).
+    if !bounds_in_range([q.from, q.to]) {
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -453,17 +426,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn bound_in_range_accepts_four_digit_years_only() {
-        let at = |y| Utc.with_ymd_and_hms(y, 1, 1, 0, 0, 0).unwrap();
-        // In range: the whole fixed-width-year span, endpoints included.
-        assert!(bound_in_range(at(2026)));
-        assert!(bound_in_range(at(0))); // renders `0000-…`
-        assert!(bound_in_range(at(9999)));
-        // Out of range: chrono sign-prefixes these, breaking lexical order.
-        assert!(!bound_in_range(at(10000)));
-        assert!(!bound_in_range(at(-1)));
-    }
+    // The `bound_in_range` unit test moved to `time_bounds`; the
+    // handler-level guard tests below stay to prove `list` still 400s.
 
     #[tokio::test]
     async fn list_rejects_expanded_year_from_bound() {

@@ -39,6 +39,7 @@ use sqlx::Row;
 use tracing::warn;
 
 use super::AppState;
+use super::time_bounds::bounds_in_range;
 
 /// Stale threshold for `last_heartbeat`. Heartbeats cadence at 30 s
 /// by default; 2 min of slack catches a few missed ticks without
@@ -280,6 +281,15 @@ pub async fn scan_durations(
     State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<ScanDurationParams>,
 ) -> Result<Json<Vec<ScanDurationStats>>, (StatusCode, String)> {
+    // Issue #1126: `finished_at` is a string-stored timestamp compared
+    // byte-wise, so an expanded-year `since` would sort below every row
+    // and match the whole table instead of a window. Reject it.
+    if !bounds_in_range([params.since]) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "since: year out of range (must be 0..=9999)".into(),
+        ));
+    }
     let since = params
         .since
         .unwrap_or_else(|| Utc::now() - Duration::hours(24));

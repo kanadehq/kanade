@@ -20,6 +20,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use tracing::warn;
 
+use super::time_bounds::bounds_in_range;
+
 /// Default time window when the caller doesn't specify `from`/`to`.
 /// One hour matches the SPA's smallest range selector and keeps the
 /// default response under ~720 rows even at 5 s granularity.
@@ -75,6 +77,13 @@ pub async fn perf(
     Path(pc_id): Path<String>,
     Query(q): Query<PerfQuery>,
 ) -> Result<Json<PerfResponse>, StatusCode> {
+    // Issue #1126: `from`/`to` gate the string-stored `at` column
+    // byte-wise (the `strftime('%s', at)` below is only bucket math, not
+    // storage), so an expanded-year bound would invert the window instead
+    // of narrowing it. Reject before defaults are applied.
+    if !bounds_in_range([q.from, q.to]) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let to = q.to.unwrap_or_else(Utc::now);
     let from = q
         .from
@@ -159,4 +168,79 @@ pub async fn perf(
         step_seconds: step_secs,
         points,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::TimeZone;
+
+    use super::*;
+
+    fn bounds_query(from: Option<DateTime<Utc>>, to: Option<DateTime<Utc>>) -> PerfQuery {
+        PerfQuery {
+            from,
+            to,
+            step: None,
+        }
+    }
+
+    // The full `host_perf_samples` shape the perf query averages over, so
+    // the in-range control runs for real against a live DB (the only place
+    // the string-compared `at` gate actually executes).
+    async fn seeded_pool() -> SqlitePool {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE host_perf_samples ( \
+               id INTEGER PRIMARY KEY AUTOINCREMENT, pc_id TEXT NOT NULL, \
+               at TIMESTAMP NOT NULL, cpu_pct REAL, mem_used_bytes REAL, \
+               mem_total_bytes REAL, swap_used_bytes REAL, swap_total_bytes REAL, \
+               disk_read_bytes_per_sec REAL, disk_written_bytes_per_sec REAL, \
+               net_rx_bytes_per_sec REAL, net_tx_bytes_per_sec REAL )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO host_perf_samples (pc_id, at, cpu_pct) VALUES (?, ?, ?)")
+            .bind("p1")
+            .bind(Utc.with_ymd_and_hms(2026, 6, 17, 10, 0, 0).unwrap())
+            .bind(50.0_f64)
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool
+    }
+
+    // Issue #1126: an expanded-year *upper* bound is the silently-wrong case
+    // (a too-large `from` is already caught by the `from >= to` check). A
+    // year-10000 `to` sorts below every stored row and used to answer an
+    // empty window as `200 OK`; it must now 400. Empty pool: the guard fires
+    // before the query, so neutralising it falls through to a table-missing
+    // 500 — a clean mutation signal.
+    #[tokio::test]
+    async fn perf_rejects_expanded_year_to_bound() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let q = bounds_query(
+            None,
+            Some(Utc.with_ymd_and_hms(10000, 1, 1, 0, 0, 0).unwrap()),
+        );
+        let res = perf(State(pool), Path("p1".into()), Query(q)).await;
+        assert!(matches!(res, Err(StatusCode::BAD_REQUEST)));
+    }
+
+    // Control: an ordinary window straddling the seeded row is accepted and
+    // returns it — proves the guard doesn't reject legitimate bounds.
+    #[tokio::test]
+    async fn perf_accepts_in_range_bounds() {
+        let pool = seeded_pool().await;
+        // A narrow window straddling the 10:00 row (wide windows trip the
+        // MAX_BUCKETS ceiling, an unrelated 400).
+        let q = bounds_query(
+            Some(Utc.with_ymd_and_hms(2026, 6, 17, 9, 0, 0).unwrap()),
+            Some(Utc.with_ymd_and_hms(2026, 6, 17, 11, 0, 0).unwrap()),
+        );
+        let res = perf(State(pool), Path("p1".into()), Query(q))
+            .await
+            .expect("in-range bounds must be accepted");
+        assert_eq!(res.0.points.len(), 1);
+    }
 }
