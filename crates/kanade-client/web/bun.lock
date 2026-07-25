@@ -8,7 +8,7 @@
         "@tauri-apps/api": "^2.11.1",
         "@tauri-apps/plugin-notification": "^2.3.3",
         "dompurify": "^3.4.12",
-        "lucide": "^1.26.0",
+        "lucide": "^1.27.0",
         "marked": "^18.0.7",
       },
       "devDependencies": {
@@ -100,7 +100,7 @@
 
     "lightningcss-win32-x64-msvc": ["lightningcss-win32-x64-msvc@1.32.0", "", { "os": "win32", "cpu": "x64" }, "sha512-Amq9B/SoZYdDi1kFrojnoqPLxYhQ4Wo5XiL8EVJrVsB8ARoC1PWW6VGtT0WKCemjy8aC+louJnjS7U18x3b06Q=="],
 
-    "lucide": ["lucide@1.26.0", "", {}, "sha512-koKiuPC/3VLiIGY+hXn9pSurD4b54LgvkNqb9FjF8A4l5ftgRwFgmpPHoOnMLPbNj8oiDjMfMsnU3FITuxZ6Mw=="],
+    "lucide": ["lucide@1.27.0", "", {}, "sha512-m78hY+pL+dLrVvDEl68oYTdvjXW5Nz0ULDsUfbWfl7lzNDv1kFZGG+bAEm2eGEmUyvpZgAcyRwNhFljIErss3w=="],
 
     "marked": ["marked@18.0.7", "", { "bin": { "marked": "bin/marked.js" } }, "sha512-iDVQ5ldaiKXn6b2JroX5kgRfmwgqolW7NpaEzTl1k/2Zh1njIEN9yniyLV/mOvWwtsE8OGgkjsCYvijuPk1dtA=="],
 
