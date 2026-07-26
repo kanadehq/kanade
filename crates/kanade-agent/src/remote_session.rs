@@ -133,11 +133,24 @@ async fn handle(
             allow_input: _,
         } => {
             let mut guard = live.lock().await;
-            if let Some(existing) = guard.as_ref() {
-                return RemoteCtrlReply::refused(format!(
-                    "session {} already has this machine's display",
-                    existing.session_id
-                ));
+            match decide_start(guard.as_ref().map(|l| l.session_id.as_str()), &session_id) {
+                StartOutcome::AlreadyRunning => {
+                    // Idempotent, mirroring Stop. A lost reply or a viewer
+                    // reconnecting re-issues the same Start, and refusing it
+                    // would tell the operator their own session was someone
+                    // else's — while the session they are asking for is in
+                    // fact already running for them.
+                    return RemoteCtrlReply {
+                        accepted: true,
+                        ..Default::default()
+                    };
+                }
+                StartOutcome::HeldByOther(other) => {
+                    return RemoteCtrlReply::refused(format!(
+                        "session {other} already has this machine's display"
+                    ));
+                }
+                StartOutcome::Start => {}
             }
 
             match start(client, exe, &session_id, output_index, quality, max_fps).await {
@@ -194,6 +207,35 @@ async fn handle(
         RemoteCtrl::Tune { .. } => {
             RemoteCtrlReply::refused("tune is not implemented yet; stop and start instead")
         }
+    }
+}
+
+/// What a `Start` request should do.
+#[derive(Debug, PartialEq, Eq)]
+enum StartOutcome {
+    /// Nothing is running; spawn a capture child.
+    Start,
+    /// This exact session is already live; accept without doing anything.
+    AlreadyRunning,
+    /// A *different* session holds this machine — carries its id.
+    HeldByOther(String),
+}
+
+/// Decide what a `Start` for `requested` should do given what is `held`.
+///
+/// The `AlreadyRunning` case is why this is not just a `is_some()` check.
+/// `Start` has the same delivery problem `Stop` does: a reply can be lost,
+/// and a reconnecting viewer re-issues its `Start`. Refusing that told the
+/// operator their own session id "already has this machine's display" —
+/// naming their session back at them as though a colleague had taken it,
+/// while the thing they asked for was in fact already running.
+///
+/// Only a *different* id is a genuine conflict, and only that is refused.
+fn decide_start(held: Option<&str>, requested: &str) -> StartOutcome {
+    match held {
+        Some(h) if h == requested => StartOutcome::AlreadyRunning,
+        Some(h) => StartOutcome::HeldByOther(h.to_string()),
+        None => StartOutcome::Start,
     }
 }
 
@@ -403,6 +445,56 @@ impl std::io::Read for PipeReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn start_on_an_idle_machine_starts() {
+        assert_eq!(decide_start(None, "s1"), StartOutcome::Start);
+    }
+
+    #[test]
+    fn restarting_the_same_session_is_idempotent() {
+        // The bug this fixes: a lost reply or a viewer reconnect re-issues
+        // the same Start, and refusing it reported the caller's own session
+        // as the one holding the machine.
+        assert_eq!(decide_start(Some("s1"), "s1"), StartOutcome::AlreadyRunning);
+    }
+
+    #[test]
+    fn start_while_another_session_holds_the_display_is_refused() {
+        // The genuine conflict — DXGI allows one duplication per output.
+        assert_eq!(
+            decide_start(Some("s1"), "s2"),
+            StartOutcome::HeldByOther("s1".to_string())
+        );
+    }
+
+    #[test]
+    fn start_matches_session_ids_exactly() {
+        assert!(matches!(
+            decide_start(Some("session-1"), "session-10"),
+            StartOutcome::HeldByOther(_)
+        ));
+        assert!(matches!(
+            decide_start(Some("S1"), "s1"),
+            StartOutcome::HeldByOther(_)
+        ));
+    }
+
+    #[test]
+    fn start_and_stop_agree_on_what_counts_as_the_same_session() {
+        // The two decisions must not disagree: a Start that considers a
+        // session "already running" and a Stop that considers the same id
+        // "held by other" would leave a session nobody can end.
+        for (held, req) in [("s1", "s1"), ("s1", "s2"), ("session-1", "session-10")] {
+            let same_for_start =
+                matches!(decide_start(Some(held), req), StartOutcome::AlreadyRunning);
+            let same_for_stop = matches!(decide_stop(Some(held), req), StopOutcome::Stop);
+            assert_eq!(
+                same_for_start, same_for_stop,
+                "disagreed on {held} vs {req}"
+            );
+        }
+    }
 
     #[test]
     fn stop_tears_down_the_session_it_names() {
