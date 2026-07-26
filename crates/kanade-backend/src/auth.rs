@@ -274,6 +274,20 @@ fn parse_allowed_features(raw: Option<&str>) -> Option<Vec<Feature>> {
     }
 }
 
+/// True for `/api/remote/{pc_id}/ws` — the one `/api/*` route [`verify`]
+/// waves through for the handler to authenticate itself.
+///
+/// Matched against the raw request path, because this middleware runs before
+/// routing and so has no `MatchedPath` to compare. Deliberately strict about
+/// the shape: a `pc_id` containing `/` would let a deeper path opt itself out
+/// of authentication by ending in `/ws`, and this is the only allow-list
+/// entry whose route is not public.
+fn is_remote_ws_path(path: &str) -> bool {
+    path.strip_prefix("/api/remote/")
+        .and_then(|rest| rest.strip_suffix("/ws"))
+        .is_some_and(|pc_id| !pc_id.is_empty() && !pc_id.contains('/'))
+}
+
 /// Resolve the caller's authoritative identity from a bearer credential —
 /// steps 1, 3 and 4 of the module doc, in that order.
 ///
@@ -392,6 +406,18 @@ pub async fn verify(
         || path == "/api/auth/forgot-password"
         || path.starts_with("/api/auth/password-setup/")
     {
+        return Ok(next.run(req).await);
+    }
+
+    // 2b. The remote-assistance WebSocket is **not** public — it is the one
+    //     route this middleware cannot authenticate. A browser cannot set an
+    //     `Authorization` header on a WebSocket, so its credential arrives in
+    //     `Sec-WebSocket-Protocol` and the handler verifies it by calling
+    //     [`verify_bearer`] directly. It also re-checks the role and the page
+    //     permission, because bypassing this layer means [`require_operator`]
+    //     and [`require_features`] have no [`Claims`] to read. See
+    //     [`crate::api::remote`].
+    if is_remote_ws_path(path) {
         return Ok(next.run(req).await);
     }
 
@@ -765,6 +791,24 @@ mod tests {
         let padded = format!("  {}\t", mint("carol", &["operator"]));
         let claims = verify_token(&pool, Some(&padded)).await.expect("accepted");
         assert_eq!(claims.role(), Role::Operator);
+    }
+
+    #[test]
+    fn remote_ws_allow_list_is_exactly_one_segment() {
+        assert!(is_remote_ws_path("/api/remote/PC1234/ws"));
+        // Casing is not folded anywhere else in the fleet either — pc_ids
+        // are OS hostnames, verbatim.
+        assert!(is_remote_ws_path("/api/remote/minipc/ws"));
+
+        // Anything that is not exactly this route keeps its authentication.
+        assert!(!is_remote_ws_path("/api/remote//ws"));
+        assert!(!is_remote_ws_path("/api/remote/PC1/frames"));
+        assert!(!is_remote_ws_path("/api/remote/PC1/ws/extra"));
+        assert!(!is_remote_ws_path("/api/agents"));
+        // The one that matters: a nested path must not opt itself out of
+        // auth just by ending in `/ws`.
+        assert!(!is_remote_ws_path("/api/remote/../accounts/ws"));
+        assert!(!is_remote_ws_path("/api/remote/a/b/ws"));
     }
 
     #[test]

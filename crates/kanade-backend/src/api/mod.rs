@@ -28,6 +28,7 @@ pub mod password_setup;
 pub mod permission_groups;
 pub mod process_perf;
 pub mod query;
+pub mod remote;
 pub mod results;
 pub mod run;
 pub mod schedules;
@@ -169,6 +170,14 @@ pub fn router(state: AppState) -> Router {
             "/api/auth/forgot-password",
             post(password_setup::forgot_password),
         )
+        // #1140: the operator's end of the remote-assistance relay. Sits in
+        // `base` rather than the `operator` group on purpose — this route is
+        // allow-listed out of `auth::verify` (its credential rides
+        // `Sec-WebSocket-Protocol`, which the middleware cannot read), so no
+        // `Claims` reach the `route_layer` gates and they would silently pass
+        // anyone. The handler does identity, role and feature itself; putting
+        // it under `operator` would look like a gate while enforcing nothing.
+        .route("/api/remote/{pc_id}/ws", get(remote::ws))
         .route("/api/agents", get(agents::list))
         // Dashboard "version distribution" card — agent-version histogram
         // for the whole fleet. Static segment, so it resolves ahead of
@@ -609,6 +618,17 @@ pub fn feature_for_path(path: &str) -> Option<Feature> {
 
         // --- Audit ---
         "/api/audit" => Feature::Audit,
+
+        // --- Remote assistance (#1140) ---
+        //
+        // Listed for completeness, NOT for enforcement: this route is
+        // allow-listed out of `auth::verify`, so `require_features` never
+        // sees `Claims` for it and `api::remote::ws` checks the feature
+        // itself. Omitting it here would be worse than redundant — this
+        // table documents itself as the single auditable route→feature map,
+        // and an absent route reads as "commons, open to any authenticated
+        // caller", which a live view of someone's desktop is not.
+        "/api/remote/{pc_id}/ws" => Feature::Remote,
 
         // --- Logs (per-PC log tail page) ---
         "/api/agents/{pc_id}/logs" => Feature::Logs,
