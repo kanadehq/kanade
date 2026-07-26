@@ -81,7 +81,7 @@ windows-service = "0.8.1"
 # because the only consumer is the (Windows-only) capture path.
 # `default-features = false` + `jpeg` keeps every other codec (and the
 # rayon/tiff/png dependency fan-out) out of the tree.
-image = { version = "0.25.9", default-features = false, features = ["jpeg"] }
+image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
 # v0.21: CreateProcessAsUserW + WTSQueryUserToken for run_as: user /
 # system_gui. Feature flags scope the binding to just what we need.
 windows = { version = "0.62.2", features = [
