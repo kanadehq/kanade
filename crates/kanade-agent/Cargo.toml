@@ -75,6 +75,13 @@ which = "8.0.5"
 # scaffolding plus the typed status struct (Running / Stopped + accepted
 # control codes) that SCM expects.
 windows-service = "0.8.1"
+# #1140 PR2: JPEG encode of captured frames, so the probe measures the
+# on-the-wire size a relay would actually push — a raw BGRA frame is
+# ~8 MB at 1080p and tells us nothing about bandwidth. Windows-only
+# because the only consumer is the (Windows-only) capture path.
+# `default-features = false` + `jpeg` keeps every other codec (and the
+# rayon/tiff/png dependency fan-out) out of the tree.
+image = { version = "0.25.9", default-features = false, features = ["jpeg"] }
 # v0.21: CreateProcessAsUserW + WTSQueryUserToken for run_as: user /
 # system_gui. Feature flags scope the binding to just what we need.
 windows = { version = "0.62.2", features = [
@@ -88,6 +95,14 @@ windows = { version = "0.62.2", features = [
     # #418 `on: network_change`: NotifyAddrChange (blocking) to wake the
     # network-change watcher when the IP address table changes.
     "Win32_NetworkManagement_IpHelper",
+    # #1140 PR2: DXGI Desktop Duplication screen capture. D3D11CreateDevice
+    # gives us the device the duplication is bound to; the Dxgi features
+    # carry IDXGIOutput1::DuplicateOutput + AcquireNextFrame and the
+    # DXGI_FORMAT_* / RECT types the frame descriptors use.
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
     # #418 `constraints.require.network`: GetNetworkConnectivityHint
     # (iphlpapi) returns NL_NETWORK_CONNECTIVITY_HINT, which lives under
     # the WinSock module — so the connectivity gate needs this feature.
