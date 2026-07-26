@@ -66,6 +66,8 @@ mod capture_frame_io;
 #[cfg(target_os = "windows")]
 mod capture_probe;
 #[cfg(target_os = "windows")]
+mod remote_session;
+#[cfg(target_os = "windows")]
 mod screen_capture;
 
 use std::path::{Path, PathBuf};
@@ -886,7 +888,17 @@ pub(crate) async fn run_agent() -> Result<()> {
     // gate — reads truthful idle instead of the stale WTS LastInputTime.
     #[cfg(target_os = "windows")]
     if let Ok(self_exe) = std::env::current_exe() {
-        tokio::spawn(session_supervisor::run(self_exe));
+        tokio::spawn(session_supervisor::run(self_exe.clone()));
+        // #1140 PR3b: serve `remote.ctrl.<pc_id>`. Subscribing unconditionally
+        // at startup is the point — the responder has to already be listening
+        // when an operator first clicks "connect", so it cannot be started on
+        // demand. Subscribing costs nothing until a Start arrives: no capture
+        // child exists, and therefore no capture, encoding or traffic.
+        tokio::spawn(remote_session::serve(
+            client.clone(),
+            pc_id.clone(),
+            self_exe,
+        ));
     }
     // #841 PR2: native Windows Event Log reader — power/session/sleep lanes
     // straight from the log via EvtQuery, replacing the collect-winlog-events
