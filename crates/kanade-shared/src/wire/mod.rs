@@ -30,8 +30,8 @@ pub use logs::LogsRequest;
 pub use obs_event::ObsEvent;
 pub use process_perf::{ProcessPerf, ProcessSnapshot};
 pub use remote::{
-    FrameMeta, FrameMetaError, MAX_TILE_BYTES, MouseButton, RemoteCtrl, RemoteCtrlReply,
-    RemoteInput, TileEncoding, header as remote_header,
+    FrameKind, FrameMeta, FrameMetaError, MAX_TILE_BYTES, MouseButton, RemoteCtrl, RemoteCtrlReply,
+    RemoteInput, TileEncoding, frame_kind, gap_headers, header as remote_header, resumed_headers,
 };
 pub use result::{
     EXIT_SKIP_DEADLINE, EXIT_SKIP_REVOKED, EXIT_SKIP_STALENESS, EXIT_SKIP_VERSION_PIN, ExecResult,

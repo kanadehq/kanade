@@ -755,15 +755,33 @@ pub(crate) fn active_console_session() -> Option<u32> {
     if s == u32::MAX { None } else { Some(s) }
 }
 
-/// Spawn `"<exe>" --session-agent` as the logged-in user, capturing its stdout.
+/// Spawn `"<exe>" --session-agent` as the logged-in user — the #855 idle
+/// sensor. Thin wrapper over [`spawn_session_child`], kept so the sensor's
+/// call site reads as what it is.
+pub(crate) fn spawn_session_agent_child(exe: &std::path::Path) -> Result<SessionAgentChild> {
+    spawn_session_child(exe, &["--session-agent"])
+}
+
+/// Spawn `"<exe>" <args...>` as the logged-in user, capturing its stdout.
+///
 /// Reuses the `RunAs::User` token / env-block / `CreateProcessAsUserW` dance,
 /// but: only stdout is piped, the Job is `KILL_ON_JOB_CLOSE`, and there is no
-/// timeout/script — it's a long-lived sensor read by [`read_lines`].
-pub(crate) fn spawn_session_agent_child(exe: &std::path::Path) -> Result<SessionAgentChild> {
+/// timeout/script — it's a long-lived child read by [`read_lines`] (NDJSON)
+/// or by a binary frame reader.
+///
+/// `args` are appended verbatim after the quoted exe path. They are the
+/// agent's own literal flags, never operator input, so they are not quoted:
+/// quoting them would only matter for a value with a space in it, and
+/// introducing that would be a bug in the caller rather than something to
+/// paper over here.
+pub(crate) fn spawn_session_child(
+    exe: &std::path::Path,
+    args: &[&str],
+) -> Result<SessionAgentChild> {
     unsafe {
         let session = WTSGetActiveConsoleSessionId();
         if session == u32::MAX {
-            bail!("no active console session — session-agent needs a logged-in user");
+            bail!("no active console session — an in-session child needs a logged-in user");
         }
         let token = acquire_token(RunAs::User, session)?;
 
@@ -783,11 +801,15 @@ pub(crate) fn spawn_session_agent_child(exe: &std::path::Path) -> Result<Session
             std::ptr::null_mut()
         });
 
-        // Command line: the current exe + `--session-agent`. push_quoted_arg
-        // handles the exe path quoting; the flag is a plain literal.
+        // Command line: the current exe + the caller's flags.
+        // push_quoted_arg handles the exe path quoting; the flags are plain
+        // literals owned by the agent.
         let mut cmd = String::new();
         push_quoted_arg(&mut cmd, &exe.to_string_lossy());
-        cmd.push_str(" --session-agent");
+        for a in args {
+            cmd.push(' ');
+            cmd.push_str(a);
+        }
         let mut cmd_buf: Vec<u16> = cmd.encode_utf16().collect();
         cmd_buf.push(0);
 
