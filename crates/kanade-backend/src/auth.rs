@@ -14,9 +14,11 @@
 //!   4. JWT mode (HS256) — `aud=kanade` + `exp`. On a valid signature the
 //!      caller's `sub` is looked up in the SQLite `users` table and the
 //!      **DB row is authoritative**: a missing row → 401, a `disabled`
-//!      row → 403, otherwise the DB `role` (not the token's claim) is
-//!      injected into [`Claims`]. This makes `disable` / role changes
-//!      take effect immediately rather than waiting for `exp`.
+//!      row → 401 as well (**not** 403 — the SPA's expired-token path then
+//!      logs the user out instead of trapping them on a page that spams
+//!      permission toasts, Gemini #331), otherwise the DB `role` (not the
+//!      token's claim) is injected into [`Claims`]. This makes `disable` /
+//!      role changes take effect immediately rather than waiting for `exp`.
 //!
 //! Secret resolution is registry-first, env-second:
 //!
@@ -30,6 +32,13 @@
 //! `JwtSecret` is the fleet-wide skeleton key (anyone holding it can
 //! mint admin tokens), so it lives **only on the backend host** — agents
 //! and the CLI never need it.
+//!
+//! Steps 1, 3 and 4 live in [`verify_bearer`] rather than in the middleware
+//! body, because not every route can be authenticated by a layer: a browser
+//! cannot set an `Authorization` header on a WebSocket, so the
+//! remote-assistance socket (#1140) verifies its `Sec-WebSocket-Protocol`
+//! credential by calling [`verify_bearer`] directly. One implementation, one
+//! place where the DB stays authoritative.
 //!
 //! Per-route role enforcement is via the [`require_operator`] /
 //! [`require_admin`] `route_layer` middleware applied to the mutating /
@@ -265,12 +274,101 @@ fn parse_allowed_features(raw: Option<&str>) -> Option<Vec<Feature>> {
     }
 }
 
+/// Resolve the caller's authoritative identity from a bearer credential —
+/// steps 1, 3 and 4 of the module doc, in that order.
+///
+/// This is the **single** implementation of "who is this caller", shared by
+/// the `/api/*` middleware ([`verify`]) and by the routes that cannot go
+/// through it. A browser cannot set an `Authorization` header on a WebSocket,
+/// so the remote-assistance socket (#1140) carries its credential in
+/// `Sec-WebSocket-Protocol` and verifies it here instead of via the layer.
+/// Sharing one function is what keeps the DB authoritative everywhere: `role`,
+/// `disabled` and `allowed_features` are re-read on every call, so a
+/// second verifier can never become the one path where an account change
+/// doesn't take effect.
+///
+/// `token` is the raw credential *without* the `Bearer ` prefix; blank and
+/// whitespace-only values are treated as absent. Every `Err` on this path
+/// maps to a `401` (see [`unauth`]) — including a disabled account, so the
+/// SPA's expired-token path logs the user out rather than trapping them on a
+/// page that spams permission toasts (Gemini #331). The string is the reason;
+/// callers own the logging so each can attach its own context.
+pub async fn verify_bearer(pool: &SqlitePool, token: Option<&str>) -> Result<Claims, String> {
+    // 1. Auth opt-out for local development. [`verify`] has already
+    //    short-circuited on this before it gets here (its check covers the
+    //    untokened paths too), so this branch is what the non-middleware
+    //    callers rely on — without it, a dev backend started with
+    //    `KANADE_AUTH_DISABLE=1` would refuse the WebSocket for want of a
+    //    credential the SPA never obtained.
+    if env::var(ENV_DISABLE).is_ok() {
+        return Ok(Claims::service("auth-disabled"));
+    }
+    verify_token(pool, token).await
+}
+
+/// The token-dependent half of [`verify_bearer`], split out so the tests can
+/// exercise it without mutating process-global environment state (which would
+/// race every other test in the binary).
+async fn verify_token(pool: &SqlitePool, token: Option<&str>) -> Result<Claims, String> {
+    let Some(token) = token.map(str::trim).filter(|t| !t.is_empty()) else {
+        return Err("missing bearer token".to_string());
+    };
+
+    // 3. Static service token: admin-equivalent. A mismatch is NOT a
+    //    rejection — fall through to JWT so user tokens coexist.
+    if let Some(expected) = resolve_static_token()
+        && constant_time_eq(token.as_bytes(), expected.as_bytes())
+    {
+        return Ok(Claims::service("service-token"));
+    }
+
+    // 4. JWT mode.
+    let secret = signing_secret();
+    let key = DecodingKey::from_secret(secret.as_bytes());
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.set_audience(&[EXPECTED_AUDIENCE]);
+
+    let claims = match decode::<Claims>(token, &key, &validation) {
+        Ok(data) => data.claims,
+        Err(e) => return Err(format!("invalid token: {e}")),
+    };
+
+    // DB is authoritative: re-read role + disabled now so account
+    // changes apply immediately rather than at the token's exp.
+    match lookup_user(pool, &claims.sub).await {
+        Ok(Some(user)) => {
+            if user.disabled {
+                return Err("account disabled".to_string());
+            }
+            let mut claims = claims;
+            // DB is authoritative for BOTH role and the page allow-list —
+            // overwrite whatever the token carried (the mint path never sets
+            // allowed_features, but a hand-crafted token might).
+            claims.roles = vec![user.role.as_str().to_string()];
+            claims.allowed_features = user.allowed_features;
+            Ok(claims)
+        }
+        Ok(None) => Err("unknown account".to_string()),
+        Err(e) => {
+            // Fail closed: a DB hiccup must not grant access. Logged here
+            // rather than at the call site because it is an infrastructure
+            // fault, not a rejected caller — the reason handed back is
+            // deliberately vague.
+            error!(error = %e, sub = %claims.sub, "user lookup failed");
+            Err("auth backend unavailable".to_string())
+        }
+    }
+}
+
 pub async fn verify(
     State(pool): State<SqlitePool>,
     req: Request,
     next: Next,
 ) -> Result<Response, Response> {
-    // 1. Auth opt-out for local development.
+    // 1. Auth opt-out for local development. Checked here rather than left
+    //    to [`verify_bearer`] below because this one covers *every* path —
+    //    the SPA static files and /health included — while the call below is
+    //    only reached by the tokened `/api/*` routes.
     if env::var(ENV_DISABLE).is_ok() {
         let mut req = req;
         req.extensions_mut()
@@ -301,63 +399,20 @@ pub async fn verify(
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|h| h.strip_prefix("Bearer "))
-        .map(str::trim)
-        .filter(|t| !t.is_empty());
-    let Some(token) = token else {
-        return Err(unauth("missing bearer token"));
-    };
+        .and_then(|h| h.strip_prefix("Bearer "));
 
-    // 3. Static service token: admin-equivalent. A mismatch is NOT a
-    //    rejection — fall through to JWT so user tokens coexist.
-    if let Some(expected) = resolve_static_token()
-        && constant_time_eq(token.as_bytes(), expected.as_bytes())
-    {
-        let mut req = req;
-        req.extensions_mut()
-            .insert(Claims::service("service-token"));
-        return Ok(next.run(req).await);
-    }
-
-    // 4. JWT mode.
-    let secret = signing_secret();
-    let key = DecodingKey::from_secret(secret.as_bytes());
-    let mut validation = Validation::new(Algorithm::HS256);
-    validation.set_audience(&[EXPECTED_AUDIENCE]);
-
-    let claims = match decode::<Claims>(token, &key, &validation) {
-        Ok(data) => data.claims,
-        Err(e) => {
-            warn!(error = %e, path, "JWT verify failed");
-            return Err(unauth(&format!("invalid token: {e}")));
-        }
-    };
-
-    // DB is authoritative: re-read role + disabled now so account
-    // changes apply immediately rather than at the token's exp.
-    match lookup_user(&pool, &claims.sub).await {
-        Ok(Some(user)) => {
-            if user.disabled {
-                // 401 (not 403) so the SPA's expired-token path logs the
-                // user out instead of trapping them on a page that spams
-                // permission toasts (Gemini #331).
-                return Err(unauth("account disabled"));
-            }
-            let mut claims = claims;
-            // DB is authoritative for BOTH role and the page allow-list —
-            // overwrite whatever the token carried (the mint path never sets
-            // allowed_features, but a hand-crafted token might).
-            claims.roles = vec![user.role.as_str().to_string()];
-            claims.allowed_features = user.allowed_features;
+    match verify_bearer(&pool, token).await {
+        Ok(claims) => {
             let mut req = req;
             req.extensions_mut().insert(claims);
             Ok(next.run(req).await)
         }
-        Ok(None) => Err(unauth("unknown account")),
-        Err(e) => {
-            // Fail closed: a DB hiccup must not grant access.
-            error!(error = %e, sub = %claims.sub, "user lookup failed");
-            Err(unauth("auth backend unavailable"))
+        Err(reason) => {
+            // The path is the context worth having in the log, and it is only
+            // known here — which is why [`verify_token`] returns the reason
+            // instead of logging it.
+            warn!(path, reason, "auth rejected");
+            Err(unauth(&reason))
         }
     }
 }
@@ -604,6 +659,112 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(eff("u").await, None);
+    }
+
+    /// Mint a token the way `/api/auth/login` does, with a caller-chosen
+    /// `roles` claim so the tests can prove the DB overrides it.
+    fn mint(sub: &str, roles: &[&str]) -> String {
+        use jsonwebtoken::{EncodingKey, Header, encode};
+        let claims = Claims {
+            sub: sub.into(),
+            exp: 4_102_444_800,
+            aud: Some(EXPECTED_AUDIENCE.to_string()),
+            roles: roles.iter().map(|r| r.to_string()).collect(),
+            allowed_features: None,
+        };
+        encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(signing_secret().as_bytes()),
+        )
+        .expect("mint")
+    }
+
+    async fn test_pool() -> SqlitePool {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn verify_token_rejects_absent_and_blank_credentials() {
+        let pool = test_pool().await;
+        for token in [None, Some(""), Some("   ")] {
+            assert_eq!(
+                verify_token(&pool, token).await.unwrap_err(),
+                "missing bearer token"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn verify_token_rejects_a_bad_signature() {
+        let pool = test_pool().await;
+        let err = verify_token(&pool, Some("not.a.jwt")).await.unwrap_err();
+        assert!(err.starts_with("invalid token: "), "{err}");
+    }
+
+    #[tokio::test]
+    async fn verify_token_lets_the_db_override_the_token() {
+        let pool = test_pool().await;
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, role, allowed_features) \
+             VALUES ('alice', 'x', 'viewer', '[\"audit\"]')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // The token claims admin and carries no allow-list; the DB row says
+        // viewer, restricted to Audit. The DB wins on both — this is the
+        // property the WebSocket path must not lose by verifying separately.
+        let claims = verify_token(&pool, Some(&mint("alice", &["admin"])))
+            .await
+            .expect("accepted");
+        assert_eq!(claims.role(), Role::Viewer);
+        assert_eq!(claims.allowed_features, Some(vec![Feature::Audit]));
+        assert_eq!(claims.sub, "alice");
+    }
+
+    #[tokio::test]
+    async fn verify_token_rejects_disabled_and_unknown_accounts() {
+        let pool = test_pool().await;
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, role, disabled) \
+             VALUES ('bob', 'x', 'admin', 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // A still-valid token whose account was disabled since it was minted.
+        assert_eq!(
+            verify_token(&pool, Some(&mint("bob", &["admin"])))
+                .await
+                .unwrap_err(),
+            "account disabled"
+        );
+        // A well-signed token for an account that no longer exists.
+        assert_eq!(
+            verify_token(&pool, Some(&mint("ghost", &["admin"])))
+                .await
+                .unwrap_err(),
+            "unknown account"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_token_trims_surrounding_whitespace() {
+        let pool = test_pool().await;
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, role) VALUES ('carol', 'x', 'operator')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let padded = format!("  {}\t", mint("carol", &["operator"]));
+        let claims = verify_token(&pool, Some(&padded)).await.expect("accepted");
+        assert_eq!(claims.role(), Role::Operator);
     }
 
     #[test]
