@@ -300,6 +300,28 @@ pub const OBJECT_RESULT_OUTPUT: &str = "result_output";
 /// `kanade-shared::bootstrap`.
 pub const OBJECT_COLLECTIONS: &str = "collections";
 
+/// The NATS broker's default `max_payload`. A publish above this is
+/// rejected outright, which is why every variable-size thing this system
+/// puts in a single message is budgeted against it.
+///
+/// Named rather than spelled inline so the derivation below reads as a
+/// derivation. If a deployment ever raises the broker's setting, this is
+/// the one place that has to learn about it.
+pub const NATS_DEFAULT_MAX_PAYLOAD: usize = 1024 * 1024;
+
+/// How large a single variable-size blob may be inside one NATS message:
+/// a quarter of [`NATS_DEFAULT_MAX_PAYLOAD`], leaving the other
+/// three-quarters for whatever structured fields travel alongside it.
+///
+/// Shared by every such budget in the system — currently
+/// [`STDOUT_INLINE_THRESHOLD`] and `wire::MAX_TILE_BYTES`. Those are
+/// *different concepts* (when to spill stdout to the Object Store; how
+/// far an encoder may let one screen tile grow) and deliberately remain
+/// separate constants, but they answer to the same broker limit, so the
+/// limit lives in one place and each concept derives from it. Restating
+/// `256 * 1024` at each site would let them drift apart silently.
+pub const NATS_PAYLOAD_BUDGET: usize = NATS_DEFAULT_MAX_PAYLOAD / 4;
+
 /// Inline threshold for `ExecResult.stdout` / `.stderr`. Larger
 /// payloads overflow into [`OBJECT_RESULT_OUTPUT`]. 256 KB = 1/4 of
 /// the NATS default `max_payload` (1 MB) so the rest of the
@@ -309,7 +331,7 @@ pub const OBJECT_COLLECTIONS: &str = "collections";
 /// Lives next to the bucket constant rather than on the agent side
 /// so the SPA / future operator tooling can quote the same threshold
 /// when explaining "why this result has no inline stdout".
-pub const STDOUT_INLINE_THRESHOLD: usize = 256 * 1024;
+pub const STDOUT_INLINE_THRESHOLD: usize = NATS_PAYLOAD_BUDGET;
 
 /// Key inside [`BUCKET_AGENT_CONFIG`] carrying the broadcast target
 /// version. Agents watch this key and self-update when their running
