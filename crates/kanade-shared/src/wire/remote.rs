@@ -94,7 +94,13 @@ impl TileEncoding {
 
 /// Metadata for one tile, carried in NATS headers alongside the raw image
 /// payload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Also `Serialize`/`Deserialize`: the same metadata travels as JSON over
+/// the agent's in-session IPC pipe, where there are no NATS headers to put
+/// it in. One type describing a tile, two encodings of it depending on which
+/// hop it is crossing — the alternative was a near-duplicate struct that
+/// would drift the first time a field was added.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameMeta {
     /// Monotonic per-session frame counter. Tiles of the same frame share
     /// it, which is what lets a viewer decide whether it is assembling a
