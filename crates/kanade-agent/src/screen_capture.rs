@@ -219,8 +219,36 @@ impl CaptureSession {
 
     /// Dimensions of the attached output, valid once the first frame has
     /// been captured (both zero before that).
+    ///
+    /// Retained across access loss: a session that captured at 3840x1600 and
+    /// then hit the lock screen still reports 3840x1600, not `0x0`. The
+    /// staging texture is what must be rebuilt on a mode change, and
+    /// [`Self::ensure_staging`] already forces that whenever `staging` is
+    /// `None` — so zeroing the dimensions bought nothing and made every
+    /// consumer's "what resolution is this session?" answer a lie the moment
+    /// the user locked their PC.
     pub fn dimensions(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+
+    /// Report an unavailable desktop, having first honoured the caller's
+    /// timeout.
+    ///
+    /// Both routes to `Unavailable` return **immediately** from the OS —
+    /// `duplicate_output` fails fast while the desktop is unreachable, and
+    /// `AcquireNextFrame` reports `ACCESS_LOST` without waiting out its
+    /// timeout. Neither is self-pacing, so the sleep has to be here.
+    ///
+    /// This exists because the first attempt at the fix only throttled the
+    /// rebuild-retry route, on the assumption that `ACCESS_LOST` arrived
+    /// after `AcquireNextFrame` had already blocked. A real lock-screen run
+    /// disproved it: the session ping-ponged between a *successful*
+    /// `duplicate_output` and an instant `ACCESS_LOST` on the next acquire,
+    /// touching the throttled branch not once — 8421 `Unavailable`s in 90 s
+    /// where ~900 was the intended ceiling.
+    fn unavailable(timeout_ms: u32, reason: String) -> Capture {
+        std::thread::sleep(Duration::from_millis(u64::from(timeout_ms)));
+        Capture::Unavailable(reason)
     }
 
     /// Wait up to `timeout_ms` for the next desktop update.
@@ -244,23 +272,15 @@ impl CaptureSession {
                     self.needs_rebuild = false;
                     // Access loss often accompanies a mode change, so force
                     // the staging texture to be re-created at the new size.
+                    // The cached dimensions deliberately survive — see
+                    // `dimensions`.
                     self.staging = None;
-                    self.width = 0;
-                    self.height = 0;
                 }
                 Err(e) => {
-                    // Honour the same "wait up to timeout_ms" contract the
-                    // acquire path gets for free from AcquireNextFrame.
-                    // `duplicate_output` fails *immediately* while the
-                    // desktop is unreachable, so without this a caller's
-                    // poll loop would spin through the whole adapter walk
-                    // (cast → GetAdapter → EnumOutputs → DuplicateOutput) as
-                    // fast as the CPU allows for as long as the screen stays
-                    // locked — burning a core through every lunch break.
-                    // Throttling here rather than in each caller keeps the
-                    // timeout meaning one thing across all three outcomes.
-                    std::thread::sleep(Duration::from_millis(u64::from(timeout_ms)));
-                    return Ok(Capture::Unavailable(format!("desktop still gone: {e}")));
+                    return Ok(Self::unavailable(
+                        timeout_ms,
+                        format!("desktop still gone: {e}"),
+                    ));
                 }
             }
         }
@@ -283,7 +303,10 @@ impl CaptureSession {
                 DXGI_ERROR_WAIT_TIMEOUT => Ok(Capture::Idle),
                 DXGI_ERROR_ACCESS_LOST => {
                     self.mark_lost();
-                    Ok(Capture::Unavailable(format!("desktop access lost: {e}")))
+                    Ok(Self::unavailable(
+                        timeout_ms,
+                        format!("desktop access lost: {e}"),
+                    ))
                 }
                 _ => Err(anyhow!("AcquireNextFrame failed: {e}")),
             };
