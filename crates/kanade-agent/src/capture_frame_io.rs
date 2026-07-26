@@ -41,12 +41,31 @@ use serde::{Deserialize, Serialize};
 /// lets the agent report a clear error rather than a truncated read.
 pub const MAX_FRAME_BYTES: usize = 2 * 1024 * 1024;
 
-/// The JSON half of a frame: everything about the tile except its pixels.
+/// The JSON half of a frame: what this message is, and everything about it
+/// except the bytes.
+///
+/// Tagged rather than "a tile, possibly empty" because the two carry
+/// genuinely different information. A gap means capture stopped — the
+/// screen is locked, a UAC prompt is up, the display mode changed — and a
+/// consumer has to be able to say so rather than silently hold the last
+/// picture, which reads to an operator as a frozen but live screen.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct FrameHeader {
-    #[serde(flatten)]
-    pub meta: FrameMeta,
-    pub encoding: TileEncoding,
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum FrameHeader {
+    /// Payload is the encoded image.
+    Tile {
+        #[serde(flatten)]
+        meta: FrameMeta,
+        encoding: TileEncoding,
+    },
+    /// Payload is a UTF-8 reason string.
+    Gap,
+    /// Capture works again but has nothing new to show. No payload.
+    ///
+    /// Needed because a recovered-but-unchanged desktop produces no tiles:
+    /// without an explicit marker, the consumer would keep believing the
+    /// last gap until something on screen happened to move.
+    Resumed,
 }
 
 /// A frame read off the pipe.
@@ -54,6 +73,31 @@ pub struct FrameHeader {
 pub struct CapturedTile {
     pub header: FrameHeader,
     pub payload: Vec<u8>,
+}
+
+impl CapturedTile {
+    /// The tile metadata, when this is a tile.
+    pub fn as_tile(&self) -> Option<(&FrameMeta, TileEncoding)> {
+        match &self.header {
+            FrameHeader::Tile { meta, encoding } => Some((meta, *encoding)),
+            FrameHeader::Gap | FrameHeader::Resumed => None,
+        }
+    }
+
+    /// True when this marks capture recovering with nothing to show yet.
+    pub fn is_resumed(&self) -> bool {
+        matches!(self.header, FrameHeader::Resumed)
+    }
+
+    /// The gap reason, when this is a gap. Lossy-decoded: a mangled reason
+    /// is still worth showing, and failing to report a gap because its
+    /// explanation had a bad byte would be the wrong trade.
+    pub fn as_gap(&self) -> Option<String> {
+        match &self.header {
+            FrameHeader::Gap => Some(String::from_utf8_lossy(&self.payload).into_owned()),
+            FrameHeader::Tile { .. } | FrameHeader::Resumed => None,
+        }
+    }
 }
 
 /// Serialise one tile into a frame.
@@ -144,7 +188,7 @@ mod tests {
     use super::*;
 
     fn header() -> FrameHeader {
-        FrameHeader {
+        FrameHeader::Tile {
             meta: FrameMeta {
                 frame_seq: 7,
                 tile_index: 0,
@@ -177,19 +221,20 @@ mod tests {
         // The property that matters on a stream: no framing drift between
         // consecutive tiles of different sizes.
         let mut buf = Vec::new();
-        let mut h1 = header();
-        h1.meta.tile_index = 0;
+        let h1 = header();
         let mut h2 = header();
-        h2.meta.tile_index = 1;
+        if let FrameHeader::Tile { meta, .. } = &mut h2 {
+            meta.tile_index = 1;
+        }
         buf.extend(encode_frame(&h1, &[1, 2, 3]).unwrap());
         buf.extend(encode_frame(&h2, &vec![9u8; 1000]).unwrap());
 
         let mut cur = std::io::Cursor::new(buf);
         let a = read_frame(&mut cur).expect("first");
         let b = read_frame(&mut cur).expect("second");
-        assert_eq!(a.header.meta.tile_index, 0);
+        assert_eq!(a.as_tile().expect("tile").0.tile_index, 0);
         assert_eq!(a.payload, vec![1, 2, 3]);
-        assert_eq!(b.header.meta.tile_index, 1);
+        assert_eq!(b.as_tile().expect("tile").0.tile_index, 1);
         assert_eq!(b.payload.len(), 1000);
     }
 
@@ -279,10 +324,86 @@ mod tests {
     }
 
     #[test]
+    fn a_gap_round_trips_with_its_reason() {
+        let bytes = encode_frame(&FrameHeader::Gap, b"desktop access lost").expect("encode");
+        let mut cur = std::io::Cursor::new(bytes);
+        let got = read_frame(&mut cur).expect("read");
+        assert_eq!(got.as_gap().as_deref(), Some("desktop access lost"));
+        assert!(got.as_tile().is_none());
+    }
+
+    #[test]
+    fn a_gap_with_invalid_utf8_still_reports_something() {
+        // Losing the gap because its explanation had a bad byte would be the
+        // wrong trade: the operator needs to know capture stopped.
+        let bytes = encode_frame(&FrameHeader::Gap, &[0xFF, 0xFE]).expect("encode");
+        let mut cur = std::io::Cursor::new(bytes);
+        let got = read_frame(&mut cur).expect("read");
+        assert!(got.as_gap().is_some());
+    }
+
+    #[test]
+    fn a_tile_is_not_mistaken_for_a_gap() {
+        let bytes = encode_frame(&header(), &[0xFF, 0xD8]).expect("encode");
+        let mut cur = std::io::Cursor::new(bytes);
+        let got = read_frame(&mut cur).expect("read");
+        assert!(got.as_gap().is_none());
+        assert!(got.as_tile().is_some());
+    }
+
+    #[test]
+    fn gaps_and_tiles_interleave_on_one_stream() {
+        // The ordering property the whole design rests on: a gap must land
+        // between the tiles it separates, not beside them.
+        let mut buf = Vec::new();
+        buf.extend(encode_frame(&header(), &[1, 2]).unwrap());
+        buf.extend(encode_frame(&FrameHeader::Gap, b"locked").unwrap());
+        buf.extend(encode_frame(&header(), &[3, 4]).unwrap());
+
+        let mut cur = std::io::Cursor::new(buf);
+        assert!(read_frame(&mut cur).unwrap().as_tile().is_some());
+        assert_eq!(
+            read_frame(&mut cur).unwrap().as_gap().as_deref(),
+            Some("locked")
+        );
+        assert!(read_frame(&mut cur).unwrap().as_tile().is_some());
+    }
+
+    #[test]
+    fn a_resumed_marker_round_trips_and_is_not_a_gap() {
+        let bytes = encode_frame(&FrameHeader::Resumed, &[]).expect("encode");
+        let mut cur = std::io::Cursor::new(bytes);
+        let got = read_frame(&mut cur).expect("read");
+        assert!(got.is_resumed());
+        assert!(got.as_gap().is_none(), "resumed must not read as a gap");
+        assert!(got.as_tile().is_none());
+    }
+
+    #[test]
+    fn a_gap_recovery_sequence_survives_the_stream() {
+        // The sequence the protocol exists for: capture stops, capture
+        // recovers with nothing to show, then a tile finally arrives. All
+        // three have to be distinguishable and in order.
+        let mut buf = Vec::new();
+        buf.extend(encode_frame(&FrameHeader::Gap, b"locked").unwrap());
+        buf.extend(encode_frame(&FrameHeader::Resumed, &[]).unwrap());
+        buf.extend(encode_frame(&header(), &[0xFF, 0xD8]).unwrap());
+
+        let mut cur = std::io::Cursor::new(buf);
+        assert_eq!(
+            read_frame(&mut cur).unwrap().as_gap().as_deref(),
+            Some("locked")
+        );
+        assert!(read_frame(&mut cur).unwrap().is_resumed());
+        assert!(read_frame(&mut cur).unwrap().as_tile().is_some());
+    }
+
+    #[test]
     fn header_json_is_flat() {
         // `#[serde(flatten)]` keeps the meta fields at the top level, so the
         // IPC shape stays readable when dumped for debugging.
         let s = serde_json::to_string(&header()).unwrap();
+        assert!(s.contains("\"kind\":\"tile\""), "{s}");
         assert!(s.contains("\"frame_seq\":7"), "{s}");
         assert!(s.contains("\"encoding\":\"jpeg\""), "{s}");
         assert!(!s.contains("\"meta\""), "{s}");

@@ -139,6 +139,11 @@ pub struct FrameMeta {
 /// NATS header names for [`FrameMeta`]. Namespaced so they cannot collide
 /// with anything the broker or a future feature adds.
 pub mod header {
+    /// Which kind of message this is: a tile, or a gap in the stream.
+    /// Present on every frame-plane message so a viewer can dispatch before
+    /// trying to parse geometry that a gap does not have.
+    pub const KIND: &str = "Kanade-Kind";
+
     pub const FRAME_SEQ: &str = "Kanade-Frame-Seq";
     pub const TILE_INDEX: &str = "Kanade-Tile-Index";
     pub const TILE_COUNT: &str = "Kanade-Tile-Count";
@@ -152,6 +157,90 @@ pub mod header {
     pub const CAPTURED_AT: &str = "Kanade-Captured-At";
 }
 
+/// What a frame-plane message carries.
+///
+/// The gap variant is why this enum exists. A locked workstation, a UAC
+/// prompt or a display mode change stops capture dead (see the agent's
+/// `screen_capture`), and a viewer only ever told about tiles cannot
+/// distinguish "the picture is still because nothing is changing" from "we
+/// cannot see the screen at all". Those need different words on screen, so
+/// they need different messages on the wire.
+///
+/// Gaps ride the frame plane rather than the control plane because they are
+/// part of what the viewer is *showing*, not a request or a reply — and
+/// because arriving in order with the tiles is what makes them meaningful.
+/// A gap delivered out of band could easily be painted after the frames
+/// that already resumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameKind {
+    /// Headers carry a [`FrameMeta`]; payload is the encoded image.
+    Tile,
+    /// Headers carry nothing else; payload is a UTF-8 reason string.
+    Gap,
+    /// Capture works again, but there is nothing new to show yet. No
+    /// headers beyond the kind, no payload.
+    ///
+    /// Without this, recovery is only observable when the next tile
+    /// happens to arrive — and a desktop that is reachable but unchanged
+    /// produces no tiles at all. An operator would keep reading "screen
+    /// unavailable" for as long as nobody moved a window, long after
+    /// capture had recovered.
+    ///
+    /// The alternative was to force a full frame on recovery, which would
+    /// have meant sending several hundred KB to say "nothing changed" —
+    /// the opposite of the bandwidth argument that shaped this whole
+    /// format.
+    Resumed,
+}
+
+impl FrameKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FrameKind::Tile => "tile",
+            FrameKind::Gap => "gap",
+            FrameKind::Resumed => "resumed",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "tile" => Some(FrameKind::Tile),
+            "gap" => Some(FrameKind::Gap),
+            "resumed" => Some(FrameKind::Resumed),
+            _ => None,
+        }
+    }
+}
+
+/// Headers for a gap message. The reason travels as the payload, not a
+/// header, because it is free text of unbounded length and headers are a
+/// poor place for that.
+pub fn gap_headers() -> async_nats::HeaderMap {
+    let mut h = async_nats::HeaderMap::new();
+    h.insert(header::KIND, FrameKind::Gap.as_str());
+    h
+}
+
+/// Headers for a resumed message. Carries nothing but the kind — the
+/// message exists to mark a transition, not to deliver content.
+pub fn resumed_headers() -> async_nats::HeaderMap {
+    let mut h = async_nats::HeaderMap::new();
+    h.insert(header::KIND, FrameKind::Resumed.as_str());
+    h
+}
+
+/// Read the kind off a frame-plane message.
+///
+/// A message with no `Kanade-Kind` header is rejected rather than assumed:
+/// every publisher of this plane sets it, so a missing one means the
+/// message did not come from a publisher that agrees with this contract.
+pub fn frame_kind(h: &async_nats::HeaderMap) -> Result<FrameKind, FrameMetaError> {
+    let v = h
+        .get(header::KIND)
+        .ok_or(FrameMetaError::Missing(header::KIND))?;
+    FrameKind::parse(v.as_str()).ok_or_else(|| FrameMetaError::UnknownKind(v.as_str().to_string()))
+}
+
 /// A frame header was missing or unparseable.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FrameMetaError {
@@ -161,6 +250,8 @@ pub enum FrameMetaError {
     NotANumber { name: &'static str, value: String },
     #[error("unknown tile encoding {0:?}")]
     UnknownEncoding(String),
+    #[error("unknown frame kind {0:?}")]
+    UnknownKind(String),
     #[error("tile {w}x{h} at ({x},{y}) does not fit a {screen_w}x{screen_h} screen")]
     OutOfBounds {
         x: u32,
@@ -180,6 +271,7 @@ impl FrameMeta {
     /// payload, not the geometry).
     pub fn to_headers(&self, encoding: TileEncoding) -> async_nats::HeaderMap {
         let mut h = async_nats::HeaderMap::new();
+        h.insert(header::KIND, FrameKind::Tile.as_str());
         h.insert(header::FRAME_SEQ, self.frame_seq.to_string().as_str());
         h.insert(header::TILE_INDEX, self.tile_index.to_string().as_str());
         h.insert(header::TILE_COUNT, self.tile_count.to_string().as_str());
@@ -572,6 +664,59 @@ mod tests {
             FrameMeta::from_headers(&h),
             Err(FrameMetaError::OutOfBounds { .. })
         ));
+    }
+
+    #[test]
+    fn tile_headers_declare_their_kind() {
+        let h = meta().to_headers(TileEncoding::Jpeg);
+        assert_eq!(frame_kind(&h).expect("kind"), FrameKind::Tile);
+    }
+
+    #[test]
+    fn gap_headers_declare_their_kind_and_carry_no_geometry() {
+        let h = gap_headers();
+        assert_eq!(frame_kind(&h).expect("kind"), FrameKind::Gap);
+        // A gap has no tile to describe; asking for one must fail cleanly
+        // rather than yield a zero-sized tile a viewer would try to paint.
+        assert!(FrameMeta::from_headers(&h).is_err());
+    }
+
+    #[test]
+    fn a_message_without_a_kind_is_rejected() {
+        // Not defaulted to Tile: a missing kind means the publisher does not
+        // share this contract, and guessing would hand geometry parsing a
+        // message that may have none.
+        let h = async_nats::HeaderMap::new();
+        assert_eq!(
+            frame_kind(&h).unwrap_err(),
+            FrameMetaError::Missing(header::KIND)
+        );
+    }
+
+    #[test]
+    fn an_unknown_kind_is_rejected_with_its_value() {
+        let mut h = async_nats::HeaderMap::new();
+        h.insert(header::KIND, "cursor");
+        assert_eq!(
+            frame_kind(&h).unwrap_err(),
+            FrameMetaError::UnknownKind("cursor".to_string())
+        );
+    }
+
+    #[test]
+    fn frame_kind_keys_round_trip() {
+        for k in [FrameKind::Tile, FrameKind::Gap, FrameKind::Resumed] {
+            assert_eq!(FrameKind::parse(k.as_str()), Some(k));
+        }
+        assert_eq!(FrameKind::parse("tiles"), None);
+    }
+
+    #[test]
+    fn resumed_headers_declare_their_kind_and_nothing_else() {
+        let h = resumed_headers();
+        assert_eq!(frame_kind(&h).expect("kind"), FrameKind::Resumed);
+        // Like a gap, it has no tile to describe.
+        assert!(FrameMeta::from_headers(&h).is_err());
     }
 
     #[test]

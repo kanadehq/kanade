@@ -261,6 +261,8 @@ fn run_session_capture(cli: &Cli) -> Result<()> {
         let mut out = std::io::stdout().lock();
         let mut scratch = Vec::new();
         let mut frame_seq: u64 = 0;
+        // Edge-triggered: one gap when capture stops, not one per poll.
+        let mut in_gap = false;
 
         loop {
             if deadline.is_some_and(|d| Instant::now() >= d) {
@@ -269,14 +271,43 @@ fn run_session_capture(cli: &Cli) -> Result<()> {
             let started = Instant::now();
 
             match session.next_frame(100)? {
-                // Nothing to send. `Unavailable` (lock screen / secure
-                // desktop) is silently skipped here: this pipe carries only
-                // tiles, and the gap belongs on the control plane, which
-                // PR3b adds. Until then the agent infers a gap from frames
-                // simply not arriving — acceptable while nothing downstream
-                // renders it, and the first thing PR3b must fix.
-                Capture::Idle | Capture::Unavailable(_) => {}
+                // Nothing changed. Normally that means saying nothing —
+                // an idle desktop is the steady state, not an event. The
+                // exception is the first successful poll after a gap: the
+                // desktop is reachable again, and a consumer that only
+                // learns this from the next tile would keep showing
+                // "unavailable" for as long as nobody moved a window.
+                // A recovered-but-static screen produces no tiles at all,
+                // so the transition needs its own message.
+                Capture::Idle => {
+                    if in_gap {
+                        in_gap = false;
+                        let bytes = encode_frame(&FrameHeader::Resumed, &[])?;
+                        if out.write_all(&bytes).is_err() || out.flush().is_err() {
+                            return Ok(());
+                        }
+                    }
+                }
+                // Capture stopped: locked workstation, UAC secure desktop,
+                // display mode change. Reported rather than skipped, so a
+                // viewer can say "the screen is unavailable" instead of
+                // holding the last picture, which reads as a live but frozen
+                // desktop. Repeats are suppressed because the retry runs at
+                // the poll interval and would otherwise emit ten gaps a
+                // second for as long as the machine stays locked.
+                Capture::Unavailable(reason) => {
+                    if !in_gap {
+                        in_gap = true;
+                        let bytes = encode_frame(&FrameHeader::Gap, reason.as_bytes())?;
+                        if out.write_all(&bytes).is_err() || out.flush().is_err() {
+                            return Ok(());
+                        }
+                    }
+                }
                 Capture::Frame(frame) => {
+                    // A tile is itself proof capture recovered, so no
+                    // separate Resumed marker is needed on this path.
+                    in_gap = false;
                     let tiles = encode_tiles(&frame, cli.session_capture_quality, &mut scratch)?;
                     let tile_count = u16::try_from(tiles.len()).unwrap_or(u16::MAX);
                     let captured_at_ms = SystemTime::now()
@@ -285,7 +316,7 @@ fn run_session_capture(cli: &Cli) -> Result<()> {
                         .unwrap_or(0);
 
                     for (i, tile) in tiles.iter().enumerate() {
-                        let header = FrameHeader {
+                        let header = FrameHeader::Tile {
                             meta: FrameMeta {
                                 frame_seq,
                                 tile_index: u16::try_from(i).unwrap_or(u16::MAX),
@@ -359,37 +390,48 @@ fn run_capture_decode(cli: &Cli) -> Result<()> {
         let mut frames = BTreeSet::new();
         let mut screens = BTreeSet::new();
         let mut largest = 0usize;
+        let mut gaps: Vec<String> = Vec::new();
+        let mut resumes = 0u64;
 
         loop {
             match read_frame(&mut reader) {
-                Ok(tile) => {
+                Ok(msg) => {
+                    if let Some(reason) = msg.as_gap() {
+                        gaps.push(reason);
+                        continue;
+                    }
+                    if msg.is_resumed() {
+                        resumes += 1;
+                        continue;
+                    }
+                    let (meta, _enc) = msg
+                        .as_tile()
+                        .ok_or_else(|| anyhow::anyhow!("message is neither tile nor gap"))?;
                     tiles += 1;
-                    bytes += tile.payload.len() as u64;
-                    largest = largest.max(tile.payload.len());
-                    frames.insert(tile.header.meta.frame_seq);
-                    screens.insert((tile.header.meta.screen_w, tile.header.meta.screen_h));
+                    bytes += msg.payload.len() as u64;
+                    largest = largest.max(msg.payload.len());
+                    frames.insert(meta.frame_seq);
+                    screens.insert((meta.screen_w, meta.screen_h));
                     // Every tile must be a real JPEG and sit inside its
                     // screen — this is the round-trip proof, not a formality.
                     anyhow::ensure!(
-                        tile.payload.starts_with(&[0xFF, 0xD8]),
+                        msg.payload.starts_with(&[0xFF, 0xD8]),
                         "tile {} of frame {} is not a JPEG",
-                        tile.header.meta.tile_index,
-                        tile.header.meta.frame_seq,
+                        meta.tile_index,
+                        meta.frame_seq,
                     );
-                    tile.header.meta.validate().map_err(|e| {
-                        anyhow::anyhow!("frame {} geometry: {e}", tile.header.meta.frame_seq)
-                    })?;
+                    meta.validate()
+                        .map_err(|e| anyhow::anyhow!("frame {} geometry: {e}", meta.frame_seq))?;
                     // The check that makes this dump proof of shippability
                     // rather than just of framing: a tile over the budget
-                    // would be rejected by the broker in PR3b, and a real
-                    // 3840x1600 capture does produce those without
-                    // splitting.
+                    // would be rejected by the broker, and a real 3840x1600
+                    // capture does produce those without splitting.
                     anyhow::ensure!(
-                        tile.payload.len() <= kanade_shared::wire::MAX_TILE_BYTES,
+                        msg.payload.len() <= kanade_shared::wire::MAX_TILE_BYTES,
                         "tile {} of frame {} is {} bytes, over the {} wire budget",
-                        tile.header.meta.tile_index,
-                        tile.header.meta.frame_seq,
-                        tile.payload.len(),
+                        meta.tile_index,
+                        meta.frame_seq,
+                        msg.payload.len(),
                         kanade_shared::wire::MAX_TILE_BYTES,
                     );
                 }
@@ -420,6 +462,12 @@ fn run_capture_decode(cli: &Cli) -> Result<()> {
         );
         for (w, h) in &screens {
             println!("screen      {w}x{h}");
+        }
+        if !gaps.is_empty() || resumes > 0 {
+            println!("gaps        {} ({resumes} resumed)", gaps.len());
+            for g in &gaps {
+                println!("  - {g}");
+            }
         }
         anyhow::ensure!(tiles > 0, "dump contained no frames");
         println!(
