@@ -51,6 +51,14 @@ mod service;
 // the user session and feeds its in-session idle into env_gate's cache.
 #[cfg(target_os = "windows")]
 mod session_supervisor;
+// #1140 PR2: DXGI Desktop Duplication plus the probe that measures it.
+// Windows-only at the module declaration for the same reason `klp` is — the
+// capture path is entirely Win32/D3D11, and the probe's only caller is the
+// Windows runner, so compiling either elsewhere is all dead code.
+#[cfg(target_os = "windows")]
+mod capture_probe;
+#[cfg(target_os = "windows")]
+mod screen_capture;
 
 use std::path::{Path, PathBuf};
 
@@ -83,6 +91,25 @@ struct Cli {
     /// and prints `{"idle_ms":N}` lines to stdout). Not for manual use.
     #[arg(long, hide = true)]
     session_agent: bool,
+
+    /// #1140 PR2 internal: measure the DXGI Desktop Duplication capture path
+    /// instead of running the agent, then exit. Diagnostic only — it must be
+    /// run interactively (a Session 0 service cannot capture a desktop).
+    #[arg(long, hide = true)]
+    capture_probe: bool,
+
+    /// How long `--capture-probe` samples for, in seconds.
+    #[arg(long, hide = true, default_value_t = 10)]
+    capture_probe_secs: u64,
+
+    /// JPEG quality `--capture-probe` encodes at (1-100).
+    #[arg(long, hide = true, default_value_t = 75)]
+    capture_probe_quality: u8,
+
+    /// Write the first captured frame here as a JPEG, so the run can be
+    /// eyeballed and not just trusted.
+    #[arg(long, hide = true)]
+    capture_probe_save: Option<PathBuf>,
 }
 
 /// Top-level entry point.
@@ -100,8 +127,17 @@ fn main() -> Result<()> {
     // It must NOT run the boot sentinel (it would corrupt the service's
     // rollback attempt counter in the shared data dir) and must NOT attach to
     // the SCM — so branch out before either. It reads its own argv only.
-    if Cli::parse().session_agent {
+    let cli = Cli::parse();
+    if cli.session_agent {
         return run_session_agent();
+    }
+
+    // #1140 PR2: the capture probe is a diagnostic, not the agent. It branches
+    // out alongside `--session-agent` and for the same reasons — it must not
+    // run the boot sentinel (it would corrupt the service's rollback attempt
+    // counter) and must not attach to the SCM.
+    if cli.capture_probe {
+        return run_capture_probe(&cli);
     }
 
     // #582: boot sentinel is the VERY first thing — before the service
@@ -140,6 +176,30 @@ fn main() -> Result<()> {
         .build()
         .context("build tokio runtime")?;
     runtime.block_on(run_agent())
+}
+
+/// #1140 PR2: run the screen-capture probe and exit.
+///
+/// Kept as its own function so the platform gate lives in exactly one place
+/// instead of splitting `main`'s control flow across two `cfg` blocks.
+fn run_capture_probe(cli: &Cli) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        capture_probe::run(
+            cli.capture_probe_secs,
+            cli.capture_probe_quality,
+            cli.capture_probe_save.clone(),
+        )
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Referenced so the probe flags don't read as dead fields off-Windows.
+        let _ = cli;
+        anyhow::bail!(
+            "--capture-probe is Windows-only: it measures DXGI Desktop Duplication, \
+             which has no non-Windows counterpart in this agent"
+        )
+    }
 }
 
 /// #855: the `--session-agent` child. Runs INSIDE the user's console session
