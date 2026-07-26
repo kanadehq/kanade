@@ -11,6 +11,7 @@ mod jobtail;
 mod logs;
 mod obs_event;
 mod process_perf;
+mod remote;
 mod result;
 mod server_settings;
 mod staleness;
@@ -28,6 +29,10 @@ pub use jobtail::{JobTailReply, JobTailRequest};
 pub use logs::LogsRequest;
 pub use obs_event::ObsEvent;
 pub use process_perf::{ProcessPerf, ProcessSnapshot};
+pub use remote::{
+    FrameMeta, FrameMetaError, MAX_TILE_BYTES, MouseButton, RemoteCtrl, RemoteCtrlReply,
+    RemoteInput, TileEncoding, header as remote_header,
+};
 pub use result::{
     EXIT_SKIP_DEADLINE, EXIT_SKIP_REVOKED, EXIT_SKIP_STALENESS, EXIT_SKIP_VERSION_PIN, ExecResult,
     is_synthetic_skip,

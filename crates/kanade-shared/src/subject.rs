@@ -225,6 +225,49 @@ pub fn ping(pc_id: &str) -> String {
     format!("agents.{pc_id}.ping")
 }
 
+/// `remote.ctrl.<pc_id>` — #1140 control plane for a remote-assistance
+/// session: start, stop, retune.
+///
+/// Addressed by **pc_id, not session id**, because the agent has to already
+/// be subscribed when the first request arrives — a session-scoped control
+/// subject would have nothing listening at the moment an operator clicks
+/// "connect". Request/reply: the backend sends a [`crate::wire::RemoteCtrl`]
+/// and the agent answers with a [`crate::wire::RemoteCtrlReply`] carrying
+/// the screen geometry (so the SPA can size its canvas before the first
+/// frame lands) or a refusal reason.
+pub fn remote_ctrl(pc_id: &str) -> String {
+    format!("remote.ctrl.{pc_id}")
+}
+
+/// `remote.frame.<session_id>` — agent → backend, one encoded tile per
+/// message.
+///
+/// Session-scoped rather than pc-scoped so two operators viewing the same
+/// machine never have to demultiplex each other, and so a torn-down
+/// session's late frames land on a subject nobody reads any more.
+///
+/// **Core NATS only — deliberately not JetStream.** A frame is worthless the
+/// moment it has been displayed; retaining megabytes per second of them
+/// would cost storage and add latency for nothing. `remote.*` sits outside
+/// the `events.>` / `obs.>` / `commands.*` filters precisely so no stream
+/// catches it — the same reasoning [`NOTIFICATIONS_AMEND_SUBJECT`] records.
+///
+/// The payload is the **raw encoded image**, not JSON: tile metadata rides
+/// in NATS headers (see [`crate::wire::FrameMeta`]). Base64 inside a JSON
+/// envelope inflates every frame by a third, and #1142 measured a typical
+/// session at ~4.0 Mbps — so the envelope alone would cost ~1.3 Mbps per
+/// viewer to carry nothing.
+pub fn remote_frame(session_id: &str) -> String {
+    format!("remote.frame.{session_id}")
+}
+
+/// `remote.input.<session_id>` — backend → agent, one input event per
+/// message. JSON, unlike frames: these are small and structured, and the
+/// encoding overhead that matters for pixels is irrelevant for a mouse move.
+pub fn remote_input(session_id: &str) -> String {
+    format!("remote.input.{session_id}")
+}
+
 // v0.14: subject::inventory_request was retired alongside the
 // hardcoded inventory loop. On-demand collection now goes through
 // the normal exec path (`kanade exec configs/jobs/inventory-
@@ -317,6 +360,39 @@ mod tests {
         assert!(unacked.starts_with("events.notifications."));
         // Still a subset of the EVENTS stream's retained subjects.
         assert!(EVENTS_NOTIFICATIONS_FILTER.starts_with("events."));
+    }
+
+    #[test]
+    fn remote_subjects_format_their_scope() {
+        assert_eq!(remote_ctrl("PC1234"), "remote.ctrl.PC1234");
+        assert_eq!(remote_frame("sess-9f3a"), "remote.frame.sess-9f3a");
+        assert_eq!(remote_input("sess-9f3a"), "remote.input.sess-9f3a");
+    }
+
+    #[test]
+    fn remote_subjects_stay_outside_every_retained_prefix() {
+        // The whole plane is core-NATS-only. If any of these ever started
+        // with a retained prefix, JetStream would quietly begin storing a
+        // video stream — this test is the guard on that.
+        for s in [remote_ctrl("PC1"), remote_frame("s1"), remote_input("s1")] {
+            for retained in [
+                "events.",
+                "obs.",
+                "commands.",
+                "notifications.",
+                "inventory.",
+            ] {
+                assert!(!s.starts_with(retained), "{s} collides with {retained}");
+            }
+        }
+    }
+
+    #[test]
+    fn remote_ctrl_is_pc_scoped_and_frame_is_session_scoped() {
+        // Encodes the design decision: control must be reachable before a
+        // session exists, frames must not be.
+        assert!(remote_ctrl("PC1").ends_with("PC1"));
+        assert!(remote_frame("sess-1").ends_with("sess-1"));
     }
 
     #[test]

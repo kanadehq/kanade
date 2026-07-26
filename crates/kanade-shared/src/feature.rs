@@ -48,6 +48,12 @@ pub enum Feature {
     Jetstream,
     Accounts,
     Settings,
+    /// #1140 — remote screen view / control. Gated like any other page, but
+    /// the stakes differ: every other feature reveals data the endpoint
+    /// already sent us, while this one reaches into a machine somebody is
+    /// sitting at. Being in the catalog is what lets an operator hold, say,
+    /// Agents without also holding Remote.
+    Remote,
 }
 
 impl Feature {
@@ -78,6 +84,7 @@ impl Feature {
             Feature::Jetstream => "jetstream",
             Feature::Accounts => "accounts",
             Feature::Settings => "settings",
+            Feature::Remote => "remote",
         }
     }
 
@@ -109,6 +116,7 @@ impl Feature {
             "jetstream" => Feature::Jetstream,
             "accounts" => Feature::Accounts,
             "settings" => Feature::Settings,
+            "remote" => Feature::Remote,
             _ => return None,
         })
     }
@@ -136,7 +144,7 @@ impl Feature {
     /// Every feature, in catalog order. Drives the SPA's account editor
     /// checkbox list and lets the backend validate a submitted allow-list
     /// against the full known set.
-    pub const ALL: [Feature; 23] = [
+    pub const ALL: [Feature; 24] = [
         Feature::Dashboard,
         Feature::Run,
         Feature::Exec,
@@ -160,6 +168,7 @@ impl Feature {
         Feature::Jetstream,
         Feature::Accounts,
         Feature::Settings,
+        Feature::Remote,
     ];
 }
 
@@ -180,7 +189,7 @@ mod tests {
         // validation + the SPA editor; assert the count matches the array
         // length so adding a variant without updating ALL fails to compile
         // (length mismatch) or fails here.
-        assert_eq!(Feature::ALL.len(), 23);
+        assert_eq!(Feature::ALL.len(), 24);
         // No duplicate keys.
         let mut keys: Vec<&str> = Feature::ALL.iter().map(|f| f.as_str()).collect();
         keys.sort_unstable();
