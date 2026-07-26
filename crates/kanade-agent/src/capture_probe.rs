@@ -34,6 +34,8 @@
 
 use std::time::Duration;
 
+use crate::capture_encode::{bgra_to_rgb, crop_bgra_to_rgb, encode_jpeg};
+
 /// Percentile over a sorted-on-demand sample set.
 ///
 /// Nearest-rank: index `ceil(p/100 * n) - 1`, clamped. Averages hide
@@ -46,66 +48,6 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
     let rank = (p / 100.0 * sorted.len() as f64).ceil() as usize;
     let idx = rank.saturating_sub(1).min(sorted.len() - 1);
     sorted[idx]
-}
-
-/// Convert tightly-packed BGRA to tightly-packed RGB.
-///
-/// Duplication hands back BGRA; JPEG wants RGB, and dropping alpha shrinks
-/// the buffer the encoder walks by a quarter. A trailing partial pixel
-/// (only possible from a malformed buffer) is ignored rather than panicking
-/// — the probe should report a bad frame, not abort the run.
-pub fn bgra_to_rgb(bgra: &[u8], out: &mut Vec<u8>) {
-    out.clear();
-    out.reserve(bgra.len() / 4 * 3);
-    for px in bgra.chunks_exact(4) {
-        out.push(px[2]);
-        out.push(px[1]);
-        out.push(px[0]);
-    }
-}
-
-/// Crop a rectangle out of a tightly-packed BGRA buffer into tightly-packed
-/// RGB, appending to `out`.
-///
-/// This is what makes the dirty-rect comparison possible: encoding only the
-/// changed tiles instead of the whole screen. Returns `false` — leaving
-/// `out` untouched — when the rectangle is empty or falls outside the
-/// buffer, so a malformed rect from DXGI degrades to "skip this tile"
-/// instead of panicking mid-run.
-///
-/// Takes plain coordinates rather than a `DirtyRect` so it stays free of the
-/// Windows-only capture types and testable everywhere.
-#[allow(clippy::too_many_arguments)]
-pub fn crop_bgra_to_rgb(
-    bgra: &[u8],
-    width: u32,
-    height: u32,
-    x: u32,
-    y: u32,
-    w: u32,
-    h: u32,
-    out: &mut Vec<u8>,
-) -> bool {
-    if w == 0 || h == 0 || x + w > width || y + h > height {
-        return false;
-    }
-    let stride = width as usize * 4;
-    if bgra.len() < stride * height as usize {
-        return false;
-    }
-
-    out.clear();
-    out.reserve(w as usize * h as usize * 3);
-    for row in 0..h as usize {
-        let start = (y as usize + row) * stride + x as usize * 4;
-        let line = &bgra[start..start + w as usize * 4];
-        for px in line.chunks_exact(4) {
-            out.push(px[2]);
-            out.push(px[1]);
-            out.push(px[0]);
-        }
-    }
-    true
 }
 
 /// One frame's timings and sizes.
@@ -559,122 +501,9 @@ fn encode_dirty_tiles(
     Ok((total, tiles))
 }
 
-/// JPEG-encode a tightly-packed RGB buffer.
-fn encode_jpeg(rgb: &[u8], width: u32, height: u32, quality: u8) -> anyhow::Result<Vec<u8>> {
-    use anyhow::Context;
-    use image::ExtendedColorType;
-    use image::codecs::jpeg::JpegEncoder;
-
-    let mut out = Vec::new();
-    let mut enc = JpegEncoder::new_with_quality(&mut out, quality);
-    enc.encode(rgb, width, height, ExtendedColorType::Rgb8)
-        .context("jpeg encode")?;
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn bgra_to_rgb_reorders_channels_and_drops_alpha() {
-        // One pixel: B=1 G=2 R=3 A=255 → RGB 3,2,1.
-        let mut out = Vec::new();
-        bgra_to_rgb(&[1, 2, 3, 255], &mut out);
-        assert_eq!(out, vec![3, 2, 1]);
-    }
-
-    #[test]
-    fn bgra_to_rgb_handles_multiple_pixels() {
-        let mut out = Vec::new();
-        bgra_to_rgb(&[1, 2, 3, 255, 10, 20, 30, 255], &mut out);
-        assert_eq!(out, vec![3, 2, 1, 30, 20, 10]);
-    }
-
-    #[test]
-    fn bgra_to_rgb_reuses_the_buffer() {
-        // The probe reuses one Vec across every frame; a stale tail from a
-        // previous (larger) frame would corrupt the encode.
-        let mut out = Vec::new();
-        bgra_to_rgb(&[1, 2, 3, 255, 10, 20, 30, 255], &mut out);
-        bgra_to_rgb(&[9, 8, 7, 255], &mut out);
-        assert_eq!(out, vec![7, 8, 9]);
-    }
-
-    #[test]
-    fn bgra_to_rgb_ignores_trailing_partial_pixel() {
-        let mut out = Vec::new();
-        bgra_to_rgb(&[1, 2, 3, 255, 42, 42], &mut out);
-        assert_eq!(out, vec![3, 2, 1]);
-    }
-
-    /// 2x2 BGRA image, one distinct colour per pixel, laid out row-major:
-    /// (0,0)=blue-ish 1, (1,0)=2, (0,1)=3, (1,1)=4 in the R channel.
-    fn tiny_bgra() -> Vec<u8> {
-        vec![
-            10, 20, 1, 255, // (0,0) → RGB 1,20,10
-            11, 21, 2, 255, // (1,0) → RGB 2,21,11
-            12, 22, 3, 255, // (0,1) → RGB 3,22,12
-            13, 23, 4, 255, // (1,1) → RGB 4,23,13
-        ]
-    }
-
-    #[test]
-    fn crop_extracts_the_requested_rectangle() {
-        let mut out = Vec::new();
-        // Bottom-right single pixel.
-        assert!(crop_bgra_to_rgb(&tiny_bgra(), 2, 2, 1, 1, 1, 1, &mut out));
-        assert_eq!(out, vec![4, 23, 13]);
-    }
-
-    #[test]
-    fn crop_walks_rows_with_the_right_stride() {
-        let mut out = Vec::new();
-        // Right-hand column, both rows — catches an off-by-one in the row
-        // stride, which would silently return the wrong pixels.
-        assert!(crop_bgra_to_rgb(&tiny_bgra(), 2, 2, 1, 0, 1, 2, &mut out));
-        assert_eq!(out, vec![2, 21, 11, 4, 23, 13]);
-    }
-
-    #[test]
-    fn crop_of_the_whole_frame_matches_the_full_conversion() {
-        let bgra = tiny_bgra();
-        let mut cropped = Vec::new();
-        let mut full = Vec::new();
-        assert!(crop_bgra_to_rgb(&bgra, 2, 2, 0, 0, 2, 2, &mut cropped));
-        bgra_to_rgb(&bgra, &mut full);
-        assert_eq!(cropped, full);
-    }
-
-    #[test]
-    fn crop_rejects_a_rectangle_past_the_edge() {
-        let mut out = Vec::new();
-        assert!(!crop_bgra_to_rgb(&tiny_bgra(), 2, 2, 1, 1, 2, 2, &mut out));
-    }
-
-    #[test]
-    fn crop_rejects_an_empty_rectangle() {
-        let mut out = Vec::new();
-        assert!(!crop_bgra_to_rgb(&tiny_bgra(), 2, 2, 0, 0, 0, 1, &mut out));
-        assert!(!crop_bgra_to_rgb(&tiny_bgra(), 2, 2, 0, 0, 1, 0, &mut out));
-    }
-
-    #[test]
-    fn crop_rejects_a_short_buffer() {
-        // A truncated frame must not be read past its end.
-        let mut out = Vec::new();
-        let short = vec![0u8; 4];
-        assert!(!crop_bgra_to_rgb(&short, 2, 2, 0, 0, 2, 2, &mut out));
-    }
-
-    #[test]
-    fn crop_leaves_the_output_untouched_when_it_rejects() {
-        // The probe reuses one scratch buffer; a rejected crop must not
-        // half-fill it and have the caller encode garbage.
-        let mut out = vec![9, 9, 9];
-        assert!(!crop_bgra_to_rgb(&tiny_bgra(), 2, 2, 5, 5, 1, 1, &mut out));
-        assert_eq!(out, vec![9, 9, 9]);
-    }
 
     #[test]
     fn tile_saving_is_the_fraction_of_bytes_avoided() {

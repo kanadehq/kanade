@@ -55,6 +55,14 @@ mod session_supervisor;
 // Windows-only at the module declaration for the same reason `klp` is — the
 // capture path is entirely Win32/D3D11, and the probe's only caller is the
 // Windows runner, so compiling either elsewhere is all dead code.
+// #1140 PR3a: framing for tiles crossing the in-session IPC pipe. Windows-
+// only for the same reason capture_probe is — its only producer and consumer
+// are the Windows capture path, so off-Windows every function is dead code
+// and the build fails on it (learned the hard way in #1142).
+#[cfg(target_os = "windows")]
+mod capture_encode;
+#[cfg(target_os = "windows")]
+mod capture_frame_io;
 #[cfg(target_os = "windows")]
 mod capture_probe;
 #[cfg(target_os = "windows")]
@@ -110,6 +118,37 @@ struct Cli {
     /// eyeballed and not just trusted.
     #[arg(long, hide = true)]
     capture_probe_save: Option<PathBuf>,
+
+    /// #1140 PR3a internal: run as the in-session capture child. Streams
+    /// length-prefixed tile frames on stdout for the agent to read. Launched
+    /// by the agent inside the logged-in user session; not for manual use
+    /// except when dumping frames for verification.
+    #[arg(long, hide = true)]
+    session_capture: bool,
+
+    /// JPEG quality for `--session-capture`, 1-100.
+    #[arg(long, hide = true, default_value_t = 75)]
+    session_capture_quality: u8,
+
+    /// Frame-rate ceiling for `--session-capture`. The desktop decides the
+    /// real rate; this only bounds it.
+    #[arg(long, hide = true, default_value_t = 10)]
+    session_capture_max_fps: u8,
+
+    /// Display output `--session-capture` attaches to, 0 = primary.
+    #[arg(long, hide = true, default_value_t = 0)]
+    session_capture_output: u32,
+
+    /// Stop `--session-capture` after this many seconds. 0 = run until the
+    /// pipe breaks, which is what the agent uses.
+    #[arg(long, hide = true, default_value_t = 0)]
+    session_capture_secs: u64,
+
+    /// #1140 PR3a internal: decode a file of captured frames and print a
+    /// summary. The verification counterpart to `--session-capture`, so a
+    /// dump can be proved to round-trip rather than assumed to.
+    #[arg(long, hide = true)]
+    capture_decode: Option<PathBuf>,
 }
 
 /// Top-level entry point.
@@ -138,6 +177,16 @@ fn main() -> Result<()> {
     // counter) and must not attach to the SCM.
     if cli.capture_probe {
         return run_capture_probe(&cli);
+    }
+
+    // #1140 PR3a: the capture child and the frame-dump decoder branch out
+    // here for the same reasons — neither is the agent, and running the boot
+    // sentinel or attaching to the SCM would corrupt the service's state.
+    if cli.session_capture {
+        return run_session_capture(&cli);
+    }
+    if cli.capture_decode.is_some() {
+        return run_capture_decode(&cli);
     }
 
     // #582: boot sentinel is the VERY first thing — before the service
@@ -176,6 +225,215 @@ fn main() -> Result<()> {
         .build()
         .context("build tokio runtime")?;
     runtime.block_on(run_agent())
+}
+
+/// #1140 PR3a: run as the in-session capture child and exit.
+///
+/// Streams length-prefixed tile frames (see `capture_frame_io`) on stdout
+/// until the pipe breaks — which is how the child learns the agent is gone,
+/// since a killed parent leaves no other signal an unprivileged process in
+/// the user session can observe.
+fn run_session_capture(cli: &Cli) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::io::Write;
+        use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+        use kanade_shared::wire::{FrameMeta, TileEncoding};
+
+        use crate::capture_encode::encode_tiles;
+        use crate::capture_frame_io::{FrameHeader, encode_frame};
+        use crate::screen_capture::{Capture, CaptureSession};
+
+        let mut session = CaptureSession::new(cli.session_capture_output).context(
+            "attach capture to display — this must run in the interactive desktop session",
+        )?;
+
+        // A zero ceiling would divide by zero and, read literally, means
+        // "no frames at all"; treat it as 1 fps so a typo degrades to slow
+        // rather than to a panic.
+        let fps = cli.session_capture_max_fps.max(1);
+        let min_interval = Duration::from_millis(1000 / u64::from(fps));
+
+        let deadline = (cli.session_capture_secs > 0)
+            .then(|| Instant::now() + Duration::from_secs(cli.session_capture_secs));
+
+        let mut out = std::io::stdout().lock();
+        let mut scratch = Vec::new();
+        let mut frame_seq: u64 = 0;
+
+        loop {
+            if deadline.is_some_and(|d| Instant::now() >= d) {
+                break;
+            }
+            let started = Instant::now();
+
+            match session.next_frame(100)? {
+                // Nothing to send. `Unavailable` (lock screen / secure
+                // desktop) is silently skipped here: this pipe carries only
+                // tiles, and the gap belongs on the control plane, which
+                // PR3b adds. Until then the agent infers a gap from frames
+                // simply not arriving — acceptable while nothing downstream
+                // renders it, and the first thing PR3b must fix.
+                Capture::Idle | Capture::Unavailable(_) => {}
+                Capture::Frame(frame) => {
+                    let tiles = encode_tiles(&frame, cli.session_capture_quality, &mut scratch)?;
+                    let tile_count = u16::try_from(tiles.len()).unwrap_or(u16::MAX);
+                    let captured_at_ms = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+
+                    for (i, tile) in tiles.iter().enumerate() {
+                        let header = FrameHeader {
+                            meta: FrameMeta {
+                                frame_seq,
+                                tile_index: u16::try_from(i).unwrap_or(u16::MAX),
+                                tile_count,
+                                x: tile.x,
+                                y: tile.y,
+                                w: tile.w,
+                                h: tile.h,
+                                screen_w: frame.width,
+                                screen_h: frame.height,
+                                captured_at_ms,
+                            },
+                            encoding: TileEncoding::Jpeg,
+                        };
+                        let bytes = encode_frame(&header, &tile.jpeg)?;
+                        // A broken pipe means the agent exited. That is a
+                        // normal end of life for this process, not a failure
+                        // to report — there is nobody left to report it to.
+                        if out.write_all(&bytes).is_err() {
+                            return Ok(());
+                        }
+                    }
+                    if out.flush().is_err() {
+                        return Ok(());
+                    }
+                    frame_seq += 1;
+                }
+            }
+
+            // Pace against the whole iteration, not just the sleep, so a
+            // slow encode eats into the interval instead of adding to it.
+            let elapsed = started.elapsed();
+            if elapsed < min_interval {
+                std::thread::sleep(min_interval - elapsed);
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = cli;
+        anyhow::bail!("--session-capture is Windows-only")
+    }
+}
+
+/// #1140 PR3a: decode a dump of captured frames and print a summary.
+///
+/// The verification counterpart to `--session-capture`. The capture child
+/// can only be spawned for real by the agent (the token dance needs
+/// LocalSystem), so being able to run the child by hand, redirect stdout to
+/// a file, and prove the bytes round-trip is what makes the framing
+/// testable without a deployment.
+fn run_capture_decode(cli: &Cli) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::collections::BTreeSet;
+        use std::io::BufReader;
+
+        use crate::capture_frame_io::read_frame;
+
+        let path = cli
+            .capture_decode
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("--capture-decode needs a path"))?;
+        let file = std::fs::File::open(path)
+            .with_context(|| format!("open frame dump {}", path.display()))?;
+        let mut reader = BufReader::new(file);
+
+        let mut tiles = 0u64;
+        let mut bytes = 0u64;
+        let mut frames = BTreeSet::new();
+        let mut screens = BTreeSet::new();
+        let mut largest = 0usize;
+
+        loop {
+            match read_frame(&mut reader) {
+                Ok(tile) => {
+                    tiles += 1;
+                    bytes += tile.payload.len() as u64;
+                    largest = largest.max(tile.payload.len());
+                    frames.insert(tile.header.meta.frame_seq);
+                    screens.insert((tile.header.meta.screen_w, tile.header.meta.screen_h));
+                    // Every tile must be a real JPEG and sit inside its
+                    // screen — this is the round-trip proof, not a formality.
+                    anyhow::ensure!(
+                        tile.payload.starts_with(&[0xFF, 0xD8]),
+                        "tile {} of frame {} is not a JPEG",
+                        tile.header.meta.tile_index,
+                        tile.header.meta.frame_seq,
+                    );
+                    tile.header.meta.validate().map_err(|e| {
+                        anyhow::anyhow!("frame {} geometry: {e}", tile.header.meta.frame_seq)
+                    })?;
+                    // The check that makes this dump proof of shippability
+                    // rather than just of framing: a tile over the budget
+                    // would be rejected by the broker in PR3b, and a real
+                    // 3840x1600 capture does produce those without
+                    // splitting.
+                    anyhow::ensure!(
+                        tile.payload.len() <= kanade_shared::wire::MAX_TILE_BYTES,
+                        "tile {} of frame {} is {} bytes, over the {} wire budget",
+                        tile.header.meta.tile_index,
+                        tile.header.meta.frame_seq,
+                        tile.payload.len(),
+                        kanade_shared::wire::MAX_TILE_BYTES,
+                    );
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(anyhow::anyhow!("decode frame {}: {e}", tiles + 1)),
+            }
+        }
+
+        println!("frames      {}", frames.len());
+        println!("tiles       {tiles}");
+        println!(
+            "tiles/frame {:.1}",
+            if frames.is_empty() {
+                0.0
+            } else {
+                tiles as f64 / frames.len() as f64
+            }
+        );
+        println!(
+            "payload     {:.0} KB total | {:.0} KB mean | {:.0} KB largest",
+            bytes as f64 / 1024.0,
+            if tiles == 0 {
+                0.0
+            } else {
+                bytes as f64 / tiles as f64 / 1024.0
+            },
+            largest as f64 / 1024.0,
+        );
+        for (w, h) in &screens {
+            println!("screen      {w}x{h}");
+        }
+        anyhow::ensure!(tiles > 0, "dump contained no frames");
+        println!(
+            "\nevery tile round-tripped, is a JPEG, fits its screen, and is under \
+             the {} KB wire budget",
+            kanade_shared::wire::MAX_TILE_BYTES / 1024,
+        );
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = cli;
+        anyhow::bail!("--capture-decode is Windows-only")
+    }
 }
 
 /// #1140 PR2: run the screen-capture probe and exit.
