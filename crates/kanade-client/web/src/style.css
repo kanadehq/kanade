@@ -1156,6 +1156,100 @@ button.nav-item.active:hover {
   color: var(--text);
 }
 
+.confirm-note {
+  margin: -8px 0 14px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* The support-code field. `type="password"` so the code isn't readable
+   over the user's shoulder while the desk types it on their machine. */
+.unlock-input {
+  width: 100%;
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  font-family: inherit;
+  font-size: 15px;
+  letter-spacing: 0.08em;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.unlock-input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.unlock-error {
+  margin: 0 0 12px;
+  font-size: 13px;
+}
+
+/* ---- Support mode ----
+   A grant means this machine is temporarily open to helpdesk-only jobs, so
+   the banner is full-width and warm-toned: the user should never be in that
+   state without being able to see it and end it themselves. */
+.support-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--accent-soft);
+  border-bottom: 1px solid var(--accent);
+}
+
+.support-banner-icon {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+.support-banner-text {
+  font-weight: 500;
+}
+
+.support-banner-countdown {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.support-banner-lock {
+  padding: 3px 12px;
+  font-size: 12px;
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--accent);
+}
+
+.support-banner-lock:hover {
+  background: var(--panel);
+  color: var(--text);
+}
+
+/* Marks a row that exists only because of a live grant, so its later
+   disappearance reads as expected rather than as a bug. */
+.job-unlock-badge {
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+}
+
+/* The version label doubles as the support-mode opener (N quick taps).
+   Deliberately given no hover affordance — it should look inert. */
+.sidebar-version {
+  user-select: none;
+}
+
 /* ---- Dark theme ---- */
 @media (prefers-color-scheme: dark) {
   :root {

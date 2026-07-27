@@ -46,6 +46,20 @@
         </div>
       </header>
 
+      <!-- Support-mode banner: shown only while this user holds an unlock
+           grant (KLP support.status / support.unlock). Deliberately loud and
+           full-width — an end user must be able to see at a glance that their
+           machine is currently open to helpdesk-only actions, and how much
+           longer. Filled + revealed by main.ts. -->
+      <div class="support-banner" id="support-banner" role="status" hidden>
+        <i class="support-banner-icon" data-lucide="shield-check"></i>
+        <span class="support-banner-text" id="support-banner-text"></span>
+        <span class="support-banner-countdown" id="support-banner-countdown"></span>
+        <button class="support-banner-lock" id="support-lock-btn" type="button">
+          終了
+        </button>
+      </div>
+
       <div class="layout">
         <!-- Left sidebar nav. Home / Notifications / Health are fixed;
              the job categories below the divider are injected by main.ts

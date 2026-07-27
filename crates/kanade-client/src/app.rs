@@ -34,6 +34,7 @@ use kanade_shared::ipc::notifications::{
     NotificationsSubscribeResult, NotificationsUnackResult,
 };
 use kanade_shared::ipc::state::StateSnapshot;
+use kanade_shared::ipc::support::{SupportLockResult, SupportStatusResult, SupportUnlockResult};
 use kanade_shared::ipc::system::PingResult;
 use tauri::{Emitter, Manager, State};
 use tokio::sync::Mutex;
@@ -217,6 +218,38 @@ async fn jobs_execute(state: State<'_, AppState>, id: String) -> Result<JobsExec
 async fn jobs_kill(state: State<'_, AppState>, run_id: String) -> Result<JobsKillResult, String> {
     let client = connected_client(&state).await?;
     client.jobs_kill(&run_id).await.map_err(|e| e.to_string())
+}
+
+/// `support.unlock` — redeem a support code typed by the IT desk, revealing
+/// this user's `client.unlock`-gated jobs for the grant's lifetime. The
+/// error string reaches the WebView verbatim; a wrong code is
+/// `Unauthorized`, a rate-limited caller `RateLimit`.
+#[tauri::command]
+async fn support_unlock(
+    state: State<'_, AppState>,
+    code: String,
+) -> Result<SupportUnlockResult, String> {
+    let client = connected_client(&state).await?;
+    client
+        .support_unlock(&code)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// `support.lock` — end the support session immediately.
+#[tauri::command]
+async fn support_lock(state: State<'_, AppState>) -> Result<SupportLockResult, String> {
+    let client = connected_client(&state).await?;
+    client.support_lock().await.map_err(|e| e.to_string())
+}
+
+/// `support.status` — the grants this user currently holds, so a WebView
+/// that (re)connected can restore its support-mode banner without asking
+/// the desk to re-type the code.
+#[tauri::command]
+async fn support_status(state: State<'_, AppState>) -> Result<SupportStatusResult, String> {
+    let client = connected_client(&state).await?;
+    client.support_status().await.map_err(|e| e.to_string())
 }
 
 /// `notifications.subscribe` — start `notifications.new` pushes on the
@@ -721,6 +754,9 @@ pub fn run() {
             jobs_list,
             jobs_execute,
             jobs_kill,
+            support_unlock,
+            support_lock,
+            support_status,
             notifications_subscribe,
             notifications_list,
             notifications_ack,

@@ -75,3 +75,5 @@ pub mod server;
 pub mod state;
 #[cfg(target_os = "windows")]
 pub mod subscriptions;
+#[cfg(target_os = "windows")]
+pub mod unlock;

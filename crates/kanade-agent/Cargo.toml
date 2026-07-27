@@ -17,6 +17,10 @@ kanade-shared = { workspace = true }
 
 anyhow     = { workspace = true }
 async-nats = { workspace = true }
+# Verifies the operator's support-unlock codes locally (KLP
+# `support.unlock`), so a helpdesk can still open a machine while the
+# backend is unreachable. Same hasher the backend mints them with.
+argon2     = { workspace = true }
 base64     = { workspace = true }
 bytes      = { workspace = true }
 chrono     = { workspace = true }

@@ -43,6 +43,13 @@ const DRAIN_INTERVAL: Duration = Duration::from_secs(1);
 /// rationale (#139).
 const ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// The agent's standard obs-outbox directory. One source of truth for the
+/// callers that don't already receive the path from `main` (the KLP
+/// handlers, which are constructed long before it is computed there).
+pub fn default_dir() -> PathBuf {
+    kanade_shared::default_paths::data_dir().join("obs-outbox")
+}
+
 /// Idempotently make sure the outbox directory exists. Cheap on
 /// the steady state (one stat call) but on a long-tail-busy agent
 /// the per-enqueue `create_dir_all` adds up — Gemini #249 medium.

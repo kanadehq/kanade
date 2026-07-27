@@ -76,6 +76,16 @@ pub const JOBS_KILL: &str = "jobs.kill";
 /// Bundle recent inventory + log tail + agent state, upload to the
 /// JetStream Object Store, return the resulting ticket / object id.
 pub const SUPPORT_UPLOAD_DIAGNOSTICS: &str = "support.upload_diagnostics";
+/// Redeem an operator-issued support code, granting this OS user
+/// time-limited access to `client.unlock`-gated jobs.
+pub const SUPPORT_UNLOCK: &str = "support.unlock";
+/// Drop every unlock grant this OS user holds, immediately (the
+/// "サポートモードを終了" button — the grant also expires on its own).
+pub const SUPPORT_LOCK: &str = "support.lock";
+/// Report the grants this OS user currently holds. Lets the Client App
+/// restore its support-mode banner after a reconnect / restart without
+/// re-asking for the code (grants outlive a single connection).
+pub const SUPPORT_STATUS: &str = "support.status";
 
 // ---- maintenance.* ----
 
@@ -119,6 +129,9 @@ mod tests {
         assert_eq!(JOBS_KILL, "jobs.kill");
 
         assert_eq!(SUPPORT_UPLOAD_DIAGNOSTICS, "support.upload_diagnostics");
+        assert_eq!(SUPPORT_UNLOCK, "support.unlock");
+        assert_eq!(SUPPORT_LOCK, "support.lock");
+        assert_eq!(SUPPORT_STATUS, "support.status");
 
         assert_eq!(MAINTENANCE_LIST, "maintenance.list");
         assert_eq!(MAINTENANCE_DEFER, "maintenance.defer");

@@ -1,9 +1,19 @@
 //! Backend-side, operator-editable server settings (`server_settings` KV
 //! bucket).
 //!
-//!   GET /api/server-settings           (viewer+) -> ServerSettings (stored)
-//!   GET /api/server-settings/defaults  (viewer+) -> ServerSettings (built-in)
-//!   PUT /api/server-settings           (operator) per-field merge (PATCH)
+//!   GET    /api/server-settings                        (viewer+) -> ServerSettings (stored)
+//!   GET    /api/server-settings/defaults               (viewer+) -> ServerSettings (built-in)
+//!   PUT    /api/server-settings                        (operator) per-field merge (PATCH)
+//!   PUT    /api/server-settings/support-codes/{scope}  (operator) set/rotate one code
+//!   DELETE /api/server-settings/support-codes/{scope}  (operator) remove one code
+//!
+//! Support codes get their own endpoints rather than riding the generic
+//! merge, because a secret behaves differently from every other field here:
+//! it is **write-only**. Responses blank the stored hash
+//! ([`ServerSettings::redacted`]), so the document the SPA holds cannot be
+//! sent back intact — routing it through the PATCH merge would let a
+//! well-behaved "save the form" round-trip blank a live code. Set-and-forget
+//! endpoints make that structurally impossible.
 //!
 //! A single KV singleton ([`BUCKET_SERVER_SETTINGS`] /
 //! [`KEY_SERVER_SETTINGS`]) holds the current [`ServerSettings`]. Unlike
@@ -18,14 +28,14 @@
 //! behaves as it did before the bucket existed.
 
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use kanade_shared::config::MailSection;
 use kanade_shared::kv::{BUCKET_SERVER_SETTINGS, KEY_SERVER_SETTINGS};
 use kanade_shared::kv_cas;
 use kanade_shared::wire::{
     MAX_AGENT_PRUNE_DAYS, MAX_CHECK_STATUS_STALE_DAYS, MAX_COLLECT_RETENTION_DAYS,
-    MAX_SESSION_TTL_HOURS, ServerSettings,
+    MAX_SESSION_TTL_HOURS, MAX_SUPPORT_UNLOCK_TTL_MINUTES, ServerSettings, SupportCode,
 };
 use lettre::message::Mailbox;
 use serde_json::{Map, Value};
@@ -45,7 +55,11 @@ pub async fn get(State(s): State<AppState>) -> Result<Json<ServerSettings>, (Sta
     // with pruning off when they thought it was on.
     match kv.get(KEY_SERVER_SETTINGS).await {
         Ok(Some(bytes)) => serde_json::from_slice::<ServerSettings>(&bytes)
-            .map(Json)
+            // Blank the support-code hashes: this route is viewer+, so an
+            // unredacted response would hand every read-only account an
+            // offline-crackable hash for a code that grants privileged job
+            // execution on end-user machines.
+            .map(|s| Json(s.redacted()))
             .map_err(|e| {
                 warn!(error = %e, "decode server_settings");
                 (
@@ -244,12 +258,29 @@ pub async fn put(
         Some(KEY_SERVER_SETTINGS),
         Some(&caller),
         // Audit the whole stored document (raw, so it stays complete even
-        // for keys this build doesn't model). The SMTP password is never in
-        // the document, so this can't leak it.
-        doc,
+        // for keys this build doesn't model) minus the support-code hashes.
+        // The SMTP password is never in the document; the hashes are, and an
+        // audit trail is a long-lived, widely-readable copy — exactly what a
+        // secret must not be duplicated into.
+        redact_support_hashes(doc),
     )
     .await;
-    Ok(Json(merged))
+    Ok(Json(merged.redacted()))
+}
+
+/// Blank every `support_codes[].hash` in a raw settings document, leaving
+/// the rest byte-identical. Used on the audit copy, which is raw JSON (so
+/// unknown keys survive) rather than the typed view [`ServerSettings::redacted`]
+/// operates on.
+fn redact_support_hashes(mut doc: Value) -> Value {
+    if let Some(codes) = doc.get_mut("support_codes").and_then(Value::as_array_mut) {
+        for c in codes {
+            if let Some(obj) = c.as_object_mut() {
+                obj.remove("hash");
+            }
+        }
+    }
+    doc
 }
 
 /// Overwrite / unset / preserve one key of the stored document per the
@@ -454,6 +485,235 @@ pub(crate) async fn load_from_js(
 /// bootstrap, so a lookup error means the broker is unreachable — surface
 /// 503 rather than reporting defaults (which, for a destructive prune
 /// knob, would be a misleading "off").
+/// Body of `PUT /api/server-settings/support-codes/{scope}`.
+///
+/// `code` is the plaintext the operator typed. It is hashed here and
+/// **never stored, logged, echoed, or audited** — the response is the
+/// redacted settings document, so there is no path by which it comes back.
+#[derive(serde::Deserialize)]
+pub struct SupportCodeBody {
+    /// The secret the helpdesk will type into the Client App.
+    pub code: String,
+    /// Human label shown in the Client App's support-mode banner.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Grant window in minutes. Omit for
+    /// [`DEFAULT_SUPPORT_UNLOCK_TTL_MINUTES`].
+    #[serde(default)]
+    pub ttl_minutes: Option<u32>,
+    /// Suspend the code without deleting it (the secret stays set, so
+    /// re-enabling doesn't require re-issuing one).
+    #[serde(default)]
+    pub disabled: bool,
+}
+
+/// Minimum length for a support code. Short enough not to fight an operator
+/// choosing something typable over the phone, long enough that the
+/// per-machine rate limit (5 tries / 5 min) makes guessing hopeless rather
+/// than merely slow.
+const MIN_SUPPORT_CODE_LEN: usize = 8;
+
+/// `PUT /api/server-settings/support-codes/{scope}` — set or rotate the code
+/// for one unlock scope (operator+).
+///
+/// Upsert by scope: setting a code for an existing scope replaces the hash
+/// (a rotation) and leaves nothing recoverable of the old one. The write
+/// runs under the same KV optimistic-concurrency as the generic PUT, so it
+/// can't clobber a concurrent settings edit.
+pub async fn put_support_code(
+    State(s): State<AppState>,
+    caller: Caller,
+    Path(scope): Path<String>,
+    Json(body): Json<SupportCodeBody>,
+) -> Result<Json<ServerSettings>, (StatusCode, String)> {
+    let scope = scope.trim().to_string();
+    validate_support_code(&scope, &body)?;
+
+    // Hash before the CAS: argon2 is deliberately slow, and the CAS closure
+    // may re-run on a revision conflict.
+    let hash = hash_support_code(&body.code)?;
+    let entry = SupportCode {
+        scope: scope.clone(),
+        hash,
+        label: body.label.map(|l| l.trim().to_string()),
+        ttl_minutes: body.ttl_minutes,
+        disabled: body.disabled,
+    };
+    let entry_value = serde_json::to_value(&entry).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("encode support code: {e}"),
+        )
+    })?;
+
+    let kv = open_bucket(&s).await?;
+    let merged_map =
+        kv_cas::read_modify_write::<Map<String, Value>, _>(&kv, KEY_SERVER_SETTINGS, |obj| {
+            let codes = obj
+                .entry("support_codes".to_string())
+                .or_insert_with(|| Value::Array(Vec::new()));
+            // A non-array value here means the document was hand-corrupted;
+            // replacing it is the only forward move (and loses nothing a
+            // reader could have used — the agent would have failed to decode
+            // the whole document).
+            if !codes.is_array() {
+                *codes = Value::Array(Vec::new());
+            }
+            let arr = codes.as_array_mut().expect("just ensured array");
+            arr.retain(|c| c.get("scope").and_then(Value::as_str) != Some(scope.as_str()));
+            arr.push(entry_value.clone());
+            true
+        })
+        .await
+        .map_err(|e| {
+            warn!(error = %format!("{e:#}"), "write support code");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("write support code: {e}"),
+            )
+        })?;
+
+    let merged = decode_merged(Value::Object(merged_map))?;
+    info!(
+        scope = %entry.scope,
+        disabled = entry.disabled,
+        "support code set",
+    );
+    audit::record(
+        &s.nats,
+        "operator",
+        "support_code_set",
+        Some(&entry.scope),
+        Some(&caller),
+        // Scope + knobs only: never the code, never its hash.
+        serde_json::json!({
+            "scope": entry.scope,
+            "label": entry.label,
+            "ttl_minutes": entry.ttl_minutes,
+            "disabled": entry.disabled,
+        }),
+    )
+    .await;
+    Ok(Json(merged.redacted()))
+}
+
+/// `DELETE /api/server-settings/support-codes/{scope}` — remove one scope's
+/// code (operator+). Idempotent: deleting a scope that has no code is a
+/// success, since the end state the caller asked for is the state they get.
+pub async fn delete_support_code(
+    State(s): State<AppState>,
+    caller: Caller,
+    Path(scope): Path<String>,
+) -> Result<Json<ServerSettings>, (StatusCode, String)> {
+    let scope = scope.trim().to_string();
+    let kv = open_bucket(&s).await?;
+    let merged_map =
+        kv_cas::read_modify_write::<Map<String, Value>, _>(&kv, KEY_SERVER_SETTINGS, |obj| {
+            let Some(arr) = obj.get_mut("support_codes").and_then(Value::as_array_mut) else {
+                return false;
+            };
+            let before = arr.len();
+            arr.retain(|c| c.get("scope").and_then(Value::as_str) != Some(scope.as_str()));
+            arr.len() != before
+        })
+        .await
+        .map_err(|e| {
+            warn!(error = %format!("{e:#}"), "delete support code");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("delete support code: {e}"),
+            )
+        })?;
+
+    let merged = decode_merged(Value::Object(merged_map))?;
+    info!(scope = %scope, "support code deleted");
+    audit::record(
+        &s.nats,
+        "operator",
+        "support_code_deleted",
+        Some(&scope),
+        Some(&caller),
+        serde_json::json!({ "scope": scope }),
+    )
+    .await;
+    Ok(Json(merged.redacted()))
+}
+
+/// Reject a support-code body that could never work, before anything is
+/// hashed or written.
+fn validate_support_code(scope: &str, body: &SupportCodeBody) -> Result<(), (StatusCode, String)> {
+    if !kanade_shared::manifest::is_valid_resource_id(scope) {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "scope must be a slug ([A-Za-z0-9._-]) matching a job's client.unlock".to_string(),
+        ));
+    }
+    // No trim: whitespace inside a secret is significant, so silently eating
+    // the edges would store a different code than the operator typed. But
+    // the Client App trims what the *user* types, so a code that needs an
+    // edge space could never be redeemed — reject it here rather than ship
+    // an unusable one.
+    if body.code != body.code.trim() {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "code must not start or end with whitespace".to_string(),
+        ));
+    }
+    if body.code.chars().count() < MIN_SUPPORT_CODE_LEN {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("code must be at least {MIN_SUPPORT_CODE_LEN} characters"),
+        ));
+    }
+    if let Some(ttl) = body.ttl_minutes {
+        if ttl == 0 || ttl > MAX_SUPPORT_UNLOCK_TTL_MINUTES {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("ttl_minutes must be 1..={MAX_SUPPORT_UNLOCK_TTL_MINUTES}"),
+            ));
+        }
+    }
+    if let Some(label) = body.label.as_ref() {
+        if label.trim().is_empty() {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "label must not be blank when set; omit it instead".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// argon2id-hash a support code with a fresh random salt, in PHC format —
+/// the same shape (and default parameters) the `users` table stores account
+/// passwords in, so the agent's verifier needs no special casing.
+fn hash_support_code(code: &str) -> Result<String, (StatusCode, String)> {
+    use argon2::password_hash::{PasswordHasher, SaltString, rand_core::OsRng};
+
+    let salt = SaltString::generate(&mut OsRng);
+    argon2::Argon2::default()
+        .hash_password(code.as_bytes(), &salt)
+        .map(|h| h.to_string())
+        .map_err(|e| {
+            warn!(error = %e, "hash support code");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to hash the support code".to_string(),
+            )
+        })
+}
+
+/// Decode a merged raw document back into the typed view for the response.
+fn decode_merged(doc: Value) -> Result<ServerSettings, (StatusCode, String)> {
+    serde_json::from_value(doc).map_err(|e| {
+        warn!(error = %e, "decode merged server_settings");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("merged server_settings is corrupt: {e}"),
+        )
+    })
+}
+
 async fn open_bucket(
     s: &AppState,
 ) -> Result<async_nats::jetstream::kv::Store, (StatusCode, String)> {
@@ -474,10 +734,102 @@ mod tests {
     use kanade_shared::config::{MailEncryption, MailSection};
     use serde_json::{Map, Value, json};
 
-    use super::{ServerSettings, merge_field, normalize, validate};
+    use super::{
+        MIN_SUPPORT_CODE_LEN, ServerSettings, SupportCodeBody, hash_support_code, merge_field,
+        normalize, redact_support_hashes, validate, validate_support_code,
+    };
 
     fn obj(v: Value) -> Map<String, Value> {
         v.as_object().expect("object literal").clone()
+    }
+
+    fn code_body(code: &str) -> SupportCodeBody {
+        SupportCodeBody {
+            code: code.to_string(),
+            label: None,
+            ttl_minutes: None,
+            disabled: false,
+        }
+    }
+
+    #[test]
+    fn support_code_validation_rejects_the_unusable() {
+        assert!(validate_support_code("support", &code_body("hunter2!!")).is_ok());
+        // Scope must be a slug — it is compared byte-for-byte with a
+        // manifest's `client.unlock`, so anything else can never match.
+        assert!(validate_support_code("has space", &code_body("hunter2!!")).is_err());
+        assert!(validate_support_code("", &code_body("hunter2!!")).is_err());
+        // Too short to survive guessing even at 5 tries / 5 min.
+        let short = "a".repeat(MIN_SUPPORT_CODE_LEN - 1);
+        assert!(validate_support_code("support", &code_body(&short)).is_err());
+        // Edge whitespace: the client trims what the user types, so this
+        // code could be stored but never redeemed.
+        assert!(validate_support_code("support", &code_body(" hunter2!! ")).is_err());
+        // Out-of-range TTL.
+        let mut ttl = code_body("hunter2!!");
+        ttl.ttl_minutes = Some(0);
+        assert!(validate_support_code("support", &ttl).is_err());
+        ttl.ttl_minutes = Some(u32::MAX);
+        assert!(validate_support_code("support", &ttl).is_err());
+        // Blank label (omit it instead).
+        let mut label = code_body("hunter2!!");
+        label.label = Some("   ".into());
+        assert!(validate_support_code("support", &label).is_err());
+    }
+
+    #[test]
+    fn hashed_code_verifies_and_is_salted() {
+        use argon2::{Argon2, PasswordHash, PasswordVerifier};
+        let a = hash_support_code("hunter2!!").unwrap();
+        let b = hash_support_code("hunter2!!").unwrap();
+        assert_ne!(a, b, "each hash must carry its own salt");
+        for h in [&a, &b] {
+            let parsed = PasswordHash::new(h).unwrap();
+            assert!(
+                Argon2::default()
+                    .verify_password(b"hunter2!!", &parsed)
+                    .is_ok()
+            );
+            assert!(
+                Argon2::default()
+                    .verify_password(b"hunter3!!", &parsed)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn audit_copy_carries_no_hashes() {
+        // The audit trail is a long-lived, widely-readable copy of the
+        // document — the one place a secret must not be duplicated into.
+        let doc = json!({
+            "agent_prune_days": 7,
+            "support_codes": [
+                {"scope":"support","hash":"$argon2id$secret","label":"desk"},
+                {"scope":"admin","hash":"$argon2id$other"},
+            ],
+        });
+        let redacted = redact_support_hashes(doc);
+        let text = redacted.to_string();
+        assert!(!text.contains("argon2"), "audit leaked a hash: {text}");
+        // Everything else survives, including the unrelated key.
+        assert_eq!(redacted["agent_prune_days"], 7);
+        assert_eq!(redacted["support_codes"][0]["scope"], "support");
+        assert_eq!(redacted["support_codes"][0]["label"], "desk");
+    }
+
+    #[test]
+    fn audit_redaction_tolerates_a_missing_or_odd_field() {
+        // Documents written before the feature (no key) and hand-corrupted
+        // ones (wrong type) must pass through rather than panic.
+        assert_eq!(
+            redact_support_hashes(json!({"agent_prune_days": 7}))["agent_prune_days"],
+            7
+        );
+        assert_eq!(
+            redact_support_hashes(json!({"support_codes": "nonsense"}))["support_codes"],
+            "nonsense"
+        );
     }
 
     fn sample_mail() -> MailSection {
