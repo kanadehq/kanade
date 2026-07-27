@@ -1030,13 +1030,18 @@ async function promptSupportUnlock(): Promise<void> {
   } catch (err) {
     // A wrong code is the expected outcome of a typo, so it gets a plain
     // message rather than a console-only failure the user can't see.
-    await confirmDialog({
+    //
+    // 再入力 is the AFFIRMATIVE action (the `ok` slot). `confirmDialog`
+    // resolves false for cancel, Escape AND backdrop click alike, so putting
+    // retry on the cancel side would reopen the passcode prompt for someone
+    // who pressed Escape to walk away from it — and its focus-on-open lands
+    // on cancel, so a stray Enter would do the same.
+    const retry = await confirmDialog({
       title: unlockErrorMessage(err),
-      confirmLabel: "閉じる",
-      cancelLabel: "再入力",
-    }).then((closed) => {
-      if (!closed) void promptSupportUnlock();
+      confirmLabel: "再入力",
+      cancelLabel: "閉じる",
     });
+    if (retry) void promptSupportUnlock();
   }
 }
 
