@@ -15,8 +15,11 @@ categories.workspace   = true
 [dependencies]
 anyhow     = { workspace = true }
 async-nats = { workspace = true }
+base64     = { workspace = true }
 chrono     = { workspace = true }
 croner     = { workspace = true }
+# #1165: Ed25519 command signing / verification (`signing`).
+ed25519-dalek = { workspace = true }
 humantime  = { workspace = true }
 pelite     = { workspace = true }
 schemars   = { workspace = true }
