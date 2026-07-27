@@ -66,6 +66,7 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use super::super::connection::ConnectionState;
+use super::super::unlock;
 use super::system::HandlerResult;
 use crate::outbox;
 use crate::process::{ExecOutcome, run_command_with_kill};
@@ -174,12 +175,18 @@ pub async fn handle_jobs_list(
         .iter()
         .map(|c| (c.name.clone(), c.status))
         .collect();
+    // `client.unlock` hides a job entirely unless the calling OS user holds
+    // a live grant for its scope (`support.unlock`). Resolved per call from
+    // the process-wide grant store, so a grant that lapsed mid-session drops
+    // the rows on the next refresh with no client cooperation needed.
+    let unlocked = |scope: &str| unlock::holds(&conn.peer.user_sid, scope);
     Ok(build_job_list(
         &manifests,
         params.category,
         &conn.pc_id,
         &groups,
         &checks,
+        &unlocked,
     ))
 }
 
@@ -255,25 +262,46 @@ fn job_show_when_satisfied(m: &Manifest, checks: &HashMap<String, CheckStatus>) 
     }
 }
 
+/// Whether a manifest's `client.unlock` gate is open for the caller: a job
+/// with no `unlock` scope is always open; otherwise the caller must hold a
+/// live grant for that exact scope (`unlocked`). A `client:`-less manifest is
+/// "open" here (dropped later by [`manifest_to_job`] as operator-only).
+///
+/// Unlike `show_when` this is an authorization gate, not a display hint — the
+/// run path calls the same `unlocked` predicate, so a job hidden here can't be
+/// fired by guessing its id.
+fn job_unlocked(m: &Manifest, unlocked: &dyn Fn(&str) -> bool) -> bool {
+    match m.client.as_ref().and_then(|c| c.unlock.as_ref()) {
+        None => true,
+        Some(scope) => unlocked(scope),
+    }
+}
+
 /// Pure mapping + filtering: manifests → the `jobs.list` wire result.
 ///
 /// Keeps only manifests carrying a `client:` block, drops any whose
-/// `visible_to` excludes this agent (#816) or whose `show_when` gate the
-/// current check results don't satisfy, maps each to a
-/// [`UserInvokableJob`], applies the optional category filter, and
-/// sorts by display name so the catalog renders in a stable order
-/// regardless of KV key iteration order.
+/// `visible_to` excludes this agent (#816), whose `show_when` gate the
+/// current check results don't satisfy, or whose `client.unlock` scope the
+/// caller hasn't unlocked, maps each to a [`UserInvokableJob`], applies the
+/// optional category filter, and sorts by display name so the catalog
+/// renders in a stable order regardless of KV key iteration order.
+///
+/// `unlocked` answers "does the caller hold a grant for this scope right
+/// now" — injected rather than read from the grant store directly so this
+/// stays a pure function the tests can drive.
 pub fn build_job_list(
     manifests: &[Manifest],
     filter: Option<String>,
     pc_id: &str,
     groups: &[String],
     checks: &HashMap<String, CheckStatus>,
+    unlocked: &dyn Fn(&str) -> bool,
 ) -> JobsListResult {
     let mut items: Vec<UserInvokableJob> = manifests
         .iter()
         .filter(|m| job_visible(m, pc_id, groups))
         .filter(|m| job_show_when_satisfied(m, checks))
+        .filter(|m| job_unlocked(m, unlocked))
         .filter_map(manifest_to_job)
         .filter(|j| filter.as_deref().is_none_or(|c| j.category == c))
         .collect();
@@ -325,6 +353,10 @@ fn manifest_to_job(m: &Manifest) -> Option<UserInvokableJob> {
             enabled: c.enabled,
             message: c.message.clone(),
         }),
+        // Display marker only — the gate already ran. Lets the Client App
+        // badge the row so the user can see this one came from the desk's
+        // support code and isn't part of their everyday catalog.
+        unlock: client.unlock.clone(),
         // Per-user run history is minted by `jobs.execute` (a
         // follow-up PR); until then every row is "never run by you".
         last_run: None,
@@ -383,6 +415,24 @@ pub async fn handle_jobs_execute(
             return Err(RpcError::new(
                 ErrorKind::Unauthorized,
                 format!("job '{}' is not available on this PC", params.id),
+            ));
+        }
+    }
+
+    // Enforce `client.unlock` on the run path too — the listing gate alone
+    // would be cosmetic, since the Client App is not the only thing that can
+    // speak KLP on this box and a job id is not a secret. Re-checked HERE
+    // rather than trusted from the listing, so a grant that lapsed between
+    // the user seeing the row and pressing 実行 refuses the run.
+    if let Some(scope) = client_hint.unlock.as_deref() {
+        if !unlock::holds(&conn.peer.user_sid, scope) {
+            warn!(
+                job_id = %params.id, scope, user = %conn.peer.user,
+                "jobs.execute: refusing an unlock-gated job with no live grant",
+            );
+            return Err(RpcError::new(
+                ErrorKind::Unauthorized,
+                format!("job '{}' requires an unlocked support session", params.id),
             ));
         }
     }
@@ -1124,6 +1174,13 @@ mod tests {
         HashMap::new()
     }
 
+    /// Unlock predicate for the tests that don't exercise `client.unlock`:
+    /// the caller holds no grants, which is the state every user is in until
+    /// a support code is redeemed.
+    fn all_locked(_scope: &str) -> bool {
+        false
+    }
+
     /// Build a manifest fixture. Pass `client: Some((name, category_key))`
     /// for a user-invokable job, `None` for an operator-only one.
     fn manifest(id: &str, client: Option<(&str, &str)>) -> Manifest {
@@ -1158,6 +1215,7 @@ mod tests {
                 visible_to: None,
                 show_when: None,
                 confirm: None,
+                unlock: None,
             }),
             tags: Vec::new(),
             origin: None,
@@ -1174,7 +1232,7 @@ mod tests {
             manifest("chrome-update", Some(("Chrome を更新", "software_update"))),
             manifest("check-bitlocker", None),
         ];
-        let result = build_job_list(&manifests, None, "PC1", &[], &no_checks());
+        let result = build_job_list(&manifests, None, "PC1", &[], &no_checks(), &all_locked);
         assert_eq!(result.items.len(), 1);
         assert_eq!(result.items[0].id, "chrome-update");
         assert_eq!(result.items[0].display_name, "Chrome を更新");
@@ -1195,6 +1253,7 @@ mod tests {
             "PC1",
             &[],
             &no_checks(),
+            &all_locked,
         );
         assert_eq!(only_troubleshoot.items.len(), 1);
         assert_eq!(only_troubleshoot.items[0].id, "fix-teams");
@@ -1203,7 +1262,7 @@ mod tests {
     #[test]
     fn empty_when_no_client_jobs() {
         let manifests = [manifest("inv-hw", None), manifest("inv-sw", None)];
-        let result = build_job_list(&manifests, None, "PC1", &[], &no_checks());
+        let result = build_job_list(&manifests, None, "PC1", &[], &no_checks(), &all_locked);
         assert!(result.items.is_empty());
     }
 
@@ -1225,7 +1284,7 @@ mod tests {
         let manifests = [public, grouped, pc_only];
 
         // PC1 in no groups → only the public job.
-        let r = build_job_list(&manifests, None, "PC1", &[], &no_checks());
+        let r = build_job_list(&manifests, None, "PC1", &[], &no_checks(), &all_locked);
         let ids: Vec<_> = r.items.iter().map(|j| j.id.as_str()).collect();
         assert_eq!(ids, vec!["public"]);
 
@@ -1236,13 +1295,14 @@ mod tests {
             "PC1",
             &["wave1".to_string()],
             &no_checks(),
+            &all_locked,
         );
         let mut ids: Vec<_> = r.items.iter().map(|j| j.id.clone()).collect();
         ids.sort();
         assert_eq!(ids, vec!["grouped", "public"]);
 
         // PC2 (no groups) → public + pc-only.
-        let r = build_job_list(&manifests, None, "PC2", &[], &no_checks());
+        let r = build_job_list(&manifests, None, "PC2", &[], &no_checks(), &all_locked);
         let mut ids: Vec<_> = r.items.iter().map(|j| j.id.clone()).collect();
         ids.sort();
         assert_eq!(ids, vec!["pc-only", "public"]);
@@ -1261,7 +1321,7 @@ mod tests {
         let manifests = std::slice::from_ref(&update);
 
         let shown = |checks: &HashMap<String, CheckStatus>| {
-            !build_job_list(manifests, None, "PC1", &[], checks)
+            !build_job_list(manifests, None, "PC1", &[], checks, &all_locked)
                 .items
                 .is_empty()
         };
@@ -1286,8 +1346,74 @@ mod tests {
         let job = manifest("plain", Some(("Plain", "catalog")));
         let mut checks = HashMap::new();
         checks.insert("whatever".to_string(), CheckStatus::Fail);
-        let r = build_job_list(std::slice::from_ref(&job), None, "PC1", &[], &checks);
+        let r = build_job_list(
+            std::slice::from_ref(&job),
+            None,
+            "PC1",
+            &[],
+            &checks,
+            &all_locked,
+        );
         assert_eq!(r.items.len(), 1);
+    }
+
+    #[test]
+    fn unlock_hides_the_job_until_its_scope_is_granted() {
+        // The core of the 裏コマンド gate: a scoped job is absent from the
+        // catalog for a locked caller and present for an unlocked one.
+        let mut secret = manifest(
+            "profile-rebuild",
+            Some(("プロファイル再作成", "troubleshoot")),
+        );
+        secret.client.as_mut().unwrap().unlock = Some("support".into());
+        let manifests = std::slice::from_ref(&secret);
+
+        assert!(
+            build_job_list(manifests, None, "PC1", &[], &no_checks(), &all_locked)
+                .items
+                .is_empty(),
+            "a locked caller must not even see the row",
+        );
+
+        let holds_support = |scope: &str| scope == "support";
+        let r = build_job_list(manifests, None, "PC1", &[], &no_checks(), &holds_support);
+        assert_eq!(r.items.len(), 1);
+        // The row carries its scope so the client can badge it as
+        // helpdesk-only rather than rendering it like an everyday action.
+        assert_eq!(r.items[0].unlock.as_deref(), Some("support"));
+    }
+
+    #[test]
+    fn unlock_grants_open_only_their_own_scope() {
+        // Holding the first-line code must not reveal the administrator
+        // jobs — the whole point of having more than one scope.
+        let mut desk = manifest("desk-job", Some(("一次対応", "troubleshoot")));
+        desk.client.as_mut().unwrap().unlock = Some("support".into());
+        let mut admin = manifest("admin-job", Some(("管理者用", "troubleshoot")));
+        admin.client.as_mut().unwrap().unlock = Some("admin".into());
+        let manifests = [desk, admin];
+
+        let holds_support = |scope: &str| scope == "support";
+        let r = build_job_list(&manifests, None, "PC1", &[], &no_checks(), &holds_support);
+        assert_eq!(r.items.len(), 1);
+        assert_eq!(r.items[0].id, "desk-job");
+    }
+
+    #[test]
+    fn unlock_absent_always_shows_and_carries_no_badge() {
+        // Every ordinary job must be unaffected: this is the field that
+        // could quietly empty the whole catalog if its default flipped.
+        let plain = manifest("plain", Some(("Plain", "catalog")));
+        let r = build_job_list(
+            std::slice::from_ref(&plain),
+            None,
+            "PC1",
+            &[],
+            &no_checks(),
+            &all_locked,
+        );
+        assert_eq!(r.items.len(), 1);
+        assert!(r.items[0].unlock.is_none());
     }
 
     #[test]
@@ -1298,7 +1424,14 @@ mod tests {
             c.description = Some("重いとき用".into());
             c.icon = Some("brush-cleaning".into());
         }
-        let result = build_job_list(std::slice::from_ref(&m), None, "PC1", &[], &no_checks());
+        let result = build_job_list(
+            std::slice::from_ref(&m),
+            None,
+            "PC1",
+            &[],
+            &no_checks(),
+            &all_locked,
+        );
         let row = &result.items[0];
         assert_eq!(row.display_description.as_deref(), Some("重いとき用"));
         assert_eq!(row.icon.as_deref(), Some("brush-cleaning"));
@@ -1314,8 +1447,15 @@ mod tests {
         // Client App can suppress the modal or reword it. Absent ⇒ None
         // (client keeps its always-confirm default).
         let plain = manifest("plain", Some(("Plain", "catalog")));
-        let plain_row =
-            &build_job_list(std::slice::from_ref(&plain), None, "PC1", &[], &no_checks()).items[0];
+        let plain_row = &build_job_list(
+            std::slice::from_ref(&plain),
+            None,
+            "PC1",
+            &[],
+            &no_checks(),
+            &all_locked,
+        )
+        .items[0];
         assert!(plain_row.confirm.is_none());
 
         let mut m = manifest("wifi-tweak", Some(("Wi-Fi 省電力を切る", "settings")));
@@ -1323,8 +1463,15 @@ mod tests {
             enabled: false,
             message: Some("すぐ実行します".into()),
         });
-        let row =
-            &build_job_list(std::slice::from_ref(&m), None, "PC1", &[], &no_checks()).items[0];
+        let row = &build_job_list(
+            std::slice::from_ref(&m),
+            None,
+            "PC1",
+            &[],
+            &no_checks(),
+            &all_locked,
+        )
+        .items[0];
         let c = row.confirm.as_ref().expect("confirm projected");
         assert!(!c.enabled);
         assert_eq!(c.message.as_deref(), Some("すぐ実行します"));
@@ -1339,7 +1486,7 @@ mod tests {
         long.execute.timeout = "1h".into();
         let mut sub = manifest("blip", Some(("Blip", "catalog")));
         sub.execute.timeout = "500ms".into();
-        let result = build_job_list(&[long, sub], None, "PC1", &[], &no_checks());
+        let result = build_job_list(&[long, sub], None, "PC1", &[], &no_checks(), &all_locked);
         let by_id = |id: &str| {
             result
                 .items
@@ -1358,7 +1505,7 @@ mod tests {
             manifest("a", Some(("Apple", "catalog"))),
             manifest("m", Some(("Mango", "catalog"))),
         ];
-        let result = build_job_list(&manifests, None, "PC1", &[], &no_checks());
+        let result = build_job_list(&manifests, None, "PC1", &[], &no_checks(), &all_locked);
         let names: Vec<&str> = result
             .items
             .iter()

@@ -2911,6 +2911,7 @@ name = "kanade-agent"
 version = "0.44.32"
 dependencies = [
  "anyhow",
+ "argon2",
  "async-nats",
  "base64 0.23.0",
  "bytes",

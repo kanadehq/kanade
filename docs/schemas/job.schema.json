@@ -635,6 +635,13 @@
             }
           ]
         },
+        "unlock": {
+          "description": "Optional **unlock scope** — the \"裏コマンド\" gate. `None` (the\noverwhelming default) ⇒ the job behaves as it always has. `Some(scope)`\n⇒ the job is hidden from `jobs.list` **and refused by\n`jobs.execute`** unless the calling OS user currently holds an\nunlock grant for that scope, obtained by typing the operator's secret\ncode into the Client App (`support.unlock`).\n\nThe intended use is helpdesk-only actions: a job an end user must not\ndiscover or fire on their own, but which the IT desk can enable in\nseconds while walking that user through a problem — without an\noperator-side exec, which needs SPA access and a correctly-cased\n`pc_id`.\n\nThe scope is a free-form slug (`support`, `admin`, …) matched against\nthe scopes configured in `ServerSettings::support_codes`, so one\ndeployment can run a first-line code and a stronger administrator code\nside by side, each opening a different set of jobs. A scope with no\nconfigured code opens for nobody (fail-closed) — a typo hides the job\nrather than exposing it.\n\nThis is an authorization boundary, so — unlike the display-only\n[`show_when`](ClientHint::show_when) and like\n[`visible_to`](ClientHint::visible_to) — the agent enforces it on the\n**run** path too: a user who learns the job id can't fire it by\ncalling `jobs.execute` directly. It gates the END-USER surface only;\nthe operator `POST /api/exec` path never consults `client:`. New field\n⇒ #492 wire rule (`serde(default)` + `skip_serializing_if`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "visible_to": {
           "description": "Optional visibility scope for the end-user Client App (#816).\n\n`None` ⇒ visible to every PC (current behavior). When set, only\nagents whose `pc_id` / group membership match the [`Target`] list\nthe job in `jobs.list` and may run it via KLP `jobs.execute`.\n\nThis gates the END-USER surface ONLY. Operators are unaffected:\n`POST /api/exec/{job_id}` (SPA / `kanade exec`) is a separate path\nthat never consults `client:`, so an operator can still run the\njob on any PC regardless of `visible_to`. Reuses the schedule\n`Target` shape (`all` / `groups` / `pcs`); a present-but-empty\ntarget is rejected by [`Manifest::validate`].",
           "anyOf": [

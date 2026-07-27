@@ -171,6 +171,10 @@ type UserInvokableJob = {
   // message. `enabled: false` runs immediately with no prompt; `message`
   // overrides the dialog text.
   confirm?: JobConfirm | null;
+  // The manifest's `client.unlock` scope, present only on rows that a live
+  // support grant revealed. A display marker: the agent already applied the
+  // gate on the way out and re-checks it on execute.
+  unlock?: string | null;
 };
 
 type JobConfirm = {
@@ -797,13 +801,243 @@ function renderJobRow(j: UserInvokableJob): string {
   const desc = j.display_description
     ? `<span class="job-desc">${escapeHtml(j.display_description)}</span>`
     : "";
+  // Unlock-gated rows are visually distinct: the user is looking at an
+  // action that only exists because the desk opened their machine, and it
+  // disappears again when the grant lapses. Marking it prevents the far
+  // worse surprise of a button that silently vanishes mid-session.
+  const gated = j.unlock
+    ? `<span class="job-unlock-badge" title="サポート担当者の解錠中のみ表示されます">サポート専用</span>`
+    : "";
   return `
-    <div class="job-row">
+    <div class="job-row${j.unlock ? " job-row-unlocked" : ""}">
       ${iconHtml(j.icon, fallback)}
       <span class="job-name">${escapeHtml(j.display_name)}</span>
+      ${gated}
       <button class="job-run-btn" data-job-id="${escapeHtml(j.id)}" data-label="${escapeHtml(j.display_name)}">実行</button>
       ${desc}
     </div>`;
+}
+
+// ---- Support mode: the 裏コマンド unlock ------------------------------
+//
+// The IT desk types an operator-issued code on the user's machine to reveal
+// `client.unlock`-scoped jobs. Everything here is UI: the agent holds the
+// grant, gates `jobs.list`, and re-checks on `jobs.execute`, so nothing in
+// this file is load-bearing for security — hiding the banner or faking a
+// grant client-side reveals and runs exactly nothing.
+
+type UnlockGrant = {
+  scope: string;
+  label?: string | null;
+  // RFC3339 wall clock. Used only for the countdown; the agent enforces
+  // expiry on its own monotonic deadline.
+  expires_at: string;
+};
+
+type SupportUnlockResult = { grants: UnlockGrant[] };
+type SupportStatusResult = { grants: UnlockGrant[] };
+type SupportLockResult = { released: number };
+
+let supportGrants: UnlockGrant[] = [];
+// 1 s ticker, live only while a grant is held.
+let supportTimer: number | undefined;
+
+// How many taps on the version label open the passcode prompt, and how
+// close together they must be. The *opener* is deliberately not a secret —
+// it only reveals an input box — so it can be documented to the desk without
+// weakening anything. Keeping the real secret out of a keystroke buffer is
+// the point: a global key sequence would put the code itself one keylogger
+// (or one shoulder) away, and would fire a rate-limited unlock attempt on
+// every stray keypress.
+const UNLOCK_TAPS = 5;
+const UNLOCK_TAP_WINDOW_MS = 3000;
+let unlockTapCount = 0;
+let unlockTapLast = 0;
+
+// Register a tap on the version label; opens the prompt on the Nth in a row.
+function noteUnlockTap(): void {
+  const now = performance.now();
+  unlockTapCount = now - unlockTapLast > UNLOCK_TAP_WINDOW_MS ? 1 : unlockTapCount + 1;
+  unlockTapLast = now;
+  if (unlockTapCount >= UNLOCK_TAPS) {
+    unlockTapCount = 0;
+    void promptSupportUnlock();
+  }
+}
+
+function grantLabel(g: UnlockGrant): string {
+  const l = (g.label ?? "").trim();
+  return l || g.scope;
+}
+
+// Remaining ms on the longest-lived grant, or 0 when none are live.
+function supportRemainingMs(): number {
+  const now = Date.now();
+  return supportGrants.reduce((max, g) => {
+    const ms = Date.parse(g.expires_at) - now;
+    return Number.isFinite(ms) && ms > max ? ms : max;
+  }, 0);
+}
+
+function fmtCountdown(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000));
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+// Paint the banner from `supportGrants`, and drive the auto-relock: when the
+// last grant lapses we clear the UI and re-pull the catalog so the gated rows
+// disappear on their own. (The agent stops honouring them at the same moment
+// regardless — this just keeps the screen from lying about it.)
+function renderSupportBanner(): void {
+  const banner = $("support-banner");
+  const live = supportGrants.length > 0 && supportRemainingMs() > 0;
+  if (!live) {
+    const wasUnlocked = supportGrants.length > 0;
+    supportGrants = [];
+    banner.hidden = true;
+    if (supportTimer !== undefined) {
+      clearInterval(supportTimer);
+      supportTimer = undefined;
+    }
+    // Only when we're coming *from* an unlocked state: a plain locked
+    // render must not fire a catalog refetch on every tick.
+    if (wasUnlocked) void loadJobs(true);
+    return;
+  }
+  const names = supportGrants.map(grantLabel).join(" / ");
+  $("support-banner-text").textContent = `サポートモード：${names}`;
+  $("support-banner-countdown").textContent = fmtCountdown(supportRemainingMs());
+  banner.hidden = false;
+  if (supportTimer === undefined) {
+    supportTimer = window.setInterval(renderSupportBanner, 1000);
+  }
+}
+
+// Adopt a fresh grant set from the agent and re-pull the catalog, since what
+// is listed depends on it.
+function applySupportGrants(grants: UnlockGrant[], refreshJobs: boolean): void {
+  const had = supportGrants.length > 0;
+  supportGrants = Array.isArray(grants) ? grants : [];
+  renderSupportBanner();
+  // `renderSupportBanner` already refetches on the unlocked→locked edge;
+  // don't pay for it twice.
+  if (refreshJobs && (supportGrants.length > 0 || had)) void loadJobs(true);
+}
+
+// Called on every (re)connect: grants live in the agent and outlive a single
+// KLP connection, so a client that dropped and came back restores the banner
+// instead of making the desk re-type the code.
+async function refreshSupportStatus(): Promise<void> {
+  try {
+    const res = await invoke<SupportStatusResult>("support_status");
+    applySupportGrants(res.grants ?? [], false);
+  } catch (err) {
+    // An older agent answers MethodNotFound; a disconnected one errors.
+    // Either way "not unlocked" is the right rendering.
+    console.debug("support_status unavailable", err);
+    applySupportGrants([], false);
+  }
+}
+
+async function endSupportMode(): Promise<void> {
+  try {
+    await invoke<SupportLockResult>("support_lock");
+  } catch (err) {
+    console.error("support_lock failed", err);
+  }
+  // Clear locally regardless: if the call failed the agent still holds the
+  // grant, but the next jobs.list is authoritative and the UI shouldn't
+  // pretend the button did nothing.
+  applySupportGrants([], true);
+}
+
+// Turn the agent's KLP error string into something a user at a support desk
+// can act on. `klp_client` formats these as
+// `KLP error <code> (<Kind>): <detail>`.
+function unlockErrorMessage(err: unknown): string {
+  const s = String(err);
+  if (s.includes("-32003")) return "試行回数が多すぎます。しばらく待ってからやり直してください。";
+  if (s.includes("-32000")) return "コードが違います。";
+  if (s.includes("-32601")) return "このエージェントはサポートモードに対応していません。";
+  return `解錠できませんでした: ${s}`;
+}
+
+// The passcode prompt. Separate from `confirmDialog` because it carries an
+// input and an inline error line, and because it must never echo what was
+// typed anywhere but the masked field.
+function passcodeDialog(): Promise<string | null> {
+  if (confirmDialogOpen) return Promise.resolve(null);
+  confirmDialogOpen = true;
+  return new Promise((resolve) => {
+    const titleId = `unlock-title-${performance.now()}`;
+    const overlay = document.createElement("div");
+    overlay.className = "confirm-overlay";
+    overlay.innerHTML = `
+      <div class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="${titleId}">
+        <p class="confirm-title" id="${titleId}">サポートコードを入力</p>
+        <p class="confirm-note muted">情報システム部門から案内されたコードを入力してください。</p>
+        <input class="unlock-input" type="password" autocomplete="off"
+               spellcheck="false" aria-labelledby="${titleId}" />
+        <p class="unlock-error error" hidden></p>
+        <div class="confirm-actions">
+          <button class="confirm-cancel" type="button">キャンセル</button>
+          <button class="confirm-ok" type="button">解錠</button>
+        </div>
+      </div>`;
+
+    const input = overlay.querySelector<HTMLInputElement>(".unlock-input")!;
+    const cancelBtn = overlay.querySelector<HTMLButtonElement>(".confirm-cancel")!;
+    const okBtn = overlay.querySelector<HTMLButtonElement>(".confirm-ok")!;
+
+    const close = (result: string | null): void => {
+      document.removeEventListener("keydown", onKey);
+      // Blank the field before it leaves the DOM so the typed code isn't
+      // sitting in a detached node waiting on GC.
+      input.value = "";
+      overlay.remove();
+      confirmDialogOpen = false;
+      resolve(result);
+    };
+    const submit = (): void => {
+      const code = input.value.trim();
+      if (code === "") return;
+      close(code);
+    };
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") close(null);
+      else if (e.key === "Enter" && document.activeElement === input) submit();
+    };
+
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) close(null);
+    });
+    cancelBtn.addEventListener("click", () => close(null));
+    okBtn.addEventListener("click", submit);
+    document.addEventListener("keydown", onKey);
+    document.body.appendChild(overlay);
+    input.focus();
+  });
+}
+
+async function promptSupportUnlock(): Promise<void> {
+  const code = await passcodeDialog();
+  if (code === null) return;
+  try {
+    const res = await invoke<SupportUnlockResult>("support_unlock", { code });
+    applySupportGrants(res.grants ?? [], true);
+  } catch (err) {
+    // A wrong code is the expected outcome of a typo, so it gets a plain
+    // message rather than a console-only failure the user can't see.
+    await confirmDialog({
+      title: unlockErrorMessage(err),
+      confirmLabel: "閉じる",
+      cancelLabel: "再入力",
+    }).then((closed) => {
+      if (!closed) void promptSupportUnlock();
+    });
+  }
 }
 
 // ---- Notifications (Phase E, #102) ----
@@ -1769,6 +2003,9 @@ async function onConnected() {
   if (healthTimer === undefined) {
     healthTimer = window.setInterval(renderHealth, 10000);
   }
+  // Before the catalog: a grant that survived the reconnect decides what
+  // `jobs.list` returns, and this restores the banner that goes with it.
+  await refreshSupportStatus();
   void loadJobs();
   void loadNotifications();
 }
@@ -1878,6 +2115,17 @@ window.addEventListener("DOMContentLoaded", () => {
   // the innerHTML churn that per-element listeners wouldn't.
   document.addEventListener("click", (e) => {
     const t = e.target as HTMLElement;
+
+    // The support-mode opener: N quick taps on the version label. Handled
+    // before anything else so it can't be swallowed by a broader selector.
+    if (t.closest("#app-version")) {
+      noteUnlockTap();
+      return;
+    }
+    if (t.closest("#support-lock-btn")) {
+      void endSupportMode();
+      return;
+    }
 
     // Nav item / dashboard card → switch view.
     const nav = t.closest<HTMLElement>(".nav-item, .dash-card");

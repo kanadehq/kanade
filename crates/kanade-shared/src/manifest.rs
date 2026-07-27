@@ -823,6 +823,35 @@ pub struct ClientHint {
         skip_serializing_if = "Option::is_none"
     )]
     pub confirm: Option<ConfirmHint>,
+    /// Optional **unlock scope** — the "裏コマンド" gate. `None` (the
+    /// overwhelming default) ⇒ the job behaves as it always has. `Some(scope)`
+    /// ⇒ the job is hidden from `jobs.list` **and refused by
+    /// `jobs.execute`** unless the calling OS user currently holds an
+    /// unlock grant for that scope, obtained by typing the operator's secret
+    /// code into the Client App (`support.unlock`).
+    ///
+    /// The intended use is helpdesk-only actions: a job an end user must not
+    /// discover or fire on their own, but which the IT desk can enable in
+    /// seconds while walking that user through a problem — without an
+    /// operator-side exec, which needs SPA access and a correctly-cased
+    /// `pc_id`.
+    ///
+    /// The scope is a free-form slug (`support`, `admin`, …) matched against
+    /// the scopes configured in `ServerSettings::support_codes`, so one
+    /// deployment can run a first-line code and a stronger administrator code
+    /// side by side, each opening a different set of jobs. A scope with no
+    /// configured code opens for nobody (fail-closed) — a typo hides the job
+    /// rather than exposing it.
+    ///
+    /// This is an authorization boundary, so — unlike the display-only
+    /// [`show_when`](ClientHint::show_when) and like
+    /// [`visible_to`](ClientHint::visible_to) — the agent enforces it on the
+    /// **run** path too: a user who learns the job id can't fire it by
+    /// calling `jobs.execute` directly. It gates the END-USER surface only;
+    /// the operator `POST /api/exec` path never consults `client:`. New field
+    /// ⇒ #492 wire rule (`serde(default)` + `skip_serializing_if`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unlock: Option<String>,
 }
 
 /// Confirmation-dialog config for a [`ClientHint`] — see
@@ -2676,6 +2705,32 @@ impl Manifest {
                     }
                 }
             }
+            // unlock: the scope slug is matched byte-for-byte against the
+            // operator's configured `support_codes[].scope`, so a slug with
+            // stray whitespace / punctuation can never match one — and
+            // because the gate fails closed, the job would simply be
+            // invisible forever with no error anywhere. Reject it at create
+            // time. (Whether a code is actually CONFIGURED for the scope
+            // can't be checked here — that lives in server settings, not the
+            // manifest — so an unconfigured scope stays a runtime miss =
+            // hidden.)
+            //
+            // Validated EXACTLY AS STORED — no `.trim()`, the same no-trim
+            // rule `View::validate` / `AgentGroup::validate` spell out. The
+            // backend trims a support code's scope before storing it, so a
+            // padded manifest scope that validated as its trimmed form but
+            // was stored raw would pass this check and then never match a
+            // code — precisely the silent-forever-hidden failure this guard
+            // exists to prevent.
+            if let Some(scope) = &client.unlock {
+                if !is_valid_resource_id(scope) {
+                    return Err(
+                        "client.unlock must be a non-empty unlock scope slug ([A-Za-z0-9._-]) \
+                         with no surrounding whitespace"
+                            .to_string(),
+                    );
+                }
+            }
         }
         // #219: a `collect:` job's `name` heads the bundle on the SPA
         // Collect page (and the Client App row when paired with
@@ -3921,6 +3976,78 @@ client:
             m.client.unwrap().show_when.unwrap().is,
             vec![CheckStatus::Fail, CheckStatus::Unknown]
         );
+    }
+
+    #[test]
+    fn manifest_client_unlock_round_trips_and_defaults_absent() {
+        let yaml = r#"
+id: j
+version: 1.0.0
+execute:
+  shell: powershell
+  script: "echo x"
+  timeout: 30s
+client:
+  name: "A job"
+  category: troubleshoot
+  unlock: support
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        m.validate().expect("valid");
+        assert_eq!(
+            m.client.as_ref().unwrap().unlock.as_deref(),
+            Some("support")
+        );
+
+        // Absent ⇒ an ordinary job, and absent from the encoded form too, so
+        // an older reader sees byte-for-byte what it saw before the field.
+        let plain = yaml.replace("  unlock: support\n", "");
+        let m: Manifest = serde_yaml::from_str(&plain).expect("parse");
+        assert!(m.client.as_ref().unwrap().unlock.is_none());
+        let v = serde_json::to_value(&m).unwrap();
+        assert!(v["client"].get("unlock").is_none(), "wire: {v:?}");
+    }
+
+    #[test]
+    fn manifest_client_unlock_rejects_a_malformed_scope() {
+        // The scope is compared byte-for-byte with a configured support
+        // code's scope, and the gate fails closed — so a typo with spaces
+        // would hide the job forever with no error anywhere. Catch it at
+        // create time instead.
+        let yaml = r#"
+id: j
+version: 1.0.0
+execute:
+  shell: powershell
+  script: "echo x"
+  timeout: 30s
+client:
+  name: "A job"
+  category: troubleshoot
+  unlock: "help desk"
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        let err = m.validate().expect_err("malformed unlock scope must fail");
+        assert!(err.contains("client.unlock"), "err: {err}");
+
+        let blank = yaml.replace(r#"unlock: "help desk""#, r#"unlock: "  ""#);
+        let m: Manifest = serde_yaml::from_str(&blank).expect("parse");
+        let err = m.validate().expect_err("blank unlock scope must fail");
+        assert!(err.contains("client.unlock"), "err: {err}");
+
+        // The padded-but-otherwise-valid case (Claude review on #1166): the
+        // charset check runs on the scope EXACTLY AS STORED, so these must
+        // fail here rather than pass validation and then silently never
+        // match a support code (whose scope the backend trims before
+        // storing) — leaving the job hidden forever with no error anywhere.
+        for padded in [r#"unlock: " support""#, r#"unlock: "support ""#] {
+            let m: Manifest = serde_yaml::from_str(&yaml.replace(r#"unlock: "help desk""#, padded))
+                .expect("parse");
+            let err = m
+                .validate()
+                .expect_err("padded unlock scope must fail: {padded}");
+            assert!(err.contains("client.unlock"), "{padded} err: {err}");
+        }
     }
 
     #[test]

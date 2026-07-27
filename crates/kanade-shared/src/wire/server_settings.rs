@@ -64,6 +64,85 @@ pub const DEFAULT_CHECK_STATUS_STALE_DAYS: u32 = 30;
 /// handler and clamped in [`ServerSettings::effective_check_status_stale_days`].
 pub const MAX_CHECK_STATUS_STALE_DAYS: u32 = 3650;
 
+/// Built-in default for [`SupportCode::ttl_minutes`] — how long an unlock
+/// grant lasts when the operator hasn't set a per-code window. 15 minutes is
+/// about the length of a helpdesk call: long enough that the desk isn't
+/// re-typing the code mid-troubleshoot, short enough that a machine left
+/// unattended after the call re-locks on its own.
+pub const DEFAULT_SUPPORT_UNLOCK_TTL_MINUTES: u32 = 15;
+
+/// Upper bound on [`SupportCode::ttl_minutes`] (8 hours). An unlock grant is
+/// standing permission for an end user's machine to run privileged jobs, so
+/// it must not outlive a working day even by operator error — a longer window
+/// is a `visible_to` targeting decision, not an unlock one. Enforced by the
+/// support-code endpoint and clamped in [`SupportCode::effective_ttl_minutes`]
+/// so a hand-written KV value stays bounded too.
+pub const MAX_SUPPORT_UNLOCK_TTL_MINUTES: u32 = 480;
+
+/// One operator-issued support code — the "裏コマンド" that reveals
+/// `client.unlock`-scoped jobs in the Client App (see
+/// [`crate::manifest::ClientHint::unlock`]).
+///
+/// **Only the argon2id hash is stored.** Verification needs no plaintext, so
+/// unlike the SMTP password (#884, which must stay in the HKLM registry
+/// because SMTP AUTH needs the real string) a support code can live in KV
+/// safely — an agent reads the hash to verify a typed code locally, which is
+/// what keeps unlocking working while the backend is down, exactly when the
+/// desk needs it most.
+///
+/// The plaintext exists only in transit: the operator types it once into the
+/// SPA, the backend hashes it, and no layer ever stores or returns it. The
+/// API blanks [`hash`](Self::hash) on the way out too — an operator rotating
+/// a code sets a new one, they never read the old one back.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct SupportCode {
+    /// The scope this code opens, matched byte-for-byte against a job's
+    /// `client.unlock`. Unique within the list; a slug (`[A-Za-z0-9._-]`).
+    pub scope: String,
+    /// argon2id PHC-format hash of the code. Empty ⇒ **no code configured**
+    /// for this scope, which fails closed (nothing can be unlocked with it) —
+    /// that's also what an API response looks like, since the hash is blanked
+    /// before it leaves the backend.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub hash: String,
+    /// Human label for the code (`"ヘルプデスク一次窓口"`), shown in the
+    /// Client App's support-mode banner so the user can see which desk opened
+    /// their machine. `None` ⇒ the banner falls back to the scope slug.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// How long a grant from this code lasts, in minutes. `None` ⇒
+    /// [`DEFAULT_SUPPORT_UNLOCK_TTL_MINUTES`]. Clamped to
+    /// `1..=`[`MAX_SUPPORT_UNLOCK_TTL_MINUTES`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl_minutes: Option<u32>,
+    /// Temporarily suspend the code without deleting it (and without having
+    /// to re-issue a new secret afterwards) — a disabled code never verifies.
+    /// `false` (the default) ⇒ live.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub disabled: bool,
+}
+
+impl SupportCode {
+    /// The grant window this code mints, in minutes: the configured value if
+    /// set, else [`DEFAULT_SUPPORT_UNLOCK_TTL_MINUTES`]. Floored at 1 and
+    /// clamped to [`MAX_SUPPORT_UNLOCK_TTL_MINUTES`] so a `0` (which would
+    /// mint an already-expired grant, i.e. an unlock that silently does
+    /// nothing) or an out-of-band giant value can't reach the grant store.
+    pub fn effective_ttl_minutes(&self) -> u32 {
+        self.ttl_minutes
+            .unwrap_or(DEFAULT_SUPPORT_UNLOCK_TTL_MINUTES)
+            .clamp(1, MAX_SUPPORT_UNLOCK_TTL_MINUTES)
+    }
+
+    /// Whether this entry can ever grant anything: live and carrying a hash.
+    /// Both halves fail closed — a blanked (API-redacted) or hand-cleared
+    /// hash opens nothing, and neither does a disabled code.
+    pub fn is_usable(&self) -> bool {
+        !self.disabled && !self.hash.is_empty()
+    }
+}
+
 /// Value stored in the `server_settings` KV bucket under the single key
 /// [`crate::kv::KEY_SERVER_SETTINGS`]. Operator-editable, backend-side
 /// server configuration that isn't per-agent (so it doesn't belong in
@@ -177,6 +256,23 @@ pub struct ServerSettings {
     /// prior-status are preserved.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub check_status_stale_days: Option<u32>,
+
+    /// Operator-issued support codes — the helpdesk "裏コマンド" that reveals
+    /// `client.unlock`-scoped jobs in the Client App. See [`SupportCode`].
+    ///
+    /// The one non-`Option` field in this document, because a list has an
+    /// honest empty state: `[]` (the default) means **no codes configured**,
+    /// so every `client.unlock` job stays hidden from everyone — the same
+    /// fail-closed "behave as before" the `None`s give the other fields.
+    ///
+    /// Unlike the rest of the document this is read by **agents** as well as
+    /// the backend (each agent verifies a typed code against these hashes
+    /// locally, so an unlock still works during a backend outage), and it is
+    /// **not** editable through the generic `PUT /api/server-settings` merge:
+    /// a secret gets its own set-and-forget endpoint so a redacted document
+    /// round-tripping through the SPA form can never blank a live code.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub support_codes: Vec<SupportCode>,
 }
 
 impl ServerSettings {
@@ -203,7 +299,33 @@ impl ServerSettings {
             collect_retention_days: Some(DEFAULT_COLLECT_RETENTION_DAYS),
             session_ttl_hours: Some(DEFAULT_SESSION_TTL_HOURS),
             check_status_stale_days: Some(DEFAULT_CHECK_STATUS_STALE_DAYS),
+            // No built-in code: a deployment that configures none has no
+            // unlockable jobs, which is the only safe default for a secret.
+            support_codes: Vec::new(),
         }
+    }
+
+    /// The live code for `scope`, or `None` when the scope has no code, its
+    /// code is disabled, or the hash was blanked (an API-redacted document).
+    /// Every caller of this is a gate, so all three cases fail closed.
+    pub fn support_code(&self, scope: &str) -> Option<&SupportCode> {
+        self.support_codes
+            .iter()
+            .find(|c| c.scope == scope && c.is_usable())
+    }
+
+    /// The same document with every support-code hash blanked — what an HTTP
+    /// response is allowed to contain. Scope / label / TTL stay visible so
+    /// the SPA can list and manage the codes; the secret material never
+    /// leaves the backend, not even to an operator-authenticated caller.
+    /// (`GET /api/server-settings` is viewer+, so an unredacted document
+    /// would hand every read-only account an offline-crackable hash.)
+    #[must_use]
+    pub fn redacted(mut self) -> Self {
+        for c in &mut self.support_codes {
+            c.hash.clear();
+        }
+        self
     }
 
     /// The configured controller-tier runner group, trimmed, or `None` when
@@ -599,6 +721,93 @@ mod tests {
                 .unwrap()
                 .contains("check_status_stale_days")
         );
+    }
+
+    #[test]
+    fn support_codes_absent_by_default_and_omitted_from_the_wire() {
+        // The pre-feature document must round-trip byte-identically: no
+        // `support_codes` key, so an older backend / agent reading it sees
+        // exactly what it saw before, and nothing is unlockable.
+        let s = ServerSettings::default();
+        assert!(s.support_codes.is_empty());
+        assert_eq!(serde_json::to_string(&s).unwrap(), "{}");
+        assert!(s.support_code("support").is_none());
+    }
+
+    #[test]
+    fn support_code_lookup_fails_closed() {
+        let s = ServerSettings {
+            support_codes: vec![
+                SupportCode {
+                    scope: "support".into(),
+                    hash: "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA".into(),
+                    label: Some("ヘルプデスク".into()),
+                    ..Default::default()
+                },
+                SupportCode {
+                    scope: "admin".into(),
+                    hash: "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA".into(),
+                    disabled: true,
+                    ..Default::default()
+                },
+                SupportCode {
+                    // Hash blanked — what an API-redacted document looks like.
+                    // It must never be treated as a live code.
+                    scope: "blank".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert!(s.support_code("support").is_some());
+        assert!(s.support_code("admin").is_none(), "disabled must not match");
+        assert!(
+            s.support_code("blank").is_none(),
+            "blank hash must not match"
+        );
+        assert!(s.support_code("nope").is_none());
+    }
+
+    #[test]
+    fn redacted_blanks_hashes_but_keeps_the_roster() {
+        // The SPA still needs to see WHICH scopes exist (to list / rotate /
+        // delete them); it must never see the hash.
+        let s = ServerSettings {
+            support_codes: vec![SupportCode {
+                scope: "support".into(),
+                hash: "$argon2id$secret".into(),
+                label: Some("ヘルプデスク".into()),
+                ttl_minutes: Some(30),
+                disabled: false,
+            }],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&s.redacted()).unwrap();
+        assert!(!json.contains("argon2"), "wire leaked the hash: {json}");
+        assert!(!json.contains("hash"), "wire leaked the hash key: {json}");
+        assert!(json.contains("\"scope\":\"support\""), "wire: {json}");
+        assert!(json.contains("\"ttl_minutes\":30"), "wire: {json}");
+    }
+
+    #[test]
+    fn support_code_ttl_clamps() {
+        let unset = SupportCode::default();
+        assert_eq!(
+            unset.effective_ttl_minutes(),
+            DEFAULT_SUPPORT_UNLOCK_TTL_MINUTES
+        );
+        // 0 would mint an already-expired grant (an unlock that silently
+        // does nothing) — floored to the shortest real window instead.
+        let zero = SupportCode {
+            ttl_minutes: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(zero.effective_ttl_minutes(), 1);
+        let huge = SupportCode {
+            ttl_minutes: Some(u32::MAX),
+            ..Default::default()
+        };
+        assert_eq!(huge.effective_ttl_minutes(), MAX_SUPPORT_UNLOCK_TTL_MINUTES);
     }
 
     #[test]

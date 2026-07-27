@@ -443,6 +443,13 @@ pub fn router(state: AppState) -> Router {
         )
         // Replace the backend server-settings document (operator+).
         .route("/api/server-settings", put(server_settings::put))
+        // Helpdesk unlock codes (operator+). Deliberately NOT part of the
+        // document PUT above: responses blank the stored hash, so a form
+        // round-trip must never be able to write the field back.
+        .route(
+            "/api/server-settings/support-codes/{scope}",
+            put(server_settings::put_support_code).delete(server_settings::delete_support_code),
+        )
         // Restart the backend service (operator+). The backend exits
         // non-zero and the SCM's failure-recovery actions relaunch it —
         // used to apply a server_settings change (e.g. SMTP) that's only
@@ -702,8 +709,17 @@ pub fn feature_for_path(path: &str) -> Option<Feature> {
         // --- Exec ---
         "/api/exec/{job_id}" => Feature::Exec,
 
-        // --- Settings (server settings + backend restart) ---
-        "/api/server-settings" | "/api/server/restart" => Feature::Settings,
+        // --- Settings (server settings + support codes + backend restart) ---
+        //
+        // The support-code routes belong here with the settings document
+        // they live inside: without an arm they would fall through to
+        // commons, so an operator whose permission group denies the
+        // Settings page could still mint or rotate the codes that unlock
+        // helpdesk-only jobs across the fleet — a wider capability than the
+        // generic settings PUT sitting next to them.
+        "/api/server-settings"
+        | "/api/server-settings/support-codes/{scope}"
+        | "/api/server/restart" => Feature::Settings,
 
         // --- Accounts (also admin-gated; raw SQL + permission groups here) ---
         "/api/accounts"
@@ -777,6 +793,13 @@ mod feature_map_tests {
         );
         assert_eq!(
             feature_for_path("/api/server-settings"),
+            Some(Feature::Settings)
+        );
+        // The support-code routes gate with the same page. Falling through
+        // to commons would let a Settings-denied operator mint the codes
+        // that unlock helpdesk-only jobs (Claude review on #1166).
+        assert_eq!(
+            feature_for_path("/api/server-settings/support-codes/{scope}"),
             Some(Feature::Settings)
         );
         assert_eq!(feature_for_path("/api/query"), Some(Feature::Accounts));

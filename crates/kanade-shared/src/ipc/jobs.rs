@@ -122,6 +122,15 @@ pub struct UserInvokableJob {
     /// `skip_serializing_if`.)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm: Option<JobConfirm>,
+    /// The `client.unlock` scope that revealed this row, when it is an
+    /// unlock-gated job. `None` ⇒ an ordinary job every user sees.
+    ///
+    /// Purely a display marker: the agent has already applied the gate
+    /// (a gated row only appears at all while the caller holds a matching
+    /// grant, and `jobs.execute` re-checks), so the client uses this
+    /// solely to badge the row as helpdesk-only. #492 wire rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unlock: Option<String>,
     /// Snapshot of the last KLP-driven run of this job FOR THIS
     /// USER. `None` until they've executed it at least once.
     /// Backend keeps the cross-user / cross-PC history separately
@@ -350,6 +359,7 @@ mod tests {
             version: "1.0.0".into(),
             timeout_secs: None,
             confirm: None,
+            unlock: None,
             last_run: None,
         })
         .unwrap();
@@ -357,6 +367,22 @@ mod tests {
         // confirm is None ⇒ omitted (not `null`), so an older client that
         // predates the field keeps its historical always-confirm default.
         assert!(v.get("confirm").is_none(), "wire: {v:?}");
+        // Likewise `unlock`: an ungated job must look exactly as it did
+        // before the field existed, so an older client renders no badge.
+        assert!(v.get("unlock").is_none(), "wire: {v:?}");
+    }
+
+    #[test]
+    fn user_invokable_job_unlock_badge_round_trips() {
+        // A gated row carries its scope so the client can badge it. The
+        // agent only ever emits this row to a caller who already holds the
+        // grant — the field is decoration, not the gate.
+        let wire = r#"{
+            "id":"profile-rebuild","display_name":"プロファイル再作成",
+            "category":"troubleshoot","version":"1.0.0","unlock":"support"
+        }"#;
+        let j: UserInvokableJob = serde_json::from_str(wire).unwrap();
+        assert_eq!(j.unlock.as_deref(), Some("support"));
     }
 
     #[test]

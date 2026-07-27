@@ -1756,6 +1756,9 @@ Request の `id` は Client 採番 (**UUID v7 推奨** — 時系列ソート可
 | `jobs.progress` | push (A→C) | stdout chunk / exit code / status 変化 |
 | `jobs.kill` | req-rep | 自接続で投げた run の停止 |
 | `support.upload_diagnostics` | req-rep | サポート問い合わせ用 zip を Object Store にアップロード |
+| `support.unlock` | req-rep | サポートコードを照合し `client.unlock` スコープを時限解錠 |
+| `support.lock` | req-rep | 保持中の解錠グラントを即時破棄 |
+| `support.status` | req-rep | 現在保持している解錠グラント一覧 (再接続時のバナー復元用) |
 | `maintenance.list` | req-rep | 今後 N 日に予定された自端末向け job 一覧 |
 | `maintenance.defer` | req-rep | 配信された再起動の延期申請 (15m/30m/1h) |
 
@@ -1784,6 +1787,37 @@ check を用意し、更新ジョブを `is: [fail]` でゲートする。
   Client は wire の `Check.health_hidden`(agent が `!health` をセット)で描画時に除外する。
   `fleet`(SPA フリート集計軸)と `health`(Client Health 軸)は直交し、純粋なゲート検査は
   両方 off にすればどこにも出ずゲートだけ駆動する。
+
+#### `client.unlock` — サポートコードによる時限解錠 (裏コマンド)
+
+`client:` ジョブは `unlock: <scope>` を持てる。そのジョブは **エンドユーザーには
+存在しない**: `jobs.list` に出ず、`jobs.execute` も `Unauthorized` で拒否される。
+情シス / ヘルプデスクが問合せ対応中に **Client App でサポートコードを入力** すると、
+そのスコープが一定時間だけ開き、対象ジョブが現れて実行できるようになる。
+
+- **コードの保管**: `server_settings.support_codes[]` に **argon2id ハッシュのみ**
+  (`{scope, hash, label, ttl_minutes, disabled}`)。平文はどこにも保存しない。
+  設定は専用エンドポイント `PUT/DELETE /api/server-settings/support-codes/{scope}`
+  (operator+)。**汎用の `PUT /api/server-settings` はこのフィールドを触らない** —
+  API 応答はハッシュをマスクするので、フォームの往復で生きたコードを消せない構造にする。
+- **照合は Agent 側 (ローカル)**。backend 停止中でも解錠できる (= 最も必要な場面)。
+  KV は NATS トークン (HKLM の SYSTEM+Administrators ACL) がないと読めないため、
+  標準ユーザーはハッシュにも到達できない。ローカル管理者は元より上位の権限を持つ
+  (#1155) ので、本ゲートの防御対象は**標準ユーザー**であって端末管理者ではない。
+- **グラントは OS ユーザー (SID) 単位 + TTL**。接続単位ではないので、Client の再接続
+  (#468) でサポート中に黙って再ロックされない。期限は **monotonic clock** で判定
+  (wire の `expires_at` は表示専用) — 時刻を巻き戻して延長できないため。
+  Agent プロセス終了で全消滅 (fail-closed)。
+- **`visible_to` と同じ認可境界**: listing だけでなく **`jobs.execute` でも再判定**する
+  (`show_when` の listing-only とは別系統)。id を推測しても実行できない。
+- **失敗はレート制限**: SID 単位で 5 分内 5 回失敗 → 5 分ロックアウト。
+  誤コード / 無効スコープ / コード未設定は**すべて同じ `Unauthorized`** を返す
+  (スコープの存在を列挙させない)。
+- **監査**: 成功・失敗とも `ObsEvent`(`source: agent:support`,
+  `kind: support_unlock` / `support_unlock_failed` / `support_lock`) を per-PC
+  タイムラインに残す。「誰の端末をいつ誰が開けたか」が運用上の主目的の半分。
+- operator の `POST /api/exec` は `client:` を参照しないため無影響
+  (`visible_to` / `confirm` と同じ方針)。
 
 ### 2.12.6 Handshake (接続後最初に必ず呼ぶ)
 

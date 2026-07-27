@@ -872,7 +872,7 @@ pub(crate) async fn run_agent() -> Result<()> {
     // from `events-outbox/` above (which carries `EventStarted`
     // lifecycle events) — `obs-outbox/` carries the timeline
     // `ObsEvent`s a script emits via `emit.type: events` manifests.
-    let obs_outbox_dir = default_paths::data_dir().join("obs-outbox");
+    let obs_outbox_dir = obs_outbox::default_dir();
     let _obs_outbox_handle = obs_outbox::spawn_drain(client.clone(), obs_outbox_dir.clone());
     // #1089 / #970: record the restart itself. The backend infers outages from
     // heartbeat gaps, but cannot see a restart shorter than its staleness

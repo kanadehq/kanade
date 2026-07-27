@@ -42,6 +42,7 @@ use kanade_shared::ipc::notifications::{
 use kanade_shared::ipc::state::{
     StateSnapshotParams, StateSubscribeParams, StateUnsubscribeParams,
 };
+use kanade_shared::ipc::support::{SupportLockParams, SupportStatusParams, SupportUnlockParams};
 use kanade_shared::ipc::system::{LogTailParams, PingParams, VersionParams};
 use tracing::warn;
 
@@ -162,6 +163,27 @@ async fn dispatch_inner(
             let params: MaintenanceListParams =
                 decode_params(req.params.clone()).map_err(invalid_params)?;
             let result = handlers::maintenance::handle_maintenance_list(conn, params).await?;
+            serde_json::to_value(&result).map_err(internal)
+        }
+        method::SUPPORT_UNLOCK => {
+            // `code` is required — no Default, so route through serde
+            // directly (an omitted body must be InvalidParams, not an
+            // empty-string attempt that burns a rate-limit slot).
+            let params: SupportUnlockParams =
+                serde_json::from_value(req.params.clone()).map_err(invalid_params)?;
+            let result = handlers::support::handle_support_unlock(conn, params).await?;
+            serde_json::to_value(&result).map_err(internal)
+        }
+        method::SUPPORT_LOCK => {
+            let params: SupportLockParams =
+                decode_params(req.params.clone()).map_err(invalid_params)?;
+            let result = handlers::support::handle_support_lock(conn, params)?;
+            serde_json::to_value(&result).map_err(internal)
+        }
+        method::SUPPORT_STATUS => {
+            let params: SupportStatusParams =
+                decode_params(req.params.clone()).map_err(invalid_params)?;
+            let result = handlers::support::handle_support_status(conn, params)?;
             serde_json::to_value(&result).map_err(internal)
         }
         method::NOTIFICATIONS_LIST => {

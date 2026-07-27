@@ -1,0 +1,70 @@
+# Example `client.unlock` pattern — the helpdesk-only "裏コマンド" job.
+#
+# This action is deliberately NOT part of the end user's everyday catalog:
+# it is disruptive (it drops every network adapter for a few seconds) and
+# only makes sense when a support agent has already diagnosed the problem.
+# `client.unlock: support` hides it entirely — it is absent from
+# `jobs.list` AND refused by `jobs.execute` — until the calling OS user
+# holds a live unlock grant for the `support` scope.
+#
+# How the desk opens it, during a call with the user:
+#   1. In the Client App, click the version label at the foot of the
+#      sidebar 5 times → a passcode box appears.
+#   2. Type the support code. The agent verifies it locally against the
+#      argon2id hash in `server_settings.support_codes`, so this works even
+#      while the backend is down.
+#   3. A サポートモード banner appears with a countdown, and this job shows
+#      up in its category tagged 「サポート専用」. When the grant expires
+#      (or the desk presses 終了) it disappears again.
+#
+# Configure the code once, as an operator:
+#   curl -X PUT .../api/server-settings/support-codes/support \
+#     -H 'Authorization: Bearer <token>' -H 'Content-Type: application/json' \
+#     -d '{"code":"<secret>","label":"ヘルプデスク","ttl_minutes":15}'
+#
+# The scope string is free-form: run a second, stronger code (e.g.
+# `unlock: admin`) for jobs only the IT team itself should ever reach.
+#
+# NOTE the threat model. The unlock gate is a control on STANDARD users —
+# it stops an end user from discovering and firing privileged actions on
+# their own machine. It is not a control on a local administrator, who can
+# already read the agent's NATS token and do far more (#1155). Treat the
+# code as shoulder-surfable (it is typed in front of the user): rotate it,
+# keep the TTL short, and read the audit trail — every unlock, failed
+# attempt, and lock lands on the PC's Events timeline as
+# `agent:support` / `support_unlock*`.
+#
+# Create (no schedule — it's user-triggered):
+#   kanade job create configs/jobs/example-unlock/reset-network-stack.yaml
+id: reset-network-stack
+version: 0.1.0
+description: Reset the TCP/IP + Winsock stack (helpdesk-only, disruptive)
+tags: [troubleshoot, network]
+execute:
+  shell: powershell
+  run_as: system
+  timeout: 5m
+  script: |
+    $ErrorActionPreference = 'Stop'
+
+    Write-Output "ネットワーク設定をリセットしています…"
+    Write-Output "この間、数秒〜数十秒ほど通信が切断されます。"
+
+    netsh winsock reset | Out-Null
+    netsh int ip reset  | Out-Null
+    ipconfig /flushdns  | Out-Null
+
+    Write-Output "リセットが完了しました。設定を反映するには再起動が必要です。"
+client:
+  name: "ネットワーク設定をリセット"
+  description: "サポート担当者の指示があった場合のみ実行してください。再起動が必要です。"
+  category: troubleshoot
+  icon: unplug
+  # The gate. Matched byte-for-byte against a configured
+  # `server_settings.support_codes[].scope`; an unconfigured scope opens
+  # for nobody, so a typo hides the job rather than exposing it.
+  unlock: support
+  # This one reboots the machine's networking — keep the confirmation, and
+  # say what actually happens rather than the generic prompt.
+  confirm:
+    message: "ネットワーク設定をリセットします。一時的に通信が切断され、再起動が必要になります。よろしいですか？"

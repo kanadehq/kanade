@@ -381,6 +381,7 @@ mod tests {
                 visible_to: None,
                 show_when: None,
                 confirm: None,
+                unlock: None,
             }),
             tags: Vec::new(),
             origin: None,

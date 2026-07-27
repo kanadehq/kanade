@@ -46,6 +46,10 @@ use kanade_shared::ipc::notifications::{
     NotificationsUnackParams, NotificationsUnackResult,
 };
 use kanade_shared::ipc::state::{StateSnapshot, StateSnapshotParams};
+use kanade_shared::ipc::support::{
+    SupportLockParams, SupportLockResult, SupportStatusParams, SupportStatusResult,
+    SupportUnlockParams, SupportUnlockResult,
+};
 use kanade_shared::ipc::system::{PingParams, PingResult};
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, WriteHalf, split};
@@ -300,6 +304,40 @@ impl KlpClient {
             &JobsKillParams {
                 run_id: run_id.to_string(),
             },
+        )
+        .await
+    }
+
+    /// `support.unlock` — redeem an operator-issued support code, revealing
+    /// this OS user's `client.unlock`-gated jobs until the grant expires.
+    /// A wrong code comes back as an error, never an empty grant list.
+    pub async fn support_unlock(&self, code: &str) -> Result<SupportUnlockResult> {
+        self.request::<SupportUnlockParams, SupportUnlockResult>(
+            method::SUPPORT_UNLOCK,
+            &SupportUnlockParams {
+                code: code.to_string(),
+            },
+        )
+        .await
+    }
+
+    /// `support.lock` — end the support session now, dropping every grant.
+    pub async fn support_lock(&self) -> Result<SupportLockResult> {
+        self.request::<SupportLockParams, SupportLockResult>(
+            method::SUPPORT_LOCK,
+            &SupportLockParams {},
+        )
+        .await
+    }
+
+    /// `support.status` — the grants this OS user currently holds. Called on
+    /// every (re)connect: grants outlive a single KLP connection, so a client
+    /// that reconnected mid-session restores its banner from this rather than
+    /// asking the desk to re-type the code.
+    pub async fn support_status(&self) -> Result<SupportStatusResult> {
+        self.request::<SupportStatusParams, SupportStatusResult>(
+            method::SUPPORT_STATUS,
+            &SupportStatusParams {},
         )
         .await
     }
