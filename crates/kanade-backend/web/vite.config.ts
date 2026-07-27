@@ -61,7 +61,12 @@ export default defineConfig({
       // Windows service stays on :8080, so dev + service can coexist.
       // Override BACKEND_PROXY at run time if you'd rather aim Vite
       // at a different host / port (e.g., a staging machine).
-      '/api': process.env.BACKEND_PROXY ?? 'http://localhost:8081',
+      // `ws: true` is required for #1140's remote viewer: without it the
+      // proxy passes normal requests but drops the `Upgrade` handshake, so
+      // `/api/remote/<pc>/ws` fails in dev while working in production —
+      // the worst shape of bug to meet while building a viewer. Vite's own
+      // HMR socket is on a separate path, so this does not collide with it.
+      '/api': { target: process.env.BACKEND_PROXY ?? 'http://localhost:8081', ws: true },
       '/health': process.env.BACKEND_PROXY ?? 'http://localhost:8081',
     },
   },

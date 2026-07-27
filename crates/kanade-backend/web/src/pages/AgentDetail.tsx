@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, Loader2, Plus, Save, X } from 'lucide-react';
+import { ArrowLeft, Loader2, MonitorPlay, Plus, Save, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useParams } from 'react-router-dom';
@@ -101,6 +101,13 @@ function tooltipBytesPerSec(value: unknown): string {
 export function AgentDetail() {
   const { t } = useTranslation('agent-detail');
   const { pcId = '' } = useParams<{ pcId: string }>();
+  // #1140: the remote viewer needs BOTH tiers of permission. `hasRole` is the
+  // vertical one (the socket handler refuses anyone below operator) and
+  // `canSee` the horizontal one (`ProtectedLayout` bounces a feature-restricted
+  // account off /remote/:pcId straight back to the dashboard). Checking only
+  // the role would offer a restricted operator a button whose sole outcome is
+  // a silent redirect.
+  const { hasRole, canSee } = useAuth();
   const [range, setRange] = useState<RangeValue>({
     mode: 'preset',
     presetKey: '1h',
@@ -182,6 +189,16 @@ export function AgentDetail() {
           </h2>
           {agent.os_family && <Badge variant="violet">{agent.os_family}</Badge>}
         </div>
+        {/* #1140: the only way into the remote viewer — it needs a pc_id, so
+            it is reached from a machine rather than from the sidebar. */}
+        {hasRole('operator') && canSee('remote') && (
+          <Button variant="secondary" size="sm" asChild>
+            <Link to={`/remote/${encodeURIComponent(agent.pc_id)}`}>
+              <MonitorPlay className="size-4" />
+              {t('remoteScreen')}
+            </Link>
+          </Button>
+        )}
       </div>
 
       <Card>

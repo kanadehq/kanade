@@ -24,6 +24,7 @@
     "notifications": "Notifications",
     "rollout": "Rollout",
     "apps": "Apps",
+    "remote": "Remote screen",
     "agentGroups": "Groups",
     "groupDefs": "Group definitions",
     "config": "Config",

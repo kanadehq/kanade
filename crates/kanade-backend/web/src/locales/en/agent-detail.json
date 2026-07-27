@@ -138,5 +138,6 @@
         "disk_written": "Disk written/s"
       }
     }
-  }
+  },
+  "remoteScreen": "Remote screen"
 }
