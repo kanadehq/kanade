@@ -749,11 +749,15 @@ pub(crate) async fn run_backend() -> Result<()> {
         warn!(error = %e, "bootstrap admin seed failed");
     }
 
-    // NATS connect + JetStream context. The shared helper picks up
-    // $KANADE_NATS_TOKEN when set and attaches it as the bearer
-    // token; same env name + same semantics across agent / backend /
-    // CLI so a single fleet-wide secret covers all three.
-    let nats = kanade_shared::nats_client::connect(&cfg.nats.url).await?;
+    // NATS connect + JetStream context. The role decides which credential
+    // the helper looks for (#1155): `HKLM\SOFTWARE\kanade\backend\NatsToken`
+    // when provisioned, otherwise the fleet-wide token every role shared
+    // before roles existed, otherwise $KANADE_NATS_TOKEN.
+    let nats = kanade_shared::nats_client::connect(
+        kanade_shared::nats_client::NatsRole::Backend,
+        &cfg.nats.url,
+    )
+    .await?;
     info!("connected to NATS");
     let jetstream = async_nats::jetstream::new(nats.clone());
 

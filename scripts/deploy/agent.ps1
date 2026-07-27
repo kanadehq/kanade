@@ -56,7 +56,7 @@
 
 .EXAMPLE
   # Provision a fleet-wide NATS token (production):
-  PS> .\deploy-agent.ps1 -NatsToken 'kanade-fleet-secret-2026'
+  PS> .\deploy-agent.ps1 -NatsToken '<your-fleet-token>'
 
 .EXAMPLE
   # Recover from a stuck / broken service:

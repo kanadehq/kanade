@@ -139,10 +139,10 @@
   PS> .\deploy-backend.ps1 -NoFirewall                # external firewall handles ingress
 
 .EXAMPLE
-  PS> .\deploy-backend.ps1 -NatsToken 'kanade-fleet-secret-2026'   # provision NATS bearer token
+  PS> .\deploy-backend.ps1 -NatsToken '<your-fleet-token>'   # provision NATS bearer token
 
 .EXAMPLE
-  PS> .\deploy-backend.ps1 -StaticToken 'kanade-fleet-secret-2026' # provision HTTP static-token bearer
+  PS> .\deploy-backend.ps1 -StaticToken '<your-fleet-token>' # provision HTTP static-token bearer
 
 .EXAMPLE
   PS> .\deploy-backend.ps1 -JwtSecret  '<long-hs256-secret>'       # provision HS256 JWT signing key

@@ -597,6 +597,9 @@ pub(crate) async fn run_agent() -> Result<()> {
     // tracker itself owns no task — `staleness()` is a pure read.
     let staleness_tracker = staleness::Tracker::new();
     let client = kanade_shared::nats_client::connect_with_event_callback(
+        // The agent's role key is the same registry path the fleet-wide
+        // token already lives at, so this role sees no migration (#1155).
+        kanade_shared::nats_client::NatsRole::Agent,
         &cfg.agent.nats_url,
         staleness_tracker.on_event(),
     )
