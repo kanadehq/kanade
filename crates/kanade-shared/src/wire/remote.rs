@@ -417,8 +417,19 @@ pub struct RemoteCtrlReply {
     /// explanation rather than an error code.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    /// Desktop size, when known. Lets the SPA size its canvas before the
-    /// first tile arrives.
+    /// Desktop size, when known — which **in practice is never, on accept**.
+    ///
+    /// The agent answers `Start` as soon as it has spawned its capture
+    /// child, before that child has taken a frame, deliberately: blocking the
+    /// accept on a display round-trip would stall the operator's click. So it
+    /// sends `None` here and the size reaches the viewer on the first tile
+    /// instead, which is why [`FrameMeta`] repeats `screen_w` / `screen_h` on
+    /// every one of them.
+    ///
+    /// The fields remain because an agent that already knows the geometry —
+    /// one resuming a session, say — may report it, and a viewer that gets it
+    /// can size its canvas a frame earlier. Treat a value as an
+    /// optimisation; never wait for it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub screen_w: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
