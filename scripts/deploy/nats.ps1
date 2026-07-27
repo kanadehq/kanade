@@ -78,7 +78,7 @@
 .EXAMPLE
   PS> .\deploy-nats.ps1
 .EXAMPLE
-  PS> .\deploy-nats.ps1 -NatsToken 'kanade-fleet-secret-2026'
+  PS> .\deploy-nats.ps1 -NatsToken '<your-fleet-token>'
 .EXAMPLE
   PS> .\deploy-nats.ps1 -ForceConfig
 .EXAMPLE

@@ -139,10 +139,15 @@ async fn dispatch(server: String, backend_url: String, command: SubCmd) -> Resul
         return cmd::self_update::execute(args).await;
     }
 
-    // The remaining subcommands need NATS. Shared helper picks up
-    // $KANADE_NATS_TOKEN when set and attaches it as the bearer
-    // token.
-    let client = kanade_shared::nats_client::connect(&server).await?;
+    // The remaining subcommands need NATS. The role decides which
+    // credential the helper looks for (#1155):
+    // `HKLM\SOFTWARE\kanade\cli\NatsToken` when provisioned, otherwise the
+    // fleet-wide token every role shared before roles existed, otherwise
+    // $KANADE_NATS_TOKEN — which is the branch an operator shell normally
+    // takes, since the CLI does not run as LocalSystem.
+    let client =
+        kanade_shared::nats_client::connect(kanade_shared::nats_client::NatsRole::Cli, &server)
+            .await?;
     debug!("connected to NATS");
 
     match command {
