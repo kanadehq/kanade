@@ -106,10 +106,19 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Serialize, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum SocketMeta {
-    /// The agent accepted; the stream is live. Geometry is `Option` because
-    /// a well-behaved agent reports it but the wire type allows its absence,
-    /// and a viewer can also size itself from the first tile's `screen_w` /
-    /// `screen_h` (which is why those are repeated on every tile).
+    /// The agent accepted; the stream is live.
+    ///
+    /// **Geometry is normally absent, and a viewer must not wait for it.**
+    /// The agent deliberately does not report screen size when it accepts:
+    /// its capture child has not taken a frame yet, and blocking the accept
+    /// on a display round-trip would stall the operator's click. So a viewer
+    /// sizes its canvas from the first tile's `screen_w` / `screen_h`, which
+    /// is exactly why those are repeated on every tile.
+    ///
+    /// The fields stay `Option` rather than being dropped because
+    /// `RemoteCtrlReply` carries them and an agent that already knows the
+    /// geometry — one resuming a session, say — may fill them in. Treat a
+    /// value here as an optimisation, never as the source of truth.
     Started {
         session_id: String,
         screen_w: Option<u32>,
@@ -362,7 +371,19 @@ async fn pump(socket: &mut WebSocket, mut frames: async_nats::Subscriber) {
                 // input on this socket; today the only meaningful event is
                 // it going away. `None` = closed, `Err` = broken.
                 match incoming {
-                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return,
+                    Some(Ok(Message::Close(_))) => {
+                        // Echo the close before unwinding. Two reasons, both
+                        // observed against a real client: without it the
+                        // viewer reports an abnormal closure (a browser sets
+                        // `wasClean: false`, so PR4 would have to treat a
+                        // normal disconnect as an error), and the socket
+                        // would otherwise stay open until `stop_session`'s
+                        // NATS round-trip finishes — the viewer waiting on
+                        // teardown it has no stake in.
+                        let _ = socket.send(Message::Close(None)).await;
+                        return;
+                    }
+                    None | Some(Err(_)) => return,
                     Some(Ok(_)) => {}
                 }
             }
