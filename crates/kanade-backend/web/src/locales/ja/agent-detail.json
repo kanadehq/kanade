@@ -138,5 +138,6 @@
         "disk_written": "ディスク 書込/秒"
       }
     }
-  }
+  },
+  "remoteScreen": "リモート画面"
 }

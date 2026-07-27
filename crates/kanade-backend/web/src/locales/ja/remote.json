@@ -1,0 +1,25 @@
+{
+  "back": "PC詳細へ戻る",
+  "start": "接続",
+  "stop": "切断",
+  "forbidden": "リモート画面の閲覧には operator 以上の権限が必要です。",
+  "tiles": "{{count}} タイル受信",
+  "status": {
+    "idle": "未接続",
+    "connecting": "接続中",
+    "live": "受信中",
+    "unavailable": "画面を取得できません",
+    "ended": "終了"
+  },
+  "overlay": {
+    "idle": "「接続」を押すと相手の画面を表示します",
+    "connecting": "接続しています…",
+    "unavailable": "画面を取得できません（ロック中・UAC・表示モード変更など）",
+    "ended": "接続が終了しました"
+  },
+  "errors": {
+    "badProtocol": "サーバーが想定外のサブプロトコル（{{got}}）を返しました",
+    "socket": "接続に失敗しました。権限またはエージェントの状態を確認してください",
+    "closed": "接続が閉じられました"
+  }
+}

@@ -24,6 +24,7 @@
     "notifications": "通知",
     "rollout": "ロールアウト",
     "apps": "アプリ配信",
+    "remote": "リモート画面",
     "agentGroups": "グループ",
     "groupDefs": "グループ定義",
     "config": "設定",

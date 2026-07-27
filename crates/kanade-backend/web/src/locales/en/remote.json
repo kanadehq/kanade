@@ -1,0 +1,25 @@
+{
+  "back": "Back to PC",
+  "start": "Connect",
+  "stop": "Disconnect",
+  "forbidden": "Viewing a remote screen requires the operator role or higher.",
+  "tiles": "{{count}} tiles",
+  "status": {
+    "idle": "Not connected",
+    "connecting": "Connecting",
+    "live": "Streaming",
+    "unavailable": "Screen unavailable",
+    "ended": "Ended"
+  },
+  "overlay": {
+    "idle": "Press Connect to view this machine's screen",
+    "connecting": "Connecting…",
+    "unavailable": "The screen cannot be captured (locked, a UAC prompt, or a display change)",
+    "ended": "The stream ended"
+  },
+  "errors": {
+    "badProtocol": "The server negotiated an unexpected subprotocol ({{got}})",
+    "socket": "Could not connect. Check your permissions and the agent's state",
+    "closed": "The connection closed"
+  }
+}

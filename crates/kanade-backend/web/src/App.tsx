@@ -30,6 +30,7 @@ import { PasswordSetup } from '@/pages/PasswordSetup';
 import { Placeholder } from '@/pages/Placeholder';
 import { Activity } from '@/pages/Activity';
 import { ResultDetail } from '@/pages/ResultDetail';
+import { RemoteScreen } from '@/pages/RemoteScreen';
 import { Rollout } from '@/pages/Rollout';
 import { Run } from '@/pages/Run';
 import { Analytics } from '@/pages/Analytics';
@@ -124,6 +125,10 @@ function AppContent() {
               <Route path="/exec" element={<Exec />} />
               <Route path="/rollout" element={<Rollout />} />
               <Route path="/apps" element={<Apps />} />
+              {/* #1140: reached from a PC's detail page, not the sidebar — the
+                  viewer is meaningless without a pc_id. `featureForPathname`
+                  keys off the first segment, so this is gated as `remote`. */}
+              <Route path="/remote/:pcId" element={<RemoteScreen />} />
               <Route path="/groups" element={<Groups />} />
               <Route path="/group-defs" element={<GroupDefs />} />
               <Route path="/notifications" element={<Notifications />} />
