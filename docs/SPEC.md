@@ -1751,12 +1751,12 @@ Request の `id` は Client 採番 (**UUID v7 推奨** — 時系列ソート可
 | `notifications.new` | push (A→C) | 新着通知 (emergency 含む) |
 | `notifications.ack` | req-rep | 既読化 (Agent → NATS `events.notifications.acked.>` publish) |
 | `jobs.list` | req-rep | `client:` ブロックを持つ manifest 一覧 (filter: category)。`client.visible_to` で pc/group 静的スコープ、`client.show_when` で check 結果による動的表示ゲート |
-| `jobs.execute` | req-rep | 実行依頼。返り値は `run_id` |
+| `jobs.execute` | req-rep | 実行依頼。返り値は `run_id`。`visible_to` は再判定するが `show_when` / `unlock` は表示ゲートなので見ない |
 | `jobs.subscribe` | req-rep | `jobs.progress` 購読開始 |
 | `jobs.progress` | push (A→C) | stdout chunk / exit code / status 変化 |
 | `jobs.kill` | req-rep | 自接続で投げた run の停止 |
 | `support.upload_diagnostics` | req-rep | サポート問い合わせ用 zip を Object Store にアップロード |
-| `support.unlock` | req-rep | サポートコードを照合し `client.unlock` スコープを時限解錠 |
+| `support.unlock` | req-rep | サポートコードを照合し `client.unlock` スコープを時限表示 (listing のみ) |
 | `support.lock` | req-rep | 保持中の解錠グラントを即時破棄 |
 | `support.status` | req-rep | 現在保持している解錠グラント一覧 (再接続時のバナー復元用) |
 | `maintenance.list` | req-rep | 今後 N 日に予定された自端末向け job 一覧 |
@@ -1788,12 +1788,21 @@ check を用意し、更新ジョブを `is: [fail]` でゲートする。
   `fleet`(SPA フリート集計軸)と `health`(Client Health 軸)は直交し、純粋なゲート検査は
   両方 off にすればどこにも出ずゲートだけ駆動する。
 
-#### `client.unlock` — サポートコードによる時限解錠 (裏コマンド)
+#### `client.unlock` — サポートコードによる時限表示 (裏コマンド)
 
-`client:` ジョブは `unlock: <scope>` を持てる。そのジョブは **エンドユーザーには
-存在しない**: `jobs.list` に出ず、`jobs.execute` も `Unauthorized` で拒否される。
-情シス / ヘルプデスクが問合せ対応中に **Client App でサポートコードを入力** すると、
-そのスコープが一定時間だけ開き、対象ジョブが現れて実行できるようになる。
+`client:` ジョブは `unlock: <scope>` を持てる。そのジョブは通常
+**`jobs.list` に出ない**。情シス / ヘルプデスクが問合せ対応中に
+**Client App でサポートコードを入力** すると、そのスコープが一定時間だけ開き、
+対象ジョブがカタログに現れる。
+
+**これは表示ゲートであって認可境界ではない**(`show_when` と同系統、`visible_to` とは別系統)。
+`jobs.execute` では再判定しない。理由と帰結:
+
+- **見えているものは必ず実行できる**。listing と run の両方を縛ると
+  「ボタンが見えている状態で TTL が切れ、押したら失敗する」レースが生まれる。
+- 逆に **セキュリティ境界としては使えない**。標準ユーザーが Agent の Named Pipe に
+  直接 KLP を話し、job id を知っていれば実行できる。特権作業の承認ゲートは
+  operator (SPA) の exec 経路側に置く。ここはボタンを隠すだけ。
 
 - **コードの保管**: `server_settings.support_codes[]` に **argon2id ハッシュのみ**
   (`{scope, hash, label, ttl_minutes, disabled}`)。平文はどこにも保存しない。
@@ -1808,8 +1817,6 @@ check を用意し、更新ジョブを `is: [fail]` でゲートする。
   (#468) でサポート中に黙って再ロックされない。期限は **monotonic clock** で判定
   (wire の `expires_at` は表示専用) — 時刻を巻き戻して延長できないため。
   Agent プロセス終了で全消滅 (fail-closed)。
-- **`visible_to` と同じ認可境界**: listing だけでなく **`jobs.execute` でも再判定**する
-  (`show_when` の listing-only とは別系統)。id を推測しても実行できない。
 - **失敗はレート制限**: SID 単位で 5 分内 5 回失敗 → 5 分ロックアウト。
   誤コード / 無効スコープ / コード未設定は**すべて同じ `Unauthorized`** を返す
   (スコープの存在を列挙させない)。

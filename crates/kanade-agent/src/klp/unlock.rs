@@ -4,8 +4,16 @@
 //! The IT desk types an operator-issued code into the Client App
 //! (`support.unlock`); the agent verifies it against the argon2id hashes in
 //! `ServerSettings::support_codes` and records a **grant** here. While a
-//! grant is live, `jobs.list` reveals that scope's jobs and `jobs.execute`
-//! agrees to run them; when it lapses, both close again.
+//! grant is live, `jobs.list` reveals that scope's jobs; when it lapses they
+//! drop out of the catalog again.
+//!
+//! The gate is **listing-only** — `jobs.execute` does not consult it, so a
+//! visible row is always runnable and there is no race between the two. That
+//! makes this a UX affordance rather than a security boundary; see
+//! `ClientHint::unlock`. Everything below is still written to fail closed,
+//! because a grant that outlives its window or leaks to the wrong OS user
+//! would put helpdesk-only buttons in front of an end user, which is a real
+//! (if non-catastrophic) failure.
 //!
 //! Two design choices are load-bearing:
 //!
@@ -129,11 +137,9 @@ pub fn grants(sid: &str) -> Vec<UnlockGrant> {
     to_wire(entry, now)
 }
 
-/// Whether `sid` may currently see and run jobs gated on `scope`.
-///
-/// This is the single predicate both gates call — the `jobs.list` filter and
-/// the `jobs.execute` refusal — so the listing and the run path can never
-/// drift into disagreeing about what is unlocked.
+/// Whether `sid` may currently **see** jobs gated on `scope`. Consulted by
+/// the `jobs.list` filter; the run path deliberately does not (see the module
+/// docs), so anything this reveals stays runnable even once it lapses.
 pub fn holds(sid: &str, scope: &str) -> bool {
     let now = Instant::now();
     let map = lock_recover(&GRANTS);

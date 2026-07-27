@@ -1,10 +1,16 @@
 //! `support.*` method handlers — the helpdesk unlock gate.
 //!
-//! - `support.unlock` — redeem an operator-issued code, granting the calling
-//!   OS user time-limited access to `client.unlock`-scoped jobs.
+//! - `support.unlock` — redeem an operator-issued code, revealing the calling
+//!   OS user's `client.unlock`-scoped jobs for a limited window.
 //! - `support.lock` — drop every grant that user holds, now.
 //! - `support.status` — what they hold (so a reconnecting client can restore
 //!   its banner without re-asking for the code).
+//!
+//! The grant gates **`jobs.list` only** — it decides what the Client App
+//! offers, not what the agent will run (see `ClientHint::unlock`). So this is
+//! a UX affordance, not an authorization boundary: the guard rails below
+//! (rate limiting, local hashes, audit) exist to keep helpdesk-only buttons
+//! from appearing in front of end users, not to protect a capability.
 //!
 //! Verification is **local**: the argon2id hashes live in the
 //! `server_settings` KV document, which every agent can read, so a desk can

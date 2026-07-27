@@ -9,9 +9,10 @@
 //!   helpdesk ticket. The Client App shows the resulting ticket URL so
 //!   the user can paste it into the chat / email follow-up.
 //! - `support.unlock` / `support.lock` / `support.status` — the
-//!   operator-code gate in front of `client.unlock`-scoped jobs: the IT
-//!   desk types a secret code on the user's PC to reveal (and be allowed
-//!   to run) actions the end user must not fire on their own.
+//!   operator-code display gate in front of `client.unlock`-scoped jobs: the
+//!   IT desk types a secret code on the user's PC to reveal actions that have
+//!   no business sitting in that user's everyday catalog. Listing-only — see
+//!   `kanade_shared::manifest::ClientHint::unlock`.
 
 use serde::{Deserialize, Serialize};
 
@@ -61,8 +62,8 @@ pub struct SupportUploadDiagnosticsResult {
 
 // ---------- support.unlock / support.lock / support.status ----------
 
-/// One live unlock grant — the caller may see and run every
-/// `client.unlock: <scope>` job until `expires_at`.
+/// One live unlock grant — every `client.unlock: <scope>` job is listed for
+/// the caller until `expires_at`.
 ///
 /// Grants are held per **OS user** (the connection's SID), not per
 /// connection: the Client App reconnects on its own (a pipe hiccup, a

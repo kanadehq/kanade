@@ -263,13 +263,13 @@ fn job_show_when_satisfied(m: &Manifest, checks: &HashMap<String, CheckStatus>) 
 }
 
 /// Whether a manifest's `client.unlock` gate is open for the caller: a job
-/// with no `unlock` scope is always open; otherwise the caller must hold a
+/// with no `unlock` scope is always listed; otherwise the caller must hold a
 /// live grant for that exact scope (`unlocked`). A `client:`-less manifest is
 /// "open" here (dropped later by [`manifest_to_job`] as operator-only).
 ///
-/// Unlike `show_when` this is an authorization gate, not a display hint — the
-/// run path calls the same `unlocked` predicate, so a job hidden here can't be
-/// fired by guessing its id.
+/// Like `show_when` and unlike `visible_to`, this gates **listing only** — see
+/// the note in [`handle_jobs_execute`]. Hidden here means "not offered to this
+/// user right now", not "forbidden".
 fn job_unlocked(m: &Manifest, unlocked: &dyn Fn(&str) -> bool) -> bool {
     match m.client.as_ref().and_then(|c| c.unlock.as_ref()) {
         None => true,
@@ -353,9 +353,9 @@ fn manifest_to_job(m: &Manifest) -> Option<UserInvokableJob> {
             enabled: c.enabled,
             message: c.message.clone(),
         }),
-        // Display marker only — the gate already ran. Lets the Client App
-        // badge the row so the user can see this one came from the desk's
-        // support code and isn't part of their everyday catalog.
+        // Display marker: lets the Client App badge the row so the user can
+        // see this one came from the desk's support code and isn't part of
+        // their everyday catalog.
         unlock: client.unlock.clone(),
         // Per-user run history is minted by `jobs.execute` (a
         // follow-up PR); until then every row is "never run by you".
@@ -419,23 +419,12 @@ pub async fn handle_jobs_execute(
         }
     }
 
-    // Enforce `client.unlock` on the run path too — the listing gate alone
-    // would be cosmetic, since the Client App is not the only thing that can
-    // speak KLP on this box and a job id is not a secret. Re-checked HERE
-    // rather than trusted from the listing, so a grant that lapsed between
-    // the user seeing the row and pressing 実行 refuses the run.
-    if let Some(scope) = client_hint.unlock.as_deref() {
-        if !unlock::holds(&conn.peer.user_sid, scope) {
-            warn!(
-                job_id = %params.id, scope, user = %conn.peer.user,
-                "jobs.execute: refusing an unlock-gated job with no live grant",
-            );
-            return Err(RpcError::new(
-                ErrorKind::Unauthorized,
-                format!("job '{}' requires an unlocked support session", params.id),
-            ));
-        }
-    }
+    // NOTE: `client.unlock` is deliberately NOT enforced here. It is a
+    // display gate (like `show_when`), not an authorization boundary (unlike
+    // `visible_to`): the operator-side approval controls live on the SPA exec
+    // path, and gating the run here would only add a race — the row is
+    // visible, the grant lapses, and pressing 実行 fails on a button the user
+    // was just looking at. Listing-only means anything visible is runnable.
 
     // #927: honour the operator's revoke gate on the KLP path too. The
     // NATS command path refuses REVOKED scripts (`commands.rs`), but a

@@ -125,10 +125,11 @@ pub struct UserInvokableJob {
     /// The `client.unlock` scope that revealed this row, when it is an
     /// unlock-gated job. `None` ⇒ an ordinary job every user sees.
     ///
-    /// Purely a display marker: the agent has already applied the gate
-    /// (a gated row only appears at all while the caller holds a matching
-    /// grant, and `jobs.execute` re-checks), so the client uses this
-    /// solely to badge the row as helpdesk-only. #492 wire rule.
+    /// A display marker: the agent already applied the gate on the way out
+    /// (a gated row only appears while the caller holds a matching grant), so
+    /// the client uses this solely to badge the row as helpdesk-only. The
+    /// gate is listing-only — `jobs.execute` does not re-check it — so a row
+    /// the user can see is a row they can run. #492 wire rule.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unlock: Option<String>,
     /// Snapshot of the last KLP-driven run of this job FOR THIS

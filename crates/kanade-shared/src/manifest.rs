@@ -823,33 +823,43 @@ pub struct ClientHint {
         skip_serializing_if = "Option::is_none"
     )]
     pub confirm: Option<ConfirmHint>,
-    /// Optional **unlock scope** — the "裏コマンド" gate. `None` (the
+    /// Optional **unlock scope** — the "裏コマンド" display gate. `None` (the
     /// overwhelming default) ⇒ the job behaves as it always has. `Some(scope)`
-    /// ⇒ the job is hidden from `jobs.list` **and refused by
-    /// `jobs.execute`** unless the calling OS user currently holds an
-    /// unlock grant for that scope, obtained by typing the operator's secret
-    /// code into the Client App (`support.unlock`).
+    /// ⇒ the job is **hidden from `jobs.list`** unless the calling OS user
+    /// currently holds an unlock grant for that scope, obtained by typing the
+    /// operator's secret code into the Client App (`support.unlock`).
     ///
-    /// The intended use is helpdesk-only actions: a job an end user must not
-    /// discover or fire on their own, but which the IT desk can enable in
-    /// seconds while walking that user through a problem — without an
-    /// operator-side exec, which needs SPA access and a correctly-cased
+    /// The intended use is helpdesk-only actions: a job that has no business
+    /// sitting in an end user's everyday catalog, but which the IT desk can
+    /// surface in seconds while walking that user through a problem — without
+    /// an operator-side exec, which needs SPA access and a correctly-cased
     /// `pc_id`.
     ///
     /// The scope is a free-form slug (`support`, `admin`, …) matched against
     /// the scopes configured in `ServerSettings::support_codes`, so one
     /// deployment can run a first-line code and a stronger administrator code
-    /// side by side, each opening a different set of jobs. A scope with no
-    /// configured code opens for nobody (fail-closed) — a typo hides the job
-    /// rather than exposing it.
+    /// side by side, each revealing a different set of jobs. A scope with no
+    /// configured code opens for nobody — a typo hides the job rather than
+    /// exposing it.
     ///
-    /// This is an authorization boundary, so — unlike the display-only
-    /// [`show_when`](ClientHint::show_when) and like
-    /// [`visible_to`](ClientHint::visible_to) — the agent enforces it on the
-    /// **run** path too: a user who learns the job id can't fire it by
-    /// calling `jobs.execute` directly. It gates the END-USER surface only;
-    /// the operator `POST /api/exec` path never consults `client:`. New field
-    /// ⇒ #492 wire rule (`serde(default)` + `skip_serializing_if`).
+    /// **Listing only, like [`show_when`](ClientHint::show_when) and unlike
+    /// [`visible_to`](ClientHint::visible_to).** The agent does NOT re-check
+    /// it in `jobs.execute`, which has two consequences worth being explicit
+    /// about:
+    ///
+    /// - Anything the user can see, they can run — no race where the row is
+    ///   visible, the grant lapses, and pressing 実行 fails on a button they
+    ///   were just looking at.
+    /// - It is therefore **not a security boundary**: a standard user who
+    ///   speaks KLP to the agent's pipe directly and knows the job id can
+    ///   still run it. Approval controls for privileged work live on the
+    ///   operator (SPA) exec path; this hides a button, it does not guard a
+    ///   capability.
+    ///
+    /// The operator paths are unaffected in both directions: `POST
+    /// /api/exec/{job_id}` and `kanade exec` never consult `client:`, so an
+    /// operator can run the job on any PC whether or not anyone unlocked it.
+    /// New field ⇒ #492 wire rule (`serde(default)` + `skip_serializing_if`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unlock: Option<String>,
 }

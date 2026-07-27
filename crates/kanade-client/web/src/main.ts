@@ -172,8 +172,8 @@ type UserInvokableJob = {
   // overrides the dialog text.
   confirm?: JobConfirm | null;
   // The manifest's `client.unlock` scope, present only on rows that a live
-  // support grant revealed. A display marker: the agent already applied the
-  // gate on the way out and re-checks it on execute.
+  // support grant revealed. A badge hint: the agent already applied the gate
+  // when it built this list, and a listed row stays runnable.
   unlock?: string | null;
 };
 
@@ -821,10 +821,10 @@ function renderJobRow(j: UserInvokableJob): string {
 // ---- Support mode: the 裏コマンド unlock ------------------------------
 //
 // The IT desk types an operator-issued code on the user's machine to reveal
-// `client.unlock`-scoped jobs. Everything here is UI: the agent holds the
-// grant, gates `jobs.list`, and re-checks on `jobs.execute`, so nothing in
-// this file is load-bearing for security — hiding the banner or faking a
-// grant client-side reveals and runs exactly nothing.
+// `client.unlock`-scoped jobs. The grant lives in the agent and gates what
+// `jobs.list` returns, so faking one here reveals nothing — but the gate is
+// listing-only by design (`ClientHint::unlock`), so treat this as an
+// affordance for the desk rather than a lock on anything.
 
 type UnlockGrant = {
   scope: string;

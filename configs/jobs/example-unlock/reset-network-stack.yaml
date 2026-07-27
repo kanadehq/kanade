@@ -3,9 +3,14 @@
 # This action is deliberately NOT part of the end user's everyday catalog:
 # it is disruptive (it drops every network adapter for a few seconds) and
 # only makes sense when a support agent has already diagnosed the problem.
-# `client.unlock: support` hides it entirely — it is absent from
-# `jobs.list` AND refused by `jobs.execute` — until the calling OS user
-# holds a live unlock grant for the `support` scope.
+# `client.unlock: support` keeps it out of `jobs.list` until the calling OS
+# user holds a live unlock grant for the `support` scope.
+#
+# It is a DISPLAY gate, not an authorization boundary: `jobs.execute` does
+# not re-check it (so a visible button always works), and the operator
+# paths — `POST /api/exec` / `kanade exec` — never consult `client:` at all,
+# so an operator can run this on any PC whether or not anyone unlocked it.
+# Approval controls for privileged work belong on the operator exec path.
 #
 # How the desk opens it, during a call with the user:
 #   1. In the Client App, click the version label at the foot of the
@@ -25,13 +30,15 @@
 # The scope string is free-form: run a second, stronger code (e.g.
 # `unlock: admin`) for jobs only the IT team itself should ever reach.
 #
-# NOTE the threat model. The unlock gate is a control on STANDARD users —
-# it stops an end user from discovering and firing privileged actions on
-# their own machine. It is not a control on a local administrator, who can
-# already read the agent's NATS token and do far more (#1155). Treat the
-# code as shoulder-surfable (it is typed in front of the user): rotate it,
-# keep the TTL short, and read the audit trail — every unlock, failed
-# attempt, and lock lands on the PC's Events timeline as
+# NOTE what this does and does not buy you. It stops an end user from
+# DISCOVERING helpdesk-only actions in their catalog and clicking them by
+# curiosity or by being talked into it. It does not stop someone determined:
+# the gate is listing-only, so a standard user who speaks KLP to the agent's
+# pipe directly and knows the job id can still run it, and a local
+# administrator can already read the agent's NATS token and do far more
+# (#1155). Treat the code as shoulder-surfable (it is typed in front of the
+# user): rotate it, keep the TTL short, and read the audit trail — every
+# unlock, failed attempt, and lock lands on the PC's Events timeline as
 # `agent:support` / `support_unlock*`.
 #
 # Create (no schedule — it's user-triggered):
@@ -60,8 +67,8 @@ client:
   description: "サポート担当者の指示があった場合のみ実行してください。再起動が必要です。"
   category: troubleshoot
   icon: unplug
-  # The gate. Matched byte-for-byte against a configured
-  # `server_settings.support_codes[].scope`; an unconfigured scope opens
+  # The display gate. Matched byte-for-byte against a configured
+  # `server_settings.support_codes[].scope`; an unconfigured scope reveals
   # for nobody, so a typo hides the job rather than exposing it.
   unlock: support
   # This one reboots the machine's networking — keep the confirmation, and
