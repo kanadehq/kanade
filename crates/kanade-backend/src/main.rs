@@ -365,11 +365,17 @@ fn command_key_generate(rotate: bool, kid: Option<&str>) -> Result<()> {
     println!("Add this entry to every agent's HKLM\\SOFTWARE\\kanade\\agent\\CommandKeys array:");
     println!("{}", serde_json::to_string_pretty(&entry)?);
     println!();
+    // Names both outcomes because this subcommand serves both cases: a
+    // first-time mint leaves agents holding nothing (`unprovisioned`), a
+    // rotation leaves them holding the previous key (`unknown_key`). Telling a
+    // first-time operator to watch for the rotation alarm sends them looking
+    // for a signal that will not appear.
     println!(
-        "Distribute it to the whole fleet BEFORE the backend starts signing. An agent that \
-         lacks the key reports command_signature_unknown_key — the signal that means a \
-         rotation went wrong — so signing first would raise that alarm on every machine at \
-         once and teach everyone to ignore it."
+        "Distribute it to the whole fleet BEFORE the backend starts signing. An agent holding \
+         no keys yet reports command_signature_unprovisioned; one mid-rotation, holding the \
+         previous key but not this one, reports command_signature_unknown_key — the signal \
+         that means a rotation went wrong. Signing first would raise one of those on every \
+         machine at once and teach everyone to ignore it."
     );
     Ok(())
 }

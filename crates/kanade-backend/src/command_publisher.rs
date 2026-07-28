@@ -78,8 +78,9 @@ impl CommandPublisher {
             Ok(Some(s)) => {
                 info!(
                     kid = s.kid(),
-                    "signing every published command — agents that lack this key will report \
-                     command_signature_unknown_key"
+                    "signing every published command — agents holding other keys but not this one \
+                     report command_signature_unknown_key; agents holding none report \
+                     command_signature_unprovisioned"
                 );
                 Some(s)
             }

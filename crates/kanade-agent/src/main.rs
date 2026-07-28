@@ -819,7 +819,6 @@ pub(crate) async fn run_agent() -> Result<()> {
     // #1165 stage 1: one verifier shared by every command entry point, so the
     // transition reporting reflects the machine rather than one subscription.
     let verifier = std::sync::Arc::new(command_verify::Verifier::new(
-        command_verify::load_keyring(),
         pc_id.clone(),
         // `default_dir()` rather than the `obs_outbox_dir` binding below: the
         // command paths are spawned before it exists, and it is the same pure

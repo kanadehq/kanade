@@ -421,10 +421,16 @@ impl Signer {
     /// environment, rejecting an empty `kid` rather than signing under one.
     ///
     /// An empty id is not a cosmetic problem: `Kanade-Sig-Kid: ""` matches no
-    /// keyring entry, so every agent reports `command_signature_unknown_key` —
-    /// the signal that is supposed to mean "this agent missed a rotation".
-    /// Producing it from a backend-side typo would train operators to ignore
-    /// the one alarm the rotation procedure depends on.
+    /// keyring entry, so every agent that holds keys reports
+    /// `command_signature_unknown_key` — the signal that is supposed to mean
+    /// "this agent missed a rotation". Producing it from a backend-side typo
+    /// would train operators to ignore the one alarm the rotation procedure
+    /// depends on.
+    ///
+    /// (An agent holding *no* keys reports `command_signature_unprovisioned`
+    /// instead, since it cannot tell an empty id from any other it lacks. The
+    /// distinction is the agent's, in `command_verify`; the harm named above is
+    /// the one that lands on an already-provisioned fleet.)
     pub fn from_secret(secret: &str, kid: &str) -> Result<Self, String> {
         if kid.trim().is_empty() {
             return Err("the signing key id is empty".to_string());
@@ -961,9 +967,11 @@ mod tests {
 
     #[test]
     fn a_signer_refuses_an_empty_kid_rather_than_signing_under_one() {
-        // `Kanade-Sig-Kid: ""` matches no keyring entry, so every agent would
-        // report `unknown_key` — the alarm that is supposed to mean a rotation
-        // went wrong. A backend typo must not be able to raise it fleet-wide.
+        // `Kanade-Sig-Kid: ""` matches no keyring entry, so every agent that
+        // holds keys would report `unknown_key` — the alarm that is supposed to
+        // mean a rotation went wrong. A backend typo must not be able to raise
+        // it fleet-wide. (A machine holding none reports `unprovisioned`; the
+        // fleet this harms is the already-provisioned one.)
         let secret = encode_secret(&generate_keypair().unwrap());
         assert!(Signer::from_secret(&secret, "").is_err());
         assert!(Signer::from_secret(&secret, "   ").is_err());
