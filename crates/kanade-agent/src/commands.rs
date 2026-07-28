@@ -99,6 +99,12 @@ fn enqueue_result_best_effort(result: ExecResult, note: &'static str) {
     });
 }
 
+// One argument over the limit since #1165 added the verifier. Same
+// handling as the other long plumbing signatures in this crate (10+
+// existing allows): these thread the agent's shared state to a task, and
+// bundling them is a refactor of unrelated code, not part of a security
+// change.
+#[allow(clippy::too_many_arguments)]
 pub async fn command_loop(
     client: async_nats::Client,
     pc_id: String,
@@ -107,6 +113,7 @@ pub async fn command_loop(
     mut sub: async_nats::Subscriber,
     script_cache: ScriptCache,
     check_sink: crate::check_cache::CheckSink,
+    verifier: std::sync::Arc<crate::command_verify::Verifier>,
 ) {
     let jetstream = async_nats::jetstream::new(client.clone());
     let script_current = jetstream.get_key_value(BUCKET_SCRIPT_CURRENT).await.ok();
@@ -132,6 +139,14 @@ pub async fn command_loop(
                 continue;
             }
         };
+        // #1165 stage 1: check provenance over the exact received bytes and
+        // report the outcome. Nothing is rejected yet — that is stage 3, and
+        // shipping the capability first is what keeps the rollout reversible.
+        verifier.observe(
+            &msg.payload,
+            &crate::command_verify::headers_of(&msg),
+            &cmd.request_id,
+        );
         // Shared with command_replay: if the JetStream replay path
         // already ran this Command on an earlier reconnect (rare but
         // possible), drop the live duplicate here.

@@ -22,6 +22,8 @@ async-nats = { workspace = true }
 # backend is unreachable. Same hasher the backend mints them with.
 argon2     = { workspace = true }
 base64     = { workspace = true }
+# #1165: parses the provisioned Ed25519 public keys (`command_verify`).
+ed25519-dalek = { workspace = true }
 bytes      = { workspace = true }
 chrono     = { workspace = true }
 clap       = { workspace = true }

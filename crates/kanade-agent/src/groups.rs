@@ -59,6 +59,7 @@ pub fn spawn(
     staleness: crate::staleness::Tracker,
     script_cache: crate::script_cache::ScriptCache,
     check_sink: crate::check_cache::CheckSink,
+    verifier: std::sync::Arc<crate::command_verify::Verifier>,
 ) -> (
     tokio::sync::watch::Receiver<Vec<String>>,
     tokio::task::JoinHandle<()>,
@@ -73,12 +74,19 @@ pub fn spawn(
             script_cache,
             check_sink,
             tx,
+            verifier,
         )
         .await;
     });
     (rx, handle)
 }
 
+// One argument over the limit since #1165 added the verifier. Same
+// handling as the other long plumbing signatures in this crate (10+
+// existing allows): these thread the agent's shared state to a task, and
+// bundling them is a refactor of unrelated code, not part of a security
+// change.
+#[allow(clippy::too_many_arguments)]
 async fn manage(
     client: async_nats::Client,
     pc_id: String,
@@ -87,6 +95,7 @@ async fn manage(
     script_cache: crate::script_cache::ScriptCache,
     check_sink: crate::check_cache::CheckSink,
     groups_tx: tokio::sync::watch::Sender<Vec<String>>,
+    verifier: std::sync::Arc<crate::command_verify::Verifier>,
 ) {
     let js = jetstream::new(client.clone());
 
@@ -152,6 +161,7 @@ async fn manage(
             &script_cache,
             &check_sink,
             &groups_tx,
+            &verifier,
             "prime",
         )
         .await;
@@ -201,6 +211,7 @@ async fn manage(
                     &script_cache,
                     &check_sink,
                     &groups_tx,
+                    &verifier,
                     "update",
                 )
                 .await;
@@ -262,6 +273,7 @@ async fn reconcile_and_publish(
     script_cache: &crate::script_cache::ScriptCache,
     check_sink: &crate::check_cache::CheckSink,
     groups_tx: &tokio::sync::watch::Sender<Vec<String>>,
+    verifier: &std::sync::Arc<crate::command_verify::Verifier>,
     reason: &str,
 ) {
     let desired = union_groups(manual, derived);
@@ -283,6 +295,7 @@ async fn reconcile_and_publish(
             staleness,
             script_cache,
             check_sink,
+            verifier,
         )
         .await;
     }
@@ -299,6 +312,7 @@ async fn apply_delta(
     staleness: &crate::staleness::Tracker,
     script_cache: &crate::script_cache::ScriptCache,
     check_sink: &crate::check_cache::CheckSink,
+    verifier: &std::sync::Arc<crate::command_verify::Verifier>,
 ) {
     for g in &delta.to_unsubscribe {
         if let Some(handle) = subs.remove(g) {
@@ -323,6 +337,7 @@ async fn apply_delta(
                     sub,
                     script_cache.clone(),
                     check_sink.clone(),
+                    verifier.clone(),
                 ));
                 subs.insert(g.clone(), handle);
                 info!(group = %g, "subscribed to group");

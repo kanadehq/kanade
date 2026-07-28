@@ -2918,6 +2918,7 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
+ "ed25519-dalek",
  "futures",
  "humantime",
  "image",
