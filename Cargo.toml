@@ -99,6 +99,10 @@ sha2               = "0.11.0"
 # back into raw bytes so the agent's hex-formatted Command field
 # (#210 / #213) compares cleanly with sha2's hex output.
 base64             = "0.23.0"
+# #1165: backend-signed commands. Already in the tree transitively via
+# async-nats/nkeys, so declaring it directly adds no third-party code to
+# compile or audit — only the ability to call it.
+ed25519-dalek      = { version = "2.2.0", features = ["rand_core"] }
 winreg             = "0.56"
 pelite             = "0.10"
 # v0.37 Part 2: agent process self-perf via NT process info APIs

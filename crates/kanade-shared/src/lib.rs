@@ -11,6 +11,7 @@ pub mod kv_cas;
 pub mod manifest;
 pub mod nats_client;
 pub mod secrets;
+pub mod signing;
 pub mod strict;
 pub mod subject;
 pub mod wire;
