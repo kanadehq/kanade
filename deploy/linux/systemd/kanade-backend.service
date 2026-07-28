@@ -1,0 +1,29 @@
+[Unit]
+Description=kanade backend (axum + SQLite projector)
+After=network-online.target nats-server.service
+Wants=network-online.target
+Requires=nats-server.service
+
+[Service]
+Type=simple
+User=kanade
+Group=kanade
+EnvironmentFile=/etc/kanade/kanade.env
+Environment=KANADE_BACKEND_CONFIG=/etc/kanade/backend.toml
+ExecStart=/usr/local/bin/kanade-backend
+WorkingDirectory=/var/lib/kanade
+
+# The Windows build self-restarts via exit(1) + SCM recovery (5 s later).
+# Restart=on-failure + RestartSec=5 reproduces that on Linux.
+Restart=on-failure
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/kanade /var/log/kanade
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
