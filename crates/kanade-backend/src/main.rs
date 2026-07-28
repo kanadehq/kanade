@@ -3,6 +3,7 @@ mod api;
 mod audit;
 mod auth;
 mod cleanup;
+mod command_publisher;
 mod controller;
 mod mail;
 mod projector;
@@ -253,33 +254,6 @@ struct PermGroupRow {
     updated_at: String,
 }
 
-/// `wipe-projector` subcommand: drop the projector DB so it re-derives
-/// from JetStream replay, preserving the durable `users` table.
-///
-/// Why a dedicated subcommand instead of `rm backend.db` in the deploy
-/// script: of all the projector DB's tables, only `users` and
-/// `executions` are NOT sourced from a NATS stream — everything else
-/// (audit_log, notification_acks, execution_results, agents, perf
-/// samples, obs_events, inventory_*, check_status, the explode tables)
-/// re-projects on replay. A blind file delete therefore takes the auth
-/// accounts with it and locks every operator out until a bootstrap
-/// re-seed (the lockout that motivated this).
-///
-/// `executions` is the OTHER durable table but is deliberately NOT
-/// preserved: the results projector bumps its `success_count` /
-/// `failure_count` *incrementally* (an `UPDATE ... SET success_count =
-/// success_count + delta`), so keeping a row across a wipe+replay would
-/// double-count, and faithfully rebuilding it would mean reconstructing
-/// the exec-lifecycle reaping state too. Losing run history is
-/// Mint the backend's command-signing keypair (#1165).
-///
-/// The private key goes straight into the registry and is never printed —
-/// stdout here is expected to be pasted into a terminal, a ticket, or a chat
-/// window, and a secret that reaches any of those is no longer a secret.
-/// What is printed is the public key and the exact keyring entry agents need,
-/// so the operator distributes something correct by construction rather than
-/// assembling JSON by hand that `parse_keyring` may reject — a malformed entry
-/// takes the whole ring with it.
 /// Decide the `kid` for a generate run, and refuse the two ways it can wreck
 /// a fleet.
 ///
@@ -327,6 +301,15 @@ fn resolve_kid(
     Ok(kid)
 }
 
+/// Mint the backend's command-signing keypair (#1165).
+///
+/// The private key goes straight into the registry and is never printed —
+/// stdout here is expected to be pasted into a terminal, a ticket, or a chat
+/// window, and a secret that reaches any of those is no longer a secret.
+/// What is printed is the public key and the exact keyring entry agents need,
+/// so the operator distributes something correct by construction rather than
+/// assembling JSON by hand that `parse_keyring` may reject — a malformed entry
+/// takes the whole ring with it.
 fn command_key_generate(rotate: bool, kid: Option<&str>) -> Result<()> {
     use kanade_shared::signing;
 
@@ -391,6 +374,24 @@ fn command_key_generate(rotate: bool, kid: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// `wipe-projector` subcommand: drop the projector DB so it re-derives
+/// from JetStream replay, preserving the durable `users` table.
+///
+/// Why a dedicated subcommand instead of `rm backend.db` in the deploy
+/// script: of all the projector DB's tables, only `users` and
+/// `executions` are NOT sourced from a NATS stream — everything else
+/// (audit_log, notification_acks, execution_results, agents, perf
+/// samples, obs_events, inventory_*, check_status, the explode tables)
+/// re-projects on replay. A blind file delete therefore takes the auth
+/// accounts with it and locks every operator out until a bootstrap
+/// re-seed (the lockout that motivated this).
+///
+/// `executions` is the OTHER durable table but is deliberately NOT
+/// preserved: the results projector bumps its `success_count` /
+/// `failure_count` *incrementally* (an `UPDATE ... SET success_count =
+/// success_count + delta`), so keeping a row across a wipe+replay would
+/// double-count, and faithfully rebuilding it would mean reconstructing
+/// the exec-lifecycle reaping state too. Losing run history is
 /// acceptable collateral; an auth lockout is not.
 fn wipe_projector(config: Option<&Path>) -> Result<()> {
     let cfg_path = default_paths::find_config(config, "KANADE_BACKEND_CONFIG", "backend.toml")?;
@@ -1218,6 +1219,11 @@ pub(crate) async fn run_backend() -> Result<()> {
 
     let app_state = api::AppState {
         pool: pool.clone(),
+        // #1165 stage 2: every command the backend puts on the wire goes
+        // through this, signed when the host holds a key. Built before the
+        // bare `nats` handle moves into the state so the two share one
+        // connection.
+        commands: std::sync::Arc::new(command_publisher::CommandPublisher::from_host(nats.clone())),
         query_pool,
         nats,
         jetstream,

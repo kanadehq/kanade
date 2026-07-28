@@ -56,7 +56,10 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+// The two traits are imported anonymously so `key.sign(..)` / `key.verify(..)`
+// still resolve without `ed25519_dalek::Signer` colliding with this module's
+// own [`Signer`] — the type an operator-facing caller actually holds.
+use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _, VerifyingKey};
 
 /// Header carrying the base64 (standard, padded) Ed25519 signature over the
 /// message body.
@@ -389,6 +392,69 @@ pub fn sign(key: &SigningKey, kid: &str, body: &[u8], at_ms: i64) -> SigHeaders 
         kid: Some(kid.to_owned()),
         alg: Some(ALG_ED25519.to_owned()),
         at_ms: Some(at_ms.to_string()),
+    }
+}
+
+/// The signing half, bound to the id agents know it by.
+///
+/// The key and its `kid` are only meaningful together, so nothing here hands
+/// out one without the other. Signing under an id whose public half agents
+/// hold for a *different* key produces `command_signature_invalid` on every
+/// machine at once — which reads as a fleet-wide forgery, not as the
+/// misconfiguration it is. Any API that lets the two be supplied separately is
+/// a way to reach that state, and `resolve_kid` on the generating side already
+/// refuses the other way in (two keys sharing one id).
+pub struct Signer {
+    key: SigningKey,
+    kid: String,
+}
+
+impl Signer {
+    pub fn new(key: SigningKey, kid: impl Into<String>) -> Self {
+        Self {
+            key,
+            kid: kid.into(),
+        }
+    }
+
+    /// Build from the encoded secret as it rests in the registry or the
+    /// environment, rejecting an empty `kid` rather than signing under one.
+    ///
+    /// An empty id is not a cosmetic problem: `Kanade-Sig-Kid: ""` matches no
+    /// keyring entry, so every agent reports `command_signature_unknown_key` —
+    /// the signal that is supposed to mean "this agent missed a rotation".
+    /// Producing it from a backend-side typo would train operators to ignore
+    /// the one alarm the rotation procedure depends on.
+    pub fn from_secret(secret: &str, kid: &str) -> Result<Self, String> {
+        if kid.trim().is_empty() {
+            return Err("the signing key id is empty".to_string());
+        }
+        Ok(Self::new(decode_secret(secret)?, kid))
+    }
+
+    pub fn kid(&self) -> &str {
+        &self.kid
+    }
+
+    pub fn verifying_key(&self) -> VerifyingKey {
+        self.key.verifying_key()
+    }
+
+    /// Sign `body` as of `at_ms`, yielding the headers to publish with it.
+    pub fn headers(&self, body: &[u8], at_ms: i64) -> SigHeaders {
+        sign(&self.key, &self.kid, body, at_ms)
+    }
+}
+
+/// Hand-written so the private key cannot reach a log line.
+///
+/// `SigningKey` derives `Debug` and prints its bytes, so a derived impl here
+/// would put the fleet's crown jewel into any `tracing` call that formats the
+/// struct — including the ones nobody writes deliberately, like a `#[derive(
+/// Debug)]` on an enclosing type.
+impl std::fmt::Debug for Signer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Signer").field("kid", &self.kid).finish()
     }
 }
 
@@ -877,6 +943,46 @@ mod tests {
         let ring = ring_with("backend-1", key.verifying_key());
         let headers = sign(&restored, "backend-1", b"after a restart", NOW);
         assert!(verify(&ring, b"after a restart", &headers, NOW).is_ok());
+    }
+
+    #[test]
+    fn a_signer_built_from_the_stored_secret_verifies_against_its_own_ring() {
+        // The whole backend-side path in one assertion: the encoded secret as
+        // it rests in the registry, through `Signer`, out as headers, verified
+        // by the public half an agent was given.
+        let key = generate_keypair().unwrap();
+        let signer = Signer::from_secret(&encode_secret(&key), "backend-1").expect("builds");
+        let ring = ring_with("backend-1", key.verifying_key());
+
+        let body = br#"{"id":"job","request_id":"r1"}"#;
+        let headers = signer.headers(body, NOW);
+        assert_eq!(verify(&ring, body, &headers, NOW).unwrap().kid, "backend-1");
+    }
+
+    #[test]
+    fn a_signer_refuses_an_empty_kid_rather_than_signing_under_one() {
+        // `Kanade-Sig-Kid: ""` matches no keyring entry, so every agent would
+        // report `unknown_key` — the alarm that is supposed to mean a rotation
+        // went wrong. A backend typo must not be able to raise it fleet-wide.
+        let secret = encode_secret(&generate_keypair().unwrap());
+        assert!(Signer::from_secret(&secret, "").is_err());
+        assert!(Signer::from_secret(&secret, "   ").is_err());
+        // And a bad secret is still rejected on its own terms.
+        assert!(Signer::from_secret("not base64!!", "backend-1").is_err());
+    }
+
+    #[test]
+    fn debugging_a_signer_never_prints_the_key() {
+        // `SigningKey` derives Debug and prints its bytes, so a derived impl
+        // would leak the fleet's crown jewel into any log line that formats an
+        // enclosing struct.
+        let key = generate_keypair().unwrap();
+        let signer = Signer::new(key.clone(), "backend-1");
+        // Pinned exactly rather than by absence: a field added later would
+        // otherwise have to be *remembered* to be excluded, and the failure
+        // mode is a secret in a log file.
+        assert_eq!(format!("{signer:?}"), r#"Signer { kid: "backend-1" }"#);
+        assert!(!format!("{signer:?}").contains(&encode_secret(&key)));
     }
 
     #[test]

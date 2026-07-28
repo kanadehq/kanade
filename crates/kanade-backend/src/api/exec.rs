@@ -285,16 +285,23 @@ pub async fn exec_manifest(
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialize: {e}")))?;
 
             if delay.is_zero() {
-                if let Err(e) = s.nats.publish(subj.clone(), payload.into()).await {
+                if let Err(e) = s.commands.publish(subj.clone(), payload.into()).await {
                     return Err((StatusCode::BAD_GATEWAY, format!("publish to {subj}: {e}")));
                 }
                 info!(wave = idx, subject = %subj, "wave published (immediate)");
             } else {
-                let nats = s.nats.clone();
+                // #1165: the publisher, not the bare client — a delayed wave
+                // is signed when it actually goes out, so its signing time
+                // means what a freshness bound would read it as rather than
+                // "whenever this exec was assembled, possibly hours earlier".
+                let commands = s.commands.clone();
                 let subj_for_spawn = subj.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(delay).await;
-                    match nats.publish(subj_for_spawn.clone(), payload.into()).await {
+                    match commands
+                        .publish(subj_for_spawn.clone(), payload.into())
+                        .await
+                    {
                         Ok(()) => info!(
                             wave = idx,
                             subject = %subj_for_spawn,
@@ -349,7 +356,7 @@ pub async fn exec_manifest(
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialize: {e}")))?,
         );
         for subj in &subjects {
-            if let Err(e) = s.nats.publish(subj.clone(), payload.clone()).await {
+            if let Err(e) = s.commands.publish(subj.clone(), payload.clone()).await {
                 warn!(error = %e, subject = %subj, "publish failed");
                 return Err((StatusCode::BAD_GATEWAY, format!("publish to {subj}: {e}")));
             }
