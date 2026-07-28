@@ -1,0 +1,39 @@
+# Remote-mode agent config — pointed at by `cargo make agent-remote`.
+#
+# Unlike agent.dev.toml (which talks to the local unauthenticated dev
+# broker on :4223), this connects a *virtual* agent to a REMOTE kanade
+# deployment — e.g. an Oracle Cloud box — so you can watch it appear in
+# that deployment's SPA fleet from your dev machine.
+#
+# The broker URL and token are NOT hardcoded here; they come from the
+# environment, which keeps the (secret) token out of the repo. Put them
+# in a private, git-ignored profile that your shell sources, e.g.
+# `~/.config/powershell/private.ps1`:
+#
+#   $env:KANADE_REMOTE_NATS_URL = 'wss://nats.<your-domain>'
+#   $env:KANADE_NATS_TOKEN      = '<the deployment''s NATS token>'
+#
+# `KANADE_NATS_TOKEN` is read by kanade-shared::nats_client (registry →
+# env; on a machine with no registry token, the env value is used).
+#
+# This config only redirects the LOG path. The agent's data dir (outbox,
+# state.db) is NOT set here — it must be isolated via KANADE_AGENT_DATA_DIR,
+# which the `agent-remote` cargo-make task sets. That isolation is not
+# optional: without it the outbox/state.db collide with an installed
+# production agent on the same host, and this virtual agent would drain the
+# production outbox and republish its events to the remote broker. Always
+# run this via `cargo make agent-remote`, not by pointing an agent at this
+# config directly without KANADE_AGENT_DATA_DIR.
+
+[vars]
+pc_id = '{{ env(name="KANADE_DEV_AGENT_ID", default="virtual-agent") }}'
+
+[agent]
+id = '{{ vars.pc_id }}'
+# Required: set KANADE_REMOTE_NATS_URL in your private profile. No default,
+# so a missing value fails loudly rather than silently hitting localhost.
+nats_url = '{{ env(name="KANADE_REMOTE_NATS_URL") }}'
+
+[log]
+path  = './target/dev-data/agents/{{ vars.pc_id }}/agent.log'
+level = 'info'
