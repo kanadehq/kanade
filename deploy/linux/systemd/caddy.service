@@ -1,0 +1,27 @@
+# Caddy systemd unit (we install the static binary from the bundle rather
+# than the apt package, so we ship the unit too). Mirrors Caddy's official
+# unit: runs as an unprivileged user that binds :80/:443 via
+# CAP_NET_BIND_SERVICE, storing certs under the caddy user's home.
+[Unit]
+Description=Caddy (kanade reverse proxy / TLS)
+Documentation=https://caddyserver.com/docs/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=caddy
+Group=caddy
+ExecStart=/usr/local/bin/caddy run --environ --config /etc/caddy/Caddyfile --adapter caddyfile
+ExecReload=/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile --force
+TimeoutStopSec=5s
+LimitNOFILE=1048576
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/caddy /etc/caddy
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

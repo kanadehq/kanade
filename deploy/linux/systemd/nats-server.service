@@ -1,0 +1,26 @@
+[Unit]
+Description=NATS server for kanade
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kanade
+Group=kanade
+# Least privilege: the broker's own env file, carrying ONLY
+# KANADE_NATS_TOKEN — not the backend's JWT secret / admin password.
+EnvironmentFile=/etc/kanade/nats.env
+ExecStart=/usr/local/bin/nats-server -c /etc/kanade/nats-server.conf
+Restart=on-failure
+RestartSec=5
+WorkingDirectory=/var/lib/kanade
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/kanade
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

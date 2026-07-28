@@ -1,0 +1,32 @@
+# kanade — Caddy reverse proxy with automatic HTTPS (Let's Encrypt).
+# setup.sh substitutes __KANADE_DOMAIN__ with your real domain.
+#
+# Only :443 (and :80 for the ACME redirect) faces the internet. The
+# backend and NATS both bind localhost; Caddy is the single public
+# surface.
+
+# SPA + REST API + browser-facing remote-assist WebSocket.
+__KANADE_DOMAIN__ {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8080
+
+	# Basic edge brute-force dampening for the public login (floor item
+	# in #1172). Coarse per-remote-IP throttle; per-account lockout still
+	# belongs in the backend.
+	# NOTE: Caddy's rate_limit is a first-party module only in custom
+	# builds; if unavailable, drop this block and rely on fail2ban +
+	# the in-app limiter. Left here as the intended shape.
+	# rate_limit {
+	#     zone login {
+	#         match { path /api/accounts/login }
+	#         key    {remote_host}
+	#         events 10
+	#         window 1m
+	#     }
+	# }
+}
+
+# NATS over WebSocket for remote agents: wss://nats.<domain>.
+nats.__KANADE_DOMAIN__ {
+	reverse_proxy 127.0.0.1:8443
+}
