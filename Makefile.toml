@@ -242,6 +242,54 @@ env = { "KANADE_AGENT_CONFIG" = "${CARGO_MAKE_WORKING_DIRECTORY}/configs/agent.d
 command = "cargo"
 args = ["run", "-p", "kanade-agent"]
 
+[tasks.agent-remote]
+description = "Run a virtual kanade-agent against a REMOTE deployment (e.g. an Oracle Cloud box), so it shows up in that deployment's SPA fleet from your dev machine. Reads the broker URL from $KANADE_REMOTE_NATS_URL and the token from $KANADE_NATS_TOKEN — keep both in a git-ignored profile your shell sources (e.g. ~/.config/powershell/private.ps1). Override the pc_id with $KANADE_DEV_AGENT_ID (default 'virtual-agent'). Data + logs are isolated under target/dev-data/, so it never touches an installed agent."
+cwd = "${CARGO_MAKE_WORKING_DIRECTORY}"
+# KANADE_AGENT_DATA_DIR is CRITICAL, not cosmetic: without it the agent's
+# outbox / state.db resolve to the shared default path
+# (%ProgramData%\Kanade\data), which an installed production agent on the
+# same host also uses. The virtual agent would then DRAIN the production
+# agent's outbox and republish its events to the *remote* broker — stealing
+# the production fleet's results. Pinning the data dir here keeps the two
+# agents fully separate.
+# Inherits KANADE_REMOTE_NATS_URL / KANADE_NATS_TOKEN / KANADE_DEV_AGENT_ID
+# from the shell (that's the point — the secret token stays out of the repo).
+env = { "KANADE_AGENT_CONFIG" = "${CARGO_MAKE_WORKING_DIRECTORY}/configs/agent.remote.toml", "KANADE_AGENT_DATA_DIR" = "${CARGO_MAKE_WORKING_DIRECTORY}/target/dev-data/agents/remote", "RUST_LOG" = "info,kanade_agent=debug" }
+command = "cargo"
+args = ["run", "-p", "kanade-agent"]
+
+# `agent-remote-N` — multiple virtual agents against the SAME remote
+# deployment, each with a distinct pc_id and an isolated data dir (outbox /
+# state.db), reproducing multi-agent fan-out in the remote SPA. Broker URL +
+# token still come from the shell ($KANADE_REMOTE_NATS_URL / $KANADE_NATS_TOKEN).
+#
+# Run each in its OWN terminal:
+#     cargo make agent-remote-1        # terminal 1
+#     cargo make agent-remote-2        # terminal 2
+# There is deliberately no parallel `remote-fleet` task: cargo-make sets a
+# task's env in its own (process-global) environment, so running two agent
+# tasks in one parallel `run_task` lets their KANADE_DEV_AGENT_ID /
+# KANADE_AGENT_DATA_DIR race and clobber each other — both agents then come up
+# with the same pc_id and fight over one data dir. Separate invocations each
+# get a clean env. (Two processes = two agents is also the realistic shape.)
+#
+# Each task carries its FULL env, deliberately not `extend`: cargo-make
+# REPLACES the env map on extend rather than deep-merging, which would drop
+# KANADE_AGENT_CONFIG and fall back to the production agent's config path.
+[tasks.agent-remote-1]
+description = "Virtual remote agent #1 — pc_id=virtual-agent-1. Run agent-remote-2 in another terminal for a 2-agent fleet."
+cwd = "${CARGO_MAKE_WORKING_DIRECTORY}"
+command = "cargo"
+args = ["run", "-p", "kanade-agent"]
+env = { "KANADE_AGENT_CONFIG" = "${CARGO_MAKE_WORKING_DIRECTORY}/configs/agent.remote.toml", "KANADE_DEV_AGENT_ID" = "virtual-agent-1", "KANADE_AGENT_DATA_DIR" = "${CARGO_MAKE_WORKING_DIRECTORY}/target/dev-data/agents/virtual-agent-1", "RUST_LOG" = "info,kanade_agent=debug" }
+
+[tasks.agent-remote-2]
+description = "Virtual remote agent #2 — pc_id=virtual-agent-2."
+cwd = "${CARGO_MAKE_WORKING_DIRECTORY}"
+command = "cargo"
+args = ["run", "-p", "kanade-agent"]
+env = { "KANADE_AGENT_CONFIG" = "${CARGO_MAKE_WORKING_DIRECTORY}/configs/agent.remote.toml", "KANADE_DEV_AGENT_ID" = "virtual-agent-2", "KANADE_AGENT_DATA_DIR" = "${CARGO_MAKE_WORKING_DIRECTORY}/target/dev-data/agents/virtual-agent-2", "RUST_LOG" = "info,kanade_agent=debug" }
+
 [tasks.dev]
 description = "One-shot sandbox: spawns `nats-dev` (:4223), `backend-dev` (:8081), `agent-dev` (NATS :4223), and `web-dev` (:5173) in parallel — full dev stack isolated from the installed Windows services. Ctrl+C once to tear all four down. Skip this when you'd rather iterate against the production backend — use `web-dev-prod` for that."
 run_task = { name = ["nats-dev", "backend-dev", "agent-dev", "web-dev"], parallel = true }
