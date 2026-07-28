@@ -3014,7 +3014,7 @@ dependencies = [
  "chrono",
  "croner",
  "ed25519-dalek",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "humantime",
  "pelite",
  "portpicker",
