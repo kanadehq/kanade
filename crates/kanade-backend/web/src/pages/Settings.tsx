@@ -314,7 +314,13 @@ function ServerTab() {
       }),
     onSuccess: () => {
       toast.success(t('server.saved'));
-      void queryClient.invalidateQueries({ queryKey: ['server-settings'] });
+      // `exact: true` — React Query matches by PREFIX by default, so a bare
+      // `['server-settings']` also invalidates `['server-settings','defaults']`
+      // (static, compiled-in) and `['server-settings','support-codes']` (which
+      // this save cannot have changed: the document merge never touches that
+      // key). Both refetches can only return what the cache already holds, and
+      // the roster one contradicts the isolation its own comment promises.
+      void queryClient.invalidateQueries({ queryKey: ['server-settings'], exact: true });
     },
     onError: (err) => toast.error(formatError(err)),
   });
@@ -814,6 +820,11 @@ function SupportCodesCard() {
   // refetch re-fires its seeding effect and clobbers an in-progress draft.
   // Sharing the key would have made "save a support code" quietly reset every
   // other field the operator was editing.
+  //
+  // The isolation runs BOTH ways, and neither direction is free: writes here
+  // never invalidate (they adopt the mutation response instead), and the
+  // document save passes `exact: true` so its invalidation doesn't
+  // prefix-match this key.
   const roster = useQuery({
     queryKey: ['server-settings', 'support-codes'],
     queryFn: async () =>
@@ -892,6 +903,12 @@ function SupportCodesCard() {
   const showError = started && error != null && !(error === 'codeShort' && code === '');
   const existing = codes.find((c) => c.scope === scope.trim());
   const rotating = existing != null;
+  // With no roster, `codes` is empty and every scope looks new — so a submit
+  // would skip the rotate confirmation and silently replace a live code whose
+  // previous secret is then unrecoverable. We can't tell create from rotate,
+  // so we don't write at all. (The GET that failed and the PUT share a host,
+  // so this is rarely a real loss of capability; reloading is the fix.)
+  const rosterUnknown = roster.isError || roster.isLoading;
 
   // Seed the non-secret fields from the matched entry the moment the typed
   // scope becomes an existing one. A submit REPLACES the whole entry, so
@@ -966,8 +983,14 @@ function SupportCodesCard() {
         </p>
 
         {/* Roster. No hash, no code — only which scopes exist and how they
-            behave, which is everything the operator can act on. */}
-        {roster.isLoading ? (
+            behave, which is everything the operator can act on.
+            `isError` is checked FIRST: on a failed fetch `data` stays
+            undefined, so without this branch a fetch failure renders as
+            「コードが設定されていません」— an outright false statement about
+            fleet-wide state. */}
+        {roster.isError ? (
+          <p className="text-red-500 text-sm">{formatError(roster.error)}</p>
+        ) : roster.isLoading ? (
           <p className="text-muted text-sm">{t('server.supportCodes.loading')}</p>
         ) : codes.length === 0 ? (
           <p className="text-muted text-sm">{t('server.supportCodes.empty')}</p>
@@ -993,6 +1016,10 @@ function SupportCodesCard() {
                   className="ml-auto"
                   disabled={!canOperate || remove.isPending}
                   title={canOperate ? undefined : t('rbac.operatorRequired', { ns: 'common' })}
+                  // Every row's button reads just "削除" otherwise, which is
+                  // ambiguous for anyone navigating by control rather than by
+                  // row text — and the action is irreversible.
+                  aria-label={`${t('server.supportCodes.delete')} ${c.scope}`}
                   onClick={() => void onDelete(c.scope)}
                 >
                   {t('server.supportCodes.delete')}
@@ -1085,7 +1112,7 @@ function SupportCodesCard() {
         <div className="flex items-center gap-3">
           <Button
             type="button"
-            disabled={!canOperate || error != null || upsert.isPending}
+            disabled={!canOperate || error != null || rosterUnknown || upsert.isPending}
             title={canOperate ? undefined : t('rbac.operatorRequired', { ns: 'common' })}
             onClick={() => void onSubmit()}
           >
