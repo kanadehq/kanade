@@ -82,6 +82,12 @@ fn filter_subjects(pc_id: &str, groups: &[String]) -> Vec<String> {
     subjects
 }
 
+// One argument over the limit since #1165 added the verifier. Same
+// handling as the other long plumbing signatures in this crate (10+
+// existing allows): these thread the agent's shared state to a task, and
+// bundling them is a refactor of unrelated code, not part of a security
+// change.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn(
     client: async_nats::Client,
     pc_id: String,
@@ -90,6 +96,7 @@ pub fn spawn(
     script_cache: ScriptCache,
     check_sink: crate::check_cache::CheckSink,
     groups_rx: tokio::sync::watch::Receiver<Vec<String>>,
+    verifier: std::sync::Arc<crate::command_verify::Verifier>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         run(
@@ -100,11 +107,18 @@ pub fn spawn(
             script_cache,
             check_sink,
             groups_rx,
+            verifier,
         )
         .await;
     })
 }
 
+// One argument over the limit since #1165 added the verifier. Same
+// handling as the other long plumbing signatures in this crate (10+
+// existing allows): these thread the agent's shared state to a task, and
+// bundling them is a refactor of unrelated code, not part of a security
+// change.
+#[allow(clippy::too_many_arguments)]
 async fn run(
     client: async_nats::Client,
     pc_id: String,
@@ -113,6 +127,7 @@ async fn run(
     script_cache: ScriptCache,
     check_sink: crate::check_cache::CheckSink,
     mut groups_rx: tokio::sync::watch::Receiver<Vec<String>>,
+    verifier: std::sync::Arc<crate::command_verify::Verifier>,
 ) {
     let jetstream = async_nats::jetstream::new(client.clone());
     let name = consumer_name(&pc_id);
@@ -261,6 +276,15 @@ async fn run(
                     continue;
                 }
             };
+            // #1165 stage 1. This path matters more than the live one: the
+            // bypass #1155 measured *is* a JetStream consumer, so a verifier
+            // covering only `command_loop` would leave the attack it exists
+            // to stop running through the other door.
+            verifier.observe(
+                &msg.payload,
+                &crate::command_verify::headers_of(&msg),
+                &cmd.request_id,
+            );
 
             if !is_for_me(&msg.subject, &pc_id, &groups) {
                 // warn, not debug: with server-side filter_subjects

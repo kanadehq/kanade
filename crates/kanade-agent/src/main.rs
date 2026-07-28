@@ -29,6 +29,7 @@ mod self_update;
 mod klp;
 
 mod command_replay;
+mod command_verify;
 mod events_outbox;
 mod local_scheduler;
 mod nats_retry;
@@ -815,6 +816,17 @@ pub(crate) async fn run_agent() -> Result<()> {
     // subscribes to it so `runs_on: agent` schedules targeting a
     // group reflect membership changes without waiting for the
     // next schedule edit.
+    // #1165 stage 1: one verifier shared by every command entry point, so the
+    // transition reporting reflects the machine rather than one subscription.
+    let verifier = std::sync::Arc::new(command_verify::Verifier::new(
+        command_verify::load_keyring(),
+        pc_id.clone(),
+        // `default_dir()` rather than the `obs_outbox_dir` binding below: the
+        // command paths are spawned before it exists, and it is the same pure
+        // resolution either way.
+        obs_outbox::default_dir(),
+    ));
+
     let (groups_rx, _groups_handle) = groups::spawn(
         client.clone(),
         pc_id.clone(),
@@ -822,6 +834,7 @@ pub(crate) async fn run_agent() -> Result<()> {
         staleness_tracker.clone(),
         script_cache.clone(),
         check_sink.clone(),
+        verifier.clone(),
     );
 
     // KLP Phase E (live push): subscribe to the membership-filtered
@@ -852,6 +865,7 @@ pub(crate) async fn run_agent() -> Result<()> {
         script_cache.clone(),
         check_sink.clone(),
         groups_rx.clone(),
+        verifier.clone(),
     );
     // v0.24: file-based outbox for ExecResult publishes. Every
     // result the agent produces is persisted under `outbox/<rid>.json`
@@ -930,6 +944,7 @@ pub(crate) async fn run_agent() -> Result<()> {
             cmd_all,
             script_cache.clone(),
             check_sink.clone(),
+            verifier.clone(),
         ),
         commands::command_loop(
             client.clone(),
@@ -939,6 +954,7 @@ pub(crate) async fn run_agent() -> Result<()> {
             cmd_self,
             script_cache.clone(),
             check_sink.clone(),
+            verifier.clone(),
         ),
     );
 
