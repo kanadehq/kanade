@@ -12,6 +12,13 @@ import { Select } from '@/components/ui/select';
 import { LANGUAGES, type LanguageCode } from '@/i18n';
 import { apiFetch, formatError } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
+import {
+  DEFAULT_SUPPORT_UNLOCK_TTL_MINUTES,
+  MAX_SUPPORT_UNLOCK_TTL_MINUTES,
+  validateSupportCode,
+  type SupportCode,
+  type SupportCodeBody,
+} from '@/lib/supportCodes';
 import { useTheme, type Theme } from '@/lib/theme';
 
 const TABS = ['personal', 'server'] as const;
@@ -64,7 +71,20 @@ interface ServerSettings {
   check_status_stale_days: number | null;
   controller_group: string | null;
   mail: MailSettings | null;
+  /// Read-only here. Managed through its own endpoints (see
+  /// [`ServerSettingsPatch`]) and absent from the document PUT entirely.
+  /// `serde` omits the key when empty, so an older / never-configured
+  /// deployment sends nothing — hence the optional.
+  support_codes?: SupportCode[];
 }
+
+/// What the generic `PUT /api/server-settings` may carry. Deliberately
+/// **excludes** `support_codes`: responses blank the stored hash, so a
+/// round-tripped document would blank a live code if the merge accepted the
+/// field. The backend ignores it either way, but keeping it out of the type
+/// means the SPA can't even build such a body. Codes go through
+/// `PUT`/`DELETE /api/server-settings/support-codes/{scope}` instead.
+type ServerSettingsPatch = Omit<ServerSettings, 'support_codes'>;
 
 /// Settings page. Two distinct kinds of settings, split into tabs so it's
 /// unmistakable which is which:
@@ -287,14 +307,20 @@ function ServerTab() {
   }, [settings.data]);
 
   const save = useMutation({
-    mutationFn: (next: ServerSettings) =>
+    mutationFn: (next: ServerSettingsPatch) =>
       apiFetch<ServerSettings>('/api/server-settings', {
         method: 'PUT',
         body: JSON.stringify(next),
       }),
     onSuccess: () => {
       toast.success(t('server.saved'));
-      void queryClient.invalidateQueries({ queryKey: ['server-settings'] });
+      // `exact: true` — React Query matches by PREFIX by default, so a bare
+      // `['server-settings']` also invalidates `['server-settings','defaults']`
+      // (static, compiled-in) and `['server-settings','support-codes']` (which
+      // this save cannot have changed: the document merge never touches that
+      // key). Both refetches can only return what the cache already holds, and
+      // the roster one contradicts the isolation its own comment promises.
+      void queryClient.invalidateQueries({ queryKey: ['server-settings'], exact: true });
     },
     onError: (err) => toast.error(formatError(err)),
   });
@@ -443,7 +469,7 @@ function ServerTab() {
       staleValue !== settings.data.check_status_stale_days ||
       controllerValue !== (settings.data.controller_group ?? null) ||
       mailDirty);
-  const doc: ServerSettings = {
+  const doc: ServerSettingsPatch = {
     agent_prune_days: pruneValue,
     collect_retention_days: collectValue,
     session_ttl_hours: sessionTtlValue,
@@ -489,121 +515,129 @@ function ServerTab() {
         <p className="text-red-500 text-sm">{formatError(settings.error)}</p>
       )}
 
-      <Card className="max-w-xl">
-        <CardHeader>
-          <CardTitle>{t('server.agentPrune.title')}</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <p className="text-muted text-sm">{t('server.agentPrune.description')}</p>
-          <div className="space-y-1">
-            <Label htmlFor="agent-prune-days">{t('server.agentPrune.label')}</Label>
-            <div className="flex items-center gap-2">
-              <Input
-                id="agent-prune-days"
-                type="number"
-                min={1}
-                max={MAX_AGENT_PRUNE_DAYS}
-                step={1}
-                inputMode="numeric"
-                value={pruneDays}
-                placeholder={placeholder}
-                disabled={!canOperate || settings.isLoading}
-                onChange={(e) => setPruneDays(e.target.value)}
-                className="w-32"
-              />
-              <span className="text-muted text-sm">{t('server.agentPrune.unit')}</span>
+      {/* The four single-number knobs pair up two-across: each is a label and a
+          narrow field, so a full-width row wasted most of it and pushed the
+          fields that matter far apart vertically. The taller cards below stay
+          one-per-row — and everything stays ABOVE the single 保存 button, which
+          is the cue for what that button covers. */}
+      <div className="grid gap-4 lg:grid-cols-2 max-w-4xl">
+        <Card>
+          <CardHeader>
+            <CardTitle>{t('server.agentPrune.title')}</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <p className="text-muted text-sm">{t('server.agentPrune.description')}</p>
+            <div className="space-y-1">
+              <Label htmlFor="agent-prune-days">{t('server.agentPrune.label')}</Label>
+              <div className="flex items-center gap-2">
+                <Input
+                  id="agent-prune-days"
+                  type="number"
+                  min={1}
+                  max={MAX_AGENT_PRUNE_DAYS}
+                  step={1}
+                  inputMode="numeric"
+                  value={pruneDays}
+                  placeholder={placeholder}
+                  disabled={!canOperate || settings.isLoading}
+                  onChange={(e) => setPruneDays(e.target.value)}
+                  className="w-32"
+                />
+                <span className="text-muted text-sm">{t('server.agentPrune.unit')}</span>
+              </div>
+              <p className="text-muted text-xs">{t('server.agentPrune.blankHint')}</p>
             </div>
-            <p className="text-muted text-xs">{t('server.agentPrune.blankHint')}</p>
-          </div>
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
 
-      <Card className="max-w-xl">
-        <CardHeader>
-          <CardTitle>{t('server.collectRetention.title')}</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <p className="text-muted text-sm">{t('server.collectRetention.description')}</p>
-          <div className="space-y-1">
-            <Label htmlFor="collect-retention-days">{t('server.collectRetention.label')}</Label>
-            <div className="flex items-center gap-2">
-              <Input
-                id="collect-retention-days"
-                type="number"
-                min={1}
-                max={MAX_COLLECT_RETENTION_DAYS}
-                step={1}
-                inputMode="numeric"
-                value={collectDays}
-                placeholder={collectPlaceholder}
-                disabled={!canOperate || settings.isLoading}
-                onChange={(e) => setCollectDays(e.target.value)}
-                className="w-32"
-              />
-              <span className="text-muted text-sm">{t('server.collectRetention.unit')}</span>
+        <Card>
+          <CardHeader>
+            <CardTitle>{t('server.collectRetention.title')}</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <p className="text-muted text-sm">{t('server.collectRetention.description')}</p>
+            <div className="space-y-1">
+              <Label htmlFor="collect-retention-days">{t('server.collectRetention.label')}</Label>
+              <div className="flex items-center gap-2">
+                <Input
+                  id="collect-retention-days"
+                  type="number"
+                  min={1}
+                  max={MAX_COLLECT_RETENTION_DAYS}
+                  step={1}
+                  inputMode="numeric"
+                  value={collectDays}
+                  placeholder={collectPlaceholder}
+                  disabled={!canOperate || settings.isLoading}
+                  onChange={(e) => setCollectDays(e.target.value)}
+                  className="w-32"
+                />
+                <span className="text-muted text-sm">{t('server.collectRetention.unit')}</span>
+              </div>
+              <p className="text-muted text-xs">{t('server.collectRetention.blankHint')}</p>
             </div>
-            <p className="text-muted text-xs">{t('server.collectRetention.blankHint')}</p>
-          </div>
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
 
-      <Card className="max-w-xl">
-        <CardHeader>
-          <CardTitle>{t('server.sessionTtl.title')}</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <p className="text-muted text-sm">{t('server.sessionTtl.description')}</p>
-          <div className="space-y-1">
-            <Label htmlFor="session-ttl-hours">{t('server.sessionTtl.label')}</Label>
-            <div className="flex items-center gap-2">
-              <Input
-                id="session-ttl-hours"
-                type="number"
-                min={1}
-                max={MAX_SESSION_TTL_HOURS}
-                step={1}
-                inputMode="numeric"
-                value={sessionTtl}
-                placeholder={sessionTtlPlaceholder}
-                disabled={!canOperate || settings.isLoading}
-                onChange={(e) => setSessionTtl(e.target.value)}
-                className="w-32"
-              />
-              <span className="text-muted text-sm">{t('server.sessionTtl.unit')}</span>
+        <Card>
+          <CardHeader>
+            <CardTitle>{t('server.sessionTtl.title')}</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <p className="text-muted text-sm">{t('server.sessionTtl.description')}</p>
+            <div className="space-y-1">
+              <Label htmlFor="session-ttl-hours">{t('server.sessionTtl.label')}</Label>
+              <div className="flex items-center gap-2">
+                <Input
+                  id="session-ttl-hours"
+                  type="number"
+                  min={1}
+                  max={MAX_SESSION_TTL_HOURS}
+                  step={1}
+                  inputMode="numeric"
+                  value={sessionTtl}
+                  placeholder={sessionTtlPlaceholder}
+                  disabled={!canOperate || settings.isLoading}
+                  onChange={(e) => setSessionTtl(e.target.value)}
+                  className="w-32"
+                />
+                <span className="text-muted text-sm">{t('server.sessionTtl.unit')}</span>
+              </div>
+              <p className="text-muted text-xs">{t('server.sessionTtl.blankHint')}</p>
             </div>
-            <p className="text-muted text-xs">{t('server.sessionTtl.blankHint')}</p>
-          </div>
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
 
-      <Card className="max-w-xl">
-        <CardHeader>
-          <CardTitle>{t('server.checkStale.title')}</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <p className="text-muted text-sm">{t('server.checkStale.description')}</p>
-          <div className="space-y-1">
-            <Label htmlFor="check-stale-days">{t('server.checkStale.label')}</Label>
-            <div className="flex items-center gap-2">
-              <Input
-                id="check-stale-days"
-                type="number"
-                min={0}
-                max={MAX_CHECK_STATUS_STALE_DAYS}
-                step={1}
-                inputMode="numeric"
-                value={staleDays}
-                placeholder={stalePlaceholder}
-                disabled={!canOperate || settings.isLoading}
-                onChange={(e) => setStaleDays(e.target.value)}
-                className="w-32"
-              />
-              <span className="text-muted text-sm">{t('server.checkStale.unit')}</span>
+        <Card>
+          <CardHeader>
+            <CardTitle>{t('server.checkStale.title')}</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <p className="text-muted text-sm">{t('server.checkStale.description')}</p>
+            <div className="space-y-1">
+              <Label htmlFor="check-stale-days">{t('server.checkStale.label')}</Label>
+              <div className="flex items-center gap-2">
+                <Input
+                  id="check-stale-days"
+                  type="number"
+                  min={0}
+                  max={MAX_CHECK_STATUS_STALE_DAYS}
+                  step={1}
+                  inputMode="numeric"
+                  value={staleDays}
+                  placeholder={stalePlaceholder}
+                  disabled={!canOperate || settings.isLoading}
+                  onChange={(e) => setStaleDays(e.target.value)}
+                  className="w-32"
+                />
+                <span className="text-muted text-sm">{t('server.checkStale.unit')}</span>
+              </div>
+              <p className="text-muted text-xs">{t('server.checkStale.blankHint')}</p>
             </div>
-            <p className="text-muted text-xs">{t('server.checkStale.blankHint')}</p>
-          </div>
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+
+      </div>
 
       <Card className="max-w-xl">
         <CardHeader>
@@ -627,7 +661,7 @@ function ServerTab() {
         </CardContent>
       </Card>
 
-      <Card className="max-w-xl">
+      <Card className="max-w-3xl">
         <CardHeader>
           <CardTitle>{t('server.mail.title')}</CardTitle>
         </CardHeader>
@@ -717,12 +751,17 @@ function ServerTab() {
         >
           {save.isPending ? t('server.saving') : t('server.save')}
         </Button>
+        {/* Deliberately BEFORE the support-codes card in the DOM: that card
+            saves through its own endpoint, so it must not look like it is
+            covered by this button. */}
         {!canOperate && (
           <span className="text-xs text-muted">
             {t('rbac.operatorRequired', { ns: 'common' })}
           </span>
         )}
       </div>
+
+      <SupportCodesCard />
 
       <Card className="max-w-xl border-danger/40">
         <CardHeader>
@@ -749,5 +788,347 @@ function ServerTab() {
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+/// Support-code roster + editor — the operator side of the Client App's
+/// helpdesk unlock (`client.unlock`, #1166).
+///
+/// Its own card AND its own save button, deliberately outside the document
+/// form above, because a secret behaves differently from every other field on
+/// this page:
+///
+/// - **Write-only.** `GET /api/server-settings` blanks the stored argon2id
+///   hash, so there is nothing to seed an "edit" field with. An entry's mere
+///   presence is what tells us a scope has a code; rotating means typing a new
+///   one, never reading the old one back.
+/// - **Not part of the document merge.** Routing it through the generic PUT
+///   would let a redacted document round-trip and blank a live code, so the
+///   backend gives it dedicated endpoints and this component uses them.
+function SupportCodesCard() {
+  const { t } = useTranslation('settings');
+  const { hasRole } = useAuth();
+  const canOperate = hasRole('operator');
+  const queryClient = useQueryClient();
+  const confirm = useConfirm();
+
+  // The roster gets its OWN cache entry rather than reading the document
+  // query the form above seeds from. Both come from `GET /api/server-settings`,
+  // so this costs one extra GET on mount — worth it, because writing a code
+  // must not disturb the other card: the document query's `staleTime: Infinity`
+  // exists precisely so nothing but its own save refetches it (#520), and any
+  // refetch re-fires its seeding effect and clobbers an in-progress draft.
+  // Sharing the key would have made "save a support code" quietly reset every
+  // other field the operator was editing.
+  //
+  // The isolation runs BOTH ways, and neither direction is free: writes here
+  // never invalidate (they adopt the mutation response instead), and the
+  // document save passes `exact: true` so its invalidation doesn't
+  // prefix-match this key.
+  const roster = useQuery({
+    queryKey: ['server-settings', 'support-codes'],
+    queryFn: async () =>
+      (await apiFetch<ServerSettings>('/api/server-settings')).support_codes ?? [],
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+  });
+  // Sorted by scope, not by write order. The endpoint's upsert removes the
+  // old entry and pushes the new one, so a rotate would otherwise move that
+  // row to the bottom of the list — rows jumping under the operator's cursor
+  // right after they act on one is how a 削除 lands on the wrong scope.
+  const codes = [...(roster.data ?? [])].sort((a, b) => a.scope.localeCompare(b.scope));
+
+  // Both endpoints answer with the merged, redacted document, so the roster
+  // is updated from the response instead of invalidating and re-fetching.
+  const adoptRoster = (next: ServerSettings) =>
+    queryClient.setQueryData<SupportCode[]>(
+      ['server-settings', 'support-codes'],
+      next.support_codes ?? [],
+    );
+
+  const [scope, setScope] = useState('');
+  const [code, setCode] = useState('');
+  const [label, setLabel] = useState('');
+  const [ttlMinutes, setTtlMinutes] = useState('');
+  const [disabled, setDisabled] = useState(false);
+
+  const clearDraft = () => {
+    setScope('');
+    setCode('');
+    setLabel('');
+    setTtlMinutes('');
+    setDisabled(false);
+    // Re-arm the seeding effect: after a save the roster changed, so typing
+    // the same scope again must re-read the (possibly new) stored values.
+    seededScope.current = null;
+  };
+
+  const upsert = useMutation({
+    mutationFn: ({ scope: s, body }: { scope: string; body: SupportCodeBody }) =>
+      apiFetch<ServerSettings>(
+        `/api/server-settings/support-codes/${encodeURIComponent(s)}`,
+        { method: 'PUT', body: JSON.stringify(body) },
+      ),
+    onSuccess: (next) => {
+      toast.success(t('server.supportCodes.saved'));
+      // Blank the draft on success so the plaintext doesn't linger in a
+      // form field (and in React state) after it has been committed.
+      clearDraft();
+      adoptRoster(next);
+    },
+    onError: (err) => toast.error(formatError(err)),
+  });
+
+  const remove = useMutation({
+    mutationFn: (s: string) =>
+      apiFetch<ServerSettings>(
+        `/api/server-settings/support-codes/${encodeURIComponent(s)}`,
+        { method: 'DELETE' },
+      ),
+    onSuccess: (next) => {
+      toast.success(t('server.supportCodes.deleted'));
+      adoptRoster(next);
+    },
+    onError: (err) => toast.error(formatError(err)),
+  });
+
+  const error = validateSupportCode({ scope, code, label, ttlMinutes });
+  // Show the message only once it's about something the operator has actually
+  // filled in. An empty draft isn't "invalid", it's just not started — and
+  // `codeShort` on an untouched code field would scold them for not having
+  // reached it yet, which is what typing only the scope used to produce. The
+  // button stays disabled on `error` regardless, so nothing is submittable
+  // just because the message is hidden.
+  const started = scope !== '' || code !== '' || label !== '' || ttlMinutes !== '';
+  const showError = started && error != null && !(error === 'codeShort' && code === '');
+  const existing = codes.find((c) => c.scope === scope.trim());
+  const rotating = existing != null;
+  // With no roster, `codes` is empty and every scope looks new — so a submit
+  // would skip the rotate confirmation and silently replace a live code whose
+  // previous secret is then unrecoverable. We can't tell create from rotate,
+  // so we don't write at all. (The GET that failed and the PUT share a host,
+  // so this is rarely a real loss of capability; reloading is the fix.)
+  const rosterUnknown = roster.isError || roster.isLoading;
+
+  // Seed the non-secret fields from the matched entry the moment the typed
+  // scope becomes an existing one. A submit REPLACES the whole entry, so
+  // without this a rotate — where the operator only means to change the
+  // secret — silently wipes the label and TTL they had configured. These
+  // fields are not secrets, so unlike the code they can be read back.
+  //
+  // Keyed on the seeded scope rather than on `existing`, so re-seeding
+  // happens once per scope change and never overwrites edits the operator
+  // makes afterwards (including deliberately blanking the label).
+  const seededScope = useRef<string | null>(null);
+  useEffect(() => {
+    const s = scope.trim();
+    if (existing == null) {
+      // Leaving a matched scope arms the next match to re-seed.
+      if (seededScope.current !== null && seededScope.current !== s) {
+        seededScope.current = null;
+      }
+      return;
+    }
+    if (seededScope.current === s) return;
+    seededScope.current = s;
+    setLabel(existing.label ?? '');
+    setTtlMinutes(existing.ttl_minutes == null ? '' : String(existing.ttl_minutes));
+    setDisabled(existing.disabled ?? false);
+  }, [scope, existing]);
+
+  const onSubmit = async () => {
+    const s = scope.trim();
+    // Rotating is destructive in the one way that matters: the previous
+    // secret becomes unrecoverable, and any desk still carrying it is locked
+    // out with no warning. Confirm it; creating a new scope needs no prompt.
+    if (rotating) {
+      const ok = await confirm({
+        title: t('server.supportCodes.rotateConfirm.title'),
+        description: t('server.supportCodes.rotateConfirm.description', { scope: s }),
+        confirmLabel: t('server.supportCodes.rotateConfirm.confirm'),
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    upsert.mutate({
+      scope: s,
+      body: {
+        code,
+        label: label.trim() === '' ? null : label.trim(),
+        ttl_minutes: ttlMinutes.trim() === '' ? null : Number(ttlMinutes),
+        disabled,
+      },
+    });
+  };
+
+  const onDelete = async (s: string) => {
+    const ok = await confirm({
+      title: t('server.supportCodes.deleteConfirm.title'),
+      description: t('server.supportCodes.deleteConfirm.description', { scope: s }),
+      confirmLabel: t('server.supportCodes.deleteConfirm.confirm'),
+      danger: true,
+    });
+    if (ok) remove.mutate(s);
+  };
+
+  return (
+    <Card className="max-w-3xl">
+      <CardHeader>
+        <CardTitle>{t('server.supportCodes.title')}</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <p className="text-muted text-sm">{t('server.supportCodes.description')}</p>
+        <p className="text-muted text-xs rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2">
+          {t('server.supportCodes.scopeNote')}
+        </p>
+
+        {/* Roster. No hash, no code — only which scopes exist and how they
+            behave, which is everything the operator can act on.
+            `isError` is checked FIRST: on a failed fetch `data` stays
+            undefined, so without this branch a fetch failure renders as
+            「コードが設定されていません」— an outright false statement about
+            fleet-wide state. */}
+        {roster.isError ? (
+          <p className="text-red-500 text-sm">{formatError(roster.error)}</p>
+        ) : roster.isLoading ? (
+          <p className="text-muted text-sm">{t('server.supportCodes.loading')}</p>
+        ) : codes.length === 0 ? (
+          <p className="text-muted text-sm">{t('server.supportCodes.empty')}</p>
+        ) : (
+          <ul className="divide-y divide-border rounded-md border border-border">
+            {codes.map((c) => (
+              <li key={c.scope} className="flex items-center gap-3 px-3 py-2 text-sm">
+                <span className="font-mono">{c.scope}</span>
+                {c.label && <span className="text-muted">{c.label}</span>}
+                <span className="text-muted text-xs">
+                  {t('server.supportCodes.ttlSummary', {
+                    minutes: c.ttl_minutes ?? DEFAULT_SUPPORT_UNLOCK_TTL_MINUTES,
+                  })}
+                </span>
+                {c.disabled && (
+                  <span className="text-xs rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5">
+                    {t('server.supportCodes.disabledBadge')}
+                  </span>
+                )}
+                <Button
+                  type="button"
+                  variant="danger"
+                  className="ml-auto"
+                  disabled={!canOperate || remove.isPending}
+                  title={canOperate ? undefined : t('rbac.operatorRequired', { ns: 'common' })}
+                  // Every row's button reads just "削除" otherwise, which is
+                  // ambiguous for anyone navigating by control rather than by
+                  // row text — and the action is irreversible.
+                  aria-label={`${t('server.supportCodes.delete')} ${c.scope}`}
+                  onClick={() => void onDelete(c.scope)}
+                >
+                  {t('server.supportCodes.delete')}
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {/* Editor. Upsert by scope — typing an existing scope rotates it. */}
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="space-y-1">
+            <Label htmlFor="support-code-scope">{t('server.supportCodes.scope')}</Label>
+            <Input
+              id="support-code-scope"
+              type="text"
+              value={scope}
+              placeholder="support"
+              disabled={!canOperate}
+              onChange={(e) => setScope(e.target.value)}
+              autoComplete="off"
+              className="font-mono"
+            />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="support-code-label">{t('server.supportCodes.label')}</Label>
+            <Input
+              id="support-code-label"
+              type="text"
+              value={label}
+              placeholder={t('server.supportCodes.labelPlaceholder')}
+              disabled={!canOperate}
+              onChange={(e) => setLabel(e.target.value)}
+              autoComplete="off"
+            />
+          </div>
+          <div className="space-y-1 sm:col-span-2">
+            <Label htmlFor="support-code-secret">{t('server.supportCodes.code')}</Label>
+            <Input
+              id="support-code-secret"
+              type="password"
+              value={code}
+              disabled={!canOperate}
+              onChange={(e) => setCode(e.target.value)}
+              // `new-password` (not `off`): stops the browser offering a
+              // saved credential for this origin, and stops it offering to
+              // save the support code as one.
+              autoComplete="new-password"
+            />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="support-code-ttl">{t('server.supportCodes.ttl')}</Label>
+            <div className="flex items-center gap-2">
+              <Input
+                id="support-code-ttl"
+                type="number"
+                min={1}
+                max={MAX_SUPPORT_UNLOCK_TTL_MINUTES}
+                step={1}
+                inputMode="numeric"
+                value={ttlMinutes}
+                placeholder={String(DEFAULT_SUPPORT_UNLOCK_TTL_MINUTES)}
+                disabled={!canOperate}
+                onChange={(e) => setTtlMinutes(e.target.value)}
+                className="w-28"
+              />
+              <span className="text-muted text-sm">{t('server.supportCodes.ttlUnit')}</span>
+            </div>
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="support-code-disabled">{t('server.supportCodes.disabled')}</Label>
+            <div className="flex items-center gap-2 pt-2">
+              <input
+                id="support-code-disabled"
+                type="checkbox"
+                checked={disabled}
+                disabled={!canOperate}
+                onChange={(e) => setDisabled(e.target.checked)}
+              />
+              <span className="text-muted text-xs">{t('server.supportCodes.disabledHint')}</span>
+            </div>
+          </div>
+        </div>
+
+        <p className="text-muted text-xs">{t('server.supportCodes.writeOnlyHint')}</p>
+        {showError && (
+          <p className="text-red-500 text-xs">{t(`server.supportCodes.errors.${error}`)}</p>
+        )}
+
+        <div className="flex items-center gap-3">
+          <Button
+            type="button"
+            disabled={!canOperate || error != null || rosterUnknown || upsert.isPending}
+            title={canOperate ? undefined : t('rbac.operatorRequired', { ns: 'common' })}
+            onClick={() => void onSubmit()}
+          >
+            {upsert.isPending
+              ? t('server.supportCodes.saving')
+              : rotating
+                ? t('server.supportCodes.rotate')
+                : t('server.supportCodes.create')}
+          </Button>
+          {!canOperate && (
+            <span className="text-xs text-muted">
+              {t('rbac.operatorRequired', { ns: 'common' })}
+            </span>
+          )}
+        </div>
+      </CardContent>
+    </Card>
   );
 }

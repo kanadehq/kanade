@@ -87,6 +87,47 @@
       "blankHint": "Fill in the host and from-address to enable email; clear them both to disable it (email becomes a no-op).",
       "invalid": "Enter a host, a valid from-address (with @), and a port between 1 and 65535 — or clear the host and from-address to disable email."
     },
+    "supportCodes": {
+      "title": "Support codes (Client App unlock)",
+      "description": "The IT desk types one of these on a user's machine to reveal jobs carrying `client.unlock` in the Client App catalog, for a limited window — a way to surface heavier actions during a support call.",
+      "scopeNote": "This is a display gate, not an authorization boundary. It hides jobs; it does not forbid running them (SPA / CLI execution works regardless of unlock state). Approval controls for privileged work belong on the SPA execution path.",
+      "loading": "Loading…",
+      "empty": "No codes configured. Until one is, jobs carrying `client.unlock` are hidden from everyone.",
+      "scope": "Scope",
+      "label": "Display name (optional)",
+      "labelPlaceholder": "First-line helpdesk",
+      "code": "Code",
+      "ttl": "Valid for",
+      "ttlUnit": "min",
+      "ttlSummary": "{{minutes}} min",
+      "disabled": "Suspended",
+      "disabledHint": "Disable without deleting the code",
+      "disabledBadge": "Suspended",
+      "writeOnlyHint": "The code is stored hashed and can never be read back (it is never displayed and never returned by the API). To change it, enter a new one. The scope must match a job's `client.unlock` exactly.",
+      "create": "Set code",
+      "rotate": "Rotate code",
+      "saving": "Saving…",
+      "saved": "Support code saved",
+      "delete": "Delete",
+      "deleted": "Support code deleted",
+      "errors": {
+        "scope": "Scope may only contain A-Z a-z 0-9 . _ - and must not be empty.",
+        "codeShort": "The code must be at least 8 characters.",
+        "codeWhitespace": "The code must not start or end with whitespace (the Client App trims what the user types, so it could never be entered).",
+        "ttl": "Valid-for must be 1-480 minutes (leave blank for the 15-minute default).",
+        "label": "The display name must not be only whitespace. Leave it blank instead."
+      },
+      "rotateConfirm": {
+        "title": "Rotate this code?",
+        "description": "The existing code for scope \"{{scope}}\" becomes unrecoverable. Anyone still carrying the old one will no longer be able to unlock.",
+        "confirm": "Rotate"
+      },
+      "deleteConfirm": {
+        "title": "Delete this support code?",
+        "description": "Removes the code for scope \"{{scope}}\". Jobs carrying that scope become hidden from everyone.",
+        "confirm": "Delete"
+      }
+    },
     "restart": {
       "title": "Restart backend",
       "description": "Restart the backend service to apply settings that only take effect at startup (e.g. the mail relay). The API is unavailable for a few seconds while it comes back, and this page reloads automatically.",
