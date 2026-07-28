@@ -392,6 +392,70 @@ pub fn sign(key: &SigningKey, kid: &str, body: &[u8], at_ms: i64) -> SigHeaders 
     }
 }
 
+/// Registry subkey + value holding the backend's **private** signing key.
+///
+/// Lives beside `StaticToken` / `JwtSecret` in the key `deploy-backend.ps1`
+/// already hardens to SYSTEM + Administrators. Registry ACLs are per-key, not
+/// per-value, so a value written into that key inherits the protection — which
+/// is why the writer must refuse to *create* the key: creating it would
+/// produce an unhardened one and leave the signing key world-readable.
+pub const REG_BACKEND_SUBKEY: &str = r"SOFTWARE\kanade\backend";
+pub const REG_SIGNING_KEY: &str = "CommandSigningKey";
+/// Registry value holding the `kid` that names the key beside it.
+///
+/// Persisted rather than re-derived. The signing path needs it to fill
+/// `Kanade-Sig-Kid`, and it is the operator's choice — re-deriving a date
+/// stamp at signing time would produce a different id than the one already
+/// distributed to agents whenever a key is generated on one day and first used
+/// on another. An id that disagrees with the fleet's keyring is
+/// indistinguishable, from the agent's side, from an unknown signer.
+pub const REG_SIGNING_KID: &str = "CommandSigningKid";
+
+/// Mint a fresh signing keypair.
+pub fn generate_keypair() -> Result<SigningKey, String> {
+    // Seeded from the OS CSPRNG directly rather than through
+    // `SigningKey::generate`, which wants a `rand_core` RNG — and this
+    // workspace carries three incompatible `rand_core` majors transitively.
+    // Filling 32 bytes sidesteps the version pairing entirely, and the seed
+    // *is* the key, so nothing is lost.
+    let mut seed = [0u8; 32];
+    getrandom::fill(&mut seed).map_err(|e| format!("OS randomness unavailable: {e}"))?;
+    Ok(SigningKey::from_bytes(&seed))
+}
+
+/// Base64 of the 32-byte seed. This is the secret; it is written to the
+/// registry and never printed by any code path that logs.
+pub fn encode_secret(key: &SigningKey) -> String {
+    base64_encode(&key.to_bytes())
+}
+
+pub fn decode_secret(raw: &str) -> Result<SigningKey, String> {
+    let bytes = base64_decode(raw)?;
+    let arr: [u8; 32] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| format!("signing key must be 32 bytes, got {}", bytes.len()))?;
+    Ok(SigningKey::from_bytes(&arr))
+}
+
+pub fn encode_public(key: &VerifyingKey) -> String {
+    base64_encode(key.as_bytes())
+}
+
+/// The JSON object an agent's `CommandKeys` array holds for this key.
+///
+/// Emitted by the generator so the operator distributes a value that is
+/// correct by construction rather than assembling it by hand — the shape is
+/// parsed by `kanade-agent`'s `parse_keyring`, and a hand-built entry that
+/// fails to parse takes the whole ring with it.
+pub fn keyring_entry(kid: &str, key: &VerifyingKey, label: &str) -> serde_json::Value {
+    serde_json::json!({
+        "kid": kid,
+        "public_key": encode_public(key),
+        "label": label,
+    })
+}
+
 fn base64_encode(bytes: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(bytes)
@@ -797,5 +861,59 @@ mod tests {
             verify(&ring, b"body", &headers, NOW).is_ok(),
             "an enormous bound must read as permissive, not as inverted"
         );
+    }
+
+    #[test]
+    fn a_generated_key_round_trips_through_its_encoded_secret() {
+        // The registry stores the encoded secret; if this did not round trip,
+        // a backend would come back from a restart unable to sign and every
+        // agent would start reporting unsigned traffic.
+        let key = generate_keypair().expect("OS randomness");
+        let restored = decode_secret(&encode_secret(&key)).expect("decodes");
+        assert_eq!(restored.to_bytes(), key.to_bytes());
+
+        // And the restored key produces signatures the original's public half
+        // accepts — the property that actually matters across a restart.
+        let ring = ring_with("backend-1", key.verifying_key());
+        let headers = sign(&restored, "backend-1", b"after a restart", NOW);
+        assert!(verify(&ring, b"after a restart", &headers, NOW).is_ok());
+    }
+
+    #[test]
+    fn two_generated_keys_differ() {
+        // Cheap guard against a seeding mistake that returns a constant —
+        // which would make every backend in existence share one key.
+        let a = generate_keypair().unwrap();
+        let b = generate_keypair().unwrap();
+        assert_ne!(a.to_bytes(), b.to_bytes());
+    }
+
+    #[test]
+    fn a_malformed_secret_is_rejected_with_its_length() {
+        assert!(decode_secret("not base64!!").is_err());
+        let short = base64_encode(&[0u8; 31]);
+        let err = decode_secret(&short).unwrap_err();
+        assert!(
+            err.contains("31"),
+            "the error should name the length: {err}"
+        );
+    }
+
+    #[test]
+    fn the_emitted_keyring_entry_is_what_the_agent_parses() {
+        // The generator prints this for an operator to distribute. It has to
+        // match `kanade-agent`'s `parse_keyring` shape exactly — a hand-fixed
+        // entry that fails to parse takes the entire ring with it, and at
+        // stage 3 an empty ring rejects every command on that machine.
+        let key = generate_keypair().unwrap();
+        let entry = keyring_entry("backend-20260728", &key.verifying_key(), "backend");
+        assert_eq!(entry["kid"], "backend-20260728");
+        assert_eq!(entry["label"], "backend");
+        let pk = entry["public_key"]
+            .as_str()
+            .expect("public_key is a string");
+        assert_eq!(pk, encode_public(&key.verifying_key()));
+        // 32 bytes base64-encodes to 44 chars with padding.
+        assert_eq!(pk.len(), 44);
     }
 }

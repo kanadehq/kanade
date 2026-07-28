@@ -94,6 +94,29 @@ enum Command {
     /// service does (the global `--config`), so it targets the exact
     /// file the backend opens.
     WipeProjector,
+    /// #1165: mint this backend's command-signing keypair.
+    ///
+    /// Runs **here**, on the backend host, rather than in the `kanade` CLI:
+    /// the private key is born where it will live and never crosses a wire or
+    /// an operator's shell history. The CLI deliberately holds no signing key
+    /// — that is the property the whole design rests on.
+    ///
+    /// Writes the private key to `HKLM\SOFTWARE\kanade\backend` (the key
+    /// `deploy-backend.ps1` already hardens to SYSTEM + Administrators) and
+    /// prints only the public half, plus the ready-to-distribute keyring
+    /// entry for agents.
+    #[command(name = "command-key-generate")]
+    KeyGenerate {
+        /// Replace an existing signing key. Without this, an existing key is
+        /// left alone — silently replacing the fleet's signer would make every
+        /// agent report an unknown key at once.
+        #[arg(long)]
+        rotate: bool,
+        /// Key id agents will match against. Defaults to a date-stamped one,
+        /// because a rotation needs the old and new to coexist on one ring.
+        #[arg(long)]
+        kid: Option<String>,
+    },
 }
 
 /// Top-level entry point.
@@ -117,6 +140,7 @@ fn main() -> Result<()> {
                 installed_exe,
             } => arm_for_swap(new_version, installed_exe),
             Command::WipeProjector => wipe_projector(cli.config.as_deref()),
+            Command::KeyGenerate { rotate, kid } => command_key_generate(*rotate, kid.as_deref()),
         };
     }
 
@@ -247,6 +271,126 @@ struct PermGroupRow {
 /// success_count + delta`), so keeping a row across a wipe+replay would
 /// double-count, and faithfully rebuilding it would mean reconstructing
 /// the exec-lifecycle reaping state too. Losing run history is
+/// Mint the backend's command-signing keypair (#1165).
+///
+/// The private key goes straight into the registry and is never printed —
+/// stdout here is expected to be pasted into a terminal, a ticket, or a chat
+/// window, and a secret that reaches any of those is no longer a secret.
+/// What is printed is the public key and the exact keyring entry agents need,
+/// so the operator distributes something correct by construction rather than
+/// assembling JSON by hand that `parse_keyring` may reject — a malformed entry
+/// takes the whole ring with it.
+/// Decide the `kid` for a generate run, and refuse the two ways it can wreck
+/// a fleet.
+///
+/// Pure, and separate from the registry, because `read_hklm_value` returns
+/// `None` on non-Windows — a test that reached through the registry would
+/// assert nothing at all on CI, which is where these guards most need to be
+/// held. Same lesson as extracting the transition rule in #1171: the decision
+/// and the I/O have to come apart before the decision can be tested.
+fn resolve_kid(
+    key_exists: bool,
+    existing_kid: Option<&str>,
+    rotate: bool,
+    requested: Option<&str>,
+    today: &str,
+) -> Result<String, String> {
+    if key_exists && !rotate {
+        return Err(format!(
+            "a command-signing key already exists at HKLM\\{}\\{}. Pass --rotate to replace \
+             it — and note that agents keep accepting the old key until you retire it from \
+             their keyring, which is what makes a rotation safe.",
+            kanade_shared::signing::REG_BACKEND_SUBKEY,
+            kanade_shared::signing::REG_SIGNING_KEY
+        ));
+    }
+
+    let kid = requested
+        .map(str::to_owned)
+        // Date-stamped so a rotation produces a distinguishable second entry:
+        // two keys must coexist on one ring for the window in which some
+        // agents have the new one and some do not.
+        .unwrap_or_else(|| format!("backend-{today}"));
+
+    // Rotating twice in a day would otherwise mint a second, different key
+    // under an id agents already trust — every agent would then hold one
+    // public key under that id and receive signatures from another, reporting
+    // a bad signature fleet-wide and looking exactly like a forgery.
+    if rotate && existing_kid == Some(kid.as_str()) {
+        return Err(format!(
+            "the new key would reuse the id {kid}, which already names the current key. Two \
+             different keys must never share an id — agents match signatures to a key by it. \
+             Pass an explicit --kid."
+        ));
+    }
+
+    Ok(kid)
+}
+
+fn command_key_generate(rotate: bool, kid: Option<&str>) -> Result<()> {
+    use kanade_shared::signing;
+
+    let existing = kanade_shared::secrets::read_hklm_value(
+        signing::REG_BACKEND_SUBKEY,
+        signing::REG_SIGNING_KEY,
+    );
+    let existing_kid = kanade_shared::secrets::read_hklm_value(
+        signing::REG_BACKEND_SUBKEY,
+        signing::REG_SIGNING_KID,
+    );
+    let kid = resolve_kid(
+        existing.is_some(),
+        existing_kid.as_deref(),
+        rotate,
+        kid,
+        &chrono::Utc::now().format("%Y%m%d").to_string(),
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
+
+    let key = signing::generate_keypair().map_err(|e| anyhow::anyhow!(e))?;
+    kanade_shared::secrets::write_hklm_value(
+        signing::REG_BACKEND_SUBKEY,
+        signing::REG_SIGNING_KEY,
+        &signing::encode_secret(&key),
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
+    // The kid is persisted beside the key, not merely printed. The signing
+    // path needs it to fill `Kanade-Sig-Kid`, and it is the operator's choice
+    // — re-deriving a date at signing time would produce a different id than
+    // the one distributed to agents whenever the key is generated on one day
+    // and first used on another.
+    kanade_shared::secrets::write_hklm_value(
+        signing::REG_BACKEND_SUBKEY,
+        signing::REG_SIGNING_KID,
+        &kid,
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
+
+    let entry = signing::keyring_entry(&kid, &key.verifying_key(), "backend");
+    println!(
+        "Wrote the private key to HKLM\\{}\\{} (SYSTEM + Administrators only, inherited from the existing key's ACL).",
+        signing::REG_BACKEND_SUBKEY,
+        signing::REG_SIGNING_KEY
+    );
+    println!();
+    println!("kid:        {kid}");
+    println!(
+        "public key: {}",
+        signing::encode_public(&key.verifying_key())
+    );
+    println!();
+    println!("Add this entry to every agent's HKLM\\SOFTWARE\\kanade\\agent\\CommandKeys array:");
+    println!("{}", serde_json::to_string_pretty(&entry)?);
+    println!();
+    println!(
+        "Distribute it to the whole fleet BEFORE the backend starts signing. An agent that \
+         lacks the key reports command_signature_unknown_key — the signal that means a \
+         rotation went wrong — so signing first would raise that alarm on every machine at \
+         once and teach everyone to ignore it."
+    );
+    Ok(())
+}
+
 /// acceptable collateral; an auth lockout is not.
 fn wipe_projector(config: Option<&Path>) -> Result<()> {
     let cfg_path = default_paths::find_config(config, "KANADE_BACKEND_CONFIG", "backend.toml")?;
@@ -1377,5 +1521,68 @@ mod tests {
         assert_eq!(users, 0);
         pool.close().await;
         let _ = remove_db_files(&db_path);
+    }
+}
+
+#[cfg(test)]
+mod key_generate_tests {
+    use super::resolve_kid;
+
+    const TODAY: &str = "20260728";
+
+    #[test]
+    fn a_fresh_host_gets_a_date_stamped_id() {
+        assert_eq!(
+            resolve_kid(false, None, false, None, TODAY).unwrap(),
+            "backend-20260728"
+        );
+    }
+
+    #[test]
+    fn an_explicit_id_wins() {
+        assert_eq!(
+            resolve_kid(false, None, false, Some("prod-signer"), TODAY).unwrap(),
+            "prod-signer"
+        );
+    }
+
+    #[test]
+    fn an_existing_key_is_not_replaced_without_rotate() {
+        // The guard the PR body calls a fleet-safety property. It could not be
+        // tested while it lived behind `read_hklm_value`, which returns None
+        // on the CI runners.
+        let err = resolve_kid(true, Some("backend-20260101"), false, None, TODAY).unwrap_err();
+        assert!(err.contains("--rotate"), "{err}");
+    }
+
+    #[test]
+    fn rotate_mints_a_new_id_alongside_the_old() {
+        assert_eq!(
+            resolve_kid(true, Some("backend-20260101"), true, None, TODAY).unwrap(),
+            "backend-20260728"
+        );
+    }
+
+    #[test]
+    fn rotating_twice_in_a_day_refuses_to_reuse_the_id() {
+        // Two different keys sharing an id is the worst outcome available
+        // here: agents hold one public key under that id and receive
+        // signatures made by another, so every command reports a bad
+        // signature — fleet-wide, and looking exactly like a forgery.
+        let err = resolve_kid(true, Some("backend-20260728"), true, None, TODAY).unwrap_err();
+        assert!(err.contains("--kid"), "{err}");
+
+        // An explicit distinct id is the way through.
+        assert_eq!(
+            resolve_kid(
+                true,
+                Some("backend-20260728"),
+                true,
+                Some("backend-20260728b"),
+                TODAY
+            )
+            .unwrap(),
+            "backend-20260728b"
+        );
     }
 }
