@@ -103,6 +103,9 @@ base64             = "0.23.0"
 # async-nats/nkeys, so declaring it directly adds no third-party code to
 # compile or audit — only the ability to call it.
 ed25519-dalek      = { version = "2.2.0", features = ["rand_core"] }
+# #1165: 32 random bytes for a signing-key seed. Direct rather than via
+# `SigningKey::generate`, which needs a matching `rand_core` major.
+getrandom          = "0.3.4"
 winreg             = "0.56"
 pelite             = "0.10"
 # v0.37 Part 2: agent process self-perf via NT process info APIs

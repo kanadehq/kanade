@@ -20,6 +20,7 @@ chrono     = { workspace = true }
 croner     = { workspace = true }
 # #1165: Ed25519 command signing / verification (`signing`).
 ed25519-dalek = { workspace = true }
+getrandom  = { workspace = true }
 humantime  = { workspace = true }
 pelite     = { workspace = true }
 schemars   = { workspace = true }
