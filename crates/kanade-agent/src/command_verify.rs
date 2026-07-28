@@ -129,6 +129,7 @@ pub fn headers_of(msg: &async_nats::Message) -> SigHeaders {
         sig_b64: get(kanade_shared::signing::SIG),
         kid: get(kanade_shared::signing::SIG_KID),
         alg: get(kanade_shared::signing::SIG_ALG),
+        at_ms: get(kanade_shared::signing::SIG_AT),
     }
 }
 
@@ -150,6 +151,10 @@ pub enum Outcome {
     /// Signed, and the signature does not check out. Either a forgery or a
     /// corrupted message; both warrant a look.
     Invalid,
+    /// Genuine, but older than its key's policy allows. Reported separately
+    /// from `Invalid` because nothing is wrong with the message — a replayed
+    /// break-glass command and a forgery need different responses.
+    Stale,
 }
 
 impl Outcome {
@@ -159,6 +164,7 @@ impl Outcome {
             Outcome::Unsigned => "command_signature_absent",
             Outcome::UnknownKid => "command_signature_unknown_key",
             Outcome::Invalid => "command_signature_invalid",
+            Outcome::Stale => "command_signature_stale",
         }
     }
 }
@@ -198,7 +204,24 @@ impl Verifier {
 
     /// Check one message and report. **Never blocks execution** — stage 1.
     pub fn observe(&self, body: &[u8], headers: &SigHeaders, request_id: &str) -> Outcome {
-        let outcome = match verify(&self.ring, body, headers) {
+        self.observe_at(
+            body,
+            headers,
+            request_id,
+            chrono::Utc::now().timestamp_millis(),
+        )
+    }
+
+    /// [`Verifier::observe`] with the clock injected, so the freshness branch
+    /// is reachable from a test.
+    fn observe_at(
+        &self,
+        body: &[u8],
+        headers: &SigHeaders,
+        request_id: &str,
+        now_ms: i64,
+    ) -> Outcome {
+        let outcome = match verify(&self.ring, body, headers, now_ms) {
             Ok(v) => {
                 if v.policy.audit_every_use {
                     // A break-glass key whose use nobody investigates is a
@@ -217,6 +240,10 @@ impl Verifier {
                     "command signed by a key this agent does not have"
                 );
                 Outcome::UnknownKid
+            }
+            Err(e @ VerifyError::Stale { .. }) => {
+                warn!(error = %e, request_id, "command signature is past its freshness bound");
+                Outcome::Stale
             }
             Err(e) => {
                 warn!(error = %e, request_id, "command signature did not verify");
@@ -377,14 +404,14 @@ mod tests {
 
         // Unsigned traffic on an agent with no keys: normal, stage 1.
         assert_eq!(
-            verify(&ring, b"body", &SigHeaders::default()),
+            verify(&ring, b"body", &SigHeaders::default(), 0),
             Err(VerifyError::Unsigned)
         );
         // Signed traffic it cannot check: reported, not silently accepted as
         // if it were unsigned.
-        let headers = sign(&sk, "backend-1", b"body");
+        let headers = sign(&sk, "backend-1", b"body", 0);
         assert!(matches!(
-            verify(&ring, b"body", &headers),
+            verify(&ring, b"body", &headers, 0),
             Err(VerifyError::UnknownKid { .. })
         ));
     }
@@ -399,6 +426,7 @@ mod tests {
             Outcome::Unsigned,
             Outcome::UnknownKid,
             Outcome::Invalid,
+            Outcome::Stale,
         ]
         .iter()
         .map(|o| o.kind())
@@ -527,5 +555,69 @@ mod tests {
             at,
         );
         assert!(e.payload["from"].is_null());
+    }
+
+    #[test]
+    fn a_replayed_break_glass_command_is_reported_stale_not_invalid() {
+        // The first-boot case the freshness bound exists for: the dedup cache
+        // is empty, so nothing else would stop a week-old emergency command.
+        // It must read as `Stale` rather than `Invalid` — the message is
+        // genuine, and "someone forged this" would send an operator looking
+        // for an intruder that isn't there.
+        let sk = SigningKey::from_bytes(&[9u8; 32]);
+        let mut ring = KeyRing::new();
+        ring.insert(
+            "break-glass",
+            sk.verifying_key(),
+            KeyPolicy::break_glass("break-glass", std::time::Duration::from_secs(300)),
+        );
+        let dir = std::env::temp_dir().join("kanade-command-verify-test");
+        let v = Verifier::new(ring, "PC1".into(), dir);
+
+        let now = 1_700_000_000_000i64;
+        let body = b"emergency";
+        let week = 7 * 24 * 60 * 60 * 1000;
+
+        assert_eq!(
+            v.observe_at(body, &sign(&sk, "break-glass", body, now - week), "r1", now),
+            Outcome::Stale
+        );
+        // The same key inside its window is fine.
+        assert_eq!(
+            v.observe_at(
+                body,
+                &sign(&sk, "break-glass", body, now - 1_000),
+                "r2",
+                now
+            ),
+            Outcome::Verified
+        );
+    }
+
+    #[test]
+    fn the_ordinary_signer_is_never_stale() {
+        // JetStream replay hands back commands retained for 7 days; a bound on
+        // the backend key would turn every reconnect into a rejection.
+        let sk = SigningKey::from_bytes(&[4u8; 32]);
+        let mut ring = KeyRing::new();
+        ring.insert(
+            "backend-1",
+            sk.verifying_key(),
+            KeyPolicy::backend("backend"),
+        );
+        let dir = std::env::temp_dir().join("kanade-command-verify-test");
+        let v = Verifier::new(ring, "PC1".into(), dir);
+
+        let now = 1_700_000_000_000i64;
+        let week = 7 * 24 * 60 * 60 * 1000;
+        assert_eq!(
+            v.observe_at(
+                b"job",
+                &sign(&sk, "backend-1", b"job", now - week),
+                "r1",
+                now
+            ),
+            Outcome::Verified
+        );
     }
 }
