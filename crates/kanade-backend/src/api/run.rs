@@ -143,7 +143,7 @@ pub async fn run(
         )
     })?;
     state
-        .nats
+        .commands
         .publish(subject::commands_pc(&req.pc_id), payload.into())
         .await
         .map_err(|e| {

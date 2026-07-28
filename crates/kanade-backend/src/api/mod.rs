@@ -99,6 +99,12 @@ pub struct AppState {
     /// SQLite layer rather than by convention. See `api::query`.
     pub query_pool: SqlitePool,
     pub nats: async_nats::Client,
+    /// #1165 stage 2: the only route a `Command` takes to the wire, so no
+    /// call site can publish one without its provenance signature. Deliberately
+    /// not reachable through [`AppState::nats`] — that handle stays for every
+    /// other plane (results, kill, audit, notifications), none of which a
+    /// signature covers. `Arc` keeps `AppState`'s per-request `Clone` cheap.
+    pub commands: std::sync::Arc<crate::command_publisher::CommandPublisher>,
     pub jetstream: async_nats::jetstream::Context,
     /// v0.35 / #88: explode-spec lookup cache, kept fresh by a KV
     /// `watch_all()` on BUCKET_JOBS. The /inventory/.../search/...
