@@ -3,12 +3,29 @@ use std::time::Duration;
 use anyhow::Result;
 use clap::Args;
 use futures::StreamExt;
+use kanade_shared::signing;
 use kanade_shared::wire::{Command, RunAs, Shell};
 use kanade_shared::{ExecResult, subject};
 use tracing::info;
 use uuid::Uuid;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
+
+/// Environment pair carrying the break-glass signing key (#1165).
+///
+/// An environment variable rather than a file or the registry, because the key
+/// must **not rest on an operator machine** — that is the rejected "CLI holds a
+/// signing key" option. The operator retrieves it from an offline medium during
+/// an incident, exports it for that shell, and it goes away with the shell.
+///
+/// Not perfect: a process environment is readable by the user's own processes,
+/// and a careless `export` reaches shell history. What bounds the damage is the
+/// key's own policy rather than its storage — a short `max_age` means a leaked
+/// key can only sign *fresh* commands, and `audit_every_use` means every use is
+/// recorded agent-side, draining through the obs outbox even if the incident
+/// took the backend down.
+pub const ENV_BREAK_GLASS_KEY: &str = "KANADE_BREAK_GLASS_KEY";
+pub const ENV_BREAK_GLASS_KID: &str = "KANADE_BREAK_GLASS_KID";
 
 #[derive(Args, Debug)]
 pub struct RunArgs {
@@ -30,6 +47,71 @@ pub struct RunArgs {
     pub run_as: String,
     /// Script body (use `--` before the script to bypass clap flag parsing).
     pub script: Vec<String>,
+}
+
+/// Resolve the break-glass signer from the environment.
+///
+/// `Ok(None)` means unsigned, which is what `kanade run` has always published
+/// and what agents still accept — the rollout is at "capability first,
+/// enforcement last", so an operator without the key is not blocked today. At
+/// stage 3 the same absence becomes a rejection, which is why the log line
+/// below says so rather than staying silent about it.
+///
+/// Half a pair is a hard error. Signing under an invented id would be reported
+/// by every provisioned agent as an unattributable signature, and publishing
+/// unsigned instead would silently discard the operator's intent to sign
+/// mid-incident — neither is a reasonable guess at what they meant.
+fn break_glass_signer() -> Result<Option<signing::Signer>> {
+    let raw_secret = std::env::var(ENV_BREAK_GLASS_KEY).ok();
+    let raw_kid = std::env::var(ENV_BREAK_GLASS_KID).ok();
+    // An exported-but-empty variable is "not set" as far as an operator is
+    // concerned; treating `KANADE_BREAK_GLASS_KID=` as a present-but-blank id
+    // would fail with a confusing unattributable-signature error instead.
+    let secret = raw_secret
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    let kid = raw_kid.as_deref().map(str::trim).filter(|v| !v.is_empty());
+    match signing::pair(secret, kid) {
+        Ok(Some((secret, kid))) => Ok(Some(
+            signing::Signer::from_secret(secret, kid).map_err(|e| anyhow::anyhow!(e))?,
+        )),
+        Ok(None) => {
+            info!(
+                "publishing unsigned — set {ENV_BREAK_GLASS_KEY} and {ENV_BREAK_GLASS_KID} to sign \
+                 with the break-glass key. Agents accept unsigned commands today; once command \
+                 signing is enforced they will not."
+            );
+            Ok(None)
+        }
+        Err(signing::MissingHalf::Kid) => anyhow::bail!(
+            "${ENV_BREAK_GLASS_KEY} is set but ${ENV_BREAK_GLASS_KID} is not. The two are only \
+             meaningful together — a signature carrying an id no agent holds is rejected as \
+             unattributable, so refusing here rather than guessing."
+        ),
+        Err(signing::MissingHalf::Key) => anyhow::bail!(
+            "${ENV_BREAK_GLASS_KID} is set but ${ENV_BREAK_GLASS_KEY} is not. Retrieve the private \
+             key from wherever it rests; `kanade command-key break-glass` mints a new one only if \
+             the old is genuinely lost, and a new id has to reach every agent before it works."
+        ),
+    }
+}
+
+/// The NATS headers carrying a signature over `payload`.
+fn sig_headers(signer: &signing::Signer, payload: &[u8], at_ms: i64) -> async_nats::HeaderMap {
+    let h = signer.headers(payload, at_ms);
+    let mut map = async_nats::HeaderMap::new();
+    for (name, value) in [
+        (signing::SIG, h.sig_b64.as_deref()),
+        (signing::SIG_KID, h.kid.as_deref()),
+        (signing::SIG_ALG, h.alg.as_deref()),
+        (signing::SIG_AT, h.at_ms.as_deref()),
+    ] {
+        if let Some(v) = value {
+            map.insert(name, v);
+        }
+    }
+    map
 }
 
 pub async fn execute(client: async_nats::Client, args: RunArgs) -> Result<()> {
@@ -100,9 +182,24 @@ pub async fn execute(client: async_nats::Client, args: RunArgs) -> Result<()> {
     let mut sub = client.subscribe(result_subj.clone()).await?;
 
     let payload = serde_json::to_vec(&cmd)?;
-    client
-        .publish(subject::commands_pc(&args.pc_id), payload.into())
-        .await?;
+    let signer = break_glass_signer()?;
+    let subject = subject::commands_pc(&args.pc_id);
+    match &signer {
+        Some(s) => {
+            // Signed at publish, so the covered timestamp says when the bytes
+            // went out. That matters far more here than for the backend: this
+            // key is the one with a freshness bound, and the bound is what it
+            // is measured against.
+            let headers = sig_headers(s, &payload, chrono::Utc::now().timestamp_millis());
+            info!(kid = s.kid(), "signing with the break-glass key");
+            client
+                .publish_with_headers(subject, headers, payload.into())
+                .await?;
+        }
+        None => {
+            client.publish(subject, payload.into()).await?;
+        }
+    }
     client.flush().await?;
     info!(
         pc_id = %args.pc_id,
@@ -155,4 +252,95 @@ pub async fn execute(client: async_nats::Client, args: RunArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kanade_shared::signing::{KeyPolicy, KeyRing, SigHeaders, VerifyError, verify};
+
+    /// A signer plus the ring an agent builds from the entry
+    /// `kanade command-key break-glass` prints for it. Derived from the signer
+    /// rather than from a separately generated key, so the test cannot pass by
+    /// accidentally pairing the wrong halves.
+    fn signer_and_ring(kid: &str, max_age: Duration) -> (signing::Signer, KeyRing) {
+        let key = signing::generate_keypair().unwrap();
+        let signer = signing::Signer::from_secret(&signing::encode_secret(&key), kid).unwrap();
+        let mut ring = KeyRing::new();
+        ring.insert(
+            kid,
+            signer.verifying_key(),
+            KeyPolicy::break_glass("break-glass", max_age),
+        );
+        (signer, ring)
+    }
+
+    fn headers_back(map: &async_nats::HeaderMap) -> SigHeaders {
+        let get = |name: &str| map.get(name).map(|v| v.to_string());
+        SigHeaders {
+            sig_b64: get(signing::SIG),
+            kid: get(signing::SIG_KID),
+            alg: get(signing::SIG_ALG),
+            at_ms: get(signing::SIG_AT),
+        }
+    }
+
+    #[test]
+    fn a_break_glass_run_verifies_against_the_ring_an_agent_holds() {
+        // The cross-crate property the recovery path rests on: bytes signed
+        // here verify under the entry `kanade command-key break-glass` prints.
+        let (signer, ring) = signer_and_ring("break-glass-1", Duration::from_secs(900));
+
+        let body = br#"{"id":"adhoc-run","request_id":"r1"}"#;
+        let at = 1_700_000_000_000;
+        let map = sig_headers(&signer, body, at);
+        let ok = verify(&ring, body, &headers_back(&map), at).expect("verifies");
+        assert_eq!(ok.kid, "break-glass-1");
+        // Auditing is not optional for this key — the agent logs every use.
+        assert!(ok.policy.audit_every_use);
+    }
+
+    #[test]
+    fn a_captured_break_glass_command_stops_working_once_it_is_stale() {
+        // Why the bound exists rather than being belt-and-braces: `kanade run`
+        // sets `deadline_at: None`, and the agent's replay dedup is an
+        // in-memory cache that is empty on first boot. On a machine that
+        // reboots into a JetStream replay, this is the only thing between it and
+        // a week-old emergency command.
+        let (signer, ring) = signer_and_ring("break-glass-1", Duration::from_secs(900));
+
+        let body = b"emergency";
+        let signed_at = 1_700_000_000_000i64;
+        let map = sig_headers(&signer, body, signed_at);
+        let headers = headers_back(&map);
+
+        // Inside the window.
+        assert!(verify(&ring, body, &headers, signed_at + 60_000).is_ok());
+        // Past it — genuine, and refused on policy rather than on signature.
+        assert!(matches!(
+            verify(&ring, body, &headers, signed_at + 3_600_000),
+            Err(VerifyError::Stale { .. })
+        ));
+    }
+
+    #[test]
+    fn every_signature_header_travels_and_none_is_blank() {
+        // A partial set is classified `Malformed` by the agent, not `Unsigned` —
+        // so a missing header turns a legitimate break-glass command into a
+        // reported anomaly mid-incident.
+        let (signer, _) = signer_and_ring("bg", Duration::from_secs(900));
+        let map = sig_headers(&signer, b"body", 1);
+        for name in [
+            signing::SIG,
+            signing::SIG_KID,
+            signing::SIG_ALG,
+            signing::SIG_AT,
+        ] {
+            let v = map
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} missing"))
+                .to_string();
+            assert!(!v.is_empty(), "{name} is blank");
+        }
+    }
 }

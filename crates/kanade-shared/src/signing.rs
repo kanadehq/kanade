@@ -452,6 +452,69 @@ impl Signer {
     }
 }
 
+/// Which half of a `(secret, kid)` pair is missing.
+///
+/// Returned rather than a formatted message so each caller can name the store
+/// it looked in — the registry, an environment variable pair, a config file —
+/// while the rule itself lives in one place. Two callers writing their own
+/// version of "half is an error" is how they end up disagreeing about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissingHalf {
+    /// A key id with no key to go with it.
+    Key,
+    /// A key with no id. Cannot be signed with: `Kanade-Sig-Kid` has to name
+    /// something the fleet's keyring recognises, and guessing produces a
+    /// signature every agent reports as unattributable.
+    Kid,
+}
+
+/// Classify a possibly-half-configured `(secret, kid)` pair.
+///
+/// `Ok(None)` = nothing configured, which is a legitimate state everywhere
+/// this is used (a host that does not sign, an operator without a break-glass
+/// key to hand). `Err` = exactly one half present, which is never intentional
+/// and must not silently fall back to unsigned: signing under a mismatched or
+/// invented id produces `command_signature_invalid` fleet-wide, which is the
+/// forgery alarm raised by a configuration mistake.
+pub fn pair<'a>(
+    secret: Option<&'a str>,
+    kid: Option<&'a str>,
+) -> Result<Option<(&'a str, &'a str)>, MissingHalf> {
+    match (secret, kid) {
+        (Some(s), Some(k)) => Ok(Some((s, k))),
+        (Some(_), None) => Err(MissingHalf::Kid),
+        (None, Some(_)) => Err(MissingHalf::Key),
+        (None, None) => Ok(None),
+    }
+}
+
+/// The JSON object an agent's `CommandKeys` array holds for a **break-glass**
+/// key.
+///
+/// Differs from [`keyring_entry`] by carrying `max_age_secs`, which is what
+/// makes the agent treat it as break-glass at all: `parse_keyring` maps a
+/// present `max_age_secs` to [`KeyPolicy::break_glass`], and that constructor
+/// is what sets `audit_every_use`.
+///
+/// Deliberately does **not** emit `audit_every_use`. The agent ignores that
+/// field whenever `max_age_secs` is present — auditing is not optional for a
+/// break-glass key — so printing it would put a value in the operator's file
+/// that looks adjustable and is not. An entry that lies about what it controls
+/// is worse than one that omits it.
+pub fn break_glass_keyring_entry(
+    kid: &str,
+    key: &VerifyingKey,
+    label: &str,
+    max_age: Duration,
+) -> serde_json::Value {
+    serde_json::json!({
+        "kid": kid,
+        "public_key": encode_public(key),
+        "label": label,
+        "max_age_secs": max_age.as_secs(),
+    })
+}
+
 /// Hand-written so the private key cannot reach a log line.
 ///
 /// `SigningKey` derives `Debug` and prints its bytes, so a derived impl here
@@ -991,6 +1054,43 @@ mod tests {
         // mode is a secret in a log file.
         assert_eq!(format!("{signer:?}"), r#"Signer { kid: "backend-1" }"#);
         assert!(!format!("{signer:?}").contains(&encode_secret(&key)));
+    }
+
+    #[test]
+    fn a_half_configured_pair_names_the_missing_half() {
+        assert_eq!(
+            pair(Some("secret"), Some("kid")),
+            Ok(Some(("secret", "kid")))
+        );
+        assert_eq!(pair(None, None), Ok(None));
+        // The two failures are distinguished because the fixes differ: one
+        // needs a key generated, the other needs the id it was distributed
+        // under.
+        assert_eq!(pair(Some("secret"), None), Err(MissingHalf::Kid));
+        assert_eq!(pair(None, Some("kid")), Err(MissingHalf::Key));
+    }
+
+    #[test]
+    fn a_break_glass_entry_carries_the_bound_and_not_the_audit_flag() {
+        // `max_age_secs` is what makes the agent treat this as break-glass at
+        // all (`parse_keyring` maps it to `KeyPolicy::break_glass`, which is
+        // what turns auditing on). Emitting `audit_every_use` too would put a
+        // field in the operator's file that the agent ignores — adjustable in
+        // appearance, fixed in fact.
+        let key = generate_keypair().unwrap();
+        let entry = break_glass_keyring_entry(
+            "break-glass-20260730",
+            &key.verifying_key(),
+            "break-glass",
+            Duration::from_secs(900),
+        );
+        assert_eq!(entry["kid"], "break-glass-20260730");
+        assert_eq!(entry["max_age_secs"], 900);
+        assert_eq!(entry["public_key"], encode_public(&key.verifying_key()));
+        assert!(
+            entry.get("audit_every_use").is_none(),
+            "must not print a field the agent overrides: {entry}"
+        );
     }
 
     #[test]

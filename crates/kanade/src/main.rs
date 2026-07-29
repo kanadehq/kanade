@@ -62,6 +62,9 @@ enum SubCmd {
     Script(cmd::script::ScriptArgs),
     /// Manage the layered agent_config KV bucket (global / per-group / per-pc).
     Config(cmd::config::ConfigArgs),
+    /// Break-glass command-signing key (#1165). The backend's own key is minted
+    /// on the backend host (`kanade-backend command-key-generate`), never here.
+    CommandKey(cmd::command_key::CommandKeyArgs),
     /// Manage groups: list fleet-wide, add/remove PC memberships,
     /// list PCs in a given group.
     Group(cmd::group::GroupArgs),
@@ -144,6 +147,12 @@ async fn dispatch(server: String, backend_url: String, command: SubCmd) -> Resul
         return cmd::query::execute(&backend_url, args).await;
     } else if let SubCmd::SelfUpdate(args) = command {
         return cmd::self_update::execute(args).await;
+    } else if let SubCmd::CommandKey(args) = command {
+        // #1165: needs neither NATS nor the backend, and that is deliberate
+        // rather than incidental. This mints the credential for recovering from
+        // a dead backend; requiring a broker to produce it would put the
+        // recovery tool behind the thing it recovers from.
+        return cmd::command_key::execute(args);
     }
 
     // The remaining subcommands need NATS. The role decides which
@@ -178,7 +187,8 @@ async fn dispatch(server: String, backend_url: String, command: SubCmd) -> Resul
         | SubCmd::Login(_)
         | SubCmd::Account(_)
         | SubCmd::Query(_)
-        | SubCmd::SelfUpdate(_) => {
+        | SubCmd::SelfUpdate(_)
+        | SubCmd::CommandKey(_) => {
             unreachable!("handled above")
         }
     }

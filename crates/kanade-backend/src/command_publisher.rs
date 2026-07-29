@@ -220,9 +220,18 @@ fn choose(
     env: (Option<String>, Option<String>),
 ) -> Result<Option<(String, String, Source)>, String> {
     for (source, (secret, kid)) in [(Source::Registry, registry), (Source::Env, env)] {
-        match (secret, kid) {
-            (Some(secret), Some(kid)) => return Ok(Some((secret, kid, source))),
-            (Some(_), None) => {
+        // The "half a pair is an error" rule itself lives in `signing::pair`,
+        // shared with the CLI's break-glass path. Only the phrasing is local —
+        // naming the store an operator has to go fix is the whole value of
+        // having two callers rather than one.
+        let classified = signing::pair(secret.as_deref(), kid.as_deref())
+            .map(|pair| pair.map(|(s, k)| (s.to_owned(), k.to_owned())));
+        match classified {
+            Ok(Some((secret, kid))) => {
+                return Ok(Some((secret, kid, source)));
+            }
+            Ok(None) => continue,
+            Err(signing::MissingHalf::Kid) => {
                 return Err(format!(
                     "a command-signing key is present in {} but its key id is missing. The two \
                      are only meaningful together — signing under the wrong id is reported by \
@@ -230,14 +239,13 @@ fn choose(
                     source.describe()
                 ));
             }
-            (None, Some(kid)) => {
+            Err(signing::MissingHalf::Key) => {
                 return Err(format!(
-                    "a command-signing key id ({kid}) is present in {} but the key itself is \
-                     missing.",
+                    "a command-signing key id ({}) is present in {} but the key itself is missing.",
+                    kid.as_deref().unwrap_or_default(),
                     source.describe()
                 ));
             }
-            (None, None) => continue,
         }
     }
     Ok(None)
