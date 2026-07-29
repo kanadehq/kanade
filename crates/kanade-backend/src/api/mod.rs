@@ -168,6 +168,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/auth/login", post(accounts::login))
         .route("/api/auth/me", get(accounts::me))
         .route("/api/auth/change-password", post(accounts::change_password))
+        // #1192: self-service TOTP MFA enrolment (authed, like change-password).
+        .route("/api/auth/mfa/init", post(accounts::mfa_init))
+        .route("/api/auth/mfa/verify", post(accounts::mfa_verify))
+        .route("/api/auth/mfa/disable", post(accounts::mfa_disable))
         // #770: PUBLIC one-time password setup/reset links + self-service
         // forgot-password (allow-listed in crate::auth::verify, like login).
         .route(

@@ -193,6 +193,10 @@ fn err(code: StatusCode, msg: &str) -> Response {
 pub struct LoginReq {
     username: String,
     password: String,
+    /// TOTP code (#1192). Only consulted when the account has MFA enabled;
+    /// omitted on the first request so the server can reply `mfa_required`.
+    #[serde(default)]
+    totp_code: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -236,15 +240,28 @@ fn too_many(retry_after_secs: u64) -> Response {
         .into_response()
 }
 
+/// The login result: either a minted session, or a signal that the password
+/// was correct but a TOTP code is still needed (#1192). Untagged so the SPA
+/// distinguishes them by the presence of `token` vs `mfa_required`.
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum LoginOutcome {
+    Success(LoginResp),
+    MfaRequired { mfa_required: bool },
+}
+
 /// `POST /api/auth/login` — public. Verifies credentials and mints a
 /// JWT. Returns `401` for unknown user / bad password / disabled
 /// account (deliberately indistinguishable to the caller), or `429` when the
-/// account or source IP is rate-limited (#1191).
+/// account or source IP is rate-limited (#1191). When the account has MFA
+/// enabled, a valid `totp_code` is also required; a correct password with no
+/// code yields `200 {mfa_required:true}` so the SPA can prompt, and a wrong
+/// code counts toward the same lockout as a wrong password.
 pub async fn login(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(req): Json<LoginReq>,
-) -> Result<Json<LoginResp>, Response> {
+) -> Result<Json<LoginOutcome>, Response> {
     let ip = client_ip(&headers);
 
     // #1191: reject a throttled account / IP before spending an argon2 verify.
@@ -252,8 +269,8 @@ pub async fn login(
         return Err(too_many(retry_after));
     }
 
-    let row = sqlx::query_as::<_, (String, String, i64, i64)>(
-        "SELECT password_hash, role, disabled, must_change_pw FROM users WHERE username = ?",
+    let row = sqlx::query_as::<_, (String, String, i64, i64, Option<String>)>(
+        "SELECT password_hash, role, disabled, must_change_pw, totp_secret FROM users WHERE username = ?",
     )
     .bind(&req.username)
     .fetch_optional(&state.pool)
@@ -267,21 +284,41 @@ pub async fn login(
     })?;
 
     // Count the failure (per-account + per-IP) then return the opaque 401.
+    // Used for a bad password AND a bad TOTP code — both are login failures.
     let fail = || {
         state.login_throttle.record_failure(&req.username, &ip);
         err(StatusCode::UNAUTHORIZED, "invalid credentials")
     };
-    let Some((hash, role, disabled, must_change_pw)) = row else {
+    let Some((hash, role, disabled, must_change_pw, totp_secret)) = row else {
         return Err(fail());
     };
     if disabled != 0 || !verify_password_async(req.password.clone(), hash).await {
         return Err(fail());
     }
-    // Correct credentials — clear the account's failure streak.
-    state.login_throttle.record_success(&req.username);
     let Some(role) = Role::parse(&role) else {
         return Err(err(StatusCode::INTERNAL_SERVER_ERROR, "corrupt role"));
     };
+
+    // #1192: with MFA enabled, the password alone is not enough. A missing
+    // code (first round-trip) asks the SPA to prompt and is NOT a failure
+    // (the password was correct); a wrong code is a throttled 401 like a bad
+    // password. The failure streak is cleared only after all factors pass.
+    if let Some(secret) = totp_secret.as_deref().filter(|s| !s.is_empty()) {
+        let Some(code) = req.totp_code.as_deref().filter(|c| !c.trim().is_empty()) else {
+            return Ok(Json(LoginOutcome::MfaRequired { mfa_required: true }));
+        };
+        match crate::mfa::verify(secret, &req.username, code.trim()) {
+            Ok(true) => {}
+            Ok(false) => return Err(fail()),
+            Err(e) => {
+                warn!(error = %e, "totp verify failed");
+                return Err(err(StatusCode::INTERNAL_SERVER_ERROR, "mfa check failed"));
+            }
+        }
+    }
+
+    // All factors correct — clear the account's failure streak.
+    state.login_throttle.record_success(&req.username);
 
     // Operator-configured session window (default 24h). A broker hiccup
     // reading the KV must not block login — fall back to the built-in
@@ -297,12 +334,12 @@ pub async fn login(
     } as i64;
     let (token, exp) = mint_jwt(&req.username, role, ttl_hours)
         .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "token mint failed"))?;
-    Ok(Json(LoginResp {
+    Ok(Json(LoginOutcome::Success(LoginResp {
         token,
         role,
         must_change_pw: must_change_pw != 0,
         exp,
-    }))
+    })))
 }
 
 #[derive(Serialize)]
@@ -314,6 +351,9 @@ pub struct MeResp {
     /// Resolved from the DB by [`crate::auth::verify`]; drives the SPA's
     /// sidebar + route filtering (the hard backend gate is `require_features`).
     allowed_features: Option<Vec<Feature>>,
+    /// #1192: whether this account has TOTP MFA enrolled. Drives the SPA's
+    /// account-security panel (enroll vs. disable).
+    mfa_enabled: bool,
 }
 
 /// `GET /api/auth/me` — the caller's own identity + effective role.
@@ -325,21 +365,158 @@ pub async fn me(
     claims: axum::Extension<Claims>,
 ) -> Result<Json<MeResp>, Response> {
     // Service tokens have no `users` row; treat them as never needing a
-    // password change.
-    let must_change_pw =
-        sqlx::query_scalar::<_, i64>("SELECT must_change_pw FROM users WHERE username = ?")
-            .bind(&claims.sub)
-            .fetch_optional(&state.pool)
-            .await
-            .map_err(db_err)?
-            .unwrap_or(0);
+    // password change and MFA-less.
+    let row = sqlx::query_as::<_, (i64, Option<String>)>(
+        "SELECT must_change_pw, totp_secret FROM users WHERE username = ?",
+    )
+    .bind(&claims.sub)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(db_err)?;
+    let (must_change_pw, mfa_enabled) = match row {
+        Some((m, secret)) => (m, secret.is_some_and(|s| !s.is_empty())),
+        None => (0, false),
+    };
     Ok(Json(MeResp {
         username: claims.sub.clone(),
         role: claims.role(),
         must_change_pw: must_change_pw != 0,
         // Already resolved from the DB by `verify` — no extra query needed.
         allowed_features: claims.allowed_features.clone(),
+        mfa_enabled,
     }))
+}
+
+// ---- MFA enrollment (#1192) ----------------------------------------
+
+#[derive(Serialize)]
+pub struct MfaInitResp {
+    /// Fresh base32 secret. NOT stored yet — the client must confirm a code
+    /// (via `mfa/verify`) before it becomes the account's active secret. It
+    /// travels once over HTTPS so the authenticator app can be seeded.
+    secret: String,
+    /// `otpauth://` URL for the same secret (the SPA renders it as a QR).
+    otpauth_url: String,
+}
+
+/// `POST /api/auth/mfa/init` — self-service. Generates a candidate secret and
+/// returns it + its otpauth URL. Stateless: nothing is written until
+/// `mfa/verify` succeeds, so an abandoned enrolment leaves the account
+/// untouched.
+pub async fn mfa_init(claims: axum::Extension<Claims>) -> Result<Json<MfaInitResp>, Response> {
+    let secret = crate::mfa::generate_secret_base32();
+    let otpauth_url = crate::mfa::otpauth_url(&secret, &claims.sub)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &format!("mfa init: {e}")))?;
+    Ok(Json(MfaInitResp {
+        secret,
+        otpauth_url,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct MfaVerifyReq {
+    /// The candidate secret returned by `mfa/init`.
+    secret: String,
+    /// A code from the authenticator for the candidate secret.
+    code: String,
+    /// A code from the CURRENTLY-active authenticator. Required only when the
+    /// account already has MFA enabled (rotation); ignored on first enrolment.
+    #[serde(default)]
+    current_code: Option<String>,
+}
+
+/// `POST /api/auth/mfa/verify` — self-service. Confirms the candidate secret
+/// by verifying a live code, then activates it (writes `users.totp_secret`).
+/// From here login requires a code.
+///
+/// When MFA is ALREADY enabled this is a rotation, and a valid `current_code`
+/// for the existing secret is also required — otherwise a walked-away session
+/// could swap in a secret it chose (and whose codes it can compute itself),
+/// silently taking over MFA and bypassing the `mfa/disable` protection.
+pub async fn mfa_verify(
+    State(state): State<AppState>,
+    claims: axum::Extension<Claims>,
+    Json(req): Json<MfaVerifyReq>,
+) -> Result<StatusCode, Response> {
+    let current: Option<String> =
+        sqlx::query_scalar("SELECT totp_secret FROM users WHERE username = ?")
+            .bind(&claims.sub)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(db_err)?
+            .flatten();
+    if let Some(current) = current.filter(|s| !s.is_empty()) {
+        let Some(cur_code) = req.current_code.as_deref().filter(|c| !c.trim().is_empty()) else {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "current code required to change MFA",
+            ));
+        };
+        match crate::mfa::verify(&current, &claims.sub, cur_code.trim()) {
+            Ok(true) => {}
+            Ok(false) => return Err(err(StatusCode::BAD_REQUEST, "invalid current code")),
+            Err(e) => {
+                return Err(err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("mfa verify: {e}"),
+                ));
+            }
+        }
+    }
+
+    let ok = crate::mfa::verify(&req.secret, &claims.sub, req.code.trim())
+        .map_err(|e| err(StatusCode::BAD_REQUEST, &format!("mfa verify: {e}")))?;
+    if !ok {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid code"));
+    }
+    sqlx::query("UPDATE users SET totp_secret = ? WHERE username = ?")
+        .bind(&req.secret)
+        .bind(&claims.sub)
+        .execute(&state.pool)
+        .await
+        .map_err(db_err)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+pub struct MfaDisableReq {
+    /// A current code, required to disable — so a walked-away session can't
+    /// silently drop MFA.
+    code: String,
+}
+
+/// `POST /api/auth/mfa/disable` — self-service. Requires a valid current code,
+/// then clears `users.totp_secret`. Self-service only: an operator who has lost
+/// their authenticator cannot self-recover, and the admin user-update path does
+/// NOT touch `totp_secret` — an admin-initiated MFA reset for device loss is a
+/// follow-up (#1192).
+pub async fn mfa_disable(
+    State(state): State<AppState>,
+    claims: axum::Extension<Claims>,
+    Json(req): Json<MfaDisableReq>,
+) -> Result<StatusCode, Response> {
+    let secret: Option<String> =
+        sqlx::query_scalar("SELECT totp_secret FROM users WHERE username = ?")
+            .bind(&claims.sub)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(db_err)?
+            .flatten();
+    let Some(secret) = secret.filter(|s| !s.is_empty()) else {
+        // Already off — idempotent.
+        return Ok(StatusCode::NO_CONTENT);
+    };
+    let ok = crate::mfa::verify(&secret, &claims.sub, req.code.trim())
+        .map_err(|e| err(StatusCode::BAD_REQUEST, &format!("mfa disable: {e}")))?;
+    if !ok {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid code"));
+    }
+    sqlx::query("UPDATE users SET totp_secret = NULL WHERE username = ?")
+        .bind(&claims.sub)
+        .execute(&state.pool)
+        .await
+        .map_err(db_err)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]

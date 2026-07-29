@@ -1,0 +1,11 @@
+-- #1192: TOTP MFA for operator accounts. A NULL `totp_secret` means MFA is
+-- OFF for that account (the default and the state for every existing row).
+-- The column holds the base32 TOTP secret, written only after the user has
+-- proved possession by verifying a code against a pending secret during
+-- enrollment; login then requires a valid code whenever this is non-NULL.
+--
+-- On a `-WipeDb` upgrade the `users` table is snapshotted and restored, so
+-- this column must be added to the snapshot/restore in main.rs alongside the
+-- existing optional columns (email / allowed_features / permission_group) —
+-- otherwise a wipe silently disables MFA for everyone.
+ALTER TABLE users ADD COLUMN totp_secret TEXT;
