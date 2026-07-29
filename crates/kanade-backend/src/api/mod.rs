@@ -133,6 +133,8 @@ pub struct AppState {
     /// links in account emails. `None` ⇒ the link base is derived from the
     /// request `Host` header instead (see `password_setup::link_base`).
     pub public_url: Option<String>,
+    /// #1191: in-memory rate limiting + lockout for the public login route.
+    pub login_throttle: std::sync::Arc<crate::login_throttle::LoginThrottle>,
 }
 
 impl FromRef<AppState> for SqlitePool {
