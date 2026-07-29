@@ -7,6 +7,7 @@ mod command_publisher;
 mod controller;
 mod login_throttle;
 mod mail;
+mod mfa;
 mod projector;
 mod scheduler;
 mod web;
@@ -240,6 +241,10 @@ struct UserRow {
     /// account captured from a pre-`permission_group` DB) — preserved so a
     /// wipe doesn't drop everyone's group assignment.
     permission_group: Option<String>,
+    /// #1192 TOTP secret (base32). `None` = MFA off, or an account captured
+    /// from a pre-`totp_secret` DB — preserved across the wipe so a
+    /// migration-driven wipe doesn't silently disable MFA for everyone.
+    totp_secret: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -525,6 +530,7 @@ async fn snapshot_durable(db_path: &str) -> Result<(Vec<UserRow>, Vec<PermGroupR
     let has_email = column_exists("email").await?;
     let has_allowed = column_exists("allowed_features").await?;
     let has_group = column_exists("permission_group").await?;
+    let has_totp = column_exists("totp_secret").await?;
     let email_expr = if has_email {
         "email"
     } else {
@@ -540,11 +546,16 @@ async fn snapshot_durable(db_path: &str) -> Result<(Vec<UserRow>, Vec<PermGroupR
     } else {
         "CAST(NULL AS TEXT) AS permission_group"
     };
+    let totp_expr = if has_totp {
+        "totp_secret"
+    } else {
+        "CAST(NULL AS TEXT) AS totp_secret"
+    };
     // Composed only from hardcoded column literals above (the `*_expr`
     // branches are static strings, no user input), so it's injection-safe;
     // `AssertSqlSafe` is required because the composed string isn't `'static`.
     let select = format!(
-        "SELECT username, password_hash, role, disabled, must_change_pw, created_at, updated_at, {email_expr}, {allowed_expr}, {group_expr} FROM users"
+        "SELECT username, password_hash, role, disabled, must_change_pw, created_at, updated_at, {email_expr}, {allowed_expr}, {group_expr}, {totp_expr} FROM users"
     );
 
     let rows = sqlx::query_as::<
@@ -557,6 +568,7 @@ async fn snapshot_durable(db_path: &str) -> Result<(Vec<UserRow>, Vec<PermGroupR
             i64,
             String,
             String,
+            Option<String>,
             Option<String>,
             Option<String>,
             Option<String>,
@@ -580,6 +592,7 @@ async fn snapshot_durable(db_path: &str) -> Result<(Vec<UserRow>, Vec<PermGroupR
                 email,
                 allowed_features,
                 permission_group,
+                totp_secret,
             )| {
                 UserRow {
                     username,
@@ -590,6 +603,7 @@ async fn snapshot_durable(db_path: &str) -> Result<(Vec<UserRow>, Vec<PermGroupR
                     email,
                     allowed_features,
                     permission_group,
+                    totp_secret,
                     created_at,
                     updated_at,
                 }
@@ -671,8 +685,8 @@ async fn restore_users(pool: &sqlx::SqlitePool, users: &[UserRow]) -> Result<usi
     for u in users {
         sqlx::query(
             "INSERT INTO users \
-             (username, password_hash, role, disabled, must_change_pw, created_at, updated_at, email, allowed_features, permission_group) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (username, password_hash, role, disabled, must_change_pw, created_at, updated_at, email, allowed_features, permission_group, totp_secret) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&u.username)
         .bind(&u.password_hash)
@@ -684,6 +698,7 @@ async fn restore_users(pool: &sqlx::SqlitePool, users: &[UserRow]) -> Result<usi
         .bind(&u.email)
         .bind(&u.allowed_features)
         .bind(&u.permission_group)
+        .bind(&u.totp_secret)
         .execute(&mut *tx)
         .await
         .with_context(|| format!("restore user {}", u.username))?;
