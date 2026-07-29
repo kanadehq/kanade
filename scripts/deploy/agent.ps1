@@ -45,6 +45,23 @@
   agent reads this at startup ahead of $env:KANADE_NATS_TOKEN.
   Required when the broker is started with `authorization { token: ... }`.
 
+.PARAMETER CommandKeys
+  If set, write the command-signing keyring (#1165) to
+  HKLM\SOFTWARE\kanade\agent\CommandKeys (REG_SZ) with the same
+  hardened ACL. A JSON ARRAY of entries, each `{kid, public_key,
+  label?, max_age_secs?}` -- include BOTH the backend key and the
+  break-glass key; the value is replaced, not merged.
+
+  Provisioned here rather than over NATS because the NATS route is
+  circular: once agents reject unsigned commands, the command that
+  would carry the keyring to a machine with an empty ring is itself
+  rejected. Get the entries from `kanade-backend command-key-generate`
+  (backend key) and `kanade command-key break-glass` (break-glass).
+
+  These are PUBLIC keys, so the value is not a secret -- the ACL is
+  there to stop tampering, not disclosure. Whoever can write this
+  decides what the machine will execute.
+
 .EXAMPLE
   # Drop deploy-agent.ps1 + kanade-agent.exe + agent.toml in a folder,
   # then on the target:
@@ -59,6 +76,15 @@
   PS> .\deploy-agent.ps1 -NatsToken '<your-fleet-token>'
 
 .EXAMPLE
+  # Kit a new machine with both the NATS token and the command-signing
+  # keyring, so it starts out able to verify rather than needing someone
+  # to remember a follow-up step:
+  PS> .\deploy-agent.ps1 -NatsToken '<your-fleet-token>' -CommandKeys @'
+  [{"kid":"backend-20260728","label":"backend","public_key":"..."},
+   {"kid":"break-glass-20260730-1432","label":"break-glass","public_key":"...","max_age_secs":900}]
+  '@
+
+.EXAMPLE
   # Recover from a stuck / broken service:
   PS> .\deploy-agent.ps1 -Recreate
 #>
@@ -70,7 +96,8 @@ param(
     [switch]$ForceConfig,
     [switch]$Recreate,
     [switch]$NoStart,
-    [string]$NatsToken   = ''
+    [string]$NatsToken   = '',
+    [string]$CommandKeys = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -188,6 +215,110 @@ if ($ForceConfig -or -not (Test-Path $configDst)) {
 
 if ($NatsToken) {
     Set-KanadeRegistrySecret -Subkey 'agent' -ValueName 'NatsToken' -Value $NatsToken
+}
+
+# #1165: the command-signing keyring, provisioned here for the same reason
+# the NATS token is. Bootstrapping it over NATS instead is circular -- once
+# agents reject unsigned commands, the command that would carry the keyring
+# to a machine with an empty ring is itself rejected. A machine that cannot
+# be handed a NATS token cannot join the fleet at all, so this channel is
+# already the fleet's trust bootstrap; the keyring belongs beside it.
+#
+# Rotation does NOT come through here: the `provision-command-keys` job
+# updates a ring that already exists. This is the entry that makes a newly
+# kitted machine start out trusted rather than needing someone to remember.
+if ($CommandKeys) {
+    # Validated before writing, because every way this can be wrong is
+    # silent later. A malformed ring leaves the agent holding nothing, which
+    # reads as "not provisioned yet" -- and at stage 3 that machine rejects
+    # every command it is sent, including the one that would fix it.
+    $trimmed = $CommandKeys.Trim()
+    if (-not $trimmed.StartsWith('[')) {
+        throw "CommandKeys must be a JSON ARRAY of entries, even for a single key. Got: $($trimmed.Substring(0, [Math]::Min(40, $trimmed.Length)))..."
+    }
+    try {
+        # Assign FIRST, then wrap. `@($x | ConvertFrom-Json)` looks equivalent
+        # and is not: on Windows PowerShell 5.1 -- which is what runs in
+        # production -- that form collapses the whole array into ONE element,
+        # so a two-key ring counts as one and the duplicate check below never
+        # sees a second entry to compare. Measured: 5.1 gives 1, pwsh 7 gives
+        # 2, and `-InputObject` inside `@()` is no better. Assigning
+        # materialises a real Object[], and `@()` on that is identity.
+        $parsed = ConvertFrom-Json -InputObject $trimmed
+    } catch {
+        throw "CommandKeys is not valid JSON: $($_.Exception.Message)"
+    }
+    $entries = @($parsed)
+    if ($entries.Count -eq 0) {
+        throw 'CommandKeys is an empty array — that provisions no keys at all. Omit the parameter if that is what you meant.'
+    }
+    foreach ($e in $entries) {
+        # Types are checked, not just presence. `IsNullOrWhiteSpace` coerces
+        # its argument, so an unquoted `"kid": 20260728` reads as the non-empty
+        # string "20260728" here and sails through — while the agent, whose
+        # `KeyEntry.kid` is a `String`, rejects the JSON number outright. That
+        # would push the discovery from "installing one machine" to "the ring
+        # is already on the fleet", which is the whole thing this block exists
+        # to prevent. Same for a bare `true` or an object where a string
+        # belongs. (A non-object element, e.g. `["kid1","kid2"]`, yields $null
+        # for these properties in non-strict mode, so it lands here too rather
+        # than raising a .NET error — measured on 5.1 and pwsh 7.)
+        if ($e.kid -isnot [string] -or $e.public_key -isnot [string]) {
+            throw "every CommandKeys entry needs STRING 'kid' and 'public_key' (quote them); got: $($e | ConvertTo-Json -Compress)"
+        }
+        if ([string]::IsNullOrWhiteSpace($e.kid) -or [string]::IsNullOrWhiteSpace($e.public_key)) {
+            throw "every CommandKeys entry needs a non-empty 'kid' and 'public_key'; got: $($e | ConvertTo-Json -Compress)"
+        }
+        if ($null -ne $e.label -and $e.label -isnot [string]) {
+            throw "CommandKeys entry '$($e.kid)' has a non-string 'label'; got: $($e | ConvertTo-Json -Compress)"
+        }
+        # `max_age_secs` is what makes the agent treat an entry as break-glass
+        # at all, so a quoted "900" silently demoting it to an ordinary
+        # unbounded key is exactly the mistake worth catching before the fleet
+        # has it.
+        if ($null -ne $e.max_age_secs -and $e.max_age_secs -isnot [int] -and $e.max_age_secs -isnot [long]) {
+            throw "CommandKeys entry '$($e.kid)' has a non-numeric 'max_age_secs' (do not quote it); got: $($e | ConvertTo-Json -Compress)"
+        }
+        # A zero window bricks the key silently. The agent turns any present
+        # `max_age_secs` into a break-glass policy, and `Duration::from_secs(0)`
+        # makes `verify` reject every signature whose age is not exactly zero —
+        # so the entry looks provisioned, reports nothing wrong, and fails the
+        # first time someone reaches for it, which is during an incident. A
+        # negative value is refused by the agent's `Option<u64>` instead, but
+        # only after the ring has been distributed. `kanade command-key
+        # break-glass` already refuses `--max-age-mins 0`; this is the same
+        # guard on the path that takes hand-authored input.
+        if ($null -ne $e.max_age_secs -and $e.max_age_secs -le 0) {
+            throw "CommandKeys entry '$($e.kid)' has max_age_secs = $($e.max_age_secs). A non-positive window rejects every signature made with the key. Pick a window a human can act inside."
+        }
+    }
+    # The agent keys its ring by id, so a repeat would silently drop one key
+    # and every command signed by it would stop verifying with nothing to
+    # explain it. `parse_keyring` refuses such a ring outright; catching it
+    # here means the operator finds out while installing one machine rather
+    # than after distributing to the fleet.
+    $dupes = @($entries | Group-Object -Property kid | Where-Object { $_.Count -gt 1 })
+    if ($dupes.Count) {
+        throw "CommandKeys lists these ids more than once: $($dupes.Name -join ', '). Two different keys must never share an id."
+    }
+
+    Set-KanadeRegistrySecret -Subkey 'agent' -ValueName 'CommandKeys' -Value $trimmed
+
+    # Read back rather than echoing the input: the point is what this machine
+    # actually holds, and a report that repeats its argument proves nothing.
+    # Closed in a finally, matching Set-KanadeRegistrySecret above. Leaking it
+    # is harmless while this is the last thing the script does with the key,
+    # but the shape gets copied.
+    $rk = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SOFTWARE\kanade\agent')
+    try {
+        $written = $rk.GetValue('CommandKeys')
+    } finally {
+        $rk.Close()
+    }
+    # Same 5.1 trap as above — assign, then enumerate.
+    $readBack = ConvertFrom-Json -InputObject $written
+    $kids = @($readBack) | ForEach-Object { $_.kid }
+    Write-Host "CommandKeys provisioned. kids: $($kids -join ', ')"
 }
 
 # Service binPath = quoted exe + --config flag pointing at the
