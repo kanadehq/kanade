@@ -1,4 +1,4 @@
-import { KeyRound, LogIn, LogOut } from 'lucide-react';
+import { KeyRound, LogIn, LogOut, ShieldCheck } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 
@@ -23,6 +23,11 @@ export function AuthBar() {
           {role && <div className="text-[10px] uppercase tracking-wide text-muted">{role}</div>}
         </div>
         <div className="flex items-center gap-1">
+          <Button variant="ghost" size="icon" asChild title={t('auth.security')}>
+            <Link to="/security" aria-label={t('auth.security')}>
+              <ShieldCheck className="size-3.5" />
+            </Link>
+          </Button>
           <Button variant="ghost" size="icon" asChild title={t('auth.changePassword')}>
             <Link to="/change-password" aria-label={t('auth.changePassword')}>
               <KeyRound className="size-3.5" />

@@ -40,7 +40,8 @@
     "signedIn": "Signed in",
     "login": "login",
     "logout": "logout",
-    "changePassword": "Change password"
+    "changePassword": "Change password",
+    "security": "Security & MFA"
   },
   "actions": {
     "save": "Save",

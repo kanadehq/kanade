@@ -22,6 +22,11 @@ type Me = {
   username: string;
   role: Role;
   must_change_pw: boolean;
+  /** Whether this account has TOTP MFA enrolled (#1192). Drives the
+   *  self-service Security page's enable/disable state. The backend is
+   *  the enforcement boundary (it demands a code at login); this is a
+   *  display hint. */
+  mfa_enabled: boolean;
   /** Per-account page allow-list (#1008). `null` = unrestricted (every
    *  page). An array restricts to those feature keys (see `lib/features`).
    *  Resolved from the DB by the backend; the backend is the real gate — the
@@ -38,6 +43,8 @@ type AuthContextValue = {
   isAuthenticated: boolean;
   /** True while the signed-in caller still owes a forced password change. */
   mustChangePw: boolean;
+  /** True when the signed-in caller has TOTP MFA enrolled (#1192). */
+  mfaEnabled: boolean;
   /** Re-fetch `/api/auth/me` (e.g. after a password change clears the gate). */
   refresh: () => Promise<void>;
   /** True when the signed-in caller's role is at least `min`. */
@@ -139,6 +146,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       logout,
       isAuthenticated: token.length > 0,
       mustChangePw: me?.must_change_pw ?? false,
+      mfaEnabled: me?.mfa_enabled ?? false,
       refresh,
       hasRole: (min: Role) => (me ? RANK[me.role] >= RANK[min] : false),
       canSee: (feature: Feature) => {
