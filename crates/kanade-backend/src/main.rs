@@ -5,6 +5,7 @@ mod auth;
 mod cleanup;
 mod command_publisher;
 mod controller;
+mod login_throttle;
 mod mail;
 mod projector;
 mod scheduler;
@@ -1238,6 +1239,7 @@ pub(crate) async fn run_backend() -> Result<()> {
         group_cache: api::group_sql::new_cache(),
         mailer,
         public_url: cfg.server.public_url.clone(),
+        login_throttle: std::sync::Arc::new(login_throttle::LoginThrottle::default()),
     };
 
     // Scheduler runs alongside the projectors; if it can't init (no

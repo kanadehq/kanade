@@ -203,13 +203,55 @@ pub struct LoginResp {
     exp: i64,
 }
 
+/// Best-effort client IP for login throttling (#1191). Behind Caddy the
+/// socket peer is loopback, so read `X-Forwarded-For` — but take the **last**
+/// hop, not the first. Caddy (like Go's `httputil.ReverseProxy`) *appends* the
+/// real peer to any client-supplied value, so `1.2.3.4, <real>` means the
+/// trustworthy IP is the rightmost segment; the leftmost is attacker-supplied
+/// and using it would let a client rotate a bogus value to dodge the per-IP
+/// cap or frame another IP's bucket. Assumes a single trusted proxy (the
+/// `deploy/linux` Caddyfile). Falls back to a shared bucket when the header is
+/// absent (a direct LAN deploy), so the per-IP limit degrades to global-ish
+/// rather than off.
+fn client_ip(headers: &HeaderMap) -> String {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.rsplit(',').next())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// `429 Too Many Requests` with a `Retry-After` (seconds) for a throttled login.
+fn too_many(retry_after_secs: u64) -> Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(
+            axum::http::header::RETRY_AFTER,
+            retry_after_secs.to_string(),
+        )],
+        "too many login attempts; try again later",
+    )
+        .into_response()
+}
+
 /// `POST /api/auth/login` — public. Verifies credentials and mints a
 /// JWT. Returns `401` for unknown user / bad password / disabled
-/// account (deliberately indistinguishable to the caller).
+/// account (deliberately indistinguishable to the caller), or `429` when the
+/// account or source IP is rate-limited (#1191).
 pub async fn login(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<LoginReq>,
 ) -> Result<Json<LoginResp>, Response> {
+    let ip = client_ip(&headers);
+
+    // #1191: reject a throttled account / IP before spending an argon2 verify.
+    if let Err(retry_after) = state.login_throttle.check(&req.username, &ip) {
+        return Err(too_many(retry_after));
+    }
+
     let row = sqlx::query_as::<_, (String, String, i64, i64)>(
         "SELECT password_hash, role, disabled, must_change_pw FROM users WHERE username = ?",
     )
@@ -224,13 +266,19 @@ pub async fn login(
         )
     })?;
 
-    let unauthorized = || err(StatusCode::UNAUTHORIZED, "invalid credentials");
+    // Count the failure (per-account + per-IP) then return the opaque 401.
+    let fail = || {
+        state.login_throttle.record_failure(&req.username, &ip);
+        err(StatusCode::UNAUTHORIZED, "invalid credentials")
+    };
     let Some((hash, role, disabled, must_change_pw)) = row else {
-        return Err(unauthorized());
+        return Err(fail());
     };
     if disabled != 0 || !verify_password_async(req.password.clone(), hash).await {
-        return Err(unauthorized());
+        return Err(fail());
     }
+    // Correct credentials — clear the account's failure streak.
+    state.login_throttle.record_success(&req.username);
     let Some(role) = Role::parse(&role) else {
         return Err(err(StatusCode::INTERNAL_SERVER_ERROR, "corrupt role"));
     };
@@ -993,6 +1041,23 @@ pub async fn seed_bootstrap_admin(pool: &SqlitePool) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn client_ip_takes_the_trusted_last_hop_not_the_spoofable_first() {
+        let mut h = HeaderMap::new();
+        // Caddy appends the real peer, so `<spoofed>, <real>` → we must use
+        // the last hop (the real one), never the client-supplied first.
+        h.insert("x-forwarded-for", "1.2.3.4, 203.0.113.9".parse().unwrap());
+        assert_eq!(client_ip(&h), "203.0.113.9");
+
+        // Single hop.
+        let mut h1 = HeaderMap::new();
+        h1.insert("x-forwarded-for", "198.51.100.7".parse().unwrap());
+        assert_eq!(client_ip(&h1), "198.51.100.7");
+
+        // No header (direct deploy) → shared bucket rather than off.
+        assert_eq!(client_ip(&HeaderMap::new()), "unknown");
+    }
 
     #[test]
     fn canonical_features_validates_dedupes_orders() {
