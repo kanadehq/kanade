@@ -43,8 +43,64 @@
 //! gain and retire entries during rotation, and re-releasing the fleet to
 //! rotate a key is the kind of procedure that does not get used. The public
 //! keys are not secrets; the ACL is there to stop tampering, not disclosure.
+//!
+//! # The ring reloads itself when, and only when, it is wrong
+//!
+//! Loading once at startup made provisioning a no-op until the agent
+//! restarted — measured on the dev host, where the key was distributed
+//! successfully at 17:27 and the agent, running since 15:47, still reported an
+//! unknown key hours later. That defeats the whole "distribute before the
+//! backend signs" ordering the rollout depends on: the key is on disk, the
+//! in-memory ring is empty, and stage 2 raises the rotation alarm fleet-wide
+//! anyway.
+//!
+//! So a [`VerifyError::UnknownKid`] triggers a reload and one retry. That is
+//! the *only* outcome a stale ring can explain — an unsigned command, a bad
+//! signature or a stale one are all unaffected by which keys we hold — so the
+//! common path never touches the registry, and no other outcome can be used to
+//! provoke a read.
+//!
+//! The reload is rate-limited because the trigger is reachable by anyone who
+//! can put bytes on a command subject: without a floor, a stream of commands
+//! bearing invented key ids would turn every one of them into a registry read.
+//! [`RELOAD_MIN_INTERVAL`] bounds that to one read per interval per machine,
+//! which still lets a freshly provisioned key take effect within seconds
+//! rather than at the next restart.
+//!
+//! ## A reload may improve the ring or leave it alone — never destroy it
+//!
+//! This is what makes a skipped or failed reload a *delay* rather than an
+//! outage, and it is load-bearing rather than tidy. The provisioning job writes
+//! `CommandKeys` while the agent is running, so a reload can catch a partial
+//! write; treating that like an absent value — which is what a boot-time load
+//! correctly does — would take a machine from verifying to holding no keys at
+//! all. At stage 3 that is the difference between one delayed command and a
+//! machine that refuses every command until something reloads successfully.
+//!
+//! So [`read_keyring`] separates "nothing provisioned" (`Ok(empty)` — a real
+//! state an operator can intend) from "provisioned and unusable" (`Err`), and
+//! only the former replaces a live ring.
+//!
+//! ## What stage 3 has to add here
+//!
+//! With enforcement on, the moment a command is about to be **rejected** for an
+//! unknown key is exactly the moment a skipped reload stops being free. Stage 3
+//! must force a reload before rejecting, ignoring [`RELOAD_MIN_INTERVAL`] —
+//! otherwise a key that landed seconds ago is still refused, and the rate limit
+//! turns from an I/O bound into a rejection bug.
+//!
+//! ## If the keyring source stops being local
+//!
+//! The reload runs synchronously on the async command path, which is fine only
+//! because the registry is local and memory-mapped: microseconds, at most once
+//! per interval per machine. Move the ring to a network fetch, a remote share
+//! or a KV read and that inverts — it then belongs on `spawn_blocking`, and the
+//! `last_reload` guard held across the load (which is what collapses two
+//! concurrent misses into one read) has to be reworked around an async-aware
+//! lock rather than simply dropped, or the dedup it provides is lost.
 
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use kanade_shared::signing::{KeyPolicy, KeyRing, SigHeaders, VerifyError, verify};
 use kanade_shared::wire::ObsEvent;
@@ -56,6 +112,15 @@ const REG_VALUE: &str = "CommandKeys";
 
 /// `source` on emitted [`ObsEvent`]s.
 const SOURCE: &str = "command_signature";
+
+/// Floor between two keyring reloads.
+///
+/// The reload trigger is attacker-reachable — anyone who can place bytes on a
+/// command subject can name a key id we do not hold — so this is what stops
+/// that from becoming one registry read per delivered command. Short enough
+/// that a newly provisioned key takes effect on the next command rather than
+/// at the next restart, which is the whole point of reloading at all.
+const RELOAD_MIN_INTERVAL: Duration = Duration::from_secs(30);
 
 /// One entry of the JSON array stored in the registry.
 #[derive(Debug, Deserialize)]
@@ -72,21 +137,23 @@ struct KeyEntry {
     audit_every_use: bool,
 }
 
-/// Load the trusted keys. An absent or unreadable value yields an empty ring,
-/// which is correct for stage 1: an agent with no keys still runs unsigned
-/// commands exactly as it does today, and reports every signed one it cannot
-/// check.
-pub fn load_keyring() -> KeyRing {
+/// Read the trusted keys, distinguishing "nothing is provisioned" from
+/// "something is provisioned and it is broken".
+///
+/// The split exists because the two answers are only interchangeable at boot.
+/// An **absent** value is a legitimate state — no keys yet, or an operator
+/// deliberately revoking the ring — and yields an empty ring. An **unparseable**
+/// value is a failure, and as a reload it must not be allowed to replace a ring
+/// that is currently working: the provisioning job writes this value while the
+/// agent is running, so a reload can catch a partial write, and collapsing that
+/// into "empty" would take a machine from verifying to holding nothing. At
+/// stage 3 that is the difference between one skipped reload and a machine that
+/// rejects every command.
+fn read_keyring() -> Result<KeyRing, String> {
     let Some(raw) = kanade_shared::secrets::read_hklm_value(REG_SUBKEY, REG_VALUE) else {
-        return KeyRing::new();
+        return Ok(KeyRing::new());
     };
-    parse_keyring(&raw).unwrap_or_else(|e| {
-        // Fail to an empty ring rather than panicking: a corrupt keyring must
-        // not stop an agent from working during stages 1-2, and at stage 3 an
-        // empty ring rejects everything, which is the safe direction.
-        warn!(error = %e, "command keyring is unreadable — treating as empty");
-        KeyRing::new()
-    })
+    parse_keyring(&raw)
 }
 
 fn parse_keyring(raw: &str) -> Result<KeyRing, String> {
@@ -144,9 +211,19 @@ pub enum Outcome {
     Verified,
     /// No signature at all — normal traffic until the backend starts signing.
     Unsigned,
-    /// Signed by a key this agent does not have. Almost always a stale
-    /// keyring mid-rotation; indistinguishable at a glance from a backend
-    /// that has stopped sending, which is why it is reported.
+    /// Signed, and this agent holds **no keys at all** — provisioning has not
+    /// reached it, or what reached it failed to parse.
+    ///
+    /// Split from [`Outcome::UnknownKid`] because the two are different
+    /// operational states with different fixes, and conflating them makes the
+    /// rollout unreadable: during stages 1-2 every not-yet-provisioned machine
+    /// would raise the *rotation* alarm, which is supposed to mean "this
+    /// machine missed a key change". An alarm that fires on the normal
+    /// starting state is one operators learn to ignore before it ever matters.
+    Unprovisioned,
+    /// Signed by a key this agent does not have, **while holding others**.
+    /// A stale keyring mid-rotation: provisioning reached this machine once,
+    /// but not for this key.
     UnknownKid,
     /// Signed, and the signature does not check out. Either a forgery or a
     /// corrupted message; both warrant a look.
@@ -158,10 +235,27 @@ pub enum Outcome {
 }
 
 impl Outcome {
+    /// Every variant, kept **here** rather than in the test that consumes it.
+    ///
+    /// The uniqueness guard on [`Outcome::kind`] is only as good as this list,
+    /// and a list living in a test module is one a new variant gets added
+    /// without — which is exactly what happened when `Unprovisioned` was added.
+    /// Sitting against the enum, it is in the diff you are already editing.
+    #[cfg(test)]
+    const ALL: [Outcome; 6] = [
+        Outcome::Verified,
+        Outcome::Unsigned,
+        Outcome::Unprovisioned,
+        Outcome::UnknownKid,
+        Outcome::Invalid,
+        Outcome::Stale,
+    ];
+
     fn kind(self) -> &'static str {
         match self {
             Outcome::Verified => "command_signature_ok",
             Outcome::Unsigned => "command_signature_absent",
+            Outcome::Unprovisioned => "command_signature_unprovisioned",
             Outcome::UnknownKid => "command_signature_unknown_key",
             Outcome::Invalid => "command_signature_invalid",
             Outcome::Stale => "command_signature_stale",
@@ -169,9 +263,54 @@ impl Outcome {
     }
 }
 
+/// What a reload attempt did, for the log line an operator reads when a
+/// machine will not verify.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reload {
+    /// The ring was replaced with what the store holds.
+    Done,
+    /// Inside [`RELOAD_MIN_INTERVAL`] of the last attempt — we did not look.
+    RateLimited,
+    /// We looked and could not use what we found. The previous ring is kept.
+    Failed,
+}
+
+impl Reload {
+    fn as_str(self) -> &'static str {
+        match self {
+            Reload::Done => "reloaded",
+            Reload::RateLimited => "rate-limited",
+            Reload::Failed => "reload-failed",
+        }
+    }
+}
+
+/// Take a lock, ignoring poisoning.
+///
+/// A panic on some other command path must not stop this machine verifying
+/// the next one: every value behind these locks is replaceable state
+/// (a keyring, a timestamp, a last-reported class), so the worst a poisoned
+/// guard can carry is a stale value that the next call overwrites anyway.
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// How the ring is (re)loaded. Boxed rather than hard-wired to
+/// [`read_keyring`] so the reload path is reachable from a test — the registry
+/// returns nothing on non-Windows, so a test that went through it would assert
+/// nothing at all on CI, which is where this needs to hold.
+type Loader = Box<dyn Fn() -> Result<KeyRing, String> + Send + Sync>;
+
 /// Verifies commands and reports when the fleet's signing state changes.
 pub struct Verifier {
-    ring: KeyRing,
+    /// Behind a lock because an `UnknownKid` replaces it in place — see the
+    /// module doc. `Mutex` rather than `RwLock`: reads are already serialized
+    /// by the command path being one message at a time per subscription, and
+    /// the lock is held for a signature verify (tens of microseconds).
+    ring: Mutex<KeyRing>,
+    loader: Loader,
+    /// When the ring was last pulled from the store, for [`RELOAD_MIN_INTERVAL`].
+    last_reload: Mutex<Instant>,
     pc_id: String,
     obs_dir: std::path::PathBuf,
     /// Last reported class. Events fire on **transition**, the same shape the
@@ -181,7 +320,16 @@ pub struct Verifier {
 }
 
 impl Verifier {
-    pub fn new(ring: KeyRing, pc_id: String, obs_dir: std::path::PathBuf) -> Self {
+    /// Production constructor: loads the ring from the registry now, and
+    /// reloads from the same place when a command names a key it lacks.
+    pub fn new(pc_id: String, obs_dir: std::path::PathBuf) -> Self {
+        Self::with_loader(pc_id, obs_dir, Box::new(read_keyring))
+    }
+
+    /// The ring's source is a single argument so the initial load and every
+    /// reload cannot drift apart — the caller can no longer hand in one ring
+    /// and have it silently refreshed from somewhere else.
+    fn with_loader(pc_id: String, obs_dir: std::path::PathBuf, loader: Loader) -> Self {
         // Every other `obs_outbox::enqueue` caller in this crate does this
         // first; skipping it would make the first report fail on a fresh
         // install, which is precisely when a mis-provisioned keyring is most
@@ -189,20 +337,37 @@ impl Verifier {
         if let Err(e) = crate::obs_outbox::ensure_outbox_dir(&obs_dir) {
             warn!(error = %e, "command_verify: outbox dir — reports may be dropped until it exists");
         }
+        let ring = loader().unwrap_or_else(|e| {
+            // No earlier ring to lose at construction, so degrading is safe
+            // here in a way it is not on the reload path.
+            warn!(error = %e, "command keyring is unreadable — treating as empty");
+            KeyRing::new()
+        });
         if ring.is_empty() {
-            info!("command keyring is empty — signatures will be reported, not checked");
+            info!(
+                "command keyring is empty — signed commands will be reported unprovisioned until \
+                 one is distributed (no restart needed; the ring reloads on demand)"
+            );
         } else {
             info!(kids = ?ring.kids().collect::<Vec<_>>(), "command keyring loaded");
         }
         Self {
-            ring,
+            ring: Mutex::new(ring),
+            loader,
+            last_reload: Mutex::new(Instant::now()),
             pc_id,
             obs_dir,
             last: Mutex::new(None),
         }
     }
 
-    /// Check one message and report. **Never blocks execution** — stage 1.
+    /// Check one message and report.
+    ///
+    /// **Never withholds a command from running** — stage 1 is observational,
+    /// so every outcome here, including a failed verification, still lets the
+    /// command execute. (That is a statement about authorisation, not about
+    /// executor scheduling: this is a synchronous call and may do one local
+    /// registry read per [`RELOAD_MIN_INTERVAL`] — see the module doc.)
     pub fn observe(&self, body: &[u8], headers: &SigHeaders, request_id: &str) -> Outcome {
         self.observe_at(
             body,
@@ -221,7 +386,62 @@ impl Verifier {
         request_id: &str,
         now_ms: i64,
     ) -> Outcome {
-        let outcome = match verify(&self.ring, body, headers, now_ms) {
+        let outcome = self.classify(body, headers, request_id, now_ms, Instant::now());
+        self.report_transition(outcome);
+        outcome
+    }
+
+    /// Verify, reloading the ring once if the only thing wrong is that we do
+    /// not hold the named key.
+    ///
+    /// `now` is passed in rather than read here so the rate limit is testable
+    /// without sleeping.
+    fn classify(
+        &self,
+        body: &[u8],
+        headers: &SigHeaders,
+        request_id: &str,
+        now_ms: i64,
+        now: Instant,
+    ) -> Outcome {
+        match self.check(body, headers, request_id, now_ms) {
+            Ok(outcome) => outcome,
+            // The one outcome a stale in-memory ring can explain. Everything
+            // else — unsigned, malformed, bad signature, stale — means the same
+            // thing whatever keys we hold, so it must not reach the store: the
+            // trigger is reachable by anyone who can put bytes on a command
+            // subject.
+            Err(kid) => {
+                let reload = self.reload_if_due(now);
+                if reload != Reload::Done {
+                    return self.report_missing(&kid, request_id, reload.as_str());
+                }
+                match self.check(body, headers, request_id, now_ms) {
+                    Ok(outcome) => {
+                        info!(
+                            kid,
+                            request_id, "keyring reload resolved a previously unknown key"
+                        );
+                        outcome
+                    }
+                    Err(kid) => self.report_missing(&kid, request_id, "reloaded"),
+                }
+            }
+        }
+    }
+
+    /// Verify against the current ring. `Err(kid)` means **only**
+    /// [`VerifyError::UnknownKid`]; every other error is already a final
+    /// answer and comes back as its `Outcome`.
+    fn check(
+        &self,
+        body: &[u8],
+        headers: &SigHeaders,
+        request_id: &str,
+        now_ms: i64,
+    ) -> Result<Outcome, String> {
+        let ring = lock(&self.ring);
+        match verify(&ring, body, headers, now_ms) {
             Ok(v) => {
                 if v.policy.audit_every_use {
                     // A break-glass key whose use nobody investigates is a
@@ -229,29 +449,80 @@ impl Verifier {
                     // deliberately not rate-limited.
                     warn!(kid = v.kid, request_id, "command signed by an audited key");
                 }
-                Outcome::Verified
+                Ok(Outcome::Verified)
             }
-            Err(VerifyError::Unsigned) => Outcome::Unsigned,
-            Err(VerifyError::UnknownKid { kid }) => {
-                warn!(
-                    kid,
-                    request_id,
-                    known = ?self.ring.kids().collect::<Vec<_>>(),
-                    "command signed by a key this agent does not have"
-                );
-                Outcome::UnknownKid
-            }
+            Err(VerifyError::Unsigned) => Ok(Outcome::Unsigned),
+            Err(VerifyError::UnknownKid { kid }) => Err(kid),
             Err(e @ VerifyError::Stale { .. }) => {
                 warn!(error = %e, request_id, "command signature is past its freshness bound");
-                Outcome::Stale
+                Ok(Outcome::Stale)
             }
             Err(e) => {
                 warn!(error = %e, request_id, "command signature did not verify");
-                Outcome::Invalid
+                Ok(Outcome::Invalid)
             }
-        };
-        self.report_transition(outcome);
-        outcome
+        }
+    }
+
+    /// Classify and log a key we still do not hold after doing what we can.
+    fn report_missing(&self, kid: &str, request_id: &str, reload: &str) -> Outcome {
+        let ring = lock(&self.ring);
+        if ring.is_empty() {
+            warn!(
+                kid,
+                request_id,
+                reload,
+                "command is signed but this agent holds no keys — provision \
+                 HKLM\\SOFTWARE\\kanade\\agent\\CommandKeys"
+            );
+            Outcome::Unprovisioned
+        } else {
+            warn!(
+                kid,
+                request_id,
+                reload,
+                known = ?ring.kids().collect::<Vec<_>>(),
+                "command signed by a key this agent does not have"
+            );
+            Outcome::UnknownKid
+        }
+    }
+
+    /// Pull the ring from the store if the rate limit allows, reporting which
+    /// of the three things happened — the distinction reaches the log line an
+    /// operator reads when a machine will not verify, and "we did not look" and
+    /// "we looked and the value is broken" send them to different places.
+    fn reload_if_due(&self, now: Instant) -> Reload {
+        let mut last = lock(&self.last_reload);
+        // `checked_duration_since` rather than subtraction: an `Instant` from
+        // before the recorded one would panic on the underflow, and a test (or
+        // a future caller) passing a non-monotonic clock should not take the
+        // agent down.
+        if now.checked_duration_since(*last).unwrap_or_default() < RELOAD_MIN_INTERVAL {
+            return Reload::RateLimited;
+        }
+        // Consumed even when the load fails: a corrupt value plus a stream of
+        // unknown-key commands would otherwise be one read per command, which
+        // is the case the floor exists for.
+        *last = now;
+        // Held across the load deliberately: two command paths hitting an
+        // unknown key at once would otherwise both read the store.
+        match (self.loader)() {
+            Ok(fresh) => {
+                *lock(&self.ring) = fresh;
+                Reload::Done
+            }
+            // Keep what we have. A reload can only ever improve the ring or
+            // leave it alone — never destroy a working one — which is what
+            // makes a skipped or failed reload a delay rather than an outage.
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "keyring reload failed — keeping the keys already loaded"
+                );
+                Reload::Failed
+            }
+        }
     }
 
     /// Emit an obs event when the class changes, so the fleet view shows which
@@ -265,10 +536,7 @@ impl Verifier {
     /// running — the same class of failure as the #1145 throttle that passed
     /// two static reviews and did nothing on real hardware.
     fn report_transition(&self, outcome: Outcome) {
-        let mut last = match self.last.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut last = lock(&self.last);
         let Some(transition) = step(*last, outcome) else {
             return;
         };
@@ -340,6 +608,58 @@ mod tests {
 
     fn b64(bytes: &[u8]) -> String {
         base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    fn test_dir() -> std::path::PathBuf {
+        std::env::temp_dir().join("kanade-command-verify-test")
+    }
+
+    /// A verifier whose ring never changes — the pre-reload behaviour.
+    fn verifier_with(ring: KeyRing) -> Verifier {
+        Verifier::with_loader("PC1".into(), test_dir(), Box::new(move || Ok(ring.clone())))
+    }
+
+    fn backend_ring(kid: &str, sk: &SigningKey) -> KeyRing {
+        let mut r = KeyRing::new();
+        r.insert(kid, sk.verifying_key(), KeyPolicy::backend("backend"));
+        r
+    }
+
+    /// A ring that is empty until `provision()` is called, counting how many
+    /// times it was read — the shape of a machine whose key arrives while the
+    /// agent is already running.
+    #[derive(Clone)]
+    struct Store {
+        inner: std::sync::Arc<Mutex<(Result<KeyRing, String>, usize)>>,
+    }
+
+    impl Default for Store {
+        fn default() -> Self {
+            Self {
+                inner: std::sync::Arc::new(Mutex::new((Ok(KeyRing::new()), 0))),
+            }
+        }
+    }
+
+    impl Store {
+        fn provision(&self, ring: KeyRing) {
+            lock(&self.inner).0 = Ok(ring);
+        }
+        /// What a partially-written `CommandKeys` value looks like from here.
+        fn corrupt(&self) {
+            lock(&self.inner).0 = Err("expected value at line 1 column 3".into());
+        }
+        fn reads(&self) -> usize {
+            lock(&self.inner).1
+        }
+        fn loader(&self) -> Loader {
+            let inner = self.inner.clone();
+            Box::new(move || {
+                let mut g = lock(&inner);
+                g.1 += 1;
+                g.0.clone()
+            })
+        }
     }
 
     #[test]
@@ -421,16 +741,7 @@ mod tests {
         // These strings reach the SPA's Events filter and the backend's
         // UNIQUE key, so a collision or a rename is a data change, not a
         // cosmetic one.
-        let kinds: Vec<_> = [
-            Outcome::Verified,
-            Outcome::Unsigned,
-            Outcome::UnknownKid,
-            Outcome::Invalid,
-            Outcome::Stale,
-        ]
-        .iter()
-        .map(|o| o.kind())
-        .collect();
+        let kinds: Vec<_> = Outcome::ALL.iter().map(|o| o.kind()).collect();
         let unique: std::collections::BTreeSet<_> = kinds.iter().collect();
         assert_eq!(unique.len(), kinds.len(), "kinds must not collide");
         assert!(kinds.iter().all(|k| k.starts_with("command_signature")));
@@ -571,8 +882,7 @@ mod tests {
             sk.verifying_key(),
             KeyPolicy::break_glass("break-glass", std::time::Duration::from_secs(300)),
         );
-        let dir = std::env::temp_dir().join("kanade-command-verify-test");
-        let v = Verifier::new(ring, "PC1".into(), dir);
+        let v = verifier_with(ring);
 
         let now = 1_700_000_000_000i64;
         let body = b"emergency";
@@ -595,6 +905,208 @@ mod tests {
     }
 
     #[test]
+    fn a_key_provisioned_after_boot_takes_effect_without_a_restart() {
+        // Measured on the dev host: the key was distributed successfully at
+        // 17:27 and the agent, running since 15:47, still reported an unknown
+        // key hours later because the ring was read once at startup and never
+        // again. This is that scenario as a test.
+        let sk = SigningKey::from_bytes(&[11u8; 32]);
+        let store = Store::default();
+        let v = Verifier::with_loader("PC1".into(), test_dir(), store.loader());
+
+        let now = 1_700_000_000_000i64;
+        let body = b"job";
+        let headers = sign(&sk, "backend-1", body, now);
+        let boot = Instant::now();
+
+        // Before provisioning: signed, and we hold nothing.
+        assert_eq!(
+            v.classify(body, &headers, "r1", now, boot),
+            Outcome::Unprovisioned
+        );
+
+        store.provision(backend_ring("backend-1", &sk));
+
+        // Still inside the rate-limit window — the ring on disk is right, but
+        // we have not looked. Reporting the stale answer here is correct; what
+        // must not happen is reporting it forever.
+        assert_eq!(
+            v.classify(body, &headers, "r2", now, boot),
+            Outcome::Unprovisioned
+        );
+
+        // Past the window: the next unknown key pulls the ring and the same
+        // command verifies. No restart, no redeploy.
+        let later = boot + RELOAD_MIN_INTERVAL;
+        assert_eq!(
+            v.classify(body, &headers, "r3", now, later),
+            Outcome::Verified
+        );
+    }
+
+    #[test]
+    fn a_reload_that_cannot_be_read_keeps_the_working_ring() {
+        // The regression this split exists for. The provisioning job writes
+        // `CommandKeys` while the agent is running, so a reload can catch a
+        // partial write. Collapsing that into "empty" — which is right at boot,
+        // where there is nothing to lose — would take a verifying machine down
+        // to holding no keys, and at stage 3 that is a machine refusing every
+        // command rather than one delayed command.
+        let sk = SigningKey::from_bytes(&[21u8; 32]);
+        let store = Store::default();
+        store.provision(backend_ring("backend-1", &sk));
+        let v = Verifier::with_loader("PC1".into(), test_dir(), store.loader());
+
+        let now = 1_700_000_000_000i64;
+        let good = sign(&sk, "backend-1", b"job", now);
+        let t = Instant::now() + RELOAD_MIN_INTERVAL * 2;
+        assert_eq!(v.classify(b"job", &good, "r1", now, t), Outcome::Verified);
+
+        // Someone is mid-write on the registry value.
+        store.corrupt();
+
+        // An unknown key drives a reload, which fails.
+        let unknown = sign(&sk, "backend-2", b"job", now);
+        assert_eq!(
+            v.classify(b"job", &unknown, "r2", now, t + RELOAD_MIN_INTERVAL),
+            Outcome::UnknownKid,
+            "a failed reload must not turn this into Unprovisioned"
+        );
+
+        // And the key we already had still verifies.
+        assert_eq!(
+            v.classify(b"job", &good, "r3", now, t + RELOAD_MIN_INTERVAL * 2),
+            Outcome::Verified,
+            "the working ring must survive a failed reload"
+        );
+    }
+
+    #[test]
+    fn only_an_unknown_key_reaches_the_store() {
+        // The reload trigger is attacker-reachable — anyone who can place bytes
+        // on a command subject picks the `kid`. If unsigned or invalid traffic
+        // also reloaded, every delivered command would become a registry read
+        // and the rate limit would be the only thing standing between the fleet
+        // and a remote I/O amplifier.
+        let sk = SigningKey::from_bytes(&[12u8; 32]);
+        let store = Store::default();
+        store.provision(backend_ring("backend-1", &sk));
+        let v = Verifier::with_loader("PC1".into(), test_dir(), store.loader());
+        let after_boot = Instant::now() + RELOAD_MIN_INTERVAL * 10;
+        let now = 1_700_000_000_000i64;
+        let reads = store.reads();
+
+        // Unsigned: normal stage-1/2 traffic.
+        assert_eq!(
+            v.classify(b"x", &SigHeaders::default(), "r1", now, after_boot),
+            Outcome::Unsigned
+        );
+        // A signature that does not match the bytes.
+        let forged = sign(&SigningKey::from_bytes(&[99u8; 32]), "backend-1", b"x", now);
+        assert_eq!(
+            v.classify(b"x", &forged, "r2", now, after_boot),
+            Outcome::Invalid
+        );
+        // Malformed.
+        let partial = SigHeaders {
+            sig_b64: Some("AAAA".into()),
+            kid: None,
+            alg: None,
+            at_ms: None,
+        };
+        assert_eq!(
+            v.classify(b"x", &partial, "r3", now, after_boot),
+            Outcome::Invalid
+        );
+        assert_eq!(store.reads(), reads, "none of these may touch the store");
+
+        // And the one that does.
+        let unknown = sign(&sk, "backend-2", b"x", now);
+        assert_eq!(
+            v.classify(b"x", &unknown, "r4", now, after_boot),
+            Outcome::UnknownKid
+        );
+        assert_eq!(store.reads(), reads + 1);
+    }
+
+    #[test]
+    fn repeated_unknown_keys_reload_at_most_once_per_interval() {
+        let sk = SigningKey::from_bytes(&[13u8; 32]);
+        let store = Store::default();
+        store.provision(backend_ring("backend-1", &sk));
+        let v = Verifier::with_loader("PC1".into(), test_dir(), store.loader());
+        let now = 1_700_000_000_000i64;
+        let headers = sign(&sk, "backend-2", b"x", now);
+        let base = Instant::now() + RELOAD_MIN_INTERVAL;
+        let reads = store.reads();
+
+        for i in 0..20 {
+            // Twenty commands spread across less than one interval.
+            let t = base + RELOAD_MIN_INTERVAL / 40 * i;
+            assert_eq!(v.classify(b"x", &headers, "r", now, t), Outcome::UnknownKid);
+        }
+        assert_eq!(
+            store.reads(),
+            reads + 1,
+            "a flood of invented key ids must not become a flood of store reads"
+        );
+
+        // The floor is per interval, not once ever — otherwise a key
+        // provisioned after the first miss would never be picked up.
+        assert_eq!(
+            v.classify(b"x", &headers, "r", now, base + RELOAD_MIN_INTERVAL * 2),
+            Outcome::UnknownKid
+        );
+        assert_eq!(store.reads(), reads + 2);
+    }
+
+    #[test]
+    fn an_empty_ring_and_a_missing_key_are_different_states() {
+        // They need opposite responses — "provisioning never reached this
+        // machine" vs "this machine missed a rotation" — and during stages 1-2
+        // every unprovisioned machine would otherwise raise the rotation alarm,
+        // which is how an alarm gets ignored before it ever matters.
+        let sk = SigningKey::from_bytes(&[14u8; 32]);
+        let now = 1_700_000_000_000i64;
+        let headers = sign(&sk, "backend-2", b"x", now);
+        let t = Instant::now() + RELOAD_MIN_INTERVAL * 2;
+
+        let empty =
+            Verifier::with_loader("PC1".into(), test_dir(), Box::new(|| Ok(KeyRing::new())));
+        assert_eq!(
+            empty.classify(b"x", &headers, "r1", now, t),
+            Outcome::Unprovisioned
+        );
+
+        let other = verifier_with(backend_ring("backend-1", &sk));
+        assert_eq!(
+            other.classify(b"x", &headers, "r2", now, t),
+            Outcome::UnknownKid
+        );
+    }
+
+    #[test]
+    fn a_non_monotonic_clock_does_not_panic() {
+        // `Instant` subtraction panics on underflow. The clock is injected, so
+        // an out-of-order value is reachable; taking the agent down over it
+        // would be a worse outcome than skipping one reload.
+        let sk = SigningKey::from_bytes(&[15u8; 32]);
+        let v = verifier_with(backend_ring("backend-1", &sk));
+        let now = 1_700_000_000_000i64;
+        let headers = sign(&sk, "backend-2", b"x", now);
+        // `checked_sub` because `Instant - Duration` panics when the result
+        // would precede the platform's monotonic epoch — which is exactly the
+        // boot-adjacent case a CI runner can be in.
+        let Some(past) = Instant::now().checked_sub(RELOAD_MIN_INTERVAL * 3) else {
+            return;
+        };
+        assert_eq!(
+            v.classify(b"x", &headers, "r1", now, past),
+            Outcome::UnknownKid
+        );
+    }
+
+    #[test]
     fn the_ordinary_signer_is_never_stale() {
         // JetStream replay hands back commands retained for 7 days; a bound on
         // the backend key would turn every reconnect into a rejection.
@@ -605,8 +1117,7 @@ mod tests {
             sk.verifying_key(),
             KeyPolicy::backend("backend"),
         );
-        let dir = std::env::temp_dir().join("kanade-command-verify-test");
-        let v = Verifier::new(ring, "PC1".into(), dir);
+        let v = verifier_with(ring);
 
         let now = 1_700_000_000_000i64;
         let week = 7 * 24 * 60 * 60 * 1000;
