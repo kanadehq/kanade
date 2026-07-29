@@ -84,6 +84,13 @@ enum SubCmd {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // #1187: this binary links two rustls crypto providers — aws-lc-rs (via
+    // reqwest) and ring (via async-nats) — so rustls 0.23 cannot auto-pick a
+    // process-level provider and the first wss/TLS use (`kanade run` against a
+    // wss:// broker) panics on flush. Install ring explicitly, before any TLS.
+    // `install_default` returns Err if one is already installed — ignore it.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
