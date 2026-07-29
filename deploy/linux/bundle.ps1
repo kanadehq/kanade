@@ -25,6 +25,9 @@
 [CmdletBinding()]
 param(
 	[Parameter(Mandatory = $true)][string]$Backend,
+	# Must match the architecture of the -Backend binary you pass; there
+	# is no way to verify that here (build-release.ps1 keeps them in step).
+	[ValidateSet('x86_64', 'aarch64')][string]$Arch = 'aarch64',
 	[string]$Out = '.',
 	[string]$NatsVersion = 'v2.14.3',
 	[string]$CaddyVersion = '2.10.2'
@@ -33,9 +36,14 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'   # faster Invoke-WebRequest
 
-if (-not (Test-Path -LiteralPath $Backend)) { throw "backend binary not found: $Backend" }
+if (-not (Test-Path -LiteralPath $Backend -PathType Leaf)) { throw "backend binary not found (or not a file): $Backend" }
 $here = $PSScriptRoot
 $repoRoot = (Resolve-Path (Join-Path $here '..\..')).Path
+
+# Map the user-facing arch (x86_64 / aarch64) to the nats/caddy asset arch
+# (amd64 / arm64).
+$dlArch = if ($Arch -eq 'x86_64') { 'amd64' } else { 'arm64' }
+$bundleName = "kanade-linux-$Arch-bundle"
 
 function Get-Checked([string]$Url, [string]$OutFile, [string]$SumsUrl, [string]$Name, [string]$Algo = 'SHA256') {
 	# Download $Url to $OutFile and verify it against the checksum for
@@ -53,7 +61,7 @@ function Get-Checked([string]$Url, [string]$OutFile, [string]$SumsUrl, [string]$
 }
 
 $stage = Join-Path ([System.IO.Path]::GetTempPath()) ("kbundle-" + [System.IO.Path]::GetRandomFileName())
-$root = Join-Path $stage 'kanade-linux-arm64-bundle'
+$root = Join-Path $stage $bundleName
 New-Item -ItemType Directory -Force -Path (Join-Path $root 'bin'), (Join-Path $root 'etc'), (Join-Path $root 'systemd') | Out-Null
 try {
 	Write-Host "==> backend: $Backend"
@@ -62,16 +70,16 @@ try {
 	$dl = Join-Path $stage 'dl'
 	New-Item -ItemType Directory -Force -Path $dl | Out-Null
 
-	Write-Host "==> nats-server $NatsVersion (linux-arm64), checksum-verified"
-	$nbase = "nats-server-$NatsVersion-linux-arm64.tar.gz"
+	Write-Host "==> nats-server $NatsVersion (linux-$dlArch), checksum-verified"
+	$nbase = "nats-server-$NatsVersion-linux-$dlArch.tar.gz"
 	$nrel = "https://github.com/nats-io/nats-server/releases/download/$NatsVersion"
 	$ntar = Join-Path $dl $nbase
 	Get-Checked "$nrel/$nbase" $ntar "$nrel/SHA256SUMS" $nbase
 	& tar.exe -xzf $ntar -C $dl
-	Copy-Item -LiteralPath (Join-Path $dl "nats-server-$NatsVersion-linux-arm64\nats-server") -Destination (Join-Path $root 'bin\nats-server')
+	Copy-Item -LiteralPath (Join-Path $dl "nats-server-$NatsVersion-linux-$dlArch\nats-server") -Destination (Join-Path $root 'bin\nats-server')
 
-	Write-Host "==> caddy $CaddyVersion (linux-arm64), checksum-verified"
-	$cbase = "caddy_${CaddyVersion}_linux_arm64.tar.gz"
+	Write-Host "==> caddy $CaddyVersion (linux-$dlArch), checksum-verified"
+	$cbase = "caddy_${CaddyVersion}_linux_$dlArch.tar.gz"
 	$crel = "https://github.com/caddyserver/caddy/releases/download/v$CaddyVersion"
 	$ctar = Join-Path $dl $cbase
 	Get-Checked "$crel/$cbase" $ctar "$crel/caddy_${CaddyVersion}_checksums.txt" $cbase 'SHA512'
@@ -89,17 +97,18 @@ try {
 	Copy-Item -LiteralPath (Join-Path $here 'README.md')                  -Destination (Join-Path $root 'README.md')
 
 	New-Item -ItemType Directory -Force -Path $Out | Out-Null
-	$outFile = Join-Path ((Resolve-Path $Out).Path) 'kanade-linux-arm64-bundle.tar.gz'
-	& tar.exe -C $stage -czf $outFile 'kanade-linux-arm64-bundle'
+	$archiveName = "$bundleName.tar.gz"
+	$outFile = Join-Path ((Resolve-Path $Out).Path) $archiveName
+	& tar.exe -C $stage -czf $outFile $bundleName
 	$sum = (Get-FileHash -Algorithm SHA256 -LiteralPath $outFile).Hash
-	"$sum  kanade-linux-arm64-bundle.tar.gz" | Set-Content -LiteralPath "$outFile.sha256" -NoNewline
+	"$sum  $archiveName" | Set-Content -LiteralPath "$outFile.sha256" -NoNewline
 
 	Write-Host ""
 	Write-Host "==> Bundle: $outFile"
 	Write-Host "    sha256: $sum"
 	Write-Host "    Copy to the server, then:"
-	Write-Host "      tar -xzf kanade-linux-arm64-bundle.tar.gz"
-	Write-Host "      cd kanade-linux-arm64-bundle"
+	Write-Host "      tar -xzf $archiveName"
+	Write-Host "      cd $bundleName"
 	Write-Host "      sudo KANADE_DOMAIN=kanade.example.com bash ./setup.sh"
 }
 finally {
