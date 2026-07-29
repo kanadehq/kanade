@@ -96,7 +96,9 @@ export function Run() {
               <Label>{t('fields.shell')}</Label>
               <Select value={shell} onChange={(e) => setShell(e.target.value)}>
                 <option value="powershell">powershell</option>
+                <option value="pwsh">pwsh</option>
                 <option value="cmd">cmd</option>
+                <option value="sh">sh</option>
               </Select>
             </div>
             <div>

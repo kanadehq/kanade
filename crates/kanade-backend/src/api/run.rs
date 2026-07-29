@@ -31,8 +31,9 @@ const DEFAULT_PING_WAIT_SECS: u64 = 5;
 #[derive(Deserialize)]
 pub struct RunRequest {
     pub pc_id: String,
-    /// `"powershell"` (or `ps` / `pwsh`) or `"cmd"`. Default
-    /// powershell.
+    /// `"powershell"` (or `ps`), `"pwsh"` (PowerShell 7,
+    /// cross-platform), `"cmd"`, or `"sh"` (POSIX). Default powershell.
+    /// Note `pwsh` is its own shell, not an alias of `powershell`.
     #[serde(default = "default_shell_str")]
     pub shell: String,
     pub script: String,
@@ -67,12 +68,17 @@ pub async fn run(
     Json(req): Json<RunRequest>,
 ) -> Result<Json<ExecResult>, (StatusCode, String)> {
     let shell = match req.shell.as_str() {
-        "powershell" | "ps" | "pwsh" => Shell::Powershell,
+        // `pwsh` is now its own variant (PowerShell 7, cross-platform),
+        // no longer an alias for Windows PowerShell — so the SPA/API can
+        // target a Linux agent with `sh` or `pwsh`.
+        "powershell" | "ps" => Shell::Powershell,
         "cmd" => Shell::Cmd,
+        "sh" => Shell::Sh,
+        "pwsh" => Shell::Pwsh,
         other => {
             return Err((
                 StatusCode::BAD_REQUEST,
-                format!("unknown shell {other:?} (use powershell or cmd)"),
+                format!("unknown shell {other:?} (use powershell, pwsh, cmd, or sh)"),
             ));
         }
     };

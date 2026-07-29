@@ -106,8 +106,12 @@ pub async fn run_finalize(
     // never reaches the unsafe injection path — cmd.exe quoting doesn't
     // nest, so JSON `"` + shell metacharacters in a collected path could
     // break out into command injection at the agent's privilege.
-    if matches!(fin.shell, Shell::Cmd) {
-        warn!(job = %parent.id, "finalize: cmd shell is not supported (injection risk); skipping hook");
+    // `sh` is rejected alongside `cmd`: same non-nesting-quote injection
+    // risk, plus the prelude below (`$env:KANADE_COLLECT_RESULT = '...'`)
+    // is PowerShell syntax and would be malformed in a POSIX shell.
+    // `pwsh` is fine — it's PowerShell, so the prelude is valid.
+    if matches!(fin.shell, Shell::Cmd | Shell::Sh) {
+        warn!(job = %parent.id, "finalize: cmd/sh shell is not supported (injection risk + PowerShell prelude); skipping hook");
         return;
     }
     // Inject `KANADE_COLLECT_RESULT` only when there's a collect payload

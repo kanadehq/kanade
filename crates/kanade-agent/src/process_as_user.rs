@@ -575,6 +575,31 @@ fn build_command_line(
             )
         }
         Shell::Cmd => ("cmd.exe", vec!["/C", &cmd.script]),
+        Shell::Pwsh => {
+            // PowerShell 7 in the user session. Same launcher as
+            // Windows PowerShell; only the host binary differs. This is
+            // the Windows path, so `-ExecutionPolicy Bypass` still
+            // applies (pwsh honors execution policy on Windows).
+            let staged = crate::process::TempPowerShellLaunch::stage(&cmd.script)?;
+            path_owned = staged.launcher_path().to_string_lossy().into_owned();
+            launch = Some(staged);
+            (
+                "pwsh.exe",
+                vec![
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    path_owned.as_str(),
+                ],
+            )
+        }
+        // `sh` in an interactive Windows user session is an unusual but
+        // valid combination (e.g. a git-bash `sh.exe` on PATH). Inline
+        // like Cmd; if `sh.exe` isn't present the spawn fails with a
+        // clear error, same as any missing host.
+        Shell::Sh => ("sh.exe", vec!["-c", &cmd.script]),
     };
     let mut full = OsString::from(program);
     for a in args {
