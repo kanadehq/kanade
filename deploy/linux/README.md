@@ -56,32 +56,74 @@ separately). Until then, build the artifact once on any ARM64 build box:
 interim build step exists at all. Once the release target lands, point
 `bundle.sh --backend` at the downloaded Release asset instead.
 
+## Quick path: one command (symmetric with the Windows `build-release.ps1`)
+
+`build-release.sh` (and its Windows twin `build-release.ps1`) is the
+role-parameterized collector — the counterpart of the Windows
+`scripts/build-release.ps1`. It downloads the kanade role binaries from
+Releases for the target arch and packs a bundle per role, in one call:
+
+```bash
+# Both roles, version from Cargo.toml, arch from `uname -m`:
+./deploy/linux/build-release.sh
+# → dist/kanade-linux-<arch>-bundle.tar.gz  (backend + nats + caddy)
+#   dist/kanade-linux-agent-bundle.tar.gz   (agent)
+
+# Pin a version / target an x86_64 box / one role:
+./deploy/linux/build-release.sh --roles backend --version 0.44.35 --arch x86_64
+```
+
+`fleet-deploy.sh` takes it the rest of the way — the counterpart of the
+Windows `scripts/fleet-deploy.ps1 -Role`: collect → scp → install over
+ssh, in one command (it probes the target's arch itself):
+
+```bash
+# Backend (needs the public domain):
+./deploy/linux/fleet-deploy.sh --role backend --host ubuntu@1.2.3.4 \
+    --domain kanade.example.com --identity ~/.ssh/key
+
+# Agent, co-located with a backend (reuses its token):
+./deploy/linux/fleet-deploy.sh --role agent --host ubuntu@1.2.3.4 --identity ~/.ssh/key
+```
+
+The platform difference: Windows `fleet-deploy.ps1` drives an on-box
+agent's self-update/rollout over NATS; the Linux fleet is the offline
+bundle model, so this ships a tarball over ssh and runs the installer.
+Same UX (pick a role + target), different plumbing.
+
+The rest of this doc is the **manual, step-by-step** path the one-command
+tools automate — useful for closed networks where the collector can't
+reach the target directly.
+
 ## 1. Assemble the bundle (on a box with internet)
 
 **Linux / macOS:**
 
 ```bash
 ./deploy/linux/bundle.sh --backend target/release/kanade-backend
-# → kanade-linux-arm64-bundle.tar.gz (+ .sha256)
+# → kanade-linux-aarch64-bundle.tar.gz (+ .sha256)
+# amd64 box? add --arch x86_64  (→ kanade-linux-x86_64-bundle.tar.gz)
 ```
 
 **Windows** (PowerShell 7, no Git Bash needed):
 
 ```powershell
-.\deploy\linux\bundle.ps1 -Backend C:\path\to\kanade-backend
+.\deploy\linux\bundle.ps1 -Backend C:\path\to\kanade-backend   # -Arch x86_64 for amd64
 ```
 
-Either downloads `nats-server` and `caddy` (aarch64), verifies each against
-its official checksums, and packs them with the backend, the configs, the
-systemd units and `setup.sh`. Both produce the same tarball.
+Either downloads `nats-server` and `caddy` for the selected arch (default
+aarch64), verifies each against its official checksums, and packs them
+with the backend, the configs, the systemd units and `setup.sh`. Both
+produce the same tarball.
 
 ## 2. Install on the server (offline)
 
 ```bash
-scp kanade-linux-arm64-bundle.tar.gz  server:
+# (aarch64 shown; swap for kanade-linux-x86_64-bundle on an amd64 box)
+scp kanade-linux-aarch64-bundle.tar.gz  server:
 ssh server
-tar -xzf kanade-linux-arm64-bundle.tar.gz
-cd kanade-linux-arm64-bundle
+tar -xzf kanade-linux-aarch64-bundle.tar.gz
+cd kanade-linux-aarch64-bundle
 # `bash ./setup.sh` (not `./setup.sh`) so it runs regardless of whether the
 # archive carried the exec bit — a Windows-built bundle may not.
 sudo KANADE_DOMAIN=kanade.example.com bash ./setup.sh
