@@ -19,12 +19,26 @@ type LoginResp = {
   exp: number;
 };
 
+// The backend's login reply is an untagged union: either a full session
+// (has `token`) or a prompt for a second factor (`mfa_required: true`,
+// no token) when the password was correct but the account has TOTP on.
+type MfaRequired = { mfa_required: true };
+type LoginOutcome = LoginResp | MfaRequired;
+
+function needsMfa(o: LoginOutcome): o is MfaRequired {
+  return 'mfa_required' in o && !('token' in o);
+}
+
 export function Login() {
   const { setToken, isAuthenticated } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [totpCode, setTotpCode] = useState('');
+  // Set once the server answers `mfa_required` for a correct password:
+  // flips the form to a second step asking for the authenticator code.
+  const [mfaStep, setMfaStep] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   // Self-service password reset: toggles the form to a username-only
@@ -48,13 +62,28 @@ export function Login() {
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!username.trim() || !password) return;
+    // On the second step the code is required; don't fire a request that
+    // would just come back mfa_required again.
+    if (mfaStep && !totpCode.trim()) return;
     setBusy(true);
     setError('');
     try {
-      const resp = await apiFetch<LoginResp>('/api/auth/login', {
+      const resp = await apiFetch<LoginOutcome>('/api/auth/login', {
         method: 'POST',
-        body: JSON.stringify({ username: username.trim(), password }),
+        body: JSON.stringify({
+          username: username.trim(),
+          password,
+          // Only send a code on the second step; omit it on the first so
+          // a code-less first attempt gets the mfa_required prompt.
+          ...(mfaStep && totpCode.trim() ? { totp_code: totpCode.trim() } : {}),
+        }),
       });
+      if (needsMfa(resp)) {
+        // Correct password, MFA on: reveal the code field and stop.
+        setMfaStep(true);
+        setError('');
+        return;
+      }
       setToken(resp.token);
       // A freshly-seeded / reset account is forced to pick a new
       // password before doing anything else.
@@ -131,16 +160,36 @@ export function Login() {
                     placeholder={t('passwordPlaceholder')}
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
+                    disabled={mfaStep}
                   />
                 </div>
+                {mfaStep && (
+                  <div className="space-y-1">
+                    <Label htmlFor="login-totp">{t('mfaLabel')}</Label>
+                    <Input
+                      id="login-totp"
+                      autoFocus
+                      inputMode="numeric"
+                      autoComplete="one-time-code"
+                      pattern="[0-9]*"
+                      maxLength={6}
+                      placeholder={t('mfaPlaceholder')}
+                      value={totpCode}
+                      onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, ''))}
+                    />
+                    <p className="text-xs text-muted">{t('mfaHint')}</p>
+                  </div>
+                )}
                 {error && <p className="text-sm text-red-500">{error}</p>}
                 <Button
                   type="submit"
-                  disabled={busy || !username.trim() || !password}
+                  disabled={
+                    busy || !username.trim() || !password || (mfaStep && !totpCode.trim())
+                  }
                   className="w-full"
                 >
                   <LogIn className="size-4 mr-2" />
-                  {busy ? t('submitting') : t('submit')}
+                  {busy ? t('submitting') : mfaStep ? t('mfaSubmit') : t('submit')}
                 </Button>
               </form>
               <button

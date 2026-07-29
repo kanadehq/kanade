@@ -40,7 +40,8 @@
     "signedIn": "サインイン中",
     "login": "ログイン",
     "logout": "ログアウト",
-    "changePassword": "パスワード変更"
+    "changePassword": "パスワード変更",
+    "security": "セキュリティ・MFA"
   },
   "actions": {
     "save": "保存",
