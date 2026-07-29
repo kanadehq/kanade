@@ -626,11 +626,27 @@ pub(crate) async fn run_agent() -> Result<()> {
     // channel; heartbeat / inventory / self_update subscribe.
     let cfg_rx = config_supervisor::spawn(client.clone(), pc_id.clone(), staleness_tracker.clone());
 
+    // #1165 stage 1: one verifier shared by every command entry point, so the
+    // transition reporting reflects the machine rather than one subscription.
+    //
+    // Built here rather than beside the command subscriptions further down
+    // because the heartbeat reports which keys it holds, and the heartbeat
+    // starts first. Its construction depends on nothing but `pc_id` and a pure
+    // path resolution, so moving it earlier costs nothing.
+    let verifier = std::sync::Arc::new(command_verify::Verifier::new(
+        pc_id.clone(),
+        // `default_dir()` rather than the `obs_outbox_dir` binding below: the
+        // command paths are spawned before it exists, and it is the same pure
+        // resolution either way.
+        obs_outbox::default_dir(),
+    ));
+
     tokio::spawn(heartbeat::heartbeat_loop(
         client.clone(),
         pc_id.clone(),
         AGENT_VERSION.to_string(),
         cfg_rx.clone(),
+        verifier.clone(),
     ));
     // v0.40 Part 1: host-wide perf snapshot publisher. Runs on its
     // own cadence (default 60 s) so the slightly heavier host-wide
@@ -816,16 +832,6 @@ pub(crate) async fn run_agent() -> Result<()> {
     // subscribes to it so `runs_on: agent` schedules targeting a
     // group reflect membership changes without waiting for the
     // next schedule edit.
-    // #1165 stage 1: one verifier shared by every command entry point, so the
-    // transition reporting reflects the machine rather than one subscription.
-    let verifier = std::sync::Arc::new(command_verify::Verifier::new(
-        pc_id.clone(),
-        // `default_dir()` rather than the `obs_outbox_dir` binding below: the
-        // command paths are spawned before it exists, and it is the same pure
-        // resolution either way.
-        obs_outbox::default_dir(),
-    ));
-
     let (groups_rx, _groups_handle) = groups::spawn(
         client.clone(),
         pc_id.clone(),

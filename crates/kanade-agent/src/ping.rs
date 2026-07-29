@@ -75,6 +75,13 @@ pub async fn serve(
                 // here never clears a value an earlier heartbeat stored.
                 last_logon_user: None,
                 last_logon_display_name: None,
+                // Same rationale again: the keyring report rides the regular
+                // heartbeat, and the projector COALESCEs, so `None` here
+                // leaves the last reported ring intact. Note this is the one
+                // place `None` is correct — everywhere else an empty ring must
+                // travel as `Some([])`, because there it means "holds nothing"
+                // rather than "not answering".
+                command_keys: None,
             };
             let payload = match serde_json::to_vec(&hb) {
                 Ok(b) => b,

@@ -138,6 +138,19 @@ where
                 .expect("serialising Vec<String> is infallible"),
         )
     };
+    // #1165: the command-signing keys this agent trusts, as a JSON array.
+    //
+    // An empty ring stores `"[]"`, NOT NULL — the opposite of
+    // `quarantined_versions` above, and deliberately so. NULL has to keep
+    // meaning "this agent did not tell us" (a ping reply, or a build that
+    // predates the field), because the COALESCE below relies on it. If an
+    // empty ring also stored NULL, the machine that most needs provisioning
+    // would be indistinguishable from one that simply has not reported yet —
+    // and the whole point of this column is to make that set enumerable.
+    let command_keys_json = hb
+        .command_keys
+        .as_ref()
+        .map(|kids| serde_json::to_string(kids).expect("serialising Vec<String> is infallible"));
     // #655: last signed-in account. COALESCE(excluded, agents) — the
     // OPPOSITE precedence to hostname/os_family below: a non-NULL value
     // the agent reports WINS, so a user switch is reflected on the next
@@ -153,8 +166,9 @@ where
              agent_disk_read_bytes, agent_disk_written_bytes,
              quarantined_versions,
              last_logon_user, last_logon_display_name,
+             command_keys,
              updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
          ON CONFLICT(pc_id) DO UPDATE SET
              hostname                  = COALESCE(agents.hostname, excluded.hostname),
              os_family                 = COALESCE(agents.os_family, excluded.os_family),
@@ -177,6 +191,12 @@ where
                      THEN excluded.last_logon_display_name
                  ELSE agents.last_logon_display_name
              END,
+             -- COALESCE(excluded, agents), same precedence as last_logon_user:
+             -- a ping reply reports NULL and must not erase what the last real
+             -- heartbeat said. An empty ring arrives as an empty JSON array,
+             -- which is not NULL, so revoking every key still overwrites --
+             -- the one case where a cleared value has to survive.
+             command_keys              = COALESCE(excluded.command_keys, agents.command_keys),
              updated_at                = CURRENT_TIMESTAMP",
     )
     .bind(&hb.pc_id)
@@ -195,6 +215,7 @@ where
     // to the login name without making the stored value sticky.
     .bind(&hb.last_logon_user)
     .bind(&hb.last_logon_display_name)
+    .bind(command_keys_json)
     .execute(executor)
     .await?;
     Ok(())

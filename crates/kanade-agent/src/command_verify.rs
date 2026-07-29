@@ -361,6 +361,18 @@ impl Verifier {
         }
     }
 
+    /// The key ids on the ring **as it stands in memory**, for the heartbeat.
+    ///
+    /// Deliberately not a registry read. Those two diverge between a key
+    /// landing on disk and the reload that picks it up, and the question an
+    /// operator is asking — "would this machine accept a command signed by X
+    /// right now" — is answered by memory. Reporting the file would describe a
+    /// machine that does not exist yet, and at stage 3 that is the difference
+    /// between "safe to retire the old key" and a stranded endpoint.
+    pub fn trusted_kids(&self) -> Vec<String> {
+        lock(&self.ring).kids().map(str::to_owned).collect()
+    }
+
     /// Check one message and report.
     ///
     /// **Never withholds a command from running** — stage 1 is observational,

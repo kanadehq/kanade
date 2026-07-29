@@ -109,6 +109,10 @@ pub async fn heartbeat_loop(
     pc_id: String,
     agent_version: String,
     mut cfg_rx: watch::Receiver<EffectiveConfig>,
+    // #1165: read once per tick for the trusted-key report. Shared with the
+    // command paths so the heartbeat describes the ring those paths actually
+    // use, including any reload they triggered.
+    verifier: std::sync::Arc<crate::command_verify::Verifier>,
 ) {
     let mut current_dur = cfg_rx.borrow().heartbeat_duration();
     let mut ticker = tokio::time::interval(current_dur);
@@ -168,6 +172,10 @@ pub async fn heartbeat_loop(
                     quarantined_versions: quarantined_versions.clone(),
                     last_logon_user,
                     last_logon_display_name,
+                    // Always `Some`, even when empty: an empty ring is the
+                    // state an operator has to act on, and omitting it would
+                    // make it arrive looking like an agent too old to report.
+                    command_keys: Some(verifier.trusted_kids()),
                 };
                 let payload = match serde_json::to_vec(&hb) {
                     Ok(b) => b,
