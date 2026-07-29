@@ -1,0 +1,16 @@
+-- #1165: the command-signing key ids each agent currently trusts.
+--
+-- JSON array of kids, as reported by the heartbeat. Three distinct states,
+-- which is why this is nullable rather than DEFAULT '[]':
+--
+--   NULL   the agent has not told us -- it predates the field, or the row was
+--          last touched by a ping reply (which reports nothing and is
+--          COALESCE'd so it cannot erase a real answer).
+--   '[]'   reporting, and holds no keys. This is the set an operator has to
+--          provision; at stage 3 these machines would reject every command.
+--   '["backend-20260728", ...]'  what this machine will accept right now.
+--
+-- Backfills as NULL for every existing row, which is correct: those agents
+-- have not reported and the column must not claim otherwise. The projection
+-- fills in as each agent upgrades and beats.
+ALTER TABLE agents ADD COLUMN command_keys TEXT;

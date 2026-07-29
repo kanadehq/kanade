@@ -92,6 +92,32 @@ pub struct Heartbeat {
     /// when unavailable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_logon_display_name: Option<String>,
+    /// #1165: the command-signing key ids this agent currently trusts.
+    ///
+    /// Reported so "which machines still trust the old key" is answerable.
+    /// Without it, retiring a key is a guess: an agent that never received the
+    /// replacement rejects every command at stage 3, and there is no way to
+    /// know it was going to before it does.
+    ///
+    /// `Option<Vec<_>>` rather than a plain `Vec` with
+    /// `skip_serializing_if = "Vec::is_empty"` — the shape
+    /// [`Self::quarantined_versions`] uses — because **empty is the state this
+    /// exists to surface**. Skipping an empty list would put "this agent holds
+    /// no keys" and "this agent is too old to say" on the wire as the same
+    /// thing, and they need opposite responses: provision the first one, and
+    /// upgrade the second before you can even ask. So:
+    ///
+    /// * `None` — the agent predates this field. Unknown, not empty.
+    /// * `Some([])` — reporting, and holds nothing. This is the work queue.
+    /// * `Some([kid, ..])` — what it will actually accept right now.
+    ///
+    /// It reports the **in-memory** ring, not the registry. Those differ
+    /// between a key landing on disk and the reload that picks it up (#1186),
+    /// and the useful answer is what this agent would accept if a command
+    /// arrived now — reporting the file would describe a machine that does not
+    /// exist yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_keys: Option<Vec<String>>,
 }
 
 #[cfg(test)]
@@ -114,6 +140,7 @@ mod tests {
             quarantined_versions: vec!["0.43.51".into()],
             last_logon_user: Some("EXAMPLE\\taro".into()),
             last_logon_display_name: Some("Yamada Taro".into()),
+            command_keys: Some(vec!["backend-20260728".into()]),
         };
         let json = serde_json::to_string(&hb).unwrap();
         let back: Heartbeat = serde_json::from_str(&json).unwrap();
@@ -129,6 +156,7 @@ mod tests {
         assert_eq!(back.quarantined_versions, hb.quarantined_versions);
         assert_eq!(back.last_logon_user, hb.last_logon_user);
         assert_eq!(back.last_logon_display_name, hb.last_logon_display_name);
+        assert_eq!(back.command_keys, hb.command_keys);
     }
 
     #[test]
@@ -146,6 +174,7 @@ mod tests {
             quarantined_versions: Vec::new(),
             last_logon_user: None,
             last_logon_display_name: None,
+            command_keys: None,
         };
         let json = serde_json::to_string(&hb).unwrap();
         assert!(
@@ -155,6 +184,43 @@ mod tests {
         // And a payload without the field still decodes to empty.
         let back: Heartbeat = serde_json::from_str(&json).unwrap();
         assert!(back.quarantined_versions.is_empty());
+    }
+
+    #[test]
+    fn an_empty_keyring_is_reported_rather_than_omitted() {
+        // The distinction the whole field exists for. `quarantined_versions`
+        // skips an empty list because "nothing quarantined" is the boring
+        // default; an empty *keyring* is the opposite — it is the machine an
+        // operator has to act on. If it were skipped, it would arrive looking
+        // exactly like an agent too old to report at all, and the two need
+        // opposite responses (provision it / upgrade it first).
+        let hb = Heartbeat {
+            pc_id: "x".into(),
+            at: chrono::Utc.with_ymd_and_hms(2026, 5, 16, 0, 0, 0).unwrap(),
+            agent_version: "0.44.36".into(),
+            hostname: None,
+            os_family: None,
+            agent_cpu_pct: None,
+            agent_rss_bytes: None,
+            agent_disk_read_bytes: None,
+            agent_disk_written_bytes: None,
+            quarantined_versions: Vec::new(),
+            last_logon_user: None,
+            last_logon_display_name: None,
+            command_keys: Some(Vec::new()),
+        };
+        let json = serde_json::to_string(&hb).unwrap();
+        assert!(
+            json.contains("command_keys"),
+            "an empty keyring must still reach the backend: {json}"
+        );
+        let back: Heartbeat = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.command_keys, Some(Vec::new()));
+
+        // And an agent that predates the field stays distinguishable from it.
+        let old = r#"{"pc_id":"x","at":"2026-05-16T00:00:00Z","agent_version":"0.44.35"}"#;
+        let hb: Heartbeat = serde_json::from_str(old).unwrap();
+        assert_eq!(hb.command_keys, None, "absent must not decode as empty");
     }
 
     #[test]

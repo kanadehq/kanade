@@ -50,6 +50,22 @@ pub struct AgentRow {
     /// non-Windows agents.
     pub last_logon_user: Option<String>,
     pub last_logon_display_name: Option<String>,
+    /// #1165: the command-signing key ids this agent trusts.
+    ///
+    /// Serialised even when empty — unlike [`Self::quarantined_versions`]
+    /// above, which omits its empty case because "nothing quarantined" is the
+    /// boring default. Here the states are:
+    ///
+    /// * absent — the agent has not reported (predates the field). Upgrade it
+    ///   before asking the question.
+    /// * `[]` — reporting, holds nothing. **This is the work queue**: at stage
+    ///   3 these machines reject every command.
+    /// * `[kid, ..]` — what it will accept right now.
+    ///
+    /// Collapsing the middle case into the first would make the set this
+    /// column exists to enumerate unenumerable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command_keys: Option<Vec<String>>,
     /// #1051: operator-managed key/value metadata for this PC, from the
     /// `agent_meta` projection (source of truth is the KV bucket the SPA
     /// `PUT`/`kanade meta` write). Decorated onto the returned page so the
@@ -847,6 +863,15 @@ fn row_to_agent(r: sqlx::sqlite::SqliteRow) -> AgentRow {
         // before this normalisation. Treat "" as None here so the SPA's
         // `display_name || user` fallback shows the login name instead
         // of a blank cell.
+        // #1165: NULL (never reported) stays `None`; a stored `"[]"` decodes
+        // to `Some([])` and must survive as such. A malformed value degrades
+        // to `None` — "we cannot say" — rather than to `Some([])`, which would
+        // put a healthy machine on the provisioning work queue.
+        command_keys: r
+            .try_get::<Option<String>, _>("command_keys")
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok()),
         last_logon_user: r
             .try_get::<Option<String>, _>("last_logon_user")
             .ok()
@@ -1019,6 +1044,67 @@ mod tests {
             },
         )
         .await
+    }
+
+    /// #1165: the three states of `command_keys` stay three states all the
+    /// way out to the API. Collapsing any pair makes the provisioning work
+    /// queue either unenumerable or wrong.
+    #[tokio::test]
+    async fn command_keys_keep_never_reported_distinct_from_empty() {
+        let pool = seeded_pool().await;
+        sqlx::query("UPDATE agents SET command_keys = ? WHERE pc_id = 'PC001'")
+            .bind(r#"["backend-20260728"]"#)
+            .execute(&pool)
+            .await
+            .unwrap();
+        // Reported, and holds nothing: the machine to provision.
+        sqlx::query("UPDATE agents SET command_keys = ? WHERE pc_id = 'PC002'")
+            .bind("[]")
+            .execute(&pool)
+            .await
+            .unwrap();
+        // WS-9 is left NULL — an agent that predates the field.
+
+        let (_h, Json(rows)) = call(pool, ListParams::default()).await.unwrap();
+        let by_id = |id: &str| {
+            rows.iter()
+                .find(|r| r.pc_id == id)
+                .unwrap()
+                .command_keys
+                .clone()
+        };
+        assert_eq!(by_id("PC001"), Some(vec!["backend-20260728".to_string()]));
+        assert_eq!(
+            by_id("PC002"),
+            Some(Vec::new()),
+            "an empty ring must arrive as an empty list, not as absent"
+        );
+        assert_eq!(
+            by_id("WS-9"),
+            None,
+            "never reported must stay distinguishable from holds-nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_malformed_command_keys_blob_reads_as_unknown_not_as_empty() {
+        // Degrading to `Some([])` would put a healthy machine on the
+        // provisioning queue — and at stage 3 an operator acting on that queue
+        // would "fix" a machine that was never broken while the real one waits.
+        let pool = seeded_pool().await;
+        sqlx::query("UPDATE agents SET command_keys = ? WHERE pc_id = 'PC001'")
+            .bind("not json")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (_h, Json(rows)) = call(pool, ListParams::default()).await.unwrap();
+        assert_eq!(
+            rows.iter()
+                .find(|r| r.pc_id == "PC001")
+                .unwrap()
+                .command_keys,
+            None
+        );
     }
 
     /// #582 Phase 2: a populated quarantine JSON blob (what the
