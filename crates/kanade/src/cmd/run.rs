@@ -39,9 +39,16 @@ pub async fn execute(client: async_nats::Client, args: RunArgs) -> Result<()> {
     let script = args.script.join(" ");
     let request_id = Uuid::new_v4().to_string();
     let shell = match args.shell.as_str() {
-        "powershell" | "ps" | "pwsh" => Shell::Powershell,
+        // `ps` stays an alias for Windows PowerShell 5.1. `pwsh` is now
+        // its OWN variant (PowerShell 7, cross-platform) — no longer an
+        // alias for `powershell` — so a Linux target can be addressed.
+        "powershell" | "ps" => Shell::Powershell,
         "cmd" => Shell::Cmd,
-        other => anyhow::bail!("unknown shell {other:?} (use powershell or cmd)"),
+        "sh" => Shell::Sh,
+        "pwsh" => Shell::Pwsh,
+        other => {
+            anyhow::bail!("unknown shell {other:?} (use powershell, pwsh, cmd, or sh)")
+        }
     };
     // Keep in sync with `kanade_shared::wire::RunAs` (and the
     // `value_parser` list on the arg above) if the enum grows a

@@ -344,6 +344,31 @@ pub async fn run_command_with_kill(
             // doesn't require an init on this branch.
             ("cmd", vec!["/C", &cmd.script])
         }
+        Shell::Sh => {
+            _launch = None;
+            // Inline like Cmd — `sh -c <script>`. No launcher/prelude:
+            // sh is UTF-8 native so the CP932 console dance the
+            // PowerShell branch needs doesn't apply.
+            ("sh", vec!["-c", &cmd.script])
+        }
+        Shell::Pwsh => {
+            // PowerShell 7, cross-platform. Reuse the exact same temp
+            // `.ps1` launcher as Windows PowerShell (script staging +
+            // `[CmdletBinding()]/param()` header handling are identical
+            // across both PowerShell hosts) — only the program name and
+            // the execution-policy switch differ.
+            let launch = TempPowerShellLaunch::stage(&cmd.script)?;
+            launcher_path_owned = Some(launch.launcher_path().to_string_lossy().into_owned());
+            _launch = Some(launch);
+            let mut args = vec!["-NoProfile", "-NonInteractive"];
+            // `-ExecutionPolicy` is a Windows-only concept; pwsh on
+            // Linux/macOS rejects it. Only pass it where it means
+            // something.
+            #[cfg(target_os = "windows")]
+            args.extend_from_slice(&["-ExecutionPolicy", "Bypass"]);
+            args.extend_from_slice(&["-File", launcher_path_owned.as_deref().unwrap()]);
+            ("pwsh", args)
+        }
     };
     let mut builder = ProcessCommand::new(program);
     builder

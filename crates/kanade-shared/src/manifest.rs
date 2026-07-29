@@ -2525,10 +2525,18 @@ impl Manifest {
             // agent's (often LocalSystem) privilege. PowerShell's
             // single-quote escaping is safe, and finalize hooks are
             // PowerShell by convention anyway.
-            if finalize.shell == ExecuteShell::Cmd {
+            // `sh` is rejected for the same injection reason (its
+            // single-word quoting doesn't nest around the JSON result
+            // either), and additionally because the injected prelude is
+            // PowerShell syntax (`$env:KANADE_COLLECT_RESULT = '...'`) —
+            // it would be malformed in a POSIX shell. `pwsh` IS allowed:
+            // it's PowerShell, so the prelude + single-quote escaping are
+            // valid and safe.
+            if matches!(finalize.shell, ExecuteShell::Cmd | ExecuteShell::Sh) {
                 return Err(
-                    "finalize.shell: cmd is not supported for finalize hooks (shell-injection \
-                     risk when the result JSON is injected into the environment); use powershell"
+                    "finalize.shell: cmd and sh are not supported for finalize hooks \
+                     (shell-injection risk when the result JSON is injected, and the injected \
+                     prelude is PowerShell syntax); use powershell or pwsh"
                         .to_string(),
                 );
             }
@@ -2786,8 +2794,14 @@ impl Manifest {
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ExecuteShell {
+    /// Windows PowerShell 5.1 (`powershell`).
     Powershell,
+    /// `cmd.exe` (`cmd /C`). Windows only.
     Cmd,
+    /// POSIX shell (`sh -c`). Linux/macOS.
+    Sh,
+    /// PowerShell 7, cross-platform (`pwsh`).
+    Pwsh,
 }
 
 impl From<ExecuteShell> for Shell {
@@ -2795,6 +2809,8 @@ impl From<ExecuteShell> for Shell {
         match s {
             ExecuteShell::Powershell => Shell::Powershell,
             ExecuteShell::Cmd => Shell::Cmd,
+            ExecuteShell::Sh => Shell::Sh,
+            ExecuteShell::Pwsh => Shell::Pwsh,
         }
     }
 }
@@ -3467,6 +3483,50 @@ finalize:
         let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
         let err = m.validate().expect_err("cmd finalize rejected");
         assert!(err.contains("finalize.shell"), "got: {err}");
+    }
+
+    #[test]
+    fn manifest_finalize_rejects_sh_shell() {
+        // sh finalize is rejected for the same reason as cmd: the agent
+        // injects the result JSON, and the injected prelude is PowerShell
+        // syntax that a POSIX shell can't run.
+        let yaml = r#"
+id: collect-fin-sh
+version: 0.1.0
+execute:
+  shell: powershell
+  timeout: 120s
+  script: |
+    @{ files = @() } | ConvertTo-Json
+finalize:
+  shell: sh
+  script: |
+    echo hi
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        let err = m.validate().expect_err("sh finalize rejected");
+        assert!(err.contains("finalize.shell"), "got: {err}");
+    }
+
+    #[test]
+    fn manifest_finalize_accepts_pwsh_shell() {
+        // pwsh IS PowerShell, so the injected prelude + single-quote
+        // escaping are valid and safe — a pwsh finalize must validate.
+        let yaml = r#"
+id: collect-fin-pwsh
+version: 0.1.0
+execute:
+  shell: pwsh
+  timeout: 120s
+  script: |
+    @{ files = @() } | ConvertTo-Json
+finalize:
+  shell: pwsh
+  script: |
+    Write-Output hi
+"#;
+        let m: Manifest = serde_yaml::from_str(yaml).expect("parse");
+        m.validate().expect("pwsh finalize accepted");
     }
 
     #[test]
@@ -7323,6 +7383,22 @@ runs_on: agent
     fn execute_shell_into_wire_shell() {
         assert_eq!(Shell::from(ExecuteShell::Powershell), Shell::Powershell);
         assert_eq!(Shell::from(ExecuteShell::Cmd), Shell::Cmd);
+        assert_eq!(Shell::from(ExecuteShell::Sh), Shell::Sh);
+        assert_eq!(Shell::from(ExecuteShell::Pwsh), Shell::Pwsh);
+    }
+
+    #[test]
+    fn execute_shell_parses_sh_and_pwsh() {
+        // The manifest `execute.shell` accepts the two new lowercase
+        // tokens end-to-end (serde), so an operator can author a Linux
+        // job.
+        for (yaml_shell, want) in [("sh", ExecuteShell::Sh), ("pwsh", ExecuteShell::Pwsh)] {
+            let yaml = format!(
+                "id: x\nversion: 1.0.0\nexecute:\n  shell: {yaml_shell}\n  script: \"echo\"\n  timeout: 1s\n"
+            );
+            let m: Manifest = serde_yaml::from_str(&yaml).expect("parse");
+            assert_eq!(m.execute.shell, want, "shell {yaml_shell}");
+        }
     }
 
     #[test]

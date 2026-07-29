@@ -170,8 +170,22 @@ pub struct RetrySpec {
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Shell {
+    /// Windows PowerShell 5.1 — the literal `powershell` on PATH. The
+    /// agent stages the script to a temp `.ps1` and runs it via a
+    /// UTF-8-console launcher (see `process.rs`).
     Powershell,
+    /// `cmd.exe` — `cmd /C <script>` inline. Windows only.
     Cmd,
+    /// POSIX shell — `sh -c <script>` inline. Linux/macOS. The agent
+    /// spawns the literal `sh` on PATH; there is no per-OS gate, so a
+    /// misdirected `sh` job to a host without `sh` fails at spawn.
+    Sh,
+    /// PowerShell 7 (cross-platform) — the literal `pwsh` on PATH.
+    /// Distinct from [`Shell::Powershell`] (Windows PowerShell 5.1):
+    /// reuses the same temp-`.ps1` launcher, but skips
+    /// `-ExecutionPolicy Bypass` off Windows (no execution policy
+    /// there).
+    Pwsh,
 }
 
 /// **Token + session combination** the agent uses to spawn a job's
@@ -243,6 +257,16 @@ mod tests {
         assert_eq!(json, "\"powershell\"");
         let json = serde_json::to_string(&Shell::Cmd).unwrap();
         assert_eq!(json, "\"cmd\"");
+        let json = serde_json::to_string(&Shell::Sh).unwrap();
+        assert_eq!(json, "\"sh\"");
+        let json = serde_json::to_string(&Shell::Pwsh).unwrap();
+        assert_eq!(json, "\"pwsh\"");
+        // Round-trip the new variants from the wire form.
+        assert_eq!(serde_json::from_str::<Shell>("\"sh\"").unwrap(), Shell::Sh);
+        assert_eq!(
+            serde_json::from_str::<Shell>("\"pwsh\"").unwrap(),
+            Shell::Pwsh
+        );
     }
 
     #[test]

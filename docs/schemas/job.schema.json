@@ -823,10 +823,27 @@
       ]
     },
     "ExecuteShell": {
-      "type": "string",
-      "enum": [
-        "powershell",
-        "cmd"
+      "oneOf": [
+        {
+          "description": "Windows PowerShell 5.1 (`powershell`).",
+          "type": "string",
+          "const": "powershell"
+        },
+        {
+          "description": "`cmd.exe` (`cmd /C`). Windows only.",
+          "type": "string",
+          "const": "cmd"
+        },
+        {
+          "description": "POSIX shell (`sh -c`). Linux/macOS.",
+          "type": "string",
+          "const": "sh"
+        },
+        {
+          "description": "PowerShell 7, cross-platform (`pwsh`).",
+          "type": "string",
+          "const": "pwsh"
+        }
       ]
     },
     "ExplodeColumn": {
