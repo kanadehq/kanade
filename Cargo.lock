@@ -2894,6 +2894,7 @@ dependencies = [
  "kanade-shared",
  "reqwest",
  "rpassword",
+ "rustls",
  "serde",
  "serde_json",
  "serde_yaml",

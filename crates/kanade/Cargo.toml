@@ -28,6 +28,7 @@ glob       = { workspace = true }
 humantime  = { workspace = true }
 reqwest    = { workspace = true }
 rpassword  = { workspace = true }
+rustls     = { workspace = true }   # #1187: install a crypto provider in main()
 serde      = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
