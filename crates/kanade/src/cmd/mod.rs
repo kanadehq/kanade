@@ -115,6 +115,7 @@ mod tests {
     }
 }
 
+pub mod command_key;
 pub mod config;
 pub mod exec;
 pub mod freeze;

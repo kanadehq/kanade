@@ -160,7 +160,23 @@ fn parse_keyring(raw: &str) -> Result<KeyRing, String> {
     use base64::Engine;
     let entries: Vec<KeyEntry> = serde_json::from_str(raw).map_err(|e| e.to_string())?;
     let mut ring = KeyRing::new();
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for e in entries {
+        // A ring is keyed by `kid`, so a repeat would have one entry silently
+        // replace the other and every command signed by the loser would stop
+        // verifying with nothing to explain it. That is the worst available
+        // outcome: the array is what an operator hand-assembles or re-types
+        // during an incident, and "two different keys under one id" is exactly
+        // the state the whole scheme assumes cannot happen. Refuse the ring
+        // instead — loudly, in the same way a malformed entry does, and for the
+        // same reason (half a keyring is worse than none).
+        if !seen.insert(e.kid.clone()) {
+            return Err(format!(
+                "key {} appears twice — two different keys must never share an id, and a ring \
+                 keyed by id cannot hold both",
+                e.kid
+            ));
+        }
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&e.public_key)
             .map_err(|err| format!("key {}: {err}", e.kid))?;
@@ -726,6 +742,36 @@ mod tests {
 
         // Not JSON at all.
         assert!(parse_keyring("{{{").is_err());
+    }
+
+    #[test]
+    fn a_duplicate_kid_is_refused_rather_than_silently_collapsed() {
+        // The failure this prevents is invisible: `KeyRing` is keyed by id, so
+        // two entries sharing one would leave whichever came last in the map and
+        // every command signed by the other would fail verification with no
+        // signal pointing at the cause. Reachable in practice — the array is
+        // hand-assembled, and two break-glass keys minted close together used
+        // to default to the same id.
+        let a = b64(SigningKey::from_bytes(&[1u8; 32])
+            .verifying_key()
+            .as_bytes());
+        let b = b64(SigningKey::from_bytes(&[2u8; 32])
+            .verifying_key()
+            .as_bytes());
+        let raw =
+            format!(r#"[{{"kid":"bg","public_key":"{a}"}},{{"kid":"bg","public_key":"{b}"}}]"#);
+        let err = parse_keyring(&raw).unwrap_err();
+        assert!(err.contains("bg"), "the error must name the id: {err}");
+        assert!(err.contains("twice"), "{err}");
+
+        // Distinct ids in the same array are the normal multi-signer case and
+        // must keep working — this guard must not be a rotation blocker.
+        let raw = format!(
+            r#"[{{"kid":"backend-1","public_key":"{a}"}},{{"kid":"bg","public_key":"{b}","max_age_secs":900}}]"#
+        );
+        let ring = parse_keyring(&raw).expect("two distinct ids are fine");
+        assert!(ring.get("backend-1").is_some());
+        assert!(ring.get("bg").is_some());
     }
 
     #[test]
