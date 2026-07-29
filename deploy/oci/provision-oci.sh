@@ -148,12 +148,21 @@ if [ -n "$INST" ]; then
 fi
 
 if [ -z "$INST" ]; then
-  # cloud-init: open the instance-local iptables (Oracle Ubuntu blocks by default)
+  # cloud-init: open the instance-local iptables (Oracle Ubuntu blocks by default).
+  # The rules MUST go before the REJECT rule. Oracle's Ubuntu images put that
+  # REJECT at line 5 (not 6), so a hardcoded `-I INPUT 6` lands AFTER it and the
+  # ACCEPTs never match — 80/443 stay blocked and ACME fails. Insert at the
+  # REJECT's actual line number instead.
   CLOUD_INIT="$(mktemp)"
   cat > "$CLOUD_INIT" <<'EOF'
 #!/bin/bash
-iptables -I INPUT 6 -p tcp --dport 80  -j ACCEPT
-iptables -I INPUT 6 -p tcp --dport 443 -j ACCEPT
+# Require $1 to be a rule number: a `policy REJECT` chain header also
+# contains "REJECT", and matching it would yield $1="Chain" (non-numeric),
+# making the -I below fail silently (no set -e here).
+rej=$(iptables -L INPUT --line-numbers | awk '$1 ~ /^[0-9]+$/ && /REJECT/{print $1; exit}')
+rej=${rej:-1}
+iptables -I INPUT "$rej" -p tcp --dport 443 -j ACCEPT
+iptables -I INPUT "$rej" -p tcp --dport 80  -j ACCEPT
 netfilter-persistent save
 EOF
   mapfile -t ADS < <(oci iam availability-domain list -c "$C" --query 'data[].name' --raw-output 2>/dev/null | tr -d '[],"' | grep -v '^$')

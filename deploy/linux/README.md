@@ -113,9 +113,12 @@ inbound **TCP 80 and 443**. On many clouds (Oracle especially) there are
 restrictive `iptables`):
 
 ```bash
-# instance-level (Oracle Ubuntu images block by default)
-sudo iptables -I INPUT 6 -p tcp --dport 80  -j ACCEPT
-sudo iptables -I INPUT 6 -p tcp --dport 443 -j ACCEPT
+# instance-level (Oracle Ubuntu images block by default). Insert BEFORE the
+# REJECT rule — on these images it's at line 5, so a hardcoded `-I INPUT 6`
+# would land after it and 80/443 would stay blocked (ACME then fails).
+rej=$(sudo iptables -L INPUT --line-numbers | awk '$1 ~ /^[0-9]+$/ && /REJECT/{print $1; exit}')
+sudo iptables -I INPUT "${rej:-1}" -p tcp --dport 443 -j ACCEPT
+sudo iptables -I INPUT "${rej:-1}" -p tcp --dport 80  -j ACCEPT
 sudo netfilter-persistent save
 ```
 
