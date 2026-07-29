@@ -108,6 +108,11 @@ fi
 echo "==> NATS config + Caddyfile + systemd units (from bundle)"
 install -o kanade -g kanade -m 0644 "$bundle/etc/nats-server.conf" /etc/kanade/nats-server.conf
 sed "s|__KANADE_DOMAIN__|${KANADE_DOMAIN}|g" "$bundle/etc/Caddyfile" > /etc/caddy/Caddyfile
+# The secret-generation block above set `umask 077`, which persists and would
+# make this redirect create the Caddyfile mode 0600 — caddy runs as an
+# unprivileged user and would fail to start with "permission denied". The
+# Caddyfile carries no secrets (just the domain), so force it world-readable.
+chmod 0644 /etc/caddy/Caddyfile
 install -m 0644 "$bundle/systemd/nats-server.service"    /etc/systemd/system/nats-server.service
 install -m 0644 "$bundle/systemd/kanade-backend.service" /etc/systemd/system/kanade-backend.service
 install -m 0644 "$bundle/systemd/caddy.service"          /etc/systemd/system/caddy.service

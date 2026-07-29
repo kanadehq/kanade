@@ -62,8 +62,10 @@ cbase="caddy_${CADDY_VERSION}_linux_arm64.tar.gz"
 crel="https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}"
 curl -fsSL "$crel/$cbase" -o "$tmp/$cbase"
 # Caddy publishes a per-release checksums file covering every asset.
+# It is SHA-512 (NATS's SHA256SUMS above is SHA-256) — using sha256sum here
+# fails with "no properly formatted SHA256 checksum lines found".
 curl -fsSL "$crel/caddy_${CADDY_VERSION}_checksums.txt" -o "$tmp/caddy_checksums.txt"
-( cd "$tmp" && sha256sum --check --ignore-missing caddy_checksums.txt ) \
+( cd "$tmp" && sha512sum --check --ignore-missing caddy_checksums.txt ) \
 	|| { echo "caddy checksum FAILED" >&2; exit 1; }
 tar -xzf "$tmp/$cbase" -C "$tmp"
 install -m 0755 "$tmp/caddy" "$root/bin/caddy"

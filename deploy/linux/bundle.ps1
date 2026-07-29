@@ -37,16 +37,18 @@ if (-not (Test-Path -LiteralPath $Backend)) { throw "backend binary not found: $
 $here = $PSScriptRoot
 $repoRoot = (Resolve-Path (Join-Path $here '..\..')).Path
 
-function Get-Checked([string]$Url, [string]$OutFile, [string]$SumsUrl, [string]$Name) {
+function Get-Checked([string]$Url, [string]$OutFile, [string]$SumsUrl, [string]$Name, [string]$Algo = 'SHA256') {
 	# Download $Url to $OutFile and verify it against the checksum for
-	# $Name listed in the file at $SumsUrl (format: "<sha256>  <name>").
+	# $Name listed in the file at $SumsUrl (format: "<hash>  <name>").
+	# $Algo differs per project: NATS's SHA256SUMS is SHA-256, Caddy's
+	# checksums.txt is SHA-512.
 	Invoke-WebRequest -Uri $Url -OutFile $OutFile
 	$sums = Join-Path (Split-Path $OutFile) 'SUMS.txt'
 	Invoke-WebRequest -Uri $SumsUrl -OutFile $sums
 	$line = Select-String -Path $sums -SimpleMatch $Name | Select-Object -First 1
 	if (-not $line) { throw "no checksum entry for $Name" }
 	$want = ($line.Line -split '\s+')[0]
-	$got = (Get-FileHash -Algorithm SHA256 -LiteralPath $OutFile).Hash
+	$got = (Get-FileHash -Algorithm $Algo -LiteralPath $OutFile).Hash
 	if ($got -ne $want) { throw "checksum mismatch for $Name`n  want $want`n  got  $got" }
 }
 
@@ -72,7 +74,7 @@ try {
 	$cbase = "caddy_${CaddyVersion}_linux_arm64.tar.gz"
 	$crel = "https://github.com/caddyserver/caddy/releases/download/v$CaddyVersion"
 	$ctar = Join-Path $dl $cbase
-	Get-Checked "$crel/$cbase" $ctar "$crel/caddy_${CaddyVersion}_checksums.txt" $cbase
+	Get-Checked "$crel/$cbase" $ctar "$crel/caddy_${CaddyVersion}_checksums.txt" $cbase 'SHA512'
 	& tar.exe -xzf $ctar -C $dl
 	Copy-Item -LiteralPath (Join-Path $dl 'caddy') -Destination (Join-Path $root 'bin\caddy')
 
