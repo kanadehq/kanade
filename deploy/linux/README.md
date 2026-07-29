@@ -152,6 +152,50 @@ curl https://kanade.example.com/               # SPA
 sudo sed -n 's/^KANADE_BOOTSTRAP_ADMIN_PASSWORD=//p' /etc/kanade/kanade.env
 ```
 
+## Deploying a Linux agent
+
+Same collect-then-install model, for the **agent** (`bundle-agent.sh` /
+`bundle-agent.ps1` → tarball → `setup-agent.sh` → a `kanade-agent`
+systemd service). Unlike the backend bundle there is nothing to fetch
+(no NATS/Caddy), so it is **arch-agnostic** — you pass the `kanade-agent`
+binary matching the target's architecture
+(`kanade-agent-<arch>-unknown-linux-musl` from a Release).
+
+```bash
+# On a box with internet — collect the agent binary + config + unit:
+./bundle-agent.sh --agent /path/to/kanade-agent
+# → kanade-linux-agent-bundle.tar.gz (+ .sha256)   (bundle-agent.ps1 on Windows)
+
+# On the target — extract and install. Use `bash ./setup-agent.sh` (not
+# `./setup-agent.sh`): a Windows-built bundle's tar may not carry the
+# exec bit, so a bare invocation fails with "command not found".
+tar -xzf kanade-linux-agent-bundle.tar.gz
+cd kanade-linux-agent-bundle
+
+# Co-located with a backend on the same box — reuses the backend's
+# /etc/kanade/nats.env token and the local broker (nats://127.0.0.1:4222):
+sudo bash ./setup-agent.sh
+
+# Standalone agent box talking to a remote broker over wss:
+sudo KANADE_NATS_URL=wss://nats.kanade.example.com \
+     KANADE_NATS_TOKEN=<the deployment's token> bash ./setup-agent.sh
+```
+
+The agent runs as **root** (so `kanade run` / jobs can manage the box —
+the Linux analog of the Windows LocalSystem agent) with an isolated data
+dir at `/var/lib/kanade-agent`. It appears in the SPA fleet under the
+host's name. `setup-agent.sh` ends with `systemctl restart`, so a
+re-deploy swaps the running binary. Check it with:
+
+```bash
+systemctl status kanade-agent
+journalctl -u kanade-agent -f
+```
+
+Note: `sh` / `pwsh` command execution on the Linux agent needs #1198
+(older agent builds can register and be monitored but fail exec at
+`spawn powershell`).
+
 ## Open items
 
 - **aarch64-linux release target** (add to `release.yml`) so the backend
