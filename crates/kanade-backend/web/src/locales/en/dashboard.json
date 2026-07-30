@@ -32,7 +32,8 @@
       "jetstream": {
         "label": "JetStream",
         "hintHealthy": "streams + KV + obj store",
-        "hintMissing": "missing: {{names}}"
+        "hintMissing": "missing: {{names}}",
+        "hintPeak": "peak {{pct}}% · {{name}}"
       },
       "failures": {
         "label": "failures / {{hours}}h",

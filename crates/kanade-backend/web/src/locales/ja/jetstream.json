@@ -8,11 +8,16 @@
   },
   "columns": {
     "name": "名前",
-    "status": "状態"
+    "status": "状態",
+    "usage": "使用量"
   },
   "status": {
     "ok": "正常",
     "missing": "未作成"
+  },
+  "usage": {
+    "noCap": "上限なし",
+    "aria": "{{name}} の使用量"
   },
   "loading": "読み込み中…",
   "errorTitle": "JetStream の状態を読み込めませんでした"
