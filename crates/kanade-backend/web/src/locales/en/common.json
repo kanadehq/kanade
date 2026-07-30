@@ -66,6 +66,13 @@
     "empty": "No data",
     "error": "Error"
   },
+  "errorBoundary": {
+    "updateTitle": "A new version is available",
+    "updateDescription": "The page failed to render because the backend was updated and the assets this tab is holding are stale. Reload to pick up the latest version.",
+    "title": "Something went wrong rendering this page",
+    "description": "An unexpected error occurred. Reload the page or try again. If it keeps happening, contact an administrator.",
+    "reload": "Reload"
+  },
   "rbac": {
     "operatorRequired": "Operator role required — ask an admin for access.",
     "adminRequired": "Admin role required."
