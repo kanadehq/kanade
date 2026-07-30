@@ -28,13 +28,21 @@ pub enum AgentSub {
     /// typo doesn't fan a half-baked binary out to the whole fleet.
     ///
     /// v0.13.1+: the Object Store key is auto-extracted from the
-    /// binary's embedded VERSIONINFO resource — no `--version`
-    /// flag, no chance of a label/binary mismatch. Cross-arch
-    /// publish works too (the extractor is pure-Rust `pelite`,
-    /// no spawn).
+    /// binary's embedded VERSIONINFO resource — no chance of a
+    /// label/binary mismatch. Cross-arch publish works too (the
+    /// extractor is pure-Rust `pelite`, no spawn).
+    ///
+    /// A non-PE binary (e.g. a Linux ELF) carries no VERSIONINFO
+    /// resource, so it can't be auto-labelled — pass `--version` for
+    /// those. When a PE version AND `--version` are both present they
+    /// must agree, preserving the no-mismatch guarantee.
     Publish {
         /// Path to the new agent binary (e.g. `target/release/kanade-agent.exe`).
         binary: PathBuf,
+        /// Explicit version label. Omit for a Windows PE (read from its
+        /// VERSIONINFO); required for a non-PE ELF (Linux agent).
+        #[arg(long)]
+        version: Option<String>,
     },
     /// Flip `target_version` (and optionally `target_version_jitter`)
     /// on one scope of the layered agent_config bucket. Verifies the
@@ -89,31 +97,62 @@ pub struct RolloutArgs {
 
 pub async fn execute(client: async_nats::Client, args: AgentArgs) -> Result<()> {
     match args.sub {
-        AgentSub::Publish { binary } => publish(client, binary).await,
+        AgentSub::Publish { binary, version } => publish(client, binary, version).await,
         AgentSub::Rollout(args) => rollout(client, args).await,
         AgentSub::Current => current(client).await,
         AgentSub::Logs { pc_id, tail } => logs(client, pc_id, tail).await,
     }
 }
 
-async fn publish(client: async_nats::Client, binary: PathBuf) -> Result<()> {
+/// Decide the publish label from the explicit `--version` (if any) and the
+/// version extracted from the binary's PE VERSIONINFO (if any). `Ok(None)`
+/// means neither was available — the caller falls back to an interactive
+/// prompt. Comparison ignores a leading `v` and surrounding whitespace so
+/// `v1.2.3`, `1.2.3 ` and `1.2.3` are the same label.
+fn resolve_publish_version(
+    version_override: Option<String>,
+    extracted: Option<String>,
+) -> Result<Option<String>> {
+    let strip = |s: &str| s.trim().trim_start_matches('v').to_string();
+    match (version_override, extracted) {
+        (Some(v), Some(pe)) if strip(&v) != strip(&pe) => bail!(
+            "--version {v} disagrees with the binary's embedded version {pe}; \
+             omit --version to use the embedded one, or pass the matching label"
+        ),
+        (Some(v), _) => Ok(Some(v)),
+        (None, Some(pe)) => Ok(Some(pe)),
+        (None, None) => Ok(None),
+    }
+}
+
+async fn publish(
+    client: async_nats::Client,
+    binary: PathBuf,
+    version_override: Option<String>,
+) -> Result<()> {
     let bytes = fs::read(&binary)
         .await
         .with_context(|| format!("read {binary:?}"))?;
 
-    // v0.13.1+: extract version from the binary's embedded VERSIONINFO
-    // resource (pelite, no spawn, cross-arch safe). Normally the binary
-    // IS its label. agent publish has no `--version` flag, so on the rare
-    // extraction failure the inline prompt (#270) is the only recovery
-    // short of re-running; pipe / CI still fails fast.
-    let version = match kanade_shared::exe_version::extract_pe_version(&bytes) {
+    // v0.13.1+: for a Windows PE the version comes from the embedded
+    // VERSIONINFO resource (pelite, no spawn, cross-arch safe) so the
+    // binary IS its label. A non-PE ELF has no such resource, so
+    // `--version` supplies the label. Precedence:
+    //   * both present  → must agree (keeps the no-mismatch guarantee)
+    //   * --version only → use it (the ELF case)
+    //   * PE only        → use the embedded label
+    //   * neither        → interactive prompt (#270), else fail fast
+    let extracted = kanade_shared::exe_version::extract_pe_version(&bytes);
+    let version = match resolve_publish_version(version_override, extracted)? {
         Some(v) => v,
+        // Neither an explicit label nor an embedded one: last-resort
+        // interactive prompt (#270); a pipe / CI still fails fast.
         None => match super::prompt_version_if_interactive(binary.clone()).await? {
             Some(v) => v,
             None => bail!(
-                "couldn't extract VERSIONINFO from {binary:?} — is it a Windows PE built \
-                 with `winres` (kanade ≥ v0.13.1)? Older binaries need to be re-published \
-                 from a current build."
+                "no version: {binary:?} has no embedded VERSIONINFO (a non-PE binary, e.g. a \
+                 Linux ELF?) — pass --version <X.Y.Z>. A Windows PE built with `winres` \
+                 (kanade ≥ v0.13.1) is auto-labelled."
             ),
         },
     };
@@ -302,4 +341,40 @@ async fn current(client: async_nats::Client) -> Result<()> {
         None => println!("global = (unset)"),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_publish_version;
+
+    #[test]
+    fn version_override_only_is_used() {
+        // ELF case: no embedded version, explicit --version wins.
+        let v = resolve_publish_version(Some("1.2.3".into()), None).unwrap();
+        assert_eq!(v.as_deref(), Some("1.2.3"));
+    }
+
+    #[test]
+    fn embedded_only_is_used() {
+        let v = resolve_publish_version(None, Some("0.44.35".into())).unwrap();
+        assert_eq!(v.as_deref(), Some("0.44.35"));
+    }
+
+    #[test]
+    fn neither_yields_none_for_prompt_fallback() {
+        assert_eq!(resolve_publish_version(None, None).unwrap(), None);
+    }
+
+    #[test]
+    fn agreeing_override_and_embedded_ok_ignoring_v_prefix() {
+        // `v1.2.3` (flag) vs `1.2.3` (PE) must be treated as equal.
+        let v = resolve_publish_version(Some("v1.2.3".into()), Some("1.2.3".into())).unwrap();
+        assert_eq!(v.as_deref(), Some("v1.2.3"));
+    }
+
+    #[test]
+    fn disagreeing_override_and_embedded_errors() {
+        let e = resolve_publish_version(Some("9.9.9".into()), Some("1.2.3".into()));
+        assert!(e.is_err(), "a real mismatch must be rejected");
+    }
 }
