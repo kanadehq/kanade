@@ -86,10 +86,31 @@ ssh, in one command (it probes the target's arch itself):
 ./deploy/linux/fleet-deploy.sh --role agent --host ubuntu@1.2.3.4 --identity ~/.ssh/key
 ```
 
-The platform difference: Windows `fleet-deploy.ps1` drives an on-box
-agent's self-update/rollout over NATS; the Linux fleet is the offline
-bundle model, so this ships a tarball over ssh and runs the installer.
-Same UX (pick a role + target), different plumbing.
+### First deploy vs. update — same split as Windows
+
+Like the Windows `fleet-deploy.ps1`, the agent has two paths:
+
+- **`--mode install`** (default, shown above) — the first deploy: bundle →
+  scp → `setup-agent.sh` over ssh.
+- **`--mode update`** — 2nd-deploy-onwards over **NATS**, no ssh (the twin
+  of the Windows agent rollout): publishes the agent ELF to the release
+  object store and flips `target_version` on a scope; the on-box agents
+  self-update on their next watch tick and systemd restarts each onto the
+  new binary.
+
+```bash
+# Roll a version out to a scope over NATS (needs `kanade` on PATH, pointed
+# at the deployment via KANADE_NATS_URL / KANADE_NATS_TOKEN):
+./deploy/linux/fleet-deploy.sh --role agent --mode update --arch x86_64 \
+    --version 0.44.36 --group canary --jitter 5m       # or --pc <id> / --all
+```
+
+This works because the agent's self-update (`self_update.rs`) is
+OS-neutral — a three-step binary swap then `exit(64)`, which the
+`kanade-agent.service` `Restart`/`RestartForceExitStatus=64` turns into a
+restart, exactly as SCM failure-actions do on Windows. The one Linux-only
+enabler is `kanade agent publish --version` (an ELF has no PE VERSIONINFO
+to auto-label).
 
 The rest of this doc is the **manual, step-by-step** path the one-command
 tools automate — useful for closed networks where the collector can't

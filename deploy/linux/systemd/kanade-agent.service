@@ -23,10 +23,17 @@ Environment=KANADE_AGENT_DATA_DIR=/var/lib/kanade-agent
 ExecStart=/usr/local/bin/kanade-agent
 WorkingDirectory=/var/lib/kanade-agent
 
-# The Windows build self-restarts via exit(1) + SCM recovery (5 s later).
-# Restart=on-failure + RestartSec=5 reproduces that on Linux.
+# The Windows build self-restarts via exit(1)/exit(64) + SCM recovery.
+# Restart=on-failure + RestartSec=5 reproduces that on Linux. exit(64) is
+# the NATS self-update swap signal (self_update.rs); RestartForceExitStatus
+# forces a restart onto the freshly-swapped binary for that specific code
+# regardless of the Restart= policy (belt-and-braces — on-failure already
+# covers a non-zero exit). It does NOT exempt the restart from
+# StartLimitIntervalSec/StartLimitBurst, but a self-update is a single
+# exit → single restart, so the default start-limit is never approached.
 Restart=on-failure
 RestartSec=5
+RestartForceExitStatus=64
 
 [Install]
 WantedBy=multi-user.target

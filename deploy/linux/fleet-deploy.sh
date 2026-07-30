@@ -28,6 +28,7 @@ set -euo pipefail
 ROLE=""
 HOST=""
 IDENTITY=""
+MODE="install"
 VERSION=""
 ARCH=""
 DOMAIN=""
@@ -37,10 +38,16 @@ OUT_DIR=""
 BACKEND_BIN=""
 AGENT_BIN=""
 GITHUB_REPO="yukimemi/kanade"
+# --mode update scope
+PC=""
+GROUP=""
+ALL=false
+JITTER=""
 
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--role) ROLE="$2"; shift 2 ;;
+		--mode) MODE="$2"; shift 2 ;;
 		--host) HOST="$2"; shift 2 ;;
 		--identity) IDENTITY="$2"; shift 2 ;;
 		--version) VERSION="$2"; shift 2 ;;
@@ -52,6 +59,10 @@ while [ $# -gt 0 ]; do
 		--backend-bin) BACKEND_BIN="$2"; shift 2 ;;
 		--agent-bin) AGENT_BIN="$2"; shift 2 ;;
 		--github-repo) GITHUB_REPO="$2"; shift 2 ;;
+		--pc) PC="$2"; shift 2 ;;
+		--group) GROUP="$2"; shift 2 ;;
+		--all) ALL=true; shift ;;
+		--jitter) JITTER="$2"; shift 2 ;;
 		*) echo "unknown arg: $1" >&2; exit 1 ;;
 	esac
 done
@@ -60,13 +71,97 @@ case "$ROLE" in
 	backend | agent) ;;
 	*) echo "--role backend|agent is required" >&2; exit 1 ;;
 esac
-[ -n "$HOST" ] || { echo "--host [user@]host is required" >&2; exit 1; }
+case "$MODE" in
+	install | update) ;;
+	*) echo "--mode install|update (default install)" >&2; exit 1 ;;
+esac
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# --------------------------------------------------------------------------
+# --mode update: the NATS path (no ssh), symmetric with the Windows
+# fleet-deploy.ps1 agent rollout. Publishes the agent ELF to the release
+# object store and flips target_version on a scope; the on-box agents
+# self-update on their next watch tick (self_update.rs) and systemd
+# Restart brings each back on the new binary. `kanade` must be on PATH and
+# pointed at the deployment (KANADE_NATS_URL / KANADE_NATS_TOKEN /
+# KANADE_BACKEND_URL), exactly as the Windows script expects.
+# --------------------------------------------------------------------------
+if [ "$MODE" = "update" ]; then
+	[ "$ROLE" = "agent" ] || {
+		echo "--mode update is agent-only (backend update = re-run --mode install)" >&2
+		exit 1
+	}
+	[ -n "$ARCH" ] || {
+		echo "--mode update needs --arch x86_64|aarch64 (the fleet's arch — no --host to probe)" >&2
+		exit 1
+	}
+	case "$ARCH" in
+		aarch64 | arm64) ARCH="aarch64" ;;
+		x86_64 | amd64)  ARCH="x86_64" ;;
+		*) echo "unsupported --arch '$ARCH'" >&2; exit 1 ;;
+	esac
+	command -v kanade >/dev/null 2>&1 || {
+		echo "'kanade' not on PATH — needed to publish + rollout over NATS" >&2
+		exit 1
+	}
+	# Exactly one scope — reject an ambiguous combination rather than
+	# silently picking a precedence (the Rust `kanade agent rollout` uses
+	# conflicts_with_all + refuses a missing scope; match that here so the
+	# two front-ends behave the same).
+	n=0
+	if $ALL; then n=$((n + 1)); fi
+	if [ -n "$GROUP" ]; then n=$((n + 1)); fi
+	if [ -n "$PC" ]; then n=$((n + 1)); fi
+	if [ "$n" -ne 1 ]; then
+		echo "--mode update needs EXACTLY one scope: --all | --group <name> | --pc <id>" >&2
+		exit 1
+	fi
+	scope_args=()
+	if $ALL; then scope_args=(--global)
+	elif [ -n "$GROUP" ]; then scope_args=(--group "$GROUP")
+	else scope_args=(--pc "$PC")
+	fi
+	[ -n "$JITTER" ] && scope_args+=(--jitter "$JITTER")
+
+	ver="$VERSION"
+	[ -n "$ver" ] || ver="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$here/../../Cargo.toml" | head -n1)"
+	[ -n "$ver" ] || { echo "couldn't resolve a version — pass --version" >&2; exit 1; }
+	ver="${ver#v}"
+	tag="v${ver}"
+
+	work="$(mktemp -d)"
+	trap 'rm -rf "$work"' EXIT
+	if [ -n "$AGENT_BIN" ]; then
+		elf="$AGENT_BIN"
+	else
+		asset="kanade-agent-${ARCH}-unknown-linux-musl.tar.gz"
+		url="https://github.com/${GITHUB_REPO}/releases/download/${tag}/${asset}"
+		echo "==> downloading ${url}"
+		curl -fsSL "$url" -o "$work/$asset" || { echo "download failed: $url" >&2; exit 1; }
+		tar -xzf "$work/$asset" -C "$work"
+		elf="$(find "$work" -maxdepth 2 -type f -name 'kanade-agent*' ! -name '*.tar.gz' | head -n1)"
+		[ -n "$elf" ] || { echo "agent ELF not found inside $asset" >&2; exit 1; }
+	fi
+
+	echo "==> kanade agent publish --version ${ver} <elf>"
+	kanade agent publish --version "$ver" "$elf"
+	echo "==> kanade agent rollout ${ver} ${scope_args[*]}"
+	kanade agent rollout "$ver" "${scope_args[@]}"
+	echo ""
+	echo "==> Done. Agent ${ver} rolled out over NATS. Agents self-update on their"
+	echo "    next watch tick; systemd Restart brings each back on the new binary."
+	exit 0
+fi
+
+# --------------------------------------------------------------------------
+# --mode install (default): first-deploy via offline bundle over ssh.
+# --------------------------------------------------------------------------
+[ -n "$HOST" ] || { echo "--host [user@]host is required for --mode install" >&2; exit 1; }
 if [ "$ROLE" = "backend" ] && [ -z "$DOMAIN" ]; then
 	echo "--domain <your.domain> is required for --role backend (A records for it AND nats.<domain> must point at the host)" >&2
 	exit 1
 fi
-
-here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ssh/scp option array — shared so the identity + host-key policy stay in
 # lockstep between the copy and the remote install.
