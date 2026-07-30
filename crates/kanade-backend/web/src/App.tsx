@@ -35,7 +35,7 @@ import { Rollout } from '@/pages/Rollout';
 import { Run } from '@/pages/Run';
 import { Analytics } from '@/pages/Analytics';
 import { Schedules } from '@/pages/Schedules';
-import { Security } from '@/pages/Security';
+import { Account } from '@/pages/Account';
 import { Settings } from '@/pages/Settings';
 import { Views } from '@/pages/Views';
 import { ThemeProvider, useTheme } from '@/lib/theme';
@@ -141,7 +141,10 @@ function AppContent() {
                   backend) and self-service forced password change. */}
               <Route path="/accounts" element={<Accounts />} />
               <Route path="/change-password" element={<ChangePassword />} />
-              <Route path="/security" element={<Security />} />
+              <Route path="/account" element={<Account />} />
+              {/* MFA + password moved into one Account page; keep the old
+                  path working for bookmarks. */}
+              <Route path="/security" element={<Navigate to="/account" replace />} />
               <Route path="*" element={<Placeholder name="Not Found" />} />
             </Route>
           </Routes>

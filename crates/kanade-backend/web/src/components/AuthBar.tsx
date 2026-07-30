@@ -1,4 +1,4 @@
-import { KeyRound, LogIn, LogOut, ShieldCheck } from 'lucide-react';
+import { LogIn, LogOut, UserCog } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 
@@ -15,22 +15,22 @@ export function AuthBar() {
 
   if (isAuthenticated) {
     return (
+      // `min-w-0 flex-1` on the identity + `shrink-0` on the actions keeps
+      // the long username truncating instead of shoving the buttons off the
+      // narrow (w-56) sidebar and colliding with them.
       <div className="flex items-center justify-between gap-2">
-        <div className="min-w-0">
+        <div className="min-w-0 flex-1">
           {/* Identity + role so the operator always knows which
               account / privilege level they're acting as. */}
           <div className="text-xs font-medium truncate">{username ?? t('auth.signedIn')}</div>
           {role && <div className="text-[10px] uppercase tracking-wide text-muted">{role}</div>}
         </div>
-        <div className="flex items-center gap-1">
-          <Button variant="ghost" size="icon" asChild title={t('auth.security')}>
-            <Link to="/security" aria-label={t('auth.security')}>
-              <ShieldCheck className="size-3.5" />
-            </Link>
-          </Button>
-          <Button variant="ghost" size="icon" asChild title={t('auth.changePassword')}>
-            <Link to="/change-password" aria-label={t('auth.changePassword')}>
-              <KeyRound className="size-3.5" />
+        <div className="flex shrink-0 items-center gap-1">
+          {/* One entry to the Account page (MFA + password) instead of the
+              two icons that used to crowd the account name. */}
+          <Button variant="ghost" size="icon" asChild title={t('auth.account')}>
+            <Link to="/account" aria-label={t('auth.account')}>
+              <UserCog className="size-3.5" />
             </Link>
           </Button>
           <Button variant="secondary" size="sm" onClick={logout}>
