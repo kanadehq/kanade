@@ -1,10 +1,15 @@
-//! Agent-side command provenance check (#1165, rollout stage 1).
+//! Agent-side command provenance check (#1165).
 //!
-//! Verifies the backend's signature on every wire `Command` and **reports the
-//! outcome without acting on it**. Nothing is rejected here yet; that is stage
-//! 3, and the ordering is deliberate — capability first, enforcement last, so
+//! Verifies the backend's signature on every wire `Command`, reports the
+//! outcome, and — on a host whose local config asks for it — **refuses** the
+//! ones that do not verify.
+//!
+//! Refusing is off unless an operator turns it on, per host. That ordering was
+//! deliberate rather than incidental: capability first, enforcement last, so
 //! every step of the rollout is reversible (the same shape #1159 used for
-//! per-role NATS credentials).
+//! per-role NATS credentials). Reporting shipped a release ahead of refusing,
+//! which is how the fleet's readiness became answerable — via `command_keys`
+//! on the heartbeat (#1195) — before anything depended on it.
 //!
 //! # Both entry points, not just the obvious one
 //!
@@ -81,13 +86,19 @@
 //! state an operator can intend) from "provisioned and unusable" (`Err`), and
 //! only the former replaces a live ring.
 //!
-//! ## What stage 3 has to add here
+//! ## An enforcing host ignores the rate limit
 //!
-//! With enforcement on, the moment a command is about to be **rejected** for an
-//! unknown key is exactly the moment a skipped reload stops being free. Stage 3
-//! must force a reload before rejecting, ignoring [`RELOAD_MIN_INTERVAL`] —
-//! otherwise a key that landed seconds ago is still refused, and the rate limit
-//! turns from an I/O bound into a rejection bug.
+//! With enforcement on, the moment a command is about to be **refused** for an
+//! unknown key is exactly the moment a skipped reload stops being free: a key
+//! that landed twenty seconds ago would be refused for the rest of the window,
+//! and the limit would have turned from an I/O bound into a rejection bug. So
+//! [`Verifier::classify`] forces the reload when this host is enforcing,
+//! ignoring [`RELOAD_MIN_INTERVAL`].
+//!
+//! The flooding that bound existed to stop is not worth a rejection here. The
+//! read is a local, memory-mapped registry lookup — cheaper than the Ed25519
+//! verify the same command already cost — so an attacker naming invented key
+//! ids buys microseconds per command they were already paying for.
 //!
 //! ## If the keyring source stops being local
 //!
@@ -105,10 +116,18 @@ use std::time::{Duration, Instant};
 use kanade_shared::signing::{KeyPolicy, KeyRing, SigHeaders, VerifyError, verify};
 use kanade_shared::wire::ObsEvent;
 use serde::Deserialize;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 const REG_SUBKEY: &str = r"SOFTWARE\kanade\agent";
 const REG_VALUE: &str = "CommandKeys";
+/// Registry value that turns stage 3 on for this host: `"1"` / `"true"`.
+///
+/// **Local config, never KV** — the reasoning is in the module doc above. Read
+/// once at construction: flipping enforcement is a deliberate act that should
+/// take effect at a moment an operator chose, and a value that could change
+/// under a running agent would make "was this host enforcing when it refused?"
+/// unanswerable after the fact.
+const REG_ENFORCE: &str = "RequireSignedCommands";
 
 /// `source` on emitted [`ObsEvent`]s.
 const SOURCE: &str = "command_signature";
@@ -121,6 +140,21 @@ const SOURCE: &str = "command_signature";
 /// that a newly provisioned key takes effect on the next command rather than
 /// at the next restart, which is the whole point of reloading at all.
 const RELOAD_MIN_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Floor an **enforcing** host uses instead, when it is about to refuse.
+///
+/// Short, but not zero. Removing the floor entirely made every unknown-kid
+/// command do a registry read *while holding `last_reload`*, so concurrent
+/// command paths serialize behind one I/O each — for traffic whose `kid` an
+/// attacker picks. The cost that matters there is the serialization, not the
+/// microseconds.
+///
+/// A second still lets a key that landed moments ago be picked up: the worst
+/// case is that one command is refused and the next one succeeds, which is
+/// bounded and self-correcting. Thirty seconds was not — it was long enough
+/// that an operator watching a rotation would see refusals and conclude the
+/// key had not landed.
+const RELOAD_FORCED_MIN_INTERVAL: Duration = Duration::from_secs(1);
 
 /// One entry of the JSON array stored in the registry.
 #[derive(Debug, Deserialize)]
@@ -149,6 +183,31 @@ struct KeyEntry {
 /// into "empty" would take a machine from verifying to holding nothing. At
 /// stage 3 that is the difference between one skipped reload and a machine that
 /// rejects every command.
+/// Whether local config asks this host to enforce (#1165 stage 3).
+///
+/// Deliberately reads only the registry. The `agent_config` KV bucket is the
+/// convenient place and the wrong one: any holder of the shared NATS token can
+/// write it (#1155), so an attacker able to forge commands could first turn
+/// off the check that would have caught them. An enforcement switch reachable
+/// by the attacker is not a switch. Returns `false` off-Windows, where
+/// `read_hklm_value` has no store to read.
+fn enforce_requested() -> bool {
+    matches!(
+        kanade_shared::secrets::read_hklm_value(REG_SUBKEY, REG_ENFORCE)
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1" | "true" | "yes")
+    )
+}
+
+/// The kids on a ring, for a log line. Free function so it can be called
+/// before the ring moves into the struct.
+fn lock_kids(ring: &KeyRing) -> Vec<&str> {
+    ring.kids().collect()
+}
+
 fn read_keyring() -> Result<KeyRing, String> {
     let Some(raw) = kanade_shared::secrets::read_hklm_value(REG_SUBKEY, REG_VALUE) else {
         return Ok(KeyRing::new());
@@ -251,6 +310,51 @@ pub enum Outcome {
 }
 
 impl Outcome {
+    /// Whether a host that is enforcing should refuse to run this command.
+    ///
+    /// `Verified` runs. Everything else — including [`Outcome::Unsigned`],
+    /// which is the whole point of stage 3 — does not.
+    ///
+    /// A method on the outcome rather than a `match` at the call site so the
+    /// answer cannot drift between the live subscription and the JetStream
+    /// replay. Those are two decode paths for the same bytes (#1155's measured
+    /// bypass *is* a consumer), and an enforcement gate that covered only one
+    /// would leave the attack it exists to stop running through the other.
+    pub fn is_refusal(self) -> bool {
+        !matches!(self, Outcome::Verified)
+    }
+
+    /// The stderr an operator reads when their command was refused.
+    ///
+    /// Names the state rather than restating the code, because the person
+    /// reading it is mid-incident and the useful content is what to do next.
+    fn refusal_reason(self) -> &'static str {
+        match self {
+            Outcome::Verified => "verified",
+            Outcome::Unsigned => {
+                "command carried no signature, and this host requires one. If this came from \
+                 `kanade run`, set the break-glass key; if from the backend, that backend is not \
+                 signing yet."
+            }
+            Outcome::Unprovisioned => {
+                "this host holds no command-signing keys at all, so nothing can be verified. \
+                 Provision HKLM\\SOFTWARE\\kanade\\agent\\CommandKeys."
+            }
+            Outcome::UnknownKid => {
+                "signed by a key this host does not have — it likely missed a rotation. Re-run \
+                 the keyring provisioning for this machine."
+            }
+            Outcome::Invalid => {
+                "signature does not match these bytes. Either the command was tampered with in \
+                 flight or it was signed by a key that is not the one it claims."
+            }
+            Outcome::Stale => {
+                "signature is outside its freshness window. Most often the clocks disagree — \
+                 compare this host's time with the signing host's before assuming a replay."
+            }
+        }
+    }
+
     /// Every variant, kept **here** rather than in the test that consumes it.
     ///
     /// The uniqueness guard on [`Outcome::kind`] is only as good as this list,
@@ -325,6 +429,17 @@ pub struct Verifier {
     /// the lock is held for a signature verify (tens of microseconds).
     ring: Mutex<KeyRing>,
     loader: Loader,
+    /// What local config asked for (#1165 stage 3) — **not** the answer.
+    ///
+    /// Whether this host actually refuses is [`Verifier::enforcing_now`],
+    /// which also consults the live ring. Config is fixed for the process;
+    /// the ring is not, and conflating them once cost a bricking bug: an
+    /// enforcing host whose ring later reloaded to empty would have refused
+    /// every command, including the one that would restore its keys.
+    enforce_requested: bool,
+    /// Set once we have warned about declining to enforce on an empty ring, so
+    /// the warning marks the transition rather than repeating per command.
+    empty_ring_warned: std::sync::atomic::AtomicBool,
     /// When the ring was last pulled from the store, for [`RELOAD_MIN_INTERVAL`].
     last_reload: Mutex<Instant>,
     pc_id: String,
@@ -339,13 +454,23 @@ impl Verifier {
     /// Production constructor: loads the ring from the registry now, and
     /// reloads from the same place when a command names a key it lacks.
     pub fn new(pc_id: String, obs_dir: std::path::PathBuf) -> Self {
-        Self::with_loader(pc_id, obs_dir, Box::new(read_keyring))
+        Self::with_loader_and_policy(pc_id, obs_dir, Box::new(read_keyring), enforce_requested())
     }
 
     /// The ring's source is a single argument so the initial load and every
     /// reload cannot drift apart — the caller can no longer hand in one ring
     /// and have it silently refreshed from somewhere else.
+    #[cfg(test)]
     fn with_loader(pc_id: String, obs_dir: std::path::PathBuf, loader: Loader) -> Self {
+        Self::with_loader_and_policy(pc_id, obs_dir, loader, false)
+    }
+
+    fn with_loader_and_policy(
+        pc_id: String,
+        obs_dir: std::path::PathBuf,
+        loader: Loader,
+        enforce_requested: bool,
+    ) -> Self {
         // Every other `obs_outbox::enqueue` caller in this crate does this
         // first; skipping it would make the first report fail on a fresh
         // install, which is precisely when a mis-provisioned keyring is most
@@ -367,14 +492,92 @@ impl Verifier {
         } else {
             info!(kids = ?ring.kids().collect::<Vec<_>>(), "command keyring loaded");
         }
+        // An empty ring cannot enforce. Nothing verifies against no keys, so
+        // "enforce" there means "refuse every command", which is not a
+        // security posture — it is a machine that has stopped working, and one
+        // that cannot be fixed remotely because the command carrying the keys
+        // is refused along with the rest.
+        //
+        // Declining costs nothing an attacker can use: emptying the ring needs
+        // local administrator on this host, and someone with that can already
+        // run anything here — they gain no reach they did not have. What it
+        // buys is turning a bricked endpoint into a visible misconfiguration,
+        // and a safety net under the class of bug that nearly shipped in
+        // #1186, where a failed reload wiped a working ring.
+        let enforcing = enforce_requested && !ring.is_empty();
+        if enforce_requested && !enforcing {
+            error!(
+                "RequireSignedCommands is set but this host holds NO command-signing keys — \
+                 refusing to enforce, because that would reject every command including the one \
+                 that would provision the keys. Provision the keyring; the ring reloads on \
+                 demand, so no restart is needed."
+            );
+        } else if enforcing {
+            warn!(
+                kids = ?lock_kids(&ring),
+                "enforcing command signatures — unverified commands will be REFUSED"
+            );
+        }
         Self {
             ring: Mutex::new(ring),
             loader,
+            enforce_requested,
+            empty_ring_warned: std::sync::atomic::AtomicBool::new(false),
             last_reload: Mutex::new(Instant::now()),
             pc_id,
             obs_dir,
             last: Mutex::new(None),
         }
+    }
+
+    /// Whether this host refuses right now.
+    ///
+    /// Evaluated per decision, **not** cached from construction, because the
+    /// ring can change under a running agent. `read_keyring` maps an absent
+    /// registry value to `Ok(empty)` — a state an operator can legitimately
+    /// intend, by revoking every key — and a provisioning script that deletes
+    /// before writing passes through it. If enforcement were a boot-time
+    /// snapshot, a host that reloaded into an empty ring would keep refusing
+    /// with nothing to verify against: every command `Unprovisioned`, every
+    /// command refused, including the one that would restore its keys. That is
+    /// precisely the bricking the constructor check exists to prevent, reached
+    /// through the reload path instead.
+    fn enforcing_now(&self) -> bool {
+        if !self.enforce_requested {
+            return false;
+        }
+        if lock(&self.ring).is_empty() {
+            // Warn on the transition, not per command: this fires from the
+            // command path, and the state it describes persists until someone
+            // acts on it. The per-command signal is the `Unprovisioned`
+            // outcome, which is already reported and fleet-enumerable (#1195).
+            if !self
+                .empty_ring_warned
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+            {
+                error!(
+                    "this host is configured to require signed commands but its keyring is now \
+                     EMPTY — declining to enforce rather than refusing everything, including the \
+                     command that would restore the keys. Re-provision \
+                     HKLM\\SOFTWARE\\kanade\\agent\\CommandKeys."
+                );
+            }
+            return false;
+        }
+        self.empty_ring_warned
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        true
+    }
+
+    /// The stderr for a refusal, or `None` when this outcome is allowed to
+    /// run — either because it verified, or because this host is not
+    /// enforcing.
+    ///
+    /// Returning the message rather than a bool keeps the "why" attached to
+    /// the decision; the caller publishes it as the refusal's stderr, which is
+    /// the only thing the issuer will see.
+    pub fn refusal(&self, outcome: Outcome) -> Option<&'static str> {
+        (outcome.is_refusal() && self.enforcing_now()).then(|| outcome.refusal_reason())
     }
 
     /// The key ids on the ring **as it stands in memory**, for the heartbeat.
@@ -389,13 +592,16 @@ impl Verifier {
         lock(&self.ring).kids().map(str::to_owned).collect()
     }
 
-    /// Check one message and report.
+    /// Check one message and report the outcome.
     ///
-    /// **Never withholds a command from running** — stage 1 is observational,
-    /// so every outcome here, including a failed verification, still lets the
-    /// command execute. (That is a statement about authorisation, not about
-    /// executor scheduling: this is a synchronous call and may do one local
-    /// registry read per [`RELOAD_MIN_INTERVAL`] — see the module doc.)
+    /// **Classifies; does not decide.** Acting on the answer is
+    /// [`Verifier::refusal`], and the split is what lets a non-enforcing host
+    /// report exactly what an enforcing one would refuse — the reports are the
+    /// evidence an operator uses to judge whether flipping is safe.
+    ///
+    /// (This is a synchronous call and may do one local registry read — per
+    /// [`RELOAD_MIN_INTERVAL`], or unconditionally on an enforcing host. See
+    /// the module doc.)
     pub fn observe(&self, body: &[u8], headers: &SigHeaders, request_id: &str) -> Outcome {
         self.observe_at(
             body,
@@ -440,7 +646,21 @@ impl Verifier {
             // trigger is reachable by anyone who can put bytes on a command
             // subject.
             Err(kid) => {
-                let reload = self.reload_if_due(now);
+                // An enforcing host ignores the rate limit here. This is the
+                // moment the limit stops being free: about to refuse for a key
+                // we might already hold on disk, a skipped read turns an I/O
+                // bound into a rejection bug, and a key provisioned twenty
+                // seconds ago would be refused for the remainder of the
+                // window. The read is a local, memory-mapped registry lookup —
+                // cheaper than the Ed25519 verify this command already cost —
+                // so the flooding an attacker could provoke is not
+                // amplification worth a rejection.
+                //
+                // Keyed on the *config* rather than `enforcing_now`, and the
+                // difference matters: a host whose ring has gone empty is not
+                // enforcing, but it is exactly the host that most needs to
+                // look at the store again — the reload is how it recovers.
+                let reload = self.reload_if_due(now, self.enforce_requested);
                 if reload != Reload::Done {
                     return self.report_missing(&kid, request_id, reload.as_str());
                 }
@@ -520,13 +740,18 @@ impl Verifier {
     /// of the three things happened — the distinction reaches the log line an
     /// operator reads when a machine will not verify, and "we did not look" and
     /// "we looked and the value is broken" send them to different places.
-    fn reload_if_due(&self, now: Instant) -> Reload {
+    fn reload_if_due(&self, now: Instant, force: bool) -> Reload {
         let mut last = lock(&self.last_reload);
         // `checked_duration_since` rather than subtraction: an `Instant` from
         // before the recorded one would panic on the underflow, and a test (or
         // a future caller) passing a non-monotonic clock should not take the
         // agent down.
-        if now.checked_duration_since(*last).unwrap_or_default() < RELOAD_MIN_INTERVAL {
+        let floor = if force {
+            RELOAD_FORCED_MIN_INTERVAL
+        } else {
+            RELOAD_MIN_INTERVAL
+        };
+        if now.checked_duration_since(*last).unwrap_or_default() < floor {
             return Reload::RateLimited;
         }
         // Consumed even when the load fails: a corrupt value plus a stream of
@@ -645,6 +870,15 @@ mod tests {
     /// A verifier whose ring never changes — the pre-reload behaviour.
     fn verifier_with(ring: KeyRing) -> Verifier {
         Verifier::with_loader("PC1".into(), test_dir(), Box::new(move || Ok(ring.clone())))
+    }
+
+    fn enforcing_with(ring: KeyRing) -> Verifier {
+        Verifier::with_loader_and_policy(
+            "PC1".into(),
+            test_dir(),
+            Box::new(move || Ok(ring.clone())),
+            true,
+        )
     }
 
     fn backend_ring(kid: &str, sk: &SigningKey) -> KeyRing {
@@ -780,7 +1014,7 @@ mod tests {
         assert!(ring.is_empty());
         let sk = SigningKey::from_bytes(&[3u8; 32]);
 
-        // Unsigned traffic on an agent with no keys: normal, stage 1.
+        // Unsigned traffic on an agent with no keys: normal until enforced.
         assert_eq!(
             verify(&ring, b"body", &SigHeaders::default(), 0),
             Err(VerifyError::Unsigned)
@@ -1000,6 +1234,261 @@ mod tests {
             v.classify(body, &headers, "r3", now, later),
             Outcome::Verified
         );
+    }
+
+    #[test]
+    fn enforcement_refuses_everything_that_is_not_verified() {
+        let sk = SigningKey::from_bytes(&[31u8; 32]);
+        let v = enforcing_with(backend_ring("backend-1", &sk));
+
+        // The one that runs.
+        assert!(v.refusal(Outcome::Verified).is_none());
+        // Everything else does not — `Unsigned` above all, since refusing it
+        // is what stage 3 is for.
+        for o in [
+            Outcome::Unsigned,
+            Outcome::Unprovisioned,
+            Outcome::UnknownKid,
+            Outcome::Invalid,
+            Outcome::Stale,
+        ] {
+            let reason = v.refusal(o).unwrap_or_else(|| panic!("{o:?} must refuse"));
+            assert!(!reason.is_empty());
+        }
+    }
+
+    #[test]
+    fn an_enforcing_host_reloads_before_refusing_even_inside_the_rate_limit() {
+        // The rejection bug the module doc warned about: a key provisioned
+        // seconds ago, inside the reload window, would be refused for the rest
+        // of it. Free to skip a reload while nothing is enforced; not free
+        // once the answer is "refuse".
+        let sk = SigningKey::from_bytes(&[41u8; 32]);
+        let store = Store::default();
+        store.provision(backend_ring("backend-1", &sk));
+        let v = Verifier::with_loader_and_policy(
+            "PC1".into(),
+            test_dir(),
+            store.loader(),
+            true, // enforcing
+        );
+        let now = 1_700_000_000_000i64;
+        let boot = Instant::now();
+
+        // A key this host does not hold yet.
+        let headers = sign(&sk, "backend-2", b"job", now);
+        assert_eq!(
+            v.classify(b"job", &headers, "r1", now, boot),
+            Outcome::UnknownKid
+        );
+
+        // It lands on disk — well inside RELOAD_MIN_INTERVAL of the last read.
+        let mut rotated = backend_ring("backend-1", &sk);
+        rotated.insert(
+            "backend-2",
+            sk.verifying_key(),
+            KeyPolicy::backend("backend (new)"),
+        );
+        store.provision(rotated);
+
+        // A second later — deep inside RELOAD_MIN_INTERVAL, so a non-enforcing
+        // host would still be rate-limited and would refuse. This one reads
+        // again and accepts.
+        //
+        // A second, not zero: the forced path shortens the floor rather than
+        // removing it, because removing it made every unknown-kid command do a
+        // registry read while holding `last_reload`, serializing the command
+        // paths behind attacker-chosen ids.
+        assert_eq!(
+            v.classify(
+                b"job",
+                &headers,
+                "r2",
+                now,
+                boot + RELOAD_FORCED_MIN_INTERVAL
+            ),
+            Outcome::Verified,
+            "an enforcing host must not refuse a key it already has on disk"
+        );
+    }
+
+    #[test]
+    fn the_forced_path_shortens_the_floor_rather_than_removing_it() {
+        // Without any floor, every unknown-kid command on an enforcing host
+        // does a registry read while holding `last_reload` — so concurrent
+        // command paths serialize behind one I/O each, for traffic whose kid
+        // an attacker picks. The cost that matters is the serialization, not
+        // the microseconds.
+        let sk = SigningKey::from_bytes(&[43u8; 32]);
+        let store = Store::default();
+        store.provision(backend_ring("backend-1", &sk));
+        let v = Verifier::with_loader_and_policy("PC1".into(), test_dir(), store.loader(), true);
+        let now = 1_700_000_000_000i64;
+        let headers = sign(&sk, "backend-2", b"x", now);
+        let base = Instant::now() + RELOAD_FORCED_MIN_INTERVAL;
+        let reads = store.reads();
+
+        // A burst inside one forced interval collapses to a single read.
+        for i in 0..10 {
+            assert_eq!(
+                v.classify(
+                    b"x",
+                    &headers,
+                    "r",
+                    now,
+                    base + RELOAD_FORCED_MIN_INTERVAL / 20 * i
+                ),
+                Outcome::UnknownKid
+            );
+        }
+        assert_eq!(
+            store.reads(),
+            reads + 1,
+            "a burst must not be one read each"
+        );
+
+        // And the next interval reads again — a floor, not a latch.
+        assert_eq!(
+            v.classify(
+                b"x",
+                &headers,
+                "r",
+                now,
+                base + RELOAD_FORCED_MIN_INTERVAL * 2
+            ),
+            Outcome::UnknownKid
+        );
+        assert_eq!(store.reads(), reads + 2);
+    }
+
+    #[test]
+    fn a_non_enforcing_host_still_respects_the_rate_limit() {
+        // The bypass is scoped to enforcement. Without it, ordinary traffic
+        // naming invented key ids would be one registry read per command.
+        let sk = SigningKey::from_bytes(&[42u8; 32]);
+        let store = Store::default();
+        store.provision(backend_ring("backend-1", &sk));
+        let v = Verifier::with_loader("PC1".into(), test_dir(), store.loader());
+        let now = 1_700_000_000_000i64;
+        let boot = Instant::now();
+        let headers = sign(&sk, "backend-2", b"job", now);
+        let reads = store.reads();
+
+        for i in 0..5 {
+            assert_eq!(
+                v.classify(
+                    b"job",
+                    &headers,
+                    "r",
+                    now,
+                    boot + RELOAD_MIN_INTERVAL / 20 * i
+                ),
+                Outcome::UnknownKid
+            );
+        }
+        assert_eq!(store.reads(), reads, "still bounded when not enforcing");
+    }
+
+    #[test]
+    fn a_host_that_is_not_enforcing_refuses_nothing() {
+        // Stages 1-2, and the state every host is in until an operator flips
+        // it. The outcome is still classified and reported; only the acting on
+        // it is off.
+        let sk = SigningKey::from_bytes(&[32u8; 32]);
+        let v = verifier_with(backend_ring("backend-1", &sk));
+        for o in Outcome::ALL {
+            assert!(v.refusal(o).is_none(), "{o:?} must not refuse");
+        }
+    }
+
+    #[test]
+    fn a_ring_that_goes_empty_at_runtime_stops_enforcing_too() {
+        // The constructor's empty-ring guard is not enough on its own: the
+        // ring changes under a running agent. `read_keyring` maps an absent
+        // registry value to `Ok(empty)` — a revoke an operator can intend, and
+        // a window a provisioning script that deletes-then-writes passes
+        // through — so a host that booted enforcing can reload into holding
+        // nothing. Cached enforcement would then refuse every command,
+        // including the one restoring its keys: the same bricking, reached by
+        // the other door.
+        let sk = SigningKey::from_bytes(&[51u8; 32]);
+        let store = Store::default();
+        store.provision(backend_ring("backend-1", &sk));
+        let v = Verifier::with_loader_and_policy("PC1".into(), test_dir(), store.loader(), true);
+
+        // Enforcing while it holds a key.
+        assert!(v.refusal(Outcome::Unsigned).is_some());
+
+        // Everything is revoked, and a command with an unknown kid drives the
+        // reload that picks the empty ring up.
+        store.provision(KeyRing::new());
+        let t = Instant::now() + RELOAD_MIN_INTERVAL * 2;
+        assert_eq!(
+            v.classify(b"job", &sign(&sk, "backend-2", b"job", 0), "r1", 0, t),
+            Outcome::Unprovisioned
+        );
+
+        assert!(
+            v.refusal(Outcome::Unsigned).is_none(),
+            "a host holding no keys must stop enforcing, not brick"
+        );
+
+        // And it resumes once keys come back — declining is a live response to
+        // the ring, not a latch that needs a restart to clear.
+        store.provision(backend_ring("backend-1", &sk));
+        assert_eq!(
+            v.classify(
+                b"job",
+                &sign(&sk, "backend-2", b"job", 0),
+                "r2",
+                0,
+                t + RELOAD_MIN_INTERVAL * 2
+            ),
+            Outcome::UnknownKid
+        );
+        assert!(
+            v.refusal(Outcome::Unsigned).is_some(),
+            "enforcement must come back when the keys do"
+        );
+    }
+
+    #[test]
+    fn an_empty_ring_declines_to_enforce_rather_than_bricking_the_host() {
+        // Asking a host with no keys to enforce is asking it to refuse every
+        // command — including the one that would provision the keys, which is
+        // the only remote way out. Declining loses nothing to an attacker
+        // (emptying the ring needs local admin, and that already grants
+        // arbitrary local execution) and turns a dead endpoint into a visible
+        // misconfiguration.
+        let v = Verifier::with_loader_and_policy(
+            "PC1".into(),
+            test_dir(),
+            Box::new(|| Ok(KeyRing::new())),
+            true,
+        );
+        assert!(
+            v.refusal(Outcome::Unsigned).is_none(),
+            "an empty ring must not enforce"
+        );
+    }
+
+    #[test]
+    fn every_refusal_reason_says_what_to_do_next() {
+        // The reason becomes the refused command's stderr, and it is the only
+        // thing the issuer sees — during an incident, with the obs event stuck
+        // in an outbox behind a backend that is down. A message that only
+        // restates the outcome would leave them where they started.
+        for o in Outcome::ALL {
+            if !o.is_refusal() {
+                continue;
+            }
+            let r = o.refusal_reason();
+            assert!(r.len() > 40, "{o:?} reason is too thin: {r}");
+            assert!(
+                r.contains("host") || r.contains("key") || r.contains("clock"),
+                "{o:?} reason should point somewhere: {r}"
+            );
+        }
     }
 
     #[test]

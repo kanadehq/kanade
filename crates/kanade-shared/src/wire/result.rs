@@ -105,12 +105,30 @@ pub const EXIT_SKIP_REVOKED: i32 = 126;
 /// Synthetic exit code: the `staleness.mode: strict` policy suppressed
 /// the fire. See [`EXIT_SKIP_VERSION_PIN`].
 pub const EXIT_SKIP_STALENESS: i32 = 127;
+/// Synthetic exit code: the agent **refused** the command because its
+/// provenance signature did not check out (#1165 stage 3).
+///
+/// Extends the reserved block downwards, because 124–127 was full. It shares
+/// the block's contract — the script never ran, so this is not evidence about
+/// its outcome — but it is not a *skip*: the other four mean "policy said not
+/// now", while this one means "this command was not authorised". The specific
+/// code is what carries that distinction; [`is_synthetic_skip`] deliberately
+/// does not, because every consumer of that predicate is asking the narrower
+/// question of whether the script ran.
+///
+/// Emitting a result at all is the point. `kanade run` waits on
+/// `results.<request_id>`, so a refusal that published nothing would be
+/// indistinguishable from an agent that is simply gone — and the most likely
+/// refusal in practice is an operator's own break-glass command going stale on
+/// a host whose clock is wrong, during an incident, with the backend down and
+/// the obs event stuck in the outbox.
+pub const EXIT_REJECTED_UNSIGNED: i32 = 123;
 
-/// True when `exit_code` is one of the reserved synthetic skip codes
-/// (124–127) — the agent published this result *instead of* running
-/// the script, so it carries no evidence about the script's outcome.
+/// True when `exit_code` is one of the reserved synthetic codes (123–127) —
+/// the agent published this result *instead of* running the script, so it
+/// carries no evidence about the script's outcome.
 pub fn is_synthetic_skip(exit_code: i32) -> bool {
-    (EXIT_SKIP_VERSION_PIN..=EXIT_SKIP_STALENESS).contains(&exit_code)
+    (EXIT_REJECTED_UNSIGNED..=EXIT_SKIP_STALENESS).contains(&exit_code)
 }
 
 impl ExecResult {
@@ -141,6 +159,7 @@ mod tests {
     #[test]
     fn synthetic_skip_covers_exactly_the_reserved_codes() {
         for code in [
+            EXIT_REJECTED_UNSIGNED,
             EXIT_SKIP_VERSION_PIN,
             EXIT_SKIP_DEADLINE,
             EXIT_SKIP_REVOKED,
@@ -148,7 +167,11 @@ mod tests {
         ] {
             assert!(is_synthetic_skip(code), "{code} is a reserved skip code");
         }
-        for code in [0, 1, -1, 123, 128, 255] {
+        // 123 moved into the reserved block when the signature rejection was
+        // added (#1165) — the block was full at 124-127 and grew downwards.
+        // 122 is the new edge, and pinning both edges is what makes a future
+        // widening a deliberate act rather than an accident.
+        for code in [0, 1, -1, 122, 128, 255] {
             assert!(!is_synthetic_skip(code), "{code} is a real exit code");
         }
     }

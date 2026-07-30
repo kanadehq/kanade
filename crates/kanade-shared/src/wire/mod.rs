@@ -34,8 +34,8 @@ pub use remote::{
     RemoteInput, TileEncoding, frame_kind, gap_headers, header as remote_header, resumed_headers,
 };
 pub use result::{
-    EXIT_SKIP_DEADLINE, EXIT_SKIP_REVOKED, EXIT_SKIP_STALENESS, EXIT_SKIP_VERSION_PIN, ExecResult,
-    is_synthetic_skip,
+    EXIT_REJECTED_UNSIGNED, EXIT_SKIP_DEADLINE, EXIT_SKIP_REVOKED, EXIT_SKIP_STALENESS,
+    EXIT_SKIP_VERSION_PIN, ExecResult, is_synthetic_skip,
 };
 pub use server_settings::{
     DEFAULT_CHECK_STATUS_STALE_DAYS, DEFAULT_COLLECT_RETENTION_DAYS, DEFAULT_SESSION_TTL_HOURS,
