@@ -40,8 +40,10 @@
     "signedIn": "サインイン中",
     "login": "ログイン",
     "logout": "ログアウト",
-    "changePassword": "パスワード変更",
-    "security": "セキュリティ・MFA"
+    "account": "アカウント・セキュリティ"
+  },
+  "account": {
+    "title": "アカウント・セキュリティ"
   },
   "actions": {
     "save": "保存",
