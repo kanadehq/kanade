@@ -21,8 +21,9 @@ use kanade_shared::kv::{
     BUCKET_JOBS, BUCKET_JOBS_YAML, BUCKET_SCHEDULES, BUCKET_SCRIPT_CURRENT, BUCKET_SCRIPT_STATUS,
     SCRIPT_STATUS_REVOKED,
 };
-use kanade_shared::manifest::{Manifest, Schedule};
+use kanade_shared::manifest::{ExecuteShell, InventoryHint, Manifest, RepoOrigin, Schedule};
 use kanade_shared::subject;
+use kanade_shared::wire::RunAs;
 use serde::Serialize;
 use sqlx::{Row, SqlitePool};
 use tracing::{info, warn};
@@ -125,16 +126,66 @@ pub struct JobLiveCounts {
     pub pending: i64,
 }
 
-/// `GET /api/jobs` row shape — the registered Manifest from the KV
-/// catalog plus a `live` object aggregated from the `executions`
-/// table. `serde(flatten)` keeps the Manifest fields at the JSON
-/// root so existing SPA code reading `job.id` / `job.version` keeps
-/// working unchanged.
+/// The `execute:` fields the Jobs page's catalog table renders
+/// (`web/src/pages/Jobs.tsx` `JobRow`). The full `Execute` is NOT
+/// serialised here — `execute.script` bodies were ~85 % of the list
+/// payload (#1214①) and neither list consumer (Jobs page, Exec
+/// picker) reads them. The YAML editor fetches the full source via
+/// `GET /api/jobs/{id}/yaml` instead.
+#[derive(Serialize)]
+pub struct ExecuteSummary {
+    pub shell: ExecuteShell,
+    pub timeout: String,
+    pub run_as: RunAs,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+}
+
+/// `GET /api/jobs` row shape — a projection of the registered
+/// Manifest carrying only the fields the SPA's two list consumers
+/// read, plus the `live` counters aggregated from `executions`.
+/// Field-for-field this keeps the old flattened shape (`job.id`,
+/// `job.execute.shell`, …), so the SPA needs no change; what changed
+/// is what's absent: `execute.script` / `script_file` /
+/// `script_object` and the hint blocks the table never renders
+/// (#1214①, ~500 KB → ~75 KB on the measured catalog).
+///
+/// `kanade job list` pretty-prints this verbatim — dropping the
+/// script body from its output is the deliberate compatibility call
+/// from #1214: `list` is a catalog overview and
+/// `GET /api/jobs/{id}/yaml` remains the path to a full manifest.
 #[derive(Serialize)]
 pub struct JobListRow {
-    #[serde(flatten)]
-    pub manifest: Manifest,
+    pub id: String,
+    pub version: String,
+    pub description: Option<String>,
+    pub execute: ExecuteSummary,
+    pub inventory: Option<InventoryHint>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<RepoOrigin>,
     pub live: JobLiveCounts,
+}
+
+impl JobListRow {
+    fn from_manifest(m: Manifest, live: JobLiveCounts) -> Self {
+        Self {
+            id: m.id,
+            version: m.version,
+            description: m.description,
+            execute: ExecuteSummary {
+                shell: m.execute.shell,
+                timeout: m.execute.timeout,
+                run_as: m.execute.run_as,
+                cwd: m.execute.cwd,
+            },
+            inventory: m.inventory,
+            tags: m.tags,
+            origin: m.origin,
+            live,
+        }
+    }
 }
 
 /// GET /api/jobs — list every registered job + live in-flight
@@ -154,14 +205,25 @@ pub async fn list(
         .try_collect()
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("kv keys: {e}")))?;
-    let mut manifests = Vec::with_capacity(keys.len());
-    for k in keys {
-        if let Ok(Some(bytes)) = kv.get(&k).await
-            && let Ok(job) = serde_json::from_slice::<Manifest>(&bytes)
-        {
-            manifests.push(job);
+    // #1214②: fan the per-key GETs out in parallel — the previous
+    // sequential loop serialised one NATS round-trip per catalog row
+    // on the Jobs page's critical path. Mirrors scripts::list_status
+    // ("Gemini #47 review"), bounded by the operator-facing catalog
+    // size (~10s-100s of jobs).
+    let fetches = keys.into_iter().map(|k| {
+        let kv = kv.clone();
+        async move {
+            match kv.get(&k).await {
+                Ok(Some(bytes)) => serde_json::from_slice::<Manifest>(&bytes).ok(),
+                _ => None,
+            }
         }
-    }
+    });
+    let mut manifests: Vec<Manifest> = futures::future::join_all(fetches)
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
     manifests.sort_by(|a, b| a.id.cmp(&b.id));
 
     // v0.30 / PR γ: one GROUP BY query for the whole list instead of
@@ -178,7 +240,7 @@ pub async fn list(
         .into_iter()
         .map(|m| {
             let live = live_counts.get(&m.id).cloned().unwrap_or_default();
-            JobListRow { manifest: m, live }
+            JobListRow::from_manifest(m, live)
         })
         .collect();
     Ok(Json(out))
@@ -728,5 +790,53 @@ mod tests {
             .unwrap();
         assert_eq!(facts_left, 1, "the other job's fact survives");
         assert_eq!(hist_left, 1, "the other job's history survives");
+    }
+
+    /// #1214①: the list response must NOT carry the script body (it
+    /// was ~85 % of the payload) while keeping the flattened shape
+    /// the SPA's `JobRow` reads.
+    #[test]
+    fn job_list_row_omits_script_but_keeps_catalog_shape() {
+        let m: Manifest = serde_yaml::from_str(
+            "id: inv-hw\n\
+             version: 1.2.3\n\
+             description: hardware inventory\n\
+             execute:\n\
+             \x20 shell: powershell\n\
+             \x20 timeout: 30s\n\
+             \x20 run_as: system\n\
+             \x20 cwd: C:\\Temp\n\
+             \x20 script: |\n\
+             \x20   Get-ComputerInfo | Out-Null\n\
+             tags: [inventory, windows]\n",
+        )
+        .unwrap();
+        let row = JobListRow::from_manifest(
+            m,
+            JobLiveCounts {
+                running: 2,
+                pending: 1,
+            },
+        );
+        let v = serde_json::to_value(&row).unwrap();
+
+        assert_eq!(v["id"], "inv-hw");
+        assert_eq!(v["version"], "1.2.3");
+        assert_eq!(v["description"], "hardware inventory");
+        assert_eq!(v["execute"]["shell"], "powershell");
+        assert_eq!(v["execute"]["timeout"], "30s");
+        assert_eq!(v["execute"]["run_as"], "system");
+        assert_eq!(v["execute"]["cwd"], "C:\\Temp");
+        assert_eq!(v["tags"], serde_json::json!(["inventory", "windows"]));
+        assert_eq!(v["live"], serde_json::json!({"running": 2, "pending": 1}));
+        // Serialized as null (not omitted) — the SPA types it as
+        // `unknown | null`.
+        assert!(v.get("inventory").is_some());
+        assert!(v["inventory"].is_null());
+
+        // The whole point of #1214①: no script source in the list row.
+        assert!(v["execute"].get("script").is_none());
+        assert!(v["execute"].get("script_file").is_none());
+        assert!(v["execute"].get("script_object").is_none());
     }
 }
