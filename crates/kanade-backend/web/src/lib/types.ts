@@ -101,10 +101,20 @@ export type EffectiveConfigResponse = {
   warnings: string[];
 };
 
+export type JetstreamProbe = {
+  name: string;
+  exists: boolean;
+  /** Bytes stored in the backing stream (omitted if unreadable). */
+  bytes?: number;
+  /** Configured cap; omitted = unlimited (the curated object stores). */
+  max_bytes?: number;
+  messages?: number;
+};
+
 export type JetstreamSnapshot = {
-  streams: { name: string; exists: boolean }[];
-  kv_buckets: { name: string; exists: boolean }[];
-  object_stores: { name: string; exists: boolean }[];
+  streams: JetstreamProbe[];
+  kv_buckets: JetstreamProbe[];
+  object_stores: JetstreamProbe[];
 };
 
 // v0.40 Part 1: per-PC host-wide perf time-series response from

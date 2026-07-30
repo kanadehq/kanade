@@ -32,7 +32,8 @@
       "jetstream": {
         "label": "JetStream",
         "hintHealthy": "ストリーム + KV + オブジェクトストア",
-        "hintMissing": "欠落: {{names}}"
+        "hintMissing": "欠落: {{names}}",
+        "hintPeak": "最大 {{pct}}% · {{name}}"
       },
       "failures": {
         "label": "失敗 / {{hours}}時間",

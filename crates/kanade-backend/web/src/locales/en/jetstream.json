@@ -8,11 +8,16 @@
   },
   "columns": {
     "name": "name",
-    "status": "status"
+    "status": "status",
+    "usage": "usage"
   },
   "status": {
     "ok": "ok",
     "missing": "missing"
+  },
+  "usage": {
+    "noCap": "no cap",
+    "aria": "{{name}} usage"
   },
   "loading": "loading…",
   "errorTitle": "Couldn't load JetStream status"

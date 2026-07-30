@@ -391,6 +391,21 @@ export function Dashboard() {
   // were dropped as duplicates of the fleet-health rollup up top.
   const js = jsQ.data;
 
+  // Fullest capped resource across every stream / store — turns the
+  // JetStream card from a bare green "5/5" into "how close to trimming".
+  const jsPeak = (() => {
+    if (!js) return null;
+    const all = [...js.streams, ...js.object_stores, ...js.kv_buckets];
+    let best: { name: string; pct: number } | null = null;
+    for (const r of all) {
+      if (r.bytes != null && r.max_bytes != null && r.max_bytes > 0) {
+        const pct = (r.bytes / r.max_bytes) * 100;
+        if (!best || pct > best.pct) best = { name: r.name, pct };
+      }
+    }
+    return best;
+  })();
+
   const recentFail = (resultsQ.data ?? []).filter((r) => r.exit_code !== 0).length;
   const recentTotal = (resultsQ.data ?? []).length;
 
@@ -561,7 +576,12 @@ export function Dashboard() {
                   ? t('fleetHealth.stats.jetstream.hintMissing', {
                       names: health.jetstream.missing.join(', '),
                     })
-                  : t('fleetHealth.stats.jetstream.hintHealthy')
+                  : jsPeak
+                    ? t('fleetHealth.stats.jetstream.hintPeak', {
+                        pct: Math.round(jsPeak.pct),
+                        name: jsPeak.name,
+                      })
+                    : t('fleetHealth.stats.jetstream.hintHealthy')
               }
             />
             {/* Deep-link into the Activity list, pre-filtered to the
