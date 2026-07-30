@@ -41,6 +41,46 @@ pub fn read_hklm_value(_subkey: &str, _value: &str) -> Option<String> {
     None
 }
 
+/// Like [`read_hklm_value`], but separating **absent** from **unreadable**.
+///
+/// `read_hklm_value` collapses the two into `None`, which is fine for a value
+/// consulted once at startup: either way there is nothing to use. It is not
+/// fine for one re-read on a schedule, where "absent" means *adopt an empty
+/// value* — a transient failure would then replace whatever is loaded with
+/// nothing, on every poll, forever. The command keyring is read that way
+/// (#1165), and there "adopt nothing" silently turns verification off.
+///
+/// `Ok(None)` is reserved for the cases that genuinely mean absent: the subkey
+/// or value does not exist, the value is empty, or this is not Windows and
+/// there is no registry to consult.
+#[cfg(windows)]
+pub fn try_read_hklm_value(subkey: &str, value: &str) -> Result<Option<String>, String> {
+    use std::io::ErrorKind;
+    use winreg::RegKey;
+    use winreg::enums::HKEY_LOCAL_MACHINE;
+
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let key = match hklm.open_subkey(subkey) {
+        Ok(k) => k,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("open HKLM\\{subkey}: {e}")),
+    };
+    match key.get_value::<String, _>(value) {
+        Ok(s) if s.is_empty() => Ok(None),
+        Ok(s) => Ok(Some(s)),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("read HKLM\\{subkey}\\{value}: {e}")),
+    }
+}
+
+#[cfg(not(windows))]
+pub fn try_read_hklm_value(_subkey: &str, _value: &str) -> Result<Option<String>, String> {
+    // Genuinely absent rather than a failure: there is no registry here, so
+    // "nothing is provisioned" is the truthful answer and an agent on this
+    // platform simply holds no keys.
+    Ok(None)
+}
+
 /// Write a `REG_SZ` value into an **existing** `HKLM\<subkey>`.
 ///
 /// Deliberately opens rather than creates. Registry ACLs are per-key, and the

@@ -175,7 +175,13 @@ pub async fn heartbeat_loop(
                     // Always `Some`, even when empty: an empty ring is the
                     // state an operator has to act on, and omitting it would
                     // make it arrive looking like an agent too old to report.
-                    command_keys: Some(verifier.trusted_kids()),
+                    // Refresh-then-report, not just report. The command path
+                    // only re-reads the store when a command names a key it
+                    // lacks, which never happens for a key that was *removed*
+                    // — so without this, a revoked key would keep verifying
+                    // until the agent restarted. See `refresh_and_kids`; this
+                    // interval is what bounds revocation latency.
+                    command_keys: Some(verifier.refresh_and_kids()),
                 };
                 let payload = match serde_json::to_vec(&hb) {
                     Ok(b) => b,

@@ -65,6 +65,36 @@
 //! common path never touches the registry, and no other outcome can be used to
 //! provoke a read.
 //!
+//! ## The command path alone is not enough — revocation has no trigger
+//!
+//! That narrowness is right for **verification**, and it was incomplete as a
+//! policy for the ring, because verification is not the ring's only reader.
+//! `UnknownKid` means "a key is missing". Revocation is the opposite shape: the
+//! key is still *present* in memory, so every command signed with it verifies,
+//! no unknown-key outcome ever occurs, and nothing asks the store again.
+//! Removing a key from `CommandKeys` would have had no effect until the agent
+//! restarted — which makes "the array is replaced, not merged, so emergency
+//! revocation is possible" untrue in practice.
+//!
+//! The reported ring has the same gap in the other direction: a newly *added*
+//! key stays invisible to the command path until something signs with it, so a
+//! fleet-wide "has the new key landed everywhere?" check would answer no
+//! indefinitely.
+//!
+//! So [`Verifier::refresh_and_kids`] re-reads once per heartbeat, and the
+//! heartbeat interval is what bounds revocation latency. It is cheap because
+//! the raw value is compared before anything is parsed — the expensive part is
+//! `VerifyingKey::from_bytes` (an Ed25519 point decompression per entry), and
+//! an unchanged store skips it entirely.
+//!
+//! Chosen over a registry change notification, which would react in
+//! sub-second rather than sub-interval, for one reason: **a watcher that
+//! silently died would leave revocation looking instant while it was not**.
+//! Refreshing on the same path that *reports* the ring means one signal covers
+//! both — if the refresh stops working, `command_keys` visibly stops matching
+//! what was provisioned. A faster mechanism can be added later on top of this
+//! one; it should not replace it.
+//!
 //! The reload is rate-limited because the trigger is reachable by anyone who
 //! can put bytes on a command subject: without a floor, a stream of commands
 //! bearing invented key ids would turn every one of them into a registry read.
@@ -208,11 +238,24 @@ fn lock_kids(ring: &KeyRing) -> Vec<&str> {
     ring.kids().collect()
 }
 
-fn read_keyring() -> Result<KeyRing, String> {
-    let Some(raw) = kanade_shared::secrets::read_hklm_value(REG_SUBKEY, REG_VALUE) else {
-        return Ok(KeyRing::new());
-    };
-    parse_keyring(&raw)
+fn read_keyring_raw() -> Result<Option<String>, String> {
+    // `try_read_hklm_value`, not `read_hklm_value`: the latter reports a failed
+    // read as `None`, indistinguishable from a value that is genuinely absent.
+    // Read once at startup that hardly matters. Read on a schedule it matters a
+    // lot — "absent" means *adopt an empty ring*, so a transient failure would
+    // silently drop every key this machine trusts, and keep doing it.
+    kanade_shared::secrets::try_read_hklm_value(REG_SUBKEY, REG_VALUE)
+}
+
+/// Parse what [`read_keyring_raw`] returned. `None` (value absent) is the
+/// legitimate "nothing provisioned, or an operator revoked everything" state
+/// and yields an empty ring; an unparseable value is an error the caller must
+/// not let replace a working ring.
+fn parse_raw(raw: Option<&str>) -> Result<KeyRing, String> {
+    match raw {
+        None => Ok(KeyRing::new()),
+        Some(s) => parse_keyring(s),
+    }
 }
 
 fn parse_keyring(raw: &str) -> Result<KeyRing, String> {
@@ -389,6 +432,10 @@ impl Outcome {
 enum Reload {
     /// The ring was replaced with what the store holds.
     Done,
+    /// We read the store and it is byte-identical to what the ring was built
+    /// from, so nothing was parsed. Distinct from [`Reload::Done`] because a
+    /// retry after this cannot succeed — the ring did not move.
+    Unchanged,
     /// Inside [`RELOAD_MIN_INTERVAL`] of the last attempt — we did not look.
     RateLimited,
     /// We looked and could not use what we found. The previous ring is kept.
@@ -399,6 +446,7 @@ impl Reload {
     fn as_str(self) -> &'static str {
         match self {
             Reload::Done => "reloaded",
+            Reload::Unchanged => "unchanged",
             Reload::RateLimited => "rate-limited",
             Reload::Failed => "reload-failed",
         }
@@ -419,7 +467,15 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// [`read_keyring`] so the reload path is reachable from a test — the registry
 /// returns nothing on non-Windows, so a test that went through it would assert
 /// nothing at all on CI, which is where this needs to hold.
-type Loader = Box<dyn Fn() -> Result<KeyRing, String> + Send + Sync>;
+/// Yields the store's **raw** value: `Ok(None)` = absent (a state an operator
+/// can intend), `Ok(Some(s))` = the JSON as stored, `Err` = unreadable.
+///
+/// Raw rather than parsed so the refresh can compare bytes and skip the work
+/// when nothing changed. The expensive part is not the registry read — it is
+/// `VerifyingKey::from_bytes`, which decompresses an Ed25519 point per entry
+/// (tens of microseconds each). Comparing first makes the steady state a
+/// single memory-mapped read.
+type Loader = Box<dyn Fn() -> Result<Option<String>, String> + Send + Sync>;
 
 /// Verifies commands and reports when the fleet's signing state changes.
 pub struct Verifier {
@@ -428,6 +484,9 @@ pub struct Verifier {
     /// by the command path being one message at a time per subscription, and
     /// the lock is held for a signature verify (tens of microseconds).
     ring: Mutex<KeyRing>,
+    /// The raw store value [`Verifier::ring`] was built from, so a refresh can
+    /// skip parsing when nothing changed. `None` = the value was absent.
+    last_raw: Mutex<Option<String>>,
     loader: Loader,
     /// What local config asked for (#1165 stage 3) — **not** the answer.
     ///
@@ -454,7 +513,12 @@ impl Verifier {
     /// Production constructor: loads the ring from the registry now, and
     /// reloads from the same place when a command names a key it lacks.
     pub fn new(pc_id: String, obs_dir: std::path::PathBuf) -> Self {
-        Self::with_loader_and_policy(pc_id, obs_dir, Box::new(read_keyring), enforce_requested())
+        Self::with_loader_and_policy(
+            pc_id,
+            obs_dir,
+            Box::new(read_keyring_raw),
+            enforce_requested(),
+        )
     }
 
     /// The ring's source is a single argument so the initial load and every
@@ -478,10 +542,18 @@ impl Verifier {
         if let Err(e) = crate::obs_outbox::ensure_outbox_dir(&obs_dir) {
             warn!(error = %e, "command_verify: outbox dir — reports may be dropped until it exists");
         }
-        let ring = loader().unwrap_or_else(|e| {
+        // Two different failures, two different messages — they send an
+        // operator to different places. One means the store could not be read
+        // at all (permissions, a missing hive); the other means it was read and
+        // holds something that is not a keyring.
+        let raw = loader().unwrap_or_else(|e| {
+            warn!(error = %e, "command keyring could not be READ — starting with no keys");
+            None
+        });
+        let ring = parse_raw(raw.as_deref()).unwrap_or_else(|e| {
             // No earlier ring to lose at construction, so degrading is safe
-            // here in a way it is not on the reload path.
-            warn!(error = %e, "command keyring is unreadable — treating as empty");
+            // here in a way it is not on the refresh path.
+            warn!(error = %e, "command keyring is present but UNPARSEABLE — starting with no keys");
             KeyRing::new()
         });
         if ring.is_empty() {
@@ -520,6 +592,7 @@ impl Verifier {
         }
         Self {
             ring: Mutex::new(ring),
+            last_raw: Mutex::new(raw),
             loader,
             enforce_requested,
             empty_ring_warned: std::sync::atomic::AtomicBool::new(false),
@@ -758,24 +831,91 @@ impl Verifier {
         // unknown-key commands would otherwise be one read per command, which
         // is the case the floor exists for.
         *last = now;
-        // Held across the load deliberately: two command paths hitting an
-        // unknown key at once would otherwise both read the store.
-        match (self.loader)() {
+        // `last_reload` is released here; `pull` takes `last_raw` itself, and
+        // that is what serialises concurrent readers — this floor only bounds
+        // how often the command path *asks*.
+        drop(last);
+        self.pull()
+    }
+
+    /// Re-read the store and adopt it if it changed.
+    ///
+    /// The `last_raw` guard is taken **before** the read, not after, and that
+    /// ordering is load-bearing now that two callers reach here independently
+    /// (a command path via [`Verifier::reload_if_due`], and the heartbeat via
+    /// [`Verifier::refresh_and_kids`]). Reading first and locking second lets
+    /// two concurrent pulls observe different values and commit in the wrong
+    /// order — the one that read the *older* value taking the lock last and
+    /// installing a stale ring. For a revocation that means the revoked key
+    /// comes back.
+    ///
+    /// What the guard buys is ordering, and only ordering. It does **not**
+    /// collapse two arrivals into one store read — the loader runs
+    /// unconditionally inside the critical section, so serialised callers each
+    /// read (`an_unchanged_store_is_not_reparsed` asserts exactly that). The
+    /// saving on an unchanged store is the parse, not the read.
+    fn pull(&self) -> Reload {
+        let mut last_raw = lock(&self.last_raw);
+        let raw = match (self.loader)() {
+            Ok(raw) => raw,
+            // Keep what we have. A refresh can only ever improve the ring or
+            // leave it alone — never destroy a working one — which is what
+            // makes a skipped or failed one a delay rather than an outage.
+            Err(e) => {
+                warn!(error = %e, "keyring refresh failed — keeping the keys already loaded");
+                return Reload::Failed;
+            }
+        };
+        if *last_raw == raw {
+            // The store has not changed, so neither has the ring. Returning
+            // before the parse is what makes a per-heartbeat refresh cost a
+            // single memory-mapped read: the expensive part is
+            // `VerifyingKey::from_bytes`, which decompresses an Ed25519 point
+            // per entry.
+            return Reload::Unchanged;
+        }
+        match parse_raw(raw.as_deref()) {
             Ok(fresh) => {
+                info!(
+                    kids = ?fresh.kids().collect::<Vec<_>>(),
+                    "command keyring changed — adopted"
+                );
                 *lock(&self.ring) = fresh;
+                *last_raw = raw;
                 Reload::Done
             }
-            // Keep what we have. A reload can only ever improve the ring or
-            // leave it alone — never destroy a working one — which is what
-            // makes a skipped or failed reload a delay rather than an outage.
             Err(e) => {
-                warn!(
-                    error = %e,
-                    "keyring reload failed — keeping the keys already loaded"
-                );
+                // Do NOT record the raw value: leaving `last_raw` alone means
+                // the next refresh tries again rather than treating a
+                // half-written value as the new normal and never re-reading it.
+                warn!(error = %e, "keyring changed but is unreadable — keeping the keys already loaded");
                 Reload::Failed
             }
         }
+    }
+
+    /// Re-read the store, ignoring the command-path rate limit, and report the
+    /// key ids now in force. Called once per heartbeat.
+    ///
+    /// This is what makes **revocation** work. The command-path reload fires
+    /// only on [`VerifyError::UnknownKid`], which covers a ring that is
+    /// missing a key — but a *revoked* key is one the ring still has, so every
+    /// command signed with it verifies, no unknown-key outcome ever occurs, and
+    /// nothing would trigger a re-read. Removing a key from the store would
+    /// then have no effect until the agent restarted.
+    ///
+    /// It also keeps the reported ring honest. `command_keys` reports what this
+    /// agent would accept *now*, and a newly added key is invisible to the
+    /// command path until something signs with it — so a fleet-wide "has the
+    /// new key landed everywhere" check would answer no forever.
+    ///
+    /// **The heartbeat interval therefore bounds revocation latency.** That
+    /// coupling is deliberate but worth knowing: an operator who widens
+    /// `heartbeat_interval` for bandwidth also widens the window in which a
+    /// revoked key keeps working.
+    pub fn refresh_and_kids(&self) -> Vec<String> {
+        self.pull();
+        self.trusted_kids()
     }
 
     /// Emit an obs event when the class changes, so the fleet view shows which
@@ -867,16 +1007,50 @@ mod tests {
         std::env::temp_dir().join("kanade-command-verify-test")
     }
 
-    /// A verifier whose ring never changes — the pre-reload behaviour.
+    /// Render a ring back to the registry value it would have been stored as.
+    ///
+    /// The loader now yields raw text so an unchanged store can skip parsing,
+    /// so the fixtures have to round-trip through that same text — otherwise
+    /// they would exercise a path production never takes.
+    fn ring_to_json(ring: &KeyRing) -> Option<String> {
+        let kids: Vec<&str> = ring.kids().collect();
+        if kids.is_empty() {
+            // An empty ring is the *absent* value, not `[]`: that is what
+            // `read_keyring_raw` returns when the registry has no such value.
+            return None;
+        }
+        let entries: Vec<serde_json::Value> = kids
+            .iter()
+            .map(|kid| {
+                let (_, vk, policy) = ring.get(kid).expect("kid came from this ring");
+                match policy.max_age {
+                    Some(d) => serde_json::json!({
+                        "kid": kid,
+                        "public_key": kanade_shared::signing::encode_public(vk),
+                        "max_age_secs": d.as_secs(),
+                    }),
+                    None => serde_json::json!({
+                        "kid": kid,
+                        "public_key": kanade_shared::signing::encode_public(vk),
+                    }),
+                }
+            })
+            .collect();
+        Some(serde_json::to_string(&entries).expect("serialising a ring is infallible"))
+    }
+
+    /// A verifier whose store never changes — the pre-refresh behaviour.
     fn verifier_with(ring: KeyRing) -> Verifier {
-        Verifier::with_loader("PC1".into(), test_dir(), Box::new(move || Ok(ring.clone())))
+        let raw = ring_to_json(&ring);
+        Verifier::with_loader("PC1".into(), test_dir(), Box::new(move || Ok(raw.clone())))
     }
 
     fn enforcing_with(ring: KeyRing) -> Verifier {
+        let raw = ring_to_json(&ring);
         Verifier::with_loader_and_policy(
             "PC1".into(),
             test_dir(),
-            Box::new(move || Ok(ring.clone())),
+            Box::new(move || Ok(raw.clone())),
             true,
         )
     }
@@ -890,26 +1064,36 @@ mod tests {
     /// A ring that is empty until `provision()` is called, counting how many
     /// times it was read — the shape of a machine whose key arrives while the
     /// agent is already running.
+    /// What the fake store holds: the value a read would return — including a
+    /// failure, which is a distinct case from an absent value — and how many
+    /// reads have happened, which is what the dedup tests assert on.
+    type StoreState = (Result<Option<String>, String>, usize);
+
     #[derive(Clone)]
     struct Store {
-        inner: std::sync::Arc<Mutex<(Result<KeyRing, String>, usize)>>,
+        inner: std::sync::Arc<Mutex<StoreState>>,
     }
 
     impl Default for Store {
         fn default() -> Self {
             Self {
-                inner: std::sync::Arc::new(Mutex::new((Ok(KeyRing::new()), 0))),
+                inner: std::sync::Arc::new(Mutex::new((Ok(None), 0))),
             }
         }
     }
 
     impl Store {
         fn provision(&self, ring: KeyRing) {
-            lock(&self.inner).0 = Ok(ring);
+            lock(&self.inner).0 = Ok(ring_to_json(&ring));
         }
-        /// What a partially-written `CommandKeys` value looks like from here.
+        /// What a partially-written `CommandKeys` value looks like from here:
+        /// present, changed, and unparseable.
         fn corrupt(&self) {
-            lock(&self.inner).0 = Err("expected value at line 1 column 3".into());
+            lock(&self.inner).0 = Ok(Some("[{\"kid\":\"half-writ".to_string()));
+        }
+        /// The store becoming unreadable, as distinct from holding rubbish.
+        fn unreadable(&self) {
+            lock(&self.inner).0 = Err("registry unavailable".into());
         }
         fn reads(&self) -> usize {
             lock(&self.inner).1
@@ -1460,12 +1644,8 @@ mod tests {
         // (emptying the ring needs local admin, and that already grants
         // arbitrary local execution) and turns a dead endpoint into a visible
         // misconfiguration.
-        let v = Verifier::with_loader_and_policy(
-            "PC1".into(),
-            test_dir(),
-            Box::new(|| Ok(KeyRing::new())),
-            true,
-        );
+        let v =
+            Verifier::with_loader_and_policy("PC1".into(), test_dir(), Box::new(|| Ok(None)), true);
         assert!(
             v.refusal(Outcome::Unsigned).is_none(),
             "an empty ring must not enforce"
@@ -1489,6 +1669,123 @@ mod tests {
                 "{o:?} reason should point somewhere: {r}"
             );
         }
+    }
+
+    #[test]
+    fn revoking_a_key_takes_effect_without_a_restart() {
+        // The gap this whole change exists for. The command path re-reads only
+        // on `UnknownKid` — "a key is missing" — and a revoked key is the
+        // opposite shape: still present in memory, so every command signed
+        // with it verifies, no unknown-key outcome ever fires, and nothing
+        // asks the store again. Removing it from `CommandKeys` had no effect
+        // until the agent restarted, which makes "the array is replaced, not
+        // merged, so emergency revocation is possible" untrue in practice.
+        let backend = SigningKey::from_bytes(&[61u8; 32]);
+        let compromised = SigningKey::from_bytes(&[62u8; 32]);
+        let mut both = backend_ring("backend-1", &backend);
+        both.insert(
+            "leaked",
+            compromised.verifying_key(),
+            KeyPolicy::backend("leaked"),
+        );
+        let store = Store::default();
+        store.provision(both);
+        let v = Verifier::with_loader("PC1".into(), test_dir(), store.loader());
+
+        let now = 1_700_000_000_000i64;
+        let t = Instant::now() + RELOAD_MIN_INTERVAL * 2;
+        let signed = sign(&compromised, "leaked", b"payload", now);
+
+        // Before: the leaked key verifies, and note that it does so WITHOUT
+        // ever producing an unknown-key outcome — which is exactly why no
+        // re-read was ever triggered.
+        assert_eq!(
+            v.classify(b"payload", &signed, "r1", now, t),
+            Outcome::Verified
+        );
+
+        // The operator revokes it by writing a ring without it.
+        store.provision(backend_ring("backend-1", &backend));
+
+        // Command traffic alone still does not notice — the key is in memory.
+        assert_eq!(
+            v.classify(b"payload", &signed, "r2", now, t),
+            Outcome::Verified,
+            "this is the gap: the command path has no reason to re-read"
+        );
+
+        // The heartbeat refresh is what closes it.
+        let kids = v.refresh_and_kids();
+        assert_eq!(kids, vec!["backend-1".to_string()]);
+        assert_eq!(
+            v.classify(b"payload", &signed, "r3", now, t),
+            Outcome::UnknownKid,
+            "a revoked key must stop verifying"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_store_is_not_reparsed() {
+        // What makes a per-heartbeat refresh affordable. The registry read is
+        // cheap; `VerifyingKey::from_bytes` is not — it decompresses an
+        // Ed25519 point per entry. Comparing the raw value first skips that
+        // entirely in the steady state, which is every heartbeat but the ones
+        // that follow a real change.
+        let sk = SigningKey::from_bytes(&[63u8; 32]);
+        let store = Store::default();
+        store.provision(backend_ring("backend-1", &sk));
+        let v = Verifier::with_loader("PC1".into(), test_dir(), store.loader());
+        let reads = store.reads();
+
+        assert_eq!(v.pull(), Reload::Unchanged);
+        assert_eq!(v.pull(), Reload::Unchanged);
+        // It still READ the store each time — that is the cheap part, and
+        // skipping it would mean never noticing a change.
+        assert_eq!(store.reads(), reads + 2);
+
+        // A real change is adopted.
+        store.provision(backend_ring("backend-2", &sk));
+        assert_eq!(v.pull(), Reload::Done);
+        assert_eq!(v.pull(), Reload::Unchanged);
+    }
+
+    #[test]
+    fn a_half_written_value_is_retried_rather_than_remembered() {
+        // `last_raw` is deliberately NOT updated on a parse failure. Recording
+        // it would treat a half-written value as the new normal: the next
+        // refresh would compare equal, skip, and never look again — so a
+        // provisioning write caught mid-flight would strand the machine on its
+        // old ring until a restart, silently.
+        let sk = SigningKey::from_bytes(&[64u8; 32]);
+        let store = Store::default();
+        store.provision(backend_ring("backend-1", &sk));
+        let v = Verifier::with_loader("PC1".into(), test_dir(), store.loader());
+
+        store.corrupt();
+        assert_eq!(v.pull(), Reload::Failed);
+        assert_eq!(v.pull(), Reload::Failed, "it must keep retrying");
+        // And the working ring is still there.
+        assert_eq!(v.trusted_kids(), vec!["backend-1".to_string()]);
+
+        // Once the write completes, it is adopted.
+        store.provision(backend_ring("backend-2", &sk));
+        assert_eq!(v.pull(), Reload::Done);
+        assert_eq!(v.trusted_kids(), vec!["backend-2".to_string()]);
+    }
+
+    #[test]
+    fn an_unreadable_store_keeps_the_ring_and_does_not_poison_the_cache() {
+        let sk = SigningKey::from_bytes(&[65u8; 32]);
+        let store = Store::default();
+        store.provision(backend_ring("backend-1", &sk));
+        let v = Verifier::with_loader("PC1".into(), test_dir(), store.loader());
+
+        store.unreadable();
+        assert_eq!(v.pull(), Reload::Failed);
+        assert_eq!(v.trusted_kids(), vec!["backend-1".to_string()]);
+
+        store.provision(backend_ring("backend-2", &sk));
+        assert_eq!(v.pull(), Reload::Done);
     }
 
     #[test]
@@ -1618,8 +1915,7 @@ mod tests {
         let headers = sign(&sk, "backend-2", b"x", now);
         let t = Instant::now() + RELOAD_MIN_INTERVAL * 2;
 
-        let empty =
-            Verifier::with_loader("PC1".into(), test_dir(), Box::new(|| Ok(KeyRing::new())));
+        let empty = Verifier::with_loader("PC1".into(), test_dir(), Box::new(|| Ok(None)));
         assert_eq!(
             empty.classify(b"x", &headers, "r1", now, t),
             Outcome::Unprovisioned
