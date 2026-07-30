@@ -1,44 +1,68 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { lazy } from 'react';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { Toaster } from 'sonner';
 
 import { ProtectedLayout } from '@/components/ProtectedLayout';
 import { ConfirmDialogProvider } from '@/components/ui/confirm-dialog';
 import { AuthProvider } from '@/lib/auth';
-import { Accounts } from '@/pages/Accounts';
-import { AgentDetail } from '@/pages/AgentDetail';
-import { Agents } from '@/pages/Agents';
-import { Apps } from '@/pages/Apps';
-import { ChangePassword } from '@/pages/ChangePassword';
-import { Audit } from '@/pages/Audit';
-import { Collect } from '@/pages/Collect';
-import { Compliance } from '@/pages/Compliance';
-import { Config } from '@/pages/Config';
-import { Dashboard } from '@/pages/Dashboard';
-import { Events } from '@/pages/Events';
-import { Exec } from '@/pages/Exec';
-import { GroupDefs } from '@/pages/GroupDefs';
-import { Groups } from '@/pages/Groups';
-import { Inventory } from '@/pages/Inventory';
-import { JetStream } from '@/pages/JetStream';
-import { Jobs } from '@/pages/Jobs';
 import { Login } from '@/pages/Login';
-import { Logs } from '@/pages/Logs';
-import { NotificationDetail } from '@/pages/NotificationDetail';
-import { Notifications } from '@/pages/Notifications';
 import { PasswordSetup } from '@/pages/PasswordSetup';
 import { Placeholder } from '@/pages/Placeholder';
-import { Activity } from '@/pages/Activity';
-import { ResultDetail } from '@/pages/ResultDetail';
-import { RemoteScreen } from '@/pages/RemoteScreen';
-import { Rollout } from '@/pages/Rollout';
-import { Run } from '@/pages/Run';
-import { Analytics } from '@/pages/Analytics';
-import { Schedules } from '@/pages/Schedules';
-import { Account } from '@/pages/Account';
-import { Settings } from '@/pages/Settings';
-import { Views } from '@/pages/Views';
 import { ThemeProvider, useTheme } from '@/lib/theme';
+
+// #1215③: route-level code splitting. Every authenticated page is a
+// lazy chunk so the entry bundle no longer carries the whole app —
+// most importantly the heavy single-route deps (monaco-editor via the
+// YAML editor, recharts via Dashboard/Analytics, marked+dompurify via
+// Notifications, qrcode via Account). Vite splits those automatically
+// once no eager importer chains them into the entry chunk. The
+// Suspense boundary lives in ProtectedLayout (around <Outlet/>) so
+// chunk loads swap only the content area, not the chrome.
+//
+// Login / PasswordSetup / Placeholder stay eager: the two public
+// routes ARE the cold-load target for an unauthenticated session, and
+// Placeholder is a one-liner.
+const Accounts = lazy(() => import('@/pages/Accounts').then((m) => ({ default: m.Accounts })));
+const AgentDetail = lazy(() => import('@/pages/AgentDetail').then((m) => ({ default: m.AgentDetail })));
+const Agents = lazy(() => import('@/pages/Agents').then((m) => ({ default: m.Agents })));
+const Apps = lazy(() => import('@/pages/Apps').then((m) => ({ default: m.Apps })));
+const ChangePassword = lazy(() =>
+  import('@/pages/ChangePassword').then((m) => ({ default: m.ChangePassword })),
+);
+const Audit = lazy(() => import('@/pages/Audit').then((m) => ({ default: m.Audit })));
+const Collect = lazy(() => import('@/pages/Collect').then((m) => ({ default: m.Collect })));
+const Compliance = lazy(() => import('@/pages/Compliance').then((m) => ({ default: m.Compliance })));
+const Config = lazy(() => import('@/pages/Config').then((m) => ({ default: m.Config })));
+const Dashboard = lazy(() => import('@/pages/Dashboard').then((m) => ({ default: m.Dashboard })));
+const Events = lazy(() => import('@/pages/Events').then((m) => ({ default: m.Events })));
+const Exec = lazy(() => import('@/pages/Exec').then((m) => ({ default: m.Exec })));
+const GroupDefs = lazy(() => import('@/pages/GroupDefs').then((m) => ({ default: m.GroupDefs })));
+const Groups = lazy(() => import('@/pages/Groups').then((m) => ({ default: m.Groups })));
+const Inventory = lazy(() => import('@/pages/Inventory').then((m) => ({ default: m.Inventory })));
+const JetStream = lazy(() => import('@/pages/JetStream').then((m) => ({ default: m.JetStream })));
+const Jobs = lazy(() => import('@/pages/Jobs').then((m) => ({ default: m.Jobs })));
+const Logs = lazy(() => import('@/pages/Logs').then((m) => ({ default: m.Logs })));
+const NotificationDetail = lazy(() =>
+  import('@/pages/NotificationDetail').then((m) => ({ default: m.NotificationDetail })),
+);
+const Notifications = lazy(() =>
+  import('@/pages/Notifications').then((m) => ({ default: m.Notifications })),
+);
+const Activity = lazy(() => import('@/pages/Activity').then((m) => ({ default: m.Activity })));
+const ResultDetail = lazy(() =>
+  import('@/pages/ResultDetail').then((m) => ({ default: m.ResultDetail })),
+);
+const RemoteScreen = lazy(() =>
+  import('@/pages/RemoteScreen').then((m) => ({ default: m.RemoteScreen })),
+);
+const Rollout = lazy(() => import('@/pages/Rollout').then((m) => ({ default: m.Rollout })));
+const Run = lazy(() => import('@/pages/Run').then((m) => ({ default: m.Run })));
+const Analytics = lazy(() => import('@/pages/Analytics').then((m) => ({ default: m.Analytics })));
+const Schedules = lazy(() => import('@/pages/Schedules').then((m) => ({ default: m.Schedules })));
+const Account = lazy(() => import('@/pages/Account').then((m) => ({ default: m.Account })));
+const Settings = lazy(() => import('@/pages/Settings').then((m) => ({ default: m.Settings })));
+const Views = lazy(() => import('@/pages/Views').then((m) => ({ default: m.Views })));
 
 const queryClient = new QueryClient({
   defaultOptions: {

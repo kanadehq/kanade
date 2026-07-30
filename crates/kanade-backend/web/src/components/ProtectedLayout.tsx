@@ -1,5 +1,8 @@
+import { Suspense } from 'react';
 import { Navigate, Outlet, useLocation } from 'react-router-dom';
+import { Loader2 } from 'lucide-react';
 
+import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { Sidebar } from '@/components/Sidebar';
 import { useAuth } from '@/lib/auth';
 import { featureForPathname } from '@/lib/features';
@@ -45,7 +48,30 @@ export function ProtectedLayout() {
           together when changing the sidebar width. */}
       <main className="md:pl-56">
         <div className="max-w-screen-2xl mx-auto px-4 py-6">
-          <Outlet />
+          {/* #1215③: page components are React.lazy (route-level code
+              splitting). Both boundaries sit INSIDE the chrome so a
+              chunk load / failure touches only the content area — the
+              sidebar must not unmount / flash on navigation. The
+              ErrorBoundary is what keeps a stale-chunk import failure
+              (old tab, redeployed backend) from white-screening the
+              whole app — see ErrorBoundary.tsx. `key` ties the
+              boundary to the route so a caught GENERIC error on one
+              page doesn't trap the operator after they navigate away:
+              the remount clears the error state and the new route
+              renders. On the chunk-error path the remount just
+              re-attempts the same failing import and re-shows the
+              reload prompt — same UX, no trap either. */}
+          <ErrorBoundary key={location.pathname}>
+            <Suspense
+              fallback={
+                <div className="flex items-center justify-center py-24">
+                  <Loader2 className="size-6 animate-spin text-muted-foreground" />
+                </div>
+              }
+            >
+              <Outlet />
+            </Suspense>
+          </ErrorBoundary>
         </div>
       </main>
     </div>
