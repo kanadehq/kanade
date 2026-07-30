@@ -81,7 +81,7 @@
   # to remember a follow-up step:
   PS> .\deploy-agent.ps1 -NatsToken '<your-fleet-token>' -CommandKeys @'
   [{"kid":"backend-20260728","label":"backend","public_key":"..."},
-   {"kid":"break-glass-20260730-1432","label":"break-glass","public_key":"...","max_age_secs":900}]
+   {"kid":"break-glass-20260730-1432","label":"break-glass","public_key":"...","max_age_secs":3600}]
   '@
 
 .EXAMPLE
