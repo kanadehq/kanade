@@ -69,7 +69,7 @@ regex              = "1.13.1"
 axum               = { version = "0.8.9", features = ["multipart", "ws"] }
 sqlx               = { version = "0.9.0", features = ["runtime-tokio", "sqlite", "macros", "chrono", "migrate"] }
 tower              = "0.5.3"
-tower-http         = { version = "0.7.0", features = ["cors", "trace"] }
+tower-http         = { version = "0.7.0", features = ["cors", "trace", "compression-gzip", "compression-br"] }
 serde_yaml         = "0.9.34"
 serde_ignored      = "0.1.14"
 schemars           = { version = "1.2.2", features = ["chrono04", "uuid1"] }
