@@ -24,6 +24,7 @@ use kanade_shared::config::{LogSection, load_backend_config};
 use kanade_shared::default_paths;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use tokio::net::TcpListener;
+use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn};
 use tracing_subscriber::layer::SubscriberExt;
@@ -1287,7 +1288,14 @@ pub(crate) async fn run_backend() -> Result<()> {
             pool.clone(),
             auth::verify,
         ))
-        .layer(TraceLayer::new_for_http());
+        .layer(TraceLayer::new_for_http())
+        // #1215①: outermost layer so every response — API JSON and the
+        // embedded SPA alike — is gzip/br/deflate-compressed when the
+        // client advertises it. The 1.5 MB JS bundle and the ~500 KB
+        // /api/jobs payload both compress ~10×. Upgrade requests (the
+        // /api/remote WebSocket) carry no body and pass through
+        // untouched.
+        .layer(CompressionLayer::new());
 
     let listener = TcpListener::bind(&cfg.server.bind)
         .await
