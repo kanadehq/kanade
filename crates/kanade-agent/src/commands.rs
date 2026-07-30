@@ -8,7 +8,8 @@ use kanade_shared::ExecResult;
 use kanade_shared::default_paths;
 use kanade_shared::kv::{BUCKET_SCRIPT_CURRENT, BUCKET_SCRIPT_STATUS, SCRIPT_STATUS_REVOKED};
 use kanade_shared::wire::{
-    Command, EXIT_SKIP_DEADLINE, EXIT_SKIP_REVOKED, EXIT_SKIP_STALENESS, EXIT_SKIP_VERSION_PIN,
+    Command, EXIT_REJECTED_UNSIGNED, EXIT_SKIP_DEADLINE, EXIT_SKIP_REVOKED, EXIT_SKIP_STALENESS,
+    EXIT_SKIP_VERSION_PIN,
 };
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
@@ -139,14 +140,29 @@ pub async fn command_loop(
                 continue;
             }
         };
-        // #1165 stage 1: check provenance over the exact received bytes and
-        // report the outcome. Nothing is rejected yet — that is stage 3, and
-        // shipping the capability first is what keeps the rollout reversible.
-        verifier.observe(
+        // #1165: check provenance over the exact received bytes, report the
+        // outcome, and — on a host that is enforcing — refuse.
+        let outcome = verifier.observe(
             &msg.payload,
             &crate::command_verify::headers_of(&msg),
             &cmd.request_id,
         );
+        if let Some(reason) = verifier.refusal(outcome) {
+            warn!(
+                request_id = %cmd.request_id,
+                subject = %msg.subject,
+                reason,
+                "REFUSED: command did not verify",
+            );
+            // Before the dedup insert below, deliberately. A refusal must not
+            // consume the request_id: the operator's fix (provision the key,
+            // correct the clock, sign it properly) produces a *retry*, and on
+            // the ad-hoc path that retry can legitimately carry the same id.
+            // Marking it seen would make the second attempt vanish silently —
+            // the exact failure this whole branch exists to end.
+            publish_signature_refused(&pc_id, &cmd, reason);
+            continue;
+        }
         // Shared with command_replay: if the JetStream replay path
         // already ran this Command on an earlier reconnect (rare but
         // possible), drop the live duplicate here.
@@ -934,6 +950,57 @@ async fn publish_staleness_skipped(
     Ok(())
 }
 
+/// #1165 stage 3: synthesise an ExecResult for a command this host **refused**
+/// because its provenance did not check out.
+///
+/// Publishing something is the whole point. `kanade run` waits on
+/// `results.<request_id>`; a refusal that emitted nothing would be
+/// indistinguishable from an agent that is simply gone, and the two need
+/// opposite responses. That distinction is worth most in the case it is most
+/// likely to arise: an operator's own break-glass command refused as stale on
+/// a host whose clock is wrong, mid-incident, with the backend down — so the
+/// `command_signature_stale` obs event is sitting in the outbox rather than
+/// reaching anybody.
+///
+/// Shared by the live subscription and the JetStream replay, because both
+/// decode the same bytes and a refusal reachable through only one of them is
+/// the #1155 bypass with extra steps.
+pub(crate) fn publish_signature_refused(pc_id: &str, cmd: &Command, reason: &str) {
+    let now = chrono::Utc::now();
+    // Deterministic `result_id`, unlike every other result this agent
+    // publishes, because a refusal is the one that repeats.
+    //
+    // The refusal deliberately does not consume the `request_id` (see the call
+    // site), so nothing stops the same unverifiable command being seen again —
+    // and it will be: the replay consumer is `DeliverPolicy::LastPerSubject`,
+    // so it re-delivers the newest command on every reconnect, and a broadcast
+    // reaches `commands.all` and `commands.pc.<id>` both. With a fresh v4 each
+    // time, one bad command would accrete a result row per delivery forever.
+    //
+    // Derived from (request_id, pc_id) so every re-publish lands on the same
+    // row and the projector's `ON CONFLICT(result_id) DO UPDATE` collapses it.
+    // Chosen over an in-memory "already refused" set because that set dies
+    // with the process — and an agent restart is exactly when the replay
+    // re-delivers.
+    let result = ExecResult {
+        result_id: refusal_result_id(&cmd.request_id, pc_id),
+        request_id: cmd.request_id.clone(),
+        exec_id: cmd.exec_id.clone(),
+        parent_result_id: None,
+        pc_id: pc_id.to_string(),
+        exit_code: EXIT_REJECTED_UNSIGNED,
+        stdout: String::new(),
+        stderr: format!("refused: {reason}"),
+        started_at: now,
+        finished_at: now,
+        stdout_object: None,
+        stderr_object: None,
+        manifest_id: Some(cmd.id.clone()),
+        collect_object: None,
+    };
+    enqueue_result_best_effort(result, "signature-refusal result enqueued to outbox");
+}
+
 /// Synthesise an ExecResult that mirrors a real run but flags
 /// "didn't actually run because we were too late". Exit code 125
 /// follows the cron / GNU coreutils convention for "missed /
@@ -1057,6 +1124,16 @@ async fn publish_revoked_skipped(pc_id: &str, cmd: &Command) -> Result<()> {
     Ok(())
 }
 
+/// The `result_id` [`publish_signature_refused`] uses. Extracted so the
+/// determinism it relies on is testable without a broker or an outbox.
+fn refusal_result_id(request_id: &str, pc_id: &str) -> String {
+    Uuid::new_v5(
+        &Uuid::NAMESPACE_OID,
+        format!("{request_id}|{pc_id}|signature-refused").as_bytes(),
+    )
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1067,6 +1144,35 @@ mod tests {
             .timestamp_opt(1_700_000_000 + secs, 0)
             .single()
             .unwrap()
+    }
+
+    #[test]
+    fn a_repeated_refusal_lands_on_the_same_result_row() {
+        // A refusal deliberately does not consume the request_id, so the same
+        // unverifiable command WILL be seen again — the replay consumer is
+        // LastPerSubject and re-delivers on every reconnect, and a broadcast
+        // arrives on both `commands.all` and `commands.pc.<id>`. With a fresh
+        // v4 per publish, one bad command would accrete a result row per
+        // delivery, forever.
+        let a = refusal_result_id("req-1", "PC1");
+        let b = refusal_result_id("req-1", "PC1");
+        assert_eq!(a, b, "the projector collapses on result_id; it must repeat");
+
+        // Different command, or the same command on another machine, must NOT
+        // collapse — each is a distinct refusal an operator needs to see.
+        assert_ne!(a, refusal_result_id("req-2", "PC1"));
+        assert_ne!(a, refusal_result_id("req-1", "PC2"));
+
+        // Stable across processes -- an in-memory suppression set would
+        // forget this on restart, which is precisely when the replay
+        // re-delivers. A v5 UUID is a pure function of its name, so pinning
+        // the derivation proves nothing process-local seeds it.
+        assert_eq!(
+            a,
+            Uuid::new_v5(&Uuid::NAMESPACE_OID, b"req-1|PC1|signature-refused").to_string()
+        );
+        // A real v5, not a v4 that happened to repeat.
+        assert_eq!(Uuid::parse_str(&a).unwrap().get_version_num(), 5);
     }
 
     #[test]

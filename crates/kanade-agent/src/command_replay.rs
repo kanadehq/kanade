@@ -276,16 +276,16 @@ async fn run(
                     continue;
                 }
             };
-            // #1165 stage 1. This path matters more than the live one: the
-            // bypass #1155 measured *is* a JetStream consumer, so a verifier
-            // covering only `command_loop` would leave the attack it exists
-            // to stop running through the other door.
-            verifier.observe(
-                &msg.payload,
-                &crate::command_verify::headers_of(&msg),
-                &cmd.request_id,
-            );
-
+            // Addressed-to-me runs BEFORE provenance, and the order became
+            // load-bearing when refusals started producing an `ExecResult`
+            // (#1165 stage 3). The race this check exists for — a group
+            // command in flight while a membership removal propagates — would
+            // otherwise have this host publish a REFUSED result under its own
+            // pc_id for a command it was never responsible for, and report a
+            // signing-state transition it has no business reporting.
+            //
+            // Verifying first bought nothing anyway: a command not addressed
+            // here is dropped whatever its signature says.
             if !is_for_me(&msg.subject, &pc_id, &groups) {
                 // warn, not debug: with server-side filter_subjects
                 // narrowing delivery, anything landing here is the
@@ -297,6 +297,27 @@ async fn run(
                     subject = %msg.subject,
                     "replay msg not addressed to this agent; dropping (already acked)",
                 );
+                continue;
+            }
+
+            // #1165. This path matters more than the live one: the bypass
+            // #1155 measured *is* a JetStream consumer, so a verifier covering
+            // only `command_loop` would leave the attack it exists to stop
+            // running through the other door. That applies to the refusal
+            // below exactly as it applied to the observation.
+            let outcome = verifier.observe(
+                &msg.payload,
+                &crate::command_verify::headers_of(&msg),
+                &cmd.request_id,
+            );
+            if let Some(reason) = verifier.refusal(outcome) {
+                warn!(
+                    request_id = %cmd.request_id,
+                    subject = %msg.subject,
+                    reason,
+                    "REFUSED: replayed command did not verify",
+                );
+                crate::commands::publish_signature_refused(&pc_id, &cmd, reason);
                 continue;
             }
 

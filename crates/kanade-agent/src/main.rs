@@ -626,7 +626,7 @@ pub(crate) async fn run_agent() -> Result<()> {
     // channel; heartbeat / inventory / self_update subscribe.
     let cfg_rx = config_supervisor::spawn(client.clone(), pc_id.clone(), staleness_tracker.clone());
 
-    // #1165 stage 1: one verifier shared by every command entry point, so the
+    // #1165: one verifier shared by every command entry point, so the
     // transition reporting reflects the machine rather than one subscription.
     //
     // Built here rather than beside the command subscriptions further down
