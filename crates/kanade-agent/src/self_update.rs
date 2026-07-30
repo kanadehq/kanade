@@ -544,6 +544,34 @@ async fn maybe_download(
 ///
 /// Startup-time cleanup of `<exe>.old` lives in `main.rs` so the
 /// stale binary doesn't accumulate.
+///
+/// Give `target` the mode of `reference` (the outgoing binary) with the
+/// owner-exec bit guaranteed (#1212). On Unix a service binary must be
+/// executable or `exec()`/systemd can't launch it, and `fs::copy` leaves
+/// `target` at the staged download's 0644. Inheriting `reference`'s mode
+/// (rather than forcing 0755) preserves an operator's hardening — e.g. a
+/// 0750 install stays 0750 — while the `| 0o100` floor guarantees the
+/// swapped-in binary can always be launched by its owner (the agent runs
+/// as that user). No-op on Windows, which has no exec bit.
+fn inherit_executable_mode(reference: &Path, target: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // `reference` is the running binary, so metadata should always
+        // read; fall back to 0755 rather than ever leaving it non-exec.
+        let mode = std::fs::metadata(reference)
+            .map(|m| m.permissions().mode() & 0o7777)
+            .unwrap_or(0o755)
+            | 0o100;
+        std::fs::set_permissions(target, std::fs::Permissions::from_mode(mode))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (reference, target);
+    }
+    Ok(())
+}
+
 async fn swap_and_restart(staged: &Path, target_version: &str, running: &str) -> Result<()> {
     let current = std::env::current_exe().context("current_exe")?;
     let exe_dir = current
@@ -565,6 +593,15 @@ async fn swap_and_restart(staged: &Path, target_version: &str, running: &str) ->
     tokio::fs::copy(staged, &new_path)
         .await
         .with_context(|| format!("copy {staged:?} -> {new_path:?}"))?;
+    // #1212: `fs::copy` preserves the SOURCE mode, and the staged download
+    // is written 0644 — so on Unix the swapped-in binary would be
+    // non-executable and systemd could never launch it (the agent
+    // crash-loops, and the in-process boot-sentinel rollback can't help
+    // because the new binary never execs). Inherit the outgoing binary's
+    // mode (preserving any operator hardening) with an owner-exec floor,
+    // before it becomes the service binary. No-op on Windows.
+    inherit_executable_mode(&current, &new_path)
+        .with_context(|| format!("chmod +x {new_path:?}"))?;
 
     tokio::fs::rename(&current, &old_path)
         .await
@@ -812,5 +849,48 @@ mod tests {
         assert!(!digest_matches(&URL_SAFE.encode(DIGEST), &DIGEST));
         // Undecodable payload → fail closed.
         assert!(!digest_matches("SHA-256=not*valid*base64", &DIGEST));
+    }
+
+    // #1212: a swapped-in binary must be executable on Unix, or systemd /
+    // exec() can't launch it and the agent bricks. `fs::copy` leaves the
+    // staged file at 0644, so the swap inherits the outgoing binary's mode
+    // with an owner-exec floor.
+    #[cfg(unix)]
+    #[test]
+    fn inherit_executable_mode_preserves_hardening_and_guarantees_exec() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("kanade-exec-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mk = |name: &str, mode: u32| {
+            let p = dir.join(name);
+            std::fs::write(&p, b"#!/bin/true\n").unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+            p
+        };
+        let mode_of =
+            |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+
+        // Reference 0755 (the usual install); target left at fs::copy's 0644.
+        let reference = mk("cur", 0o755);
+        let target = mk("new", 0o644);
+        assert_eq!(mode_of(&target) & 0o111, 0, "starts non-exec");
+        super::inherit_executable_mode(&reference, &target).unwrap();
+        assert_eq!(mode_of(&target), 0o755, "inherits 0755");
+
+        // Operator-hardened 0750 must be preserved (not widened to
+        // world-exec).
+        let hardened = mk("cur2", 0o750);
+        let target2 = mk("new2", 0o644);
+        super::inherit_executable_mode(&hardened, &target2).unwrap();
+        assert_eq!(mode_of(&target2), 0o750, "preserves 0750 hardening");
+
+        // A somehow-non-exec reference still yields an owner-executable
+        // result (the floor).
+        let noexec = mk("cur3", 0o644);
+        let target3 = mk("new3", 0o644);
+        super::inherit_executable_mode(&noexec, &target3).unwrap();
+        assert_eq!(mode_of(&target3) & 0o100, 0o100, "owner-exec floor applied");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
