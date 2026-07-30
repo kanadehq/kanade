@@ -38,13 +38,36 @@ use kanade_shared::signing;
 
 /// Default freshness bound for a newly minted break-glass key.
 ///
-/// Long enough for a human to retrieve the key from wherever it rests, compose
-/// a command and send it. Short enough that a captured command cannot be
-/// replayed later: `kanade run` sets `deadline_at: None`, and the agent's
-/// replay dedup is an in-memory cache that is **empty on first boot**, so on a
-/// machine that reboots into a JetStream replay this bound is the only thing
-/// standing between it and a week-old emergency command.
-const DEFAULT_MAX_AGE_MINS: u64 = 15;
+/// Bounds the age of a **signature**, not the life of the key — the key itself
+/// never expires, and one retrieved from an offline copy months later works
+/// because using it produces a fresh signature at that moment. This is why one
+/// break-glass key suffices rather than a rotating pair.
+///
+/// It has to be short enough that a captured command cannot be replayed later:
+/// `kanade run` sets `deadline_at: None`, and the agent's replay dedup is an
+/// in-memory cache that is **empty after a reboot** — which an incident makes
+/// likely — so on a machine replaying from JetStream this bound is the only
+/// thing standing between it and a stale emergency command.
+///
+/// # Why an hour and not the tighter window this started at
+///
+/// The check is symmetric (`age > bound || age < -bound`), so this is really a
+/// **± clock-skew tolerance** between the signing host and the target. And the
+/// machines that need break-glass correlate with the machines whose clocks are
+/// wrong: off for months, dead CMOS battery, w32time not yet resynced. A
+/// window tight enough to be elegant is one where a *freshly made* signature
+/// reads as stale on exactly the host you are trying to rescue.
+///
+/// Weighed against that, what a replay actually buys an attacker here is
+/// narrow: re-running the same script the operator already ran, not arbitrary
+/// code. The costs are asymmetric — a too-tight window fails the feature
+/// completely at the one moment it exists for, while a looser one widens a
+/// bounded, low-value replay. An hour also stays far from the 7-day JetStream
+/// retention that motivated having a bound at all.
+///
+/// Per-key overridable with `--max-age-mins`; the value travels in the keyring
+/// entry, so tightening it later is a re-provision rather than a rebuild.
+const DEFAULT_MAX_AGE_MINS: u64 = 60;
 
 #[derive(Args, Debug)]
 pub struct CommandKeyArgs {
@@ -106,6 +129,16 @@ fn resolve_kid(requested: Option<&str>, stamp: &str) -> Result<String, String> {
     Ok(kid)
 }
 
+/// The freshness window as a `Duration`.
+///
+/// Exists so the minutes-to-seconds conversion has exactly one home. A test
+/// that redoes the arithmetic cannot catch an error in the arithmetic — it
+/// agrees with a `* 6` typo as readily as with `* 60` — so the generator and
+/// the test that pins its output must go through the same call.
+fn max_age(mins: u64) -> std::time::Duration {
+    std::time::Duration::from_secs(mins * 60)
+}
+
 fn break_glass(args: BreakGlassArgs) -> Result<()> {
     if args.max_age_mins == 0 {
         anyhow::bail!(
@@ -120,7 +153,7 @@ fn break_glass(args: BreakGlassArgs) -> Result<()> {
     .map_err(|e| anyhow::anyhow!(e))?;
 
     let key = signing::generate_keypair().map_err(|e| anyhow::anyhow!(e))?;
-    let max_age = std::time::Duration::from_secs(args.max_age_mins * 60);
+    let max_age = max_age(args.max_age_mins);
     let entry =
         signing::break_glass_keyring_entry(&kid, &key.verifying_key(), "break-glass", max_age);
 
@@ -171,6 +204,30 @@ mod tests {
             resolve_kid(None, "20260730-1432").unwrap(),
             "break-glass-20260730-1432"
         );
+    }
+
+    #[test]
+    fn the_default_window_reaches_the_keyring_entry_as_an_hour() {
+        // Asserted through the entry the operator actually pastes, and through
+        // the same `max_age` the generator calls. Both halves are needed for
+        // this to mean anything: an earlier version of this test did its own
+        // `* 60`, which agrees with a `* 6` typo in the generator as readily
+        // as with the correct code — it pinned the constant while claiming to
+        // pin the conversion.
+        //
+        // Pinned at all because the number is a judgement, not an arbitrary
+        // constant: the freshness check is symmetric, so this is the ±
+        // clock-skew tolerance between the signing host and the target, and a
+        // machine that needs break-glass is disproportionately one whose clock
+        // is wrong. Tightening it is a deliberate act with a rehearsal cost.
+        let key = signing::generate_keypair().unwrap();
+        let entry = signing::break_glass_keyring_entry(
+            "bg",
+            &key.verifying_key(),
+            "break-glass",
+            max_age(DEFAULT_MAX_AGE_MINS),
+        );
+        assert_eq!(entry["max_age_secs"], 3600);
     }
 
     #[test]
