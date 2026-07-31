@@ -78,9 +78,14 @@ impl CommandPublisher {
             Ok(Some(s)) => {
                 info!(
                     kid = s.kid(),
+                    identity = %identity_of(&s),
                     "signing every published command — agents holding other keys but not this one \
                      report command_signature_unknown_key; agents holding none report \
-                     command_signature_unprovisioned"
+                     command_signature_unprovisioned. `identity` is what a correctly provisioned \
+                     agent reports in command_keys (#1229) — an agent listing this kid with a \
+                     different fingerprint holds the WRONG key: it reports \
+                     command_signature_invalid for commands signed here, and once enforcement is \
+                     on it refuses them."
                 );
                 Some(s)
             }
@@ -110,6 +115,17 @@ impl CommandPublisher {
         self.signer.as_ref().map(Signer::kid)
     }
 
+    /// This backend's own `kid:fingerprint` — the exact string a correctly
+    /// provisioned agent reports in `command_keys` — or `None` when it is not
+    /// signing.
+    ///
+    /// Exists so the fleet-wide question can be *compared* rather than assumed
+    /// (#1229): the backend holds the public half already, so "does the fleet
+    /// trust the key I actually sign with" needs no separate source of truth.
+    pub fn identity(&self) -> Option<String> {
+        self.signer.as_ref().map(identity_of)
+    }
+
     /// Publish a serialized `Command` to `subject`, signed if possible.
     pub async fn publish(&self, subject: String, payload: Bytes) -> Result<(), PublishError> {
         match headers_for(
@@ -125,6 +141,17 @@ impl CommandPublisher {
             None => self.nats.publish(subject, payload).await,
         }
     }
+}
+
+/// The `kid:fingerprint` form, matching what an agent puts in `command_keys`.
+/// One place, so the two sides cannot drift into formats that look comparable
+/// and are not.
+fn identity_of(signer: &Signer) -> String {
+    format!(
+        "{}:{}",
+        signer.kid(),
+        signing::fingerprint(&signer.verifying_key())
+    )
 }
 
 /// The headers to publish alongside `body`, or `None` when this backend is not

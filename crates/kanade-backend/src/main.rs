@@ -368,6 +368,17 @@ fn command_key_generate(rotate: bool, kid: Option<&str>) -> Result<()> {
         "public key: {}",
         signing::encode_public(&key.verifying_key())
     );
+    // Printed because it is the value an operator matches against, not one they
+    // transcribe: it is what a correctly provisioned agent reports in
+    // `command_keys`, so a host listing this kid with any other fingerprint
+    // holds the wrong key and will refuse every command once enforcement is on
+    // (#1229). Deriving it here rather than by hand keeps the fleet check
+    // honest — a fingerprint computed from the same mistyped paste that wrote
+    // the ring would agree with itself.
+    println!(
+        "identity:   {kid}:{}",
+        signing::fingerprint(&key.verifying_key())
+    );
     println!();
     println!("Add this entry to every agent's HKLM\\SOFTWARE\\kanade\\agent\\CommandKeys array:");
     println!("{}", serde_json::to_string_pretty(&entry)?);
