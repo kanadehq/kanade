@@ -159,6 +159,7 @@ pub async fn heartbeat_loop(
                 let perf = refresh_self_perf(&mut sys, is_first_tick);
                 is_first_tick = false;
                 let (last_logon_user, last_logon_display_name) = last_logon();
+                let (command_keys, enforcing) = verifier.refresh_and_report();
                 let hb = Heartbeat {
                     pc_id: pc_id.clone(),
                     at: chrono::Utc::now(),
@@ -172,16 +173,22 @@ pub async fn heartbeat_loop(
                     quarantined_versions: quarantined_versions.clone(),
                     last_logon_user,
                     last_logon_display_name,
-                    // Always `Some`, even when empty: an empty ring is the
-                    // state an operator has to act on, and omitting it would
-                    // make it arrive looking like an agent too old to report.
+                    // Always `Some`, even when empty / false: those are the
+                    // states an operator has to act on, and omitting them would
+                    // make them arrive looking like an agent too old to report.
                     // Refresh-then-report, not just report. The command path
                     // only re-reads the store when a command names a key it
                     // lacks, which never happens for a key that was *removed*
                     // — so without this, a revoked key would keep verifying
-                    // until the agent restarted. See `refresh_and_keys`; this
+                    // until the agent restarted. See `refresh_and_report`; this
                     // interval is what bounds revocation latency.
-                    command_keys: Some(verifier.refresh_and_keys()),
+                    //
+                    // One call for both because they are one observation: read
+                    // separately, a reload landing in between could pair a
+                    // populated ring with the `enforcing: false` that an empty
+                    // one produces, and describe a machine that never existed.
+                    command_keys: Some(command_keys),
+                    enforcing: Some(enforcing),
                 };
                 let payload = match serde_json::to_vec(&hb) {
                     Ok(b) => b,

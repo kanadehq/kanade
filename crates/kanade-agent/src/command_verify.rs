@@ -81,7 +81,7 @@
 //! fleet-wide "has the new key landed everywhere?" check would answer no
 //! indefinitely.
 //!
-//! So [`Verifier::refresh_and_keys`] re-reads once per heartbeat, and the
+//! So [`Verifier::refresh_and_report`] re-reads once per heartbeat, and the
 //! heartbeat interval is what bounds revocation latency. It is cheap because
 //! the raw value is compared before anything is parsed — the expensive part is
 //! `VerifyingKey::from_bytes` (an Ed25519 point decompression per entry), and
@@ -112,7 +112,7 @@
 //! all. At stage 3 that is the difference between one delayed command and a
 //! machine that refuses every command until something reloads successfully.
 //!
-//! So [`read_keyring`] separates "nothing provisioned" (`Ok(empty)` — a real
+//! So [`read_keyring_raw`] separates "nothing provisioned" (`Ok(None)` — a real
 //! state an operator can intend) from "provisioned and unusable" (`Err`), and
 //! only the former replaces a live ring.
 //!
@@ -464,7 +464,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 /// How the ring is (re)loaded. Boxed rather than hard-wired to
-/// [`read_keyring`] so the reload path is reachable from a test — the registry
+/// [`read_keyring_raw`] so the reload path is reachable from a test — the registry
 /// returns nothing on non-Windows, so a test that went through it would assert
 /// nothing at all on CI, which is where this needs to hold.
 /// Yields the store's **raw** value: `Ok(None)` = absent (a state an operator
@@ -642,6 +642,20 @@ impl Verifier {
         true
     }
 
+    /// The same predicate as [`Verifier::enforcing_now`], against a ring the
+    /// caller already holds — the reporting path (#1250).
+    ///
+    /// Split from the decision path for two reasons. It takes the lock as an
+    /// argument, so the ring and the enforcement state reported on one
+    /// heartbeat describe **one instant** rather than two reads a reload could
+    /// slip between. And it does not warn: the empty-ring log is about
+    /// declining to act, and firing it from an observation would make its
+    /// volume a function of the heartbeat interval. Reporting `false` is the
+    /// signal here, and unlike the log it is fleet-enumerable.
+    fn enforcing_with(&self, ring: &KeyRing) -> bool {
+        self.enforce_requested && !ring.is_empty()
+    }
+
     /// The stderr for a refusal, or `None` when this outcome is allowed to
     /// run — either because it verified, or because this host is not
     /// enforcing.
@@ -653,8 +667,14 @@ impl Verifier {
         (outcome.is_refusal() && self.enforcing_now()).then(|| outcome.refusal_reason())
     }
 
-    /// The ring **as it stands in memory**, as `kid:fingerprint`, for the
-    /// heartbeat.
+    /// The ring **as it stands in memory**, as `kid:fingerprint`.
+    ///
+    /// Test-only since #1250 folded reporting into
+    /// [`Verifier::refresh_and_report`], which reads the ring and the
+    /// enforcement state under one lock. Kept because the reload tests need to
+    /// inspect the ring *without* refreshing it — asserting what a specific
+    /// `pull` left behind is the whole point there, and an accessor that
+    /// re-read would answer a different question.
     ///
     /// Deliberately not a registry read. Those two diverge between a key
     /// landing on disk and the reload that picks it up, and the question an
@@ -668,6 +688,7 @@ impl Verifier {
     /// wrote the ring, so two hosts can agree on it while holding different
     /// keys, and that host refuses every command with nothing in the fleet view
     /// to distinguish it.
+    #[cfg(test)]
     pub fn trusted_keys(&self) -> Vec<String> {
         lock(&self.ring).kid_fingerprints().collect()
     }
@@ -850,7 +871,7 @@ impl Verifier {
     /// The `last_raw` guard is taken **before** the read, not after, and that
     /// ordering is load-bearing now that two callers reach here independently
     /// (a command path via [`Verifier::reload_if_due`], and the heartbeat via
-    /// [`Verifier::refresh_and_keys`]). Reading first and locking second lets
+    /// [`Verifier::refresh_and_report`]). Reading first and locking second lets
     /// two concurrent pulls observe different values and commit in the wrong
     /// order — the one that read the *older* value taking the lock last and
     /// installing a stale ring. For a revocation that means the revoked key
@@ -901,8 +922,16 @@ impl Verifier {
         }
     }
 
-    /// Re-read the store, ignoring the command-path rate limit, and report the
-    /// keys now in force as `kid:fingerprint`. Called once per heartbeat.
+    /// Re-read the store, ignoring the command-path rate limit, and report both
+    /// the keys now in force (as `kid:fingerprint`) and whether this host is
+    /// enforcing. Called once per heartbeat.
+    ///
+    /// The two are returned together, under one lock, because they are only
+    /// meaningful as a pair: "holds the right ring but is not enforcing" and
+    /// "is enforcing" are the two halves of the stage-3 work queue, and a
+    /// reload landing between two separate reads would let a heartbeat describe
+    /// a machine that never existed — a ring with keys alongside the
+    /// `enforcing: false` that an *empty* ring produces.
     ///
     /// This is what makes **revocation** work. The command-path reload fires
     /// only on [`VerifyError::UnknownKid`], which covers a ring that is
@@ -920,9 +949,13 @@ impl Verifier {
     /// coupling is deliberate but worth knowing: an operator who widens
     /// `heartbeat_interval` for bandwidth also widens the window in which a
     /// revoked key keeps working.
-    pub fn refresh_and_keys(&self) -> Vec<String> {
+    pub fn refresh_and_report(&self) -> (Vec<String>, bool) {
         self.pull();
-        self.trusted_keys()
+        let ring = lock(&self.ring);
+        (
+            ring.kid_fingerprints().collect(),
+            self.enforcing_with(&ring),
+        )
     }
 
     /// Emit an obs event when the class changes, so the fleet view shows which
@@ -1733,7 +1766,7 @@ mod tests {
         );
 
         // The heartbeat refresh is what closes it.
-        let kids = v.refresh_and_keys();
+        let (kids, _) = v.refresh_and_report();
         assert_eq!(kids, vec![reported("backend-1", &backend)]);
         assert_eq!(
             v.classify(b"payload", &signed, "r3", now, t),
@@ -1777,10 +1810,83 @@ mod tests {
         store.provision(backend_ring("backend-1", &sk));
         let v = Verifier::with_loader("PC1".into(), test_dir(), store.loader());
 
-        let first = v.refresh_and_keys();
+        let (first, _) = v.refresh_and_report();
         assert_eq!(v.pull(), Reload::Unchanged);
-        assert_eq!(v.refresh_and_keys(), first);
+        assert_eq!(v.refresh_and_report().0, first);
         assert_eq!(first, vec![reported("backend-1", &sk)]);
+    }
+
+    #[test]
+    fn a_host_that_is_not_configured_to_enforce_reports_false() {
+        // Every machine in the fleet today: a complete ring, and not enforcing.
+        // The pair is the point — the ring alone cannot express it.
+        let sk = SigningKey::from_bytes(&[73u8; 32]);
+        let store = Store::default();
+        store.provision(backend_ring("backend-1", &sk));
+        let v = Verifier::with_loader("PC1".into(), test_dir(), store.loader());
+
+        let (keys, enforcing) = v.refresh_and_report();
+        assert_eq!(keys, vec![reported("backend-1", &sk)]);
+        assert!(!enforcing, "with_loader does not request enforcement");
+    }
+
+    #[test]
+    fn an_enforcing_host_that_loses_its_ring_reports_false() {
+        // The effective state, not the configured one. `RequireSignedCommands`
+        // is still set here, but the agent declines to enforce on an empty ring
+        // — refusing everything would include the command that restores the
+        // keys — so a host in this state is NOT enforcing, and reporting the
+        // registry value would describe a machine that does not exist.
+        //
+        // Fleet-wide this is the difference between "someone wiped a ring and
+        // that host silently stopped enforcing" and a healthy host, which the
+        // registry value cannot tell apart.
+        let sk = SigningKey::from_bytes(&[74u8; 32]);
+        let store = Store::default();
+        store.provision(backend_ring("backend-1", &sk));
+        let v = Verifier::with_loader_and_policy("PC1".into(), test_dir(), store.loader(), true);
+
+        let (_, enforcing) = v.refresh_and_report();
+        assert!(enforcing, "a requested, populated ring enforces");
+
+        store.provision(KeyRing::new());
+        let (keys, enforcing) = v.refresh_and_report();
+        assert!(keys.is_empty());
+        assert!(
+            !enforcing,
+            "an empty ring cannot enforce, whatever the registry says"
+        );
+    }
+
+    #[test]
+    fn reporting_does_not_fire_the_empty_ring_warning() {
+        // The reporting path must stay side-effect free: the empty-ring log is
+        // about declining to ACT, and firing it from an observation would make
+        // its volume a function of the heartbeat interval. The fleet-visible
+        // `enforcing: false` is the signal here — and unlike a log line, it can
+        // be counted.
+        let sk = SigningKey::from_bytes(&[75u8; 32]);
+        let store = Store::default();
+        store.provision(KeyRing::new());
+        let v = Verifier::with_loader_and_policy("PC1".into(), test_dir(), store.loader(), true);
+
+        for _ in 0..3 {
+            assert!(!v.refresh_and_report().1);
+        }
+        assert!(
+            !v.empty_ring_warned
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "reporting must not consume the one-shot warning the command path owns"
+        );
+
+        // And the command path still owns it.
+        let _ = v.refusal(Outcome::Unsigned);
+        assert!(
+            v.empty_ring_warned
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "the decision path is what warns"
+        );
+        let _ = sk;
     }
 
     #[test]

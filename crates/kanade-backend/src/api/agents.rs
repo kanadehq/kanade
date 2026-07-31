@@ -66,6 +66,18 @@ pub struct AgentRow {
     /// column exists to enumerate unenumerable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command_keys: Option<Vec<String>>,
+    /// #1250: whether this agent is refusing commands it cannot verify.
+    ///
+    /// Same three-state shape and the same reason as [`Self::command_keys`]:
+    ///
+    /// * absent — never reported. Unknown, not "no".
+    /// * `false` — reporting, and not enforcing. **This is the work queue.**
+    /// * `true` — refusing unverified commands right now.
+    ///
+    /// Not derivable from `command_keys`: a host can hold a perfect ring and
+    /// not be enforcing, which is what the whole fleet is doing today.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enforcing: Option<bool>,
     /// #1051: operator-managed key/value metadata for this PC, from the
     /// `agent_meta` projection (source of truth is the KV bucket the SPA
     /// `PUT`/`kanade meta` write). Decorated onto the returned page so the
@@ -872,6 +884,11 @@ fn row_to_agent(r: sqlx::sqlite::SqliteRow) -> AgentRow {
             .ok()
             .flatten()
             .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok()),
+        // #1250: NULL (never reported) stays `None`. `try_get` on a column
+        // added by a later migration than the row was written under yields
+        // `Err` on an older DB, which `.ok().flatten()` folds into `None` —
+        // the correct answer there, since the agent genuinely has not said.
+        enforcing: r.try_get::<Option<bool>, _>("enforcing").ok().flatten(),
         last_logon_user: r
             .try_get::<Option<String>, _>("last_logon_user")
             .ok()
@@ -1083,6 +1100,38 @@ mod tests {
             by_id("WS-9"),
             None,
             "never reported must stay distinguishable from holds-nothing"
+        );
+    }
+
+    /// #1250: the same three states for enforcement, and the same reason.
+    /// `false` is the remaining stage-3 work; absent is a machine that has not
+    /// answered. An operator counting the first must not be handed the second.
+    #[tokio::test]
+    async fn enforcing_keeps_never_reported_distinct_from_not_enforcing() {
+        let pool = seeded_pool().await;
+        sqlx::query("UPDATE agents SET enforcing = 1 WHERE pc_id = 'PC001'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        // Reported, and not enforcing: the work queue.
+        sqlx::query("UPDATE agents SET enforcing = 0 WHERE pc_id = 'PC002'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        // WS-9 is left NULL — never reported.
+
+        let (_h, Json(rows)) = call(pool, ListParams::default()).await.unwrap();
+        let by_id = |id: &str| rows.iter().find(|r| r.pc_id == id).unwrap().enforcing;
+        assert_eq!(by_id("PC001"), Some(true));
+        assert_eq!(
+            by_id("PC002"),
+            Some(false),
+            "not enforcing must arrive as false, not as absent"
+        );
+        assert_eq!(
+            by_id("WS-9"),
+            None,
+            "never reported must stay distinguishable from not-enforcing"
         );
     }
 

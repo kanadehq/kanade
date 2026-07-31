@@ -134,6 +134,32 @@ pub struct Heartbeat {
     /// exist yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_keys: Option<Vec<String>>,
+    /// #1250: whether this agent is refusing commands it cannot verify.
+    ///
+    /// [`Self::command_keys`] made key *distribution* enumerable; this makes
+    /// *enforcement* enumerable, which nothing else does. It cannot be inferred
+    /// from the signature outcomes: in normal operation every command is
+    /// signed, so an enforcing host and a non-enforcing one both report
+    /// `command_signature_ok`. The two are observationally identical until
+    /// something unsigned arrives — which is exactly the event nobody wants to
+    /// stage across a fleet to find out. Nor from `command_keys`: a host can
+    /// hold a perfect ring and not be enforcing, which is what every machine is
+    /// doing today.
+    ///
+    /// Three states, for the same reason as `command_keys`:
+    ///
+    /// * `None` — the agent predates this field. Unknown, not "no".
+    /// * `Some(false)` — reporting, and not enforcing. **This is the queue.**
+    /// * `Some(true)` — refusing unverified commands right now.
+    ///
+    /// The **effective** state, not the configured one: an agent declines to
+    /// enforce on an empty ring (refusing everything would include the command
+    /// that restores the keys), so a host in that state reports `false` however
+    /// its registry reads. Reporting the configured value would describe a
+    /// machine that does not exist — the same rule that makes `command_keys`
+    /// report memory rather than disk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enforcing: Option<bool>,
 }
 
 #[cfg(test)]
@@ -157,6 +183,7 @@ mod tests {
             last_logon_user: Some("EXAMPLE\\taro".into()),
             last_logon_display_name: Some("Yamada Taro".into()),
             command_keys: Some(vec!["backend-20260728".into()]),
+            enforcing: Some(false),
         };
         let json = serde_json::to_string(&hb).unwrap();
         let back: Heartbeat = serde_json::from_str(&json).unwrap();
@@ -191,6 +218,7 @@ mod tests {
             last_logon_user: None,
             last_logon_display_name: None,
             command_keys: None,
+            enforcing: None,
         };
         let json = serde_json::to_string(&hb).unwrap();
         assert!(
@@ -224,6 +252,7 @@ mod tests {
             last_logon_user: None,
             last_logon_display_name: None,
             command_keys: Some(Vec::new()),
+            enforcing: Some(false),
         };
         let json = serde_json::to_string(&hb).unwrap();
         assert!(
@@ -237,6 +266,47 @@ mod tests {
         let old = r#"{"pc_id":"x","at":"2026-05-16T00:00:00Z","agent_version":"0.44.35"}"#;
         let hb: Heartbeat = serde_json::from_str(old).unwrap();
         assert_eq!(hb.command_keys, None, "absent must not decode as empty");
+    }
+
+    #[test]
+    fn not_enforcing_is_reported_rather_than_omitted() {
+        // #1250, and the same trap as the keyring above: `false` is the state
+        // worth acting on, so it must not be skipped. A `skip_serializing_if`
+        // that dropped it would put "this host is not enforcing" and "this host
+        // is too old to say" on the wire as the same absence — and stage 3's
+        // remaining work is exactly the first set.
+        let hb = Heartbeat {
+            pc_id: "x".into(),
+            at: chrono::Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap(),
+            agent_version: "0.45.1".into(),
+            hostname: None,
+            os_family: None,
+            agent_cpu_pct: None,
+            agent_rss_bytes: None,
+            agent_disk_read_bytes: None,
+            agent_disk_written_bytes: None,
+            quarantined_versions: Vec::new(),
+            last_logon_user: None,
+            last_logon_display_name: None,
+            command_keys: Some(vec!["backend-20260728:75b4c8f44e18012d".into()]),
+            enforcing: Some(false),
+        };
+        let json = serde_json::to_string(&hb).unwrap();
+        assert!(
+            json.contains("\"enforcing\":false"),
+            "a host that is not enforcing must say so: {json}"
+        );
+        let back: Heartbeat = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.enforcing, Some(false));
+
+        // The pairing this field exists to expose: a complete ring proves
+        // nothing about enforcement, so neither value can be read off the
+        // other. This heartbeat is every machine in the fleet today.
+        assert!(back.command_keys.is_some_and(|k| !k.is_empty()));
+
+        let old = r#"{"pc_id":"x","at":"2026-08-01T00:00:00Z","agent_version":"0.45.1"}"#;
+        let hb: Heartbeat = serde_json::from_str(old).unwrap();
+        assert_eq!(hb.enforcing, None, "absent must not decode as false");
     }
 
     #[test]

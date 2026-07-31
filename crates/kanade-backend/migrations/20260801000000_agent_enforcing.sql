@@ -1,0 +1,26 @@
+-- #1250: whether each agent is refusing commands it cannot verify.
+--
+-- The other half of the #1165 rollout's observability. `command_keys`
+-- (#1195, #1229) made key DISTRIBUTION enumerable; nothing made ENFORCEMENT
+-- enumerable, and it cannot be derived from what is already stored: in normal
+-- operation every command is signed, so an enforcing host and a non-enforcing
+-- one both record `command_signature_ok`. A perfect ring in `command_keys`
+-- likewise says nothing — that is the state the entire fleet is in today.
+--
+-- NULLable with no DEFAULT, deliberately, exactly as `command_keys` is. The
+-- three states are:
+--
+--   NULL  -- never reported. The agent predates the field, or has not sent a
+--            heartbeat since being upgraded. Unknown, NOT "no".
+--   0     -- reporting, and not enforcing. This is the work queue, and it is
+--            the row an operator needs to be able to COUNT.
+--   1     -- refusing unverified commands right now.
+--
+-- A `DEFAULT 0` would collapse the first two into each other on backfill and
+-- silently claim the whole fleet had answered "not enforcing" before a single
+-- agent had said anything, which is the one distinction this column exists to
+-- keep. Existing rows backfill to NULL and fill in on the next heartbeat.
+--
+-- INTEGER rather than BOOLEAN: SQLite has no boolean type, and sqlx maps
+-- `Option<bool>` onto 0/1 here.
+ALTER TABLE agents ADD COLUMN enforcing INTEGER;
