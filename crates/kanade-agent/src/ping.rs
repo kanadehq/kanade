@@ -82,6 +82,7 @@ pub async fn serve(
                 // travel as `Some([])`, because there it means "holds nothing"
                 // rather than "not answering".
                 command_keys: None,
+                enforcing: None,
             };
             let payload = match serde_json::to_vec(&hb) {
                 Ok(b) => b,

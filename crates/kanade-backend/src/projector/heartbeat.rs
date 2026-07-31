@@ -166,9 +166,9 @@ where
              agent_disk_read_bytes, agent_disk_written_bytes,
              quarantined_versions,
              last_logon_user, last_logon_display_name,
-             command_keys,
+             command_keys, enforcing,
              updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
          ON CONFLICT(pc_id) DO UPDATE SET
              hostname                  = COALESCE(agents.hostname, excluded.hostname),
              os_family                 = COALESCE(agents.os_family, excluded.os_family),
@@ -197,6 +197,12 @@ where
              -- which is not NULL, so revoking every key still overwrites --
              -- the one case where a cleared value has to survive.
              command_keys              = COALESCE(excluded.command_keys, agents.command_keys),
+             -- #1250: same precedence, same reason. A ping reply reports NULL
+             -- and must not erase it. `false` arrives as 0, which is not NULL,
+             -- so a host that STOPS enforcing still overwrites -- the case that
+             -- has to survive, because was-enforcing-now-is-not is what an
+             -- emergency disable looks like, and what a wiped ring looks like.
+             enforcing                 = COALESCE(excluded.enforcing, agents.enforcing),
              updated_at                = CURRENT_TIMESTAMP",
     )
     .bind(&hb.pc_id)
@@ -216,6 +222,7 @@ where
     .bind(&hb.last_logon_user)
     .bind(&hb.last_logon_display_name)
     .bind(command_keys_json)
+    .bind(hb.enforcing)
     .execute(executor)
     .await?;
     Ok(())
