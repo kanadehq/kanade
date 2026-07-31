@@ -6,6 +6,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 
 import { ErrorCard } from '@/components/ErrorCard';
+import { SigningBadge } from '@/components/SigningBadge';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -50,6 +51,7 @@ const TOGGLEABLE_COLS = [
   'agent',
   'lastHeartbeat',
   'lastLogon',
+  'signing',
   'cpu',
   'rss',
   'actions',
@@ -984,6 +986,12 @@ export function Agents() {
                 as an em-dash, so the table stays usable during a
                 rolling upgrade. Headers are prefixed "agent" so the
                 columns are clearly the agent process, not the host. */}
+            {/* #1253: command-signing rollout state. Not sortable — the
+                backend's sort allow-list has no token for it, and adding one
+                would make this column stop being a pure SPA change. */}
+            {isColVisible('signing') && (
+              <TableHead title={t('columnTitles.signing')}>{t('columns.signing')}</TableHead>
+            )}
             {isColVisible('cpu') && (
               <TableHead className="text-right" title={t('columnTitles.cpu')}>
                 {t('columns.cpu')}
@@ -1096,6 +1104,11 @@ export function Agents() {
                   </TableCell>
                 );
               })}
+              {isColVisible('signing') && (
+                <TableCell label={t('columns.signing')}>
+                  <SigningBadge agent={a} />
+                </TableCell>
+              )}
               {isColVisible('cpu') && (
                 <TableCell label={t('columns.cpu')} className="text-right text-muted text-xs">{fmtPct(a.agent_cpu_pct)}</TableCell>
               )}

@@ -20,6 +20,18 @@
     "onlineTitle": "Heartbeat within the last 2 minutes",
     "offlineTitle": "No heartbeat for ≥ 2 minutes — counts as stale on the Dashboard"
   },
+  "signing": {
+    "enforcing": "enforcing",
+    "enforcingTitle": "Reports that it verifies commands and refuses the ones it cannot verify.",
+    "ready": "keys ready",
+    "readyTitle": "Reports a keyring and no enforcement yet. Enforcement begins at this host's next agent restart — no action needed unless you want it sooner.",
+    "keysOnly": "keys held",
+    "keysOnlyTitle": "Reports a keyring, but this agent version cannot say whether it enforces. Upgrade it to find out.",
+    "none": "no keys",
+    "noneTitle": "Reports its keyring and holds nothing. Harmless today; this host would refuse every command the day enforcement is enabled. Run the provisioning job.",
+    "unknown": "unknown",
+    "unknownTitle": "This agent predates keyring reporting, so nothing can be said about it. Upgrade it before provisioning — not the same as holding no keys."
+  },
   "columns": {
     "status": "status",
     "pcId": "pc_id",
@@ -27,6 +39,7 @@
     "agent": "agent",
     "lastHeartbeat": "last heartbeat",
     "lastLogon": "last sign-in",
+    "signing": "signing",
     "cpu": "agent CPU",
     "rss": "agent RSS",
     "actions": "actions",
@@ -36,6 +49,7 @@
     "attributesLabel": "attributes"
   },
   "columnTitles": {
+    "signing": "Command-signing rollout state: does this host verify who sent a command, and does it refuse when it cannot? Shows what each agent REPORTS — it cannot tell whether a host's keys are the ones the backend actually signs with.",
     "cpu": "Agent process CPU % (one core = 100)",
     "rss": "Agent process resident set size (current RAM footprint)",
     "lastLogon": "Most recent account the Windows sign-in screen used (display name over login name)",
