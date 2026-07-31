@@ -118,6 +118,15 @@ pub async fn publish(
         })?;
     info!(version, digest = ?meta.digest, "publish: agent binary uploaded");
 
+    // #1216: write-through so the SPA's immediate post-upload refetch
+    // sees the release without racing the metadata watcher. Best-effort
+    // — the watcher heals the index on the meta message.
+    if let Err(e) =
+        crate::projector::object_meta::apply(&state.pool, OBJECT_AGENT_RELEASES, &meta).await
+    {
+        warn!(error = %e, %version, "object_meta write-through failed (watcher will heal)");
+    }
+
     audit::record(
         &state.nats,
         "operator",
@@ -215,6 +224,15 @@ pub async fn delete_release(
     })?;
     info!(%version, "publish: agent binary deleted");
 
+    // #1216: write-through so the SPA's immediate post-delete refetch
+    // no longer lists the release (watcher would heal, but slower).
+    if let Err(e) =
+        crate::projector::object_meta::delete_key(&state.pool, OBJECT_AGENT_RELEASES, &version)
+            .await
+    {
+        warn!(error = %e, %version, "object_meta write-through failed (watcher will heal)");
+    }
+
     audit::record(
         &state.nats,
         "operator",
@@ -245,43 +263,25 @@ pub struct ReleaseRow {
 pub async fn list_releases(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<ReleaseRow>>, (StatusCode, String)> {
-    let store = state
-        .jetstream
-        .get_object_store(OBJECT_AGENT_RELEASES)
+    // #1216: read the SQLite metadata index (projector::object_meta)
+    // instead of ObjectStore::list() — the latter full-scanned the
+    // stream per cold request (10 s on the measured bucket).
+    let metas = crate::projector::object_meta::list_bucket(&state.pool, OBJECT_AGENT_RELEASES)
         .await
         .map_err(|e| {
-            warn!(error = %e, "get_object_store agent_releases");
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                format!(
-                    "Object Store '{OBJECT_AGENT_RELEASES}' missing — run `kanade jetstream setup`"
-                ),
-            )
+            warn!(error = %e, "object_store_meta list agent_releases");
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
         })?;
-    let mut list = store.list().await.map_err(|e| {
-        warn!(error = %e, "object_store.list");
-        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-    })?;
 
-    let mut rows = Vec::new();
-    while let Some(meta) = list.next().await {
-        let Ok(meta) = meta else { continue };
-        // async-nats' ObjectMeta.modified is a time::OffsetDateTime;
-        // convert to chrono via Unix nanos so the wire shape matches
-        // every other `*_at` field on the backend.
-        let modified = meta.modified.and_then(|t| {
-            let nanos = t.unix_timestamp_nanos();
-            let secs = (nanos.div_euclid(1_000_000_000)) as i64;
-            let nsec = (nanos.rem_euclid(1_000_000_000)) as u32;
-            chrono::DateTime::<chrono::Utc>::from_timestamp(secs, nsec).map(|d| d.to_rfc3339())
-        });
-        rows.push(ReleaseRow {
-            version: meta.name,
-            size: meta.size as u64,
-            digest: meta.digest,
-            modified,
-        });
-    }
+    let mut rows: Vec<ReleaseRow> = metas
+        .into_iter()
+        .map(|m| ReleaseRow {
+            version: m.key,
+            size: m.size as u64,
+            digest: m.digest,
+            modified: m.modified,
+        })
+        .collect();
     rows.sort_by(|a, b| b.modified.cmp(&a.modified));
     Ok(Json(rows))
 }

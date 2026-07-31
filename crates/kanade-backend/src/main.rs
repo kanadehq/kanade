@@ -1240,6 +1240,18 @@ pub(crate) async fn run_backend() -> Result<()> {
         });
     }
 
+    // #1216: object-store metadata index — one supervised watcher per
+    // bucket keeps `object_store_meta` in sync (including direct-NATS
+    // writers the API never sees), and the four list endpoints read
+    // the index instead of full-scanning the stream per request.
+    for bucket in projector::object_meta::BUCKETS {
+        let pool = pool.clone();
+        let js = jetstream.clone();
+        tokio::spawn(async move {
+            projector::object_meta::run(pool, js, bucket).await;
+        });
+    }
+
     let app_state = api::AppState {
         pool: pool.clone(),
         // #1165 stage 2: every command the backend puts on the wire goes

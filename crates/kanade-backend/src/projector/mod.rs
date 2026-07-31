@@ -10,6 +10,7 @@ pub mod heartbeat;
 pub mod history;
 pub mod host_perf;
 pub mod notifications;
+pub mod object_meta;
 pub mod obs_events;
 pub mod process_perf;
 pub mod results;

@@ -24,7 +24,6 @@ use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use futures::StreamExt;
 use kanade_shared::kv::OBJECT_COLLECTIONS;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -130,57 +129,38 @@ async fn collect_job_meta(
 pub async fn list_bundles(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<BundleRow>>, (StatusCode, String)> {
-    let store = state
-        .jetstream
-        .get_object_store(OBJECT_COLLECTIONS)
+    // #1216: read the SQLite metadata index (projector::object_meta)
+    // instead of ObjectStore::list() — the latter full-scanned the
+    // stream per cold request (29.6 s for 20 bundles on the measured
+    // bucket). Agent uploads never touch the backend API; the index
+    // sees them via the bucket's metadata watch.
+    let metas = crate::projector::object_meta::list_bucket(&state.pool, OBJECT_COLLECTIONS)
         .await
         .map_err(|e| {
-            warn!(error = %e, "get_object_store collections");
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                format!(
-                    "Object Store '{OBJECT_COLLECTIONS}' missing — run `kanade jetstream setup`"
-                ),
-            )
+            warn!(error = %e, "object_store_meta list collections");
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
         })?;
-    let mut list = store.list().await.map_err(|e| {
-        warn!(error = %e, "object_store.list collections");
-        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-    })?;
 
     // First pass: parse every object key into a row skeleton. The
     // distinct producing job_ids are gathered from `rows` afterwards so
     // we can resolve their `collect:` labels from the in-memory jobs
     // cache in one shot (below) rather than a KV round-trip per job.
     let mut rows = Vec::new();
-    while let Some(item) = list.next().await {
-        // Propagate stream errors rather than truncating — a partial
-        // list served as 200 would lie about what's in the bucket.
-        let meta = item.map_err(|e| {
-            warn!(error = %e, "collect.list: object metadata stream error");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("list bundles: {e}"),
-            )
-        })?;
-        let Some((pc_id, job_id, collected_at, label)) = parse_bundle_key(&meta.name) else {
-            warn!(key = %meta.name, "collect.list: object key not <pc_id>/<job_id>/[<label>__]<ts>.zip — skipping");
+    for m in metas {
+        let Some((pc_id, job_id, collected_at, label)) = parse_bundle_key(&m.key) else {
+            warn!(key = %m.key, "collect.list: object key not <pc_id>/<job_id>/[<label>__]<ts>.zip — skipping");
             continue;
         };
-        let modified = meta
-            .modified
-            .and_then(|t| chrono::DateTime::from_timestamp(t.unix_timestamp(), t.nanosecond()))
-            .map(|d| d.to_rfc3339());
         rows.push(BundleRow {
-            key: meta.name,
+            key: m.key,
             pc_id,
             job_id,
             // Prefer the key's own timestamp; fall back to the object's
             // modified time only when the filename wasn't a timestamp.
-            collected_at: Some(collected_at).filter(|s| !s.is_empty()).or(modified),
+            collected_at: Some(collected_at).filter(|s| !s.is_empty()).or(m.modified),
             label,
-            size: meta.size as u64,
-            digest: meta.digest,
+            size: m.size as u64,
+            digest: m.digest,
             // Filled in from the jobs cache in the second pass, once we
             // know every job_id that appears in the listing.
             name: None,
@@ -323,6 +303,14 @@ pub async fn delete_bundle(
             (StatusCode::INTERNAL_SERVER_ERROR, msg)
         }
     })?;
+
+    // #1216: write-through so the SPA's immediate post-delete refetch
+    // no longer lists the bundle (watcher would heal, but slower).
+    if let Err(e) =
+        crate::projector::object_meta::delete_key(&state.pool, OBJECT_COLLECTIONS, &key).await
+    {
+        warn!(error = %e, %key, "object_meta write-through failed (watcher will heal)");
+    }
 
     audit::record(
         &state.nats,

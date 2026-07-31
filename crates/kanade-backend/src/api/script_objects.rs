@@ -38,7 +38,6 @@ use axum::body::{Body, Bytes};
 use axum::extract::{Multipart, Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use futures::StreamExt;
 use kanade_shared::kv::OBJECT_SCRIPTS;
 use serde::Serialize;
 use tokio::io::AsyncReadExt;
@@ -176,6 +175,13 @@ pub async fn publish(
     })?;
     info!(name, version, digest = ?meta.digest, "script_objects: uploaded");
 
+    // #1216: write-through so the SPA's immediate post-upload refetch
+    // sees the object without racing the metadata watcher. Best-effort
+    // — the watcher heals the index on the meta message.
+    if let Err(e) = crate::projector::object_meta::apply(&state.pool, OBJECT_SCRIPTS, &meta).await {
+        warn!(error = %e, %key, "object_meta write-through failed (watcher will heal)");
+    }
+
     audit::record(
         &state.nats,
         "operator",
@@ -214,50 +220,32 @@ pub struct ScriptObjectRow {
 pub async fn list_objects(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<ScriptObjectRow>>, (StatusCode, String)> {
-    let store = state
-        .jetstream
-        .get_object_store(OBJECT_SCRIPTS)
+    // #1216: read the SQLite metadata index (projector::object_meta)
+    // instead of ObjectStore::list() — same full-stream scan the
+    // sibling endpoints paid, just not (yet) user-visible on this
+    // small bucket.
+    let metas = crate::projector::object_meta::list_bucket(&state.pool, OBJECT_SCRIPTS)
         .await
         .map_err(|e| {
-            warn!(error = %e, "get_object_store scripts");
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                format!("Object Store '{OBJECT_SCRIPTS}' missing — run `kanade jetstream setup`"),
-            )
+            warn!(error = %e, "object_store_meta list scripts");
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
         })?;
-    let mut list = store.list().await.map_err(|e| {
-        warn!(error = %e, "object_store.list");
-        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-    })?;
 
     let mut rows = Vec::new();
-    while let Some(item) = list.next().await {
-        // Propagate stream errors instead of silently truncating —
-        // same posture as app_packages::list_packages.
-        let meta = item.map_err(|e| {
-            warn!(error = %e, "script_objects.list: object metadata stream error");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("list script objects: {e}"),
-            )
-        })?;
-        let (name, version) = match meta.name.rsplit_once('/') {
+    for m in metas {
+        let (name, version) = match m.key.rsplit_once('/') {
             Some((n, v)) => (n.to_string(), v.to_string()),
             None => {
-                warn!(key = %meta.name, "script_objects.list: object key has no '/' — skipping");
+                warn!(key = %m.key, "script_objects.list: object key has no '/' — skipping");
                 continue;
             }
         };
-        let modified = meta
-            .modified
-            .and_then(|t| chrono::DateTime::from_timestamp(t.unix_timestamp(), t.nanosecond()))
-            .map(|d| d.to_rfc3339());
         rows.push(ScriptObjectRow {
             name,
             version,
-            size: meta.size as u64,
-            digest: meta.digest,
-            modified,
+            size: m.size as u64,
+            digest: m.digest,
+            modified: m.modified,
         });
     }
     rows.sort_by(|a, b| {
@@ -482,6 +470,14 @@ pub async fn delete_object(
         }
     })?;
     info!(name, version, "script_objects: deleted");
+
+    // #1216: write-through so the SPA's immediate post-delete refetch
+    // no longer lists the object (watcher would heal, but slower).
+    if let Err(e) =
+        crate::projector::object_meta::delete_key(&state.pool, OBJECT_SCRIPTS, &key).await
+    {
+        warn!(error = %e, %key, "object_meta write-through failed (watcher will heal)");
+    }
 
     audit::record(
         &state.nats,

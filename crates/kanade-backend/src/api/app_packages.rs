@@ -249,6 +249,15 @@ pub async fn publish(
     }
     info!(name, version, size, digest = ?meta.digest, "app_packages: uploaded");
 
+    // #1216: write-through so the SPA's immediate post-upload refetch
+    // sees the package without racing the metadata watcher. Best-effort
+    // — the watcher heals the index on the meta message.
+    if let Err(e) =
+        crate::projector::object_meta::apply(&state.pool, OBJECT_APP_PACKAGES, &meta).await
+    {
+        warn!(error = %e, %key, "object_meta write-through failed (watcher will heal)");
+    }
+
     audit::record(
         &state.nats,
         "operator",
@@ -287,62 +296,35 @@ pub struct PackageRow {
 pub async fn list_packages(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<PackageRow>>, (StatusCode, String)> {
-    let store = state
-        .jetstream
-        .get_object_store(OBJECT_APP_PACKAGES)
+    // #1216: read the SQLite metadata index (projector::object_meta)
+    // instead of ObjectStore::list() — the latter full-scanned the
+    // stream per cold request (27 s on the measured bucket).
+    let metas = crate::projector::object_meta::list_bucket(&state.pool, OBJECT_APP_PACKAGES)
         .await
         .map_err(|e| {
-            warn!(error = %e, "get_object_store app_packages");
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                format!(
-                    "Object Store '{OBJECT_APP_PACKAGES}' missing — run `kanade jetstream setup`"
-                ),
-            )
+            warn!(error = %e, "object_store_meta list app_packages");
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
         })?;
-    let mut list = store.list().await.map_err(|e| {
-        warn!(error = %e, "object_store.list");
-        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-    })?;
 
     let mut rows = Vec::new();
-    while let Some(item) = list.next().await {
-        // Propagate stream errors instead of silently truncating
-        // — a partial list returned as `200 OK` would lie to the
-        // operator about what's in the bucket.
-        let meta = item.map_err(|e| {
-            warn!(error = %e, "app_packages.list: object metadata stream error");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("list app packages: {e}"),
-            )
-        })?;
+    for m in metas {
         // Object key is `<name>/<version>` — split on the LAST
         // slash so future packages with a slash-containing name
         // wouldn't trip the parser (defensive; current
         // `validate_segment` forbids slashes either way).
-        let (name, version) = match meta.name.rsplit_once('/') {
+        let (name, version) = match m.key.rsplit_once('/') {
             Some((n, v)) => (n.to_string(), v.to_string()),
             None => {
-                warn!(key = %meta.name, "app_packages.list: object key has no '/' — skipping");
+                warn!(key = %m.key, "app_packages.list: object key has no '/' — skipping");
                 continue;
             }
         };
-        // `time::OffsetDateTime` exposes the seconds + sub-second
-        // components separately, so we skip the nanos-divide
-        // jig the agent_releases module currently does (kept
-        // there for back-compat; sibling-cleanup is a separate
-        // PR if it gets noticed).
-        let modified = meta
-            .modified
-            .and_then(|t| chrono::DateTime::from_timestamp(t.unix_timestamp(), t.nanosecond()))
-            .map(|d| d.to_rfc3339());
         rows.push(PackageRow {
             name,
             version,
-            size: meta.size as u64,
-            digest: meta.digest,
-            modified,
+            size: m.size as u64,
+            digest: m.digest,
+            modified: m.modified,
         });
     }
     // Sort: newest first, then alphabetically within the same
@@ -598,6 +580,14 @@ pub async fn delete_package(
         }
     })?;
     info!(name, version, "app_packages: deleted");
+
+    // #1216: write-through so the SPA's immediate post-delete refetch
+    // no longer lists the package (watcher would heal, but slower).
+    if let Err(e) =
+        crate::projector::object_meta::delete_key(&state.pool, OBJECT_APP_PACKAGES, &key).await
+    {
+        warn!(error = %e, %key, "object_meta write-through failed (watcher will heal)");
+    }
 
     audit::record(
         &state.nats,
