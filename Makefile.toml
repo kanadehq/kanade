@@ -202,6 +202,43 @@ env = { "BACKEND_PROXY" = "http://localhost:8080" }
 command = "bun"
 args = ["run", "dev"]
 
+[tasks.demo-api]
+description = "Mock backend for the demo SPA (:8082). Serves /api/* from an invented 248-PC fleet — no NATS, no SQLite, no agents. See crates/kanade-backend/web/demo/README.md."
+# Deliberately NO `cwd`, unlike its `web-dev-demo` sibling. cargo-make
+# chdir's the whole process per task and re-expands
+# CARGO_MAKE_WORKING_DIRECTORY from wherever it currently is, so in a
+# parallel `run_task` the FIRST task to set a cwd poisons the variable
+# for every task after it: this one setting `.../crates/kanade-backend/web`
+# left `web-dev-demo` resolving `.../crates/kanade-backend/web/crates/kanade-backend/web`
+# and failing with "指定されたパスが見つかりません". The same trap is why
+# `dev` lists `web-dev` LAST — the root-cwd tasks all resolve before it
+# moves the process. Keeping this task at the workspace root and passing
+# the script's full path means `demo` works whichever order the two
+# spawn in. `demo/server.ts` imports nothing from node_modules, so it
+# doesn't need to run from the SPA directory.
+command = "bun"
+# Pinned rather than inherited: `server.ts` honours DEMO_API_PORT, and an
+# operator who happens to have that set in their environment would move
+# the mock while `web-dev-demo` below kept proxying to 8082 — the SPA
+# would come up talking to nothing. The two ports have to agree, so both
+# are written here.
+env = { "DEMO_API_PORT" = "8082" }
+# --watch so editing the fixtures reloads the mock in place, matching the
+# HMR the SPA half of `demo` already gives you.
+args = ["--watch", "run", "${CARGO_MAKE_WORKING_DIRECTORY}/crates/kanade-backend/web/demo/server.ts"]
+
+[tasks.web-dev-demo]
+description = "Vite dev server pointed at the mock demo backend on :8082 (paired with `demo-api`). Use `cargo make demo` to start both."
+dependencies = ["web-install"]
+cwd = "${CARGO_MAKE_WORKING_DIRECTORY}/crates/kanade-backend/web"
+env = { "BACKEND_PROXY" = "http://localhost:8082" }
+command = "bun"
+args = ["run", "dev"]
+
+[tasks.demo]
+description = "Demo stack: mock backend (:8082) + Vite dev server (:5173) with a fake 248-PC fleet. Nothing else needs to be running — no NATS, no backend, no agent. Log in at http://localhost:5173 with ANY username/password. For screenshots, product demos and UI work away from real fleet data."
+run_task = { name = ["demo-api", "web-dev-demo"], parallel = true }
+
 [tasks.nats-dev]
 description = "Run an unauthenticated nats-server for dev (listens on :4223, JetStream store under target/dev-data/nats-jetstream). Coexists with the production KanadeNats service on :4222 — they use distinct ports + distinct JetStream stores, so dev exec/job/schedule registrations stay isolated from prod."
 cwd = "${CARGO_MAKE_WORKING_DIRECTORY}"
