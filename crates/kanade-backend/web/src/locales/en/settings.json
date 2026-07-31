@@ -45,6 +45,21 @@
       "unsetPlaceholder": "default",
       "blankHint": "Leave blank to use the default (shown faintly, currently 30 days). Extending this keeps bundles longer; the bucket's size cap still bounds total disk."
     },
+    "objectStoreCaps": {
+      "title": "Object store disk caps",
+      "description": "Per-bucket disk limit (MiB) for each NATS Object Store. Once a bucket fills, the oldest objects are evicted automatically. Applied immediately on save — no restart needed. Together the buckets share the broker-wide limit (max_file_store, 50 GB by default). Warning: evicting an old agent_releases / app_packages version breaks any rollout that still references it — size these buckets for the versions your active rollouts and retention habits need.",
+      "unit": "MiB",
+      "unsetPlaceholder": "default",
+      "blankHint": "Leave a field blank to use that bucket's default (shown faintly).",
+      "overBudget": "The total of {{total}} MiB exceeds the broker-wide object-store budget ({{max}} MiB). Lower one or more buckets.",
+      "fields": {
+        "result_output_mib": "Large job output (result_output)",
+        "agent_releases_mib": "Agent binaries (agent_releases)",
+        "app_packages_mib": "App packages (app_packages)",
+        "scripts_mib": "Script objects (scripts)",
+        "collections_mib": "Collected bundles (collections)"
+      }
+    },
     "sessionTtl": {
       "title": "Login session lifetime",
       "description": "How long a SPA / CLI login stays valid before you have to sign in again. Applies to tokens minted after the change, not already-issued sessions. Disabling an account still takes effect immediately, regardless of this window.",

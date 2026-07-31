@@ -35,7 +35,8 @@ use kanade_shared::kv::{BUCKET_SERVER_SETTINGS, KEY_SERVER_SETTINGS};
 use kanade_shared::kv_cas;
 use kanade_shared::wire::{
     MAX_AGENT_PRUNE_DAYS, MAX_CHECK_STATUS_STALE_DAYS, MAX_COLLECT_RETENTION_DAYS,
-    MAX_SESSION_TTL_HOURS, MAX_SUPPORT_UNLOCK_TTL_MINUTES, ServerSettings, SupportCode,
+    MAX_OBJECT_STORE_CAP_MIB, MAX_OBJECT_STORE_TOTAL_MIB, MAX_SESSION_TTL_HOURS,
+    MAX_SUPPORT_UNLOCK_TTL_MINUTES, ObjectStoreCaps, ServerSettings, SupportCode,
 };
 use lettre::message::Mailbox;
 use serde_json::{Map, Value};
@@ -161,8 +162,43 @@ pub async fn put(
         })?),
         None => None,
     };
+    let caps_value = match typed.object_store_caps.as_ref() {
+        Some(c) => Some(serde_json::to_value(c).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("encode object_store_caps: {e}"),
+            )
+        })?),
+        None => None,
+    };
 
     let kv = open_bucket(&s).await?;
+    // The aggregate cap budget must hold for the MERGED document, not
+    // just the incoming body (CodeRabbit #1248): a PUT that leaves
+    // `object_store_caps` untouched keeps the stored caps, which may
+    // predate the aggregate check or be an out-of-band KV write. The
+    // merge replaces the whole key when addressed, so the merged caps
+    // are the incoming value when the key is present, else the stored
+    // one — validate THAT before any write. A concurrent editor between
+    // this check and the CAS below is bounded by the broker's own 10047
+    // reservation refusal, and the next save re-checks.
+    {
+        let stored_caps: Option<ObjectStoreCaps> = match kv.get(KEY_SERVER_SETTINGS).await {
+            Ok(Some(bytes)) => serde_json::from_slice::<Value>(&bytes)
+                .ok()
+                .and_then(|v| v.get("object_store_caps").cloned())
+                .and_then(|v| serde_json::from_value(v).ok()),
+            _ => None,
+        };
+        let merged_caps = if incoming.contains_key("object_store_caps") {
+            typed.object_store_caps.clone()
+        } else {
+            stored_caps
+        };
+        if let Some(c) = merged_caps.as_ref() {
+            validate_object_store_caps(c)?;
+        }
+    }
     // Whether the merge actually changed `collect_retention_days` — set inside
     // the CAS closure so it reflects the *committed* attempt (the closure is
     // re-run on a revision conflict; its last invocation is the one that
@@ -170,6 +206,9 @@ pub async fn put(
     // re-sends an unchanged value (the SPA always sends the full document)
     // doesn't pay a stream round-trip.
     let mut collect_changed = false;
+    // Same change-tracking for `object_store_caps` (#1247): gates the
+    // per-bucket max_bytes reconcile.
+    let mut caps_changed = false;
     // Merge under optimistic concurrency: read the current document (raw, so
     // unknown fields survive), apply only the addressed keys, and CAS-write —
     // retrying the whole round on a revision conflict. `read_modify_write`
@@ -199,6 +238,8 @@ pub async fn put(
             );
             changed |= merge_field(obj, &incoming, "controller_group", controller_value.clone());
             changed |= merge_field(obj, &incoming, "mail", mail_value.clone());
+            caps_changed = merge_field(obj, &incoming, "object_store_caps", caps_value.clone());
+            changed |= caps_changed;
             changed
         })
         .await
@@ -249,6 +290,29 @@ pub async fn put(
                 "collect retention: applied to KV but reconcile of the Object Store max_age failed; \
                  will be applied on the next backend restart",
             ),
+        }
+    }
+    // #1247: apply a caps change to every object store's backing stream
+    // right away. Same best-effort posture as the collect reconcile above:
+    // the value is persisted, and the boot reconcile re-applies it on the
+    // next restart if a stream update fails here.
+    if caps_changed {
+        for (bucket, cap_mib) in merged.effective_object_store_caps().effective_all() {
+            match kanade_shared::bootstrap::reconcile_object_store_max_bytes(
+                &s.jetstream,
+                bucket,
+                cap_mib,
+            )
+            .await
+            {
+                Ok(true) => info!(bucket, cap_mib, "object store cap applied"),
+                Ok(false) => {}
+                Err(e) => warn!(
+                    error = %format!("{e:#}"), bucket, cap_mib,
+                    "object store cap: applied to KV but reconcile failed; \
+                     will be applied on the next backend restart",
+                ),
+            }
         }
     }
     audit::record(
@@ -399,6 +463,61 @@ fn validate(s: &ServerSettings) -> Result<(), (StatusCode, String)> {
     }
     if let Some(m) = s.mail.as_ref() {
         validate_mail(m)?;
+    }
+    if let Some(c) = s.object_store_caps.as_ref() {
+        validate_object_store_caps(c)?;
+    }
+    Ok(())
+}
+
+/// #1247: each bucket cap must be `1..=MAX_OBJECT_STORE_CAP_MIB`.
+/// `Some(0)` is rejected like the other numeric knobs — NATS treats
+/// `max_bytes: 0` as **unlimited**, the exact failure mode this feature
+/// removes, and a stored 0 would wedge the SPA's `min=1` field. Omit /
+/// `null` to fall back to the built-in default instead.
+///
+/// The EFFECTIVE total (unset buckets resolved to their defaults) must
+/// also fit the broker-wide object-store budget
+/// ([`MAX_OBJECT_STORE_TOTAL_MIB`] = 50 GiB minus the streams'
+/// reservations): without it an operator could store five individually
+/// legal caps whose sum the broker then refuses (10047) — the KV
+/// document would claim caps the streams don't have. A broker with a
+/// non-default `max_file_store` still has its own 10047 backstop; this
+/// check is the early, legible one.
+fn validate_object_store_caps(c: &ObjectStoreCaps) -> Result<(), (StatusCode, String)> {
+    for (field, v) in [
+        ("result_output_mib", c.result_output_mib),
+        ("agent_releases_mib", c.agent_releases_mib),
+        ("app_packages_mib", c.app_packages_mib),
+        ("scripts_mib", c.scripts_mib),
+        ("collections_mib", c.collections_mib),
+    ] {
+        let Some(v) = v else { continue };
+        if v == 0 {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!(
+                    "object_store_caps.{field} must be >= 1; omit it or send null to use the default"
+                ),
+            ));
+        }
+        if v > MAX_OBJECT_STORE_CAP_MIB {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("object_store_caps.{field} must be <= {MAX_OBJECT_STORE_CAP_MIB} (50 GiB)"),
+            ));
+        }
+    }
+    let total: u64 = c.effective_all().iter().map(|(_, v)| *v as u64).sum();
+    if total > MAX_OBJECT_STORE_TOTAL_MIB as u64 {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!(
+                "object_store_caps total {total} MiB exceeds the broker-wide object-store budget \
+                 {MAX_OBJECT_STORE_TOTAL_MIB} MiB (max_file_store minus stream reservations); \
+                 lower one or more buckets"
+            ),
+        ));
     }
     Ok(())
 }
@@ -735,8 +854,9 @@ mod tests {
     use serde_json::{Map, Value, json};
 
     use super::{
-        MIN_SUPPORT_CODE_LEN, ServerSettings, SupportCodeBody, hash_support_code, merge_field,
-        normalize, redact_support_hashes, validate, validate_support_code,
+        MAX_OBJECT_STORE_CAP_MIB, MIN_SUPPORT_CODE_LEN, ObjectStoreCaps, ServerSettings,
+        SupportCodeBody, hash_support_code, merge_field, normalize, redact_support_hashes,
+        validate, validate_support_code,
     };
 
     fn obj(v: Value) -> Map<String, Value> {
@@ -948,6 +1068,79 @@ mod tests {
             ..Default::default()
         };
         assert!(validate(&s).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_zero_or_oversize_object_store_caps() {
+        // 0 is rejected (NATS reads max_bytes: 0 as UNLIMITED — the exact
+        // failure mode #1247 removes); over the 50 GiB ceiling is rejected.
+        for caps in [
+            ObjectStoreCaps {
+                result_output_mib: Some(0),
+                ..Default::default()
+            },
+            ObjectStoreCaps {
+                app_packages_mib: Some(MAX_OBJECT_STORE_CAP_MIB + 1),
+                ..Default::default()
+            },
+            ObjectStoreCaps {
+                scripts_mib: Some(0),
+                ..Default::default()
+            },
+        ] {
+            assert!(
+                validate(&ServerSettings {
+                    object_store_caps: Some(caps),
+                    ..Default::default()
+                })
+                .is_err()
+            );
+        }
+        // In-range and partial (per-bucket defaults for the rest) pass.
+        assert!(
+            validate(&ServerSettings {
+                object_store_caps: Some(ObjectStoreCaps {
+                    app_packages_mib: Some(8192),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_rejects_aggregate_over_broker_budget() {
+        // Each field is individually in range, but the effective TOTAL
+        // (set fields + defaults for the rest) must fit the broker-wide
+        // budget — else the KV doc would claim caps the broker refuses
+        // to apply (10047). Defaults total ≈ 13.5 GiB, so four ~12 GiB
+        // overrides blow past 50 GiB.
+        assert!(
+            validate(&ServerSettings {
+                object_store_caps: Some(ObjectStoreCaps {
+                    result_output_mib: Some(12_000),
+                    agent_releases_mib: Some(12_000),
+                    app_packages_mib: Some(12_000),
+                    collections_mib: Some(12_000),
+                    scripts_mib: Some(12_000),
+                }),
+                ..Default::default()
+            })
+            .is_err()
+        );
+        // The same total spread differently still fails.
+        assert!(
+            validate(&ServerSettings {
+                object_store_caps: Some(ObjectStoreCaps {
+                    app_packages_mib: Some(40_000),
+                    agent_releases_mib: Some(12_000),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .is_err()
+        );
     }
 
     #[test]

@@ -25,8 +25,9 @@ pub struct ResourceProbe {
     /// resource is missing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bytes: Option<u64>,
-    /// Configured `max_bytes` cap. `None` = unlimited (the curated object
-    /// stores — agent_releases / app_packages / scripts — run uncapped).
+    /// Configured `max_bytes` cap. `None` = unlimited (object stores
+    /// created before #1247's caps were reconciled — a boot reconcile
+    /// applies the configured/default cap and this turns into `Some`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_bytes: Option<u64>,
     /// Message count in the backing stream (a KV / object store counts one

@@ -59,7 +59,6 @@ reconnect.
 ## Single-node limits and the reconnect herd
 
 Two things to size for on a single-node JetStream:
-
 1. **Steady-state footprint** — ~21,000 consumers at 3,000 agents live in
    the JetStream meta (Raft) layer and cost memory + file handles. Size
    the broker host's RAM and `max_file`/`max_memory` JetStream limits
@@ -73,6 +72,64 @@ Two things to size for on a single-node JetStream:
 
    Note that random, *unsynchronised* reconnects (one laptop's wifi flap)
    are not a herd — only fleet-wide synchronised events are.
+
+## Storage: the 50 GB file store, per-resource caps, and retention
+
+RAM and consumers are only half the sizing story; the other half is
+disk. All JetStream data lives under one directory
+(`store_dir: C:/ProgramData/Kanade/nats/jetstream`) bounded broker-wide
+by `max_file_store: 50GB` (`configs/nats-server.conf`) — a **soft
+limit shared by every stream and object store**, not a per-stream one.
+What happens as it fills:
+
+1. Resources with their own retention evict oldest-first
+   (`DiscardPolicy::Old`) and stay healthy.
+2. A resource **without** caps cannot evict, so once the file store is
+   full, *every* JetStream publish fleet-wide starts failing with
+   "insufficient storage resources available" (error 10077) — agent
+   result uploads, collect-bundle uploads, publishes, KV puts. Reads
+   keep working; the write side is what dies. Uncapped resources also
+   squeeze the capped ones out of their fair share.
+
+So every resource must carry a cap, and it does:
+
+- **Streams** (`RESULTS` / `INVENTORY` / `AUDIT` / `OBS_EVENTS` /
+  `NOTIFICATIONS` / `EXEC` / `EVENTS`) each have `max_age` +
+  `max_bytes` (bootstrap.rs, ~5.3 GiB reserved total). They are
+  transport + replay buffers — the durable record is the backend's
+  SQLite, which is why the caps can be tighter than the history an
+  operator expects to see.
+- **Object stores** are capped per bucket by `max_bytes`, tunable from
+  the SPA (**Settings → server → Object store disk caps**, #1247) with
+  no restart; blank fields fall back to these built-in defaults:
+
+  | Bucket | Default cap | Holds |
+  |---|---|---|
+  | `result_output` | 1,024 MiB | oversized stdout/stderr blobs (projected into SQLite within seconds) |
+  | `agent_releases` | 2,048 MiB | agent exes (~20 versions) |
+  | `app_packages` | 5,120 MiB | operator-curated installers |
+  | `scripts` | 256 MiB | manifest script bodies |
+  | `collections` | 5,120 MiB | collect-job bundles (also `max_age`, tunable via *Collected-bundle retention*) |
+
+  The backend reconciles the configured values onto the backing
+  `OBJ_*` streams **at every boot and on every save**, which is also
+  how caps reach buckets created before the cap existed. Total default
+  reservation ≈ 13.5 GiB — sized, with the streams, to sit well inside
+  50 GB.
+
+- **SQLite (the projection)** is *not* unbounded either: the backend
+  cleanup task prunes on a 5-minute tick in bounded batches —
+  `execution_results` / `executions` / `obs_events` /
+  `inventory_history` 90 d, `audit_log` 365 d, `host_perf_samples`
+  30 d, `process_perf_samples` 7 d. Every DB window is deliberately
+  **longer than the matching stream window**, so anything the stream
+  can replay is guaranteed to already be in SQLite. Remaining tables
+  are upsert/replace-shaped (live-state sized), and dead agents are
+  pruned by `agent_prune_days` (also a ServerSettings knob).
+
+Live usage per resource (used bytes vs cap) is on the SPA's JetStream
+page — it reads the broker's current config, so a changed cap shows up
+there on the next load.
 
 ## Levers, in order of preference
 
