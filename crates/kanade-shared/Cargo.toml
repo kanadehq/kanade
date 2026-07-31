@@ -26,6 +26,8 @@ pelite     = { workspace = true }
 schemars   = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
+# #1229: fingerprints over command-signing public keys (`signing::fingerprint`).
+sha2       = { workspace = true }
 # `Schedule.when` is an externally-tagged enum; serde_yaml 0.9 maps
 # those to `!tag` YAML syntax by default, so the field rides
 # `serde_yaml::with::singleton_map` to keep the operator-facing

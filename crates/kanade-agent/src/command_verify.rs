@@ -81,7 +81,7 @@
 //! fleet-wide "has the new key landed everywhere?" check would answer no
 //! indefinitely.
 //!
-//! So [`Verifier::refresh_and_kids`] re-reads once per heartbeat, and the
+//! So [`Verifier::refresh_and_keys`] re-reads once per heartbeat, and the
 //! heartbeat interval is what bounds revocation latency. It is cheap because
 //! the raw value is compared before anything is parsed — the expensive part is
 //! `VerifyingKey::from_bytes` (an Ed25519 point decompression per entry), and
@@ -653,7 +653,8 @@ impl Verifier {
         (outcome.is_refusal() && self.enforcing_now()).then(|| outcome.refusal_reason())
     }
 
-    /// The key ids on the ring **as it stands in memory**, for the heartbeat.
+    /// The ring **as it stands in memory**, as `kid:fingerprint`, for the
+    /// heartbeat.
     ///
     /// Deliberately not a registry read. Those two diverge between a key
     /// landing on disk and the reload that picks it up, and the question an
@@ -661,8 +662,14 @@ impl Verifier {
     /// right now" — is answered by memory. Reporting the file would describe a
     /// machine that does not exist yet, and at stage 3 that is the difference
     /// between "safe to retire the old key" and a stranded endpoint.
-    pub fn trusted_kids(&self) -> Vec<String> {
-        lock(&self.ring).kids().map(str::to_owned).collect()
+    ///
+    /// The fingerprint is what makes the answer comparable *across* machines
+    /// rather than only within one (#1229): the id alone is chosen by whoever
+    /// wrote the ring, so two hosts can agree on it while holding different
+    /// keys, and that host refuses every command with nothing in the fleet view
+    /// to distinguish it.
+    pub fn trusted_keys(&self) -> Vec<String> {
+        lock(&self.ring).kid_fingerprints().collect()
     }
 
     /// Check one message and report the outcome.
@@ -843,7 +850,7 @@ impl Verifier {
     /// The `last_raw` guard is taken **before** the read, not after, and that
     /// ordering is load-bearing now that two callers reach here independently
     /// (a command path via [`Verifier::reload_if_due`], and the heartbeat via
-    /// [`Verifier::refresh_and_kids`]). Reading first and locking second lets
+    /// [`Verifier::refresh_and_keys`]). Reading first and locking second lets
     /// two concurrent pulls observe different values and commit in the wrong
     /// order — the one that read the *older* value taking the lock last and
     /// installing a stale ring. For a revocation that means the revoked key
@@ -895,7 +902,7 @@ impl Verifier {
     }
 
     /// Re-read the store, ignoring the command-path rate limit, and report the
-    /// key ids now in force. Called once per heartbeat.
+    /// keys now in force as `kid:fingerprint`. Called once per heartbeat.
     ///
     /// This is what makes **revocation** work. The command-path reload fires
     /// only on [`VerifyError::UnknownKid`], which covers a ring that is
@@ -913,9 +920,9 @@ impl Verifier {
     /// coupling is deliberate but worth knowing: an operator who widens
     /// `heartbeat_interval` for bandwidth also widens the window in which a
     /// revoked key keeps working.
-    pub fn refresh_and_kids(&self) -> Vec<String> {
+    pub fn refresh_and_keys(&self) -> Vec<String> {
         self.pull();
-        self.trusted_kids()
+        self.trusted_keys()
     }
 
     /// Emit an obs event when the class changes, so the fleet view shows which
@@ -1059,6 +1066,17 @@ mod tests {
         let mut r = KeyRing::new();
         r.insert(kid, sk.verifying_key(), KeyPolicy::backend("backend"));
         r
+    }
+
+    /// What the heartbeat should report for this key. Computed rather than
+    /// hard-coded so a test asserts "the fingerprint of THIS key", which is the
+    /// property under test — a literal would still pass if the wrong key's
+    /// fingerprint were reported.
+    fn reported(kid: &str, sk: &SigningKey) -> String {
+        format!(
+            "{kid}:{}",
+            kanade_shared::signing::fingerprint(&sk.verifying_key())
+        )
     }
 
     /// A ring that is empty until `provision()` is called, counting how many
@@ -1715,13 +1733,54 @@ mod tests {
         );
 
         // The heartbeat refresh is what closes it.
-        let kids = v.refresh_and_kids();
-        assert_eq!(kids, vec!["backend-1".to_string()]);
+        let kids = v.refresh_and_keys();
+        assert_eq!(kids, vec![reported("backend-1", &backend)]);
         assert_eq!(
             v.classify(b"payload", &signed, "r3", now, t),
             Outcome::UnknownKid,
             "a revoked key must stop verifying"
         );
+    }
+
+    #[test]
+    fn two_rings_sharing_a_kid_but_not_a_key_report_differently() {
+        // The state #1229 exists to make visible. Both hosts answer
+        // "backend-1", both look correct in any kid-only view, and the one
+        // holding the wrong bytes refuses every command once enforcement is on
+        // — without self-healing, because the reload-on-unknown-key path never
+        // fires for a key that is *present*.
+        let right = SigningKey::from_bytes(&[70u8; 32]);
+        let wrong = SigningKey::from_bytes(&[71u8; 32]);
+
+        let good = Store::default();
+        good.provision(backend_ring("backend-1", &right));
+        let bad = Store::default();
+        bad.provision(backend_ring("backend-1", &wrong));
+
+        let a = Verifier::with_loader("PC1".into(), test_dir(), good.loader());
+        let b = Verifier::with_loader("PC2".into(), test_dir(), bad.loader());
+
+        let (a, b) = (a.trusted_keys(), b.trusted_keys());
+        assert_ne!(a, b, "a fleet view must be able to tell these apart");
+        assert!(
+            a[0].starts_with("backend-1:") && b[0].starts_with("backend-1:"),
+            "and the kid must still be greppable on its own: {a:?} {b:?}"
+        );
+    }
+
+    #[test]
+    fn a_fingerprint_survives_a_reload_that_changes_nothing_else() {
+        // Reporting is downstream of the ring, not of the read: the value must
+        // not depend on whether this heartbeat happened to re-parse.
+        let sk = SigningKey::from_bytes(&[72u8; 32]);
+        let store = Store::default();
+        store.provision(backend_ring("backend-1", &sk));
+        let v = Verifier::with_loader("PC1".into(), test_dir(), store.loader());
+
+        let first = v.refresh_and_keys();
+        assert_eq!(v.pull(), Reload::Unchanged);
+        assert_eq!(v.refresh_and_keys(), first);
+        assert_eq!(first, vec![reported("backend-1", &sk)]);
     }
 
     #[test]
@@ -1765,12 +1824,12 @@ mod tests {
         assert_eq!(v.pull(), Reload::Failed);
         assert_eq!(v.pull(), Reload::Failed, "it must keep retrying");
         // And the working ring is still there.
-        assert_eq!(v.trusted_kids(), vec!["backend-1".to_string()]);
+        assert_eq!(v.trusted_keys(), vec![reported("backend-1", &sk)]);
 
         // Once the write completes, it is adopted.
         store.provision(backend_ring("backend-2", &sk));
         assert_eq!(v.pull(), Reload::Done);
-        assert_eq!(v.trusted_kids(), vec!["backend-2".to_string()]);
+        assert_eq!(v.trusted_keys(), vec![reported("backend-2", &sk)]);
     }
 
     #[test]
@@ -1782,7 +1841,7 @@ mod tests {
 
         store.unreadable();
         assert_eq!(v.pull(), Reload::Failed);
-        assert_eq!(v.trusted_kids(), vec!["backend-1".to_string()]);
+        assert_eq!(v.trusted_keys(), vec![reported("backend-1", &sk)]);
 
         store.provision(backend_ring("backend-2", &sk));
         assert_eq!(v.pull(), Reload::Done);

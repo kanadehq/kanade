@@ -92,12 +92,28 @@ pub struct Heartbeat {
     /// when unavailable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_logon_display_name: Option<String>,
-    /// #1165: the command-signing key ids this agent currently trusts.
+    /// #1165: the command-signing keys this agent currently trusts, each as
+    /// `kid:fingerprint`.
     ///
     /// Reported so "which machines still trust the old key" is answerable.
     /// Without it, retiring a key is a guess: an agent that never received the
     /// replacement rejects every command at stage 3, and there is no way to
     /// know it was going to before it does.
+    ///
+    /// The fingerprint half (#1229) answers a question the id cannot: **do two
+    /// machines holding the same id hold the same key**. The id is chosen by
+    /// whoever wrote the ring, so a mistyped paste, a same-`kid` re-mint, or a
+    /// hand-edited registry value produces a host that reports the expected id,
+    /// refuses every command once enforcement is on, and never self-heals —
+    /// the reload-on-unknown-key path (#1186) does not fire, because the key
+    /// *is* present, just wrong.
+    ///
+    /// One flat string rather than a nested object on purpose. The projected
+    /// column is a JSON array queried with `LIKE`, because the read-only query
+    /// path rejects table-valued functions (`json_each`) — so
+    /// `LIKE '%"backend-2026…:3f2a…"%'` pins the exact key with the machinery
+    /// that already exists, while `LIKE '%"backend-2026…:%'` still asks the
+    /// id-only question. Nothing parses these back apart; they are matched.
     ///
     /// `Option<Vec<_>>` rather than a plain `Vec` with
     /// `skip_serializing_if = "Vec::is_empty"` — the shape

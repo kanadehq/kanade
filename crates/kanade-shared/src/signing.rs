@@ -185,6 +185,39 @@ impl KeyRing {
     pub fn kids(&self) -> impl Iterator<Item = &str> {
         self.keys.keys().map(String::as_str)
     }
+
+    /// Every entry as `kid:fingerprint`, which is what the heartbeat reports.
+    ///
+    /// The `kid` alone cannot answer "do two machines holding the same id hold
+    /// the same key" (#1229). A ring entry with the right id and wrong bytes
+    /// refuses every command once enforcement is on, and does not self-heal —
+    /// the reload-on-unknown-key path never fires, because the key *is*
+    /// present, just wrong. Carrying the fingerprint makes that state visible
+    /// from the fleet view instead of only on the host.
+    pub fn kid_fingerprints(&self) -> impl Iterator<Item = String> {
+        self.keys
+            .iter()
+            .map(|(kid, (key, _))| format!("{kid}:{}", fingerprint(key)))
+    }
+}
+
+/// A short, stable identifier for a **public** key: the first 8 bytes of
+/// SHA-256 over its raw 32 bytes, lower-case hex.
+///
+/// Truncated deliberately. This is not a security boundary — the ring itself
+/// is the trust root, and a fingerprint that matched by luck would still have
+/// to be a valid Ed25519 key someone had provisioned. It exists to be read,
+/// compared, and pasted by an operator, and to survive a `LIKE` against the
+/// projected JSON array, so 16 characters beats 64.
+pub fn fingerprint(key: &VerifyingKey) -> String {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(key.as_bytes());
+    digest[..8].iter().fold(String::new(), |mut s, b| {
+        use std::fmt::Write;
+        let _ = write!(s, "{b:02x}");
+        s
+    })
 }
 
 /// Why a message was not accepted as backend-authored.
@@ -620,6 +653,63 @@ mod tests {
         let mut r = KeyRing::new();
         r.insert(kid, vk, KeyPolicy::backend("backend"));
         r
+    }
+
+    #[test]
+    fn a_fingerprint_is_a_fixed_width_lower_hex_string() {
+        let (_, vk) = keypair(1);
+        let fp = fingerprint(&vk);
+        assert_eq!(fp.len(), 16, "8 bytes, hex: {fp}");
+        assert!(
+            fp.chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "must be pasteable and LIKE-able without escaping: {fp}"
+        );
+    }
+
+    #[test]
+    fn a_fingerprint_is_stable_across_calls_and_distinct_across_keys() {
+        // Stability is the whole point — a value that varied per call would
+        // make every host look like the odd one out. Distinctness is what makes
+        // a same-kid-different-key ring visible (#1229).
+        let (_, a) = keypair(2);
+        let (_, b) = keypair(3);
+        assert_eq!(fingerprint(&a), fingerprint(&a));
+        assert_ne!(fingerprint(&a), fingerprint(&b));
+    }
+
+    #[test]
+    fn a_fingerprint_is_pinned_to_the_public_key_bytes() {
+        // Pinned against a hand-computed value so a change of hash, of
+        // truncation length, or of *what* is hashed (the raw 32 bytes, not the
+        // base64 text) fails here rather than fleet-wide, where every host
+        // would silently disagree with every stored literal.
+        use sha2::{Digest, Sha256};
+
+        let (_, vk) = keypair(7);
+        let expect: String = Sha256::digest(vk.as_bytes())[..8]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(fingerprint(&vk), expect);
+    }
+
+    #[test]
+    fn a_ring_reports_each_entry_as_kid_then_fingerprint() {
+        let (_, a) = keypair(4);
+        let (_, b) = keypair(5);
+        let mut ring = ring_with("backend-1", a);
+        ring.insert("break-glass-1", b, KeyPolicy::backend("break-glass"));
+
+        let reported: Vec<String> = ring.kid_fingerprints().collect();
+        assert_eq!(
+            reported,
+            vec![
+                format!("backend-1:{}", fingerprint(&a)),
+                format!("break-glass-1:{}", fingerprint(&b)),
+            ],
+            "sorted by kid, so a heartbeat does not churn the projected value"
+        );
     }
 
     #[test]
