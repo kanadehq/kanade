@@ -44,6 +44,16 @@ const MAX_SESSION_TTL_HOURS = 8_760;
 // feedback only. Unlike the others, 0 is VALID here (disables staleness).
 const MAX_CHECK_STATUS_STALE_DAYS = 3650;
 
+// Mirrors `MAX_OBJECT_STORE_CAP_MIB` (kanade_shared::wire::server_settings):
+// 50 GiB — one bucket can never be configured to eat the whole JetStream
+// file store. The backend PUT enforces the same bound.
+const MAX_OBJECT_STORE_CAP_MIB = 51_200;
+
+// Mirrors `MAX_OBJECT_STORE_TOTAL_MIB` (kanade_shared::wire::server_settings):
+// the aggregate ceiling for the five effective caps — 50 GiB minus the
+// streams' ~4.8 GiB reservations. The backend PUT enforces the same bound.
+const MAX_OBJECT_STORE_TOTAL_MIB = 46_272;
+
 /// SMTP transport security — mirrors `kanade_shared::config::MailEncryption`
 /// (serialised lowercase).
 type MailEncryption = 'starttls' | 'tls' | 'none';
@@ -59,6 +69,17 @@ interface MailSettings {
   username: string | null;
 }
 
+/// Per-bucket disk caps (MiB) for the five NATS Object Stores (#1247) —
+/// mirrors `kanade_shared::wire::ObjectStoreCaps`. Every field nullable:
+/// `null` (or absent) ⇒ the bucket resolves to its built-in default.
+interface ObjectStoreCaps {
+  result_output_mib: number | null;
+  agent_releases_mib: number | null;
+  app_packages_mib: number | null;
+  scripts_mib: number | null;
+  collections_mib: number | null;
+}
+
 /// Backend-side server settings document (`server_settings` KV). Mirrors
 /// `kanade_shared::wire::ServerSettings`: every field is nullable, where
 /// `null` (or absent) means "unset — fall back to the built-in default".
@@ -71,6 +92,7 @@ interface ServerSettings {
   check_status_stale_days: number | null;
   controller_group: string | null;
   mail: MailSettings | null;
+  object_store_caps: ObjectStoreCaps | null;
   /// Read-only here. Managed through its own endpoints (see
   /// [`ServerSettingsPatch`]) and absent from the document PUT entirely.
   /// `serde` omits the key when empty, so an older / never-configured
@@ -278,6 +300,14 @@ function ServerTab() {
   const [mailEncryption, setMailEncryption] = useState<MailEncryption>('starttls');
   const [mailFrom, setMailFrom] = useState('');
   const [mailUsername, setMailUsername] = useState('');
+  // Object-store disk caps (MiB), one string field per bucket (#1247).
+  // All blank → whole key unset (every bucket on its built-in default);
+  // a per-bucket blank falls back to that bucket's default.
+  const [capResultOutput, setCapResultOutput] = useState('');
+  const [capAgentReleases, setCapAgentReleases] = useState('');
+  const [capAppPackages, setCapAppPackages] = useState('');
+  const [capScripts, setCapScripts] = useState('');
+  const [capCollections, setCapCollections] = useState('');
   useEffect(() => {
     if (settings.data) {
       setPruneDays(settings.data.agent_prune_days == null ? '' : String(settings.data.agent_prune_days));
@@ -303,6 +333,12 @@ function ServerTab() {
       setMailEncryption(m?.encryption ?? 'starttls');
       setMailFrom((m?.from ?? '').trim());
       setMailUsername((m?.username ?? '').trim());
+      const c = settings.data.object_store_caps;
+      setCapResultOutput(c?.result_output_mib == null ? '' : String(c.result_output_mib));
+      setCapAgentReleases(c?.agent_releases_mib == null ? '' : String(c.agent_releases_mib));
+      setCapAppPackages(c?.app_packages_mib == null ? '' : String(c.app_packages_mib));
+      setCapScripts(c?.scripts_mib == null ? '' : String(c.scripts_mib));
+      setCapCollections(c?.collections_mib == null ? '' : String(c.collections_mib));
     }
   }, [settings.data]);
 
@@ -457,10 +493,66 @@ function ServerTab() {
         mailValue.from !== storedMail.from ||
         (mailValue.username ?? null) !== (storedMail.username ?? null)));
 
+  // object_store_caps (#1247): per-bucket blank → that bucket's built-in
+  // default; ALL blank → whole key unset. A non-blank value must be a
+  // whole number in [1, MAX_OBJECT_STORE_CAP_MIB] (0 is rejected because
+  // NATS reads max_bytes: 0 as UNLIMITED — the failure mode this removes).
+  const capInputs: { key: keyof ObjectStoreCaps; raw: string }[] = [
+    { key: 'result_output_mib', raw: capResultOutput },
+    { key: 'agent_releases_mib', raw: capAgentReleases },
+    { key: 'app_packages_mib', raw: capAppPackages },
+    { key: 'scripts_mib', raw: capScripts },
+    { key: 'collections_mib', raw: capCollections },
+  ];
+  const capsValid = capInputs.every(({ raw }) => {
+    const t = raw.trim();
+    if (t === '') return true;
+    const n = Number(t);
+    return Number.isInteger(n) && n >= 1 && n <= MAX_OBJECT_STORE_CAP_MIB;
+  });
+  // Aggregate budget: the effective total (entered values + built-in
+  // defaults for blanks) must fit the broker-wide max_file_store, or the
+  // broker refuses every cap update (10047) and the saved document lies.
+  // The backend PUT enforces this authoritatively; this is early feedback.
+  // Skipped while /defaults hasn't loaded (per-field check above still
+  // applies).
+  const capsEffectiveTotal = capInputs.reduce((sum, { key, raw }) => {
+    const t = raw.trim();
+    if (t !== '') {
+      const n = Number(t);
+      return sum + (Number.isInteger(n) ? n : 0);
+    }
+    return sum + (defaults.data?.object_store_caps?.[key] ?? 0);
+  }, 0);
+  const capsAggregateValid =
+    defaults.data == null || capsEffectiveTotal <= MAX_OBJECT_STORE_TOTAL_MIB;
+  const capsAllBlank = capInputs.every(({ raw }) => raw.trim() === '');
+  const capsValue: ObjectStoreCaps | null = capsAllBlank
+    ? null
+    : (Object.fromEntries(
+        capInputs.map(({ key, raw }) => {
+          const t = raw.trim();
+          return [key, t === '' ? null : Number(t)];
+        }),
+      ) as unknown as ObjectStoreCaps);
+  const storedCaps = settings.data?.object_store_caps ?? null;
+  const capsDirty =
+    (capsValue === null) !== (storedCaps === null) ||
+    (capsValue !== null &&
+      storedCaps !== null &&
+      capInputs.some(({ key }) => (capsValue[key] ?? null) !== (storedCaps[key] ?? null)));
+
   // One save for the whole document. The PUT merges per-field, but the SPA
   // always sends every field it knows, so an unchanged one is re-sent
   // as-is. `dirty` if any field diverges from the stored doc.
-  const valid = pruneValid && collectValid && sessionTtlValid && staleValid && mailValid;
+  const valid =
+    pruneValid &&
+    collectValid &&
+    sessionTtlValid &&
+    staleValid &&
+    mailValid &&
+    capsValid &&
+    capsAggregateValid;
   const dirty =
     settings.data != null &&
     (pruneValue !== settings.data.agent_prune_days ||
@@ -468,7 +560,8 @@ function ServerTab() {
       sessionTtlValue !== settings.data.session_ttl_hours ||
       staleValue !== settings.data.check_status_stale_days ||
       controllerValue !== (settings.data.controller_group ?? null) ||
-      mailDirty);
+      mailDirty ||
+      capsDirty);
   const doc: ServerSettingsPatch = {
     agent_prune_days: pruneValue,
     collect_retention_days: collectValue,
@@ -476,6 +569,7 @@ function ServerTab() {
     check_status_stale_days: staleValue,
     controller_group: controllerValue,
     mail: mailValue,
+    object_store_caps: capsValue,
   };
 
   // Faint placeholder = what a blank field resolves to: the built-in
@@ -504,6 +598,12 @@ function ServerTab() {
     defaults.data && defaults.data.check_status_stale_days != null
       ? String(defaults.data.check_status_stale_days)
       : t('server.checkStale.unsetPlaceholder');
+  // Every object-store cap has a real built-in default (#1247), so each
+  // blank field resolves to the number shown faintly.
+  const capPlaceholder = (key: keyof ObjectStoreCaps): string => {
+    const v = defaults.data?.object_store_caps?.[key];
+    return v != null ? String(v) : t('server.objectStoreCaps.unsetPlaceholder');
+  };
 
   return (
     <div className="space-y-4">
@@ -576,6 +676,53 @@ function ServerTab() {
               </div>
               <p className="text-muted text-xs">{t('server.collectRetention.blankHint')}</p>
             </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>{t('server.objectStoreCaps.title')}</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <p className="text-muted text-sm">{t('server.objectStoreCaps.description')}</p>
+            {(
+              [
+                ['result_output_mib', capResultOutput, setCapResultOutput],
+                ['agent_releases_mib', capAgentReleases, setCapAgentReleases],
+                ['app_packages_mib', capAppPackages, setCapAppPackages],
+                ['scripts_mib', capScripts, setCapScripts],
+                ['collections_mib', capCollections, setCapCollections],
+              ] as const
+            ).map(([key, value, setValue]) => (
+              <div className="space-y-1" key={key}>
+                <Label htmlFor={`cap-${key}`}>{t(`server.objectStoreCaps.fields.${key}`)}</Label>
+                <div className="flex items-center gap-2">
+                  <Input
+                    id={`cap-${key}`}
+                    type="number"
+                    min={1}
+                    max={MAX_OBJECT_STORE_CAP_MIB}
+                    step={1}
+                    inputMode="numeric"
+                    value={value}
+                    placeholder={capPlaceholder(key)}
+                    disabled={!canOperate || settings.isLoading}
+                    onChange={(e) => setValue(e.target.value)}
+                    className="w-32"
+                  />
+                  <span className="text-muted text-sm">{t('server.objectStoreCaps.unit')}</span>
+                </div>
+              </div>
+            ))}
+            <p className="text-muted text-xs">{t('server.objectStoreCaps.blankHint')}</p>
+            {!capsAggregateValid && (
+              <p className="text-danger text-xs">
+                {t('server.objectStoreCaps.overBudget', {
+                  total: capsEffectiveTotal,
+                  max: MAX_OBJECT_STORE_TOTAL_MIB,
+                })}
+              </p>
+            )}
           </CardContent>
         </Card>
 

@@ -45,6 +45,21 @@
       "unsetPlaceholder": "既定値",
       "blankHint": "空欄にすると既定値 (薄く表示・現在は 30 日) を使います。 値を大きくするほど長く保持されますが、 バケットの容量上限による総ディスク量の制限は変わりません。"
     },
+    "objectStoreCaps": {
+      "title": "オブジェクトストレージの容量上限",
+      "description": "NATS オブジェクトストア各バケットのディスク上限 (MiB) です。 上限に達すると古いオブジェクトから自動削除されます。 保存すると即座に反映されます (再起動不要)。 ブローカ全体の上限 (max_file_store、 既定 50 GB) を各バケットで分け合うイメージです。 注意: agent_releases / app_packages の古いバージョンが削除されると、 そのバージョンを参照しているロールアウトが失敗するようになります。 稼働中のロールアウトと保持したいバージョン数を見込んでサイジングしてください。",
+      "unit": "MiB",
+      "unsetPlaceholder": "既定値",
+      "blankHint": "空欄にすると各バケットの既定値 (薄く表示) を使います。",
+      "overBudget": "合計 {{total}} MiB がブローカ全体のオブジェクトストア予算 ({{max}} MiB) を超えています。 いずれかのバケットを下げてください。",
+      "fields": {
+        "result_output_mib": "実行結果の大きな出力 (result_output)",
+        "agent_releases_mib": "エージェントのバイナリ (agent_releases)",
+        "app_packages_mib": "配布アプリ (app_packages)",
+        "scripts_mib": "スクリプトオブジェクト (scripts)",
+        "collections_mib": "収集ファイル (collections)"
+      }
+    },
     "sessionTtl": {
       "title": "ログインセッションの有効期限",
       "description": "SPA / CLI にログインしてから再ログインが必要になるまでの時間です。 変更後に発行されるトークンにのみ適用され、 発行済みのセッションはそのままです。 アカウントを無効化した場合は、 この期限に関わらず即座に失効します。",

@@ -79,6 +79,120 @@ pub const DEFAULT_SUPPORT_UNLOCK_TTL_MINUTES: u32 = 15;
 /// so a hand-written KV value stays bounded too.
 pub const MAX_SUPPORT_UNLOCK_TTL_MINUTES: u32 = 480;
 
+/// Per-bucket disk caps (MiB) for the five NATS Object Stores, reconciled
+/// onto each backing `OBJ_*` stream at backend boot and on save (#1247).
+/// `None` (unset) ⇒ the built-in default below, so a blank SPA field
+/// preserves the out-of-box budget and a deployment that never opens the
+/// Settings page is still capped.
+///
+/// Why these exist: `agent_releases` / `app_packages` / `scripts` were
+/// created with no caps at all, and caps added to code AFTER a bucket
+/// existed never reached the live broker (`ensure_object_store` tolerates
+/// the 10058 config-drift error rather than reconciling — which is how
+/// `OBJ_result_output` grew to 6.76 GB against a nominal 1 GiB cap).
+/// The reconcile path (`bootstrap::reconcile_object_store_max_bytes`) makes
+/// the configured value actually land, so these defaults are also the
+/// **fix** for already-drifted buckets, applied on the first boot after
+/// upgrade.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct ObjectStoreCaps {
+    /// `result_output` — overflow stdout/stderr blobs. Transport +
+    /// replay buffer (the projector derefs within seconds into SQLite),
+    /// so this is a runaway-output backstop, not a history budget.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_output_mib: Option<u32>,
+    /// `agent_releases` — one exe per version (~100 MB each). Sized for
+    /// ~20 recent versions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_releases_mib: Option<u32>,
+    /// `app_packages` — operator-curated installers; the largest bucket
+    /// in practice (1.5 GB at measurement time, uncapped).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_packages_mib: Option<u32>,
+    /// `scripts` — manifest script bodies; tiny payloads, so the cap is
+    /// a cardinality backstop.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scripts_mib: Option<u32>,
+    /// `collections` — collect-job bundles. Its `max_age` has its own
+    /// knob ([`ServerSettings::collect_retention_days`]); this caps the
+    /// disk regardless of window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collections_mib: Option<u32>,
+}
+
+/// Built-in per-bucket caps (MiB) — the values fresh buckets are born
+/// with and unset SPA fields resolve to. Total ≈ 13.5 GiB, comfortably
+/// inside the broker-wide `max_file_store: 50GB` once the ~5.3 GiB of
+/// stream reservations (bootstrap.rs) are accounted for.
+pub const DEFAULT_RESULT_OUTPUT_CAP_MIB: u32 = 1024;
+pub const DEFAULT_AGENT_RELEASES_CAP_MIB: u32 = 2048;
+pub const DEFAULT_APP_PACKAGES_CAP_MIB: u32 = 5120;
+pub const DEFAULT_SCRIPTS_CAP_MIB: u32 = 256;
+pub const DEFAULT_COLLECTIONS_CAP_MIB: u32 = 5120;
+
+/// Upper bound per bucket (50 GiB) — the broker-wide `max_file_store`
+/// default, so a single bucket can never be configured to eat the whole
+/// file store by fat-finger. Enforced by the PUT handler and clamped in
+/// the `effective_*` accessors so a hand-written KV value stays bounded.
+pub const MAX_OBJECT_STORE_CAP_MIB: u32 = 51_200;
+
+/// Upper bound on the SUM of the five effective bucket caps (45.2 GiB):
+/// the broker-wide 50 GiB minus the ~4.8 GiB the streams reserve
+/// (INVENTORY 1024 + RESULTS 2048 + EXEC 64 + EVENTS 256 + AUDIT 512 +
+/// OBS_EVENTS 512 + NOTIFICATIONS 512 MiB — bootstrap.rs). Without an
+/// aggregate bound, five individually-legal caps could total 250 GiB and
+/// every `update_stream` would be refused by the broker (10047) — the KV
+/// document claiming caps the streams don't have. Enforced by the PUT
+/// handler on the merged document.
+pub const MAX_OBJECT_STORE_TOTAL_MIB: u32 = 46_272;
+
+impl ObjectStoreCaps {
+    fn effective(v: Option<u32>, default: u32) -> u32 {
+        v.unwrap_or(default).clamp(1, MAX_OBJECT_STORE_CAP_MIB)
+    }
+
+    pub fn effective_result_output_mib(&self) -> u32 {
+        Self::effective(self.result_output_mib, DEFAULT_RESULT_OUTPUT_CAP_MIB)
+    }
+    pub fn effective_agent_releases_mib(&self) -> u32 {
+        Self::effective(self.agent_releases_mib, DEFAULT_AGENT_RELEASES_CAP_MIB)
+    }
+    pub fn effective_app_packages_mib(&self) -> u32 {
+        Self::effective(self.app_packages_mib, DEFAULT_APP_PACKAGES_CAP_MIB)
+    }
+    pub fn effective_scripts_mib(&self) -> u32 {
+        Self::effective(self.scripts_mib, DEFAULT_SCRIPTS_CAP_MIB)
+    }
+    pub fn effective_collections_mib(&self) -> u32 {
+        Self::effective(self.collections_mib, DEFAULT_COLLECTIONS_CAP_MIB)
+    }
+
+    /// `(bucket, effective cap in MiB)` for every object store, in
+    /// bootstrap order — the reconcile loop's input.
+    pub fn effective_all(&self) -> [(&'static str, u32); 5] {
+        [
+            (
+                crate::kv::OBJECT_AGENT_RELEASES,
+                self.effective_agent_releases_mib(),
+            ),
+            (
+                crate::kv::OBJECT_APP_PACKAGES,
+                self.effective_app_packages_mib(),
+            ),
+            (crate::kv::OBJECT_SCRIPTS, self.effective_scripts_mib()),
+            (
+                crate::kv::OBJECT_RESULT_OUTPUT,
+                self.effective_result_output_mib(),
+            ),
+            (
+                crate::kv::OBJECT_COLLECTIONS,
+                self.effective_collections_mib(),
+            ),
+        ]
+    }
+}
+
 /// One operator-issued support code — the "裏コマンド" that reveals
 /// `client.unlock`-scoped jobs in the Client App (see
 /// [`crate::manifest::ClientHint::unlock`]).
@@ -257,6 +371,16 @@ pub struct ServerSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub check_status_stale_days: Option<u32>,
 
+    /// Per-bucket disk caps (MiB) for the five NATS Object Stores (#1247)
+    /// — see [`ObjectStoreCaps`]. `None` (unset) ⇒ every bucket resolves
+    /// to its built-in default, so a blank field preserves the out-of-box
+    /// budget. Applied to the backing `OBJ_*` streams at backend boot and
+    /// whenever this document is saved from the SPA
+    /// (`bootstrap::reconcile_object_store_max_bytes`), which is also what
+    /// finally delivers caps to buckets created before the caps existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_store_caps: Option<ObjectStoreCaps>,
+
     /// Operator-issued support codes — the helpdesk "裏コマンド" that reveals
     /// `client.unlock`-scoped jobs in the Client App. See [`SupportCode`].
     ///
@@ -299,9 +423,33 @@ impl ServerSettings {
             collect_retention_days: Some(DEFAULT_COLLECT_RETENTION_DAYS),
             session_ttl_hours: Some(DEFAULT_SESSION_TTL_HOURS),
             check_status_stale_days: Some(DEFAULT_CHECK_STATUS_STALE_DAYS),
+            // Real per-bucket defaults, so the SPA renders them as faint
+            // placeholders and unset deployments are capped out of the box.
+            object_store_caps: Some(ObjectStoreCaps {
+                result_output_mib: Some(DEFAULT_RESULT_OUTPUT_CAP_MIB),
+                agent_releases_mib: Some(DEFAULT_AGENT_RELEASES_CAP_MIB),
+                app_packages_mib: Some(DEFAULT_APP_PACKAGES_CAP_MIB),
+                scripts_mib: Some(DEFAULT_SCRIPTS_CAP_MIB),
+                collections_mib: Some(DEFAULT_COLLECTIONS_CAP_MIB),
+            }),
             // No built-in code: a deployment that configures none has no
             // unlockable jobs, which is the only safe default for a secret.
             support_codes: Vec::new(),
+        }
+    }
+
+    /// The caps document with every bucket resolved: stored values where
+    /// set, built-in defaults elsewhere, each clamped to
+    /// `1..=MAX_OBJECT_STORE_CAP_MIB` so an out-of-band KV write can't
+    /// reach the broker unsanitised.
+    pub fn effective_object_store_caps(&self) -> ObjectStoreCaps {
+        let c = self.object_store_caps.clone().unwrap_or_default();
+        ObjectStoreCaps {
+            result_output_mib: Some(c.effective_result_output_mib()),
+            agent_releases_mib: Some(c.effective_agent_releases_mib()),
+            app_packages_mib: Some(c.effective_app_packages_mib()),
+            scripts_mib: Some(c.effective_scripts_mib()),
+            collections_mib: Some(c.effective_collections_mib()),
         }
     }
 
@@ -817,5 +965,69 @@ mod tests {
         let json = r#"{"agent_prune_days":7,"some_future_knob":true}"#;
         let s: ServerSettings = serde_json::from_str(json).unwrap();
         assert_eq!(s.agent_prune_days, Some(7));
+    }
+
+    #[test]
+    fn object_store_caps_unset_resolves_to_builtin_defaults() {
+        // Blank doc ⇒ every bucket capped at its built-in default — the
+        // out-of-box fix for uncapped / drifted buckets (#1247).
+        let s = ServerSettings::default();
+        assert_eq!(s.object_store_caps, None);
+        let c = s.effective_object_store_caps();
+        assert_eq!(c.result_output_mib, Some(DEFAULT_RESULT_OUTPUT_CAP_MIB));
+        assert_eq!(c.agent_releases_mib, Some(DEFAULT_AGENT_RELEASES_CAP_MIB));
+        assert_eq!(c.app_packages_mib, Some(DEFAULT_APP_PACKAGES_CAP_MIB));
+        assert_eq!(c.scripts_mib, Some(DEFAULT_SCRIPTS_CAP_MIB));
+        assert_eq!(c.collections_mib, Some(DEFAULT_COLLECTIONS_CAP_MIB));
+    }
+
+    #[test]
+    fn object_store_caps_partial_override_keeps_other_defaults() {
+        let s = ServerSettings {
+            object_store_caps: Some(ObjectStoreCaps {
+                app_packages_mib: Some(8192),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let c = s.effective_object_store_caps();
+        assert_eq!(c.app_packages_mib, Some(8192));
+        assert_eq!(c.scripts_mib, Some(DEFAULT_SCRIPTS_CAP_MIB));
+    }
+
+    #[test]
+    fn object_store_caps_clamps_out_of_band_writes() {
+        let s = ServerSettings {
+            object_store_caps: Some(ObjectStoreCaps {
+                result_output_mib: Some(0),
+                app_packages_mib: Some(u32::MAX),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let c = s.effective_object_store_caps();
+        // 0 floors to 1 MiB — NATS treats max_bytes: 0 as unlimited, the
+        // exact failure mode this feature exists to remove.
+        assert_eq!(c.result_output_mib, Some(1));
+        assert_eq!(c.app_packages_mib, Some(MAX_OBJECT_STORE_CAP_MIB));
+    }
+
+    #[test]
+    fn object_store_caps_round_trips_and_omits_when_unset() {
+        let s = ServerSettings {
+            object_store_caps: Some(ObjectStoreCaps {
+                scripts_mib: Some(512),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert_eq!(json, r#"{"object_store_caps":{"scripts_mib":512}}"#);
+        assert_eq!(serde_json::from_str::<ServerSettings>(&json).unwrap(), s);
+        assert!(
+            !serde_json::to_string(&ServerSettings::default())
+                .unwrap()
+                .contains("object_store_caps")
+        );
     }
 }

@@ -33,7 +33,10 @@ use crate::kv::{
     OBJECT_COLLECTIONS, OBJECT_RESULT_OUTPUT, OBJECT_SCRIPTS, STREAM_AUDIT, STREAM_EVENTS,
     STREAM_EXEC, STREAM_INVENTORY, STREAM_NOTIFICATIONS, STREAM_OBS_EVENTS, STREAM_RESULTS,
 };
-use crate::wire::DEFAULT_COLLECT_RETENTION_DAYS;
+use crate::wire::{
+    DEFAULT_AGENT_RELEASES_CAP_MIB, DEFAULT_APP_PACKAGES_CAP_MIB, DEFAULT_COLLECT_RETENTION_DAYS,
+    DEFAULT_COLLECTIONS_CAP_MIB, DEFAULT_RESULT_OUTPUT_CAP_MIB, DEFAULT_SCRIPTS_CAP_MIB,
+};
 
 /// Create-or-update an Object Store, but never let it wedge backend
 /// startup. `create_object_store` neither reconciles an existing
@@ -428,11 +431,21 @@ pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
     info!(bucket = BUCKET_SCHEDULES_YAML, "ready");
 
     // ── Object Store ─────────────────────────────────────────────
+    // #1247: every bucket is born with a `max_bytes` cap. The first
+    // three had none at all (unbounded disk leak); result_output /
+    // collections had caps in code since #518, but pre-existing
+    // buckets never received them (create-drift tolerated by
+    // `ensure_object_store`) — the backend's boot reconcile
+    // (`reconcile_object_store_max_bytes` driven by
+    // `ServerSettings::object_store_caps`) is what delivers these to
+    // a live broker. The shared DEFAULT_*_CAP_MIB constants keep the
+    // fresh-bucket value and the SPA-visible default in one place.
     // agent_releases — one object per version, raw exe bytes.
     ensure_object_store(
         js,
         ObjectStoreConfig {
             bucket: OBJECT_AGENT_RELEASES.into(),
+            max_bytes: DEFAULT_AGENT_RELEASES_CAP_MIB as i64 * MIB,
             ..Default::default()
         },
     )
@@ -447,6 +460,7 @@ pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
         js,
         ObjectStoreConfig {
             bucket: OBJECT_APP_PACKAGES.into(),
+            max_bytes: DEFAULT_APP_PACKAGES_CAP_MIB as i64 * MIB,
             ..Default::default()
         },
     )
@@ -461,6 +475,7 @@ pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
         js,
         ObjectStoreConfig {
             bucket: OBJECT_SCRIPTS.into(),
+            max_bytes: DEFAULT_SCRIPTS_CAP_MIB as i64 * MIB,
             ..Default::default()
         },
     )
@@ -487,7 +502,7 @@ pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
         ObjectStoreConfig {
             bucket: OBJECT_RESULT_OUTPUT.into(),
             max_age: Duration::from_secs(SECS_PER_DAY * 30),
-            max_bytes: GIB,
+            max_bytes: DEFAULT_RESULT_OUTPUT_CAP_MIB as i64 * MIB,
             ..Default::default()
         },
     )
@@ -511,7 +526,7 @@ pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
         ObjectStoreConfig {
             bucket: OBJECT_COLLECTIONS.into(),
             max_age: Duration::from_secs(SECS_PER_DAY * DEFAULT_COLLECT_RETENTION_DAYS as u64),
-            max_bytes: 5 * GIB,
+            max_bytes: DEFAULT_COLLECTIONS_CAP_MIB as i64 * MIB,
             ..Default::default()
         },
     )
@@ -580,6 +595,57 @@ pub async fn reconcile_collect_retention(
         stream = %stream_name,
         retention_days,
         "collect retention: reconciled Object Store max_age",
+    );
+    Ok(true)
+}
+
+/// Reconcile one Object Store's disk cap to `cap_mib` by updating
+/// `max_bytes` on its backing `OBJ_<bucket>` stream (#1247).
+///
+/// Same shape as [`reconcile_collect_retention`] (read-modify-write
+/// patching ONLY the one field, so object-store-specific stream
+/// settings and the `max_age` window stay untouched), but for the
+/// field that bounds disk. This is what delivers caps to buckets
+/// created BEFORE the cap existed — `ensure_object_store` deliberately
+/// tolerates the 10058 config-drift error instead of reconciling, so
+/// without this a live bucket keeps whatever it was born with forever
+/// (how `OBJ_result_output` reached 6.76 GB against a nominal 1 GiB).
+///
+/// Idempotent: returns `Ok(false)` when already in sync. A missing
+/// stream is a soft error the caller logs and continues past —
+/// bootstrap runs before this on the boot path. Eviction is the
+/// broker's job once the cap lands (`DiscardPolicy::Old`, the object
+/// store default); shrink-to-fit is not instantaneous but needs no
+/// operator action.
+pub async fn reconcile_object_store_max_bytes(
+    js: &jetstream::Context,
+    bucket: &str,
+    cap_mib: u32,
+) -> Result<bool> {
+    const MIB: i64 = 1024 * 1024;
+    let desired = cap_mib as i64 * MIB;
+    let stream_name = object_store_stream_name(bucket);
+
+    let mut stream = js
+        .get_stream(&stream_name)
+        .await
+        .with_context(|| format!("get_stream {stream_name} for max_bytes reconcile"))?;
+    let info = stream
+        .info()
+        .await
+        .with_context(|| format!("stream info {stream_name}"))?;
+    if info.config.max_bytes == desired {
+        return Ok(false);
+    }
+    let mut cfg = info.config.clone();
+    cfg.max_bytes = desired;
+    js.update_stream(cfg)
+        .await
+        .with_context(|| format!("update_stream {stream_name} max_bytes"))?;
+    info!(
+        stream = %stream_name,
+        cap_mib,
+        "object store: reconciled max_bytes",
     );
     Ok(true)
 }
@@ -769,6 +835,73 @@ mod tests {
                 .await
                 .expect("idempotent reconcile"),
             "second reconcile with the same value should be a no-op",
+        );
+    }
+
+    /// `reconcile_object_store_max_bytes` must deliver a cap to a bucket
+    /// that was provisioned WITHOUT one — the exact drift case #1247
+    /// fixes (`OBJ_result_output` at 6.76 GB against a nominal 1 GiB,
+    /// because a cap added in code after the bucket existed never reached
+    /// the broker). Asserts the backing stream's `max_bytes` changes, the
+    /// `max_age` window survives the max_bytes-only update, and the
+    /// idempotent no-op path. Mirrors
+    /// [`reconcile_collect_retention_updates_max_age`].
+    #[tokio::test]
+    #[ignore = "requires nats-server in PATH; cargo test -- --ignored"]
+    async fn reconcile_object_store_max_bytes_updates_cap() {
+        use crate::kv::OBJECT_RESULT_OUTPUT;
+        const SECS_PER_DAY: u64 = 24 * 60 * 60;
+        let b = spawn_broker().await;
+
+        // Provision the way the pre-#518 bucket was born: a 30-day window
+        // but NO size cap (the drifted production state).
+        ensure_object_store(
+            &b.js,
+            ObjectStoreConfig {
+                bucket: OBJECT_RESULT_OUTPUT.into(),
+                max_age: Duration::from_secs(SECS_PER_DAY * 30),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("fresh uncapped result_output bucket");
+
+        let stream_name = object_store_stream_name(OBJECT_RESULT_OUTPUT);
+
+        // Apply the 1 GiB cap — first call changes the stream.
+        assert!(
+            reconcile_object_store_max_bytes(&b.js, OBJECT_RESULT_OUTPUT, 1024)
+                .await
+                .expect("reconcile to 1024 MiB"),
+            "first reconcile should report a change",
+        );
+        let mut stream = b.js.get_stream(&stream_name).await.expect("stream");
+        let info = stream.info().await.expect("info");
+        assert_eq!(
+            info.config.max_bytes,
+            1024 * 1024 * 1024,
+            "max_bytes must land on the previously-uncapped stream",
+        );
+        assert_eq!(
+            info.config.max_age,
+            Duration::from_secs(SECS_PER_DAY * 30),
+            "the retention window must survive the max_bytes-only update",
+        );
+
+        // Re-applying the same value is a no-op (no revision-bumping update).
+        assert!(
+            !reconcile_object_store_max_bytes(&b.js, OBJECT_RESULT_OUTPUT, 1024)
+                .await
+                .expect("idempotent reconcile"),
+            "second reconcile with the same value should be a no-op",
+        );
+
+        // A different value reconciles again (operator tune-down/tune-up).
+        assert!(
+            reconcile_object_store_max_bytes(&b.js, OBJECT_RESULT_OUTPUT, 2048)
+                .await
+                .expect("reconcile to 2048 MiB"),
+            "changing the cap should report a change",
         );
     }
 }

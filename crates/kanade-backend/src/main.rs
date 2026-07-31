@@ -958,6 +958,25 @@ pub(crate) async fn run_backend() -> Result<()> {
                     warn!(error = %format!("{e:#}"), "collect retention reconcile at boot failed")
                 }
             }
+            // #1247: reconcile every object store's max_bytes cap onto its
+            // backing stream. This is also the fix for pre-existing buckets
+            // that never received their cap (create-drift tolerated by
+            // ensure_object_store) — e.g. OBJ_result_output at 6.76 GB
+            // against a nominal 1 GiB. Non-fatal per bucket: a failure
+            // leaves the previous cap and the next save / restart retries.
+            for (bucket, cap_mib) in settings.effective_object_store_caps().effective_all() {
+                match kanade_shared::bootstrap::reconcile_object_store_max_bytes(
+                    &jetstream, bucket, cap_mib,
+                )
+                .await
+                {
+                    Ok(true) => info!(bucket, cap_mib, "object store cap reconciled at boot"),
+                    Ok(false) => {}
+                    Err(e) => {
+                        warn!(error = %format!("{e:#}"), bucket, "object store cap reconcile at boot failed")
+                    }
+                }
+            }
         }
         Err(e) => {
             warn!(error = %format!("{e:#}"), "collect retention: read server_settings failed; skipping boot reconcile")
