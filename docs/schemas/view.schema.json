@@ -187,10 +187,6 @@
             "null"
           ]
         },
-        "dashboard": {
-          "description": "Tab this widget lives under on the Analytics page. Widgets from\nevery job are collected and grouped by this label, so the same\nstring across jobs builds one multi-source dashboard. Required.",
-          "type": "string"
-        },
         "description": {
           "description": "Optional one-line subtitle shown muted under the `title` on the\nAnalytics page — room for a unit, a caveat, or what the number\nmeans (\"samples × 2 min\", \"Security 4624 only\"). Rejected if\npresent-but-blank.",
           "type": [
@@ -236,9 +232,9 @@
           ],
           "format": "int32"
         },
-        "pin_dashboard": {
-          "description": "Promote this widget to the main Dashboard, not just the Analytics\npage (#vuln-roadmap PR3). The Dashboard fetches the pinned subset\n(`/api/analytics?pinned=true`, fleet scope) and renders it with the\nsame widget components. Operator-controlled, so any config-driven\nview (e.g. a future vulnerability rollup) can surface up front\nwithout a bespoke card. Defaults to `false`. Pin a `scope: fleet`\nwidget — a `pc`-scoped one needs a selected PC and won't render on\nthe fleet Dashboard.",
-          "type": "boolean"
+        "placement": {
+          "description": "Where this widget surfaces — an Analytics tab and/or a pinned\nDashboard card. Same block a view's `sql_widgets:` uses, so the\ntwo widget kinds are authored identically; previously this was a\nflat `dashboard:` + `pin_dashboard:` pair that meant the same\nthing in a different shape.",
+          "$ref": "#/$defs/Placement"
         },
         "render": {
           "description": "Which widget the SPA draws. See [`AggregateRender`].",
@@ -300,9 +296,46 @@
         }
       },
       "required": [
-        "dashboard",
+        "placement",
         "title",
         "render"
+      ]
+    },
+    "AnalyticsPlacement": {
+      "description": "The `placement.analytics` block — see [`Placement::analytics`].\n\nDeserialized from a bare string as well as a map, so\n`analytics: app-usage` and `analytics: { tab: app-usage, width: half }`\nboth work. Serialized back as a bare string whenever no `width` is set,\nwhich keeps the stored resource JSON in its terse form for every\nwidget that doesn't ask for a width — i.e. almost all of them.",
+      "type": "object",
+      "properties": {
+        "tab": {
+          "description": "Tab this widget groups under. Widgets from every job/view are\ncollected and grouped by this label, so the same string across\nsources builds one multi-source dashboard.",
+          "type": "string"
+        },
+        "width": {
+          "description": "How much of the Analytics row this widget takes (#1257). Absent ⇒\nthe per-`render` default.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WidgetWidth"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "tab"
+      ]
+    },
+    "AnalyticsPlacementSchema": {
+      "description": "Schema-only mirror of the two shapes [`de_analytics`] accepts.\n\nNeeded because the generated schema is what the SPA's YAML editor\nvalidates against. Pointing `schemars` at [`AnalyticsPlacement`]\ndirectly advertises only the block form, which would put a red\nsquiggle under `analytics: app-usage` — the bare-string form every\nwidget in `configs/` actually uses, and the one the field\nserializes back to. The deserializer would still accept it; the\noperator would just be told, in the editor we ship, that correct\nconfig is wrong.\n\n(Contrast [`ConfirmHint`], where the scalar really is a rarely-used\nshorthand for the canonical struct, so advertising the struct alone\nis a reasonable trade. Here the scalar is the canonical form.)",
+      "anyOf": [
+        {
+          "description": "`analytics: app-usage`",
+          "type": "string"
+        },
+        {
+          "description": "`analytics: { tab: app-usage, width: half }`",
+          "$ref": "#/$defs/AnalyticsPlacement"
+        }
       ]
     },
     "DashboardPlacement": {
@@ -313,18 +346,33 @@
           "description": "Pin this widget to the main Dashboard's promoted section.",
           "type": "boolean",
           "default": false
+        },
+        "width": {
+          "description": "How much of the Dashboard's pinned row this widget takes (#1257).\nAbsent ⇒ the per-`render` default. See [`WidgetWidth`].\n\nNested under `dashboard` on purpose: the Dashboard's pinned strip\nis a summary where two full-width widgets push everything else\nbelow the fold, while the Analytics page gives a widget the tab to\nitself and wants the default. Living here says \"Dashboard only\"\nstructurally, instead of needing a `pin_`-prefixed name to say it.\nAn `analytics` width can be added later by promoting that field to\na string-or-block, without disturbing this one.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WidgetWidth"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
     },
     "Placement": {
-      "description": "Where a [`SqlWidget`] surfaces in the SPA. Mirrors the placement an\n[`AggregateWidget`] expresses via `dashboard` + `pin_dashboard`, but as an\nexplicit block since a SQL widget lives on a standalone view.",
+      "description": "Where a widget surfaces in the SPA — an Analytics tab and/or a pinned\nDashboard card. Shared verbatim by both widget kinds: a job's\n[`AggregateWidget`] and a view's [`SqlWidget`] are authored the same\nway. (#1257 folded the aggregate side's flat `dashboard:` +\n`pin_dashboard:` pair into this block; expressing one idea in two\nshapes meant a width had to be invented twice.)",
       "type": "object",
       "properties": {
         "analytics": {
-          "description": "The Analytics tab this widget groups under (the `AggregateWidget`\n`dashboard` analogue). Absent ⇒ not shown on the Analytics page.",
-          "type": [
-            "string",
-            "null"
+          "description": "The Analytics tab this widget groups under. Absent ⇒ not shown on\nthe Analytics page.\n\nWritten either as a bare tab name or as a block, so the common\ncase stays one line and a width is there when it's wanted:\n\n```yaml\nanalytics: app-usage\n# or\nanalytics: { tab: app-usage, width: half }\n```",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AnalyticsPlacementSchema"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "dashboard": {
@@ -520,6 +568,27 @@
         "query",
         "render",
         "placement"
+      ]
+    },
+    "WidgetWidth": {
+      "description": "How much of the widget grid a widget asks for (#1257).\n\nBoth the Analytics page and the Dashboard's pinned strip lay widgets\nout two-up on a wide screen. Until this existed, the width was\ndecided purely by `render`: `bar` / `timeline` / `op_timeline` /\n`table` always claimed the full row, everything else a single\ncolumn. That is a sensible default but a bad rule — an operator who\npins two `bar` widgets that answer the same question (app usage\nalongside browsing, say) cannot put them side by side, and each\npushes the rest of the page further down.\n\nAbsent ⇒ keep the per-`render` default, so every existing manifest\nrenders exactly as before.",
+      "oneOf": [
+        {
+          "description": "Span the whole widget row.",
+          "type": "string",
+          "const": "full"
+        },
+        {
+          "description": "Take one column, so a sibling can share the row.",
+          "type": "string",
+          "const": "half"
+        },
+        {
+          "title": "492 forward-compat catch-all (see [`AggregateScope::Unknown`]).",
+          "description": "Rendered as if unset — a width hint is presentation-only, so an\nunreadable variant must not drop the widget.",
+          "type": "string",
+          "const": "unknown"
+        }
       ]
     }
   }

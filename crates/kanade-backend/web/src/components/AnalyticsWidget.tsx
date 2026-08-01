@@ -23,6 +23,11 @@ export type BarRow = { label: string; value: number; est_minutes?: number };
 export type HourBucket = { hour: number; total: number; active: number };
 /** One cell of a `table` widget — a JSON scalar from the SQL result. */
 export type CellValue = string | number | boolean | null;
+/** Operator-declared width hint (#1257), from the manifest's `width:`.
+ *  Absent ⇒ fall back to the per-`render` default. `unknown` is the
+ *  #492 forward-compat catch-all and is treated as absent. */
+export type WidgetWidth = 'full' | 'half' | 'unknown';
+
 export type Widget = {
   dashboard: string;
   title: string;
@@ -30,6 +35,7 @@ export type Widget = {
   scope: 'pc' | 'fleet';
   /** Whether this widget is promoted to the main Dashboard. */
   pin_dashboard?: boolean;
+  width?: WidgetWidth;
 } & (
   | { render: 'bar'; rows: BarRow[] }
   | {
@@ -66,16 +72,31 @@ export function fmtMinutes(min: number): string {
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 
+/** Renders that need the whole row when the manifest doesn't say. A
+ *  24-bucket strip, the four-lane swimlane and an arbitrary SQL grid all
+ *  have real horizontal content; `bar` is here because a ranked list
+ *  with long labels reads better wide, not because it breaks narrow. */
+const WIDE_BY_DEFAULT = new Set(['timeline', 'bar', 'op_timeline', 'table']);
+
+/**
+ * Grid span for one widget. Pure so the precedence is testable without
+ * mounting anything — the interesting cases are all about *absence*
+ * (unset, and the #492 `unknown` catch-all) falling back rather than
+ * forcing a width.
+ */
+export function widgetSpanClass(render: string, width?: WidgetWidth): string {
+  // An explicit hint wins in BOTH directions: `half` narrows a bar,
+  // and `full` widens a gauge. Anything else — unset, or a variant this
+  // build doesn't know — defers to the per-render default, so an older
+  // SPA meeting a newer manifest degrades to today's layout instead of
+  // dropping the widget.
+  if (width === 'half') return '';
+  if (width === 'full') return 'lg:col-span-2';
+  return WIDE_BY_DEFAULT.has(render) ? 'lg:col-span-2' : '';
+}
+
 export function WidgetCard({ w, t }: { w: Widget; t: (k: string) => string }) {
-  // Timeline, bar, the operational swimlane and the (often wide) SQL table
-  // read better full-width.
-  const span =
-    w.render === 'timeline' ||
-    w.render === 'bar' ||
-    w.render === 'op_timeline' ||
-    w.render === 'table'
-      ? 'lg:col-span-2'
-      : '';
+  const span = widgetSpanClass(w.render, w.width);
   return (
     <Card className={span}>
       <CardHeader>
