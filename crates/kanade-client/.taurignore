@@ -8,9 +8,10 @@
 # which restarted the dev server: an immediate rebuild loop that ended in
 # `script "dev" exited with code 255`.
 #
-# `web/src` is here for a different reason: editing the UI is not a
-# Rust-side change either, and without it every one-character tweak to
-# the frontend rebuilt and relaunched the whole binary.
+# `web/src` and `web/demo` are here for a different reason: editing the
+# UI or a fixture is not a Rust-side change either, and without them every
+# one-character tweak rebuilt and relaunched the whole binary — which,
+# while tuning demo fixtures, is most of what you do.
 #
 # Deliberately narrow, and it has to be. Ignoring `web/` wholesale also
 # hides the `package.json` the CLI resolves `beforeDevCommand` against,
@@ -18,3 +19,4 @@
 web/node_modules
 web/dist
 web/src
+web/demo
