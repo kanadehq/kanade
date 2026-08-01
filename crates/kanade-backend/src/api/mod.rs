@@ -683,9 +683,9 @@ pub fn feature_for_path(path: &str) -> Option<Feature> {
         "/api/views" | "/api/views/{id}/yaml" | "/api/views/{id}" => Feature::Views,
 
         // --- Group definitions (#1032) — the declarative/dynamic `groups/`
-        // manifest kind. Gated with the Groups page (its own SPA management
-        // page at /group-defs sits alongside the per-PC membership page under
-        // the same `groups` visibility feature). ---
+        // manifest kind, and since #1274 the only thing the SPA's single
+        // /groups page lists. Gated by the same `groups` visibility feature
+        // as the membership + contacts endpoints below. ---
         "/api/group-defs"
         | "/api/group-defs/{id}/yaml"
         | "/api/group-defs/{id}/members"

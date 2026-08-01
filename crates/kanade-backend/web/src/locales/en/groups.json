@@ -1,36 +1,47 @@
 {
   "title": "Groups",
-  "subtitle": "Group-centric view of agent group membership — drives targeted exec and layered config.",
-  "addTitle": "Add PCs to a group",
-  "pcMultiPlaceholder": "Select PCs (one or more)…",
-  "groupName": "Group",
-  "groupNamePlaceholder": "wave1, canary, …",
-  "pc": "PC",
-  "add": "Add",
-  "members": "Members",
-  "noMembers": "(no members)",
-  "config": "Config",
-  "configured": "configured",
-  "configHint": "A groups.<name> config override exists — manage it on the Config page.",
-  "email": "Notify email",
-  "emailNone": "(none)",
-  "emailEdit": "Edit notify emails for {{group}}",
-  "emailPlaceholder": "ops@example.com, it@example.com",
-  "emailHint": "Comma- or space-separated. Used by compliance alerts with email: true.",
-  "save": "Save",
-  "cancel": "Cancel",
-  "actions": "Actions",
-  "removeMember": "Remove {{pcId}} from {{group}}",
-  "confirmRemove": "Remove {{pcId}} from \"{{group}}\"?",
-  "remove": "Remove",
-  "removeAll": "Remove all members",
-  "removeAllLabel": "Remove all",
-  "confirmRemoveAll": "Remove all {{count}} member(s) from \"{{group}}\"? The group disappears once it has no members and no config.",
-  "empty": "No groups yet — add a PC to a group above, or set a group config override on the Config page.",
+  "subtitle": "Declared fleet groups (#1032): a static member list or a dynamic SQL query that returns pc_ids. Drives targeted exec, layered config, a schedule's target.groups, and where a group's alert email goes.",
+  "errorTitle": "Failed to load groups",
+  "loading": "Loading groups…",
+  "empty": "No groups yet. Create one here, or apply YAML with `kanade group def create`.",
+  "actions": {
+    "new": "New group",
+    "editAria": "Edit group {{id}}",
+    "deleteAria": "Delete group {{id}}"
+  },
+  "kind": {
+    "static": "static",
+    "dynamic": "dynamic"
+  },
+  "staticSummary_one": "{{count}} member (static list)",
+  "staticSummary_other": "{{count}} members (static list)",
+  "dynamicSummary": "Dynamic — membership recomputed every {{refresh}}",
+  "defaultRefresh": "10m",
+  "members": {
+    "show": "resolved members",
+    "hide": "hide members",
+    "loading": "resolving…",
+    "count_one": "{{count}} PC",
+    "count_other": "{{count}} PCs"
+  },
+  "contacts": {
+    "none": "no notify email",
+    "loading": "loading notify email…",
+    "edit": "Edit notify emails for {{id}}",
+    "placeholder": "ops@example.com, it@example.com",
+    "hint": "Comma- or space-separated. Used by compliance alerts with email: true.",
+    "save": "Save",
+    "cancel": "Cancel",
+    "saved": "Updated notify emails for {{id}}",
+    "clearFailed": "Deleted {{id}}, but clearing its notify emails failed: {{error}}"
+  },
+  "confirm": {
+    "deleteTitle": "Delete group \"{{id}}\"?",
+    "deleteDescription": "Removes the group definition and its notify email addresses. Schedules targeting it stop resolving members via this group (manual agent_groups membership is untouched).",
+    "deleteLabel": "Delete"
+  },
   "toast": {
-    "added": "Added {{count}} PC(s) to {{group}}",
-    "removed": "Removed {{pcId}} from {{group}}",
-    "removedAll": "Removed all members from {{group}}",
-    "emailSaved": "Updated notify emails for {{group}}"
+    "deleted": "Deleted group: {{id}}",
+    "deleteFailed": "Delete failed: {{error}}"
   }
 }

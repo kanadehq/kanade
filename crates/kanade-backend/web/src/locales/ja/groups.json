@@ -1,36 +1,45 @@
 {
   "title": "グループ",
-  "subtitle": "エージェントのグループ所属をグループ起点で管理 — ターゲット実行とレイヤード設定の単位です。",
-  "addTitle": "PC をグループに追加",
-  "pcMultiPlaceholder": "PC を選択（複数可）…",
-  "groupName": "グループ",
-  "groupNamePlaceholder": "wave1, canary, …",
-  "pc": "PC",
-  "add": "追加",
-  "members": "メンバー",
-  "noMembers": "（メンバーなし）",
-  "config": "設定",
-  "configured": "設定あり",
-  "configHint": "groups.<name> の設定オーバーライドがあります — 設定ページで管理できます。",
-  "email": "通知メール",
-  "emailNone": "（なし）",
-  "emailEdit": "{{group}} の通知メールを編集",
-  "emailPlaceholder": "ops@example.com, it@example.com",
-  "emailHint": "カンマまたは空白区切り。email: true のコンプライアンス alert で使われます。",
-  "save": "保存",
-  "cancel": "キャンセル",
-  "actions": "操作",
-  "removeMember": "{{pcId}} を {{group}} から削除",
-  "confirmRemove": "{{pcId}} を「{{group}}」から削除しますか？",
-  "remove": "削除",
-  "removeAll": "全メンバーを削除",
-  "removeAllLabel": "全削除",
-  "confirmRemoveAll": "「{{group}}」から {{count}} 台すべてを削除しますか？メンバーと設定が両方なくなるとグループは一覧から消えます。",
-  "empty": "グループはまだありません — 上のフォームで PC をグループに追加するか、設定ページでグループ設定を作成してください。",
+  "subtitle": "宣言的なフリートグループ (#1032)。静的なメンバー一覧、または pc_id を返す動的 SQL クエリで定義します。ターゲット実行・レイヤード設定・スケジュールの target.groups・グループ宛アラートメールの宛先はここが起点です。",
+  "errorTitle": "グループの読み込みに失敗しました",
+  "loading": "グループを読み込み中…",
+  "empty": "グループがまだありません。ここで作成するか、`kanade group def create` で YAML を適用してください。",
+  "actions": {
+    "new": "新規グループ",
+    "editAria": "グループ {{id}} を編集",
+    "deleteAria": "グループ {{id}} を削除"
+  },
+  "kind": {
+    "static": "静的",
+    "dynamic": "動的"
+  },
+  "staticSummary_other": "メンバー {{count}} 台（静的リスト）",
+  "dynamicSummary": "動的 — メンバーを {{refresh}} ごとに再計算",
+  "defaultRefresh": "10m",
+  "members": {
+    "show": "解決されたメンバー",
+    "hide": "メンバーを隠す",
+    "loading": "解決中…",
+    "count_other": "{{count}} 台"
+  },
+  "contacts": {
+    "none": "通知メールなし",
+    "loading": "通知メールを読み込み中…",
+    "edit": "{{id}} の通知メールを編集",
+    "placeholder": "ops@example.com, it@example.com",
+    "hint": "カンマまたは空白区切り。email: true のコンプライアンス alert で使われます。",
+    "save": "保存",
+    "cancel": "キャンセル",
+    "saved": "{{id}} の通知メールを更新しました",
+    "clearFailed": "{{id}} は削除しましたが、通知メールの消去に失敗しました: {{error}}"
+  },
+  "confirm": {
+    "deleteTitle": "グループ「{{id}}」を削除しますか？",
+    "deleteDescription": "グループ定義と、そのグループの通知メール設定を削除します。これを対象にしているスケジュールは、このグループ経由でのメンバー解決を行わなくなります（手動の agent_groups 所属はそのまま）。",
+    "deleteLabel": "削除"
+  },
   "toast": {
-    "added": "{{count}} 台を {{group}} に追加しました",
-    "removed": "{{pcId}} を {{group}} から削除しました",
-    "removedAll": "{{group}} の全メンバーを削除しました",
-    "emailSaved": "{{group}} の通知メールを更新しました"
+    "deleted": "グループを削除しました: {{id}}",
+    "deleteFailed": "削除に失敗しました: {{error}}"
   }
 }

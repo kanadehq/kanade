@@ -1,38 +1,54 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Check, Mail, Plus, Settings2, X } from 'lucide-react';
+import {
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Loader2,
+  Mail,
+  Pencil,
+  Plus,
+  Trash2,
+  X,
+} from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Link } from 'react-router-dom';
 import { toast } from 'sonner';
 
-import { PcPicker } from '@/components/PcPicker';
+import { ErrorCard } from '@/components/ErrorCard';
+import { type EditorMode, type RepoOrigin, YamlEditorDialog } from '@/components/YamlEditorDialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { useConfirm } from '@/components/ui/confirm-dialog';
 import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table';
 import { apiFetch, formatError } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 
-// Mirror of the backend GroupSummary (api/agent_groups.rs): the
-// group-centric inverse of the per-PC agent_groups KV rows, plus
-// whether a `groups.<name>` config override exists and the group's
-// notification email addresses (`group_contacts` KV).
-type GroupSummary = {
-  name: string;
-  members: string[];
-  has_config: boolean;
-  emails: string[];
+// Mirrors `kanade_shared::manifest::GroupDef` (the bits the list renders).
+// `members` / `query` are omitted when empty/absent by the backend (serde
+// skip), so both are optional here — a static group carries `members`, a
+// dynamic one a `query`.
+type GroupDefRow = {
+  id: string;
+  description?: string | null;
+  members?: string[];
+  query?: string | null;
+  refresh?: string | null;
+  tags?: string[];
+  /** GitOps provenance (#678) — present ⇒ open the editor read-only. */
+  origin?: RepoOrigin | null;
 };
+
+// `GET /api/group-defs/{id}/members` — the resolved pc_id set (a dynamic
+// group runs its query server-side; a static group returns its literal list).
+type GroupMembers = { id: string; kind: string; count: number; members: string[] };
+
+// `GET /api/groups/{name}/email` — mirrors `kanade_shared::wire::GroupContacts`.
+type GroupContacts = { emails: string[] };
+
+function isDynamic(g: GroupDefRow): boolean {
+  return typeof g.query === 'string' && g.query.trim().length > 0;
+}
 
 // Split an operator's free-form input (comma / whitespace / newline
 // separated) into trimmed, non-empty address tokens. The backend
@@ -45,362 +61,345 @@ function parseEmails(raw: string): string[] {
     .filter(Boolean);
 }
 
-type GroupsOverview = {
-  groups: GroupSummary[];
-};
-
 export function Groups() {
   const { t } = useTranslation('groups');
   const { hasRole } = useAuth();
-  const canOperate = hasRole('operator');
   const qc = useQueryClient();
   const confirm = useConfirm();
+  const [editor, setEditor] = useState<EditorMode | null>(null);
+  const [preview, setPreview] = useState<Set<string>>(new Set());
+  // Self-gate the write controls for non-operators (the backend RBAC already
+  // rejects the writes, but hiding the buttons stops a viewer hitting a 403;
+  // matches the Compliance page's operator-gated clear button). Viewers keep
+  // the read-only list + members preview.
+  const canOperate = hasRole('operator');
 
-  const overview = useQuery({
-    queryKey: ['groups'],
-    queryFn: () => apiFetch<GroupsOverview>('/api/groups'),
+  const { data, error, isLoading } = useQuery({
+    queryKey: ['group-defs'],
+    queryFn: () => apiFetch<GroupDefRow[]>('/api/group-defs'),
   });
 
-  // add-membership form
-  const [newGroup, setNewGroup] = useState('');
-  const [newPcs, setNewPcs] = useState<string[]>([]);
-
-  // Inline notify-email editor: which group's address list is open,
-  // and the in-progress draft text.
-  const [editingEmail, setEditingEmail] = useState<string | null>(null);
-  const [emailDraft, setEmailDraft] = useState('');
-
-  const invalidate = () => qc.invalidateQueries({ queryKey: ['groups'] });
-  const onError = (err: unknown) => toast.error(formatError(err));
-
-  // Each membership is a separate per-PC KV row (`POST
-  // /api/agents/<pc>/groups`), so adding several at once is N
-  // independent POSTs. Fired in batches (not one big Promise.all):
-  // selecting 50-100 PCs would otherwise exceed the browser's per-host
-  // connection cap and pile a burst onto the backend KV store. A
-  // bounded window keeps it responsive without serialising every call.
-  const add = useMutation({
-    mutationFn: async (v: { pcIds: string[]; group: string }) => {
-      const BATCH = 10;
-      for (let i = 0; i < v.pcIds.length; i += BATCH) {
-        await Promise.all(
-          v.pcIds.slice(i, i + BATCH).map((pcId) =>
-            apiFetch(`/api/agents/${encodeURIComponent(pcId)}/groups`, {
-              method: 'POST',
-              body: JSON.stringify({ group: v.group }),
-            }),
-          ),
-        );
+  const del = useMutation({
+    mutationFn: async (id: string) => {
+      await apiFetch(`/api/group-defs/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      // Clear the group's notification addresses too (#1274). A group with no
+      // definition has no row on this page any more, so contacts left behind
+      // would keep routing compliance alerts to an address nothing can show
+      // or edit. The PUT is idempotent and an empty list is filtered out of
+      // every read path (`contacts_map`), so it is a no-op for a group that
+      // never had contacts. Best-effort: a failure here must not report the
+      // (already successful) delete as failed.
+      try {
+        await apiFetch(`/api/groups/${encodeURIComponent(id)}/email`, {
+          method: 'PUT',
+          body: JSON.stringify({ emails: [] }),
+        });
+      } catch (e) {
+        toast.warning(t('contacts.clearFailed', { id, error: formatError(e) }));
       }
     },
-    onSuccess: (_data, v) => {
-      toast.success(t('toast.added', { count: v.pcIds.length, group: v.group }));
-      setNewPcs([]);
-      invalidate();
+    onSuccess: (_r, id) => {
+      qc.invalidateQueries({ queryKey: ['group-defs'] });
+      qc.invalidateQueries({ queryKey: ['group-contacts', id] });
+      toast.success(t('toast.deleted', { id }));
     },
-    onError: (err) => {
-      onError(err);
-      // Partial failure may have added some — refetch the real state.
-      invalidate();
-    },
+    onError: (e) => toast.error(t('toast.deleteFailed', { error: formatError(e) })),
   });
-
-  const remove = useMutation({
-    mutationFn: (v: { pcId: string; group: string }) =>
-      apiFetch(
-        `/api/agents/${encodeURIComponent(v.pcId)}/groups/${encodeURIComponent(v.group)}`,
-        { method: 'DELETE' },
-      ),
-    onSuccess: (_data, v) => {
-      toast.success(t('toast.removed', { pcId: v.pcId, group: v.group }));
-      invalidate();
-    },
-    onError,
-  });
-
-  // "Empty this group" = remove it from every member. There is no
-  // group entity to delete server-side — a group with zero members
-  // and no config simply stops appearing in the overview. Each
-  // DELETE touches a different per-PC KV row, so firing them in
-  // parallel is safe (no read-modify-write contention).
-  const removeAll = useMutation({
-    mutationFn: async (g: GroupSummary) => {
-      await Promise.all(
-        g.members.map((pcId) =>
-          apiFetch(
-            `/api/agents/${encodeURIComponent(pcId)}/groups/${encodeURIComponent(g.name)}`,
-            { method: 'DELETE' },
-          ),
-        ),
-      );
-    },
-    onSuccess: (_data, g) => {
-      toast.success(t('toast.removedAll', { group: g.name }));
-      invalidate();
-    },
-    onError: (err) => {
-      onError(err);
-      // Partial failure leaves some members removed — refetch so the
-      // table shows the actual remaining membership.
-      invalidate();
-    },
-  });
-
-  // Replace a group's notify-email list (`PUT /api/groups/<name>/email`).
-  // The backend normalises + validates, so a bad address comes back as a
-  // 400 surfaced via onError.
-  const saveEmails = useMutation({
-    mutationFn: (v: { group: string; emails: string[] }) =>
-      apiFetch(`/api/groups/${encodeURIComponent(v.group)}/email`, {
-        method: 'PUT',
-        body: JSON.stringify({ emails: v.emails }),
-      }),
-    onSuccess: (_data, v) => {
-      toast.success(t('toast.emailSaved', { group: v.group }));
-      setEditingEmail(null);
-      invalidate();
-    },
-    onError,
-  });
-
-  const groups = overview.data?.groups ?? [];
 
   return (
-    <div className="p-4 md:p-6 space-y-6 max-w-5xl">
-      <header>
-        <h1 className="text-2xl font-bold">{t('title')}</h1>
-        <p className="text-muted text-sm">{t('subtitle')}</p>
-      </header>
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-xl">{t('title')}</h2>
+          <p className="text-muted text-sm">{t('subtitle')}</p>
+        </div>
+        {canOperate && (
+          <Button onClick={() => setEditor({ type: 'create' })}>
+            <Plus className="size-4" />
+            {t('actions.new')}
+          </Button>
+        )}
+      </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">{t('addTitle')}</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <form
-            className="flex flex-wrap items-end gap-3"
-            onSubmit={(e) => {
-              e.preventDefault();
-              const group = newGroup.trim();
-              if (!group || newPcs.length === 0) return;
-              add.mutate({ pcIds: newPcs, group });
-            }}
-          >
-            <div className="space-y-1">
-              <Label htmlFor="add-group">{t('groupName')}</Label>
-              <Input
-                id="add-group"
-                value={newGroup}
-                onChange={(e) => setNewGroup(e.target.value)}
-                placeholder={t('groupNamePlaceholder')}
-                list="group-names"
-                className="w-44"
-              />
-              {/* Offer existing names as completions so "add another
-                  PC to wave1" doesn't depend on retyping it exactly,
-                  while still allowing a brand-new name. */}
-              <datalist id="group-names">
-                {groups.map((g) => (
-                  <option key={g.name} value={g.name} />
-                ))}
-              </datalist>
-            </div>
-            <div className="space-y-1">
-              <Label htmlFor="add-pc">{t('pc')}</Label>
-              <PcPicker
-                id="add-pc"
-                mode="multi"
-                value={newPcs}
-                onChange={setNewPcs}
-                placeholder={t('pcMultiPlaceholder')}
-                className="w-64"
-              />
-            </div>
-            <Button
-              type="submit"
-              disabled={!canOperate || !newGroup.trim() || newPcs.length === 0 || add.isPending}
-              title={canOperate ? undefined : t('rbac.operatorRequired', { ns: 'common' })}
-            >
-              <Plus className="size-4 mr-2" />
-              {t('add')}
-            </Button>
-          </form>
-          {!canOperate && (
-            <p className="text-xs text-muted mt-2">
-              {t('rbac.operatorRequired', { ns: 'common' })}
-            </p>
-          )}
-        </CardContent>
-      </Card>
-
-      {overview.isError && (
-        <p className="text-red-500 text-sm">{formatError(overview.error)}</p>
-      )}
-
-      {!overview.isLoading && groups.length === 0 ? (
-        <p className="text-muted text-sm">{t('empty')}</p>
+      {error ? (
+        <ErrorCard title={t('errorTitle')} error={error} />
+      ) : isLoading ? (
+        <div className="text-muted text-sm">{t('loading')}</div>
+      ) : !data || data.length === 0 ? (
+        <Card>
+          <CardContent className="py-8 text-center text-muted text-sm">{t('empty')}</CardContent>
+        </Card>
       ) : (
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>{t('groupName')}</TableHead>
-              <TableHead>{t('members')}</TableHead>
-              <TableHead>{t('email')}</TableHead>
-              <TableHead>{t('config')}</TableHead>
-              <TableHead className="text-right">{t('actions')}</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {groups.map((g) => (
-              <TableRow key={g.name}>
-                <TableCell label={t('groupName')} className="font-medium">
-                  <code>{g.name}</code>
-                </TableCell>
-                <TableCell label={t('members')}>
-                  {g.members.length === 0 ? (
-                    <span className="text-muted text-xs">{t('noMembers')}</span>
-                  ) : (
-                    <div className="flex flex-wrap gap-1.5">
-                      {g.members.map((pc) => (
-                        <span
-                          key={pc}
-                          className="inline-flex items-center gap-1 rounded bg-muted/10 px-1.5 py-0.5"
-                        >
-                          <Link to={`/agents/${encodeURIComponent(pc)}`}>
-                            <code className="text-xs hover:underline">{pc}</code>
-                          </Link>
-                          {canOperate && (
-                            <button
-                              type="button"
-                              aria-label={t('removeMember', { pcId: pc, group: g.name })}
-                              disabled={remove.isPending || removeAll.isPending}
-                              onClick={async () => {
-                                if (
-                                  await confirm({
-                                    title: t('confirmRemove', { pcId: pc, group: g.name }),
-                                    confirmLabel: t('remove'),
-                                    danger: true,
-                                  })
-                                ) {
-                                  remove.mutate({ pcId: pc, group: g.name });
-                                }
-                              }}
-                              className="text-muted hover:text-fg"
-                            >
-                              <X className="size-3" />
-                            </button>
-                          )}
-                        </span>
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          {data.map((g) => {
+            const dynamic = isDynamic(g);
+            const open = preview.has(g.id);
+            return (
+              <Card key={g.id}>
+                <CardHeader className="flex flex-row items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <CardTitle className="text-sm flex items-center gap-2">
+                      <code>{g.id}</code>
+                      <Badge variant={dynamic ? 'violet' : 'default'}>
+                        {dynamic ? t('kind.dynamic') : t('kind.static')}
+                      </Badge>
+                    </CardTitle>
+                    {g.description && <p className="mt-1 text-muted text-xs">{g.description}</p>}
+                  </div>
+                  {canOperate && (
+                    <div className="flex shrink-0 gap-1">
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => setEditor({ type: 'edit', id: g.id })}
+                        aria-label={t('actions.editAria', { id: g.id })}
+                      >
+                        <Pencil className="size-3.5" />
+                      </Button>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        aria-label={t('actions.deleteAria', { id: g.id })}
+                        onClick={async () => {
+                          const ok = await confirm({
+                            title: t('confirm.deleteTitle', { id: g.id }),
+                            description: t('confirm.deleteDescription'),
+                            confirmLabel: t('confirm.deleteLabel'),
+                          });
+                          if (ok) del.mutate(g.id);
+                        }}
+                      >
+                        <Trash2 className="size-3.5 text-danger" />
+                      </Button>
+                    </div>
+                  )}
+                </CardHeader>
+                <CardContent className="space-y-2">
+                  {/* Definition summary: static shows its member count; dynamic
+                      shows the recompute cadence + the query. */}
+                  <div className="text-muted text-xs">
+                    {dynamic
+                      ? t('dynamicSummary', { refresh: g.refresh || t('defaultRefresh') })
+                      : t('staticSummary', { count: g.members?.length ?? 0 })}
+                  </div>
+                  {dynamic && g.query && (
+                    <pre className="max-h-40 overflow-auto rounded bg-muted/10 p-2 text-[11px] leading-snug">
+                      {g.query.trim()}
+                    </pre>
+                  )}
+                  {g.tags && g.tags.length > 0 && (
+                    <div className="flex flex-wrap gap-1">
+                      {g.tags.map((tag) => (
+                        <Badge key={tag} variant="default">
+                          {tag}
+                        </Badge>
                       ))}
                     </div>
                   )}
-                </TableCell>
-                <TableCell label={t('email')}>
-                  {editingEmail === g.name ? (
-                    <div className="flex items-center gap-1.5">
-                      <Input
-                        autoFocus
-                        value={emailDraft}
-                        onChange={(e) => setEmailDraft(e.target.value)}
-                        placeholder={t('emailPlaceholder')}
-                        title={t('emailHint')}
-                        className="w-64"
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') {
-                            e.preventDefault();
-                            // Guard against a double-submit from holding/
-                            // mashing Enter while the PUT is in flight.
-                            if (!saveEmails.isPending) {
-                              saveEmails.mutate({
-                                group: g.name,
-                                emails: parseEmails(emailDraft),
-                              });
-                            }
-                          } else if (e.key === 'Escape') {
-                            setEditingEmail(null);
-                          }
-                        }}
-                      />
-                      <Button
-                        size="sm"
-                        disabled={saveEmails.isPending}
-                        aria-label={t('save')}
-                        onClick={() =>
-                          saveEmails.mutate({ group: g.name, emails: parseEmails(emailDraft) })
-                        }
-                      >
-                        <Check className="size-3" />
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        aria-label={t('cancel')}
-                        onClick={() => setEditingEmail(null)}
-                      >
-                        <X className="size-3" />
-                      </Button>
-                    </div>
-                  ) : (
-                    <button
-                      type="button"
-                      disabled={!canOperate}
-                      title={canOperate ? t('emailEdit', { group: g.name }) : undefined}
-                      onClick={() => {
-                        setEditingEmail(g.name);
-                        setEmailDraft(g.emails.join(', '));
-                      }}
-                      className="inline-flex items-center gap-1 text-left enabled:hover:text-fg disabled:cursor-default"
-                    >
-                      <Mail className="size-3 text-muted shrink-0" />
-                      {g.emails.length === 0 ? (
-                        <span className="text-muted text-xs">{t('emailNone')}</span>
-                      ) : (
-                        <span className="text-xs break-all">{g.emails.join(', ')}</span>
-                      )}
-                    </button>
-                  )}
-                </TableCell>
-                <TableCell label={t('config')}>
-                  {g.has_config ? (
-                    <Link to="/config" title={t('configHint')}>
-                      <Badge variant="violet">
-                        <Settings2 className="size-3 mr-1" />
-                        {t('configured')}
-                      </Badge>
-                    </Link>
-                  ) : (
-                    <span className="text-muted text-xs">—</span>
-                  )}
-                </TableCell>
-                <TableCell className="text-right whitespace-nowrap">
-                  {canOperate && g.members.length > 0 && (
-                    <Button
-                      variant="danger"
-                      size="sm"
-                      disabled={removeAll.isPending}
-                      onClick={async () => {
-                        if (
-                          await confirm({
-                            title: t('confirmRemoveAll', {
-                              group: g.name,
-                              count: g.members.length,
-                            }),
-                            confirmLabel: t('removeAllLabel'),
-                            danger: true,
-                          })
-                        ) {
-                          removeAll.mutate(g);
-                        }
-                      }}
-                    >
-                      {t('removeAll')}
-                    </Button>
-                  )}
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
+
+                  {/* Notification addresses for this group (#1274). `group_contacts`
+                      is keyed by group name, and a definition's id IS that name —
+                      it is the string the materializer stores in each member PC's
+                      `agent_groups_derived` row (that bucket is keyed by pc_id; the
+                      group name lives in the value). So the compliance-alert
+                      fan-out resolves exactly the key edited here. */}
+                  <ContactsEditor id={g.id} canOperate={canOperate} />
+
+                  {/* Resolved-members preview — evaluates the group (a dynamic
+                      one runs its SQL) so the operator can see exactly who it
+                      covers before wiring it into a schedule's target. */}
+                  <button
+                    type="button"
+                    className="flex items-center gap-1 text-xs text-muted underline"
+                    aria-expanded={open}
+                    aria-controls={`preview-${g.id}`}
+                    onClick={() =>
+                      setPreview((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(g.id)) next.delete(g.id);
+                        else next.add(g.id);
+                        return next;
+                      })
+                    }
+                  >
+                    {open ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
+                    {open ? t('members.hide') : t('members.show')}
+                  </button>
+                  {open && <MembersPreview id={g.id} />}
+                </CardContent>
+              </Card>
+            );
+          })}
+        </div>
+      )}
+
+      {editor && (
+        <YamlEditorDialog
+          open
+          onOpenChange={(next) => {
+            if (!next) setEditor(null);
+          }}
+          kind="group"
+          mode={editor}
+          // Open a Git-managed group read-only (parity with jobs/schedules/
+          // views) so a ClickOps edit can't silently diverge from the repo.
+          gitOrigin={
+            editor.type === 'edit'
+              ? (data?.find((g) => g.id === editor.id)?.origin ?? null)
+              : null
+          }
+        />
+      )}
+    </div>
+  );
+}
+
+// The group's notification addresses (`group_contacts` KV, via
+// `GET`/`PUT /api/groups/{name}/email`). Fetched per card rather than from
+// `GET /api/groups`: that endpoint walks every PC's membership row across two
+// buckets to build its union — far more work than one KV get per group — and
+// it omits a definition that currently resolves to nobody, which is exactly a
+// group whose alert address you might still want to set.
+function ContactsEditor({ id, canOperate }: { id: string; canOperate: boolean }) {
+  const { t } = useTranslation('groups');
+  const qc = useQueryClient();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+
+  const q = useQuery({
+    queryKey: ['group-contacts', id],
+    queryFn: () => apiFetch<GroupContacts>(`/api/groups/${encodeURIComponent(id)}/email`),
+  });
+
+  const save = useMutation({
+    mutationFn: (emails: string[]) =>
+      apiFetch<GroupContacts>(`/api/groups/${encodeURIComponent(id)}/email`, {
+        method: 'PUT',
+        body: JSON.stringify({ emails }),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['group-contacts', id] });
+      toast.success(t('contacts.saved', { id }));
+      setEditing(false);
+    },
+    onError: (e) => toast.error(formatError(e)),
+  });
+
+  const emails = q.data?.emails ?? [];
+
+  if (editing) {
+    return (
+      <div className="flex items-center gap-1.5">
+        <Mail className="size-3 shrink-0 text-muted" />
+        <Input
+          autoFocus
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          placeholder={t('contacts.placeholder')}
+          title={t('contacts.hint')}
+          aria-label={t('contacts.edit', { id })}
+          className="h-7 flex-1 text-xs"
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              // Guard against a double-submit from holding/mashing Enter
+              // while the PUT is in flight.
+              if (!save.isPending) save.mutate(parseEmails(draft));
+            } else if (e.key === 'Escape') {
+              setEditing(false);
+            }
+          }}
+        />
+        <Button
+          size="sm"
+          disabled={save.isPending}
+          aria-label={t('contacts.save')}
+          onClick={() => save.mutate(parseEmails(draft))}
+        >
+          <Check className="size-3" />
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          aria-label={t('contacts.cancel')}
+          onClick={() => setEditing(false)}
+        >
+          <X className="size-3" />
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      // Also gated on the GET having succeeded. `emails` falls back to `[]` on
+      // error, so an enabled trigger would open the editor on an empty draft
+      // and the PUT — a whole-list replace — would wipe addresses the operator
+      // never saw. The error text renders in place of the addresses below.
+      disabled={!canOperate || q.isLoading || Boolean(q.error)}
+      title={canOperate ? t('contacts.edit', { id }) : undefined}
+      onClick={() => {
+        setDraft(emails.join(', '));
+        setEditing(true);
+      }}
+      className="flex items-center gap-1 text-left text-xs enabled:hover:text-fg disabled:cursor-default"
+    >
+      <Mail className="size-3 shrink-0 text-muted" />
+      {q.isLoading ? (
+        <span className="text-muted">{t('contacts.loading')}</span>
+      ) : q.error ? (
+        <span className="text-danger">{formatError(q.error)}</span>
+      ) : emails.length === 0 ? (
+        <span className="text-muted">{t('contacts.none')}</span>
+      ) : (
+        <span className="break-all">{emails.join(', ')}</span>
+      )}
+    </button>
+  );
+}
+
+// Fetches + renders the resolved pc_id set for one group. A query error
+// (e.g. a broken dynamic SQL) surfaces as a 400 with the reason, shown inline
+// so the operator can debug the group without leaving the page.
+function MembersPreview({ id }: { id: string }) {
+  const { t } = useTranslation('groups');
+  const q = useQuery({
+    queryKey: ['group-defs', id, 'members'],
+    queryFn: () =>
+      apiFetch<GroupMembers>(`/api/group-defs/${encodeURIComponent(id)}/members`),
+    staleTime: 30_000,
+  });
+  if (q.isLoading) {
+    return (
+      <div id={`preview-${id}`} className="text-muted text-xs">
+        <Loader2 className="mr-1 inline size-3.5 animate-spin" />
+        {t('members.loading')}
+      </div>
+    );
+  }
+  if (q.error) {
+    return (
+      <div
+        id={`preview-${id}`}
+        className="whitespace-pre-wrap rounded bg-danger/5 p-2 text-xs text-danger"
+      >
+        {formatError(q.error)}
+      </div>
+    );
+  }
+  const members = q.data?.members ?? [];
+  return (
+    <div id={`preview-${id}`} className="space-y-1 rounded border border-border/50 p-2">
+      <div className="text-muted text-xs">{t('members.count', { count: members.length })}</div>
+      {members.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {members.map((pc) => (
+            <code key={pc} className="rounded bg-muted/10 px-1 text-[11px]">
+              {pc}
+            </code>
+          ))}
+        </div>
       )}
     </div>
   );
