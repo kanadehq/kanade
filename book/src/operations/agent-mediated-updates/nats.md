@@ -41,8 +41,13 @@ This installs `nats-server.exe` to `%ProgramFiles%\Kanade\` and
 `nats-server.conf` to `%ProgramData%\Kanade\config\` (with ACL
 hardened to SYSTEM + Administrators because the bearer token
 lives in plaintext), registers the `KanadeNats` Windows service,
-opens TCP 4222 (broker) + 8222 (monitoring HTTP), and starts the
-service.
+opens TCP 4222 (broker), and starts the service.
+
+Monitoring (8222) is deliberately **not** opened, and the rule is
+removed if an older deploy created one: the endpoint has no
+authentication of its own, and every in-repo consumer reads it over
+loopback. The shipped `nats-server.conf` binds it to `127.0.0.1`
+accordingly.
 
 ## Agent-mediated update (steady state)
 
@@ -104,10 +109,18 @@ require_approval: true
 
 After the broker comes back, the outbox drains and you'll see the
 result row in `/api/results`. Confirm the new NATS version via
-the broker's monitoring endpoint:
+the broker's monitoring endpoint — **on the broker host**, since
+monitoring is bound to loopback and not opened in the firewall:
 
 ```pwsh
-curl http://<broker>:8222/varz | python -m json.tool | rg version
+curl http://127.0.0.1:8222/varz | python -m json.tool | rg version
+```
+
+From anywhere else, ask the fleet instead of the port — the same
+agent-exec path that just performed the update:
+
+```pwsh
+kanade exec collect-broker-health --pcs <broker-host>
 ```
 
 ## Why we don't need a separate "broker update" mechanism
