@@ -126,6 +126,15 @@ impl CommandPublisher {
         self.signer.as_ref().map(identity_of)
     }
 
+    /// The same identity split into its halves, for callers that need to
+    /// compare rather than print — `GET /api/command-signing` (#1260).
+    ///
+    /// Both come from the live [`Signer`], so an API answer and the startup log
+    /// line cannot disagree: there is one key, and both read it.
+    pub fn identity_parts(&self) -> Option<(&str, String)> {
+        self.signer.as_ref().map(identity_parts_of)
+    }
+
     /// Publish a serialized `Command` to `subject`, signed if possible.
     pub async fn publish(&self, subject: String, payload: Bytes) -> Result<(), PublishError> {
         match headers_for(
@@ -147,11 +156,15 @@ impl CommandPublisher {
 /// One place, so the two sides cannot drift into formats that look comparable
 /// and are not.
 fn identity_of(signer: &Signer) -> String {
-    format!(
-        "{}:{}",
-        signer.kid(),
-        signing::fingerprint(&signer.verifying_key())
-    )
+    let (kid, fp) = identity_parts_of(signer);
+    format!("{kid}:{fp}")
+}
+
+/// The halves, for `GET /api/command-signing` (#1260). [`identity_of`] is
+/// written in terms of this so the string an operator reads in a log and the
+/// pair a caller compares against can never describe different keys.
+fn identity_parts_of(signer: &Signer) -> (&str, String) {
+    (signer.kid(), signing::fingerprint(&signer.verifying_key()))
 }
 
 /// The headers to publish alongside `body`, or `None` when this backend is not
@@ -285,6 +298,22 @@ mod tests {
 
     fn secret() -> String {
         signing::encode_secret(&signing::generate_keypair().unwrap())
+    }
+
+    #[test]
+    fn the_reported_halves_rejoin_into_the_logged_identity() {
+        // #1260: the API answers with the pair, the startup log prints the
+        // string, and an operator compares one against the other. If they were
+        // built independently they could disagree in a way that looks like a
+        // fleet-wide key mismatch — so both go through `identity_parts_of`,
+        // and this pins that they still do.
+        let signer = Signer::from_secret(&secret(), "backend-1").unwrap();
+        let (kid, fp) = identity_parts_of(&signer);
+        assert_eq!(format!("{kid}:{fp}"), identity_of(&signer));
+        assert_eq!(kid, "backend-1");
+        // And the fingerprint is of the PUBLIC half, which is what an agent
+        // reports — not of the secret, which nothing else could ever match.
+        assert_eq!(fp, signing::fingerprint(&signer.verifying_key()));
     }
 
     #[test]

@@ -28,6 +28,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { apiFetch, apiFetchPaged, formatError } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { useDebouncedValue } from '@/lib/hooks';
+import type { BackendSigningKey } from '@/lib/signing';
 import type { AgentGroups, AgentRow, EffectiveConfigResponse, Heartbeat } from '@/lib/types';
 import { cn, fmtIsoLocal, isAgentOnline, unresolvedQuarantine } from '@/lib/utils';
 
@@ -234,6 +235,19 @@ export function Agents() {
     queryKey: ['agent-meta-keys'],
     queryFn: () => apiFetch<string[]>('/api/agents/meta-keys'),
   }).data ?? [];
+  // #1260: the key this backend actually signs with, so the signing column can
+  // CHECK what each agent reports instead of only repeating it. `undefined`
+  // while loading, or when the backend is not signing — `signingState` treats
+  // both as "no expected value" and abstains rather than guessing, which is
+  // exactly the behaviour the column had before this existed.
+  //
+  // No `refetchInterval`: the backend's own key changes only when an operator
+  // rotates it, which restarts the backend, which reloads the SPA.
+  const backendKey = useQuery({
+    queryKey: ['command-signing'],
+    queryFn: () => apiFetch<BackendSigningKey>('/api/command-signing'),
+    staleTime: Infinity,
+  }).data;
   const toggleMetaCol = (key: string) =>
     setMetaCols((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
   const metaVal = (a: AgentRow, key: string) =>
@@ -1106,7 +1120,7 @@ export function Agents() {
               })}
               {isColVisible('signing') && (
                 <TableCell label={t('columns.signing')}>
-                  <SigningBadge agent={a} />
+                  <SigningBadge agent={a} backend={backendKey} />
                 </TableCell>
               )}
               {isColVisible('cpu') && (
