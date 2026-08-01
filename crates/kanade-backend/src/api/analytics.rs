@@ -27,7 +27,7 @@ use futures::StreamExt;
 use kanade_shared::kv::{BUCKET_JOBS, BUCKET_VIEWS};
 use kanade_shared::manifest::{
     AggregateAgg, AggregateRender, AggregateScope, AggregateTimeBucket, AggregateTransform,
-    AggregateWidget, Manifest, SqlWidget, View,
+    AggregateWidget, Manifest, SqlWidget, View, WidgetWidth,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -194,6 +194,11 @@ pub struct WidgetResult {
     /// Analytics page can show a "pinned" affordance; the Dashboard fetches
     /// with `?pinned=true` and only ever sees `true` here.
     pub pin_dashboard: bool,
+    /// Operator-declared width hint (#1257), carried straight from the
+    /// spec. Absent ⇒ the SPA keeps its per-`render` default, so a
+    /// manifest that says nothing renders exactly as it did before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<WidgetWidth>,
     #[serde(flatten)]
     pub data: WidgetData,
 }
@@ -246,9 +251,9 @@ pub async fn get(
             // here. Leave a debug breadcrumb (not warn — this handler polls
             // every ~30s) so a misconfigured pin is diagnosable; the field doc
             // also tells operators to pin fleet-scope widgets.
-            if only_pinned && w.pin_dashboard {
+            if only_pinned && w.placement.is_pinned() {
                 debug!(
-                    dashboard = %w.dashboard, title = %w.title,
+                    dashboard = %w.placement.tab(), title = %w.title,
                     "analytics: pinned widget skipped — pin a fleet-scope widget for the Dashboard",
                 );
             }
@@ -256,16 +261,20 @@ pub async fn get(
         }
         // Dashboard pinned section asks for `?pinned=true` and gets only the
         // promoted widgets; the Analytics page omits the param and gets all.
-        if only_pinned && !w.pin_dashboard {
+        if only_pinned && !w.placement.is_pinned() {
             continue;
         }
         match compute_widget(&ctx, &w).await {
             Ok(Some(data)) => out.push(WidgetResult {
-                dashboard: w.dashboard,
+                dashboard: w.placement.tab().to_string(),
                 title: w.title,
                 description: w.description,
                 scope: scope_str,
-                pin_dashboard: w.pin_dashboard,
+                pin_dashboard: w.placement.is_pinned(),
+                // Resolved for the surface being served, so a widget can
+                // be half-width on the Dashboard and full-width on its
+                // Analytics tab from one definition.
+                width: w.placement.width_for(only_pinned),
                 data,
             }),
             // A widget whose enums fell through to the #492 Unknown
@@ -274,7 +283,7 @@ pub async fn get(
             Ok(None) => {}
             // One bad widget shouldn't 500 the whole page — log and drop.
             Err(e) => {
-                warn!(error = %e, dashboard = %w.dashboard, title = %w.title, "analytics: widget compute")
+                warn!(error = %e, dashboard = %w.placement.tab(), title = %w.title, "analytics: widget compute")
             }
         }
     }
@@ -324,6 +333,7 @@ pub async fn get(
                 description: w.description,
                 scope: scope_str,
                 pin_dashboard: w.placement.is_pinned(),
+                width: w.placement.width_for(only_pinned),
                 data,
             }),
             // One bad view widget (a query error, a missing column) shouldn't
@@ -342,7 +352,7 @@ pub async fn get(
 /// with no `order` anywhere stays purely alphabetical, and a lower `order`
 /// pulls a widget — and, via first-appearance, its tab — earlier.
 fn widget_sort_key(w: &AggregateWidget) -> (i32, &str, &str) {
-    (w.order.unwrap_or(0), &w.dashboard, &w.title)
+    (w.order.unwrap_or(0), w.placement.tab(), &w.title)
 }
 
 /// Collect every aggregate widget the fleet declares, merging two sources
@@ -998,6 +1008,9 @@ fn host_of(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
+    // Only the tests build widgets by hand; the handlers read them off a
+    // stored Manifest, so these stay out of the non-test import list.
+    use kanade_shared::manifest::{AnalyticsPlacement, Placement};
 
     use super::*;
 
@@ -1106,11 +1119,16 @@ mod tests {
 
     fn widget(kind: &str, agg: AggregateAgg, render: AggregateRender) -> AggregateWidget {
         AggregateWidget {
-            dashboard: "D".into(),
+            placement: Placement {
+                analytics: Some(AnalyticsPlacement {
+                    tab: "D".into(),
+                    width: None,
+                }),
+                dashboard: None,
+            },
             title: "T".into(),
             description: None,
             order: None,
-            pin_dashboard: false,
             scope: AggregateScope::Pc,
             kind: Some(kind.into()),
             source: None,
@@ -1142,20 +1160,29 @@ mod tests {
         let mut ws = [
             {
                 let mut w = widget("k", AggregateAgg::Count, AggregateRender::Stat);
-                w.dashboard = "Utilization".into();
+                w.placement.analytics = Some(AnalyticsPlacement {
+                    tab: "Utilization".into(),
+                    width: None,
+                });
                 w.title = "B".into();
                 w
             },
             {
                 let mut w = widget("k", AggregateAgg::Count, AggregateRender::Stat);
-                w.dashboard = "Utilization".into();
+                w.placement.analytics = Some(AnalyticsPlacement {
+                    tab: "Utilization".into(),
+                    width: None,
+                });
                 w.title = "A".into();
                 w
             },
             {
                 // Explicit low order pulls this first despite "Z"/"Zzz".
                 let mut w = widget("k", AggregateAgg::Count, AggregateRender::Stat);
-                w.dashboard = "Zzz".into();
+                w.placement.analytics = Some(AnalyticsPlacement {
+                    tab: "Zzz".into(),
+                    width: None,
+                });
                 w.title = "Z".into();
                 w.order = Some(-1);
                 w
@@ -1164,7 +1191,7 @@ mod tests {
         ws.sort_by(|a, b| widget_sort_key(a).cmp(&widget_sort_key(b)));
         let got: Vec<(&str, &str)> = ws
             .iter()
-            .map(|w| (w.dashboard.as_str(), w.title.as_str()))
+            .map(|w| (w.placement.tab(), w.title.as_str()))
             .collect();
         // order:-1 first; then the order:0 pair alphabetical by title.
         assert_eq!(

@@ -93,7 +93,7 @@ pub struct Manifest {
     /// touches stdout and is never delivered to the agent — it's a pure
     /// *read spec* the backend reads from `BUCKET_JOBS` at query time and
     /// turns into `json_extract` aggregation SQL. Each entry is one widget
-    /// (a `dashboard:` tab groups them); `scope:` selects per-PC vs
+    /// (a `placement.analytics:` tab groups them); `scope:` selects per-PC vs
     /// fleet-wide rollup. Because it consumes nothing at run time it
     /// composes with every other hint (typically paired with `emit:`,
     /// which produces the events it reads). See [`AggregateWidget`].
@@ -978,10 +978,12 @@ where
 /// reboot / agent-health trends, etc.
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
 pub struct AggregateWidget {
-    /// Tab this widget lives under on the Analytics page. Widgets from
-    /// every job are collected and grouped by this label, so the same
-    /// string across jobs builds one multi-source dashboard. Required.
-    pub dashboard: String,
+    /// Where this widget surfaces — an Analytics tab and/or a pinned
+    /// Dashboard card. Same block a view's `sql_widgets:` uses, so the
+    /// two widget kinds are authored identically; previously this was a
+    /// flat `dashboard:` + `pin_dashboard:` pair that meant the same
+    /// thing in a different shape.
+    pub placement: Placement,
     /// Widget heading. Required, validated non-empty.
     pub title: String,
     /// Optional one-line subtitle shown muted under the `title` on the
@@ -1000,19 +1002,6 @@ pub struct AggregateWidget {
     /// applies it.)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order: Option<i32>,
-    /// Promote this widget to the main Dashboard, not just the Analytics
-    /// page (#vuln-roadmap PR3). The Dashboard fetches the pinned subset
-    /// (`/api/analytics?pinned=true`, fleet scope) and renders it with the
-    /// same widget components. Operator-controlled, so any config-driven
-    /// view (e.g. a future vulnerability rollup) can surface up front
-    /// without a bespoke card. Defaults to `false`. Pin a `scope: fleet`
-    /// widget — a `pc`-scoped one needs a selected PC and won't render on
-    /// the fleet Dashboard.
-    // `Not::not` is `!self`, so this skips serializing the field when it's
-    // `false` — keeps `pin_dashboard: false` out of the stored job/view JSON,
-    // matching how the optional fields above omit their defaults.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub pin_dashboard: bool,
     /// `pc` rolls up a single selected PC; `fleet` rolls up all PCs
     /// (and unlocks `group_by: pc_id` to rank PCs against each other).
     /// Defaults to `pc`.
@@ -1076,6 +1065,34 @@ pub struct AggregateWidget {
     pub limit: Option<u32>,
     /// Which widget the SPA draws. See [`AggregateRender`].
     pub render: AggregateRender,
+}
+
+/// How much of the widget grid a widget asks for (#1257).
+///
+/// Both the Analytics page and the Dashboard's pinned strip lay widgets
+/// out two-up on a wide screen. Until this existed, the width was
+/// decided purely by `render`: `bar` / `timeline` / `op_timeline` /
+/// `table` always claimed the full row, everything else a single
+/// column. That is a sensible default but a bad rule — an operator who
+/// pins two `bar` widgets that answer the same question (app usage
+/// alongside browsing, say) cannot put them side by side, and each
+/// pushes the rest of the page further down.
+///
+/// Absent ⇒ keep the per-`render` default, so every existing manifest
+/// renders exactly as before.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum WidgetWidth {
+    /// Span the whole widget row.
+    Full,
+    /// Take one column, so a sibling can share the row.
+    Half,
+    /// #492 forward-compat catch-all (see [`AggregateScope::Unknown`]).
+    /// Rendered as if unset — a width hint is presentation-only, so an
+    /// unreadable variant must not drop the widget.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Per-PC vs fleet-wide rollup for an [`AggregateWidget`].
@@ -1199,11 +1216,12 @@ pub fn validate_aggregate_widgets(widgets: &[AggregateWidget], field: &str) -> R
     }
     for (i, w) in widgets.iter().enumerate() {
         let at = format!("{field}[{i}]");
-        for (label, value) in [("dashboard", &w.dashboard), ("title", &w.title)] {
-            if value.trim().is_empty() {
-                return Err(format!("{at}.{label} must not be empty"));
-            }
+        if w.title.trim().is_empty() {
+            return Err(format!("{at}.title must not be empty"));
         }
+        // Same rule the SQL widgets get: a widget that is neither on a
+        // tab nor pinned renders nowhere, which is never what was meant.
+        validate_placement(&w.placement, &at)?;
         // A present-but-blank `description` renders an empty muted line —
         // reject it so the subtitle only shows when it says something.
         if let Some(description) = &w.description {
@@ -1515,15 +1533,32 @@ pub enum RenderKind {
     Unknown,
 }
 
-/// Where a [`SqlWidget`] surfaces in the SPA. Mirrors the placement an
-/// [`AggregateWidget`] expresses via `dashboard` + `pin_dashboard`, but as an
-/// explicit block since a SQL widget lives on a standalone view.
+/// Where a widget surfaces in the SPA — an Analytics tab and/or a pinned
+/// Dashboard card. Shared verbatim by both widget kinds: a job's
+/// [`AggregateWidget`] and a view's [`SqlWidget`] are authored the same
+/// way. (#1257 folded the aggregate side's flat `dashboard:` +
+/// `pin_dashboard:` pair into this block; expressing one idea in two
+/// shapes meant a width had to be invented twice.)
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Debug, Clone)]
 pub struct Placement {
-    /// The Analytics tab this widget groups under (the `AggregateWidget`
-    /// `dashboard` analogue). Absent ⇒ not shown on the Analytics page.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub analytics: Option<String>,
+    /// The Analytics tab this widget groups under. Absent ⇒ not shown on
+    /// the Analytics page.
+    ///
+    /// Written either as a bare tab name or as a block, so the common
+    /// case stays one line and a width is there when it's wanted:
+    ///
+    /// ```yaml
+    /// analytics: app-usage
+    /// # or
+    /// analytics: { tab: app-usage, width: half }
+    /// ```
+    #[serde(
+        default,
+        deserialize_with = "de_analytics",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "Option<AnalyticsPlacementSchema>")]
+    pub analytics: Option<AnalyticsPlacement>,
     /// Promote to the main Dashboard (reuses #900's pinned section). Absent ⇒
     /// not pinned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1538,8 +1573,99 @@ impl Placement {
     /// The Analytics tab name, or a fallback so a dashboard-only widget still
     /// carries a group label for the shared widget list.
     pub fn tab(&self) -> &str {
-        self.analytics.as_deref().unwrap_or("Dashboard")
+        self.analytics
+            .as_ref()
+            .map_or("Dashboard", |a| a.tab.as_str())
     }
+    /// Width to render at on the surface being served. The two surfaces
+    /// are independent: the Dashboard's pinned strip is a summary where
+    /// two full-width widgets push everything else below the fold, while
+    /// an Analytics tab gives the widget the room and usually wants the
+    /// per-`render` default.
+    pub fn width_for(&self, pinned: bool) -> Option<WidgetWidth> {
+        if pinned {
+            self.dashboard.as_ref().and_then(|d| d.width)
+        } else {
+            self.analytics.as_ref().and_then(|a| a.width)
+        }
+    }
+}
+
+/// The `placement.analytics` block — see [`Placement::analytics`].
+///
+/// Deserialized from a bare string as well as a map, so
+/// `analytics: app-usage` and `analytics: { tab: app-usage, width: half }`
+/// both work. Serialized back as a bare string whenever no `width` is set,
+/// which keeps the stored resource JSON in its terse form for every
+/// widget that doesn't ask for a width — i.e. almost all of them.
+#[derive(Deserialize, schemars::JsonSchema, Debug, Clone)]
+pub struct AnalyticsPlacement {
+    /// Tab this widget groups under. Widgets from every job/view are
+    /// collected and grouped by this label, so the same string across
+    /// sources builds one multi-source dashboard.
+    pub tab: String,
+    /// How much of the Analytics row this widget takes (#1257). Absent ⇒
+    /// the per-`render` default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<WidgetWidth>,
+}
+
+impl Serialize for AnalyticsPlacement {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self.width {
+            None => s.serialize_str(&self.tab),
+            Some(width) => {
+                use serde::ser::SerializeStruct;
+                let mut st = s.serialize_struct("AnalyticsPlacement", 2)?;
+                st.serialize_field("tab", &self.tab)?;
+                st.serialize_field("width", &width)?;
+                st.end()
+            }
+        }
+    }
+}
+
+/// Schema-only mirror of the two shapes [`de_analytics`] accepts.
+///
+/// Needed because the generated schema is what the SPA's YAML editor
+/// validates against. Pointing `schemars` at [`AnalyticsPlacement`]
+/// directly advertises only the block form, which would put a red
+/// squiggle under `analytics: app-usage` — the bare-string form every
+/// widget in `configs/` actually uses, and the one the field
+/// serializes back to. The deserializer would still accept it; the
+/// operator would just be told, in the editor we ship, that correct
+/// config is wrong.
+///
+/// (Contrast [`ConfirmHint`], where the scalar really is a rarely-used
+/// shorthand for the canonical struct, so advertising the struct alone
+/// is a reasonable trade. Here the scalar is the canonical form.)
+#[derive(schemars::JsonSchema)]
+#[serde(untagged)]
+#[allow(dead_code)] // constructed only by `schemars`, never at run time
+enum AnalyticsPlacementSchema {
+    /// `analytics: app-usage`
+    Tab(String),
+    /// `analytics: { tab: app-usage, width: half }`
+    Block(AnalyticsPlacement),
+}
+
+/// Reads [`Placement::analytics`] from either a bare tab name or a block.
+/// An explicit `analytics: null` maps to `None` rather than erroring, the
+/// same way [`de_confirm`] handles it.
+fn de_analytics<'de, D>(d: D) -> Result<Option<AnalyticsPlacement>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StrOrBlock {
+        Tab(String),
+        Block(AnalyticsPlacement),
+    }
+    Ok(Option::<StrOrBlock>::deserialize(d)?.map(|v| match v {
+        StrOrBlock::Tab(tab) => AnalyticsPlacement { tab, width: None },
+        StrOrBlock::Block(b) => b,
+    }))
 }
 
 /// The `placement.dashboard` block — see [`Placement::dashboard`].
@@ -1548,6 +1674,40 @@ pub struct DashboardPlacement {
     /// Pin this widget to the main Dashboard's promoted section.
     #[serde(default)]
     pub pin: bool,
+    /// How much of the Dashboard's pinned row this widget takes (#1257).
+    /// Absent ⇒ the per-`render` default. See [`WidgetWidth`].
+    ///
+    /// Nested under `dashboard` on purpose: the Dashboard's pinned strip
+    /// is a summary where two full-width widgets push everything else
+    /// below the fold, while the Analytics page gives a widget the tab to
+    /// itself and wants the default. Living here says "Dashboard only"
+    /// structurally, instead of needing a `pin_`-prefixed name to say it.
+    /// An `analytics` width can be added later by promoting that field to
+    /// a string-or-block, without disturbing this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<WidgetWidth>,
+}
+
+/// Shared placement rules for both widget kinds. `at` names the widget
+/// for error messages.
+///
+/// A widget that surfaces nowhere is an invisible no-op. A `dashboard:`
+/// block with `pin: false` doesn't count — it pins nowhere — so gate on
+/// the effective pin, not the block's presence (Gemini / CodeRabbit).
+pub fn validate_placement(p: &Placement, at: &str) -> Result<(), String> {
+    if p.analytics.is_none() && !p.is_pinned() {
+        return Err(format!(
+            "{at}.placement must set `analytics` and/or pin to `dashboard` (else the widget renders nowhere)"
+        ));
+    }
+    if let Some(a) = &p.analytics {
+        if a.tab.trim().is_empty() {
+            return Err(format!(
+                "{at}.placement.analytics must not be empty when set"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Per-widget validation for a list of [`SqlWidget`]s — shared by the
@@ -1575,22 +1735,7 @@ pub fn validate_sql_widgets(widgets: &[SqlWidget], field: &str) -> Result<(), St
             humantime::parse_duration(refresh)
                 .map_err(|e| format!("{at}.refresh '{refresh}' is not a valid duration: {e}"))?;
         }
-        // A widget that surfaces nowhere is an invisible no-op. A
-        // `dashboard:` block with `pin: false` doesn't count — it pins
-        // nowhere — so gate on the effective pin, not the block's presence
-        // (Gemini / CodeRabbit).
-        if w.placement.analytics.is_none() && !w.placement.is_pinned() {
-            return Err(format!(
-                "{at}.placement must set `analytics` and/or pin to `dashboard` (else the widget renders nowhere)"
-            ));
-        }
-        if let Some(tab) = &w.placement.analytics {
-            if tab.trim().is_empty() {
-                return Err(format!(
-                    "{at}.placement.analytics must not be empty when set"
-                ));
-            }
-        }
+        validate_placement(&w.placement, &at)?;
         // A per-PC widget (its query binds `:pc_id`) renders only in the
         // per-PC Analytics scope, bound to the selected PC. The Dashboard's
         // pinned section is fleet-scope and never sends a PC, so a pinned
@@ -4445,11 +4590,11 @@ tags: [ok, "   "]
         // bare total stat — alongside emit (composes with every hint).
         let m = manifest_with_aggregate(
             "emit:\n  type: events\naggregate:\n\
-             - { dashboard: Utilization, title: Top apps, kind: app_sample, agg: count, group_by: foreground.app, sample_minutes: 2, exclude: [LockApp], render: bar }\n\
-             - { dashboard: Utilization, title: Active ratio, kind: presence, agg: ratio, bool_path: active, sample_minutes: 5, render: gauge }\n\
-             - { dashboard: Utilization, title: By hour, kind: presence, agg: ratio, bool_path: active, time_bucket: hour, render: timeline }\n\
-             - { dashboard: Reliability, title: Crashes by PC, scope: fleet, kind: unexpected_shutdown, agg: count, group_by: pc_id, render: bar }\n\
-             - { dashboard: Reliability, title: Total crashes, scope: fleet, kind: unexpected_shutdown, agg: count, render: stat }\n",
+             - { placement: { analytics: Utilization }, title: Top apps, kind: app_sample, agg: count, group_by: foreground.app, sample_minutes: 2, exclude: [LockApp], render: bar }\n\
+             - { placement: { analytics: Utilization }, title: Active ratio, kind: presence, agg: ratio, bool_path: active, sample_minutes: 5, render: gauge }\n\
+             - { placement: { analytics: Utilization }, title: By hour, kind: presence, agg: ratio, bool_path: active, time_bucket: hour, render: timeline }\n\
+             - { placement: { analytics: Reliability }, title: Crashes by PC, scope: fleet, kind: unexpected_shutdown, agg: count, group_by: pc_id, render: bar }\n\
+             - { placement: { analytics: Reliability }, title: Total crashes, scope: fleet, kind: unexpected_shutdown, agg: count, render: stat }\n",
         );
         m.validate().expect("valid aggregate spec");
     }
@@ -4464,7 +4609,7 @@ tags: [ok, "   "]
     #[test]
     fn aggregate_rejects_ratio_without_bool_path() {
         let m = manifest_with_aggregate(
-            "aggregate:\n- { dashboard: D, title: T, kind: presence, agg: ratio, render: gauge }\n",
+            "aggregate:\n- { placement: { analytics: D }, title: T, kind: presence, agg: ratio, render: gauge }\n",
         );
         let err = m.validate().expect_err("ratio needs bool_path");
         assert!(err.contains("agg=ratio requires `bool_path`"), "err: {err}");
@@ -4473,7 +4618,7 @@ tags: [ok, "   "]
     #[test]
     fn aggregate_rejects_sum_without_value_path() {
         let m = manifest_with_aggregate(
-            "aggregate:\n- { dashboard: D, title: T, kind: io, agg: sum, render: bar }\n",
+            "aggregate:\n- { placement: { analytics: D }, title: T, kind: io, agg: sum, render: bar }\n",
         );
         let err = m.validate().expect_err("sum needs value_path");
         assert!(err.contains("agg=sum requires `value_path`"), "err: {err}");
@@ -4482,7 +4627,7 @@ tags: [ok, "   "]
     #[test]
     fn aggregate_rejects_pc_id_group_without_fleet() {
         let m = manifest_with_aggregate(
-            "aggregate:\n- { dashboard: D, title: T, kind: presence, agg: count, group_by: pc_id, render: bar }\n",
+            "aggregate:\n- { placement: { analytics: D }, title: T, kind: presence, agg: count, group_by: pc_id, render: bar }\n",
         );
         let err = m.validate().expect_err("pc_id grouping needs fleet");
         assert!(
@@ -4494,7 +4639,7 @@ tags: [ok, "   "]
     #[test]
     fn aggregate_rejects_transform_with_pc_id_group() {
         let m = manifest_with_aggregate(
-            "aggregate:\n- { dashboard: D, title: T, scope: fleet, kind: web_visit, agg: count, group_by: pc_id, transform: host, render: bar }\n",
+            "aggregate:\n- { placement: { analytics: D }, title: T, scope: fleet, kind: web_visit, agg: count, group_by: pc_id, transform: host, render: bar }\n",
         );
         let err = m
             .validate()
@@ -4508,7 +4653,7 @@ tags: [ok, "   "]
     #[test]
     fn aggregate_rejects_timeline_without_bucket() {
         let m = manifest_with_aggregate(
-            "aggregate:\n- { dashboard: D, title: T, kind: presence, agg: ratio, bool_path: active, render: timeline }\n",
+            "aggregate:\n- { placement: { analytics: D }, title: T, kind: presence, agg: ratio, bool_path: active, render: timeline }\n",
         );
         let err = m.validate().expect_err("timeline needs a bucket");
         assert!(
@@ -4520,7 +4665,7 @@ tags: [ok, "   "]
     #[test]
     fn aggregate_rejects_bucket_on_non_timeline() {
         let m = manifest_with_aggregate(
-            "aggregate:\n- { dashboard: D, title: T, kind: presence, agg: ratio, bool_path: active, time_bucket: hour, render: gauge }\n",
+            "aggregate:\n- { placement: { analytics: D }, title: T, kind: presence, agg: ratio, bool_path: active, time_bucket: hour, render: gauge }\n",
         );
         let err = m.validate().expect_err("bucket only on timeline");
         assert!(
@@ -4534,7 +4679,7 @@ tags: [ok, "   "]
         // A path with characters outside [A-Za-z0-9_.] could break out of
         // the `'$.' || ?` bind — reject at create time.
         let m = manifest_with_aggregate(
-            "aggregate:\n- { dashboard: D, title: T, kind: k, agg: count, group_by: \"foo'; DROP\", render: bar }\n",
+            "aggregate:\n- { placement: { analytics: D }, title: T, kind: k, agg: count, group_by: \"foo'; DROP\", render: bar }\n",
         );
         let err = m.validate().expect_err("unsafe path must fail");
         assert!(err.contains("dotted JSON path"), "err: {err}");
@@ -4543,7 +4688,7 @@ tags: [ok, "   "]
     #[test]
     fn aggregate_rejects_blank_title() {
         let m = manifest_with_aggregate(
-            "aggregate:\n- { dashboard: D, title: \"  \", kind: k, agg: count, render: stat }\n",
+            "aggregate:\n- { placement: { analytics: D }, title: \"  \", kind: k, agg: count, render: stat }\n",
         );
         let err = m.validate().expect_err("blank title must fail");
         assert!(err.contains("title must not be empty"), "err: {err}");
@@ -4552,7 +4697,7 @@ tags: [ok, "   "]
     #[test]
     fn aggregate_rejects_blank_kind() {
         let m = manifest_with_aggregate(
-            "aggregate:\n- { dashboard: D, title: T, kind: \" \", agg: count, render: stat }\n",
+            "aggregate:\n- { placement: { analytics: D }, title: T, kind: \" \", agg: count, render: stat }\n",
         );
         let err = m.validate().expect_err("blank kind must fail");
         assert!(err.contains("kind must not be empty"), "err: {err}");
@@ -4561,7 +4706,7 @@ tags: [ok, "   "]
     #[test]
     fn aggregate_rejects_blank_source_when_set() {
         let m = manifest_with_aggregate(
-            "aggregate:\n- { dashboard: D, title: T, kind: k, source: \"\", agg: count, render: stat }\n",
+            "aggregate:\n- { placement: { analytics: D }, title: T, kind: k, source: \"\", agg: count, render: stat }\n",
         );
         let err = m.validate().expect_err("blank source must fail");
         assert!(
@@ -4573,7 +4718,7 @@ tags: [ok, "   "]
     #[test]
     fn aggregate_accepts_description_and_rejects_blank() {
         let ok = manifest_with_aggregate(
-            "aggregate:\n- { dashboard: D, title: T, description: \"samples x 2 min\", kind: k, agg: count, render: stat }\n",
+            "aggregate:\n- { placement: { analytics: D }, title: T, description: \"samples x 2 min\", kind: k, agg: count, render: stat }\n",
         );
         ok.validate()
             .expect("description is a valid optional field");
@@ -4582,7 +4727,7 @@ tags: [ok, "   "]
             Some("samples x 2 min")
         );
         let bad = manifest_with_aggregate(
-            "aggregate:\n- { dashboard: D, title: T, description: \"  \", kind: k, agg: count, render: stat }\n",
+            "aggregate:\n- { placement: { analytics: D }, title: T, description: \"  \", kind: k, agg: count, render: stat }\n",
         );
         let err = bad.validate().expect_err("blank description must fail");
         assert!(
@@ -4594,7 +4739,7 @@ tags: [ok, "   "]
     #[test]
     fn aggregate_rejects_count_with_value_path() {
         let m = manifest_with_aggregate(
-            "aggregate:\n- { dashboard: D, title: T, kind: k, agg: count, value_path: bytes, render: stat }\n",
+            "aggregate:\n- { placement: { analytics: D }, title: T, kind: k, agg: count, value_path: bytes, render: stat }\n",
         );
         let err = m.validate().expect_err("count must not use value_path");
         assert!(
@@ -4606,7 +4751,7 @@ tags: [ok, "   "]
     #[test]
     fn aggregate_rejects_ratio_with_value_path() {
         let m = manifest_with_aggregate(
-            "aggregate:\n- { dashboard: D, title: T, kind: k, agg: ratio, bool_path: active, value_path: bytes, render: gauge }\n",
+            "aggregate:\n- { placement: { analytics: D }, title: T, kind: k, agg: ratio, bool_path: active, value_path: bytes, render: gauge }\n",
         );
         let err = m.validate().expect_err("ratio must not use value_path");
         assert!(
@@ -4618,7 +4763,7 @@ tags: [ok, "   "]
     #[test]
     fn aggregate_rejects_gauge_without_ratio() {
         let m = manifest_with_aggregate(
-            "aggregate:\n- { dashboard: D, title: T, kind: k, agg: count, group_by: app, render: gauge }\n",
+            "aggregate:\n- { placement: { analytics: D }, title: T, kind: k, agg: count, group_by: app, render: gauge }\n",
         );
         let err = m.validate().expect_err("gauge needs ratio");
         assert!(
@@ -4630,7 +4775,7 @@ tags: [ok, "   "]
     #[test]
     fn aggregate_rejects_limit_without_group_by() {
         let m = manifest_with_aggregate(
-            "aggregate:\n- { dashboard: D, title: T, kind: k, agg: count, limit: 5, render: stat }\n",
+            "aggregate:\n- { placement: { analytics: D }, title: T, kind: k, agg: count, limit: 5, render: stat }\n",
         );
         let err = m.validate().expect_err("limit needs group_by");
         assert!(err.contains("limit requires `group_by`"), "err: {err}");
@@ -4639,7 +4784,7 @@ tags: [ok, "   "]
     #[test]
     fn aggregate_rejects_exclude_without_group_by() {
         let m = manifest_with_aggregate(
-            "aggregate:\n- { dashboard: D, title: T, kind: k, agg: count, exclude: [x], render: stat }\n",
+            "aggregate:\n- { placement: { analytics: D }, title: T, kind: k, agg: count, exclude: [x], render: stat }\n",
         );
         let err = m.validate().expect_err("exclude needs group_by");
         assert!(err.contains("exclude requires `group_by`"), "err: {err}");
@@ -4648,11 +4793,11 @@ tags: [ok, "   "]
     #[test]
     fn aggregate_rejects_zero_limit_and_zero_sample_minutes() {
         let m = manifest_with_aggregate(
-            "aggregate:\n- { dashboard: D, title: T, kind: k, agg: count, group_by: app, limit: 0, render: bar }\n",
+            "aggregate:\n- { placement: { analytics: D }, title: T, kind: k, agg: count, group_by: app, limit: 0, render: bar }\n",
         );
         assert!(m.validate().unwrap_err().contains("limit must be > 0"));
         let m = manifest_with_aggregate(
-            "aggregate:\n- { dashboard: D, title: T, kind: k, agg: count, group_by: app, sample_minutes: 0, render: bar }\n",
+            "aggregate:\n- { placement: { analytics: D }, title: T, kind: k, agg: count, group_by: app, sample_minutes: 0, render: bar }\n",
         );
         assert!(
             m.validate()
@@ -4664,7 +4809,7 @@ tags: [ok, "   "]
     #[test]
     fn aggregate_rejects_empty_exclude_entry() {
         let m = manifest_with_aggregate(
-            "aggregate:\n- { dashboard: D, title: T, kind: k, agg: count, group_by: app, exclude: [\"  \"], render: bar }\n",
+            "aggregate:\n- { placement: { analytics: D }, title: T, kind: k, agg: count, group_by: app, exclude: [\"  \"], render: bar }\n",
         );
         let err = m.validate().expect_err("blank exclude entry must fail");
         assert!(
@@ -4677,7 +4822,7 @@ tags: [ok, "   "]
     fn aggregate_rejects_malformed_dotted_paths() {
         for bad in [".foo", "foo.", "foo..bar", "."] {
             let m = manifest_with_aggregate(&format!(
-                "aggregate:\n- {{ dashboard: D, title: T, kind: k, agg: count, group_by: \"{bad}\", render: bar }}\n"
+                "aggregate:\n- {{ placement: {{ analytics: D }}, title: T, kind: k, agg: count, group_by: \"{bad}\", render: bar }}\n"
             ));
             let err = m.validate().expect_err("malformed path must fail");
             assert!(err.contains("dotted JSON path"), "path {bad}: {err}");
@@ -4690,7 +4835,7 @@ tags: [ok, "   "]
         // catch-all (so old readers don't choke); validate() rejects it as
         // a typo at create time.
         let m = manifest_with_aggregate(
-            "aggregate:\n- { dashboard: D, title: T, kind: k, agg: count, render: heatmap }\n",
+            "aggregate:\n- { placement: { analytics: D }, title: T, kind: k, agg: count, render: heatmap }\n",
         );
         let err = m.validate().expect_err("unknown render must fail");
         assert!(err.contains("render is not a known value"), "err: {err}");
@@ -4699,11 +4844,87 @@ tags: [ok, "   "]
     #[test]
     fn aggregate_accepts_order_field() {
         let m = manifest_with_aggregate(
-            "aggregate:\n- { dashboard: D, title: T, order: -5, kind: k, agg: count, render: stat }\n",
+            "aggregate:\n- { placement: { analytics: D }, title: T, order: -5, kind: k, agg: count, render: stat }\n",
         );
         m.validate().expect("order is a valid optional field");
         let w = &m.aggregate.as_ref().unwrap()[0];
         assert_eq!(w.order, Some(-5));
+    }
+
+    // #1257 moved aggregate widgets onto the shared `placement:` block, so
+    // `validate_placement` is now reachable from a second call site
+    // (`validate_aggregate_widgets`). The SqlWidget side already covers the
+    // rule; these pin it down where it is new, since a regression there
+    // would be invisible to those tests.
+
+    #[test]
+    fn aggregate_rejects_widget_that_surfaces_nowhere() {
+        // No `analytics` tab and not pinned ⇒ the widget renders nowhere.
+        // Before #1257 this was unrepresentable (`dashboard` was a required
+        // String), so it's a genuinely new way to write a broken widget.
+        let err = manifest_with_aggregate(
+            "aggregate:\n- { placement: {}, title: T, kind: k, agg: count, render: stat }\n",
+        )
+        .validate()
+        .expect_err("a widget with no surface must be rejected");
+        assert!(err.contains("placement must set"), "err: {err}");
+
+        // `pin: false` is a block that pins nowhere — presence of the block
+        // must not be mistaken for an actual surface.
+        let err = manifest_with_aggregate(
+            "aggregate:\n- { placement: { dashboard: { pin: false } }, title: T, kind: k, agg: count, render: stat }\n",
+        )
+        .validate()
+        .expect_err("pin: false surfaces nowhere either");
+        assert!(err.contains("placement must set"), "err: {err}");
+    }
+
+    #[test]
+    fn aggregate_accepts_dashboard_only_widget() {
+        // The capability the refactor unlocks: an aggregate widget that is
+        // pinned to the Dashboard without also claiming an Analytics tab.
+        // `tab()` falls back to a label so the grouped widget list still has
+        // a key to group under.
+        let m = manifest_with_aggregate(
+            "aggregate:\n- { placement: { dashboard: { pin: true } }, title: T, scope: fleet, kind: k, agg: count, render: stat }\n",
+        );
+        m.validate().expect("dashboard-only placement is valid");
+        let p = &m.aggregate.as_ref().unwrap()[0].placement;
+        assert!(p.is_pinned());
+        assert!(p.analytics.is_none());
+        assert_eq!(p.tab(), "Dashboard");
+    }
+
+    #[test]
+    fn analytics_placement_reads_both_shapes_and_serializes_terse() {
+        // The scalar-or-block contract, and the one-way collapse back to
+        // the terse form: a block that sets no width is stored as the bare
+        // string, so resource JSON doesn't grow a wrapper for the ~all
+        // widgets that never ask for a width.
+        let bare = manifest_with_aggregate(
+            "aggregate:\n- { placement: { analytics: Uptime }, title: T, kind: k, agg: count, render: stat }\n",
+        );
+        let block = manifest_with_aggregate(
+            "aggregate:\n- { placement: { analytics: { tab: Uptime } }, title: T, kind: k, agg: count, render: stat }\n",
+        );
+        for m in [&bare, &block] {
+            assert_eq!(m.aggregate.as_ref().unwrap()[0].placement.tab(), "Uptime");
+        }
+        let json = serde_json::to_string(&bare.aggregate.as_ref().unwrap()[0].placement)
+            .expect("serialize placement");
+        assert!(json.contains(r#""analytics":"Uptime""#), "json: {json}");
+
+        // With a width it has to keep the block form, or the width is lost.
+        let wide = manifest_with_aggregate(
+            "aggregate:\n- { placement: { analytics: { tab: Uptime, width: half } }, title: T, kind: k, agg: count, render: stat }\n",
+        );
+        let p = &wide.aggregate.as_ref().unwrap()[0].placement;
+        assert_eq!(p.width_for(false), Some(WidgetWidth::Half));
+        // …and the Dashboard surface is untouched by an Analytics width.
+        assert_eq!(p.width_for(true), None);
+        let json = serde_json::to_string(p).expect("serialize placement");
+        assert!(json.contains(r#""tab":"Uptime""#), "json: {json}");
+        assert!(json.contains(r#""width":"half""#), "json: {json}");
     }
 
     #[test]
@@ -4711,7 +4932,7 @@ tags: [ok, "   "]
         // op_timeline needs no kind/agg — it reconstructs a fixed multi-kind
         // swimlane. A bare per-PC spec is valid, and `kind`/`agg` stay None.
         let m = manifest_with_aggregate(
-            "aggregate:\n- { dashboard: Uptime, title: Operational state, scope: pc, render: op_timeline }\n",
+            "aggregate:\n- { placement: { analytics: Uptime }, title: Operational state, scope: pc, render: op_timeline }\n",
         );
         m.validate().expect("minimal op_timeline is valid");
         let w = &m.aggregate.as_ref().unwrap()[0];
@@ -4723,7 +4944,7 @@ tags: [ok, "   "]
     #[test]
     fn aggregate_rejects_op_timeline_with_fleet_scope() {
         let m = manifest_with_aggregate(
-            "aggregate:\n- { dashboard: Uptime, title: T, scope: fleet, render: op_timeline }\n",
+            "aggregate:\n- { placement: { analytics: Uptime }, title: T, scope: fleet, render: op_timeline }\n",
         );
         let err = m.validate().expect_err("op_timeline must be per-PC");
         assert!(
@@ -4746,7 +4967,7 @@ tags: [ok, "   "]
             ("limit: 5", "limit"),
         ] {
             let m = manifest_with_aggregate(&format!(
-                "aggregate:\n- {{ dashboard: Uptime, title: T, scope: pc, {block}, render: op_timeline }}\n"
+                "aggregate:\n- {{ placement: {{ analytics: Uptime }}, title: T, scope: pc, {block}, render: op_timeline }}\n"
             ));
             let err = m
                 .validate()
@@ -4767,8 +4988,8 @@ tags: [ok, "   "]
     fn view_accepts_valid_widgets() {
         let v = view_from(
             "widgets:\n\
-             - { dashboard: Reliability, title: Crashes by PC, scope: fleet, kind: unexpected_shutdown, agg: count, group_by: pc_id, render: bar }\n\
-             - { dashboard: Reliability, title: Total, scope: fleet, kind: unexpected_shutdown, agg: count, render: stat }\n",
+             - { placement: { analytics: Reliability }, title: Crashes by PC, scope: fleet, kind: unexpected_shutdown, agg: count, group_by: pc_id, render: bar }\n\
+             - { placement: { analytics: Reliability }, title: Total, scope: fleet, kind: unexpected_shutdown, agg: count, render: stat }\n",
         );
         v.validate().expect("valid view");
     }
@@ -4783,7 +5004,7 @@ tags: [ok, "   "]
     #[test]
     fn view_rejects_blank_id() {
         let v: View = serde_yaml::from_str(
-            "id: \"  \"\nwidgets:\n- { dashboard: D, title: T, kind: k, agg: count, render: stat }\n",
+            "id: \"  \"\nwidgets:\n- { placement: { analytics: D }, title: T, kind: k, agg: count, render: stat }\n",
         )
         .expect("parse");
         let err = v.validate().expect_err("blank id must fail");
@@ -4796,7 +5017,7 @@ tags: [ok, "   "]
         // `/api/views/{id}` URL segment — reject at create time.
         for bad in ["../etc", "a/b", "has space", "x;y"] {
             let v: View = serde_yaml::from_str(&format!(
-                "id: \"{bad}\"\nwidgets:\n- {{ dashboard: D, title: T, kind: k, agg: count, render: stat }}\n",
+                "id: \"{bad}\"\nwidgets:\n- {{ placement: {{ analytics: D }}, title: T, kind: k, agg: count, render: stat }}\n",
             ))
             .expect("parse");
             let err = v.validate().expect_err("unsafe id must fail");
@@ -4811,7 +5032,7 @@ tags: [ok, "   "]
         // (and `/api/views/{id}` segment) nothing matches — reject it outright
         // (the id is used verbatim).
         let v: View = serde_yaml::from_str(
-            "id: \" my-view \"\nwidgets:\n- { dashboard: D, title: T, kind: k, agg: count, render: stat }\n",
+            "id: \" my-view \"\nwidgets:\n- { placement: { analytics: D }, title: T, kind: k, agg: count, render: stat }\n",
         )
         .expect("parse");
         let err = v.validate().expect_err("padded id must fail");
@@ -4823,7 +5044,7 @@ tags: [ok, "   "]
         // The same per-widget rule the job hint enforces (ratio needs
         // bool_path), reported under the `widgets[..]` field.
         let v = view_from(
-            "widgets:\n- { dashboard: D, title: T, kind: presence, agg: ratio, render: gauge }\n",
+            "widgets:\n- { placement: { analytics: D }, title: T, kind: presence, agg: ratio, render: gauge }\n",
         );
         let err = v.validate().expect_err("ratio without bool_path must fail");
         assert!(
@@ -4862,7 +5083,7 @@ tags: [ok, "   "]
         // No refresh ⇒ default; a view can mix aggregate + sql widgets.
         let v = view_from(
             "widgets:
-  - { dashboard: D, title: T, kind: k, agg: count, render: stat }
+  - { placement: { analytics: D }, title: T, kind: k, agg: count, render: stat }
 sql_widgets:
   - title: N affected
     query: \"SELECT count(*) AS n FROM feeds\"

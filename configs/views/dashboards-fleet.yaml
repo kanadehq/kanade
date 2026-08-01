@@ -30,7 +30,7 @@ widgets:
   # events in the window and the SPA folds them into lane spans (the same
   # strip the Events page renders). Per-PC only — pick a PC in the
   # Analytics scope to see it. `order: -10` pulls the Uptime tab first.
-  - dashboard: Uptime
+  - placement: { analytics: Uptime }
     title: Operational state
     description: Power / session / sleep intervals reconstructed from events
     order: -10
@@ -38,7 +38,7 @@ widgets:
     render: op_timeline
 
   # ── Reliability ──────────────────────────────────────────────────
-  - dashboard: Reliability
+  - placement: { analytics: Reliability }
     title: Unexpected shutdowns by PC
     description: Event 41 count per PC (top offenders)
     scope: fleet
@@ -46,7 +46,7 @@ widgets:
     agg: count
     group_by: pc_id
     render: bar
-  - dashboard: Reliability
+  - placement: { analytics: Reliability, dashboard: { pin: true } }
     title: Unexpected shutdowns (total)
     description: Event 41 across the fleet
     scope: fleet
@@ -56,8 +56,7 @@ widgets:
     # Promote this headline number to the main Dashboard's "Pinned
     # widgets" section. Any fleet-scope widget can opt in this way; it
     # renders there with the same component as on the Analytics page.
-    pin_dashboard: true
-  - dashboard: Reliability
+  - placement: { analytics: Reliability }
     title: Reboots by hour (fleet)
     description: Boot events bucketed by local hour
     scope: fleet
@@ -65,7 +64,7 @@ widgets:
     agg: count
     time_bucket: hour
     render: timeline
-  - dashboard: Reliability
+  - placement: { analytics: Reliability }
     title: This PC's reboots by hour
     description: Boot events bucketed by local hour
     scope: pc
@@ -84,7 +83,7 @@ widgets:
   # widget is source-pinned to it and stays empty until that job is run.
   # `user` exists on both, so the top-users / by-hour widgets work on the
   # default fleet.
-  - dashboard: Access
+  - placement: { analytics: Access }
     title: Logons by type (Security 4624)
     description: Needs the on-demand collect-winlog-logons-all job
     scope: fleet
@@ -93,7 +92,7 @@ widgets:
     agg: count
     group_by: logon_type
     render: bar
-  - dashboard: Access
+  - placement: { analytics: Access }
     title: Top users by logon (fleet)
     description: Winlogon 7001 + Security 4624, by user
     scope: fleet
@@ -101,7 +100,7 @@ widgets:
     agg: count
     group_by: user
     render: bar
-  - dashboard: Access
+  - placement: { analytics: Access }
     title: Logons by hour (fleet)
     description: Logon events bucketed by local hour
     scope: fleet
@@ -109,7 +108,7 @@ widgets:
     agg: count
     time_bucket: hour
     render: timeline
-  - dashboard: Access
+  - placement: { analytics: Access }
     title: This PC's logons by hour
     description: Logon events bucketed by local hour
     scope: pc
@@ -119,7 +118,7 @@ widgets:
     render: timeline
 
   # ── Agent health ─────────────────────────────────────────────────
-  - dashboard: Agent health
+  - placement: { analytics: Agent health }
     title: Self-updates by PC
     description: agent_self_update count per PC
     scope: fleet
@@ -127,7 +126,7 @@ widgets:
     agg: count
     group_by: pc_id
     render: bar
-  - dashboard: Agent health
+  - placement: { analytics: Agent health }
     title: Agent restarts by PC
     description: agent_started count per PC
     scope: fleet
