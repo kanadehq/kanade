@@ -443,6 +443,55 @@ it down for production with token auth:
 `nats_url` in `agent.toml` / `backend.toml` stays plain. The secret
 never lands in config files or process listings.
 
+#### Seeing which credential each host actually used
+
+Provisioning a credential and a host *presenting* it are different facts,
+and only the second one is worth acting on. The backend polls the broker's
+monitoring endpoint (`/connz`) every 60 s and records, per host, the NATS
+user its live connection authenticated as — reported by NATS, not by the
+agent, because a host kitted from a stale image is exactly the one whose
+own account of itself cannot be trusted (#1270). It surfaces on
+`GET /api/agents` as `nats_user`, with `nats_user_since` marking when that
+last changed:
+
+| value | meaning |
+| --- | --- |
+| *(absent)* | never correlated — no live connection seen, or the agent predates #1270 and announces no pc_id. **Unknown, not "old credential".** |
+| `shared-token` | the single fleet-wide token. The migration queue. |
+| `no-auth` | the broker authenticated nobody (no `authorization` block). |
+| `unknown` | connected, credential unnameable without printing a secret. |
+| anything else | the NATS username, verbatim. |
+
+```powershell
+# How many hosts are still on the shared token?
+(irm http://<backend>/api/agents -Headers $h) |
+  Group-Object nats_user | Select-Object Count, Name
+```
+
+Under today's token auth every host that *correlates* lands in the one
+`shared-token` bucket — hosts whose agent announces no pc_id stay absent,
+and a connection the backend cannot vouch for reads `unknown`. That is the
+endpoint's answer rather than a shortcut: nats-server reports which
+credential a connection authenticated with, and for token auth it reports
+only that a token was used (`[REDACTED]`, measured on 2.14.3). A `users`
+split is what makes the answer per-role — and the value is never stored raw
+regardless, because whether the broker hides a credential is the broker
+build's choice, not this code's.
+
+Treat the monitoring port as sensitive: it enumerates every connection, its
+IP and its subscriptions, and NATS provides no authentication for it. Both
+shipped broker configs bind it to loopback (`http: "127.0.0.1:8222"`), which
+is right for the usual deploy where the backend runs on the broker host —
+note that the bare `http_port: 8222` form listens on **all** interfaces. If
+you split backend and broker across hosts, widen the bind to a management
+interface and set `monitor_url` to match.
+
+Set `[nats] monitor_url` in `backend.toml` if monitoring does not live at
+`http://<nats-host>:8222`. If it is unreachable or switched off, the
+projection simply stops updating: values already recorded are kept (they
+remain the best answer about each host), and a host that was never
+correlated stays empty until the first successful poll.
+
 For multi-tenant / per-agent identity (NKeys, NATS JWT, mTLS), see
 [spec §2.7.1](https://github.com/yukimemi/kanade/blob/main/docs/SPEC.md).
 Stick with the shared token while operating ≤ ~1000 hosts.

@@ -78,6 +78,33 @@ pub struct AgentRow {
     /// not be enforcing, which is what the whole fleet is doing today.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enforcing: Option<bool>,
+    /// #1270: the NATS credential this host's live connection authenticated
+    /// with, as reported by the **broker** — not by the agent, which knows
+    /// only which token it was handed.
+    ///
+    /// Same three-state discipline as the two fields above:
+    ///
+    /// * absent — never correlated. No live connection has been observed
+    ///   for this pc_id, or the host runs an agent old enough that its
+    ///   connection announces no pc_id to join on. Unknown, not "old
+    ///   credential".
+    /// * `"shared-token"` — the single fleet-wide token. **This is the
+    ///   migration queue** the tightening step of #1266 has to empty.
+    /// * `"no-auth"` / `"unknown"` — the broker authenticated nobody, or
+    ///   it named the credential in a way that cannot be shown to be
+    ///   safe to store (it may be the credential itself).
+    /// * anything else — the NATS username, verbatim.
+    ///
+    /// Sticky: a host that goes offline keeps its last observed value,
+    /// because that is still the best answer about it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nats_user: Option<String>,
+    /// When [`Self::nats_user`] last **changed**, not when it was last
+    /// confirmed — re-confirming every row every poll would be a perpetual
+    /// write load for no new information (cf. #488). "When was this host
+    /// last seen at all" is `last_heartbeat`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nats_user_since: Option<chrono::DateTime<chrono::Utc>>,
     /// #1051: operator-managed key/value metadata for this PC, from the
     /// `agent_meta` projection (source of truth is the KV bucket the SPA
     /// `PUT`/`kanade meta` write). Decorated onto the returned page so the
@@ -889,6 +916,19 @@ fn row_to_agent(r: sqlx::sqlite::SqliteRow) -> AgentRow {
         // `Err` on an older DB, which `.ok().flatten()` folds into `None` —
         // the correct answer there, since the agent genuinely has not said.
         enforcing: r.try_get::<Option<bool>, _>("enforcing").ok().flatten(),
+        // #1270: NULL (never correlated) stays `None`, and an empty string
+        // — which no classifier produces, but which a hand-edited row
+        // could hold — is folded into it rather than shown as a credential
+        // with no name.
+        nats_user: r
+            .try_get::<Option<String>, _>("nats_user")
+            .ok()
+            .flatten()
+            .filter(|s| !s.is_empty()),
+        nats_user_since: r
+            .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("nats_user_since")
+            .ok()
+            .flatten(),
         last_logon_user: r
             .try_get::<Option<String>, _>("last_logon_user")
             .ok()
@@ -1061,6 +1101,52 @@ mod tests {
             },
         )
         .await
+    }
+
+    /// #1270: the states of `nats_user` survive to the API, and the
+    /// migration queue stays countable there.
+    #[tokio::test]
+    async fn nats_user_keeps_never_correlated_distinct_from_the_shared_token() {
+        let pool = seeded_pool().await;
+        // Still on the fleet-wide credential: the queue to empty.
+        sqlx::query("UPDATE agents SET nats_user = 'shared-token' WHERE pc_id = 'PC001'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        // Migrated to a named NATS user.
+        sqlx::query("UPDATE agents SET nats_user = 'kanade-agent' WHERE pc_id = 'PC002'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        // WS-9 was never correlated; web%01 holds an empty string, which is
+        // not a credential and must not read as one.
+        sqlx::query("UPDATE agents SET nats_user = '' WHERE pc_id = 'web%01'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (_h, Json(rows)) = call(pool, ListParams::default()).await.unwrap();
+        let by_id = |id: &str| {
+            rows.iter()
+                .find(|r| r.pc_id == id)
+                .unwrap()
+                .nats_user
+                .clone()
+        };
+        assert_eq!(by_id("PC001").as_deref(), Some("shared-token"));
+        assert_eq!(by_id("PC002").as_deref(), Some("kanade-agent"));
+        assert_eq!(
+            by_id("WS-9"),
+            None,
+            "never correlated must stay distinguishable from the shared token",
+        );
+        assert_eq!(by_id("web%01"), None, "'' is not a credential");
+        // The count an operator runs before tightening anything.
+        assert_eq!(
+            rows.iter()
+                .filter(|r| r.nats_user.as_deref() == Some("shared-token"))
+                .count(),
+            1,
+        );
     }
 
     /// #1165: the three states of `command_keys` stay three states all the

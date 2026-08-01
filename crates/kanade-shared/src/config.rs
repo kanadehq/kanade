@@ -106,6 +106,83 @@ pub struct ServerSection {
 #[derive(Deserialize, Debug, Clone)]
 pub struct NatsSection {
     pub url: String,
+    /// #1270: base URL of the broker's HTTP monitoring endpoint (the
+    /// `http_port` in `nats-server.conf`, 8222 by default). The backend
+    /// polls `/connz` there to learn which NATS user each agent's live
+    /// connection authenticated as.
+    ///
+    /// Optional: when unset it is derived from [`Self::url`] by swapping
+    /// the scheme for `http` and the port for 8222, which is right for the
+    /// standard single-broker deploy. Set it when monitoring listens
+    /// elsewhere. Unreachable / disabled monitoring is not fatal — the
+    /// projection simply stays unpopulated.
+    #[serde(default)]
+    pub monitor_url: Option<String>,
+}
+
+/// Port `nats-server` serves its monitoring endpoints on by default, and
+/// the `http_port` shipped in `configs/nats-server.conf`.
+const DEFAULT_MONITOR_PORT: u16 = 8222;
+
+impl NatsSection {
+    /// The monitoring base URL to poll — configured, or derived from
+    /// [`Self::url`].
+    ///
+    /// Derivation deliberately keeps only the **host**: the client URL's
+    /// port is the client port (4222), its scheme may be `nats`/`tls`/`ws`
+    /// (none of which the monitoring endpoint speaks), and it may carry
+    /// inline credentials that must not be re-sent over plain HTTP.
+    pub fn resolved_monitor_url(&self) -> String {
+        if let Some(u) = self.monitor_url.as_deref().map(str::trim)
+            && !u.is_empty()
+        {
+            let u = u.trim_end_matches('/');
+            // A scheme-less value (`10.0.0.9:8222`) would otherwise be
+            // parsed as a URI whose *scheme* is the hostname, failing every
+            // poll behind a "monitoring endpoint unreadable" line that names
+            // the symptom rather than the typo.
+            return if u.contains("://") {
+                u.to_string()
+            } else {
+                format!("http://{u}")
+            };
+        }
+        let host = monitor_host_from_client_url(&self.url);
+        format!("http://{host}:{DEFAULT_MONITOR_PORT}")
+    }
+}
+
+/// Extract the host from a NATS client URL, dropping scheme, credentials,
+/// port and path. Returns the input unchanged when it is already a bare
+/// host, and falls back to loopback for input with no host at all — a
+/// wrong-but-harmless target beats a panic in a background poller.
+fn monitor_host_from_client_url(url: &str) -> String {
+    let after_scheme = url.split_once("://").map_or(url, |(_scheme, rest)| rest);
+    // `user:pass@host:port` — credentials are before the LAST '@' so a
+    // password containing '@' does not truncate the host.
+    let authority = match after_scheme.rsplit_once('@') {
+        Some((_creds, host)) => host,
+        None => after_scheme,
+    };
+    // Strip any path / query the URL carried.
+    let authority = authority
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(authority)
+        .trim();
+    // IPv6 literals are bracketed (`[::1]:4222`) and their colons are not
+    // port separators — keep the brackets, which is also the form an HTTP
+    // URL needs.
+    let host = if let Some(end) = authority.find(']') {
+        &authority[..=end]
+    } else {
+        authority.split(':').next().unwrap_or(authority)
+    };
+    if host.is_empty() {
+        "127.0.0.1".to_string()
+    } else {
+        host.to_string()
+    }
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -138,6 +215,75 @@ pub fn load_backend_config(path: &Path) -> Result<BackendConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn nats(url: &str, monitor: Option<&str>) -> NatsSection {
+        NatsSection {
+            url: url.to_string(),
+            monitor_url: monitor.map(str::to_string),
+        }
+    }
+
+    /// #1270: the derived monitoring URL must keep the host and drop
+    /// everything else. The client port is not the monitoring port, and an
+    /// inline credential must not be replayed over plain HTTP.
+    #[test]
+    fn the_monitor_url_derives_from_the_client_url_host_only() {
+        for (client, want) in [
+            ("nats://127.0.0.1:4222", "http://127.0.0.1:8222"),
+            (
+                "nats://nats.example.com:4222",
+                "http://nats.example.com:8222",
+            ),
+            // No scheme, no port — a bare host is still a host.
+            ("broker-01", "http://broker-01:8222"),
+            // Inline credentials: the host is after the last '@'.
+            ("nats://user:p@ss@10.0.0.5:4222", "http://10.0.0.5:8222"),
+            // wss deploys terminate elsewhere, but the host still answers.
+            (
+                "wss://kanade.example.com:443/nats",
+                "http://kanade.example.com:8222",
+            ),
+            // IPv6 literals keep their brackets in both URL forms.
+            ("nats://[::1]:4222", "http://[::1]:8222"),
+        ] {
+            assert_eq!(
+                nats(client, None).resolved_monitor_url(),
+                want,
+                "deriving from {client}",
+            );
+        }
+    }
+
+    #[test]
+    fn an_explicit_monitor_url_wins_and_is_taken_verbatim() {
+        assert_eq!(
+            nats("nats://127.0.0.1:4222", Some("http://10.0.0.9:9999")).resolved_monitor_url(),
+            "http://10.0.0.9:9999",
+        );
+        // A trailing slash would produce `//connz` when joined.
+        assert_eq!(
+            nats("nats://127.0.0.1:4222", Some("http://10.0.0.9:9999/")).resolved_monitor_url(),
+            "http://10.0.0.9:9999",
+        );
+        // Blank / whitespace-only is not a configured value — fall back to
+        // derivation rather than polling the empty string.
+        assert_eq!(
+            nats("nats://127.0.0.1:4222", Some("   ")).resolved_monitor_url(),
+            "http://127.0.0.1:8222",
+        );
+        // A scheme-less value is the likely typo, and it parses as a URI
+        // whose scheme is the hostname — which fails on every poll behind an
+        // error that names the symptom, not the cause.
+        assert_eq!(
+            nats("nats://127.0.0.1:4222", Some("10.0.0.9:8222")).resolved_monitor_url(),
+            "http://10.0.0.9:8222",
+        );
+        // ...but an explicit scheme is never rewritten, including https.
+        assert_eq!(
+            nats("nats://127.0.0.1:4222", Some("https://mon.example.com")).resolved_monitor_url(),
+            "https://mon.example.com",
+        );
+    }
 
     /// Smoke test the dev-fleet flow against `agent.dev.toml`:
     ///   1. When `KANADE_DEV_AGENT_ID` is set, the teravars template

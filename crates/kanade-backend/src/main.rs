@@ -1270,6 +1270,26 @@ pub(crate) async fn run_backend() -> Result<()> {
         });
     }
 
+    // #1270: which NATS credential each agent's live connection
+    // authenticated with, asked of the BROKER rather than of the agent.
+    // Polls the monitoring endpoint; a broker with monitoring off or bound
+    // elsewhere leaves `agents.nats_user` NULL, which reads as "never
+    // correlated" — the honest answer, and the projector says so once
+    // rather than once a minute.
+    {
+        let pool = pool.clone();
+        let monitor_url = cfg.nats.resolved_monitor_url();
+        // The broker connection rides along so the projector can tell a
+        // credential it merely *resolved* from one the broker actually
+        // *accepted* — only the latter proves which auth mode is in force.
+        let nats_client = nats.clone();
+        tokio::spawn(async move {
+            if let Err(e) = projector::nats_conns::run(pool, monitor_url, nats_client).await {
+                error!(error = %e, "nats connections projector exited");
+            }
+        });
+    }
+
     // #1216: object-store metadata index — one supervised watcher per
     // bucket keeps `object_store_meta` in sync (including direct-NATS
     // writers the API never sees), and the four list endpoints read
