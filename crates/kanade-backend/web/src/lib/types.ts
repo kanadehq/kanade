@@ -38,6 +38,19 @@ export type AgentRow = {
   // Omitted when the PC has no metadata. Drives the Agents page's
   // selectable attribute columns.
   meta?: MetaEntry[];
+  // #1165: the command-signing keys this agent trusts, each as
+  // `kid:fingerprint` (#1229). Three states, and they must stay three —
+  // absent means the agent predates the field, `[]` means it reports and
+  // holds nothing (the provisioning work queue), populated means what it
+  // will accept right now. `?:` rather than `| null` because the Rust side
+  // uses `skip_serializing_if`, so the key is genuinely absent.
+  command_keys?: string[];
+  // #1250: whether this agent refuses commands it cannot verify. Absent =
+  // predates the field (an agent can report `command_keys` and not this,
+  // which is every 0.45.1 agent); `false` = provisioned but not enforcing,
+  // the remaining stage-3 work; `true` = done. Not derivable from
+  // `command_keys` — a host can hold a perfect ring and not enforce.
+  enforcing?: boolean;
 };
 
 export type Heartbeat = {
