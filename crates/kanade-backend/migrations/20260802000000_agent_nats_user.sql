@@ -1,0 +1,56 @@
+-- #1270: which NATS credential each agent's live connection authenticated
+-- with, as reported by the broker -- not by the agent.
+--
+-- The source is the monitoring endpoint's `/connz`, joined onto a pc_id via
+-- the connection name the agent announces. Asking the broker rather than
+-- adding a heartbeat field is the whole point: the agent knows which token
+-- it was *given*, not what the server *authenticated it as*, and those
+-- differ exactly in the failure cases worth catching (a host kitted from a
+-- stale image). Heartbeats are also unsigned and forgeable (#1269), and a
+-- host whose own account of itself is in doubt cannot be the witness.
+--
+-- Nullable with no DEFAULT, exactly as `command_keys` (#1195) and
+-- `enforcing` (#1250) are, and for the same reason. The states are:
+--
+--   NULL             -- never correlated. No live connection has been
+--                       observed for this pc_id since the backend started
+--                       polling, or the host runs an agent old enough that
+--                       its connection carries no pc_id to join on.
+--                       Unknown, NOT "on the old credential".
+--   'shared-token'   -- authenticated with the token: on a broker that
+--                       accepts token auth at all there is exactly one, so
+--                       this is the single fleet-wide credential.
+--                       **This is the migration queue**, and the set an
+--                       operator has to be able to COUNT.
+--   'no-auth'        -- the broker authenticated nobody (no `authorization`
+--                       block). Expected on a dev broker, alarming anywhere
+--                       else.
+--   'unknown'        -- connected, but the credential cannot be named
+--                       safely. See below.
+--   any other value  -- the NATS username the broker authenticated the
+--                       connection as, verbatim.
+--
+-- Why a credential is sometimes unnameable: `authorized_user` is a
+-- username only when the broker runs `users`. Under `authorization
+-- { token }` nats-server 2.14.3 reports the literal '[REDACTED]' -- it
+-- hides the credential, which is what 'shared-token' above is derived
+-- from. That redaction is the broker build's courtesy, not something this
+-- code controls, so the projector still refuses to store any value it
+-- cannot prove is safe: copying the fleet's NATS credential into this
+-- table would serve it from `GET /api/agents` to every operator session.
+-- What it can prove: the redaction marker, the backend's own token
+-- (recorded as the sentinel, never as its value), and a username from a
+-- broker that is provably not in token mode -- because nats-server refuses
+-- to load a config with both and rejects token auth once users exist.
+--
+-- `nats_user_since` stamps when the label last CHANGED, not when it was
+-- last confirmed: on a 3,000-host fleet re-confirming every row on every
+-- poll would be a perpetual write load against SQLite's single writer
+-- (cf. #488), and "since when has this host been on this credential" is the
+-- more useful answer anyway. How recently the host was seen at all is
+-- already `last_heartbeat`.
+--
+-- Existing rows backfill to NULL, which is correct: nothing has been
+-- observed about them yet. The projector fills them in within one poll.
+ALTER TABLE agents ADD COLUMN nats_user TEXT;
+ALTER TABLE agents ADD COLUMN nats_user_since TEXT;

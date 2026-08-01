@@ -9,6 +9,7 @@ pub mod group_materializer;
 pub mod heartbeat;
 pub mod history;
 pub mod host_perf;
+pub mod nats_conns;
 pub mod notifications;
 pub mod object_meta;
 pub mod obs_events;

@@ -19,6 +19,17 @@ bind = '0.0.0.0:8080'
 
 [nats]
 url = 'nats://127.0.0.1:4222'
+# Base URL of the broker's HTTP monitoring endpoint (`http_port` in
+# nats-server.conf, 8222 by default). The backend polls /connz there to
+# learn which NATS user each agent's live connection authenticated as
+# (#1270) — the broker's answer, not the agent's. Optional: when unset it
+# is derived from `url` above by keeping the host and swapping in
+# http://…:8222, which is right for the standard single-broker deploy.
+# Unreachable or disabled monitoring is not fatal — the projection stops
+# updating, values already recorded are kept, a host that was never
+# correlated stays empty until the first successful poll, and the backend
+# logs the outage once rather than once a minute.
+# monitor_url = 'http://127.0.0.1:8222'
 
 [db]
 sqlite_path = '{{ vars.base }}/backend.db'

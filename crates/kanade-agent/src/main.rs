@@ -602,6 +602,12 @@ pub(crate) async fn run_agent() -> Result<()> {
         // token already lives at, so this role sees no migration (#1155).
         kanade_shared::nats_client::NatsRole::Agent,
         &cfg.agent.nats_url,
+        // #1270: announce the pc_id in the connection name. The broker
+        // echoes it in `/connz` beside the user it authenticated us as,
+        // which is the only way the backend can say *which host* is still
+        // on the old credential — the agent's own account of itself
+        // (a heartbeat field) would be exactly what is in doubt.
+        Some(cfg.agent.id.as_str()),
         staleness_tracker.on_event(),
     )
     .await?;
