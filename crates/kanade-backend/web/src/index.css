@@ -183,6 +183,34 @@
 .notif-md p {
   margin: 0.4rem 0;
 }
+/* Headings sized DOWN from browser defaults on purpose. This block sits
+   inside a card whose own title is already the largest text around, so a
+   default `h1` (2em) would out-shout the notification's actual subject
+   line. h1/h2 collapse to the same size — a body needs sections, not a
+   six-level outline — and everything stays within one step of body text. */
+.notif-md h1,
+.notif-md h2,
+.notif-md h3,
+.notif-md h4,
+.notif-md h5,
+.notif-md h6 {
+  font-weight: 600;
+  line-height: 1.3;
+  margin: 0.9rem 0 0.3rem;
+}
+.notif-md h1,
+.notif-md h2 {
+  font-size: 1.08em;
+}
+.notif-md h3,
+.notif-md h4 {
+  font-size: 1em;
+}
+.notif-md h5,
+.notif-md h6 {
+  font-size: 0.95em;
+  color: var(--color-muted);
+}
 /* Only real (http/https) links are styled as links. An anchor whose href was
    stripped by the sanitizer (e.g. a `javascript:` URL) is inert, so it must not
    look clickable. */

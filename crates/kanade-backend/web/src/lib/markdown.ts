@@ -29,6 +29,13 @@ const ALLOWED_TAGS = [
   'p', 'br', 'strong', 'em', 'del', 'code', 'pre', 'blockquote',
   'ul', 'ol', 'li', 'a',
   'table', 'thead', 'tbody', 'tr', 'th', 'td',
+  // Headings. A fleet-wide notice is a document — steps, then how to
+  // report, then who to contact — and without these an operator's `##`
+  // was silently flattened to body text by DOMPurify's KEEP_CONTENT,
+  // losing the structure while looking like it had been accepted. The
+  // CSS caps them well below browser defaults so an `h1` can't tower
+  // over the card title above it.
+  'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
 ];
 // `target` / `rel` are added by the link hook below; `align` is what GFM emits
 // for table-column alignment.
