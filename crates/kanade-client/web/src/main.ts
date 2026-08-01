@@ -2043,12 +2043,16 @@ function escapeHtml(s: string): string {
 // we don't mutate the shared `marked` singleton's global state.
 const MARKED_OPTS = { async: false, gfm: true, breaks: true } as const;
 
-// The only tags an operator can produce. GFM tables are allowed (no script
-// surface); images / headings / raw HTML are not.
+// The only tags an operator can produce. GFM tables and headings are
+// allowed (no script surface); images / raw HTML are not.
 const NOTIF_MD_ALLOWED_TAGS = [
   "p", "br", "strong", "em", "del", "code", "pre", "blockquote",
   "ul", "ol", "li", "a",
   "table", "thead", "tbody", "tr", "th", "td",
+  // Kept in parity with the SPA allowlist (backend web lib/markdown.ts)
+  // — an operator previews there and the end user reads it here, so a
+  // tag allowed in one and stripped in the other means the preview lies.
+  "h1", "h2", "h3", "h4", "h5", "h6",
 ];
 // `data-href` + `class` are added by the link hook below; `align` is what GFM
 // emits for column alignment.

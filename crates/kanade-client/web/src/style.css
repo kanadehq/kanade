@@ -961,6 +961,37 @@ ul.checks {
   color: var(--muted);
 }
 
+/* Headings, sized down from browser defaults — same reasoning as the
+   SPA's `.notif-md` block, and kept in parity with it so an operator's
+   preview matches what the end user sees. The panel is narrower than
+   the SPA card, so the steps are the same but the margins are tighter. */
+.notif-md h1,
+.notif-md h2,
+.notif-md h3,
+.notif-md h4,
+.notif-md h5,
+.notif-md h6 {
+  font-weight: 600;
+  line-height: 1.3;
+  margin: 10px 0 4px;
+}
+
+.notif-md h1,
+.notif-md h2 {
+  font-size: 1.08em;
+}
+
+.notif-md h3,
+.notif-md h4 {
+  font-size: 1em;
+}
+
+.notif-md h5,
+.notif-md h6 {
+  font-size: 0.95em;
+  color: var(--muted);
+}
+
 /* Narrow panel: let a wide table scroll horizontally instead of bursting the
    layout. `display: block` + `width: max-content` makes overflow-x kick in. */
 .notif-md table {
