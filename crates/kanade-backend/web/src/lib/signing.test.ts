@@ -70,6 +70,66 @@ describe('signingState', () => {
   });
 });
 
+describe('signingState with the backend key known (#1260)', () => {
+  const BACKEND = { kid: 'backend-20260728', fingerprint: '75b4c8f44e18012d' };
+
+  test('a matching ring still reaches the enforcement states', () => {
+    expect(signingState(row({ command_keys: RING, enforcing: true }), BACKEND)).toBe('enforcing');
+    expect(signingState(row({ command_keys: RING, enforcing: false }), BACKEND)).toBe('ready');
+  });
+
+  test('the right kid with wrong bytes outranks an enforcing claim', () => {
+    // The most important ordering in this file. A host enforcing on the wrong
+    // key refuses EVERY command, and reporting `enforcing: true` is exactly
+    // what it does while doing so — so if `enforcing` were checked first the
+    // page would paint the worst host on the fleet green.
+    const wrong = ['backend-20260728:0000000000000000', RING[1]!];
+    expect(signingState(row({ command_keys: wrong, enforcing: true }), BACKEND)).toBe('wrongKey');
+    expect(signingState(row({ command_keys: wrong, enforcing: false }), BACKEND)).toBe('wrongKey');
+  });
+
+  test('a ring without the current kid at all is stale, not wrong', () => {
+    // Different cause, different urgency: this is the ordinary state of a
+    // machine a rotation has not reached yet, while `wrongKey` means someone
+    // wrote bytes nobody intended.
+    const old = ['backend-20260101:aaaaaaaaaaaaaaaa', RING[1]!];
+    expect(signingState(row({ command_keys: old, enforcing: true }), BACKEND)).toBe('staleRing');
+  });
+
+  test('a backend that is not signing restores the abstaining behaviour', () => {
+    // Null halves are a real state, not an error. With nothing to compare
+    // against, a verdict would be invented — so the states collapse back to
+    // what the agent reported, exactly as before #1260.
+    const none = { kid: null, fingerprint: null };
+    const wrong = ['backend-20260728:0000000000000000'];
+    expect(signingState(row({ command_keys: wrong, enforcing: true }), none)).toBe('enforcing');
+    expect(signingState(row({ command_keys: wrong, enforcing: true }), undefined)).toBe('enforcing');
+  });
+
+  test('a bare kid from a pre-fingerprint agent is not accused', () => {
+    // #1229 added the fingerprint half; an older agent reports the kid alone.
+    // It may hold the right key — nothing here can tell — so abstain rather
+    // than flag a machine that is probably fine.
+    expect(signingState(row({ command_keys: ['backend-20260728'], enforcing: true }), BACKEND)).toBe(
+      'enforcing',
+    );
+  });
+
+  test('an empty ring stays the provisioning queue, not a mismatch', () => {
+    expect(signingState(row({ command_keys: [] }), BACKEND)).toBe('none');
+    expect(signingState(row(), BACKEND)).toBe('unknown');
+  });
+
+  test('a kid containing a colon still compares on the right halves', () => {
+    // Split on the LAST colon: nothing forbids a colon in a kid, and getting
+    // this wrong would compare "backend" against "2026:75b4…" and accuse every
+    // host in the fleet at once.
+    const backend = { kid: 'backend:eu', fingerprint: '75b4c8f44e18012d' };
+    const held = ['backend:eu:75b4c8f44e18012d'];
+    expect(signingState(row({ command_keys: held, enforcing: true }), backend)).toBe('enforcing');
+  });
+});
+
 describe('keyIds', () => {
   test('strips the fingerprint so a tooltip leads with names', () => {
     expect(keyIds(row({ command_keys: RING }))).toEqual([

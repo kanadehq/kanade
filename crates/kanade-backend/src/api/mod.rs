@@ -43,7 +43,7 @@ pub mod views;
 pub mod yaml_body;
 
 use axum::Router;
-use axum::extract::{DefaultBodyLimit, FromRef};
+use axum::extract::{DefaultBodyLimit, FromRef, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, patch, post, put};
 use kanade_shared::feature::Feature;
@@ -164,6 +164,10 @@ pub fn router(state: AppState) -> Router {
         // Public: backend build version (so the SPA can show it, even on
         // the login screen). Allow-listed in `crate::auth::verify`.
         .route("/api/version", get(version))
+        // #1260: this backend's own signing identity, so a fleet-wide "does
+        // everyone trust the key we actually sign with" is a comparison rather
+        // than an assumption. Authed (not allow-listed in `auth::verify`).
+        .route("/api/command-signing", get(command_signing))
         // RBAC: credential login (public), self identity, self password.
         .route("/api/auth/login", post(accounts::login))
         .route("/api/auth/me", get(accounts::me))
@@ -763,6 +767,39 @@ async fn version() -> axum::Json<VersionResponse> {
     axum::Json(VersionResponse {
         version: env!("CARGO_PKG_VERSION"),
     })
+}
+
+/// #1260: which command-signing key this backend actually signs with.
+///
+/// Both fields are `null` when it is not signing. That is a real, expected
+/// state — during stage 1, and after a key is removed — and a caller must be
+/// able to tell it from a failed request: one means "nothing to compare
+/// against", the other means "ask again". Encoding it as an error would make a
+/// transient hiccup look like a fleet-wide key mismatch.
+#[derive(serde::Serialize)]
+struct CommandSigningResponse {
+    kid: Option<String>,
+    fingerprint: Option<String>,
+}
+
+/// `GET /api/command-signing` — the public half of this backend's signing key.
+///
+/// Exists because #1229 gave every agent a `kid:fingerprint` to report but
+/// left nothing to compare it *against*. A ring carrying the right `kid` and
+/// the wrong bytes refuses every command once enforcement is on and never
+/// self-heals — the reload path fires on an *unknown* key, and this one is
+/// known — so until the expected value is queryable, that host is
+/// indistinguishable from a healthy one.
+///
+/// Authenticated (viewer+) rather than public like `/api/version`. A public
+/// key fingerprint is not a secret, but it describes fleet configuration and
+/// there is no reason for it to be readable before login.
+async fn command_signing(State(st): State<AppState>) -> axum::Json<CommandSigningResponse> {
+    let (kid, fingerprint) = match st.commands.identity_parts() {
+        Some((kid, fp)) => (Some(kid.to_string()), Some(fp)),
+        None => (None, None),
+    };
+    axum::Json(CommandSigningResponse { kid, fingerprint })
 }
 
 /// Shared regex compiler for list-endpoint text filters (results /

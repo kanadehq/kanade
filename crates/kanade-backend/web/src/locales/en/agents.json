@@ -27,6 +27,10 @@
     "readyTitle": "Reports a keyring and no enforcement yet. Enforcement begins at this host's next agent restart — no action needed unless you want it sooner.",
     "keysOnly": "keys held",
     "keysOnlyTitle": "Reports a keyring, but this agent version cannot say whether it enforces. Upgrade it to find out.",
+    "wrongKey": "wrong key",
+    "wrongKeyTitle": "Holds this backend's key id with DIFFERENT key material. It rejects everything this backend signs, and cannot recover on its own — the reload path only fires for an unknown key, and this one is known. Re-run the provisioning job, and find out how the ring got there.",
+    "staleRing": "old key",
+    "staleRingTitle": "Holds a keyring, but not the key this backend signs with today. Normal while a rotation is still reaching the fleet; a problem if it persists, because this host rejects everything this backend sends. Re-run the provisioning job.",
     "none": "no keys",
     "noneTitle": "Reports its keyring and holds nothing. Harmless today; this host would refuse every command the day enforcement is enabled. Run the provisioning job.",
     "unknown": "unknown",
@@ -49,7 +53,7 @@
     "attributesLabel": "attributes"
   },
   "columnTitles": {
-    "signing": "Command-signing rollout state: does this host verify who sent a command, and does it refuse when it cannot? Shows what each agent REPORTS — it cannot tell whether a host's keys are the ones the backend actually signs with.",
+    "signing": "Command-signing rollout state: does this host verify who sent a command, and does it refuse when it cannot? Keys are compared against the one this backend actually signs with; when the backend is not signing there is nothing to compare against and only what each agent reports is shown.",
     "cpu": "Agent process CPU % (one core = 100)",
     "rss": "Agent process resident set size (current RAM footprint)",
     "lastLogon": "Most recent account the Windows sign-in screen used (display name over login name)",
