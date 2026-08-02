@@ -6,6 +6,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 
 import { ErrorCard } from '@/components/ErrorCard';
+import { CredentialBadge } from '@/components/CredentialBadge';
 import { SigningBadge } from '@/components/SigningBadge';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -53,6 +54,7 @@ const TOGGLEABLE_COLS = [
   'lastHeartbeat',
   'lastLogon',
   'signing',
+  'credential',
   'cpu',
   'rss',
   'actions',
@@ -1006,6 +1008,13 @@ export function Agents() {
             {isColVisible('signing') && (
               <TableHead title={t('columnTitles.signing')}>{t('columns.signing')}</TableHead>
             )}
+            {/* #1270: which NATS credential the BROKER authenticated this
+                host as. Not sortable, same reason as `signing` — the
+                backend's sort allow-list has no token for it, and adding
+                one would stop this being a pure SPA change. */}
+            {isColVisible('credential') && (
+              <TableHead title={t('columnTitles.credential')}>{t('columns.credential')}</TableHead>
+            )}
             {isColVisible('cpu') && (
               <TableHead className="text-right" title={t('columnTitles.cpu')}>
                 {t('columns.cpu')}
@@ -1121,6 +1130,11 @@ export function Agents() {
               {isColVisible('signing') && (
                 <TableCell label={t('columns.signing')}>
                   <SigningBadge agent={a} backend={backendKey} />
+                </TableCell>
+              )}
+              {isColVisible('credential') && (
+                <TableCell label={t('columns.credential')}>
+                  <CredentialBadge agent={a} />
                 </TableCell>
               )}
               {isColVisible('cpu') && (

@@ -51,6 +51,17 @@ export type AgentRow = {
   // the remaining stage-3 work; `true` = done. Not derivable from
   // `command_keys` — a host can hold a perfect ring and not enforce.
   enforcing?: boolean;
+  // #1270: the NATS credential this host's live connection authenticated
+  // with, as reported by the BROKER — not by the agent, which knows only
+  // what it was handed. Absent = never correlated (no live connection seen,
+  // or the agent predates the field and announces no pc_id); `shared-token`
+  // = the fleet-wide credential, i.e. the migration queue; `no-auth` /
+  // `unknown` = the broker authenticated nobody, or the value cannot be
+  // shown to be safe to store; anything else is the NATS username.
+  nats_user?: string;
+  // When `nats_user` last CHANGED — not when it was last confirmed. "How
+  // recently was this host seen at all" is `last_heartbeat`.
+  nats_user_since?: string;
 };
 
 export type Heartbeat = {
