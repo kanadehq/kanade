@@ -1,6 +1,6 @@
 {
   "title": "Groups",
-  "subtitle": "Declared fleet groups (#1032): a static member list or a dynamic SQL query that returns pc_ids. Drives targeted exec, layered config, a schedule's target.groups, and where a group's alert email goes.",
+  "subtitle": "Declared fleet groups: a static member list or a dynamic SQL query that returns pc_ids. Drives targeted exec, layered config, a schedule's target.groups, and where a group's alert email goes.",
   "errorTitle": "Failed to load groups",
   "loading": "Loading groups…",
   "empty": "No groups yet. Create one here, or apply YAML with `kanade group def create`.",

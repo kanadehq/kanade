@@ -29,7 +29,7 @@
     },
     "payload": "payload (key = value)",
     "dedupe": "collapse duplicates",
-    "forensicNote": "logon_type only exists on collect-winlog-logons-all data and pre-#378 rows (before the Winlogon source switch); duplicates there are UAC split-token pairs.",
+    "forensicNote": "logon_type only exists on collect-winlog-logons-all data and rows from before the Winlogon source switch; duplicates there are UAC split-token pairs.",
     "since": "since",
     "limit": "limit",
     "placeholders": {

@@ -1,6 +1,6 @@
 {
   "title": "検索",
-  "description": "任意のインベントリマニフェストを横断検索します — <code>explode</code> 配列フィールドとトップレベルのスカラー項目の両方に対応 (#40, #574)。列でフィルタし、1ページあたり最大 {{max}} 行までページングできます。行をクリックすると該当 PC のインベントリ詳細に移動します。",
+  "description": "任意のインベントリマニフェストを横断検索します — <code>explode</code> 配列フィールドとトップレベルのスカラー項目の両方に対応。列でフィルタし、1ページあたり最大 {{max}} 行までページングできます。行をクリックすると該当 PC のインベントリ詳細に移動します。",
   "loadingManifests": "マニフェストを読み込み中…",
   "loadError": "マニフェスト一覧を読み込めませんでした",
   "noManifests": "検索可能なインベントリマニフェストがまだありません。<code>display</code> または <code>explode</code> 仕様を持つインベントリジョブを <code>kanade job create</code> で登録してください (<code>configs/jobs/inventory-sw.yaml</code> を参照)。",

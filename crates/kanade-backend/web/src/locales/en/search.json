@@ -1,6 +1,6 @@
 {
   "title": "Search",
-  "description": "Cross-PC search across any inventory manifest — both <code>explode</code> array fields and top-level scalar facts (#40, #574). Filter by column, page through up to {{max}} rows at a time. Click a row to jump to that PC's inventory detail.",
+  "description": "Cross-PC search across any inventory manifest — both <code>explode</code> array fields and top-level scalar facts. Filter by column, page through up to {{max}} rows at a time. Click a row to jump to that PC's inventory detail.",
   "loadingManifests": "loading manifests…",
   "loadError": "Couldn't load manifest list",
   "noManifests": "No searchable inventory manifests yet. Register an inventory job with a <code>display</code> or <code>explode</code> spec via <code>kanade job create</code> (see <code>configs/jobs/inventory-sw.yaml</code> for an example).",

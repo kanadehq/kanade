@@ -3,7 +3,7 @@
   "intro": "2 種類の汎用 Object Store バケットを操作: <code>app_packages</code> (バイナリ) と <code>scripts</code> (manifest スクリプト本体)。",
   "appPackages": {
     "title": "App packages",
-    "description": "<code>/api/app-packages</code> (#207) に対する操作。<code>&lt;name&gt;/&lt;version&gt;</code> でキー付けされた、operator が curate するインストーラ / バイナリ。kanade-client app や Webex / Teams / カスタム MSI 等のサードパーティ インストーラもここ。Body 上限 256 MB。",
+    "description": "<code>/api/app-packages</code> に対する操作。<code>&lt;name&gt;/&lt;version&gt;</code> でキー付けされた、operator が curate するインストーラ / バイナリ。kanade-client app や Webex / Teams / カスタム MSI 等のサードパーティ インストーラもここ。Body 上限 256 MB。",
     "upload": {
       "nameLabel": "名前",
       "namePlaceholder": "例: kanade-client",
@@ -37,7 +37,7 @@
   },
   "scriptObjects": {
     "title": "Script objects",
-    "description": "<code>/api/script-objects</code> (#211) に対する操作。manifest の <code>execute.script_object</code> から参照されるスクリプト本体 — agent が exec 時に fetch + sha 検証 (#214)。Body 上限は 4 MB (インストーラではなく PowerShell / shell スクリプト想定)。",
+    "description": "<code>/api/script-objects</code> に対する操作。manifest の <code>execute.script_object</code> から参照されるスクリプト本体 — agent が exec 時に fetch + sha 検証。Body 上限は 4 MB (インストーラではなく PowerShell / shell スクリプト想定)。",
     "upload": {
       "nameLabel": "名前",
       "namePlaceholder": "例: inventory-os",
