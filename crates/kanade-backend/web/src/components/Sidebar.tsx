@@ -65,6 +65,7 @@ const groups: {
       { to: '/views', labelKey: 'nav.views', feature: 'views' },
       { to: '/notifications', labelKey: 'nav.notifications', feature: 'notifications' },
       { to: '/rollout', labelKey: 'nav.rollout', feature: 'rollout' },
+      { to: '/agent-install', labelKey: 'nav.agentInstall', feature: 'rollout' },
       { to: '/apps', labelKey: 'nav.apps', feature: 'apps' },
       // `nav.agentGroups` (not `nav.groups`) — that key is already
       // taken by the sidebar section labels above.

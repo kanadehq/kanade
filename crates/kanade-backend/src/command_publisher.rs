@@ -135,6 +135,17 @@ impl CommandPublisher {
         self.signer.as_ref().map(identity_parts_of)
     }
 
+    /// This backend's own public key as a `CommandKeys` keyring entry, or
+    /// `None` when it is not signing.
+    ///
+    /// `POST /api/agents/installer` bakes this (and only this — never a
+    /// break-glass key) into the generated install script so a freshly
+    /// installed agent's ring trusts this backend from first boot and
+    /// stage-3 enforcement works without a separate provisioning step.
+    pub fn keyring_entry(&self) -> Option<serde_json::Value> {
+        keyring_entry_of(self.signer.as_ref())
+    }
+
     /// Publish a serialized `Command` to `subject`, signed if possible.
     pub async fn publish(&self, subject: String, payload: Bytes) -> Result<(), PublishError> {
         match headers_for(
@@ -165,6 +176,15 @@ fn identity_of(signer: &Signer) -> String {
 /// pair a caller compares against can never describe different keys.
 fn identity_parts_of(signer: &Signer) -> (&str, String) {
     (signer.kid(), signing::fingerprint(&signer.verifying_key()))
+}
+
+/// The keyring entry a signer maps to, or `None` for a non-signing backend.
+/// Split out from [`CommandPublisher::keyring_entry`] for the same reason
+/// [`identity_parts_of`] is split out: the shape decision is reachable in a
+/// unit test without a broker (a `CommandPublisher` needs a live
+/// `async_nats::Client`).
+fn keyring_entry_of(signer: Option<&Signer>) -> Option<serde_json::Value> {
+    signer.map(|s| signing::keyring_entry(s.kid(), &s.verifying_key(), "backend"))
 }
 
 /// The headers to publish alongside `body`, or `None` when this backend is not
@@ -419,6 +439,38 @@ mod tests {
         assert_eq!(
             verify(&KeyRing::new(), b"body", &SigHeaders::default(), 0),
             Err(VerifyError::Unsigned)
+        );
+    }
+
+    #[test]
+    fn a_non_signing_backend_has_no_keyring_entry() {
+        // The installer omits -CommandKeys entirely rather than shipping an
+        // empty ring — an empty ring would parse as "provisioned, trusts
+        // nobody" on the agent.
+        assert!(keyring_entry_of(None).is_none());
+    }
+
+    #[test]
+    fn the_keyring_entry_is_this_backends_own_public_key() {
+        // POST /api/agents/installer bakes this into a fresh agent's ring, so
+        // it must name the key the backend actually signs with — a kid or
+        // public half assembled from anything else is the wrong-key ring that
+        // refuses every command once enforcement is on.
+        let key = signing::generate_keypair().unwrap();
+        let signer = Signer::from_secret(&signing::encode_secret(&key), "backend-1").unwrap();
+        let entry = keyring_entry_of(Some(&signer)).expect("a signing backend has an entry");
+        assert_eq!(entry["kid"], signer.kid());
+        assert_eq!(
+            entry["public_key"],
+            signing::encode_public(&signer.verifying_key())
+        );
+        assert_eq!(entry["label"], "backend");
+        // And never anything but the public half: no field may carry the
+        // secret into a file an operator ships around the fleet.
+        let secret = signing::encode_secret(&key);
+        assert!(
+            !entry.to_string().contains(&secret),
+            "keyring entry must not contain the signing secret"
         );
     }
 }

@@ -1317,6 +1317,7 @@ pub(crate) async fn run_backend() -> Result<()> {
         group_cache: api::group_sql::new_cache(),
         mailer,
         public_url: cfg.server.public_url.clone(),
+        nats_url: cfg.nats.url.clone(),
         login_throttle: std::sync::Arc::new(login_throttle::LoginThrottle::default()),
     };
 

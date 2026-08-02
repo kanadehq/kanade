@@ -1,0 +1,34 @@
+{
+  "title": "Agent Install",
+  "intro": "Download a ready-to-run installer ZIP for fresh Windows PCs.",
+  "instructions": {
+    "title": "How to install",
+    "description": "Provision a new PC with the kanade agent in three steps.",
+    "steps": {
+      "one": "Choose the options below and download the installer ZIP.",
+      "two": "Copy the ZIP to the target PC and extract it.",
+      "three": "Right-click <code>install.cmd</code> and choose <strong>Run as administrator</strong>."
+    },
+    "autoNote": "Service registration and failure-recovery settings are provisioned automatically — and when command signing is enabled, the backend's command-signing public key is embedded too.",
+    "windowsNote": "Windows only.",
+    "breakGlassNote": "Break-glass keys are not part of the ZIP and must still be distributed separately."
+  },
+  "download": {
+    "title": "Download installer",
+    "description": "The ZIP contains <code>kanade-agent.exe</code>, a pre-filled <code>agent.toml</code>, and the install scripts (<code>install.cmd</code> / <code>install-agent.ps1</code>).",
+    "versionLabel": "Agent version",
+    "errorTitle": "Failed to load releases",
+    "noReleases": "No agent release has been published yet. Publish one first with <code>kanade agent publish</code> (or the Rollout page).",
+    "natsUrlLabel": "NATS URL (optional)",
+    "natsUrlPlaceholder": "Empty = this backend's configured NATS URL",
+    "natsUrlHint": "Left empty, the ZIP uses the NATS URL this backend is configured with. Remote PCs need a broker address they can actually reach.",
+    "natsTokenLabel": "NATS token (optional)",
+    "natsTokenPlaceholder": "Only when the broker requires a token",
+    "downloadButton": "Download installer ZIP"
+  },
+  "signing": {
+    "errorTitle": "Failed to load command-signing status",
+    "enabled": "This backend signs commands (kid <code>{{kid}}</code>, fingerprint <code>{{fingerprint}}</code>) — the public key is embedded into the ZIP automatically.",
+    "disabled": "This backend is not signing commands, so the ZIP will not provision command keys."
+  }
+}

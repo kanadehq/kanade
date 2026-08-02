@@ -25,6 +25,9 @@ import { ThemeProvider, useTheme } from '@/lib/theme';
 // Placeholder is a one-liner.
 const Accounts = lazy(() => import('@/pages/Accounts').then((m) => ({ default: m.Accounts })));
 const AgentDetail = lazy(() => import('@/pages/AgentDetail').then((m) => ({ default: m.AgentDetail })));
+const AgentInstall = lazy(() =>
+  import('@/pages/AgentInstall').then((m) => ({ default: m.AgentInstall })),
+);
 const Agents = lazy(() => import('@/pages/Agents').then((m) => ({ default: m.Agents })));
 const Apps = lazy(() => import('@/pages/Apps').then((m) => ({ default: m.Apps })));
 const ChangePassword = lazy(() =>
@@ -148,6 +151,7 @@ function AppContent() {
               <Route path="/views" element={<Views />} />
               <Route path="/exec" element={<Exec />} />
               <Route path="/rollout" element={<Rollout />} />
+              <Route path="/agent-install" element={<AgentInstall />} />
               <Route path="/apps" element={<Apps />} />
               {/* #1140: reached from a PC's detail page, not the sidebar — the
                   viewer is meaningless without a pc_id. `featureForPathname`

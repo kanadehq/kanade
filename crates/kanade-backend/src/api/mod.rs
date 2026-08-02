@@ -1,6 +1,7 @@
 pub mod accounts;
 pub mod agent_config;
 pub mod agent_groups;
+pub mod agent_installer;
 pub mod agent_logs;
 pub mod agent_meta;
 pub mod agent_releases;
@@ -133,6 +134,11 @@ pub struct AppState {
     /// links in account emails. `None` ⇒ the link base is derived from the
     /// request `Host` header instead (see `password_setup::link_base`).
     pub public_url: Option<String>,
+    /// This backend's own configured `[nats] url`. `POST
+    /// /api/agents/installer` writes it into the bundled `agent.toml` when
+    /// the request doesn't override `nats_url` — a fresh agent should
+    /// dial the same broker the backend does by default.
+    pub nats_url: String,
     /// #1191: in-memory rate limiting + lockout for the public login route.
     pub login_throttle: std::sync::Arc<crate::login_throttle::LoginThrottle>,
 }
@@ -515,6 +521,10 @@ pub fn router(state: AppState) -> Router {
             delete(agent_releases::delete_release),
         )
         .route("/api/agents/rollout", post(agent_releases::rollout))
+        // On-the-fly agent installer ZIP. POST (not GET) because the
+        // request can carry a NATS token, and query strings end up in
+        // trace logs — a body does not.
+        .route("/api/agents/installer", post(agent_installer::installer))
         .route(
             "/api/agents/publish",
             post(agent_releases::publish).layer(DefaultBodyLimit::max(PUBLISH_BODY_LIMIT)),
@@ -701,6 +711,7 @@ pub fn feature_for_path(path: &str) -> Option<Feature> {
         "/api/agents/releases"
         | "/api/agents/releases/{version}"
         | "/api/agents/rollout"
+        | "/api/agents/installer"
         | "/api/agents/publish" => Feature::Rollout,
 
         // --- Apps (app packages + script objects) ---
@@ -852,6 +863,13 @@ mod feature_map_tests {
             Some(Feature::Settings)
         );
         assert_eq!(feature_for_path("/api/query"), Some(Feature::Accounts));
+        // The installer download carries the same fleet-mutation weight as
+        // a rollout — it can mint an agent pre-provisioned with a NATS
+        // token and the signing keyring — so it gates with Rollout.
+        assert_eq!(
+            feature_for_path("/api/agents/installer"),
+            Some(Feature::Rollout)
+        );
         // #1032: group-def routes gate with the Groups page (its SPA
         // management page lives alongside the membership page).
         assert_eq!(feature_for_path("/api/group-defs"), Some(Feature::Groups));

@@ -74,6 +74,9 @@ tracing    = { workspace = true }
 tracing-appender   = { workspace = true }
 tracing-subscriber = { workspace = true }
 totp-rs = { workspace = true }
+# Agent installer ZIP (POST /api/agents/installer): same minimal feature
+# set kanade-agent's collect bundle uses — deflate only, no bzip2/zstd/aes.
+zip        = { version = "2.4.2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 # The #1270 live test spawns a throwaway token-auth `nats-server` on a
