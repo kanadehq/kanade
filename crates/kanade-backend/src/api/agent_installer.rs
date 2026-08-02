@@ -230,7 +230,12 @@ fn resolve_nats(
         Some(u) => u.to_string(),
         None => backend_url.to_string(),
     };
-    Ok((url, ai.nats_token.clone()))
+    // An empty stored token (a hand-written KV value bypassing PUT
+    // validation) is no token: embedding `-NatsToken ''` would hand
+    // deploy-agent.ps1 an empty-string argument, and the audit record
+    // would claim a token was embedded when none was.
+    let token = ai.nats_token.clone().filter(|t| !t.is_empty());
+    Ok((url, token))
 }
 
 /// The version string reaches three sinks that tolerate no hostile bytes:
@@ -614,6 +619,22 @@ mod tests {
         let (url, token) = resolve_nats(&settings, "nats://backend:4222").unwrap();
         assert_eq!(url, "nats://broker.corp:4222");
         assert_eq!(token.as_deref(), Some("s3cret"));
+    }
+
+    #[test]
+    fn resolve_nats_treats_an_empty_token_as_no_token() {
+        // A hand-written KV value with `nats_token = Some("")` bypasses PUT
+        // validation — embedding `-NatsToken ''` would hand deploy-agent.ps1
+        // an empty argument and the audit would claim a token was embedded.
+        let settings = ServerSettings {
+            agent_install: Some(kanade_shared::wire::AgentInstallSection {
+                nats_token: Some(String::new()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let (_, token) = resolve_nats(&settings, "nats://backend:4222").unwrap();
+        assert_eq!(token, None);
     }
 
     #[test]

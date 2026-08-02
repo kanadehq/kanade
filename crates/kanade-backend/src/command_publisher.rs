@@ -138,7 +138,7 @@ impl CommandPublisher {
     /// This backend's own public key as a `CommandKeys` keyring entry, or
     /// `None` when it is not signing.
     ///
-    /// `POST /api/agents/installer` bakes this (and only this — never a
+    /// `GET /api/agents/installer` bakes this (and only this — never a
     /// break-glass key) into the generated install script so a freshly
     /// installed agent's ring trusts this backend from first boot and
     /// stage-3 enforcement works without a separate provisioning step.
@@ -452,7 +452,7 @@ mod tests {
 
     #[test]
     fn the_keyring_entry_is_this_backends_own_public_key() {
-        // POST /api/agents/installer bakes this into a fresh agent's ring, so
+        // GET /api/agents/installer bakes this into a fresh agent's ring, so
         // it must name the key the backend actually signs with — a kid or
         // public half assembled from anything else is the wrong-key ring that
         // refuses every command once enforcement is on.

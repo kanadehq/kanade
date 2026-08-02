@@ -54,10 +54,17 @@ export function ProtectedLayout() {
   // Commons routes (dashboard, agents, …) are open to unrestricted accounts
   // only: the backend 403s restricted accounts on the commons APIs, so
   // landing them there would render a page of errors. Send them to their
-  // first allowed page instead. /change-password stays reachable — the
-  // mustChangePw trap above depends on it. (/login and /password-setup are
-  // public routes outside this layout.)
-  if (!feature && isRestricted && location.pathname !== '/change-password') {
+  // first allowed page instead. /change-password and /account stay
+  // reachable — the mustChangePw trap above depends on the former, and the
+  // latter is the self-service MFA page whose endpoints (/api/auth/mfa/*)
+  // the backend allow-lists for restricted accounts too. (/login and
+  // /password-setup are public routes outside this layout.)
+  if (
+    !feature &&
+    isRestricted &&
+    location.pathname !== '/change-password' &&
+    location.pathname !== '/account'
+  ) {
     return <Navigate to={firstAllowed} replace />;
   }
 

@@ -134,10 +134,11 @@ pub struct AppState {
     /// links in account emails. `None` ⇒ the link base is derived from the
     /// request `Host` header instead (see `password_setup::link_base`).
     pub public_url: Option<String>,
-    /// This backend's own configured `[nats] url`. `POST
+    /// This backend's own configured `[nats] url`. `GET
     /// /api/agents/installer` writes it into the bundled `agent.toml` when
-    /// the request doesn't override `nats_url` — a fresh agent should
-    /// dial the same broker the backend does by default.
+    /// the operator hasn't configured `agent_install.nats_url` in server
+    /// settings — a fresh agent should dial the same broker the backend
+    /// does by default.
     pub nats_url: String,
     /// #1191: in-memory rate limiting + lockout for the public login route.
     pub login_throttle: std::sync::Arc<crate::login_throttle::LoginThrottle>,
