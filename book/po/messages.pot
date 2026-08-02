@@ -2,7 +2,7 @@
 msgid ""
 msgstr ""
 "Project-Id-Version: kanade — 奏\n"
-"POT-Creation-Date: 2026-08-02T15:30:00+09:00\n"
+"POT-Creation-Date: 2026-08-02T20:32:03+09:00\n"
 "PO-Revision-Date: \n"
 "Last-Translator: \n"
 "Language-Team: \n"
@@ -384,25 +384,101 @@ msgid ""
 msgstr ""
 
 #: src\getting-started/screenshots.md:40
-msgid "Inventory"
+msgid "One host"
 msgstr ""
 
 #: src\getting-started/screenshots.md:42
+msgid ""
+"Opening a row gives that machine's own numbers: CPU, memory, disk and "
+"network sampled by the agent, over a window you pick. The agent measures "
+"itself too, so the chart can answer \"was it the machine, or was it us\"."
+msgstr ""
+
+#: src\getting-started/screenshots.md:46
+msgid ""
+"![One agent's host "
+"performance](../images/screenshots/agent-detail-perf-light-en.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:48
+msgid "Whatever else you know about it"
+msgstr ""
+
+#: src\getting-started/screenshots.md:50
+msgid ""
+"A machine reports what it can see about itself; it cannot know whose desk it "
+"is on or which cost centre pays for it. So every host carries a free-form "
+"key/value card an operator can edit — primary user, email, department, site, "
+"asset tag, a note about why this one is special."
+msgstr ""
+
+#: src\getting-started/screenshots.md:55
+msgid ""
+"![Operator-attached "
+"metadata](../images/screenshots/agent-detail-meta-light-en.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:57
+msgid ""
+"These are ordinary fields, not a fixed schema, and they are writable through "
+"the API — which is how a directory-sync job keeps `display_name` and "
+"`department` current without anyone typing them. Once set, they are columns "
+"you can show and search on across the fleet."
+msgstr ""
+
+#: src\getting-started/screenshots.md:62
+msgid "Inventory"
+msgstr ""
+
+#: src\getting-started/screenshots.md:64
 msgid ""
 "Whatever your manifests collect. The probes are operator-authored PowerShell "
 "tagged `inventory:` in a YAML job, so the columns reflect what you decided "
 "to gather, not a fixed schema. Clicking a row opens that PC's full facts."
 msgstr ""
 
-#: src\getting-started/screenshots.md:46
+#: src\getting-started/screenshots.md:68
 msgid "![Inventory](../images/screenshots/inventory-light-en.jpg)"
 msgstr ""
 
-#: src\getting-started/screenshots.md:48
+#: src\getting-started/screenshots.md:70
+msgid "Clicking through gives every fact that PC reported, one card per probe:"
+msgstr ""
+
+#: src\getting-started/screenshots.md:72
+msgid "![One PC's facts](../images/screenshots/inventory-pc-light-en.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:74
+msgid "What changed, and when"
+msgstr ""
+
+#: src\getting-started/screenshots.md:76
+msgid ""
+"Each fact card has a History tab. Inventory is not only a snapshot — every "
+"run is diffed against the last one, so an installed application carries its "
+"own timeline: when it appeared, every version it moved through, and when it "
+"went away."
+msgstr ""
+
+#: src\getting-started/screenshots.md:81
+msgid ""
+"![Inventory "
+"history](../images/screenshots/inventory-history-all-light-en.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:83
+msgid ""
+"Nothing here was configured to be tracked. The probe reports a list of "
+"installed applications; the added / removed / changed rows fall out of "
+"comparing consecutive runs."
+msgstr ""
+
+#: src\getting-started/screenshots.md:87
 msgid "Compliance"
 msgstr ""
 
-#: src\getting-started/screenshots.md:50
+#: src\getting-started/screenshots.md:89
 msgid ""
 "Fleet-wide status for every health check, grouped per check with its own "
 "counts. A check is just a job carrying a `check:` hint, so adding one is "
@@ -410,51 +486,86 @@ msgid ""
 "to verify."
 msgstr ""
 
-#: src\getting-started/screenshots.md:55
+#: src\getting-started/screenshots.md:94
 msgid "![Compliance](../images/screenshots/compliance-light-en.jpg)"
 msgstr ""
 
-#: src\getting-started/screenshots.md:57
+#: src\getting-started/screenshots.md:96
 msgid ""
 "The detail column is the point: it says _why_ a host is unhappy, in that "
 "host's own terms."
 msgstr ""
 
-#: src\getting-started/screenshots.md:60
+#: src\getting-started/screenshots.md:99
+msgid "Support deadlines"
+msgstr ""
+
+#: src\getting-started/screenshots.md:101
+msgid ""
+"The same mechanism, pointed at dates rather than settings. This check reads "
+"each host's OS build, looks its end-of-life date up, and reports it as fail, "
+"warn or ok against how far out that date is — so a build that is fine today "
+"starts warning on its own, months before anyone would have thought to ask."
+msgstr ""
+
+#: src\getting-started/screenshots.md:106
+msgid "![OS end-of-life](../images/screenshots/compliance-os-eol-light-en.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:108
 msgid "Uptime and activity"
 msgstr ""
 
-#: src\getting-started/screenshots.md:62
+#: src\getting-started/screenshots.md:110
 msgid ""
 "Power, session, sleep and active intervals reconstructed from Windows event "
 "log entries, one lane per kind. A blank lane means no event of that kind in "
 "the window — the machine was off, or idle."
 msgstr ""
 
-#: src\getting-started/screenshots.md:66
+#: src\getting-started/screenshots.md:114
 msgid "![Events](../images/screenshots/events-light-en.jpg)"
 msgstr ""
 
-#: src\getting-started/screenshots.md:68
+#: src\getting-started/screenshots.md:116
 msgid "Analytics"
 msgstr ""
 
-#: src\getting-started/screenshots.md:70
+#: src\getting-started/screenshots.md:118
 msgid ""
 "Aggregations over whatever your jobs emit. App-usage, browsing history and "
 "inventory facts are shown here; the widgets are defined in YAML and can be "
 "pinned to the dashboard."
 msgstr ""
 
-#: src\getting-started/screenshots.md:74
+#: src\getting-started/screenshots.md:122
 msgid "![Analytics](../images/screenshots/analytics-light-en.jpg)"
 msgstr ""
 
-#: src\getting-started/screenshots.md:76
+#: src\getting-started/screenshots.md:124
+msgid ""
+"The tabs are not a fixed set of reports — each one is a `dashboard:` name "
+"some manifest declared, so a new tab appears by writing a widget that claims "
+"it. These two came with the fixture:"
+msgstr ""
+
+#: src\getting-started/screenshots.md:128
+msgid ""
+"![Analytics — "
+"inventory](../images/screenshots/analytics-inventory-light-en.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:130
+msgid ""
+"![Analytics — browsing "
+"history](../images/screenshots/analytics-web-history-light-en.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:132
 msgid "Groups"
 msgstr ""
 
-#: src\getting-started/screenshots.md:78
+#: src\getting-started/screenshots.md:134
 msgid ""
 "Declared fleet groups. A dynamic group carries a query the backend "
 "re-evaluates on a schedule, so membership follows the fleet as metadata "
@@ -463,59 +574,94 @@ msgid ""
 "literal member list, for membership no query can express."
 msgstr ""
 
-#: src\getting-started/screenshots.md:84
+#: src\getting-started/screenshots.md:140
 msgid "![Groups](../images/screenshots/groups-light-en.jpg)"
 msgstr ""
 
-#: src\getting-started/screenshots.md:86
+#: src\getting-started/screenshots.md:142
 msgid "Notifications"
 msgstr ""
 
-#: src\getting-started/screenshots.md:88
+#: src\getting-started/screenshots.md:144
 msgid ""
 "Send a notice to the Client App and track who confirmed it. Bodies are "
 "Markdown — headings, lists, tables, links — so a fleet-wide notice can be a "
 "document rather than a paragraph."
 msgstr ""
 
-#: src\getting-started/screenshots.md:92
+#: src\getting-started/screenshots.md:148
 msgid "![Notifications](../images/screenshots/notifications-light-en.jpg)"
 msgstr ""
 
-#: src\getting-started/screenshots.md:94
+#: src\getting-started/screenshots.md:150
+msgid "Who confirmed, and who took it back"
+msgstr ""
+
+#: src\getting-started/screenshots.md:152
+msgid ""
+"Opening a notice tracks it per recipient, against the person who was signed "
+"in on that machine. Three states, not two: confirmed, still outstanding, and "
+"**withdrawn** — someone who confirmed and then took it back. A withdrawn row "
+"keeps both times, so \"everyone has read it\" cannot quietly become true "
+"again after the fact."
+msgstr ""
+
+#: src\getting-started/screenshots.md:158
+msgid ""
+"![Notification "
+"audience](../images/screenshots/notification-detail-audience-light-en.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:160
 msgid "Jobs"
 msgstr ""
 
-#: src\getting-started/screenshots.md:96
+#: src\getting-started/screenshots.md:162
 msgid ""
 "The manifests themselves, grouped by tag. Everything kanade runs on an "
 "endpoint is one of these."
 msgstr ""
 
-#: src\getting-started/screenshots.md:99
+#: src\getting-started/screenshots.md:165
 msgid "![Jobs](../images/screenshots/jobs-light-en.jpg)"
 msgstr ""
 
-#: src\getting-started/screenshots.md:101
+#: src\getting-started/screenshots.md:167
+msgid "One run"
+msgstr ""
+
+#: src\getting-started/screenshots.md:169
+msgid ""
+"Every dispatch keeps its own result: the exit code, the ids that tie it back "
+"to the job and the request, and the output exactly as the host produced it. "
+"A failure is worth more than a red badge — this one carries the PowerShell "
+"error that caused it."
+msgstr ""
+
+#: src\getting-started/screenshots.md:174
+msgid "![A single run](../images/screenshots/activity-detail-light-en.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:176
 msgid "Audit"
 msgstr ""
 
-#: src\getting-started/screenshots.md:103
+#: src\getting-started/screenshots.md:178
 msgid ""
 "Every dispatch and every operator action, with the payload behind each one. "
 "Filterable by actor, action, target, and a text search into the payload "
 "itself."
 msgstr ""
 
-#: src\getting-started/screenshots.md:107
+#: src\getting-started/screenshots.md:182
 msgid "![Audit](../images/screenshots/audit-light-en.jpg)"
 msgstr ""
 
-#: src\getting-started/screenshots.md:109
+#: src\getting-started/screenshots.md:184
 msgid "Accounts"
 msgstr ""
 
-#: src\getting-started/screenshots.md:111
+#: src\getting-started/screenshots.md:186
 msgid ""
 "Operator accounts and their page access. Three states are visible at once "
 "here, because they are easy to confuse: unrestricted, a per-account "
@@ -523,78 +669,97 @@ msgid ""
 "account's own list, if any, no longer applies."
 msgstr ""
 
-#: src\getting-started/screenshots.md:116
+#: src\getting-started/screenshots.md:191
 msgid "![Accounts](../images/screenshots/accounts-light-en.jpg)"
 msgstr ""
 
-#: src\getting-started/screenshots.md:118
+#: src\getting-started/screenshots.md:193
+msgid "Your own account"
+msgstr ""
+
+#: src\getting-started/screenshots.md:195
+msgid ""
+"Two-factor auth and the password sit on one self-service page, so an "
+"operator sets both up without an administrator in the loop. Enrolment is "
+"ordinary TOTP — scan the code with any authenticator, or type the setup key "
+"in by hand. The candidate secret is only stored once a live code confirms "
+"it, so an abandoned enrolment leaves the account exactly as it was."
+msgstr ""
+
+#: src\getting-started/screenshots.md:201
+msgid ""
+"![Two-factor "
+"enrolment](../images/screenshots/account-mfa-enroll-light-en.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:203
 msgid "JetStream"
 msgstr ""
 
-#: src\getting-started/screenshots.md:120
+#: src\getting-started/screenshots.md:205
 msgid ""
 "The broker's own health: every stream, KV bucket and object store the "
 "backend bootstraps, with usage against its limit."
 msgstr ""
 
-#: src\getting-started/screenshots.md:123
+#: src\getting-started/screenshots.md:208
 msgid "![JetStream](../images/screenshots/jetstream-light-en.jpg)"
 msgstr ""
 
-#: src\getting-started/screenshots.md:125
+#: src\getting-started/screenshots.md:210
 msgid "Dark theme"
 msgstr ""
 
-#: src\getting-started/screenshots.md:127
+#: src\getting-started/screenshots.md:212
 msgid ""
 "The console follows the operating system by default, and can be pinned to "
 "light or dark per browser."
 msgstr ""
 
-#: src\getting-started/screenshots.md:132
+#: src\getting-started/screenshots.md:217
 msgid "![Dashboard, dark](../images/screenshots/dashboard-dark-en.jpg)"
 msgstr ""
 
-#: src\getting-started/screenshots.md:132
+#: src\getting-started/screenshots.md:217
 msgid "![Agents, dark](../images/screenshots/agents-dark-en.jpg)"
 msgstr ""
 
-#: src\getting-started/screenshots.md:133
+#: src\getting-started/screenshots.md:218
 msgid "![Compliance, dark](../images/screenshots/compliance-dark-en.jpg)"
 msgstr ""
 
-#: src\getting-started/screenshots.md:133
+#: src\getting-started/screenshots.md:218
 msgid "![Uptime, dark](../images/screenshots/events-dark-en.jpg)"
 msgstr ""
 
-#: src\getting-started/screenshots.md:135
+#: src\getting-started/screenshots.md:220
 msgid "On a phone"
 msgstr ""
 
-#: src\getting-started/screenshots.md:137
+#: src\getting-started/screenshots.md:222
 msgid ""
 "Below 1024px a data table stops being a table: each row becomes a card and "
 "every value carries its column name. No horizontal scrolling, no pinch-zoom "
 "to read a cell."
 msgstr ""
 
-#: src\getting-started/screenshots.md:143
+#: src\getting-started/screenshots.md:228
 msgid "![Dashboard on a phone](../images/screenshots/dashboard-mobile-en.jpg)"
 msgstr ""
 
-#: src\getting-started/screenshots.md:143
+#: src\getting-started/screenshots.md:228
 msgid "![Agents on a phone](../images/screenshots/agents-mobile-en.jpg)"
 msgstr ""
 
-#: src\getting-started/screenshots.md:143
+#: src\getting-started/screenshots.md:228
 msgid "![Compliance on a phone](../images/screenshots/compliance-mobile-en.jpg)"
 msgstr ""
 
-#: src\getting-started/screenshots.md:145
+#: src\getting-started/screenshots.md:230
 msgid "The Client App"
 msgstr ""
 
-#: src\getting-started/screenshots.md:147
+#: src\getting-started/screenshots.md:232
 msgid ""
 "The half that lands on the end user's desk. It is a small tray application "
 "on the PC itself — the health tab they check, the jobs they can run without "
@@ -602,112 +767,112 @@ msgid ""
 "over a named pipe on the same machine; it never reaches the backend directly."
 msgstr ""
 
-#: src\getting-started/screenshots.md:152
+#: src\getting-started/screenshots.md:237
 msgid ""
 "These are shown at 880×560, the app's own window size, and in Japanese only: "
 "the Client App has no i18n layer — its strings are written into the source — "
 "so an English edition of these shots does not exist to capture."
 msgstr ""
 
-#: src\getting-started/screenshots.md:156
+#: src\getting-started/screenshots.md:241
 msgid "Opening on the two things the user is being asked to look at:"
 msgstr ""
 
-#: src\getting-started/screenshots.md:158
+#: src\getting-started/screenshots.md:243
 msgid "![Client App home](../images/screenshots/client-home.jpg)"
 msgstr ""
 
-#: src\getting-started/screenshots.md:160
+#: src\getting-started/screenshots.md:245
 msgid "Device health"
 msgstr ""
 
-#: src\getting-started/screenshots.md:162
+#: src\getting-started/screenshots.md:247
 msgid ""
 "The same checks the operator sees on the Compliance page, from the other "
 "side. A warning carries the operator's own explanation and the remedy, so "
 "the first move is not \"open a ticket\"."
 msgstr ""
 
-#: src\getting-started/screenshots.md:166
+#: src\getting-started/screenshots.md:251
 msgid "![Device health](../images/screenshots/client-health.jpg)"
 msgstr ""
 
-#: src\getting-started/screenshots.md:168
+#: src\getting-started/screenshots.md:253
 msgid "Notices"
 msgstr ""
 
-#: src\getting-started/screenshots.md:170
+#: src\getting-started/screenshots.md:255
 msgid ""
 "Sent from the Notifications page, tracked back to who confirmed. Expanding "
 "one renders the Markdown the operator wrote — headings, a numbered "
 "procedure, a table, a quote, a link:"
 msgstr ""
 
-#: src\getting-started/screenshots.md:174
+#: src\getting-started/screenshots.md:259
 msgid "![Notification list](../images/screenshots/client-notifications.jpg)"
 msgstr ""
 
-#: src\getting-started/screenshots.md:176
+#: src\getting-started/screenshots.md:261
 msgid ""
 "![Notification, "
 "expanded](../images/screenshots/client-notification-detail.jpg)"
 msgstr ""
 
-#: src\getting-started/screenshots.md:178
+#: src\getting-started/screenshots.md:263
 msgid "Self-service"
 msgstr ""
 
-#: src\getting-started/screenshots.md:180
+#: src\getting-started/screenshots.md:265
 msgid ""
 "Jobs an operator has published to the user, grouped by category. Each is an "
 "ordinary manifest; what makes it appear here is the operator deciding it "
 "should."
 msgstr ""
 
-#: src\getting-started/screenshots.md:186
+#: src\getting-started/screenshots.md:271
 msgid "![Updates](../images/screenshots/client-updates.jpg)"
 msgstr ""
 
-#: src\getting-started/screenshots.md:186
+#: src\getting-started/screenshots.md:271
 msgid "![Troubleshooting](../images/screenshots/client-troubleshoot.jpg)"
 msgstr ""
 
-#: src\getting-started/screenshots.md:188
+#: src\getting-started/screenshots.md:273
 msgid ""
 "A job can ask before it runs — `confirm:` in the manifest, with the "
 "operator's own wording — and the run streams its output as it goes, rather "
 "than appearing complete after a silence:"
 msgstr ""
 
-#: src\getting-started/screenshots.md:194
+#: src\getting-started/screenshots.md:279
 msgid "![Confirmation](../images/screenshots/client-confirm.jpg)"
 msgstr ""
 
-#: src\getting-started/screenshots.md:194
+#: src\getting-started/screenshots.md:279
 msgid "![A run in progress](../images/screenshots/client-running.jpg)"
 msgstr ""
 
-#: src\getting-started/screenshots.md:196
+#: src\getting-started/screenshots.md:281
 msgid "The catalog is the same mechanism pointed at installs:"
 msgstr ""
 
-#: src\getting-started/screenshots.md:198
+#: src\getting-started/screenshots.md:283
 msgid "![Catalog](../images/screenshots/client-catalog.jpg)"
 msgstr ""
 
-#: src\getting-started/screenshots.md:200
+#: src\getting-started/screenshots.md:285
 msgid "Running it yourself"
 msgstr ""
 
-#: src\getting-started/screenshots.md:203
+#: src\getting-started/screenshots.md:288
 msgid "# the operator console\n"
 msgstr ""
 
-#: src\getting-started/screenshots.md:204
+#: src\getting-started/screenshots.md:289
 msgid "# the Client App\n"
 msgstr ""
 
-#: src\getting-started/screenshots.md:207
+#: src\getting-started/screenshots.md:292
 msgid ""
 "Then open <http://localhost:5173> and sign in with any username and "
 "password. Nothing else needs to be running. See "

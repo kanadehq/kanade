@@ -37,6 +37,28 @@ checked in. Detail belongs to Inventory; this page answers "is it there".
 The columns are yours to choose — the shot above hides the ones this fleet
 does not need, which is what the columns picker is for.
 
+### One host
+
+Opening a row gives that machine's own numbers: CPU, memory, disk and network
+sampled by the agent, over a window you pick. The agent measures itself too,
+so the chart can answer "was it the machine, or was it us".
+
+![One agent's host performance](../images/screenshots/agent-detail-perf-light-en.jpg)
+
+### Whatever else you know about it
+
+A machine reports what it can see about itself; it cannot know whose desk it
+is on or which cost centre pays for it. So every host carries a free-form
+key/value card an operator can edit — primary user, email, department, site,
+asset tag, a note about why this one is special.
+
+![Operator-attached metadata](../images/screenshots/agent-detail-meta-light-en.jpg)
+
+These are ordinary fields, not a fixed schema, and they are writable through
+the API — which is how a directory-sync job keeps `display_name` and
+`department` current without anyone typing them. Once set, they are columns
+you can show and search on across the fleet.
+
 ## Inventory
 
 Whatever your manifests collect. The probes are operator-authored PowerShell
@@ -44,6 +66,23 @@ tagged `inventory:` in a YAML job, so the columns reflect what you decided to
 gather, not a fixed schema. Clicking a row opens that PC's full facts.
 
 ![Inventory](../images/screenshots/inventory-light-en.jpg)
+
+Clicking through gives every fact that PC reported, one card per probe:
+
+![One PC's facts](../images/screenshots/inventory-pc-light-en.jpg)
+
+### What changed, and when
+
+Each fact card has a History tab. Inventory is not only a snapshot — every
+run is diffed against the last one, so an installed application carries its
+own timeline: when it appeared, every version it moved through, and when it
+went away.
+
+![Inventory history](../images/screenshots/inventory-history-all-light-en.jpg)
+
+Nothing here was configured to be tracked. The probe reports a list of
+installed applications; the added / removed / changed rows fall out of
+comparing consecutive runs.
 
 ## Compliance
 
@@ -56,6 +95,15 @@ verify.
 
 The detail column is the point: it says *why* a host is unhappy, in that
 host's own terms.
+
+### Support deadlines
+
+The same mechanism, pointed at dates rather than settings. This check reads
+each host's OS build, looks its end-of-life date up, and reports it as fail,
+warn or ok against how far out that date is — so a build that is fine today
+starts warning on its own, months before anyone would have thought to ask.
+
+![OS end-of-life](../images/screenshots/compliance-os-eol-light-en.jpg)
 
 ## Uptime and activity
 
@@ -72,6 +120,14 @@ inventory facts are shown here; the widgets are defined in YAML and can be
 pinned to the dashboard.
 
 ![Analytics](../images/screenshots/analytics-light-en.jpg)
+
+The tabs are not a fixed set of reports — each one is a `dashboard:` name
+some manifest declared, so a new tab appears by writing a widget that claims
+it. These two came with the fixture:
+
+![Analytics — inventory](../images/screenshots/analytics-inventory-light-en.jpg)
+
+![Analytics — browsing history](../images/screenshots/analytics-web-history-light-en.jpg)
 
 ## Groups
 
@@ -91,12 +147,31 @@ document rather than a paragraph.
 
 ![Notifications](../images/screenshots/notifications-light-en.jpg)
 
+### Who confirmed, and who took it back
+
+Opening a notice tracks it per recipient, against the person who was signed
+in on that machine. Three states, not two: confirmed, still outstanding, and
+**withdrawn** — someone who confirmed and then took it back. A withdrawn row
+keeps both times, so "everyone has read it" cannot quietly become true again
+after the fact.
+
+![Notification audience](../images/screenshots/notification-detail-audience-light-en.jpg)
+
 ## Jobs
 
 The manifests themselves, grouped by tag. Everything kanade runs on an
 endpoint is one of these.
 
 ![Jobs](../images/screenshots/jobs-light-en.jpg)
+
+### One run
+
+Every dispatch keeps its own result: the exit code, the ids that tie it back
+to the job and the request, and the output exactly as the host produced it.
+A failure is worth more than a red badge — this one carries the PowerShell
+error that caused it.
+
+![A single run](../images/screenshots/activity-detail-light-en.jpg)
 
 ## Audit
 
@@ -114,6 +189,16 @@ allow-list, and a shared permission group — where the group governs and the
 account's own list, if any, no longer applies.
 
 ![Accounts](../images/screenshots/accounts-light-en.jpg)
+
+### Your own account
+
+Two-factor auth and the password sit on one self-service page, so an operator
+sets both up without an administrator in the loop. Enrolment is ordinary
+TOTP — scan the code with any authenticator, or type the setup key in by
+hand. The candidate secret is only stored once a live code confirms it, so an
+abandoned enrolment leaves the account exactly as it was.
+
+![Two-factor enrolment](../images/screenshots/account-mfa-enroll-light-en.jpg)
 
 ## JetStream
 

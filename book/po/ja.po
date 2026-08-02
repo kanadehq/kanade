@@ -1,7 +1,7 @@
 msgid ""
 msgstr ""
 "Project-Id-Version: kanade — 奏\n"
-"POT-Creation-Date: 2026-08-02T15:30:00+09:00\n"
+"POT-Creation-Date: 2026-08-02T20:32:03+09:00\n"
 "PO-Revision-Date: \n"
 "Last-Translator: \n"
 "Language-Team: \n"
@@ -457,10 +457,68 @@ msgstr ""
 "はそのためのものです。"
 
 #: src\getting-started/screenshots.md:40
+msgid "One host"
+msgstr "1台を見る"
+
+#: src\getting-started/screenshots.md:42
+msgid ""
+"Opening a row gives that machine's own numbers: CPU, memory, disk and "
+"network sampled by the agent, over a window you pick. The agent measures "
+"itself too, so the chart can answer \"was it the machine, or was it us\"."
+msgstr ""
+"行を開くと、その端末自身の数字が出ます。エージェントが採取した CPU・メモリ・"
+"ディスク・ネットワークを、選んだ期間で表示します。エージェントは自分自身も計"
+"測しているので、「端末のせいか、こちらのせいか」にもグラフが答えられます。"
+
+#: src\getting-started/screenshots.md:46
+msgid ""
+"![One agent's host performance](../images/screenshots/agent-detail-perf-"
+"light-en.jpg)"
+msgstr ""
+"![1台のホストパフォーマンス](../images/screenshots/agent-detail-perf-light-"
+"ja.jpg)"
+
+#: src\getting-started/screenshots.md:48
+msgid "Whatever else you know about it"
+msgstr "端末が知り得ないことを持たせる"
+
+#: src\getting-started/screenshots.md:50
+msgid ""
+"A machine reports what it can see about itself; it cannot know whose desk it "
+"is on or which cost centre pays for it. So every host carries a free-form "
+"key/value card an operator can edit — primary user, email, department, site, "
+"asset tag, a note about why this one is special."
+msgstr ""
+"端末は自分について見えることしか報告できません。誰の机の上にあるのか、どの部"
+"門が費用を持っているのかは、端末には分からないままです。そこで各ホストは、運"
+"用者が編集できる自由な key/value のカードを持ちます — 利用者、メール、部署、"
+"拠点、資産管理番号、この端末が特別な理由を書いたメモ。"
+
+#: src\getting-started/screenshots.md:55
+msgid ""
+"![Operator-attached metadata](../images/screenshots/agent-detail-meta-light-"
+"en.jpg)"
+msgstr ""
+"![運用者が付けたメタデータ](../images/screenshots/agent-detail-meta-light-"
+"ja.jpg)"
+
+#: src\getting-started/screenshots.md:57
+msgid ""
+"These are ordinary fields, not a fixed schema, and they are writable through "
+"the API — which is how a directory-sync job keeps `display_name` and "
+"`department` current without anyone typing them. Once set, they are columns "
+"you can show and search on across the fleet."
+msgstr ""
+"これらは決まったスキーマではなくただのフィールドで、API から書き込めます。"
+"ディレクトリ同期のジョブが `display_name` や `department` を最新に保てるのは"
+"そのためで、誰も手で入力しません。一度入れてしまえば、フリート全体に対して表"
+"示・検索できる列になります。"
+
+#: src\getting-started/screenshots.md:62
 msgid "Inventory"
 msgstr "インベントリ"
 
-#: src\getting-started/screenshots.md:42
+#: src\getting-started/screenshots.md:64
 msgid ""
 "Whatever your manifests collect. The probes are operator-authored PowerShell "
 "tagged `inventory:` in a YAML job, so the columns reflect what you decided "
@@ -471,15 +529,58 @@ msgstr ""
 "たもの」です。固定スキーマではありません。行をクリックすると、その端末の全"
 "ファクトが開きます。"
 
-#: src\getting-started/screenshots.md:46
+#: src\getting-started/screenshots.md:68
 msgid "![Inventory](../images/screenshots/inventory-light-en.jpg)"
 msgstr "![Inventory](../images/screenshots/inventory-light-ja.jpg)"
 
-#: src\getting-started/screenshots.md:48
+#: src\getting-started/screenshots.md:70
+msgid "Clicking through gives every fact that PC reported, one card per probe:"
+msgstr ""
+"さらに開くと、その PC が報告したファクトが、プローブごとに1枚のカードで並びま"
+"す。"
+
+#: src\getting-started/screenshots.md:72
+msgid "![One PC's facts](../images/screenshots/inventory-pc-light-en.jpg)"
+msgstr ""
+"![1台の PC のファクト](../images/screenshots/inventory-pc-light-ja.jpg)"
+
+#: src\getting-started/screenshots.md:74
+msgid "What changed, and when"
+msgstr "何がいつ変わったか"
+
+#: src\getting-started/screenshots.md:76
+msgid ""
+"Each fact card has a History tab. Inventory is not only a snapshot — every "
+"run is diffed against the last one, so an installed application carries its "
+"own timeline: when it appeared, every version it moved through, and when it "
+"went away."
+msgstr ""
+"各ファクトカードには履歴タブがあります。インベントリはスナップショットだけで"
+"はありません。実行のたびに前回と差分を取るので、インストール済みアプリはそれ"
+"自身の時系列を持ちます — いつ現れ、どのバージョンを辿り、いつ消えたか。"
+
+#: src\getting-started/screenshots.md:81
+msgid ""
+"![Inventory history](../images/screenshots/inventory-history-all-light-"
+"en.jpg)"
+msgstr ""
+"![インベントリ履歴](../images/screenshots/inventory-history-all-light-ja.jpg)"
+
+#: src\getting-started/screenshots.md:83
+msgid ""
+"Nothing here was configured to be tracked. The probe reports a list of "
+"installed applications; the added / removed / changed rows fall out of "
+"comparing consecutive runs."
+msgstr ""
+"ここでは何ひとつ「追跡する」と設定していません。プローブはインストール済みア"
+"プリの一覧を報告するだけで、追加・削除・変更の行は連続する実行を突き合わせた"
+"結果として出てきます。"
+
+#: src\getting-started/screenshots.md:87
 msgid "Compliance"
 msgstr "コンプライアンス"
 
-#: src\getting-started/screenshots.md:50
+#: src\getting-started/screenshots.md:89
 msgid ""
 "Fleet-wide status for every health check, grouped per check with its own "
 "counts. A check is just a job carrying a `check:` hint, so adding one is "
@@ -491,22 +592,43 @@ msgstr ""
 "フェストを書くことです。kanade が検証できる項目のハードコード一覧、というもの"
 "は存在しません。"
 
-#: src\getting-started/screenshots.md:55
+#: src\getting-started/screenshots.md:94
 msgid "![Compliance](../images/screenshots/compliance-light-en.jpg)"
 msgstr "![Compliance](../images/screenshots/compliance-light-ja.jpg)"
 
-#: src\getting-started/screenshots.md:57
+#: src\getting-started/screenshots.md:96
 msgid ""
 "The detail column is the point: it says _why_ a host is unhappy, in that "
 "host's own terms."
 msgstr ""
 "肝は詳細列です。その端末がなぜ問題なのかを、その端末自身の言葉で書きます。"
 
-#: src\getting-started/screenshots.md:60
+#: src\getting-started/screenshots.md:99
+msgid "Support deadlines"
+msgstr "サポート期限"
+
+#: src\getting-started/screenshots.md:101
+msgid ""
+"The same mechanism, pointed at dates rather than settings. This check reads "
+"each host's OS build, looks its end-of-life date up, and reports it as fail, "
+"warn or ok against how far out that date is — so a build that is fine today "
+"starts warning on its own, months before anyone would have thought to ask."
+msgstr ""
+"同じ仕組みを、設定ではなく日付に向けたものです。このチェックは各ホストの OS "
+"ビルドを読み、そのサポート終了日を引き当て、期限までの距離に応じて異常・警"
+"告・OK として報告します。今日は問題ないビルドが、誰かが気づこうと思うより何ヶ"
+"月も前に、自分から警告し始めます。"
+
+#: src\getting-started/screenshots.md:106
+msgid "![OS end-of-life](../images/screenshots/compliance-os-eol-light-en.jpg)"
+msgstr ""
+"![OS サポート期限](../images/screenshots/compliance-os-eol-light-ja.jpg)"
+
+#: src\getting-started/screenshots.md:108
 msgid "Uptime and activity"
 msgstr "稼働状況"
 
-#: src\getting-started/screenshots.md:62
+#: src\getting-started/screenshots.md:110
 msgid ""
 "Power, session, sleep and active intervals reconstructed from Windows event "
 "log entries, one lane per kind. A blank lane means no event of that kind in "
@@ -516,15 +638,15 @@ msgstr ""
 "成し、種別ごとのレーンで並べます。レーンの空白は、その種別のイベントが無い区"
 "間 — 電源オフ、またはアイドルです。"
 
-#: src\getting-started/screenshots.md:66
+#: src\getting-started/screenshots.md:114
 msgid "![Events](../images/screenshots/events-light-en.jpg)"
 msgstr "![Events](../images/screenshots/events-light-ja.jpg)"
 
-#: src\getting-started/screenshots.md:68
+#: src\getting-started/screenshots.md:116
 msgid "Analytics"
 msgstr "分析"
 
-#: src\getting-started/screenshots.md:70
+#: src\getting-started/screenshots.md:118
 msgid ""
 "Aggregations over whatever your jobs emit. App-usage, browsing history and "
 "inventory facts are shown here; the widgets are defined in YAML and can be "
@@ -534,15 +656,40 @@ msgstr ""
 "リを出しています。ウィジェットは YAML で定義し、ダッシュボードに固定できま"
 "す。"
 
-#: src\getting-started/screenshots.md:74
+#: src\getting-started/screenshots.md:122
 msgid "![Analytics](../images/screenshots/analytics-light-en.jpg)"
 msgstr "![Analytics](../images/screenshots/analytics-light-ja.jpg)"
 
-#: src\getting-started/screenshots.md:76
+#: src\getting-started/screenshots.md:124
+msgid ""
+"The tabs are not a fixed set of reports — each one is a `dashboard:` name "
+"some manifest declared, so a new tab appears by writing a widget that claims "
+"it. These two came with the fixture:"
+msgstr ""
+"タブは決まったレポートの一覧ではありません。ひとつひとつがどれかのマニフェス"
+"トが宣言した `dashboard:` の名前なので、その名前を名乗るウィジェットを書けば"
+"新しいタブが現れます。次の2つはフィクスチャに入っているものです。"
+
+#: src\getting-started/screenshots.md:128
+msgid ""
+"![Analytics — inventory](../images/screenshots/analytics-inventory-light-"
+"en.jpg)"
+msgstr ""
+"![分析 — インベントリ](../images/screenshots/analytics-inventory-light-"
+"ja.jpg)"
+
+#: src\getting-started/screenshots.md:130
+msgid ""
+"![Analytics — browsing history](../images/screenshots/analytics-web-history-"
+"light-en.jpg)"
+msgstr ""
+"![分析 — 閲覧履歴](../images/screenshots/analytics-web-history-light-ja.jpg)"
+
+#: src\getting-started/screenshots.md:132
 msgid "Groups"
 msgstr "グループ"
 
-#: src\getting-started/screenshots.md:78
+#: src\getting-started/screenshots.md:134
 msgid ""
 "Declared fleet groups. A dynamic group carries a query the backend re-"
 "evaluates on a schedule, so membership follows the fleet as metadata changes "
@@ -556,15 +703,15 @@ msgstr ""
 "ります。静的グループはメンバーを直接列挙するもので、クエリでは表せない所属の"
 "ためにあります。"
 
-#: src\getting-started/screenshots.md:84
+#: src\getting-started/screenshots.md:140
 msgid "![Groups](../images/screenshots/groups-light-en.jpg)"
 msgstr "![Groups](../images/screenshots/groups-light-ja.jpg)"
 
-#: src\getting-started/screenshots.md:86
+#: src\getting-started/screenshots.md:142
 msgid "Notifications"
 msgstr "通知"
 
-#: src\getting-started/screenshots.md:88
+#: src\getting-started/screenshots.md:144
 msgid ""
 "Send a notice to the Client App and track who confirmed it. Bodies are "
 "Markdown — headings, lists, tables, links — so a fleet-wide notice can be a "
@@ -574,15 +721,40 @@ msgstr ""
 "（見出し・箇条書き・表・リンク）なので、全社通知を段落ではなく文書として書け"
 "ます。"
 
-#: src\getting-started/screenshots.md:92
+#: src\getting-started/screenshots.md:148
 msgid "![Notifications](../images/screenshots/notifications-light-en.jpg)"
 msgstr "![Notifications](../images/screenshots/notifications-light-ja.jpg)"
 
-#: src\getting-started/screenshots.md:94
+#: src\getting-started/screenshots.md:150
+msgid "Who confirmed, and who took it back"
+msgstr "誰が確認し、誰が取り消したか"
+
+#: src\getting-started/screenshots.md:152
+msgid ""
+"Opening a notice tracks it per recipient, against the person who was signed "
+"in on that machine. Three states, not two: confirmed, still outstanding, and "
+"**withdrawn** — someone who confirmed and then took it back. A withdrawn row "
+"keeps both times, so \"everyone has read it\" cannot quietly become true "
+"again after the fact."
+msgstr ""
+"通知を開くと、宛先ごとに、その端末にサインインしていた本人と紐づけて追跡され"
+"ます。状態は2つではなく3つです — 確認済み、まだ未確認、そして**取消済**（一度"
+"確認したあとに取り消した人）。取消済の行は両方の時刻を保持するので、「全員が"
+"読んだ」があとから静かに真に戻ることはありません。"
+
+#: src\getting-started/screenshots.md:158
+msgid ""
+"![Notification audience](../images/screenshots/notification-detail-audience-"
+"light-en.jpg)"
+msgstr ""
+"![通知の配信先](../images/screenshots/notification-detail-audience-light-"
+"ja.jpg)"
+
+#: src\getting-started/screenshots.md:160
 msgid "Jobs"
 msgstr "ジョブ"
 
-#: src\getting-started/screenshots.md:96
+#: src\getting-started/screenshots.md:162
 msgid ""
 "The manifests themselves, grouped by tag. Everything kanade runs on an "
 "endpoint is one of these."
@@ -590,15 +762,35 @@ msgstr ""
 "マニフェストそのものを、タグ別にまとめた一覧です。kanade が端末で実行するもの"
 "は、すべてこのどれかです。"
 
-#: src\getting-started/screenshots.md:99
+#: src\getting-started/screenshots.md:165
 msgid "![Jobs](../images/screenshots/jobs-light-en.jpg)"
 msgstr "![Jobs](../images/screenshots/jobs-light-ja.jpg)"
 
-#: src\getting-started/screenshots.md:101
+#: src\getting-started/screenshots.md:167
+msgid "One run"
+msgstr "1回の実行"
+
+#: src\getting-started/screenshots.md:169
+msgid ""
+"Every dispatch keeps its own result: the exit code, the ids that tie it back "
+"to the job and the request, and the output exactly as the host produced it. "
+"A failure is worth more than a red badge — this one carries the PowerShell "
+"error that caused it."
+msgstr ""
+"配信のたびに、その実行自身の結果が残ります。終了コード、ジョブとリクエストへ"
+"辿るための各種 ID、そしてホストが出力したそのままの内容です。失敗は赤いバッジ"
+"以上の価値があります — この例では、原因になった PowerShell のエラーがそのまま"
+"入っています。"
+
+#: src\getting-started/screenshots.md:174
+msgid "![A single run](../images/screenshots/activity-detail-light-en.jpg)"
+msgstr "![1回の実行](../images/screenshots/activity-detail-light-ja.jpg)"
+
+#: src\getting-started/screenshots.md:176
 msgid "Audit"
 msgstr "監査ログ"
 
-#: src\getting-started/screenshots.md:103
+#: src\getting-started/screenshots.md:178
 msgid ""
 "Every dispatch and every operator action, with the payload behind each one. "
 "Filterable by actor, action, target, and a text search into the payload "
@@ -607,15 +799,15 @@ msgstr ""
 "すべての配信と、すべての運用者操作を、その裏にあるペイロードごと記録します。"
 "実行主体・アクション・対象で絞り込め、ペイロード本文の全文検索もできます。"
 
-#: src\getting-started/screenshots.md:107
+#: src\getting-started/screenshots.md:182
 msgid "![Audit](../images/screenshots/audit-light-en.jpg)"
 msgstr "![Audit](../images/screenshots/audit-light-ja.jpg)"
 
-#: src\getting-started/screenshots.md:109
+#: src\getting-started/screenshots.md:184
 msgid "Accounts"
 msgstr "アカウント"
 
-#: src\getting-started/screenshots.md:111
+#: src\getting-started/screenshots.md:186
 msgid ""
 "Operator accounts and their page access. Three states are visible at once "
 "here, because they are easy to confuse: unrestricted, a per-account allow-"
@@ -627,15 +819,40 @@ msgstr ""
 "が設定されている場合はグループが優先し、アカウント個別のリストは（あっても）"
 "効きません。"
 
-#: src\getting-started/screenshots.md:116
+#: src\getting-started/screenshots.md:191
 msgid "![Accounts](../images/screenshots/accounts-light-en.jpg)"
 msgstr "![Accounts](../images/screenshots/accounts-light-ja.jpg)"
 
-#: src\getting-started/screenshots.md:118
+#: src\getting-started/screenshots.md:193
+msgid "Your own account"
+msgstr "自分のアカウント"
+
+#: src\getting-started/screenshots.md:195
+msgid ""
+"Two-factor auth and the password sit on one self-service page, so an "
+"operator sets both up without an administrator in the loop. Enrolment is "
+"ordinary TOTP — scan the code with any authenticator, or type the setup key "
+"in by hand. The candidate secret is only stored once a live code confirms "
+"it, so an abandoned enrolment leaves the account exactly as it was."
+msgstr ""
+"二要素認証とパスワードは、ひとつのセルフサービスページにまとまっています。管"
+"理者を介さずに運用者自身が設定できます。登録はごく普通の TOTP で、任意の認証"
+"アプリで QR を読むか、セットアップキーを手入力します。候補の秘密鍵は実際の"
+"コードで確認できて初めて保存されるので、途中でやめた登録はアカウントを元のま"
+"ま残します。"
+
+#: src\getting-started/screenshots.md:201
+msgid ""
+"![Two-factor enrolment](../images/screenshots/account-mfa-enroll-light-"
+"en.jpg)"
+msgstr ""
+"![二要素認証の登録](../images/screenshots/account-mfa-enroll-light-ja.jpg)"
+
+#: src\getting-started/screenshots.md:203
 msgid "JetStream"
 msgstr "JetStream"
 
-#: src\getting-started/screenshots.md:120
+#: src\getting-started/screenshots.md:205
 msgid ""
 "The broker's own health: every stream, KV bucket and object store the "
 "backend bootstraps, with usage against its limit."
@@ -643,42 +860,42 @@ msgstr ""
 "ブローカー自身の健康状態です。バックエンドがブートストラップするストリーム・"
 "KVバケット・オブジェクトストアを、上限に対する使用量とともに一覧します。"
 
-#: src\getting-started/screenshots.md:123
+#: src\getting-started/screenshots.md:208
 msgid "![JetStream](../images/screenshots/jetstream-light-en.jpg)"
 msgstr "![JetStream](../images/screenshots/jetstream-light-ja.jpg)"
 
-#: src\getting-started/screenshots.md:125
+#: src\getting-started/screenshots.md:210
 msgid "Dark theme"
 msgstr "ダークテーマ"
 
-#: src\getting-started/screenshots.md:127
+#: src\getting-started/screenshots.md:212
 msgid ""
 "The console follows the operating system by default, and can be pinned to "
 "light or dark per browser."
 msgstr ""
 "既定では OS の設定に追随し、ブラウザごとにライト／ダークへ固定もできます。"
 
-#: src\getting-started/screenshots.md:132
+#: src\getting-started/screenshots.md:217
 msgid "![Dashboard, dark](../images/screenshots/dashboard-dark-en.jpg)"
 msgstr "![Dashboard, dark](../images/screenshots/dashboard-dark-ja.jpg)"
 
-#: src\getting-started/screenshots.md:132
+#: src\getting-started/screenshots.md:217
 msgid "![Agents, dark](../images/screenshots/agents-dark-en.jpg)"
 msgstr "![Agents, dark](../images/screenshots/agents-dark-ja.jpg)"
 
-#: src\getting-started/screenshots.md:133
+#: src\getting-started/screenshots.md:218
 msgid "![Compliance, dark](../images/screenshots/compliance-dark-en.jpg)"
 msgstr "![Compliance, dark](../images/screenshots/compliance-dark-ja.jpg)"
 
-#: src\getting-started/screenshots.md:133
+#: src\getting-started/screenshots.md:218
 msgid "![Uptime, dark](../images/screenshots/events-dark-en.jpg)"
 msgstr "![Uptime, dark](../images/screenshots/events-dark-ja.jpg)"
 
-#: src\getting-started/screenshots.md:135
+#: src\getting-started/screenshots.md:220
 msgid "On a phone"
 msgstr "スマートフォンでは"
 
-#: src\getting-started/screenshots.md:137
+#: src\getting-started/screenshots.md:222
 msgid ""
 "Below 1024px a data table stops being a table: each row becomes a card and "
 "every value carries its column name. No horizontal scrolling, no pinch-zoom "
@@ -688,25 +905,25 @@ msgstr ""
 "り、値には列名が付きます。横スクロールも、セルを読むためのピンチズームもあり"
 "ません。"
 
-#: src\getting-started/screenshots.md:143
+#: src\getting-started/screenshots.md:228
 msgid "![Dashboard on a phone](../images/screenshots/dashboard-mobile-en.jpg)"
 msgstr "![Dashboard on a phone](../images/screenshots/dashboard-mobile-ja.jpg)"
 
-#: src\getting-started/screenshots.md:143
+#: src\getting-started/screenshots.md:228
 msgid "![Agents on a phone](../images/screenshots/agents-mobile-en.jpg)"
 msgstr "![Agents on a phone](../images/screenshots/agents-mobile-ja.jpg)"
 
-#: src\getting-started/screenshots.md:143
+#: src\getting-started/screenshots.md:228
 msgid ""
 "![Compliance on a phone](../images/screenshots/compliance-mobile-en.jpg)"
 msgstr ""
 "![Compliance on a phone](../images/screenshots/compliance-mobile-ja.jpg)"
 
-#: src\getting-started/screenshots.md:145
+#: src\getting-started/screenshots.md:230
 msgid "The Client App"
 msgstr "クライアントアプリ"
 
-#: src\getting-started/screenshots.md:147
+#: src\getting-started/screenshots.md:232
 msgid ""
 "The half that lands on the end user's desk. It is a small tray application "
 "on the PC itself — the health tab they check, the jobs they can run without "
@@ -718,7 +935,7 @@ msgstr ""
 "ます。同じ端末のエージェントと名前付きパイプで話し、バックエンドへは直接つな"
 "がりません。"
 
-#: src\getting-started/screenshots.md:152
+#: src\getting-started/screenshots.md:237
 msgid ""
 "These are shown at 880×560, the app's own window size, and in Japanese only: "
 "the Client App has no i18n layer — its strings are written into the source — "
@@ -728,19 +945,19 @@ msgstr ""
 "イアントアプリには i18n の層が無く、文字列がソースに直接書かれているため、英"
 "語版の画面というものが存在しません。"
 
-#: src\getting-started/screenshots.md:156
+#: src\getting-started/screenshots.md:241
 msgid "Opening on the two things the user is being asked to look at:"
 msgstr "利用者に見てほしい2つを、開いた直後に出します。"
 
-#: src\getting-started/screenshots.md:158
+#: src\getting-started/screenshots.md:243
 msgid "![Client App home](../images/screenshots/client-home.jpg)"
 msgstr "![Client App home](../images/screenshots/client-home.jpg)"
 
-#: src\getting-started/screenshots.md:160
+#: src\getting-started/screenshots.md:245
 msgid "Device health"
 msgstr "端末ヘルス"
 
-#: src\getting-started/screenshots.md:162
+#: src\getting-started/screenshots.md:247
 msgid ""
 "The same checks the operator sees on the Compliance page, from the other "
 "side. A warning carries the operator's own explanation and the remedy, so "
@@ -750,15 +967,15 @@ msgstr ""
 "のです。警告には運用者自身が書いた説明と対処が付くので、最初の一手が「問い合"
 "わせる」にはなりません。"
 
-#: src\getting-started/screenshots.md:166
+#: src\getting-started/screenshots.md:251
 msgid "![Device health](../images/screenshots/client-health.jpg)"
 msgstr "![Device health](../images/screenshots/client-health.jpg)"
 
-#: src\getting-started/screenshots.md:168
+#: src\getting-started/screenshots.md:253
 msgid "Notices"
 msgstr "通知"
 
-#: src\getting-started/screenshots.md:170
+#: src\getting-started/screenshots.md:255
 msgid ""
 "Sent from the Notifications page, tracked back to who confirmed. Expanding "
 "one renders the Markdown the operator wrote — headings, a numbered "
@@ -767,11 +984,11 @@ msgstr ""
 "通知ページから送られ、誰が確認したかまで追跡されます。開くと、運用者が書いた "
 "Markdown がそのまま描画されます — 見出し、番号付きの手順、表、引用、リンク。"
 
-#: src\getting-started/screenshots.md:174
+#: src\getting-started/screenshots.md:259
 msgid "![Notification list](../images/screenshots/client-notifications.jpg)"
 msgstr "![Notification list](../images/screenshots/client-notifications.jpg)"
 
-#: src\getting-started/screenshots.md:176
+#: src\getting-started/screenshots.md:261
 msgid ""
 "![Notification, expanded](../images/screenshots/client-notification-"
 "detail.jpg)"
@@ -779,11 +996,11 @@ msgstr ""
 "![Notification, expanded](../images/screenshots/client-notification-"
 "detail.jpg)"
 
-#: src\getting-started/screenshots.md:178
+#: src\getting-started/screenshots.md:263
 msgid "Self-service"
 msgstr "セルフサービス"
 
-#: src\getting-started/screenshots.md:180
+#: src\getting-started/screenshots.md:265
 msgid ""
 "Jobs an operator has published to the user, grouped by category. Each is an "
 "ordinary manifest; what makes it appear here is the operator deciding it "
@@ -792,15 +1009,15 @@ msgstr ""
 "運用者が利用者に公開したジョブを、カテゴリ別に並べます。中身はどれも普通のマ"
 "ニフェストで、ここに出るかどうかは運用者が決めるだけです。"
 
-#: src\getting-started/screenshots.md:186
+#: src\getting-started/screenshots.md:271
 msgid "![Updates](../images/screenshots/client-updates.jpg)"
 msgstr "![Updates](../images/screenshots/client-updates.jpg)"
 
-#: src\getting-started/screenshots.md:186
+#: src\getting-started/screenshots.md:271
 msgid "![Troubleshooting](../images/screenshots/client-troubleshoot.jpg)"
 msgstr "![Troubleshooting](../images/screenshots/client-troubleshoot.jpg)"
 
-#: src\getting-started/screenshots.md:188
+#: src\getting-started/screenshots.md:273
 msgid ""
 "A job can ask before it runs — `confirm:` in the manifest, with the "
 "operator's own wording — and the run streams its output as it goes, rather "
@@ -810,35 +1027,35 @@ msgstr ""
 "面で）。実行中は出力が流れていくので、沈黙のあと完了だけが現れる、ということ"
 "になりません。"
 
-#: src\getting-started/screenshots.md:194
+#: src\getting-started/screenshots.md:279
 msgid "![Confirmation](../images/screenshots/client-confirm.jpg)"
 msgstr "![Confirmation](../images/screenshots/client-confirm.jpg)"
 
-#: src\getting-started/screenshots.md:194
+#: src\getting-started/screenshots.md:279
 msgid "![A run in progress](../images/screenshots/client-running.jpg)"
 msgstr "![A run in progress](../images/screenshots/client-running.jpg)"
 
-#: src\getting-started/screenshots.md:196
+#: src\getting-started/screenshots.md:281
 msgid "The catalog is the same mechanism pointed at installs:"
 msgstr "カタログは同じ仕組みを、インストールに向けたものです。"
 
-#: src\getting-started/screenshots.md:198
+#: src\getting-started/screenshots.md:283
 msgid "![Catalog](../images/screenshots/client-catalog.jpg)"
 msgstr "![Catalog](../images/screenshots/client-catalog.jpg)"
 
-#: src\getting-started/screenshots.md:200
+#: src\getting-started/screenshots.md:285
 msgid "Running it yourself"
 msgstr "自分で動かす"
 
-#: src\getting-started/screenshots.md:203
+#: src\getting-started/screenshots.md:288
 msgid "# the operator console\n"
 msgstr "# 運用コンソール\n"
 
-#: src\getting-started/screenshots.md:204
+#: src\getting-started/screenshots.md:289
 msgid "# the Client App\n"
 msgstr "# クライアントアプリ\n"
 
-#: src\getting-started/screenshots.md:207
+#: src\getting-started/screenshots.md:292
 msgid ""
 "Then open <http://localhost:5173> and sign in with any username and "
 "password. Nothing else needs to be running. See `crates/kanade-backend/web/"
