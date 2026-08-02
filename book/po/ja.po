@@ -73,7 +73,7 @@ msgstr "kanade を取り除く (undeploy)"
 
 #: src\SUMMARY.md:21 src\operations/broker-sizing.md:1
 msgid "Broker sizing & scaling"
-msgstr ""
+msgstr "ブローカーのサイジングとスケーリング"
 
 #: src\SUMMARY.md:23
 msgid "3. Developer Guide"
@@ -712,24 +712,29 @@ msgid ""
 "on the PC itself — the health tab they check, the jobs they can run without "
 "raising a ticket, and the notice they have to confirm. It talks to the agent "
 "over a named pipe on the same machine; it never reaches the backend directly."
-msgstr "利用者の手元に届く側です。端末に常駐する小さなトレイアプリで、本人が見るヘルスタブ、問い合わせずに自分で実行できるジョブ、確認を求められる通知が入っています。同じ端末のエージェントと名前付きパイプで話し、バックエンドへは直接つながりません。"
+msgstr ""
+"利用者の手元に届く側です。端末に常駐する小さなトレイアプリで、本人が見るヘル"
+"スタブ、問い合わせずに自分で実行できるジョブ、確認を求められる通知が入ってい"
+"ます。同じ端末のエージェントと名前付きパイプで話し、バックエンドへは直接つな"
+"がりません。"
 
 #: src\getting-started/screenshots.md:152
 msgid ""
 "These are shown at 880×560, the app's own window size, and in Japanese only: "
 "the Client App has no i18n layer — its strings are written into the source — "
 "so an English edition of these shots does not exist to capture."
-msgstr "アプリ自身のウィンドウサイズである 880×560 で、日本語のみ掲載しています。クライアントアプリには i18n の層が無く、文字列がソースに直接書かれているため、英語版の画面というものが存在しません。"
+msgstr ""
+"アプリ自身のウィンドウサイズである 880×560 で、日本語のみ掲載しています。クラ"
+"イアントアプリには i18n の層が無く、文字列がソースに直接書かれているため、英"
+"語版の画面というものが存在しません。"
 
 #: src\getting-started/screenshots.md:156
 msgid "Opening on the two things the user is being asked to look at:"
 msgstr "利用者に見てほしい2つを、開いた直後に出します。"
 
 #: src\getting-started/screenshots.md:158
-#, fuzzy
 msgid "![Client App home](../images/screenshots/client-home.jpg)"
-msgstr ""
-"![Compliance on a phone](../images/screenshots/compliance-mobile-ja.jpg)"
+msgstr "![Client App home](../images/screenshots/client-home.jpg)"
 
 #: src\getting-started/screenshots.md:160
 msgid "Device health"
@@ -740,12 +745,14 @@ msgid ""
 "The same checks the operator sees on the Compliance page, from the other "
 "side. A warning carries the operator's own explanation and the remedy, so "
 "the first move is not \"open a ticket\"."
-msgstr "運用者がコンプライアンスページで見ているのと同じチェックを、反対側から見たものです。警告には運用者自身が書いた説明と対処が付くので、最初の一手が「問い合わせる」にはなりません。"
+msgstr ""
+"運用者がコンプライアンスページで見ているのと同じチェックを、反対側から見たも"
+"のです。警告には運用者自身が書いた説明と対処が付くので、最初の一手が「問い合"
+"わせる」にはなりません。"
 
 #: src\getting-started/screenshots.md:166
-#, fuzzy
 msgid "![Device health](../images/screenshots/client-health.jpg)"
-msgstr "![Events](../images/screenshots/events-light-ja.jpg)"
+msgstr "![Device health](../images/screenshots/client-health.jpg)"
 
 #: src\getting-started/screenshots.md:168
 msgid "Notices"
@@ -756,19 +763,21 @@ msgid ""
 "Sent from the Notifications page, tracked back to who confirmed. Expanding "
 "one renders the Markdown the operator wrote — headings, a numbered "
 "procedure, a table, a quote, a link:"
-msgstr "通知ページから送られ、誰が確認したかまで追跡されます。開くと、運用者が書いた Markdown がそのまま描画されます — 見出し、番号付きの手順、表、引用、リンク。"
+msgstr ""
+"通知ページから送られ、誰が確認したかまで追跡されます。開くと、運用者が書いた "
+"Markdown がそのまま描画されます — 見出し、番号付きの手順、表、引用、リンク。"
 
 #: src\getting-started/screenshots.md:174
-#, fuzzy
 msgid "![Notification list](../images/screenshots/client-notifications.jpg)"
-msgstr "![Notifications](../images/screenshots/notifications-light-ja.jpg)"
+msgstr "![Notification list](../images/screenshots/client-notifications.jpg)"
 
 #: src\getting-started/screenshots.md:176
-#, fuzzy
 msgid ""
 "![Notification, expanded](../images/screenshots/client-notification-"
 "detail.jpg)"
-msgstr "![Notifications](../images/screenshots/notifications-light-ja.jpg)"
+msgstr ""
+"![Notification, expanded](../images/screenshots/client-notification-"
+"detail.jpg)"
 
 #: src\getting-started/screenshots.md:178
 msgid "Self-service"
@@ -779,43 +788,43 @@ msgid ""
 "Jobs an operator has published to the user, grouped by category. Each is an "
 "ordinary manifest; what makes it appear here is the operator deciding it "
 "should."
-msgstr "運用者が利用者に公開したジョブを、カテゴリ別に並べます。中身はどれも普通のマニフェストで、ここに出るかどうかは運用者が決めるだけです。"
+msgstr ""
+"運用者が利用者に公開したジョブを、カテゴリ別に並べます。中身はどれも普通のマ"
+"ニフェストで、ここに出るかどうかは運用者が決めるだけです。"
 
 #: src\getting-started/screenshots.md:186
-#, fuzzy
 msgid "![Updates](../images/screenshots/client-updates.jpg)"
-msgstr "![Uptime, dark](../images/screenshots/events-dark-ja.jpg)"
+msgstr "![Updates](../images/screenshots/client-updates.jpg)"
 
 #: src\getting-started/screenshots.md:186
-#, fuzzy
 msgid "![Troubleshooting](../images/screenshots/client-troubleshoot.jpg)"
-msgstr "![Groups](../images/screenshots/groups-light-ja.jpg)"
+msgstr "![Troubleshooting](../images/screenshots/client-troubleshoot.jpg)"
 
 #: src\getting-started/screenshots.md:188
 msgid ""
 "A job can ask before it runs — `confirm:` in the manifest, with the "
 "operator's own wording — and the run streams its output as it goes, rather "
 "than appearing complete after a silence:"
-msgstr "ジョブは実行前に確認を挟めます（マニフェストの `confirm:` に、運用者自身の文面で）。実行中は出力が流れていくので、沈黙のあと完了だけが現れる、ということになりません。"
+msgstr ""
+"ジョブは実行前に確認を挟めます（マニフェストの `confirm:` に、運用者自身の文"
+"面で）。実行中は出力が流れていくので、沈黙のあと完了だけが現れる、ということ"
+"になりません。"
 
 #: src\getting-started/screenshots.md:194
-#, fuzzy
 msgid "![Confirmation](../images/screenshots/client-confirm.jpg)"
-msgstr "![Compliance](../images/screenshots/compliance-light-ja.jpg)"
+msgstr "![Confirmation](../images/screenshots/client-confirm.jpg)"
 
 #: src\getting-started/screenshots.md:194
-#, fuzzy
 msgid "![A run in progress](../images/screenshots/client-running.jpg)"
-msgstr "![Agents](../images/screenshots/agents-light-ja.jpg)"
+msgstr "![A run in progress](../images/screenshots/client-running.jpg)"
 
 #: src\getting-started/screenshots.md:196
 msgid "The catalog is the same mechanism pointed at installs:"
 msgstr "カタログは同じ仕組みを、インストールに向けたものです。"
 
 #: src\getting-started/screenshots.md:198
-#, fuzzy
 msgid "![Catalog](../images/screenshots/client-catalog.jpg)"
-msgstr "![Agents](../images/screenshots/agents-light-ja.jpg)"
+msgstr "![Catalog](../images/screenshots/client-catalog.jpg)"
 
 #: src\getting-started/screenshots.md:200
 msgid "Running it yourself"
@@ -823,11 +832,11 @@ msgstr "自分で動かす"
 
 #: src\getting-started/screenshots.md:203
 msgid "# the operator console\n"
-msgstr ""
+msgstr "# 運用コンソール\n"
 
 #: src\getting-started/screenshots.md:204
 msgid "# the Client App\n"
-msgstr ""
+msgstr "# クライアントアプリ\n"
 
 #: src\getting-started/screenshots.md:207
 msgid ""
@@ -1242,6 +1251,11 @@ msgid ""
 "-Recreate\n"
 "```"
 msgstr ""
+"```powershell\n"
+"# 管理者権限の PowerShell プロンプト\n"
+"& \"dist\\nats\\deploy-nats.ps1\" -NatsToken \"your-secure-nats-token\" "
+"-Recreate\n"
+"```"
 
 #: src\operations/deploy.md:35
 msgid ""
@@ -1283,6 +1297,13 @@ msgid ""
 "    -ForceConfig -Recreate\n"
 "```"
 msgstr ""
+"```powershell\n"
+"# 管理者権限の PowerShell プロンプト\n"
+"& \"dist\\backend\\deploy-backend.ps1\" `\n"
+"    -NatsToken \"your-secure-nats-token\" `\n"
+"    -StaticToken \"your-operator-spa-bearer-token\" `\n"
+"    -ForceConfig -Recreate\n"
+"```"
 
 #: src\operations/deploy.md:52
 msgid "`-NatsToken`: Connects the backend to the local NATS server securely."
@@ -1336,6 +1357,11 @@ msgid ""
 "-Recreate\n"
 "```"
 msgstr ""
+"```powershell\n"
+"# 管理者権限の PowerShell プロンプト\n"
+"& \".\\deploy-agent.ps1\" -NatsToken \"your-secure-nats-token\" -ForceConfig "
+"-Recreate\n"
+"```"
 
 #: src\operations/deploy.md:70
 msgid "The script:"
@@ -1849,7 +1875,7 @@ msgstr ""
 
 #: src\operations/agent-mediated-updates/backend.md:165
 msgid "`Start-BitsTransfer : HTTP status 401`"
-msgstr ""
+msgstr "`Start-BitsTransfer : HTTP status 401`"
 
 #: src\operations/agent-mediated-updates/backend.md:165
 msgid "`$AgentSourceAuthToken` empty but backend requires auth"
@@ -1864,18 +1890,24 @@ msgid ""
 "`Start-BitsTransfer : The transfer encountered an error` / job state "
 "`TransientError`"
 msgstr ""
+"`Start-BitsTransfer : The transfer encountered an error` / ジョブ状態が "
+"`TransientError`"
 
 #: src\operations/agent-mediated-updates/backend.md:166
 msgid ""
 "BITS service not running, or target machine's WinHTTP can't reach "
 "`$AgentSourceUrl`"
 msgstr ""
+"BITS サービスが停止しているか、対象マシンの WinHTTP から `$AgentSourceUrl` に"
+"到達できない"
 
 #: src\operations/agent-mediated-updates/backend.md:166
 msgid ""
 "`Get-Service BITS`; check WinHTTP proxy with `netsh winhttp show proxy` "
 "(BITS uses WinHTTP, not IE/WinINet)."
 msgstr ""
+"`Get-Service BITS` で確認。WinHTTP のプロキシは `netsh winhttp show proxy` で"
+"確認します (BITS が使うのは WinHTTP であって IE/WinINet ではありません)。"
 
 #: src\operations/agent-mediated-updates/backend.md:167
 msgid "`sha256 mismatch — expected=<x> actual=<y>`"
@@ -2299,7 +2331,6 @@ msgstr ""
 "ローを使います:"
 
 #: src\operations/agent-mediated-updates/nats.md:40
-#, fuzzy
 msgid ""
 "This installs `nats-server.exe` to `%ProgramFiles%\\Kanade\\` and `nats-"
 "server.conf` to `%ProgramData%\\Kanade\\config\\` (with ACL hardened to "
@@ -2308,10 +2339,10 @@ msgid ""
 "starts the service."
 msgstr ""
 "これで `nats-server.exe` を `%ProgramFiles%\\Kanade\\` に、`nats-"
-"server.conf` を `%ProgramData%\\Kanade\\config\\` にインストール (bearer "
-"token を平文で保存するので ACL を SYSTEM + Administrators のみに絞ります)、"
-"`KanadeNats` Windows サービスを登録、TCP 4222 (broker) と 8222 (monitoring "
-"HTTP) を開放、サービスを起動します。"
+"server.conf` を `%ProgramData%\\Kanade\\config\\` にインストールし (bearer "
+"token を平文で保存するため ACL は SYSTEM + Administrators に絞ります)、"
+"`KanadeNats` Windows サービスを登録し、TCP 4222 (broker) を開放し、サービスを"
+"起動します。"
 
 #: src\operations/agent-mediated-updates/nats.md:46
 msgid ""
@@ -2320,6 +2351,10 @@ msgid ""
 "and every in-repo consumer reads it over loopback. The shipped `nats-"
 "server.conf` binds it to `127.0.0.1` accordingly."
 msgstr ""
+"monitoring (8222) は意図的に開放**しません**。古いデプロイが作った規則があれ"
+"ば削除します。このエンドポイントには独自の認証が無く、リポジトリ内の利用側は"
+"すべてループバック経由で読むためです。同梱の `nats-server.conf` もそれに合わ"
+"せて `127.0.0.1` にバインドしています。"
 
 #: src\operations/agent-mediated-updates/nats.md:52
 msgid "Agent-mediated update (steady state)"
@@ -2330,6 +2365,9 @@ msgid ""
 "`scripts/deploy/nats.ps1` ships the `$AgentSource*` knobs (#234), so the "
 "broker can be upgraded through the fleet — no RDP to the broker host."
 msgstr ""
+"`scripts/deploy/nats.ps1` には `$AgentSource*` のノブがあります (#234)。ブ"
+"ローカー自身もフリート経由で更新できるので、ブローカーのホストに RDP する必要"
+"はありません。"
 
 #: src\operations/agent-mediated-updates/nats.md:57
 msgid "1. Build / fetch nats-server.exe"
@@ -2352,13 +2390,12 @@ msgid "3. Edit deploy-nats.ps1"
 msgstr "3. deploy-nats.ps1 を編集"
 
 #: src\operations/agent-mediated-updates/nats.md:76
-#, fuzzy
 msgid ""
 "The pattern matches [deploy/backend.ps1](./backend.md#3-edit-"
 "scriptsdeploybackendps1):"
 msgstr ""
-"agent モードノブが入ったあとは、パターンは [deploy/backend.ps1](./"
-"backend.md#3-edit-scriptsdeploybackendps1) と同じ:"
+"パターンは [deploy/backend.ps1](./backend.md#3-edit-scriptsdeploybackendps1) "
+"と同じです:"
 
 #: src\operations/agent-mediated-updates/nats.md:79
 msgid ""
@@ -2381,10 +2418,11 @@ msgid "4. Publish + register + exec"
 msgstr "4. publish + 登録 + exec"
 
 #: src\operations/agent-mediated-updates/nats.md:94
-#, fuzzy
 msgid ""
 "The job manifest ships at `configs/jobs/installers/install-kanade-nats.yaml`:"
-msgstr "`configs/jobs/installers/install-kanade-client.yaml`:"
+msgstr ""
+"ジョブマニフェストは `configs/jobs/installers/install-kanade-nats.yaml` にあ"
+"ります:"
 
 #: src\operations/agent-mediated-updates/nats.md:98
 msgid "install-kanade-nats"
@@ -2399,7 +2437,6 @@ msgid "5. Verify"
 msgstr "5. 確認"
 
 #: src\operations/agent-mediated-updates/nats.md:110
-#, fuzzy
 msgid ""
 "After the broker comes back, the outbox drains and you'll see the result row "
 "in `/api/results`. Confirm the new NATS version via the broker's monitoring "
@@ -2408,17 +2445,17 @@ msgid ""
 msgstr ""
 "ブローカーが復帰すると outbox が drain され、`/api/results` に result row が"
 "出てきます。新しい NATS バージョンはブローカーの monitoring エンドポイントで"
-"確認:"
+"確認しますが、monitoring はループバックにバインドされ firewall でも開放してい"
+"ないので、**ブローカーのホスト上で**実行してください:"
 
 #: src\operations/agent-mediated-updates/nats.md:115
-#, fuzzy
 msgid ""
 "```pwsh\n"
 "curl http://127.0.0.1:8222/varz | python -m json.tool | rg version\n"
 "```"
 msgstr ""
 "```pwsh\n"
-"curl http://<broker>:8222/varz | python -m json.tool | rg version\n"
+"curl http://127.0.0.1:8222/varz | python -m json.tool | rg version\n"
 "```"
 
 #: src\operations/agent-mediated-updates/nats.md:119
@@ -2426,6 +2463,8 @@ msgid ""
 "From anywhere else, ask the fleet instead of the port — the same agent-exec "
 "path that just performed the update:"
 msgstr ""
+"それ以外の場所からは、ポートではなくフリートに尋ねます — いま更新を実行したの"
+"と同じ agent-exec の経路です:"
 
 #: src\operations/agent-mediated-updates/nats.md:126
 msgid "Why we don't need a separate \"broker update\" mechanism"
@@ -2699,11 +2738,11 @@ msgstr "Agent"
 
 #: src\operations/undeploy.md:11
 msgid "`scripts/deploy/agent.ps1`"
-msgstr ""
+msgstr "`scripts/deploy/agent.ps1`"
 
 #: src\operations/undeploy.md:11
 msgid "`scripts/undeploy/agent.ps1`"
-msgstr ""
+msgstr "`scripts/undeploy/agent.ps1`"
 
 #: src\operations/undeploy.md:12 src\operations/undeploy.md:57
 msgid "Backend"
@@ -2711,7 +2750,7 @@ msgstr "Backend"
 
 #: src\operations/undeploy.md:12
 msgid "`scripts/undeploy/backend.ps1`"
-msgstr ""
+msgstr "`scripts/undeploy/backend.ps1`"
 
 #: src\operations/undeploy.md:13
 msgid "NATS server"
@@ -2719,11 +2758,11 @@ msgstr "NATS server"
 
 #: src\operations/undeploy.md:13
 msgid "`scripts/deploy/nats.ps1`"
-msgstr ""
+msgstr "`scripts/deploy/nats.ps1`"
 
 #: src\operations/undeploy.md:13
 msgid "`scripts/undeploy/nats.ps1`"
-msgstr ""
+msgstr "`scripts/undeploy/nats.ps1`"
 
 #: src\operations/undeploy.md:14
 msgid "Client (Tauri)"
@@ -2733,10 +2772,12 @@ msgstr "Client (Tauri)"
 msgid ""
 "`configs/jobs/installers/scripts/install-kanade-client.ps1` (agent-driven)"
 msgstr ""
+"`configs/jobs/installers/scripts/install-kanade-client.ps1` (エージェント経"
+"由)"
 
 #: src\operations/undeploy.md:14
 msgid "`scripts/undeploy/client.ps1`"
-msgstr ""
+msgstr "`scripts/undeploy/client.ps1`"
 
 #: src\operations/undeploy.md:16
 msgid ""
@@ -2744,6 +2785,9 @@ msgid ""
 "uninstall, safe to run when the component is already gone (each step logs "
 "\"not present, skipping\" and moves on)."
 msgstr ""
+"4本とも管理者専用かつ冪等です。アンインストールが途中で終わったあとに再実行し"
+"ても安全ですし、対象がすでに無い状態で実行しても安全です (各ステップが「not "
+"present, skipping」と記録して次に進みます)。"
 
 #: src\operations/undeploy.md:20
 msgid "Default posture: safe"
@@ -2804,6 +2848,8 @@ msgid ""
 "That's enough for the common case: \"this host's kanade is misbehaving, get "
 "it off without destroying state\"."
 msgstr ""
+"よくあるケース —「この端末の kanade がおかしいので、状態を壊さずに外したい」"
+"— にはこれで十分です。"
 
 #: src\operations/undeploy.md:42
 msgid "`-Purge`: destructive cleanup"
@@ -2921,6 +2967,10 @@ msgid ""
 "(`/api/agents` staleness threshold). If you want it removed from the SPA "
 "immediately, delete the row via the backend API after undeploy."
 msgstr ""
+"この端末が居なくなったことをフリートの他の部分に通知はしません。バックエンド"
+"はハートビートが時効になるまで (`/api/agents` の staleness 閾値) 「エージェン"
+"ト」に載せ続けます。SPA から即座に消したい場合は、undeploy のあとバックエン"
+"ド API で行を削除してください。"
 
 #: src\operations/undeploy.md:110
 msgid ""
@@ -2929,6 +2979,10 @@ msgid ""
 "swap to an older version, re-run the matching `deploy-*.ps1` against a "
 "folder containing the older binary."
 msgstr ""
+"デプロイ済みバイナリを以前のバージョンへ戻すことはしません。このスクリプトの"
+"語彙では「ロールバック」は「完全に削除する」という意味です。古いバージョンへ"
+"入れ替えたい場合は、そのバイナリが入ったフォルダに対して対応する `deploy-"
+"*.ps1` を実行し直してください。"
 
 #: src\operations/undeploy.md:115
 msgid ""
@@ -2951,72 +3005,78 @@ msgid ""
 "during a scale-up so you can decide whether to add a startup splay or grow/"
 "cluster the broker."
 msgstr ""
+"kanade は単一の NATS + JetStream ブローカーの上で動きます。フリートが大きくな"
+"る (数百台 → 数千台) と、スケーリングのボトルネックになるのはエージェントでは"
+"なくブローカーです。このページでは、エージェント1台あたりのフットプリント、"
+"`#512` の作業で何が変わったか、単一ノードで注意すべき限界、そしてスケールアッ"
+"プ中に実測値を採取して起動スプレイを入れるかブローカーを増強/クラスタ化するか"
+"を判断する方法を扱います。"
 
 #: src\operations/broker-sizing.md:10
 msgid "Per-agent consumer footprint"
-msgstr ""
+msgstr "エージェント1台あたりの consumer フットプリント"
 
 #: src\operations/broker-sizing.md:12
 msgid ""
 "Each running agent holds a handful of JetStream consumers — one ordered push "
 "consumer per KV watch, plus its durable command-replay consumer:"
 msgstr ""
+"稼働中のエージェントはそれぞれ JetStream の consumer をいくつか保持します。"
+"KV watch ごとに ordered push consumer が1つ、それに加えてコマンド再生用の "
+"durable consumer が1つです:"
 
 #: src\operations/broker-sizing.md:15
 msgid "Consumer"
-msgstr ""
+msgstr "Consumer"
 
 #: src\operations/broker-sizing.md:15
-#, fuzzy
 msgid "Source"
-msgstr "設定ソース"
+msgstr "由来"
 
 #: src\operations/broker-sizing.md:17
-#, fuzzy
 msgid "`agent_config` watch (key-filtered)"
-msgstr "`agent_config` (KV)"
+msgstr "`agent_config` watch (キーで絞り込み)"
 
 #: src\operations/broker-sizing.md:17 src\operations/broker-sizing.md:18
 msgid "`config_supervisor`"
-msgstr ""
+msgstr "`config_supervisor`"
 
 #: src\operations/broker-sizing.md:18
 msgid "`agent_groups` watch (membership → effective config)"
-msgstr ""
+msgstr "`agent_groups` watch (所属 → 実効 config)"
 
 #: src\operations/broker-sizing.md:19
 msgid "`agent_groups` watch (membership → subscriptions)"
-msgstr ""
+msgstr "`agent_groups` watch (所属 → 購読)"
 
 #: src\operations/broker-sizing.md:19
 msgid "`groups.rs`"
-msgstr ""
+msgstr "`groups.rs`"
 
 #: src\operations/broker-sizing.md:20
 msgid "`schedules` watch"
-msgstr ""
+msgstr "`schedules` watch"
 
 #: src\operations/broker-sizing.md:20 src\operations/broker-sizing.md:21
 #: src\operations/broker-sizing.md:22
 msgid "`local_scheduler`"
-msgstr ""
+msgstr "`local_scheduler`"
 
 #: src\operations/broker-sizing.md:21
-#, fuzzy
 msgid "`jobs` watch"
-msgstr "`jobs` (KV)"
+msgstr "`jobs` watch"
 
 #: src\operations/broker-sizing.md:22
 msgid "`fleet_config` freeze watch (single key)"
-msgstr ""
+msgstr "`fleet_config` の freeze watch (単一キー)"
 
 #: src\operations/broker-sizing.md:23
 msgid "`EXEC` durable replay"
-msgstr ""
+msgstr "`EXEC` durable replay"
 
 #: src\operations/broker-sizing.md:23
 msgid "`command_replay`"
-msgstr ""
+msgstr "`command_replay`"
 
 #: src\operations/broker-sizing.md:25
 msgid ""
@@ -3024,48 +3084,53 @@ msgid ""
 "it does **not** shrink with key-filtering — so the broker-side total grows "
 "linearly with the fleet:"
 msgstr ""
+"つまり**エージェント1台あたり約7 consumer**です。この数はエージェントごとにほ"
+"ぼ固定で、キーで絞り込んでも**減りません**。したがってブローカー側の総数はフ"
+"リートに比例して増えます:"
 
 #: src\operations/broker-sizing.md:29
 msgid "Fleet size"
-msgstr ""
+msgstr "フリート規模"
 
 #: src\operations/broker-sizing.md:29
 msgid "~Consumers on the broker"
-msgstr ""
+msgstr "ブローカー上の consumer 数 (概算)"
 
 #: src\operations/broker-sizing.md:31
 msgid "15"
-msgstr ""
+msgstr "15"
 
 #: src\operations/broker-sizing.md:31
 msgid "~105"
-msgstr ""
+msgstr "約 105"
 
 #: src\operations/broker-sizing.md:32
 msgid "500"
-msgstr ""
+msgstr "500"
 
 #: src\operations/broker-sizing.md:32
 msgid "~3,500"
-msgstr ""
+msgstr "約 3,500"
 
 #: src\operations/broker-sizing.md:33
 msgid "3,000"
-msgstr ""
+msgstr "3,000"
 
 #: src\operations/broker-sizing.md:33
 msgid "~21,000"
-msgstr ""
+msgstr "約 21,000"
 
 #: src\operations/broker-sizing.md:35
 msgid "What v0.43.96 changed (and what it did not)"
-msgstr ""
+msgstr "v0.43.96 で変わったこと (と変わらなかったこと)"
 
 #: src\operations/broker-sizing.md:37
 msgid ""
 "`#512` (shipped in v0.43.96) attacked the **super-linear** costs, not the "
 "consumer count:"
 msgstr ""
+"`#512` (v0.43.96 で出荷) が叩いたのは**超線形**のコストであって、consumer の"
+"数ではありません:"
 
 #: src\operations/broker-sizing.md:40
 msgid ""
@@ -3073,12 +3138,18 @@ msgid ""
 "`global`, `pcs.<self>`, and its `groups.<g>` keys instead of the whole "
 "bucket (`watch_all`). This removes two blow-ups:"
 msgstr ""
+"**`#832` — `agent_config` のキー絞り込み watch。** エージェントはバケット全"
+"体 (`watch_all`) ではなく、`global`、`pcs.<self>`、自分の `groups.<g>` だけ"
+"を watch します。これで2つの爆発が消えます:"
 
 #: src\operations/broker-sizing.md:43
 msgid ""
 "**Per-PC write fan-out**: a write to one `pcs.<id>` no longer reaches all N "
 "agents (it used to, with N−1 classifying-and-dropping it)."
 msgstr ""
+"**PC 単位の書き込みファンアウト**: `pcs.<id>` 1件への書き込みが全 N エージェ"
+"ントに届かなくなりました (以前は届いていて、N−1 台が分類しては捨てていまし"
+"た)。"
 
 #: src\operations/broker-sizing.md:45
 msgid ""
@@ -3086,6 +3157,9 @@ msgid ""
 "instead of a `keys()` + per-key walk over the whole bucket — aggregate "
 "**O(N²) → O(N)**."
 msgstr ""
+"**再接続時の再同期ストーム**: 再同期はバケット全体に対する `keys()` + キーご"
+"との走査ではなく、エージェントあたり 3〜5 回の直接 `get` になりました。総計"
+"で **O(N²) → O(N)** です。"
 
 #: src\operations/broker-sizing.md:48
 msgid ""
@@ -3093,6 +3167,9 @@ msgid ""
 "`KEY_FREEZE`, so the freeze watcher uses `watch(KEY_FREEZE)` instead of "
 "`watch_all` + a client-side filter."
 msgstr ""
+"**`#839` — 単一キーの freeze watch。** `fleet_config` は `KEY_FREEZE` しか持"
+"たないので、freeze の watcher は `watch_all` + クライアント側フィルタではな"
+"く `watch(KEY_FREEZE)` を使います。"
 
 #: src\operations/broker-sizing.md:52
 msgid ""
@@ -3103,14 +3180,20 @@ msgid ""
 "consumers and the connection/consumer-create burst of a synchronised "
 "reconnect."
 msgstr ""
+"**変わっていない**のは、エージェント1台あたり約7 consumer というフットプリン"
+"トと、`schedules` / `jobs` の `watch_all` です (これらは全エージェントがター"
+"ゲティング判定のために評価する共有カタログで、無くすにはサーバー側ターゲティ"
+"ングという別の変更が要ります)。したがって 3,000 台では依然として約 21,000 "
+"consumer と、同期した再接続による接続/consumer 作成のバーストを見込んでおく必"
+"要があります。"
 
 #: src\operations/broker-sizing.md:59
 msgid "Single-node limits and the reconnect herd"
-msgstr ""
+msgstr "単一ノードの限界と再接続の群れ"
 
 #: src\operations/broker-sizing.md:61
 msgid "Two things to size for on a single-node JetStream:"
-msgstr ""
+msgstr "単一ノードの JetStream でサイジングすべきものは2つです:"
 
 #: src\operations/broker-sizing.md:62
 msgid ""
@@ -3119,6 +3202,10 @@ msgid ""
 "host's RAM and `max_file`/`max_memory` JetStream limits accordingly, and "
 "watch the meta layer's health."
 msgstr ""
+"**定常状態のフットプリント** — 3,000 台での約 21,000 consumer は JetStream の"
+"メタ (Raft) 層に載り、メモリとファイルハンドルを消費します。目標 N に合わせて"
+"ブローカーホストの RAM と JetStream の `max_file`/`max_memory` を設定し、メタ"
+"層の健全性を監視してください。"
 
 #: src\operations/broker-sizing.md:66
 msgid ""
@@ -3129,16 +3216,24 @@ msgid ""
 "`get`s, so the dangerous O(N²) read-storm is gone — but the connection + "
 "consumer-create burst is still O(N) and synchronised."
 msgstr ""
+"**再接続の群れ (herd)** — 多数のエージェントが_同一の瞬間に_再接続すると (ブ"
+"ローカー再起動、朝の電源投入の波、多数の PC を巻き込むネットワーク事象)、接続"
+"を張り直して **consumer をバースト的に作り直します**。キー絞り込みによって各"
+"エージェントの再同期はすでに数回の安価な `get` まで落ちているので、危険な "
+"O(N²) の読み込みストームは消えています。ただし接続 + consumer 作成のバースト"
+"は依然として O(N) で、しかも同期しています。"
 
 #: src\operations/broker-sizing.md:73
 msgid ""
 "Note that random, _unsynchronised_ reconnects (one laptop's wifi flap) are "
 "not a herd — only fleet-wide synchronised events are."
 msgstr ""
+"なお、ランダムで_同期していない_再接続 (ノート PC 1台の wifi 瞬断) は群れでは"
+"ありません。群れになるのはフリート全体が同期した事象だけです。"
 
 #: src\operations/broker-sizing.md:76
 msgid "Storage: the 50 GB file store, per-resource caps, and retention"
-msgstr ""
+msgstr "ストレージ: 50 GB のファイルストア、リソース単位の上限、保持期間"
 
 #: src\operations/broker-sizing.md:78
 msgid ""
@@ -3148,12 +3243,20 @@ msgid ""
 "(`configs/nats-server.conf`) — a **soft limit shared by every stream and "
 "object store**, not a per-stream one. What happens as it fills:"
 msgstr ""
+"RAM と consumer はサイジングの話の半分にすぎず、もう半分はディスクです。"
+"JetStream のデータはすべて1つのディレクトリ (`store_dir: C:/ProgramData/"
+"Kanade/nats/jetstream`) の下に置かれ、ブローカー全体として `max_file_store: "
+"50GB` (`configs/nats-server.conf`) で制限されます。これは**全ストリームと全オ"
+"ブジェクトストアで共有されるソフト上限**であって、ストリーム単位のものではあ"
+"りません。埋まっていくと何が起きるか:"
 
 #: src\operations/broker-sizing.md:85
 msgid ""
 "Resources with their own retention evict oldest-first (`DiscardPolicy::Old`) "
 "and stay healthy."
 msgstr ""
+"自前の保持設定を持つリソースは古いものから退避し (`DiscardPolicy::Old`)、健全"
+"なままです。"
 
 #: src\operations/broker-sizing.md:87
 msgid ""
@@ -3164,10 +3267,16 @@ msgid ""
 "what dies. Uncapped resources also squeeze the capped ones out of their fair "
 "share."
 msgstr ""
+"上限を**持たない**リソースは退避できません。そのためファイルストアが一杯にな"
+"ると、フリート全体で_あらゆる_ JetStream publish が「insufficient storage "
+"resources available」(エラー 10077) で失敗し始めます — エージェントの結果アッ"
+"プロード、collect バンドルのアップロード、publish、KV put。読み取りは動き続"
+"け、死ぬのは書き込み側です。上限の無いリソースは、上限のあるリソースの取り分"
+"も押しのけます。"
 
 #: src\operations/broker-sizing.md:94
 msgid "So every resource must carry a cap, and it does:"
-msgstr ""
+msgstr "したがって全リソースが上限を持たねばならず、実際に持っています:"
 
 #: src\operations/broker-sizing.md:96
 msgid ""
@@ -3177,6 +3286,11 @@ msgid ""
 "— the durable record is the backend's SQLite, which is why the caps can be "
 "tighter than the history an operator expects to see."
 msgstr ""
+"**ストリーム** (`RESULTS` / `INVENTORY` / `AUDIT` / `OBS_EVENTS` / "
+"`NOTIFICATIONS` / `EXEC` / `EVENTS`) はそれぞれ `max_age` と `max_bytes` を持"
+"ちます (bootstrap.rs、合計で約 5.3 GiB を確保)。これらは転送 + 再生のバッファ"
+"であり、永続的な記録はバックエンドの SQLite です。運用者が見たいと思う履歴よ"
+"り上限を短く取れるのはそのためです。"
 
 #: src\operations/broker-sizing.md:102
 msgid ""
@@ -3184,79 +3298,81 @@ msgid ""
 "(**Settings → server → Object store disk caps**, #1247) with no restart; "
 "blank fields fall back to these built-in defaults:"
 msgstr ""
+"**オブジェクトストア**はバケットごとに `max_bytes` で制限され、SPA から再起動"
+"なしで変更できます (**設定 → server → オブジェクトストアのディスク上限**、"
+"#1247)。空欄にすると以下の組み込み既定値に戻ります:"
 
 #: src\operations/broker-sizing.md:106
-#, fuzzy
 msgid "Bucket"
-msgstr "バケット / キー"
+msgstr "バケット"
 
 #: src\operations/broker-sizing.md:106
 msgid "Default cap"
-msgstr ""
+msgstr "既定の上限"
 
 #: src\operations/broker-sizing.md:106
 msgid "Holds"
-msgstr ""
+msgstr "格納するもの"
 
 #: src\operations/broker-sizing.md:108
 msgid "`result_output`"
-msgstr ""
+msgstr "`result_output`"
 
 #: src\operations/broker-sizing.md:108
 msgid "1,024 MiB"
-msgstr ""
+msgstr "1,024 MiB"
 
 #: src\operations/broker-sizing.md:108
 msgid "oversized stdout/stderr blobs (projected into SQLite within seconds)"
-msgstr ""
+msgstr "大きすぎる stdout/stderr の blob (数秒で SQLite に投影されます)"
 
 #: src\operations/broker-sizing.md:109
-#, fuzzy
 msgid "`agent_releases`"
-msgstr "`agent.nats_url`"
+msgstr "`agent_releases`"
 
 #: src\operations/broker-sizing.md:109
 msgid "2,048 MiB"
-msgstr ""
+msgstr "2,048 MiB"
 
 #: src\operations/broker-sizing.md:109
 msgid "agent exes (~20 versions)"
-msgstr ""
+msgstr "エージェントの実行ファイル (約20バージョン)"
 
 #: src\operations/broker-sizing.md:110
 msgid "`app_packages`"
-msgstr ""
+msgstr "`app_packages`"
 
 #: src\operations/broker-sizing.md:110 src\operations/broker-sizing.md:112
 msgid "5,120 MiB"
-msgstr ""
+msgstr "5,120 MiB"
 
 #: src\operations/broker-sizing.md:110
 msgid "operator-curated installers"
-msgstr ""
+msgstr "運用者が用意したインストーラ"
 
 #: src\operations/broker-sizing.md:111
-#, fuzzy
 msgid "`scripts`"
-msgstr "スクリプトの動作:"
+msgstr "`scripts`"
 
 #: src\operations/broker-sizing.md:111
 msgid "256 MiB"
-msgstr ""
+msgstr "256 MiB"
 
 #: src\operations/broker-sizing.md:111
 msgid "manifest script bodies"
-msgstr ""
+msgstr "マニフェストのスクリプト本体"
 
 #: src\operations/broker-sizing.md:112
 msgid "`collections`"
-msgstr ""
+msgstr "`collections`"
 
 #: src\operations/broker-sizing.md:112
 msgid ""
 "collect-job bundles (also `max_age`, tunable via _Collected-bundle "
 "retention_)"
 msgstr ""
+"collect ジョブのバンドル (`max_age` もあり、_収集バンドルの保持期間_ で変更で"
+"きます)"
 
 #: src\operations/broker-sizing.md:114
 msgid ""
@@ -3265,6 +3381,10 @@ msgid ""
 "buckets created before the cap existed. Total default reservation ≈ 13.5 GiB "
 "— sized, with the streams, to sit well inside 50 GB."
 msgstr ""
+"バックエンドは設定値を裏側の `OBJ_*` ストリームへ**起動のたびと保存のたびに**"
+"反映します。上限が導入される前に作られたバケットにも上限が行き渡るのはこの仕"
+"組みによります。既定の合計確保量は約 13.5 GiB で、ストリームと合わせて 50 GB "
+"に十分収まるよう設計されています。"
 
 #: src\operations/broker-sizing.md:120
 msgid ""
@@ -3277,6 +3397,14 @@ msgid ""
 "are upsert/replace-shaped (live-state sized), and dead agents are pruned by "
 "`agent_prune_days` (also a ServerSettings knob)."
 msgstr ""
+"**SQLite (投影)** も_無制限ではありません_。バックエンドのクリーンアップタス"
+"クが5分ごとに、区切られたバッチで刈り取ります — `execution_results` / "
+"`executions` / `obs_events` / `inventory_history` が 90 日、`audit_log` が "
+"365 日、`host_perf_samples` が 30 日、`process_perf_samples` が 7 日です。ど"
+"の DB の窓も、対応するストリームの窓より**意図的に長く**取ってあります。スト"
+"リームが再生できるものは必ず SQLite に既にある、ということです。残りのテーブ"
+"ルは upsert/replace 型 (現在の状態ぶんの大きさ) で、死んだエージェントは "
+"`agent_prune_days` (これも ServerSettings のノブ) で刈られます。"
 
 #: src\operations/broker-sizing.md:130
 msgid ""
@@ -3284,10 +3412,13 @@ msgid ""
 "it reads the broker's current config, so a changed cap shows up there on the "
 "next load."
 msgstr ""
+"リソースごとの実使用量 (使用バイト数と上限) は SPA の JetStream ページにあり"
+"ます。ブローカーの現在の設定を読むので、上限を変えると次回の読み込みで反映さ"
+"れます。"
 
 #: src\operations/broker-sizing.md:134
 msgid "Levers, in order of preference"
-msgstr ""
+msgstr "打ち手 (優先順)"
 
 #: src\operations/broker-sizing.md:136
 msgid ""
@@ -3295,6 +3426,9 @@ msgid ""
 "the steady-state consumer count at your target N. This is the primary lever; "
 "everything else is secondary."
 msgstr ""
+"**まずブローカーのサイジング。** 目標 N での定常 consumer 数を賄えるだけの "
+"RAM とファイル上限を、この単一ノードに与えてください。これが主たる打ち手で、"
+"他はすべて副次的です。"
 
 #: src\operations/broker-sizing.md:139
 msgid ""
@@ -3310,6 +3444,16 @@ msgid ""
 "(gated to the first sync after a `Disconnected → Connected`, capped a few "
 "seconds)."
 msgstr ""
+"**起動スプレイ — 実測したときだけ。** 再接続の再同期の前に PC ごとの決定的な"
+"遅延 (`hash(pc_id)`) を入れれば、consumer 作成と接続のバーストを一定の窓に均"
+"せます。これは設計判断として**まだ製品に入っていません**。PR1 ですでに二次の"
+"項は消えており、async-nats の再接続バックオフと `nats_retry` の ±25% ジッタが"
+"ある程度はバーストを散らしているからです。またスプレイは、群れではない単発の"
+"瞬断も含めてすべての再接続に遅延を足すので、実際に群れがブローカーを苦しめて"
+"いないかぎり差し引きで損になります。**データで判断してください** (次節)。同期"
+"した事象で consumer 作成の遅延、接続の滞留、JetStream API のエラーが見えたな"
+"ら、スプレイを入れます (`Disconnected → Connected` 後の最初の同期だけに限定"
+"し、数秒で頭打ちにします)。"
 
 #: src\operations/broker-sizing.md:150
 msgid ""
@@ -3318,16 +3462,21 @@ msgid ""
 "candidate to merge) and keep KV history shallow (`agent_config` / "
 "`agent_groups` are at `history: 1`)."
 msgstr ""
+"**エージェントあたりの consumer を減らす。** 可能なら watch をまとめ (freeze "
+"watch はすでに単一キー、2本の `agent_groups` watch は統合の候補)、KV の履歴は"
+"浅く保ちます (`agent_config` / `agent_groups` は `history: 1`)。"
 
 #: src\operations/broker-sizing.md:154
 msgid ""
 "**Cluster JetStream.** Beyond what one node can hold, move to a JetStream "
 "cluster. This is the last resort and the biggest change."
 msgstr ""
+"**JetStream をクラスタ化する。** 1ノードで抱えられる量を超えたら、JetStream "
+"クラスタへ移ります。これが最後の手段であり、最も大きな変更です。"
 
 #: src\operations/broker-sizing.md:157
 msgid "Measuring at scale (retro-analysis)"
-msgstr ""
+msgstr "規模での実測 (事後分析)"
 
 #: src\operations/broker-sizing.md:159
 msgid ""
@@ -3335,6 +3484,9 @@ msgid ""
 "numbers instead, with the bundled `collect:` job, and review the bundle "
 "afterwards."
 msgstr ""
+"本番のブローカーを立ち上がりの最中にライブで眺めるのは、たいてい無理です。代"
+"わりに同梱の `collect:` ジョブで数値を採取し、あとからバンドルを見てくださ"
+"い。"
 
 #: src\operations/broker-sizing.md:163
 msgid ""
@@ -3342,6 +3494,8 @@ msgid ""
 "synchronised reconnect event** (the herd moment is what decides the splay "
 "question):"
 msgstr ""
+"**バックエンド / NATS のホスト上で**、できれば**同期した再接続事象の最中か直"
+"後に**実行します (スプレイの是非を決めるのは群れの瞬間です):"
 
 #: src\operations/broker-sizing.md:171
 msgid ""
@@ -3355,10 +3509,19 @@ msgid ""
 "`KANADE_BH_INTERVAL_SEC` (and `KANADE_BH_MON_PORT` if the broker's "
 "`http_port` differs) on the target if needed."
 msgstr ""
+"このジョブ (`configs/jobs/collect-broker-health.yaml`) はブローカーを約3分に"
+"わたってサンプリングし、バンドルを `OBJECT_COLLECTIONS` にアップロードしま"
+"す。SPA の **収集** ページからダウンロードしてください (zip をそのままレ"
+"ビュー担当に渡しても構いません)。読み取り専用で、**事前準備は一切不要**です。"
+"NATS の認証なしの HTTP monitoring ポート (既定 8222 — kanade が `jetstream "
+"status` のために既に叩いているのと同じ `/jsz` エンドポイント) を読むだけなの"
+"で、SYSTEM の PATH に `nats` CLI を置く必要も、トークンも要りません。必要なら"
+"対象側で `KANADE_BH_SAMPLES` / `KANADE_BH_INTERVAL_SEC` (ブローカーの "
+"`http_port` が違う場合は `KANADE_BH_MON_PORT` も) で窓を調整できます。"
 
 #: src\operations/broker-sizing.md:181
 msgid "The bundle contains:"
-msgstr ""
+msgstr "バンドルの内容:"
 
 #: src\operations/broker-sizing.md:183
 msgid ""
@@ -3366,6 +3529,9 @@ msgid ""
 "and JetStream consumer count (`/jsz`) per sample. A spike here at the herd "
 "moment is the splay signal."
 msgstr ""
+"**時系列** (`connz-*.json`、`jsz-*.json`) — サンプルごとの接続数 (`/connz`) "
+"と JetStream の consumer 数 (`/jsz`)。群れの瞬間にここが跳ねていれば、それが"
+"スプレイの signal です。"
 
 #: src\operations/broker-sizing.md:186
 msgid ""
@@ -3373,20 +3539,25 @@ msgid ""
 "consumers=true&streams=true`: the full consumer list; confirms the ~7N total "
 "and which streams hold them."
 msgstr ""
+"**consumer フットプリント** (`jsz-full.json`) — `/jsz?"
+"consumers=true&streams=true`。consumer の全リストで、合計が約 7N であること"
+"と、どのストリームが抱えているかを確認できます。"
 
 #: src\operations/broker-sizing.md:188
 msgid ""
 "**Server health/resources** (`varz.json`, `healthz.json`) — `/varz` (memory, "
 "CPU, connections, slow consumers) and `/healthz` status."
 msgstr ""
+"**サーバーの健全性/リソース** (`varz.json`、`healthz.json`) — `/varz` (メモ"
+"リ、CPU、接続数、slow consumer) と `/healthz` の状態。"
 
 #: src\operations/broker-sizing.md:190
 msgid "**Log tails** (redacted) — backend and nats-server."
-msgstr ""
+msgstr "**ログの末尾** (秘匿情報は伏せ済み) — backend と nats-server。"
 
 #: src\operations/broker-sizing.md:192
 msgid "What to look for"
-msgstr ""
+msgstr "何を見るか"
 
 #: src\operations/broker-sizing.md:194
 msgid ""
@@ -3394,6 +3565,9 @@ msgid ""
 "healthz`, head-room on mem/cpu in `/varz` → the broker absorbed the event; "
 "**no splay needed**, just keep sizing ahead of N."
 msgstr ""
+"サンプルを通して consumer/接続数が**なめらか**で、`/healthz` が健全、`/varz` "
+"のメモリ/CPU に余裕がある → ブローカーはその事象を吸収できています。**スプレ"
+"イは不要**で、N に先回りしてサイジングを続けるだけです。"
 
 #: src\operations/broker-sizing.md:197
 msgid ""
@@ -3401,6 +3575,9 @@ msgid ""
 "JetStream API errors, or mem/cpu pegged → the herd is real → add the startup "
 "splay (lever 2) and/or grow the broker."
 msgstr ""
+"事象の時点で接続の滞留や consumer 作成の遅延が**とがっている**、JetStream "
+"API がエラーを返す、メモリ/CPU が張り付く → 群れは実在します → 起動スプレイ "
+"(打ち手2) を入れる、あるいはブローカーを増強します。"
 
 #: src\operations/broker-sizing.md:201
 msgid ""
@@ -3408,6 +3585,9 @@ msgid ""
 "`OBS_EVENTS` `agent_update` timeline (via the backend API), not by this job "
 "— that data is already queryable fleet-wide."
 msgstr ""
+"`#828` のダウングレード・フラッピングの回帰は、このジョブではなく "
+"`OBS_EVENTS` の `agent_update` タイムラインから (バックエンド API 経由で) 別"
+"途確認します。そのデータはすでにフリート全体に対して問い合わせ可能です。"
 
 #: src\developing/writing-agent-scripts.md:3
 msgid ""
@@ -3488,6 +3668,11 @@ msgid ""
 "stderr, the host's agent is too old — upgrade it (see [agent self-update](../"
 "operations/agent-mediated-updates/agent-self.md))."
 msgstr ""
+"0.42.0 より前のエージェントは `powershell -Command \"<body>\"` を使っており、"
+"これは本文をコマンドライン式として解析するため `[CmdletBinding()]` を構文エ"
+"ラーとして弾きます。stderr に「Unexpected token '\\[CmdletBinding()\\]'」が出"
+"ていたら、その端末のエージェントが古すぎます。更新してください ([エージェント"
+"の自己更新](../operations/agent-mediated-updates/agent-self.md) を参照)。"
 
 #: src\developing/writing-agent-scripts.md:37
 msgid "`$PSScriptRoot` is read-only for `run_as: user`"
@@ -3599,6 +3784,9 @@ msgid ""
 "in the user's desktop session (useful for GUI tools that need both elevation "
 "and an interactive window)."
 msgstr ""
+"`system_gui` は「PsExec の `-i -s`」パターンです。管理者権限を持ちつつ、ユー"
+"ザーのデスクトップセッションから見える形で動きます (昇格と対話ウィンドウの両"
+"方を必要とする GUI ツールに有用です)。"
 
 #: src\developing/writing-agent-scripts.md:75
 msgid "stdout vs Write-Host"
@@ -3625,6 +3813,14 @@ msgid ""
 "results.rs::upsert_inventory`), and your inventory fact is silently dropped "
 "(the backend logs `stdout was not JSON`)."
 msgstr ""
+"**インベントリスクリプトで進捗表示に `Write-Host` を使ってはいけません。** よ"
+"くある思い込みに反して、エージェントが stdout をリダイレクトしてスクリプトを"
+"実行すると `Write-Host` は別のホストストリームには留まらず、その出力は捕捉さ"
+"れた stdout に**混ざり込みます**。この余分なテキストが projector の単一 JSON "
+"塊としての解析 (`crates/kanade-backend/src/projector/"
+"results.rs::upsert_inventory` で stdout 全体に対する `serde_json::from_str`) "
+"を壊し、インベントリのファクトが黙って捨てられます (バックエンドは `stdout "
+"was not JSON` と記録します)。"
 
 #: src\developing/writing-agent-scripts.md:91
 msgid ""
@@ -3632,6 +3828,9 @@ msgid ""
 "stderr is captured into the result's separate `stderr` field, which the "
 "projector ignores, so stdout stays a single clean JSON line."
 msgstr ""
+"進捗表示は `[Console]::Error.WriteLine(...)` で **stderr** に送ってください。"
+"stderr は結果の別フィールド `stderr` に捕捉され、projector はそれを無視するの"
+"で、stdout はきれいな JSON 1行のままになります。"
 
 #: src\developing/writing-agent-scripts.md:95
 msgid ""
@@ -3642,6 +3841,12 @@ msgid ""
 "parsed)\n"
 "```"
 msgstr ""
+"```powershell\n"
+"[Console]::Error.WriteLine(\"Downloading...\")  # → stderr (記録されるが "
+"projector は無視)\n"
+"Write-Output ($obj | ConvertTo-Json)          # → stdout (解析される唯一の "
+"JSON 行)\n"
+"```"
 
 #: src\developing/writing-agent-scripts.md:100
 msgid ""
@@ -3650,6 +3855,10 @@ msgid ""
 "expected JSON will fail the inventory parse. See `configs/jobs/installers/"
 "scripts/install-kanade-client.ps1` for a worked example."
 msgstr ""
+"stdout はちょうど1つの `Write-Output` だけに保ってください。stdout に出る他の"
+"もの (紛れ込んだ `Write-Host` や `Write-Output`、cmdlet のパイプライン出力) "
+"が期待する JSON でなければ、インベントリの解析は失敗します。実例は `configs/"
+"jobs/installers/scripts/install-kanade-client.ps1` にあります。"
 
 #: src\developing/writing-agent-scripts.md:106
 msgid "UTF-8 by default"
@@ -3733,6 +3942,13 @@ msgid ""
 "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n"
 "```"
 msgstr ""
+"```powershell\n"
+"& git pull\n"
+"if ($LASTEXITCODE -ne 0) { throw \"git pull failed with exit code "
+"$LASTEXITCODE\" }\n"
+"# ネイティブの終了コードをそのまま伝播させたい場合は:\n"
+"if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n"
+"```"
 
 #: src\developing/writing-agent-scripts.md:148
 msgid ""
@@ -3781,6 +3997,9 @@ msgid ""
 "value and exit early. The agent has no way to send the script a graceful "
 "\"wrap up\" signal."
 msgstr ""
+"協調的なキャンセルが必要なら、番兵ファイルやレジストリ値をポーリングして早め"
+"に抜けてください。エージェントからスクリプトへ、穏当に「切り上げろ」と伝える"
+"手段はありません。"
 
 #: src\developing/writing-agent-scripts.md:169
 msgid "Killing a running job"
