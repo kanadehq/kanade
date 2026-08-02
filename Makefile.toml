@@ -239,6 +239,32 @@ args = ["run", "dev"]
 description = "Demo stack: mock backend (:8082) + Vite dev server (:5173) with a fake 248-PC fleet. Nothing else needs to be running — no NATS, no backend, no agent. Log in at http://localhost:5173 with ANY username/password. For screenshots, product demos and UI work away from real fleet data."
 run_task = { name = ["demo-api", "web-dev-demo"], parallel = true }
 
+[tasks.demo-client]
+description = "Demo the end-user Client App in a browser (:1421) — no Tauri, no agent, no NATS. The WebView's only outside contact is @tauri-apps/api invoke/listen, which KANADE_CLIENT_DEMO swaps for fixtures under demo/. See crates/kanade-client/web/demo/README.md."
+# Shell script rather than `cwd` + `command`, matching web-build/web-test:
+# the `cd` happens inside the script's own subshell, so it cannot poison
+# CARGO_MAKE_WORKING_DIRECTORY for anything running alongside (the trap
+# documented on `demo-api`). Installing first keeps the task self-
+# contained on a clean checkout — `vite: command not found` would
+# otherwise be the first thing a newcomer sees.
+env = { "KANADE_CLIENT_DEMO" = "1" }
+script_runner = "@shell"
+script = '''
+cd crates/kanade-client/web
+bun install --frozen-lockfile
+bun run dev'''
+
+[tasks.demo-client-app]
+description = "Demo the Client App in a REAL desktop window (Tauri, :1420) — what the browser demo can't show: no address bar, and genuine OS toasts. Windows only; needs `cargo install tauri-cli`. Registers kanade-client:// for the current user while it runs and removes it on exit. See crates/kanade-client/web/demo/README.md."
+# A PowerShell script rather than a cargo-make `script`, because this task
+# MUTATES THE MACHINE (an HKCU protocol registration, so the demo's own
+# toast doesn't activate an installed client) and has to undo that even
+# when the run ends on Ctrl-C. cargo-make's shell runner offers no
+# equivalent of try/finally, and `@duckscript` cannot spawn the long-lived
+# dev server this needs to wrap.
+cwd = "${CARGO_MAKE_WORKING_DIRECTORY}"
+command = "pwsh"
+args = ["-NoProfile", "-File", "scripts/demo-client-app.ps1"]
 [tasks.nats-dev]
 description = "Run an unauthenticated nats-server for dev (listens on :4223, JetStream store under target/dev-data/nats-jetstream). Coexists with the production KanadeNats service on :4222 — they use distinct ports + distinct JetStream stores, so dev exec/job/schedule registrations stay isolated from prod."
 cwd = "${CARGO_MAKE_WORKING_DIRECTORY}"

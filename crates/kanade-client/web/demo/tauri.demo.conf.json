@@ -1,0 +1,18 @@
+{
+  "identifier": "com.yukimemi.kanade-client-demo",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "端末管理支援ツール (デモ)",
+        "width": 880,
+        "height": 560,
+        "minWidth": 640,
+        "minHeight": 420,
+        "resizable": true,
+        "fullscreen": false,
+        "visible": true
+      }
+    ]
+  }
+}
