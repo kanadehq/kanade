@@ -83,6 +83,18 @@
       "unsetPlaceholder": "unset (runs nowhere)",
       "blankHint": "Leave blank and controller-tier jobs run nowhere (fail-safe) — the safe default so an external fetch never lands on an endpoint by accident."
     },
+    "agentInstall": {
+      "title": "Agent installer",
+      "description": "Connection settings baked into the installer ZIP served on the Agent Install page — used by fresh Windows PCs on first install.",
+      "natsUrl": "NATS URL",
+      "natsUrlPlaceholder": "blank = this backend's configured NATS URL",
+      "natsUrlHint": "Leave the URL blank and installers use the NATS URL this backend is configured with. Remote PCs need a broker address they can actually reach.",
+      "natsToken": "NATS token",
+      "natsTokenPlaceholder": "type a new token to replace the stored one",
+      "tokenSet": "A token is currently configured.",
+      "tokenNotSet": "No token configured — set one only when the broker requires it.",
+      "tokenHint": "The stored token is never displayed. Saving with the field blank keeps the current token."
+    },
     "mail": {
       "title": "Email (SMTP) settings",
       "description": "The outbound SMTP relay used for compliance-alert notifications and account setup links. Non-secret connection settings only.",

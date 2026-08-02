@@ -3,7 +3,7 @@ import { Navigate, Outlet, useLocation } from 'react-router-dom';
 import { Loader2 } from 'lucide-react';
 
 import { ErrorBoundary } from '@/components/ErrorBoundary';
-import { Sidebar } from '@/components/Sidebar';
+import { groups, Sidebar } from '@/components/Sidebar';
 import { useAuth } from '@/lib/auth';
 import { featureForPathname } from '@/lib/features';
 
@@ -13,7 +13,7 @@ import { featureForPathname } from '@/lib/features';
 /// current location stashed in `state.from` so the post-login
 /// navigation can drop them back where they were.
 export function ProtectedLayout() {
-  const { isAuthenticated, mustChangePw, canSee } = useAuth();
+  const { isAuthenticated, mustChangePw, canSee, isRestricted, hasRole } = useAuth();
   const location = useLocation();
 
   if (!isAuthenticated) {
@@ -27,14 +27,45 @@ export function ProtectedLayout() {
     return <Navigate to="/change-password" replace />;
   }
 
+  // A restricted account's home: the first sidebar entry (in sidebar order)
+  // its allow-list permits. Falls back to /change-password — reachable for
+  // every account — when the allow-list holds no page feature at all.
+  const firstAllowed = (() => {
+    for (const g of groups) {
+      for (const l of g.links) {
+        if (l.adminOnly && !hasRole('admin')) continue;
+        if (l.feature && canSee(l.feature)) return l.to;
+      }
+    }
+    return '/change-password';
+  })();
+
   // Per-account page visibility (#1008): a restricted account that types
-  // (or bookmarks) the URL of a page it isn't allowed gets bounced to the
-  // dashboard. Commons/baseline routes map to `null` and are always allowed;
-  // `canSee` is optimistic while identity loads so unrestricted users don't
-  // flash a redirect. The backend still 403s the underlying data regardless.
+  // (or bookmarks) the URL of a page it isn't allowed gets bounced to its
+  // home (the dashboard for unrestricted accounts — nothing changes there).
+  // `canSee`/`isRestricted` are optimistic while identity loads so
+  // unrestricted users don't flash a redirect. The backend still 403s the
+  // underlying data regardless.
   const feature = featureForPathname(location.pathname);
   if (feature && !canSee(feature)) {
-    return <Navigate to="/dashboard" replace />;
+    return <Navigate to={isRestricted ? firstAllowed : '/dashboard'} replace />;
+  }
+
+  // Commons routes (dashboard, agents, …) are open to unrestricted accounts
+  // only: the backend 403s restricted accounts on the commons APIs, so
+  // landing them there would render a page of errors. Send them to their
+  // first allowed page instead. /change-password and /account stay
+  // reachable — the mustChangePw trap above depends on the former, and the
+  // latter is the self-service MFA page whose endpoints (/api/auth/mfa/*)
+  // the backend allow-lists for restricted accounts too. (/login and
+  // /password-setup are public routes outside this layout.)
+  if (
+    !feature &&
+    isRestricted &&
+    location.pathname !== '/change-password' &&
+    location.pathname !== '/account'
+  ) {
+    return <Navigate to={firstAllowed} replace />;
   }
 
   return (

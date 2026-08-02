@@ -23,6 +23,7 @@
     "views": "Views",
     "notifications": "Notifications",
     "rollout": "Rollout",
+    "agentInstall": "Agent Install",
     "apps": "Apps",
     "remote": "Remote screen",
     "agentGroups": "Groups",

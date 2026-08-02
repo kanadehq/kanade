@@ -13,7 +13,10 @@
 //! ([`ServerSettings::redacted`]), so the document the SPA holds cannot be
 //! sent back intact — routing it through the PATCH merge would let a
 //! well-behaved "save the form" round-trip blank a live code. Set-and-forget
-//! endpoints make that structurally impossible.
+//! endpoints make that structurally impossible. The `agent_install`
+//! section's NATS token is the same shape of secret one nesting level down;
+//! it stays on the generic PUT but merges per-inner-key so an omitted token
+//! preserves the stored one (see `merge_agent_install`).
 //!
 //! A single KV singleton ([`BUCKET_SERVER_SETTINGS`] /
 //! [`KEY_SERVER_SETTINGS`]) holds the current [`ServerSettings`]. Unlike
@@ -34,9 +37,10 @@ use kanade_shared::config::MailSection;
 use kanade_shared::kv::{BUCKET_SERVER_SETTINGS, KEY_SERVER_SETTINGS};
 use kanade_shared::kv_cas;
 use kanade_shared::wire::{
-    MAX_AGENT_PRUNE_DAYS, MAX_CHECK_STATUS_STALE_DAYS, MAX_COLLECT_RETENTION_DAYS,
-    MAX_OBJECT_STORE_CAP_MIB, MAX_OBJECT_STORE_TOTAL_MIB, MAX_SESSION_TTL_HOURS,
-    MAX_SUPPORT_UNLOCK_TTL_MINUTES, ObjectStoreCaps, ServerSettings, SupportCode,
+    AgentInstallSection, MAX_AGENT_PRUNE_DAYS, MAX_CHECK_STATUS_STALE_DAYS,
+    MAX_COLLECT_RETENTION_DAYS, MAX_OBJECT_STORE_CAP_MIB, MAX_OBJECT_STORE_TOTAL_MIB,
+    MAX_SESSION_TTL_HOURS, MAX_SUPPORT_UNLOCK_TTL_MINUTES, ObjectStoreCaps, ServerSettings,
+    SupportCode,
 };
 use lettre::message::Mailbox;
 use serde_json::{Map, Value};
@@ -117,6 +121,12 @@ pub async fn defaults() -> Json<ServerSettings> {
 /// - `mail`: host non-empty, port in 1..=65535, `from` a parseable address
 ///   (the same parser `Mailer` uses at boot, so a bad address is caught here
 ///   instead of silently disabling email at the next restart).
+/// - `agent_install`: `nats_url` non-empty, no `'` / newline (TOML literal-
+///   string safety — the installer splices it into agent.toml); `nats_token`
+///   no newline (it lands in a PowerShell literal). Merged SPECIALLY (see
+///   [`merge_agent_install`]): an incoming section that omits `nats_token`
+///   keeps the stored one — the support-code trap, where a form round-trip
+///   of the redacted document would otherwise silently clear a live secret.
 pub async fn put(
     State(s): State<AppState>,
     caller: Caller,
@@ -240,6 +250,10 @@ pub async fn put(
             changed |= merge_field(obj, &incoming, "mail", mail_value.clone());
             caps_changed = merge_field(obj, &incoming, "object_store_caps", caps_value.clone());
             changed |= caps_changed;
+            // agent_install is NOT a generic merge_field: the section holds
+            // a write-only secret, so it merges per-inner-key and an omitted
+            // nats_token preserves the stored one (see merge_agent_install).
+            changed |= merge_agent_install(obj, &incoming);
             changed
         })
         .await
@@ -267,6 +281,7 @@ pub async fn put(
         session_ttl_hours = ?merged.session_ttl_hours,
         controller_group = ?merged.controller_group,
         mail_configured = merged.mail.is_some(),
+        agent_install_configured = merged.agent_install.is_some(),
         "server_settings merged",
     );
     // Apply a collect-retention change to the live `collections` Object Store
@@ -322,27 +337,36 @@ pub async fn put(
         Some(KEY_SERVER_SETTINGS),
         Some(&caller),
         // Audit the whole stored document (raw, so it stays complete even
-        // for keys this build doesn't model) minus the support-code hashes.
-        // The SMTP password is never in the document; the hashes are, and an
-        // audit trail is a long-lived, widely-readable copy — exactly what a
-        // secret must not be duplicated into.
-        redact_support_hashes(doc),
+        // for keys this build doesn't model) minus the secrets (support-code
+        // hashes, the installer NATS token). The SMTP password is never in
+        // the document; the hashes and token are, and an audit trail is a
+        // long-lived, widely-readable copy — exactly what a secret must not
+        // be duplicated into.
+        redact_secrets(doc),
     )
     .await;
     Ok(Json(merged.redacted()))
 }
 
-/// Blank every `support_codes[].hash` in a raw settings document, leaving
-/// the rest byte-identical. Used on the audit copy, which is raw JSON (so
-/// unknown keys survive) rather than the typed view [`ServerSettings::redacted`]
-/// operates on.
-fn redact_support_hashes(mut doc: Value) -> Value {
+/// Blank every secret in a raw settings document, leaving the rest
+/// byte-identical: the support-code hashes and `agent_install.nats_token`.
+/// Used on the audit copy, which is raw JSON (so unknown keys survive)
+/// rather than the typed view [`ServerSettings::redacted`] operates on.
+fn redact_secrets(mut doc: Value) -> Value {
     if let Some(codes) = doc.get_mut("support_codes").and_then(Value::as_array_mut) {
         for c in codes {
             if let Some(obj) = c.as_object_mut() {
                 obj.remove("hash");
             }
         }
+    }
+    // The installer token is a live broker credential, and the audit trail
+    // is a long-lived, widely-readable copy — exactly what a secret must not
+    // be duplicated into. Keep the same presence indicator redacted()
+    // computes for responses, so the audit still records "a token was set".
+    if let Some(ai) = doc.get_mut("agent_install").and_then(Value::as_object_mut) {
+        let had_token = ai.remove("nats_token").is_some_and(|v| v.is_string());
+        ai.insert("nats_token_set".to_string(), Value::Bool(had_token));
     }
     doc
 }
@@ -377,6 +401,62 @@ fn merge_field(
         }
         None => obj.remove(key).is_some(),
     }
+}
+
+/// Merge the `agent_install` section per INNER key — the one section a
+/// whole-value replace would corrupt. Its `nats_token` is write-only
+/// (responses redact it to `nats_token_set`), so the document the SPA holds
+/// can never contain it: a generic "present key → replace" merge would then
+/// blank the stored token on every unrelated url edit — the support-code
+/// trap, one layer down.
+///
+/// Rules: section absent from the request → untouched; section `null` →
+/// whole section unset; otherwise start from the STORED section and apply
+/// each incoming inner key (`null` → clear that key, value → set it), so an
+/// omitted `nats_token` keeps the stored one and only an explicit
+/// `nats_token: "..."` / `null` rotates / clears it. `nats_token_set` is
+/// computed by `redacted()` on the way out — it is never stored, and never
+/// accepted from the client (also enforced by `skip_deserializing`).
+fn merge_agent_install(obj: &mut Map<String, Value>, incoming: &Map<String, Value>) -> bool {
+    let Some(inc) = incoming.get("agent_install") else {
+        return false;
+    };
+    if inc.is_null() {
+        return obj.remove("agent_install").is_some();
+    }
+    let Some(inc_obj) = inc.as_object() else {
+        // validate() runs on the typed decode before this, so a non-object,
+        // non-null section is already a 422 and never reaches the merge.
+        return false;
+    };
+    let mut merged = match obj.get("agent_install").and_then(Value::as_object) {
+        Some(o) => o.clone(),
+        None => Map::new(),
+    };
+    for (k, v) in inc_obj {
+        if k == "nats_token_set" {
+            continue;
+        }
+        if v.is_null() {
+            merged.remove(k);
+        } else {
+            merged.insert(k.clone(), v.clone());
+        }
+    }
+    // A stored indicator (hand-written KV, or written before the key was
+    // skip-stored) never survives a merge either.
+    merged.remove("nats_token_set");
+    if merged.is_empty() {
+        // All keys cleared → drop the section, so an emptied section reads
+        // back as unset (None) rather than a present-but-empty object.
+        return obj.remove("agent_install").is_some();
+    }
+    let new_val = Value::Object(merged);
+    if obj.get("agent_install") == Some(&new_val) {
+        return false;
+    }
+    obj.insert("agent_install".to_string(), new_val);
+    true
 }
 
 /// Reject a body whose known fields are out of range. Runs on the decoded
@@ -466,6 +546,39 @@ fn validate(s: &ServerSettings) -> Result<(), (StatusCode, String)> {
     }
     if let Some(c) = s.object_store_caps.as_ref() {
         validate_object_store_caps(c)?;
+    }
+    if let Some(ai) = s.agent_install.as_ref() {
+        validate_agent_install(ai)?;
+    }
+    Ok(())
+}
+
+/// The installer splices these values into a TOML literal string
+/// (`agent.toml`) and a PowerShell single-quoted literal
+/// (`install-agent.ps1`) — formats with no escape hatch for quote/newline.
+/// Enforce the same rules the installer applies at generation time, here at
+/// the write boundary, so a bad value is rejected when typed rather than
+/// breaking (or worse, injecting into) every downloaded ZIP. 400 (not 422
+/// like the range checks above) to match the installer's own rejection of
+/// the same bytes.
+fn validate_agent_install(ai: &AgentInstallSection) -> Result<(), (StatusCode, String)> {
+    if let Some(url) = ai.nats_url.as_deref()
+        && (url.is_empty() || url.contains('\'') || url.contains('\n') || url.contains('\r'))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "agent_install.nats_url must be non-empty and contain no single quote or newline \
+             (TOML literal-string safety)"
+                .into(),
+        ));
+    }
+    if let Some(token) = ai.nats_token.as_deref()
+        && (token.contains('\n') || token.contains('\r'))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "agent_install.nats_token must not contain a newline".into(),
+        ));
     }
     Ok(())
 }
@@ -855,8 +968,8 @@ mod tests {
 
     use super::{
         MAX_OBJECT_STORE_CAP_MIB, MIN_SUPPORT_CODE_LEN, ObjectStoreCaps, ServerSettings,
-        SupportCodeBody, hash_support_code, merge_field, normalize, redact_support_hashes,
-        validate, validate_support_code,
+        SupportCodeBody, hash_support_code, merge_agent_install, merge_field, normalize,
+        redact_secrets, validate, validate_support_code,
     };
 
     fn obj(v: Value) -> Map<String, Value> {
@@ -929,7 +1042,7 @@ mod tests {
                 {"scope":"admin","hash":"$argon2id$other"},
             ],
         });
-        let redacted = redact_support_hashes(doc);
+        let redacted = redact_secrets(doc);
         let text = redacted.to_string();
         assert!(!text.contains("argon2"), "audit leaked a hash: {text}");
         // Everything else survives, including the unrelated key.
@@ -939,15 +1052,38 @@ mod tests {
     }
 
     #[test]
+    fn audit_copy_carries_no_install_token() {
+        // Same rule for agent_install.nats_token: it is a live broker
+        // credential, so the audit copy keeps only the presence indicator.
+        let doc = json!({
+            "agent_install": {"nats_url":"nats://b:4222","nats_token":"s3cret"},
+        });
+        let redacted = redact_secrets(doc);
+        let text = redacted.to_string();
+        assert!(!text.contains("s3cret"), "audit leaked the token: {text}");
+        assert_eq!(redacted["agent_install"]["nats_url"], "nats://b:4222");
+        assert_eq!(redacted["agent_install"]["nats_token_set"], true);
+
+        // No token configured → indicator false.
+        let doc = json!({ "agent_install": {"nats_url":"nats://b:4222"} });
+        let redacted = redact_secrets(doc);
+        assert_eq!(redacted["agent_install"]["nats_token_set"], false);
+    }
+
+    #[test]
     fn audit_redaction_tolerates_a_missing_or_odd_field() {
         // Documents written before the feature (no key) and hand-corrupted
         // ones (wrong type) must pass through rather than panic.
         assert_eq!(
-            redact_support_hashes(json!({"agent_prune_days": 7}))["agent_prune_days"],
+            redact_secrets(json!({"agent_prune_days": 7}))["agent_prune_days"],
             7
         );
         assert_eq!(
-            redact_support_hashes(json!({"support_codes": "nonsense"}))["support_codes"],
+            redact_secrets(json!({"support_codes": "nonsense"}))["support_codes"],
+            "nonsense"
+        );
+        assert_eq!(
+            redact_secrets(json!({"agent_install": "nonsense"}))["agent_install"],
             "nonsense"
         );
     }
@@ -1205,5 +1341,97 @@ mod tests {
         assert_eq!(m.from, "kanade-noreply@example.com");
         // A whitespace-only username becomes None (unauthenticated relay).
         assert_eq!(m.username, None);
+    }
+
+    #[test]
+    fn agent_install_merge_preserves_the_stored_token_across_a_url_edit() {
+        // THE trap this merge exists for: the SPA round-trips the redacted
+        // document, which can never contain the token. A url-only save must
+        // not blank the stored secret.
+        let mut stored =
+            obj(json!({ "agent_install": {"nats_url":"nats://old:4222","nats_token":"s3cret"} }));
+        let incoming = obj(json!({ "agent_install": {"nats_url":"nats://new:4222"} }));
+        assert!(merge_agent_install(&mut stored, &incoming));
+        assert_eq!(
+            stored["agent_install"],
+            json!({"nats_url":"nats://new:4222","nats_token":"s3cret"}),
+        );
+
+        // Re-saving the identical section is a no-op (no revision bump).
+        assert!(!merge_agent_install(&mut stored, &incoming));
+    }
+
+    #[test]
+    fn agent_install_merge_sets_and_clears_the_token_only_explicitly() {
+        let mut stored =
+            obj(json!({ "agent_install": {"nats_url":"nats://b:4222","nats_token":"old"} }));
+        // Explicit string → rotate.
+        let incoming = obj(json!({ "agent_install": {"nats_token":"new"} }));
+        assert!(merge_agent_install(&mut stored, &incoming));
+        assert_eq!(stored["agent_install"]["nats_token"], "new");
+        assert_eq!(stored["agent_install"]["nats_url"], "nats://b:4222");
+        // Explicit null → clear (and ONLY the token).
+        let incoming = obj(json!({ "agent_install": {"nats_token": null} }));
+        assert!(merge_agent_install(&mut stored, &incoming));
+        assert!(stored["agent_install"].get("nats_token").is_none());
+        assert_eq!(stored["agent_install"]["nats_url"], "nats://b:4222");
+        // Section absent from the request → untouched.
+        assert!(!merge_agent_install(&mut stored, &obj(json!({}))));
+        assert_eq!(stored["agent_install"]["nats_url"], "nats://b:4222");
+        // Section null → whole section unset.
+        let incoming = obj(json!({ "agent_install": null }));
+        assert!(merge_agent_install(&mut stored, &incoming));
+        assert!(stored.get("agent_install").is_none());
+    }
+
+    #[test]
+    fn agent_install_merge_never_stores_the_indicator() {
+        // nats_token_set is computed by redacted() on the way out; a client
+        // (or a hand-written KV doc) must never get it INTO the store.
+        let mut stored =
+            obj(json!({ "agent_install": {"nats_url":"nats://b:4222","nats_token_set":true} }));
+        let incoming =
+            obj(json!({ "agent_install": {"nats_url":"nats://b:4222","nats_token_set":true} }));
+        assert!(merge_agent_install(&mut stored, &incoming));
+        assert!(stored["agent_install"].get("nats_token_set").is_none());
+    }
+
+    #[test]
+    fn agent_install_merge_drops_a_fully_cleared_section() {
+        // Clearing the last key removes the section entirely, so it reads
+        // back as unset (None) rather than a present-but-empty object.
+        let mut stored = obj(json!({ "agent_install": {"nats_url":"nats://b:4222"} }));
+        let incoming = obj(json!({ "agent_install": {"nats_url": null} }));
+        assert!(merge_agent_install(&mut stored, &incoming));
+        assert!(stored.get("agent_install").is_none());
+    }
+
+    #[test]
+    fn validate_rejects_injectable_agent_install_values() {
+        use kanade_shared::wire::AgentInstallSection;
+        let ok = |nats_url: Option<&str>, nats_token: Option<&str>| ServerSettings {
+            agent_install: Some(AgentInstallSection {
+                nats_url: nats_url.map(str::to_string),
+                nats_token: nats_token.map(str::to_string),
+                nats_token_set: false,
+            }),
+            ..Default::default()
+        };
+        assert!(validate(&ok(Some("nats://broker.corp:4222"), Some("tok"))).is_ok());
+        assert!(validate(&ok(None, None)).is_ok());
+        // TOML literal-string injection / corruption vectors.
+        for bad in ["", "nats://evil'\nx='y'", "nats://a\nb", "nats://a\rb"] {
+            assert!(
+                validate(&ok(Some(bad), None)).is_err(),
+                "nats_url {bad:?} must be rejected"
+            );
+        }
+        // PowerShell line-structure breakers in the token.
+        for bad in ["a\nb", "a\rb"] {
+            assert!(
+                validate(&ok(None, Some(bad))).is_err(),
+                "nats_token {bad:?} must be rejected"
+            );
+        }
     }
 }

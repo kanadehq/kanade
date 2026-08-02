@@ -1,6 +1,7 @@
 pub mod accounts;
 pub mod agent_config;
 pub mod agent_groups;
+pub mod agent_installer;
 pub mod agent_logs;
 pub mod agent_meta;
 pub mod agent_releases;
@@ -133,6 +134,12 @@ pub struct AppState {
     /// links in account emails. `None` ⇒ the link base is derived from the
     /// request `Host` header instead (see `password_setup::link_base`).
     pub public_url: Option<String>,
+    /// This backend's own configured `[nats] url`. `GET
+    /// /api/agents/installer` writes it into the bundled `agent.toml` when
+    /// the operator hasn't configured `agent_install.nats_url` in server
+    /// settings — a fresh agent should dial the same broker the backend
+    /// does by default.
+    pub nats_url: String,
     /// #1191: in-memory rate limiting + lockout for the public login route.
     pub login_throttle: std::sync::Arc<crate::login_throttle::LoginThrottle>,
 }
@@ -412,6 +419,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/notifications", get(notifications::list_sent))
         .route("/api/agents/{pc_id}/logs", get(agent_logs::tail))
         .route("/api/agents/releases", get(agent_releases::list_releases))
+        // Self-service installer download (viewer+ base router; the real
+        // restriction is the `agent-install` page feature, so a restricted
+        // "download user" can fetch it without holding Rollout). GET, no
+        // body: the ZIP always bundles the latest release, and the NATS
+        // coordinates come from server settings, not the caller.
+        .route("/api/agents/installer", get(agent_installer::installer))
         .route("/api/app-packages", get(app_packages::list_packages))
         .route(
             "/api/app-packages/{name}/{version}",
@@ -585,8 +598,10 @@ pub fn router(state: AppState) -> Router {
         // Per-account PAGE enforcement (horizontal axis), layered over the
         // whole API. Runs after `auth::verify` (added in `main`, so it has
         // injected `Claims`) and after routing (so `MatchedPath` is set,
-        // which `feature_for_path` keys off). Unrestricted callers and
-        // commons routes pass straight through — see `auth::require_features`.
+        // which `feature_for_path` keys off). Unrestricted callers pass
+        // straight through; restricted ones get only their allow-listed
+        // features plus a small infrastructure set — see
+        // `auth::require_features`.
         .layer(axum::middleware::from_fn(crate::auth::require_features))
         // Everything else (`/`, `/assets/...`, hash-router paths) is served
         // from the rust-embed bundle. The fallback runs after the API routes
@@ -597,10 +612,10 @@ pub fn router(state: AppState) -> Router {
 /// Map a matched route pattern (`MatchedPath`, e.g. `/api/agents/{pc_id}`)
 /// to the page **feature** that owns it, for per-account page enforcement
 /// (`auth::require_features`). `None` = **commons**: a route open to any
-/// authenticated caller regardless of their allow-list — the public /
-/// self-service routes, the Dashboard landing feeds, and the shared fleet
-/// substrate (roster, per-PC detail/perf) that the Dashboard itself surfaces
-/// to everyone.
+/// *unrestricted* caller — the public / self-service routes, the Dashboard
+/// landing feeds, and the shared fleet substrate. For a *restricted*
+/// account (a non-NULL allow-list) commons routes are closed except the
+/// small infrastructure allow-list in `auth::RESTRICTED_COMMONS`.
 ///
 /// This is the single, auditable route→feature table. Commons-by-default is
 /// deliberate (most endpoints are shared substrate); a NEW page-specific
@@ -702,6 +717,13 @@ pub fn feature_for_path(path: &str) -> Option<Feature> {
         | "/api/agents/releases/{version}"
         | "/api/agents/rollout"
         | "/api/agents/publish" => Feature::Rollout,
+
+        // --- Agent install (self-service installer download) ---
+        //
+        // Its own feature, NOT Rollout: the whole point is a restricted
+        // "download user" (viewer + only this feature) that can fetch the
+        // installer ZIP without also holding release publish/rollout.
+        "/api/agents/installer" => Feature::AgentInstall,
 
         // --- Apps (app packages + script objects) ---
         "/api/app-packages"
@@ -852,6 +874,13 @@ mod feature_map_tests {
             Some(Feature::Settings)
         );
         assert_eq!(feature_for_path("/api/query"), Some(Feature::Accounts));
+        // The installer download gates on its OWN feature — the whole point
+        // of the split is a "download user" holding agent-install WITHOUT
+        // Rollout (release publish / rollout stay operator territory).
+        assert_eq!(
+            feature_for_path("/api/agents/installer"),
+            Some(Feature::AgentInstall)
+        );
         // #1032: group-def routes gate with the Groups page (its SPA
         // management page lives alongside the membership page).
         assert_eq!(feature_for_path("/api/group-defs"), Some(Feature::Groups));

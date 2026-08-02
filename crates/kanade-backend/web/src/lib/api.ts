@@ -94,10 +94,20 @@ export async function apiFetchText(path: string, init: RequestInit = {}): Promis
  * JSON — `apiFetch`'s `res.text()` would corrupt binary bytes. Used by
  * the Collect page's download button.
  */
-export async function apiFetchBlob(path: string, init: RequestInit = {}): Promise<Blob> {
+export async function apiFetchBlob(
+  path: string,
+  init: RequestInit = {},
+  onResponse?: (res: Response) => void,
+): Promise<Blob> {
   const headers = new Headers(init.headers ?? {});
   for (const [k, v] of Object.entries(authHeaders())) headers.set(k, v as string);
   if (!headers.has('X-Kanade-Source')) headers.set('X-Kanade-Source', 'spa');
+  // Same JSON defaulting as apiFetchRaw — POSTing a string body without
+  // it would hit the backend as unlabelled octets. (FormData stays
+  // untouched for the same #218 reason.)
+  if (init.body && !headers.has('Content-Type') && !(init.body instanceof FormData)) {
+    headers.set('Content-Type', 'application/json');
+  }
 
   const res = await fetch(path, { ...init, headers });
   if (res.status === 401) {
@@ -113,6 +123,9 @@ export async function apiFetchBlob(path: string, init: RequestInit = {}): Promis
     const body = await res.text().catch(() => '');
     throw new ApiError(res.status, res.statusText, body);
   }
+  // Lets the caller read response headers (e.g. Content-Disposition for
+  // the download filename) — the Blob alone doesn't carry them.
+  onResponse?.(res);
   return res.blob();
 }
 

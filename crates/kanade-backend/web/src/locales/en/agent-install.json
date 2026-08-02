@@ -1,0 +1,25 @@
+{
+  "title": "Agent Install",
+  "intro": "Install the kanade agent on this PC.",
+  "instructions": {
+    "title": "How to install",
+    "description": "Set up this PC with the kanade agent in three steps.",
+    "steps": {
+      "one": "Download the installer ZIP below.",
+      "two": "Extract the ZIP on this PC.",
+      "three": "Right-click <code>install.cmd</code> and choose <strong>Run as administrator</strong>."
+    },
+    "autoNote": "Everything is preconfigured by the server: the connection settings and — when command signing is enabled — the signing public key are already baked into the ZIP. Service registration and failure-recovery settings happen automatically during the install.",
+    "windowsNote": "Windows only."
+  },
+  "download": {
+    "title": "Download installer",
+    "description": "The ZIP contains <code>kanade-agent.exe</code>, a pre-filled <code>agent.toml</code>, and the install scripts (<code>install.cmd</code> / <code>install-agent.ps1</code>). Always the latest agent release.",
+    "downloadButton": "Download installer ZIP"
+  },
+  "signing": {
+    "errorTitle": "Failed to load command-signing status",
+    "enabled": "This backend signs commands (kid <code>{{kid}}</code>, fingerprint <code>{{fingerprint}}</code>) — the public key is embedded into the ZIP automatically.",
+    "disabled": "This backend is not signing commands, so the ZIP will not provision command keys."
+  }
+}

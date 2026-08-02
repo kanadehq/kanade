@@ -83,6 +83,18 @@
       "unsetPlaceholder": "未設定 (どこでも実行しない)",
       "blankHint": "空欄にすると controller ティアのジョブはどこでも実行されません (フェイルセーフ)。 外部フェッチが誤って端末に乗らないようにするための既定の安全側です。"
     },
+    "agentInstall": {
+      "title": "エージェントインストーラ",
+      "description": "「エージェント導入」ページで配布するインストーラ ZIP に組み込む接続設定です。 新規 Windows PC の初回インストールで使われます。",
+      "natsUrl": "NATS URL",
+      "natsUrlPlaceholder": "空欄 = このバックエンドに設定された NATS URL",
+      "natsUrlHint": "URL を空欄にすると、 このバックエンドに設定された NATS URL が使われます。 リモート PC からは到達可能なブローカーのアドレスが必要です。",
+      "natsToken": "NATS トークン",
+      "natsTokenPlaceholder": "新しいトークンを入力すると差し替わります",
+      "tokenSet": "トークンは設定済みです。",
+      "tokenNotSet": "トークンは未設定です。 ブローカーが要求する場合のみ設定してください。",
+      "tokenHint": "保存済みのトークンは表示されません。 空欄のまま保存すると現在のトークンが保持されます。"
+    },
     "mail": {
       "title": "メール (SMTP) 設定",
       "description": "コンプライアンス警告の通知やアカウント設定リンクの送信に使う SMTP リレー。 秘密情報を含まない接続設定のみです。",

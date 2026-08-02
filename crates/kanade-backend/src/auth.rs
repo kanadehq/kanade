@@ -488,47 +488,85 @@ pub async fn require_admin(req: Request, next: Next) -> Result<Response, Respons
 ///
 ///   * caller unrestricted (`allowed_features == None`, or no identity /
 ///     service token) → allow;
-///   * the matched route is **commons** (`feature_for_path` → `None`:
-///     login, self-service, the Dashboard landing feeds, shared substrate)
-///     → allow;
-///   * otherwise allow iff the caller's allow-list intersects the route's
-///     feature(s); else `403`.
+///   * the matched route is in [`RESTRICTED_COMMONS`] (the small
+///     infrastructure set a restricted account still needs: version,
+///     command-signing, auth self-service) → allow;
+///   * the matched route is **feature-gated** (`feature_for_path` →
+///     `Some`) → allow iff the caller's allow-list holds the feature;
+///   * otherwise (a **commons** route, `feature_for_path` → `None`) →
+///     `403` for a restricted account.
 ///
-/// Commons-by-default (an unmapped route is open to any authenticated
-/// caller) is deliberate: most endpoints are shared substrate, and the
-/// sensitive per-page data lives behind the mapped routes. A NEW topical
-/// endpoint must be added to `feature_for_path` to be gated.
+/// Commons-by-default now applies ONLY to unrestricted accounts. It used to
+/// cover restricted ones too ("most endpoints are shared substrate"), but
+/// that made a page restriction porous: the restricted "download user"
+/// (viewer + only the `agent-install` feature) could read the whole fleet
+/// roster, dashboard feeds and every other unmapped endpoint. A NEW topical
+/// endpoint must still be added to `feature_for_path` to be gated for
+/// unrestricted callers' restricted colleagues — and is otherwise closed to
+/// restricted accounts by default, which is the safe direction.
+///
+/// Requests with no `MatchedPath` (the SPA static fallback) pass for
+/// everyone — they serve the app shell itself, not data.
 pub async fn require_features(req: Request, next: Next) -> Result<Response, Response> {
     // Decide entirely within a borrow of `req.extensions()` and yield only
-    // owned data (`Feature::as_str` is `&'static str`), so no borrow — and no
-    // clone of the allow-list — outlives the block. Then `req` is free to move
-    // into `next.run`.
-    let denied: Option<&'static str> = {
+    // owned data, so no borrow — and no clone of the allow-list — outlives
+    // the block. Then `req` is free to move into `next.run`.
+    let denied: Option<String> = {
         let ext = req.extensions();
-        match ext
-            .get::<Claims>()
-            .and_then(|c| c.allowed_features.as_ref())
-        {
-            // No authenticated identity (public route) or an unrestricted
-            // caller (service token / NULL allow-list) → nothing to enforce.
-            None => None,
-            Some(allowed) => match ext
-                .get::<MatchedPath>()
-                .and_then(|m| crate::api::feature_for_path(m.as_str()))
-            {
-                // Commons route, or the caller is permitted this page.
-                None => None,
-                Some(feature) if allowed.contains(&feature) => None,
-                Some(feature) => Some(feature.as_str()),
-            },
-        }
+        feature_denial(
+            ext.get::<Claims>()
+                .and_then(|c| c.allowed_features.as_deref()),
+            ext.get::<MatchedPath>().map(|m| m.as_str()),
+        )
     };
 
     match denied {
         None => Ok(next.run(req).await),
-        Some(want) => Err(forbidden(&format!(
-            "account not permitted to access this page (requires {want})"
-        ))),
+        Some(msg) => Err(forbidden(&msg)),
+    }
+}
+
+/// Matched-route patterns a **restricted** account may still hit even
+/// though they map to commons: the infrastructure every logged-in session
+/// needs. Kept deliberately tiny — everything else commons carries fleet
+/// data, which is exactly what a page restriction is supposed to withhold.
+const RESTRICTED_COMMONS: [&str; 7] = [
+    // Backend build version (the SPA shows it on every page).
+    "/api/version",
+    // Public-key info only; the AgentInstall page reads it to show whether
+    // the installer will embed a signing keyring.
+    "/api/command-signing",
+    // Self-service identity / credential routes. The must_change_pw trap
+    // (login → forced change-password) must keep working for a restricted
+    // account, and `me` is how the SPA learns the allow-list itself.
+    "/api/auth/me",
+    "/api/auth/change-password",
+    "/api/auth/mfa/init",
+    "/api/auth/mfa/verify",
+    "/api/auth/mfa/disable",
+];
+
+/// The `require_features` decision, pure for testability: `Some(message)`
+/// to deny with a 403, `None` to allow. `allowed` is the caller's DB
+/// allow-list (`None` = unrestricted / no identity / service token);
+/// `matched_path` is the axum `MatchedPath` pattern (`None` = the SPA
+/// static fallback, which serves no data and always passes).
+fn feature_denial(allowed: Option<&[Feature]>, matched_path: Option<&str>) -> Option<String> {
+    let allowed = allowed?;
+    let path = matched_path?;
+    if RESTRICTED_COMMONS.contains(&path) {
+        return None;
+    }
+    match crate::api::feature_for_path(path) {
+        Some(feature) if allowed.contains(&feature) => None,
+        Some(feature) => Some(format!(
+            "account not permitted to access this page (requires {})",
+            feature.as_str()
+        )),
+        // Commons route, restricted caller: closed since the
+        // agent-install split — commons-by-default only ever made sense
+        // for unrestricted accounts.
+        None => Some("account not permitted to access this route".to_string()),
     }
 }
 
@@ -829,5 +867,65 @@ mod tests {
             allowed_features: None,
         };
         assert_eq!(none.role(), Role::Viewer);
+    }
+
+    #[test]
+    fn restricted_accounts_lose_commons_except_infrastructure() {
+        let download_user = [Feature::AgentInstall];
+        let restricted = Some(&download_user[..]);
+
+        // Commons data routes are now CLOSED to a restricted account — the
+        // porousness this change removes (a "download user" reading the
+        // whole fleet roster would make the page restriction cosmetic).
+        assert!(feature_denial(restricted, Some("/api/agents")).is_some());
+        assert!(feature_denial(restricted, Some("/api/perf/fleet")).is_some());
+        assert!(feature_denial(restricted, Some("/api/config/defaults")).is_some());
+        // An unknown / future path is commons, hence also closed.
+        assert!(feature_denial(restricted, Some("/api/something-new")).is_some());
+
+        // …but the hardcoded infrastructure set stays open, or the SPA
+        // session itself (and the must_change_pw trap) stops working.
+        for path in [
+            "/api/version",
+            "/api/command-signing",
+            "/api/auth/me",
+            "/api/auth/change-password",
+            "/api/auth/mfa/init",
+            "/api/auth/mfa/verify",
+            "/api/auth/mfa/disable",
+        ] {
+            assert_eq!(feature_denial(restricted, Some(path)), None, "{path}");
+        }
+    }
+
+    #[test]
+    fn restricted_accounts_keep_only_their_features() {
+        let download_user = [Feature::AgentInstall];
+        let restricted = Some(&download_user[..]);
+        // The one page they hold…
+        assert_eq!(
+            feature_denial(restricted, Some("/api/agents/installer")),
+            None
+        );
+        // …and nothing else gated.
+        let denied = feature_denial(restricted, Some("/api/audit")).expect("denied");
+        assert!(denied.contains("audit"), "{denied}");
+        assert!(feature_denial(restricted, Some("/api/agents/releases")).is_some());
+        // Even an empty allow-list is a REAL restriction (commons-only,
+        // minus infrastructure) — not unrestricted.
+        assert!(feature_denial(Some(&[]), Some("/api/agents")).is_some());
+        assert_eq!(feature_denial(Some(&[]), Some("/api/auth/me")), None);
+    }
+
+    #[test]
+    fn unrestricted_callers_pass_commons_and_gated_alike() {
+        // No allow-list (NULL in the DB, service token, no identity) → the
+        // pre-change behaviour for everyone.
+        assert_eq!(feature_denial(None, Some("/api/agents")), None);
+        assert_eq!(feature_denial(None, Some("/api/audit")), None);
+        assert_eq!(feature_denial(None, Some("/api/auth/me")), None);
+        // The SPA static fallback has no MatchedPath and serves no data —
+        // it passes for restricted accounts too, or they can't load the app.
+        assert_eq!(feature_denial(Some(&[]), None), None);
     }
 }

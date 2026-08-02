@@ -23,6 +23,7 @@
     "views": "ビュー",
     "notifications": "通知",
     "rollout": "ロールアウト",
+    "agentInstall": "エージェント導入",
     "apps": "アプリ配信",
     "remote": "リモート画面",
     "agentGroups": "グループ",
