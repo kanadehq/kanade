@@ -8,8 +8,9 @@
 .DESCRIPTION
   Counterpart to deploy-nats.ps1. Stops the Windows service,
   unregisters it from SCM, removes the installed binary, and
-  removes the broker (4222) + monitoring (8222) firewall rules
-  the deploy script opened.
+  removes the broker (4222) firewall rule the deploy script opened,
+  plus the legacy monitoring (8222) rule on hosts old enough to have
+  one.
 
   ⚠️⚠️  -Purge removes the JetStream data directory
   (%ProgramData%\Kanade\nats\jetstream\). That holds **every KV
@@ -129,15 +130,24 @@ if (Test-Path $exeDst) {
 
 # --- Firewall ----------------------------------------------------------------
 if (-not $KeepFirewall) {
-    # deploy-nats.ps1 creates "KanadeNats (broker TCP 4222)" and
-    # "KanadeNats (monitoring TCP 8222)". Wildcard the suffix so
-    # both go in one sweep.
+    # deploy-nats.ps1 creates "KanadeNats (broker TCP 4222)"; hosts
+    # deployed before the monitoring port was closed also carry
+    # "KanadeNats (monitoring TCP 8222)" (deploy-nats.ps1 now removes
+    # that one on re-run). Wildcard the suffix so both go in one sweep
+    # either way.
     $pattern = "$ServiceName (*)"
     $rules = Get-NetFirewallRule -DisplayName $pattern -ErrorAction SilentlyContinue
     if ($rules) {
         foreach ($r in $rules) {
             Write-Host "Removing firewall rule '$($r.DisplayName)'"
-            Remove-NetFirewallRule -DisplayName $r.DisplayName -ErrorAction SilentlyContinue
+            # Same reasoning as the cleanup in deploy/nats.ps1: report what
+            # is true. Suppressing the error here would leave an operator
+            # believing an undeploy closed a port it did not.
+            Remove-NetFirewallRule -DisplayName $r.DisplayName -ErrorAction Continue
+        }
+        $left = Get-NetFirewallRule -DisplayName $pattern -ErrorAction SilentlyContinue
+        if ($left) {
+            Write-Warning "Firewall rules still present after removal: $(($left | ForEach-Object DisplayName) -join ', '). A rule pushed by Group Policy cannot be removed locally: drop it in the policy."
         }
     } else {
         Write-Host "No firewall rules matching '$pattern' found, skipping"

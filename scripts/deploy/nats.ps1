@@ -18,9 +18,30 @@
   `build-release.ps1 -Roles nats` to fetch it from
   https://github.com/nats-io/nats-server/releases.
 
-  Firewall: opens TCP 4222 (broker) and 8222 (monitoring HTTP) by
-  default. Pass -NoFirewall when an external firewall (corporate /
-  WAF / cloud security group) is the source of truth.
+  Firewall: opens TCP 4222 (broker) by default, and REMOVES the
+  monitoring rule this script used to create for 8222. Pass
+  -NoFirewall when an external firewall (corporate / WAF / cloud
+  security group) is the source of truth.
+
+  Why 8222 is no longer opened: the NATS monitoring endpoint has no
+  authentication of its own, and whoever reaches it can enumerate
+  every connection, its IP and its subscriptions (/connz), plus the
+  server and JetStream state (/varz, /jsz). Nothing in kanade reads it
+  remotely -- the backend's own poller and the collect-broker-health
+  job both use http://127.0.0.1:8222 -- so the inbound rule granted
+  access to strangers and to nobody else. deploy/linux/README.md has
+  said to keep 8222 private since the Linux deploy landed; this brings
+  the Windows path in line.
+
+  NOTE the rule is not the whole story. A program-scoped allow rule
+  (the kind Windows offers to create the first time a binary listens)
+  admits traffic to EVERY port nats-server listens on, regardless of
+  the port rules here. What actually closes monitoring is the bind in
+  nats-server.conf -- `http: "127.0.0.1:8222"` rather than the bare
+  `http_port: 8222`, which listens on all interfaces. Applying that to
+  an installed host needs -ForceConfig, and -ForceConfig without
+  -NatsToken installs the repo's placeholder token, which locks the
+  fleet out: pass both.
 
   Agent-mediated update mode (#234): like deploy-backend.ps1, this
   script has a second mode for upgrading the broker through the fleet
@@ -37,7 +58,7 @@
 
   CAVEAT unique to NATS: the agent reaches the broker OVER the broker,
   so stopping nats-server for the swap drops the agent's own connection
-  mid-job. This is safe — not lossy: the agent's outbox queues results
+  mid-job. This is safe -- not lossy: the agent's outbox queues results
   during the outage and drains them on reconnect once the upgraded
   broker is back up. The job result is therefore "delayed, not lost".
   Expect the `install-kanade-nats` exec result to land a few seconds
@@ -80,7 +101,10 @@
 .EXAMPLE
   PS> .\deploy-nats.ps1 -NatsToken '<your-fleet-token>'
 .EXAMPLE
-  PS> .\deploy-nats.ps1 -ForceConfig
+  PS> .\deploy-nats.ps1 -ForceConfig -NatsToken '<your-fleet-token>'
+  # -ForceConfig overwrites the installed nats-server.conf with the one
+  # in this repo, whose token is the PLACEHOLDER. Pair it with
+  # -NatsToken or the broker comes back up rejecting the whole fleet.
 .EXAMPLE
   PS> .\deploy-nats.ps1 -NoFirewall
 .EXAMPLE
@@ -129,11 +153,11 @@ the shipped sample's commented-out auth block).
 
 $ErrorActionPreference = 'Stop'
 
-# === Agent-mode knobs (#234 — mirror of deploy-backend.ps1) ================
+# === Agent-mode knobs (#234 -- mirror of deploy-backend.ps1) ================
 # When this script is uploaded to OBJECT_SCRIPTS via
 # `kanade script publish deploy-nats <v> <edited-copy>` and a manifest
 # references it through `execute.script_object`, PowerShell runs the body
-# with NO CLI args — the `param()` block takes defaults, so
+# with NO CLI args -- the `param()` block takes defaults, so
 # `$SourceDir = $PSScriptRoot` ends up `$null` and the folder-install path
 # fails fast.
 #
@@ -146,7 +170,7 @@ $ErrorActionPreference = 'Stop'
 # bootstrap.
 #
 # `Get-FileHash <nats-server.exe> -Algorithm SHA256` for the Sha256 value
-# — a mismatch aborts BEFORE the swap, so a MITM / corrupted upload leaves
+# -- a mismatch aborts BEFORE the swap, so a MITM / corrupted upload leaves
 # the running broker intact.
 #
 # Unlike deploy-backend.ps1 there is no boot-sentinel quarantine / arm-for-
@@ -187,7 +211,7 @@ if ($AgentSourceUrl) {
         throw 'deploy-nats (agent mode): $AgentSourceVersion must be set alongside $AgentSourceUrl.'
     }
     if (-not $AgentSourceSha256) {
-        throw 'deploy-nats (agent mode): $AgentSourceSha256 must be set — leaving it blank would silently install whatever the backend serves.'
+        throw 'deploy-nats (agent mode): $AgentSourceSha256 must be set -- leaving it blank would silently install whatever the backend serves.'
     }
 
     $tmpRoot = [System.IO.Path]::GetTempPath()
@@ -201,7 +225,7 @@ if ($AgentSourceUrl) {
     # of restarting; -Priority Foreground runs at interactive speed during
     # the deploy window. Bearer auth via -CustomHeaders (BITS on PS 5.1+).
     # On any throw (HTTP error, BITS stopped, sha mismatch below) the trap
-    # above clears $AgentStaging before re-throwing — no leaked tmp dir.
+    # above clears $AgentStaging before re-throwing -- no leaked tmp dir.
     $bitsHeaders = @()
     if ($AgentSourceAuthToken) {
         $bitsHeaders += "Authorization: Bearer $($AgentSourceAuthToken.Trim())"
@@ -224,13 +248,13 @@ if ($AgentSourceUrl) {
     $expected = $AgentSourceSha256.ToLowerInvariant()
     if ($actual -ne $expected) {
         Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $AgentStaging
-        throw "deploy-nats (agent mode): sha256 mismatch — expected=$expected actual=$actual. Refusing to install (possible MITM / corrupted upload)."
+        throw "deploy-nats (agent mode): sha256 mismatch -- expected=$expected actual=$actual. Refusing to install (possible MITM / corrupted upload)."
     }
     Write-Host "deploy-nats (agent mode): sha256 verified"
 
     # nats-server.conf: reuse the one already installed (the operator's
     # production config, with their token edits). Agent-mode is an upgrade
-    # path, not a fresh install — error fast if it's absent rather than
+    # path, not a fresh install -- error fast if it's absent rather than
     # reaching for a default sample that would clobber the live token.
     #
     # This path is spelled out literally rather than via $configDst because
@@ -243,7 +267,7 @@ if ($AgentSourceUrl) {
         Write-Host "deploy-nats (agent mode): reusing existing nats-server.conf from $existingConfig"
     } else {
         Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $AgentStaging
-        throw "deploy-nats (agent mode): no existing nats-server.conf at $existingConfig — agent-mode is an upgrade path, not a fresh install. Run with -SourceDir <folder> manually for the initial install."
+        throw "deploy-nats (agent mode): no existing nats-server.conf at $existingConfig -- agent-mode is an upgrade path, not a fresh install. Run with -SourceDir <folder> manually for the initial install."
     }
 
     # The install vars below ($exeSrc / $configSrc) are computed from
@@ -333,7 +357,7 @@ if ($NatsToken) {
 # ever run in.
 #
 # SIDs (instead of "SYSTEM" / "Administrators" names) are used to
-# stay locale-agnostic — non-EN Windows installs translate the
+# stay locale-agnostic -- non-EN Windows installs translate the
 # display names, but SID literals always resolve correctly:
 #   *S-1-5-18         = NT AUTHORITY\SYSTEM
 #   *S-1-5-32-544     = BUILTIN\Administrators
@@ -359,7 +383,7 @@ if (-not $svc) {
     Set-Service -Name $ServiceName -StartupType Automatic
 }
 
-# Failure recovery — restart on any non-clean-stop exit.
+# Failure recovery -- restart on any non-clean-stop exit.
 #
 #   actions= restart/5000/restart/15000/restart/60000
 #     1st failure: wait 5s; 2nd: 15s; 3rd: 60s.
@@ -375,8 +399,7 @@ if ($LASTEXITCODE -ne 0) { throw "sc.exe failureflag failed (exit $LASTEXITCODE)
 
 if (-not $NoFirewall) {
     foreach ($entry in @(
-        @{ Port = 4222; Label = 'broker'     },
-        @{ Port = 8222; Label = 'monitoring' }
+        @{ Port = 4222; Label = 'broker' }
     )) {
         $ruleName = "$ServiceName ($($entry.Label) TCP $($entry.Port))"
         $existing = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
@@ -394,6 +417,34 @@ if (-not $NoFirewall) {
             Write-Host "Created firewall rule '$ruleName'."
         }
     }
+    # Converge, don't just stop creating it. Every host deployed before
+    # this change carries the monitoring rule, and operators re-run the
+    # deploy script -- they do not undeploy -- so dropping it from the list
+    # above would leave the rule in place forever on exactly the hosts
+    # that already have it.
+    $staleName = "$ServiceName (monitoring TCP 8222)"
+    if (Get-NetFirewallRule -DisplayName $staleName -ErrorAction SilentlyContinue) {
+        # Report what is true, not what was attempted. `-ErrorAction
+        # SilentlyContinue` on the removal would swallow the failure and the
+        # next line would claim a port was closed that is still open -- the
+        # one outcome a hardening step must never produce. `Continue` (not
+        # `Stop`, and not the script-wide 'Stop' preference set above)
+        # because this block runs BEFORE Start-Service: aborting here would
+        # leave the broker down over a cleanup step, trading an open
+        # monitoring port for a fleet-wide outage.
+        Remove-NetFirewallRule -DisplayName $staleName -ErrorAction Continue
+        if (Get-NetFirewallRule -DisplayName $staleName -ErrorAction SilentlyContinue) {
+            Write-Warning "Firewall rule '$staleName' is STILL PRESENT after an attempted removal -- the monitoring port may remain reachable from the network. A rule pushed by Group Policy cannot be removed locally: drop it in the policy. Either way the loopback bind in nats-server.conf is what actually closes the port (see .DESCRIPTION)."
+        } else {
+            Write-Host "Removed firewall rule '$staleName' (monitoring is loopback-only; see .DESCRIPTION)."
+        }
+    }
+    # Not detectable cheaply from here, and worth saying out loud rather
+    # than leaving an operator to conclude monitoring is closed when a
+    # program-scoped rule is still admitting it.
+    # Backtick, not backslash: `\"` is not an escape in PowerShell, so the
+    # backslash renders literally and the quote terminates the string.
+    Write-Host "NOTE: a program-scoped allow rule for nats-server.exe (created by the Windows first-run prompt) admits every port it listens on, whatever the rules above say. Closing monitoring for real means 'http: `"127.0.0.1:8222`"' in nats-server.conf; check with: netsh advfirewall firewall show rule name=all dir=in | Select-String nats"
 } else {
     Write-Host "Firewall: -NoFirewall set; skipping rules."
 }
