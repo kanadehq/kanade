@@ -3,7 +3,7 @@
   "intro": "Upload + manage the two generic Object Store buckets: <code>app_packages</code> (binaries) and <code>scripts</code> (manifest script bodies).",
   "appPackages": {
     "title": "App packages",
-    "description": "From <code>/api/app-packages</code> (#207). Operator-curated installers / binaries keyed by <code>&lt;name&gt;/&lt;version&gt;</code>. The kanade-client app + third-party installers (Webex, Teams, custom MSIs) live here. 256 MB body limit.",
+    "description": "From <code>/api/app-packages</code>. Operator-curated installers / binaries keyed by <code>&lt;name&gt;/&lt;version&gt;</code>. The kanade-client app + third-party installers (Webex, Teams, custom MSIs) live here. 256 MB body limit.",
     "upload": {
       "nameLabel": "name",
       "namePlaceholder": "e.g. kanade-client",
@@ -37,7 +37,7 @@
   },
   "scriptObjects": {
     "title": "Script objects",
-    "description": "From <code>/api/script-objects</code> (#211). Manifest script bodies referenced by <code>execute.script_object</code> — agents fetch + sha-verify at exec time (#214). 4 MB body limit, since these are PowerShell / shell bodies, not installer payloads.",
+    "description": "From <code>/api/script-objects</code>. Manifest script bodies referenced by <code>execute.script_object</code> — agents fetch + sha-verify at exec time. 4 MB body limit, since these are PowerShell / shell bodies, not installer payloads.",
     "upload": {
       "nameLabel": "name",
       "namePlaceholder": "e.g. inventory-os",

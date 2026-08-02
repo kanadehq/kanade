@@ -29,7 +29,7 @@
     },
     "payload": "payload (キー = 値)",
     "dedupe": "重複を畳む",
-    "forensicNote": "logon_type は collect-winlog-logons-all のデータと #378 以前の行 (Winlogon ソース移行前) にのみ存在します。そこでの重複は UAC スプリットトークンのペアです。",
+    "forensicNote": "logon_type は collect-winlog-logons-all のデータと、Winlogon ソース移行前の古い行にのみ存在します。そこでの重複は UAC スプリットトークンのペアです。",
     "since": "期間",
     "limit": "件数",
     "placeholders": {
