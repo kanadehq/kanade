@@ -5,8 +5,10 @@
 //! `web/src/components/Sidebar.tsx`). An account's `allowed_features`
 //! column (`users.allowed_features`, JSON array of these string keys) is
 //! an **allow-list**: `NULL` means "unrestricted — every page", any array
-//! restricts the account to exactly those pages (plus the always-open
-//! commons: the login/self-service routes and the Dashboard landing feed).
+//! restricts the account to exactly those pages — commons routes
+//! (`feature_for_path` → `None`) are then closed too, except a small
+//! hardcoded infrastructure allow-list (version, command-signing, auth
+//! self-service) in backend `auth::require_features`.
 //!
 //! Backend and SPA share these string keys so a page can't be gated on one
 //! side without the other agreeing on its name. The keys match the SPA
@@ -42,6 +44,14 @@ pub enum Feature {
     Views,
     Notifications,
     Rollout,
+    /// Self-service agent-installer download (`GET /api/agents/installer`).
+    /// Exists so a restricted "download user" (viewer + ONLY this feature)
+    /// can fetch the installer ZIP without holding Rollout (release
+    /// publish/delete/rollout stay operator territory). The key carries a
+    /// hyphen to match the SPA route (`/agent-install`), so it can't ride
+    /// the enum's blanket `lowercase` rename.
+    #[serde(rename = "agent-install")]
+    AgentInstall,
     Apps,
     Groups,
     Config,
@@ -78,6 +88,7 @@ impl Feature {
             Feature::Views => "views",
             Feature::Notifications => "notifications",
             Feature::Rollout => "rollout",
+            Feature::AgentInstall => "agent-install",
             Feature::Apps => "apps",
             Feature::Groups => "groups",
             Feature::Config => "config",
@@ -110,6 +121,7 @@ impl Feature {
             "views" => Feature::Views,
             "notifications" => Feature::Notifications,
             "rollout" => Feature::Rollout,
+            "agent-install" => Feature::AgentInstall,
             "apps" => Feature::Apps,
             "groups" => Feature::Groups,
             "config" => Feature::Config,
@@ -144,7 +156,7 @@ impl Feature {
     /// Every feature, in catalog order. Drives the SPA's account editor
     /// checkbox list and lets the backend validate a submitted allow-list
     /// against the full known set.
-    pub const ALL: [Feature; 24] = [
+    pub const ALL: [Feature; 25] = [
         Feature::Dashboard,
         Feature::Run,
         Feature::Exec,
@@ -162,6 +174,7 @@ impl Feature {
         Feature::Views,
         Feature::Notifications,
         Feature::Rollout,
+        Feature::AgentInstall,
         Feature::Apps,
         Feature::Groups,
         Feature::Config,
@@ -189,7 +202,7 @@ mod tests {
         // validation + the SPA editor; assert the count matches the array
         // length so adding a variant without updating ALL fails to compile
         // (length mismatch) or fails here.
-        assert_eq!(Feature::ALL.len(), 24);
+        assert_eq!(Feature::ALL.len(), 25);
         // No duplicate keys.
         let mut keys: Vec<&str> = Feature::ALL.iter().map(|f| f.as_str()).collect();
         keys.sort_unstable();
@@ -207,6 +220,19 @@ mod tests {
             serde_json::from_str::<Feature>("\"jetstream\"").unwrap(),
             Feature::Jetstream
         );
+        // The one key that ISN'T the variant name lowercased: it matches
+        // the SPA route `/agent-install`, hyphen included.
+        assert_eq!(
+            serde_json::to_string(&Feature::AgentInstall).unwrap(),
+            "\"agent-install\""
+        );
+        assert_eq!(
+            serde_json::from_str::<Feature>("\"agent-install\"").unwrap(),
+            Feature::AgentInstall
+        );
+        // The blanket lowercase form must NOT parse — the stored/SPA key
+        // is the hyphenated one only.
+        assert_eq!(Feature::parse("agentinstall"), None);
     }
 
     #[test]

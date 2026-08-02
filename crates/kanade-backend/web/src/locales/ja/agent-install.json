@@ -1,29 +1,20 @@
 {
   "title": "エージェント導入",
-  "intro": "新規の Windows PC 向けに、そのまま実行できるインストーラ ZIP をダウンロードします。",
+  "intro": "この PC に kanade エージェントをインストールします。",
   "instructions": {
     "title": "インストール手順",
-    "description": "3 つの手順で新しい PC に kanade エージェントを導入できます。",
+    "description": "3 つの手順でこの PC に kanade エージェントを導入できます。",
     "steps": {
-      "one": "下のオプションを選んで、インストーラ ZIP をダウンロードします。",
-      "two": "ZIP を対象の PC にコピーして展開します。",
+      "one": "下のボタンからインストーラ ZIP をダウンロードします。",
+      "two": "ダウンロードした ZIP をこの PC で展開します。",
       "three": "<code>install.cmd</code> を右クリックし、 <strong>管理者として実行</strong> を選びます。"
     },
-    "autoNote": "サービスの登録と障害時の回復設定は自動で行われます。コマンド署名が有効な場合は、バックエンドの署名公開鍵も自動で埋め込まれます。",
-    "windowsNote": "Windows 専用です。",
-    "breakGlassNote": "ブレークグラスキーは ZIP には含まれないため、従来どおり別途配布してください。"
+    "autoNote": "接続設定と、 コマンド署名が有効な場合は署名公開鍵が、 あらかじめサーバー側で ZIP に組み込まれています。 サービスの登録と障害時の回復設定もインストール時に自動で行われます。",
+    "windowsNote": "Windows 専用です。"
   },
   "download": {
     "title": "インストーラのダウンロード",
-    "description": "ZIP には <code>kanade-agent.exe</code>、設定済みの <code>agent.toml</code>、インストールスクリプト (<code>install.cmd</code> / <code>install-agent.ps1</code>) が含まれます。",
-    "versionLabel": "エージェントのバージョン",
-    "errorTitle": "リリース一覧の取得に失敗しました",
-    "noReleases": "エージェントのリリースがまだ公開されていません。先に <code>kanade agent publish</code> (またはロールアウト画面) で公開してください。",
-    "natsUrlLabel": "NATS URL (任意)",
-    "natsUrlPlaceholder": "空欄 = このバックエンドに設定された NATS URL",
-    "natsUrlHint": "空欄のままにすると、このバックエンドに設定された NATS URL が使われます。リモート PC からは到達可能なブローカーのアドレスが必要です。",
-    "natsTokenLabel": "NATS トークン (任意)",
-    "natsTokenPlaceholder": "ブローカーがトークンを要求する場合のみ入力",
+    "description": "ZIP には <code>kanade-agent.exe</code>、設定済みの <code>agent.toml</code>、インストールスクリプト (<code>install.cmd</code> / <code>install-agent.ps1</code>) が含まれます。 常に最新のエージェントリリースが使われます。",
     "downloadButton": "インストーラ ZIP をダウンロード"
   },
   "signing": {

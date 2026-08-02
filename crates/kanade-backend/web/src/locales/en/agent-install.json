@@ -1,29 +1,20 @@
 {
   "title": "Agent Install",
-  "intro": "Download a ready-to-run installer ZIP for fresh Windows PCs.",
+  "intro": "Install the kanade agent on this PC.",
   "instructions": {
     "title": "How to install",
-    "description": "Provision a new PC with the kanade agent in three steps.",
+    "description": "Set up this PC with the kanade agent in three steps.",
     "steps": {
-      "one": "Choose the options below and download the installer ZIP.",
-      "two": "Copy the ZIP to the target PC and extract it.",
+      "one": "Download the installer ZIP below.",
+      "two": "Extract the ZIP on this PC.",
       "three": "Right-click <code>install.cmd</code> and choose <strong>Run as administrator</strong>."
     },
-    "autoNote": "Service registration and failure-recovery settings are provisioned automatically — and when command signing is enabled, the backend's command-signing public key is embedded too.",
-    "windowsNote": "Windows only.",
-    "breakGlassNote": "Break-glass keys are not part of the ZIP and must still be distributed separately."
+    "autoNote": "Everything is preconfigured by the server: the connection settings and — when command signing is enabled — the signing public key are already baked into the ZIP. Service registration and failure-recovery settings happen automatically during the install.",
+    "windowsNote": "Windows only."
   },
   "download": {
     "title": "Download installer",
-    "description": "The ZIP contains <code>kanade-agent.exe</code>, a pre-filled <code>agent.toml</code>, and the install scripts (<code>install.cmd</code> / <code>install-agent.ps1</code>).",
-    "versionLabel": "Agent version",
-    "errorTitle": "Failed to load releases",
-    "noReleases": "No agent release has been published yet. Publish one first with <code>kanade agent publish</code> (or the Rollout page).",
-    "natsUrlLabel": "NATS URL (optional)",
-    "natsUrlPlaceholder": "Empty = this backend's configured NATS URL",
-    "natsUrlHint": "Left empty, the ZIP uses the NATS URL this backend is configured with. Remote PCs need a broker address they can actually reach.",
-    "natsTokenLabel": "NATS token (optional)",
-    "natsTokenPlaceholder": "Only when the broker requires a token",
+    "description": "The ZIP contains <code>kanade-agent.exe</code>, a pre-filled <code>agent.toml</code>, and the install scripts (<code>install.cmd</code> / <code>install-agent.ps1</code>). Always the latest agent release.",
     "downloadButton": "Download installer ZIP"
   },
   "signing": {

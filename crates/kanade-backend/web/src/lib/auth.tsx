@@ -54,6 +54,13 @@ type AuthContextValue = {
    *  gates the data), `true` for unrestricted accounts, else membership in
    *  the allow-list. Drives sidebar/route filtering; enforcement is backend. */
   canSee: (feature: Feature) => boolean;
+  /** True once identity is loaded AND the account carries an allow-list
+   *  (`allowed_features` is an array). Restricted accounts are 403'd by the
+   *  backend on the commons APIs too, so the SPA hides the featureless
+   *  (commons) sidebar entries and redirects commons routes to the account's
+   *  first allowed page. False while identity loads — same optimism as
+   *  `canSee`, so unrestricted users never flash a redirect. */
+  isRestricted: boolean;
 };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -159,6 +166,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (!Array.isArray(me.allowed_features)) return true;
         return me.allowed_features.includes(feature);
       },
+      isRestricted: me != null && Array.isArray(me.allowed_features),
     }),
     [token, me, setToken, logout, refresh],
   );

@@ -257,6 +257,29 @@ impl SupportCode {
     }
 }
 
+/// Self-service agent-installer knobs (`GET /api/agents/installer`) —
+/// what the generated ZIP bakes in for a fresh PC. Kept server-side so the
+/// restricted "download user" (viewer + the `agent-install` feature only)
+/// never chooses — and never sees — these values.
+// PartialEq/Eq beyond the minimal derive list: `ServerSettings` derives
+// them, so every section must too.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentInstallSection {
+    /// NATS URL baked into the installer's agent.toml. None → the backend's
+    /// own configured `[nats] url`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nats_url: Option<String>,
+    /// NATS token baked into install-agent.ps1. WRITE-ONLY: redacted from
+    /// every GET response (GET /api/server-settings is viewer+).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nats_token: Option<String>,
+    /// Read-only indicator computed by redacted() so the SPA can show
+    /// "configured" without ever seeing the value. Never accepted from PUT.
+    #[serde(skip_deserializing)]
+    pub nats_token_set: bool,
+}
+
 /// Value stored in the `server_settings` KV bucket under the single key
 /// [`crate::kv::KEY_SERVER_SETTINGS`]. Operator-editable, backend-side
 /// server configuration that isn't per-agent (so it doesn't belong in
@@ -322,6 +345,16 @@ pub struct ServerSettings {
     /// discussion.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mail: Option<MailSection>,
+
+    /// Self-service agent-installer knobs — see [`AgentInstallSection`].
+    /// `None` (unset) ⇒ the installer falls back to this backend's own
+    /// `[nats] url` and embeds no token. The `nats_token` inside is
+    /// write-only: [`ServerSettings::redacted`] strips it from every
+    /// response and the PUT merge preserves a stored token across a
+    /// url-only edit (the same support-code trap: a form round-trip must
+    /// never silently clear a secret).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_install: Option<AgentInstallSection>,
 
     /// Retention window (days) for collected file bundles — the `collect:`
     /// job archives uploaded to the `collections` Object Store (#219).
@@ -420,6 +453,7 @@ impl ServerSettings {
             agent_prune_days: None,
             controller_group: None,
             mail: None,
+            agent_install: None,
             collect_retention_days: Some(DEFAULT_COLLECT_RETENTION_DAYS),
             session_ttl_hours: Some(DEFAULT_SESSION_TTL_HOURS),
             check_status_stale_days: Some(DEFAULT_CHECK_STATUS_STALE_DAYS),
@@ -468,10 +502,19 @@ impl ServerSettings {
     /// leaves the backend, not even to an operator-authenticated caller.
     /// (`GET /api/server-settings` is viewer+, so an unredacted document
     /// would hand every read-only account an offline-crackable hash.)
+    ///
+    /// Same treatment for `agent_install.nats_token`: it is a live broker
+    /// credential baked into installer ZIPs, so it never leaves the backend
+    /// either — the response carries only `nats_token_set` (computed HERE,
+    /// never accepted from a client) so the SPA can render "configured".
     #[must_use]
     pub fn redacted(mut self) -> Self {
         for c in &mut self.support_codes {
             c.hash.clear();
+        }
+        if let Some(ai) = self.agent_install.as_mut() {
+            ai.nats_token_set = ai.nats_token.is_some();
+            ai.nats_token = None;
         }
         self
     }
@@ -1029,5 +1072,91 @@ mod tests {
                 .unwrap()
                 .contains("object_store_caps")
         );
+    }
+
+    #[test]
+    fn agent_install_defaults_to_unset_and_omits_when_unset() {
+        assert_eq!(ServerSettings::default().agent_install, None);
+        assert_eq!(ServerSettings::defaults().agent_install, None);
+        // A doc written before this field existed decodes to `None` — the
+        // installer then falls back to the backend's own [nats] url, the
+        // pre-feature behaviour.
+        let s: ServerSettings = serde_json::from_str(r#"{"agent_prune_days":7}"#).unwrap();
+        assert_eq!(s.agent_install, None);
+        assert!(
+            !serde_json::to_string(&ServerSettings::default())
+                .unwrap()
+                .contains("agent_install")
+        );
+    }
+
+    #[test]
+    fn agent_install_round_trips() {
+        let s = ServerSettings {
+            agent_install: Some(AgentInstallSection {
+                nats_url: Some("nats://broker.corp:4222".into()),
+                nats_token: Some("s3cret".into()),
+                nats_token_set: false,
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert_eq!(
+            json,
+            r#"{"agent_install":{"nats_url":"nats://broker.corp:4222","nats_token":"s3cret","nats_token_set":false}}"#
+        );
+        assert_eq!(serde_json::from_str::<ServerSettings>(&json).unwrap(), s);
+    }
+
+    #[test]
+    fn agent_install_token_set_is_never_accepted_from_the_wire() {
+        // `skip_deserializing`: a client sending nats_token_set gets it
+        // dropped, so the indicator can only ever come from redacted()
+        // looking at the real stored token — never from a claim.
+        let s: ServerSettings = serde_json::from_str(
+            r#"{"agent_install":{"nats_url":"nats://b:4222","nats_token_set":true}}"#,
+        )
+        .unwrap();
+        let ai = s.agent_install.unwrap();
+        assert!(!ai.nats_token_set);
+        assert_eq!(ai.nats_url.as_deref(), Some("nats://b:4222"));
+    }
+
+    #[test]
+    fn redacted_strips_the_install_token_but_reports_its_presence() {
+        // GET /api/server-settings is viewer+, so the stored NATS token must
+        // never survive redacted() — not even to an operator. The boolean is
+        // all the SPA gets to render "configured".
+        let with_token = ServerSettings {
+            agent_install: Some(AgentInstallSection {
+                nats_url: Some("nats://broker.corp:4222".into()),
+                nats_token: Some("s3cret".into()),
+                nats_token_set: false,
+            }),
+            ..Default::default()
+        };
+        let redacted = with_token.redacted();
+        let ai = redacted.agent_install.as_ref().unwrap();
+        assert_eq!(ai.nats_token, None, "token must not survive redacted()");
+        assert!(ai.nats_token_set);
+        // The URL is not a secret — it stays.
+        assert_eq!(ai.nats_url.as_deref(), Some("nats://broker.corp:4222"));
+        // And on the wire the token key is gone entirely (not null).
+        let json = serde_json::to_string(&redacted).unwrap();
+        assert!(!json.contains("s3cret"), "wire leaked the token: {json}");
+        assert!(!json.contains("nats_token\""), "wire: {json}");
+        assert!(json.contains(r#""nats_token_set":true"#), "wire: {json}");
+
+        // No token configured → indicator false, nothing to strip.
+        let sans_token = ServerSettings {
+            agent_install: Some(AgentInstallSection {
+                nats_url: Some("nats://broker.corp:4222".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .redacted();
+        let ai = sans_token.agent_install.as_ref().unwrap();
+        assert!(!ai.nats_token_set);
     }
 }

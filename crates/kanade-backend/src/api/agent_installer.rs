@@ -1,35 +1,36 @@
-//! `POST /api/agents/installer` — generate an agent installer ZIP on the fly.
+//! `GET /api/agents/installer` — generate an agent installer ZIP on the fly.
 //!
-//! The ZIP kits a fresh Windows PC end to end: extract, right-click
-//! `install.cmd` → *Run as administrator*, done. Contents:
+//! Self-service: the route sits in the viewer+ base router, gated by the
+//! `agent-install` page feature, so a restricted "download user" account
+//! (viewer + ONLY that feature) can kit a fresh Windows PC: extract,
+//! right-click `install.cmd` → *Run as administrator*, done. There is no
+//! request body and no version parameter — the caller never chooses
+//! anything. The ZIP always bundles the latest release (by Object Store
+//! `modified`), and the NATS url/token it bakes in come from the
+//! `agent_install` section of the server-settings document (falling back
+//! to this backend's own `[nats] url`, no token). Contents:
 //!
-//!   * `kanade-agent.exe` — the bytes of one release from the
-//!     `agent_releases` Object Store (explicit `version`, or the latest by
-//!     `modified` when omitted).
+//!   * `kanade-agent.exe` — the bytes of the latest release from the
+//!     `agent_releases` Object Store.
 //!   * `agent.toml` — the repo's `configs/agent.toml` with the single
-//!     `nats_url` line rewritten to the requested (or this backend's own)
-//!     NATS URL.
+//!     `nats_url` line rewritten to the settings (or backend) NATS URL.
 //!   * `deploy-agent.ps1` — the canonical `scripts/deploy/agent.ps1`,
 //!     verbatim. All install logic lives there; this module only wraps it.
 //!   * `install-agent.ps1` — a generated wrapper that invokes
-//!     `deploy-agent.ps1` with the operator's `-NatsToken` and, when this
+//!     `deploy-agent.ps1` with the configured `-NatsToken` and, when this
 //!     backend signs commands, a `-CommandKeys` ring holding the backend's
 //!     own PUBLIC key (never a break-glass key — those are distributed
 //!     separately, by hand).
 //!   * `install.cmd` — a generated CRLF bootstrap for double-click
 //!     installs (PowerShell with a bypass policy, pause-on-failure).
 //!   * `README.txt` — the two-step instructions.
-//!
-//! POST rather than GET because the request can carry a NATS token, and
-//! query strings end up in trace logs — a body does not.
 
-use axum::Json;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use kanade_shared::kv::OBJECT_AGENT_RELEASES;
-use serde::Deserialize;
+use kanade_shared::wire::ServerSettings;
 use tokio::io::AsyncReadExt;
 use tracing::{info, warn};
 
@@ -51,26 +52,9 @@ const DEPLOY_AGENT_PS1: &str = include_str!("../../../../scripts/deploy/agent.ps
 /// time instead of silently shipping an unrewritten loopback config.
 const NATS_URL_LINE: &str = "nats_url = 'nats://127.0.0.1:4222'";
 
-#[derive(Deserialize, Debug, Default)]
-pub struct InstallerRequest {
-    /// Which agent release to bundle. Default: the latest by Object Store
-    /// `modified` timestamp.
-    #[serde(default)]
-    pub version: Option<String>,
-    /// Written into the bundled `agent.toml`. Default: this backend's own
-    /// configured `[nats] url`.
-    #[serde(default)]
-    pub nats_url: Option<String>,
-    /// Baked into the generated install script as `-NatsToken`. Omitted
-    /// from the script when not provided.
-    #[serde(default)]
-    pub nats_token: Option<String>,
-}
-
 pub async fn installer(
     State(state): State<AppState>,
     caller: Caller,
-    Json(body): Json<InstallerRequest>,
 ) -> Result<Response, (StatusCode, String)> {
     let store = state
         .jetstream
@@ -86,60 +70,44 @@ pub async fn installer(
             )
         })?;
 
-    // Resolve which release to bundle: explicit version (fail-fast 404,
-    // same check `rollout` does) or the latest by `modified` (mirrors
-    // `agent_releases::list_releases` ordering).
-    let version = match body.version.as_deref() {
-        Some(v) => {
-            if store.info(v).await.is_err() {
+    // Always the latest release by `modified` (mirrors
+    // `agent_releases::list_releases` ordering) — a self-service download
+    // offers no version choice.
+    let version = {
+        let mut metas =
+            crate::projector::object_meta::list_bucket(&state.pool, OBJECT_AGENT_RELEASES)
+                .await
+                .map_err(|e| {
+                    warn!(error = %e, "object_store_meta list agent_releases");
+                    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+                })?;
+        metas.sort_by(|a, b| b.modified.cmp(&a.modified));
+        match metas.into_iter().next() {
+            Some(m) => m.key,
+            None => {
                 return Err((
                     StatusCode::NOT_FOUND,
                     format!(
-                        "version '{v}' not found in {OBJECT_AGENT_RELEASES} — run `kanade agent publish` first"
+                        "no agent releases in {OBJECT_AGENT_RELEASES} — run `kanade agent publish` first"
                     ),
                 ));
-            }
-            v.to_string()
-        }
-        None => {
-            let mut metas =
-                crate::projector::object_meta::list_bucket(&state.pool, OBJECT_AGENT_RELEASES)
-                    .await
-                    .map_err(|e| {
-                        warn!(error = %e, "object_store_meta list agent_releases");
-                        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-                    })?;
-            metas.sort_by(|a, b| b.modified.cmp(&a.modified));
-            match metas.into_iter().next() {
-                Some(m) => m.key,
-                None => {
-                    return Err((
-                        StatusCode::NOT_FOUND,
-                        format!(
-                            "no agent releases in {OBJECT_AGENT_RELEASES} — run `kanade agent publish` first"
-                        ),
-                    ));
-                }
             }
         }
     };
     check_version(&version)?;
 
-    let nats_url = body.nats_url.unwrap_or_else(|| state.nats_url.clone());
+    // The NATS coordinates baked into the ZIP come from the
+    // server-settings document, NOT from the caller — a self-service
+    // download user must never choose (or see) them.
+    let settings = super::server_settings::load(&state).await.map_err(|e| {
+        warn!(error = %format!("{e:#}"), "read server_settings for installer");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("read server_settings: {e:#}"),
+        )
+    })?;
+    let (nats_url, nats_token) = resolve_nats(&settings, &state.nats_url)?;
     let agent_toml = render_agent_toml(&nats_url)?;
-
-    // The token lands in a PowerShell single-quoted literal inside the
-    // generated script. `ps_quote` escapes `'`; a raw newline would break
-    // the line structure, so reject it outright rather than escaping
-    // halfway.
-    if let Some(token) = body.nats_token.as_deref()
-        && (token.contains('\n') || token.contains('\r'))
-    {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "nats_token must not contain a newline".into(),
-        ));
-    }
 
     // When this backend signs commands, provision the fresh agent's ring
     // with THIS backend's own public key — nothing else. Break-glass keys
@@ -175,11 +143,7 @@ pub async fn installer(
         )
     })?;
 
-    let install_ps1 = render_install_ps1(
-        &version,
-        body.nats_token.as_deref(),
-        command_keys.as_deref(),
-    );
+    let install_ps1 = render_install_ps1(&version, nats_token.as_deref(), command_keys.as_deref());
     let install_cmd = render_install_cmd(&version);
     let readme = render_readme(&version, command_keys.is_some());
 
@@ -219,7 +183,7 @@ pub async fn installer(
         serde_json::json!({
             "version": version,
             "nats_url": nats_url,
-            "token_embedded": body.nats_token.is_some(),
+            "token_embedded": nats_token.is_some(),
             "command_keys_embedded": keyring.is_some(),
         }),
     )
@@ -236,6 +200,37 @@ pub async fn installer(
         Body::from(zip_bytes),
     )
         .into_response())
+}
+
+/// What the ZIP bakes in for NATS: the `agent_install` section of the
+/// server-settings document where set, else this backend's own `[nats] url`
+/// and no token. Split out pure so the fallback/validation rules are
+/// testable without a broker.
+///
+/// A stored `nats_url` that fails the TOML literal-string rules (validated
+/// at PUT, but a hand-written KV value can bypass that) is a 500 naming the
+/// Settings page — NOT a silent fallback, which would ship installers that
+/// dial a different broker than the operator configured.
+fn resolve_nats(
+    settings: &ServerSettings,
+    backend_url: &str,
+) -> Result<(String, Option<String>), (StatusCode, String)> {
+    let Some(ai) = settings.agent_install.as_ref() else {
+        return Ok((backend_url.to_string(), None));
+    };
+    let url = match ai.nats_url.as_deref() {
+        Some(u) if u.is_empty() || u.contains('\'') || u.contains('\n') || u.contains('\r') => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_settings agent_install.nats_url is invalid (must be non-empty, with no \
+                 single quote or newline) — fix it on the Settings page"
+                    .into(),
+            ));
+        }
+        Some(u) => u.to_string(),
+        None => backend_url.to_string(),
+    };
+    Ok((url, ai.nats_token.clone()))
 }
 
 /// The version string reaches three sinks that tolerate no hostile bytes:
@@ -583,5 +578,60 @@ mod tests {
         let unsigned = render_readme("0.43.99", false);
         assert!(unsigned.contains("not signing commands"));
         assert!(!unsigned.contains("PUBLIC key (provisioned"));
+    }
+
+    #[test]
+    fn resolve_nats_falls_back_to_the_backend_url() {
+        // No section at all, and a section without a url, both mean "dial
+        // the same broker this backend does"; neither embeds a token.
+        for settings in [
+            ServerSettings::default(),
+            ServerSettings {
+                agent_install: Some(kanade_shared::wire::AgentInstallSection {
+                    nats_token: Some("tok".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ] {
+            let (url, _) = resolve_nats(&settings, "nats://backend:4222").unwrap();
+            assert_eq!(url, "nats://backend:4222");
+        }
+        let (_, token) = resolve_nats(&ServerSettings::default(), "nats://backend:4222").unwrap();
+        assert_eq!(token, None);
+    }
+
+    #[test]
+    fn resolve_nats_prefers_the_settings_values() {
+        let settings = ServerSettings {
+            agent_install: Some(kanade_shared::wire::AgentInstallSection {
+                nats_url: Some("nats://broker.corp:4222".into()),
+                nats_token: Some("s3cret".into()),
+                nats_token_set: false,
+            }),
+            ..Default::default()
+        };
+        let (url, token) = resolve_nats(&settings, "nats://backend:4222").unwrap();
+        assert_eq!(url, "nats://broker.corp:4222");
+        assert_eq!(token.as_deref(), Some("s3cret"));
+    }
+
+    #[test]
+    fn resolve_nats_rejects_a_hostile_stored_url() {
+        // PUT validates, but a hand-written KV value can bypass it — a bad
+        // stored url is a 500 naming the Settings page, never a ZIP with
+        // injected agent.toml lines.
+        for bad in ["", "nats://evil'\nx='y'", "nats://a\nb", "nats://a\rb"] {
+            let settings = ServerSettings {
+                agent_install: Some(kanade_shared::wire::AgentInstallSection {
+                    nats_url: Some(bad.into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let (code, msg) = resolve_nats(&settings, "nats://backend:4222").unwrap_err();
+            assert_eq!(code, StatusCode::INTERNAL_SERVER_ERROR, "{bad:?}");
+            assert!(msg.contains("Settings"), "{msg}");
+        }
     }
 }

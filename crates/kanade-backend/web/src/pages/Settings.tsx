@@ -80,6 +80,22 @@ interface ObjectStoreCaps {
   collections_mib: number | null;
 }
 
+/// Connection settings baked into the agent-installer ZIP (the download on
+/// the Agent Install page) — mirrors the `agent_install` section of
+/// `kanade_shared::wire::ServerSettings`.
+interface AgentInstallSettings {
+  /// `null` (or blank in the form) ⇒ installers use the backend's own
+  /// configured NATS URL.
+  nats_url: string | null;
+  /// Write-only on the wire: GET redacts it (the key is always absent) and
+  /// reports `nats_token_set` instead; the PUT merge changes the stored
+  /// token ONLY when this key is present in the body.
+  nats_token?: string;
+  /// Server-reported: whether a token is currently stored. Display hint
+  /// for the form (the token itself can never be read back).
+  nats_token_set?: boolean;
+}
+
 /// Backend-side server settings document (`server_settings` KV). Mirrors
 /// `kanade_shared::wire::ServerSettings`: every field is nullable, where
 /// `null` (or absent) means "unset — fall back to the built-in default".
@@ -93,6 +109,7 @@ interface ServerSettings {
   controller_group: string | null;
   mail: MailSettings | null;
   object_store_caps: ObjectStoreCaps | null;
+  agent_install: AgentInstallSettings | null;
   /// Read-only here. Managed through its own endpoints (see
   /// [`ServerSettingsPatch`]) and absent from the document PUT entirely.
   /// `serde` omits the key when empty, so an older / never-configured
@@ -308,6 +325,13 @@ function ServerTab() {
   const [capAppPackages, setCapAppPackages] = useState('');
   const [capScripts, setCapScripts] = useState('');
   const [capCollections, setCapCollections] = useState('');
+  // Agent-installer connection settings (baked into the installer ZIP).
+  // The URL follows the blank → null convention; the token is write-only —
+  // GET never returns it, so the field starts blank and is only SENT when
+  // the operator types a new value. It's re-blanked on every seed (including
+  // the post-save refetch) so a saved token can't be re-sent by accident.
+  const [agentInstallNatsUrl, setAgentInstallNatsUrl] = useState('');
+  const [agentInstallNatsToken, setAgentInstallNatsToken] = useState('');
   useEffect(() => {
     if (settings.data) {
       setPruneDays(settings.data.agent_prune_days == null ? '' : String(settings.data.agent_prune_days));
@@ -339,6 +363,8 @@ function ServerTab() {
       setCapAppPackages(c?.app_packages_mib == null ? '' : String(c.app_packages_mib));
       setCapScripts(c?.scripts_mib == null ? '' : String(c.scripts_mib));
       setCapCollections(c?.collections_mib == null ? '' : String(c.collections_mib));
+      setAgentInstallNatsUrl((settings.data.agent_install?.nats_url ?? '').trim());
+      setAgentInstallNatsToken('');
     }
   }, [settings.data]);
 
@@ -542,6 +568,22 @@ function ServerTab() {
       storedCaps !== null &&
       capInputs.some(({ key }) => (capsValue[key] ?? null) !== (storedCaps[key] ?? null)));
 
+  // agent_install: nats_url follows the usual blank → null convention (any
+  // string is accepted — the backend validates the URL). nats_token is
+  // write-only: included in the PATCH only when the operator typed a new
+  // value, so saving with the field blank KEEPS the stored token (there is
+  // deliberately no way to read or clear it from this form). Typing a token
+  // is itself a change, so it feeds `dirty` directly.
+  const aiUrlTrimmed = agentInstallNatsUrl.trim();
+  const aiUrlValue: string | null = aiUrlTrimmed === '' ? null : aiUrlTrimmed;
+  const aiTokenTyped = agentInstallNatsToken !== '';
+  const agentInstallValue: AgentInstallSettings = {
+    nats_url: aiUrlValue,
+    ...(aiTokenTyped ? { nats_token: agentInstallNatsToken } : {}),
+  };
+  const aiDirty =
+    aiUrlValue !== (settings.data?.agent_install?.nats_url ?? null) || aiTokenTyped;
+
   // One save for the whole document. The PUT merges per-field, but the SPA
   // always sends every field it knows, so an unchanged one is re-sent
   // as-is. `dirty` if any field diverges from the stored doc.
@@ -561,7 +603,8 @@ function ServerTab() {
       staleValue !== settings.data.check_status_stale_days ||
       controllerValue !== (settings.data.controller_group ?? null) ||
       mailDirty ||
-      capsDirty);
+      capsDirty ||
+      aiDirty);
   const doc: ServerSettingsPatch = {
     agent_prune_days: pruneValue,
     collect_retention_days: collectValue,
@@ -570,6 +613,7 @@ function ServerTab() {
     controller_group: controllerValue,
     mail: mailValue,
     object_store_caps: capsValue,
+    agent_install: agentInstallValue,
   };
 
   // Faint placeholder = what a blank field resolves to: the built-in
@@ -805,6 +849,47 @@ function ServerTab() {
             />
             <p className="text-muted text-xs">{t('server.controllerGroup.blankHint')}</p>
           </div>
+        </CardContent>
+      </Card>
+
+      <Card className="max-w-3xl">
+        <CardHeader>
+          <CardTitle>{t('server.agentInstall.title')}</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <p className="text-muted text-sm">{t('server.agentInstall.description')}</p>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-1">
+              <Label htmlFor="agent-install-nats-url">{t('server.agentInstall.natsUrl')}</Label>
+              <Input
+                id="agent-install-nats-url"
+                type="text"
+                value={agentInstallNatsUrl}
+                placeholder={t('server.agentInstall.natsUrlPlaceholder')}
+                disabled={!canOperate || settings.isLoading}
+                onChange={(e) => setAgentInstallNatsUrl(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="agent-install-nats-token">{t('server.agentInstall.natsToken')}</Label>
+              <Input
+                id="agent-install-nats-token"
+                type="password"
+                value={agentInstallNatsToken}
+                placeholder={t('server.agentInstall.natsTokenPlaceholder')}
+                disabled={!canOperate || settings.isLoading}
+                onChange={(e) => setAgentInstallNatsToken(e.target.value)}
+                autoComplete="new-password"
+              />
+              <p className="text-muted text-xs">
+                {settings.data?.agent_install?.nats_token_set
+                  ? t('server.agentInstall.tokenSet')
+                  : t('server.agentInstall.tokenNotSet')}
+              </p>
+            </div>
+          </div>
+          <p className="text-muted text-xs">{t('server.agentInstall.natsUrlHint')}</p>
+          <p className="text-muted text-xs">{t('server.agentInstall.tokenHint')}</p>
         </CardContent>
       </Card>
 

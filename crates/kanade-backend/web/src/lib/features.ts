@@ -2,13 +2,16 @@
 //
 // These are the **hard-gated** features — the pages the backend enforces via
 // `kanade_shared::feature::Feature` + `api::feature_for_path` (403 on a
-// disallowed page). This list is the backend's `Feature` catalog MINUS the
-// two always-commons pages the backend never gates:
+// disallowed page). For UNRESTRICTED accounts this list is the backend's
+// `Feature` catalog MINUS the two always-commons pages:
 //   - `dashboard` — the landing feed, reached from the logo.
 //   - `agents` — the fleet roster / per-PC detail, shared substrate consumed
 //     by Config/Rollout/Groups/Logs too, so it stays baseline-visible.
-// Restricting an account to a subset means it can still reach those commons
-// pages plus whatever is checked here.
+// A RESTRICTED account (allowed_features is an array) is different: the
+// backend 403s it on the commons API routes too (except /api/version,
+// /api/command-signing and the /api/auth/* self-service routes), so the SPA
+// hides the commons entries and redirects it to its first allowed page —
+// such an account reaches literally only what is checked here.
 //
 // Keep this in lockstep with the Rust `Feature` enum: a page offered here as
 // restrictable MUST have a gated route in `feature_for_path`, otherwise the
@@ -29,6 +32,7 @@ export const GATEABLE_FEATURES = [
   'views',
   'notifications',
   'rollout',
+  'agent-install',
   'apps',
   'remote',
   'groups',
@@ -60,6 +64,7 @@ export const FEATURE_NAV_KEY: Record<Feature, string> = {
   views: 'nav.views',
   notifications: 'nav.notifications',
   rollout: 'nav.rollout',
+  'agent-install': 'nav.agentInstall',
   apps: 'nav.apps',
   remote: 'nav.remote',
   groups: 'nav.agentGroups',
@@ -71,9 +76,11 @@ export const FEATURE_NAV_KEY: Record<Feature, string> = {
 
 // Route-path first segment → gated feature. A route not listed here (`/`,
 // `/dashboard`, `/agents`, `/change-password`, unknown) is commons/baseline:
-// always reachable. Sub-routes inherit their parent (`/activity/:id`,
-// `/inventory/search`, `/notifications/:id` → the parent's feature) because
-// the guard keys off the first path segment only.
+// always reachable for UNRESTRICTED accounts; a restricted account landing on
+// one is redirected to its first allowed page by ProtectedLayout (the backend
+// 403s it on the commons APIs anyway). Sub-routes inherit their parent
+// (`/activity/:id`, `/inventory/search`, `/notifications/:id` → the parent's
+// feature) because the guard keys off the first path segment only.
 const ROUTE_FEATURE: Record<string, Feature> = {
   '/run': 'run',
   '/exec': 'exec',
@@ -90,6 +97,7 @@ const ROUTE_FEATURE: Record<string, Feature> = {
   '/views': 'views',
   '/notifications': 'notifications',
   '/rollout': 'rollout',
+  '/agent-install': 'agent-install',
   '/apps': 'apps',
   '/remote': 'remote',
   '/groups': 'groups',

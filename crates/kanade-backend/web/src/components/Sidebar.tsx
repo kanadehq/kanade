@@ -21,9 +21,12 @@ import { cn } from '@/lib/utils';
 // structural metadata (path, accent) stays in code.
 // `feature` (when present) is the #1008 page-visibility key: the link is
 // hidden unless the caller's allow-list permits it (`canSee`). Links without
-// a `feature` are baseline/commons and always shown (e.g. Agents — the fleet
-// roster the backend keeps open to everyone). The keys match `lib/features`.
-const groups: {
+// a `feature` are baseline/commons — shown to every UNRESTRICTED account, but
+// hidden from restricted ones (the backend 403s them on the commons APIs, so
+// the link would dead-end). The keys match `lib/features`.
+// Exported so ProtectedLayout can derive a restricted account's landing page
+// (first link, in this order, whose feature passes `canSee`).
+export const groups: {
   labelKey: string;
   accent: string;
   links: { to: string; labelKey: string; adminOnly?: boolean; feature?: Feature }[];
@@ -65,7 +68,7 @@ const groups: {
       { to: '/views', labelKey: 'nav.views', feature: 'views' },
       { to: '/notifications', labelKey: 'nav.notifications', feature: 'notifications' },
       { to: '/rollout', labelKey: 'nav.rollout', feature: 'rollout' },
-      { to: '/agent-install', labelKey: 'nav.agentInstall', feature: 'rollout' },
+      { to: '/agent-install', labelKey: 'nav.agentInstall', feature: 'agent-install' },
       { to: '/apps', labelKey: 'nav.apps', feature: 'apps' },
       // `nav.agentGroups` (not `nav.groups`) — that key is already
       // taken by the sidebar section labels above.
@@ -99,9 +102,33 @@ function BackendVersion() {
   );
 }
 
+// The brand mark (baton + wordmark), shared by the desktop sidebar and the
+// mobile top bar so the two never drift.
+function LogoMark({ imgClass, textClass }: { imgClass: string; textClass: string }) {
+  return (
+    <>
+      {/* Baton-only crop of the canonical mark (assets/icon.svg).
+          Dark variant swaps via <picture> + prefers-color-scheme.
+          The 奏 kanji lives in the title text below, not the icon. */}
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcSet="/icon-dark.svg" />
+        <img src="/icon.svg" alt="kanade baton" className={imgClass} />
+      </picture>
+      <h1
+        className={cn(
+          'font-extrabold bg-gradient-to-br from-violet via-amber to-teal bg-clip-text text-transparent',
+          textClass,
+        )}
+      >
+        奏 kanade
+      </h1>
+    </>
+  );
+}
+
 function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
   const { t } = useTranslation('common');
-  const { hasRole, canSee } = useAuth();
+  const { hasRole, canSee, isRestricted } = useAuth();
   // Resolve each group's visible links once so a group whose links are all
   // filtered out (by role or page-visibility) doesn't render an empty header
   // + divider.
@@ -109,32 +136,28 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
     .map((g) => ({
       ...g,
       links: g.links.filter(
-        (l) => (!l.adminOnly || hasRole('admin')) && (!l.feature || canSee(l.feature)),
+        (l) =>
+          (!l.adminOnly || hasRole('admin')) && (l.feature ? canSee(l.feature) : !isRestricted),
       ),
     }))
     .filter((g) => g.links.length > 0);
   return (
     <>
-      <Link
-        to="/"
-        onClick={onNavigate}
-        className="flex items-center gap-2 px-4 py-4 group"
-      >
-        {/* Baton-only crop of the canonical mark (assets/icon.svg).
-            Dark variant swaps via <picture> + prefers-color-scheme.
-            The 奏 kanji lives in the title text below, not the icon. */}
-        <picture>
-          <source media="(prefers-color-scheme: dark)" srcSet="/icon-dark.svg" />
-          <img
-            src="/icon.svg"
-            alt="kanade baton"
-            className="h-7 w-auto transition-transform group-hover:rotate-3"
+      {/* The logo links to the dashboard for unrestricted accounts only —
+          a restricted account (e.g. the download-only installer user) is
+          403'd on the commons APIs, so its logo stays an unlinked mark. */}
+      {isRestricted ? (
+        <span className="flex items-center gap-2 px-4 py-4">
+          <LogoMark imgClass="h-7 w-auto" textClass="text-xl" />
+        </span>
+      ) : (
+        <Link to="/" onClick={onNavigate} className="flex items-center gap-2 px-4 py-4 group">
+          <LogoMark
+            imgClass="h-7 w-auto transition-transform group-hover:rotate-3"
+            textClass="text-xl"
           />
-        </picture>
-        <h1 className="text-xl font-extrabold bg-gradient-to-br from-violet via-amber to-teal bg-clip-text text-transparent">
-          奏 kanade
-        </h1>
-      </Link>
+        </Link>
+      )}
 
       <nav className="flex-1 overflow-y-auto px-2 pb-3">
         {visibleGroups.map((g, idx) => (
@@ -204,6 +227,7 @@ export function Sidebar() {
   const [open, setOpen] = useState(false);
   const location = useLocation();
   const { t } = useTranslation('common');
+  const { isRestricted } = useAuth();
 
   // Close the mobile drawer when the route changes — clicking a
   // link inside the drawer fires the NavLink before this effect, so
@@ -242,15 +266,16 @@ export function Sidebar() {
           >
             <Menu className="size-5" />
           </button>
-          <Link to="/" className="flex items-center gap-2">
-            <picture>
-              <source media="(prefers-color-scheme: dark)" srcSet="/icon-dark.svg" />
-              <img src="/icon.svg" alt="kanade baton" className="h-6 w-auto" />
-            </picture>
-            <h1 className="text-lg font-extrabold bg-gradient-to-br from-violet via-amber to-teal bg-clip-text text-transparent">
-              奏 kanade
-            </h1>
-          </Link>
+          {/* Same restricted-account unlinking as the desktop logo. */}
+          {isRestricted ? (
+            <span className="flex items-center gap-2">
+              <LogoMark imgClass="h-6 w-auto" textClass="text-lg" />
+            </span>
+          ) : (
+            <Link to="/" className="flex items-center gap-2">
+              <LogoMark imgClass="h-6 w-auto" textClass="text-lg" />
+            </Link>
+          )}
         </div>
       </header>
 
