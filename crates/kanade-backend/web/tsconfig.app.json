@@ -33,5 +33,9 @@
     },
     "ignoreDeprecations": "6.0"
   },
-  "include": ["src"]
+  // `demo/` is type-checked too, even though it never enters the bundle
+  // (`noEmit` is on and Vite builds from index.html). The demo mock is
+  // real TypeScript that people edit; leaving it outside meant a mistake
+  // there surfaced when the mock crashed at run time instead of in CI.
+  "include": ["src", "demo"]
 }
