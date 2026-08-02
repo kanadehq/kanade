@@ -39,9 +39,11 @@
   the port rules here. What actually closes monitoring is the bind in
   nats-server.conf -- `http: "127.0.0.1:8222"` rather than the bare
   `http_port: 8222`, which listens on all interfaces. Applying that to
-  an installed host needs -ForceConfig, and -ForceConfig without
-  -NatsToken installs the repo's placeholder token, which locks the
-  fleet out: pass both.
+  an installed host needs -ForceConfig, which overwrites the config
+  with this repo's copy -- placeholder token and all. Pass -NatsToken
+  with it. If you forget, or if the substitution fails, the script now
+  restores the previous config and refuses to start the broker rather
+  than leaving one that cannot authenticate its own fleet.
 
   Agent-mediated update mode (#234): like deploy-backend.ps1, this
   script has a second mode for upgrading the broker through the fleet
@@ -98,6 +100,11 @@
 
 .EXAMPLE
   PS> .\deploy-nats.ps1
+  # Binary + service only, keeping whatever config is already installed.
+  # On a FIRST install there is no config yet, so the repo's sample is
+  # seeded -- placeholder token and all -- and the script installs and
+  # registers the service but refuses to START it until a real token is
+  # set. Re-run with -NatsToken to finish.
 .EXAMPLE
   PS> .\deploy-nats.ps1 -NatsToken '<your-fleet-token>'
 .EXAMPLE
@@ -122,22 +129,60 @@ param(
     [string]$NatsToken   = ''
 )
 
-# Rewrite `authorization.token: "..."` inside the installed
-# nats-server.conf to the supplied value. Uses [System.IO.File] for
-# byte-exact preservation of surrounding whitespace + CRLF; the
-# regex replacement double-escapes any `$` in the token so the
-# replacement string doesn't misinterpret it as a backref.
+# Rewrite the `token: "..."` line in the installed nats-server.conf to the
+# supplied value. Uses [System.IO.File] for byte-exact preservation of
+# surrounding whitespace + CRLF; the regex replacement double-escapes any `$`
+# in the token so the replacement string doesn't misinterpret it as a backref.
+#
+# LINE-oriented, not brace-oriented, and that is the fix rather than a style
+# choice. The previous pattern was
+#
+#     (?ms)(authorization\s*\{[^}]*?token:\s*)"[^"]*"
+#
+# which fails outright on the config this repo ships, because the header
+# comment contains the words
+#
+#     # ... drop the `authorization { ... }` block and start with `nats-server -js`
+#
+# `[^}]*?` cannot cross the `}` on that line, so the match dies there and the
+# real block below is never reached. `-ForceConfig -NatsToken` therefore threw
+# on every run against the shipped file -- after the config had already been
+# overwritten with the placeholder and the service stopped, which is how it
+# left a broker that could not authenticate its own fleet.
+#
+# A comment cannot be mistaken for the setting here: nats-server comments start
+# with `#`, and `^\s*token:` requires the line to begin with the key. The
+# match count is asserted, so a config that grows a second `token:` (an
+# accounts block, a leafnode remote) fails loudly instead of having one of them
+# silently rewritten.
 function Set-NatsServerToken {
     param(
         [Parameter(Mandatory)][string]$ConfigPath,
         [Parameter(Mandatory)][string]$Token
     )
 
-    $content = [System.IO.File]::ReadAllText($ConfigPath)
-    $pattern = '(?ms)(authorization\s*\{[^}]*?token:\s*)"[^"]*"'
-    if ($content -notmatch $pattern) {
+    # Reject what cannot round-trip BEFORE touching the file. A token holding
+    # a double quote writes `token: "ab"cd"`, which nats-server cannot parse --
+    # so the broker fails to start, which is the exact failure class this
+    # function exists to prevent (review #1290, coderabbit). The read-back
+    # below would not catch it either: the corrupt line still matches a
+    # substring search for the escaped token. A line break breaks the
+    # line-oriented pattern the same way.
+    if ($Token -match '["\r\n]') {
         throw @"
-Couldn't find an `authorization.token` line inside `authorization { ... }` in
+The supplied NATS token contains a double quote or a line break, which cannot
+be written into a nats-server config string. Generate one without them, e.g.
+  [Convert]::ToBase64String((1..32|%{Get-Random -Max 256}))
+"@
+    }
+
+    $content = [System.IO.File]::ReadAllText($ConfigPath)
+    $pattern = '(?m)^([^\S\r\n]*token:[^\S\r\n]*)"[^"]*"'
+    # NOT $matches: that is a PowerShell automatic variable.
+    $hits = [regex]::Matches($content, $pattern)
+    if ($hits.Count -eq 0) {
+        throw @"
+No uncommented ``token: "..."`` line found in
   $ConfigPath
 to substitute. Either edit the file to include
   authorization { token: "<your-token>" }
@@ -145,10 +190,27 @@ or drop -NatsToken (the broker will then run unauthenticated, matching
 the shipped sample's commented-out auth block).
 "@
     }
+    if ($hits.Count -gt 1) {
+        throw @"
+Found $($hits.Count) ``token: "..."`` lines in
+  $ConfigPath
+and cannot tell which one is the broker's authorization token. Set it by hand
+and re-run without -NatsToken.
+"@
+    }
     $escaped = $Token -replace '\$', '$$$$'
-    $new = $content -replace $pattern, ('$1"' + $escaped + '"')
+    $new = [regex]::Replace($content, $pattern, ('$1"' + $escaped + '"'))
     $utf8NoBom = New-Object System.Text.UTF8Encoding $false
     [System.IO.File]::WriteAllText($ConfigPath, $new, $utf8NoBom)
+
+    # Read back rather than trust the write. This function's failure mode is
+    # not "throws" -- it is "leaves a config the fleet cannot authenticate
+    # against", and the caller has already stopped the service by this point.
+    $after = [System.IO.File]::ReadAllText($ConfigPath)
+    $want = '(?m)^[^\S\r\n]*token:[^\S\r\n]*"' + [regex]::Escape($Token) + '"'
+    if ($after -notmatch $want) {
+        throw "token substitution did not take effect in $ConfigPath"
+    }
 }
 
 $ErrorActionPreference = 'Stop'
@@ -326,6 +388,18 @@ foreach ($d in @($binDir, $configDir, $natsDir, $jsDir, $logsDir)) {
 Write-Host "Installing $exeName -> $exeDst"
 Copy-Item -Path $exeSrc -Destination $exeDst -Force
 
+# Keep the config that is currently working, so a failure between here and the
+# token substitution can put it back. The service is already stopped at this
+# point: without this, a throw below leaves the host with the repo's
+# PLACEHOLDER token and a dead broker -- which is not a config error an
+# operator can see, it is a fleet that cannot authenticate, discovered later.
+#
+# IN MEMORY, not a .bak file. A copy on disk would be a plaintext duplicate of
+# the fleet credential inheriting whatever ACL $configDir hands out -- the
+# hardening two thirds of this file exists for, undone -- and one more of them
+# would accumulate per run (review #1290, claude). The config is a few KB.
+$configBefore = if (Test-Path $configDst) { [System.IO.File]::ReadAllText($configDst) } else { $null }
+
 if ($ForceConfig -or -not (Test-Path $configDst)) {
     $verb = if (Test-Path $configDst) { 'Overwriting' } else { 'Seeding' }
     Write-Host "$verb $configName -> $configDst"
@@ -340,7 +414,20 @@ if ($ForceConfig -or -not (Test-Path $configDst)) {
 # the file is readable only by SYSTEM + Administrators.
 if ($NatsToken) {
     Write-Host "Substituting authorization.token in $configDst"
-    Set-NatsServerToken -ConfigPath $configDst -Token $NatsToken
+    try {
+        Set-NatsServerToken -ConfigPath $configDst -Token $NatsToken
+    } catch {
+        # Roll the config back before rethrowing. The alternative -- what this
+        # script did until now -- is a stopped service next to a config holding
+        # a credential nobody provisioned, and the operator finds out when the
+        # fleet stops answering.
+        if ($null -ne $configBefore) {
+            $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+            [System.IO.File]::WriteAllText($configDst, $configBefore, $utf8NoBom)
+            Write-Warning "Token substitution failed; restored the previous $configName. The service is still stopped -- start it with: Start-Service $ServiceName"
+        }
+        throw
+    }
 }
 
 # Harden the ACL on nats-server.conf. The NATS bearer token lives
@@ -450,6 +537,27 @@ if (-not $NoFirewall) {
 }
 
 if (-not $NoStart) {
+    # Refuse to START on the repo's placeholder token -- but only to start.
+    # The check belongs here, not beside the config copy: a fresh install
+    # legitimately seeds the sample config, `-NoStart` legitimately ends with
+    # no running broker, and a binary-only upgrade should still replace the
+    # exe on a host whose config was left at the placeholder. Blocking those
+    # was the first version of this guard, and it broke the bare
+    # `.\deploy-nats.ps1` first-install flow documented above (review #1290,
+    # claude). What is never acceptable is the broker actually coming up on a
+    # credential published in a public repository: locked away from its own
+    # fleet, and open to anyone who read the README.
+    $installed = [System.IO.File]::ReadAllText($configDst)
+    if ($installed -match 'token:\s*"CHANGE-ME') {
+        throw @"
+Not starting ${ServiceName}: $configName still carries this repo's PLACEHOLDER
+token. The binary and the service are installed -- finish the job with:
+
+  .\deploy-nats.ps1 -NatsToken '<your-fleet-token>'
+
+(or edit $configDst by hand and run: Start-Service $ServiceName)
+"@
+    }
     Write-Host "Starting $ServiceName"
     Start-Service -Name $ServiceName
     (Get-Service -Name $ServiceName).WaitForStatus('Running', '00:00:30')
