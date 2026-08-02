@@ -36,6 +36,19 @@
     "unknown": "unknown",
     "unknownTitle": "This agent predates keyring reporting, so nothing can be said about it. Upgrade it before provisioning — not the same as holding no keys."
   },
+  "credential": {
+    "named": "migrated",
+    "namedTitle": "Authenticated as a named NATS user. This host is off the shared credential.",
+    "shared": "shared token",
+    "sharedTitle": "Authenticated with the fleet-wide token. This is the migration queue: the set that has to reach zero before per-role permissions can be narrowed server-side.",
+    "noAuth": "no auth",
+    "noAuthTitle": "The broker required no credential at all. Expected on a dev broker with no `authorization` block; anywhere else it means the broker is open to anyone who can reach it.",
+    "unproven": "unproven",
+    "unprovenTitle": "On the broker, but the backend cannot prove what it was authenticated as — so the value is not recorded, in case it is the credential itself. Nothing to provision here; check the backend's own broker connection.",
+    "unseen": "not seen",
+    "unseenTitle": "No live connection has been correlated to this host: it has not been seen since the backend started polling, or its agent predates the pc_id in the connection name and cannot be joined on. Unknown — NOT 'still on the old credential'.",
+    "since": "since {{at}}"
+  },
   "columns": {
     "status": "status",
     "pcId": "pc_id",
@@ -50,14 +63,16 @@
     "label": "columns",
     "pick": "choose",
     "builtinSection": "standard columns",
-    "attributesLabel": "attributes"
+    "attributesLabel": "attributes",
+    "credential": "NATS credential"
   },
   "columnTitles": {
     "signing": "Command-signing rollout state: does this host verify who sent a command, and does it refuse when it cannot? Keys are compared against the one this backend actually signs with; when the backend is not signing there is nothing to compare against and only what each agent reports is shown.",
     "cpu": "Agent process CPU % (one core = 100)",
     "rss": "Agent process resident set size (current RAM footprint)",
     "lastLogon": "Most recent account the Windows sign-in screen used (display name over login name)",
-    "attribute": "agent_meta attribute: {{key}}"
+    "attribute": "agent_meta attribute: {{key}}",
+    "credential": "Which NATS credential this host's live connection authenticated with, as reported by the BROKER rather than by the agent — a host kitted from a stale image reports what it was given, not what the server accepted. Blank means no live connection has been correlated to it, which is not the same as being on the old credential."
   },
   "actions": {
     "facts": "facts",
