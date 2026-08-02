@@ -5,6 +5,7 @@
 # 1. Getting Started
 
 - [Quickstart](./getting-started/quickstart.md)
+- [Screenshots](./getting-started/screenshots.md)
 - [System Architecture](./getting-started/architecture.md)
 
 # 2. Operations
