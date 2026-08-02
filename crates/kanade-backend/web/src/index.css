@@ -287,7 +287,20 @@
    set by <TableCell label=…>) beside its value. Pure page scroll, no
    horizontal bar, no nested scroll. Scoped to `.kn-table` so only our data
    tables transform — never the `.notif-md` markdown tables above. */
-@media (max-width: 1023px) {
+/* `.kn-table-wide` opts one table into card mode EARLIER — up to 1535px
+   instead of 1023px. For a table whose intrinsic width exceeds what the
+   content area offers on a laptop, `lg` is simply the wrong threshold: it
+   switches to table layout at 1024px and then has nowhere to put the
+   overflow, because #1005 removed the wrapper's horizontal scroll. The
+   Accounts table is the case — it needs ~1230px and a 1100px viewport gives
+   its card 786px, so the action column rendered 445px outside the border.
+
+   Implemented by widening the shared block below to 1535px and handing the
+   1024-1535 band BACK to ordinary tables, rather than by copying the card
+   rules into a second block: two copies of forty lines of layout CSS is how
+   they drift. The hand-back is deliberately small and lists only the
+   properties the shared block sets. */
+@media (max-width: 1535px) {
   .kn-table > table,
   .kn-table > table > thead,
   .kn-table > table > tbody,
@@ -347,6 +360,39 @@
     min-width: 0;
     max-width: 100%;
     overflow-wrap: anywhere;
+  }
+}
+
+/* Hand 1024-1535 back to ordinary data tables: they keep the `lg` threshold
+   they were designed for, and only `.kn-table-wide` stays in card mode up
+   there. Mirrors — and must stay in step with — the `display` switches and
+   the label injection in the block above. */
+@media (min-width: 1024px) and (max-width: 1535px) {
+  .kn-table:not(.kn-table-wide) > table {
+    display: table;
+    width: 100%;
+  }
+  .kn-table:not(.kn-table-wide) > table > thead {
+    display: table-header-group;
+  }
+  .kn-table:not(.kn-table-wide) > table > tbody {
+    display: table-row-group;
+  }
+  .kn-table:not(.kn-table-wide) > table > tbody > tr {
+    display: table-row;
+    border-bottom: 0;
+    padding: 0;
+  }
+  .kn-table:not(.kn-table-wide) > table > tbody > tr > td,
+  .kn-table:not(.kn-table-wide) > table > tbody > tr > td[data-label] {
+    display: table-cell;
+    width: auto;
+    padding: 0.5rem 0.75rem;
+    text-align: unset;
+    max-width: none;
+  }
+  .kn-table:not(.kn-table-wide) > table > tbody > tr > td[data-label]::before {
+    content: none;
   }
 }
 
