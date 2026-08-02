@@ -87,15 +87,42 @@ post(/^\/api\/auth\/login$/, () =>
   }),
 );
 
+// TOTP enrolment (#1192) is stateful here so the whole flow is walkable in
+// the demo: `init` hands out a fixed candidate secret, `verify` flips what
+// `me` reports, `disable` clears it. Nothing is validated — any code is
+// accepted — because the point is to exercise the screens, not to be an
+// authenticator. The secret is the RFC 4226 test vector, not a live one.
+let mfaEnabled = false;
+const DEMO_MFA_SECRET = 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP';
+
 get(/^\/api\/auth\/me$/, () =>
   json({
     username: 'demo',
     role: 'admin',
     must_change_pw: false,
-    mfa_enabled: false,
+    mfa_enabled: mfaEnabled,
     allowed_features: null,
   }),
 );
+
+post(/^\/api\/auth\/mfa\/init$/, () =>
+  json({
+    secret: DEMO_MFA_SECRET,
+    otpauth_url:
+      `otpauth://totp/kanade:demo?secret=${DEMO_MFA_SECRET}` +
+      '&issuer=kanade&algorithm=SHA1&digits=6&period=30',
+  }),
+);
+
+post(/^\/api\/auth\/mfa\/verify$/, () => {
+  mfaEnabled = true;
+  return new Response(null, { status: 204 });
+});
+
+post(/^\/api\/auth\/mfa\/disable$/, () => {
+  mfaEnabled = false;
+  return new Response(null, { status: 204 });
+});
 
 get(/^\/api\/version$/, () => json({ version: CURRENT_VERSION }));
 
@@ -122,13 +149,23 @@ function agentRow(p: (typeof FLEET)[number]) {
     quarantined_versions: [],
     last_logon_user: p.last_logon_user,
     last_logon_display_name: p.last_logon_display_name,
+    // `agent_meta` is for what the MACHINE CANNOT KNOW about itself —
+    // whose desk it is on, which cost centre pays for it, why it is an
+    // exception. `model` and `serial` used to be in here, and they are
+    // exactly the wrong example: the inventory probe already reports both,
+    // and the PC detail page shows them as 機種 / シリアル. Duplicating
+    // them here teaches that this card is a second place to keep facts the
+    // fleet already collects, which is the opposite of the point.
     meta: [
       { key: 'display_name', value: p.last_logon_display_name },
       { key: 'email', value: p.email },
       { key: 'department', value: p.dept },
       { key: 'site', value: p.site },
-      { key: 'model', value: p.model },
-      { key: 'serial', value: p.serial },
+      { key: 'asset_tag', value: `A-${p.serial.slice(-6)}` },
+      // Lease end is the clearest example of the category: it lives in a
+      // contract, so no probe can ever discover it, and it is always set
+      // rather than blank — an empty row would read as an unfinished card.
+      { key: 'lease_end', value: `20${27 + (p.serial.charCodeAt(p.serial.length - 1) % 3)}-03-31` },
     ],
     // Both are optional on the wire and their ABSENCE is meaningful, so
     // they are spread in rather than set to null: `command_keys: undefined`
@@ -239,15 +276,21 @@ get(/^\/api\/agents\/([^/]+)\/perf$/, (_req, _url, m) => {
   });
 });
 
+// `[name, RSS MiB, CPU % ceiling]`. The CPU ceiling is per process rather
+// than one number for all of them: a flat ceiling had `kanade-agent.exe`
+// drawing up to 60 % CPU, which both contradicts the 0.9 % the Agents page
+// reports for the agent and is a poor advertisement for a management agent.
+// Ceilings are ordered the way a real desktop looks — a browser can exceed
+// 100 % on a multi-core box, an idle helper cannot.
 const TOP_PROCESSES = [
-  ['chrome.exe', 5_400],
-  ['Teams.exe', 3_100],
-  ['EXCEL.EXE', 1_900],
-  ['OUTLOOK.EXE', 1_400],
-  ['Code.exe', 1_250],
-  ['MsMpEng.exe', 620],
-  ['explorer.exe', 320],
-  ['kanade-agent.exe', 42],
+  ['chrome.exe', 5_400, 180],
+  ['Teams.exe', 3_100, 45],
+  ['EXCEL.EXE', 1_900, 35],
+  ['OUTLOOK.EXE', 1_400, 20],
+  ['Code.exe', 1_250, 40],
+  ['MsMpEng.exe', 620, 25],
+  ['explorer.exe', 320, 8],
+  ['kanade-agent.exe', 42, 2],
 ] as const;
 
 get(/^\/api\/agents\/([^/]+)\/processes$/, (_req, _url, m) => {
@@ -257,10 +300,12 @@ get(/^\/api\/agents\/([^/]+)\/processes$/, (_req, _url, m) => {
   return json({
     pc_id: p.pc_id,
     latest_at: iso(90 * 1000),
-    processes: TOP_PROCESSES.map(([name, mb], i) => ({
+    processes: TOP_PROCESSES.map(([name, mb, cpuMax], i) => ({
       pid: 1000 + i * 137,
       name,
-      cpu_pct: Math.round(r() * (i === 0 ? 240 : 60) * 10) / 10,
+      // Never below a tenth of the ceiling, so a process does not flicker
+      // to 0 % between reloads and read as "not running".
+      cpu_pct: Math.round(cpuMax * (0.1 + r() * 0.9) * 10) / 10,
       rss_bytes: mb * 1024 * 1024,
       disk_read_bytes_per_sec: Math.round(r() * 1_200_000),
       disk_written_bytes_per_sec: Math.round(r() * 600_000),
@@ -285,11 +330,17 @@ get(/^\/api\/agents\/([^/]+)\/processes\/timeline$/, (_req, url, m) => {
     points: Array.from({ length: n }, (_, i) => ({
       at: iso((n - 1 - i) * 300_000),
       values: Object.fromEntries(
-        TOP_PROCESSES.map(([name, mb]) => [
+        TOP_PROCESSES.map(([name, mb, cpuMax]) => [
           name,
-          metric === 'cpu_pct'
-            ? Math.round(r() * 30 * 10) / 10
-            : Math.round(mb * 1024 * 1024 * (0.8 + r() * 0.4)),
+          // The SPA's metric values are `cpu | rss | disk_read | disk_written`
+          // (`ChartMetric` in AgentProcessSection.tsx). Comparing against
+          // `cpu_pct` never matched, so the CPU chart was fed RSS *bytes*
+          // and plotted them on an axis labelled `%` — billions of percent.
+          metric === 'cpu'
+            ? Math.round(cpuMax * (0.1 + r() * 0.9) * 10) / 10
+            : metric === 'disk_read' || metric === 'disk_written'
+              ? Math.round(r() * (metric === 'disk_read' ? 1_200_000 : 600_000))
+              : Math.round(mb * 1024 * 1024 * (0.8 + r() * 0.4)),
         ]),
       ),
     })),
@@ -1295,13 +1346,26 @@ get(/^\/api\/analytics$/, (_req, url) => {
  * evening before it happened.
  */
 // Tuned against the Events page's DEFAULT view (200-row limit, "2 days
-// back to midnight"), not for maximum realism: 8 hosts at this event
-// density land ~150 rows in that window, so every lane is fully covered
+// back to midnight"), not for maximum realism: on a WEEKDAY, 8 hosts at
+// this density land ~150 rows in that window, so every lane is covered
 // the moment the page opens. Raise either number and the page opens on
 // its truncation warning with the left half of the strip hatched as
 // "not fetched" — correct behaviour, terrible first impression.
+//
+// That tuning only holds on a weekday. Measured on a Sunday, the same
+// default window returns 38 rows across 2 hosts, because it contains
+// nothing but the weekend and the weekend runs the skeleton crew below.
+// The lanes are then ~2.5 h wide and read as "uptime tracking is broken"
+// rather than "nobody was in". Widening the window is the fix at the
+// viewing end, not here — 7 days always contains a working day — which
+// is what `demo/capture-screenshots.mjs` pins for the Events frame.
 const EVENT_PC_COUNT = 8;
-const EVENT_DAYS = 4;
+// Eight days, so a 7-day window is full rather than half grey. Day count
+// costs nothing in the DEFAULT 2-day view — that filters by time, so only
+// per-day event density decides its row count — but a window wider than
+// this many days paints an empty left half, which reads as missing data
+// rather than as the window simply reaching past the fixture.
+const EVENT_DAYS = 8;
 
 // `ObsEvent.source` is `<scheme>:<detail>`, not a bare word — see the
 // field's doc comment in kanade-shared/src/wire/obs_event.rs. It exists
