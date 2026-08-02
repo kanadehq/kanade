@@ -164,7 +164,7 @@ export function Notifications() {
   };
 
   return (
-    <div className="p-4 md:p-6 space-y-6 max-w-5xl">
+    <div className="p-4 md:p-6 space-y-6">
       <header>
         <h1 className="text-2xl font-bold">{t('title')}</h1>
         <p className="text-muted text-sm">{t('subtitle')}</p>
