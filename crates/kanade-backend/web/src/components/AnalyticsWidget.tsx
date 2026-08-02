@@ -261,6 +261,12 @@ function PieWidget({ rows, donut, empty }: { rows: BarRow[]; donut?: boolean; em
             outerRadius={85}
             innerRadius={donut ? 52 : 0}
             paddingAngle={rows.length > 1 ? 2 : 0}
+            // Draw the sectors outright. The mount animation starts every
+            // sector at startAngle === endAngle, and `Sector` renders null at
+            // zero width, so a run that never advances leaves empty
+            // `recharts-pie-sector` groups: a legend with no pie behind it.
+            // Every other chart in this app already opts out for this reason.
+            isAnimationActive={false}
           >
             {rows.map((r, i) => (
               // Label-qualified by index: multiple rows can share a label
