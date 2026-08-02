@@ -2,7 +2,7 @@
 msgid ""
 msgstr ""
 "Project-Id-Version: kanade — 奏\n"
-"POT-Creation-Date: 2026-05-28T19:49:23+09:00\n"
+"POT-Creation-Date: 2026-08-02T15:30:00+09:00\n"
 "PO-Revision-Date: \n"
 "Last-Translator: \n"
 "Language-Team: \n"
@@ -28,67 +28,75 @@ msgstr ""
 msgid "Quickstart"
 msgstr ""
 
-#: src\SUMMARY.md:8 src\getting-started/architecture.md:1
+#: src\SUMMARY.md:8 src\getting-started/screenshots.md:1
+msgid "Screenshots"
+msgstr ""
+
+#: src\SUMMARY.md:9 src\getting-started/architecture.md:1
 msgid "System Architecture"
 msgstr ""
 
-#: src\SUMMARY.md:10
+#: src\SUMMARY.md:11
 msgid "2. Operations"
 msgstr ""
 
-#: src\SUMMARY.md:12
+#: src\SUMMARY.md:13
 msgid "Overview"
 msgstr ""
 
-#: src\SUMMARY.md:13 src\operations/deploy.md:1
+#: src\SUMMARY.md:14 src\operations/deploy.md:1
 msgid "Installation and Deployment"
 msgstr ""
 
-#: src\SUMMARY.md:14
+#: src\SUMMARY.md:15
 msgid "Agent-Mediated Updates"
 msgstr ""
 
-#: src\SUMMARY.md:15 src\operations/agent-mediated-updates/backend.md:1
+#: src\SUMMARY.md:16 src\operations/agent-mediated-updates/backend.md:1
 msgid "Updating kanade-backend"
 msgstr ""
 
-#: src\SUMMARY.md:16 src\operations/agent-mediated-updates/client.md:1
+#: src\SUMMARY.md:17 src\operations/agent-mediated-updates/client.md:1
 msgid "Updating kanade-client"
 msgstr ""
 
-#: src\SUMMARY.md:17 src\operations/agent-mediated-updates/nats.md:1
+#: src\SUMMARY.md:18 src\operations/agent-mediated-updates/nats.md:1
 msgid "Updating NATS server"
 msgstr ""
 
-#: src\SUMMARY.md:18 src\operations/agent-mediated-updates/agent-self.md:1
+#: src\SUMMARY.md:19 src\operations/agent-mediated-updates/agent-self.md:1
 msgid "Updating kanade-agent itself"
 msgstr ""
 
-#: src\SUMMARY.md:19
+#: src\SUMMARY.md:20
 msgid "Removing kanade (undeploy)"
 msgstr ""
 
-#: src\SUMMARY.md:21
+#: src\SUMMARY.md:21 src\operations/broker-sizing.md:1
+msgid "Broker sizing & scaling"
+msgstr ""
+
+#: src\SUMMARY.md:23
 msgid "3. Developer Guide"
 msgstr ""
 
-#: src\SUMMARY.md:23 src\developing/writing-agent-scripts.md:1
+#: src\SUMMARY.md:25 src\developing/writing-agent-scripts.md:1
 msgid "Writing scripts for the agent"
 msgstr ""
 
-#: src\SUMMARY.md:24
+#: src\SUMMARY.md:26
 msgid "Workflow and Contribution"
 msgstr ""
 
-#: src\SUMMARY.md:26
+#: src\SUMMARY.md:28
 msgid "4. Reference"
 msgstr ""
 
-#: src\SUMMARY.md:28 src\reference/spec.md:1
+#: src\SUMMARY.md:30 src\reference/spec.md:1
 msgid "Spec (legacy single-page)"
 msgstr ""
 
-#: src\SUMMARY.md:29 src\reference/config.md:1
+#: src\SUMMARY.md:31 src\reference/config.md:1
 msgid "Configuration Reference"
 msgstr ""
 
@@ -307,6 +315,404 @@ msgid ""
 "After deployment, you can verify and interact with the real Windows "
 "services. Use the following task to stop and cleanly delete the services "
 "when finished:"
+msgstr ""
+
+#: src\getting-started/screenshots.md:3
+msgid ""
+"What the operator console looks like in use. Every image on this page was "
+"captured from the demo stack (`cargo make demo`), which serves an invented "
+"248-PC fleet from a mock backend — no NATS, no agents, no real hosts. Names, "
+"hostnames and sign-in accounts are fiction; nothing here came from a "
+"deployment."
+msgstr ""
+
+#: src\getting-started/screenshots.md:9
+msgid "Desktop captures are 1440×900, mobile 390×901."
+msgstr ""
+
+#: src\getting-started/screenshots.md:11
+msgid ""
+"The console is shown in English here; the Japanese edition of this page has "
+"the same shots with the interface in Japanese. The _data_ stays Japanese in "
+"both, because the fixture is a Japanese company — widget titles, group names "
+"and check descriptions are operator-authored, so they are whatever the "
+"operator wrote, not something the interface translates."
+msgstr ""
+
+#: src\getting-started/screenshots.md:17
+msgid "The fleet at a glance"
+msgstr ""
+
+#: src\getting-started/screenshots.md:19
+msgid ""
+"The dashboard opens on the numbers an operator checks first: how many agents "
+"are reporting, how many have gone quiet, whether the broker's streams are "
+"within their limits, and how many job runs failed in the last day. Each "
+"figure links through to the page that explains it."
+msgstr ""
+
+#: src\getting-started/screenshots.md:24
+msgid "![Dashboard](../images/screenshots/dashboard-light-en.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:26
+msgid ""
+"The pinned widgets below are operator-defined — they come from the same "
+"analytics views you can build yourself, pinned to the dashboard from the "
+"Analytics page."
+msgstr ""
+
+#: src\getting-started/screenshots.md:30
+msgid "Agents"
+msgstr ""
+
+#: src\getting-started/screenshots.md:32
+msgid ""
+"Liveness only: who is online, on which agent version, and when each host "
+"last checked in. Detail belongs to Inventory; this page answers \"is it "
+"there\"."
+msgstr ""
+
+#: src\getting-started/screenshots.md:35
+msgid "![Agents](../images/screenshots/agents-light-en.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:37
+msgid ""
+"The columns are yours to choose — the shot above hides the ones this fleet "
+"does not need, which is what the columns picker is for."
+msgstr ""
+
+#: src\getting-started/screenshots.md:40
+msgid "Inventory"
+msgstr ""
+
+#: src\getting-started/screenshots.md:42
+msgid ""
+"Whatever your manifests collect. The probes are operator-authored PowerShell "
+"tagged `inventory:` in a YAML job, so the columns reflect what you decided "
+"to gather, not a fixed schema. Clicking a row opens that PC's full facts."
+msgstr ""
+
+#: src\getting-started/screenshots.md:46
+msgid "![Inventory](../images/screenshots/inventory-light-en.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:48
+msgid "Compliance"
+msgstr ""
+
+#: src\getting-started/screenshots.md:50
+msgid ""
+"Fleet-wide status for every health check, grouped per check with its own "
+"counts. A check is just a job carrying a `check:` hint, so adding one is "
+"writing a manifest — there is no hard-coded list of things kanade knows how "
+"to verify."
+msgstr ""
+
+#: src\getting-started/screenshots.md:55
+msgid "![Compliance](../images/screenshots/compliance-light-en.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:57
+msgid ""
+"The detail column is the point: it says _why_ a host is unhappy, in that "
+"host's own terms."
+msgstr ""
+
+#: src\getting-started/screenshots.md:60
+msgid "Uptime and activity"
+msgstr ""
+
+#: src\getting-started/screenshots.md:62
+msgid ""
+"Power, session, sleep and active intervals reconstructed from Windows event "
+"log entries, one lane per kind. A blank lane means no event of that kind in "
+"the window — the machine was off, or idle."
+msgstr ""
+
+#: src\getting-started/screenshots.md:66
+msgid "![Events](../images/screenshots/events-light-en.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:68
+msgid "Analytics"
+msgstr ""
+
+#: src\getting-started/screenshots.md:70
+msgid ""
+"Aggregations over whatever your jobs emit. App-usage, browsing history and "
+"inventory facts are shown here; the widgets are defined in YAML and can be "
+"pinned to the dashboard."
+msgstr ""
+
+#: src\getting-started/screenshots.md:74
+msgid "![Analytics](../images/screenshots/analytics-light-en.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:76
+msgid "Groups"
+msgstr ""
+
+#: src\getting-started/screenshots.md:78
+msgid ""
+"Declared fleet groups. A dynamic group carries a query the backend "
+"re-evaluates on a schedule, so membership follows the fleet as metadata "
+"changes — stamp `site` and `department` onto an agent once, and a PC that "
+"moves office lands in the right groups by itself. A static group carries a "
+"literal member list, for membership no query can express."
+msgstr ""
+
+#: src\getting-started/screenshots.md:84
+msgid "![Groups](../images/screenshots/groups-light-en.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:86
+msgid "Notifications"
+msgstr ""
+
+#: src\getting-started/screenshots.md:88
+msgid ""
+"Send a notice to the Client App and track who confirmed it. Bodies are "
+"Markdown — headings, lists, tables, links — so a fleet-wide notice can be a "
+"document rather than a paragraph."
+msgstr ""
+
+#: src\getting-started/screenshots.md:92
+msgid "![Notifications](../images/screenshots/notifications-light-en.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:94
+msgid "Jobs"
+msgstr ""
+
+#: src\getting-started/screenshots.md:96
+msgid ""
+"The manifests themselves, grouped by tag. Everything kanade runs on an "
+"endpoint is one of these."
+msgstr ""
+
+#: src\getting-started/screenshots.md:99
+msgid "![Jobs](../images/screenshots/jobs-light-en.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:101
+msgid "Audit"
+msgstr ""
+
+#: src\getting-started/screenshots.md:103
+msgid ""
+"Every dispatch and every operator action, with the payload behind each one. "
+"Filterable by actor, action, target, and a text search into the payload "
+"itself."
+msgstr ""
+
+#: src\getting-started/screenshots.md:107
+msgid "![Audit](../images/screenshots/audit-light-en.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:109
+msgid "Accounts"
+msgstr ""
+
+#: src\getting-started/screenshots.md:111
+msgid ""
+"Operator accounts and their page access. Three states are visible at once "
+"here, because they are easy to confuse: unrestricted, a per-account "
+"allow-list, and a shared permission group — where the group governs and the "
+"account's own list, if any, no longer applies."
+msgstr ""
+
+#: src\getting-started/screenshots.md:116
+msgid "![Accounts](../images/screenshots/accounts-light-en.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:118
+msgid "JetStream"
+msgstr ""
+
+#: src\getting-started/screenshots.md:120
+msgid ""
+"The broker's own health: every stream, KV bucket and object store the "
+"backend bootstraps, with usage against its limit."
+msgstr ""
+
+#: src\getting-started/screenshots.md:123
+msgid "![JetStream](../images/screenshots/jetstream-light-en.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:125
+msgid "Dark theme"
+msgstr ""
+
+#: src\getting-started/screenshots.md:127
+msgid ""
+"The console follows the operating system by default, and can be pinned to "
+"light or dark per browser."
+msgstr ""
+
+#: src\getting-started/screenshots.md:132
+msgid "![Dashboard, dark](../images/screenshots/dashboard-dark-en.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:132
+msgid "![Agents, dark](../images/screenshots/agents-dark-en.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:133
+msgid "![Compliance, dark](../images/screenshots/compliance-dark-en.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:133
+msgid "![Uptime, dark](../images/screenshots/events-dark-en.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:135
+msgid "On a phone"
+msgstr ""
+
+#: src\getting-started/screenshots.md:137
+msgid ""
+"Below 1024px a data table stops being a table: each row becomes a card and "
+"every value carries its column name. No horizontal scrolling, no pinch-zoom "
+"to read a cell."
+msgstr ""
+
+#: src\getting-started/screenshots.md:143
+msgid "![Dashboard on a phone](../images/screenshots/dashboard-mobile-en.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:143
+msgid "![Agents on a phone](../images/screenshots/agents-mobile-en.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:143
+msgid "![Compliance on a phone](../images/screenshots/compliance-mobile-en.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:145
+msgid "The Client App"
+msgstr ""
+
+#: src\getting-started/screenshots.md:147
+msgid ""
+"The half that lands on the end user's desk. It is a small tray application "
+"on the PC itself — the health tab they check, the jobs they can run without "
+"raising a ticket, and the notice they have to confirm. It talks to the agent "
+"over a named pipe on the same machine; it never reaches the backend directly."
+msgstr ""
+
+#: src\getting-started/screenshots.md:152
+msgid ""
+"These are shown at 880×560, the app's own window size, and in Japanese only: "
+"the Client App has no i18n layer — its strings are written into the source — "
+"so an English edition of these shots does not exist to capture."
+msgstr ""
+
+#: src\getting-started/screenshots.md:156
+msgid "Opening on the two things the user is being asked to look at:"
+msgstr ""
+
+#: src\getting-started/screenshots.md:158
+msgid "![Client App home](../images/screenshots/client-home.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:160
+msgid "Device health"
+msgstr ""
+
+#: src\getting-started/screenshots.md:162
+msgid ""
+"The same checks the operator sees on the Compliance page, from the other "
+"side. A warning carries the operator's own explanation and the remedy, so "
+"the first move is not \"open a ticket\"."
+msgstr ""
+
+#: src\getting-started/screenshots.md:166
+msgid "![Device health](../images/screenshots/client-health.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:168
+msgid "Notices"
+msgstr ""
+
+#: src\getting-started/screenshots.md:170
+msgid ""
+"Sent from the Notifications page, tracked back to who confirmed. Expanding "
+"one renders the Markdown the operator wrote — headings, a numbered "
+"procedure, a table, a quote, a link:"
+msgstr ""
+
+#: src\getting-started/screenshots.md:174
+msgid "![Notification list](../images/screenshots/client-notifications.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:176
+msgid ""
+"![Notification, "
+"expanded](../images/screenshots/client-notification-detail.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:178
+msgid "Self-service"
+msgstr ""
+
+#: src\getting-started/screenshots.md:180
+msgid ""
+"Jobs an operator has published to the user, grouped by category. Each is an "
+"ordinary manifest; what makes it appear here is the operator deciding it "
+"should."
+msgstr ""
+
+#: src\getting-started/screenshots.md:186
+msgid "![Updates](../images/screenshots/client-updates.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:186
+msgid "![Troubleshooting](../images/screenshots/client-troubleshoot.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:188
+msgid ""
+"A job can ask before it runs — `confirm:` in the manifest, with the "
+"operator's own wording — and the run streams its output as it goes, rather "
+"than appearing complete after a silence:"
+msgstr ""
+
+#: src\getting-started/screenshots.md:194
+msgid "![Confirmation](../images/screenshots/client-confirm.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:194
+msgid "![A run in progress](../images/screenshots/client-running.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:196
+msgid "The catalog is the same mechanism pointed at installs:"
+msgstr ""
+
+#: src\getting-started/screenshots.md:198
+msgid "![Catalog](../images/screenshots/client-catalog.jpg)"
+msgstr ""
+
+#: src\getting-started/screenshots.md:200
+msgid "Running it yourself"
+msgstr ""
+
+#: src\getting-started/screenshots.md:203
+msgid "# the operator console\n"
+msgstr ""
+
+#: src\getting-started/screenshots.md:204
+msgid "# the Client App\n"
+msgstr ""
+
+#: src\getting-started/screenshots.md:207
+msgid ""
+"Then open <http://localhost:5173> and sign in with any username and "
+"password. Nothing else needs to be running. See "
+"`crates/kanade-backend/web/demo/README.md` for what the mock covers and how "
+"to add to it."
 msgstr ""
 
 #: src\getting-started/architecture.md:3
@@ -942,7 +1348,7 @@ msgstr ""
 
 #: src\operations/agent-mediated-updates/backend.md:57
 #: src\operations/agent-mediated-updates/client.md:38
-#: src\operations/agent-mediated-updates/nats.md:64
+#: src\operations/agent-mediated-updates/nats.md:68
 msgid "2. Publish the binary"
 msgstr ""
 
@@ -1024,8 +1430,8 @@ msgid ""
 msgstr ""
 
 #: src\operations/agent-mediated-updates/backend.md:120
-#: src\operations/agent-mediated-updates/client.md:69
-#: src\operations/agent-mediated-updates/nats.md:93
+#: src\operations/agent-mediated-updates/client.md:66
+#: src\operations/agent-mediated-updates/nats.md:98
 msgid "id"
 msgstr ""
 
@@ -1034,33 +1440,33 @@ msgid "install-kanade-backend"
 msgstr ""
 
 #: src\operations/agent-mediated-updates/backend.md:120
-#: src\operations/agent-mediated-updates/client.md:69
+#: src\operations/agent-mediated-updates/client.md:66
+#: src\operations/agent-mediated-updates/client.md:78
 #: src\operations/agent-mediated-updates/client.md:81
-#: src\operations/agent-mediated-updates/client.md:84
-#: src\operations/agent-mediated-updates/nats.md:93
+#: src\operations/agent-mediated-updates/nats.md:98
 msgid "version"
 msgstr ""
 
 #: src\operations/agent-mediated-updates/backend.md:121
-#: src\operations/agent-mediated-updates/client.md:70
-#: src\operations/agent-mediated-updates/nats.md:94
+#: src\operations/agent-mediated-updates/client.md:67
+#: src\operations/agent-mediated-updates/nats.md:99
 msgid "execute"
 msgstr ""
 
 #: src\operations/agent-mediated-updates/backend.md:123
-#: src\operations/agent-mediated-updates/client.md:72
-#: src\operations/agent-mediated-updates/nats.md:96
+#: src\operations/agent-mediated-updates/client.md:69
+#: src\operations/agent-mediated-updates/nats.md:101
 msgid "shell"
 msgstr ""
 
 #: src\operations/agent-mediated-updates/backend.md:123
-#: src\operations/agent-mediated-updates/client.md:72
-#: src\operations/agent-mediated-updates/nats.md:96
+#: src\operations/agent-mediated-updates/client.md:69
+#: src\operations/agent-mediated-updates/nats.md:101
 msgid "powershell"
 msgstr ""
 
 #: src\operations/agent-mediated-updates/backend.md:124
-#: src\operations/agent-mediated-updates/nats.md:97
+#: src\operations/agent-mediated-updates/nats.md:102
 msgid "script_object"
 msgstr ""
 
@@ -1069,30 +1475,30 @@ msgid "deploy-backend/0.43.0"
 msgstr ""
 
 #: src\operations/agent-mediated-updates/backend.md:125
-#: src\operations/agent-mediated-updates/nats.md:98
+#: src\operations/agent-mediated-updates/nats.md:103
 msgid "timeout"
 msgstr ""
 
 #: src\operations/agent-mediated-updates/backend.md:125
-#: src\operations/agent-mediated-updates/nats.md:98
+#: src\operations/agent-mediated-updates/nats.md:103
 msgid "300s"
 msgstr ""
 
 #: src\operations/agent-mediated-updates/backend.md:126
-#: src\operations/agent-mediated-updates/client.md:75
-#: src\operations/agent-mediated-updates/nats.md:99
+#: src\operations/agent-mediated-updates/client.md:72
+#: src\operations/agent-mediated-updates/nats.md:104
 msgid "run_as"
 msgstr ""
 
 #: src\operations/agent-mediated-updates/backend.md:126
-#: src\operations/agent-mediated-updates/client.md:75
-#: src\operations/agent-mediated-updates/nats.md:99
+#: src\operations/agent-mediated-updates/client.md:72
+#: src\operations/agent-mediated-updates/nats.md:104
 msgid "system"
 msgstr ""
 
 #: src\operations/agent-mediated-updates/backend.md:126
-#: src\operations/agent-mediated-updates/client.md:76
-#: src\operations/agent-mediated-updates/nats.md:99
+#: src\operations/agent-mediated-updates/client.md:73
+#: src\operations/agent-mediated-updates/nats.md:104
 msgid "require_approval"
 msgstr ""
 
@@ -1169,7 +1575,7 @@ msgid ""
 msgstr ""
 
 #: src\operations/agent-mediated-updates/backend.md:165
-msgid "`Invoke-WebRequest : missing bearer token`"
+msgid "`Start-BitsTransfer : HTTP status 401`"
 msgstr ""
 
 #: src\operations/agent-mediated-updates/backend.md:165
@@ -1181,28 +1587,46 @@ msgid "Set it."
 msgstr ""
 
 #: src\operations/agent-mediated-updates/backend.md:166
+msgid ""
+"`Start-BitsTransfer : The transfer encountered an error` / job state "
+"`TransientError`"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:166
+msgid ""
+"BITS service not running, or target machine's WinHTTP can't reach "
+"`$AgentSourceUrl`"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:166
+msgid ""
+"`Get-Service BITS`; check WinHTTP proxy with `netsh winhttp show proxy` "
+"(BITS uses WinHTTP, not IE/WinINet)."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/backend.md:167
 msgid "`sha256 mismatch — expected=<x> actual=<y>`"
 msgstr ""
 
-#: src\operations/agent-mediated-updates/backend.md:166
+#: src\operations/agent-mediated-updates/backend.md:167
 msgid "Hash in script doesn't match the published binary"
 msgstr ""
 
-#: src\operations/agent-mediated-updates/backend.md:166
+#: src\operations/agent-mediated-updates/backend.md:167
 msgid ""
 "Re-publish or recompute the hash. The script aborts BEFORE the swap, so the "
 "existing install is intact."
 msgstr ""
 
-#: src\operations/agent-mediated-updates/backend.md:167
+#: src\operations/agent-mediated-updates/backend.md:168
 msgid "Job runs but kanade-backend doesn't come back up"
 msgstr ""
 
-#: src\operations/agent-mediated-updates/backend.md:167
+#: src\operations/agent-mediated-updates/backend.md:168
 msgid "Service-failure / config drift on target"
 msgstr ""
 
-#: src\operations/agent-mediated-updates/backend.md:167
+#: src\operations/agent-mediated-updates/backend.md:168
 msgid ""
 "Read `C:\\ProgramData\\Kanade\\log\\backend.*.log` on the target. The agent "
 "can fetch it via `kanade logs <pc>` (when implemented) or you can pull the "
@@ -1354,74 +1778,74 @@ msgid ""
 "[scripts/deploy/backend.ps1](./backend.md#3-edit-scriptsdeploybackendps1)."
 msgstr ""
 
-#: src\operations/agent-mediated-updates/client.md:64
+#: src\operations/agent-mediated-updates/client.md:61
 msgid "4. Register / update the job"
 msgstr ""
 
-#: src\operations/agent-mediated-updates/client.md:66
+#: src\operations/agent-mediated-updates/client.md:63
 msgid "`configs/jobs/installers/install-kanade-client.yaml`:"
 msgstr ""
 
-#: src\operations/agent-mediated-updates/client.md:69
+#: src\operations/agent-mediated-updates/client.md:66
 msgid "install-kanade-client"
 msgstr ""
 
-#: src\operations/agent-mediated-updates/client.md:73
+#: src\operations/agent-mediated-updates/client.md:70
 msgid "script_file"
 msgstr ""
 
-#: src\operations/agent-mediated-updates/client.md:73
+#: src\operations/agent-mediated-updates/client.md:70
 msgid ""
 "scripts/install-kanade-client.ps1   # body inlined at `job create` (relative "
 "to the manifest YAML)\n"
 "  timeout"
 msgstr ""
 
-#: src\operations/agent-mediated-updates/client.md:74
+#: src\operations/agent-mediated-updates/client.md:71
 msgid "180s"
 msgstr ""
 
-#: src\operations/agent-mediated-updates/client.md:78
+#: src\operations/agent-mediated-updates/client.md:75
 msgid "inventory"
 msgstr ""
 
-#: src\operations/agent-mediated-updates/client.md:80
+#: src\operations/agent-mediated-updates/client.md:77
 msgid "display"
 msgstr ""
 
+#: src\operations/agent-mediated-updates/client.md:78
+#: src\operations/agent-mediated-updates/client.md:79
 #: src\operations/agent-mediated-updates/client.md:81
-#: src\operations/agent-mediated-updates/client.md:82
-#: src\operations/agent-mediated-updates/client.md:84
 msgid "field"
 msgstr ""
 
+#: src\operations/agent-mediated-updates/client.md:78
+#: src\operations/agent-mediated-updates/client.md:79
 #: src\operations/agent-mediated-updates/client.md:81
-#: src\operations/agent-mediated-updates/client.md:82
-#: src\operations/agent-mediated-updates/client.md:84
 msgid "label"
 msgstr ""
 
-#: src\operations/agent-mediated-updates/client.md:81
+#: src\operations/agent-mediated-updates/client.md:78
 msgid "Version"
 msgstr ""
 
-#: src\operations/agent-mediated-updates/client.md:82
+#: src\operations/agent-mediated-updates/client.md:79
 msgid "path"
 msgstr ""
 
-#: src\operations/agent-mediated-updates/client.md:82
+#: src\operations/agent-mediated-updates/client.md:79
 msgid "Install path"
 msgstr ""
 
-#: src\operations/agent-mediated-updates/client.md:83
+#: src\operations/agent-mediated-updates/client.md:80
 msgid "summary"
 msgstr ""
 
-#: src\operations/agent-mediated-updates/client.md:84
+#: src\operations/agent-mediated-updates/client.md:81
 msgid "Client version"
 msgstr ""
 
-#: src\operations/agent-mediated-updates/client.md:91
+#: src\operations/agent-mediated-updates/client.md:88
 msgid ""
 "The `inventory:` block tells the projector that the script's stdout is a "
 "single JSON blob whose `version` / `path` fields populate the SPA's "
@@ -1429,19 +1853,19 @@ msgid ""
 "ssh needed."
 msgstr ""
 
-#: src\operations/agent-mediated-updates/client.md:96
+#: src\operations/agent-mediated-updates/client.md:93
 msgid "5. Fire it"
 msgstr ""
 
-#: src\operations/agent-mediated-updates/client.md:102
+#: src\operations/agent-mediated-updates/client.md:99
 msgid "Or against a group:"
 msgstr ""
 
-#: src\operations/agent-mediated-updates/client.md:108
+#: src\operations/agent-mediated-updates/client.md:105
 msgid "6. Verify in the SPA"
 msgstr ""
 
-#: src\operations/agent-mediated-updates/client.md:110
+#: src\operations/agent-mediated-updates/client.md:107
 msgid ""
 "Open the SPA Inventory page (or query `/api/inventory?app=kanade-client`) "
 "and confirm the target hosts report the new version."
@@ -1541,46 +1965,53 @@ msgid ""
 "This installs `nats-server.exe` to `%ProgramFiles%\\Kanade\\` and "
 "`nats-server.conf` to `%ProgramData%\\Kanade\\config\\` (with ACL hardened "
 "to SYSTEM + Administrators because the bearer token lives in plaintext), "
-"registers the `KanadeNats` Windows service, opens TCP 4222 (broker) + 8222 "
-"(monitoring HTTP), and starts the service."
+"registers the `KanadeNats` Windows service, opens TCP 4222 (broker), and "
+"starts the service."
 msgstr ""
 
-#: src\operations/agent-mediated-updates/nats.md:47
+#: src\operations/agent-mediated-updates/nats.md:46
+msgid ""
+"Monitoring (8222) is deliberately **not** opened, and the rule is removed if "
+"an older deploy created one: the endpoint has no authentication of its own, "
+"and every in-repo consumer reads it over loopback. The shipped "
+"`nats-server.conf` binds it to `127.0.0.1` accordingly."
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:52
 msgid "Agent-mediated update (steady state)"
 msgstr ""
 
-#: src\operations/agent-mediated-updates/nats.md:49
+#: src\operations/agent-mediated-updates/nats.md:54
 msgid ""
-"**Status:** template-only. `scripts/deploy/nats.ps1` doesn't ship "
-"`$AgentSource*` knobs yet — agent-mode is on the backlog. The shape below is "
-"what it WILL look like once the knobs land."
+"`scripts/deploy/nats.ps1` ships the `$AgentSource*` knobs (#234), so the "
+"broker can be upgraded through the fleet — no RDP to the broker host."
 msgstr ""
 
-#: src\operations/agent-mediated-updates/nats.md:53
+#: src\operations/agent-mediated-updates/nats.md:57
 msgid "1. Build / fetch nats-server.exe"
 msgstr ""
 
-#: src\operations/agent-mediated-updates/nats.md:55
+#: src\operations/agent-mediated-updates/nats.md:59
 msgid "Either:"
 msgstr ""
 
-#: src\operations/agent-mediated-updates/nats.md:61
+#: src\operations/agent-mediated-updates/nats.md:65
 msgid ""
 "…or download it directly from "
 "[github.com/nats-io/nats-server/releases](https://github.com/nats-io/nats-server/releases)."
 msgstr ""
 
-#: src\operations/agent-mediated-updates/nats.md:70
+#: src\operations/agent-mediated-updates/nats.md:74
 msgid "3. Edit deploy-nats.ps1"
 msgstr ""
 
-#: src\operations/agent-mediated-updates/nats.md:72
+#: src\operations/agent-mediated-updates/nats.md:76
 msgid ""
-"Once the agent-mode knobs ship, the pattern matches "
+"The pattern matches "
 "[deploy/backend.ps1](./backend.md#3-edit-scriptsdeploybackendps1):"
 msgstr ""
 
-#: src\operations/agent-mediated-updates/nats.md:75
+#: src\operations/agent-mediated-updates/nats.md:79
 msgid ""
 "```powershell\n"
 "$AgentSourceUrl       = 'http://kanade-backend.example.com:8080'\n"
@@ -1590,45 +2021,53 @@ msgid ""
 "```"
 msgstr ""
 
-#: src\operations/agent-mediated-updates/nats.md:82
+#: src\operations/agent-mediated-updates/nats.md:86
 msgid "4. Publish + register + exec"
 msgstr ""
 
-#: src\operations/agent-mediated-updates/nats.md:90
-msgid "The job manifest will look like:"
+#: src\operations/agent-mediated-updates/nats.md:94
+msgid ""
+"The job manifest ships at `configs/jobs/installers/install-kanade-nats.yaml`:"
 msgstr ""
 
-#: src\operations/agent-mediated-updates/nats.md:93
+#: src\operations/agent-mediated-updates/nats.md:98
 msgid "install-kanade-nats"
 msgstr ""
 
-#: src\operations/agent-mediated-updates/nats.md:97
+#: src\operations/agent-mediated-updates/nats.md:102
 msgid "deploy-nats/2.10.20"
 msgstr ""
 
-#: src\operations/agent-mediated-updates/nats.md:103
+#: src\operations/agent-mediated-updates/nats.md:108
 msgid "5. Verify"
 msgstr ""
 
-#: src\operations/agent-mediated-updates/nats.md:105
+#: src\operations/agent-mediated-updates/nats.md:110
 msgid ""
 "After the broker comes back, the outbox drains and you'll see the result row "
 "in `/api/results`. Confirm the new NATS version via the broker's monitoring "
-"endpoint:"
-msgstr ""
-
-#: src\operations/agent-mediated-updates/nats.md:109
-msgid ""
-"```pwsh\n"
-"curl http://<broker>:8222/varz | python -m json.tool | rg version\n"
-"```"
-msgstr ""
-
-#: src\operations/agent-mediated-updates/nats.md:113
-msgid "Why we don't need a separate \"broker update\" mechanism"
+"endpoint — **on the broker host**, since monitoring is bound to loopback and "
+"not opened in the firewall:"
 msgstr ""
 
 #: src\operations/agent-mediated-updates/nats.md:115
+msgid ""
+"```pwsh\n"
+"curl http://127.0.0.1:8222/varz | python -m json.tool | rg version\n"
+"```"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:119
+msgid ""
+"From anywhere else, ask the fleet instead of the port — the same agent-exec "
+"path that just performed the update:"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:126
+msgid "Why we don't need a separate \"broker update\" mechanism"
+msgstr ""
+
+#: src\operations/agent-mediated-updates/nats.md:128
 msgid ""
 "Earlier designs considered a dedicated bootstrap channel (parallel NATS link "
 "the agent uses just for broker updates) to avoid the self-update-over-broker "
@@ -1873,7 +2312,8 @@ msgid "Client (Tauri)"
 msgstr ""
 
 #: src\operations/undeploy.md:14
-msgid "`configs/jobs/installers/scripts/install-kanade-client.ps1` (agent-driven)"
+msgid ""
+"`configs/jobs/installers/scripts/install-kanade-client.ps1` (agent-driven)"
 msgstr ""
 
 #: src\operations/undeploy.md:14
@@ -2051,6 +2491,468 @@ msgid ""
 "`target_version` entry under `agent_config.pcs.<pc>` stays in the KV. Clean "
 "those up server-side with `kanade jetstream kv del agent_config "
 "pcs.<pc>.target_version` if needed."
+msgstr ""
+
+#: src\operations/broker-sizing.md:3
+msgid ""
+"kanade runs on a single NATS + JetStream broker. As the fleet grows "
+"(hundreds → thousands of agents) the broker, not the agents, is the scaling "
+"bottleneck. This page covers the per-agent footprint, what the `#512` work "
+"changed, the single-node limits to watch, and how to capture real numbers "
+"during a scale-up so you can decide whether to add a startup splay or "
+"grow/cluster the broker."
+msgstr ""
+
+#: src\operations/broker-sizing.md:10
+msgid "Per-agent consumer footprint"
+msgstr ""
+
+#: src\operations/broker-sizing.md:12
+msgid ""
+"Each running agent holds a handful of JetStream consumers — one ordered push "
+"consumer per KV watch, plus its durable command-replay consumer:"
+msgstr ""
+
+#: src\operations/broker-sizing.md:15
+msgid "Consumer"
+msgstr ""
+
+#: src\operations/broker-sizing.md:15
+msgid "Source"
+msgstr ""
+
+#: src\operations/broker-sizing.md:17
+msgid "`agent_config` watch (key-filtered)"
+msgstr ""
+
+#: src\operations/broker-sizing.md:17 src\operations/broker-sizing.md:18
+msgid "`config_supervisor`"
+msgstr ""
+
+#: src\operations/broker-sizing.md:18
+msgid "`agent_groups` watch (membership → effective config)"
+msgstr ""
+
+#: src\operations/broker-sizing.md:19
+msgid "`agent_groups` watch (membership → subscriptions)"
+msgstr ""
+
+#: src\operations/broker-sizing.md:19
+msgid "`groups.rs`"
+msgstr ""
+
+#: src\operations/broker-sizing.md:20
+msgid "`schedules` watch"
+msgstr ""
+
+#: src\operations/broker-sizing.md:20 src\operations/broker-sizing.md:21
+#: src\operations/broker-sizing.md:22
+msgid "`local_scheduler`"
+msgstr ""
+
+#: src\operations/broker-sizing.md:21
+msgid "`jobs` watch"
+msgstr ""
+
+#: src\operations/broker-sizing.md:22
+msgid "`fleet_config` freeze watch (single key)"
+msgstr ""
+
+#: src\operations/broker-sizing.md:23
+msgid "`EXEC` durable replay"
+msgstr ""
+
+#: src\operations/broker-sizing.md:23
+msgid "`command_replay`"
+msgstr ""
+
+#: src\operations/broker-sizing.md:25
+msgid ""
+"That is **~7 consumers per agent**. The count is roughly fixed per agent — "
+"it does **not** shrink with key-filtering — so the broker-side total grows "
+"linearly with the fleet:"
+msgstr ""
+
+#: src\operations/broker-sizing.md:29
+msgid "Fleet size"
+msgstr ""
+
+#: src\operations/broker-sizing.md:29
+msgid "~Consumers on the broker"
+msgstr ""
+
+#: src\operations/broker-sizing.md:31
+msgid "15"
+msgstr ""
+
+#: src\operations/broker-sizing.md:31
+msgid "~105"
+msgstr ""
+
+#: src\operations/broker-sizing.md:32
+msgid "500"
+msgstr ""
+
+#: src\operations/broker-sizing.md:32
+msgid "~3,500"
+msgstr ""
+
+#: src\operations/broker-sizing.md:33
+msgid "3,000"
+msgstr ""
+
+#: src\operations/broker-sizing.md:33
+msgid "~21,000"
+msgstr ""
+
+#: src\operations/broker-sizing.md:35
+msgid "What v0.43.96 changed (and what it did not)"
+msgstr ""
+
+#: src\operations/broker-sizing.md:37
+msgid ""
+"`#512` (shipped in v0.43.96) attacked the **super-linear** costs, not the "
+"consumer count:"
+msgstr ""
+
+#: src\operations/broker-sizing.md:40
+msgid ""
+"**`#832` — `agent_config` key-filtered watch.** The agent watches only "
+"`global`, `pcs.<self>`, and its `groups.<g>` keys instead of the whole "
+"bucket (`watch_all`). This removes two blow-ups:"
+msgstr ""
+
+#: src\operations/broker-sizing.md:43
+msgid ""
+"**Per-PC write fan-out**: a write to one `pcs.<id>` no longer reaches all N "
+"agents (it used to, with N−1 classifying-and-dropping it)."
+msgstr ""
+
+#: src\operations/broker-sizing.md:45
+msgid ""
+"**Reconnect re-sync storm**: re-sync is now 3–5 direct `get`s per agent "
+"instead of a `keys()` + per-key walk over the whole bucket — aggregate "
+"**O(N²) → O(N)**."
+msgstr ""
+
+#: src\operations/broker-sizing.md:48
+msgid ""
+"**`#839` — single-key freeze watch.** `fleet_config` holds only "
+"`KEY_FREEZE`, so the freeze watcher uses `watch(KEY_FREEZE)` instead of "
+"`watch_all` + a client-side filter."
+msgstr ""
+
+#: src\operations/broker-sizing.md:52
+msgid ""
+"What is **unchanged**: the ~7-consumers-per-agent footprint, and the "
+"`schedules` / `jobs` `watch_all` (those are a shared catalog every agent "
+"must evaluate for targeting — removing them needs server-side targeting, a "
+"separate change). So at 3,000 agents you still provision for ~21,000 "
+"consumers and the connection/consumer-create burst of a synchronised "
+"reconnect."
+msgstr ""
+
+#: src\operations/broker-sizing.md:59
+msgid "Single-node limits and the reconnect herd"
+msgstr ""
+
+#: src\operations/broker-sizing.md:61
+msgid "Two things to size for on a single-node JetStream:"
+msgstr ""
+
+#: src\operations/broker-sizing.md:62
+msgid ""
+"**Steady-state footprint** — ~21,000 consumers at 3,000 agents live in the "
+"JetStream meta (Raft) layer and cost memory + file handles. Size the broker "
+"host's RAM and `max_file`/`max_memory` JetStream limits accordingly, and "
+"watch the meta layer's health."
+msgstr ""
+
+#: src\operations/broker-sizing.md:66
+msgid ""
+"**The reconnect herd** — when many agents reconnect _at the same instant_ "
+"(broker restart, the morning power-on wave, a network event hitting many "
+"PCs), they re-establish connections and **recreate their consumers in a "
+"burst**. Key-filtering already cut each agent's re-sync to a few cheap "
+"`get`s, so the dangerous O(N²) read-storm is gone — but the connection + "
+"consumer-create burst is still O(N) and synchronised."
+msgstr ""
+
+#: src\operations/broker-sizing.md:73
+msgid ""
+"Note that random, _unsynchronised_ reconnects (one laptop's wifi flap) are "
+"not a herd — only fleet-wide synchronised events are."
+msgstr ""
+
+#: src\operations/broker-sizing.md:76
+msgid "Storage: the 50 GB file store, per-resource caps, and retention"
+msgstr ""
+
+#: src\operations/broker-sizing.md:78
+msgid ""
+"RAM and consumers are only half the sizing story; the other half is disk. "
+"All JetStream data lives under one directory (`store_dir: "
+"C:/ProgramData/Kanade/nats/jetstream`) bounded broker-wide by "
+"`max_file_store: 50GB` (`configs/nats-server.conf`) — a **soft limit shared "
+"by every stream and object store**, not a per-stream one. What happens as it "
+"fills:"
+msgstr ""
+
+#: src\operations/broker-sizing.md:85
+msgid ""
+"Resources with their own retention evict oldest-first (`DiscardPolicy::Old`) "
+"and stay healthy."
+msgstr ""
+
+#: src\operations/broker-sizing.md:87
+msgid ""
+"A resource **without** caps cannot evict, so once the file store is full, "
+"_every_ JetStream publish fleet-wide starts failing with \"insufficient "
+"storage resources available\" (error 10077) — agent result uploads, "
+"collect-bundle uploads, publishes, KV puts. Reads keep working; the write "
+"side is what dies. Uncapped resources also squeeze the capped ones out of "
+"their fair share."
+msgstr ""
+
+#: src\operations/broker-sizing.md:94
+msgid "So every resource must carry a cap, and it does:"
+msgstr ""
+
+#: src\operations/broker-sizing.md:96
+msgid ""
+"**Streams** (`RESULTS` / `INVENTORY` / `AUDIT` / `OBS_EVENTS` / "
+"`NOTIFICATIONS` / `EXEC` / `EVENTS`) each have `max_age` + `max_bytes` "
+"(bootstrap.rs, ~5.3 GiB reserved total). They are transport + replay buffers "
+"— the durable record is the backend's SQLite, which is why the caps can be "
+"tighter than the history an operator expects to see."
+msgstr ""
+
+#: src\operations/broker-sizing.md:102
+msgid ""
+"**Object stores** are capped per bucket by `max_bytes`, tunable from the SPA "
+"(**Settings → server → Object store disk caps**, #1247) with no restart; "
+"blank fields fall back to these built-in defaults:"
+msgstr ""
+
+#: src\operations/broker-sizing.md:106
+msgid "Bucket"
+msgstr ""
+
+#: src\operations/broker-sizing.md:106
+msgid "Default cap"
+msgstr ""
+
+#: src\operations/broker-sizing.md:106
+msgid "Holds"
+msgstr ""
+
+#: src\operations/broker-sizing.md:108
+msgid "`result_output`"
+msgstr ""
+
+#: src\operations/broker-sizing.md:108
+msgid "1,024 MiB"
+msgstr ""
+
+#: src\operations/broker-sizing.md:108
+msgid "oversized stdout/stderr blobs (projected into SQLite within seconds)"
+msgstr ""
+
+#: src\operations/broker-sizing.md:109
+msgid "`agent_releases`"
+msgstr ""
+
+#: src\operations/broker-sizing.md:109
+msgid "2,048 MiB"
+msgstr ""
+
+#: src\operations/broker-sizing.md:109
+msgid "agent exes (~20 versions)"
+msgstr ""
+
+#: src\operations/broker-sizing.md:110
+msgid "`app_packages`"
+msgstr ""
+
+#: src\operations/broker-sizing.md:110 src\operations/broker-sizing.md:112
+msgid "5,120 MiB"
+msgstr ""
+
+#: src\operations/broker-sizing.md:110
+msgid "operator-curated installers"
+msgstr ""
+
+#: src\operations/broker-sizing.md:111
+msgid "`scripts`"
+msgstr ""
+
+#: src\operations/broker-sizing.md:111
+msgid "256 MiB"
+msgstr ""
+
+#: src\operations/broker-sizing.md:111
+msgid "manifest script bodies"
+msgstr ""
+
+#: src\operations/broker-sizing.md:112
+msgid "`collections`"
+msgstr ""
+
+#: src\operations/broker-sizing.md:112
+msgid ""
+"collect-job bundles (also `max_age`, tunable via _Collected-bundle "
+"retention_)"
+msgstr ""
+
+#: src\operations/broker-sizing.md:114
+msgid ""
+"The backend reconciles the configured values onto the backing `OBJ_*` "
+"streams **at every boot and on every save**, which is also how caps reach "
+"buckets created before the cap existed. Total default reservation ≈ 13.5 GiB "
+"— sized, with the streams, to sit well inside 50 GB."
+msgstr ""
+
+#: src\operations/broker-sizing.md:120
+msgid ""
+"**SQLite (the projection)** is _not_ unbounded either: the backend cleanup "
+"task prunes on a 5-minute tick in bounded batches — `execution_results` / "
+"`executions` / `obs_events` / `inventory_history` 90 d, `audit_log` 365 d, "
+"`host_perf_samples` 30 d, `process_perf_samples` 7 d. Every DB window is "
+"deliberately **longer than the matching stream window**, so anything the "
+"stream can replay is guaranteed to already be in SQLite. Remaining tables "
+"are upsert/replace-shaped (live-state sized), and dead agents are pruned by "
+"`agent_prune_days` (also a ServerSettings knob)."
+msgstr ""
+
+#: src\operations/broker-sizing.md:130
+msgid ""
+"Live usage per resource (used bytes vs cap) is on the SPA's JetStream page — "
+"it reads the broker's current config, so a changed cap shows up there on the "
+"next load."
+msgstr ""
+
+#: src\operations/broker-sizing.md:134
+msgid "Levers, in order of preference"
+msgstr ""
+
+#: src\operations/broker-sizing.md:136
+msgid ""
+"**Broker sizing first.** Give the single node enough RAM / file limits for "
+"the steady-state consumer count at your target N. This is the primary lever; "
+"everything else is secondary."
+msgstr ""
+
+#: src\operations/broker-sizing.md:139
+msgid ""
+"**Startup splay — only if measured.** A deterministic per-PC delay "
+"(`hash(pc_id)`) before the reconnect re-sync would smear the consumer-create "
+"/ connection burst across a window. It is **not in the product yet** by "
+"design: PR1 already removed the quadratic term, and async-nats' reconnect "
+"backoff + `nats_retry`'s ±25% jitter already spread the burst somewhat. A "
+"splay also adds latency to every single reconnect (including herd-less "
+"blips), so it is a net cost unless a herd actually stresses the broker. "
+"**Decide from data** (next section): if a synchronised event shows "
+"consumer-create latency, connection backlog, or JetStream API errors, add "
+"the splay (gated to the first sync after a `Disconnected → Connected`, "
+"capped a few seconds)."
+msgstr ""
+
+#: src\operations/broker-sizing.md:150
+msgid ""
+"**Reduce consumers per agent.** Fold watches where possible (the freeze "
+"watch is already a single key; the two `agent_groups` watches are a "
+"candidate to merge) and keep KV history shallow (`agent_config` / "
+"`agent_groups` are at `history: 1`)."
+msgstr ""
+
+#: src\operations/broker-sizing.md:154
+msgid ""
+"**Cluster JetStream.** Beyond what one node can hold, move to a JetStream "
+"cluster. This is the last resort and the biggest change."
+msgstr ""
+
+#: src\operations/broker-sizing.md:157
+msgid "Measuring at scale (retro-analysis)"
+msgstr ""
+
+#: src\operations/broker-sizing.md:159
+msgid ""
+"You usually cannot watch a production broker live during a ramp. Capture the "
+"numbers instead, with the bundled `collect:` job, and review the bundle "
+"afterwards."
+msgstr ""
+
+#: src\operations/broker-sizing.md:163
+msgid ""
+"Run it **on the backend / NATS host**, ideally **during or right after a "
+"synchronised reconnect event** (the herd moment is what decides the splay "
+"question):"
+msgstr ""
+
+#: src\operations/broker-sizing.md:171
+msgid ""
+"The job (`configs/jobs/collect-broker-health.yaml`) samples the broker over "
+"~3 minutes and uploads a bundle to `OBJECT_COLLECTIONS`; download it from "
+"the SPA **Collect** page (or hand the zip to your reviewer). It is read-only "
+"and needs **zero pre-setup**: it reads NATS' unauthenticated HTTP monitoring "
+"port (default 8222 — the same `/jsz` endpoint kanade already curls for "
+"`jetstream status`), so no `nats` CLI on the SYSTEM PATH and no token are "
+"required. Tune the window with `KANADE_BH_SAMPLES` / "
+"`KANADE_BH_INTERVAL_SEC` (and `KANADE_BH_MON_PORT` if the broker's "
+"`http_port` differs) on the target if needed."
+msgstr ""
+
+#: src\operations/broker-sizing.md:181
+msgid "The bundle contains:"
+msgstr ""
+
+#: src\operations/broker-sizing.md:183
+msgid ""
+"**Time series** (`connz-*.json`, `jsz-*.json`) — connection count (`/connz`) "
+"and JetStream consumer count (`/jsz`) per sample. A spike here at the herd "
+"moment is the splay signal."
+msgstr ""
+
+#: src\operations/broker-sizing.md:186
+msgid ""
+"**Consumer footprint** (`jsz-full.json`) — "
+"`/jsz?consumers=true&streams=true`: the full consumer list; confirms the ~7N "
+"total and which streams hold them."
+msgstr ""
+
+#: src\operations/broker-sizing.md:188
+msgid ""
+"**Server health/resources** (`varz.json`, `healthz.json`) — `/varz` (memory, "
+"CPU, connections, slow consumers) and `/healthz` status."
+msgstr ""
+
+#: src\operations/broker-sizing.md:190
+msgid "**Log tails** (redacted) — backend and nats-server."
+msgstr ""
+
+#: src\operations/broker-sizing.md:192
+msgid "What to look for"
+msgstr ""
+
+#: src\operations/broker-sizing.md:194
+msgid ""
+"**Smooth** consumer/connection counts across the samples, healthy "
+"`/healthz`, head-room on mem/cpu in `/varz` → the broker absorbed the event; "
+"**no splay needed**, just keep sizing ahead of N."
+msgstr ""
+
+#: src\operations/broker-sizing.md:197
+msgid ""
+"**Spiky** connection backlog or consumer-create latency at the event, "
+"JetStream API errors, or mem/cpu pegged → the herd is real → add the startup "
+"splay (lever 2) and/or grow the broker."
+msgstr ""
+
+#: src\operations/broker-sizing.md:201
+msgid ""
+"The `#828` downgrade-flap regression is checked separately from the "
+"`OBS_EVENTS` `agent_update` timeline (via the backend API), not by this job "
+"— that data is already queryable fleet-wide."
 msgstr ""
 
 #: src\developing/writing-agent-scripts.md:3
@@ -2234,30 +3136,48 @@ msgstr ""
 
 #: src\developing/writing-agent-scripts.md:81
 msgid ""
-"Use `Write-Host` for progress chatter — it goes to the host stream, NOT "
-"stdout, so it doesn't pollute the JSON parse."
+"**Do NOT use `Write-Host` for progress chatter in an inventory script.** "
+"Contrary to a common assumption, `Write-Host` does NOT stay on a separate "
+"host stream once the agent runs your script with stdout redirected — its "
+"output bleeds INTO the captured stdout. That extra text breaks the "
+"projector's single-JSON-blob parse (`serde_json::from_str` over the whole "
+"stdout, in "
+"`crates/kanade-backend/src/projector/results.rs::upsert_inventory`), and "
+"your inventory fact is silently dropped (the backend logs `stdout was not "
+"JSON`)."
 msgstr ""
 
-#: src\developing/writing-agent-scripts.md:84
+#: src\developing/writing-agent-scripts.md:91
+msgid ""
+"Send progress chatter to **stderr** via `[Console]::Error.WriteLine(...)`. "
+"stderr is captured into the result's separate `stderr` field, which the "
+"projector ignores, so stdout stays a single clean JSON line."
+msgstr ""
+
+#: src\developing/writing-agent-scripts.md:95
 msgid ""
 "```powershell\n"
-"Write-Host \"Downloading...\"         # → host stream (logged but ignored by "
-"projector)\n"
-"Write-Output ($obj | ConvertTo-Json) # → stdout (parsed)\n"
+"[Console]::Error.WriteLine(\"Downloading...\")  # → stderr (logged, ignored "
+"by projector)\n"
+"Write-Output ($obj | ConvertTo-Json)          # → stdout (the ONE JSON line, "
+"parsed)\n"
 "```"
 msgstr ""
 
-#: src\developing/writing-agent-scripts.md:89
+#: src\developing/writing-agent-scripts.md:100
 msgid ""
-"Avoid `Write-Output` for chatter — anything on stdout that isn't the "
-"expected JSON will fail the inventory parse."
+"Keep stdout to exactly one `Write-Output` — anything else on stdout (a stray "
+"`Write-Host`, `Write-Output`, or a cmdlet's pipeline output) that isn't the "
+"expected JSON will fail the inventory parse. See "
+"`configs/jobs/installers/scripts/install-kanade-client.ps1` for a worked "
+"example."
 msgstr ""
 
-#: src\developing/writing-agent-scripts.md:92
+#: src\developing/writing-agent-scripts.md:106
 msgid "UTF-8 by default"
 msgstr ""
 
-#: src\developing/writing-agent-scripts.md:94
+#: src\developing/writing-agent-scripts.md:108
 msgid ""
 "The launcher sets `[Console]::OutputEncoding = UTF-8` and `$OutputEncoding = "
 "UTF-8` before invoking your script, so any stdout / stderr you produce is "
@@ -2266,18 +3186,18 @@ msgid ""
 "view without per-host workarounds."
 msgstr ""
 
-#: src\developing/writing-agent-scripts.md:101
+#: src\developing/writing-agent-scripts.md:115
 msgid ""
 "If you explicitly need OEM / CP932 / Shift-JIS output (e.g. calling a legacy "
 "CLI that ignores `$OutputEncoding`), set it yourself in the script after the "
 "launcher prelude has run — your assignment takes precedence."
 msgstr ""
 
-#: src\developing/writing-agent-scripts.md:106
+#: src\developing/writing-agent-scripts.md:120
 msgid "Native command exit codes"
 msgstr ""
 
-#: src\developing/writing-agent-scripts.md:108
+#: src\developing/writing-agent-scripts.md:122
 msgid ""
 "If your script ends with a successful native command run, the overall exit "
 "is 0 — that's PowerShell's default. If a native command fails "
@@ -2285,7 +3205,7 @@ msgid ""
 "`$ErrorActionPreference = 'Stop'` does **not** save you here."
 msgstr ""
 
-#: src\developing/writing-agent-scripts.md:114
+#: src\developing/writing-agent-scripts.md:128
 msgid ""
 "Windows PowerShell 5.1 (the default on Windows endpoints — and what the "
 "agent's `powershell.exe` resolves to) treats native command non-zero exits "
@@ -2295,7 +3215,7 @@ msgid ""
 "check `$LASTEXITCODE` explicitly.**"
 msgstr ""
 
-#: src\developing/writing-agent-scripts.md:122
+#: src\developing/writing-agent-scripts.md:136
 msgid ""
 "The agent does NOT auto-propagate `$LASTEXITCODE` either — that would exit "
 "nonzero even when your script handled the native error gracefully. If you "
@@ -2303,7 +3223,7 @@ msgid ""
 "yourself:"
 msgstr ""
 
-#: src\developing/writing-agent-scripts.md:127
+#: src\developing/writing-agent-scripts.md:141
 msgid ""
 "```powershell\n"
 "& git pull\n"
@@ -2314,7 +3234,7 @@ msgid ""
 "```"
 msgstr ""
 
-#: src\developing/writing-agent-scripts.md:134
+#: src\developing/writing-agent-scripts.md:148
 msgid ""
 "`throw` is usually preferable because it produces a clean PowerShell error "
 "record (which the `trap { … break }` cleanup pattern can intercept) and "
@@ -2322,40 +3242,40 @@ msgid ""
 "the exact code."
 msgstr ""
 
-#: src\developing/writing-agent-scripts.md:139
+#: src\developing/writing-agent-scripts.md:153
 msgid "Timeouts"
 msgstr ""
 
-#: src\developing/writing-agent-scripts.md:141
+#: src\developing/writing-agent-scripts.md:155
 msgid ""
 "The manifest's `timeout:` is enforced by the agent. When it fires, the agent "
 "calls `child.kill()` on the PowerShell process — no graceful shutdown, no "
 "trap, no finally. Plan for it:"
 msgstr ""
 
-#: src\developing/writing-agent-scripts.md:145
+#: src\developing/writing-agent-scripts.md:159
 msgid "Budget the script to finish in `timeout * 0.6` and leave headroom."
 msgstr ""
 
-#: src\developing/writing-agent-scripts.md:147
+#: src\developing/writing-agent-scripts.md:161
 msgid ""
 "Use `trap { ... ; break }` for cleanup of resources that need explicit "
 "release (staging dirs, lock files) — `trap` fires on terminating errors, NOT "
 "on the agent's kill. Don't rely on it for the timeout case."
 msgstr ""
 
-#: src\developing/writing-agent-scripts.md:151
+#: src\developing/writing-agent-scripts.md:165
 msgid ""
 "If you need cooperative cancellation, poll a sentinel file or a registry "
 "value and exit early. The agent has no way to send the script a graceful "
 "\"wrap up\" signal."
 msgstr ""
 
-#: src\developing/writing-agent-scripts.md:155
+#: src\developing/writing-agent-scripts.md:169
 msgid "Killing a running job"
 msgstr ""
 
-#: src\developing/writing-agent-scripts.md:157
+#: src\developing/writing-agent-scripts.md:171
 msgid ""
 "`kanade kill <exec_id>` publishes a kill message the agent subscribes to. On "
 "receipt, the agent calls `child.kill()` — same hard-kill as the timeout "
