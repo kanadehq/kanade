@@ -1,0 +1,20 @@
+# Paths the Tauri dev watcher must NOT treat as Rust-side changes.
+#
+# `tauri dev` watches this crate and rebuilds the binary on any file
+# change. Vite writes `node_modules/.vite-temp/*` while probing its
+# config, and the dev server's own output lands in `web/dist` — both are
+# frontend-side churn that the Rust build has no stake in. Without this,
+# starting the dev server tripped the watcher, which restarted the app,
+# which restarted the dev server: an immediate rebuild loop that ended in
+# `script "dev" exited with code 255`.
+#
+# `web/src` is here for a different reason: editing the UI is not a
+# Rust-side change either, and without it every one-character tweak to
+# the frontend rebuilt and relaunched the whole binary.
+#
+# Deliberately narrow, and it has to be. Ignoring `web/` wholesale also
+# hides the `package.json` the CLI resolves `beforeDevCommand` against,
+# which then fails with `Script not found "dev"`.
+web/node_modules
+web/dist
+web/src

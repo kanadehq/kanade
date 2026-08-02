@@ -21,6 +21,28 @@ categories.workspace   = true
 # src/main.rs). Linux UDS support lands in a follow-up PR and
 # will widen the gate.
 
+# `custom-protocol` is a DEFAULT feature rather than pinned directly on
+# the `tauri` dependency, so it can be turned off on purpose.
+#
+# It is the switch that decides which frontend the binary loads, and its
+# polarity is inverted from what the name suggests: `tauri`'s own build
+# script does `let dev = !custom_protocol`, and `Manager::get_app_url()`
+# reads `build.devUrl` under `cfg(dev)` and the embedded `frontendDist`
+# under `cfg(not(dev))`. Pinned on the dependency, the feature could not
+# be removed by any command-line flag — so `cargo tauri dev` started
+# Vite and then launched a binary that ignored it. The window showed
+# whatever had been embedded at compile time while the very same URL
+# rendered correctly in a browser beside it, and nothing in the output
+# named the cause.
+#
+# Keeping it in `default` leaves every existing build path unchanged:
+# `cargo build --release --workspace --bins` (what `release.yml` runs)
+# still produces a production binary. Only an explicit
+# `--no-default-features` opts into the dev-server flow.
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
 [dependencies]
 kanade-shared = { workspace = true }
 
@@ -37,10 +59,9 @@ anyhow = { workspace = true }
 # "localhost — ERR_CONNECTION_REFUSED" because nothing is serving that
 # port. `tauri build` injects this feature automatically, but we build
 # the client with plain `cargo build --release --workspace`, so it must
-# be enabled here. (Trade-off: `cargo tauri dev` no longer hot-reloads
-# from the Vite server for this crate — this repo embeds at build time
-# and never uses the dev-server flow, so that's fine.)
-tauri = { version = "2.11.5", features = ["custom-protocol"] }
+# be on by default — see `[features]` below, which keeps it on for every
+# existing build path while making it possible to turn OFF deliberately.
+tauri = { version = "2.11.5", features = [] }
 # Native OS toast notifications — used for info/warn toasts. Emergencies are
 # built as raw WinRT toasts in `app.rs` (the plugin can't persist a toast nor
 # carry the click-to-open `launch`).
