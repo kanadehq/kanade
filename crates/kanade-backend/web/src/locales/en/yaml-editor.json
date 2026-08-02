@@ -1,0 +1,46 @@
+{
+  "nouns": {
+    "manifest": "job",
+    "schedule": "schedule",
+    "view": "view",
+    "group": "group"
+  },
+  "nounsTitle": {
+    "manifest": "Job",
+    "schedule": "Schedule",
+    "view": "View",
+    "group": "Group"
+  },
+  "title": {
+    "create": "New {{noun}}",
+    "edit": "Edit {{noun}}: {{id}}",
+    "readOnly": "{{noun}}: {{id}} · read-only"
+  },
+  "description": {
+    "editable": "Schema-aware editor — comments and indentation round-trip through <code>application/yaml</code>. Hover field names for docs.",
+    "gitManaged": "Managed in Git — read-only. Edit the source in the repo, then run <code>{{cmd}}</code> to apply (SPEC §3 GitOps)."
+  },
+  "git": {
+    "badge": "Managed in Git",
+    "openRepo": "open repo",
+    "script": "↳ script:"
+  },
+  "loading": {
+    "yaml": "loading current YAML…",
+    "editor": "loading editor…"
+  },
+  "errors": {
+    "load": "Couldn't load YAML: {{error}}",
+    "save": "Save failed: {{error}}"
+  },
+  "toast": {
+    "created": "Created {{noun}}",
+    "saved": "Saved {{noun}}: {{id}}"
+  },
+  "actions": {
+    "close": "Close",
+    "cancel": "Cancel",
+    "save": "Save",
+    "saving": "saving…"
+  }
+}

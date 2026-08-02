@@ -29,7 +29,17 @@ export default defineConfig({
     ctViteConfig: {
       plugins: [react(), tailwindcss()],
       resolve: {
-        alias: { '@': path.resolve(rootDir, './src') },
+        alias: {
+          '@': path.resolve(rootDir, './src'),
+          // Same alias the app's vite.config carries, and for the same
+          // reason: monaco-editor 0.56's `exports` map no longer resolves
+          // the deep `esm/vs/...` specifier that `monaco-worker-manager`
+          // (via monaco-yaml) still imports. Without it, mounting anything
+          // that reaches the YAML editor fails at bundle time rather than
+          // in the test. See vite.config.ts for the full write-up.
+          'monaco-editor/esm/vs/editor/editor.worker.js':
+            'monaco-editor/editor/editor.worker.js',
+        },
       },
     },
   },
