@@ -29,6 +29,7 @@ import {
 import { apiFetch, formatError } from '@/lib/api';
 import { useAuth, type Role } from '@/lib/auth';
 import { FEATURE_NAV_KEY, GATEABLE_FEATURES } from '@/lib/features';
+import { fmtIsoLocal } from '@/lib/utils';
 
 type Account = {
   username: string;
@@ -247,8 +248,18 @@ export function Accounts() {
     !(groupsQuery.data ?? []).find((g) => g.name === name)?.features.includes('accounts');
   const selectedGroupLocksSelfOut = !!pagesGroup && groupLocksSelfOut(pagesGroup);
 
+  // No `max-w-5xl` on the container below. The cap is not what garbled the
+  // columns — removing it alone changes nothing there — but once the columns
+  // have floors it IS what makes the table stick out of its own card: the
+  // card stops at 1024px while the table needs 1230px, so the action buttons
+  // render 255px outside the border. Uncapped, the card follows the window
+  // and the table fits inside it exactly.
+  //
+  // The two symptoms had two different causes, and reading them as one is
+  // why an earlier pass tried removing this, saw the columns still garbled,
+  // and put it back.
   return (
-    <div className="p-4 md:p-6 space-y-6 max-w-5xl">
+    <div className="p-4 md:p-6 space-y-6">
       <header>
         <h1 className="text-2xl font-bold">{t('title')}</h1>
         <p className="text-muted text-sm">{t('subtitle')}</p>
@@ -338,16 +349,41 @@ export function Accounts() {
 
       {accounts.isError && <p className="text-red-500 text-sm">{formatError(accounts.error)}</p>}
 
-      <Table>
+      {/* `wideCards`: seven columns plus four action buttons need ~1230px,
+          and a 1100px viewport gives this card 786px — as a table it put
+          the action column 445px outside its own border. Cards up to
+          1535px instead, where every value gets its label and nothing
+          overflows. */}
+      <Table wideCards>
         <TableHeader>
           <TableRow>
-            <TableHead>{t('username')}</TableHead>
-            <TableHead>{t('email')}</TableHead>
+            {/* Floors for the two columns whose content is a single
+                unbreakable token. `overflow-wrap: anywhere` (index.css, #1005)
+                sets their min-content to ONE character, so `table-layout:
+                auto` hands the width to the columns that cannot shrink — the
+                role <select>, the action buttons — and starves these to a
+                vertical stack of letters. The floor is what stops that; the
+                wrap behaviour itself is still wanted for anything longer.
+
+                Trimmed to the smallest values that still hold the columns
+                open (measured: 7rem/11rem gives a table min-content of
+                1230px against 1262px at 8rem/13rem). It is not free — see
+                the PR for what the floors cost in horizontal fit, and what
+                the alternatives measured. */}
+            <TableHead className="min-w-[7rem]">{t('username')}</TableHead>
+            <TableHead className="min-w-[11rem]">{t('email')}</TableHead>
             <TableHead>{t('role')}</TableHead>
             <TableHead>{t('status')}</TableHead>
             <TableHead>{t('pageAccess')}</TableHead>
             <TableHead>{t('created')}</TableHead>
-            <TableHead className="text-right">{t('actions')}</TableHead>
+            {/* Left-aligned, like every other actions column in the app
+                (Activity, Agents, Schedules, Jobs, Views, Groups). This page
+                was the only one right-aligning it. Harmless while the page
+                was capped at 5xl and the columns were packed; once the cap
+                came off, the actions column collected all the slack and threw
+                the buttons to the far edge, leaving a gap between them and
+                the timestamp they belong to. */}
+            <TableHead>{t('actions')}</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -357,8 +393,14 @@ export function Accounts() {
                 {/* Group the name + badge as one flex item so the card view
                     keeps them together on the value side (not split across
                     the row by justify-content: space-between). */}
-                <span className="inline-flex items-center">
-                  {a.username}
+                {/* `flex-wrap` + a non-breaking name: with the badge pinned
+                    to the same line the cell could not fit both, and
+                    `overflow-wrap: anywhere` (index.css) let the browser
+                    satisfy the constraint by breaking the USERNAME one
+                    character per line instead. Wrapping the badge under the
+                    name is the give this cell needs. */}
+                <span className="inline-flex flex-wrap items-center gap-y-1">
+                  <span className="whitespace-nowrap">{a.username}</span>
                   {a.must_change_pw === 1 && (
                     <Badge variant="amber" className="ml-2">
                       {t('mustChange')}
@@ -378,7 +420,7 @@ export function Accounts() {
                   }}
                 >
                   {a.email ? (
-                    <span className="break-all">{a.email}</span>
+                    <span>{a.email}</span>
                   ) : (
                     <span className="text-muted">{t('setEmail')}</span>
                   )}
@@ -429,8 +471,13 @@ export function Accounts() {
                   )}
                 </button>
               </TableCell>
-              <TableCell label={t('created')} className="text-muted text-xs">{a.created_at}</TableCell>
-              <TableCell className="text-right space-x-2 whitespace-nowrap">
+              <TableCell
+                label={t('created')}
+                className="text-muted text-xs whitespace-nowrap"
+              >
+                {fmtIsoLocal(a.created_at)}
+              </TableCell>
+              <TableCell className="space-x-2 whitespace-nowrap">
                 {/* Mail a setup/reset link; only when the account has an
                     email on file. */}
                 {a.email && (
@@ -527,7 +574,7 @@ export function Accounts() {
                   <TableHead>{t('group.name')}</TableHead>
                   <TableHead>{t('group.pages')}</TableHead>
                   <TableHead>{t('group.members')}</TableHead>
-                  <TableHead className="text-right">{t('actions')}</TableHead>
+                  <TableHead>{t('actions')}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -553,7 +600,7 @@ export function Accounts() {
                       </button>
                     </TableCell>
                     <TableCell label={t('group.members')}>{g.member_count}</TableCell>
-                    <TableCell className="text-right space-x-2 whitespace-nowrap">
+                    <TableCell className="space-x-2 whitespace-nowrap">
                       <Button variant="secondary" size="sm" onClick={() => openGroupEdit(g)}>
                         {t('group.editPages')}
                       </Button>

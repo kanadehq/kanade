@@ -12,10 +12,21 @@ interface TableProps extends HTMLAttributes<HTMLTableElement> {
    * a non-`cards` table needs none.
    */
   cards?: boolean;
+  /**
+   * Collapse to cards up to 1535px instead of the usual 1023px.
+   *
+   * For a table whose intrinsic width exceeds the content area on a laptop,
+   * `lg` is the wrong threshold: it switches to table layout at 1024px and
+   * then has nowhere to put the overflow, because the wrapper has no
+   * horizontal scroll (see the note above). Opt in per table rather than
+   * moving the global breakpoint — most data tables are designed to be wide
+   * on a laptop and would lose that.
+   */
+  wideCards?: boolean;
 }
 
 export const Table = forwardRef<HTMLTableElement, TableProps>(
-  ({ className, cards = true, ...props }, ref) => (
+  ({ className, cards = true, wideCards = false, ...props }, ref) => (
     // No `overflow-*` on the wrapper. An `overflow-x-auto` here used to
     // guard narrow viewports + intrinsically wide rows, but any
     // non-`visible` overflow turns the wrapper into a scroll container
@@ -33,7 +44,13 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
     // table stays tabular at every width, so it keeps the classic
     // `overflow-x-auto` safety net — otherwise wide content (long paths, a
     // nested table) would burst out and scroll the whole page sideways.
-    <div className={cn(cards ? 'kn-table' : 'overflow-x-auto', 'rounded-lg border border-border bg-card')}>
+    <div
+      className={cn(
+        cards ? 'kn-table' : 'overflow-x-auto',
+        cards && wideCards && 'kn-table-wide',
+        'rounded-lg border border-border bg-card',
+      )}
+    >
       <table ref={ref} className={cn('w-full text-sm', className)} {...props} />
     </div>
   ),
