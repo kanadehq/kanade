@@ -69,7 +69,6 @@ const groups: {
       // `nav.agentGroups` (not `nav.groups`) — that key is already
       // taken by the sidebar section labels above.
       { to: '/groups', labelKey: 'nav.agentGroups', feature: 'groups' },
-      { to: '/group-defs', labelKey: 'nav.groupDefs', feature: 'groups' },
       { to: '/config', labelKey: 'nav.config', feature: 'config' },
       { to: '/jetstream', labelKey: 'nav.jetstream', feature: 'jetstream' },
       { to: '/accounts', labelKey: 'nav.accounts', adminOnly: true, feature: 'accounts' },

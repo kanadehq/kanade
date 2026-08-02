@@ -37,7 +37,6 @@ const Config = lazy(() => import('@/pages/Config').then((m) => ({ default: m.Con
 const Dashboard = lazy(() => import('@/pages/Dashboard').then((m) => ({ default: m.Dashboard })));
 const Events = lazy(() => import('@/pages/Events').then((m) => ({ default: m.Events })));
 const Exec = lazy(() => import('@/pages/Exec').then((m) => ({ default: m.Exec })));
-const GroupDefs = lazy(() => import('@/pages/GroupDefs').then((m) => ({ default: m.GroupDefs })));
 const Groups = lazy(() => import('@/pages/Groups').then((m) => ({ default: m.Groups })));
 const Inventory = lazy(() => import('@/pages/Inventory').then((m) => ({ default: m.Inventory })));
 const JetStream = lazy(() => import('@/pages/JetStream').then((m) => ({ default: m.JetStream })));
@@ -155,7 +154,6 @@ function AppContent() {
                   keys off the first segment, so this is gated as `remote`. */}
               <Route path="/remote/:pcId" element={<RemoteScreen />} />
               <Route path="/groups" element={<Groups />} />
-              <Route path="/group-defs" element={<GroupDefs />} />
               <Route path="/notifications" element={<Notifications />} />
               <Route path="/notifications/:id" element={<NotificationDetail />} />
               <Route path="/config" element={<Config />} />
