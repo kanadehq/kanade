@@ -164,6 +164,20 @@ endpoint is one of these.
 
 ![Jobs](../images/screenshots/jobs-light-en.jpg)
 
+### The manifest itself
+
+Opening one shows the YAML an operator wrote, not a form generated from it.
+Comments and block-scalar indentation survive the round trip, because the
+source is stored verbatim rather than re-serialised from a parsed object —
+so the file you get back is the file you saved. The editor knows the schema:
+hovering a field name shows what it does.
+
+![A job manifest](../images/screenshots/jobs-yaml-light-en.jpg)
+
+A manifest kept in Git opens read-only instead, pointing at the path in the
+repository — the SPA will not let an edit here diverge from the source of
+truth.
+
 ### One run
 
 Every dispatch keeps its own result: the exit code, the ids that tie it back
