@@ -107,13 +107,16 @@ deployed client:
 1. **Upload the binary.**
 
    ```bash
-   kanade app publish kanade-client 0.42.0 \
+   kanade app publish kanade-client \
      target/release/kanade-client.exe
    ```
 
-   The bucket is keyed by `<name>/<version>` — pick the version
-   string per release (semver / calendar / git sha all work; see
-   `kanade-shared::kv::OBJECT_APP_PACKAGES` for the constraints).
+   The bucket is keyed by `<name>/<version>`. The version is read
+   from the binary's embedded VERSIONINFO (#261) so it can't drift
+   from what you built; pass `--version <label>` to override, or for
+   inputs without PE metadata (see
+   `kanade-shared::kv::OBJECT_APP_PACKAGES` for what a version
+   string may contain — semver / calendar / git sha all work).
    `kanade app` (#222) talks straight to NATS — no backend HTTP
    round-trip — so this works even when the backend itself is
    restarting.
@@ -260,9 +263,12 @@ Five steps per backend release:
 1. **Upload the binary.**
 
    ```bash
-   kanade app publish kanade-backend 0.43.0 \
+   kanade app publish kanade-backend \
      target/release/kanade-backend.exe
    ```
+
+   Version from the binary's VERSIONINFO (#261); `--version` to
+   override.
 
 2. **Stamp the install script with this release's coordinates.**
    Copy `scripts/deploy/backend.ps1` locally and set the three
@@ -360,7 +366,7 @@ Five steps, same shape as the backend flow:
 1. **Upload the target binary to app-packages.**
 
    ```bash
-   kanade app publish kanade-agent 0.43.48 dist/agent/kanade-agent.exe
+   kanade app publish kanade-agent dist/agent/kanade-agent.exe
    ```
 
 2. **Stamp the swap script with this release's coordinates.** Copy
