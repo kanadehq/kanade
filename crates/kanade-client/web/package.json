@@ -11,7 +11,7 @@
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-notification": "^2.3.3",
-    "dompurify": "^3.4.12",
+    "dompurify": "^3.4.13",
     "lucide": "^1.28.0",
     "marked": "^18.0.7"
   },
