@@ -6,6 +6,8 @@ import { Trans, useTranslation } from 'react-i18next';
 import { ErrorCard } from '@/components/ErrorCard';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Label } from '@/components/ui/label';
+import { Select } from '@/components/ui/select';
 import { apiFetch, apiFetchBlob, formatError } from '@/lib/api';
 import type { BackendSigningKey } from '@/lib/signing';
 import { toast } from 'sonner';
@@ -13,22 +15,49 @@ import { toast } from 'sonner';
 const FALLBACK_FILENAME = 'kanade-agent-installer.zip';
 
 // Pull the download filename out of the installer's Content-Disposition
-// header (`attachment; filename="kanade-agent-installer-<version>.zip"`).
-// Kept pure and exported so the parsing is testable without a DOM —
-// the same reason lib/signing.ts stays out of its badge component.
+// header (`attachment; filename="kanade-agent-installer-<version>.zip"` /
+// `…-<version>-linux-<arch>.tar.gz`). Kept pure and exported so the parsing
+// is testable without a DOM — the same reason lib/signing.ts stays out of
+// its badge component.
 export function installerFilename(contentDisposition: string | null): string {
   const m = /filename="?([^";]+)"?/i.exec(contentDisposition ?? '');
   return m?.[1]?.trim() || FALLBACK_FILENAME;
 }
 
+export type InstallerOs = 'windows' | 'linux';
+type InstallerArch = 'x86_64' | 'aarch64';
+
+// Initial OS for the toggle, guessed from the browser. `platform` is
+// `navigator.userAgentData.platform` (Chromium) — more reliable than the UA
+// string, which is frozen/reduced there — with the plain UA as fallback.
+// 'Win' → windows, 'Linux'/'X11' → linux; anything else (including macOS,
+// which has no installer) defaults to 'windows', the dominant endpoint OS.
+// Pure + exported so the mapping is unit-testable without a DOM.
+export function detectOs(ua: string, platform?: string): InstallerOs {
+  const probe = platform || ua;
+  if (probe.includes('Win')) return 'windows';
+  if (probe.includes('Linux') || probe.includes('X11')) return 'linux';
+  return 'windows';
+}
+
 // First-time agent install for END USERS (the download-only account): no
-// options, no version picker — `GET /api/agents/installer` always builds the
-// ZIP from the latest release with the NATS settings and (when the backend
-// signs commands) the signing public key baked in server-side. The page is
-// the only one a restricted installer account can reach; the endpoint is
-// gated by the `agent-install` feature, not by role.
+// options beyond the OS/arch — `GET /api/agents/installer` always builds
+// the package from the latest release with the NATS settings and (on
+// Windows, when the backend signs commands) the signing public key baked in
+// server-side. The page is the only one a restricted installer account can
+// reach; the endpoint is gated by the `agent-install` feature, not by role.
 export function AgentInstall() {
   const { t } = useTranslation('agent-install');
+  // Preselect the visitor's own OS — the common case is downloading the
+  // installer on (or for) a machine of the same platform. userAgentData is
+  // Chromium-only; absent elsewhere, the UA string carries the same hint.
+  const [os, setOs] = useState<InstallerOs>(() =>
+    detectOs(
+      navigator.userAgent,
+      (navigator as { userAgentData?: { platform?: string } }).userAgentData?.platform,
+    ),
+  );
+  const [arch, setArch] = useState<InstallerArch>('x86_64');
   const [downloading, setDownloading] = useState(false);
 
   // Same query key + staleTime as the Agents page: this backend's signing
@@ -48,7 +77,13 @@ export function AgentInstall() {
     setDownloading(true);
     try {
       let filename = FALLBACK_FILENAME;
-      const blob = await apiFetchBlob('/api/agents/installer', {}, (res) => {
+      // Bare URL = Windows ZIP; Linux takes the platform query params
+      // (arch defaults server-side to x86_64, sent explicitly anyway).
+      const apiUrl =
+        os === 'linux'
+          ? `/api/agents/installer?os=linux&arch=${arch}`
+          : '/api/agents/installer';
+      const blob = await apiFetchBlob(apiUrl, {}, (res) => {
         filename = installerFilename(res.headers.get('Content-Disposition'));
       });
       const url = URL.createObjectURL(blob);
@@ -75,27 +110,73 @@ export function AgentInstall() {
         <span className="text-xs text-muted">{t('intro')}</span>
       </div>
 
+      {/* OS toggle — switches both the instructions and the download
+          target. aria-pressed toggle buttons, not the WAI-ARIA tabs
+          pattern: two options don't justify the roving-tabindex +
+          arrow-key machinery the Settings tabs carry. */}
+      <div className="inline-flex rounded-md border border-border bg-card text-sm overflow-hidden">
+        {(['windows', 'linux'] as const).map((k) => (
+          <button
+            key={k}
+            type="button"
+            aria-pressed={os === k}
+            onClick={() => setOs(k)}
+            className={os === k ? 'px-4 h-9 bg-accent/15 text-accent' : 'px-4 h-9 hover:bg-accent/5'}
+          >
+            {t(`os.${k}`)}
+          </button>
+        ))}
+      </div>
+
       <Card>
         <CardHeader>
           <CardTitle>{t('instructions.title')}</CardTitle>
           <CardDescription>{t('instructions.description')}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3 text-sm">
-          <ol className="list-decimal space-y-1.5 pl-5">
-            <li>{t('instructions.steps.one')}</li>
-            <li>{t('instructions.steps.two')}</li>
-            <li>
-              <Trans
-                ns="agent-install"
-                i18nKey="instructions.steps.three"
-                components={{ code: <code />, strong: <strong /> }}
-              />
-            </li>
-          </ol>
-          <ul className="list-disc space-y-1 pl-5 text-muted">
-            <li>{t('instructions.autoNote')}</li>
-            <li>{t('instructions.windowsNote')}</li>
-          </ul>
+          {os === 'windows' ? (
+            <>
+              <ol className="list-decimal space-y-1.5 pl-5">
+                <li>{t('instructions.steps.one')}</li>
+                <li>{t('instructions.steps.two')}</li>
+                <li>
+                  <Trans
+                    ns="agent-install"
+                    i18nKey="instructions.steps.three"
+                    components={{ code: <code />, strong: <strong /> }}
+                  />
+                </li>
+              </ol>
+              <ul className="list-disc space-y-1 pl-5 text-muted">
+                <li>{t('instructions.autoNote')}</li>
+                <li>{t('instructions.windowsNote')}</li>
+              </ul>
+            </>
+          ) : (
+            <>
+              <ol className="list-decimal space-y-1.5 pl-5">
+                <li>{t('instructions.linux.steps.one')}</li>
+                <li>
+                  <Trans
+                    ns="agent-install"
+                    i18nKey="instructions.linux.steps.two"
+                    components={{ code: <code /> }}
+                  />
+                </li>
+                <li>
+                  <Trans
+                    ns="agent-install"
+                    i18nKey="instructions.linux.steps.three"
+                    components={{ code: <code /> }}
+                  />
+                </li>
+              </ol>
+              <ul className="list-disc space-y-1 pl-5 text-muted">
+                <li>{t('instructions.linux.systemdNote')}</li>
+                <li>{t('instructions.linux.signingNote')}</li>
+              </ul>
+            </>
+          )}
         </CardContent>
       </Card>
 
@@ -103,11 +184,29 @@ export function AgentInstall() {
         <CardHeader>
           <CardTitle>{t('download.title')}</CardTitle>
           <CardDescription>
-            <Trans ns="agent-install" i18nKey="download.description" components={{ code: <code /> }} />
+            <Trans
+              ns="agent-install"
+              i18nKey={os === 'linux' ? 'download.descriptionLinux' : 'download.description'}
+              components={{ code: <code /> }}
+            />
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
-          <div className="flex items-center gap-3">
+          <div className="flex items-end gap-3">
+            {os === 'linux' && (
+              <div className="space-y-1">
+                <Label htmlFor="ai-arch">{t('download.archLabel')}</Label>
+                <Select
+                  id="ai-arch"
+                  value={arch}
+                  onChange={(e) => setArch(e.target.value as InstallerArch)}
+                  className="w-56"
+                >
+                  <option value="x86_64">{t('download.archOptions.x86_64')}</option>
+                  <option value="aarch64">{t('download.archOptions.aarch64')}</option>
+                </Select>
+              </div>
+            )}
             <Button onClick={download} disabled={downloading}>
               {downloading ? (
                 <Loader2 className="size-4 mr-2 animate-spin" />
@@ -118,7 +217,9 @@ export function AgentInstall() {
             </Button>
           </div>
           {/* #1260 status: whether this backend signs commands decides
-              whether the ZIP embeds a command-signing public key. */}
+              whether the package embeds a command-signing public key
+              (Windows — Linux provisioning doesn't exist yet). About the
+              backend, not the selected OS, so it shows on both tabs. */}
           {signingQ.error ? (
             <ErrorCard title={t('signing.errorTitle')} error={signingQ.error} />
           ) : signing && (

@@ -443,6 +443,44 @@ async fn sleep_jitter(max: Duration) {
     tokio::time::sleep(Duration::from_secs(pick)).await;
 }
 
+/// The `agent_releases` Object Store key THIS agent fetches for
+/// `target_version`. Mirrors the publish-side key scheme
+/// (`kanade_shared::bin_platform`): Windows releases sit at the bare
+/// `<version>` key (what every pre-Linux agent in the field fetches), Linux
+/// releases at `<version>-linux-<arch>` for the running binary's own
+/// architecture. Pure + cfg-gated so each OS's branch is unit-testable on
+/// its own host.
+///
+/// An arch we don't ship (Linux riscv64, say, or any non-Windows/Linux OS)
+/// falls back to the bare key — the get then 404s and the agent keeps
+/// running its current binary, which is the safe failure for an
+/// unsupported platform.
+fn release_key_for_this_agent(target: &str) -> String {
+    #[cfg(target_os = "windows")]
+    {
+        target.to_string()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let arch = if cfg!(target_arch = "x86_64") {
+            "x86_64"
+        } else if cfg!(target_arch = "aarch64") {
+            "aarch64"
+        } else {
+            warn!(
+                arch = std::env::consts::ARCH,
+                "self-update: unsupported linux arch — trying the bare (Windows) key, which will 404"
+            );
+            return target.to_string();
+        };
+        format!("{target}-linux-{arch}")
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        target.to_string()
+    }
+}
+
 async fn maybe_download(
     store: &jetstream::object_store::ObjectStore,
     target: &str,
@@ -457,10 +495,11 @@ async fn maybe_download(
         running, "target_version drift — downloading new binary"
     );
 
+    let key = release_key_for_this_agent(target);
     let mut object = store
-        .get(target)
+        .get(&key)
         .await
-        .with_context(|| format!("object store get '{target}'"))?;
+        .with_context(|| format!("object store get '{key}'"))?;
 
     let staging = staging_path(target)?;
     if let Some(parent) = staging.parent() {
@@ -746,6 +785,32 @@ mod tests {
         assert_eq!(parse_version("0.43.41.2"), None); // too many
         assert_eq!(parse_version("0.43.x"), None); // non-numeric
         assert_eq!(parse_version("v0.43.41"), None); // prefix
+    }
+
+    #[test]
+    fn release_key_matches_this_agents_platform() {
+        let key = release_key_for_this_agent("0.45.4");
+        // Windows agents fetch the bare key — the whole backward-compat
+        // contract with the pre-Linux fleet.
+        #[cfg(target_os = "windows")]
+        assert_eq!(key, "0.45.4");
+        // Linux agents fetch the arch-suffixed key for their own arch.
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        assert_eq!(key, "0.45.4-linux-x86_64");
+        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+        assert_eq!(key, "0.45.4-linux-aarch64");
+        // Shape invariants on every platform: non-empty, contains the
+        // target, and any suffix is one of the two published ones.
+        assert!(key.starts_with("0.45.4"));
+        if key != "0.45.4" {
+            assert!(
+                key.ends_with("-linux-x86_64") || key.ends_with("-linux-aarch64"),
+                "unexpected key shape: {key}"
+            );
+        }
+        // Semver prerelease dashes pass through untouched.
+        let rc = release_key_for_this_agent("0.46.0-rc.1");
+        assert!(rc.starts_with("0.46.0-rc.1"));
     }
 
     #[test]

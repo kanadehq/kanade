@@ -161,7 +161,22 @@ async fn publish(
     // `<version>` object-store key, matching `app publish`.
     validate_segment("version", &version)?;
 
-    info!(version, size = bytes.len(), "uploading new agent binary");
+    // Which platform is this binary? Read from its own bytes, not the
+    // filename: PE (Windows) stays at the bare `<version>` key, ELF
+    // (Linux) goes to `<version>-linux-<arch>`, Mach-O / unknown is a
+    // hard error — a publish that can't name its platform must not
+    // silently land on the Windows key (see kanade_shared::bin_platform).
+    let platform = kanade_shared::bin_platform::AgentPlatform::detect(&bytes)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let key = platform.release_key(&version);
+    kanade_shared::bin_platform::check_release_key(&key).map_err(|e| anyhow::anyhow!(e))?;
+
+    info!(
+        version,
+        platform = platform.as_str(),
+        size = bytes.len(),
+        "uploading new agent binary"
+    );
 
     let js = async_nats::jetstream::new(client.clone());
     let store = js
@@ -173,27 +188,22 @@ async fn publish(
     // Slice → Cursor for the put() API.
     let mut cursor = std::io::Cursor::new(bytes);
     let meta = store
-        .put(version.as_str(), &mut cursor)
+        .put(key.as_str(), &mut cursor)
         .await
         .context("object_store.put")?;
-    info!(version, digest = ?meta.digest, "agent binary uploaded");
+    info!(version, key, digest = ?meta.digest, "agent binary uploaded");
 
     // #277: same JetStream read-after-write window as `app publish`.
     // Block until a `get(key)` returns the same bytes we just put,
     // so downstream consumers (`kanade agent rollout` triggers an
     // agent self-update path that fetches from this very key) don't
     // race against the upstream race.
-    super::publish_verify::verify_readback(
-        &store,
-        version.as_str(),
-        meta.digest.as_deref(),
-        meta.size,
-    )
-    .await
-    .context("publish read-back verify")?;
+    super::publish_verify::verify_readback(&store, key.as_str(), meta.digest.as_deref(), meta.size)
+        .await
+        .context("publish read-back verify")?;
 
-    println!("published: {version}");
-    println!("  object_store : {OBJECT_AGENT_RELEASES}/{version}");
+    println!("published: {version} ({})", platform.as_str());
+    println!("  object_store : {OBJECT_AGENT_RELEASES}/{key}");
     println!();
     println!("Next: target a scope with `kanade agent rollout`:");
     println!("  kanade agent rollout {version} --group canary --jitter 5m   # try on canary first");
@@ -202,8 +212,13 @@ async fn publish(
     crate::audit::record(
         &client,
         "agent_publish",
-        Some(version.as_str()),
-        serde_json::json!({ "size": meta.size, "digest": meta.digest }),
+        Some(key.as_str()),
+        serde_json::json!({
+            "version": version,
+            "platform": platform.as_str(),
+            "size": meta.size,
+            "digest": meta.digest,
+        }),
     )
     .await;
     Ok(())
@@ -224,23 +239,38 @@ async fn rollout(client: async_nats::Client, args: RolloutArgs) -> Result<()> {
 
     let js = async_nats::jetstream::new(client.clone());
 
+    // Normalize to the BASE version: a scope's target_version never
+    // carries a platform suffix — each agent's own platform decides
+    // which suffixed binary it fetches.
+    let version = kanade_shared::bin_platform::base_version_of_key(&args.version).to_string();
+
     // Fail-fast on a version that doesn't have a binary uploaded
     // yet — saves the operator from finding out at agent-side via a
-    // "self-update fetch failed" log line per host.
+    // "self-update fetch failed" log line per host. A version passes
+    // when ANY of its keys exists: the bare Windows key or a
+    // `<version>-linux-<arch>` one — a Linux-only publish never writes
+    // the bare key.
     let store = js
         .get_object_store(OBJECT_AGENT_RELEASES)
         .await
         .with_context(|| {
             format!("object store '{OBJECT_AGENT_RELEASES}' missing — run `kanade jetstream setup`")
         })?;
-    store.info(&args.version).await.with_context(|| {
-        format!(
+    let mut found = false;
+    for candidate in kanade_shared::bin_platform::candidate_keys(&version) {
+        if store.info(&candidate).await.is_ok() {
+            found = true;
+            break;
+        }
+    }
+    if !found {
+        bail!(
             "version '{}' not found in {OBJECT_AGENT_RELEASES} — \
              run `kanade agent publish <binary>` first (the version is \
-             auto-extracted from the binary's VERSIONINFO)",
-            args.version
-        )
-    })?;
+             auto-extracted from the binary's VERSIONINFO, or passed via --version)",
+            version
+        );
+    }
 
     let kv = js
         .get_key_value(BUCKET_AGENT_CONFIG)
@@ -262,7 +292,7 @@ async fn rollout(client: async_nats::Client, args: RolloutArgs) -> Result<()> {
     // `config set` on the same scope and clobbered its change.
     kanade_shared::kv_cas::read_modify_write(&kv, &key, |scope: &mut ConfigScope| {
         let before = scope.clone();
-        scope.target_version = Some(args.version.clone());
+        scope.target_version = Some(version.clone());
         if let Some(j) = args.jitter.as_deref() {
             scope.target_version_jitter = Some(j.to_owned());
         }
@@ -274,15 +304,15 @@ async fn rollout(client: async_nats::Client, args: RolloutArgs) -> Result<()> {
 
     info!(
         scope = %label,
-        version = %args.version,
+        version = %version,
         jitter = ?args.jitter,
         "rollout: target_version flipped",
     );
 
-    println!("rolled out: {} -> {}", label, args.version);
+    println!("rolled out: {} -> {}", label, version);
     println!(
         "  kv           : {BUCKET_AGENT_CONFIG}.{key}.target_version = {}",
-        args.version
+        version
     );
     if let Some(j) = args.jitter.as_deref() {
         println!("  kv           : {BUCKET_AGENT_CONFIG}.{key}.target_version_jitter = {j}");
@@ -297,7 +327,7 @@ async fn rollout(client: async_nats::Client, args: RolloutArgs) -> Result<()> {
         "agent_rollout",
         Some(&key),
         serde_json::json!({
-            "version": args.version,
+            "version": version,
             "scope_label": label,
             "jitter": args.jitter,
         }),

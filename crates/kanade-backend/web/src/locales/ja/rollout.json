@@ -57,6 +57,7 @@
     "empty": "オブジェクトストアが空です — 上でバイナリをアップロードするか、 <code>kanade agent publish &lt;binary&gt;</code> を実行してください。",
     "columns": {
       "version": "バージョン",
+      "platform": "プラットフォーム",
       "size": "サイズ",
       "modified": "更新日時",
       "digest": "ダイジェスト",

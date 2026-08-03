@@ -18,10 +18,22 @@ import { fmtIsoLocal } from '@/lib/utils';
 
 type ReleaseRow = {
   version: string;
+  // Which platform build this row is: "windows" for bare-version keys,
+  // "linux-x86_64" / "linux-aarch64" for platform keys. The same version
+  // can appear once per platform.
+  platform: string;
   size: number;
   digest: string | null;
   modified: string | null;
 };
+
+// A rollout targets a bare VERSION while `version` is the Object Store key,
+// which for Linux builds carries a platform suffix (`0.46.0-linux-x86_64`).
+// Strip the suffix to get the rollout-visible version — mirrors
+// `base_version_of_key` in kanade-shared/src/bin_platform.rs.
+export function releaseBaseVersion(key: string): string {
+  return key.replace(/-linux-(x86_64|aarch64)$/, '');
+}
 
 type ScopeKind = 'global' | 'group' | 'pc';
 
@@ -229,11 +241,17 @@ export function Rollout() {
             <Label htmlFor="ro-version">{t('rolloutPanel.versionLabel')}</Label>
             <Select id="ro-version" value={version} onChange={(e) => setVersion(e.target.value)}>
               <option value="">{t('rolloutPanel.versionPickerPlaceholder')}</option>
-              {(releasesQ.data ?? []).map((r) => (
-                <option key={r.version} value={r.version}>
-                  {r.version} · {fmtSize(r.size)} · {fmtIsoLocal(r.modified)}
-                </option>
-              ))}
+              {/* A rollout targets a bare VERSION, but the list can carry the
+                  same version once per platform as suffixed keys
+                  (0.46.0, 0.46.0-linux-x86_64, …) — dedupe on the base
+                  version and submit that, never the suffixed key. */}
+              {[...new Map((releasesQ.data ?? []).map((r) => [releaseBaseVersion(r.version), r])).values()].map(
+                (r) => (
+                  <option key={releaseBaseVersion(r.version)} value={releaseBaseVersion(r.version)}>
+                    {releaseBaseVersion(r.version)} · {fmtSize(r.size)} · {fmtIsoLocal(r.modified)}
+                  </option>
+                ),
+              )}
             </Select>
           </div>
           <div className="space-y-1">
@@ -409,6 +427,7 @@ export function Rollout() {
               <TableHeader>
                 <TableRow>
                   <TableHead>{t('releases.columns.version')}</TableHead>
+                  <TableHead>{t('releases.columns.platform')}</TableHead>
                   <TableHead>{t('releases.columns.size')}</TableHead>
                   <TableHead>{t('releases.columns.modified')}</TableHead>
                   <TableHead>{t('releases.columns.digest')}</TableHead>
@@ -417,8 +436,11 @@ export function Rollout() {
               </TableHeader>
               <TableBody>
                 {(releasesQ.data ?? []).map((r) => (
-                  <TableRow key={r.version}>
+                  // Same version can appear once per platform — the row key
+                  // (and the DELETE target) needs both halves.
+                  <TableRow key={`${r.version}:${r.platform}`}>
                     <TableCell label={t('releases.columns.version')}><code className="text-xs">{r.version}</code></TableCell>
+                    <TableCell label={t('releases.columns.platform')} className="text-muted text-xs">{r.platform}</TableCell>
                     <TableCell label={t('releases.columns.size')} className="text-muted text-xs">{fmtSize(r.size)}</TableCell>
                     <TableCell label={t('releases.columns.modified')} className="text-muted text-xs">{fmtIsoLocal(r.modified)}</TableCell>
                     <TableCell label={t('releases.columns.digest')} className="text-muted text-xs">
@@ -429,7 +451,7 @@ export function Rollout() {
                         <Button
                           size="sm"
                           variant="secondary"
-                          onClick={() => setVersion(r.version)}
+                          onClick={() => setVersion(releaseBaseVersion(r.version))}
                         >
                           <Rocket className="size-3.5" />
                           {t('releases.actions.rollout')}

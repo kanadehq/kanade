@@ -57,6 +57,7 @@
     "empty": "Object Store empty — upload a binary above (or run <code>kanade agent publish &lt;binary&gt;</code>).",
     "columns": {
       "version": "version",
+      "platform": "platform",
       "size": "size",
       "modified": "modified",
       "digest": "digest",

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import { installerFilename } from './AgentInstall';
+import { detectOs, installerFilename } from './AgentInstall';
 
 // The installer endpoint names its ZIP in Content-Disposition
 // (`attachment; filename="kanade-agent-installer-<version>.zip"`). The
@@ -24,5 +24,40 @@ describe('installerFilename', () => {
     expect(installerFilename(null)).toBe('kanade-agent-installer.zip');
     expect(installerFilename('attachment')).toBe('kanade-agent-installer.zip');
     expect(installerFilename('attachment; filename=""')).toBe('kanade-agent-installer.zip');
+  });
+});
+
+// The OS toggle preselects the visitor's own platform. userAgentData.platform
+// (Chromium) wins over the UA string when both are present; macOS and other
+// unsupported platforms fall back to 'windows', the dominant endpoint OS.
+
+describe('detectOs', () => {
+  test('Windows UA → windows', () => {
+    expect(
+      detectOs('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0'),
+    ).toBe('windows');
+  });
+
+  test('Linux UA (with and without X11) → linux', () => {
+    expect(detectOs('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0.0.0')).toBe(
+      'linux',
+    );
+    expect(detectOs('Mozilla/5.0 (Linux aarch64; rv:133.0) Gecko/20100101 Firefox/133.0')).toBe(
+      'linux',
+    );
+  });
+
+  test('userAgentData.platform takes precedence over the UA string', () => {
+    // UA claims Linux, but the (more reliable) client hint says Windows.
+    expect(detectOs('Mozilla/5.0 (X11; Linux x86_64)', 'Windows')).toBe('windows');
+    expect(detectOs('Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Linux')).toBe('linux');
+  });
+
+  test('macOS and other unrecognized platforms fall back to windows', () => {
+    expect(
+      detectOs('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15'),
+    ).toBe('windows');
+    expect(detectOs('', 'macOS')).toBe('windows');
+    expect(detectOs('')).toBe('windows');
   });
 });
