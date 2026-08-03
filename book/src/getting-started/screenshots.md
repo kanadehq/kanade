@@ -59,6 +59,24 @@ the API — which is how a directory-sync job keeps `display_name` and
 `department` current without anyone typing them. Once set, they are columns
 you can show and search on across the fleet.
 
+### Watching the screen
+
+Sometimes the only way to understand a report is to look. From the host's own
+page an operator can open its screen and watch it live.
+
+![Remote view](../images/screenshots/remote-light-en.jpg)
+
+Nothing listens on the endpoint for this. The agent already holds one
+outbound connection, and the session rides it — so a PC behind NAT, on a
+branch-office line, or on someone's home wifi is reachable on exactly the
+same terms as one on the desk next door, with no inbound path opened to it.
+The header reports the desktop size and the tile count, because a session
+that has stopped updating should be distinguishable from one showing a
+screen that simply isn't changing.
+
+*The desktop above is synthetic — it is drawn by the demo stack, not
+captured from a machine.*
+
 ## Inventory
 
 Whatever your manifests collect. The probes are operator-authored PowerShell

@@ -223,6 +223,37 @@ const SHOTS = [
     },
   },
 
+  {
+    // The remote screen only exists as a live socket, so this frame is the
+    // one that needs a click: the page opens idle over a black canvas and
+    // connects on demand.
+    name: 'remote',
+    path: () => `/remote/${ids.pc}`,
+    settleExtra: 400,
+    prep: async (p) => {
+      // The connect button is the trailing action in the header; the label
+      // is localised, and the back control precedes it.
+      await p.getByRole('button').last().click();
+      // Wait for a PAINTED canvas, not merely a sized one. The viewer sets
+      // width/height from the tile meta and only then awaits
+      // `createImageBitmap`, so a size check passes before anything is drawn
+      // — which is the black rectangle this shot exists to replace. A fresh
+      // canvas is transparent, so a non-zero alpha at the centre is the
+      // cheapest proof that a tile actually landed.
+      await p.waitForFunction(() => {
+        const c = document.querySelector('canvas');
+        if (!c || c.width <= 1 || c.height <= 1) return false;
+        const px = c
+          .getContext('2d')
+          ?.getImageData(Math.floor(c.width / 2), Math.floor(c.height / 2), 1, 1).data;
+        return !!px && px[3] !== 0;
+      }, null, { timeout: 15000 });
+      // Long enough for a few more tiles to land: a counter reading "1" makes
+      // a live session look like a single still.
+      await sleep(4600);
+    },
+  },
+
   // ---- inventory drill-down + history ---------------------------------
   {
     name: 'inventory-pc',
@@ -326,6 +357,7 @@ const SHOTS = [
 const DARK = new Set([
   'dashboard', 'dashboard-widgets', 'agents', 'compliance', 'compliance-os-eol',
   'inventory-history-all', 'analytics-inventory', 'jetstream', 'notification-detail', 'notification-detail-audience',
+  'remote',
   'account-mfa-enroll',
   'agent-detail-perf', 'events', 'audit',
 ]);

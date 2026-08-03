@@ -3029,11 +3029,63 @@ const SORTED_ROUTES = [
   ...ROUTES.filter(([, p]) => isParameterised(p)),
 ];
 
-const server = Bun.serve({
+
+// ---- remote view (#1140) ----
+
+/**
+ * The operator-side remote screen is the one page that is not HTTP: the SPA
+ * opens `ws(s)://…/api/remote/<pc_id>/ws` and reads length-prefixed binary
+ * frames. Without a socket here the page renders its chrome over a black
+ * canvas forever, which is worse than not showing the feature at all.
+ *
+ * Frame layout, mirroring `kanade_shared::wire::remote` and the decoder in
+ * `src/lib/remoteFrame.ts`:
+ *
+ *     [u32 LE meta length][meta JSON][payload bytes]
+ *
+ * The desktop served is a SYNTHETIC image (`demo/remote-desktop.jpg`), drawn
+ * with generic window shapes and invented data — no vendor chrome, no logo,
+ * and above all not a picture of anyone's actual machine. Regenerate it with
+ * `demo/make-remote-desktop.sh`, which reproduces the committed file exactly.
+ */
+const REMOTE_DESKTOP = await Bun.file(new URL('./remote-desktop.jpg', import.meta.url)).arrayBuffer();
+const REMOTE_W = 1920;
+const REMOTE_H = 1080;
+
+function remoteFrame(meta: unknown, payload: ArrayBuffer | null = null): Uint8Array {
+  const metaBytes = new TextEncoder().encode(JSON.stringify(meta));
+  const body = payload ? new Uint8Array(payload) : new Uint8Array(0);
+  const out = new Uint8Array(4 + metaBytes.length + body.length);
+  new DataView(out.buffer).setUint32(0, metaBytes.length, /* littleEndian */ true);
+  out.set(metaBytes, 4);
+  out.set(body, 4 + metaBytes.length);
+  return out;
+}
+
+type RemoteSocketData = { pcId: string; seq: number; timer?: ReturnType<typeof setInterval> };
+
+const server = Bun.serve<RemoteSocketData>({
   port: PORT,
   idleTimeout: 60,
-  fetch(req) {
+  // Return type annotated: `fetch` calls `server.upgrade`, so without it TS
+  // recurses through `server`'s own initialiser and gives up (TS7022/7023).
+  fetch(req): Response | Promise<Response> | undefined {
     const url = new URL(req.url);
+
+    // Upgrade before the route table: this path has no HTTP handler, and a
+    // failed upgrade must not fall through to the `[]` catch-all.
+    const remote = url.pathname.match(/^\/api\/remote\/([^/]+)\/ws$/);
+    if (remote) {
+      // Annotated because `server` is still being initialised at this point,
+      // so TS cannot infer the return type without recursing into itself.
+      const ok: boolean = server.upgrade(req, {
+        // Echo the viewer's subprotocol back; the browser aborts the
+        // handshake if the server picks one it did not offer.
+        headers: { 'Sec-WebSocket-Protocol': 'kanade.remote.v1' },
+        data: { pcId: decodeURIComponent(remote[1]!), seq: 0 } satisfies RemoteSocketData,
+      });
+      return ok ? undefined : new Response('expected a websocket upgrade', { status: 426 });
+    }
 
     for (const [method, pattern, handler] of SORTED_ROUTES) {
       if (req.method !== method) continue;
@@ -3059,6 +3111,59 @@ const server = Bun.serve({
     // `data ?? []` map over nothing, and pages that reach for
     // `data.rows ?? []` read undefined off it and fall back the same way.
     return json([]);
+  },
+
+  websocket: {
+    open(ws) {
+      const d = ws.data;
+      ws.send(
+        remoteFrame({
+          kind: 'started',
+          session_id: `demo-${d.pcId}`,
+          // Null on purpose: the real agent answers Start before its capture
+          // child has taken a frame, so a viewer must size from the first
+          // tile. Sending real geometry here would let a viewer bug that
+          // depends on this pass in the demo and fail on a live host.
+          screen_w: null,
+          screen_h: null,
+          allow_input: false,
+        }),
+      );
+      const tile = () => {
+        d.seq += 1;
+        ws.send(
+          remoteFrame(
+            {
+              kind: 'tile',
+              frame_seq: d.seq,
+              tile_index: 0,
+              tile_count: 1,
+              x: 0,
+              y: 0,
+              w: REMOTE_W,
+              h: REMOTE_H,
+              screen_w: REMOTE_W,
+              screen_h: REMOTE_H,
+              captured_at_ms: Date.now(),
+              encoding: 'jpeg',
+            },
+            REMOTE_DESKTOP,
+          ),
+        );
+      };
+      tile();
+      // A real session only sends what changed, so a still desktop goes
+      // quiet. Repeating the full frame keeps the viewer's tile counter
+      // moving, which is what tells an operator the session is alive.
+      d.timer = setInterval(tile, 2000);
+    },
+    close(ws) {
+      const d = ws.data;
+      if (d.timer) clearInterval(d.timer);
+    },
+    message() {
+      // The viewer sends input events when `allow_input` is set. It is not.
+    },
   },
 });
 
