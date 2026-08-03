@@ -186,19 +186,24 @@ That stages `kanade-x86_64-pc-windows-msvc.zip` into `dist\cli\kanade.exe`
 (note: **not** `kanade-cli.exe` — the crate is plain `kanade`), publishes
 it as the `kanade-cli` app package, injects `BackendBase` / `Version` /
 `ExpectedSha256` / `CliSourceAuthToken` into a temp copy of
-`scripts/install-kanade-cli.ps1`, renders a version-pinned temp manifest,
-`job create`s it and execs at the target.
+`configs/jobs/installers/scripts/install-kanade-cli.ps1`, renders a
+version-pinned temp manifest, `job create`s it and execs at the target.
 
 Manual breakdown, if you need to deviate:
 
 1. **Upload the binary.**
 
    ```bash
-   kanade app publish kanade-cli 0.45.4 dist/cli/kanade.exe
+   kanade app publish kanade-cli dist/cli/kanade.exe
    ```
 
+   The version is read from the binary's embedded VERSIONINFO (#261), so
+   it can't drift from what you built. Pass `--version <X.Y.Z>` only for
+   inputs without PE metadata.
+
 2. **Pin the knobs** at the top of
-   `scripts/install-kanade-cli.ps1` — `$BackendBase`, `$Version`,
+   `configs/jobs/installers/scripts/install-kanade-cli.ps1` —
+   `$BackendBase`, `$Version`,
    `$ExpectedSha256` (`Get-FileHash dist\cli\kanade.exe -Algorithm
    SHA256`), `$CliSourceAuthToken`. A blank `$ExpectedSha256` is a hard
    error, same posture as the client installer.
@@ -230,7 +235,16 @@ no interactive profile. Two notes on that:
 
 Renaming a running image is legal on Windows, so the swap succeeds even
 if an operator has a `kanade` running at the time — the running process
-keeps its now-`.old` file open and exits normally.
+keeps its now-renamed file open and exits normally. That renamed file is
+`kanade.exe.old.<8 hex>`, unique per run rather than a fixed
+`kanade.exe.old`, precisely because it is the file most likely to still
+be **locked**: with a fixed name the *next* install's rename would target
+it and die with a sharing violation, i.e. an install refused by the
+debris of the last one. Each run sweeps whatever earlier rollback files
+have since been released, so they don't accumulate.
+
+`-Role cli` rejects `-All` outright (`-Pc` / `-Groups` only) — a
+forgotten flag must not be how an admin CLI reaches every endpoint.
 
 ## install-kanade-backend — end-to-end flow
 

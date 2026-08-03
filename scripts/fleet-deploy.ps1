@@ -69,6 +69,8 @@
   Whole-fleet target: `--all` for the job-install exec, `--global` for the
   agent rollout. Pair with -Jitter for agent rollouts so the fleet doesn't
   synchronise its downloads. Mutually exclusive with -Pc / -Groups.
+  Rejected for -Role cli: the admin CLI belongs on operator hosts, not on
+  every end-user endpoint.
 
 .PARAMETER Jitter
   (agent only) `--jitter` for the rollout (humantime, e.g. `30m`) —
@@ -289,6 +291,14 @@ if (-not $hasPc -and -not $Groups -and -not $All) {
 }
 if ($Role -eq 'agent' -and $Groups -and $Groups.Count -gt 1) {
     throw "agent rollout targets a single group — pass exactly one -Groups value."
+}
+# The CLI is an operator tool, not fleet software: -All would push an
+# admin CLI onto every end-user endpoint. -Groups stays allowed — a
+# deliberately named group of operator hosts is a considered act —
+# but fleet-wide never is, and a forgotten flag must not be how it
+# happens.
+if ($Role -eq 'cli' -and $All) {
+    throw "-Role cli does not support -All — install the admin CLI at operator hosts (-Pc <pc_id>, or -Groups <operator-group>)."
 }
 
 # ---- helpers --------------------------------------------------------------
