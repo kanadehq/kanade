@@ -20,6 +20,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ExternalLink, GitBranch, Loader2, Save } from 'lucide-react';
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 
 import { Button } from '@/components/ui/button';
@@ -191,6 +192,7 @@ export function YamlEditorDialog({
   mode,
   gitOrigin,
 }: YamlEditorDialogProps) {
+  const { t } = useTranslation('yaml-editor');
   const qc = useQueryClient();
   // #678: a Git-managed job is read-only in the SPA — editing belongs in
   // the repo (GitOps). Only meaningful on an edit; create is always
@@ -240,34 +242,50 @@ export function YamlEditorDialog({
     }
   }, [open, mode, kind, fetched.data]);
 
+  // Display noun per kind ('manifest' surfaces to operators as "job").
+  // Two maps rather than capitalising in code: English wants "Job" at the
+  // head of a title and "job" mid-sentence, and Japanese wants the same
+  // word in both places — casing is a property of the language, not
+  // something to derive with `charAt(0).toUpperCase()`.
+  const noun = t(`nouns.${kind}`);
+  const nounTitle = t(`nounsTitle.${kind}`);
+
   const save = useMutation({
     mutationFn: () => postYaml(kind, text),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: listQueryKey(kind) });
       onOpenChange(false);
-      toast.success(mode.type === 'create' ? `Created ${kind}` : `Saved ${kind}: ${mode.id}`);
+      // The noun, not the raw `kind`: an operator who just saved a job
+      // should not be told they saved a "manifest".
+      toast.success(
+        mode.type === 'create'
+          ? t('toast.created', { noun })
+          : t('toast.saved', { noun, id: mode.id }),
+      );
     },
-    onError: (e) => toast.error(`Save failed: ${formatError(e)}`),
+    onError: (e) => toast.error(t('errors.save', { error: formatError(e) })),
   });
 
-  // Display noun per kind ('manifest' surfaces to operators as "job").
-  const noun = kind === 'manifest' ? 'job' : kind; // job | schedule | view | group
-  const Noun = noun.charAt(0).toUpperCase() + noun.slice(1);
   const title =
     mode.type === 'create'
-      ? `New ${noun}`
+      ? t('title.create', { noun })
       : gitManaged
-        ? `${Noun}: ${mode.id} · read-only`
-        : `Edit ${noun}: ${mode.id}`;
+        ? t('title.readOnly', { noun: nounTitle, id: mode.id })
+        : t('title.edit', { noun, id: mode.id });
 
   const repoUrl = repoWebUrl(gitOrigin?.repo);
   // #695: the read-only banner is shared across kinds, so the apply
   // command and the source-path label follow `kind`.
   // The CLI verb differs for groups: `kanade group def create` (the plain
   // `kanade group …` namespace is the imperative membership commands).
-  const applyCmd = kind === 'group' ? 'kanade group def create' : `kanade ${noun} create`;
-  // The YAML's source-path label is the manifest's top-level key name.
-  const sourceLabel = `${kind === 'manifest' ? 'manifest' : noun}:`;
+  // NOT the translated noun: this is a command the operator types, so it
+  // stays English whatever the interface language is. `kanade ジョブ create`
+  // would be a command that does not exist.
+  const cliNoun = kind === 'manifest' ? 'job' : kind;
+  const applyCmd = kind === 'group' ? 'kanade group def create' : `kanade ${cliNoun} create`;
+  // The YAML's source-path label is the manifest's top-level key name — a
+  // key in the file, so likewise untranslated.
+  const sourceLabel = `${kind}:`;
 
   const isLoadingExisting = mode.type === 'edit' && fetched.isLoading;
   const hasLoadError = mode.type === 'edit' && Boolean(fetched.error);
@@ -279,15 +297,18 @@ export function YamlEditorDialog({
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>
             {gitManaged ? (
-              <>
-                Managed in Git — read-only. Edit the source in the repo, then run{' '}
-                <code className="text-xs">{applyCmd}</code> to apply (SPEC §3 GitOps).
-              </>
+              <Trans
+                ns="yaml-editor"
+                i18nKey="description.gitManaged"
+                values={{ cmd: applyCmd }}
+                components={{ code: <code className="text-xs" /> }}
+              />
             ) : (
-              <>
-                Schema-aware editor — comments and indentation round-trip through{' '}
-                <code className="text-xs">application/yaml</code>. Hover field names for docs.
-              </>
+              <Trans
+                ns="yaml-editor"
+                i18nKey="description.editable"
+                components={{ code: <code className="text-xs" /> }}
+              />
             )}
           </DialogDescription>
         </DialogHeader>
@@ -299,7 +320,7 @@ export function YamlEditorDialog({
           <div className="rounded border border-violet/30 bg-violet/5 p-2 text-xs">
             <div className="flex items-center gap-1.5 font-medium text-violet">
               <GitBranch className="size-3.5" />
-              Managed in Git
+              {t('git.badge')}
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-1.5 text-muted">
               <span>{sourceLabel}</span>
@@ -311,14 +332,14 @@ export function YamlEditorDialog({
                   rel="noreferrer"
                   className="inline-flex items-center gap-0.5 text-violet hover:underline"
                 >
-                  open repo
+                  {t('git.openRepo')}
                   <ExternalLink className="size-3" />
                 </a>
               )}
             </div>
             {gitOrigin.script_file && (
               <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-muted">
-                <span>↳ script:</span>
+                <span>{t('git.script')}</span>
                 <code className="break-all text-fg">{gitOrigin.script_file}</code>
               </div>
             )}
@@ -328,18 +349,18 @@ export function YamlEditorDialog({
         {isLoadingExisting ? (
           <div className="flex items-center gap-2 text-muted h-[60vh] justify-center">
             <Loader2 className="size-4 animate-spin" />
-            loading current YAML…
+            {t('loading.yaml')}
           </div>
         ) : fetched.error ? (
           <div className="text-danger text-sm whitespace-pre-wrap bg-danger/5 p-2 rounded">
-            Couldn't load YAML: {formatError(fetched.error)}
+            {t('errors.load', { error: formatError(fetched.error) })}
           </div>
         ) : (
           <Suspense
             fallback={
               <div className="flex items-center gap-2 text-muted h-[60vh] justify-center">
                 <Loader2 className="size-4 animate-spin" />
-                loading editor…
+                {t('loading.editor')}
               </div>
             }
           >
@@ -358,7 +379,7 @@ export function YamlEditorDialog({
             // Read-only: no Save. Editing happens in Git, so the only
             // action is to dismiss the viewer.
             <Button variant="default" onClick={() => onOpenChange(false)}>
-              Close
+              {t('actions.close')}
             </Button>
           ) : (
             <>
@@ -367,7 +388,7 @@ export function YamlEditorDialog({
                 onClick={() => onOpenChange(false)}
                 disabled={save.isPending}
               >
-                Cancel
+                {t('actions.cancel')}
               </Button>
               <Button
                 variant="default"
@@ -377,12 +398,12 @@ export function YamlEditorDialog({
                 {save.isPending ? (
                   <>
                     <Loader2 className="size-3.5 animate-spin" />
-                    saving…
+                    {t('actions.saving')}
                   </>
                 ) : (
                   <>
                     <Save className="size-3.5" />
-                    Save
+                    {t('actions.save')}
                   </>
                 )}
               </Button>

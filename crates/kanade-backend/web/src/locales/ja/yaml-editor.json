@@ -1,0 +1,46 @@
+{
+  "nouns": {
+    "manifest": "ジョブ",
+    "schedule": "スケジュール",
+    "view": "ビュー",
+    "group": "グループ"
+  },
+  "nounsTitle": {
+    "manifest": "ジョブ",
+    "schedule": "スケジュール",
+    "view": "ビュー",
+    "group": "グループ"
+  },
+  "title": {
+    "create": "新しい{{noun}}",
+    "edit": "{{noun}}を編集: {{id}}",
+    "readOnly": "{{noun}}: {{id}} · 読み取り専用"
+  },
+  "description": {
+    "editable": "スキーマ対応のエディタです。コメントとインデントは <code>application/yaml</code> のまま往復します。フィールド名にカーソルを合わせると説明が出ます。",
+    "gitManaged": "Git 管理のため読み取り専用です。リポジトリ側のソースを編集し、<code>{{cmd}}</code> を実行して反映してください (SPEC §3 GitOps)。"
+  },
+  "git": {
+    "badge": "Git 管理",
+    "openRepo": "リポジトリを開く",
+    "script": "↳ スクリプト:"
+  },
+  "loading": {
+    "yaml": "現在の YAML を読み込み中…",
+    "editor": "エディタを読み込み中…"
+  },
+  "errors": {
+    "load": "YAML を読み込めませんでした: {{error}}",
+    "save": "保存に失敗しました: {{error}}"
+  },
+  "toast": {
+    "created": "{{noun}}を作成しました",
+    "saved": "{{noun}}を保存しました: {{id}}"
+  },
+  "actions": {
+    "close": "閉じる",
+    "cancel": "キャンセル",
+    "save": "保存",
+    "saving": "保存中…"
+  }
+}
