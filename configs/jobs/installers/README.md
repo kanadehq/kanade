@@ -1,7 +1,7 @@
 # `configs/jobs/installers/` — kanade-component install manifests
 
 This directory holds the `kanade Job` manifests that install /
-update the kanade components themselves (backend, client). They
+update the kanade components themselves (backend, client, CLI). They
 sit under `configs/jobs/` alongside the example operational
 manifests but in a dedicated `installers/` subdir so the two
 intents read separately at a glance: the sibling `inventory-*`,
@@ -19,8 +19,10 @@ configs/jobs/installers/
 ├── install-kanade-client.yaml      — client-app install/upgrade (#210, script_file)
 ├── install-kanade-backend.yaml     — backend self-update (#210, script_object)
 ├── install-kanade-agent.yaml       — agent emergency out-of-band swap (#566, script_object)
+├── install-kanade-cli.yaml         — admin-CLI install/upgrade (script_file)
 └── scripts/
-    └── install-kanade-client.ps1   — inlined into the client manifest via `script_file:` (#215)
+    ├── install-kanade-client.ps1   — inlined into the client manifest via `script_file:` (#215)
+    └── install-kanade-cli.ps1      — inlined into the CLI manifest via `script_file:`
 ```
 
 The backend self-update and the agent emergency swap don't ship a
@@ -48,6 +50,7 @@ sequence in one command — it's the agent-route companion to
 .\scripts\fleet-deploy.ps1 -Role client -Groups canary -SourceUrl http://<backend-host>:8080
 .\scripts\fleet-deploy.ps1 -Role agent -Version latest -Pc <pc-id>   # try on one box
 .\scripts\fleet-deploy.ps1 -Role agent -All -Jitter 30m              # then fleet-wide rollout
+.\scripts\fleet-deploy.ps1 -Role cli -Version latest -Pc <pc-id>     # admin CLI onto an operator host
 .\scripts\fleet-deploy.ps1 -Role backend -Pc <pc-id> -DryRun         # print every command, change nothing
 ```
 
@@ -74,7 +77,7 @@ the SPA Inventory page instead.
 
 What it automates per role:
 
-- **backend / client** — `kanade app publish` → inject the deploy script's
+- **backend / client / cli** — `kanade app publish` → inject the deploy script's
   download knobs (`SourceUrl`/`Version`/`Sha256`/`AuthToken`, plus
   backend-only `-WipeDb` / `-JwtSecret` / `-StaticToken` /
   `-BootstrapAdminPassword`) into a **temp** copy → publish it
@@ -104,13 +107,16 @@ deployed client:
 1. **Upload the binary.**
 
    ```bash
-   kanade app publish kanade-client 0.42.0 \
+   kanade app publish kanade-client \
      target/release/kanade-client.exe
    ```
 
-   The bucket is keyed by `<name>/<version>` — pick the version
-   string per release (semver / calendar / git sha all work; see
-   `kanade-shared::kv::OBJECT_APP_PACKAGES` for the constraints).
+   The bucket is keyed by `<name>/<version>`. The version is read
+   from the binary's embedded VERSIONINFO (#261) so it can't drift
+   from what you built; pass `--version <label>` to override, or for
+   inputs without PE metadata (see
+   `kanade-shared::kv::OBJECT_APP_PACKAGES` for what a version
+   string may contain — semver / calendar / git sha all work).
    `kanade app` (#222) talks straight to NATS — no backend HTTP
    round-trip — so this works even when the backend itself is
    restarting.
@@ -154,6 +160,95 @@ deployed client:
    operators see "which kanade-client version is on each PC" at a
    glance.
 
+## install-kanade-cli — end-to-end flow
+
+Puts the `kanade` admin CLI on an operator host and keeps it current.
+
+**Why this job exists.** The CLI is the one kanade component with no
+rollout path of its own — agents self-update via `kanade agent rollout`,
+the backend has `install-kanade-backend`, the client has
+`install-kanade-client`, and the CLI got hand-copied onto whichever box
+needed to run operator commands. That is how a host ends up driving a
+newer backend with a CLI old enough that `job validate` and `job create`
+disagree about the manifest schema. With this job the CLI rides the same
+publish → job → exec route as everything else, and the `inventory:` block
+answers "which CLI is on which host" from the SPA.
+
+**Target operator hosts, not the fleet.** `--pcs <id>`, not `--all`. The
+binary carries no credentials of its own (it reads `$env:KANADE_*_TOKEN`
+or a `kanade login` session), so a stray copy is not a privilege grant,
+but an admin CLI on end-user endpoints is noise at best.
+
+The one-command path:
+
+```powershell
+.\scripts\fleet-deploy.ps1 -Role cli -Version latest -Pc <operator-host>
+```
+
+That stages `kanade-x86_64-pc-windows-msvc.zip` into `dist\cli\kanade.exe`
+(note: **not** `kanade-cli.exe` — the crate is plain `kanade`), publishes
+it as the `kanade-cli` app package, injects `BackendBase` / `Version` /
+`ExpectedSha256` / `CliSourceAuthToken` into a temp copy of
+`configs/jobs/installers/scripts/install-kanade-cli.ps1`, renders a
+version-pinned temp manifest, `job create`s it and execs at the target.
+
+Manual breakdown, if you need to deviate:
+
+1. **Upload the binary.**
+
+   ```bash
+   kanade app publish kanade-cli dist/cli/kanade.exe
+   ```
+
+   The version is read from the binary's embedded VERSIONINFO (#261), so
+   it can't drift from what you built. Pass `--version <X.Y.Z>` only for
+   inputs without PE metadata.
+
+2. **Pin the knobs** at the top of
+   `configs/jobs/installers/scripts/install-kanade-cli.ps1` —
+   `$BackendBase`, `$Version`,
+   `$ExpectedSha256` (`Get-FileHash dist\cli\kanade.exe -Algorithm
+   SHA256`), `$CliSourceAuthToken`. A blank `$ExpectedSha256` is a hard
+   error, same posture as the client installer.
+
+3. **Register + deploy.**
+
+   ```bash
+   kanade job create configs/jobs/installers/install-kanade-cli.yaml
+   kanade exec install-kanade-cli --pcs <operator-host>
+   ```
+
+The script installs to `%ProgramFiles%\Kanade\kanade.exe` with the same
+stage → verify sha256 → atomic swap → rollback-on-failure shape as the
+client installer, and adds `%ProgramFiles%\Kanade` to the **machine**
+PATH (knob `$AddToMachinePath`, default on) — a CLI that isn't on PATH is
+half-installed, since scheduled jobs and service-hosted scripts run with
+no interactive profile. Two notes on that:
+
+- The PATH write goes through the registry with
+  `DoNotExpandEnvironmentNames` and re-writes with the original value
+  kind, **not** `[Environment]::SetEnvironmentVariable(..., 'Machine')` —
+  that API reads the value expanded and writes it back as plain `REG_SZ`,
+  permanently baking this machine's `%SystemRoot%` / `%ProgramFiles%`
+  into every other entry.
+- No `WM_SETTINGCHANGE` broadcast: the job runs as LocalSystem in session
+  0 and `HWND_BROADCAST` doesn't cross sessions. Already-running
+  processes keep the environment they inherited; a new logon (or service
+  restart) picks the entry up.
+
+Renaming a running image is legal on Windows, so the swap succeeds even
+if an operator has a `kanade` running at the time — the running process
+keeps its now-renamed file open and exits normally. That renamed file is
+`kanade.exe.old.<8 hex>`, unique per run rather than a fixed
+`kanade.exe.old`, precisely because it is the file most likely to still
+be **locked**: with a fixed name the *next* install's rename would target
+it and die with a sharing violation, i.e. an install refused by the
+debris of the last one. Each run sweeps whatever earlier rollback files
+have since been released, so they don't accumulate.
+
+`-Role cli` rejects `-All` outright (`-Pc` / `-Groups` only) — a
+forgotten flag must not be how an admin CLI reaches every endpoint.
+
 ## install-kanade-backend — end-to-end flow
 
 Self-update path for the backend itself, riding on the agent that
@@ -168,9 +263,12 @@ Five steps per backend release:
 1. **Upload the binary.**
 
    ```bash
-   kanade app publish kanade-backend 0.43.0 \
+   kanade app publish kanade-backend \
      target/release/kanade-backend.exe
    ```
+
+   Version from the binary's VERSIONINFO (#261); `--version` to
+   override.
 
 2. **Stamp the install script with this release's coordinates.**
    Copy `scripts/deploy/backend.ps1` locally and set the three
@@ -268,7 +366,7 @@ Five steps, same shape as the backend flow:
 1. **Upload the target binary to app-packages.**
 
    ```bash
-   kanade app publish kanade-agent 0.43.48 dist/agent/kanade-agent.exe
+   kanade app publish kanade-agent dist/agent/kanade-agent.exe
    ```
 
 2. **Stamp the swap script with this release's coordinates.** Copy
@@ -320,7 +418,7 @@ The two install manifests pick different transports for their
 script bodies — both are first-class in SPEC §2.4.1, and the
 pick is per-script:
 
-- **`script_file:` (install-kanade-client)** — small (~60 lines,
+- **`script_file:` (install-kanade-client, install-kanade-cli)** — small (~60 lines,
   < 4 KB), version-coupled to the manifest, lives in the same
   repo. CLI's resolver (#215) reads the file at `kanade job
   create` time and inlines it into `execute.script` before

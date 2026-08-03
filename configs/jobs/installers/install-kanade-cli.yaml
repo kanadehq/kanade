@@ -1,0 +1,76 @@
+# Install manifest for the `kanade` admin CLI. The script body lives in
+# the sibling `scripts/install-kanade-cli.ps1` and gets inlined by
+# `kanade job create` (#215) before the manifest is stored — operators
+# read it as a normal `.ps1`, the backend sees one fully-resolved
+# `Manifest` row. Same `script_file:` transport the client installer
+# uses.
+#
+# WHY the CLI needs an install job. Every other kanade component has a
+# rollout path: agents self-update via `kanade agent rollout`, the
+# backend has `install-kanade-backend`, the client has
+# `install-kanade-client`. The CLI had none — it got hand-copied onto
+# whichever host needed to run operator commands, which is exactly how a
+# host ends up driving a newer backend with a CLI old enough that
+# `validate` and `create` disagree about the manifest schema. With this
+# job the CLI rides the same publish -> job -> exec route as everything
+# else, and version bumps are `fleet-deploy.ps1 -Role cli -Version
+# latest -Pc <host>` like the rest.
+#
+# The normal way to drive it:
+#
+#     scripts/fleet-deploy.ps1 -Role cli -Version latest -Pc <host>
+#
+# which publishes the binary, injects BackendBase / Version /
+# ExpectedSha256 / CliSourceAuthToken into a TEMP copy of the script,
+# renders a version-pinned TEMP manifest, registers the job and execs it.
+# Nothing under version control is mutated. The manual breakdown is in
+# ./README.md.
+#
+# ── TARGETING ────────────────────────────────────────────────────────
+# This is an operator-host tool, NOT fleet software. Exec it at the
+# hosts that actually run operator commands — the backend host, an
+# ops-management box — with `--pcs <id>`. Do not `--all`. The binary
+# carries no credentials of its own (it reads $env:KANADE_*_TOKEN or a
+# `kanade login` session), so a stray copy is not a privilege grant, but
+# an admin CLI on end-user endpoints is noise at best.
+#
+# pc_ids are VERBATIM: the agent registers its `$env:COMPUTERNAME` as-is,
+# casing is not uniform across a fleet, and NATS subjects are
+# case-sensitive — a mis-cased id publishes to a subject nobody is
+# subscribed to and the exec sticks at `pending` with no error.
+#
+# `require_approval: true` matches the other installer manifests — the
+# SPEC §2.4.1 marker for "operator must intend this", gating the SPA
+# action behind an explicit ack.
+
+id: install-kanade-cli
+tags: [infra]   # operator taxonomy for the SPA tag filter
+version: 0.1.0
+description: "Install / update the kanade admin CLI from OBJECT_APP_PACKAGES"
+
+execute:
+  shell: powershell
+  script_file: scripts/install-kanade-cli.ps1
+  # Same budget as the client installer: a ~20 MB BITS download plus a
+  # file swap. The script's own RetryTimeout only bounds recovery after
+  # a dropped connection — this is what bounds the whole job.
+  timeout: 180s
+  # System session: the install lands under %ProgramFiles% and the
+  # machine PATH entry is written to HKLM. Nothing here needs a desktop.
+  run_as: system
+
+require_approval: true
+
+# Stdout JSON feeds the inventory projector
+# (kanade-backend::projector::results), so the SPA's Inventory page
+# answers "which CLI version is on which operator host" — the question
+# that motivated the job. `on_path` reports whether %ProgramFiles%\Kanade
+# actually ended up on the machine PATH, which is what decides whether a
+# scheduled job can invoke `kanade` by bare name.
+inventory:
+  display:
+    - { field: version, label: Version }
+    - { field: path, label: Install path }
+    - { field: on_path, label: On machine PATH }
+  summary:
+    - { field: version, label: CLI version }

@@ -11,7 +11,7 @@
   staged binary the rest of the way — it does what an operator would
   otherwise type out by hand every release:
 
-    backend / client (job-install pattern)
+    backend / client / cli (job-install pattern)
       1. kanade app publish kanade-<role> <exe>      (version auto-from-PE)
       2. inject the agent-mode download knobs into a temp copy of the
          role's deploy script (SourceUrl / Version / Sha256 / AuthToken,
@@ -37,8 +37,15 @@
   environment.
 
 .PARAMETER Role
-  backend | agent | client. backend/client go through the install job;
-  agent goes through publish + rollout.
+  backend | agent | client | cli. backend/client/cli go through the
+  install job; agent goes through publish + rollout.
+
+  `cli` is the `kanade` admin CLI — the one component with no self-update
+  path, previously hand-copied onto whichever host ran operator commands
+  (which is how a host ends up driving a newer backend with a CLI old
+  enough that `validate` and `create` disagree about the manifest
+  schema). Target it at operator hosts with -Pc, not -All: it's not
+  fleet software.
 
 .PARAMETER Pc
   Target pc_id, passed through VERBATIM (no case folding). The agent
@@ -62,6 +69,8 @@
   Whole-fleet target: `--all` for the job-install exec, `--global` for the
   agent rollout. Pair with -Jitter for agent rollouts so the fleet doesn't
   synchronise its downloads. Mutually exclusive with -Pc / -Groups.
+  Rejected for -Role cli: the admin CLI belongs on operator hosts, not on
+  every end-user endpoint.
 
 .PARAMETER Jitter
   (agent only) `--jitter` for the rollout (humantime, e.g. `30m`) —
@@ -174,12 +183,16 @@
   PS> .\scripts\fleet-deploy.ps1 -Role agent -All -Jitter 30m
 
 .EXAMPLE
+  # Put the current CLI on an operator host (and keep it current):
+  PS> .\scripts\fleet-deploy.ps1 -Role cli -Version latest -Pc <backend-host>
+
+.EXAMPLE
   # See exactly what would run, change nothing:
   PS> .\scripts\fleet-deploy.ps1 -Role client -Groups canary -DryRun
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][ValidateSet('backend', 'agent', 'client')]
+    [Parameter(Mandatory)][ValidateSet('backend', 'agent', 'client', 'cli')]
     [string]$Role,
 
     # No baked-in default — resolved from $env:KANADE_TARGET_PC, else one
@@ -278,6 +291,14 @@ if (-not $hasPc -and -not $Groups -and -not $All) {
 }
 if ($Role -eq 'agent' -and $Groups -and $Groups.Count -gt 1) {
     throw "agent rollout targets a single group — pass exactly one -Groups value."
+}
+# The CLI is an operator tool, not fleet software: -All would push an
+# admin CLI onto every end-user endpoint. -Groups stays allowed — a
+# deliberately named group of operator hosts is a considered act —
+# but fleet-wide never is, and a forgotten flag must not be how it
+# happens.
+if ($Role -eq 'cli' -and $All) {
+    throw "-Role cli does not support -All — install the admin CLI at operator hosts (-Pc <pc_id>, or -Groups <operator-group>)."
 }
 
 # ---- helpers --------------------------------------------------------------
@@ -380,7 +401,10 @@ if (-not $PSBoundParameters.ContainsKey('SourceUrl')) {
     }
 }
 
-$exeName = "kanade-$Role.exe"
+# Staged binary name. Every role but `cli` is `kanade-<role>.exe`; the
+# CLI crate is plain `kanade`, so build-release.ps1 stages it as
+# `dist\cli\kanade.exe`.
+$exeName = if ($Role -eq 'cli') { 'kanade.exe' } else { "kanade-$Role.exe" }
 if (-not $ExePath) { $ExePath = Join-Path $repoRoot "dist\$Role\$exeName" }
 
 # `-Version latest` -> resolve the newest release tag and force a stage so
@@ -490,7 +514,7 @@ if ($Role -eq 'agent') {
 }
 
 # =========================================================================
-# backend / client: job-install path
+# backend / client / cli: job-install path
 # =========================================================================
 
 # Per-role differences in one table.
@@ -513,6 +537,21 @@ $spec = @{
         Delivery     = 'file'                    # script_file (inlined at job create)
         InstalledExe = Join-Path $env:ProgramFiles 'Kanade\kanade-client.exe'
         Knobs        = @{ Url = 'BackendBase'; Ver = 'Version'; Sha = 'ExpectedSha256'; Tok = 'ClientSourceAuthToken' }
+    }
+    cli     = @{
+        # App package is `kanade-cli`, not the crate name `kanade`, even
+        # though every other role's package matches its crate: a bare
+        # `kanade` key sitting next to kanade-agent / kanade-backend /
+        # kanade-client in the bucket reads as "the whole product"
+        # rather than "the CLI". The name lines up with the role and the
+        # job id instead.
+        App          = 'kanade-cli'
+        JobId        = 'install-kanade-cli'
+        Manifest     = Join-Path $repoRoot 'configs\jobs\installers\install-kanade-cli.yaml'
+        DeployScript = Join-Path $repoRoot 'configs\jobs\installers\scripts\install-kanade-cli.ps1'
+        Delivery     = 'file'                    # script_file (inlined at job create)
+        InstalledExe = Join-Path $env:ProgramFiles 'Kanade\kanade.exe'
+        Knobs        = @{ Url = 'BackendBase'; Ver = 'Version'; Sha = 'ExpectedSha256'; Tok = 'CliSourceAuthToken' }
     }
 }[$Role]
 

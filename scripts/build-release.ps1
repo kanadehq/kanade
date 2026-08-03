@@ -72,6 +72,13 @@
   embedded version metadata (not `--version`, which would run the GUI),
   so an already-current client zip is skipped just like the services.
 
+  `cli` (the `kanade` admin CLI) is also supported but NOT in the
+  default set — it's an operator tool rather than fleet software, and
+  the box doing the staging usually already has one. Stage it explicitly
+  with `-Roles cli` (that's what `fleet-deploy.ps1 -Role cli -Stage`
+  does). It stages as `dist\cli\kanade.exe`, not `kanade-cli.exe`,
+  because the crate is plain `kanade`.
+
 .PARAMETER TargetDir
   Cargo `--target-dir` for cached build artifacts shared across runs.
   Default: `<repo>\.cargo-stage-cache`. Only used for -FromSource / -FromCrates.
@@ -190,6 +197,25 @@ $roleSpec = @{
         # `kanade-client-x86_64-pc-windows-msvc.exe` like the others.
         Crate       = 'kanade-client'
         ExeName     = 'kanade-client.exe'
+        BinaryOnly  = $true
+    }
+    'cli' = @{
+        # The `kanade` admin CLI. BinaryOnly like the client — no
+        # <role>.toml, no deploy-<role>.ps1, no Windows service; a single
+        # exe that the `install-kanade-cli` job (or an operator) drops
+        # into %ProgramFiles%\Kanade.
+        #
+        # Two names break the `kanade-<role>` shape every other role
+        # follows, because the crate is plain `kanade`: the GitHub asset
+        # (derived from `Crate`) is `kanade-x86_64-pc-windows-msvc.zip`,
+        # and the staged file is `kanade.exe`. fleet-deploy.ps1
+        # special-cases the same two.
+        #
+        # Not in the default -Roles set: unlike the fleet components,
+        # the CLI is an operator tool that most stages don't need, and
+        # the box doing the staging usually already has one on PATH.
+        Crate       = 'kanade'
+        ExeName     = 'kanade.exe'
         BinaryOnly  = $true
     }
     'nats' = @{

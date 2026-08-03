@@ -420,12 +420,18 @@ agent + nats) is a separate, agent-driven step:
    backend -Version X.Y.Z` downloads the release `.zip` (SPA embedded)
    and extracts it into `dist/backend/`. First-time / staging only.
 2. **Publish + roll out** — `scripts/fleet-deploy.ps1 -Role
-   backend|agent|client` does the whole agent-route in one command (app
-   publish → deploy-script knob injection → script/manifest publish → job
-   create → `kanade exec --pcs <pc>` → verify; agent uses `agent publish`
-   + `agent rollout`). `-DryRun` prints every command without running it.
-   See `configs/jobs/installers/README.md` for the full breakdown and the
-   manual fallback.
+   backend|agent|client|cli` does the whole agent-route in one command
+   (app publish → deploy-script knob injection → script/manifest publish
+   → job create → `kanade exec --pcs <pc>` → verify; agent uses `agent
+   publish` + `agent rollout`). `-DryRun` prints every command without
+   running it. See `configs/jobs/installers/README.md` for the full
+   breakdown and the manual fallback.
+
+   `-Role cli` installs the admin CLI itself (`install-kanade-cli`) —
+   target operator hosts with `-Pc`, not `-All`. It's the one component
+   with no self-update path, so without this an operator host silently
+   drifts behind the backend until `job validate` and `job create`
+   disagree about the manifest schema.
 
 Gotchas (each has cost a session): the exec target is `--pcs <id>` /
 `--groups <g>` **not** `--target pcs=`, and pc_ids must be passed
