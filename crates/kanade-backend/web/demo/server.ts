@@ -1147,7 +1147,11 @@ get(/^\/api\/analytics$/, (_req, url) => {
         from: new Date(fromMs).toISOString(),
         to: new Date(toMs).toISOString(),
         last_heartbeat: iso(p.heartbeat_ms_ago),
-        events: events.map((e) => ({ at: new Date(e.at).toISOString(), kind: e.kind })),
+        events: events.map((e) => ({
+          at: new Date(e.at).toISOString(),
+          kind: e.kind,
+          source: e.source,
+        })),
       },
       {
         dashboard: 'app-usage',
@@ -1488,23 +1492,17 @@ function eventsForPc(p: (typeof FLEET)[number], idx: number, days: number): RawE
       // End of day. Laptops close the lid and suspend — including over
       // the weekend, which is where the strip gets its long amber block.
       //
-      // …but not EVERY night, and the reason is a property of the
-      // swimlane, not of laptops. `buildLanes` decides whether winlog is
-      // available for a host by asking whether any boot/shutdown event
-      // falls inside the fetched window (`hasPower`,
-      // OperationalTimeline.tsx:800). A laptop that only ever suspends
-      // has none, so the strip switches to the #970 idle-sampler
-      // backfill and paints power + session straight across the night —
-      // claiming the user was signed in while the box was actually shut
-      // in a bag. Staggering a real shutdown across hosts every other
-      // night keeps at least one power event inside the default 2-day
-      // window, so the lanes stay winlog-reconstructed and truthful.
-      // (The underlying conflation of "no reboot in this window" with
-      // "this host has no winlog collector" is a product-side gap; a
-      // host that genuinely stays up for a week hits it too.)
-      const absDay = Math.floor(day0 / 86_400_000);
-      const powersOffTonight = (absDay + idx) % 2 === 0;
-      if (isLaptop && !powersOffTonight) {
+      // Every night now. This used to stagger a real shutdown across hosts
+      // every other night, because a laptop that only ever suspends has no
+      // power event inside the default 2-day window, and `buildLanes` read
+      // that as "this host has no winlog collector" — switching to the #970
+      // idle-sampler backfill and painting power + session straight across
+      // the night, claiming the user was signed in while the box was shut in
+      // a bag. The stagger existed to keep the demo honest about a
+      // product-side defect (#1256). With the predicate now answering the
+      // question it was always meant to ask, the fixture can be what a
+      // laptop fleet actually looks like.
+      if (isLaptop) {
         push(logoff + ri(1, 5), 'sleep', SRC_SYSTEM);
       } else {
         push(logoff + ri(1, 3), 'shutdown', SRC_SYSTEM);
@@ -1558,6 +1556,55 @@ get(/^\/api\/obs_events$/, (_req, url) => {
       kind: e.kind,
       source: e.source,
       event_record_id: e.source.startsWith('winlog:') ? String(400_000 + i) : null,
+      payload: e.payload,
+    })),
+  });
+});
+
+/**
+ * Newest event before `before`, per PC and per lane — the same seeding the
+ * real backend's `op_timeline` CTE has always done, now exposed for the
+ * Events page too (#1256).
+ *
+ * The mock has to implement it: without seeds a host that did not reboot
+ * inside the window reports no power event, the strip cannot tell that from
+ * "this host has no winlog collector", and the demo reproduces the bug it is
+ * supposed to demonstrate the fix for.
+ */
+const SEED_LANE_OF: Record<string, string> = {
+  boot: 'power', shutdown: 'power', unexpected_shutdown: 'power',
+  log_service_started: 'power', log_service_stopped: 'power',
+  logon: 'session', logoff: 'session',
+  sleep: 'sleep', resume: 'sleep',
+  active: 'active', idle: 'active',
+};
+
+get(/^\/api\/obs_events\/lane_seeds$/, (_req, url) => {
+  const pcs = (url.searchParams.get('pcs') ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  const before = Date.parse(url.searchParams.get('before') ?? '');
+  if (!pcs.length || Number.isNaN(before)) return json({ events: [] });
+  const all = buildEvents();
+  const out: RawEvent[] = [];
+  for (const pc of pcs) {
+    const newestPerLane = new Map<string, RawEvent>();
+    for (const e of all) {
+      if (e.pc_id !== pc || e.at >= before) continue;
+      const lane = SEED_LANE_OF[e.kind];
+      if (!lane) continue;
+      const cur = newestPerLane.get(lane);
+      if (!cur || e.at > cur.at) newestPerLane.set(lane, e);
+    }
+    out.push(...newestPerLane.values());
+  }
+  out.sort((a, b) => a.at - b.at);
+  return json({
+    events: out.map((e, i) => ({
+      id: 900_000 + i,
+      pc_id: e.pc_id,
+      at: new Date(e.at).toISOString(),
+      kind: e.kind,
+      source: e.source,
+      event_record_id: e.source.startsWith('winlog:') ? String(500_000 + i) : null,
       payload: e.payload,
     })),
   });

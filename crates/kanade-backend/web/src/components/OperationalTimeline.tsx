@@ -5,7 +5,15 @@ import { AGENT_ACTIVE_THRESHOLD_MS, fmtIsoLocal } from '@/lib/utils';
 
 // One raw operational event. Mirrors the backend `OpEvent`
 // (api/analytics.rs) and the per-PC rows the Events page already holds.
-export type OpEvent = { at: string; kind: string };
+export type OpEvent = {
+  at: string;
+  kind: string;
+  /** `<scheme>:<detail>` of the collector that produced it, e.g.
+   *  `winlog:System` or `agent:internal`. Optional so a caller that only has
+   *  `{at, kind}` still type-checks; `hasWinlog` falls back to a kind test
+   *  when it is absent. */
+  source?: string;
+};
 
 // A reconstructed lane interval. `openStart` / `openEnd` mark a span that
 // began before the window or is still open at its end (the matching
@@ -785,19 +793,37 @@ export function buildLanes(
   // active/idle (no winlog power lane) has no ON spans, and clipping to an
   // empty set would erase its only signal.
   const powerKinds = new Set<string>([...power.starts, ...power.ends]);
-  // Note this is kind-membership over whatever `events` holds, which a
-  // truncated fetch can change. If truncation drops every power event for a
-  // host while keeping its recent session/active ones — plausible, since the
-  // last reboot may be days old while sign-in and sampler traffic is
-  // constant — `hasPower` flips false and the covered region silently
-  // switches from winlog reconstruction to the presence-envelope backfill.
-  // That isn't fabrication (the envelope is sampler-evidenced, the same
-  // inference #970 already rests on), but it is a different *method* inside
-  // the region the strip presents as covered, and nothing distinguishes it
-  // from a genuinely winlog-less host. Detecting the difference would need a
-  // second query ("does this PC have power events older than the floor?"),
-  // so it is documented rather than handled.
-  const hasPower = events.some((e) => powerKinds.has(e.kind));
+  // Kind membership is still how the FALLBACK works when a caller supplies no
+  // `source` (see below), and it carries the old hazard: a truncated fetch
+  // that drops a host's power events while keeping its session/sampler
+  // traffic makes the fallback answer "no winlog". Callers that pass `source`
+  // are immune, and both surfaces do — the Events page reads it off
+  // `/api/obs_events`, the Analytics widget off the `op_timeline` payload.
+  // #1256: this used to be `events.some((e) => powerKinds.has(e.kind))`,
+  // which reads as "does this host run the winlog collector?" but measures
+  // "did this host reboot inside the window?". Those diverge on any host that
+  // stays up longer than the window — the common case for a laptop that
+  // suspends at night — and when they diverge the lanes below get
+  // re-synthesised from the sampler envelope while the sleep lane, drawn from
+  // the very winlog events the predicate just declared absent, contradicts
+  // them on the same strip.
+  //
+  // `source` answers the intended question directly. It is optional on the
+  // type, so fall back to the old kind test when a caller has none: wrong in
+  // the same way as before rather than newly wrong.
+  const hasWinlog = events.some((e) =>
+    e.source === undefined ? powerKinds.has(e.kind) : e.source.startsWith('winlog:'),
+  );
+  // Whether clipping to power is MEANINGFUL, which is a different question
+  // from whether winlog exists. Decoupling `hasWinlog` from the power kinds
+  // (#1256) separated the two: a host can report winlog session/sleep events
+  // and still have no power span in the window — a freshly onboarded host
+  // whose real boot predates retention, or one the seed lookup found no
+  // power event for. `clipToOn(spans, [])` returns nothing, so clipping then
+  // erases the very evidence the lane exists to show. This is the guarantee
+  // the old `hasPower` gate happened to provide for free, and it has to be
+  // stated separately now that the predicate no longer implies it.
+  const canClipToPower = onIntervals.length > 0;
   const session = OP_LANES.find((l) => l.key === 'session')!;
   // The active lane (agent idle sampler): a filled span = active, a gap =
   // idle. Built once and shown as-is on its own lane.
@@ -848,20 +874,22 @@ export function buildLanes(
   return OP_LANES.map((lane) => {
     let spans: Span[];
     if (lane.key === 'power') {
-      spans = hasPower ? powerSpans : presenceSpans;
+      spans = hasWinlog ? powerSpans : presenceSpans;
     } else if (lane.key === 'session') {
       // Both session paths in one branch so the generic branch below doesn't
       // rebuild the spans `sessionSpans` already holds.
-      spans = hasPower
-        ? clipToOn(sessionSpans, onIntervals)
+      spans = hasWinlog
+        ? canClipToPower
+          ? clipToOn(sessionSpans, onIntervals)
+          : sessionSpans
         : mergeSpans([...sessionSpans, ...presenceSpans]);
     } else if (lane.key === 'active') {
       // Reuse the pre-built active spans; still clip to power ON when winlog
       // exists so a stale open span can't paint across a powered-off gap.
-      spans = hasPower ? clipToOn(activeSpans, onIntervals) : activeSpans;
+      spans = hasWinlog && canClipToPower ? clipToOn(activeSpans, onIntervals) : activeSpans;
     } else {
       spans = buildSpans(events, lane.starts, lane.ends, t0, t1, now);
-      if (hasPower) spans = clipToOn(spans, onIntervals);
+      if (hasWinlog && canClipToPower) spans = clipToOn(spans, onIntervals);
     }
     // Hatch any ongoing state past the agent's last heartbeat as unconfirmed.
     spans = gateToHeartbeat(spans, certainEdge, liveEdge);

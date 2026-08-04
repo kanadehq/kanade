@@ -102,6 +102,13 @@ pub struct HourBucket {
 pub struct OpEvent {
     pub at: DateTime<Utc>,
     pub kind: String,
+    /// `<scheme>:<detail>` of the collector that produced this event, carried
+    /// through so the SPA can tell winlog-derived state from sampler-derived
+    /// state. Without it the strip has to infer "does this host run the winlog
+    /// collector?" from which KINDS happen to be present, which answers a
+    /// different question — "did it reboot inside the window?" — and gets it
+    /// wrong on any host that stays up longer than the window (#1256).
+    pub source: String,
 }
 
 /// The render-specific payload. Tagged by `render` so the SPA picks the
@@ -777,7 +784,7 @@ async fn op_timeline(ctx: &Ctx<'_>) -> anyhow::Result<WidgetData> {
         .ok_or_else(|| anyhow::anyhow!("op_timeline requires a pc_id"))?;
     let rows = sqlx::query(
         "WITH op AS ( \
-           SELECT at, kind, \
+           SELECT at, kind, source, \
                   CASE \
                     WHEN kind IN ('boot', 'shutdown', 'unexpected_shutdown', \
                                   'log_service_started', 'log_service_stopped') THEN 'power' \
@@ -794,14 +801,14 @@ async fn op_timeline(ctx: &Ctx<'_>) -> anyhow::Result<WidgetData> {
                           'agent_offline', 'agent_online') \
              AND at < ?3 \
          ), seeded AS ( \
-           SELECT at, kind FROM op WHERE at >= ?2 \
+           SELECT at, kind, source FROM op WHERE at >= ?2 \
            UNION ALL \
-           SELECT at, kind FROM ( \
-             SELECT at, kind, ROW_NUMBER() OVER (PARTITION BY lane ORDER BY at DESC) AS rn \
+           SELECT at, kind, source FROM ( \
+             SELECT at, kind, source, ROW_NUMBER() OVER (PARTITION BY lane ORDER BY at DESC) AS rn \
              FROM op WHERE at < ?2 \
            ) WHERE rn = 1 \
          ) \
-         SELECT at, kind FROM seeded ORDER BY at",
+         SELECT at, kind, source FROM seeded ORDER BY at",
     )
     .bind(pc_id)
     .bind(ctx.from)
@@ -813,7 +820,8 @@ async fn op_timeline(ctx: &Ctx<'_>) -> anyhow::Result<WidgetData> {
         .filter_map(|r| {
             let at: DateTime<Utc> = r.try_get("at").ok()?;
             let kind: String = r.try_get("kind").ok()?;
-            Some(OpEvent { at, kind })
+            let source: String = r.try_get("source").ok()?;
+            Some(OpEvent { at, kind, source })
         })
         .collect();
     // Best-effort read of the agent's last heartbeat so the SPA can gate the

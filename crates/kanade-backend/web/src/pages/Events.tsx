@@ -1139,18 +1139,59 @@ function EventsOperational({
     [events, opEvents, pcs, windowFrom, windowTo],
   );
 
+  // Lane seeds: the newest event before the window, per PC and per lane.
+  //
+  // Without them a host that did not reboot inside the window reports no
+  // power event at all, and the strip cannot tell "no winlog collector here"
+  // from "stayed up the whole time" — it then re-synthesises power and
+  // session from the sampler envelope and paints edge to edge (#1256). The
+  // Analytics `op_timeline` query has always seeded itself; this is the same
+  // footing for this page, so the two surfaces stop disagreeing about the
+  // same host and window.
+  //
+  // Scoped to the PCs actually drawn (≤ CHART_MAX_PCS) and issued only once
+  // they are known, so it is a bounded set of index seeks rather than a
+  // fleet-wide walk back to whenever each host last rebooted. Separate query
+  // key, so it caches on its own and never delays the main list.
+  const seedPcs = useMemo(() => [...pcs].sort().join(','), [pcs]);
+  // `swimlaneWindow` yields undefined bounds when there is nothing to span;
+  // seeding a window that does not exist would be asking the backend to walk
+  // history for a strip that will not be drawn.
+  const seedBefore = from === undefined ? null : new Date(from).toISOString();
+  const { data: seedData } = useQuery({
+    queryKey: ['obs_events_lane_seeds', seedPcs, seedBefore],
+    queryFn: () =>
+      apiFetch<ListResponse>(
+        `/api/obs_events/lane_seeds?pcs=${encodeURIComponent(seedPcs)}&before=${encodeURIComponent(
+          seedBefore as string,
+        )}`,
+      ),
+    enabled: seedPcs.length > 0 && seedBefore !== null,
+    staleTime: 60_000,
+  });
+
   // Group the kept PCs' events into the shape the strip wants.
   const byPc = useMemo(() => {
     const kept = new Set(pcs);
     const out = new Map<string, OpEvent[]>();
+    // Seeds first so each lane's carry-in starts from the state the host was
+    // already in. `buildSpans` sorts, so order here is for clarity only.
+    for (const e of seedData?.events ?? []) {
+      if (!kept.has(e.pc_id)) continue;
+      const arr = out.get(e.pc_id);
+      if (arr) arr.push({ at: e.at, kind: e.kind, source: e.source });
+      else out.set(e.pc_id, [{ at: e.at, kind: e.kind, source: e.source }]);
+    }
     for (const e of opEvents) {
       if (!kept.has(e.pc_id)) continue;
       const arr = out.get(e.pc_id);
-      if (arr) arr.push({ at: e.at, kind: e.kind });
-      else out.set(e.pc_id, [{ at: e.at, kind: e.kind }]);
+      // `source` too: the strip needs it to tell "this host has no winlog
+      // collector" from "this host did not reboot inside the window" (#1256).
+      if (arr) arr.push({ at: e.at, kind: e.kind, source: e.source });
+      else out.set(e.pc_id, [{ at: e.at, kind: e.kind, source: e.source }]);
     }
     return out;
-  }, [opEvents, pcs]);
+  }, [opEvents, pcs, seedData]);
 
   if (pcs.length === 0) return null;
 
