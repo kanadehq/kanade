@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { Download, Loader2, ShieldAlert, ShieldCheck } from 'lucide-react';
+import { Check, Copy, Download, Loader2, ShieldAlert, ShieldCheck } from 'lucide-react';
 import { useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 
@@ -40,6 +40,26 @@ export function detectOs(ua: string, platform?: string): InstallerOs {
   return 'windows';
 }
 
+// The copyable one-liner install command for each OS. The script endpoints
+// (`installer.ps1` / `installer.sh`) are auth-gated like every other API
+// route, so the command embeds the caller's session token as a Bearer
+// header and points at the backend that served this SPA (`origin`) —
+// correct even when the operator browses through a reverse proxy. Pure +
+// exported so the shape is unit-testable.
+export function oneLiner(os: InstallerOs, origin: string, token: string): string {
+  if (os === 'linux') {
+    // printf (a shell builtin — never a /proc cmdline entry) feeds curl a
+    // config on stdin, so the token never appears in any process's argv:
+    // /proc/<pid>/cmdline is world-readable on Linux. Two escaping layers:
+    // `\`/`"` for the double-quoted curl-config value (unreachable with
+    // today's JWT charset, pinned for future token formats), then `'` →
+    // `'\''` for the single-quoted printf argument.
+    const quoted = token.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/'/g, `'\\''`);
+    return `printf 'header = "Authorization: Bearer %s"\\n' '${quoted}' | curl -fsSL -K - ${origin}/api/agents/installer.sh | sudo bash`;
+  }
+  return `irm -Headers @{Authorization='Bearer ${token}'} ${origin}/api/agents/installer.ps1 | iex`;
+}
+
 // First-time agent install for END USERS (the download-only account): no
 // options beyond the OS/arch — `GET /api/agents/installer` always builds
 // the package from the latest release with the NATS settings and (on
@@ -59,6 +79,29 @@ export function AgentInstall() {
   );
   const [arch, setArch] = useState<InstallerArch>('x86_64');
   const [downloading, setDownloading] = useState(false);
+  // Session token embedded into the one-liner — same accessor as
+  // lib/api.ts / lib/auth.tsx (`localStorage.kanade_token`). Read once:
+  // the embedded token expires with the session anyway, so live-tracking
+  // changes buys nothing. Absent token (shouldn't happen behind the auth
+  // gate) → the one-liner block is hidden.
+  const [token] = useState(() => localStorage.getItem('kanade_token') ?? '');
+  const [copied, setCopied] = useState(false);
+
+  const command = token ? oneLiner(os, window.location.origin, token) : '';
+
+  async function copyOneLiner() {
+    // Same rule as MfaCard's copySecret: only claim success once the write
+    // actually resolves — a false "copied" (insecure origin, denied
+    // permission) would strand the operator.
+    try {
+      await navigator.clipboard.writeText(command);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+      toast.success(t('oneLiner.copied'));
+    } catch {
+      toast.error(t('oneLiner.copyFailed'));
+    }
+  }
 
   // Same query key + staleTime as the Agents page: this backend's signing
   // key only changes on an operator rotation, which restarts the backend.
@@ -216,6 +259,30 @@ export function AgentInstall() {
               {t('download.downloadButton')}
             </Button>
           </div>
+          {/* One-liner install — the same installer, fetched and run by a
+              single pasted command on the target machine. The command
+              embeds the session token, so it's hidden when there is none
+              (shouldn't happen behind the auth gate). */}
+          {token && (
+            <div className="space-y-1.5">
+              <p className="text-sm font-medium">{t(`oneLiner.label.${os}`)}</p>
+              <div className="flex items-center gap-2">
+                <code className="flex-1 overflow-x-auto whitespace-nowrap rounded-md border border-border bg-bg px-3 py-2 text-xs">
+                  {command}
+                </code>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={copyOneLiner}
+                  title={t('oneLiner.copyTitle')}
+                >
+                  {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+                </Button>
+              </div>
+              <p className="text-xs text-muted">{t(`oneLiner.hint.${os}`)}</p>
+              <p className="text-xs text-amber">{t('oneLiner.tokenWarning')}</p>
+            </div>
+          )}
           {/* #1260 status: whether this backend signs commands decides
               whether the package embeds a command-signing public key
               (Windows — Linux provisioning doesn't exist yet). About the
