@@ -29,6 +29,12 @@ const h = (n: number) => new Date(T0 + n * 3_600_000).toISOString();
 const H = (n: number) => T0 + n * 3_600_000;
 
 const ev = (at: string, kind: string) => ({ at, kind });
+/** Winlog-sourced. `source` is what tells the strip a host runs the winlog
+ *  collector, rather than inferring it from which kinds happen to be in the
+ *  fetched window (#1256). */
+const evw = (at: string, kind: string) => ({ at, kind, source: 'winlog:System' });
+/** Agent idle-sampler sourced. */
+const eva = (at: string, kind: string) => ({ at, kind, source: 'agent:internal' });
 
 type Lane = ReturnType<typeof buildLanes>[number];
 const lane = (lanes: Lane[], key: string): Lane => {
@@ -156,6 +162,77 @@ describe('lane matrix: which feeds the PC reports', () => {
     expect(coversAt(lane(lanes, 'session'), H(5))).toBe(true);
     expect(lane(lanes, 'power').spans).toHaveLength(0);
     expect(lane(lanes, 'active').spans).toHaveLength(0);
+  });
+
+  // #1256. The matrix above varies WHICH FEED a host reports — a property of
+  // the host. The code's branch key is which KINDS landed in this window — a
+  // property of the fetch. Those are different axes, which is how a matrix
+  // that reads exhaustive left the one cell that matters unexplored: partial
+  // winlog (session/sleep, no reboot in-window) alongside a running sampler.
+  //
+  // `ev` carries no `source`, so these use `evw` / `eva` to say which
+  // collector produced each event — the distinction the fix rests on.
+  describe('partial winlog + sampler (the cell #1256 fell through)', () => {
+    // A laptop that suspended overnight and never rebooted inside the window.
+    const night = [
+      evw(h(2), 'logon'), eva(h(3), 'active'), eva(h(8), 'idle'),
+      evw(h(9), 'logoff'), evw(h(9), 'sleep'),
+      evw(h(21), 'resume'), evw(h(21), 'logon'), eva(h(22), 'active'),
+    ];
+
+    test('session does not claim signed-in across the logged-off night', () => {
+      const lanes = buildLanes(night, T0, T1, NOW);
+      expect(coversAt(lane(lanes, 'session'), H(15))).toBe(false);
+    });
+
+    test('the sampler envelope does not paint where the sampler was silent', () => {
+      const lanes = buildLanes(night, T0, T1, NOW);
+      // No active/idle event exists between 8h and 22h. Anything painted at
+      // 15h on a sampler-derived lane came from carry-in, i.e. from absence.
+      expect(coversAt(lane(lanes, 'active'), H(15))).toBe(false);
+    });
+
+    // The trap this PR's first draft fell into: every assertion above probes
+    // H(15), inside the stretch that is uncovered either way, so none of them
+    // could tell "correctly reads as logged off" from "clipped everything to
+    // nothing". Deriving `hasWinlog` from `source` decoupled it from whether
+    // any power span exists, and `clipToOn(spans, [])` returns nothing — so
+    // the genuine, winlog-confirmed session at h2–h9 vanished. Probe a
+    // COVERED instant, not only an uncovered one.
+    test('genuine winlog spans survive when there is no power span to clip to', () => {
+      const lanes = buildLanes(night, T0, T1, NOW);
+      expect(coversAt(lane(lanes, 'session'), H(5))).toBe(true);
+      expect(coversAt(lane(lanes, 'active'), H(5))).toBe(true);
+    });
+
+    test('power is not synthesised from the envelope when winlog exists', () => {
+      // Unseeded: winlog is demonstrably running (logon/sleep/resume carry
+      // `winlog:*`) but says nothing about power inside the window. The old
+      // predicate read that as "no winlog collector" and painted power from
+      // the sampler envelope, carried in to both edges — across a night the
+      // sampler never sampled. Nothing is the honest answer; the no-evidence
+      // bands hatch it.
+      const lanes = buildLanes(night, T0, T1, NOW);
+      expect(coversAt(lane(lanes, 'power'), H(15))).toBe(false);
+    });
+
+    test('a seeded boot lets the power lane say ON without the envelope', () => {
+      // What `/api/obs_events/lane_seeds` supplies: the newest power event
+      // before the window. Sleep is not a power-off, so ON is correct here —
+      // and it now comes from winlog rather than from the sampler.
+      const lanes = buildLanes([evw(h(-5), 'boot'), ...night], T0, T1, NOW);
+      expect(coversAt(lane(lanes, 'power'), H(15))).toBe(true);
+      expect(coversAt(lane(lanes, 'sleep'), H(15))).toBe(true);
+      expect(coversAt(lane(lanes, 'session'), H(15))).toBe(false);
+    });
+
+    test('a winlog-less host still gets the #970 envelope backfill', () => {
+      // The behaviour the predicate exists to protect: sampler-only hosts
+      // must keep power/session painted from the envelope.
+      const lanes = buildLanes([eva(h(3), 'active'), eva(h(8), 'idle')], T0, T1, NOW);
+      expect(coversAt(lane(lanes, 'power'), H(5))).toBe(true);
+      expect(coversAt(lane(lanes, 'session'), H(5))).toBe(true);
+    });
   });
 
   test('no events at all: every lane is empty', () => {

@@ -227,6 +227,7 @@ pub fn router(state: AppState) -> Router {
         // `recent` is the dashboard "latest activity" feed.
         .route("/api/obs_events", get(obs_events::list))
         .route("/api/obs_events/kinds", get(obs_events::kinds))
+        .route("/api/obs_events/lane_seeds", get(obs_events::lane_seeds))
         // Issue #391: distinct sources for the include/exclude chips.
         .route("/api/obs_events/sources", get(obs_events::sources))
         .route("/api/obs_events/recent", get(obs_events::recent))
@@ -652,7 +653,10 @@ pub fn feature_for_path(path: &str) -> Option<Feature> {
         | "/api/executions/{exec_id}" => Feature::Activity,
 
         // --- Events (obs_events; `recent` stays commons for the dashboard) ---
-        "/api/obs_events" | "/api/obs_events/kinds" | "/api/obs_events/sources" => Feature::Events,
+        "/api/obs_events"
+        | "/api/obs_events/kinds"
+        | "/api/obs_events/lane_seeds"
+        | "/api/obs_events/sources" => Feature::Events,
 
         // --- Audit ---
         "/api/audit" => Feature::Audit,

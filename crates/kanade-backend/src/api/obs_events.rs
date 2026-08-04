@@ -272,6 +272,82 @@ fn row_to_event(r: &SqliteRow) -> sqlx::Result<EventRow> {
     })
 }
 
+/// How many PCs one `lane_seeds` call may ask about. The swimlane draws at
+/// most `CHART_MAX_PCS` (40) hosts, so this is that with headroom rather
+/// than an arbitrary cap — a caller asking for more is asking for something
+/// the strip cannot render.
+const MAX_SEED_PCS: usize = 64;
+
+#[derive(Deserialize)]
+pub struct SeedsQuery {
+    /// Comma-separated `pc_id`s — the hosts the strip is about to draw.
+    pub pcs: String,
+    /// The window start. Seeds are the newest event strictly before it.
+    pub before: DateTime<Utc>,
+}
+
+/// `GET /api/obs_events/lane_seeds`.
+///
+/// The newest event before `before`, per PC and per swimlane lane.
+///
+/// The Events page fetches a WINDOW of events, so a host that did not reboot
+/// inside it reports no power event at all, and the strip cannot tell "this
+/// host has no winlog collector" from "this host simply stayed up" (#1256).
+/// The Analytics `op_timeline` query has always seeded itself this way; this
+/// gives the Events page the same footing so the two surfaces stop
+/// disagreeing about the same host and window.
+///
+/// Deliberately a separate call rather than a wider `list`: seeding the whole
+/// fleet would mean walking back per kind until every PC is covered, which a
+/// host that last rebooted months ago makes unbounded. Scoped to the ≤40 PCs
+/// actually drawn, each lookup is an index seek on `(pc_id, at DESC)` — the
+/// same shape `op_timeline` already runs per PC.
+pub async fn lane_seeds(
+    State(pool): State<SqlitePool>,
+    Query(q): Query<SeedsQuery>,
+) -> Result<Json<ListResponse>, StatusCode> {
+    let pcs: Vec<&str> = q
+        .pcs
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if pcs.is_empty() || pcs.len() > MAX_SEED_PCS {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // One seek per PC rather than a dynamic `IN (…)`: keeps the SQL static
+    // (the same reason `op_timeline` spells its kind lists out) and bounded
+    // by MAX_SEED_PCS.
+    //
+    // The lane CASE must stay aligned with `OP_LANES` in the SPA's
+    // OperationalTimeline.tsx and with the `op_timeline` query in
+    // analytics.rs — see `tests::lane_seed_kinds_match_op_timeline`.
+    let mut events = Vec::new();
+    for pc in pcs {
+        let rows = sqlx::query(
+            "SELECT id, pc_id, at, kind, source, event_record_id, payload FROM (                SELECT id, pc_id, at, kind, source, event_record_id, payload,                       ROW_NUMBER() OVER (                         PARTITION BY CASE                           WHEN kind IN ('boot', 'shutdown', 'unexpected_shutdown',                                         'log_service_started', 'log_service_stopped') THEN 'power'                           WHEN kind IN ('logon', 'logoff') THEN 'session'                           WHEN kind IN ('sleep', 'resume') THEN 'sleep'                           WHEN kind IN ('active', 'idle') THEN 'active'                         END                         ORDER BY at DESC                       ) AS rn                FROM obs_events                WHERE pc_id = ?1 AND at < ?2                  AND kind IN ('boot', 'shutdown', 'unexpected_shutdown',                               'log_service_started', 'log_service_stopped',                               'logon', 'logoff', 'sleep', 'resume',                               'active', 'idle')              ) WHERE rn = 1 ORDER BY at",
+        )
+        .bind(pc)
+        .bind(q.before)
+        .fetch_all(&pool)
+        .await
+        .map_err(|e| {
+            warn!(error = %e, pc_id = %pc, "lane_seeds query failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        for r in &rows {
+            match row_to_event(r) {
+                Ok(ev) => events.push(ev),
+                // Same posture as `list`: one undecodable row must not cost
+                // the whole strip its seeds.
+                Err(e) => warn!(error = %e, "skipping undecodable lane seed"),
+            }
+        }
+    }
+    Ok(Json(ListResponse { events }))
+}
+
 #[derive(Serialize)]
 pub struct KindsResponse {
     pub kinds: Vec<String>,
@@ -470,5 +546,97 @@ mod tests {
             .await
             .expect("in-range bounds must be accepted");
         assert_eq!(res.0.events.len(), 1);
+    }
+    /// Insert one obs_event, with a unique `event_record_id` so the table's
+    /// `UNIQUE(pc_id, source, event_record_id)` doesn't collapse the rows.
+    async fn seed_row(pool: &SqlitePool, pc: &str, at: DateTime<Utc>, kind: &str, rec: &str) {
+        sqlx::query(
+            "INSERT INTO obs_events (pc_id, at, kind, source, event_record_id, payload)
+             VALUES (?, ?, ?, 'winlog:System', ?, '{}')",
+        )
+        .bind(pc)
+        .bind(at)
+        .bind(kind)
+        .bind(rec)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// The lane CASE in `lane_seeds` must group kinds exactly the way
+    /// `op_timeline` (analytics.rs) and `OP_LANES` (OperationalTimeline.tsx)
+    /// do. There are three copies of that mapping; this pins the one this
+    /// module owns, the same way `analytics::tests::op_timeline_kind_set_is_stable`
+    /// pins the query next door.
+    ///
+    /// Behavioural rather than string-matching on the SQL: it asserts what
+    /// the grouping DOES — one seed per lane, the newest of each — so a CASE
+    /// edited into a different shape fails even if it still parses.
+    #[tokio::test]
+    async fn lane_seed_kinds_match_op_timeline() {
+        let pool = fresh_pool().await;
+        let at = |h: u32| Utc.with_ymd_and_hms(2026, 6, 17, h, 0, 0).unwrap();
+
+        // Two events per lane before the window. The SECOND of each pair is
+        // what a correct lane grouping returns.
+        for (i, (older, newer)) in [
+            ("boot", "shutdown"), // power
+            ("logon", "logoff"),  // session
+            ("sleep", "resume"),  // sleep
+            ("active", "idle"),   // active
+        ]
+        .iter()
+        .enumerate()
+        {
+            seed_row(&pool, "seedpc", at(i as u32 * 2), older, &format!("o{i}")).await;
+            seed_row(
+                &pool,
+                "seedpc",
+                at(i as u32 * 2 + 1),
+                newer,
+                &format!("n{i}"),
+            )
+            .await;
+        }
+        // Neither a lane kind nor an observation kind: must not seed anything.
+        seed_row(&pool, "seedpc", at(15), "app_sample", "x1").await;
+        // Observation kinds drive no lane, so they must not seed either — a
+        // seeded `agent_online` would assert liveness the window never saw.
+        seed_row(&pool, "seedpc", at(16), "agent_online", "x2").await;
+
+        let res = lane_seeds(
+            State(pool),
+            Query(SeedsQuery {
+                pcs: "seedpc".into(),
+                before: Utc.with_ymd_and_hms(2026, 6, 18, 0, 0, 0).unwrap(),
+            }),
+        )
+        .await
+        .expect("lane_seeds must succeed");
+
+        let mut got: Vec<&str> = res.0.events.iter().map(|e| e.kind.as_str()).collect();
+        got.sort_unstable();
+        assert_eq!(
+            got,
+            ["idle", "logoff", "resume", "shutdown"],
+            "one seed per lane, the newest of each — and nothing from a              non-lane kind"
+        );
+    }
+
+    #[tokio::test]
+    async fn lane_seeds_rejects_an_empty_or_oversized_pc_list() {
+        let pool = fresh_pool().await;
+        let before = Utc.with_ymd_and_hms(2026, 6, 18, 0, 0, 0).unwrap();
+        for pcs in [
+            "".to_string(),
+            ",, ,".to_string(),
+            (0..MAX_SEED_PCS + 1)
+                .map(|i| format!("pc{i}"))
+                .collect::<Vec<_>>()
+                .join(","),
+        ] {
+            let res = lane_seeds(State(pool.clone()), Query(SeedsQuery { pcs, before })).await;
+            assert!(matches!(res, Err(StatusCode::BAD_REQUEST)));
+        }
     }
 }
