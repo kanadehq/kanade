@@ -109,7 +109,7 @@ sha2               = "0.11.0"
 # Decoding NATS Object Store digest strings (`SHA-256=<base64>`)
 # back into raw bytes so the agent's hex-formatted Command field
 # (#210 / #213) compares cleanly with sha2's hex output.
-base64             = "0.23.0"
+base64             = "0.23.1"
 # #1165: backend-signed commands. Already in the tree transitively via
 # async-nats/nkeys, so declaring it directly adds no third-party code to
 # compile or audit — only the ability to call it.
