@@ -9,7 +9,7 @@
         "@tauri-apps/plugin-notification": "^2.3.3",
         "dompurify": "^3.4.13",
         "lucide": "^1.28.0",
-        "marked": "^18.0.7",
+        "marked": "^18.0.8",
       },
       "devDependencies": {
         "typescript": "^6.0.3",
@@ -102,7 +102,7 @@
 
     "lucide": ["lucide@1.28.0", "", {}, "sha512-sxVxWEXfq7rRNzmffDBRohYBOFjfoOhrO7jGGCLNNRoY2fPjeuqi2boXR2UAROEyQUm+xe13DGOQNtnmwv6Y3w=="],
 
-    "marked": ["marked@18.0.7", "", { "bin": { "marked": "bin/marked.js" } }, "sha512-iDVQ5ldaiKXn6b2JroX5kgRfmwgqolW7NpaEzTl1k/2Zh1njIEN9yniyLV/mOvWwtsE8OGgkjsCYvijuPk1dtA=="],
+    "marked": ["marked@18.0.8", "", { "bin": { "marked": "bin/marked.js" } }, "sha512-wsTzDkXm7dJwwTZ5nM2ZJFUsAZwUDPxFAl4MEb35pS14Gn/8KFlV8N5xE/sVIsTcZoYmwbTw/6pSba70mvfDRA=="],
 
     "nanoid": ["nanoid@3.3.16", "", { "bin": { "nanoid": "bin/nanoid.cjs" } }, "sha512-bzlKTyNJ7+LdGIIwy8ijFpIqEQIvafahV7eYykJ8Cvh42EdJeODoJ6gUJXpQJvej1BddH8OqTXZNE/KfbWAu8Q=="],
 
