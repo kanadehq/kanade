@@ -255,6 +255,23 @@ systemctl status kanade-agent
 journalctl -u kanade-agent -f
 ```
 
+### Easier path: the backend-generated installer tarball
+
+The backend can also generate the Linux installer for you — the
+counterpart of the Windows Agent Install ZIP: `GET
+/api/agents/installer?os=linux&arch=x86_64|aarch64` (or the SPA Agent
+Install page) returns a tar.gz with the same layout as the manual bundle
+above (`bin/`, `etc/`, `systemd/`, `setup-agent.sh`) plus a generated
+`install.sh` that bakes in the NATS token configured under Settings →
+server settings (`agent_install`). Extract and `sudo ./install.sh` — no
+`KANADE_NATS_TOKEN` to pass by hand. The release it bundles comes from
+the `agent_releases` Object Store (`<version>-linux-<arch>` keys,
+published with `kanade agent publish --version …`); the manual
+bundle-agent.sh flow above remains the way to install a binary that was
+never published to the store. One caveat: command-signing keyring
+provisioning is Windows-only today, so agents installed this way run
+with signature verification inactive (the #1165 gap).
+
 Note: `sh` / `pwsh` command execution on the Linux agent needs #1198
 (older agent builds can register and be monitored but fail exec at
 `spawn powershell`).

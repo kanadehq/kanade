@@ -1,3 +1,4 @@
+pub mod bin_platform;
 pub mod boot_sentinel;
 pub mod bootstrap;
 pub mod check_eval;

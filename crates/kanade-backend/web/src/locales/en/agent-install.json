@@ -1,25 +1,44 @@
 {
   "title": "Agent Install",
-  "intro": "Install the kanade agent on this PC.",
+  "intro": "Install the kanade agent on this machine.",
+  "os": {
+    "windows": "Windows",
+    "linux": "Linux"
+  },
   "instructions": {
     "title": "How to install",
-    "description": "Set up this PC with the kanade agent in three steps.",
+    "description": "Set up this machine with the kanade agent in three steps.",
     "steps": {
       "one": "Download the installer ZIP below.",
       "two": "Extract the ZIP on this PC.",
       "three": "Right-click <code>install.cmd</code> and choose <strong>Run as administrator</strong>."
     },
     "autoNote": "Everything is preconfigured by the server: the connection settings and — when command signing is enabled — the signing public key are already baked into the ZIP. Service registration and failure-recovery settings happen automatically during the install.",
-    "windowsNote": "Windows only."
+    "windowsNote": "Windows only.",
+    "linux": {
+      "steps": {
+        "one": "Download the installer tarball below.",
+        "two": "Copy it to the target host and extract it: <code>tar xzf kanade-agent-installer-*.tar.gz</code>",
+        "three": "Run <code>sudo ./install.sh</code> on the target host."
+      },
+      "systemdNote": "The installer registers a systemd service (running as root). Re-running it later upgrades the agent in place.",
+      "signingNote": "Command-signing keyring provisioning is Windows-only for now — signed-command verification is inactive on Linux."
+    }
   },
   "download": {
     "title": "Download installer",
     "description": "The ZIP contains <code>kanade-agent.exe</code>, a pre-filled <code>agent.toml</code>, and the install scripts (<code>install.cmd</code> / <code>install-agent.ps1</code>). Always the latest agent release.",
-    "downloadButton": "Download installer ZIP"
+    "descriptionLinux": "The tarball contains the <code>kanade-agent</code> binary, a pre-filled <code>agent.toml</code>, and <code>install.sh</code>. Always the latest agent release.",
+    "archLabel": "Architecture",
+    "archOptions": {
+      "x86_64": "x86_64 (64-bit Intel/AMD)",
+      "aarch64": "aarch64 (ARM64)"
+    },
+    "downloadButton": "Download installer"
   },
   "signing": {
     "errorTitle": "Failed to load command-signing status",
-    "enabled": "This backend signs commands (kid <code>{{kid}}</code>, fingerprint <code>{{fingerprint}}</code>) — the public key is embedded into the ZIP automatically.",
-    "disabled": "This backend is not signing commands, so the ZIP will not provision command keys."
+    "enabled": "This backend signs commands (kid <code>{{kid}}</code>, fingerprint <code>{{fingerprint}}</code>) — the public key is embedded into the Windows installer automatically.",
+    "disabled": "This backend is not signing commands, so the installer will not provision command keys."
   }
 }

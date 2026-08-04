@@ -74,9 +74,14 @@ tracing    = { workspace = true }
 tracing-appender   = { workspace = true }
 tracing-subscriber = { workspace = true }
 totp-rs = { workspace = true }
-# Agent installer ZIP (POST /api/agents/installer): same minimal feature
+# Agent installer ZIP (GET /api/agents/installer): same minimal feature
 # set kanade-agent's collect bundle uses — deflate only, no bzip2/zstd/aes.
 zip        = { version = "2.4.2", default-features = false, features = ["deflate"] }
+# Linux agent installer tarball (GET /api/agents/installer?os=linux) —
+# versions match the existing lockfile entries (both already in the tree
+# transitively).
+tar        = "0.4.46"
+flate2     = "1.1.9"
 
 [dev-dependencies]
 # The #1270 live test spawns a throwaway token-auth `nats-server` on a

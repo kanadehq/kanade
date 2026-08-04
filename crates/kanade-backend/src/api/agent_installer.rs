@@ -1,14 +1,20 @@
-//! `GET /api/agents/installer` — generate an agent installer ZIP on the fly.
+//! `GET /api/agents/installer` — generate an agent installer archive on the
+//! fly, for Windows (ZIP) or Linux (tar.gz).
 //!
 //! Self-service: the route sits in the viewer+ base router, gated by the
 //! `agent-install` page feature, so a restricted "download user" account
-//! (viewer + ONLY that feature) can kit a fresh Windows PC: extract,
-//! right-click `install.cmd` → *Run as administrator*, done. There is no
-//! request body and no version parameter — the caller never chooses
-//! anything. The ZIP always bundles the latest release (by Object Store
-//! `modified`), and the NATS url/token it bakes in come from the
-//! `agent_install` section of the server-settings document (falling back
-//! to this backend's own `[nats] url`, no token). Contents:
+//! (viewer + ONLY that feature) can kit a fresh machine: extract, run the
+//! bootstrap as admin/root, done. There is no request body and no version
+//! parameter — the caller picks only the platform (`?os=windows|linux`,
+//! default `windows`; `?arch=x86_64|aarch64`, default `x86_64`). The
+//! archive always bundles the latest release FOR THAT PLATFORM (by Object
+//! Store `modified`, over the platform's keys — bare keys for Windows,
+//! `<version>-linux-<arch>` for Linux; see kanade_shared::bin_platform),
+//! and the NATS url/token it bakes in come from the `agent_install`
+//! section of the server-settings document (falling back to this
+//! backend's own `[nats] url`, no token).
+//!
+//! Windows ZIP contents:
 //!
 //!   * `kanade-agent.exe` — the bytes of the latest release from the
 //!     `agent_releases` Object Store.
@@ -24,13 +30,34 @@
 //!   * `install.cmd` — a generated CRLF bootstrap for double-click
 //!     installs (PowerShell with a bypass policy, pause-on-failure).
 //!   * `README.txt` — the two-step instructions.
+//!
+//! Linux tar.gz contents (the `deploy/linux/bundle-agent.sh` layout,
+//! relative to the extraction root):
+//!
+//!   * `bin/kanade-agent` (0755) — the latest `<version>-linux-<arch>`
+//!     release.
+//!   * `etc/agent.toml` — same rewritten config as the Windows ZIP.
+//!   * `systemd/kanade-agent.service` — the repo unit, verbatim.
+//!   * `setup-agent.sh` (0755) — the canonical Linux installer, verbatim.
+//!     It resolves the token from `KANADE_NATS_TOKEN` → co-located
+//!     `nats.env` → existing `agent.env` → hard fail, and overrides
+//!     `nats_url` only when `KANADE_NATS_URL` is set.
+//!   * `install.sh` (0755) — a generated wrapper: exports
+//!     `KANADE_NATS_TOKEN` when (and only when) the settings carry one,
+//!     then `exec ./setup-agent.sh`. `KANADE_NATS_URL` is deliberately NOT
+//!     exported — the baked agent.toml already carries it.
+//!   * `README.txt` — extract + `sudo ./install.sh` instructions, with
+//!     the note that command-signing keyring provisioning is Windows-only
+//!     today (#1165 gap).
 
 use axum::body::Body;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use kanade_shared::bin_platform::{LINUX_SUFFIX_AARCH64, LINUX_SUFFIX_X86_64, platform_of_key};
 use kanade_shared::kv::OBJECT_AGENT_RELEASES;
 use kanade_shared::wire::ServerSettings;
+use serde::Deserialize;
 use tokio::io::AsyncReadExt;
 use tracing::{info, warn};
 
@@ -46,15 +73,78 @@ const AGENT_TOML_TEMPLATE: &str = include_str!("../../../../configs/agent.toml")
 /// never drift from what `scripts/deploy/agent.ps1` documents.
 const DEPLOY_AGENT_PS1: &str = include_str!("../../../../scripts/deploy/agent.ps1");
 
+/// The canonical Linux install script + systemd unit, shipped verbatim for
+/// the same reason — all Linux install logic lives in `setup-agent.sh`.
+const SETUP_AGENT_SH: &str = include_str!("../../../../deploy/linux/setup-agent.sh");
+const AGENT_SERVICE: &str = include_str!("../../../../deploy/linux/systemd/kanade-agent.service");
+
 /// The exact `[agent]` line in `configs/agent.toml` that carries the
 /// loopback default. Matched verbatim (and replaced exactly once) so a
 /// template edit that moves or rewords the line fails loudly at request
 /// time instead of silently shipping an unrewritten loopback config.
 const NATS_URL_LINE: &str = "nats_url = 'nats://127.0.0.1:4222'";
 
+/// Which OS the generated installer targets. Default Windows (the
+/// pre-Linux behavior, so existing links keep working).
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+enum InstallerOs {
+    #[default]
+    Windows,
+    Linux,
+}
+
+impl InstallerOs {
+    fn as_str(&self) -> &'static str {
+        match self {
+            InstallerOs::Windows => "windows",
+            InstallerOs::Linux => "linux",
+        }
+    }
+}
+
+/// Which CPU architecture a Linux installer targets. Default x86_64.
+/// (Windows releases sit at the bare `<version>` key regardless of arch —
+/// the key scheme's backward-compat decision — so this only filters Linux.)
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+enum InstallerArch {
+    #[default]
+    X86_64,
+    Aarch64,
+}
+
+impl InstallerArch {
+    fn as_str(&self) -> &'static str {
+        match self {
+            InstallerArch::X86_64 => "x86_64",
+            InstallerArch::Aarch64 => "aarch64",
+        }
+    }
+
+    /// The Object Store key suffix for this arch's Linux releases.
+    fn linux_suffix(&self) -> &'static str {
+        match self {
+            InstallerArch::X86_64 => LINUX_SUFFIX_X86_64,
+            InstallerArch::Aarch64 => LINUX_SUFFIX_AARCH64,
+        }
+    }
+}
+
+/// `?os=windows|linux&arch=x86_64|aarch64` — both optional, unknown values
+/// rejected 400 by the Query extractor's serde failure.
+#[derive(Deserialize, Debug, Default)]
+pub struct InstallerParams {
+    #[serde(default)]
+    os: InstallerOs,
+    #[serde(default)]
+    arch: InstallerArch,
+}
+
 pub async fn installer(
     State(state): State<AppState>,
     caller: Caller,
+    Query(params): Query<InstallerParams>,
 ) -> Result<Response, (StatusCode, String)> {
     let store = state
         .jetstream
@@ -70,33 +160,38 @@ pub async fn installer(
             )
         })?;
 
-    // Always the latest release by `modified` (mirrors
-    // `agent_releases::list_releases` ordering) — a self-service download
-    // offers no version choice.
-    let version = {
-        let mut metas =
-            crate::projector::object_meta::list_bucket(&state.pool, OBJECT_AGENT_RELEASES)
-                .await
-                .map_err(|e| {
-                    warn!(error = %e, "object_store_meta list agent_releases");
-                    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-                })?;
-        metas.sort_by(|a, b| b.modified.cmp(&a.modified));
-        match metas.into_iter().next() {
-            Some(m) => m.key,
+    // Always the latest release FOR THE REQUESTED PLATFORM by `modified`
+    // (mirrors `agent_releases::list_releases` ordering) — a self-service
+    // download offers no version choice, only os/arch.
+    let key = {
+        let metas = crate::projector::object_meta::list_bucket(&state.pool, OBJECT_AGENT_RELEASES)
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "object_store_meta list agent_releases");
+                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+            })?;
+        let rows: Vec<(String, Option<String>)> =
+            metas.into_iter().map(|m| (m.key, m.modified)).collect();
+        match latest_key_for_platform(&rows, params.os, params.arch) {
+            Some(k) => k,
             None => {
+                let label = match params.os {
+                    InstallerOs::Windows => "windows".to_string(),
+                    InstallerOs::Linux => format!("linux-{}", params.arch.as_str()),
+                };
                 return Err((
                     StatusCode::NOT_FOUND,
                     format!(
-                        "no agent releases in {OBJECT_AGENT_RELEASES} — run `kanade agent publish` first"
+                        "no {label} agent releases in {OBJECT_AGENT_RELEASES} — publish one first \
+                         (`kanade agent publish`)"
                     ),
                 ));
             }
         }
     };
-    check_version(&version)?;
+    check_version(&key)?;
 
-    // The NATS coordinates baked into the ZIP come from the
+    // The NATS coordinates baked into the archive come from the
     // server-settings document, NOT from the caller — a self-service
     // download user must never choose (or see) them.
     let settings = super::server_settings::load(&state).await.map_err(|e| {
@@ -109,97 +204,174 @@ pub async fn installer(
     let (nats_url, nats_token) = resolve_nats(&settings, &state.nats_url)?;
     let agent_toml = render_agent_toml(&nats_url)?;
 
-    // When this backend signs commands, provision the fresh agent's ring
-    // with THIS backend's own public key — nothing else. Break-glass keys
-    // are never bundled; an operator distributes those separately.
-    let keyring = state.commands.keyring_entry();
-    let command_keys = match &keyring {
-        Some(entry) => Some(serde_json::to_string(&vec![entry]).map_err(|e| {
-            warn!(error = %e, "serialize command keyring");
-            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-        })?),
-        None => None,
-    };
-
     // Read the release binary. ~20 MB in memory is acceptable — the
     // publish path already buffers 64 MB multipart bodies.
-    let mut obj = store.get(&version).await.map_err(|e| {
+    let mut obj = store.get(&key).await.map_err(|e| {
         let msg = e.to_string();
         if msg.contains("not found") || msg.contains("no objects") {
             return (
                 StatusCode::NOT_FOUND,
-                format!("version '{version}' not in Object Store"),
+                format!("release '{key}' not in Object Store"),
             );
         }
-        warn!(error = %e, %version, "object_store.get");
+        warn!(error = %e, %key, "object_store.get");
         (StatusCode::INTERNAL_SERVER_ERROR, msg)
     })?;
     let mut exe = Vec::with_capacity(obj.info().size);
     obj.read_to_end(&mut exe).await.map_err(|e| {
-        warn!(error = %e, %version, "read agent binary");
+        warn!(error = %e, %key, "read agent binary");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("read agent binary '{version}': {e}"),
+            format!("read agent binary '{key}': {e}"),
         )
     })?;
 
-    let install_ps1 = render_install_ps1(&version, nats_token.as_deref(), command_keys.as_deref());
-    let install_cmd = render_install_cmd(&version);
-    let readme = render_readme(&version, command_keys.is_some());
-
-    let entries: Vec<(&str, Vec<u8>)> = vec![
-        ("kanade-agent.exe", exe),
-        ("agent.toml", agent_toml.into_bytes()),
-        ("deploy-agent.ps1", DEPLOY_AGENT_PS1.as_bytes().to_vec()),
-        ("install-agent.ps1", install_ps1.into_bytes()),
-        ("install.cmd", install_cmd.into_bytes()),
-        ("README.txt", readme.into_bytes()),
-    ];
-    // Zip writing is CPU-bound (deflate over ~20 MB) — keep it off the
-    // async executor.
-    let zip_bytes = tokio::task::spawn_blocking(move || build_zip(entries))
-        .await
-        .map_err(|e| {
-            warn!(error = %e, "installer zip task join");
-            (StatusCode::INTERNAL_SERVER_ERROR, format!("zip task: {e}"))
-        })?
-        .map_err(|e| {
-            warn!(error = %e, "build installer zip");
+    // Archive assembly is CPU-bound (deflate/gzip over ~20 MB) — built in
+    // a spawn_blocking closure below. The keyring is embedded only in the
+    // Windows flow: command-signing keyring provisioning is Windows-only
+    // today (#1165 gap), so the Linux tarball never carries one.
+    let (content_type, filename, payload, command_keys_embedded) = match params.os {
+        InstallerOs::Windows => {
+            // When this backend signs commands, provision the fresh agent's
+            // ring with THIS backend's own public key — nothing else.
+            // Break-glass keys are never bundled; an operator distributes
+            // those separately.
+            let keyring = state.commands.keyring_entry();
+            let command_keys = match &keyring {
+                Some(entry) => Some(serde_json::to_string(&vec![entry]).map_err(|e| {
+                    warn!(error = %e, "serialize command keyring");
+                    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+                })?),
+                None => None,
+            };
+            let install_ps1 =
+                render_install_ps1(&key, nats_token.as_deref(), command_keys.as_deref());
+            let install_cmd = render_install_cmd(&key);
+            let readme = render_readme(&key, command_keys.is_some());
+            let entries: Vec<(&str, Vec<u8>)> = vec![
+                ("kanade-agent.exe", exe),
+                ("agent.toml", agent_toml.into_bytes()),
+                ("deploy-agent.ps1", DEPLOY_AGENT_PS1.as_bytes().to_vec()),
+                ("install-agent.ps1", install_ps1.into_bytes()),
+                ("install.cmd", install_cmd.into_bytes()),
+                ("README.txt", readme.into_bytes()),
+            ];
+            let zip_bytes = tokio::task::spawn_blocking(move || build_zip(entries))
+                .await
+                .map_err(|e| {
+                    warn!(error = %e, "installer zip task join");
+                    (StatusCode::INTERNAL_SERVER_ERROR, format!("zip task: {e}"))
+                })?
+                .map_err(|e| {
+                    warn!(error = %e, "build installer zip");
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("build installer zip: {e}"),
+                    )
+                })?;
             (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("build installer zip: {e}"),
+                "application/zip",
+                format!("kanade-agent-installer-{key}.zip"),
+                zip_bytes,
+                command_keys.is_some(),
             )
-        })?;
+        }
+        InstallerOs::Linux => {
+            let install_sh = render_install_sh(nats_token.as_deref());
+            let readme = render_readme_linux(&key);
+            let entries: Vec<TarEntry> = vec![
+                TarEntry::new("bin/kanade-agent", 0o755, exe),
+                TarEntry::new("etc/agent.toml", 0o644, agent_toml.into_bytes()),
+                TarEntry::new(
+                    "systemd/kanade-agent.service",
+                    0o644,
+                    AGENT_SERVICE.as_bytes().to_vec(),
+                ),
+                TarEntry::new("setup-agent.sh", 0o755, SETUP_AGENT_SH.as_bytes().to_vec()),
+                TarEntry::new("install.sh", 0o755, install_sh.into_bytes()),
+                TarEntry::new("README.txt", 0o644, readme.into_bytes()),
+            ];
+            let arch = params.arch;
+            let tgz_bytes = tokio::task::spawn_blocking(move || build_tar_gz(entries))
+                .await
+                .map_err(|e| {
+                    warn!(error = %e, "installer tar task join");
+                    (StatusCode::INTERNAL_SERVER_ERROR, format!("tar task: {e}"))
+                })?
+                .map_err(|e| {
+                    warn!(error = %e, "build installer tarball");
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("build installer tarball: {e}"),
+                    )
+                })?;
+            info!(%key, arch = arch.as_str(), "installer: tar.gz generated");
+            (
+                "application/gzip",
+                format!("kanade-agent-installer-{key}.tar.gz"),
+                tgz_bytes,
+                false,
+            )
+        }
+    };
 
-    info!(%version, nats_url = %nats_url, "installer: ZIP generated");
+    info!(%key, os = params.os.as_str(), nats_url = %nats_url, "installer: archive generated");
 
     audit::record(
         &state.nats,
         "operator",
         "agent_installer_download",
-        Some(&version),
+        Some(&key),
         Some(&caller),
         // NEVER the token itself — only that one was embedded.
         serde_json::json!({
-            "version": version,
+            "version": key,
+            "os": params.os.as_str(),
+            "arch": params.arch.as_str(),
             "nats_url": nats_url,
             "token_embedded": nats_token.is_some(),
-            "command_keys_embedded": keyring.is_some(),
+            "command_keys_embedded": command_keys_embedded,
         }),
     )
     .await;
 
     Ok((
         [
-            (header::CONTENT_TYPE, "application/zip".to_string()),
+            (header::CONTENT_TYPE, content_type.to_string()),
             (
                 header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"kanade-agent-installer-{version}.zip\""),
+                format!("attachment; filename=\"{filename}\""),
             ),
         ],
-        Body::from(zip_bytes),
+        Body::from(payload),
     )
         .into_response())
+}
+
+/// The latest key (by `modified`, desc) belonging to the requested
+/// platform. `rows` are `(key, modified)` pairs from the object_meta
+/// index. Pure so the per-platform filtering is testable without a DB.
+fn latest_key_for_platform(
+    rows: &[(String, Option<String>)],
+    os: InstallerOs,
+    arch: InstallerArch,
+) -> Option<String> {
+    let mut matches: Vec<&(String, Option<String>)> = rows
+        .iter()
+        .filter(|(key, _)| key_matches_platform(key, os, arch))
+        .collect();
+    matches.sort_by(|a, b| b.1.cmp(&a.1));
+    matches.first().map(|(k, _)| k.clone())
+}
+
+/// Whether a store key belongs to the requested platform, by SUFFIX only
+/// (semver prerelease dashes mid-version are never parsed — see
+/// kanade_shared::bin_platform).
+fn key_matches_platform(key: &str, os: InstallerOs, arch: InstallerArch) -> bool {
+    match os {
+        InstallerOs::Windows => platform_of_key(key) == "windows",
+        InstallerOs::Linux => key.ends_with(arch.linux_suffix()),
+    }
 }
 
 /// What the ZIP bakes in for NATS: the `agent_install` section of the
@@ -238,24 +410,16 @@ fn resolve_nats(
     Ok((url, token))
 }
 
-/// The version string reaches three sinks that tolerate no hostile bytes:
-/// a quoted `Content-Disposition` filename, a PowerShell `#` comment, and
-/// batch `REM`/`echo` lines. It is caller-supplied or an Object Store key —
-/// and keys can also be written directly over NATS, while the PE
-/// VERSIONINFO extraction only trims whitespace — so restrict the charset
-/// (semver-ish) rather than escaping three different formats.
+/// The store key reaches several sinks that tolerate no hostile bytes: a
+/// quoted `Content-Disposition` filename, a PowerShell `#` comment, batch
+/// `REM`/`echo` lines, and shell scripts. Keys can also be written
+/// directly over NATS, while the PE VERSIONINFO extraction only trims
+/// whitespace — so the charset is restricted (semver-ish) rather than
+/// escaping four different formats. The rule itself lives in
+/// kanade_shared::bin_platform, shared with the publish endpoints.
 fn check_version(version: &str) -> Result<(), (StatusCode, String)> {
-    if version.is_empty()
-        || !version
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-'))
-    {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "version must be non-empty and contain only [A-Za-z0-9._+-]".into(),
-        ));
-    }
-    Ok(())
+    kanade_shared::bin_platform::check_release_key(version)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))
 }
 
 /// `agent.toml` with the loopback `nats_url` line rewritten to `nats_url`.
@@ -398,6 +562,114 @@ fn build_zip(entries: Vec<(&str, Vec<u8>)>) -> Result<Vec<u8>, zip::result::ZipE
         zw.write_all(&data)?;
     }
     Ok(zw.finish()?.into_inner())
+}
+
+/// One entry of the Linux installer tarball: path (relative to the
+/// extraction root, matching the layout `setup-agent.sh` expects around
+/// itself), permission bits, and bytes.
+struct TarEntry {
+    name: &'static str,
+    mode: u32,
+    data: Vec<u8>,
+}
+
+impl TarEntry {
+    fn new(name: &'static str, mode: u32, data: Vec<u8>) -> Self {
+        Self { name, mode, data }
+    }
+}
+
+/// Assemble the Linux installer tar.gz in memory. Pure/blocking — the
+/// handler runs it under `spawn_blocking` (gzip over ~20 MB of binary is
+/// CPU-bound). Modes are set explicitly per entry: the exec bit on
+/// `bin/kanade-agent`, `setup-agent.sh` and `install.sh` is what lets the
+/// README say `sudo ./install.sh` instead of `sudo bash install.sh` (a
+/// Windows-built tar without it is exactly why setup-agent.sh documents
+/// `bash ./setup-agent.sh`).
+fn build_tar_gz(entries: Vec<TarEntry>) -> std::io::Result<Vec<u8>> {
+    let enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    let mut builder = tar::Builder::new(enc);
+    for entry in &entries {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(entry.data.len() as u64);
+        header.set_mode(entry.mode);
+        // Reproducible output: no build-machine mtime baked in.
+        header.set_mtime(0);
+        header.set_cksum();
+        builder.append_data(&mut header, entry.name, entry.data.as_slice())?;
+    }
+    let enc = builder.into_inner()?;
+    enc.finish()
+}
+
+/// A POSIX shell single-quoted literal: `'` → `'\''` (close, escaped
+/// quote, reopen). Newlines never reach here — the settings PUT rejects
+/// them in `nats_token`.
+fn sh_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// The generated `install.sh` wrapper (LF endings, 0755). All real work
+/// stays in `setup-agent.sh`; this only provisions the token from the
+/// backend's settings and hands over. `KANADE_NATS_URL` is deliberately
+/// NOT exported: the baked `etc/agent.toml` already carries it, and
+/// setup-agent.sh only rewrites the url when the env var is set — leaving
+/// it unset keeps the "preserve an existing deployment's broker on
+/// redeploy" logic intact.
+fn render_install_sh(nats_token: Option<&str>) -> String {
+    let mut s = String::new();
+    s.push_str("#!/bin/sh\n");
+    s.push_str("# Generated by kanade-backend — do not edit.\n");
+    s.push_str("# Installs kanade-agent as a systemd service. Run as root (sudo).\n");
+    s.push_str("set -eu\n");
+    s.push_str("cd \"$(dirname \"$0\")\"\n");
+    if let Some(token) = nats_token {
+        s.push_str(&format!("export KANADE_NATS_TOKEN={}\n", sh_quote(token)));
+    }
+    s.push_str("exec ./setup-agent.sh\n");
+    s
+}
+
+/// Linux `README.txt` — the contents list plus extract/install steps.
+/// Calls out the #1165 gap explicitly: command-signing keyring
+/// provisioning is Windows-only today (the Windows install script writes
+/// the keyring to the registry; there is no Linux equivalent yet), so a
+/// Linux agent installed from this tarball runs with signature
+/// verification inactive until that's built.
+fn render_readme_linux(key: &str) -> String {
+    let mut s = String::new();
+    s.push_str(&format!("kanade-agent installer (release {key})\n"));
+    s.push_str("=================================================\n");
+    s.push('\n');
+    s.push_str("Contents:\n");
+    s.push('\n');
+    s.push_str("  bin/kanade-agent              the agent binary\n");
+    s.push_str("  etc/agent.toml                agent configuration (NATS URL baked in)\n");
+    s.push_str("  systemd/kanade-agent.service  the systemd unit\n");
+    s.push_str("  setup-agent.sh                the canonical install/update script\n");
+    s.push_str("  install.sh                    generated wrapper (token baked in, if any)\n");
+    s.push_str("  README.txt                    this file\n");
+    s.push('\n');
+    s.push_str("Install:\n");
+    s.push('\n');
+    s.push_str("  1. Extract this tarball on the target machine and enter the\n");
+    s.push_str("     directory, e.g.:\n");
+    s.push_str("       mkdir kanade-agent-installer && cd kanade-agent-installer\n");
+    s.push_str(&format!(
+        "       tar xzf ../kanade-agent-installer-{key}.tar.gz\n"
+    ));
+    s.push_str("  2. Run the installer as root:\n");
+    s.push_str("       sudo ./install.sh\n");
+    s.push('\n');
+    s.push_str("Re-running the installer upgrades the agent in place (an existing\n");
+    s.push_str("/etc/kanade/agent.env token and broker URL are preserved).\n");
+    s.push('\n');
+    s.push_str("Note: command-signing keyring provisioning is Windows-only today, so\n");
+    s.push_str("signed-command verification is INACTIVE on Linux agents installed\n");
+    s.push_str("from this tarball (the #1165 enforcement gap) — break-glass and\n");
+    s.push_str("backend public keys must be provisioned separately once a Linux\n");
+    s.push_str("provisioning path exists.\n");
+    s
 }
 
 #[cfg(test)]
@@ -654,5 +926,204 @@ mod tests {
             assert_eq!(code, StatusCode::INTERNAL_SERVER_ERROR, "{bad:?}");
             assert!(msg.contains("Settings"), "{msg}");
         }
+    }
+
+    #[test]
+    fn params_default_to_windows_x86_64_and_reject_unknowns() {
+        let p: InstallerParams = serde_urlencoded_defaults();
+        assert_eq!(p.os, InstallerOs::Windows);
+        assert_eq!(p.arch, InstallerArch::X86_64);
+        // Unknown values are a deserialize error — axum's Query extractor
+        // turns that into a 400 before the handler runs.
+        assert!(serde_json::from_str::<InstallerOs>(r#""macos""#).is_err());
+        assert!(serde_json::from_str::<InstallerArch>(r#""armv7""#).is_err());
+        assert_eq!(
+            serde_json::from_str::<InstallerOs>(r#""linux""#).unwrap(),
+            InstallerOs::Linux
+        );
+        assert_eq!(
+            serde_json::from_str::<InstallerArch>(r#""aarch64""#).unwrap(),
+            InstallerArch::Aarch64
+        );
+    }
+
+    fn serde_urlencoded_defaults() -> InstallerParams {
+        InstallerParams::default()
+    }
+
+    #[test]
+    fn latest_key_filters_by_platform() {
+        let rows: Vec<(String, Option<String>)> = vec![
+            ("0.44.0".into(), Some("2026-07-01T00:00:00Z".into())),
+            ("0.45.4".into(), Some("2026-07-03T00:00:00Z".into())),
+            (
+                "0.45.4-linux-x86_64".into(),
+                Some("2026-07-02T00:00:00Z".into()),
+            ),
+            (
+                "0.45.3-linux-x86_64".into(),
+                Some("2026-07-04T00:00:00Z".into()),
+            ),
+            (
+                "0.45.4-linux-aarch64".into(),
+                Some("2026-07-05T00:00:00Z".into()),
+            ),
+        ];
+        // Windows sees only bare keys, newest by modified — never a
+        // linux-suffixed key, even when that's newer overall.
+        assert_eq!(
+            latest_key_for_platform(&rows, InstallerOs::Windows, InstallerArch::X86_64),
+            Some("0.45.4".into())
+        );
+        // Linux x86_64 sees only its own suffix: 0.45.3-linux-x86_64 is
+        // newer than 0.45.4-linux-x86_64 (timestamps, not semver, order).
+        assert_eq!(
+            latest_key_for_platform(&rows, InstallerOs::Linux, InstallerArch::X86_64),
+            Some("0.45.3-linux-x86_64".into())
+        );
+        assert_eq!(
+            latest_key_for_platform(&rows, InstallerOs::Linux, InstallerArch::Aarch64),
+            Some("0.45.4-linux-aarch64".into())
+        );
+        // arch is ignored for Windows (bare keys carry no arch).
+        assert_eq!(
+            latest_key_for_platform(&rows, InstallerOs::Windows, InstallerArch::Aarch64),
+            Some("0.45.4".into())
+        );
+        // No key for the platform → None (the handler 404s).
+        let bare_only: Vec<(String, Option<String>)> =
+            vec![("0.44.0".into(), Some("2026-07-01T00:00:00Z".into()))];
+        assert_eq!(
+            latest_key_for_platform(&bare_only, InstallerOs::Linux, InstallerArch::X86_64),
+            None
+        );
+        // Semver prerelease dashes are never misparsed: the prerelease
+        // WINDOWS key must not look like a linux key, and the linux
+        // prerelease key still matches its suffix.
+        let rc: Vec<(String, Option<String>)> = vec![
+            (
+                "0.46.0-rc-linux".into(),
+                Some("2026-07-01T00:00:00Z".into()),
+            ),
+            (
+                "0.46.0-rc.1-linux-x86_64".into(),
+                Some("2026-07-02T00:00:00Z".into()),
+            ),
+        ];
+        assert_eq!(
+            latest_key_for_platform(&rc, InstallerOs::Windows, InstallerArch::X86_64),
+            Some("0.46.0-rc-linux".into())
+        );
+        assert_eq!(
+            latest_key_for_platform(&rc, InstallerOs::Linux, InstallerArch::X86_64),
+            Some("0.46.0-rc.1-linux-x86_64".into())
+        );
+    }
+
+    #[test]
+    fn install_sh_exports_the_token_only_when_given() {
+        let with = render_install_sh(Some("s3cret"));
+        assert!(with.starts_with("#!/bin/sh\n"));
+        assert!(with.contains("set -eu\n"));
+        assert!(with.contains("export KANADE_NATS_TOKEN='s3cret'\n"));
+        assert!(with.ends_with("exec ./setup-agent.sh\n"));
+        // No url export — the baked agent.toml carries it (setup-agent.sh
+        // only overrides when KANADE_NATS_URL is set).
+        assert!(!with.contains("KANADE_NATS_URL"));
+        // LF only.
+        assert!(!with.contains('\r'));
+
+        let without = render_install_sh(None);
+        assert!(!without.contains("KANADE_NATS_TOKEN"));
+        assert!(without.ends_with("exec ./setup-agent.sh\n"));
+    }
+
+    #[test]
+    fn install_sh_shell_escapes_single_quotes() {
+        // POSIX single-quote escaping: `'` → `'\''`. An unescaped quote
+        // would terminate the literal and let the rest of the token run
+        // as shell.
+        let out = render_install_sh(Some("it's"));
+        assert!(out.contains("export KANADE_NATS_TOKEN='it'\\''s'\n"));
+    }
+
+    #[test]
+    fn tar_gz_round_trips_all_entries_with_modes() {
+        let agent_toml = render_agent_toml("nats://broker.corp:4222").unwrap();
+        let install_sh = render_install_sh(Some("tok"));
+        let entries = vec![
+            TarEntry::new("bin/kanade-agent", 0o755, b"\x7fELF-fake".to_vec()),
+            TarEntry::new("etc/agent.toml", 0o644, agent_toml.clone().into_bytes()),
+            TarEntry::new(
+                "systemd/kanade-agent.service",
+                0o644,
+                AGENT_SERVICE.as_bytes().to_vec(),
+            ),
+            TarEntry::new("setup-agent.sh", 0o755, SETUP_AGENT_SH.as_bytes().to_vec()),
+            TarEntry::new("install.sh", 0o755, install_sh.clone().into_bytes()),
+            TarEntry::new(
+                "README.txt",
+                0o644,
+                render_readme_linux("0.45.4-linux-x86_64").into_bytes(),
+            ),
+        ];
+        let bytes = build_tar_gz(entries).unwrap();
+
+        let dec = flate2::read::GzDecoder::new(bytes.as_slice());
+        let mut archive = tar::Archive::new(dec);
+        let mut seen: std::collections::HashMap<String, (u32, Vec<u8>)> =
+            std::collections::HashMap::new();
+        for entry in archive.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            let name = entry.path().unwrap().to_string_lossy().into_owned();
+            let mode = entry.header().mode().unwrap();
+            let mut data = Vec::new();
+            use std::io::Read as _;
+            entry.read_to_end(&mut data).unwrap();
+            seen.insert(name, (mode, data));
+        }
+        for expected in [
+            "bin/kanade-agent",
+            "etc/agent.toml",
+            "systemd/kanade-agent.service",
+            "setup-agent.sh",
+            "install.sh",
+            "README.txt",
+        ] {
+            assert!(seen.contains_key(expected), "missing {expected}");
+        }
+        assert_eq!(seen.len(), 6);
+        // Executables carry the exec bit; data files don't.
+        for exe_name in ["bin/kanade-agent", "setup-agent.sh", "install.sh"] {
+            assert_eq!(seen[exe_name].0, 0o755, "{exe_name} mode");
+        }
+        for data_name in [
+            "etc/agent.toml",
+            "systemd/kanade-agent.service",
+            "README.txt",
+        ] {
+            assert_eq!(seen[data_name].0, 0o644, "{data_name} mode");
+        }
+        // The generated files round-trip byte-for-byte, and the canonical
+        // scripts ship unmodified.
+        assert_eq!(seen["etc/agent.toml"].1, agent_toml.as_bytes());
+        assert_eq!(seen["install.sh"].1, install_sh.as_bytes());
+        assert_eq!(seen["setup-agent.sh"].1, SETUP_AGENT_SH.as_bytes());
+        assert_eq!(
+            seen["systemd/kanade-agent.service"].1,
+            AGENT_SERVICE.as_bytes()
+        );
+    }
+
+    #[test]
+    fn readme_linux_documents_the_flow_and_the_signing_gap() {
+        let out = render_readme_linux("0.45.4-linux-x86_64");
+        assert!(out.contains("release 0.45.4-linux-x86_64"));
+        assert!(out.contains("tar xzf"));
+        assert!(out.contains("sudo ./install.sh"));
+        assert!(out.contains("Windows-only"));
+        assert!(out.contains("INACTIVE on Linux agents"));
+        // LF only.
+        assert!(!out.contains('\r'));
     }
 }
