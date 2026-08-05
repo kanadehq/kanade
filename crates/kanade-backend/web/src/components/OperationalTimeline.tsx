@@ -566,22 +566,29 @@ export function agentDownRanges(
   const out: { from: number; to: number; reason: NoEvidenceReason }[] = [];
   for (let i = 0; i < sorted.length; i++) {
     if (sorted[i].kind !== 'agent_offline') continue;
-    // The next event of ANY kind — including a later `agent_offline`, which
-    // would mean the agent came back and dropped again, so this stretch has
-    // to close there rather than swallowing the interval between them.
+    // What may close an outage: only an event whose EXISTENCE proves the
+    // agent was running at its own timestamp.
     //
-    // Forward scan rather than `slice(i + 1).find(...)`: the slice allocated
-    // a copy of the tail on every offline event. The array is sorted, so the
-    // first entry past `i` with a strictly greater timestamp is the answer —
-    // strictly, to step over events sharing this instant (the recovery and
-    // re-drop pair the backend emits when an agent dies again inside one
-    // sweep both carry the same `at`).
+    // This used to close on the next event of any kind, reasoning that
+    // "anything arriving from that host proves the agent was running again".
+    // That is true of delivery, not of timestamps, and the swimlane is drawn
+    // on timestamps. Winlog records are read out of the Windows event log
+    // AFTER the agent comes back — up to 24 h of them — so a `sleep` stamped
+    // ten seconds after the agent died arrives fourteen hours later and
+    // closed the outage at ten seconds. The reported case collapsed a
+    // fourteen-hour blackout into one (#1245).
+    //
+    // `agent_online` / `agent_offline` are emitted by the backend's heartbeat
+    // watchdog from live heartbeats, so their timestamps are observations
+    // rather than reconstructions. A later `agent_offline` still closes this
+    // stretch — it means the agent came back and dropped again, and the
+    // interval between the two is a separate matter.
     let next: { ts: number } | undefined;
     for (let j = i + 1; j < sorted.length; j++) {
-      if (sorted[j].ts > sorted[i].ts) {
-        next = sorted[j];
-        break;
-      }
+      if (sorted[j].ts <= sorted[i].ts) continue; // step over the same instant
+      if (sorted[j].kind !== 'agent_online' && sorted[j].kind !== 'agent_offline') continue;
+      next = sorted[j];
+      break;
     }
     const from = Math.max(sorted[i].ts, t0);
     const to = Math.min(next ? next.ts : liveEdge, t1);
@@ -824,6 +831,31 @@ export function buildLanes(
   // the old `hasPower` gate happened to provide for free, and it has to be
   // stated separately now that the predicate no longer implies it.
   const canClipToPower = onIntervals.length > 0;
+  // Recorded outages, used to stop an UNCLOSED span from bridging them.
+  //
+  // Not to erase closed spans, and not scoped to one lane. Every producer —
+  // winlog, the idle sampler, the self-update reporter — writes to the same
+  // `obs_outbox` and the drain publishes when it can, so ANY event may arrive
+  // late with its original timestamp. A NATS outage therefore does not mean
+  // the agent stopped observing; it means the backend stopped hearing. Cutting
+  // real spans on that signal would throw away evidence that is merely in
+  // flight.
+  //
+  // What is safe to act on is the ABSENCE of a closing event. `openEnd` means
+  // no matching end was found, so `buildSpans` ran the span to the window
+  // edge. That is the #1245 shape: the sampler debounces over five minutes and
+  // the machine suspends ten seconds after logoff, so the closing `idle` is
+  // never generated — not delayed, never produced — and an `active` opened in
+  // the evening painted through to the next morning's first idle.
+  //
+  // The two cases separate cleanly on this test:
+  //   - connectivity only: the closing event exists and arrives late, the span
+  //     is closed, nothing is truncated;
+  //   - host gone: no closing event exists, the span is open, and it ends
+  //     where the agent went quiet.
+  // Neither depends on knowing WHY the agent went quiet, which is just as
+  // well — the heartbeat watchdog cannot tell a dead host from a dead link.
+  const outages = agentDownRanges(events, t0, t1, liveEdge);
   const session = OP_LANES.find((l) => l.key === 'session')!;
   // The active lane (agent idle sampler): a filled span = active, a gap =
   // idle. Built once and shown as-is on its own lane.
@@ -873,8 +905,13 @@ export function buildLanes(
   const sessionSpans = buildSpans(events, session.starts, session.ends, t0, t1, now);
   return OP_LANES.map((lane) => {
     let spans: Span[];
+    // Whether this lane's spans rest on the SAMPLER'S SILENCE, which is what
+    // decides whether the outage cut below applies to them. See the comment at
+    // the cut itself for why the two kinds of span are not interchangeable.
+    let restsOnSilence: boolean;
     if (lane.key === 'power') {
       spans = hasWinlog ? powerSpans : presenceSpans;
+      restsOnSilence = !hasWinlog;
     } else if (lane.key === 'session') {
       // Both session paths in one branch so the generic branch below doesn't
       // rebuild the spans `sessionSpans` already holds.
@@ -883,13 +920,66 @@ export function buildLanes(
           ? clipToOn(sessionSpans, onIntervals)
           : sessionSpans
         : mergeSpans([...sessionSpans, ...presenceSpans]);
+      restsOnSilence = !hasWinlog;
     } else if (lane.key === 'active') {
       // Reuse the pre-built active spans; still clip to power ON when winlog
       // exists so a stale open span can't paint across a powered-off gap.
       spans = hasWinlog && canClipToPower ? clipToOn(activeSpans, onIntervals) : activeSpans;
+      restsOnSilence = true;
     } else {
       spans = buildSpans(events, lane.starts, lane.ends, t0, t1, now);
       if (hasWinlog && canClipToPower) spans = clipToOn(spans, onIntervals);
+      restsOnSilence = false;
+    }
+    // A state open when the agent died is not observed across the outage.
+    // `subtractRanges` copies the source span's fields onto both pieces, so
+    // repair the edge flags: a piece whose start moved did not begin before
+    // the window, and one whose end moved is not still open at its end.
+    // Don't let a span BRIDGE the moment the agent went quiet.
+    //
+    // Not a subtraction of the outage: a network-only outage still has the
+    // agent sampling, so genuine short spans lie wholly INSIDE it and
+    // subtracting would erase them. Only the span that was already open when
+    // the agent went quiet is cut, and only at that instant; anything
+    // starting later paints normally.
+    //
+    // This is the #1245 shape. The evening's `active` was paired with the
+    // NEXT MORNING's first `idle` — the reconstruction has no other candidate
+    // — so the span was "closed" and looked healthy while claiming fourteen
+    // hours of work across a night the machine spent suspended. What it
+    // actually bridges is a stretch where nothing was heard, and a span that
+    // spans silence is not evidence of the state it asserts.
+    //
+    // Only the spans that rest on that silence, though. Structurally an
+    // `active`→`idle` pair fourteen hours apart and a `sleep`→`resume` pair
+    // fourteen hours apart look identical, but they claim their interval on
+    // different grounds:
+    //
+    //   - `sleep`→`resume`, `boot`→`shutdown`, `logon`→`logoff`: the OS
+    //     recorded BOTH ENDS, and the pair itself asserts the interval between
+    //     them. The kernel logged the resume; the machine could not have left
+    //     that state without an event. Late delivery does not weaken it — the
+    //     record still describes the night no matter when it arrived.
+    //   - `active`→`idle`: the sampler never says "still active"; it says
+    //     "changed". The claim on the interval is the ABSENCE of a transition,
+    //     and absence is exactly what a dead agent produces. So it is not
+    //     evidence for the stretch where the agent was not heard from.
+    //
+    // Cutting the first kind was the over-correction: it threw away genuine,
+    // OS-recorded sleep and power evidence to fix a sampler artefact. The lane
+    // backfill (#970) inherits the sampler's grounds along with its spans, so
+    // `restsOnSilence` follows the source of the spans rather than the lane.
+    if (outages.length && restsOnSilence) {
+      spans = spans
+        .map((sp) => {
+          const o = outages.find((x) => x.from > sp.from && x.from < sp.to);
+          // `cutByHeartbeat` is the existing "hard cut, abuts a hatch" edge
+          // style; the reason differs but the rendering requirement is the
+          // same, and `openEnd` must clear so the tooltip stops claiming the
+          // state runs off the window edge.
+          return o ? { ...sp, to: o.from, openEnd: false, cutByHeartbeat: true } : sp;
+        })
+        .filter((sp) => sp.to > sp.from);
     }
     // Hatch any ongoing state past the agent's last heartbeat as unconfirmed.
     spans = gateToHeartbeat(spans, certainEdge, liveEdge);
