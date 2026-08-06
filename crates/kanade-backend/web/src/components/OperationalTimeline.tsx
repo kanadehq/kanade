@@ -683,6 +683,153 @@ export function noEvidenceRanges(
 }
 
 /**
+ * The unknown band, narrowed to what each lane actually doesn't know.
+ *
+ * `noEvidenceRanges` answers one question for the whole strip — "when were we
+ * not listening" — and the draw site erases it with that lane's OWN spans.
+ * Nothing carries evidence sideways, so a lane stays blind to what the lanes
+ * above it recorded about the same instant. The strip then asserts two things
+ * at once over the same pixels: a laptop suspended from 18:06 to 08:03 has a
+ * sleep span saying exactly that, while `active` and `session` hatch the whole
+ * night as unknown (#1322). It cannot be both.
+ *
+ * The rule is not "trust the other lanes" in general. It is narrower, and it
+ * is physical: **while the machine is suspended or off, no state can change**.
+ * Whatever a subordinate lane was doing when the machine went into that
+ * interval is what it was doing when it came out, and nobody had to be
+ * listening to know it. Sleep and power-off are the two intervals the OS
+ * records both ends of, which is what makes them usable here — the same
+ * property that decides the outage cut in #1245.
+ *
+ * `power` keeps the raw band: the others are subordinate to it and nothing
+ * above it settles it. `sleep` is settled by power-off alone (a machine that
+ * is off is not asleep); `session` and `active` by either.
+ *
+ * Which intervals settle anything comes from `recordedIntervals`, i.e. from
+ * the RECORDS, never from the rendered spans. A span's edges are a drawing
+ * decision as much as an observation — `buildSpans` carries in at both window
+ * edges, `clipToOn` moves an edge onto a power boundary, the heartbeat gate
+ * cuts one — and a span reaching an instant is not the same claim as the OS
+ * having logged both ends around it. The #1245 sequence is exactly that
+ * difference: one end recorded, hours of nothing after it, and a right edge
+ * the renderer supplied.
+ *
+ * Reading the span flags instead does not work, which is worth writing down
+ * because it looks like it should. `clipToOn` recomputes `openStart` as
+ * `s.openStart && from === s.from`, so a carried-in span whose left edge is
+ * clipped to a `boot` comes back with `openStart: false` — laundered into
+ * looking recorded. A bare `resume` with no `sleep` in the window then reads
+ * as "suspended ever since the boot", which is false: the machine was up, and
+ * the `sleep` record is missing or still in flight.
+ *
+ * "Off" likewise means asserted off. Reading the complement of the power lane
+ * would let a stretch we know nothing about silence the lanes below it, which
+ * is #1086's asymmetry one level down.
+ *
+ * Returns one entry per input lane, in the same order.
+ */
+export function noEvidenceByLane<
+  L extends { key: LaneKey; spans: { from: number; to: number }[] },
+  N extends { from: number; to: number },
+>(lanes: L[], bands: N[], recorded: RecordedIntervals): N[][] {
+  const offOrAsleep = mergeRanges(
+    [...recorded.off, ...recorded.asleep].map((r) => ({ from: r.from, to: r.to })),
+  );
+  return lanes.map((lane) => {
+    if (lane.key === 'power') return subtractRanges(bands, lane.spans);
+    // A machine that is off is not asleep, so only power-off settles sleep.
+    const settled = lane.key === 'sleep' ? recorded.off : offOrAsleep;
+    return subtractRanges(bands, [...lane.spans, ...settled]);
+  });
+}
+
+export type RecordedIntervals = {
+  /** Powered off: a power END record, then the next power START record. */
+  off: { from: number; to: number }[];
+  /** Suspended: a `sleep` record, then the next `resume` record. */
+  asleep: { from: number; to: number }[];
+};
+
+/**
+ * The intervals the OS accounted for at BOTH ENDS, taken from the events.
+ *
+ * Deliberately not derived from the lanes. Spans exist to be drawn, so their
+ * edges carry the renderer's decisions, and none of those are the OS saying
+ * anything. Pairing the raw records keeps "the machine was suspended across
+ * here" a claim the event log made — the only kind strong enough to settle a
+ * neighbouring lane.
+ *
+ * An open with no close yields NOTHING. A `resume` with no `sleep` before it
+ * does prove the machine had been suspended, but not since when: the missing
+ * `sleep` may be a record still in flight, and the stretch ahead of it is
+ * exactly the part nobody can account for.
+ *
+ * Records OUTSIDE the window still pair, and the result is clamped to it. A
+ * `sleep` the seed lookup found an hour before `t0` is a record like any
+ * other; refusing it would hatch the start of the window as unknown while
+ * holding the very log line that accounts for it — this fix's own bug, one
+ * step to the left. What the clamp drops is the part outside the window,
+ * which was never going to be drawn.
+ *
+ * But not ACROSS A COVERAGE HOLE. `[t0, coverEdge)` is the stretch a `limit`
+ * fetch never returned, and a pair reaching over it cannot rule out an
+ * intervening cycle whose records are simply absent. This is #1326's rule and
+ * the distinction it turns on: an agent outage preserves coverage, because
+ * the OS keeps writing to the event log and the collector backfills on
+ * return, so pairs may bridge one; a truncation loses records outright, so
+ * they may not.
+ *
+ * Measured before it was written: on the #1326 shape — a `sleep` the night
+ * before, its morning `resume` truncated away, the next one a day later —
+ * this produced a twenty-hour "suspend" and erased thirteen hours of
+ * legitimate agent-down hatch. #1326 fixed the span; without this the same
+ * artefact came back through the settling intervals.
+ */
+export function recordedIntervals(
+  events: OpEvent[],
+  t0: number,
+  t1: number,
+  // Oldest instant the event set actually covers; `t0` when nothing was
+  // truncated, which is the case that changes nothing here.
+  coverEdge: number = t0,
+): RecordedIntervals {
+  const sorted = events
+    .map((e) => ({ ts: Date.parse(e.at), kind: e.kind }))
+    .filter((e) => !Number.isNaN(e.ts))
+    .sort((a, b) => a.ts - b.ts);
+  // A second open before the close replaces the first rather than closing it:
+  // two `sleep` records in a row mean the first pairing never happened, and
+  // pairing across it would invent one interval spanning both.
+  const pairs = (opens: Set<string>, closes: Set<string>) => {
+    const out: { from: number; to: number }[] = [];
+    let open: number | undefined;
+    for (const e of sorted) {
+      if (open !== undefined && closes.has(e.kind)) {
+        // Opened before the data starts: the record that would have closed it
+        // may be inside the hole, so this close is not necessarily its match.
+        const spansHole = coverEdge > t0 && open < coverEdge;
+        const [from, to] = [Math.max(open, t0), Math.min(e.ts, t1)];
+        if (!spansHole && to > from) out.push({ from, to });
+        open = undefined;
+      } else if (opens.has(e.kind)) {
+        open = e.ts;
+      }
+    }
+    // Whatever is still open at the end stays unpaired on purpose: the close
+    // is what makes the interval the OS's claim rather than ours.
+    return out;
+  };
+  const power = OP_LANES.find((l) => l.key === 'power')!;
+  const sleep = OP_LANES.find((l) => l.key === 'sleep')!;
+  return {
+    // Powered-off runs the pairing backwards: the lane's END kinds open the
+    // off-interval and its START kinds close it.
+    off: pairs(new Set<string>(power.ends), new Set<string>(power.starts)),
+    asleep: pairs(new Set<string>(sleep.starts), new Set<string>(sleep.ends)),
+  };
+}
+
+/**
  * Newest parseable event instant, or `undefined` for an empty set. `reduce`
  * rather than `Math.max(...)`: the spread would blow the call stack on the
  * unbounded event sets the Analytics query can return.
@@ -1178,6 +1325,20 @@ export function OperationalTimeline({
     [events, t0, t1, now, lastHeartbeat, coverEdge],
   );
 
+  // …narrowed per lane, because the band above is one answer for the whole
+  // strip and a lane's own spans are not the only thing that can settle it.
+  // Both readers use this: drawing it on one basis and reporting it on
+  // another would let the crosshair say "unknown" over pixels that aren't
+  // hatched. Indexed positionally — `noEvidenceByLane` returns one entry per
+  // input lane, in order.
+  const recorded = useMemo(
+    () => recordedIntervals(events, t0, t1, coverEdge),
+    [events, t0, t1, coverEdge],
+  );
+  const laneBands = useMemo(
+    () => noEvidenceByLane(lanes, noEvidence, recorded),
+    [lanes, noEvidence, recorded],
+  );
 
   const ticks = useMemo(() => axisTicks(t0, t1), [t0, t1]);
   const gridlines = useMemo(() => axisGridlines(t0, t1), [t0, t1]);
@@ -1213,13 +1374,16 @@ export function OperationalTimeline({
   const at =
     hoverTs === null
       ? null
-      : lanes.map((lane) => {
+      : lanes.map((lane, i) => {
           const s = lane.spans.find((x) => x.from <= hoverTs && hoverTs < x.to);
           // No span AND inside a no-evidence stretch → unknown, not "off".
           // Reporting "off" here is the exact failure this change exists to
           // remove: an absent span is only meaningful where we were listening.
+          // Against THIS lane's band: a machine asleep all night settles
+          // `active` without painting it, so the readout must say "off" there
+          // rather than "unknown" — matching the pixels beside it.
           const blind =
-            !s && noEvidence.some((n) => n.from <= hoverTs && hoverTs < n.to);
+            !s && laneBands[i].some((n) => n.from <= hoverTs && hoverTs < n.to);
           return {
             key: lane.key,
             color: lane.color,
@@ -1235,7 +1399,7 @@ export function OperationalTimeline({
       onMouseMove={onMove}
       onMouseLeave={() => setHoverTs(null)}
     >
-      {lanes.map((lane) => (
+      {lanes.map((lane, laneIdx) => (
         <div key={lane.key} className="flex items-center" style={{ gap: LANE_LABEL_GAP_PX }}>
           <div
             className="flex shrink-0 items-center gap-1.5 text-xs text-muted"
@@ -1261,7 +1425,7 @@ export function OperationalTimeline({
                 opposing angle also stops the two patterns beating into a
                 moiré where an uncertain span's left edge doesn't align with
                 the band's, which same-angle stripes at different phases do. */}
-            {subtractRanges(noEvidence, lane.spans).map((n, i) => (
+            {laneBands[laneIdx].map((n, i) => (
               <div
                 key={`n-${i}`}
                 // No `pointer-events-none`, unlike the gridlines and the
