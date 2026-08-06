@@ -764,6 +764,68 @@ export function evidenceEdges(
  * the session backfill gate below), each time from a screenshot rather than
  * a failing test. `now` is a parameter for the same reason.
  */
+/**
+ * Cut a sleep span where the host proves it was not asleep.
+ *
+ * A suspended machine records nothing. So any event of the host's OWN making
+ * timestamped strictly inside a sleep span contradicts that span outright —
+ * an `active` sample, a `logoff`, a `boot`: whatever produced it, the machine
+ * was running at that instant.
+ *
+ * The span reaches there in the first place because `buildSpans` carries in:
+ * when the first sleep-lane record it can see is a `resume`, it reasons that
+ * the state must already have been open, which is normally sound — a resume
+ * does imply a prior sleep. It stops being sound when the record that closed
+ * the EARLIER sleep is missing, and `limit` truncation loses records outright
+ * (unlike an agent outage, where the OS keeps writing and the collector
+ * backfills on return — the distinction #1245 turns on). The observed case:
+ * a laptop suspended the night before, its morning `resume` dropped by a
+ * `limit=200` fetch, and the carried-in span paired with the FOLLOWING day's
+ * resume — four hours of "asleep" drawn over a stretch the same strip painted
+ * as interactive, with a `logoff` marker sitting in the middle of it (#1326).
+ *
+ * Two kinds of event are excluded, for different reasons.
+ *
+ * Observation kinds are not the host's making. `agent_offline` is written by
+ * the backend's heartbeat watchdog precisely BECAUSE the machine went quiet,
+ * so it is the one thing that appears during a genuine suspend; counting it
+ * would cut every real overnight sleep at the moment the agent dropped.
+ *
+ * The lane's OWN kinds are excluded because `buildSpans` already decided what
+ * a repeated `sleep` means: "a second start while already open is ignored (a
+ * missed end shouldn't fragment the interval)". Counting it here would undo
+ * that silently — an eight-hour suspend with one duplicate record half an
+ * hour in came out as a thirty-minute span, the rest of the night dropped.
+ * Duplicates are not hypothetical: modern standby can log more than one
+ * sleep-kind transition for what the user experienced as a single suspend,
+ * and delivery is at-least-once.
+ *
+ * That tolerance is a genuine trade — a second `sleep` could equally mean the
+ * host woke and re-slept with the `resume` lost, in which case cutting would
+ * be right. It cannot be told apart from the records, so the two places that
+ * face the question answer it the same way rather than each guessing.
+ * (`resume` never lands strictly inside a span of its own lane anyway, since
+ * `buildSpans` closes on the first one it meets.)
+ */
+const sleepKinds = OP_LANES.find((l) => l.key === 'sleep')!;
+
+function cutAtContradiction(spans: Span[], events: OpEvent[]): Span[] {
+  const own = new Set<string>([...sleepKinds.starts, ...sleepKinds.ends]);
+  const stamps = events
+    .filter((e) => !OP_OBSERVATION_KIND_SET.has(e.kind) && !own.has(e.kind))
+    .map((e) => Date.parse(e.at))
+    .filter((ts) => !Number.isNaN(ts))
+    .sort((a, b) => a - b);
+  if (!stamps.length) return spans;
+  return spans
+    .map((s) => {
+      // Strictly inside: the span's own boundary records sit at its edges.
+      const hit = stamps.find((ts) => ts > s.from && ts < s.to);
+      return hit === undefined ? s : { ...s, to: hit, openEnd: false, cutByHeartbeat: true };
+    })
+    .filter((s) => s.to > s.from);
+}
+
 export function buildLanes(
   events: OpEvent[],
   windowFrom: number,
@@ -903,6 +965,13 @@ export function buildLanes(
   // runs as the signed-in user, so its output is itself evidence of a
   // session; the logoff marker stays on the lane either way.
   const sessionSpans = buildSpans(events, session.starts, session.ends, t0, t1, now);
+  // Sleep is built ahead of the map because the active lane needs it: a
+  // suspended machine cannot be typed on, so a sleep span bounds `active`
+  // the way a power span does. Same pipeline the generic branch would run.
+  const sleepLane = OP_LANES.find((l) => l.key === 'sleep')!;
+  let sleepSpans = buildSpans(events, sleepLane.starts, sleepLane.ends, t0, t1, now);
+  if (hasWinlog && canClipToPower) sleepSpans = clipToOn(sleepSpans, onIntervals);
+  sleepSpans = cutAtContradiction(sleepSpans, events);
   return OP_LANES.map((lane) => {
     let spans: Span[];
     // Whether this lane's spans rest on the SAMPLER'S SILENCE, which is what
@@ -925,10 +994,29 @@ export function buildLanes(
       // Reuse the pre-built active spans; still clip to power ON when winlog
       // exists so a stale open span can't paint across a powered-off gap.
       spans = hasWinlog && canClipToPower ? clipToOn(activeSpans, onIntervals) : activeSpans;
+      // …and out of the stretches the host spent suspended. The two lanes
+      // used to be free to contradict each other: the suite related each to
+      // `power` and never to the other, so "asleep AND interactive at the
+      // same instant" broke no rule and was drawn (#1326).
+      //
+      // Which one gives way is not arbitrary — RECORDS BEAT SPANS. An
+      // `active` sample is a record and proves the machine was awake, which
+      // is why it cuts a sleep span in `cutAtContradiction` above. But an
+      // `active` span reaching into a suspend is not a record: it is an open
+      // interval the sampler never closed, because the machine went away
+      // before the five-minute debounce could fire (#1245's mechanism, minus
+      // the recorded outage that lets #1245 cut it). Between a reconstruction
+      // and the OS's own `sleep`, the OS wins.
+      //
+      // Applied after the outage cut below, not here: subtracting first
+      // SPLITS the span, and the cut only truncates a span the outage starts
+      // inside — so the far piece would slip past it and paint the night
+      // again. #1245 caught by its own test.
       restsOnSilence = true;
     } else {
-      spans = buildSpans(events, lane.starts, lane.ends, t0, t1, now);
-      if (hasWinlog && canClipToPower) spans = clipToOn(spans, onIntervals);
+      // Sleep, and only sleep — the other three are handled above, so this
+      // is the whole of `OP_LANES` and the compiler knows it.
+      spans = sleepSpans;
       restsOnSilence = false;
     }
     // A state open when the agent died is not observed across the outage.
@@ -980,6 +1068,24 @@ export function buildLanes(
           return o ? { ...sp, to: o.from, openEnd: false, cutByHeartbeat: true } : sp;
         })
         .filter((sp) => sp.to > sp.from);
+    }
+    // Out of the stretches the OS recorded as suspended — see the note in the
+    // active branch for why the sleep span wins over an unclosed active one,
+    // and why this runs here rather than there.
+    if (lane.key === 'active') {
+      // Per source span, so the edge flags can be repaired against it:
+      // `subtractRanges` copies them onto BOTH pieces, so a span split by a
+      // suspend would leave a left piece still claiming `openEnd` ("running
+      // past the window edge") and a right piece claiming `openStart`
+      // ("continued from before this period"). Both are false of a piece
+      // whose edge is the sleep boundary. Same repair `clipToOn` does.
+      spans = spans.flatMap((sp) =>
+        subtractRanges([sp], sleepSpans).map((piece) => ({
+          ...piece,
+          openStart: piece.openStart && piece.from === sp.from,
+          openEnd: piece.openEnd && piece.to === sp.to,
+        })),
+      );
     }
     // Hatch any ongoing state past the agent's last heartbeat as unconfirmed.
     spans = gateToHeartbeat(spans, certainEdge, liveEdge);
