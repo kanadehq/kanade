@@ -480,6 +480,139 @@ describe('lane invariants', () => {
   // so it needs its own case — a sleep left open across a power cycle (the
   // host slept, then lost power) must be cut at the shutdown, not painted
   // straight through the dark stretch to the eventual resume.
+  // The invariant that was missing, and the reason #1326 could be drawn for
+  // as long as it was. The suite related each subordinate lane to `power`
+  // (`sleep ⊆ power`, `active ⊆ power`) and never related the two to each
+  // other — so "asleep and interactive at the same instant" broke no rule.
+  test('active and sleep never overlap, in every feed combination', () => {
+    const cases: { name: string; events: { at: string; kind: string }[]; cover?: number }[] = [
+      {
+        name: 'full winlog',
+        events: [
+          ev(h(1), 'boot'),
+          ev(h(2), 'active'),
+          ev(h(5), 'idle'),
+          ev(h(6), 'sleep'),
+          ev(h(7), 'resume'),
+          ev(h(8), 'active'),
+          ev(h(10), 'idle'),
+        ],
+      },
+      {
+        name: 'the sampler never closed its span before the suspend (#1245 shape)',
+        events: [ev(h(1), 'boot'), ev(h(2), 'active'), ev(h(6), 'sleep'), ev(h(20), 'resume')],
+      },
+      {
+        name: 'a truncated fetch, first sleep-lane record is a resume (#1326)',
+        events: [
+          ev(h(2.2), 'boot'),
+          ev(h(2.5), 'active'),
+          ev(h(4), 'idle'),
+          ev(h(5), 'active'),
+          ev(h(6), 'logoff'),
+          ev(h(20), 'resume'),
+        ],
+        cover: H(2),
+      },
+    ];
+    for (const c of cases) {
+      const lanes = buildLanes(c.events, T0, T1, NOW, undefined, c.cover);
+      const sleep = lane(lanes, 'sleep').spans;
+      const active = lane(lanes, 'active').spans;
+      const overlap = sleep.reduce(
+        (sum, s) =>
+          sum + active.reduce((n, a) => n + Math.max(0, Math.min(s.to, a.to) - Math.max(s.from, a.from)), 0),
+        0,
+      );
+      expect(overlap / 60_000, `${c.name}: minutes asleep AND active`).toBe(0);
+    }
+  });
+
+  // The #1326 case on its own, stated in the terms the bug was reported in.
+  // A laptop suspended the night before; its morning `resume` fell in the
+  // stretch a `limit` fetch dropped; so the first sleep-lane record left in
+  // the set is the NEXT day's resume, and `buildSpans` carries in against it.
+  // The strip drew four hours of "asleep" over a working afternoon, with a
+  // `logoff` marker sitting inside the span.
+  test('a carried-in sleep stops at the first event the host produced', () => {
+    const truncated = [
+      ev(h(2.2), 'boot'),
+      ev(h(2.5), 'active'), // the machine is demonstrably awake here…
+      ev(h(4), 'idle'),
+      ev(h(5), 'active'),
+      ev(h(6), 'logoff'),
+      ev(h(20), 'resume'), // …yet this is the first sleep-lane record we hold
+    ];
+    const lanes = buildLanes(truncated, T0, T1, NOW, undefined, H(2));
+    expect(coversAt(lane(lanes, 'sleep'), H(10))).toBe(false);
+    expect(coversAt(lane(lanes, 'sleep'), H(5))).toBe(false);
+    // What survives is only the stretch nothing contradicts.
+    const s = lane(lanes, 'sleep').spans;
+    expect(s).toHaveLength(1);
+    expect(s[0].to).toBe(H(2.5));
+  });
+
+  // `subtractRanges` copies the source span's fields onto both pieces, so a
+  // split has to repair the edge flags. Without it the left piece keeps
+  // `openEnd` and the right keeps `openStart`, and the tooltip tells the
+  // operator the state runs off the window edge when it stops at a `sleep`.
+  test('a split active span does not claim open edges at the cut', () => {
+    const split = [
+      ev(h(1), 'boot'),
+      ev(h(2), 'active'), // never closed by an `idle` — genuinely open-ended
+      ev(h(5), 'sleep'),
+      ev(h(6), 'resume'),
+    ];
+    // Heartbeat at the window end, so `gateToHeartbeat` splits nothing and
+    // the only split under test is the suspend.
+    const lanes = buildLanes(split, T0, T1, NOW, new Date(T1).toISOString());
+    const spans = lane(lanes, 'active').spans;
+    const left = spans.find((s) => s.from === H(2))!;
+    const right = spans.find((s) => s.from === H(6))!;
+    expect(left.to).toBe(H(5));
+    expect(left.openEnd).toBe(false); // it stops at the suspend, not the edge
+    expect(right.openStart).toBe(false); // and this one starts at the resume
+    expect(right.openEnd).toBe(true); // the far edge is still genuinely open
+  });
+
+  // A repeated `sleep` is not proof the host woke. `buildSpans` already
+  // decided that ("a second start while already open is ignored — a missed
+  // end shouldn't fragment the interval"), and the contradiction cut was
+  // undoing it silently: an eight-hour suspend with one duplicate record
+  // half an hour in came out as a thirty-minute span. Modern standby can log
+  // several sleep-kind transitions for one user-perceived suspend, and
+  // delivery is at-least-once, so this is ordinary rather than exotic.
+  test('a duplicate sleep record does not cut the suspend it repeats', () => {
+    const duplicated = [
+      ev(h(1), 'boot'),
+      ev(h(2), 'sleep'),
+      ev(h(2.5), 'sleep'), // again, with no `resume` between
+      ev(h(10), 'resume'),
+    ];
+    const lanes = buildLanes(duplicated, T0, T1, NOW, new Date(T1).toISOString());
+    expect(covered(lane(lanes, 'sleep'))).toBe(8);
+    expect(coversAt(lane(lanes, 'sleep'), H(6))).toBe(true);
+  });
+
+  // …but a genuine overnight suspend must survive, and the watchdog's own
+  // `agent_offline` lands inside every one of them. It is written by the
+  // BACKEND because the machine went quiet, so it is not the host producing
+  // an event and must not count as a contradiction.
+  test('the watchdog record does not cut a real overnight sleep', () => {
+    const overnight = [
+      ev(h(1), 'boot'),
+      ev(h(2), 'active'),
+      ev(h(5), 'idle'),
+      ev(h(6), 'logoff'),
+      ev(h(6.1), 'sleep'),
+      ev(h(6.2), 'agent_offline'), // inside the sleep, by construction
+      ev(h(20), 'agent_online'),
+      ev(h(20.1), 'resume'),
+    ];
+    const lanes = buildLanes(overnight, T0, T1, NOW);
+    expect(coversAt(lane(lanes, 'sleep'), H(15))).toBe(true);
+  });
+
   test('a sleep span open across a power cycle is clipped at both ends of the gap', () => {
     const lanes = buildLanes(
       [
