@@ -7,7 +7,9 @@ import {
   axisTicks,
   buildLanes,
   evidenceEdges,
+  noEvidenceByLane,
   noEvidenceRanges,
+  recordedIntervals,
   subtractRanges,
   swimlaneWindow,
 } from './OperationalTimeline';
@@ -52,6 +54,30 @@ const coversAt = (l: Lane, ts: number) => l.spans.some((s) => s.from <= ts && ts
 /** Is every span of `sub` inside some span of `sup`? The lane containment rule. */
 const containedIn = (sub: Lane, sup: Lane) =>
   sub.spans.every((s) => sup.spans.some((o) => o.from <= s.from && o.to >= s.to));
+
+/**
+ * What the strip actually PAINTS as unknown on one lane.
+ *
+ * Goes through `noEvidenceByLane`, the same call the component makes, rather
+ * than modelling the draw site as `subtractRanges(bands, lane.spans)`. That
+ * hand-written model is what the tests used, and it stopped matching the
+ * component the moment a lane could be settled by evidence from another lane
+ * (#1322) — a test that models the renderer instead of calling it can only
+ * ever describe the renderer it was written against.
+ */
+const hatchOn = (lanes: Lane[], key: string, events: { at: string; kind: string }[]) => {
+  const bands = noEvidenceRanges(T0, T1, NOW, T0, undefined, undefined, events);
+  const recorded = recordedIntervals(events, T0, T1);
+  return noEvidenceByLane(lanes, bands, recorded)[lanes.findIndex((l) => l.key === key)];
+};
+
+/** Is that lane hatched as unknown at `ts`? */
+const unknownAt = (
+  lanes: Lane[],
+  key: string,
+  events: { at: string; kind: string }[],
+  ts: number,
+) => hatchOn(lanes, key, events).some((b) => b.from <= ts && ts < b.to);
 
 // ---------------------------------------------------------------------------
 // The matrix: which feeds a PC reports -> what each lane must show.
@@ -280,11 +306,9 @@ describe('recorded outages cut the lanes (#1245)', () => {
   test('a winlog lane is unknown while its backfill is still in flight', () => {
     const notYet = overnight.filter((e) => e.kind !== 'sleep');
     const lanes = buildLanes(notYet, T0, T1, NOW);
-    const bands = noEvidenceRanges(T0, T1, NOW, T0, undefined, undefined, notYet);
     // Nothing covers the night on the sleep lane, so the band shows through.
     expect(coversAt(lane(lanes, 'sleep'), H(15))).toBe(false);
-    const visible = subtractRanges(bands, lane(lanes, 'sleep').spans);
-    expect(visible.some((b) => b.from <= H(15) && H(15) < b.to)).toBe(true);
+    expect(unknownAt(lanes, 'sleep', notYet, H(15))).toBe(true);
   });
 
   test('and repaints it once the backfilled record arrives', () => {
@@ -294,9 +318,7 @@ describe('recorded outages cut the lanes (#1245)', () => {
     const arrived = [...overnight, ev(h(21), 'resume')];
     const lanes = buildLanes(arrived, T0, T1, NOW);
     expect(coversAt(lane(lanes, 'sleep'), H(15))).toBe(true);
-    const bands = noEvidenceRanges(T0, T1, NOW, T0, undefined, undefined, arrived);
-    const visible = subtractRanges(bands, lane(lanes, 'sleep').spans);
-    expect(visible.some((b) => b.from <= H(15) && H(15) < b.to)).toBe(false);
+    expect(unknownAt(lanes, 'sleep', arrived, H(15))).toBe(false);
   });
 
   // The other half of the rule, and the reason it is a cut rather than a
@@ -392,9 +414,194 @@ describe('recorded outages cut the lanes (#1245)', () => {
     // operator saw a solid, confident lie. Assert the band is still there
     // after that subtraction — the thing the screen actually renders.
     const lanes = buildLanes(overnight, T0, T1, NOW);
-    const bands = noEvidenceRanges(T0, T1, NOW, T0, undefined, undefined, overnight);
-    const visible = subtractRanges(bands, lane(lanes, 'active').spans);
-    expect(visible.some((b) => b.from <= H(15) && H(15) < b.to)).toBe(true);
+    expect(unknownAt(lanes, 'active', overnight, H(15))).toBe(true);
+  });
+});
+
+describe('the unknown band respects what other lanes recorded (#1322)', () => {
+  // The laptop in the #1315 capture: signed out at 18:00, suspended, opened
+  // again the next morning, agent down across the night because the agent
+  // dies with the host. The sleep lane asserts the whole night from an
+  // OS-recorded pair while active and session hatched it as unknown — the
+  // same strip claiming known and unknown over the same pixels.
+  const suspended = [
+    ev(h(2), 'boot'),
+    ev(h(3), 'logon'),
+    ev(h(4), 'active'),
+    ev(h(5), 'idle'),
+    ev(h(9), 'logoff'),
+    ev(h(9.1), 'sleep'),
+    ev(h(9.2), 'agent_offline'),
+    ev(h(20), 'resume'),
+    ev(h(20.1), 'agent_online'),
+    ev(h(20.2), 'logon'),
+  ];
+
+  test('a recorded sleep settles the lanes below it', () => {
+    const lanes = buildLanes(suspended, T0, T1, NOW);
+    // The premise: the sleep lane really does claim that instant.
+    expect(coversAt(lane(lanes, 'sleep'), H(15))).toBe(true);
+    // So neither of these can be unknown there. A suspended machine cannot
+    // be typed on, and cannot start a session.
+    expect(unknownAt(lanes, 'active', suspended, H(15))).toBe(false);
+    expect(unknownAt(lanes, 'session', suspended, H(15))).toBe(false);
+  });
+
+  // The desktop half: same night, no suspend — it shuts down. The off-gap is
+  // bounded by `shutdown` and the next `boot`, so it is asserted, not merely
+  // unpainted. This case is why the off-intervals cannot be "the complement
+  // of the power lane, minus the band": the gap lies ENTIRELY inside the
+  // outage, so subtracting the band would leave nothing and the lanes would
+  // go on hatching a night the OS accounted for at both ends.
+  const shutDown = [
+    ev(h(2), 'boot'),
+    ev(h(9), 'logoff'),
+    ev(h(9.1), 'shutdown'),
+    ev(h(9.2), 'agent_offline'),
+    ev(h(20), 'boot'),
+    ev(h(20.1), 'agent_online'),
+  ];
+
+  test('a recorded power-off gap settles the lanes below it', () => {
+    const lanes = buildLanes(shutDown, T0, T1, NOW);
+    expect(coversAt(lane(lanes, 'power'), H(15))).toBe(false);
+    for (const key of ['session', 'sleep', 'active']) {
+      expect(unknownAt(lanes, key, shutDown, H(15)), `${key} must not be unknown`).toBe(false);
+    }
+  });
+
+  // The guard, and the reason this is not "trust the lane above you". An
+  // unclosed `sleep` runs to the window edge because that is all the strip
+  // can draw, not because the OS said so — the #1245 shape exactly. Letting
+  // it settle a neighbour would reintroduce that bug sideways: the active
+  // lane would stop hatching the night on the strength of a right edge that
+  // is a rendering artefact.
+  test('an unclosed sleep settles nothing', () => {
+    const noResume = suspended.filter((e) => e.kind !== 'resume');
+    const lanes = buildLanes(noResume, T0, T1, NOW);
+    expect(coversAt(lane(lanes, 'sleep'), H(15))).toBe(true); // it paints…
+    expect(unknownAt(lanes, 'active', noResume, H(15))).toBe(true); // …but proves nothing
+  });
+
+  // Same rule from the other side: a power lane with no spans at all has no
+  // gaps to assert, so nothing below it is settled. Reading "unpainted" as
+  // "off" here would silence every lane on the strength of no data — #1086
+  // one level down.
+  test('a blank power lane is not an assertion that the host was off', () => {
+    const noPower = [
+      evw(h(3), 'logon'),
+      evw(h(9), 'logoff'),
+      ev(h(9.2), 'agent_offline'),
+      ev(h(20.1), 'agent_online'),
+    ];
+    const lanes = buildLanes(noPower, T0, T1, NOW);
+    expect(lane(lanes, 'power').spans).toHaveLength(0);
+    expect(unknownAt(lanes, 'active', noPower, H(15))).toBe(true);
+  });
+
+  // A `resume` with no `sleep` before it. The machine had been suspended —
+  // that much a resume proves — but not since when, and the strip's own span
+  // does not distinguish the two: `buildSpans` carries in from the window
+  // start, then `clipToOn` moves that edge onto the `boot` and recomputes
+  // `openStart` as `s.openStart && from === s.from`, which is now false. The
+  // flag comes out looking recorded. Reading it would assert the machine had
+  // been asleep ever since it booted, while the events say it was up and the
+  // `sleep` record is merely absent.
+  test('a resume with no sleep before it settles nothing', () => {
+    const bareResume = [
+      ev(h(0.2), 'boot'), // powered on early, so nothing clips the span away
+      ev(h(1), 'agent_offline'),
+      ev(h(9), 'agent_online'),
+      ev(h(9.1), 'resume'),
+    ];
+    const lanes = buildLanes(bareResume, T0, T1, NOW);
+    // The span is there, and its flags say nothing useful.
+    expect(coversAt(lane(lanes, 'sleep'), H(5))).toBe(true);
+    expect(lane(lanes, 'sleep').spans[0].openStart).toBe(false); // laundered
+    // The records are what count, and there is no `sleep` to pair with.
+    expect(recordedIntervals(bareResume, T0, T1).asleep).toHaveLength(0);
+    expect(unknownAt(lanes, 'active', bareResume, H(5))).toBe(true);
+    expect(unknownAt(lanes, 'session', bareResume, H(5))).toBe(true);
+  });
+
+  // The power half of "an open with no close yields nothing". The sleep half
+  // is covered above; this one was claimed as pinned in the first draft of
+  // this PR and was not — dropping the pairing rule failed only sleep tests,
+  // so the power path could have been broken silently. Found by perturbing
+  // the code rather than reading it.
+  test('a shutdown with no boot after it settles nothing', () => {
+    const neverCameBack = [
+      ev(h(2), 'boot'),
+      ev(h(9), 'logoff'),
+      ev(h(9.1), 'shutdown'),
+      ev(h(9.2), 'agent_offline'),
+      // …and that is the end of the window. No boot, so no off-INTERVAL:
+      // the host is presumably still off, but the log never said when it
+      // stopped being so, and neither may the strip.
+    ];
+    const lanes = buildLanes(neverCameBack, T0, T1, NOW);
+    expect(recordedIntervals(neverCameBack, T0, T1).off).toHaveLength(0);
+    expect(unknownAt(lanes, 'active', neverCameBack, H(15))).toBe(true);
+  });
+
+  // The other side of the same rule: a record OUTSIDE the window is still a
+  // record. The seed lookup hands the strip the newest event before `t0` per
+  // lane precisely so the edges are real, and refusing to pair with it would
+  // hatch the start of the window while holding the log line that accounts
+  // for it — this fix's own bug, one step to the left.
+  test('a sleep recorded before the window still pairs with a resume inside it', () => {
+    const sleptBefore = [
+      ev(h(-6), 'boot'),
+      ev(h(-2), 'sleep'), // before t0, from the seed lookup
+      ev(h(-1), 'agent_offline'),
+      ev(h(4), 'resume'),
+      ev(h(4.1), 'agent_online'),
+    ];
+    const asleep = recordedIntervals(sleptBefore, T0, T1).asleep;
+    expect(asleep).toHaveLength(1);
+    expect(asleep[0].from).toBe(T0); // clamped, not discarded
+    expect(asleep[0].to).toBe(H(4));
+    const lanes = buildLanes(sleptBefore, T0, T1, NOW);
+    expect(unknownAt(lanes, 'active', sleptBefore, H(2))).toBe(false);
+  });
+
+  // …but not across a coverage hole, which is #1326's rule applied here.
+  // Measured before it was written: on the #1326 shape this produced a
+  // twenty-hour "suspend" and erased thirteen hours of legitimate agent-down
+  // hatch. #1326 fixed the SPAN; the same artefact came back through the
+  // settling intervals, because those are built from records and the records
+  // that would have contradicted it are precisely the ones the fetch dropped.
+  test('a pair reaching over a truncated stretch settles nothing', () => {
+    const truncated = [
+      ev(h(-6), 'sleep'), // the seed: slept the night before
+      ev(h(2.2), 'boot'),
+      ev(h(2.5), 'active'), // demonstrably awake all afternoon
+      ev(h(4), 'idle'),
+      ev(h(5), 'active'),
+      ev(h(6), 'logoff'),
+      ev(h(7), 'agent_offline'),
+      ev(h(20), 'resume'), // …and this is the FOLLOWING day's resume
+    ];
+    const cover = H(2); // the fetch came back short; nothing before here
+    expect(recordedIntervals(truncated, T0, T1, cover).asleep).toHaveLength(0);
+    // Without that, the agent-down hatch from 7h on is erased wholesale.
+    const lanes = buildLanes(truncated, T0, T1, NOW, undefined, cover);
+    const bands = noEvidenceRanges(T0, T1, NOW, cover, undefined, undefined, truncated);
+    const per = noEvidenceByLane(lanes, bands, recordedIntervals(truncated, T0, T1, cover));
+    const active = per[lanes.findIndex((l) => l.key === 'active')];
+    expect(active.some((b) => b.from <= H(12) && H(12) < b.to)).toBe(true);
+  });
+
+  // `power` is the lane the others are subordinate to; nothing above it can
+  // settle it, so its band is the raw one minus its own spans.
+  test('the power lane keeps the band it was given', () => {
+    const lanes = buildLanes(suspended, T0, T1, NOW);
+    const bands = noEvidenceRanges(T0, T1, NOW, T0, undefined, undefined, suspended);
+    const power = lane(lanes, 'power');
+    const i = lanes.findIndex((l) => l.key === 'power');
+    expect(noEvidenceByLane(lanes, bands, recordedIntervals(suspended, T0, T1))[i]).toEqual(
+      subtractRanges(bands, power.spans),
+    );
   });
 });
 
