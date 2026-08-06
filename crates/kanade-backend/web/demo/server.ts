@@ -1378,6 +1378,10 @@ const EVENT_DAYS = 8;
 const SRC_SYSTEM = 'winlog:System';
 const SRC_SECURITY = 'winlog:Security';
 const SRC_IDLE = 'agent:internal';
+// The backend's heartbeat watchdog, not the agent — these two are the only
+// kinds whose timestamp is an observation rather than a reconstruction, which
+// is why they alone may close an unknown stretch (#1245).
+const SRC_WATCHDOG = 'backend:heartbeat-watchdog';
 
 type RawEvent = { pc_id: string; at: number; kind: string; source: string; payload: unknown };
 
@@ -1433,6 +1437,9 @@ function eventsForPc(p: (typeof FLEET)[number], idx: number, days: number): RawE
       const logon = startMin + ri(1, 3);
       const logoff = weekend ? startMin + ri(150, 300) : 18 * 60 + ri(-40, 70);
 
+      // The watchdog sees heartbeats again before the OS has finished
+      // writing anything, so the recovery marker leads the winlog by a beat.
+      if (d < days - 1) push(startMin - ri(0, 2), 'agent_online', SRC_WATCHDOG);
       // Cold boot, or a wake from last night's suspend.
       if (!powered) {
         if (!push(startMin, 'boot', SRC_SYSTEM, { uptime_reset: true })) break;
@@ -1480,12 +1487,15 @@ function eventsForPc(p: (typeof FLEET)[number], idx: number, days: number): RawE
         activeOpen = false;
         t += ri(8, 24);
       }
-      // Close the day's last burst. The swimlane reconstructs `active`
-      // as active→idle, so leaving one open doesn't just lose a tick —
-      // the span runs on until the NEXT morning's first idle, painting
-      // the box as in-use all night and inflating any duty-cycle figure
-      // computed off the same events.
-      if (activeOpen) push(logoff, 'idle', SRC_IDLE);
+      // The day's last burst is deliberately left OPEN. A real sampler
+      // cannot close it: it debounces over five minutes, and the machine is
+      // suspended ten seconds after logoff — there is no time to emit the
+      // `idle`. This used to push one anyway, because an unclosed span ran
+      // to the next morning's first idle and painted the night as work
+      // (#1245). That is a product defect, not a property of laptops, and
+      // with `agent_offline` now cutting the sampler lane the fixture can
+      // stop covering for it. The span closes where the agent died, which is
+      // the truth.
 
       push(logoff, 'logoff', SRC_SECURITY, { user: p.last_logon_user });
 
@@ -1502,12 +1512,21 @@ function eventsForPc(p: (typeof FLEET)[number], idx: number, days: number): RawE
       // product-side defect (#1256). With the predicate now answering the
       // question it was always meant to ask, the fixture can be what a
       // laptop fleet actually looks like.
+      const wentAway = logoff + ri(1, 5);
       if (isLaptop) {
-        push(logoff + ri(1, 5), 'sleep', SRC_SYSTEM);
+        push(wentAway, 'sleep', SRC_SYSTEM);
       } else {
-        push(logoff + ri(1, 3), 'shutdown', SRC_SYSTEM);
+        push(wentAway, 'shutdown', SRC_SYSTEM);
         powered = false;
       }
+      // The agent dies with the host, and the backend notices a heartbeat or
+      // two later. Without this the demo cannot show an outage at all — and
+      // an outage is the only signal that says "nobody was watching", as
+      // distinct from "nothing happened". The idle sampler debounces over
+      // five minutes, so on a machine that suspends ten seconds after logoff
+      // it never gets to emit the closing `idle`; that unclosed `active` span
+      // running to the next morning is exactly #1245.
+      push(wentAway + ri(1, 3), 'agent_offline', SRC_WATCHDOG);
     }
   }
 
@@ -1519,7 +1538,24 @@ function eventsForPc(p: (typeof FLEET)[number], idx: number, days: number): RawE
   // makes the strip's hatched "asserted but unconfirmed" tail show up in
   // the demo at all.
   const lastBeat = Date.now() - p.heartbeat_ms_ago;
-  return out.filter((e) => e.at <= lastBeat);
+  const kept = out.filter((e) => e.at <= lastBeat);
+  // …but the watchdog's own record is not the agent's to report. The backend
+  // writes `agent_offline` precisely BECAUSE the heartbeats stopped, so the
+  // cutoff above is the one event it does not bound. Stamp it at the cutoff
+  // rather than keeping whatever the day loop scheduled for that evening: a
+  // host that went quiet at 10:00 went quiet at 10:00, not at its usual
+  // logoff. One record, not one per night it stayed away — the backend
+  // notices the silence once.
+  if (!p.online) {
+    kept.push({
+      pc_id: p.pc_id,
+      at: lastBeat + 60_000,
+      kind: 'agent_offline',
+      source: SRC_WATCHDOG,
+      payload: null,
+    });
+  }
+  return kept;
 }
 
 function buildEvents(): RawEvent[] {
@@ -1530,8 +1566,9 @@ function buildEvents(): RawEvent[] {
 
 const EVENT_KINDS = [
   'boot', 'shutdown', 'logon', 'logoff', 'sleep', 'resume', 'active', 'idle',
+  'agent_offline', 'agent_online',
 ];
-const EVENT_SOURCES = [SRC_SYSTEM, SRC_SECURITY, SRC_IDLE];
+const EVENT_SOURCES = [SRC_SYSTEM, SRC_SECURITY, SRC_IDLE, SRC_WATCHDOG];
 
 get(/^\/api\/obs_events$/, (_req, url) => {
   const limit = Number(url.searchParams.get('limit') ?? '500');

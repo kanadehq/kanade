@@ -249,6 +249,155 @@ describe('lane matrix: which feeds the PC reports', () => {
 // The invariants themselves — the properties every case above must satisfy.
 // ---------------------------------------------------------------------------
 
+describe('recorded outages cut the lanes (#1245)', () => {
+  // The reported shape: the sampler opens an `active` span in the evening,
+  // the host suspends, and the closing `idle` never fires — the sampler
+  // debounces over five minutes and the box is gone in ten seconds. The span
+  // then ran to the NEXT MORNING's first idle and painted the night as work.
+  const overnight = [
+    ev(h(2), 'boot'),
+    ev(h(3), 'active'),
+    ev(h(9), 'agent_offline'), // the host went away here
+    ev(h(9.02), 'sleep'), // backfilled next morning, stamped now
+    ev(h(21), 'agent_online'), // and came back here
+    ev(h(21.5), 'idle'), // the span the old code closed against
+  ];
+
+  test('the active lane does not paint across the outage', () => {
+    const lanes = buildLanes(overnight, T0, T1, NOW);
+    expect(coversAt(lane(lanes, 'active'), H(15))).toBe(false);
+  });
+
+  test('what it does paint stops at the moment the agent went quiet', () => {
+    const lanes = buildLanes(overnight, T0, T1, NOW);
+    expect(coversAt(lane(lanes, 'active'), H(8))).toBe(true);
+    const evening = lane(lanes, 'active').spans.find((sp) => sp.from <= H(8) && H(8) < sp.to)!;
+    expect(evening.to).toBe(H(9));
+  });
+
+  // The winlog lanes are late, not absent — so they must NOT be cut, and the
+  // strip has to repaint the period once the backfill lands.
+  test('a winlog lane is unknown while its backfill is still in flight', () => {
+    const notYet = overnight.filter((e) => e.kind !== 'sleep');
+    const lanes = buildLanes(notYet, T0, T1, NOW);
+    const bands = noEvidenceRanges(T0, T1, NOW, T0, undefined, undefined, notYet);
+    // Nothing covers the night on the sleep lane, so the band shows through.
+    expect(coversAt(lane(lanes, 'sleep'), H(15))).toBe(false);
+    const visible = subtractRanges(bands, lane(lanes, 'sleep').spans);
+    expect(visible.some((b) => b.from <= H(15) && H(15) < b.to)).toBe(true);
+  });
+
+  test('and repaints it once the backfilled record arrives', () => {
+    // Same host, same window, one late `sleep` record later. No special
+    // case makes this work: the lanes are rebuilt from whatever events the
+    // fetch returned, so a record that arrives afterwards simply paints.
+    const arrived = [...overnight, ev(h(21), 'resume')];
+    const lanes = buildLanes(arrived, T0, T1, NOW);
+    expect(coversAt(lane(lanes, 'sleep'), H(15))).toBe(true);
+    const bands = noEvidenceRanges(T0, T1, NOW, T0, undefined, undefined, arrived);
+    const visible = subtractRanges(bands, lane(lanes, 'sleep').spans);
+    expect(visible.some((b) => b.from <= H(15) && H(15) < b.to)).toBe(false);
+  });
+
+  // The other half of the rule, and the reason it is a cut rather than a
+  // subtraction: every producer shares one outbox, so a NATS outage does not
+  // stop the agent observing — it stops the backend hearing. Samples taken
+  // during the outage arrive afterwards with their original timestamps and
+  // are real. Subtracting the outage would erase them wholesale.
+  test('samples produced during a link-only outage still paint', () => {
+    const linkDown = [
+      ev(h(2), 'boot'),
+      ev(h(9), 'agent_offline'),
+      ev(h(11), 'active'), // the agent kept sampling; delivery was late
+      ev(h(13), 'idle'),
+      ev(h(15), 'active'),
+      ev(h(17), 'idle'),
+      ev(h(21), 'agent_online'),
+    ];
+    const lanes = buildLanes(linkDown, T0, T1, NOW);
+    expect(coversAt(lane(lanes, 'active'), H(12))).toBe(true);
+    expect(coversAt(lane(lanes, 'active'), H(16))).toBe(true);
+    expect(coversAt(lane(lanes, 'active'), H(14))).toBe(false); // the idle gap
+  });
+
+  // The reported ORDER, which `overnight` above does not have: the closing
+  // `idle` landed at 09:16 and `agent_online` at 09:18, so the event that
+  // closes the span is stamped INSIDE the outage, two minutes before the
+  // agent was recorded back. Any rule that only cuts when the close falls
+  // after the outage's own end leaves this untouched — the whole bug, intact,
+  // with the suite still green. Pin the real ordering so that stays visible.
+  test('the closing event is inside the outage in the reported case', () => {
+    const asReported = [
+      ev(h(18.85), 'idle'),
+      ev(h(18.87), 'active'), // the span that painted the night
+      ev(h(19.14), 'logoff'),
+      ev(h(19.14), 'agent_offline'),
+      ev(h(19.145), 'sleep'),
+      ev(h(19.148), 'resume'),
+      ev(h(21.5), 'idle'), // 09:16 — closes the span, still inside the outage
+      ev(h(21.6), 'agent_online'), // 09:18
+    ];
+    const lanes = buildLanes(asReported, T0, T1, NOW);
+    expect(coversAt(lane(lanes, 'active'), H(20))).toBe(false);
+    const evening = lane(lanes, 'active').spans.find((sp) => sp.from <= H(19) && H(19) < sp.to)!;
+    expect(evening.to).toBe(H(19.14));
+  });
+
+  // A span that OPENS during an outage is a different case, and the one the
+  // "still paint" test above covers: its opening event is itself stamped
+  // inside the outage, which is positive proof the agent was sampling then.
+  // A span that opens BEFORE and closes during has no such proof — the only
+  // thing carrying it across the silence is the absence of a transition, and
+  // absence is what a dead agent produces. It is cut, deliberately: the
+  // operator gets "unknown" for a stretch nobody observed rather than a
+  // confident claim that may be hours of invented work.
+  test('a span opened before the outage is cut even if its close lands inside', () => {
+    const closesInside = [
+      ev(h(2), 'boot'),
+      ev(h(10), 'active'), // opens five minutes before the agent goes quiet
+      ev(h(10.083), 'agent_offline'),
+      ev(h(12.5), 'idle'), // and is closed from within the silent stretch
+      ev(h(13), 'agent_online'),
+    ];
+    const lanes = buildLanes(closesInside, T0, T1, NOW);
+    expect(coversAt(lane(lanes, 'active'), H(11))).toBe(false);
+    expect(coversAt(lane(lanes, 'active'), H(10.04))).toBe(true);
+  });
+
+  // The over-correction the first fix shipped, caught in the demo rather than
+  // here: cutting EVERY span that bridged the outage also cut the winlog ones.
+  // A `sleep`→`resume` pair records both ends, so it asserts the night on its
+  // own terms and stays whole; only the sampler's silence-based spans go.
+  // Note the sleep opens BEFORE the agent went quiet — the same shape that
+  // makes the active span wrong is what makes this one right.
+  test('an OS-recorded pair that opened before the outage is not cut', () => {
+    const slept = [
+      ev(h(2), 'boot'),
+      ev(h(3), 'active'),
+      ev(h(8.9), 'sleep'), // the machine suspends…
+      ev(h(9), 'agent_offline'), // …and the agent goes quiet with it
+      ev(h(21), 'agent_online'),
+      ev(h(21.1), 'resume'), // the OS logged the other end
+      ev(h(21.5), 'idle'),
+    ];
+    const lanes = buildLanes(slept, T0, T1, NOW);
+    expect(coversAt(lane(lanes, 'sleep'), H(15))).toBe(true);
+    expect(coversAt(lane(lanes, 'power'), H(15))).toBe(true); // sleep ⊆ power
+    expect(coversAt(lane(lanes, 'active'), H(15))).toBe(false); // but this one still goes
+  });
+
+  test('the unknown band survives instead of being erased by the span', () => {
+    // The draw site is `subtractRanges(noEvidence, lane.spans)`. Before the
+    // lanes were cut, the false span covered the band completely and the
+    // operator saw a solid, confident lie. Assert the band is still there
+    // after that subtraction — the thing the screen actually renders.
+    const lanes = buildLanes(overnight, T0, T1, NOW);
+    const bands = noEvidenceRanges(T0, T1, NOW, T0, undefined, undefined, overnight);
+    const visible = subtractRanges(bands, lane(lanes, 'active').spans);
+    expect(visible.some((b) => b.from <= H(15) && H(15) < b.to)).toBe(true);
+  });
+});
+
 describe('lane invariants', () => {
   // The rule #972/#981/#983 kept re-breaking: if the host was doing anything,
   // it was necessarily powered on and someone was signed in.
@@ -644,11 +793,36 @@ describe('agentDownRanges', () => {
     expect(out).toEqual([{ from: H(4), to: H(9), reason: 'agentDown' }]);
   });
 
-  // The recovery marker is a convenience, not a requirement: anything arriving
-  // from that host proves the agent was running again.
-  test('any later event closes it, not just agent_online', () => {
+  // This test used to assert the opposite — "any later event closes it" —
+  // on the reasoning that "anything arriving from that host proves the agent
+  // was running again". That is true of DELIVERY and false of TIMESTAMPS,
+  // and the strip is drawn on timestamps. Winlog is read out of the Windows
+  // event log after the agent returns, up to 24 h of it, so a record stamped
+  // seconds after the agent died arrives hours later. The implementation
+  // comment stated the same premise, so test and code agreed with each other
+  // and the pair could never fail — a fourteen-hour blackout rendered as ten
+  // seconds in production while this suite stayed green (#1245).
+  test('a backfilled winlog event does not close an outage', () => {
+    const out = agentDownRanges(
+      [
+        ev(h(4), 'agent_offline'),
+        // Stamped a minute later, delivered with the 09:00 backfill.
+        ev(h(4.02), 'sleep'),
+        ev(h(4.03), 'resume'),
+        ev(h(9), 'agent_online'),
+      ],
+      T0,
+      T1,
+      LIVE,
+    );
+    expect(out).toEqual([{ from: H(4), to: H(9), reason: 'agentDown' }]);
+  });
+
+  // Only the watchdog's own kinds close it, because only those are emitted
+  // from live heartbeats rather than reconstructed after the fact.
+  test('a boot does not close an outage either', () => {
     const out = agentDownRanges([ev(h(4), 'agent_offline'), ev(h(7), 'boot')], T0, T1, LIVE);
-    expect(out).toEqual([{ from: H(4), to: H(7), reason: 'agentDown' }]);
+    expect(out).toEqual([{ from: H(4), to: LIVE, reason: 'agentDown' }]);
   });
 
   test('an outage with nothing after it runs to the live edge', () => {
@@ -691,14 +865,14 @@ describe('agentDownRanges', () => {
   // The backend emits a recovery and a re-drop at the same instant when an
   // agent dies again inside one sweep interval. The pair must not make the
   // scan stall on its own timestamp — the second outage still has to close at
-  // whatever comes after it.
+  // the next watchdog event.
   test('a recovery and re-drop sharing an instant do not stall the scan', () => {
     const out = agentDownRanges(
       [
         ev(h(2), 'agent_offline'),
         ev(h(6), 'agent_online'),
         ev(h(6), 'agent_offline'),
-        ev(h(9), 'boot'),
+        ev(h(9), 'agent_online'),
       ],
       T0,
       T1,
@@ -706,7 +880,7 @@ describe('agentDownRanges', () => {
     );
     // [2,6] and [6,9] touch, so they coalesce — there is no measurable
     // uptime to draw between them. What matters is that the range ends at
-    // the boot, not that it runs to the live edge.
+    // the recovery, not that it runs to the live edge.
     expect(out).toEqual([{ from: H(2), to: H(9), reason: 'agentDown' }]);
   });
 
