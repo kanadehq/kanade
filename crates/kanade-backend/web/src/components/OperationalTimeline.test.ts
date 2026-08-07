@@ -605,6 +605,121 @@ describe('the unknown band respects what other lanes recorded (#1322)', () => {
   });
 });
 
+describe('an outage says which of the three causes it was (#1316)', () => {
+  /** An `agent:startup` recovery carrying the OS boot time. */
+  const startup = (at: string, bootHours: number) => ({
+    at,
+    kind: 'agent_online',
+    source: 'agent:startup',
+    bootTime: Math.floor(H(bootHours) / 1000), // seconds on the wire
+  });
+  const reasonAt = (evs: { at: string; kind: string }[], ts: number) =>
+    agentDownRanges(evs, T0, T1, T1).find((r) => r.from <= ts && ts < r.to)?.reason;
+
+  test('a boot AFTER the last heartbeat means the machine was away', () => {
+    // Quiet from 9h; comes back at 20h having booted at 19h — so it rebooted
+    // during the gap, which only happens if it had gone down.
+    const evs = [ev(h(2), 'boot'), ev(h(9), 'agent_offline'), startup(h(20), 19)];
+    expect(reasonAt(evs, H(15))).toBe('agentDownHostOff');
+  });
+
+  test('a boot BEFORE the last heartbeat means only the agent was away', () => {
+    // Same silence, but the machine it returns on booted at 2h — before the
+    // agent went quiet. It never rebooted, so it was up the whole time and
+    // the agent alone had stopped.
+    const evs = [ev(h(2), 'boot'), ev(h(9), 'agent_offline'), startup(h(20), 2)];
+    expect(reasonAt(evs, H(15))).toBe('agentDownAgentStopped');
+  });
+
+  test('hearing from the host about the silent stretch means only the link was away', () => {
+    // Positive evidence, not the absence of a restart: the agent kept
+    // sampling while the backend could not hear it, and those events arrive
+    // afterwards with their original `at`. Anything the HOST produced in
+    // there proves host and agent were both alive.
+    const evs = [
+      ev(h(2), 'boot'),
+      ev(h(9), 'agent_offline'),
+      eva(h(12), 'active'), // the SAMPLER's own, delivered late
+      eva(h(14), 'idle'),
+      ev(h(20), 'agent_online'),
+    ];
+    expect(reasonAt(evs, H(15))).toBe('agentDownLinkOnly');
+  });
+
+  test("a flapping agent's later restart does not attribute an earlier outage", () => {
+    // Two outages closer together than SAME_RECOVERY_MS. Without a bound the
+    // 12:06 startup falls inside the first outage's tolerance and its boot
+    // time is compared against the FIRST outage's last heartbeat — giving
+    // that stretch a cause derived from a restart that has nothing to do
+    // with it.
+    const evs = [
+      ev(h(2), 'boot'),
+      ev(h(12), 'agent_offline'), // outage A opens
+      ev(h(12.033), 'agent_online'), // …and closes two minutes later
+      ev(h(12.067), 'agent_offline'), // outage B opens
+      startup(h(12.1), 2), // B's restart: booted at 2h, machine stayed up
+    ];
+    // A has no evidence of its own, and must not borrow B's.
+    expect(reasonAt(evs, H(12.02))).toBe('agentDown');
+    // B keeps it.
+    expect(reasonAt(evs, H(12.08))).toBe('agentDownAgentStopped');
+  });
+
+  test('winlog records inside the gap are not evidence the agent was alive', () => {
+    // The #1245 sequence: the agent died, the OS kept logging, and the
+    // records were read out of the Event Log once it came back. They prove
+    // the MACHINE was on at that instant and nothing about the agent.
+    const evs = [
+      ev(h(2), 'boot'),
+      ev(h(9), 'agent_offline'),
+      evw(h(9.02), 'sleep'),
+      evw(h(9.03), 'resume'),
+      ev(h(20), 'agent_online'),
+    ];
+    expect(reasonAt(evs, H(15))).toBe('agentDown');
+  });
+
+  test('an agent too old to send a boot time reads as undifferentiated', () => {
+    // Most of a fleet until this rolls out. It DID restart, so calling it
+    // "link only" would report the most reassuring of the three causes on
+    // the strength of a missing field. "Cannot tell" is the honest answer.
+    const evs = [
+      ev(h(2), 'boot'),
+      ev(h(9), 'agent_offline'),
+      { at: h(20), kind: 'agent_online', source: 'agent:startup' },
+    ];
+    expect(reasonAt(evs, H(15))).toBe('agentDown');
+  });
+
+  test('a silent stretch with no restart and nothing heard stays undifferentiated', () => {
+    // The watchdog closed it from a heartbeat and nothing else came back.
+    // Neither cause has evidence, so neither is claimed.
+    const evs = [ev(h(2), 'boot'), ev(h(9), 'agent_offline'), ev(h(20), 'agent_online')];
+    expect(reasonAt(evs, H(15))).toBe('agentDown');
+  });
+
+  test('an outage still open at the window edge is not attributed', () => {
+    // Nothing has come back yet, so there is nothing to attribute it to.
+    // Calling that "the link" would claim the machine is fine.
+    const evs = [ev(h(2), 'boot'), ev(h(9), 'agent_offline')];
+    expect(reasonAt(evs, H(15))).toBe('agentDown');
+  });
+
+  test('the boot time is read as seconds, not milliseconds', () => {
+    // A unit slip here is off by 1000x and reads as "booted in 1970", which
+    // would classify EVERY outage as a reboot instead of failing visibly.
+    const evs = [ev(h(2), 'boot'), ev(h(9), 'agent_offline'), startup(h(20), 2)];
+    expect(reasonAt(evs, H(15))).toBe('agentDownAgentStopped');
+    // Same event with the value mistakenly already in ms would look ancient.
+    const wrong = [
+      ev(h(2), 'boot'),
+      ev(h(9), 'agent_offline'),
+      { at: h(20), kind: 'agent_online', source: 'agent:startup', bootTime: H(2) },
+    ];
+    expect(reasonAt(wrong, H(15))).toBe('agentDownHostOff');
+  });
+});
+
 describe('lane invariants', () => {
   // The rule #972/#981/#983 kept re-breaking: if the host was doing anything,
   // it was necessarily powered on and someone was signed in.

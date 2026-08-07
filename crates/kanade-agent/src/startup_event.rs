@@ -49,7 +49,47 @@ pub fn emit(pc_id: &str, agent_version: &str, obs_outbox_dir: &std::path::Path) 
         // are meant to collapse, which is true of the backend's inferred
         // events and false of these.)
         event_record_id: Some(format!("startup_{}", uuid::Uuid::new_v4().simple())),
-        payload: serde_json::json!({ "agent_version": agent_version }),
+        // `boot_time` is what lets the backend name the CAUSE of the outage
+        // this start ends, without a periodic sentinel write or any Event Log
+        // parsing (#1316). Compared against the last heartbeat before the
+        // gap:
+        //
+        //   boot after  the last beat → the host rebooted while we were gone
+        //                               → the MACHINE was away
+        //   boot before the last beat → the machine never rebooted, so it was
+        //                               up the whole time → the AGENT was
+        //                               stopped (crash, service stop, a
+        //                               self-update that did not come back)
+        //
+        // The third case — only the link was gone — is not decided here and
+        // is deliberately NOT "an outage that closes without one of these".
+        // A link outage does not restart the agent, so the absence of a
+        // startup event is consistent with it; it is also consistent with an
+        // agent too old to send a boot time, and with one whose startup event
+        // is still sitting in the outbox. Answering from the absence would
+        // report the most reassuring of the three causes on the strength of
+        // nothing. What identifies it is positive evidence — the agent's own
+        // records timestamped inside the silent stretch, arriving afterwards
+        // — and that lives in the consumer (`outageReason`), because it is a
+        // judgement about a whole window rather than about this one event.
+        //
+        // Epoch seconds, and derived (`now − uptime`), so it jitters by a few
+        // seconds across one boot session as the clock is disciplined — see
+        // `local_scheduler::STARTUP_BOOT_THRESHOLD_SECS`, which absorbs the
+        // same jitter for `on: startup`. Two genuinely different boots are
+        // always minutes apart, so no tolerance is needed to tell them apart;
+        // it matters only for comparisons against a nearby instant.
+        //
+        // `boot_time()` answers 0 when the platform cannot say. Sent as null
+        // rather than 0 so a consumer cannot read the epoch as "booted in
+        // 1970" and conclude the machine has been up for 56 years.
+        payload: serde_json::json!({
+            "agent_version": agent_version,
+            "boot_time": match sysinfo::System::boot_time() {
+                0 => None,
+                secs => Some(secs),
+            },
+        }),
     };
     let res = obs_outbox::ensure_outbox_dir(obs_outbox_dir)
         .and_then(|()| obs_outbox::enqueue(obs_outbox_dir, &event).map(|_| ()));
