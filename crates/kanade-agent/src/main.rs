@@ -36,6 +36,7 @@ mod local_scheduler;
 mod nats_retry;
 mod obs_outbox;
 mod outbox;
+mod outbox_retry;
 mod script_cache;
 mod staleness;
 mod startup_event;

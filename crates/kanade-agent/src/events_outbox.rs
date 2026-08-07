@@ -67,6 +67,11 @@ pub fn spawn_drain(
         // instead of dying forever. Permission / disk-full / parent-
         // missing failures are operationally recoverable, and dying
         // here would silently swallow every subsequent enqueue.
+
+        // Per-file retry state, owned by the drain task so it survives across
+        // ticks. A ledger scoped to one `drain_once` call would reset every
+        // second and back off nothing.
+        let mut ledger = crate::outbox_retry::RetryLedger::new();
         loop {
             if let Err(e) = std::fs::create_dir_all(&events_outbox_dir) {
                 warn!(
@@ -77,13 +82,17 @@ pub fn spawn_drain(
                 tokio::time::sleep(DRAIN_INTERVAL).await;
                 continue;
             }
-            drain_once(&js, &events_outbox_dir).await;
+            drain_once(&js, &events_outbox_dir, &mut ledger).await;
             tokio::time::sleep(DRAIN_INTERVAL).await;
         }
     })
 }
 
-async fn drain_once(js: &async_nats::jetstream::Context, events_outbox_dir: &Path) {
+async fn drain_once(
+    js: &async_nats::jetstream::Context,
+    events_outbox_dir: &Path,
+    ledger: &mut crate::outbox_retry::RetryLedger,
+) {
     let entries = match std::fs::read_dir(events_outbox_dir) {
         Ok(e) => e,
         Err(e) => {
@@ -118,13 +127,51 @@ async fn drain_once(js: &async_nats::jetstream::Context, events_outbox_dir: &Pat
     // its payload, ack timeout, etc.) no longer pins the entire
     // outbox behind it. The remaining unpublished files stay on
     // disk for the next tick to retry.
+    // Forget files that have left the directory, so the ledger tracks the
+    // currently-stuck set rather than everything ever seen (#1319).
+    ledger.retain_present(&files);
     for path in files {
-        if let Err(e) = publish_one(js, &path).await {
-            debug!(
-                error = %e,
-                path = %path.display(),
-                "events_outbox: publish failed for this file; will retry next tick, continuing with others",
-            );
+        // Read per file, not once per sweep. Each `publish_one` can block up
+        // to `ACK_TIMEOUT`, so a sweep over a long queue outlasts the drain
+        // interval by minutes — anchoring every decision to the instant the
+        // sweep began would shorten the real backoff and skip files that
+        // became due while it ran.
+        let now = std::time::Instant::now();
+        // Checked BEFORE the read, not after: `publish_one` opens with
+        // `std::fs::read` of the whole file, and re-reading the queue every
+        // second is what pinned a core for two days. Skipping here is the
+        // entire saving.
+        if !ledger.is_due(&path, now) {
+            continue;
+        }
+        match publish_one(js, &path).await {
+            Ok(()) => ledger.record_success(&path),
+            Err(e) => {
+                let outcome = ledger.record_failure(&path, now);
+                if ledger.should_warn(&path) {
+                    warn!(
+                        error = %e,
+                        path = %path.display(),
+                        failures = ledger.failures(&path),
+                        "events_outbox: publish keeps failing for this file",
+                    );
+                } else {
+                    debug!(
+                        error = %e,
+                        path = %path.display(),
+                        "events_outbox: publish failed; backing off, continuing with others",
+                    );
+                }
+                if outcome == crate::outbox_retry::AfterFailure::Quarantine
+                    && crate::outbox_retry::quarantine(&path, "events_outbox")
+                {
+                    // Only once the file has actually left the directory.
+                    // Clearing it for a file still sitting there would
+                    // restart it at zero failures with no backoff — the 1 Hz
+                    // re-read this change removes, back again.
+                    ledger.record_success(&path);
+                }
+            }
         }
     }
 }
