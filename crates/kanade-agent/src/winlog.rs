@@ -205,9 +205,20 @@ fn build_query(s: &Source, since: DateTime<Utc>) -> String {
 struct ParsedEvent {
     record_id: u64,
     at: DateTime<Utc>,
-    /// `<Data Name="X">v</Data>` fields (Security events, wake_detail).
+    /// `<Data Name="X">v</Data>` fields. This is what MANIFEST-BASED
+    /// providers emit, which is every provider this reader queries — the
+    /// names are in the provider manifest and appear in the rendered XML.
     named: HashMap<String, String>,
-    /// `<Data>v</Data>` values in document order (Winlogon, Kernel-Boot).
+    /// `<Data>v</Data>` values in document order, for classic (mc-style)
+    /// providers that ship no manifest.
+    ///
+    /// Do not reach for this because a field "looks positional" in a
+    /// PowerShell collector: `$e.Properties[i]` is a positional array
+    /// REGARDLESS of whether the manifest names the field, so an index that
+    /// worked there says nothing about the XML. Porting one over is how
+    /// Winlogon 7001/7002 and Kernel-Boot 27 came to read an always-empty
+    /// vector, emitting all-null logon payloads and never a hibernate resume
+    /// (#1210).
     positional: Vec<String>,
 }
 
@@ -268,22 +279,42 @@ enum Shaped {
     Skip,
 }
 
+/// One EventData field: by NAME, falling back to a positional index.
+///
+/// Named is what every provider this reader queries actually emits — they
+/// are manifest-based, so the manifest's field names appear in the rendered
+/// XML. Reading position instead is #1210: an always-empty vector, all-null
+/// logon payloads, and a hibernate resume that never fired.
+///
+/// The positional arm is for a classic (mc-style) provider that ships no
+/// manifest, in the documented field order. It is not what Windows sends for
+/// Winlogon or Kernel-Boot, and no fixture pretends otherwise — it exists so
+/// an unexpected shape degrades to the pre-#1210 behaviour rather than to
+/// nulls.
+fn field<'a>(ev: &'a ParsedEvent, name: &str, idx: usize) -> Option<&'a str> {
+    ev.named
+        .get(name)
+        .map(String::as_str)
+        .or_else(|| ev.positional.get(idx).map(String::as_str))
+}
+
 /// Shape the per-kind payload, mirroring the PowerShell collector's matrix.
 /// `resolve_user` turns a Winlogon SID into a display name (a leaf account
 /// name when it can be looked up, else the raw SID); it's only invoked for
 /// logon/logoff, the one kind whose user is a SID rather than a name.
 fn shape(s: &Source, ev: &ParsedEvent, mut resolve_user: impl FnMut(&str) -> String) -> Shaped {
     match s.id {
-        // Winlogon 7001/7002: positional Data — [0] = TSId (session),
-        // [1] = UserSid. `user` is the resolved name; `sid` keeps the raw SID
-        // for forensics regardless of whether translation succeeded.
+        // Winlogon 7001/7002:
+        //
+        //   <Data Name='TSId'>1</Data>
+        //   <Data Name='UserSid'>S-1-5-21-…</Data>
+        //
+        // `user` is the resolved name; `sid` keeps the raw SID for forensics
+        // regardless of whether translation succeeded.
         7001 | 7002 => {
-            let sid = ev.positional.get(1).map(String::as_str);
+            let sid = field(ev, "UserSid", 1);
             let user = sid.map(&mut resolve_user);
-            let session_id = ev
-                .positional
-                .first()
-                .and_then(|v| v.trim().parse::<i64>().ok());
+            let session_id = field(ev, "TSId", 0).and_then(|v| v.trim().parse::<i64>().ok());
             Shaped::Emit(json!({ "user": user, "sid": sid, "session_id": session_id }))
         }
         // Security 4800/4801: named Data — TargetUserName is already a name.
@@ -297,14 +328,15 @@ fn shape(s: &Source, ev: &ParsedEvent, mut resolve_user: impl FnMut(&str) -> Str
         }
         // Modern Standby enter/exit — same kinds as 42/107, flagged.
         506 | 507 => Shaped::Emit(json!({ "standby": "modern" })),
-        // Kernel-Boot 27: positional [0] = BootType. Only 0x2 (resume from
-        // hibernation) surfaces, as `resume`; 0x0 cold / 0x1 fast-startup are
-        // already covered by `boot` and would double every power-on.
-        27 => match ev
-            .positional
-            .first()
-            .and_then(|v| v.trim().parse::<i64>().ok())
-        {
+        // Kernel-Boot 27: `BootType`, alongside `LoadOptions`. Only 0x2
+        // (resume from hibernation) surfaces, as `resume`; 0x0 cold and 0x1
+        // fast-startup are already covered by `boot` and would double every
+        // power-on.
+        //
+        // This one failed silently in a way the logon bug did not: an absent
+        // `BootType` parses to `None` and falls through to `Skip`, so the arm
+        // simply never fired and no null payload showed up to notice.
+        27 => match field(ev, "BootType", 0).and_then(|v| v.trim().parse::<i64>().ok()) {
             Some(2) => Shaped::Emit(json!({ "from": "hibernate" })),
             _ => Shaped::Skip,
         },
@@ -898,9 +930,15 @@ mod tests {
     #[test]
     fn shape_logon_resolves_user_and_keeps_raw_sid() {
         let s = &SOURCES[0]; // 7001 logon
+        // The shape a real Winlogon 7001 carries. This fixture used to be
+        // `<Data>2</Data><Data>S-1-5-21-…</Data>` — unnamed, which Windows
+        // does not emit for a manifest-based provider — so it agreed with the
+        // implementation's wrong assumption and the pair could never fail
+        // (#1210). Replaced rather than added to, for that reason.
         let ev = parse(
             "",
-            "<EventData><Data>2</Data><Data>S-1-5-21-1-2-3-1001</Data></EventData>",
+            "<EventData><Data Name='TSId'>2</Data>\
+                        <Data Name='UserSid'>S-1-5-21-1-2-3-1001</Data></EventData>",
         );
         // A resolver that turns the SID into a name → `user` is the name, but
         // `sid` keeps the raw value for forensics.
@@ -919,9 +957,12 @@ mod tests {
         };
         assert_eq!(p["user"], json!("S-1-5-21-1-2-3-1001"));
 
-        // No UserSid in the event data (positional[1] absent) → user and sid
-        // are both null; the resolver is never called.
-        let ev_nosid = parse("", "<EventData><Data>5</Data></EventData>");
+        // No UserSid at all → user and sid are both null and the resolver is
+        // never called. This is what EVERY logon looked like in the field
+        // between v0.43.100 and this fix, which is the point of keeping it:
+        // the assertion is unchanged, but it now describes a genuinely
+        // degenerate record rather than the normal case.
+        let ev_nosid = parse("", "<EventData><Data Name='TSId'>5</Data></EventData>");
         let Shaped::Emit(p) = shape(s, &ev_nosid, |_| {
             panic!("resolver must not run with no SID")
         }) else {
@@ -930,6 +971,23 @@ mod tests {
         assert_eq!(p["user"], json!(null));
         assert_eq!(p["sid"], json!(null));
         assert_eq!(p["session_id"], json!(5));
+    }
+
+    /// The positional path is a fallback for a classic provider, not the
+    /// shape Windows sends for Winlogon. Pinned separately and labelled, so
+    /// that reading it can't be mistaken for evidence about the real record.
+    #[test]
+    fn shape_logon_falls_back_to_positional_data() {
+        let s = &SOURCES[0]; // 7001 logon
+        let ev = parse(
+            "",
+            "<EventData><Data>2</Data><Data>S-1-5-21-1-2-3-1001</Data></EventData>",
+        );
+        let Shaped::Emit(p) = shape(s, &ev, raw_user) else {
+            panic!("expected emit")
+        };
+        assert_eq!(p["session_id"], json!(2));
+        assert_eq!(p["sid"], json!("S-1-5-21-1-2-3-1001"));
     }
 
     #[test]
@@ -1006,8 +1064,15 @@ mod tests {
     #[test]
     fn shape_kernel_boot_27_only_emits_hibernate_resume() {
         let s = &SOURCES[11]; // 27 resume (hibernate gate)
-        // BootType 0x2 → resume from hibernate.
-        let hib = parse("", "<EventData><Data>2</Data></EventData>");
+        // BootType 0x2 → resume from hibernate. Named, as the real record is;
+        // the old unnamed fixture is why this arm could fall through to
+        // `Skip` on every host and no test noticed (#1210). `LoadOptions`
+        // rides along in the real payload and is ignored.
+        let hib = parse(
+            "",
+            "<EventData><Data Name='BootType'>2</Data>\
+                        <Data Name='LoadOptions'></Data></EventData>",
+        );
         let Shaped::Emit(p) = shape(s, &hib, raw_user) else {
             panic!("expected emit")
         };
@@ -1016,7 +1081,7 @@ mod tests {
         assert!(matches!(
             shape(
                 s,
-                &parse("", "<EventData><Data>0</Data></EventData>"),
+                &parse("", "<EventData><Data Name='BootType'>0</Data></EventData>"),
                 raw_user
             ),
             Shaped::Skip
@@ -1024,7 +1089,7 @@ mod tests {
         assert!(matches!(
             shape(
                 s,
-                &parse("", "<EventData><Data>1</Data></EventData>"),
+                &parse("", "<EventData><Data Name='BootType'>1</Data></EventData>"),
                 raw_user
             ),
             Shaped::Skip
