@@ -64,6 +64,7 @@ use windows::core::PWSTR;
 
 use crate::job_object::JobObject;
 use crate::live_tail::LiveTail;
+use crate::output_cap::{CappedOutput, MAX_CAPTURE_BYTES};
 use crate::process::ExecOutcome;
 
 pub async fn run_command_in_user_session(
@@ -435,7 +436,7 @@ impl HandleAsRaw for OwnedHandle {
 
 /// Which captured stream a chunk belongs to — selects the live-tail
 /// ring it gets mirrored into.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Stream {
     Stdout,
     Stderr,
@@ -452,7 +453,10 @@ fn read_to_string(
     live: Option<Arc<LiveTail>>,
     stream: Stream,
 ) -> (String, Option<anyhow::Error>) {
-    let mut buf = Vec::<u8>::with_capacity(4096);
+    // Bounded exactly as `process.rs::drain_to_string` is — same rule, one
+    // implementation, so the two capture paths cannot drift on what a run is
+    // allowed to produce (#1320).
+    let mut buf = CappedOutput::new(MAX_CAPTURE_BYTES);
     let mut chunk = [0u8; 4096];
     let mut err: Option<anyhow::Error> = None;
     let raw = handle.as_raw_handle_value();
@@ -474,7 +478,7 @@ fn read_to_string(
             break;
         }
         let slice = &chunk[..read as usize];
-        buf.extend_from_slice(slice);
+        buf.push(slice);
         // Mirror to the live ring as the bytes arrive (the final
         // `from_utf8_lossy` of the whole buffer below is unchanged).
         if let Some(lt) = &live {
@@ -484,7 +488,15 @@ fn read_to_string(
             }
         }
     }
-    (String::from_utf8_lossy(&buf).into_owned(), err)
+    if buf.truncated() {
+        warn!(
+            stream = ?stream,
+            bytes_written = buf.total(),
+            kept = MAX_CAPTURE_BYTES,
+            "output exceeded the capture cap and was truncated"
+        );
+    }
+    (buf.finish(), err)
 }
 
 fn wait_native(process: HANDLE) -> Result<WaitOutcome> {

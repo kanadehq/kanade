@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::live_tail::LiveTail;
+use crate::output_cap::{CappedOutput, MAX_CAPTURE_BYTES};
 
 use anyhow::{Context, Result};
 use futures::StreamExt;
@@ -586,7 +587,7 @@ enum OutcomeInner {
 
 /// Which captured stream a chunk belongs to — selects the live-tail
 /// ring it gets mirrored into.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Stream {
     Stdout,
     Stderr,
@@ -608,7 +609,10 @@ async fn drain_to_string<R>(
 where
     R: tokio::io::AsyncRead + Unpin,
 {
-    let mut buf = Vec::new();
+    // Bounded, not a growing `Vec`: the capture is held in memory for the
+    // whole run, so an unbounded one made a script's output the ceiling on
+    // the agent's RSS (#1320).
+    let mut buf = CappedOutput::new(MAX_CAPTURE_BYTES);
     let mut err: Option<anyhow::Error> = None;
     if let Some(mut s) = reader {
         // 8 KiB chunks: large enough that a chatty job doesn't thrash
@@ -620,7 +624,10 @@ where
                 Ok(0) => break,
                 Ok(n) => {
                     let slice = &chunk[..n];
-                    buf.extend_from_slice(slice);
+                    buf.push(slice);
+                    // The live tail still sees every byte: it is its own
+                    // bounded ring, and an operator watching a running job
+                    // wants the newest output regardless of the capture cap.
                     if let Some(lt) = &live {
                         match stream {
                             Stream::Stdout => lt.push_stdout(slice),
@@ -635,7 +642,18 @@ where
             }
         }
     }
-    (String::from_utf8_lossy(&buf).into_owned(), err)
+    // Operator-actionable, so it is not left to the payload marker alone: a
+    // job whose output is being cut is a job that should be changed (or moved
+    // to `collect:`), and the agent log is where that gets noticed.
+    if buf.truncated() {
+        warn!(
+            stream = ?stream,
+            bytes_written = buf.total(),
+            kept = MAX_CAPTURE_BYTES,
+            "output exceeded the capture cap and was truncated"
+        );
+    }
+    (buf.finish(), err)
 }
 
 /// Glue between the main `run_command_with_kill` (which expects a

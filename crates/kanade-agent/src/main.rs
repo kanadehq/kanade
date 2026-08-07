@@ -13,6 +13,7 @@ mod job_tail;
 mod live_tail;
 mod log_tail;
 mod logs;
+mod output_cap;
 mod ping;
 mod process;
 mod process_perf;
