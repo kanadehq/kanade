@@ -1170,6 +1170,16 @@ function EventsOperational({
     staleTime: 60_000,
   });
 
+  // The one field the strip needs out of a payload: an `agent:startup`
+  // event's OS boot time, which is what lets an outage be attributed to the
+  // machine, the agent or the link rather than left as "cannot tell" (#1316).
+  // Read defensively — `payload` is `unknown` here and arbitrary JSON on the
+  // wire, so anything that isn't a number is simply absent.
+  const bootTimeOf = (payload: unknown): number | undefined => {
+    const v = (payload as { boot_time?: unknown } | null)?.boot_time;
+    return typeof v === 'number' ? v : undefined;
+  };
+
   // Group the kept PCs' events into the shape the strip wants.
   const byPc = useMemo(() => {
     const kept = new Set(pcs);
@@ -1179,16 +1189,18 @@ function EventsOperational({
     for (const e of seedData?.events ?? []) {
       if (!kept.has(e.pc_id)) continue;
       const arr = out.get(e.pc_id);
-      if (arr) arr.push({ at: e.at, kind: e.kind, source: e.source });
-      else out.set(e.pc_id, [{ at: e.at, kind: e.kind, source: e.source }]);
+      const seed = { at: e.at, kind: e.kind, source: e.source, bootTime: bootTimeOf(e.payload) };
+      if (arr) arr.push(seed);
+      else out.set(e.pc_id, [seed]);
     }
     for (const e of opEvents) {
       if (!kept.has(e.pc_id)) continue;
       const arr = out.get(e.pc_id);
       // `source` too: the strip needs it to tell "this host has no winlog
       // collector" from "this host did not reboot inside the window" (#1256).
-      if (arr) arr.push({ at: e.at, kind: e.kind, source: e.source });
-      else out.set(e.pc_id, [{ at: e.at, kind: e.kind, source: e.source }]);
+      const row = { at: e.at, kind: e.kind, source: e.source, bootTime: bootTimeOf(e.payload) };
+      if (arr) arr.push(row);
+      else out.set(e.pc_id, [row]);
     }
     return out;
   }, [opEvents, pcs, seedData]);

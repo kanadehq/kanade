@@ -109,6 +109,15 @@ pub struct OpEvent {
     /// different question — "did it reboot inside the window?" — and gets it
     /// wrong on any host that stays up longer than the window (#1256).
     pub source: String,
+    /// OS boot time (epoch seconds) as reported by an `agent:startup` event,
+    /// `None` for every other row. Lets the SPA name the CAUSE of the outage
+    /// this start ended: a boot AFTER the last heartbeat means the machine
+    /// was away, a boot BEFORE it means the machine stayed up and only the
+    /// agent had stopped (#1316). Extracted as its own column rather than
+    /// shipping the whole payload — every other kind's payload is irrelevant
+    /// here and some are large.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub boot_time: Option<i64>,
 }
 
 /// The render-specific payload. Tagged by `render` so the SPA picks the
@@ -785,6 +794,7 @@ async fn op_timeline(ctx: &Ctx<'_>) -> anyhow::Result<WidgetData> {
     let rows = sqlx::query(
         "WITH op AS ( \
            SELECT at, kind, source, \
+                  json_extract(payload, '$.boot_time') AS boot_time, \
                   CASE \
                     WHEN kind IN ('boot', 'shutdown', 'unexpected_shutdown', \
                                   'log_service_started', 'log_service_stopped') THEN 'power' \
@@ -801,14 +811,14 @@ async fn op_timeline(ctx: &Ctx<'_>) -> anyhow::Result<WidgetData> {
                           'agent_offline', 'agent_online') \
              AND at < ?3 \
          ), seeded AS ( \
-           SELECT at, kind, source FROM op WHERE at >= ?2 \
+           SELECT at, kind, source, boot_time FROM op WHERE at >= ?2 \
            UNION ALL \
-           SELECT at, kind, source FROM ( \
-             SELECT at, kind, source, ROW_NUMBER() OVER (PARTITION BY lane ORDER BY at DESC) AS rn \
+           SELECT at, kind, source, boot_time FROM ( \
+             SELECT at, kind, source, boot_time, ROW_NUMBER() OVER (PARTITION BY lane ORDER BY at DESC) AS rn \
              FROM op WHERE at < ?2 \
            ) WHERE rn = 1 \
          ) \
-         SELECT at, kind, source FROM seeded ORDER BY at",
+         SELECT at, kind, source, boot_time FROM seeded ORDER BY at",
     )
     .bind(pc_id)
     .bind(ctx.from)
@@ -821,7 +831,16 @@ async fn op_timeline(ctx: &Ctx<'_>) -> anyhow::Result<WidgetData> {
             let at: DateTime<Utc> = r.try_get("at").ok()?;
             let kind: String = r.try_get("kind").ok()?;
             let source: String = r.try_get("source").ok()?;
-            Some(OpEvent { at, kind, source })
+            // Absent for every kind but `agent:startup`, and absent on rows
+            // written by agents older than #1316 — `.ok().flatten()` so both
+            // degrade to None rather than dropping the event.
+            let boot_time: Option<i64> = r.try_get("boot_time").ok().flatten();
+            Some(OpEvent {
+                at,
+                kind,
+                source,
+                boot_time,
+            })
         })
         .collect();
     // Best-effort read of the agent's last heartbeat so the SPA can gate the

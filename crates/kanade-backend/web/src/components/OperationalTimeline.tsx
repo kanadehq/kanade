@@ -13,6 +13,11 @@ export type OpEvent = {
    *  `{at, kind}` still type-checks; `hasWinlog` falls back to a kind test
    *  when it is absent. */
   source?: string;
+  /** OS boot time (epoch **seconds**) — set only on an `agent:startup`
+   *  event. What lets an outage be attributed rather than merely marked
+   *  (#1316); absent on every other kind and on anything an agent older
+   *  than that wrote. */
+  bootTime?: number | null;
 };
 
 // A reconstructed lane interval. `openStart` / `openEnd` mark a span that
@@ -532,7 +537,24 @@ export function swimlaneWindow(
 }
 
 /** Why a stretch carries no evidence. */
-export type NoEvidenceReason = 'truncated' | 'offline' | 'noEvents' | 'agentDown';
+export type NoEvidenceReason =
+  | 'truncated'
+  | 'offline'
+  | 'noEvents'
+  /** Heard nothing, and cannot say why — no `agent:startup` carrying a boot
+   *  time closed this stretch. What every outage read as before #1316, and
+   *  still the answer for agents that predate it. */
+  | 'agentDown'
+  /** The machine itself was away: the agent came back reporting a boot
+   *  LATER than the last heartbeat, so the host rebooted during the gap. */
+  | 'agentDownHostOff'
+  /** Only the agent was away: it came back reporting a boot EARLIER than the
+   *  last heartbeat, so the machine never rebooted and was up throughout. */
+  | 'agentDownAgentStopped'
+  /** Only the connection was away: the outage closed with no agent restart
+   *  at all, so the agent was running and observing the whole time — its own
+   *  records for the stretch arrive later through the outbox. */
+  | 'agentDownLinkOnly';
 
 /**
  * Unknown stretches recorded by `agent_offline` events.
@@ -559,7 +581,17 @@ export function agentDownRanges(
   liveEdge: number,
 ): { from: number; to: number; reason: NoEvidenceReason }[] {
   const sorted = events
-    .map((e) => ({ ts: Date.parse(e.at), kind: e.kind }))
+    .map((e) => ({
+      ts: Date.parse(e.at),
+      kind: e.kind,
+      // Seconds on the wire (that is what the OS reports); milliseconds
+      // everywhere in this file. Converted once, here, rather than at each
+      // comparison — a unit mismatch against an epoch-ms instant is off by a
+      // factor of 1000 and reads as "booted in 1970", which classifies every
+      // outage as a reboot instead of failing visibly.
+      bootTs: typeof e.bootTime === 'number' ? e.bootTime * 1000 : undefined,
+      source: e.source,
+    }))
     .filter((e) => !Number.isNaN(e.ts))
     .sort((a, b) => a.ts - b.ts);
 
@@ -592,10 +624,124 @@ export function agentDownRanges(
     }
     const from = Math.max(sorted[i].ts, t0);
     const to = Math.min(next ? next.ts : liveEdge, t1);
-    if (to > from) out.push({ from, to, reason: 'agentDown' });
+    if (to > from) out.push({ from, to, reason: outageReason(sorted, i, next?.ts) });
   }
   return mergeRanges(out);
 }
+
+/**
+ * Why the backend stopped hearing from the host — the question the hatch used
+ * to answer with "not distinguishable" (#1316).
+ *
+ * Three causes look identical from the outside, because all three are
+ * silence: the machine went away, the agent went away, or the link went away.
+ * They are told apart by one fact the agent reports when it comes back, its
+ * OS **boot time**, against one the backend already had, the last heartbeat
+ * before the gap:
+ *
+ * | on return | boot vs. last beat | cause |
+ * |---|---|---|
+ * | `agent:startup` | after  | the host rebooted → the MACHINE was away |
+ * | `agent:startup` | before | no reboot, so it was up → the AGENT was stopped |
+ * | the AGENT's own events stamped INSIDE the gap | — | it was alive and observing → the LINK was away |
+ *
+ * The third row is positive evidence on purpose. "No startup event, so the
+ * agent never restarted, so it was only the link" reads well and is unsound —
+ * an agent too old to send a boot time still restarts, and one whose startup
+ * event is still sitting in the outbox has not reported yet. Either would be
+ * answered with the most reassuring of the three causes on the strength of
+ * nothing. What actually identifies the link case is hearing FROM the host
+ * about the silent stretch afterwards, which is the same late-delivery
+ * property #1245 turns on.
+ *
+ * Deliberately no tolerance around the comparison. `boot_time` is derived
+ * (`now − uptime`) and jitters by seconds within one boot session, but the
+ * two instants being compared are minutes apart in every real case: a machine
+ * that rebooted was off long enough to shut down and start, and one that did
+ * not has a boot time from an earlier session entirely. A tolerance here
+ * would only blur the one case it cannot help with.
+ *
+ * Falls back to the old undifferentiated `agentDown` whenever the startup
+ * event carries no boot time — every agent older than this change, which is
+ * most of a fleet until it rolls out. Saying "cannot tell" is the honest
+ * answer there; guessing a cause from a missing field is not.
+ */
+function outageReason(
+  sorted: { ts: number; kind: string; bootTs?: number; source?: string }[],
+  offlineIdx: number,
+  closedAt: number | undefined,
+): NoEvidenceReason {
+  const lastBeat = sorted[offlineIdx].ts;
+  // The restart that ended THIS outage: an `agent_online` carrying a boot
+  // time, at or after the close. Scanning from the close rather than from the
+  // offline event matters — the watchdog's inferred `agent_online` and the
+  // agent's own `agent:startup` describe the same recovery and can arrive in
+  // either order, so the one with the payload is not necessarily the one that
+  // closed the range.
+  const startup = sorted.find(
+    (e) =>
+      e.source === 'agent:startup' &&
+      e.bootTs !== undefined &&
+      e.ts >= lastBeat &&
+      (closedAt === undefined ||
+        (e.ts <= closedAt + SAME_RECOVERY_MS &&
+          // …and not the recovery of a LATER outage. The tolerance is ten
+          // minutes and a flapping agent produces outages closer together
+          // than that, so without this the second restart's boot time gets
+          // compared against the FIRST outage's last heartbeat and attributes
+          // a stretch it knows nothing about. An `agent_offline` between the
+          // close and the startup opens a different silence; whatever comes
+          // back after it belongs to that one.
+          !sorted.some((o) => o.kind === 'agent_offline' && o.ts > closedAt && o.ts < e.ts))),
+  );
+  if (startup?.bootTs !== undefined) {
+    return startup.bootTs > lastBeat ? 'agentDownHostOff' : 'agentDownAgentStopped';
+  }
+  // The link case needs POSITIVE evidence, not the absence of a restart.
+  //
+  // "No startup event, so the agent never restarted, so only the link was
+  // down" reads well and is unsound: an agent too old to send a boot time
+  // still restarts, and a startup event that is merely still in the outbox
+  // has not arrived yet. Either would be reported as "the PC was fine" — the
+  // most reassuring of the three answers, from no evidence at all.
+  //
+  // What does identify it is the agent's own records timestamped INSIDE the
+  // stretch. The agent kept sampling while the backend could not hear it, and
+  // those events arrive afterwards with their original `at` (the same
+  // property #1245 turns on). Anything the HOST produced in there proves the
+  // host and the agent were both alive, so what was missing was the link.
+  //
+  // "The host produced it" is narrower than "it is timestamped in there".
+  // Winlog records are written by the OS and read out of the Event Log after
+  // the agent returns, so a `sleep` stamped inside the gap proves the MACHINE
+  // was on at that instant and says nothing about the agent — that is the
+  // #1245 sequence exactly, where the agent was dead and the OS logged on
+  // regardless. Only the agent's own producers (the idle sampler, `agent:*`)
+  // are evidence that the AGENT was alive.
+  //
+  // An event with no `source` at all is not counted: it cannot be attributed,
+  // and guessing here would put the reassuring answer back on weak evidence.
+  const heardFromInside = sorted.some(
+    (e) =>
+      e.source?.startsWith('agent:') &&
+      !OP_OBSERVATION_KIND_SET.has(e.kind) &&
+      e.ts > lastBeat &&
+      (closedAt === undefined || e.ts < closedAt),
+  );
+  return heardFromInside ? 'agentDownLinkOnly' : 'agentDown';
+}
+
+/**
+ * How far after an outage closes an `agent:startup` may land and still count
+ * as the same recovery.
+ *
+ * The watchdog closes the range from a heartbeat; the agent's own startup
+ * event travels the obs outbox and can be a little behind. Generous, because
+ * the alternative failure is worse: too tight and a real restart is read as
+ * "link only", which is the one cause that claims nothing was wrong with the
+ * host.
+ */
+const SAME_RECOVERY_MS = 10 * 60 * 1000;
 
 /** Coalesce overlapping / touching ranges, keeping the first one's fields. */
 function mergeRanges<T extends { from: number; to: number }>(ranges: T[]): T[] {
