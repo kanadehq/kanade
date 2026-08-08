@@ -25,6 +25,7 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
 
+use super::sql_like::contains_like;
 use super::time_bounds::bounds_in_range;
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::SqliteRow;
@@ -79,6 +80,18 @@ pub struct ListQuery {
     /// JSON number 2 that the collectors emit.
     pub payload_key: Option<String>,
     pub payload_value: Option<String>,
+    /// Issue #1343: match PCs whose operator-managed `agent_meta`
+    /// carries this text in ANY value — the same "global attribute
+    /// search" the Agents page offers (#1061), so an operator can ask
+    /// "events from the sales department's machines" without knowing
+    /// which key holds that.
+    ///
+    /// Filters the PC set, not the events: `agent_meta` describes
+    /// machines, and an event's own payload has nothing to do with it.
+    /// A PC with no metadata projected is therefore excluded outright —
+    /// see the empty-state note in the SPA, which has to distinguish
+    /// "no machine matches" from "metadata was never populated".
+    pub meta_any: Option<String>,
     pub limit: Option<i64>,
 }
 
@@ -160,6 +173,17 @@ pub async fn list(
     // payload values under SQLite's numeric comparison rules.
     let payload_value_num: Option<f64> = payload_value.and_then(|v| v.parse().ok());
 
+    // Issue #1343: blank (or whitespace-only) is "no filter", not "match
+    // every PC whose metadata contains the empty string" — the latter
+    // would silently drop every host with no metadata the moment the box
+    // was cleared.
+    let meta_any_like = q
+        .meta_any
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(contains_like);
+
     let kinds_json = csv_to_json_array(&q.kinds);
     let kinds_ex_json = csv_to_json_array(&q.kinds_ex);
     let sources_json = csv_to_json_array(&q.sources);
@@ -202,8 +226,17 @@ pub async fn list(
            AND (?11 IS NULL
                 OR json_extract(payload, '$.' || ?11) = ?12
                 OR (?13 IS NOT NULL AND json_extract(payload, '$.' || ?11) = ?13))
+           -- `ESCAPE '\\'` in the Rust source is a single backslash in the
+           -- SQL: `contains_like` escapes the operator's `%` / `_` with
+           -- it. Writing `'\'` here would emit an EMPTY escape clause,
+           -- which SQLite rejects only when the LIKE is actually
+           -- evaluated — so the bug hides behind the `?14 IS NULL`
+           -- short-circuit and every unfiltered query still passes.
+           AND (?14 IS NULL
+                OR pc_id IN (SELECT pc_id FROM agent_meta
+                             WHERE value LIKE ?14 ESCAPE '\\'))
          ORDER BY at DESC, id DESC
-         LIMIT ?14",
+         LIMIT ?15",
     )
     .bind(q.pc_id.as_deref())
     .bind(q.from)
@@ -218,6 +251,7 @@ pub async fn list(
     .bind(payload_key)
     .bind(payload_value)
     .bind(payload_value_num)
+    .bind(meta_any_like)
     .bind(limit)
     .fetch_all(&pool)
     .await
@@ -498,6 +532,7 @@ mod tests {
             sources_ex: None,
             payload_key: None,
             payload_value: None,
+            meta_any: None,
             limit: None,
         }
     }
@@ -638,5 +673,157 @@ mod tests {
             let res = lane_seeds(State(pool.clone()), Query(SeedsQuery { pcs, before })).await;
             assert!(matches!(res, Err(StatusCode::BAD_REQUEST)));
         }
+    }
+
+    // ---- #1343: filter events by the PC's agent_meta ----
+
+    /// `fresh_pool` plus a second host, and metadata for both. `pc-01`
+    /// keeps the seeded `logon`; `pc-02` gets its own event so a filter
+    /// that selects the wrong host is visible as a wrong row rather than
+    /// as an empty result.
+    async fn pool_with_meta() -> SqlitePool {
+        let pool = fresh_pool().await;
+        sqlx::query(
+            "INSERT INTO obs_events (pc_id, at, kind, source, event_record_id, payload)
+             VALUES ('pc-02', ?, 'boot', 'winlog:System', '2', '{}')",
+        )
+        .bind(Utc.with_ymd_and_hms(2026, 5, 28, 10, 42, 0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+        for (pc, key, value) in [
+            ("pc-01", "department", "Sales"),
+            ("pc-01", "owner", "Ann"),
+            ("pc-02", "department", "Engineering"),
+        ] {
+            sqlx::query("INSERT INTO agent_meta (pc_id, key, value) VALUES (?, ?, ?)")
+                .bind(pc)
+                .bind(key)
+                .bind(value)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        pool
+    }
+
+    async fn list_with_meta_any(pool: &SqlitePool, meta_any: Option<&str>) -> Vec<EventRow> {
+        let q = ListQuery {
+            meta_any: meta_any.map(str::to_string),
+            ..bounds_query(None, None)
+        };
+        list(State(pool.clone()), Query(q)).await.unwrap().0.events
+    }
+
+    #[tokio::test]
+    async fn meta_any_matches_a_value_under_any_key() {
+        let pool = pool_with_meta().await;
+        // `department` on one host, `owner` on the same host — the point
+        // of the global search is that the operator needn't know which
+        // key carries the text.
+        let rows = list_with_meta_any(&pool, Some("Sales")).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pc_id, "pc-01");
+
+        let rows = list_with_meta_any(&pool, Some("Ann")).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pc_id, "pc-01");
+    }
+
+    #[tokio::test]
+    async fn meta_any_is_a_contains_match() {
+        let pool = pool_with_meta().await;
+        let rows = list_with_meta_any(&pool, Some("ngineer")).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pc_id, "pc-02");
+    }
+
+    #[tokio::test]
+    async fn absent_or_blank_meta_any_filters_nothing() {
+        let pool = pool_with_meta().await;
+        // Blank must mean "no filter", NOT "value LIKE '%%'". The two
+        // differ exactly where it matters: a host with no metadata row
+        // survives the first and is dropped by the second, so a cleared
+        // search box would silently shrink the fleet.
+        sqlx::query(
+            "INSERT INTO obs_events (pc_id, at, kind, source, event_record_id, payload)
+             VALUES ('pc-03-no-meta', ?, 'boot', 'winlog:System', '3', '{}')",
+        )
+        .bind(Utc.with_ymd_and_hms(2026, 5, 28, 10, 43, 0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        for probe in [None, Some(""), Some("   ")] {
+            let rows = list_with_meta_any(&pool, probe).await;
+            assert_eq!(rows.len(), 3, "probe {probe:?} should not filter");
+            assert!(rows.iter().any(|r| r.pc_id == "pc-03-no-meta"));
+        }
+    }
+
+    #[tokio::test]
+    async fn meta_any_excludes_pcs_with_no_metadata() {
+        // The documented consequence, asserted so it stays intentional:
+        // the filter runs through `agent_meta`, so a host with nothing
+        // projected cannot match. The SPA's empty state exists because
+        // of this, and must not be dropped as redundant.
+        let pool = pool_with_meta().await;
+        sqlx::query(
+            "INSERT INTO obs_events (pc_id, at, kind, source, event_record_id, payload)
+             VALUES ('pc-03-no-meta', ?, 'boot', 'winlog:System', '3', '{}')",
+        )
+        .bind(Utc.with_ymd_and_hms(2026, 5, 28, 10, 43, 0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let rows = list_with_meta_any(&pool, Some("Sales")).await;
+        assert!(rows.iter().all(|r| r.pc_id != "pc-03-no-meta"));
+    }
+
+    #[tokio::test]
+    async fn meta_any_treats_like_metacharacters_literally() {
+        // `%` and `_` are LIKE wildcards. Unescaped, a search for `_`
+        // matches every single-character value and `%` matches
+        // everything — so an operator typing a literal underscore would
+        // get the whole fleet back and read it as a match.
+        let pool = fresh_pool().await;
+        for (pc, value) in [("pc-01", "a_b"), ("pc-02", "axb")] {
+            sqlx::query("INSERT INTO agent_meta (pc_id, key, value) VALUES (?, 'tag', ?)")
+                .bind(pc)
+                .bind(value)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO obs_events (pc_id, at, kind, source, event_record_id, payload)
+             VALUES ('pc-02', ?, 'boot', 'winlog:System', '2', '{}')",
+        )
+        .bind(Utc.with_ymd_and_hms(2026, 5, 28, 10, 42, 0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let rows = list_with_meta_any(&pool, Some("a_b")).await;
+        assert_eq!(rows.len(), 1, "`_` must not act as a wildcard");
+        assert_eq!(rows[0].pc_id, "pc-01");
+
+        let rows = list_with_meta_any(&pool, Some("%")).await;
+        assert!(rows.is_empty(), "`%` must not match every value");
+    }
+
+    #[tokio::test]
+    async fn meta_any_composes_with_the_other_filters() {
+        // It narrows the PC set; it must not widen or replace anything.
+        let pool = pool_with_meta().await;
+        let q = ListQuery {
+            meta_any: Some("Sales".into()),
+            kinds: Some("boot".into()),
+            ..bounds_query(None, None)
+        };
+        let rows = list(State(pool.clone()), Query(q)).await.unwrap().0.events;
+        // pc-01 matches the metadata but has only a `logon`; pc-02 has
+        // the `boot` but the wrong department. The honest answer is none.
+        assert!(rows.is_empty());
     }
 }

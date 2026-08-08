@@ -38,6 +38,7 @@ pub mod script_objects;
 pub mod scripts;
 pub mod server;
 pub mod server_settings;
+pub mod sql_like;
 pub mod time_bounds;
 pub mod view_sql;
 pub mod views;

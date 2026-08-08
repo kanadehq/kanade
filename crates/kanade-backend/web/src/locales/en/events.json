@@ -47,7 +47,8 @@
     "placeholders": {
       "pcId": "exact match — eg. pc-01",
       "payloadKey": "key — eg. user",
-      "payloadValue": "value — eg. alice"
+      "payloadValue": "value — eg. alice",
+      "metaAny": "search any value — eg. Sales"
     },
     "customFrom": "from",
     "customTo": "to",
@@ -64,7 +65,8 @@
       "30d": "30 days (from 29 days ago 00:00)",
       "all": "all time",
       "custom": "custom (absolute range)"
-    }
+    },
+    "metaAny": "pc metadata"
   },
   "columns": {
     "when": "when",
@@ -138,5 +140,11 @@
     "chart": "Timeline",
     "heatmap": "Activity",
     "table": "Event list"
+  },
+  "metaSearch": {
+    "matchedNoEvents_one": "{{count}} PC(s) match this metadata, but none have events in the selected period. Try widening the range.",
+    "matchedNoEvents_other": "{{count}} PC(s) match this metadata, but none have events in the selected period. Try widening the range.",
+    "noPcMatched": "No PC has metadata matching \"{{text}}\". The zero is about the search text, not about the fleet.",
+    "noMetadataAtAll": "No PC has any metadata set, so this search can only ever return nothing. Set metadata on the Agents page or via the AD sync first."
   }
 }
