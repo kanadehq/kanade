@@ -1462,6 +1462,96 @@ fn init_tracing(log: &LogSection) -> Result<Option<tracing_appender::non_blockin
 }
 
 #[cfg(test)]
+mod compression_tests {
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{Request, header};
+    use axum::routing::get;
+    use tower::ServiceExt;
+    use tower_http::compression::CompressionLayer;
+
+    /// Big enough that compression is worth doing and repetitive enough to
+    /// compress hard — the SPA bundle and the `/api/jobs` JSON are both like
+    /// this in the ways that matter.
+    fn payload() -> String {
+        "the quick brown fox jumps over the lazy dog. ".repeat(400)
+    }
+
+    /// Drive the layer the router mounts (`main`, "#1215①") and assert it
+    /// actually encodes.
+    ///
+    /// The failure this exists for is a PARTIAL feature drop, and it is
+    /// silent. Measured, not assumed:
+    ///
+    /// - dropping **both** `compression-gzip` and `compression-br` from
+    ///   tower-http is a compile error (`tower_http::compression` stops
+    ///   existing), so that case was never able to slip through;
+    /// - dropping **one** is not. The module still exists,
+    ///   `CompressionLayer::new()` still compiles and still runs, and the
+    ///   dropped encoding simply stops being negotiated. Removing `br` while
+    ///   keeping `gzip` fails only `brotli_is_negotiated_too` here and
+    ///   nothing else in the workspace.
+    ///
+    /// A Cargo feature edit reads as dependency housekeeping and would pass
+    /// review on that basis, which is exactly why the encodings are asserted
+    /// one by one rather than as "compression works".
+    ///
+    /// Deliberately built here rather than against the real router: the
+    /// thing at risk is the negotiation, and reaching the real router needs
+    /// an `AppState` (pool, mailer, NATS) whose setup would dominate the
+    /// test and give it other reasons to break.
+    async fn encoding_for(accept: &str) -> (Option<String>, usize) {
+        let body = payload();
+        let plain = body.len();
+        let app = Router::new()
+            .route("/x", get(move || async move { body }))
+            .layer(CompressionLayer::new());
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/x")
+                    .header(header::ACCEPT_ENCODING, accept)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let enc = res
+            .headers()
+            .get(header::CONTENT_ENCODING)
+            .map(|v| v.to_str().unwrap().to_owned());
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(plain > 4096, "payload must be worth compressing");
+        (enc, bytes.len())
+    }
+
+    #[tokio::test]
+    async fn gzip_is_negotiated_and_actually_shrinks_the_body() {
+        let (enc, len) = encoding_for("gzip").await;
+        assert_eq!(enc.as_deref(), Some("gzip"));
+        // Not just the header: a layer that labels without encoding would
+        // pass a header-only assertion.
+        assert!(len < payload().len() / 4, "gzip body was {len} bytes");
+    }
+
+    #[tokio::test]
+    async fn brotli_is_negotiated_too() {
+        let (enc, len) = encoding_for("br").await;
+        assert_eq!(enc.as_deref(), Some("br"));
+        assert!(len < payload().len() / 4, "br body was {len} bytes");
+    }
+
+    #[tokio::test]
+    async fn a_client_that_advertises_nothing_gets_the_bytes_unchanged() {
+        let (enc, len) = encoding_for("identity").await;
+        assert_eq!(enc, None);
+        assert_eq!(len, payload().len());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use sqlx::SqlitePool;
