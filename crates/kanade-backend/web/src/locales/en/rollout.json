@@ -30,7 +30,8 @@
     },
     "scopeValuePlaceholder": {
       "global": "n/a",
-      "group": "e.g. canary"
+      "group": "search groups (e.g. canary)",
+      "pc": "search PCs by pc_id"
     },
     "rolloutButton": "Roll out",
     "jitterBadge": "jitter {{jitter}}",
