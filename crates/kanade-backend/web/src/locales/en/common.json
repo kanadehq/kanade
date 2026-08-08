@@ -105,7 +105,8 @@
       "showAll": "Show all columns",
       "moveUp": "Move {{name}} left",
       "moveDown": "Move {{name}} right",
-      "resetOrder": "Reset column order"
+      "resetOrder": "Reset column order",
+      "metaSection": "Metadata"
     }
   },
   "comingSoon": {

@@ -468,30 +468,34 @@ fn sep(started: &mut bool) -> &'static str {
 /// can't trip `too many SQL variables` on a large roster. (Gemini HIGH.)
 const META_IN_CHUNK: usize = 500;
 
-/// Decorate a page of agents with their `agent_meta` rows, grouped by
-/// pc_id. No-op for an empty page. The page is queried in chunks of
-/// [`META_IN_CHUNK`] so the IN-list can't exceed SQLite's bound-parameter
-/// limit even when the caller asked for the whole (unbounded) fleet. A
-/// metadata read failure is surfaced to the caller rather than silently
-/// dropping columns.
-async fn attach_meta(pool: &SqlitePool, page: &mut [AgentRow]) -> Result<(), (StatusCode, String)> {
-    if page.is_empty() {
-        return Ok(());
-    }
+/// The `agent_meta` rows for a set of PCs, grouped by pc_id. PCs with no
+/// attributes are simply absent from the map — callers treat that as an
+/// empty set rather than an error, since having no metadata is the normal
+/// state for most of a fleet.
+///
+/// Queried in chunks of [`META_IN_CHUNK`] so the IN-list can't exceed
+/// SQLite's bound-parameter limit however many PCs the caller asked about.
+/// A read failure is surfaced rather than silently dropping columns: a
+/// blank column and a column that failed to load look identical on screen,
+/// and only one of them is worth an operator's attention.
+async fn meta_by_pc(
+    pool: &SqlitePool,
+    pc_ids: &[String],
+) -> Result<std::collections::HashMap<String, Vec<MetaEntry>>, (StatusCode, String)> {
     let mut by_pc: std::collections::HashMap<String, Vec<MetaEntry>> =
         std::collections::HashMap::new();
-    for chunk in page.chunks(META_IN_CHUNK) {
+    for chunk in pc_ids.chunks(META_IN_CHUNK) {
         let mut qb: QueryBuilder<Sqlite> =
             QueryBuilder::new("SELECT pc_id, key, value FROM agent_meta WHERE pc_id IN (");
         {
             let mut list = qb.separated(", ");
-            for a in chunk {
-                list.push_bind(a.pc_id.clone());
+            for id in chunk {
+                list.push_bind(id.clone());
             }
         }
         qb.push(") ORDER BY pc_id, key");
         let rows = qb.build().fetch_all(pool).await.map_err(|e| {
-            warn!(error = %e, "attach agent_meta");
+            warn!(error = %e, "load agent_meta");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "load agent metadata failed".to_string(),
@@ -504,6 +508,21 @@ async fn attach_meta(pool: &SqlitePool, page: &mut [AgentRow]) -> Result<(), (St
             by_pc.entry(pc).or_default().push(MetaEntry { key, value });
         }
     }
+    Ok(by_pc)
+}
+
+/// Decorate a page of agents with their `agent_meta` rows, grouped by
+/// pc_id. No-op for an empty page. The page is queried in chunks of
+/// [`META_IN_CHUNK`] so the IN-list can't exceed SQLite's bound-parameter
+/// limit even when the caller asked for the whole (unbounded) fleet. A
+/// metadata read failure is surfaced to the caller rather than silently
+/// dropping columns.
+async fn attach_meta(pool: &SqlitePool, page: &mut [AgentRow]) -> Result<(), (StatusCode, String)> {
+    if page.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<String> = page.iter().map(|a| a.pc_id.clone()).collect();
+    let mut by_pc = meta_by_pc(pool, &ids).await?;
     for a in page.iter_mut() {
         if let Some(m) = by_pc.remove(&a.pc_id) {
             a.meta = m;
@@ -929,6 +948,58 @@ fn row_to_agent(r: sqlx::sqlite::SqliteRow) -> AgentRow {
 /// fleet, sorted. Drives the Agents page column picker and the metadata
 /// search field's key dropdown (#1051). Viewer-readable (commons), like
 /// the rest of the roster substrate.
+/// Upper bound on how many PCs one [`meta_bulk`] call may ask about.
+/// The caller is meant to pass the rows currently on screen, so this is a
+/// guard against a hand-built request rather than a limit any page reaches
+/// — the largest table page in the SPA is 200 rows.
+const MAX_META_PCS: usize = 1_000;
+
+#[derive(Deserialize)]
+pub struct MetaBulkQuery {
+    /// Comma-separated pc_ids. Blank entries are ignored; duplicates are
+    /// collapsed so a caller doesn't have to pre-clean its row list.
+    #[serde(default)]
+    pcs: String,
+}
+
+/// `GET /api/agents/meta?pcs=a,b,c` — the `agent_meta` attributes for a set
+/// of PCs, as `{ pc_id: [{key, value}, …] }`.
+///
+/// #1357: any table whose rows carry a pc_id can offer metadata as columns,
+/// but only the Agents list gets its metadata joined server-side (it owns
+/// the row type). Rather than teach seven more endpoints to join it, this
+/// lets a page fetch the attributes for the rows it is already showing.
+/// The payload is therefore proportional to what is on screen, not to
+/// fleet size.
+///
+/// PCs with no attributes are absent from the map — for most of a fleet
+/// that is the normal state, and sending empty arrays for them would make
+/// the response mostly padding.
+pub async fn meta_bulk(
+    State(pool): State<SqlitePool>,
+    Query(q): Query<MetaBulkQuery>,
+) -> Result<Json<std::collections::HashMap<String, Vec<MetaEntry>>>, (StatusCode, String)> {
+    let mut seen = std::collections::HashSet::new();
+    let ids: Vec<String> = q
+        .pcs
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter(|s| seen.insert(s.to_string()))
+        .map(str::to_string)
+        .collect();
+    if ids.is_empty() {
+        return Ok(Json(std::collections::HashMap::new()));
+    }
+    if ids.len() > MAX_META_PCS {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("too many pcs: {} (max {MAX_META_PCS})", ids.len()),
+        ));
+    }
+    Ok(Json(meta_by_pc(&pool, &ids).await?))
+}
+
 pub async fn meta_keys(State(pool): State<SqlitePool>) -> Result<Json<Vec<String>>, StatusCode> {
     let rows = sqlx::query("SELECT DISTINCT key FROM agent_meta ORDER BY key")
         .fetch_all(&pool)
@@ -1625,6 +1696,93 @@ mod tests {
                 .meta
                 .is_empty()
         );
+    }
+
+    /// Call the bulk metadata endpoint with a raw `pcs` string.
+    async fn meta_bulk_call(
+        pool: SqlitePool,
+        pcs: &str,
+    ) -> Result<std::collections::HashMap<String, Vec<MetaEntry>>, (StatusCode, String)> {
+        meta_bulk(
+            State(pool),
+            Query(MetaBulkQuery {
+                pcs: pcs.to_string(),
+            }),
+        )
+        .await
+        .map(|Json(m)| m)
+    }
+
+    #[tokio::test]
+    async fn meta_bulk_returns_attributes_grouped_by_pc() {
+        let pool = seeded_pool().await;
+        set_meta(&pool, "PC001", &[("氏名", "山田太郎"), ("所属", "経理")]).await;
+        set_meta(&pool, "PC002", &[("氏名", "田中花子")]).await;
+
+        let got = meta_bulk_call(pool, "PC001,PC002").await.unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(
+            got["PC001"],
+            vec![
+                MetaEntry::new("所属", "経理"),
+                MetaEntry::new("氏名", "山田太郎"),
+            ],
+            "entries come back ordered by key"
+        );
+        assert_eq!(got["PC002"], vec![MetaEntry::new("氏名", "田中花子")]);
+    }
+
+    #[tokio::test]
+    async fn meta_bulk_omits_pcs_without_attributes() {
+        // Having no metadata is the normal state for most of a fleet, so
+        // those PCs are absent rather than present-and-empty — otherwise
+        // the response is mostly padding.
+        let pool = seeded_pool().await;
+        set_meta(&pool, "PC001", &[("dept", "eng")]).await;
+        let got = meta_bulk_call(pool, "PC001,PC002,nosuchpc").await.unwrap();
+        assert_eq!(got.keys().collect::<Vec<_>>(), vec!["PC001"]);
+    }
+
+    #[tokio::test]
+    async fn meta_bulk_cleans_up_the_caller_s_id_list() {
+        // A page passes the pc_ids of the rows it is showing; it shouldn't
+        // have to dedup or trim them first.
+        let pool = seeded_pool().await;
+        set_meta(&pool, "PC001", &[("dept", "eng")]).await;
+        let got = meta_bulk_call(pool.clone(), " PC001 , PC001 ,,PC001")
+            .await
+            .unwrap();
+        assert_eq!(got["PC001"], vec![MetaEntry::new("dept", "eng")]);
+
+        // No usable ids at all is an empty answer, not an error.
+        assert!(meta_bulk_call(pool, " , ,").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn meta_bulk_rejects_an_oversized_id_list() {
+        let pool = seeded_pool().await;
+        let pcs = (0..MAX_META_PCS + 1)
+            .map(|i| format!("PC{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let err = meta_bulk_call(pool, &pcs).await.unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("too many pcs"), "got {}", err.1);
+    }
+
+    #[tokio::test]
+    async fn meta_bulk_handles_more_pcs_than_one_sql_chunk() {
+        // The IN-list is chunked so it can't exceed SQLite's bound-parameter
+        // limit. A request spanning more than one chunk must still return
+        // every PC's attributes, not just the first chunk's.
+        let pool = seeded_pool().await;
+        let n = META_IN_CHUNK + 50;
+        let ids: Vec<String> = (0..n).map(|i| format!("BULK{i}")).collect();
+        for id in &ids {
+            set_meta(&pool, id, &[("dept", "eng")]).await;
+        }
+        let got = meta_bulk_call(pool, &ids.join(",")).await.unwrap();
+        assert_eq!(got.len(), n);
     }
 
     #[tokio::test]

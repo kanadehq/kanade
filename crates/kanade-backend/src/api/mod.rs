@@ -211,6 +211,10 @@ pub fn router(state: AppState) -> Router {
         // metadata search dropdown. Static segment, resolves ahead of the
         // `{pc_id}` route below (same as `/versions`).
         .route("/api/agents/meta-keys", get(agents::meta_keys))
+        // #1357: agent_meta for the rows a page is currently showing, so a
+        // table that isn't the Agents list can offer them as columns.
+        // Static segment, so it resolves ahead of the `{pc_id}` routes.
+        .route("/api/agents/meta", get(agents::meta_bulk))
         .route("/api/agents/{pc_id}", get(agents::detail))
         // v0.40 Part 1: per-PC host-wide perf time-series. Bucketed
         // server-side via `?from=&to=&step=` so the SPA chart can

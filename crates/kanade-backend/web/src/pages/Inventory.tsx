@@ -551,7 +551,12 @@ function FleetProbeTable({
             </div>
           )
         ) : (
-          <Table resizeKey="inventory.fleet" picker>
+          <Table
+            resizeKey="inventory.fleet"
+            picker
+            metaColumns
+            pcIds={(byJob.data?.rows ?? []).map((r) => r.pc_id)}
+          >
             <TableHeader>
               <TableRow>
                 <TableHead colId="pcId">{t('fleet.columns.pcId')}</TableHead>
@@ -574,6 +579,7 @@ function FleetProbeTable({
               {(byJob.data?.rows ?? []).map((r) => (
                 <TableRow
                   key={r.pc_id}
+                  pcId={r.pc_id}
                   className="cursor-pointer hover:bg-muted/5"
                   onClick={() => pickPc(r.pc_id)}
                 >

@@ -14,3 +14,21 @@
 //     silences the "no i18n instance" warning.
 import './index.css';
 import '../src/i18n';
+
+// #1357: some mounted components fetch through react-query (the shared
+// table asks for a page's `agent_meta`). A component under test must sit
+// under a provider exactly as it does in the app, and `retry: false` keeps
+// a deliberately-stubbed failure from taking the test's whole timeout.
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { beforeMount } from '@playwright/experimental-ct-react/hooks';
+
+beforeMount(async ({ App }) => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false, gcTime: 0 } },
+  });
+  return (
+    <QueryClientProvider client={client}>
+      <App />
+    </QueryClientProvider>
+  );
+});
