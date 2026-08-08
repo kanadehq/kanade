@@ -25,8 +25,20 @@
     "chipStates": {
       "off": "未選択",
       "include": "含む",
-      "exclude": "除外"
+      "exclude": "除外",
+      "mixed": "一部選択"
     },
+    "categories": {
+      "session": "セッション",
+      "power": "電源",
+      "presence": "在席",
+      "activity": "利用状況",
+      "other": "その他"
+    },
+    "clearSelection": "選択を解除",
+    "noSelection": "未選択 (すべて表示中)",
+    "expandGroup": "{{group}} を展開",
+    "collapseGroup": "{{group}} を折りたたむ",
     "payload": "payload (キー = 値)",
     "dedupe": "重複を畳む",
     "forensicNote": "logon_type は collect-winlog-logons-all のデータと、Winlogon ソース移行前の古い行にのみ存在します。そこでの重複は UAC スプリットトークンのペアです。",

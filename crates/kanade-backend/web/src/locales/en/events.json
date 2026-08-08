@@ -25,8 +25,20 @@
     "chipStates": {
       "off": "not filtered",
       "include": "included",
-      "exclude": "excluded"
+      "exclude": "excluded",
+      "mixed": "partly selected"
     },
+    "categories": {
+      "session": "session",
+      "power": "power",
+      "presence": "presence",
+      "activity": "activity",
+      "other": "other"
+    },
+    "clearSelection": "clear",
+    "noSelection": "nothing selected (showing all)",
+    "expandGroup": "expand {{group}}",
+    "collapseGroup": "collapse {{group}}",
     "payload": "payload (key = value)",
     "dedupe": "collapse duplicates",
     "forensicNote": "logon_type only exists on collect-winlog-logons-all data and rows from before the Winlogon source switch; duplicates there are UAC split-token pairs.",
