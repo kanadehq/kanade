@@ -551,7 +551,7 @@ function FleetProbeTable({
             </div>
           )
         ) : (
-          <Table resizeKey="inventory.fleet">
+          <Table resizeKey="inventory.fleet" picker>
             <TableHeader>
               <TableRow>
                 <TableHead colId="pcId">{t('fleet.columns.pcId')}</TableHead>

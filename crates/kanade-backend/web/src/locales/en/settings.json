@@ -24,13 +24,13 @@
     },
     "persistedHint": "Saved to localStorage; takes effect immediately."
   },
-  "tableWidths": {
-    "title": "Table column widths",
-    "description": "Column widths you have dragged on any table are stored in this browser. This clears them everywhere at once — each table also resets from a double-click on any of its column-resize handles.",
-    "reset": "Reset all table column widths",
-    "done_one": "Reset the column widths of 1 table.",
-    "done_other": "Reset the column widths of {{count}} tables.",
-    "nothing": "No table had custom column widths."
+  "tableColumns": {
+    "title": "Table columns",
+    "description": "Which columns a table shows, and how wide you dragged them, are stored in this browser. This puts every table back to its defaults at once — a single table also resets from its own column picker.",
+    "reset": "Reset all table columns",
+    "done_one": "Reset 1 table.",
+    "done_other": "Reset {{count}} tables.",
+    "nothing": "No table had custom columns."
   },
   "server": {
     "scopeNote": "These are saved on the server and shared by everyone. Changes take effect for the whole deployment.",

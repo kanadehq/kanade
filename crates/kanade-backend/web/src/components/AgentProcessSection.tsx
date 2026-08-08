@@ -355,7 +355,7 @@ export function AgentProcessSection({ pcId }: { pcId: string }) {
               <Activity className="size-3" />
               {t('process.latestAt', { at: fmtIsoLocal(latestAt) })}
             </div>
-            <Table resizeKey="agent.processes">
+            <Table resizeKey="agent.processes" picker>
               <TableHeader>
                 <TableRow>
                   <TableHead className="text-right">

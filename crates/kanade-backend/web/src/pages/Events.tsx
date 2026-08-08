@@ -1269,7 +1269,7 @@ export function Events() {
           {tab === 'chart' && <EventsTimeline events={visible} />}
           {tab === 'heatmap' && <EventsHeatmap events={visible} />}
           {tab === 'table' && (
-          <Table resizeKey="events">
+          <Table resizeKey="events" picker>
           <TableHeader>
             <TableRow>
               <TableHead>{t('columns.when')}</TableHead>

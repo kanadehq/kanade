@@ -10,7 +10,7 @@ import { useConfirm } from '@/components/ui/confirm-dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
-import { resetAllTableWidths } from '@/components/ui/table';
+import { resetAllTableColumnPrefs } from '@/components/ui/table';
 import { LANGUAGES, type LanguageCode } from '@/i18n';
 import { apiFetch, formatError } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
@@ -248,30 +248,32 @@ function PersonalTab() {
           </CardContent>
         </Card>
 
-        {/* #1344: the global way back from a column drag. Each table also
-            resets from a double-click on any of its resize handles, and
-            Agents offers it in its column picker — but neither helps an
-            operator who has squeezed some column on a page they can't
-            remember. This clears every table at once, including tables not
-            currently mounted (their widths only exist in localStorage). */}
+        {/* #1344 / #1353: the global way back. Each table can also be reset
+            from its own column picker (and a width drag from a double-click
+            on any resize handle) — but neither helps an operator who has
+            squeezed or hidden a column on a page they can't remember. This
+            clears every table at once, including tables not currently
+            mounted, whose settings exist only in localStorage. */}
         <Card>
           <CardHeader>
-            <CardTitle>{t('tableWidths.title')}</CardTitle>
+            <CardTitle>{t('tableColumns.title')}</CardTitle>
           </CardHeader>
           <CardContent className="space-y-2">
-            <p className="text-muted text-xs">{t('tableWidths.description')}</p>
+            <p className="text-muted text-xs">{t('tableColumns.description')}</p>
             <Button
               variant="secondary"
               size="sm"
               onClick={() => {
-                const cleared = resetAllTableWidths();
+                // The union of both preferences — a table counted once
+                // whether it had a width, a hidden column, or both.
+                const cleared = resetAllTableColumnPrefs();
                 toast.success(
-                  cleared ? t('tableWidths.done', { count: cleared }) : t('tableWidths.nothing'),
+                  cleared ? t('tableColumns.done', { count: cleared }) : t('tableColumns.nothing'),
                 );
               }}
             >
               <RotateCcw className="size-3.5" />
-              {t('tableWidths.reset')}
+              {t('tableColumns.reset')}
             </Button>
           </CardContent>
         </Card>
