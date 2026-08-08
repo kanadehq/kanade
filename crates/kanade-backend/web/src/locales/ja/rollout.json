@@ -30,7 +30,8 @@
     },
     "scopeValuePlaceholder": {
       "global": "対象外",
-      "group": "例: canary"
+      "group": "グループを検索 (例: canary)",
+      "pc": "pc_id で PC を検索"
     },
     "rolloutButton": "ロールアウト",
     "jitterBadge": "ジッター {{jitter}}",

@@ -5,6 +5,8 @@ import { Trans, useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 
 import { ErrorCard } from '@/components/ErrorCard';
+import { GroupPicker } from '@/components/GroupPicker';
+import { PcPicker } from '@/components/PcPicker';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -48,7 +50,11 @@ export function Rollout() {
   const qc = useQueryClient();
   const [version, setVersion] = useState('');
   const [scopeKind, setScopeKind] = useState<ScopeKind>('group');
-  const [scopeValue, setScopeValue] = useState('canary');
+  // Starts empty rather than pre-filled with `canary`: the group field is
+  // a picker now, so seeding it with a name that may not be a real group
+  // would show a committed selection that doesn't exist. The placeholder
+  // carries the hint instead.
+  const [scopeValue, setScopeValue] = useState('');
   const [jitter, setJitter] = useState('5m');
   const [uploadFile, setUploadFile] = useState<File | null>(null);
 
@@ -268,7 +274,15 @@ export function Rollout() {
             <Select
               id="ro-scope-kind"
               value={scopeKind}
-              onChange={(e) => setScopeKind(e.target.value as ScopeKind)}
+              onChange={(e) => {
+                setScopeKind(e.target.value as ScopeKind);
+                // Scope values are not interchangeable across kinds — a
+                // group name is not a pc_id. Carrying the old value over
+                // left the new picker looking empty while `scopeValue`
+                // still held it, so the form stayed submittable and could
+                // roll out to a target that doesn't exist.
+                setScopeValue('');
+              }}
             >
               <option value="global">{t('rolloutPanel.scopeOptions.global')}</option>
               <option value="group">{t('rolloutPanel.scopeOptions.group')}</option>
@@ -277,28 +291,33 @@ export function Rollout() {
           </div>
           <div className="space-y-1">
             <Label htmlFor="ro-scope-value">{scopeValueLabel}</Label>
+            {/* The shared pickers, same as every other page: PcPicker
+                async-searches `/api/agents` so this stays flat at 3000
+                hosts (the old `<Select>` rendered one <option> per agent),
+                and GroupPicker offers the real groups instead of a
+                free-text box where a typo silently targets nothing. Both
+                are single-mode: only an existing target commits. */}
             {scopeKind === 'pc' ? (
-              <Select
+              <PcPicker
                 id="ro-scope-value"
                 value={scopeValue}
-                onChange={(e) => setScopeValue(e.target.value)}
-              >
-                <option value="">{t('rolloutPanel.versionPickerPlaceholder')}</option>
-                {(agentsQ.data ?? []).map((a) => (
-                  <option key={a.pc_id} value={a.pc_id}>{a.pc_id}</option>
-                ))}
-              </Select>
+                onChange={setScopeValue}
+                placeholder={t('rolloutPanel.scopeValuePlaceholder.pc')}
+              />
+            ) : scopeKind === 'group' ? (
+              <GroupPicker
+                id="ro-scope-value"
+                value={scopeValue}
+                onChange={setScopeValue}
+                placeholder={t('rolloutPanel.scopeValuePlaceholder.group')}
+              />
             ) : (
               <Input
                 id="ro-scope-value"
-                placeholder={
-                  scopeKind === 'global'
-                    ? t('rolloutPanel.scopeValuePlaceholder.global')
-                    : t('rolloutPanel.scopeValuePlaceholder.group')
-                }
+                placeholder={t('rolloutPanel.scopeValuePlaceholder.global')}
                 value={scopeValue}
                 onChange={(e) => setScopeValue(e.target.value)}
-                disabled={scopeKind === 'global'}
+                disabled
               />
             )}
           </div>
