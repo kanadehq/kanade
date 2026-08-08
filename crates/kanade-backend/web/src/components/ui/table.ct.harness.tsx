@@ -130,7 +130,7 @@ export function PlainTable() {
  * a single `colSpan` cell. The latter must survive hiding column 1 — it is
  * `:nth-child(1)`, so an unguarded positional rule deletes it.
  */
-export function TableWithPicker({ empty = false }: { empty?: boolean }) {
+export function TableWithPicker({ empty = false, withInput = false }: { empty?: boolean; withInput?: boolean }) {
   return (
     <Table resizeKey="ct-pick" picker>
       <TableHeader>
@@ -144,14 +144,19 @@ export function TableWithPicker({ empty = false }: { empty?: boolean }) {
       </TableHeader>
       <TableBody>
         {empty ? (
+          // Two cells, not one: this mirrors the real expanded/empty rows
+          // (Jobs, Schedules) and is what makes a missing cell-count guard
+          // visible — permuting a 2-cell row against a 4-column header
+          // indexes off the end and drops the message.
           <TableRow>
-            <TableCell colSpan={COLUMNS.length}>nothing here</TableCell>
+            <TableCell />
+            <TableCell colSpan={COLUMNS.length - 1}>nothing here</TableCell>
           </TableRow>
         ) : (
           <TableRow>
             {COLUMNS.map((c) => (
               <TableCell key={c} label={c}>
-                {c} value
+                {withInput && c === 'charlie' ? <input aria-label="cell input" /> : `${c} value`}
               </TableCell>
             ))}
           </TableRow>
@@ -217,5 +222,60 @@ export function TableWithForcedToggle() {
         </TableBody>
       </Table>
     </div>
+  );
+}
+
+/**
+ * `useTableColumns().move` driven from plain buttons, with none of the
+ * picker's own guards. The picker disables the arrow at each end, which
+ * makes the *store's* refusal to move past it unreachable through the UI —
+ * and `useTableColumns` is exported for pages to build their own controls.
+ */
+export function TableWithForcedMove() {
+  const { columns, move } = useTableColumns('ct-pick');
+  return (
+    <div>
+      {columns.map((c) => (
+        <span key={c.id}>
+          <button type="button" onClick={() => move(c.id, -1)}>
+            force {c.id} left
+          </button>
+          <button type="button" onClick={() => move(c.id, 1)}>
+            force {c.id} right
+          </button>
+        </span>
+      ))}
+      <TableWithPicker />
+    </div>
+  );
+}
+
+/**
+ * A table whose headers carry NO `colId` — the shape most pages have — and
+ * whose column set can grow, standing in for a release that inserts a
+ * column into the page's JSX. Preferences stored against the old shape
+ * must not land on the new neighbours.
+ */
+export function TableWithoutColIds({ inserted = false }: { inserted?: boolean }) {
+  const cols = inserted ? ['alpha', 'inserted', 'bravo', 'charlie', 'delta'] : COLUMNS;
+  return (
+    <Table resizeKey="ct-noid" picker>
+      <TableHeader>
+        <TableRow>
+          {cols.map((c) => (
+            <TableHead key={c}>{c}</TableHead>
+          ))}
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        <TableRow>
+          {cols.map((c) => (
+            <TableCell key={c} label={c}>
+              {c} value
+            </TableCell>
+          ))}
+        </TableRow>
+      </TableBody>
+    </Table>
   );
 }
