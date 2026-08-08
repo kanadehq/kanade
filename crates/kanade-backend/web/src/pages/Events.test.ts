@@ -1,6 +1,12 @@
 import { describe, expect, test } from 'bun:test';
 
-import { DEFAULT_LIMIT, LIMIT_OPTIONS, normalizeLimit } from './Events';
+import {
+  cycleGroup,
+  DEFAULT_LIMIT,
+  groupState,
+  LIMIT_OPTIONS,
+  normalizeLimit,
+} from './Events';
 
 // Issue #1077: the Events page hydrated `limit` with `Number(raw) || 200`,
 // which let any numeric-ish URL value (1e9, -5, 200.5) reach the request.
@@ -42,5 +48,94 @@ describe('normalizeLimit', () => {
 
   test('the default is itself an offered option', () => {
     expect(LIMIT_OPTIONS as readonly number[]).toContain(DEFAULT_LIMIT);
+  });
+});
+
+// Issue #1342: the chip vocabularies are folded into groups, and a group
+// header cycles its whole membership at once. The header is the only
+// control that can act on chips the operator cannot currently see (the
+// group may be collapsed), so its behaviour has to be exactly
+// predictable from what the header itself displays.
+
+describe('groupState', () => {
+  const G = ['a', 'b', 'c'];
+
+  test('reports a uniform group as that single state', () => {
+    expect(groupState(G, [], [])).toBe('off');
+    expect(groupState(G, G, [])).toBe('include');
+    expect(groupState(G, [], G)).toBe('exclude');
+  });
+
+  test('reports a partially selected group as mixed', () => {
+    expect(groupState(G, ['a'], [])).toBe('mixed');
+    expect(groupState(G, ['a', 'b'], ['c'])).toBe('mixed');
+  });
+
+  // A collapsed group that renders as `off` while holding a selection
+  // would be a filter with no visible cause — the operator sees fewer
+  // events than they asked for and nothing on screen explains why.
+  test('a group holding any selection never reports as off', () => {
+    expect(groupState(G, ['b'], [])).not.toBe('off');
+    expect(groupState(G, [], ['b'])).not.toBe('off');
+  });
+});
+
+describe('cycleGroup', () => {
+  const G = ['a', 'b'];
+  /** Run one cycle and return the resulting lists. */
+  const cycle = (inc: string[], exc: string[]) => {
+    let nextInc = inc;
+    let nextExc = exc;
+    cycleGroup(G, inc, exc, (v) => { nextInc = v; }, (v) => { nextExc = v; });
+    return { inc: nextInc, exc: nextExc };
+  };
+
+  test('follows the same off -> include -> exclude -> off order as a chip', () => {
+    const included = cycle([], []);
+    expect(included.inc.sort()).toEqual(['a', 'b']);
+    expect(included.exc).toEqual([]);
+
+    const excluded = cycle(included.inc, included.exc);
+    expect(excluded.inc).toEqual([]);
+    expect(excluded.exc.sort()).toEqual(['a', 'b']);
+
+    const off = cycle(excluded.inc, excluded.exc);
+    expect(off.inc).toEqual([]);
+    expect(off.exc).toEqual([]);
+  });
+
+  test('a mixed group enters the cycle at include', () => {
+    const r = cycle(['a'], ['b']);
+    expect(r.inc.sort()).toEqual(['a', 'b']);
+    expect(r.exc).toEqual([]);
+  });
+
+  // The bug this rules out: appending to one list without stripping the
+  // other leaves a value in BOTH. The backend applies `kinds` and
+  // `kinds_ex` independently and the exclusion wins, so such a value
+  // would render as an included green chip while actually filtering its
+  // own events out — the UI would be stating the opposite of the query.
+  test('no value ends up in both lists', () => {
+    for (const [inc, exc] of [[[], []], [['a'], ['b']], [['a', 'b'], []], [[], ['a', 'b']]]) {
+      const r = cycle(inc, exc);
+      expect(r.inc.filter((v) => r.exc.includes(v))).toEqual([]);
+    }
+  });
+
+  // Group actions must be surgical: a source group's header cannot be
+  // allowed to disturb a kind selection, nor one group another's.
+  test('values outside the group are left untouched', () => {
+    const r = cycle(['other-inc'], ['other-exc']);
+    expect(r.inc).toContain('other-inc');
+    expect(r.exc).toContain('other-exc');
+  });
+
+  test('cycling a group twice from off is not a no-op', () => {
+    // Guards against an implementation where include and exclude
+    // collapse into the same write.
+    const once = cycle([], []);
+    const twice = cycle(once.inc, once.exc);
+    expect(twice.exc.sort()).toEqual(['a', 'b']);
+    expect(twice.inc).toEqual([]);
   });
 });

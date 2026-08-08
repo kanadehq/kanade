@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { Loader2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
@@ -28,6 +28,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { localInputToMs, msToLocalInput } from '@/lib/timeRange';
+import { groupKinds, groupSources, shortLabel, type VocabGroup } from '@/lib/vocabGroups';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { apiFetch } from '@/lib/api';
 import { escapeRegExp, fmtIsoLocal } from '@/lib/utils';
@@ -232,6 +233,54 @@ function cycleChip(
   }
 }
 
+// Issue #1342: a whole group's state, as a summary of its members'.
+// `mixed` has no equivalent for a single chip — it exists so a folded
+// group can admit that it is hiding a partial selection rather than
+// rendering as untouched.
+export type GroupChipState = ChipState | 'mixed';
+
+export function groupState(values: string[], inc: string[], exc: string[]): GroupChipState {
+  const first = chipState(values[0], inc, exc);
+  return values.every((v) => chipState(v, inc, exc) === first) ? first : 'mixed';
+}
+
+/**
+ * Cycle every member of a group together, following the same
+ * off → include → exclude → off order a single chip uses so the two
+ * controls stay predictable side by side.
+ *
+ * `mixed` enters at the start of that cycle (→ include all), which makes
+ * the header a way to normalise a half-selected group rather than a
+ * fourth state the operator has to reason about.
+ *
+ * Members are stripped from BOTH lists before being re-added: a group
+ * that is half included and half excluded has entries in each, and
+ * appending without removing would leave a value in both at once — a
+ * state the backend resolves as excluded, silently contradicting the
+ * green chip the operator would be looking at.
+ */
+export function cycleGroup(
+  values: string[],
+  inc: string[],
+  exc: string[],
+  setInc: (v: string[]) => void,
+  setExc: (v: string[]) => void,
+) {
+  const state = groupState(values, inc, exc);
+  const restInc = inc.filter((v) => !values.includes(v));
+  const restExc = exc.filter((v) => !values.includes(v));
+  if (state === 'include') {
+    setInc(restInc);
+    setExc([...restExc, ...values]);
+  } else if (state === 'exclude') {
+    setInc(restInc);
+    setExc(restExc);
+  } else {
+    setInc([...restInc, ...values]);
+    setExc(restExc);
+  }
+}
+
 function splitCsv(s: string | null): string[] {
   // Mirror the backend's CSV hygiene (trim, drop blanks) and
   // dedupe, so a hand-edited / shared URL like `?kinds=logon,
@@ -266,6 +315,181 @@ function FilterChip({ label, state, onClick }: {
     >
       {label}
     </button>
+  );
+}
+
+/**
+ * Issue #1342: one vocabulary's chip picker — the live selection over a
+ * set of folded groups.
+ *
+ * Replaces a flat row of every distinct value. The vocabularies come
+ * from the backend's DISTINCT lists and grow with every collector added
+ * (23 kinds + 12 sources when this was written), so the flat form pushed
+ * the results below the fold and buried the active selection among
+ * dozens of inactive chips.
+ *
+ * Two rules carry the design:
+ *
+ *  - The selection renders ABOVE the groups and is never folded away.
+ *    Hiding a chip is only acceptable while "what am I filtering by?"
+ *    stays answerable without opening anything.
+ *  - Group headers cycle their whole membership, so muting a family
+ *    (the four `command_signature_*` kinds) is one click, not four.
+ */
+export function ChipGroupPicker({
+  label,
+  values,
+  inc,
+  exc,
+  setInc,
+  setExc,
+  group,
+}: {
+  label: string;
+  values: string[];
+  inc: string[];
+  exc: string[];
+  setInc: (v: string[]) => void;
+  setExc: (v: string[]) => void;
+  group: (values: readonly string[]) => VocabGroup[];
+}) {
+  const { t } = useTranslation('events');
+  const [expanded, setExpanded] = useState<string[]>([]);
+  const groups = useMemo(() => group(values), [group, values]);
+
+  // Ordered by the vocabulary, not by when each was clicked, so the
+  // selection summary doesn't reshuffle under the pointer as it is
+  // edited. Both lists are shown together — an exclusion is as much a
+  // part of "what am I filtering by" as an inclusion.
+  const selected = useMemo(
+    () => values.filter((v) => inc.includes(v) || exc.includes(v)),
+    [values, inc, exc],
+  );
+
+  // A selected value that is no longer in the vocabulary — a filter for
+  // a kind the fleet has stopped emitting, or one hand-typed into the
+  // URL. It still constrains the query, so it has to remain visible and
+  // clearable; `values` alone would not surface it.
+  // Deduped across the two lists, not just within each. `splitCsv`
+  // dedupes `kinds` and `kinds_ex` separately, so `?kinds=retired&
+  // kinds_ex=retired` puts the same value in both; concatenating them
+  // would render it twice, and React would see two children with the
+  // same key.
+  const orphaned = useMemo(
+    () => Array.from(new Set([...inc, ...exc])).filter((v) => !values.includes(v)),
+    [values, inc, exc],
+  );
+
+  const groupLabel = (g: VocabGroup) =>
+    g.labelKind === 'prefix' ? g.id : t(`filters.categories.${g.id}`);
+
+  return (
+    <div className="space-y-1">
+      <div className="flex items-baseline gap-2">
+        <Label className="mb-0">{label}</Label>
+        {selected.length + orphaned.length > 0 && (
+          <button
+            type="button"
+            onClick={() => {
+              setInc([]);
+              setExc([]);
+            }}
+            className="text-[11px] text-muted underline cursor-pointer hover:text-foreground"
+          >
+            {t('filters.clearSelection')}
+          </button>
+        )}
+      </div>
+
+      {/* The selection, always on screen. */}
+      {selected.length + orphaned.length > 0 ? (
+        <div className="flex flex-wrap gap-1.5 pb-1">
+          {[...selected, ...orphaned].map((v) => (
+            <FilterChip
+              key={v}
+              label={v}
+              state={chipState(v, inc, exc)}
+              onClick={() => cycleChip(v, inc, exc, setInc, setExc)}
+            />
+          ))}
+        </div>
+      ) : (
+        <p className="pb-1 text-[11px] text-muted">{t('filters.noSelection')}</p>
+      )}
+
+      {/* The folded vocabulary. */}
+      <div className="flex flex-wrap gap-1.5">
+        {groups.map((g) => {
+          const isOpen = expanded.includes(g.key);
+          const state = groupState(g.values, inc, exc);
+          // `mixed` deliberately reads as neither green nor red: the
+          // group is partly selected, and painting it as one or the
+          // other would misreport the members hidden inside it.
+          const cls =
+            state === 'include'
+              ? 'border-emerald-500/60 bg-emerald-500/15 text-emerald-300'
+              : state === 'exclude'
+                ? 'border-red-500/60 bg-red-500/10 text-red-400'
+                : state === 'mixed'
+                  ? 'border-violet-500/60 bg-violet-500/10 text-violet-300'
+                  : 'border-border text-muted hover:border-muted-foreground/50';
+          return (
+            // Collapsed groups flow inline and wrap, so the folded state is
+            // genuinely compact — one `w-full` per group would spend a row
+            // each and give back much of the vertical space the fold was
+            // meant to reclaim. An OPEN group does claim a full row, so its
+            // members sit under their own header instead of being visually
+            // adopted by whichever group wrapped next to it.
+            <div key={g.key} className={isOpen ? 'w-full' : ''}>
+              <div className={`inline-flex items-center rounded-full border text-xs ${cls}`}>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setExpanded((prev) =>
+                      prev.includes(g.key) ? prev.filter((x) => x !== g.key) : [...prev, g.key],
+                    )
+                  }
+                  aria-expanded={isOpen}
+                  aria-label={t(isOpen ? 'filters.collapseGroup' : 'filters.expandGroup', {
+                    group: groupLabel(g),
+                  })}
+                  className="cursor-pointer py-0.5 pl-2 pr-1"
+                >
+                  {isOpen ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => cycleGroup(g.values, inc, exc, setInc, setExc)}
+                  aria-label={`${groupLabel(g)}: ${t(`filters.chipStates.${state}`)}`}
+                  title={t('filters.chipHint')}
+                  className="cursor-pointer py-0.5 pr-2.5 pl-0.5"
+                >
+                  {groupLabel(g)}
+                  <span className="ml-1 opacity-60">{g.values.length}</span>
+                </button>
+              </div>
+              {isOpen && (
+                <div className="flex flex-wrap gap-1.5 py-1.5 pl-5">
+                  {g.values.map((v) => (
+                    <FilterChip
+                      key={v}
+                      // Inside a derived group the shared prefix is already
+                      // on the header, so repeating it on every chip is noise
+                      // — `winlog:Security` reads as `Security` under
+                      // `winlog`. The stripping lives in the lib because it
+                      // has to know the separator's length.
+                      label={shortLabel(g, v)}
+                      state={chipState(v, inc, exc)}
+                      onClick={() => cycleChip(v, inc, exc, setInc, setExc)}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -835,33 +1059,31 @@ export function Events() {
           {/* Issue #391: tri-state chips — click cycles include
               (green) → exclude (red, struck) → off. Vocabulary is
               the backend's DISTINCT list, so new kinds/sources show
-              up here without SPA changes. */}
-          <div className="space-y-1">
-            <Label>{t('filters.kinds')} <span className="font-normal text-muted">{t('filters.chipHint')}</span></Label>
-            <div className="flex flex-wrap gap-1.5">
-              {(kindsQ.data?.kinds ?? []).map((k) => (
-                <FilterChip
-                  key={k}
-                  label={k}
-                  state={chipState(k, kindsInc, kindsExc)}
-                  onClick={() => cycleChip(k, kindsInc, kindsExc, setKindsInc, setKindsExc)}
-                />
-              ))}
-            </div>
-          </div>
-          <div className="space-y-1">
-            <Label>{t('filters.sources')} <span className="font-normal text-muted">{t('filters.chipHint')}</span></Label>
-            <div className="flex flex-wrap gap-1.5">
-              {(sourcesQ.data?.sources ?? []).map((s) => (
-                <FilterChip
-                  key={s}
-                  label={s}
-                  state={chipState(s, sourcesInc, sourcesExc)}
-                  onClick={() => cycleChip(s, sourcesInc, sourcesExc, setSourcesInc, setSourcesExc)}
-                />
-              ))}
-            </div>
-          </div>
+              up here without SPA changes.
+              Issue #1342: folded into groups derived from that same
+              list, with the live selection pinned above them. The URL
+              still carries individual values (see the mirror effect
+              above) — a category name there would change meaning
+              whenever the grouping rules were edited, silently
+              redefining links already shared. */}
+          <ChipGroupPicker
+            label={t('filters.kinds')}
+            values={kindsQ.data?.kinds ?? []}
+            inc={kindsInc}
+            exc={kindsExc}
+            setInc={setKindsInc}
+            setExc={setKindsExc}
+            group={groupKinds}
+          />
+          <ChipGroupPicker
+            label={t('filters.sources')}
+            values={sourcesQ.data?.sources ?? []}
+            inc={sourcesInc}
+            exc={sourcesExc}
+            setInc={setSourcesInc}
+            setExc={setSourcesExc}
+            group={groupSources}
+          />
         </CardContent>
       </Card>
 
