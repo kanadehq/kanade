@@ -5,6 +5,7 @@ import {
   useContext,
   useEffect,
   useLayoutEffect,
+  useId,
   useRef,
   useState,
   useSyncExternalStore,
@@ -12,9 +13,11 @@ import {
   type HTMLAttributes,
   type MutableRefObject,
   type PointerEvent as ReactPointerEvent,
+  type ReactNode,
   type TdHTMLAttributes,
   type ThHTMLAttributes,
 } from 'react';
+import { RotateCcw, SlidersHorizontal } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { useMediaQuery } from '@/lib/hooks';
@@ -55,7 +58,11 @@ const MIN_COL_WIDTH = 56;
 /** Keyboard nudge per arrow press (Shift = coarse). */
 const NUDGE_STEP = 16;
 const NUDGE_STEP_COARSE = 64;
+/** Width given to a column that first appears while the table is already
+ *  in fixed layout, where it cannot be measured meaningfully. */
+const DEFAULT_NEW_COL_WIDTH = 120;
 const WIDTHS_PREFIX = 'kanade.table.widths.';
+const HIDDEN_PREFIX = 'kanade.table.hidden.';
 
 /** Persisted widths, keyed by column id (see `columnIdOf`). */
 type ColumnWidths = Record<string, number>;
@@ -115,86 +122,159 @@ function headerCells(table: HTMLTableElement): HTMLTableCellElement[] {
   return row ? (Array.from(row.cells) as HTMLTableCellElement[]) : [];
 }
 
-function readWidths(key: string): ColumnWidths {
-  try {
-    const raw = localStorage.getItem(WIDTHS_PREFIX + key);
-    if (!raw) return {};
-    const parsed: unknown = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
-    const out: ColumnWidths = {};
-    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
-      // Drop anything that isn't a usable width — a corrupted or
-      // hand-edited entry would otherwise reach `<col width>` as NaN and
-      // collapse the column. Not floored at MIN_COL_WIDTH: measured widths
-      // (see the reconciliation effect) can legitimately be narrower, and
-      // discarding one here would make the column look "missing" and get
-      // re-measured under a layout it no longer matches.
-      if (typeof v === 'number' && Number.isFinite(v) && v > 0) out[k] = v;
-    }
-    return out;
-  } catch {
-    /* blocked storage / malformed JSON — fall back to automatic layout */
-    return {};
+function parseWidths(raw: unknown): ColumnWidths {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const out: ColumnWidths = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    // Drop anything that isn't a usable width — a corrupted or hand-edited
+    // entry would otherwise reach `<col width>` as NaN and collapse the
+    // column. Not floored at MIN_COL_WIDTH: measured widths (see the
+    // reconciliation effect) can legitimately be narrower, and discarding
+    // one here would make the column look "missing" and get re-measured
+    // under a layout it no longer matches.
+    if (typeof v === 'number' && Number.isFinite(v) && v > 0) out[k] = v;
   }
-}
-
-function writeWidths(key: string, widths: ColumnWidths) {
-  try {
-    if (Object.keys(widths).length) localStorage.setItem(WIDTHS_PREFIX + key, JSON.stringify(widths));
-    // Nothing stored ⇒ remove the key rather than leaving `{}` behind, so
-    // "has this table been resized?" is a plain key-exists question.
-    else localStorage.removeItem(WIDTHS_PREFIX + key);
-  } catch {
-    /* non-persistent this session; not worth surfacing */
-  }
+  return out;
 }
 
 /* ------------------------------------------------------------------ *
- * The widths live in a module-level store rather than in <Table>'s own
- * state, because the reset control is not inside the table: the Agents
- * column picker and the Settings page both need to see whether a table
- * has stored widths and to clear them, and a table's own `useState` is
- * not reachable from there. One store per `resizeKey`, subscribed to via
+ * Per-table preferences (#1344, #1353)
+ *
+ * A table's column preferences live in module-level stores rather than in
+ * <Table>'s own state, because the controls that edit them are not inside
+ * the table: the column picker sits in the page's filter row, and Settings
+ * resets every table at once. A table's `useState` is not reachable from
+ * either.
+ *
+ * There are two of these (widths and hidden columns), and #1353's second
+ * phase adds a third (order), so the subscribe / persist / reset-all
+ * plumbing is written once here and instantiated per preference. One store
+ * per `resizeKey` within each preference, read through
  * `useSyncExternalStore` so every reader re-renders on a change.
  * ------------------------------------------------------------------ */
 
-type WidthStore = { widths: ColumnWidths; listeners: Set<() => void> };
-const widthStores = new Map<string, WidthStore>();
-/** Stable empty snapshot — `useSyncExternalStore` compares by identity, so
- *  returning a fresh `{}` per call would loop forever. */
-const NO_WIDTHS: ColumnWidths = Object.freeze({});
-
-function widthStore(key: string): WidthStore {
-  let store = widthStores.get(key);
-  if (!store) {
-    store = { widths: readWidths(key), listeners: new Set() };
-    widthStores.set(key, store);
-  }
-  return store;
+interface TablePref<T> {
+  /** Live value for one table. */
+  get(key: string): T;
+  /** Replace it, persist it, and notify every reader. */
+  update(key: string, next: T | ((prev: T) => T)): void;
+  /** Subscribe from a component. `undefined` key ⇒ the empty value. */
+  use(key: string | undefined): T;
+  /** Clear it for EVERY table, including tables not currently mounted
+   *  (whose value exists only in localStorage). Returns how many tables
+   *  actually had something stored. */
+  resetAll(): number;
+  /** Every table that currently has a non-empty value, mounted or not.
+   *  Lets a caller union the keys across preferences before clearing them,
+   *  so "how many tables did that affect?" is answered once rather than
+   *  per preference. */
+  keysWithValue(): string[];
 }
 
-function updateWidths(key: string, next: ColumnWidths | ((prev: ColumnWidths) => ColumnWidths)) {
-  const store = widthStore(key);
-  const value = typeof next === 'function' ? next(store.widths) : next;
-  if (value === store.widths) return;
-  store.widths = value;
-  writeWidths(key, value);
-  for (const notify of store.listeners) notify();
-}
+function makeTablePref<T>(opts: {
+  prefix: string;
+  /** Shared empty value. Must be a stable reference — `useSyncExternalStore`
+   *  compares snapshots by identity, so a fresh one per call would loop. */
+  empty: T;
+  /** Validate whatever came back out of localStorage. Anything malformed,
+   *  hand-edited or corrupt must degrade to `empty`, never reach the DOM. */
+  parse: (raw: unknown) => T;
+  isEmpty: (value: T) => boolean;
+}): TablePref<T> {
+  const stores = new Map<string, { value: T; listeners: Set<() => void> }>();
 
-function useWidths(key: string | undefined): ColumnWidths {
-  const subscribe = useCallback(
-    (onChange: () => void) => {
-      if (!key) return () => {};
-      const store = widthStore(key);
-      store.listeners.add(onChange);
-      return () => store.listeners.delete(onChange);
+  const read = (key: string): T => {
+    try {
+      const raw = localStorage.getItem(opts.prefix + key);
+      return raw ? opts.parse(JSON.parse(raw)) : opts.empty;
+    } catch {
+      /* blocked storage / malformed JSON — behave as if nothing was stored */
+      return opts.empty;
+    }
+  };
+
+  const write = (key: string, value: T) => {
+    try {
+      if (opts.isEmpty(value)) {
+        // Remove the key rather than leaving an empty value behind, so
+        // "has this table been customised?" is a plain key-exists question.
+        localStorage.removeItem(opts.prefix + key);
+      } else {
+        localStorage.setItem(opts.prefix + key, JSON.stringify(value));
+      }
+    } catch {
+      /* non-persistent this session; not worth surfacing */
+    }
+  };
+
+  const store = (key: string) => {
+    let s = stores.get(key);
+    if (!s) {
+      s = { value: read(key), listeners: new Set() };
+      stores.set(key, s);
+    }
+    return s;
+  };
+
+  const update: TablePref<T>['update'] = (key, next) => {
+    const s = store(key);
+    const value = typeof next === 'function' ? (next as (prev: T) => T)(s.value) : next;
+    if (value === s.value) return;
+    s.value = value;
+    write(key, value);
+    for (const notify of s.listeners) notify();
+  };
+
+  return {
+    get: (key) => store(key).value,
+    update,
+    use(key) {
+      /* eslint-disable react-hooks/rules-of-hooks -- called from components */
+      const subscribe = useCallback(
+        (onChange: () => void) => {
+          if (!key) return () => {};
+          const s = store(key);
+          s.listeners.add(onChange);
+          return () => s.listeners.delete(onChange);
+        },
+        [key],
+      );
+      const snapshot = useCallback(() => (key ? store(key).value : opts.empty), [key]);
+      return useSyncExternalStore(subscribe, snapshot);
     },
-    [key],
-  );
-  const snapshot = useCallback(() => (key ? widthStore(key).widths : NO_WIDTHS), [key]);
-  return useSyncExternalStore(subscribe, snapshot);
+    keysWithValue() {
+      const keys = new Set<string>(stores.keys());
+      try {
+        for (let i = 0; i < localStorage.length; i++) {
+          const raw = localStorage.key(i);
+          if (raw?.startsWith(opts.prefix)) keys.add(raw.slice(opts.prefix.length));
+        }
+      } catch {
+        /* storage unreadable — fall back to the mounted tables alone */
+      }
+      return [...keys].filter((key) => !opts.isEmpty(store(key).value));
+    },
+    resetAll() {
+      const keys = this.keysWithValue();
+      for (const key of keys) update(key, opts.empty);
+      return keys.length;
+    },
+  };
 }
+
+const widthPref = makeTablePref<ColumnWidths>({
+  prefix: WIDTHS_PREFIX,
+  empty: Object.freeze({}) as ColumnWidths,
+  parse: parseWidths,
+  isEmpty: (w) => Object.keys(w).length === 0,
+});
+
+const hiddenPref = makeTablePref<readonly string[]>({
+  prefix: HIDDEN_PREFIX,
+  empty: Object.freeze([]) as readonly string[],
+  parse: (raw) => (Array.isArray(raw) ? raw.filter((x): x is string => typeof x === 'string') : []),
+  isEmpty: (ids) => ids.length === 0,
+});
 
 /**
  * Read/clear one table's stored column widths from outside the table —
@@ -203,35 +283,132 @@ function useWidths(key: string | undefined): ColumnWidths {
  * cue to render no control at all rather than a dead one.
  */
 export function useTableWidths(resizeKey: string): { hasWidths: boolean; reset: () => void } {
-  const widths = useWidths(resizeKey);
-  const reset = useCallback(() => updateWidths(resizeKey, {}), [resizeKey]);
+  const widths = widthPref.use(resizeKey);
+  const reset = useCallback(() => widthPref.update(resizeKey, {}), [resizeKey]);
   return { hasWidths: Object.keys(widths).length > 0, reset };
 }
 
 /**
  * Clear the stored widths of EVERY table, including tables not currently
- * mounted (their entry is only in localStorage). The global escape hatch
- * for "I made some table unreadable and can't remember which page".
- * Returns how many tables were reset.
+ * mounted. The global escape hatch for "I made some table unreadable and
+ * can't remember which page". Returns how many tables were reset.
  */
 export function resetAllTableWidths(): number {
-  const keys = new Set<string>(widthStores.keys());
-  try {
-    for (let i = 0; i < localStorage.length; i++) {
-      const raw = localStorage.key(i);
-      if (raw?.startsWith(WIDTHS_PREFIX)) keys.add(raw.slice(WIDTHS_PREFIX.length));
-    }
-  } catch {
-    /* storage unreadable — fall back to the mounted tables alone */
+  return widthPref.resetAll();
+}
+
+/* ------------------------------------------------------------------ *
+ * Column registry (#1353)
+ *
+ * The picker is not inside the table — it sits in the page's filter row —
+ * so it cannot see the columns by itself. The table publishes them here as
+ * it renders, read straight off the live <thead>, which is why a page adds
+ * the picker with one line and passes no column list and no labels: the
+ * labels ARE the header text, already translated.
+ *
+ * Not persisted. This is what's on screen right now, not a preference.
+ * ------------------------------------------------------------------ */
+
+export interface TableColumn {
+  /** Stable identity — the `colId` the page gave the header cell, else its
+   *  position. Also the key `hiddenPref` stores. */
+  id: string;
+  /** The header's own text. Empty for an icon-only header; the picker
+   *  substitutes a positional name. */
+  label: string;
+}
+
+const NO_COLUMNS: readonly TableColumn[] = Object.freeze([]);
+const columnRegistry = new Map<string, { columns: readonly TableColumn[]; listeners: Set<() => void> }>();
+
+function columnEntry(key: string) {
+  let entry = columnRegistry.get(key);
+  if (!entry) {
+    entry = { columns: NO_COLUMNS, listeners: new Set() };
+    columnRegistry.set(key, entry);
   }
-  let cleared = 0;
-  for (const key of keys) {
-    // Count only tables that actually had something stored, so the caller
-    // can report a truthful number.
-    if (Object.keys(widthStore(key).widths).length) cleared++;
-    updateWidths(key, {});
-  }
-  return cleared;
+  return entry;
+}
+
+function publishColumns(key: string, columns: TableColumn[]) {
+  const entry = columnEntry(key);
+  const same =
+    entry.columns.length === columns.length &&
+    entry.columns.every((c, i) => c.id === columns[i].id && c.label === columns[i].label);
+  if (same) return;
+  entry.columns = columns;
+  for (const notify of entry.listeners) notify();
+}
+
+function useRegisteredColumns(key: string): readonly TableColumn[] {
+  const subscribe = useCallback((onChange: () => void) => {
+    const entry = columnEntry(key);
+    entry.listeners.add(onChange);
+    return () => entry.listeners.delete(onChange);
+  }, [key]);
+  const snapshot = useCallback(() => columnEntry(key).columns, [key]);
+  return useSyncExternalStore(subscribe, snapshot);
+}
+
+/**
+ * One table's columns and their visibility, for a picker rendered outside
+ * it. Empty until the table has mounted and published its header.
+ *
+ * `toggle` refuses to hide the last visible column — a table with no
+ * columns is not a state an operator can get out of from the picker,
+ * because the picker itself would have nothing to list.
+ */
+export function useTableColumns(resizeKey: string): {
+  columns: { id: string; label: string; visible: boolean }[];
+  toggle: (id: string) => void;
+  reset: () => void;
+  hasHidden: boolean;
+} {
+  const registered = useRegisteredColumns(resizeKey);
+  const hidden = hiddenPref.use(resizeKey);
+  const columns = registered.map((c) => ({ ...c, visible: !hidden.includes(c.id) }));
+  // The id list is a stable dep only by value, and it changes rarely — join
+  // it so two renders with the same columns don't rebuild the callback.
+  const idKey = registered.map((c) => c.id).join(' ');
+  const toggle = useCallback(
+    (id: string) =>
+      hiddenPref.update(resizeKey, (prev) => {
+        if (prev.includes(id)) return prev.filter((x) => x !== id);
+        const next = [...prev, id];
+        // Decided from `prev`, NOT from a count captured at render time:
+        // two `toggle` calls in the same tick would both read the same
+        // stale count and could hide every column between them. Reading the
+        // store's own value makes the second call see the first.
+        const ids = idKey ? idKey.split(' ') : [];
+        if (ids.length > 0 && ids.every((c) => next.includes(c))) return prev;
+        return next;
+      }),
+    [resizeKey, idKey],
+  );
+  const reset = useCallback(() => hiddenPref.update(resizeKey, []), [resizeKey]);
+  return { columns, toggle, reset, hasHidden: columns.some((c) => !c.visible) };
+}
+
+/** Show every column of every table again, mounted or not. Companion to
+ *  [`resetAllTableWidths`] for the Settings escape hatch. */
+export function resetAllTableColumns(): number {
+  return hiddenPref.resetAll();
+}
+
+/**
+ * Put every table's columns back to their defaults — both widths and
+ * visibility — and return how many tables were affected.
+ *
+ * The count is the UNION of the two preferences, not the larger of them: a
+ * table with only a stored width and a different table with only a hidden
+ * column are two tables, and reporting one would be wrong. Collected before
+ * clearing, since afterwards there is nothing left to count.
+ */
+export function resetAllTableColumnPrefs(): number {
+  const affected = new Set([...widthPref.keysWithValue(), ...hiddenPref.keysWithValue()]);
+  widthPref.resetAll();
+  hiddenPref.resetAll();
+  return affected.size;
 }
 
 interface TableProps extends HTMLAttributes<HTMLTableElement> {
@@ -266,24 +443,44 @@ interface TableProps extends HTMLAttributes<HTMLTableElement> {
    * page has more than one table (`inventory`, `inventory.facts`).
    */
   resizeKey?: string;
+  /**
+   * Render a [`TableColumnPicker`] just above the table, right-aligned
+   * (#1353). Needs `resizeKey`, which is also the picker's storage key.
+   *
+   * This exists so a page opts in with one word instead of hand-placing
+   * the picker: most of these tables sit alone in a ternary branch, where
+   * adding a sibling means wrapping the branch in a fragment and
+   * re-indenting the whole table. A page that has its own filter row — or
+   * wants the picker anywhere else — leaves this off and renders
+   * `<TableColumnPicker resizeKey="…" />` itself.
+   */
+  picker?: boolean;
 }
 
 export const Table = forwardRef<HTMLTableElement, TableProps>(
-  ({ className, cards = true, wideCards = false, resizeKey, style, children, ...props }, ref) => {
+  ({ className, cards = true, wideCards = false, resizeKey, picker = false, style, children, ...props }, ref) => {
     const innerRef = useRef<HTMLTableElement | null>(null);
     const setRefs = useMergedRef(innerRef, ref);
 
     // Widths come from the shared store (see above) so the reset controls
     // in the page chrome see the same value and can clear it. Persistence
     // rides the store's setter, not an effect here.
-    const widths = useWidths(resizeKey);
+    const widths = widthPref.use(resizeKey);
     const setWidths = useCallback(
       (next: ColumnWidths | ((prev: ColumnWidths) => ColumnWidths)) => {
-        if (resizeKey) updateWidths(resizeKey, next);
+        if (resizeKey) widthPref.update(resizeKey, next);
       },
       [resizeKey],
     );
+    // #1353: columns the operator has hidden. Applied as CSS rather than by
+    // not rendering the cells, so a page opts in with one line and needs no
+    // per-column plumbing of its own.
+    const hidden = hiddenPref.use(resizeKey);
     const [layout, setLayout] = useState<{ order: string[]; total: number } | null>(null);
+    const [hiddenPositions, setHiddenPositions] = useState<number[]>([]);
+    // Scopes the generated stylesheet to THIS table. `useId` produces
+    // colons/guillemets that a CSS selector can't carry, so strip them.
+    const scopeClass = `kn-cols-${useId().replace(/[^a-zA-Z0-9_-]/g, '')}`;
     const [dragging, setDragging] = useState(false);
     const dragRef = useRef<{ colId: string; startX: number; startWidth: number } | null>(null);
 
@@ -292,6 +489,35 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
     // collapses, so it is always in table mode.
     const inTableMode = useMediaQuery(wideCards ? '(min-width: 1536px)' : '(min-width: 1024px)');
     const active = !!resizeKey && (!cards || inTableMode);
+
+    // Publish this table's columns for a picker rendered outside it, and
+    // work out which DOM positions the hidden ones occupy so they can be
+    // hidden by stylesheet. Ungated by `active`: hiding a column is
+    // meaningful at every width, including card mode where the table isn't
+    // a table (there the hidden cell's label:value line disappears).
+    //
+    // Runs after every render for the same reason the width reconciliation
+    // does — the column set belongs to the page, so there is no prop to
+    // depend on. Only property reads, no layout flush, and state is only
+    // touched when the derived value actually changed.
+    useLayoutEffect(() => {
+      const table = innerRef.current;
+      if (!resizeKey || !table) return;
+      const headers = headerCells(table);
+      if (!headers.length) return;
+      publishColumns(
+        resizeKey,
+        headers.map((th) => ({ id: columnIdOf(th), label: th.textContent?.trim() ?? '' })),
+      );
+      // `nth-child` counts every element child regardless of `display`, so
+      // these positions stay correct even as other columns are hidden.
+      const positions = headers
+        .map((th, i) => (hidden.includes(columnIdOf(th)) ? i + 1 : 0))
+        .filter((n) => n > 0);
+      setHiddenPositions((prev) =>
+        prev.length === positions.length && prev.every((n, i) => n === positions[i]) ? prev : positions,
+      );
+    });
 
     // Reconcile the stored widths against the columns actually on screen.
     // Deliberately runs after *every* render and reads the DOM: the column
@@ -305,7 +531,13 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
         setLayout((prev) => (prev === null ? prev : null));
         return;
       }
-      const headers = headerCells(table);
+      // Hidden columns are excluded throughout. A `display: none` cell
+      // generates no box, so the browser does not count it as a column at
+      // all — a <colgroup> that still had an entry for it would apply every
+      // subsequent width to the wrong column. Measuring one is equally
+      // pointless: it reads 0, which would be stored and then re-applied as
+      // a zero-width column the moment the operator showed it again.
+      const headers = headerCells(table).filter((th) => !hidden.includes(columnIdOf(th)));
       if (!headers.length) return;
       const order = headers.map(columnIdOf);
       // Every column without a stored width — the rest of the table on the
@@ -324,7 +556,15 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
         setWidths((prev) => {
           const next = { ...prev };
           headers.forEach((th, i) => {
-            if (next[order[i]] === undefined) next[order[i]] = Math.round(th.getBoundingClientRect().width);
+            if (next[order[i]] !== undefined) return;
+            // A column that appears while the table is ALREADY in fixed
+            // layout measures 0: it has no <col> yet, and fixed layout
+            // leaves nothing for an unsized column when the sized ones
+            // already account for the whole table. Storing that 0 would
+            // freeze it collapsed forever. Only a measurement taken under
+            // automatic layout is real, so fall back to a default width.
+            const measured = Math.round(th.getBoundingClientRect().width);
+            next[order[i]] = measured > 0 ? measured : DEFAULT_NEW_COL_WIDTH;
           });
           return next;
         });
@@ -345,6 +585,15 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
     // operator sees them. A separate "snapshot everything on pointerdown"
     // pass would duplicate that, and would also freeze the table into fixed
     // layout on a stray click that never moved.
+    // Forget this table's columns when it goes away. Without this the entry
+    // outlives the table, and a picker mounted for the same key before the
+    // table has rendered — a standalone `TableColumnPicker`, or a route that
+    // renders one first — would list the previous mount's columns.
+    useEffect(() => {
+      if (!resizeKey) return;
+      return () => publishColumns(resizeKey, []);
+    }, [resizeKey]);
+
     const startResize = useCallback((th: HTMLTableCellElement, clientX: number) => {
       dragRef.current = {
         colId: columnIdOf(th),
@@ -396,7 +645,22 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
     const ctx: ResizeContextValue = { widths, layout, startResize, nudge, reset, active };
     const sized = active && layout !== null;
 
-    return (
+    // `picker` adds a row ABOVE the card. Only then is there an extra
+    // wrapper — a table that didn't ask for one renders exactly the DOM it
+    // always did.
+    const withPicker = (table: ReactNode) =>
+      picker && resizeKey ? (
+        <div className="space-y-1.5">
+          <div className="flex justify-end">
+            <TableColumnPicker resizeKey={resizeKey} />
+          </div>
+          {table}
+        </div>
+      ) : (
+        table
+      );
+
+    return withPicker(
       // No `overflow-*` on the wrapper. An `overflow-x-auto` here used to
       // guard narrow viewports + intrinsically wide rows, but any
       // non-`visible` overflow turns the wrapper into a scroll container
@@ -419,6 +683,7 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
           cards ? 'kn-table' : 'overflow-x-auto',
           cards && wideCards && 'kn-table-wide',
           'rounded-lg border border-border bg-card',
+          hiddenPositions.length > 0 && scopeClass,
         )}
         // Resized past the container, the wrapper grows with the table
         // instead of letting it render outside the card border — the page
@@ -434,6 +699,36 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
         // inside it.
         style={sized && cards ? { width: 'max-content', minWidth: '100%' } : undefined}
       >
+        {/* Hidden columns (#1353). CSS rather than "don't render the cell":
+            a cell's column is decided by the page, in two places (its
+            <TableHead> and every row's <TableCell>), so making visibility a
+            render-time decision would mean threading a predicate through
+            every one of them — 119 header cells and 128 body cells across
+            the SPA. A positional rule needs neither.
+
+            `tr:not(:has(> [colspan]))` is load-bearing. An empty-state row
+            ("no results") is a single `colSpan` cell, so it is
+            `:nth-child(1)`: without the guard, hiding the first column
+            would delete the message instead. Rows whose cell count doesn't
+            match the header are left entirely alone; their `colSpan` may
+            then exceed the column count, which browsers clamp. */}
+        {hiddenPositions.length > 0 && (
+          <style>
+            {hiddenPositions
+              .map(
+                (n) =>
+                  // `!important` because index.css out-specifies this. Its
+                  // 1024-1535px block hands ordinary tables back from card
+                  // mode with `.kn-table:not(.kn-table-wide) > table > tbody >
+                  // tr > td[data-label] { display: table-cell }` — four type
+                  // selectors to this rule's two, so without it the header
+                  // cell hides and the body cells stay put. "Hidden" has to
+                  // beat every layout rule, not tie with them.
+                  `.${scopeClass} > table > * > tr:not(:has(> [colspan])) > :nth-child(${n}){display:none!important}`,
+              )
+              .join('')}
+          </style>
+        )}
         <table
           ref={setRefs}
           className={cn('w-full text-sm', className)}
@@ -453,7 +748,7 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
           )}
           <ResizeContext.Provider value={ctx}>{children}</ResizeContext.Provider>
         </table>
-      </div>
+      </div>,
     );
   },
 );
@@ -606,6 +901,92 @@ interface TableCellProps extends TdHTMLAttributes<HTMLTableCellElement> {
    * actions-button column) — those cells span the full card width.
    */
   label?: string;
+}
+
+/**
+ * The column picker for one table (#1353). Drop it in the page's filter
+ * row — `<TableColumnPicker resizeKey="events" />` — and that is the whole
+ * integration: the columns and their names come from the table's own live
+ * header, so there is no list to declare here and no strings to translate
+ * twice.
+ *
+ * Renders nothing until the table has mounted and published a header, and
+ * nothing at all for a single-column table. `children` are appended as an
+ * extra section, for a page that has its own column-ish choices to offer
+ * (Agents picks which `agent_meta` keys become columns at all).
+ */
+export function TableColumnPicker({
+  resizeKey,
+  children,
+}: {
+  resizeKey: string;
+  children?: ReactNode;
+}) {
+  const { t } = useTranslation('common');
+  const { columns, toggle, reset, hasHidden } = useTableColumns(resizeKey);
+  const { hasWidths, reset: resetWidths } = useTableWidths(resizeKey);
+  const visibleCount = columns.filter((c) => c.visible).length;
+  if (columns.length < 2 && !children) return null;
+
+  return (
+    <details className="relative">
+      <summary className="flex h-8 cursor-pointer list-none items-center gap-1.5 rounded-md border border-border px-2.5 text-sm hover:bg-muted/10">
+        <SlidersHorizontal className="size-3.5" />
+        {t('table.columns.pick')}
+      </summary>
+      {/* z-50, not z-20: the table's sticky <thead> is `lg:z-20`. At equal
+          z-index the later DOM node wins, and the table comes after this
+          filter row — so the header row would paint straight through the
+          open panel once the page is scrolled. */}
+      <div className="absolute right-0 z-50 mt-1 max-h-72 w-56 overflow-auto rounded-md border border-border bg-card p-2 shadow-lg">
+        {columns.map((c, i) => (
+          <label
+            key={c.id}
+            className={cn(
+              'flex items-center gap-2 rounded px-1 py-0.5 text-sm hover:bg-muted/10',
+              // The last visible column can't be unchecked — a table with
+              // no columns has no way back, since the picker would have
+              // nothing left to list.
+              c.visible && visibleCount <= 1 ? 'cursor-not-allowed opacity-60' : 'cursor-pointer',
+            )}
+          >
+            <input
+              type="checkbox"
+              checked={c.visible}
+              disabled={c.visible && visibleCount <= 1}
+              onChange={() => toggle(c.id)}
+            />
+            <span className="truncate">{c.label || t('table.columns.unnamed', { n: i + 1 })}</span>
+          </label>
+        ))}
+        {children}
+        {(hasHidden || hasWidths) && (
+          <div className="mt-2 space-y-0.5 border-t border-border pt-1.5">
+            {hasHidden && (
+              <button
+                type="button"
+                onClick={reset}
+                className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left text-xs text-muted hover:bg-muted/10 hover:text-fg"
+              >
+                <RotateCcw className="size-3" />
+                {t('table.columns.showAll')}
+              </button>
+            )}
+            {hasWidths && (
+              <button
+                type="button"
+                onClick={resetWidths}
+                className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left text-xs text-muted hover:bg-muted/10 hover:text-fg"
+              >
+                <RotateCcw className="size-3" />
+                {t('table.resize.reset')}
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    </details>
+  );
 }
 
 export const TableCell = forwardRef<HTMLTableCellElement, TableCellProps>(

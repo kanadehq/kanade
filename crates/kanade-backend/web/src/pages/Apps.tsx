@@ -199,7 +199,7 @@ function ObjectStoreSection({ ns, queryKey, endpoint, icon, accept }: SectionCon
             <Trans ns="apps" i18nKey={`${ns}.list.empty`} components={{ code: <code /> }} />
           </div>
         ) : (
-          <Table resizeKey="apps">
+          <Table resizeKey="apps" picker>
             <TableHeader>
               <TableRow>
                 <TableHead>{t(`${ns}.list.columns.name`)}</TableHead>

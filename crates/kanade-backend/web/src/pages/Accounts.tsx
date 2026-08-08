@@ -354,7 +354,7 @@ export function Accounts() {
           the action column 445px outside its own border. Cards up to
           1535px instead, where every value gets its label and nothing
           overflows. */}
-      <Table wideCards resizeKey="accounts">
+      <Table wideCards resizeKey="accounts" picker>
         <TableHeader>
           <TableRow>
             {/* Floors for the two columns whose content is a single
@@ -568,7 +568,7 @@ export function Accounts() {
             <p className="text-red-500 text-sm">{formatError(groupsQuery.error)}</p>
           )}
           {(groupsQuery.data ?? []).length > 0 && (
-            <Table resizeKey="accounts.groups">
+            <Table resizeKey="accounts.groups" picker>
               <TableHeader>
                 <TableRow>
                   <TableHead>{t('group.name')}</TableHead>

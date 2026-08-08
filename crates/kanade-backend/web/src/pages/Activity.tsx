@@ -339,7 +339,7 @@ export function Activity() {
           </CardContent>
         </Card>
       ) : (
-        <Table resizeKey="activity">
+        <Table resizeKey="activity" picker>
           <TableHeader>
             <TableRow>
               <TableHead>{t('columns.resultId')}</TableHead>

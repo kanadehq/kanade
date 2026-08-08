@@ -96,7 +96,13 @@
   "table": {
     "resize": {
       "label": "Resize column",
-      "hint": "Drag to resize this column. Double-click to reset every column back to automatic widths."
+      "hint": "Drag to resize this column. Double-click to reset every column back to automatic widths.",
+      "reset": "Reset column widths"
+    },
+    "columns": {
+      "pick": "Columns",
+      "unnamed": "Column {{n}}",
+      "showAll": "Show all columns"
     }
   },
   "comingSoon": {

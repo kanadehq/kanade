@@ -647,7 +647,7 @@ export function InventorySearch() {
                         to: offset + rows.length,
                       })}
                 </div>
-                <Table resizeKey="search">
+                <Table resizeKey="search" picker>
                   <TableHeader>
                     <TableRow>
                       <TableHead colId="pcId">{t('results.columns.pcId')}</TableHead>

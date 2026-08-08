@@ -301,7 +301,7 @@ export function Compliance() {
               </div>
             </CardHeader>
             <CardContent>
-              <Table resizeKey="compliance">
+              <Table resizeKey="compliance" picker>
                 <TableHeader>
                   <TableRow>
                     <TableHead>{t('col.pc')}</TableHead>

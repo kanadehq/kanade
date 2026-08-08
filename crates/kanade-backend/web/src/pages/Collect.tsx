@@ -115,7 +115,7 @@ export function Collect() {
           ) : rows.length === 0 ? (
             <div className="text-muted text-sm">{t('bundles.empty')}</div>
           ) : (
-            <Table resizeKey="collect">
+            <Table resizeKey="collect" picker>
               <TableHeader>
                 <TableRow>
                   <TableHead>{t('bundles.columns.name')}</TableHead>
