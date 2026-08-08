@@ -423,7 +423,7 @@ export function Rollout() {
               <Trans ns="rollout" i18nKey="releases.empty" components={{ code: <code /> }} />
             </div>
           ) : (
-            <Table>
+            <Table resizeKey="rollout">
               <TableHeader>
                 <TableRow>
                   <TableHead>{t('releases.columns.version')}</TableHead>

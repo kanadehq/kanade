@@ -551,15 +551,23 @@ function FleetProbeTable({
             </div>
           )
         ) : (
-          <Table>
+          <Table resizeKey="inventory.fleet">
             <TableHeader>
               <TableRow>
-                <TableHead>{t('fleet.columns.pcId')}</TableHead>
-                <TableHead>{t('fleet.columns.lastLogon')}</TableHead>
+                <TableHead colId="pcId">{t('fleet.columns.pcId')}</TableHead>
+                <TableHead colId="lastLogon">{t('fleet.columns.lastLogon')}</TableHead>
+                {/* `colId` keyed by the manifest field, not by position:
+                    the column set here is manifest-driven, so a stored
+                    width has to follow its field across manifest switches
+                    rather than land on whatever column now sits third. */}
                 {columns.map((c) => (
-                  <TableHead key={c.field}>{c.label}</TableHead>
+                  <TableHead key={c.field} colId={`f:${c.field}`}>
+                    {c.label}
+                  </TableHead>
                 ))}
-                <TableHead className="text-muted text-xs">{t('fleet.columns.collected')}</TableHead>
+                <TableHead colId="collected" className="text-muted text-xs">
+                  {t('fleet.columns.collected')}
+                </TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>

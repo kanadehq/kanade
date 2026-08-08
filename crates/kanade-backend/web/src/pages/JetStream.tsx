@@ -72,7 +72,7 @@ function UsageBar({ probe }: { probe: JetstreamProbe }) {
 function ProbeTable({ rows }: { rows: JetstreamProbe[] }) {
   const { t } = useTranslation('jetstream');
   return (
-    <Table>
+    <Table resizeKey="jetstream">
       <TableHeader>
         <TableRow>
           <TableHead>{t('columns.name')}</TableHead>

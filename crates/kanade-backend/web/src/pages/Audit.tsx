@@ -183,7 +183,7 @@ export function Audit() {
           </CardContent>
         </Card>
       ) : (
-        <Table>
+        <Table resizeKey="audit">
           <TableHeader>
             <TableRow>
               <TableHead>{t('columns.when')}</TableHead>
