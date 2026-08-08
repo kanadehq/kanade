@@ -64,7 +64,8 @@
     "pick": "choose",
     "builtinSection": "standard columns",
     "attributesLabel": "attributes",
-    "credential": "NATS credential"
+    "credential": "NATS credential",
+    "resetWidths": "Reset column widths"
   },
   "columnTitles": {
     "signing": "Command-signing rollout state: does this host verify who sent a command, and does it refuse when it cannot? Keys are compared against the one this backend actually signs with; when the backend is not signing there is nothing to compare against and only what each agent reports is shown.",

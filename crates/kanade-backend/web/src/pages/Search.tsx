@@ -647,14 +647,20 @@ export function InventorySearch() {
                         to: offset + rows.length,
                       })}
                 </div>
-                <Table>
+                <Table resizeKey="search">
                   <TableHeader>
                     <TableRow>
-                      <TableHead>{t('results.columns.pcId')}</TableHead>
-                      <TableHead>{t('results.columns.lastLogon')}</TableHead>
-                      <TableHead>{t('results.columns.collectedAt')}</TableHead>
+                      <TableHead colId="pcId">{t('results.columns.pcId')}</TableHead>
+                      <TableHead colId="lastLogon">{t('results.columns.lastLogon')}</TableHead>
+                      <TableHead colId="collectedAt">{t('results.columns.collectedAt')}</TableHead>
+                      {/* `colId` keyed by the manifest field, not by
+                          position — the column set changes with the
+                          selected manifest, so a stored width must follow
+                          its field rather than its index. */}
                       {columns.map((c) => (
-                        <TableHead key={c.field}>{c.field}</TableHead>
+                        <TableHead key={c.field} colId={`f:${c.field}`}>
+                          {c.field}
+                        </TableHead>
                       ))}
                     </TableRow>
                   </TableHeader>

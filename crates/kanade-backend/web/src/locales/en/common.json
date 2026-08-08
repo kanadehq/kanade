@@ -93,6 +93,12 @@
     "rejected": "Dropped — no such group: {{names}}",
     "error": "Couldn't load groups"
   },
+  "table": {
+    "resize": {
+      "label": "Resize column",
+      "hint": "Drag to resize this column. Double-click to reset every column back to automatic widths."
+    }
+  },
   "comingSoon": {
     "title": "{{name}} — coming soon",
     "description": "This page is on the SPA port plan. The endpoint behind it works today; the React rebuild is incremental."

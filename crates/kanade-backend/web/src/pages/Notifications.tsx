@@ -359,7 +359,7 @@ export function Notifications() {
             (history.data.length === 0 ? (
               <p className="text-muted text-sm">{t('history.empty')}</p>
             ) : (
-              <Table>
+              <Table resizeKey="notifications">
                 <TableHeader>
                   <TableRow>
                     <TableHead>{t('history.priority')}</TableHead>

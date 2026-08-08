@@ -737,7 +737,7 @@ export function Schedules() {
           </div>
         )}
       </div>
-      <Table>
+      <Table resizeKey="schedules">
         <TableHeader>
           <TableRow>
             <TableHead>{t('columns.schedule')}</TableHead>

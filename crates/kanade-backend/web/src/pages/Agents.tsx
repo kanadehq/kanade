@@ -1,5 +1,5 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Activity, AlertTriangle, ArrowDown, ArrowUp, Loader2, Plus, ScrollText, Server, Settings2, SlidersHorizontal, Trash2, Users, X } from 'lucide-react';
+import { Activity, AlertTriangle, ArrowDown, ArrowUp, Loader2, Plus, RotateCcw, ScrollText, Server, Settings2, SlidersHorizontal, Trash2, Users, X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 import { Link, useSearchParams } from 'react-router-dom';
@@ -25,7 +25,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { JsonOutput } from '@/components/ui/json-output';
 import { Select } from '@/components/ui/select';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow, useTableWidths } from '@/components/ui/table';
 import { apiFetch, apiFetchPaged, formatError } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { useDebouncedValue } from '@/lib/hooks';
@@ -332,6 +332,9 @@ export function Agents() {
       /* non-persistent this session; not worth surfacing */
     }
   }, [hiddenCols]);
+  // #1344: the table's stored column widths, so the picker can offer a way
+  // back from a drag. `hasWidths` is false until something was resized.
+  const { hasWidths: widthsStored, reset: resetWidths } = useTableWidths('agents');
   const isColVisible = (id: string) => !hiddenCols.includes(id);
   const toggleCol = (id: string) =>
     setHiddenCols((prev) => (prev.includes(id) ? prev.filter((c) => c !== id) : [...prev, id]));
@@ -845,6 +848,24 @@ export function Agents() {
                   ))}
                 </>
               )}
+              {/* Column *widths* (#1344) are dragged on the header, and the
+                  only way back is a double-click on a handle — discoverable
+                  from the handle's tooltip and nowhere else. This is the
+                  visible way back. Rendered only once widths are actually
+                  stored, so an operator who has never resized anything sees
+                  a picker that looks exactly as it did. */}
+              {widthsStored && (
+                <div className="mt-2 border-t border-border pt-1.5">
+                  <button
+                    type="button"
+                    onClick={resetWidths}
+                    className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left text-xs text-muted hover:bg-muted/10 hover:text-fg"
+                  >
+                    <RotateCcw className="size-3" />
+                    {t('columns.resetWidths')}
+                  </button>
+                </div>
+              )}
             </div>
           </details>
         </div>
@@ -959,41 +980,41 @@ export function Agents() {
           {t('errorTitle')}: {(error as Error).message}
         </p>
       )}
-      <Table>
+      <Table resizeKey="agents">
         <TableHeader>
           <TableRow>
-            {isColVisible('status') && <TableHead>{t('columns.status')}</TableHead>}
+            {isColVisible('status') && <TableHead colId="status">{t('columns.status')}</TableHead>}
             {/* pc_id is usually COMPUTERNAME lower-cased, so a separate
                 hostname column duplicated it. The hostname now rides the
                 pc_id cell, shown only when it genuinely differs. pc_id is
                 the row identity + detail link, so it's never hideable. */}
-            <TableHead aria-sort={ariaSort(SORT_FIELDS.pcId)}>
+            <TableHead colId="pcId" aria-sort={ariaSort(SORT_FIELDS.pcId)}>
               {sortBtn(SORT_FIELDS.pcId, t('columns.pcId'))}
             </TableHead>
             {isColVisible('os') && (
-              <TableHead aria-sort={ariaSort(SORT_FIELDS.os)}>
+              <TableHead colId="os" aria-sort={ariaSort(SORT_FIELDS.os)}>
                 {sortBtn(SORT_FIELDS.os, t('columns.os'))}
               </TableHead>
             )}
             {isColVisible('agent') && (
-              <TableHead aria-sort={ariaSort(SORT_FIELDS.agent)}>
+              <TableHead colId="agent" aria-sort={ariaSort(SORT_FIELDS.agent)}>
                 {sortBtn(SORT_FIELDS.agent, t('columns.agent'))}
               </TableHead>
             )}
             {isColVisible('lastHeartbeat') && (
-              <TableHead aria-sort={ariaSort(SORT_FIELDS.lastHeartbeat)}>
+              <TableHead colId="lastHeartbeat" aria-sort={ariaSort(SORT_FIELDS.lastHeartbeat)}>
                 {sortBtn(SORT_FIELDS.lastHeartbeat, t('columns.lastHeartbeat'))}
               </TableHead>
             )}
             {isColVisible('lastLogon') && (
-              <TableHead aria-sort={ariaSort(SORT_FIELDS.lastLogon)}>
+              <TableHead colId="lastLogon" aria-sort={ariaSort(SORT_FIELDS.lastLogon)}>
                 {sortBtn(SORT_FIELDS.lastLogon, t('columns.lastLogon'), t('columnTitles.lastLogon'))}
               </TableHead>
             )}
             {/* #1051: operator-selected agent_meta columns (sortable via
                 the `meta:<key>` token). */}
             {activeMetaCols.map((k) => (
-              <TableHead key={k} aria-sort={ariaSort(`meta:${k}`)}>
+              <TableHead key={k} colId={`meta:${k}`} aria-sort={ariaSort(`meta:${k}`)}>
                 {sortBtn(`meta:${k}`, k, t('columnTitles.attribute', { key: k }))}
               </TableHead>
             ))}
@@ -1006,26 +1027,26 @@ export function Agents() {
                 backend's sort allow-list has no token for it, and adding one
                 would make this column stop being a pure SPA change. */}
             {isColVisible('signing') && (
-              <TableHead title={t('columnTitles.signing')}>{t('columns.signing')}</TableHead>
+              <TableHead colId="signing" title={t('columnTitles.signing')}>{t('columns.signing')}</TableHead>
             )}
             {/* #1270: which NATS credential the BROKER authenticated this
                 host as. Not sortable, same reason as `signing` — the
                 backend's sort allow-list has no token for it, and adding
                 one would stop this being a pure SPA change. */}
             {isColVisible('credential') && (
-              <TableHead title={t('columnTitles.credential')}>{t('columns.credential')}</TableHead>
+              <TableHead colId="credential" title={t('columnTitles.credential')}>{t('columns.credential')}</TableHead>
             )}
             {isColVisible('cpu') && (
-              <TableHead className="text-right" title={t('columnTitles.cpu')}>
+              <TableHead colId="cpu" className="text-right" title={t('columnTitles.cpu')}>
                 {t('columns.cpu')}
               </TableHead>
             )}
             {isColVisible('rss') && (
-              <TableHead className="text-right" title={t('columnTitles.rss')}>
+              <TableHead colId="rss" className="text-right" title={t('columnTitles.rss')}>
                 {t('columns.rss')}
               </TableHead>
             )}
-            {isColVisible('actions') && <TableHead>{t('columns.actions')}</TableHead>}
+            {isColVisible('actions') && <TableHead colId="actions">{t('columns.actions')}</TableHead>}
           </TableRow>
         </TableHeader>
         <TableBody>

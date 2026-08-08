@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { RotateCcw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
@@ -9,6 +10,7 @@ import { useConfirm } from '@/components/ui/confirm-dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
+import { resetAllTableWidths } from '@/components/ui/table';
 import { LANGUAGES, type LanguageCode } from '@/i18n';
 import { apiFetch, formatError } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
@@ -243,6 +245,34 @@ function PersonalTab() {
               <option value="dark">{t('theme.options.dark')}</option>
             </Select>
             <p className="text-muted text-xs">{t('theme.persistedHint')}</p>
+          </CardContent>
+        </Card>
+
+        {/* #1344: the global way back from a column drag. Each table also
+            resets from a double-click on any of its resize handles, and
+            Agents offers it in its column picker — but neither helps an
+            operator who has squeezed some column on a page they can't
+            remember. This clears every table at once, including tables not
+            currently mounted (their widths only exist in localStorage). */}
+        <Card>
+          <CardHeader>
+            <CardTitle>{t('tableWidths.title')}</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            <p className="text-muted text-xs">{t('tableWidths.description')}</p>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => {
+                const cleared = resetAllTableWidths();
+                toast.success(
+                  cleared ? t('tableWidths.done', { count: cleared }) : t('tableWidths.nothing'),
+                );
+              }}
+            >
+              <RotateCcw className="size-3.5" />
+              {t('tableWidths.reset')}
+            </Button>
           </CardContent>
         </Card>
       </div>

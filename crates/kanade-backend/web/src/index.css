@@ -396,6 +396,17 @@
   }
 }
 
+/* Column resizing (#1344, ui/table.tsx). While a drag is in flight the
+   pointer spends most of its time outside the 8px handle — over other
+   headers, over the rows, off the table entirely — so the resize cursor and
+   the selection suppression have to be page-wide, not on the handle. Set on
+   <body> for the duration of the drag and removed on pointerup/cancel. */
+body.kn-col-resizing,
+body.kn-col-resizing * {
+  cursor: col-resize !important;
+  user-select: none;
+}
+
 /* Inventory fact-detail tables must not clip overflow: a nested sub-table
    (Installed apps, disks[], …) pins its own sticky header, which only resolves
    against the viewport when no ancestor clips. The outer field/value table
