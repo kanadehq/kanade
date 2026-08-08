@@ -30,7 +30,7 @@ import { Select } from '@/components/ui/select';
 import { localInputToMs, msToLocalInput } from '@/lib/timeRange';
 import { groupKinds, groupSources, shortLabel, type VocabGroup } from '@/lib/vocabGroups';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { apiFetch } from '@/lib/api';
+import { apiFetch, apiFetchPaged } from '@/lib/api';
 import { escapeRegExp, fmtIsoLocal } from '@/lib/utils';
 
 type EventRow = {
@@ -493,6 +493,68 @@ export function ChipGroupPicker({
   );
 }
 
+/**
+ * Issue #1343: why a metadata search came back empty.
+ *
+ * `meta_any` matches through `agent_meta`, so a PC with no metadata
+ * projected is excluded unconditionally. That makes a bare "no events
+ * found" genuinely ambiguous, and the two readings call for opposite
+ * responses:
+ *
+ *   - no machine carries that attribute value  → fix the search text;
+ *   - the attribute was never populated at all → go populate it (or stop
+ *     expecting this filter to work).
+ *
+ * Reading the first as a fact about the fleet — "nobody in Sales has any
+ * events" — is the same class of mistake as #1073 / #1086, where a
+ * filter's own limitation got read as a finding. So the empty state
+ * answers with counts rather than leaving the operator to guess.
+ *
+ * Both queries are cheap and only run on the empty path: the PC count is
+ * a `limit=1` request read from the count headers (no roster fetched),
+ * and the key list is the same 60s-cached query the Agents page uses.
+ */
+function MetaSearchEmptyHint({ metaAny }: { metaAny: string }) {
+  const { t } = useTranslation('events');
+
+  // How many PCs the attribute search itself matches, independent of
+  // any event. `X-Online-Count` + `X-Offline-Count` is the pre-LIMIT
+  // matched set (see build_headers in api/agents.rs).
+  const pcs = useQuery({
+    queryKey: ['events-meta-any-pcs', metaAny],
+    queryFn: () =>
+      apiFetchPaged<unknown[]>(`/api/agents?limit=1&meta_any=${encodeURIComponent(metaAny)}`),
+    enabled: metaAny !== '',
+  });
+
+  // Whether the fleet carries ANY metadata. Distinguishes "your search
+  // matched nothing" from "this filter cannot work yet".
+  const keys = useQuery({
+    queryKey: ['agent-meta-keys'],
+    queryFn: () => apiFetch<string[]>('/api/agents/meta-keys'),
+    staleTime: 60_000,
+  });
+
+  // Say nothing until both answers are in. A half-formed diagnosis is
+  // worse than none: this text exists to stop a misreading, and stating
+  // "0 PCs" while the count is still loading would create one.
+  if (!pcs.isSuccess || !keys.isSuccess) return null;
+
+  const matched = (pcs.data.online ?? 0) + (pcs.data.offline ?? 0);
+  if (matched > 0) {
+    // The search is fine — those machines simply have no events in the
+    // selected period.
+    return <p className="mt-2 text-xs text-muted">{t('metaSearch.matchedNoEvents', { count: matched })}</p>;
+  }
+  return (
+    <p className="mt-2 text-xs text-amber">
+      {keys.data.length === 0
+        ? t('metaSearch.noMetadataAtAll')
+        : t('metaSearch.noPcMatched', { text: metaAny })}
+    </p>
+  );
+}
+
 // UAC split-token dedupe window (Issue #371). An interactive
 // sign-in by an Administrators-group user writes TWO 4624s (full
 // token + filtered token) microseconds apart, so a logon_type
@@ -646,6 +708,11 @@ export function Events() {
     search.get('pkey') ?? (search.get('logon_type') ? 'logon_type' : ''));
   const [payloadValue, setPayloadValue] = useState(() =>
     search.get('pval') ?? search.get('logon_type') ?? '');
+  // Issue #1343: global attribute search over the PC's operator-managed
+  // `agent_meta` — the same box the Agents page calls the attribute
+  // search (#1061). Narrows the MACHINES, not the events, so it composes
+  // with every other filter rather than replacing any of them.
+  const [metaAny, setMetaAny] = useState(() => search.get('meta_any') ?? '');
   // Dedupe defaults ON; only the opt-out lands in the URL.
   const [dedupe, setDedupe] = useState(search.get('dedupe') !== '0');
   const [since, setSince] = useState(() => normalizeSince(search.get('since')));
@@ -674,6 +741,12 @@ export function Events() {
   const dPcIdTrimmed  = dPcId.trim();
   const dPayloadKey   = useDebouncedValue(payloadKey,   FILTER_DEBOUNCE_MS);
   const dPayloadValue = useDebouncedValue(payloadValue, FILTER_DEBOUNCE_MS);
+  const dMetaAny      = useDebouncedValue(metaAny,      FILTER_DEBOUNCE_MS);
+  // Trimmed once at the source, same as `dPcIdTrimmed` and for the same
+  // reason: the backend reads a whitespace-only value as "no filter", so
+  // an untrimmed value would put a filter on the URL that the query never
+  // applied.
+  const dMetaAnyTrimmed = dMetaAny.trim();
   // Debounced like the typed-text filters, so nudging one bound from
   // one complete value to another doesn't fire a fetch per segment.
   const dCustomFrom = useDebouncedValue(customFrom, FILTER_DEBOUNCE_MS);
@@ -755,6 +828,7 @@ export function Events() {
     if (sourcesExc.length) next.set('sources_ex', sourcesExc.join(','));
     if (dPayloadKey)   next.set('pkey', dPayloadKey);
     if (dPayloadValue) next.set('pval', dPayloadValue);
+    if (dMetaAnyTrimmed) next.set('meta_any', dMetaAnyTrimmed);
     if (!dedupe) next.set('dedupe', '0');
     if (since && since !== DEFAULT_SINCE) next.set('since', since);
     // Absolute bounds only belong in the URL while the custom preset
@@ -768,7 +842,7 @@ export function Events() {
     if (tab !== 'operational') next.set('tab', tab);
     setSearch(next, { replace: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dPcIdTrimmed, kindsInc, kindsExc, sourcesInc, sourcesExc, dPayloadKey, dPayloadValue, dedupe, since, customFromIso, customToIso, limit, tab]);
+  }, [dPcIdTrimmed, kindsInc, kindsExc, sourcesInc, sourcesExc, dPayloadKey, dPayloadValue, dMetaAnyTrimmed, dedupe, since, customFromIso, customToIso, limit, tab]);
 
   const queryString = useMemo(() => {
     const sp = new URLSearchParams();
@@ -784,8 +858,12 @@ export function Events() {
       sp.set('payload_key', dPayloadKey);
       sp.set('payload_value', dPayloadValue);
     }
+    // Trimmed at the source like `pc_id`: the backend treats a
+    // whitespace-only value as "no filter", so sending it unchanged
+    // would make the URL claim a filter the query does not apply.
+    if (dMetaAnyTrimmed) sp.set('meta_any', dMetaAnyTrimmed);
     return sp.toString();
-  }, [dPcIdTrimmed, kindsInc, kindsExc, sourcesInc, sourcesExc, dPayloadKey, dPayloadValue, limit]);
+  }, [dPcIdTrimmed, kindsInc, kindsExc, sourcesInc, sourcesExc, dPayloadKey, dPayloadValue, dMetaAnyTrimmed, limit]);
 
   const { data, error, isLoading, isFetching, dataUpdatedAt } = useQuery({
     // The preset key (not a computed ISO) partitions the cache per
@@ -964,6 +1042,18 @@ export function Events() {
                 onChange={setPcId}
               />
             </div>
+            {/* Issue #1343: sits next to the PC filter because it answers
+                the same question — WHICH MACHINES — just by attribute
+                rather than by name. */}
+            <div className="space-y-1">
+              <Label htmlFor="ev-meta-any">{t('filters.metaAny')}</Label>
+              <Input
+                id="ev-meta-any"
+                placeholder={t('filters.placeholders.metaAny')}
+                value={metaAny}
+                onChange={(e) => setMetaAny(e.target.value)}
+              />
+            </div>
             <div className="space-y-1">
               <Label>{t('filters.payload')}</Label>
               <div className="flex gap-1.5">
@@ -1112,6 +1202,9 @@ export function Events() {
           <CardHeader><CardTitle>{t('empty.title')}</CardTitle></CardHeader>
           <CardContent className="text-muted">
             {t('empty.body')}
+            {/* #1343: a metadata search can come back empty for a reason
+                that has nothing to do with the fleet's events. */}
+            {dMetaAnyTrimmed && <MetaSearchEmptyHint metaAny={dMetaAnyTrimmed} />}
           </CardContent>
         </Card>
       ) : (

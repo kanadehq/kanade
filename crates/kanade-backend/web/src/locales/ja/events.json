@@ -47,7 +47,8 @@
     "placeholders": {
       "pcId": "完全一致 — 例: pc-01",
       "payloadKey": "キー — 例: user",
-      "payloadValue": "値 — 例: alice"
+      "payloadValue": "値 — 例: alice",
+      "metaAny": "キー不問で値を検索 — 例: 営業部"
     },
     "customFrom": "開始",
     "customTo": "終了",
@@ -64,7 +65,8 @@
       "30d": "30 日 (29 日前 0:00〜)",
       "all": "全期間",
       "custom": "カスタム (日時指定)"
-    }
+    },
+    "metaAny": "PC メタデータ検索"
   },
   "columns": {
     "when": "日時",
@@ -138,5 +140,11 @@
     "chart": "タイムライン",
     "heatmap": "アクティビティ",
     "table": "イベント一覧"
+  },
+  "metaSearch": {
+    "matchedNoEvents_one": "この条件に一致する PC は {{count}} 台ありますが、選択中の期間にイベントがありません。期間を広げてみてください。",
+    "matchedNoEvents_other": "この条件に一致する PC は {{count}} 台ありますが、選択中の期間にイベントがありません。期間を広げてみてください。",
+    "noPcMatched": "「{{text}}」に一致するメタデータを持つ PC がありません。0 件はフリートの状態ではなく、検索語が一致しなかったという意味です。",
+    "noMetadataAtAll": "どの PC にもメタデータが登録されていないため、この検索は必ず 0 件になります。まず Agents ページか AD 同期でメタデータを設定してください。"
   }
 }

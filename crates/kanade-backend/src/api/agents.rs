@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
 use tracing::{info, warn};
 
+use super::sql_like::{contains_like, escape_like, starts_like};
 use crate::api::AppState;
 use crate::audit::{self, Caller};
 
@@ -195,27 +196,6 @@ fn quarantined_like(version: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(|s| format!("%\"{}\"%", escape_like(s)))
-}
-
-/// Escape the LIKE metacharacters (`\` `%` `_`) so the string matches
-/// literally under a `LIKE … ESCAPE '\'` clause. The `*_like` wrappers
-/// call this, then add their own `%` framing. Single source of truth for
-/// the escape rule (Claude: three copies had drifted apart-able).
-fn escape_like(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_")
-}
-
-/// Wrap `value` as a SQLite `LIKE '%value%'` contains-pattern with the
-/// LIKE metacharacters escaped (ESCAPE '\' is declared at the call site).
-fn contains_like(value: &str) -> String {
-    format!("%{}%", escape_like(value))
-}
-
-/// Wrap `value` as a `LIKE 'value%'` starts-with pattern (metachars escaped).
-fn starts_like(value: &str) -> String {
-    format!("{}%", escape_like(value))
 }
 
 /// #1061: one metadata filter operator. `set`/`empty`/`absent` ignore the
