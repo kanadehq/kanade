@@ -75,31 +75,29 @@ need both elevation and an interactive window).
 ## stdout vs Write-Host
 
 The backend's result projector reads **stdout** as the script's
-output. If your manifest has an `inventory:` block, stdout is
-parsed as a single JSON blob.
+output. For jobs with hint blocks (`inventory:`, `check:`, `collect:`, etc.),
+the projector extracts JSON payloads delimited by `#KANADE-<KIND>-BEGIN` and
+`#KANADE-<KIND>-END` fences (e.g. `#KANADE-INVENTORY-BEGIN` / `#KANADE-INVENTORY-END`).
 
-**Do NOT use `Write-Host` for progress chatter in an inventory
-script.** Contrary to a common assumption, `Write-Host` does NOT
-stay on a separate host stream once the agent runs your script with
-stdout redirected — its output bleeds INTO the captured stdout. That
-extra text breaks the projector's single-JSON-blob parse
-(`serde_json::from_str` over the whole stdout, in
-`crates/kanade-backend/src/projector/results.rs::upsert_inventory`),
-and your inventory fact is silently dropped (the backend logs
-`stdout was not JSON`).
+For single-hint jobs without fences, backward compatibility allows parsing the entire
+stdout as a single JSON object. However, for multi-hint jobs (e.g. combining `inventory:`
+and `check:`), fenced blocks are **required** so each hint handler can extract its respective payload.
+
+**Do NOT use `Write-Host` for progress chatter.** `Write-Host` output bleeds INTO the
+captured stdout stream, which can mess up unfenced JSON parsing or clutter log output.
 
 Send progress chatter to **stderr** via `[Console]::Error.WriteLine(...)`.
 stderr is captured into the result's separate `stderr` field, which the
-projector ignores, so stdout stays a single clean JSON line.
+projector ignores.
 
 ```powershell
 [Console]::Error.WriteLine("Downloading...")  # → stderr (logged, ignored by projector)
-Write-Output ($obj | ConvertTo-Json)          # → stdout (the ONE JSON line, parsed)
+Write-Output "#KANADE-INVENTORY-BEGIN"
+Write-Output ($obj | ConvertTo-Json -Compress)
+Write-Output "#KANADE-INVENTORY-END"
 ```
 
-Keep stdout to exactly one `Write-Output` — anything else on stdout
-(a stray `Write-Host`, `Write-Output`, or a cmdlet's pipeline output)
-that isn't the expected JSON will fail the inventory parse.
+Fencing stdout payloads ensures clean extraction even if other output is present, and allows a single job script to provide inventory facts, health check state, and file collection metadata in a single run (#821).
 See `configs/jobs/installers/scripts/install-kanade-client.ps1` for a
 worked example.
 
