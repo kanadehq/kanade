@@ -126,6 +126,31 @@ pub struct ObjectStoreCaps {
 /// inside the broker-wide `max_file_store: 50GB` once the ~5.3 GiB of
 /// stream reservations (bootstrap.rs) are accounted for.
 pub const DEFAULT_RESULT_OUTPUT_CAP_MIB: u32 = 1024;
+
+/// How long `OBJECT_RESULT_OUTPUT` keeps an overflowed stdout/stderr blob.
+///
+/// Seven days, not the thirty it used to be, because the blob is redundant
+/// almost immediately: the results projector derefs it into the row before
+/// the INSERT, so SQLite holds the text and the SPA reads it from there. What
+/// the window buys is one thing only — a `-WipeDb` re-projection replays
+/// `STREAM_RESULTS` and re-derefs, so an object that has aged out comes back
+/// as empty stdout on the rebuilt row.
+///
+/// Thirty days of copies nobody reads is what pushed the bucket into its cap,
+/// and the cap is a hard wall rather than an eviction trigger (#1321): once
+/// full, every result over the inline threshold became undeliverable
+/// fleet-wide. A week keeps the recovery path useful for any incident anyone
+/// is still investigating while cutting the standing volume by ~4x.
+///
+/// Bounded above by `STREAM_RESULTS`'s own 30-day window in any case: past
+/// that there is no message to replay, so a longer object window buys
+/// nothing.
+pub const DEFAULT_RESULT_OUTPUT_RETENTION_DAYS: u32 = 7;
+
+/// Upper bound accepted from an operator. Matches `STREAM_RESULTS`'s window —
+/// beyond it the messages are gone, so the objects would outlive the only
+/// thing that could ask for them.
+pub const MAX_RESULT_OUTPUT_RETENTION_DAYS: u32 = 30;
 pub const DEFAULT_AGENT_RELEASES_CAP_MIB: u32 = 2048;
 pub const DEFAULT_APP_PACKAGES_CAP_MIB: u32 = 5120;
 pub const DEFAULT_SCRIPTS_CAP_MIB: u32 = 256;
@@ -371,6 +396,25 @@ pub struct ServerSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub collect_retention_days: Option<u32>,
 
+    /// How long `OBJECT_RESULT_OUTPUT` keeps an overflowed stdout/stderr
+    /// blob, in days. Absent / null falls back to
+    /// [`DEFAULT_RESULT_OUTPUT_RETENTION_DAYS`].
+    ///
+    /// Unlike `collect_retention_days`, this window is NOT how long the data
+    /// survives — the results projector derefs each blob into the row before
+    /// the INSERT, so the text lives in SQLite and the SPA reads it from
+    /// there regardless. What it bounds is how long a `-WipeDb`
+    /// re-projection can still recover that text: replay re-derefs, and an
+    /// aged-out object comes back as empty stdout on the rebuilt row.
+    ///
+    /// So this trades recovery window against standing volume, and volume is
+    /// what filled the bucket into its cap (#1321 — a hard wall, not
+    /// eviction) and stopped result delivery fleet-wide. Clamped to
+    /// [`MAX_RESULT_OUTPUT_RETENTION_DAYS`], which is `STREAM_RESULTS`'s own
+    /// window: past it there is no message left to replay.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_output_retention_days: Option<u32>,
+
     /// How many hours a freshly-minted login token (SPA / CLI) stays valid
     /// before the caller must re-authenticate. Read backend-side by the
     /// login handler when it mints the JWT `exp`; changing it affects
@@ -440,7 +484,10 @@ impl ServerSettings {
     /// blank field still resolves to a sensible value:
     /// [`collect_retention_days`](Self::collect_retention_days)
     /// ([`DEFAULT_COLLECT_RETENTION_DAYS`], preserving the historical 30-day
-    /// retention) and [`session_ttl_hours`](Self::session_ttl_hours)
+    /// retention), [`result_output_retention_days`](Self::result_output_retention_days)
+    /// ([`DEFAULT_RESULT_OUTPUT_RETENTION_DAYS`], 7 days — deliberately NOT
+    /// the historical 30, see that constant) and
+    /// [`session_ttl_hours`](Self::session_ttl_hours)
     /// ([`DEFAULT_SESSION_TTL_HOURS`], 24h).
     ///
     /// Exposed via `GET /api/server-settings/defaults` so the SPA renders
@@ -455,6 +502,7 @@ impl ServerSettings {
             mail: None,
             agent_install: None,
             collect_retention_days: Some(DEFAULT_COLLECT_RETENTION_DAYS),
+            result_output_retention_days: Some(DEFAULT_RESULT_OUTPUT_RETENTION_DAYS),
             session_ttl_hours: Some(DEFAULT_SESSION_TTL_HOURS),
             check_status_stale_days: Some(DEFAULT_CHECK_STATUS_STALE_DAYS),
             // Real per-bucket defaults, so the SPA renders them as faint
@@ -559,6 +607,18 @@ impl ServerSettings {
             .or(Self::defaults().collect_retention_days)
             .unwrap_or(DEFAULT_COLLECT_RETENTION_DAYS)
             .clamp(1, MAX_COLLECT_RETENTION_DAYS)
+    }
+
+    /// The effective `result_output` retention window in days: the stored
+    /// value if set, else the built-in default. Floored at 1 and clamped to
+    /// [`MAX_RESULT_OUTPUT_RETENTION_DAYS`] so a hand-written KV value can
+    /// neither disable retention outright nor outlive the stream it exists
+    /// to serve.
+    pub fn effective_result_output_retention_days(&self) -> u32 {
+        self.result_output_retention_days
+            .or(Self::defaults().result_output_retention_days)
+            .unwrap_or(DEFAULT_RESULT_OUTPUT_RETENTION_DAYS)
+            .clamp(1, MAX_RESULT_OUTPUT_RETENTION_DAYS)
     }
 
     /// The effective login-token lifetime in hours: the stored value if
@@ -775,6 +835,41 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(zero.effective_collect_retention_days(), 1);
+    }
+
+    #[test]
+    fn result_output_retention_defaults_to_a_week_not_the_old_month() {
+        // The built-in default IS the fix: existing buckets were born at 30
+        // days and reconcile down to this. If someone raises it back the
+        // bucket grows again, so the value is pinned rather than left to the
+        // constant's own definition.
+        assert_eq!(DEFAULT_RESULT_OUTPUT_RETENTION_DAYS, 7);
+        assert_eq!(
+            ServerSettings::default().effective_result_output_retention_days(),
+            7
+        );
+    }
+
+    #[test]
+    fn result_output_retention_is_capped_by_the_stream_it_serves() {
+        // Beyond STREAM_RESULTS' own window there is no message left to
+        // replay, so a longer object window keeps blobs nothing can ask for.
+        assert_eq!(MAX_RESULT_OUTPUT_RETENTION_DAYS, 30);
+        let big = ServerSettings {
+            result_output_retention_days: Some(u32::MAX),
+            ..Default::default()
+        };
+        assert_eq!(
+            big.effective_result_output_retention_days(),
+            MAX_RESULT_OUTPUT_RETENTION_DAYS
+        );
+        // …and 0 is floored rather than disabling retention, which would put
+        // the bucket straight back to unbounded growth.
+        let zero = ServerSettings {
+            result_output_retention_days: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(zero.effective_result_output_retention_days(), 1);
     }
 
     #[test]

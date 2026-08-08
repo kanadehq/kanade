@@ -172,6 +172,14 @@
       "confirmDescription": "The backend service will restart and the API will be unavailable for a few seconds. In-flight requests may fail. This page reloads once it's back.",
       "confirmLabel": "Restart",
       "toast": "Backend is restarting — this page will reload shortly."
+    },
+    "resultOutputRetention": {
+      "label": "Result output recovery window",
+      "unit": "days",
+      "unsetPlaceholder": "default",
+      "blankHint": "How long overflowed stdout/stderr blobs stay in the object store. Not how long the output survives — it is written into the database before the row lands — but how long a database rebuild can still recover it. Blank uses the built-in default.",
+      "title": "Result output recovery",
+      "description": "Overflowed stdout/stderr is uploaded to the object store, then written into the database when the result is recorded — so the output itself is never at risk here. This window is only how long a database rebuild can still recover it."
     }
   }
 }

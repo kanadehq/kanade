@@ -39,8 +39,8 @@ use kanade_shared::kv_cas;
 use kanade_shared::wire::{
     AgentInstallSection, MAX_AGENT_PRUNE_DAYS, MAX_CHECK_STATUS_STALE_DAYS,
     MAX_COLLECT_RETENTION_DAYS, MAX_OBJECT_STORE_CAP_MIB, MAX_OBJECT_STORE_TOTAL_MIB,
-    MAX_SESSION_TTL_HOURS, MAX_SUPPORT_UNLOCK_TTL_MINUTES, ObjectStoreCaps, ServerSettings,
-    SupportCode,
+    MAX_RESULT_OUTPUT_RETENTION_DAYS, MAX_SESSION_TTL_HOURS, MAX_SUPPORT_UNLOCK_TTL_MINUTES,
+    ObjectStoreCaps, ServerSettings, SupportCode,
 };
 use lettre::message::Mailbox;
 use serde_json::{Map, Value};
@@ -160,6 +160,7 @@ pub async fn put(
     // which may re-run on a revision conflict and can't be fallible).
     let prune_value = typed.agent_prune_days.map(Value::from);
     let collect_value = typed.collect_retention_days.map(Value::from);
+    let result_output_value = typed.result_output_retention_days.map(Value::from);
     let session_ttl_value = typed.session_ttl_hours.map(Value::from);
     let check_stale_value = typed.check_status_stale_days.map(Value::from);
     let controller_value = typed.controller_group.clone().map(Value::String);
@@ -216,6 +217,8 @@ pub async fn put(
     // re-sends an unchanged value (the SPA always sends the full document)
     // doesn't pay a stream round-trip.
     let mut collect_changed = false;
+    // Same, for the `result_output` recovery window.
+    let mut result_output_changed = false;
     // Same change-tracking for `object_store_caps` (#1247): gates the
     // per-bucket max_bytes reconcile.
     let mut caps_changed = false;
@@ -234,6 +237,13 @@ pub async fn put(
                 collect_value.clone(),
             );
             changed |= collect_changed;
+            result_output_changed = merge_field(
+                obj,
+                &incoming,
+                "result_output_retention_days",
+                result_output_value.clone(),
+            );
+            changed |= result_output_changed;
             changed |= merge_field(
                 obj,
                 &incoming,
@@ -278,6 +288,7 @@ pub async fn put(
     info!(
         agent_prune_days = ?merged.agent_prune_days,
         collect_retention_days = ?merged.collect_retention_days,
+        result_output_retention_days = ?merged.result_output_retention_days,
         session_ttl_hours = ?merged.session_ttl_hours,
         controller_group = ?merged.controller_group,
         mail_configured = merged.mail.is_some(),
@@ -304,6 +315,31 @@ pub async fn put(
                 error = %format!("{e:#}"), collect_retention_days = days,
                 "collect retention: applied to KV but reconcile of the Object Store max_age failed; \
                  will be applied on the next backend restart",
+            ),
+        }
+    }
+
+    // Same for `result_output`, gated the same way. Separate from the collect
+    // block rather than folded in: they reconcile different buckets for
+    // different reasons (a data lifetime vs a replay-recovery window), and one
+    // failing must not skip the other.
+    if result_output_changed {
+        let days = merged.effective_result_output_retention_days();
+        match kanade_shared::bootstrap::reconcile_object_store_max_age(
+            &s.jetstream,
+            kanade_shared::kv::OBJECT_RESULT_OUTPUT,
+            days,
+        )
+        .await
+        {
+            Ok(true) => info!(
+                result_output_retention_days = days,
+                "result_output retention reconciled after save"
+            ),
+            Ok(false) => {}
+            Err(e) => warn!(
+                error = %format!("{e:#}"), result_output_retention_days = days,
+                "result_output retention reconcile after save failed"
             ),
         }
     }
@@ -493,6 +529,28 @@ fn validate(s: &ServerSettings) -> Result<(), (StatusCode, String)> {
                 StatusCode::UNPROCESSABLE_ENTITY,
                 format!(
                     "collect_retention_days must be <= {MAX_COLLECT_RETENTION_DAYS} (10 years)"
+                ),
+            ));
+        }
+    }
+    if let Some(days) = s.result_output_retention_days {
+        // `Some(0)` rejected like the rest: it would round-trip and wedge the
+        // SPA's `min=1` field. Omit / `null` for the built-in default.
+        if days == 0 {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "result_output_retention_days must be >= 1; omit it or send null to use the default"
+                    .to_string(),
+            ));
+        }
+        // The ceiling is STREAM_RESULTS's own window rather than a round
+        // number: past it there is no message left to replay, so a longer
+        // object window would keep blobs nothing can ask for.
+        if days > MAX_RESULT_OUTPUT_RETENTION_DAYS {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!(
+                    "result_output_retention_days must be <= {MAX_RESULT_OUTPUT_RETENTION_DAYS} (STREAM_RESULTS' own retention — beyond it there is nothing to replay)"
                 ),
             ));
         }
@@ -1168,6 +1226,42 @@ mod tests {
             ..Default::default()
         };
         assert!(validate(&s).is_err());
+    }
+
+    /// The API layer's own gate for `result_output_retention_days`.
+    ///
+    /// The wire crate's clamp tests cover
+    /// `effective_result_output_retention_days()`, which is what the RUNTIME
+    /// falls back to — but clamping silently accepts a bad value, and a PUT
+    /// should refuse it so the operator sees the mistake instead of a number
+    /// quietly becoming something else.
+    #[test]
+    fn validate_rejects_zero_or_oversize_result_output_retention() {
+        use kanade_shared::wire::MAX_RESULT_OUTPUT_RETENTION_DAYS;
+        assert!(
+            validate(&ServerSettings {
+                result_output_retention_days: Some(0),
+                ..Default::default()
+            })
+            .is_err(),
+            "0 would wedge the SPA's min=1 field; omit / null is how you ask for the default"
+        );
+        assert!(
+            validate(&ServerSettings {
+                result_output_retention_days: Some(MAX_RESULT_OUTPUT_RETENTION_DAYS + 1),
+                ..Default::default()
+            })
+            .is_err(),
+            "past STREAM_RESULTS' window there is nothing left to replay"
+        );
+        assert!(
+            validate(&ServerSettings {
+                result_output_retention_days: Some(MAX_RESULT_OUTPUT_RETENTION_DAYS),
+                ..Default::default()
+            })
+            .is_ok(),
+            "the ceiling itself must be accepted, not rejected off-by-one"
+        );
     }
 
     #[test]
