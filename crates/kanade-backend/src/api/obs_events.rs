@@ -132,6 +132,112 @@ pub struct ListResponse {
     pub events: Vec<EventRow>,
 }
 
+/// The filter gates that are the same whichever statement runs.
+///
+/// One copy, spliced into both by `concat!`, because two hand-maintained
+/// copies of a fifteen-bind WHERE is precisely the shape that drifts — and a
+/// drift here is a filter that silently stops applying on one code path.
+/// `concat!` runs at compile time, so each statement is still a single
+/// `&'static str` and the crate's no-dynamic-SQL lint is satisfied by
+/// construction rather than by review.
+macro_rules! list_sql {
+    ($pc_gate:literal) => {
+        list_sql!("", $pc_gate)
+    };
+    ($prefix:literal, $pc_gate:literal) => {
+        concat!(
+            $prefix,
+            "SELECT id, pc_id, at, kind, source, event_record_id, payload
+             FROM obs_events
+             WHERE ",
+            $pc_gate,
+            "
+           AND (?2 IS NULL OR at    >= ?2)
+           AND (?3 IS NULL OR at    <  ?3)
+           AND (?4 IS NULL OR kind   = ?4)
+           AND (?5 IS NULL OR source = ?5)
+           AND (?6 IS NULL OR json_extract(payload, '$.logon_type') = ?6)
+           AND (?7 IS NULL OR kind   IN     (SELECT value FROM json_each(?7)))
+           AND (?8 IS NULL OR kind   NOT IN (SELECT value FROM json_each(?8)))
+           AND (?9 IS NULL OR source IN     (SELECT value FROM json_each(?9)))
+           AND (?10 IS NULL OR source NOT IN (SELECT value FROM json_each(?10)))
+           AND (?11 IS NULL
+                OR json_extract(payload, '$.' || ?11) = ?12
+                OR (?13 IS NOT NULL AND json_extract(payload, '$.' || ?11) = ?13))
+           -- `ESCAPE '\\'` in the Rust source is a single backslash in the
+           -- SQL: `contains_like` escapes the operator's `%` / `_` with
+           -- it. Writing `'\'` here would emit an EMPTY escape clause,
+           -- which SQLite rejects only when the LIKE is actually
+           -- evaluated — so the bug hides behind the `?14 IS NULL`
+           -- short-circuit and every unfiltered query still passes.
+           AND (?14 IS NULL
+                OR pc_id IN (SELECT pc_id FROM agent_meta
+                             WHERE value LIKE ?14 ESCAPE '\\'))
+         ORDER BY at DESC, id DESC
+         LIMIT ?15"
+        )
+    };
+}
+
+/// No `pc_id` filter: the gate is inert and the planner walks `at` newest
+/// first, which is what the default view wants.
+const LIST_ANY_PC: &str = list_sql!("(?1 IS NULL OR pc_id  = ?1)");
+
+/// `pc_id` filter present, stated as a plain equality so SQLite can use
+/// `idx_obs_events_pc_at`.
+///
+/// The NULL-gated form `(?1 IS NULL OR pc_id = ?1)` cannot be an index
+/// constraint: whether the bind is NULL is a run-time fact, so the planner has
+/// to keep the scan general. `EXPLAIN QUERY PLAN` showed `SCAN obs_events
+/// USING INDEX idx_obs_events_at` for every combination of filters — neither
+/// `idx_obs_events_pc_at` nor `idx_obs_events_kind_at` was ever reachable
+/// through this query.
+///
+/// That is fast while the filter is loose, because `LIMIT` fills quickly, and
+/// degrades as it tightens, because the scan cannot stop until it has found
+/// enough rows or exhausted the table. Narrowing therefore made the page
+/// SLOWER, which is the opposite of what an operator expects and why the
+/// report was hard to place. Measured on 504,000 rows (400 agents x 30 days),
+/// one PC plus the `boot`/`shutdown` chips — the reported combination, and the
+/// worst case because it matches ~60 rows in a month:
+///
+/// | statement | rows | time |
+/// |---|---:|---:|
+/// | NULL-gated | 60 | 542 ms |
+/// | this one | 60 | **2.3 ms** |
+///
+/// One PC without kind filters goes 455 ms -> 10 ms. The default view is
+/// unchanged; it never depended on these indexes.
+///
+/// Binds are identical in both statements — `?1` is still bound, it just no
+/// longer has to be tested for NULL — so the call site keeps one bind
+/// sequence and the two cannot disagree about parameter order.
+const LIST_ONE_PC: &str = list_sql!("pc_id = ?1");
+
+/// `EXPLAIN QUERY PLAN` for each statement, from the SAME template.
+///
+/// The plan test used to run a hand-written, cut-down query — so a regression
+/// in the real statement (a gate added ahead of the `pc_id` equality, a
+/// reordering that defeats the index) would have left it green, because it
+/// was planning a different query. The planner reads the whole `WHERE` and
+/// `ORDER BY`, so the only thing worth planning is the text that ships.
+#[cfg(test)]
+const EXPLAIN_ONE_PC: &str = list_sql!("EXPLAIN QUERY PLAN ", "pc_id = ?1");
+#[cfg(test)]
+const EXPLAIN_ANY_PC: &str = list_sql!("EXPLAIN QUERY PLAN ", "(?1 IS NULL OR pc_id  = ?1)");
+
+/// Which statement this request runs.
+///
+/// Extracted rather than inlined at the call site so it can be pinned: a test
+/// that only compares the two constants passes just as happily when the
+/// handler stops choosing between them.
+fn list_statement(pc_id: Option<&str>) -> &'static str {
+    match pc_id {
+        Some(_) => LIST_ONE_PC,
+        None => LIST_ANY_PC,
+    }
+}
+
 /// `GET /api/obs_events`.
 pub async fn list(
     State(pool): State<SqlitePool>,
@@ -190,14 +296,18 @@ pub async fn list(
     let sources_ex_json = csv_to_json_array(&q.sources_ex);
 
     // Static SQL with "param IS NULL OR column = param" gates per
-    // optional filter. Equivalent to building a dynamic WHERE on
-    // the fly but keeps the SQL string a `&'static str`, which is
+    // optional filter, so the SQL string stays a `&'static str` —
     // what `kanade-backend`'s lint config requires (dynamic SQL is
     // blocked at the lint level to prevent accidental injection
-    // surfaces). The same binding appears twice per gated filter
-    // — once for the NULL check, once for the equality — which is
-    // a SQLite query-planner no-op (the `IS NULL` branch
-    // short-circuits at parse time when the bind is non-NULL).
+    // surfaces).
+    //
+    // The gate is NOT a planner no-op, which is what #1350 was: a
+    // run-time NULL check cannot be an index constraint, so every
+    // filter combination scanned `idx_obs_events_at`. The lint's
+    // requirement is that the SQL TEXT not depend on run-time
+    // values — not that there be only one of them — so `pc_id`,
+    // the filter that unlocks a usable index, now picks between two
+    // fixed statements. See `LIST_ONE_PC`.
     // `json_extract` on the `?6` gate: `payload` is stored as JSON
     // text, so the logon_type filter digs into it at query time.
     // No index on the expression — acceptable because the filter
@@ -210,55 +320,28 @@ pub async fn list(
     // builds its JSONPath from a validated identifier (`'$.' || ?`)
     // and compares against the text bind plus, when the value is
     // numeric, the f64 twin.
-    let rows = sqlx::query(
-        "SELECT id, pc_id, at, kind, source, event_record_id, payload
-         FROM obs_events
-         WHERE (?1 IS NULL OR pc_id  = ?1)
-           AND (?2 IS NULL OR at    >= ?2)
-           AND (?3 IS NULL OR at    <  ?3)
-           AND (?4 IS NULL OR kind   = ?4)
-           AND (?5 IS NULL OR source = ?5)
-           AND (?6 IS NULL OR json_extract(payload, '$.logon_type') = ?6)
-           AND (?7 IS NULL OR kind   IN     (SELECT value FROM json_each(?7)))
-           AND (?8 IS NULL OR kind   NOT IN (SELECT value FROM json_each(?8)))
-           AND (?9 IS NULL OR source IN     (SELECT value FROM json_each(?9)))
-           AND (?10 IS NULL OR source NOT IN (SELECT value FROM json_each(?10)))
-           AND (?11 IS NULL
-                OR json_extract(payload, '$.' || ?11) = ?12
-                OR (?13 IS NOT NULL AND json_extract(payload, '$.' || ?11) = ?13))
-           -- `ESCAPE '\\'` in the Rust source is a single backslash in the
-           -- SQL: `contains_like` escapes the operator's `%` / `_` with
-           -- it. Writing `'\'` here would emit an EMPTY escape clause,
-           -- which SQLite rejects only when the LIKE is actually
-           -- evaluated — so the bug hides behind the `?14 IS NULL`
-           -- short-circuit and every unfiltered query still passes.
-           AND (?14 IS NULL
-                OR pc_id IN (SELECT pc_id FROM agent_meta
-                             WHERE value LIKE ?14 ESCAPE '\\'))
-         ORDER BY at DESC, id DESC
-         LIMIT ?15",
-    )
-    .bind(q.pc_id.as_deref())
-    .bind(q.from)
-    .bind(q.to)
-    .bind(q.kind.as_deref())
-    .bind(q.source.as_deref())
-    .bind(q.logon_type)
-    .bind(kinds_json)
-    .bind(kinds_ex_json)
-    .bind(sources_json)
-    .bind(sources_ex_json)
-    .bind(payload_key)
-    .bind(payload_value)
-    .bind(payload_value_num)
-    .bind(meta_any_like)
-    .bind(limit)
-    .fetch_all(&pool)
-    .await
-    .map_err(|e| {
-        warn!(error = %e, "obs_events list query");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let rows = sqlx::query(list_statement(q.pc_id.as_deref()))
+        .bind(q.pc_id.as_deref())
+        .bind(q.from)
+        .bind(q.to)
+        .bind(q.kind.as_deref())
+        .bind(q.source.as_deref())
+        .bind(q.logon_type)
+        .bind(kinds_json)
+        .bind(kinds_ex_json)
+        .bind(sources_json)
+        .bind(sources_ex_json)
+        .bind(payload_key)
+        .bind(payload_value)
+        .bind(payload_value_num)
+        .bind(meta_any_like)
+        .bind(limit)
+        .fetch_all(&pool)
+        .await
+        .map_err(|e| {
+            warn!(error = %e, "obs_events list query");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     let events = rows
         .into_iter()
@@ -514,6 +597,151 @@ mod tests {
         .await
         .unwrap();
         pool
+    }
+
+    /// The two statements must be the SAME QUERY, differing only in whether
+    /// the `pc_id` gate is stated as an index-usable equality.
+    ///
+    /// They are spliced from one `list_sql!` body so the shared gates cannot
+    /// drift, but the splice itself could still be wrong — a bind renumbered
+    /// in one arm, a gate accidentally landing inside the `$pc_gate` literal.
+    /// This compares the rendered text rather than trusting that.
+    #[test]
+    fn the_two_statements_differ_only_in_the_pc_gate() {
+        assert_eq!(
+            LIST_ANY_PC.replace("(?1 IS NULL OR pc_id  = ?1)", "<GATE>"),
+            LIST_ONE_PC.replace("pc_id = ?1", "<GATE>"),
+        );
+        // And the numbering is untouched: every bind the handler supplies
+        // appears in both.
+        for n in 1..=15 {
+            let tok = format!("?{n}");
+            assert!(LIST_ANY_PC.contains(&tok), "any-pc statement lost {tok}");
+            assert!(LIST_ONE_PC.contains(&tok), "one-pc statement lost {tok}");
+        }
+    }
+
+    /// `EXPLAIN QUERY PLAN`'s human-readable text lives in the `detail`
+    /// column; column 0 is an integer node id, so `query_scalar` decodes the
+    /// wrong thing and fails at run time rather than at compile time.
+    ///
+    /// Binds all fifteen parameters, because it plans the production
+    /// statement rather than a reduced stand-in.
+    async fn plan_details(pool: &SqlitePool, sql: &'static str) -> Vec<String> {
+        sqlx::query(sql)
+            .bind(Some("pc-01"))
+            .bind(Option::<DateTime<Utc>>::None)
+            .bind(Option::<DateTime<Utc>>::None)
+            .bind(Option::<String>::None)
+            .bind(Option::<String>::None)
+            .bind(Option::<i64>::None)
+            .bind(Option::<String>::None)
+            .bind(Option::<String>::None)
+            .bind(Option::<String>::None)
+            .bind(Option::<String>::None)
+            .bind(Option::<String>::None)
+            .bind(Option::<String>::None)
+            .bind(Option::<f64>::None)
+            .bind(Option::<String>::None)
+            .bind(50i64)
+            .fetch_all(pool)
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.get::<String, _>("detail"))
+            .collect()
+    }
+
+    /// The handler must actually pick between them.
+    ///
+    /// Added after a perturbation found the gap: making the call site always
+    /// use `LIST_ANY_PC` left every test in this module green, because they
+    /// all exercised the constants and a hand-written `EXPLAIN` rather than
+    /// the selection. The statements being right is worth nothing if nothing
+    /// chooses the fast one.
+    #[test]
+    fn a_pc_filter_selects_the_sargable_statement() {
+        assert_eq!(list_statement(Some("pc-01")), LIST_ONE_PC);
+        assert_eq!(list_statement(None), LIST_ANY_PC);
+        assert_ne!(LIST_ONE_PC, LIST_ANY_PC);
+    }
+
+    /// The point of the split: with a `pc_id` the planner must reach
+    /// `idx_obs_events_pc_at` instead of scanning `idx_obs_events_at`.
+    ///
+    /// Plans `LIST_ONE_PC` itself, via an `EXPLAIN` variant spliced from the
+    /// same `list_sql!` template. A hand-written stand-in would keep passing
+    /// while the shipped statement regressed — the planner's answer depends
+    /// on the whole `WHERE` and `ORDER BY`, so a cut-down query is a
+    /// different question.
+    ///
+    /// Asserted on the PLAN, not on a duration, so it holds on a slow CI box
+    /// and fails for the actual reason if someone re-gates `pc_id`.
+    #[tokio::test]
+    async fn the_pc_filter_reaches_its_index() {
+        let pool = fresh_pool().await;
+        let detail = plan_details(&pool, EXPLAIN_ONE_PC).await.join(" | ");
+        assert!(
+            detail.contains("idx_obs_events_pc_at"),
+            "expected the pc index, got: {detail}"
+        );
+        assert!(
+            detail.contains("SEARCH"),
+            "expected a SEARCH (seek), got: {detail}"
+        );
+
+        let old = plan_details(&pool, EXPLAIN_ANY_PC).await.join(" | ");
+        assert!(
+            !old.contains("idx_obs_events_pc_at"),
+            "the NULL-gated form should NOT reach the pc index; if it now does,              SQLite got smarter and this split may be unnecessary: {old}"
+        );
+    }
+
+    /// Same rows out, whichever statement ran. The split is a planner
+    /// concern; it must not change what the API returns.
+    #[tokio::test]
+    async fn both_statements_return_the_same_rows() {
+        let pool = fresh_pool().await;
+        let t = |h: u32| Utc.with_ymd_and_hms(2026, 5, 28, h, 0, 0).unwrap();
+        seed_row(&pool, "pc-01", t(11), "boot", "10").await;
+        seed_row(&pool, "pc-02", t(12), "boot", "11").await;
+        seed_row(&pool, "pc-01", t(13), "shutdown", "12").await;
+
+        let ids = |rows: Vec<sqlx::sqlite::SqliteRow>| -> Vec<String> {
+            rows.iter()
+                .map(|r| {
+                    let pc: String = r.get("pc_id");
+                    let kind: String = r.get("kind");
+                    format!("{pc}/{kind}")
+                })
+                .collect()
+        };
+        let run = async |sql: &'static str| {
+            sqlx::query(sql)
+                .bind(Some("pc-01"))
+                .bind(Option::<DateTime<Utc>>::None)
+                .bind(Option::<DateTime<Utc>>::None)
+                .bind(Option::<String>::None)
+                .bind(Option::<String>::None)
+                .bind(Option::<i64>::None)
+                .bind(Option::<String>::None)
+                .bind(Option::<String>::None)
+                .bind(Option::<String>::None)
+                .bind(Option::<String>::None)
+                .bind(Option::<String>::None)
+                .bind(Option::<String>::None)
+                .bind(Option::<f64>::None)
+                .bind(Option::<String>::None)
+                .bind(50i64)
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+        };
+        let a = ids(run(LIST_ANY_PC).await);
+        let b = ids(run(LIST_ONE_PC).await);
+        assert_eq!(a, b, "the split changed the result set");
+        // 13:00 shutdown, 11:00 boot, then `fresh_pool`'s 10:41 logon.
+        assert_eq!(b, vec!["pc-01/shutdown", "pc-01/boot", "pc-01/logon"]);
     }
 
     /// A `ListQuery` with only the two date bounds set — every other
