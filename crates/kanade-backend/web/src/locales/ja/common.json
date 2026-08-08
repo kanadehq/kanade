@@ -102,7 +102,10 @@
     "columns": {
       "pick": "表示列",
       "unnamed": "列 {{n}}",
-      "showAll": "全ての列を表示"
+      "showAll": "全ての列を表示",
+      "moveUp": "{{name}} を左へ移動",
+      "moveDown": "{{name}} を右へ移動",
+      "resetOrder": "列の順序をリセット"
     }
   },
   "comingSoon": {

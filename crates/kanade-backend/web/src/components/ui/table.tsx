@@ -1,6 +1,9 @@
 import {
+  Children,
+  cloneElement,
   createContext,
   forwardRef,
+  isValidElement,
   useCallback,
   useContext,
   useEffect,
@@ -13,11 +16,12 @@ import {
   type HTMLAttributes,
   type MutableRefObject,
   type PointerEvent as ReactPointerEvent,
+  type ReactElement,
   type ReactNode,
   type TdHTMLAttributes,
   type ThHTMLAttributes,
 } from 'react';
-import { RotateCcw, SlidersHorizontal } from 'lucide-react';
+import { ChevronDown, ChevronUp, RotateCcw, SlidersHorizontal } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { useMediaQuery } from '@/lib/hooks';
@@ -63,7 +67,7 @@ const NUDGE_STEP_COARSE = 64;
 const DEFAULT_NEW_COL_WIDTH = 120;
 const WIDTHS_PREFIX = 'kanade.table.widths.';
 const HIDDEN_PREFIX = 'kanade.table.hidden.';
-
+const ORDER_PREFIX = 'kanade.table.order.';
 /** Persisted widths, keyed by column id (see `columnIdOf`). */
 type ColumnWidths = Record<string, number>;
 
@@ -83,6 +87,20 @@ interface ResizeContextValue {
   /** False when the table didn't opt in, or is currently rendering as
    *  cards. TableHead renders no handle at all in that case. */
   active: boolean;
+  /**
+   * Display position → source position (#1353 phase 2). `null` means "no
+   * reordering", which is both the default and the fallback when the
+   * table's header isn't shaped the way `sourceColumnIds` expects — every
+   * <TableRow> then renders its cells untouched.
+   *
+   * Applied by position rather than by id: only the header cells carry
+   * ids, and a body row has to end up in the same order as the header it
+   * belongs to.
+   */
+  perm: number[] | null;
+  /** Source-order column ids, so the header row can stamp each cell with a
+   *  reorder-stable identity. Empty when the header couldn't be read. */
+  sourceIds: string[];
 }
 
 const ResizeContext = createContext<ResizeContextValue | null>(null);
@@ -106,13 +124,122 @@ function useMergedRef<T>(
   );
 }
 
+/**
+ * Fallback identity for a header the page didn't give a `colId`.
+ *
+ * Deliberately includes the column COUNT. A bare index is not stable
+ * across releases: inserting a column into a page's JSX shifts every index
+ * after it, and stored preferences would then land on their neighbours —
+ * silently, and looking for all the world like a bug in the feature.
+ *
+ * Folding the count in makes that impossible instead of merely unlikely.
+ * Adding or removing a column changes every positional id at once, so the
+ * stored entries stop matching and are ignored: widths are re-measured,
+ * hidden columns come back, and the order falls back to source order.
+ * Losing a layout on a release that changes a table's columns is a fair
+ * price for never applying one to the wrong columns — and a page that
+ * cares passes `colId`, which is immune either way.
+ */
+function positionalId(index: number, total: number): string {
+  return `${index}/${total}`;
+}
+
 /** A column's identity for width storage: the explicit `colId` a page
- *  passed to <TableHead>, else the cell's position. Pages whose column
- *  *set* varies (a column picker, manifest-driven columns) must pass
- *  `colId` — position shifts when a column is hidden, which would hand
- *  one column's stored width to its neighbour. */
+ *  passed to <TableHead>, else its position (see [`positionalId`]). Pages
+ *  whose column *set* varies at runtime — a column picker, manifest-driven
+ *  columns — must pass `colId`, since for those the set changes without a
+ *  release and the operator would lose the layout every time. */
 function columnIdOf(th: HTMLTableCellElement): string {
-  return th.dataset.colId ?? String(th.cellIndex);
+  return th.dataset.colId ?? positionalId(th.cellIndex, th.parentElement?.children.length ?? 0);
+}
+
+/**
+ * The column ids the page's JSX emits, in SOURCE order (#1353 phase 2).
+ *
+ * Read from the React children rather than the DOM, because the DOM is
+ * already permuted — deriving source order from it would be circular. The
+ * shape it expects is `<Table><TableHeader><TableRow>{cells}` , which every
+ * table in the app uses; anything else returns `[]` and the table simply
+ * doesn't reorder rather than reordering wrongly.
+ *
+ * A cell without `colId` is identified by its source position, which is
+ * stable precisely because it is the *source* one.
+ */
+function sourceColumnIds(children: ReactNode): string[] {
+  for (const child of Children.toArray(children)) {
+    if (!isValidElement(child) || child.type !== TableHeader) continue;
+    const rows = Children.toArray((child.props as { children?: ReactNode }).children);
+    const row = rows.find((r) => isValidElement(r) && r.type === TableRow);
+    if (!row || !isValidElement(row)) return [];
+    const cells = Children.toArray((row.props as { children?: ReactNode }).children);
+    return cells.map((cell, i) =>
+      isValidElement(cell)
+        ? ((cell.props as { colId?: string }).colId ?? positionalId(i, cells.length))
+        : positionalId(i, cells.length),
+    );
+  }
+  return [];
+}
+
+/**
+ * Display position → source position, from the operator's stored order.
+ *
+ * Reconciles rather than trusting what was stored: ids that no longer
+ * exist are dropped, and columns the operator has never seen are appended
+ * in source order. So adding a column to a page doesn't scramble anyone's
+ * layout, and removing one doesn't leave a hole. Returns `null` when the
+ * result is the identity, which is the signal to do nothing at all.
+ */
+function permutationFor(sourceIds: string[], order: readonly string[]): number[] | null {
+  if (!sourceIds.length || !order.length) return null;
+  const seen = new Set<string>();
+  const perm: number[] = [];
+  for (const id of order) {
+    const at = sourceIds.indexOf(id);
+    if (at >= 0 && !seen.has(id)) {
+      seen.add(id);
+      perm.push(at);
+    }
+  }
+  sourceIds.forEach((id, i) => {
+    if (!seen.has(id)) perm.push(i);
+  });
+  return perm.every((source, display) => source === display) ? null : perm;
+}
+
+/**
+ * Apply the table's column order to one row's cells (#1353 phase 2).
+ *
+ * Permuting React children — not the DOM. `Children.toArray` assigns each
+ * cell a key, so React treats the result as a *move*: the existing nodes
+ * are relocated rather than rebuilt, and any state or focus inside a cell
+ * survives. Reordering the DOM directly would fight reconciliation.
+ *
+ * A row whose cell count doesn't match the header's is returned untouched.
+ * That is the same guard the hidden-column stylesheet uses, and it is what
+ * protects an empty-state row (one `colSpan` cell) and the expanded detail
+ * rows on Jobs / Schedules from being permuted into nonsense.
+ *
+ * The header row additionally stamps each cell with its source id, so a
+ * page that never passed `colId` still gets width storage keyed by
+ * something that doesn't move when the columns do.
+ */
+function orderCells(
+  children: ReactNode,
+  table: ResizeContextValue | null,
+  isHeader: boolean,
+): ReactNode {
+  if (!table || !table.sourceIds.length) return children;
+  const cells = Children.toArray(children);
+  if (cells.length !== table.sourceIds.length) return children;
+  const stamped = isHeader
+    ? cells.map((cell, i) =>
+        isValidElement(cell) && (cell.props as { colId?: string }).colId === undefined
+          ? cloneElement(cell as ReactElement<{ colId?: string }>, { colId: table.sourceIds[i] })
+          : cell,
+      )
+    : cells;
+  return table.perm ? table.perm.map((source) => stamped[source]) : stamped;
 }
 
 /** The header cells that define the columns. Fixed layout sizes a table
@@ -269,6 +396,13 @@ const widthPref = makeTablePref<ColumnWidths>({
   isEmpty: (w) => Object.keys(w).length === 0,
 });
 
+const orderPref = makeTablePref<readonly string[]>({
+  prefix: ORDER_PREFIX,
+  empty: Object.freeze([]) as readonly string[],
+  parse: (raw) => (Array.isArray(raw) ? raw.filter((x): x is string => typeof x === 'string') : []),
+  isEmpty: (ids) => ids.length === 0,
+});
+
 const hiddenPref = makeTablePref<readonly string[]>({
   prefix: HIDDEN_PREFIX,
   empty: Object.freeze([]) as readonly string[],
@@ -359,17 +493,23 @@ function useRegisteredColumns(key: string): readonly TableColumn[] {
  * because the picker itself would have nothing to list.
  */
 export function useTableColumns(resizeKey: string): {
+  /** In display order, i.e. after the operator's reordering. */
   columns: { id: string; label: string; visible: boolean }[];
   toggle: (id: string) => void;
   reset: () => void;
   hasHidden: boolean;
+  /** Move one column one place left (`-1`) or right (`1`). A move off
+   *  either end is a no-op rather than a wrap. */
+  move: (id: string, delta: -1 | 1) => void;
+  resetOrder: () => void;
+  hasOrder: boolean;
 } {
   const registered = useRegisteredColumns(resizeKey);
   const hidden = hiddenPref.use(resizeKey);
   const columns = registered.map((c) => ({ ...c, visible: !hidden.includes(c.id) }));
-  // The id list is a stable dep only by value, and it changes rarely — join
-  // it so two renders with the same columns don't rebuild the callback.
-  const idKey = registered.map((c) => c.id).join(' ');
+  // Packed to a string so it is a stable `useCallback` dep by value: the
+  // array identity changes every render, the column list almost never does.
+  const idKey = JSON.stringify(registered.map((c) => c.id));
   const toggle = useCallback(
     (id: string) =>
       hiddenPref.update(resizeKey, (prev) => {
@@ -379,14 +519,41 @@ export function useTableColumns(resizeKey: string): {
         // two `toggle` calls in the same tick would both read the same
         // stale count and could hide every column between them. Reading the
         // store's own value makes the second call see the first.
-        const ids = idKey ? idKey.split(' ') : [];
+        const ids: string[] = JSON.parse(idKey);
         if (ids.length > 0 && ids.every((c) => next.includes(c))) return prev;
         return next;
       }),
     [resizeKey, idKey],
   );
   const reset = useCallback(() => hiddenPref.update(resizeKey, []), [resizeKey]);
-  return { columns, toggle, reset, hasHidden: columns.some((c) => !c.visible) };
+  const order = orderPref.use(resizeKey);
+  // `registered` already arrives in DISPLAY order — it is read off the live
+  // header, which the permutation has already been applied to. So a move is
+  // a swap in that list, written back whole; storing the complete order
+  // (rather than a diff from source) is what lets it survive a page adding
+  // or removing a column later.
+  const move = useCallback(
+    (id: string, delta: -1 | 1) => {
+      const ids: string[] = JSON.parse(idKey);
+      const from = ids.indexOf(id);
+      const to = from + delta;
+      if (from < 0 || to < 0 || to >= ids.length) return;
+      const next = [...ids];
+      [next[from], next[to]] = [next[to], next[from]];
+      orderPref.update(resizeKey, next);
+    },
+    [resizeKey, idKey],
+  );
+  const resetOrder = useCallback(() => orderPref.update(resizeKey, []), [resizeKey]);
+  return {
+    columns,
+    toggle,
+    reset,
+    hasHidden: columns.some((c) => !c.visible),
+    move,
+    resetOrder,
+    hasOrder: order.length > 0,
+  };
 }
 
 /** Show every column of every table again, mounted or not. Companion to
@@ -405,9 +572,14 @@ export function resetAllTableColumns(): number {
  * clearing, since afterwards there is nothing left to count.
  */
 export function resetAllTableColumnPrefs(): number {
-  const affected = new Set([...widthPref.keysWithValue(), ...hiddenPref.keysWithValue()]);
+  const affected = new Set([
+    ...widthPref.keysWithValue(),
+    ...hiddenPref.keysWithValue(),
+    ...orderPref.keysWithValue(),
+  ]);
   widthPref.resetAll();
   hiddenPref.resetAll();
+  orderPref.resetAll();
   return affected.size;
 }
 
@@ -476,6 +648,7 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
     // not rendering the cells, so a page opts in with one line and needs no
     // per-column plumbing of its own.
     const hidden = hiddenPref.use(resizeKey);
+    const order = orderPref.use(resizeKey);
     const [layout, setLayout] = useState<{ order: string[]; total: number } | null>(null);
     const [hiddenPositions, setHiddenPositions] = useState<number[]>([]);
     // Scopes the generated stylesheet to THIS table. `useId` produces
@@ -642,7 +815,21 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
       };
     }, [dragging, setWidths]);
 
-    const ctx: ResizeContextValue = { widths, layout, startResize, nudge, reset, active };
+    // Reordering is computed during render, not in an effect: an effect
+    // would paint the source order for one frame before correcting it,
+    // which is exactly the flash a stored preference exists to avoid.
+    const sourceIds = resizeKey ? sourceColumnIds(children) : [];
+    const perm = permutationFor(sourceIds, order);
+    const ctx: ResizeContextValue = {
+      widths,
+      layout,
+      startResize,
+      nudge,
+      reset,
+      active,
+      perm,
+      sourceIds,
+    };
     const sized = active && layout !== null;
 
     // `picker` adds a row ABOVE the card. Only then is there an extra
@@ -765,6 +952,10 @@ interface TableHeaderProps extends HTMLAttributes<HTMLTableSectionElement> {
   stickyHeader?: boolean;
 }
 
+/** True inside <TableHeader>. The header row is the one that stamps each
+ *  cell with its source id; body rows only follow the permutation. */
+const HeaderContext = createContext(false);
+
 export const TableHeader = forwardRef<HTMLTableSectionElement, TableHeaderProps>(
   ({ className, stickyHeader = true, ...props }, ref) => (
     // Sticky header (table mode, `lg`+ only): as the page scrolls, the
@@ -775,15 +966,17 @@ export const TableHeader = forwardRef<HTMLTableSectionElement, TableHeaderProps>
     // so the sticky rules are deliberately `lg:`-gated. Needs an *opaque*
     // background so scrolled rows don't bleed through — `bg-card` is the
     // base, with the old faint `bg-muted/5` tint layered on the row.
-    <thead
-      ref={ref}
-      className={cn(
-        stickyHeader && 'lg:sticky lg:top-0 lg:z-20 lg:bg-card',
-        '[&>tr]:bg-muted/5 text-xs uppercase tracking-wide text-muted',
-        className,
-      )}
-      {...props}
-    />
+    <HeaderContext.Provider value={true}>
+      <thead
+        ref={ref}
+        className={cn(
+          stickyHeader && 'lg:sticky lg:top-0 lg:z-20 lg:bg-card',
+          '[&>tr]:bg-muted/5 text-xs uppercase tracking-wide text-muted',
+          className,
+        )}
+        {...props}
+      />
+    </HeaderContext.Provider>
   ),
 );
 TableHeader.displayName = 'TableHeader';
@@ -796,9 +989,19 @@ export const TableBody = forwardRef<HTMLTableSectionElement, HTMLAttributes<HTML
 TableBody.displayName = 'TableBody';
 
 export const TableRow = forwardRef<HTMLTableRowElement, HTMLAttributes<HTMLTableRowElement>>(
-  ({ className, ...props }, ref) => (
-    <tr ref={ref} className={cn('border-b border-border transition-colors hover:bg-muted/5', className)} {...props} />
-  ),
+  ({ className, children, ...props }, ref) => {
+    const table = useContext(ResizeContext);
+    const isHeader = useContext(HeaderContext);
+    return (
+      <tr
+        ref={ref}
+        className={cn('border-b border-border transition-colors hover:bg-muted/5', className)}
+        {...props}
+      >
+        {orderCells(children, table, isHeader)}
+      </tr>
+    );
+  },
 );
 TableRow.displayName = 'TableRow';
 
@@ -923,7 +1126,8 @@ export function TableColumnPicker({
   children?: ReactNode;
 }) {
   const { t } = useTranslation('common');
-  const { columns, toggle, reset, hasHidden } = useTableColumns(resizeKey);
+  const { columns, toggle, reset, hasHidden, move, resetOrder, hasOrder } =
+    useTableColumns(resizeKey);
   const { hasWidths, reset: resetWidths } = useTableWidths(resizeKey);
   const visibleCount = columns.filter((c) => c.visible).length;
   if (columns.length < 2 && !children) return null;
@@ -956,11 +1160,41 @@ export function TableColumnPicker({
               disabled={c.visible && visibleCount <= 1}
               onChange={() => toggle(c.id)}
             />
-            <span className="truncate">{c.label || t('table.columns.unnamed', { n: i + 1 })}</span>
+            <span className="flex-1 truncate">{c.label || t('table.columns.unnamed', { n: i + 1 })}</span>
+            {/* Reorder lives here rather than as a drag on the header:
+                the header already carries a click (sort) and a drag on its
+                right edge (resize), and this keeps working below the card
+                breakpoint where there is no header row at all. */}
+            <span className="flex shrink-0 items-center">
+              <button
+                type="button"
+                aria-label={t('table.columns.moveUp', { name: c.label || String(i + 1) })}
+                disabled={i === 0}
+                onClick={(e) => {
+                  e.preventDefault();
+                  move(c.id, -1);
+                }}
+                className="rounded p-0.5 text-muted hover:bg-muted/20 hover:text-fg disabled:pointer-events-none disabled:opacity-30"
+              >
+                <ChevronUp className="size-3.5" />
+              </button>
+              <button
+                type="button"
+                aria-label={t('table.columns.moveDown', { name: c.label || String(i + 1) })}
+                disabled={i === columns.length - 1}
+                onClick={(e) => {
+                  e.preventDefault();
+                  move(c.id, 1);
+                }}
+                className="rounded p-0.5 text-muted hover:bg-muted/20 hover:text-fg disabled:pointer-events-none disabled:opacity-30"
+              >
+                <ChevronDown className="size-3.5" />
+              </button>
+            </span>
           </label>
         ))}
         {children}
-        {(hasHidden || hasWidths) && (
+        {(hasHidden || hasWidths || hasOrder) && (
           <div className="mt-2 space-y-0.5 border-t border-border pt-1.5">
             {hasHidden && (
               <button
@@ -970,6 +1204,16 @@ export function TableColumnPicker({
               >
                 <RotateCcw className="size-3" />
                 {t('table.columns.showAll')}
+              </button>
+            )}
+            {hasOrder && (
+              <button
+                type="button"
+                onClick={resetOrder}
+                className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left text-xs text-muted hover:bg-muted/10 hover:text-fg"
+              >
+                <RotateCcw className="size-3" />
+                {t('table.columns.resetOrder')}
               </button>
             )}
             {hasWidths && (
