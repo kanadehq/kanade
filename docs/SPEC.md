@@ -522,6 +522,7 @@ execute:
   run_as: system                # system / user
 
 require_approval: true          # 本番配信時に承認必須 (省略時 false)
+tags: [maintenance, disk]       # オペレーター分類用タグ (省略可)
 
 # --- エンドユーザー Client App カタログ公開 (オプトイン) ---
 client:
@@ -531,16 +532,42 @@ client:
   display_description: "..."    # Client App でのツールチップ
   icon: "broom"                 # Client App でのアイコン名 (任意)
 
-# --- その他のオプトインヒント / 仕様定義 ---
+# --- オプトインヒント・拡張属性一覧 (Manifest の全オプトイン機能) ---
 # inventory:                    # インベントリ事実収集 (JSON Facts)
 # check:                        # ヘルスチェック状態更新
 # collect:                      # ファイル収集アーカイブログ作成
-# emit:                         # per-line イベントログ送出
-# finalize:                     # 事後処理フック
+# emit:                         # per-line イベントログ送出 (NDJSON)
+# aggregate:                    # Analytics ダッシュボード集計定義 (obs_events)
+# feed:                         # 外部参照データフィード定義 (Controller 階層)
+# finalize:                     # ジョブ実行完了後の後処理フック
 # staleness:                    # キャッシュ / オフライン実行ポリシー (§2.6.2)
+# origin:                       # GitOps / 定義元プロベナンス情報
+# tier:                         # 実行対象層 (endpoint | controller)
 ```
 
 > **Note (v0.18.0+)**: 配信対象 (`target`), 段階的配信 (`rollout`), 再試行 (`on_failure`), ジッター (`jitter`) は Schedule 定義 (§2.4.3) 側に移動しました。Job Manifest はスクリプト本体とオプトインの実行属性のみを所有します。
+
+#### Manifest フィールドリファレンス
+
+| フィールド | 型 | 概要 |
+|---|---|---|
+| `id` | `String` (必須) | ジョブの一意な識別子 |
+| `version` | `String` (必須) | バージョン表記 (semver) |
+| `description` | `String` | ジョブの概要・説明テキスト |
+| `execute` | `Execute` (必須) | スクリプト実行仕様 (`shell`, `script`/`script_file`/`script_object`, `timeout`, `run_as` 等) |
+| `require_approval` | `bool` | 本番配信・実行時の手動承認の必須化 (デフォルト: `false`) |
+| `tags` | `Vec<String>` | オペレーター分類・フィルタリング用タグのリスト |
+| `client` | `ClientHint` | エンドユーザー Client App (KLP) へのカタログ公開設定 |
+| `inventory` | `InventoryHint` | stdout から JSON Facts を収集し `inventory_facts` へ挿入 |
+| `check` | `CheckHint` | Client App の Health タブへ反映するヘルスチェック状態を収集 |
+| `collect` | `CollectHint` | スクリプトで収集したファイルの zip アーカイブ作成・Object Store 送出 |
+| `emit` | `EmitConfig` | stdout の 1 行ごとに `ObsEvent` NDJSON を `obs_events` テーブルへストリーミング送出 |
+| `aggregate` | `Vec<AggregateWidget>` | `obs_events` に対する Analytics ページ向けの宣言的集計定義 |
+| `feed` | `Vec<FeedSpec>` | 外部参照データ (CVE、EOL テーブル等) を Shared `feeds` テーブルへ反映 (Controller 階層) |
+| `finalize` | `FinalizeSpec` | メインスクリプト正常終了後に実行する後処理フック |
+| `staleness` | `Staleness` | オフライン/キャッシュ実行時の厳格度・ポリシー設定 (§2.6.2) |
+| `origin` | `RepoOrigin` | GitOps リポジトリ等、構成管理上の定義元情報 |
+| `tier` | `Tier` | 実行階層の制約 (`endpoint` / `controller`) |
 
 **`client` ブロック**:
 - 省略時 (= `None`) は operator 起動専用のジョブとなります
