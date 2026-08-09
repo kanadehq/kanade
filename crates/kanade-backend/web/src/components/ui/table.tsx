@@ -1040,11 +1040,18 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
           'rounded-lg border border-border bg-card',
           hiddenPositions.length > 0 && scopeClass,
         )}
-        // Resized past the container, the wrapper grows with the table
-        // instead of letting it render outside the card border — the page
-        // takes the horizontal scroll (see the header note above). Still
-        // `min-width: 100%` so a table narrowed below the container keeps
-        // filling it.
+        // Once columns are sized the card is exactly as wide as the table
+        // it draws a border around — in BOTH directions. Widened past the
+        // container it grows with the table rather than letting it render
+        // outside the border, and the page takes the horizontal scroll
+        // (see the header note above). Narrowed, it shrinks with it.
+        //
+        // This used to carry `min-width: 100%`, which only looked right
+        // while widening: narrowing the columns left the border stretched
+        // to the full width with dead space inside it, to the right of the
+        // last column. A border that doesn't end where its content does
+        // reads as a broken layout rather than as a deliberately narrow
+        // table.
         //
         // `cards` only. A `cards={false}` wrapper is already a horizontal
         // scroll container, and growing it to `max-content` would defeat
@@ -1052,7 +1059,7 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
         // scrolling, which is the one thing its `overflow-x-auto` is there
         // to prevent. Such a table just lets the widened <table> scroll
         // inside it.
-        style={sized && cards ? { width: 'max-content', minWidth: '100%' } : undefined}
+        style={sized && cards ? { width: 'max-content' } : undefined}
       >
         {/* Hidden columns (#1353). CSS rather than "don't render the cell":
             a cell's column is decided by the page, in two places (its
