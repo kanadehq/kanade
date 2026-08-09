@@ -501,17 +501,12 @@ agent_config:pcs.<pc_id>                     ← この PC 専用の override (�
 ### 2.4.1 ジョブ定義 (jobs/*.yaml)
 
 ```yaml
-id: cleanup-disk-temp           # 必須、cmd_id として使用
+id: cleanup-disk-temp           # 必須、job id / cmd_id として使用
 version: 1.0.1                  # 必須、semver
 description: "Temp ディレクトリのクリーンアップ"
 
-target:                         # いずれか必須
-  groups: [wave1, wave2]        # グループ指定
-  # pcs: [PC1234, PC5678]       # 個別指定
-  # all: true                   # 全台
-
 execute:
-  shell: powershell             # powershell / cmd / wsl
+  shell: powershell             # powershell / cmd / sh / pwsh
   # スクリプト本体: script / script_file / script_object のうち
   # **ちょうど 1 つ**を指定。複数指定や全省略は `kanade job create`
   # / `POST /api/jobs` の parse 時点で 400 リジェクト。空文字列
@@ -524,33 +519,32 @@ execute:
   # script_file: scripts/cleanup.ps1                   # repo-local file (CLI が読んで script に差し込む)
   # script_object: cleanup-disk-temp/1.0.1            # OBJECT_SCRIPTS の `<name>/<version>` キー
   timeout: 600s
-  jitter: 5m                    # 0 〜 5 分のランダム遅延
   run_as: system                # system / user
 
-# --- エンドユーザー Client App からのキック許可 (Sprint 8) ---
-user_invokable: false           # true なら Client App の「アップデート / トラブルシュート」 タブに表示されます
-category: troubleshoot          # software_update / troubleshoot / catalog (user_invokable=true 時のみ意味あり)
-display_name: "Temp フォルダのクリーンアップ"  # Client App での表示名 (省略時は id)
-display_description: "..."      # Client App でのツールチップ
-icon: "broom"                   # Client App でのアイコン名 (任意)
+require_approval: true          # 本番配信時に承認必須 (省略時 false)
 
-rollout:                        # 配信戦略 (省略可)
-  strategy: wave
-  waves:
-    - {group: canary, delay: 0m, size: 50}
-    - {group: wave1,  delay: 30m}
-    - {group: wave2,  delay: 60m}
+# --- エンドユーザー Client App カタログ公開 (オプトイン) ---
+client:
+  user_invokable: true          # true なら Client App に表示
+  category: troubleshoot        # software_update / troubleshoot / catalog
+  display_name: "Temp フォルダのクリーンアップ"  # Client App での表示名 (省略時は id)
+  display_description: "..."    # Client App でのツールチップ
+  icon: "broom"                 # Client App でのアイコン名 (任意)
 
-on_failure:
-  retry: 2
-  alert: slack                  # slack / email / none
-
-require_approval: true          # 本番配信時に承認必須
+# --- その他のオプトインヒント / 仕様定義 ---
+# inventory:                    # インベントリ事実収集 (JSON Facts)
+# check:                        # ヘルスチェック状態更新
+# collect:                      # ファイル収集アーカイブログ作成
+# emit:                         # per-line イベントログ送出
+# finalize:                     # 事後処理フック
+# staleness:                    # キャッシュ / オフライン実行ポリシー (§2.6.2)
 ```
 
-**`user_invokable` フィールド**:
-- デフォルト `false` (= 従来通り、operator 起動のみ)
-- `true` の job のみ KLP `jobs.execute` 経由で実行可。Agent 側で manifest を必ず再 lookup し、`user_invokable: false` への変更が即時反映される
+> **Note (v0.18.0+)**: 配信対象 (`target`), 段階的配信 (`rollout`), 再試行 (`on_failure`), ジッター (`jitter`) は Schedule 定義 (§2.4.3) 側に移動しました。Job Manifest はスクリプト本体とオプトインの実行属性のみを所有します。
+
+**`client` ブロック**:
+- 省略時 (= `None`) は operator 起動専用のジョブとなります
+- `client` ブロックが存在し `user_invokable: true` の job のみ KLP `jobs.execute` 経由で実行可能。Agent 側で manifest を必ず再 lookup し、非公開への変更が即時反映されます
 - `category` でユーザー向けタブ分け: `software_update` (Chrome 更新等)、`troubleshoot` (Office 修復等)、`catalog` (任意導入アプリ)
 - `display_name` / `display_description` / `icon` は Client App UI 専用フィールド (operator UI には影響なし)
 
@@ -1111,36 +1105,39 @@ if let Some(sta) = &script_status
 
 Manifest 側に *staleness policy* を持たせて、Agent が fire 時にこの判断を切り替える。
 
-#### Staleness policy のスキーマ (Manifest.exec.staleness)
+#### Staleness policy のスキーマ (Manifest.staleness)
 
 ```yaml
 # jobs/urgent-patch.yaml — 必ず最新版確認できないと走らせない
 id: urgent-patch
 version: "2.5.1"
-exec:
+execute:
   shell: powershell
   script: Install-Hotfix KB1234567
-  staleness:
-    mode: strict
-    max_cache_age: 0s     # broker と現に繋がってないと skip
+  timeout: 600s
+staleness:
+  mode: strict
+  max_cache_age: 0s     # broker と現に繋がってないと skip
 
 # jobs/inventory-hw.yaml — offline でも走らせる
 id: inventory-hw
 version: "1.0.0"
-exec:
+execute:
   shell: powershell
   script: Get-WmiObject Win32_ComputerSystem
-  staleness:
-    mode: cached          # cache 値で照合、age 制約なし
+  timeout: 600s
+staleness:
+  mode: cached          # cache 値で照合、age 制約なし
 
 # jobs/legacy.yaml — version pin / revoke 自体を無視 (旧 manifest 互換)
 id: legacy
 version: "0.1.0"
-exec:
+execute:
   shell: cmd
   script: echo hello
-  staleness:
-    mode: unchecked
+  timeout: 600s
+staleness:
+  mode: unchecked
 ```
 
 #### Mode 仕様

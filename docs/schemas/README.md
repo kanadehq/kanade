@@ -1,19 +1,21 @@
 # `docs/schemas/` — checked-in JSON Schemas
 
-Machine-readable JSON Schema (draft 2020-12) for the two operator-facing
-manifest types, so the full field set is version-controlled and visible
+Machine-readable JSON Schema (draft 2020-12) for the three operator-facing
+manifest and view types, so the full field set is version-controlled and visible
 in diffs instead of having to be reverse-engineered from the Rust types:
 
 | File | Rust type | YAML you write |
 |------|-----------|----------------|
 | [`schedule.schema.json`](./schedule.schema.json) | `kanade_shared::manifest::Schedule` | `kanade schedule create <yaml>` |
 | [`job.schema.json`](./job.schema.json) | `kanade_shared::manifest::Manifest` | `kanade job create <yaml>` |
+| [`view.schema.json`](./view.schema.json) | `kanade_shared::manifest::View` | `kanade view create <yaml>` |
 
 ## Source of truth
 
 These are **generated** from the `#[derive(JsonSchema)]` impls on the
 Rust types — the same `schemars::schema_for!` output the backend serves
-live at `GET /api/schemas/schedule.json` and `/api/schemas/manifest.json`
+live at `GET /api/schemas/schedule.json`, `/api/schemas/manifest.json`,
+and `/api/schemas/view.json`
 (which the SPA's Monaco YAML editor uses for field completion, hover
 docs, and inline validation). Every field `description` here is the
 type's doc-comment. **Do not hand-edit these files** — edit the Rust

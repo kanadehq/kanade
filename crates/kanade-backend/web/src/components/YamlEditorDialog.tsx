@@ -124,7 +124,7 @@ widgets:
     kind: unexpected_shutdown
     agg: count              # count | ratio | sum
     group_by: pc_id         # JSON path, or the literal pc_id (fleet ranking)
-    render: bar             # bar | gauge | timeline | stat
+    render: bar             # bar | gauge | timeline | op_timeline | stat
     # order: 0              # optional sort weight (lower = earlier)
 `;
 
