@@ -34,6 +34,7 @@ const MAX_AGENT_PRUNE_DAYS = 36_500;
 // Mirrors `MAX_COLLECT_RETENTION_DAYS` (kanade_shared::wire::server_settings):
 // 10 years. The backend PUT enforces the same bound; this is client-side
 // feedback only.
+const MAX_RESULT_OUTPUT_RETENTION_DAYS = 30;
 const MAX_COLLECT_RETENTION_DAYS = 3650;
 
 // Mirrors `MAX_SESSION_TTL_HOURS` (kanade_shared::wire::server_settings):
@@ -106,6 +107,7 @@ interface AgentInstallSettings {
 interface ServerSettings {
   agent_prune_days: number | null;
   collect_retention_days: number | null;
+  result_output_retention_days: number | null;
   session_ttl_hours: number | null;
   check_status_stale_days: number | null;
   controller_group: string | null;
@@ -330,6 +332,7 @@ function ServerTab() {
   // to the built-in default (30 d, shown as the placeholder) — unlike the
   // prune field, blank here does NOT disable retention.
   const [collectDays, setCollectDays] = useState('');
+  const [resultOutputDays, setResultOutputDays] = useState('');
   // Login-token lifetime (hours). Blank = unset, which falls back to the
   // built-in default (24 h, shown as the placeholder) — like collect
   // retention, blank does NOT disable sessions.
@@ -371,6 +374,11 @@ function ServerTab() {
         settings.data.collect_retention_days == null
           ? ''
           : String(settings.data.collect_retention_days),
+      );
+      setResultOutputDays(
+        settings.data.result_output_retention_days == null
+          ? ''
+          : String(settings.data.result_output_retention_days),
       );
       setSessionTtl(
         settings.data.session_ttl_hours == null ? '' : String(settings.data.session_ttl_hours),
@@ -481,6 +489,21 @@ function ServerTab() {
     (Number.isInteger(collectParsed) &&
       collectParsed >= 1 &&
       collectParsed <= MAX_COLLECT_RETENTION_DAYS);
+
+  // result_output_retention_days: same shape, different meaning. This is not
+  // how long the output survives — the projector writes it into SQLite before
+  // the row lands — but how long a `-WipeDb` replay can still rebuild it. The
+  // ceiling is STREAM_RESULTS' own window, past which there is nothing left
+  // to replay.
+  const resultOutputTrimmed = resultOutputDays.trim();
+  const resultOutputParsed = Number(resultOutputTrimmed);
+  const resultOutputValue: number | null =
+    resultOutputTrimmed === '' ? null : resultOutputParsed;
+  const resultOutputValid =
+    resultOutputTrimmed === '' ||
+    (Number.isInteger(resultOutputParsed) &&
+      resultOutputParsed >= 1 &&
+      resultOutputParsed <= MAX_RESULT_OUTPUT_RETENTION_DAYS);
 
   // session_ttl_hours: blank → unset (null → built-in 24h default). A
   // non-blank value must be a whole number in [1, MAX_SESSION_TTL_HOURS].
@@ -622,6 +645,7 @@ function ServerTab() {
   const valid =
     pruneValid &&
     collectValid &&
+    resultOutputValid &&
     sessionTtlValid &&
     staleValid &&
     mailValid &&
@@ -631,6 +655,7 @@ function ServerTab() {
     settings.data != null &&
     (pruneValue !== settings.data.agent_prune_days ||
       collectValue !== settings.data.collect_retention_days ||
+      resultOutputValue !== settings.data.result_output_retention_days ||
       sessionTtlValue !== settings.data.session_ttl_hours ||
       staleValue !== settings.data.check_status_stale_days ||
       controllerValue !== (settings.data.controller_group ?? null) ||
@@ -640,6 +665,7 @@ function ServerTab() {
   const doc: ServerSettingsPatch = {
     agent_prune_days: pruneValue,
     collect_retention_days: collectValue,
+    result_output_retention_days: resultOutputValue,
     session_ttl_hours: sessionTtlValue,
     check_status_stale_days: staleValue,
     controller_group: controllerValue,
@@ -662,6 +688,10 @@ function ServerTab() {
     defaults.data && defaults.data.collect_retention_days != null
       ? String(defaults.data.collect_retention_days)
       : t('server.collectRetention.unsetPlaceholder');
+  const resultOutputPlaceholder =
+    defaults.data && defaults.data.result_output_retention_days != null
+      ? String(defaults.data.result_output_retention_days)
+      : t('server.resultOutputRetention.unsetPlaceholder');
   // session_ttl_hours also has a real built-in default (24h), so the
   // placeholder shows that number; a blank field resolves to it.
   const sessionTtlPlaceholder =
@@ -751,6 +781,41 @@ function ServerTab() {
                 <span className="text-muted text-sm">{t('server.collectRetention.unit')}</span>
               </div>
               <p className="text-muted text-xs">{t('server.collectRetention.blankHint')}</p>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>{t('server.resultOutputRetention.title')}</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <p className="text-muted text-sm">{t('server.resultOutputRetention.description')}</p>
+            <div className="space-y-1">
+              <Label htmlFor="result-output-retention-days">
+                {t('server.resultOutputRetention.label')}
+              </Label>
+              <div className="flex items-center gap-2">
+                <Input
+                  id="result-output-retention-days"
+                  type="number"
+                  min={1}
+                  max={MAX_RESULT_OUTPUT_RETENTION_DAYS}
+                  step={1}
+                  inputMode="numeric"
+                  value={resultOutputDays}
+                  placeholder={resultOutputPlaceholder}
+                  disabled={!canOperate || settings.isLoading}
+                  onChange={(e) => setResultOutputDays(e.target.value)}
+                  className="w-32"
+                />
+                <span className="text-muted text-sm">
+                  {t('server.resultOutputRetention.unit')}
+                </span>
+              </div>
+              <p className="text-muted text-xs">
+                {t('server.resultOutputRetention.blankHint')}
+              </p>
             </div>
           </CardContent>
         </Card>

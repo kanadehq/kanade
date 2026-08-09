@@ -35,7 +35,8 @@ use crate::kv::{
 };
 use crate::wire::{
     DEFAULT_AGENT_RELEASES_CAP_MIB, DEFAULT_APP_PACKAGES_CAP_MIB, DEFAULT_COLLECT_RETENTION_DAYS,
-    DEFAULT_COLLECTIONS_CAP_MIB, DEFAULT_RESULT_OUTPUT_CAP_MIB, DEFAULT_SCRIPTS_CAP_MIB,
+    DEFAULT_COLLECTIONS_CAP_MIB, DEFAULT_RESULT_OUTPUT_CAP_MIB,
+    DEFAULT_RESULT_OUTPUT_RETENTION_DAYS, DEFAULT_SCRIPTS_CAP_MIB,
 };
 
 /// Create-or-update an Object Store, but never let it wedge backend
@@ -486,10 +487,19 @@ pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
     // 256 KB inline threshold gets uploaded here under
     // `<request_id>/{stdout,stderr}`; the backend's results
     // projector derefs the pointer fields before INSERT so SQLite
-    // + the SPA see the full text inline. 30-day max_age matches
-    // STREAM_RESULTS so the lifetimes stay in lockstep — a row still
-    // resolvable in execution_results never points at a missing
-    // blob.
+    // + the SPA see the full text inline.
+    //
+    // The window is DELIBERATELY shorter than STREAM_RESULTS's 30 days, and
+    // used to match it on the reasoning that "a row still resolvable in
+    // execution_results never points at a missing blob". That had the
+    // dependency backwards: the row does not point at the blob at all once
+    // projected — the projector derefs it into SQLite first. The only reader
+    // left is a `-WipeDb` replay, so this is a RECOVERY window, not a data
+    // lifetime, and thirty days of copies nobody reads is what walked the
+    // bucket into its cap (#1321: a hard wall, not eviction).
+    // Operator-tunable via `ServerSettings::result_output_retention_days`;
+    // applied to EXISTING buckets by `reconcile_object_store_max_age`, since
+    // `create_object_store` does not reconcile (#506).
     // #518: capped like the streams — a job whose output overflows
     // the inline threshold writes blobs HERE instead of
     // STREAM_RESULTS, so without its own cap this store bypasses
@@ -501,7 +511,9 @@ pub async fn ensure_jetstream_resources(js: &jetstream::Context) -> Result<()> {
         js,
         ObjectStoreConfig {
             bucket: OBJECT_RESULT_OUTPUT.into(),
-            max_age: Duration::from_secs(SECS_PER_DAY * 30),
+            max_age: Duration::from_secs(
+                SECS_PER_DAY * DEFAULT_RESULT_OUTPUT_RETENTION_DAYS as u64,
+            ),
             max_bytes: DEFAULT_RESULT_OUTPUT_CAP_MIB as i64 * MIB,
             ..Default::default()
         },
@@ -571,14 +583,35 @@ pub async fn reconcile_collect_retention(
     js: &jetstream::Context,
     retention_days: u32,
 ) -> Result<bool> {
+    reconcile_object_store_max_age(js, OBJECT_COLLECTIONS, retention_days).await
+}
+
+/// Reconcile ONE Object Store's retention window to `retention_days`, by
+/// updating `max_age` on its backing `OBJ_<bucket>` stream.
+///
+/// Generalised from the collect-only version when `result_output` needed the
+/// same treatment (#1321 fallout). Two buckets reconciling their `max_age`
+/// through two near-identical read-modify-write functions is the shape that
+/// drifts — and a drift here means one bucket silently keeps the old window.
+///
+/// Read-modify-write patching ONLY `max_age`, so object-store-specific stream
+/// settings and the `max_bytes` cap stay untouched.
+///
+/// Returns `Ok(true)` when it actually changed the stream, `Ok(false)` when
+/// already in sync.
+pub async fn reconcile_object_store_max_age(
+    js: &jetstream::Context,
+    bucket: &str,
+    retention_days: u32,
+) -> Result<bool> {
     const SECS_PER_DAY: u64 = 24 * 60 * 60;
     let desired = Duration::from_secs(SECS_PER_DAY * retention_days as u64);
-    let stream_name = object_store_stream_name(OBJECT_COLLECTIONS);
+    let stream_name = object_store_stream_name(bucket);
 
     let mut stream = js
         .get_stream(&stream_name)
         .await
-        .with_context(|| format!("get_stream {stream_name} for collect-retention reconcile"))?;
+        .with_context(|| format!("get_stream {stream_name} for max_age reconcile"))?;
     let info = stream
         .info()
         .await
@@ -593,8 +626,9 @@ pub async fn reconcile_collect_retention(
         .with_context(|| format!("update_stream {stream_name} max_age"))?;
     info!(
         stream = %stream_name,
+        bucket,
         retention_days,
-        "collect retention: reconciled Object Store max_age",
+        "reconciled Object Store max_age",
     );
     Ok(true)
 }
@@ -781,11 +815,74 @@ mod tests {
         );
     }
 
+    /// `result_output` reconciles through the SAME generalised function, so
+    /// this pins that the generalisation actually reaches the second bucket
+    /// — the failure it prevents is one bucket silently keeping the old
+    /// window while the other moves.
+    ///
+    /// Provisions the bucket the way production was BORN (30-day max_age),
+    /// then reconciles to the new 7-day default and asserts the live stream
+    /// moved. That is the case that matters: `create_object_store` does not
+    /// reconcile (#506), so every existing deployment is still at thirty days
+    /// and only this path can change it.
+    #[tokio::test]
+    #[ignore = "requires nats-server in PATH; cargo test -- --ignored"]
+    async fn reconcile_reaches_result_output_too() {
+        use crate::kv::OBJECT_RESULT_OUTPUT;
+        const SECS_PER_DAY: u64 = 24 * 60 * 60;
+        let b = spawn_broker().await;
+
+        ensure_object_store(
+            &b.js,
+            ObjectStoreConfig {
+                bucket: OBJECT_RESULT_OUTPUT.into(),
+                max_age: Duration::from_secs(SECS_PER_DAY * 30),
+                max_bytes: 1024 * 1024 * 1024,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("fresh result_output bucket at the old 30-day window");
+
+        let changed = reconcile_object_store_max_age(
+            &b.js,
+            OBJECT_RESULT_OUTPUT,
+            DEFAULT_RESULT_OUTPUT_RETENTION_DAYS,
+        )
+        .await
+        .expect("reconcile result_output max_age");
+        assert!(changed, "30d -> 7d must report a change");
+
+        let name = object_store_stream_name(OBJECT_RESULT_OUTPUT);
+        let mut stream = b.js.get_stream(&name).await.expect("get stream");
+        let info = stream.info().await.expect("stream info");
+        assert_eq!(
+            info.config.max_age,
+            Duration::from_secs(SECS_PER_DAY * DEFAULT_RESULT_OUTPUT_RETENTION_DAYS as u64)
+        );
+        // The cap is NOT collateral damage: read-modify-write must patch only
+        // max_age, or reconciling retention would silently drop the #1247 cap.
+        assert_eq!(info.config.max_bytes, 1024 * 1024 * 1024);
+
+        // Idempotent.
+        assert!(
+            !reconcile_object_store_max_age(
+                &b.js,
+                OBJECT_RESULT_OUTPUT,
+                DEFAULT_RESULT_OUTPUT_RETENTION_DAYS
+            )
+            .await
+            .expect("second reconcile"),
+            "already in sync must report no change"
+        );
+    }
+
+    /// when already in sync) and that `max_bytes` survives the update.
     /// `reconcile_collect_retention` must change the live bucket's `max_age`
     /// (broker-side retention) without disturbing the other stream config —
     /// the mechanism the SPA relies on to extend collect retention past the
     /// 30-day default. Also asserts the idempotent no-op path (`Ok(false)`
-    /// when already in sync) and that `max_bytes` survives the update.
+    /// when already in sync).
     #[tokio::test]
     #[ignore = "requires nats-server in PATH; cargo test -- --ignored"]
     async fn reconcile_collect_retention_updates_max_age() {

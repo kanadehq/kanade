@@ -969,6 +969,35 @@ pub(crate) async fn run_backend() -> Result<()> {
                     warn!(error = %format!("{e:#}"), "collect retention reconcile at boot failed")
                 }
             }
+            // Same for `result_output`. Unlike collect's, this window is a
+            // RECOVERY window, not a data lifetime: the results projector
+            // derefs each blob into SQLite before the INSERT, so the text is
+            // already safe — what the window bounds is how long a `-WipeDb`
+            // replay can still rebuild it. Reconciled here because a fresh
+            // bucket gets the shorter default at create time but an EXISTING
+            // one keeps whatever it was born with (`create_object_store` does
+            // not reconcile, #506), and every production bucket was born at
+            // thirty days.
+            let days = settings.effective_result_output_retention_days();
+            match kanade_shared::bootstrap::reconcile_object_store_max_age(
+                &jetstream,
+                kanade_shared::kv::OBJECT_RESULT_OUTPUT,
+                days,
+            )
+            .await
+            {
+                Ok(true) => info!(
+                    result_output_retention_days = days,
+                    "result_output retention reconciled at boot"
+                ),
+                Ok(false) => {}
+                Err(e) => {
+                    warn!(
+                        error = %format!("{e:#}"),
+                        "result_output retention reconcile at boot failed"
+                    )
+                }
+            }
             // #1247: reconcile every object store's max_bytes cap onto its
             // backing stream. This is also the fix for pre-existing buckets
             // that never received their cap (create-drift tolerated by
