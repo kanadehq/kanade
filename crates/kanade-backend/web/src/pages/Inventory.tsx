@@ -555,7 +555,6 @@ function FleetProbeTable({
             resizeKey="inventory.fleet"
             picker
             metaColumns
-            pcIds={(byJob.data?.rows ?? []).map((r) => r.pc_id)}
           >
             <TableHeader>
               <TableRow>

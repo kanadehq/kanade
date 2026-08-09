@@ -301,7 +301,7 @@ export function Compliance() {
               </div>
             </CardHeader>
             <CardContent>
-              <Table resizeKey="compliance" picker>
+              <Table resizeKey="compliance" picker metaColumns>
                 <TableHeader>
                   <TableRow>
                     <TableHead>{t('col.pc')}</TableHead>
@@ -339,7 +339,7 @@ function CheckTableRow({ row: r }: { row: CheckRow }) {
   return (
     // #1032②: a stale row (PC no longer running this check) is muted so it
     // reads as informational history, not a live failure.
-    <TableRow className={r.stale ? 'opacity-60' : undefined}>
+    <TableRow pcId={r.pc_id} className={r.stale ? 'opacity-60' : undefined}>
       <TableCell label={t('col.pc')} className="font-medium">{r.pc_id}</TableCell>
       <TableCell label={t('col.status')}>
         <div className="flex items-center gap-1">

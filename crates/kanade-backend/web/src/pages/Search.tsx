@@ -647,7 +647,7 @@ export function InventorySearch() {
                         to: offset + rows.length,
                       })}
                 </div>
-                <Table resizeKey="search" picker>
+                <Table resizeKey="search" picker metaColumns>
                   <TableHeader>
                     <TableRow>
                       <TableHead colId="pcId">{t('results.columns.pcId')}</TableHead>
@@ -686,7 +686,7 @@ export function InventorySearch() {
                       const collectedAt =
                         typeof row.collected_at === 'string' ? row.collected_at : null;
                       return (
-                        <TableRow key={rowKey}>
+                        <TableRow key={rowKey} pcId={pcId}>
                           <TableCell label={t('results.columns.pcId')}>
                             <Link
                               to={`/inventory?pc=${encodeURIComponent(pcId)}`}

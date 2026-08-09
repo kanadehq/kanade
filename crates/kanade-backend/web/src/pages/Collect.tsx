@@ -115,7 +115,7 @@ export function Collect() {
           ) : rows.length === 0 ? (
             <div className="text-muted text-sm">{t('bundles.empty')}</div>
           ) : (
-            <Table resizeKey="collect" picker>
+            <Table resizeKey="collect" picker metaColumns>
               <TableHeader>
                 <TableRow>
                   <TableHead>{t('bundles.columns.name')}</TableHead>
@@ -128,7 +128,7 @@ export function Collect() {
               </TableHeader>
               <TableBody>
                 {rows.map((r) => (
-                  <TableRow key={r.key}>
+                  <TableRow key={r.key} pcId={r.pc_id}>
                     <TableCell label={t('bundles.columns.name')}>
                       <div className="text-sm">
                         {r.name ?? r.job_id}

@@ -1,6 +1,11 @@
 import { expect, test } from '@playwright/experimental-ct-react';
 
-import { TableWithMetaColumns, TableWithPicker } from './table.ct.harness';
+import {
+  TableWithDuplicatePc,
+  TableWithLateRows,
+  TableWithMetaColumns,
+  TableWithPicker,
+} from './table.ct.harness';
 
 // #1357: agent_meta values offered as columns on any pc_id-keyed table.
 // The endpoints are stubbed — what's under test is the SPA half: that a
@@ -164,6 +169,58 @@ test.describe('Table metadata columns', () => {
     await expect(c.locator('th', { hasText: '氏名' })).toHaveCount(0);
     expect((await grid(c)).head).toEqual(['pc_id', 'os']);
     expect(await page.evaluate(() => localStorage.getItem('kanade.table.meta.ct-meta'))).toBeNull();
+  });
+
+  test('a row that appears later pulls its own metadata in', async ({ mount, page }) => {
+    // Compliance appends its "ok" rows from a child component that fetches
+    // them itself, so the parent never had a list of pc_ids to pass down.
+    // The rows announce themselves instead, which is the only way a row
+    // that didn't exist at first paint can get its values.
+    await page.route('**/api/agents/meta?*', (route) => {
+      const pcs = new URL(route.request().url()).searchParams.get('pcs') ?? '';
+      const json: Record<string, { key: string; value: string }[]> = {};
+      if (pcs.includes('pc-a')) json['pc-a'] = [{ key: '氏名', value: '山田太郎' }];
+      if (pcs.includes('pc-late')) json['pc-late'] = [{ key: '氏名', value: '鈴木一郎' }];
+      route.fulfill({ json });
+    });
+    const c = await mount(<TableWithLateRows />);
+    await c.locator('summary').click();
+    await c.getByRole('button', { name: '氏名' }).click();
+    await expect.poll(async () => (await grid(c)).rows[0]).toEqual(['pc-a', 'windows', '山田太郎']);
+
+    await c.getByRole('button', { name: 'expand' }).click();
+    await expect.poll(async () =>
+      (await c.locator('tbody tr').nth(1).locator('td').allTextContents()).map((s) => s.trim()),
+    ).toEqual(['pc-late', 'windows', '鈴木一郎']);
+  });
+
+  test('one row leaving does not strip metadata from another with the same pc_id', async ({
+    mount,
+    page,
+  }) => {
+    // Compliance lists a PC once per check, so two rows routinely carry the
+    // same pc_id. Registration is counted, not a set: if it were a set, the
+    // first row to unmount would deregister the PC and the row still on
+    // screen would lose its values.
+    await page.route('**/api/agents/meta?*', (route) =>
+      route.fulfill({ json: { 'pc-a': [{ key: '氏名', value: '山田太郎' }] } }),
+    );
+    const c = await mount(<TableWithDuplicatePc />);
+    await c.locator('summary').click();
+    await c.getByRole('button', { name: '氏名' }).click();
+    await expect.poll(async () => (await grid(c)).rows[0]).toEqual([
+      'pc-a',
+      'bitlocker',
+      '山田太郎',
+    ]);
+
+    await c.getByRole('button', { name: 'drop one' }).click();
+    const remaining = c.locator('tbody tr').first().locator('td');
+    await expect.poll(async () => (await remaining.allTextContents()).map((s) => s.trim())).toEqual([
+      'pc-a',
+      'firewall',
+      '山田太郎',
+    ]);
   });
 
   test('the choice persists across a remount', async ({ mount, page }) => {

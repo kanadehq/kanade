@@ -1269,7 +1269,7 @@ export function Events() {
           {tab === 'chart' && <EventsTimeline events={visible} />}
           {tab === 'heatmap' && <EventsHeatmap events={visible} />}
           {tab === 'table' && (
-          <Table resizeKey="events" picker>
+          <Table resizeKey="events" picker metaColumns>
           <TableHeader>
             <TableRow>
               <TableHead>{t('columns.when')}</TableHead>
@@ -1282,7 +1282,7 @@ export function Events() {
           </TableHeader>
           <TableBody>
             {visible.map((e) => (
-              <TableRow key={e.id}>
+              <TableRow key={e.id} pcId={e.pc_id}>
                 <TableCell label={t('columns.when')} className="text-muted text-xs">{fmtIsoLocal(e.at)}</TableCell>
                 <TableCell label={t('columns.pcId')}><code className="text-xs">{e.pc_id}</code></TableCell>
                 <TableCell label={t('columns.kind')}>

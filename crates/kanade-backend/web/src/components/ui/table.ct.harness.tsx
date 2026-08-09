@@ -1,6 +1,8 @@
 // Mount targets for table.ct.tsx. Playwright CT bundles only what the
 // test file *imports*, so a component defined inline in the spec would
 // never reach the browser — hence this file.
+import { useState } from 'react';
+
 import {
   resetAllTableWidths,
   Table,
@@ -290,7 +292,7 @@ const META_PCS = ['pc-a', 'pc-b'];
  */
 export function TableWithMetaColumns() {
   return (
-    <Table resizeKey="ct-meta" picker metaColumns pcIds={META_PCS}>
+    <Table resizeKey="ct-meta" picker metaColumns>
       <TableHeader>
         <TableRow>
           <TableHead colId="pcId">pc_id</TableHead>
@@ -306,5 +308,79 @@ export function TableWithMetaColumns() {
         ))}
       </TableBody>
     </Table>
+  );
+}
+
+/**
+ * Rows that appear AFTER the table has already fetched metadata, the way
+ * Compliance's "ok" rows do — a child component fetches them itself, so
+ * the parent never had a list of pc_ids to hand over. The late rows have
+ * to pull their own metadata in.
+ */
+export function TableWithLateRows() {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div>
+      <button type="button" onClick={() => setExpanded(true)}>
+        expand
+      </button>
+      <Table resizeKey="ct-late" picker metaColumns>
+        <TableHeader>
+          <TableRow>
+            <TableHead colId="pcId">pc_id</TableHead>
+            <TableHead colId="os">os</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          <TableRow pcId="pc-a">
+            <TableCell label="pc_id">pc-a</TableCell>
+            <TableCell label="os">windows</TableCell>
+          </TableRow>
+          {expanded && (
+            <TableRow pcId="pc-late">
+              <TableCell label="pc_id">pc-late</TableCell>
+              <TableCell label="os">windows</TableCell>
+            </TableRow>
+          )}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
+/**
+ * The same pc_id on two rows, one of which can be removed — the shape
+ * Compliance has, where a PC appears once per check. The registration is
+ * counted rather than a set precisely so the first row to unmount doesn't
+ * take the other's registration (and therefore its values) with it.
+ */
+export function TableWithDuplicatePc() {
+  const [both, setBoth] = useState(true);
+  return (
+    <div>
+      <button type="button" onClick={() => setBoth(false)}>
+        drop one
+      </button>
+      <Table resizeKey="ct-dup" picker metaColumns>
+        <TableHeader>
+          <TableRow>
+            <TableHead colId="pcId">pc_id</TableHead>
+            <TableHead colId="check">check</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {both && (
+            <TableRow pcId="pc-a">
+              <TableCell label="pc_id">pc-a</TableCell>
+              <TableCell label="check">bitlocker</TableCell>
+            </TableRow>
+          )}
+          <TableRow pcId="pc-a">
+            <TableCell label="pc_id">pc-a</TableCell>
+            <TableCell label="check">firewall</TableCell>
+          </TableRow>
+        </TableBody>
+      </Table>
+    </div>
   );
 }

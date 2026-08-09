@@ -339,7 +339,7 @@ export function Activity() {
           </CardContent>
         </Card>
       ) : (
-        <Table resizeKey="activity" picker>
+        <Table resizeKey="activity" picker metaColumns>
           <TableHeader>
             <TableRow>
               <TableHead>{t('columns.resultId')}</TableHead>
@@ -355,7 +355,7 @@ export function Activity() {
           </TableHeader>
           <TableBody>
             {rows.map((r) => (
-              <TableRow key={r.result_id}>
+              <TableRow key={r.result_id} pcId={r.pc_id}>
                 <TableCell label={t('columns.resultId')}>
                   {/* result_id (v0.29) is the detail-route key — was
                       request_id pre-v0.29 but that's no longer unique
