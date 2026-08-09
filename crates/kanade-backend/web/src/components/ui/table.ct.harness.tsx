@@ -279,3 +279,32 @@ export function TableWithoutColIds({ inserted = false }: { inserted?: boolean })
     </Table>
   );
 }
+
+const META_PCS = ['pc-a', 'pc-b'];
+
+/**
+ * A table with `metaColumns` on, standing in for the seven pc_id-keyed
+ * pages. `pc-b` deliberately has no attributes on the stubbed endpoint —
+ * a PC with nothing recorded must render an empty cell, not lose the
+ * column, since the column is a fleet-wide choice and not a per-row one.
+ */
+export function TableWithMetaColumns() {
+  return (
+    <Table resizeKey="ct-meta" picker metaColumns pcIds={META_PCS}>
+      <TableHeader>
+        <TableRow>
+          <TableHead colId="pcId">pc_id</TableHead>
+          <TableHead colId="os">os</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {META_PCS.map((pc) => (
+          <TableRow key={pc} pcId={pc}>
+            <TableCell label="pc_id">{pc}</TableCell>
+            <TableCell label="os">windows</TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  );
+}

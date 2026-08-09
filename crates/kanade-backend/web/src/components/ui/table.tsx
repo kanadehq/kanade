@@ -21,9 +21,12 @@ import {
   type TdHTMLAttributes,
   type ThHTMLAttributes,
 } from 'react';
-import { ChevronDown, ChevronUp, RotateCcw, SlidersHorizontal } from 'lucide-react';
+import { ChevronDown, ChevronUp, Plus, RotateCcw, SlidersHorizontal } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
+import { useQuery } from '@tanstack/react-query';
+
+import { apiFetch } from '@/lib/api';
 import { useMediaQuery } from '@/lib/hooks';
 import { cn } from '@/lib/utils';
 
@@ -68,6 +71,7 @@ const DEFAULT_NEW_COL_WIDTH = 120;
 const WIDTHS_PREFIX = 'kanade.table.widths.';
 const HIDDEN_PREFIX = 'kanade.table.hidden.';
 const ORDER_PREFIX = 'kanade.table.order.';
+const META_PREFIX = 'kanade.table.meta.';
 /** Persisted widths, keyed by column id (see `columnIdOf`). */
 type ColumnWidths = Record<string, number>;
 
@@ -101,6 +105,15 @@ interface ResizeContextValue {
   /** Source-order column ids, so the header row can stamp each cell with a
    *  reorder-stable identity. Empty when the header couldn't be read. */
   sourceIds: string[];
+  /**
+   * `agent_meta` columns the operator has added (#1357), in the order they
+   * were chosen. Appended to every row by <TableRow>: the header row gets
+   * the headings, a row with a `pcId` gets that PC's values.
+   */
+  metaKeys: string[];
+  /** `agent_meta` values for the rows on screen, by pc_id. A PC with no
+   *  attributes is simply absent. */
+  metaByPc: Record<string, Record<string, string>>;
 }
 
 const ResizeContext = createContext<ResizeContextValue | null>(null);
@@ -143,6 +156,40 @@ function useMergedRef<T>(
 function positionalId(index: number, total: number): string {
   return `${index}/${total}`;
 }
+
+/**
+ * The `agent_meta` attributes for a set of PCs, as `{ pc_id: { key: value } }`
+ * (#1357).
+ *
+ * One request for the rows on screen, rather than teaching each of the
+ * seven pc_id-keyed endpoints to join metadata itself. `undefined` ids —
+ * no metadata column selected — issue no request at all, which is the
+ * common case: this must cost nothing on a table nobody has added a
+ * metadata column to.
+ *
+ * The ids are sorted into the query key so a re-render that reorders the
+ * same rows is a cache hit rather than a refetch.
+ */
+function useAgentMeta(pcIds: string[] | undefined): Record<string, Record<string, string>> {
+  const ids = pcIds && pcIds.length ? [...new Set(pcIds)].sort() : [];
+  const { data } = useQuery({
+    queryKey: ['agent-meta', ids],
+    enabled: ids.length > 0,
+    queryFn: async () => {
+      const raw = await apiFetch<Record<string, { key: string; value: string }[]>>(
+        `/api/agents/meta?pcs=${encodeURIComponent(ids.join(','))}`,
+      );
+      const out: Record<string, Record<string, string>> = {};
+      for (const [pc, entries] of Object.entries(raw)) {
+        out[pc] = Object.fromEntries(entries.map((e) => [e.key, e.value]));
+      }
+      return out;
+    },
+  });
+  return data ?? EMPTY_META;
+}
+
+const EMPTY_META: Record<string, Record<string, string>> = Object.freeze({});
 
 /** A column's identity for width storage: the explicit `colId` a page
  *  passed to <TableHead>, else its position (see [`positionalId`]). Pages
@@ -228,9 +275,29 @@ function orderCells(
   children: ReactNode,
   table: ResizeContextValue | null,
   isHeader: boolean,
+  pcId: string | undefined,
 ): ReactNode {
   if (!table || !table.sourceIds.length) return children;
-  const cells = Children.toArray(children);
+  const own = Children.toArray(children);
+  // #1357: metadata columns are appended here rather than by the page, so
+  // the header row and the value rows can't disagree about how many there
+  // are — which is what the cell-count guard below depends on. A row with
+  // no `pcId` (an empty-state row) appends nothing and is left alone by
+  // that same guard.
+  const meta = table.metaKeys.length
+    ? table.metaKeys.map((key) =>
+        isHeader ? (
+          <TableHead key={`meta:${key}`} colId={`meta:${key}`}>
+            {key}
+          </TableHead>
+        ) : pcId !== undefined ? (
+          <TableCell key={`meta:${key}`} label={key} className="text-muted text-xs">
+            {table.metaByPc[pcId]?.[key] ?? ''}
+          </TableCell>
+        ) : null,
+      )
+    : [];
+  const cells = isHeader || pcId !== undefined ? [...own, ...meta] : own;
   if (cells.length !== table.sourceIds.length) return children;
   const stamped = isHeader
     ? cells.map((cell, i) =>
@@ -403,6 +470,21 @@ const orderPref = makeTablePref<readonly string[]>({
   isEmpty: (ids) => ids.length === 0,
 });
 
+/**
+ * The `agent_meta` keys an operator has added as columns (#1357).
+ *
+ * Distinct from `hiddenPref`, which takes existing columns away: these
+ * keys ADD columns. Nothing is selected by default and nothing ever will
+ * be — the keys are whatever whoever administers the fleet decided to
+ * record, so there is no key this code could sensibly pick for anyone.
+ */
+const metaPref = makeTablePref<readonly string[]>({
+  prefix: META_PREFIX,
+  empty: Object.freeze([]) as readonly string[],
+  parse: (raw) => (Array.isArray(raw) ? raw.filter((x): x is string => typeof x === 'string') : []),
+  isEmpty: (keys) => keys.length === 0,
+});
+
 const hiddenPref = makeTablePref<readonly string[]>({
   prefix: HIDDEN_PREFIX,
   empty: Object.freeze([]) as readonly string[],
@@ -556,6 +638,46 @@ export function useTableColumns(resizeKey: string): {
   };
 }
 
+/**
+ * The `agent_meta` keys available fleet-wide, and which of them this table
+ * shows as columns (#1357).
+ *
+ * The available keys come from the fleet, not from the table — an operator
+ * can add a column for a key none of the rows on screen happen to have,
+ * which is exactly how they discover that those PCs are missing it.
+ */
+export function useTableMetaColumns(
+  resizeKey: string,
+  /**
+   * Whether this table offers metadata columns at all. `false` skips the
+   * key request entirely — the picker calls this hook unconditionally, so
+   * without the gate every table with a picker would ask the fleet for its
+   * metadata keys whether or not it can use them.
+   */
+  enabled = true,
+): {
+  available: string[];
+  selected: readonly string[];
+  toggle: (key: string) => void;
+  reset: () => void;
+} {
+  const selected = metaPref.use(resizeKey);
+  const { data } = useQuery({
+    queryKey: ['agent-meta-keys'],
+    queryFn: () => apiFetch<string[]>('/api/agents/meta-keys'),
+    enabled,
+  });
+  const toggle = useCallback(
+    (key: string) =>
+      metaPref.update(resizeKey, (prev) =>
+        prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key],
+      ),
+    [resizeKey],
+  );
+  const reset = useCallback(() => metaPref.update(resizeKey, []), [resizeKey]);
+  return { available: data ?? [], selected, toggle, reset };
+}
+
 /** Show every column of every table again, mounted or not. Companion to
  *  [`resetAllTableWidths`] for the Settings escape hatch. */
 export function resetAllTableColumns(): number {
@@ -627,10 +749,39 @@ interface TableProps extends HTMLAttributes<HTMLTableElement> {
    * `<TableColumnPicker resizeKey="…" />` itself.
    */
   picker?: boolean;
+  /**
+   * Offer this table's `agent_meta` attributes as extra columns (#1357).
+   * Needs `resizeKey` and `pcIds`, and only makes sense on a table whose
+   * rows are about a PC — each `<TableRow>` must pass its `pcId`.
+   *
+   * Nothing is shown until the operator ticks a key in the picker: the
+   * keys are defined per deployment, so there is no default worth having.
+   */
+  metaColumns?: boolean;
+  /**
+   * The pc_ids of the rows currently rendered, for `metaColumns`. Their
+   * attributes are fetched in one request, so the payload tracks what is
+   * on screen rather than fleet size.
+   */
+  pcIds?: string[];
 }
 
 export const Table = forwardRef<HTMLTableElement, TableProps>(
-  ({ className, cards = true, wideCards = false, resizeKey, picker = false, style, children, ...props }, ref) => {
+  (
+    {
+      className,
+      cards = true,
+      wideCards = false,
+      resizeKey,
+      picker = false,
+      metaColumns = false,
+      pcIds,
+      style,
+      children,
+      ...props
+    },
+    ref,
+  ) => {
     const innerRef = useRef<HTMLTableElement | null>(null);
     const setRefs = useMergedRef(innerRef, ref);
 
@@ -649,6 +800,12 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
     // per-column plumbing of its own.
     const hidden = hiddenPref.use(resizeKey);
     const order = orderPref.use(resizeKey);
+    // #1357: metadata columns. Only fetched when the table opted in AND
+    // the operator has actually chosen a key — a table nobody has added
+    // metadata to issues no request at all.
+    const selectedMeta = metaPref.use(resizeKey);
+    const metaKeys = metaColumns ? [...selectedMeta] : [];
+    const metaByPc = useAgentMeta(metaKeys.length ? pcIds : undefined);
     const [layout, setLayout] = useState<{ order: string[]; total: number } | null>(null);
     const [hiddenPositions, setHiddenPositions] = useState<number[]>([]);
     // Scopes the generated stylesheet to THIS table. `useId` produces
@@ -818,7 +975,16 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
     // Reordering is computed during render, not in an effect: an effect
     // would paint the source order for one frame before correcting it,
     // which is exactly the flash a stored preference exists to avoid.
-    const sourceIds = resizeKey ? sourceColumnIds(children) : [];
+    const sourceIds = resizeKey
+      ? (() => {
+          const own = sourceColumnIds(children);
+          // Metadata columns sit after the page's own, in the order the
+          // operator picked them. They carry real ids (`meta:<key>`), so
+          // the order / hide / width machinery treats them as ordinary
+          // columns from here on.
+          return own.length ? [...own, ...metaKeys.map((k) => `meta:${k}`)] : own;
+        })()
+      : [];
     const perm = permutationFor(sourceIds, order);
     const ctx: ResizeContextValue = {
       widths,
@@ -829,6 +995,8 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
       active,
       perm,
       sourceIds,
+      metaKeys,
+      metaByPc,
     };
     const sized = active && layout !== null;
 
@@ -839,7 +1007,7 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
       picker && resizeKey ? (
         <div className="space-y-1.5">
           <div className="flex justify-end">
-            <TableColumnPicker resizeKey={resizeKey} />
+            <TableColumnPicker resizeKey={resizeKey} metaColumns={metaColumns} />
           </div>
           {table}
         </div>
@@ -988,8 +1156,18 @@ export const TableBody = forwardRef<HTMLTableSectionElement, HTMLAttributes<HTML
 );
 TableBody.displayName = 'TableBody';
 
-export const TableRow = forwardRef<HTMLTableRowElement, HTMLAttributes<HTMLTableRowElement>>(
-  ({ className, children, ...props }, ref) => {
+interface TableRowProps extends HTMLAttributes<HTMLTableRowElement> {
+  /**
+   * The pc_id this row is about (#1357). Only needed on a table using
+   * `metaColumns`: it is how the shared row finds this PC's `agent_meta`
+   * values. Rows that aren't about a PC — an empty state, a detail row —
+   * leave it off and get no metadata cells.
+   */
+  pcId?: string;
+}
+
+export const TableRow = forwardRef<HTMLTableRowElement, TableRowProps>(
+  ({ className, children, pcId, ...props }, ref) => {
     const table = useContext(ResizeContext);
     const isHeader = useContext(HeaderContext);
     return (
@@ -998,7 +1176,7 @@ export const TableRow = forwardRef<HTMLTableRowElement, HTMLAttributes<HTMLTable
         className={cn('border-b border-border transition-colors hover:bg-muted/5', className)}
         {...props}
       >
-        {orderCells(children, table, isHeader)}
+        {orderCells(children, table, isHeader, pcId)}
       </tr>
     );
   },
@@ -1120,15 +1298,29 @@ interface TableCellProps extends TdHTMLAttributes<HTMLTableCellElement> {
  */
 export function TableColumnPicker({
   resizeKey,
+  metaColumns = false,
   children,
 }: {
   resizeKey: string;
+  /** Show the `agent_meta` section (#1357). Set by <Table metaColumns>. */
+  metaColumns?: boolean;
   children?: ReactNode;
 }) {
   const { t } = useTranslation('common');
   const { columns, toggle, reset, hasHidden, move, resetOrder, hasOrder } =
     useTableColumns(resizeKey);
   const { hasWidths, reset: resetWidths } = useTableWidths(resizeKey);
+  const meta = useTableMetaColumns(resizeKey, metaColumns);
+  // Every displayed column is listed once, metadata included, so the
+  // reorder arrows work uniformly. A metadata column's checkbox removes
+  // the key rather than hiding the column: for a column the operator added
+  // themselves those are the same intent, and having both a "hide" here
+  // and a "remove" below would be two controls disagreeing about one
+  // column. The metadata section is therefore purely an ADD menu — it
+  // lists only the keys not already shown.
+  const unaddedMetaKeys = meta.available.filter((k) => !meta.selected.includes(k));
+  const toggleColumn = (id: string) =>
+    id.startsWith('meta:') ? meta.toggle(id.slice('meta:'.length)) : toggle(id);
   const visibleCount = columns.filter((c) => c.visible).length;
   if (columns.length < 2 && !children) return null;
 
@@ -1158,7 +1350,7 @@ export function TableColumnPicker({
               type="checkbox"
               checked={c.visible}
               disabled={c.visible && visibleCount <= 1}
-              onChange={() => toggle(c.id)}
+              onChange={() => toggleColumn(c.id)}
             />
             <span className="flex-1 truncate">{c.label || t('table.columns.unnamed', { n: i + 1 })}</span>
             {/* Reorder lives here rather than as a drag on the header:
@@ -1193,6 +1385,28 @@ export function TableColumnPicker({
             </span>
           </label>
         ))}
+        {metaColumns && unaddedMetaKeys.length > 0 && (
+          <>
+            <div className="mt-2 px-1 pb-1 text-[10px] font-medium uppercase tracking-wide text-muted">
+              {t('table.columns.metaSection')}
+            </div>
+            {/* An ADD menu, never pre-ticked: these keys are whatever the
+                fleet's administrator decided to record, so there is no
+                default this code could pick for anyone. Once added, the
+                key moves up into the list above with everything else. */}
+            {unaddedMetaKeys.map((key) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => meta.toggle(key)}
+                className="flex w-full items-center gap-2 rounded px-1 py-0.5 text-left text-sm text-muted hover:bg-muted/10 hover:text-fg"
+              >
+                <Plus className="size-3.5 shrink-0" />
+                <span className="truncate">{key}</span>
+              </button>
+            ))}
+          </>
+        )}
         {children}
         {(hasHidden || hasWidths || hasOrder) && (
           <div className="mt-2 space-y-0.5 border-t border-border pt-1.5">

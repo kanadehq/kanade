@@ -105,7 +105,8 @@
       "showAll": "全ての列を表示",
       "moveUp": "{{name}} を左へ移動",
       "moveDown": "{{name}} を右へ移動",
-      "resetOrder": "列の順序をリセット"
+      "resetOrder": "列の順序をリセット",
+      "metaSection": "付加情報"
     }
   },
   "comingSoon": {
