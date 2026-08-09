@@ -101,6 +101,22 @@ test.describe('Table column resizing', () => {
     expect(tableBox!.width).toBeGreaterThan(DESKTOP.width);
   });
 
+  test('narrowing the columns shrinks the card with them', async ({ mount, page }) => {
+    // The card draws a border around the table, so it has to end where the
+    // table ends. Left at `min-width: 100%` it stayed stretched to the full
+    // width and put dead space inside the border, to the right of the last
+    // column — which reads as a broken layout, not as a narrow table.
+    const c = await mount(<ResizableTable />);
+    const before = (await c.boundingBox())!.width;
+    await drag(page, c.locator('th', { hasText: 'alpha' }).getByRole('separator'), -200);
+
+    const wrapper = (await c.boundingBox())!.width;
+    const table = (await c.locator('table').boundingBox())!.width;
+    expect(wrapper).toBeLessThan(before);
+    // Border and content end together — no gap either side of the table.
+    expect(wrapper).toBeCloseTo(table, -1);
+  });
+
   test('a column cannot be dragged narrower than the minimum', async ({ mount, page }) => {
     const c = await mount(<ResizableTable />);
     const alpha = c.locator('th', { hasText: 'alpha' });
