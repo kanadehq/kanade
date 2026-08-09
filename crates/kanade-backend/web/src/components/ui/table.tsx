@@ -114,6 +114,21 @@ interface ResizeContextValue {
   /** `agent_meta` values for the rows on screen, by pc_id. A PC with no
    *  attributes is simply absent. */
   metaByPc: Record<string, Record<string, string>>;
+  /**
+   * Register a row's pc_id for the metadata fetch; the returned function
+   * deregisters it.
+   *
+   * The rows announce themselves rather than the page passing a list,
+   * because a page doesn't always have one: Compliance appends its "ok"
+   * rows from a child component that fetches them itself, so the parent
+   * cannot enumerate what is on screen. It also removes a second place to
+   * get the pc_id expression wrong — the list and the rows can't disagree
+   * when there is only one of them.
+   *
+   * Returns a no-op when the table isn't using metadata columns, so an
+   * ordinary table pays nothing for the plumbing.
+   */
+  registerPc: (pcId: string) => () => void;
 }
 
 const ResizeContext = createContext<ResizeContextValue | null>(null);
@@ -190,6 +205,58 @@ function useAgentMeta(pcIds: string[] | undefined): Record<string, Record<string
 }
 
 const EMPTY_META: Record<string, Record<string, string>> = Object.freeze({});
+
+/**
+ * The pc_ids of the rows currently rendered, collected from the rows
+ * themselves (#1357).
+ *
+ * Updates are batched through a microtask: a page of rows mounts fifty
+ * registrations in one pass, and one state update at the end of it is the
+ * difference between one render and fifty. The set is sorted so the query
+ * key is stable under a re-render that reorders the same rows.
+ *
+ * Counted rather than stored as a set: two rows can legitimately carry the
+ * same pc_id (a per-check table lists a PC once per check), and the first
+ * one to unmount must not take the other's registration with it.
+ */
+function useRegisteredPcIds(enabled: boolean): {
+  pcIds: string[];
+  registerPc: (pcId: string) => () => void;
+} {
+  const counts = useRef(new Map<string, number>());
+  const [pcIds, setPcIds] = useState<string[]>([]);
+  const pending = useRef(false);
+
+  const flush = useCallback(() => {
+    if (pending.current) return;
+    pending.current = true;
+    queueMicrotask(() => {
+      pending.current = false;
+      const next = [...counts.current.keys()].sort();
+      setPcIds((prev) =>
+        prev.length === next.length && prev.every((id, i) => id === next[i]) ? prev : next,
+      );
+    });
+  }, []);
+
+  const registerPc = useCallback(
+    (pcId: string) => {
+      if (!enabled) return () => {};
+      const map = counts.current;
+      map.set(pcId, (map.get(pcId) ?? 0) + 1);
+      flush();
+      return () => {
+        const left = (map.get(pcId) ?? 1) - 1;
+        if (left <= 0) map.delete(pcId);
+        else map.set(pcId, left);
+        flush();
+      };
+    },
+    [enabled, flush],
+  );
+
+  return { pcIds, registerPc };
+}
 
 /** A column's identity for width storage: the explicit `colId` a page
  *  passed to <TableHead>, else its position (see [`positionalId`]). Pages
@@ -758,12 +825,6 @@ interface TableProps extends HTMLAttributes<HTMLTableElement> {
    * keys are defined per deployment, so there is no default worth having.
    */
   metaColumns?: boolean;
-  /**
-   * The pc_ids of the rows currently rendered, for `metaColumns`. Their
-   * attributes are fetched in one request, so the payload tracks what is
-   * on screen rather than fleet size.
-   */
-  pcIds?: string[];
 }
 
 export const Table = forwardRef<HTMLTableElement, TableProps>(
@@ -775,7 +836,6 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
       resizeKey,
       picker = false,
       metaColumns = false,
-      pcIds,
       style,
       children,
       ...props
@@ -805,6 +865,7 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
     // metadata to issues no request at all.
     const selectedMeta = metaPref.use(resizeKey);
     const metaKeys = metaColumns ? [...selectedMeta] : [];
+    const { pcIds, registerPc } = useRegisteredPcIds(metaColumns);
     const metaByPc = useAgentMeta(metaKeys.length ? pcIds : undefined);
     const [layout, setLayout] = useState<{ order: string[]; total: number } | null>(null);
     const [hiddenPositions, setHiddenPositions] = useState<number[]>([]);
@@ -997,6 +1058,7 @@ export const Table = forwardRef<HTMLTableElement, TableProps>(
       sourceIds,
       metaKeys,
       metaByPc,
+      registerPc,
     };
     const sized = active && layout !== null;
 
@@ -1177,6 +1239,14 @@ export const TableRow = forwardRef<HTMLTableRowElement, TableRowProps>(
   ({ className, children, pcId, ...props }, ref) => {
     const table = useContext(ResizeContext);
     const isHeader = useContext(HeaderContext);
+    // Announce this row's PC so the table can fetch its metadata. Depends
+    // on `registerPc` itself, not the context object, which is rebuilt
+    // every render.
+    const registerPc = table?.registerPc;
+    useEffect(() => {
+      if (!pcId || !registerPc) return;
+      return registerPc(pcId);
+    }, [pcId, registerPc]);
     return (
       <tr
         ref={ref}
