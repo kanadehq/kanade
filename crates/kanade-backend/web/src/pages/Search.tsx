@@ -686,7 +686,14 @@ export function InventorySearch() {
                       const collectedAt =
                         typeof row.collected_at === 'string' ? row.collected_at : null;
                       return (
-                        <TableRow key={rowKey} pcId={pcId}>
+                        <TableRow
+                          key={rowKey}
+                          // The RAW id, not the display string: `formatCell`
+                          // renders a missing value as an em-dash, which would
+                          // otherwise be registered and sent to the metadata
+                          // endpoint as if it were a pc_id.
+                          pcId={typeof row.pc_id === 'string' && row.pc_id ? row.pc_id : undefined}
+                        >
                           <TableCell label={t('results.columns.pcId')}>
                             <Link
                               to={`/inventory?pc=${encodeURIComponent(pcId)}`}

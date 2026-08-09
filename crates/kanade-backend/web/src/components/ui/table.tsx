@@ -348,23 +348,35 @@ function orderCells(
   const own = Children.toArray(children);
   // #1357: metadata columns are appended here rather than by the page, so
   // the header row and the value rows can't disagree about how many there
-  // are — which is what the cell-count guard below depends on. A row with
-  // no `pcId` (an empty-state row) appends nothing and is left alone by
-  // that same guard.
-  const meta = table.metaKeys.length
-    ? table.metaKeys.map((key) =>
-        isHeader ? (
-          <TableHead key={`meta:${key}`} colId={`meta:${key}`}>
-            {key}
-          </TableHead>
-        ) : pcId !== undefined ? (
-          <TableCell key={`meta:${key}`} label={key} className="text-muted text-xs">
-            {table.metaByPc[pcId]?.[key] ?? ''}
-          </TableCell>
-        ) : null,
-      )
-    : [];
-  const cells = isHeader || pcId !== undefined ? [...own, ...meta] : own;
+  // are — which is what the cell-count guard below depends on.
+  //
+  // What decides whether a row takes them is its SHAPE, not whether it has
+  // a PC: a row carrying one cell per page column is a data row and gets
+  // them, a row that doesn't (an empty state, an expanded detail row) is
+  // left alone. Keying this off `pcId` instead conflated "has a PC" with
+  // "is a data row", so a data row whose `pc_id` was missing skipped the
+  // metadata cells AND fell out of the reorder permutation with them —
+  // rendering its columns in source order under a permuted header.
+  //
+  // A data row without a PC still gets the columns, empty. The column is a
+  // fleet-wide choice; whether this row has a value for it is not.
+  const ownColumnCount = table.sourceIds.length - table.metaKeys.length;
+  const isDataRow = isHeader || own.length === ownColumnCount;
+  const meta =
+    table.metaKeys.length && isDataRow
+      ? table.metaKeys.map((key) =>
+          isHeader ? (
+            <TableHead key={`meta:${key}`} colId={`meta:${key}`}>
+              {key}
+            </TableHead>
+          ) : (
+            <TableCell key={`meta:${key}`} label={key} className="text-muted text-xs">
+              {(pcId !== undefined ? table.metaByPc[pcId]?.[key] : undefined) ?? ''}
+            </TableCell>
+          ),
+        )
+      : [];
+  const cells = isDataRow ? [...own, ...meta] : own;
   if (cells.length !== table.sourceIds.length) return children;
   const stamped = isHeader
     ? cells.map((cell, i) =>
@@ -818,8 +830,8 @@ interface TableProps extends HTMLAttributes<HTMLTableElement> {
   picker?: boolean;
   /**
    * Offer this table's `agent_meta` attributes as extra columns (#1357).
-   * Needs `resizeKey` and `pcIds`, and only makes sense on a table whose
-   * rows are about a PC — each `<TableRow>` must pass its `pcId`.
+   * Needs `resizeKey`, and only makes sense on a table whose rows are
+   * about a PC — each `<TableRow>` must pass its `pcId`.
    *
    * Nothing is shown until the operator ticks a key in the picker: the
    * keys are defined per deployment, so there is no default worth having.
@@ -1352,6 +1364,19 @@ TableHead.displayName = 'TableHead';
 
 interface TableCellProps extends TdHTMLAttributes<HTMLTableCellElement> {
   /**
+   * Stretch this cell across every column the table currently has,
+   * instead of a hand-counted `colSpan`.
+   *
+   * An empty-state or loading row spans the table, and until now each page
+   * wrote that number itself — which was already easy to get wrong and
+   * became wrong for free once metadata columns (#1357) could add more at
+   * runtime. A page cannot know that count; the table does.
+   *
+   * Still one cell, so the row is left alone by the reorder guard and the
+   * hidden-column stylesheet, exactly as a hand-written `colSpan` was.
+   */
+  spanAll?: boolean;
+  /**
    * Column name for this cell. Below `lg` the table collapses into cards
    * (index.css) and this text is shown as the cell's label next to its
    * value via `data-label`. Pass the same text as the column's
@@ -1525,8 +1550,22 @@ export function TableColumnPicker({
 }
 
 export const TableCell = forwardRef<HTMLTableCellElement, TableCellProps>(
-  ({ className, label, ...props }, ref) => (
-    <td ref={ref} data-label={label} className={cn('px-3 py-2 align-middle', className)} {...props} />
-  ),
+  ({ className, label, spanAll, colSpan, ...props }, ref) => {
+    const table = useContext(ResizeContext);
+    // `sourceIds` is the live column count, metadata columns included. Falls
+    // back to the caller's `colSpan` when the table isn't tracking columns
+    // (a table with no `resizeKey`), so `spanAll` degrades to whatever the
+    // page would have written by hand rather than to nothing.
+    const span = spanAll ? (table?.sourceIds.length || colSpan) : colSpan;
+    return (
+      <td
+        ref={ref}
+        data-label={label}
+        colSpan={span}
+        className={cn('px-3 py-2 align-middle', className)}
+        {...props}
+      />
+    );
+  },
 );
 TableCell.displayName = 'TableCell';
