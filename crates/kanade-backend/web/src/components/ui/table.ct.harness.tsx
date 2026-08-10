@@ -384,3 +384,57 @@ export function TableWithDuplicatePc() {
     </div>
   );
 }
+
+/**
+ * A metadata table whose empty state uses `spanAll`. The placeholder has
+ * to keep covering the row as metadata columns are added — a hand-counted
+ * `colSpan` goes stale the moment the operator ticks a key.
+ */
+export function TableWithSpanAllPlaceholder() {
+  return (
+    <Table resizeKey="ct-span" picker metaColumns>
+      <TableHeader>
+        <TableRow>
+          <TableHead colId="pcId">pc_id</TableHead>
+          <TableHead colId="os">os</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        <TableRow>
+          <TableCell spanAll colSpan={2}>
+            nothing here
+          </TableCell>
+        </TableRow>
+      </TableBody>
+    </Table>
+  );
+}
+
+/**
+ * A metadata table with a data row that has NO pc_id — a search result
+ * whose row didn't carry one. It is still a data row: one cell per page
+ * column, so it must take the metadata columns (empty) and follow the
+ * reorder permutation like every other row.
+ */
+export function TableWithPclessRow() {
+  return (
+    <Table resizeKey="ct-pcless" picker metaColumns>
+      <TableHeader>
+        <TableRow>
+          <TableHead colId="pcId">pc_id</TableHead>
+          <TableHead colId="os">os</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        <TableRow pcId="pc-a">
+          <TableCell label="pc_id">pc-a</TableCell>
+          <TableCell label="os">windows</TableCell>
+        </TableRow>
+        <TableRow>
+          <TableCell label="pc_id">(none)</TableCell>
+          <TableCell label="os">linux</TableCell>
+        </TableRow>
+      </TableBody>
+    </Table>
+  );
+}

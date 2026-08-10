@@ -4,7 +4,9 @@ import {
   TableWithDuplicatePc,
   TableWithLateRows,
   TableWithMetaColumns,
+  TableWithPclessRow,
   TableWithPicker,
+  TableWithSpanAllPlaceholder,
 } from './table.ct.harness';
 
 // #1357: agent_meta values offered as columns on any pc_id-keyed table.
@@ -221,6 +223,49 @@ test.describe('Table metadata columns', () => {
       'firewall',
       '山田太郎',
     ]);
+  });
+
+  test('a spanAll placeholder keeps covering the row as metadata columns appear', async ({
+    mount,
+  }) => {
+    // Pages used to hand-count the `colSpan` on their empty-state rows.
+    // That number cannot include metadata columns, which the operator adds
+    // at runtime — so the placeholder stopped short and left a gap.
+    const c = await mount(<TableWithSpanAllPlaceholder />);
+    const cell = c.locator('tbody td');
+    expect(await cell.getAttribute('colspan')).toBe('2');
+
+    await c.locator('summary').click();
+    await c.getByRole('button', { name: '氏名' }).click();
+    await expect(c.locator('th', { hasText: '氏名' })).toBeVisible();
+    await expect.poll(() => cell.getAttribute('colspan')).toBe('3');
+  });
+
+  test('a data row without a pc_id still takes the column and the reorder', async ({
+    mount,
+    page,
+  }) => {
+    // Whether a row takes the metadata columns is decided by its SHAPE, not
+    // by whether it has a PC. Keying it off `pcId` meant a row with none
+    // skipped the columns and, because its cell count then no longer
+    // matched, fell out of the reorder permutation too — rendering its
+    // columns in source order under a permuted header.
+    await page.route('**/api/agents/meta?*', (route) =>
+      route.fulfill({ json: { 'pc-a': [{ key: '氏名', value: '山田太郎' }] } }),
+    );
+    const c = await mount(<TableWithPclessRow />);
+    await c.locator('summary').click();
+    await c.getByRole('button', { name: '氏名' }).click();
+    await expect(c.locator('th', { hasText: '氏名' })).toBeVisible();
+
+    // The column is there for both rows; only the value differs.
+    await expect.poll(async () => (await grid(c)).rows[1]).toEqual(['(none)', 'linux', '']);
+
+    // ...and it follows the permutation with everything else.
+    await c.getByRole('button', { name: 'Move 氏名 left' }).click();
+    await expect.poll(async () => (await grid(c)).head).toEqual(['pc_id', '氏名', 'os']);
+    await expect.poll(async () => (await grid(c)).rows[1]).toEqual(['(none)', '', 'linux']);
+    await expect.poll(async () => (await grid(c)).rows[0]).toEqual(['pc-a', '山田太郎', 'windows']);
   });
 
   test('the choice persists across a remount', async ({ mount, page }) => {

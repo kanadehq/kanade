@@ -106,7 +106,7 @@ function OkRows({ check, showStale }: { check: string; showStale: boolean }) {
   if (q.isLoading) {
     return (
       <TableRow>
-        <TableCell colSpan={4} className="text-muted text-sm">
+        <TableCell spanAll colSpan={4} className="text-muted text-sm">
           <Loader2 className="size-3.5 animate-spin inline mr-1" />
           {t('loading')}
         </TableCell>
@@ -316,7 +316,7 @@ export function Compliance() {
                   ))}
                   {g.rows.length === 0 && !expanded.has(g.name) && (
                     <TableRow>
-                      <TableCell colSpan={4} className="text-muted text-sm text-center py-4">
+                      <TableCell spanAll colSpan={4} className="text-muted text-sm text-center py-4">
                         {t('allOk', { count: g.counts.ok })}
                       </TableCell>
                     </TableRow>
