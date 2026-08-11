@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import { detectOs, installerFilename } from './AgentInstall';
+import { detectOs, installerFilename, oneLiner } from './AgentInstall';
 
 // The installer endpoint names its ZIP in Content-Disposition
 // (`attachment; filename="kanade-agent-installer-<version>.zip"`). The
@@ -59,5 +59,38 @@ describe('detectOs', () => {
     ).toBe('windows');
     expect(detectOs('', 'macOS')).toBe('windows');
     expect(detectOs('')).toBe('windows');
+  });
+});
+
+// The one-liner embeds the session token as a Bearer header and points at
+// the backend that served the SPA — the exact strings are the contract the
+// operator pastes, so pin them verbatim.
+
+describe('oneLiner', () => {
+  test('windows: irm | iex against installer.ps1', () => {
+    expect(oneLiner('windows', 'https://kanade.example', 'tok123')).toBe(
+      "irm -Headers @{Authorization='Bearer tok123'} https://kanade.example/api/agents/installer.ps1 | iex",
+    );
+  });
+
+  test('linux: token rides a stdin curl config, never argv', () => {
+    expect(oneLiner('linux', 'https://kanade.example', 'tok123')).toBe(
+      'printf \'header = "Authorization: Bearer %s"\\n\' \'tok123\' | curl -fsSL -K - https://kanade.example/api/agents/installer.sh | sudo bash',
+    );
+  });
+
+  test('linux: single quotes in the token are shell-escaped', () => {
+    expect(oneLiner('linux', 'https://k', "it's")).toContain(`'it'\\''s'`);
+  });
+
+  test('linux: double quotes and backslashes are escaped for the curl config', () => {
+    // `\` → `\\` then `"` → `\"` (the same rules render_installer_sh uses).
+    expect(oneLiner('linux', 'https://k', 'we"ird\\tok')).toContain('we\\"ird\\\\tok');
+  });
+
+  test('origin and token are interpolated verbatim', () => {
+    const cmd = oneLiner('windows', 'http://localhost:1420', 'dev');
+    expect(cmd).toContain('http://localhost:1420/api/agents/installer.ps1');
+    expect(cmd).toContain("'Bearer dev'");
   });
 });

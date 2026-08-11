@@ -431,6 +431,17 @@ pub fn router(state: AppState) -> Router {
         // body: the ZIP always bundles the latest release, and the NATS
         // coordinates come from server settings, not the caller.
         .route("/api/agents/installer", get(agent_installer::installer))
+        // One-liner installer scripts (same gate). Each embeds the
+        // caller's own Bearer token so the script's inner archive
+        // download authenticates as the same account.
+        .route(
+            "/api/agents/installer.ps1",
+            get(agent_installer::installer_ps1),
+        )
+        .route(
+            "/api/agents/installer.sh",
+            get(agent_installer::installer_sh),
+        )
         .route("/api/app-packages", get(app_packages::list_packages))
         .route(
             "/api/app-packages/{name}/{version}",
@@ -732,7 +743,9 @@ pub fn feature_for_path(path: &str) -> Option<Feature> {
         // Its own feature, NOT Rollout: the whole point is a restricted
         // "download user" (viewer + only this feature) that can fetch the
         // installer ZIP without also holding release publish/rollout.
-        "/api/agents/installer" => Feature::AgentInstall,
+        "/api/agents/installer" | "/api/agents/installer.ps1" | "/api/agents/installer.sh" => {
+            Feature::AgentInstall
+        }
 
         // --- Apps (app packages + script objects) ---
         "/api/app-packages"
@@ -885,9 +898,18 @@ mod feature_map_tests {
         assert_eq!(feature_for_path("/api/query"), Some(Feature::Accounts));
         // The installer download gates on its OWN feature — the whole point
         // of the split is a "download user" holding agent-install WITHOUT
-        // Rollout (release publish / rollout stay operator territory).
+        // Rollout (release publish / rollout stay operator territory). The
+        // one-liner script endpoints gate with it.
         assert_eq!(
             feature_for_path("/api/agents/installer"),
+            Some(Feature::AgentInstall)
+        );
+        assert_eq!(
+            feature_for_path("/api/agents/installer.ps1"),
+            Some(Feature::AgentInstall)
+        );
+        assert_eq!(
+            feature_for_path("/api/agents/installer.sh"),
             Some(Feature::AgentInstall)
         );
         // #1032: group-def routes gate with the Groups page (its SPA

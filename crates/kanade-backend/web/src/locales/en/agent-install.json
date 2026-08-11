@@ -36,6 +36,20 @@
     },
     "downloadButton": "Download installer"
   },
+  "oneLiner": {
+    "label": {
+      "windows": "…or paste this one-liner in PowerShell on the target PC",
+      "linux": "…or run this one-liner in a shell on the target host"
+    },
+    "hint": {
+      "windows": "No admin rights needed to start it — UAC prompts only for the install step.",
+      "linux": "Runs under sudo — the script detects the host architecture and installs the systemd service."
+    },
+    "tokenWarning": "The command embeds your session token: it expires with your session, so run it soon — and anyone holding it can download the installer while it's valid. Treat it like a password.",
+    "copyTitle": "Copy command to clipboard",
+    "copied": "Copied to clipboard",
+    "copyFailed": "Couldn't copy — select the command and copy it manually"
+  },
   "signing": {
     "errorTitle": "Failed to load command-signing status",
     "enabled": "This backend signs commands (kid <code>{{kid}}</code>, fingerprint <code>{{fingerprint}}</code>) — the public key is embedded into the Windows installer automatically.",
