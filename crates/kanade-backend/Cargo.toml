@@ -41,7 +41,7 @@ humantime  = { workspace = true }
 # (ring, via async-nats + lettre), and rustls then refuses to pick one —
 # the #1187 panic, landing on the SMTP path. Every crate here is already
 # in the tree via axum, so this adds no packages.
-http-body-util = "0.1.4"
+http-body-util = "0.1.5"
 hyper      = { version = "1.11.0", features = ["client", "http1"] }
 hyper-util = { version = "0.1.20", features = ["client-legacy", "http1", "tokio"] }
 jsonwebtoken = { workspace = true }
