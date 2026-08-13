@@ -446,6 +446,8 @@ interface TablePref<T> {
 
 function makeTablePref<T>(opts: {
   prefix: string;
+  /** Legacy localStorage keys for backward compatibility, mapped by table key (e.g. { agents: 'agents.hiddenColumns' }) */
+  legacyKeys?: Record<string, string>;
   /** Shared empty value. Must be a stable reference — `useSyncExternalStore`
    *  compares snapshots by identity, so a fresh one per call would loop. */
   empty: T;
@@ -459,7 +461,23 @@ function makeTablePref<T>(opts: {
   const read = (key: string): T => {
     try {
       const raw = localStorage.getItem(opts.prefix + key);
-      return raw ? opts.parse(JSON.parse(raw)) : opts.empty;
+      if (raw) return opts.parse(JSON.parse(raw));
+      if (opts.legacyKeys && opts.legacyKeys[key]) {
+        const legacyRaw = localStorage.getItem(opts.legacyKeys[key]);
+        if (legacyRaw) {
+          const parsed = opts.parse(JSON.parse(legacyRaw));
+          if (!opts.isEmpty(parsed)) {
+            try {
+              localStorage.setItem(opts.prefix + key, JSON.stringify(parsed));
+              localStorage.removeItem(opts.legacyKeys[key]);
+            } catch {
+              /* ignore storage errors */
+            }
+            return parsed;
+          }
+        }
+      }
+      return opts.empty;
     } catch {
       /* blocked storage / malformed JSON — behave as if nothing was stored */
       return opts.empty;
@@ -498,41 +516,58 @@ function makeTablePref<T>(opts: {
     for (const notify of s.listeners) notify();
   };
 
-  return {
-    get: (key) => store(key).value,
-    update,
-    use(key) {
-      /* eslint-disable react-hooks/rules-of-hooks -- called from components */
-      const subscribe = useCallback(
-        (onChange: () => void) => {
-          if (!key) return () => {};
-          const s = store(key);
-          s.listeners.add(onChange);
-          return () => s.listeners.delete(onChange);
-        },
-        [key],
-      );
-      const snapshot = useCallback(() => (key ? store(key).value : opts.empty), [key]);
-      return useSyncExternalStore(subscribe, snapshot);
-    },
-    keysWithValue() {
-      const keys = new Set<string>(stores.keys());
-      try {
-        for (let i = 0; i < localStorage.length; i++) {
-          const raw = localStorage.key(i);
-          if (raw?.startsWith(opts.prefix)) keys.add(raw.slice(opts.prefix.length));
+  const use = (key: string | undefined): T =>
+    useSyncExternalStore(
+      (notify) => {
+        if (!key) return () => {};
+        const s = store(key);
+        s.listeners.add(notify);
+        return () => s.listeners.delete(notify);
+      },
+      () => (key ? store(key).value : opts.empty),
+    );
+
+  const resetAll = (): number => {
+    let count = 0;
+    try {
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const k = localStorage.key(i);
+        if (k?.startsWith(opts.prefix)) {
+          localStorage.removeItem(k);
+          count++;
         }
-      } catch {
-        /* storage unreadable — fall back to the mounted tables alone */
       }
-      return [...keys].filter((key) => !opts.isEmpty(store(key).value));
-    },
-    resetAll() {
-      const keys = this.keysWithValue();
-      for (const key of keys) update(key, opts.empty);
-      return keys.length;
-    },
+    } catch {
+      /* blocked storage */
+    }
+    for (const [, s] of stores.entries()) {
+      if (!opts.isEmpty(s.value)) {
+        s.value = opts.empty;
+        for (const notify of s.listeners) notify();
+      }
+    }
+    return count;
   };
+
+  const keysWithValue = (): string[] => {
+    const out = new Set<string>();
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k?.startsWith(opts.prefix)) {
+          out.add(k.slice(opts.prefix.length));
+        }
+      }
+    } catch {
+      /* blocked storage */
+    }
+    for (const [k, s] of stores.entries()) {
+      if (!opts.isEmpty(s.value)) out.add(k);
+    }
+    return [...out];
+  };
+
+  return { get: (key) => store(key).value, update, use, resetAll, keysWithValue };
 }
 
 const widthPref = makeTablePref<ColumnWidths>({
@@ -559,6 +594,7 @@ const orderPref = makeTablePref<readonly string[]>({
  */
 const metaPref = makeTablePref<readonly string[]>({
   prefix: META_PREFIX,
+  legacyKeys: { agents: 'agents.metaColumns' },
   empty: Object.freeze([]) as readonly string[],
   parse: (raw) => (Array.isArray(raw) ? raw.filter((x): x is string => typeof x === 'string') : []),
   isEmpty: (keys) => keys.length === 0,
@@ -566,6 +602,7 @@ const metaPref = makeTablePref<readonly string[]>({
 
 const hiddenPref = makeTablePref<readonly string[]>({
   prefix: HIDDEN_PREFIX,
+  legacyKeys: { agents: 'agents.hiddenColumns' },
   empty: Object.freeze([]) as readonly string[],
   parse: (raw) => (Array.isArray(raw) ? raw.filter((x): x is string => typeof x === 'string') : []),
   isEmpty: (ids) => ids.length === 0,

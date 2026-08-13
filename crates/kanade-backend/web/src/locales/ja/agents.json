@@ -60,12 +60,7 @@
     "cpu": "エージェント CPU",
     "rss": "エージェント RSS",
     "actions": "操作",
-    "label": "表示列",
-    "pick": "選択",
-    "builtinSection": "標準の列",
-    "attributesLabel": "付加情報",
-    "credential": "NATS資格情報",
-    "resetWidths": "列幅をリセット"
+    "credential": "NATS資格情報"
   },
   "columnTitles": {
     "signing": "コマンド署名の展開状況: この端末はコマンドの発行元を検証しているか、検証できないときに拒否するか。鍵はこのバックエンドが実際に署名に使っているものと照合されます。バックエンドが署名していない場合は照合対象が存在しないため、各エージェントの報告内容のみを表示します。",

@@ -1,5 +1,5 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Activity, AlertTriangle, ArrowDown, ArrowUp, Loader2, Plus, RotateCcw, ScrollText, Server, Settings2, SlidersHorizontal, Trash2, Users, X } from 'lucide-react';
+import { Activity, AlertTriangle, ArrowDown, ArrowUp, Loader2, Plus, ScrollText, Server, Settings2, Trash2, Users, X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 import { Link, useSearchParams } from 'react-router-dom';
@@ -25,7 +25,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { JsonOutput } from '@/components/ui/json-output';
 import { Select } from '@/components/ui/select';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow, useTableWidths } from '@/components/ui/table';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow, useTableColumns } from '@/components/ui/table';
 import { apiFetch, apiFetchPaged, formatError } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { useDebouncedValue } from '@/lib/hooks';
@@ -40,26 +40,7 @@ import { cn, fmtIsoLocal, isAgentOnline, unresolvedQuarantine } from '@/lib/util
 const PAGE_SIZE = 50;
 // Same debounce the other list pages use for typed filters.
 const FILTER_DEBOUNCE_MS = 300;
-// #1051: localStorage key for the operator's chosen agent_meta columns
-// (per-browser; a server-side per-account pref could follow later).
-const META_COLS_KEY = 'agents.metaColumns';
-// Built-in columns an operator can hide from the column picker (persisted
-// per browser). `pc_id` is deliberately absent — it's the row identity +
-// the link to the per-PC page, so it always shows. Order matches the
-// table so the picker reads top-to-bottom like the header row.
-const TOGGLEABLE_COLS = [
-  'status',
-  'os',
-  'agent',
-  'lastHeartbeat',
-  'lastLogon',
-  'signing',
-  'credential',
-  'cpu',
-  'rss',
-  'actions',
-] as const;
-const HIDDEN_COLS_KEY = 'agents.hiddenColumns';
+
 
 // #1061: metadata filter operators (mirror the backend allow-list). The
 // value-less ops (present / blank / absent) hide the value input.
@@ -130,24 +111,7 @@ const SORT_FIELDS: Record<string, string> = {
   lastLogon: 'last_logon_user',
 };
 
-/** Read a persisted `string[]` from localStorage, tolerating anything
- *  malformed. `getItem`/`JSON.parse` can throw (blocked storage, bad
- *  JSON); a valid-JSON but non-array value (a string / object left by
- *  other code or corruption) would otherwise slip through and crash later
- *  on `.includes()`. Falls back to `[]` in every failure mode and keeps
- *  only string entries. */
-function readStringArray(key: string): string[] {
-  try {
-    const raw = localStorage.getItem(key);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) return parsed.filter((x): x is string => typeof x === 'string');
-    }
-  } catch {
-    /* malformed / unavailable — fall through to the empty default */
-  }
-  return [];
-}
+
 
 // Liveness filter for the list, shared with the URL `?status=` param
 // so the Dashboard's fleet-health tiles can deep-link straight to the
@@ -218,18 +182,6 @@ export function Agents() {
   const [dir, setDir] = useState<'asc' | 'desc'>(() =>
     searchParams.get('dir') === 'desc' ? 'desc' : 'asc',
   );
-  // #1051: which agent_meta keys render as extra columns (persisted per
-  // browser). Seeded from localStorage; kept in sync on every change.
-  const [metaCols, setMetaCols] = useState<string[]>(() => readStringArray(META_COLS_KEY));
-  useEffect(() => {
-    // setItem can throw (SecurityError under blocked storage / some iframe
-    // contexts, or QuotaExceeded) — a throw here would crash the render.
-    try {
-      localStorage.setItem(META_COLS_KEY, JSON.stringify(metaCols));
-    } catch {
-      /* non-persistent this session; not worth surfacing */
-    }
-  }, [metaCols]);
   // Distinct agent_meta keys across the fleet — drives the column picker
   // and the attribute-search key dropdown. Empty ⇒ no metadata anywhere,
   // so the controls stay hidden.
@@ -242,25 +194,11 @@ export function Agents() {
   // while loading, or when the backend is not signing — `signingState` treats
   // both as "no expected value" and abstains rather than guessing, which is
   // exactly the behaviour the column had before this existed.
-  //
-  // No `refetchInterval`: the backend's own key changes only when an operator
-  // rotates it, which restarts the backend, which reloads the SPA.
   const backendKey = useQuery({
     queryKey: ['command-signing'],
     queryFn: () => apiFetch<BackendSigningKey>('/api/command-signing'),
     staleTime: Infinity,
   }).data;
-  const toggleMetaCol = (key: string) =>
-    setMetaCols((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
-  const metaVal = (a: AgentRow, key: string) =>
-    a.meta?.find((e) => e.key === key)?.value ?? '';
-  // Render only selections that still exist fleet-wide. A key removed from
-  // all PCs (or a transiently-empty key list) drops out of `metaKeys`, so
-  // the picker can no longer offer it — filtering here stops such a
-  // selection rendering a stuck, un-removable blank column. The raw
-  // `metaCols` (localStorage) is kept intact so the choice returns if the
-  // key reappears.
-  const activeMetaCols = metaCols.filter((k) => metaKeys.includes(k));
 
   // #1061 condition-row editing.
   const addCond = () =>
@@ -322,37 +260,7 @@ export function Agents() {
   const ariaSort = (field: string): 'ascending' | 'descending' | undefined =>
     sort === field ? (dir === 'asc' ? 'ascending' : 'descending') : undefined;
 
-  // Built-in columns the operator has hidden (persisted per browser). A
-  // column is visible unless its id is in this set; pc_id is never here.
-  const [hiddenCols, setHiddenCols] = useState<string[]>(() => readStringArray(HIDDEN_COLS_KEY));
-  useEffect(() => {
-    try {
-      localStorage.setItem(HIDDEN_COLS_KEY, JSON.stringify(hiddenCols));
-    } catch {
-      /* non-persistent this session; not worth surfacing */
-    }
-  }, [hiddenCols]);
-  // #1344: the table's stored column widths, so the picker can offer a way
-  // back from a drag. `hasWidths` is false until something was resized.
-  const { hasWidths: widthsStored, reset: resetWidths } = useTableWidths('agents');
-  const isColVisible = (id: string) => !hiddenCols.includes(id);
-  const toggleCol = (id: string) =>
-    setHiddenCols((prev) => (prev.includes(id) ? prev.filter((c) => c !== id) : [...prev, id]));
-  // #1061: if the sorted column is hidden (built-in) or its metadata key
-  // drops out of the active set, the sort would persist invisibly with no
-  // header caret and no way to clear it — reconcile by clearing it.
-  const sortColumnVisible =
-    !sort ||
-    sort === SORT_FIELDS.pcId ||
-    (sort.startsWith('meta:')
-      ? activeMetaCols.includes(sort.slice(5))
-      : isColVisible(Object.entries(SORT_FIELDS).find(([, f]) => f === sort)?.[0] ?? ''));
-  useEffect(() => {
-    if (!sortColumnVisible) {
-      setSort('');
-      setDir('asc');
-    }
-  }, [sortColumnVisible]);
+
   // #1061: mirror the debounced filter + sort state into the URL (one-way:
   // state → URL, `replace`). Uses the DEBOUNCED values so a fast typist
   // can't exceed Safari's replaceState rate limit. Only touches its own
@@ -418,6 +326,26 @@ export function Agents() {
     if (serialise(urlConds) !== serialise(dConditions)) setConditions(urlConds);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams]);
+
+  const { columns: tableColumns } = useTableColumns('agents');
+  // #1061: if the sorted column is hidden or removed, clear the sort back to default
+  const sortColumnVisible =
+    !sort ||
+    sort === SORT_FIELDS.pcId ||
+    tableColumns.some(
+      (c) =>
+        c.visible &&
+        (sort.startsWith('meta:')
+          ? c.id === sort
+          : c.id === Object.entries(SORT_FIELDS).find(([, f]) => f === sort)?.[0]),
+    );
+  useEffect(() => {
+    if (!sortColumnVisible && tableColumns.length > 0) {
+      setSort('');
+      setDir('asc');
+    }
+  }, [sortColumnVisible, tableColumns]);
+
   const statusFilter = parseStatusFilter(searchParams.get('status'));
   // #652: the Rollout "quarantined K" drill-down lands here with
   // `?quarantined=<version>`. Read it from the URL (not local state) so
@@ -717,10 +645,7 @@ export function Agents() {
     );
   }
 
-  // Visible column count for the empty-state colSpan: pc_id (always) +
-  // the un-hidden built-ins + the active metadata columns.
-  const colCount =
-    1 + TOGGLEABLE_COLS.filter((c) => isColVisible(c)).length + activeMetaCols.length;
+
 
   return (
     <div className="space-y-4">
@@ -799,76 +724,7 @@ export function Agents() {
             />
           </div>
         )}
-        {/* Column picker — always available: hide/show the built-in
-            columns (pc_id is always shown), plus check agent_meta keys on
-            as extra columns when any metadata exists. */}
-        <div className="space-y-1">
-          <Label>{t('columns.label')}</Label>
-          <details className="relative">
-            <summary className="flex h-8 cursor-pointer list-none items-center gap-1.5 rounded-md border border-border px-2.5 text-sm hover:bg-muted/10">
-              <SlidersHorizontal className="size-3.5" />
-              {t('columns.pick')}
-            </summary>
-            {/* z-50, not z-20: the table's sticky <thead> is `lg:z-20`
-                (ui/table.tsx). At equal z-index the later DOM node wins,
-                and the table comes after this filter row — so the header
-                row painted straight through the open panel once the page
-                was scrolled. Matches PcPicker / GroupPicker, which are
-                z-50 for the same reason. */}
-            <div className="absolute right-0 z-50 mt-1 max-h-72 w-56 overflow-auto rounded-md border border-border bg-card p-2 shadow-lg">
-              <div className="px-1 pb-1 text-[10px] font-medium uppercase tracking-wide text-muted">
-                {t('columns.builtinSection')}
-              </div>
-              {TOGGLEABLE_COLS.map((id) => (
-                <label
-                  key={id}
-                  className="flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-sm hover:bg-muted/10"
-                >
-                  <input type="checkbox" checked={isColVisible(id)} onChange={() => toggleCol(id)} />
-                  <span className="truncate">{t(`columns.${id}`)}</span>
-                </label>
-              ))}
-              {metaKeys.length > 0 && (
-                <>
-                  <div className="mt-2 px-1 pb-1 text-[10px] font-medium uppercase tracking-wide text-muted">
-                    {t('columns.attributesLabel')}
-                  </div>
-                  {metaKeys.map((k) => (
-                    <label
-                      key={k}
-                      className="flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-sm hover:bg-muted/10"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={metaCols.includes(k)}
-                        onChange={() => toggleMetaCol(k)}
-                      />
-                      <span className="truncate">{k}</span>
-                    </label>
-                  ))}
-                </>
-              )}
-              {/* Column *widths* (#1344) are dragged on the header, and the
-                  only way back is a double-click on a handle — discoverable
-                  from the handle's tooltip and nowhere else. This is the
-                  visible way back. Rendered only once widths are actually
-                  stored, so an operator who has never resized anything sees
-                  a picker that looks exactly as it did. */}
-              {widthsStored && (
-                <div className="mt-2 border-t border-border pt-1.5">
-                  <button
-                    type="button"
-                    onClick={resetWidths}
-                    className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left text-xs text-muted hover:bg-muted/10 hover:text-fg"
-                  >
-                    <RotateCcw className="size-3" />
-                    {t('columns.resetWidths')}
-                  </button>
-                </div>
-              )}
-            </div>
-          </details>
-        </div>
+
       </div>
 
       {/* #1061: metadata condition rows — [key][op][value], AND'd. Only
@@ -980,10 +836,10 @@ export function Agents() {
           {t('errorTitle')}: {(error as Error).message}
         </p>
       )}
-      <Table resizeKey="agents">
+      <Table resizeKey="agents" picker metaColumns>
         <TableHeader>
           <TableRow>
-            {isColVisible('status') && <TableHead colId="status">{t('columns.status')}</TableHead>}
+            <TableHead colId="status">{t('columns.status')}</TableHead>
             {/* pc_id is usually COMPUTERNAME lower-cased, so a separate
                 hostname column duplicated it. The hostname now rides the
                 pc_id cell, shown only when it genuinely differs. pc_id is
@@ -991,62 +847,27 @@ export function Agents() {
             <TableHead colId="pcId" aria-sort={ariaSort(SORT_FIELDS.pcId)}>
               {sortBtn(SORT_FIELDS.pcId, t('columns.pcId'))}
             </TableHead>
-            {isColVisible('os') && (
-              <TableHead colId="os" aria-sort={ariaSort(SORT_FIELDS.os)}>
-                {sortBtn(SORT_FIELDS.os, t('columns.os'))}
-              </TableHead>
-            )}
-            {isColVisible('agent') && (
-              <TableHead colId="agent" aria-sort={ariaSort(SORT_FIELDS.agent)}>
-                {sortBtn(SORT_FIELDS.agent, t('columns.agent'))}
-              </TableHead>
-            )}
-            {isColVisible('lastHeartbeat') && (
-              <TableHead colId="lastHeartbeat" aria-sort={ariaSort(SORT_FIELDS.lastHeartbeat)}>
-                {sortBtn(SORT_FIELDS.lastHeartbeat, t('columns.lastHeartbeat'))}
-              </TableHead>
-            )}
-            {isColVisible('lastLogon') && (
-              <TableHead colId="lastLogon" aria-sort={ariaSort(SORT_FIELDS.lastLogon)}>
-                {sortBtn(SORT_FIELDS.lastLogon, t('columns.lastLogon'), t('columnTitles.lastLogon'))}
-              </TableHead>
-            )}
-            {/* #1051: operator-selected agent_meta columns (sortable via
-                the `meta:<key>` token). */}
-            {activeMetaCols.map((k) => (
-              <TableHead key={k} colId={`meta:${k}`} aria-sort={ariaSort(`meta:${k}`)}>
-                {sortBtn(`meta:${k}`, k, t('columnTitles.attribute', { key: k }))}
-              </TableHead>
-            ))}
-            {/* v0.37 Part 2: agent process self-perf columns. Pre-
-                0.37 agents leave these null and the cell renders
-                as an em-dash, so the table stays usable during a
-                rolling upgrade. Headers are prefixed "agent" so the
-                columns are clearly the agent process, not the host. */}
-            {/* #1253: command-signing rollout state. Not sortable — the
-                backend's sort allow-list has no token for it, and adding one
-                would make this column stop being a pure SPA change. */}
-            {isColVisible('signing') && (
-              <TableHead colId="signing" title={t('columnTitles.signing')}>{t('columns.signing')}</TableHead>
-            )}
-            {/* #1270: which NATS credential the BROKER authenticated this
-                host as. Not sortable, same reason as `signing` — the
-                backend's sort allow-list has no token for it, and adding
-                one would stop this being a pure SPA change. */}
-            {isColVisible('credential') && (
-              <TableHead colId="credential" title={t('columnTitles.credential')}>{t('columns.credential')}</TableHead>
-            )}
-            {isColVisible('cpu') && (
-              <TableHead colId="cpu" className="text-right" title={t('columnTitles.cpu')}>
-                {t('columns.cpu')}
-              </TableHead>
-            )}
-            {isColVisible('rss') && (
-              <TableHead colId="rss" className="text-right" title={t('columnTitles.rss')}>
-                {t('columns.rss')}
-              </TableHead>
-            )}
-            {isColVisible('actions') && <TableHead colId="actions">{t('columns.actions')}</TableHead>}
+            <TableHead colId="os" aria-sort={ariaSort(SORT_FIELDS.os)}>
+              {sortBtn(SORT_FIELDS.os, t('columns.os'))}
+            </TableHead>
+            <TableHead colId="agent" aria-sort={ariaSort(SORT_FIELDS.agent)}>
+              {sortBtn(SORT_FIELDS.agent, t('columns.agent'))}
+            </TableHead>
+            <TableHead colId="lastHeartbeat" aria-sort={ariaSort(SORT_FIELDS.lastHeartbeat)}>
+              {sortBtn(SORT_FIELDS.lastHeartbeat, t('columns.lastHeartbeat'))}
+            </TableHead>
+            <TableHead colId="lastLogon" aria-sort={ariaSort(SORT_FIELDS.lastLogon)}>
+              {sortBtn(SORT_FIELDS.lastLogon, t('columns.lastLogon'), t('columnTitles.lastLogon'))}
+            </TableHead>
+            <TableHead colId="signing" title={t('columnTitles.signing')}>{t('columns.signing')}</TableHead>
+            <TableHead colId="credential" title={t('columnTitles.credential')}>{t('columns.credential')}</TableHead>
+            <TableHead colId="cpu" className="text-right" title={t('columnTitles.cpu')}>
+              {t('columns.cpu')}
+            </TableHead>
+            <TableHead colId="rss" className="text-right" title={t('columnTitles.rss')}>
+              {t('columns.rss')}
+            </TableHead>
+            <TableHead colId="actions">{t('columns.actions')}</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -1060,8 +881,7 @@ export function Agents() {
             // them.
             const unresolvedVersions = unresolvedQuarantine(a.quarantined_versions, a.agent_version);
             return (
-            <TableRow key={a.pc_id}>
-              {isColVisible('status') && (
+              <TableRow key={a.pc_id} pcId={a.pc_id}>
                 <TableCell label={t('columns.status')}>
                   <div className="flex flex-col items-start gap-1">
                     <Badge
@@ -1092,33 +912,25 @@ export function Agents() {
                     )}
                   </div>
                 </TableCell>
-              )}
-              <TableCell label={t('columns.pcId')}>
-                <Link
-                  to={`/agents/${encodeURIComponent(a.pc_id)}`}
-                  className="hover:underline"
-                  title={t('rowLinkTitle')}
-                >
-                  <code className="text-xs">{a.pc_id}</code>
-                </Link>
-                {/* Show hostname only when it differs from pc_id beyond
-                    casing — otherwise it's the same value (e.g. MINIPC
-                    vs minipc) and just noise. */}
-                {a.hostname &&
-                  a.hostname.toLowerCase() !== a.pc_id.toLowerCase() && (
-                    <div className="text-muted text-[10px]">{a.hostname}</div>
-                  )}
-              </TableCell>
-              {isColVisible('os') && (
+                <TableCell label={t('columns.pcId')}>
+                  <Link
+                    to={`/agents/${encodeURIComponent(a.pc_id)}`}
+                    className="hover:underline"
+                    title={t('rowLinkTitle')}
+                  >
+                    <code className="text-xs">{a.pc_id}</code>
+                  </Link>
+                  {/* Show hostname only when it differs from pc_id beyond
+                      casing — otherwise it's the same value (e.g. MINIPC
+                      vs minipc) and just noise. */}
+                  {a.hostname &&
+                    a.hostname.toLowerCase() !== a.pc_id.toLowerCase() && (
+                      <div className="text-muted text-[10px]">{a.hostname}</div>
+                    )}
+                </TableCell>
                 <TableCell label={t('columns.os')} className="text-muted text-xs">{a.os_family ?? '—'}</TableCell>
-              )}
-              {isColVisible('agent') && (
                 <TableCell label={t('columns.agent')} className="text-muted text-xs">{a.agent_version ?? '—'}</TableCell>
-              )}
-              {isColVisible('lastHeartbeat') && (
                 <TableCell label={t('columns.lastHeartbeat')} className="text-muted text-xs">{fmtIsoLocal(a.last_heartbeat)}</TableCell>
-              )}
-              {isColVisible('lastLogon') && (
                 <TableCell label={t('columns.lastLogon')} className="text-xs">
                   {a.last_logon_display_name || a.last_logon_user ? (
                     <div className="flex flex-col">
@@ -1138,33 +950,14 @@ export function Agents() {
                     <span className="text-muted">—</span>
                   )}
                 </TableCell>
-              )}
-              {/* #1051: operator-selected agent_meta cells. */}
-              {activeMetaCols.map((k) => {
-                const v = metaVal(a, k);
-                return (
-                  <TableCell key={k} label={k} className="text-xs">
-                    {v || <span className="text-muted">—</span>}
-                  </TableCell>
-                );
-              })}
-              {isColVisible('signing') && (
                 <TableCell label={t('columns.signing')}>
                   <SigningBadge agent={a} backend={backendKey} />
                 </TableCell>
-              )}
-              {isColVisible('credential') && (
                 <TableCell label={t('columns.credential')}>
                   <CredentialBadge agent={a} />
                 </TableCell>
-              )}
-              {isColVisible('cpu') && (
                 <TableCell label={t('columns.cpu')} className="text-right text-muted text-xs">{fmtPct(a.agent_cpu_pct)}</TableCell>
-              )}
-              {isColVisible('rss') && (
                 <TableCell label={t('columns.rss')} className="text-right text-muted text-xs">{fmtBytes(a.agent_rss_bytes)}</TableCell>
-              )}
-              {isColVisible('actions') && (
                 <TableCell>
                   <div className="flex gap-1 flex-wrap">
                     <Button variant="secondary" size="sm" asChild>
@@ -1192,13 +985,12 @@ export function Agents() {
                     </Button>
                   </div>
                 </TableCell>
-              )}
-            </TableRow>
+              </TableRow>
             );
           })}
           {visible.length === 0 && (
             <TableRow>
-              <TableCell colSpan={colCount} className="text-center text-muted text-sm py-6">
+              <TableCell spanAll className="text-center text-muted text-sm py-6">
                 {t('filterEmpty')}
               </TableCell>
             </TableRow>
