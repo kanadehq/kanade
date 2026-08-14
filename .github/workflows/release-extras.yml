@@ -63,7 +63,7 @@ jobs:
             echo "configured=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         if: steps.gate.outputs.configured == 'true'
 
       - uses: dtolnay/rust-toolchain@stable
