@@ -135,31 +135,63 @@ pub async fn run(state: AppState) -> Result<()> {
 
     // 1. Initial load — register every enabled Schedule already in KV.
     //
-    // Best-effort: kv.keys() against an empty bucket fails on
-    // async-nats 0.48 (the internal LastPerSubject ordered-consumer
-    // returns an error when the stream has zero messages). Failing
-    // the whole scheduler over that would take down the watch loop
-    // too — which is exactly the bit that catches the first
-    // schedule POST after a fresh broker boot. Log + continue so
-    // the watch loop stays live; the initial set just stays empty
-    // until the first real schedule lands.
-    let keys: Vec<String> = match kv.keys().await {
-        Ok(stream) => stream.try_collect().await.unwrap_or_else(|e| {
-            warn!(error = %e, "collect schedules KV keys (initial load best-effort)");
-            Vec::new()
-        }),
-        Err(e) => {
-            warn!(error = %e, "list schedules KV keys (likely empty bucket; watch loop still arms)");
-            Vec::new()
+    // Retried until it succeeds (#1380): `watch_all` delivers only
+    // *subsequent* writes, so an initial listing that comes up empty on
+    // a transient KV failure (a timed-out `keys()`) leaves the registry
+    // permanently empty — every existing schedule is invisible to the
+    // armed watch, which is healthy and useless. The freeze watcher
+    // already re-seeds on failure; the initial load never got
+    // retrofitted.
+    //
+    // A genuinely empty bucket still exits promptly: gate on the
+    // stream's message count via `status()` — a stream-info call that
+    // works with zero messages, unlike `keys()`'s internal ordered
+    // consumer, which errors on async-nats 0.48+ (same pattern as
+    // `reconcile_registrations`).
+    let keys: Vec<String> = loop {
+        let status = match kv.status().await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "schedules KV status failed; retrying initial load");
+                tokio::time::sleep(StdDuration::from_secs(5)).await;
+                continue;
+            }
+        };
+        if status.values() == 0 {
+            break Vec::new();
+        }
+        match kv.keys().await {
+            Ok(stream) => match stream.try_collect().await {
+                Ok(keys) => break keys,
+                Err(e) => {
+                    warn!(error = %e, "collect schedules KV keys failed; retrying initial load");
+                    tokio::time::sleep(StdDuration::from_secs(5)).await;
+                }
+            },
+            Err(e) => {
+                warn!(error = %e, "list schedules KV keys failed; retrying initial load");
+                tokio::time::sleep(StdDuration::from_secs(5)).await;
+            }
         }
     };
-    for k in keys {
-        let entry = match kv.get(&k).await {
-            Ok(Some(b)) => b,
-            Ok(None) => continue,
-            Err(e) => {
-                warn!(error = %e, key = %k, "kv get");
-                continue;
+    // Per-entry failures that are NOT transient (a corrupt blob, a
+    // failing cron register) are counted and reported loudly — the
+    // schedule stays unregistered until a KV write or watch reopen
+    // touches it. Transport failures can't reach here: both the keys()
+    // listing and the per-key gets retry until they succeed.
+    let mut failed = 0usize;
+    'entries: for k in keys {
+        // Retried per key (same rationale as the keys() retry above): a
+        // transient get failure must not drop this schedule — the watch
+        // stays open and would never re-read it.
+        let entry = loop {
+            match kv.get(&k).await {
+                Ok(Some(b)) => break b,
+                Ok(None) => continue 'entries,
+                Err(e) => {
+                    warn!(error = %e, key = %k, "kv get failed; retrying");
+                    tokio::time::sleep(StdDuration::from_secs(5)).await;
+                }
             }
         };
         match serde_json::from_slice::<Schedule>(&entry) {
@@ -174,19 +206,33 @@ pub async fn run(state: AppState) -> Result<()> {
                 .await
                 {
                     warn!(error = %e, schedule_id = %s.id, "initial register failed");
+                    failed += 1;
                 }
             }
             Ok(s) => info!(schedule_id = %s.id, "skipped (disabled)"),
-            Err(e) => warn!(error = %e, key = %k, "deserialize Schedule"),
+            Err(e) => {
+                warn!(error = %e, key = %k, "deserialize Schedule");
+                failed += 1;
+            }
         }
     }
     // Snapshot the count before any subsequent await so the MutexGuard
     // doesn't live across the watch loop (Send bound for tokio::spawn).
     let initial_count = registered.lock().await.len();
-    info!(
-        count = initial_count,
-        "scheduler registered initial schedules"
-    );
+    if failed > 0 {
+        // #1380: be loud — this is a failure state, not a fresh-broker
+        // state. (Disabled / runs_on: agent schedules are legitimate
+        // zero-registration cases and do NOT count as failures.)
+        warn!(
+            count = initial_count,
+            failed, "scheduler registered initial schedules with per-entry failures"
+        );
+    } else {
+        info!(
+            count = initial_count,
+            "scheduler registered initial schedules"
+        );
+    }
 
     // 2. Watch — react to KV puts/deletes for the lifetime of the
     //    process. #502: wrapped in a reopen loop (the freeze-watcher
@@ -197,7 +243,6 @@ pub async fn run(state: AppState) -> Result<()> {
     //    restart, with no operator-visible error. On each reopen the
     //    registrations are reconciled against the bucket so edits
     //    that landed while the watch was down are caught up.
-    let mut first_attach = true;
     loop {
         let mut watcher = match kv.watch_all().await {
             Ok(w) => w,
@@ -207,16 +252,17 @@ pub async fn run(state: AppState) -> Result<()> {
                 continue;
             }
         };
-        // Reconcile AFTER the watch is armed, so an edit landing in
-        // the gap is seen by at least one of the two (re-applying a
-        // registration is an idempotent replace). The first attach
-        // skips it — step 1 above just did the initial load.
-        if first_attach {
-            first_attach = false;
-        } else if let Err(e) =
-            reconcile_registrations(&kv, &sched, &state, &registered, &freeze).await
-        {
-            warn!(error = %e, "schedules reconcile after watch reopen failed");
+        // Reconcile AFTER the watch is armed — on the first attach too
+        // (#1380) — so an edit landing in the gap between the initial
+        // listing and this attach (or between reopens) is seen by at
+        // least one of the two (re-applying a registration is an
+        // idempotent replace). Sweeping stale registrations here is
+        // safe even on the first attach: nothing has been consumed from
+        // this watch yet, so a registration the snapshot missed cannot
+        // have come from it — and a delete landing in the list→arm gap
+        // would otherwise survive until the next reopen.
+        if let Err(e) = reconcile_registrations(&kv, &sched, &state, &registered, &freeze).await {
+            warn!(error = %e, "schedules reconcile after watch attach/reopen failed");
         }
         while let Some(entry) = watcher.next().await {
             let entry = match entry {
@@ -261,10 +307,14 @@ pub async fn run(state: AppState) -> Result<()> {
 }
 
 /// #502: re-sync the in-memory registrations with the bucket after a
-/// watch reopen. Every schedule currently in KV is re-applied
-/// (unregister + register — the same idempotent replace the Put arm
-/// does), and any registration whose KV entry disappeared while the
-/// watch was down is dropped, so deletes can't survive a watch gap.
+/// watch (re)open — including the first attach (#1380), which closes
+/// the list→arm window the initial load can't cover: a delete landing
+/// between the listing and the watch arm would otherwise survive (no
+/// future watch event would ever correct it). Every schedule currently
+/// in KV is re-applied (unregister + register — the same idempotent
+/// replace the Put arm does), and any registration whose KV entry
+/// disappeared while the watch was down is dropped, so deletes can't
+/// survive a watch gap.
 async fn reconcile_registrations(
     kv: &async_nats::jetstream::kv::Store,
     sched: &JobScheduler,
