@@ -145,53 +145,154 @@ pub async fn run(
 
     // React to every supervisor push; trigger only when
     // target_version actually changed (cadence-only updates land
-    // here too and should be ignored).
+    // here too and should be ignored). A periodic re-check arm
+    // (#1385) runs alongside on its own cadence: the push path is
+    // dead for same-target recovery (the supervisor's
+    // send_if_modified never emits an unchanged config), so a failed
+    // download — which advances `current_target` before the attempt —
+    // would otherwise strand the agent on its old binary until the
+    // process restarts.
+    let mut reconcile = tokio::time::interval(RECONCILE_INTERVAL);
+    reconcile.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // interval()'s first tick fires immediately; the boot-time check
+    // above already ran, so consume it and start on the real cadence.
+    reconcile.tick().await;
     loop {
-        if cfg_rx.changed().await.is_err() {
-            return;
-        }
-        let (new_target, jitter) = {
-            let cfg = cfg_rx.borrow();
-            (
-                cfg.target_version.clone(),
-                cfg.target_version_jitter_duration(),
-            )
-        };
-        if new_target == current_target {
-            continue;
-        }
-        current_target = new_target.clone();
+        tokio::select! {
+            changed = cfg_rx.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                let (new_target, jitter) = {
+                    let cfg = cfg_rx.borrow();
+                    (
+                        cfg.target_version.clone(),
+                        cfg.target_version_jitter_duration(),
+                    )
+                };
+                if new_target == current_target {
+                    continue;
+                }
+                current_target = new_target.clone();
 
-        // Any target_version change clears a previous loop block —
-        // a new operator action means a fresh attempt is in order.
-        if loop_blocked_target.is_some() && loop_blocked_target.as_deref() != new_target.as_deref()
-        {
-            info!("target_version changed; clearing loop block");
-            loop_blocked_target = None;
-            clear_last_swap();
-        }
+                // Any target_version change clears a previous loop block —
+                // a new operator action means a fresh attempt is in order.
+                if loop_blocked_target.is_some()
+                    && loop_blocked_target.as_deref() != new_target.as_deref()
+                {
+                    info!("target_version changed; clearing loop block");
+                    loop_blocked_target = None;
+                    clear_last_swap();
+                }
 
-        if let Some(target) = new_target.as_deref()
-            && target != running_version
-        {
-            if loop_blocked_target.as_deref() == Some(target) {
-                warn!(target, "still loop-blocked on this target; ignoring");
-                continue;
-            }
-            if is_quarantined(target) {
-                warn!(
-                    target,
-                    "self-update: target is quarantined (crash-looped on a prior boot); refusing \
-                     to re-deploy. Republish a fixed version or clear the quarantine.",
-                );
-                continue;
-            }
-            if confirm_swap(&cfg_rx, target, &running_version).await {
-                sleep_jitter(jitter).await;
-                if let Err(e) = attempt_swap(&store, target, &running_version).await {
-                    warn!(error = %e, target, "self-update fetch failed");
+                if let Some(target) = new_target.as_deref()
+                    && target != running_version
+                {
+                    maybe_attempt_swap(
+                        &cfg_rx,
+                        &store,
+                        target,
+                        &running_version,
+                        jitter,
+                        &loop_blocked_target,
+                        false,
+                    )
+                    .await;
                 }
             }
+            _ = reconcile.tick() => {
+                // Periodic re-check: if the resolved target still
+                // disagrees with what's running, re-attempt regardless
+                // of `current_target` (the push path has already given
+                // up on it).
+                let target = cfg_rx.borrow().target_version.clone();
+                let Some(target) = target.as_deref() else { continue };
+                if target == running_version {
+                    continue;
+                }
+                // A loop-blocked or quarantined target is a refusal this
+                // process already made and logged loudly (with the
+                // remediation) at boot. The re-check has nothing to add,
+                // so skip it here without re-logging — the guards in
+                // maybe_attempt_swap answer a *push*, which is a fresh
+                // operator action worth a reply. Both conditions are
+                // re-read every tick, so clearing the quarantine (or
+                // pushing a different target) recovers on the next one.
+                if loop_blocked_target.as_deref() == Some(target) || is_quarantined(target) {
+                    continue;
+                }
+                // `stranded` = this process already attempted this exact
+                // target, i.e. the state that used to need a restart.
+                // maybe_attempt_swap logs it once it is actually about to
+                // download, so a settle-skipped downgrade can't produce a
+                // "downloading again" line it then drops.
+                let stranded = current_target.as_deref() == Some(target);
+                // No rollout jitter on this path. Jitter exists to spread
+                // a fleet-wide push, which lands on every agent within
+                // milliseconds; reconcile ticks are already spread across
+                // RECONCILE_INTERVAL by each agent's own boot time, and
+                // adding up to `target_version_jitter` (10 min by
+                // default) on top of the cadence would defeat the
+                // promptness this path exists for.
+                maybe_attempt_swap(
+                    &cfg_rx,
+                    &store,
+                    target,
+                    &running_version,
+                    Duration::ZERO,
+                    &loop_blocked_target,
+                    stranded,
+                )
+                .await;
+            }
+        }
+    }
+}
+
+/// Guarded self-update attempt shared by the push loop and the
+/// periodic re-check (#1385): loop-block / quarantine gates, then
+/// downgrade settle, rollout jitter, download, and swap. Download
+/// failures are logged here. The periodic arm deliberately bypasses
+/// the push path's `new_target == current_target` skip — a target the
+/// push path already gave up on is exactly what must be re-attempted.
+///
+/// `stranded` marks that re-attempt (a target this process already
+/// tried and failed). It is logged only once the guards have passed
+/// and the download is actually about to run, so the line can't claim
+/// a retry that the loop-block / quarantine gates then refuse.
+async fn maybe_attempt_swap(
+    cfg_rx: &watch::Receiver<EffectiveConfig>,
+    store: &jetstream::object_store::ObjectStore,
+    target: &str,
+    running_version: &str,
+    jitter: Duration,
+    loop_blocked_target: &Option<String>,
+    stranded: bool,
+) {
+    if loop_blocked_target.as_deref() == Some(target) {
+        warn!(target, "still loop-blocked on this target; ignoring");
+        return;
+    }
+    if is_quarantined(target) {
+        warn!(
+            target,
+            "self-update: target is quarantined (crash-looped on a prior boot); refusing \
+             to re-deploy. Republish a fixed version or clear the quarantine.",
+        );
+        return;
+    }
+    if confirm_swap(cfg_rx, target, running_version).await {
+        if stranded {
+            warn!(
+                target,
+                running = %running_version,
+                "self-update: periodic re-check — resolved target still differs from the \
+                 running version; downloading again",
+            );
+        }
+        sleep_jitter(jitter).await;
+        if let Err(e) = attempt_swap(store, target, running_version).await {
+            warn!(error = %e, target, "self-update fetch failed");
         }
     }
 }
@@ -242,6 +343,24 @@ fn is_loop(last: &Option<LastSwap>, target: &str, running: &str) -> bool {
 /// is comfortably longer than a reconnect's replay burst and short
 /// enough not to meaningfully delay an intentional rollback.
 const DOWNGRADE_SETTLE: Duration = Duration::from_secs(60);
+
+/// How often the watcher re-checks that the resolved target matches
+/// the running binary (#1385). The push path only fires when the
+/// resolved config *changes* — the config supervisor's
+/// `send_if_modified` suppresses identical values, so a same-target
+/// push never reaches this loop — and `current_target` advances
+/// before the download attempt, so a transient failure strands the
+/// agent on its old binary with no in-process retry. A restart
+/// recovers (the boot-time check re-attempts), but a laptop that
+/// suspends/resumes instead of rebooting can run for weeks across
+/// sleep cycles and never take that path.
+///
+/// 5 min bounds the recovery latency: this path deliberately skips the
+/// fleet-wide rollout jitter (see the call site), so the wait really is
+/// the cadence plus `attempt_swap`'s own bounded retry, not the cadence
+/// plus up to `target_version_jitter`. The check itself is a local
+/// borrow + compare with no network cost.
+const RECONCILE_INTERVAL: Duration = Duration::from_secs(300);
 
 /// Parse an `X.Y.Z` agent version into comparable parts. Returns `None`
 /// for anything that isn't exactly three dotted integers, so the caller
