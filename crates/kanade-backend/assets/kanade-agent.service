@@ -1,0 +1,39 @@
+[Unit]
+Description=kanade agent
+# network-online (not nats-server): this unit is portable to a
+# standalone agent box that has no local broker. A co-located agent
+# still starts fine — the agent retries the NATS connection, and
+# Restart=on-failure covers a broker that isn't up yet.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The agent runs privileged so `run` / jobs can manage the box — the
+# Linux analog of the Windows agent's LocalSystem identity. Because its
+# whole purpose is to run arbitrary admin commands, the strict
+# filesystem hardening the backend unit uses (ProtectSystem=strict,
+# ProtectHome) would defeat it, so it's intentionally omitted here.
+User=root
+EnvironmentFile=/etc/kanade/agent.env
+Environment=KANADE_AGENT_CONFIG=/etc/kanade/agent.toml
+# Keep the agent's outbox / state.db out of the backend's
+# /var/lib/kanade so a co-located pair never shares a data dir.
+Environment=KANADE_AGENT_DATA_DIR=/var/lib/kanade-agent
+ExecStart=/usr/local/bin/kanade-agent
+WorkingDirectory=/var/lib/kanade-agent
+
+# The Windows build self-restarts via exit(1)/exit(64) + SCM recovery.
+# Restart=on-failure + RestartSec=5 reproduces that on Linux. exit(64) is
+# the NATS self-update swap signal (self_update.rs); RestartForceExitStatus
+# forces a restart onto the freshly-swapped binary for that specific code
+# regardless of the Restart= policy (belt-and-braces — on-failure already
+# covers a non-zero exit). It does NOT exempt the restart from
+# StartLimitIntervalSec/StartLimitBurst, but a self-update is a single
+# exit → single restart, so the default start-limit is never approached.
+Restart=on-failure
+RestartSec=5
+RestartForceExitStatus=64
+
+[Install]
+WantedBy=multi-user.target
