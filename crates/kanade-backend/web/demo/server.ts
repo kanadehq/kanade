@@ -1408,6 +1408,26 @@ function eventsForPc(p: (typeof FLEET)[number], idx: number, days: number): RawE
   // `model` means the swimlane agrees with the 機種 column rather than
   // being a second, independent invention.
   const isLaptop = /ThinkPad|Latitude|EliteBook|VAIO/.test(p.model);
+  // One desktop loses power instead of shutting down — a tripped breaker, a
+  // yanked cable, a hard reset. Windows logs NOTHING at the time: the only
+  // trace is Kernel-Power 41, written during the NEXT boot and therefore
+  // stamped with the morning's timestamp. Without a fixture for it the demo
+  // only ever showed the clean case, and the strip painted every one of these
+  // nights solid green in production while the suite stayed green too.
+  //
+  // …and on one of its mornings the recovery is missing too, because the
+  // backend restarted (a deploy) while the host was away. The watchdog's
+  // open-outage map does not survive that, so no `agent_online` is ever
+  // written and the unknown stretch has no right edge to draw. What ends it
+  // is the agent's own first sample of the morning — `agent:*`, so its
+  // timestamp is an observation rather than a backfilled reconstruction.
+  //
+  // On the same host on purpose: an unclean power-off is the one night that
+  // no OTHER record accounts for, so it is the only place the difference is
+  // visible. On a night bounded by `shutdown`/`boot` or `sleep`/`resume` the
+  // lanes settle the stretch themselves and an unclosed outage shows nothing.
+  const losesPower = !isLaptop && idx === 4;
+  const deployDuringOutage = losesPower ? 3 : -1;
   // Carries across days: a laptop that suspended last night is still
   // powered this morning, so it wakes with `resume` and never re-boots.
   // That is what puts a long amber block across Fri night → Mon morning.
@@ -1437,13 +1457,27 @@ function eventsForPc(p: (typeof FLEET)[number], idx: number, days: number): RawE
       const logon = startMin + ri(1, 3);
       const logoff = weekend ? startMin + ri(150, 300) : 18 * 60 + ri(-40, 70);
 
-      // The watchdog sees heartbeats again before the OS has finished
-      // writing anything, so the recovery marker leads the winlog by a beat.
-      if (d < days - 1) push(startMin - ri(0, 2), 'agent_online', SRC_WATCHDOG);
-      // Cold boot, or a wake from last night's suspend.
-      if (!powered) {
+      const coldBoot = !powered;
+      // The watchdog's recovery marker relative to the winlog. On a WAKE the
+      // machine was already running, so heartbeats resume before the OS has
+      // finished writing anything and the marker leads. On a COLD BOOT it
+      // cannot: the agent has to be started by the machine it reports, so the
+      // first beat necessarily follows the boot record. Putting it first
+      // there made it the newest thing vouching for the host before the boot,
+      // which collapsed the unaccounted stretch of an unclean power-off to
+      // the two minutes between them and left the night reading as ON.
+      const recovery = d < days - 1 && d !== deployDuringOutage;
+      if (recovery && !coldBoot) push(startMin - ri(0, 2), 'agent_online', SRC_WATCHDOG);
+      if (coldBoot) {
         if (!push(startMin, 'boot', SRC_SYSTEM, { uptime_reset: true })) break;
         powered = true;
+        // The boot is also where an unclean power-off is discovered. It says
+        // "the previous session did not end cleanly" and nothing about when
+        // that was, which is why it is a marker on the strip rather than the
+        // end of the night's power span.
+        if (losesPower && d < days - 1) push(startMin + 1, 'unexpected_shutdown', SRC_SYSTEM);
+        // …and only now can the backend hear it again.
+        if (recovery) push(startMin + ri(1, 3), 'agent_online', SRC_WATCHDOG);
       } else if (!push(startMin, 'resume', SRC_SYSTEM)) {
         break;
       }
@@ -1515,6 +1549,9 @@ function eventsForPc(p: (typeof FLEET)[number], idx: number, days: number): RawE
       const wentAway = logoff + ri(1, 5);
       if (isLaptop) {
         push(wentAway, 'sleep', SRC_SYSTEM);
+      } else if (losesPower) {
+        // Off, with nothing logged to say so — see `losesPower` above.
+        powered = false;
       } else {
         push(wentAway, 'shutdown', SRC_SYSTEM);
         powered = false;

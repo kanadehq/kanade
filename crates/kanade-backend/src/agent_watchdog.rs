@@ -181,6 +181,19 @@ fn decide(
     out
 }
 
+/// Which hosts are still mid-outage, given each one's NEWEST watchdog record.
+///
+/// Split out for the same reason `decide` is: the rule is one line and the
+/// query around it needs a database. `latest` is `(pc_id, kind, at)`, one row
+/// per host.
+fn open_from_latest(latest: &[(String, String, DateTime<Utc>)]) -> HashMap<String, Outage> {
+    latest
+        .iter()
+        .filter(|(_, kind, _)| kind == KIND_OFFLINE)
+        .map(|(pc_id, _, at)| (pc_id.clone(), Outage { since: *at }))
+        .collect()
+}
+
 pub struct AgentWatchdog {
     /// When this process started watching. Nothing before it is asserted.
     ///
@@ -208,6 +221,71 @@ impl AgentWatchdog {
             observed_since,
             open: HashMap::new(),
         }
+    }
+
+    /// Re-open the outages a previous process left unclosed.
+    ///
+    /// `open` lives in this struct and nowhere else, so a backend restart
+    /// forgets every outage in flight. The `agent_offline` events are already
+    /// durable in `obs_events`; what is lost is the knowledge that they are
+    /// still waiting for a close. `decide` then sees a recovered agent with
+    /// no open entry and emits nothing, so the pair is never completed —
+    /// permanently. The strip has no right edge to draw and hatches from the
+    /// outage to the live edge, which is the reported "the events came back
+    /// but the stretch in between stays unknown". A backend restart is a
+    /// deploy, so this is routine rather than exotic.
+    ///
+    /// Closing a stretch that spans the restart is not a claim about what
+    /// happened while nobody was watching — that claim is already in the log,
+    /// written by the process that observed the host go quiet. This only
+    /// bounds it. Leaving it unbounded is the stronger and more wrong of the
+    /// two, and it is what "say nothing about what we did not observe" turns
+    /// into if the close is never written.
+    ///
+    /// Newest watchdog record per host decides: an `agent_online` means the
+    /// pair completed and there is nothing to reopen. Both kinds are
+    /// considered whatever wrote them — an agent's own `agent:startup` closes
+    /// an outage just as the watchdog's does, and the strip reads them the
+    /// same way. Hosts with no `agents` row are skipped: `sweep` only looks at
+    /// registered agents, so an entry for anything else could never be
+    /// closed.
+    ///
+    /// Failure is not fatal. Without the seed the watchdog behaves exactly as
+    /// it did before, so the caller logs and carries on.
+    pub async fn restore(&mut self, pool: &SqlitePool) -> Result<usize> {
+        let rows = sqlx::query(
+            "SELECT pc_id, kind, at FROM ( \
+               SELECT pc_id, kind, at, \
+                      ROW_NUMBER() OVER (PARTITION BY pc_id ORDER BY at DESC, id DESC) AS rn \
+               FROM obs_events \
+               WHERE kind IN (?1, ?2) \
+                 AND pc_id IN (SELECT pc_id FROM agents) \
+             ) WHERE rn = 1",
+        )
+        .bind(KIND_OFFLINE)
+        .bind(KIND_ONLINE)
+        .fetch_all(pool)
+        .await?;
+
+        let latest: Vec<(String, String, DateTime<Utc>)> = rows
+            .iter()
+            .filter_map(|r| {
+                Some((
+                    r.try_get("pc_id").ok()?,
+                    r.try_get("kind").ok()?,
+                    r.try_get("at").ok()?,
+                ))
+            })
+            .collect();
+
+        self.open = open_from_latest(&latest);
+        if !self.open.is_empty() {
+            info!(
+                outages = self.open.len(),
+                "restored open agent outages recorded before this process started",
+            );
+        }
+        Ok(self.open.len())
     }
 
     /// One pass. Returns `(offline_emitted, online_emitted)`.
@@ -604,5 +682,90 @@ mod tests {
                 at: ts(100),
             }]
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Surviving a restart. `open` is in-memory, so without this an outage
+    // that spanned a deploy never received its closing `agent_online` and
+    // the strip hatched from the outage to the live edge forever.
+    // -----------------------------------------------------------------
+
+    fn latest(rows: &[(&str, &str, i64)]) -> Vec<(String, String, DateTime<Utc>)> {
+        rows.iter()
+            .map(|(pc, kind, at)| (pc.to_string(), kind.to_string(), ts(*at)))
+            .collect()
+    }
+
+    #[test]
+    fn a_host_whose_newest_record_is_offline_is_still_down() {
+        let open = open_from_latest(&latest(&[("pc1", KIND_OFFLINE, 100)]));
+        assert_eq!(open["pc1"].since, ts(100));
+    }
+
+    #[test]
+    fn a_host_whose_outage_already_closed_is_not_reopened() {
+        let open = open_from_latest(&latest(&[("pc1", KIND_ONLINE, 900)]));
+        assert!(open.is_empty());
+    }
+
+    #[test]
+    fn a_restored_outage_closes_on_the_next_beat() {
+        // The whole point: the recovery the previous process could not record
+        // is emitted by this one, keyed on the ORIGINAL outage instant so the
+        // projector's UNIQUE(pc_id, source, event_record_id) still applies.
+        let open = open_from_latest(&latest(&[("pc1", KIND_OFFLINE, 100)]));
+        let agents = vec![("pc1".into(), ts(900))];
+        assert_eq!(
+            decide(&agents, ts(WATCH_START), &open, ts(905)),
+            vec![Action::Online {
+                pc_id: "pc1".into(),
+                at: ts(900),
+                since: ts(100),
+            }],
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_reads_the_newest_watchdog_record_per_host() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+        // down: dropped and never came back. back: dropped and recovered.
+        // stray: an outage for a host with no `agents` row — nothing in
+        // `sweep` could ever close it, so it must not be carried.
+        for pc in ["down", "back"] {
+            sqlx::query("INSERT INTO agents (pc_id, last_heartbeat) VALUES (?1, ?2)")
+                .bind(pc)
+                .bind(ts(900))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let rows = [
+            ("down", KIND_OFFLINE, 100),
+            ("back", KIND_OFFLINE, 100),
+            ("back", KIND_ONLINE, 500),
+            ("stray", KIND_OFFLINE, 100),
+        ];
+        for (i, (pc, kind, at)) in rows.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO obs_events (pc_id, at, kind, source, event_record_id, payload) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, '{}')",
+            )
+            .bind(pc)
+            .bind(ts(*at))
+            .bind(*kind)
+            .bind(SOURCE)
+            .bind(format!("{kind}:{i}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let mut wd = AgentWatchdog::new(ts(1000));
+        assert_eq!(wd.restore(&pool).await.unwrap(), 1);
+        assert_eq!(wd.open["down"].since, ts(100));
+        assert!(!wd.open.contains_key("back"));
+        assert!(!wd.open.contains_key("stray"));
     }
 }

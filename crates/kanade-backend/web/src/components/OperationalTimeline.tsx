@@ -1,3 +1,79 @@
+/**
+ * The operational swimlane, and the evidence rules it draws.
+ *
+ * # What a timestamp means
+ *
+ * Three producers write the events this file reads, and an `at` means
+ * something different in each. Nearly every bug this component has had came
+ * from treating one as another.
+ *
+ * | `source`     | who wrote it        | `at` dates      | proves at `at`        |
+ * |--------------|---------------------|-----------------|-----------------------|
+ * | `winlog:*`   | Windows, at the time| the MACHINE     | the host was running  |
+ * | `agent:*`    | the agent, running  | the AGENT       | the agent was running |
+ * | `backend:*`  | the heartbeat watchdog | the CONNECTION | what the backend heard |
+ *
+ * Delivery is not dating. Winlog records are read out of the Event Log after
+ * the fact — up to 24 h of backfill — so their arrival says nothing about
+ * when the host was alive, only their `at` does (#1245). Conversely an
+ * `agent:*` record proves the agent was up at its own `at` however late it
+ * lands, which is what lets it close an unknown stretch.
+ *
+ * One kind breaks the first row and has to be special-cased: see `marks` on
+ * the power lane.
+ *
+ * # What a pixel may say
+ *
+ * | rendering            | claim                          | source            |
+ * |----------------------|--------------------------------|-------------------|
+ * | solid lane colour    | this state, measured           | a span            |
+ * | lane-coloured hatch  | this state, believed unconfirmed | `Span.uncertain`|
+ * | blank                | NOT this state, measured       | absence of a span |
+ * | grey hatch (135°)    | no evidence either way         | `noEvidenceRanges`|
+ *
+ * Blank is a claim. That is the asymmetry every fix here turns on (#1086): an
+ * empty lane is only meaningful where we were listening, so anywhere we were
+ * not has to be hatched instead of left to read as a confident "off".
+ *
+ * # When a lane may claim an interval
+ *
+ * | the pair                    | claims its interval because | may bridge silence |
+ * |-----------------------------|-----------------------------|--------------------|
+ * | `boot`→`shutdown`           | the OS logged both ends     | yes                |
+ * | `sleep`→`resume`            | the OS logged both ends     | yes                |
+ * | `logon`→`logoff`            | the OS logged both ends     | yes                |
+ * | `active`→`idle`             | no transition was sampled   | NO — a dead agent  |
+ * |                             |                             | samples nothing    |
+ * | anything with no closing record | the renderer ran it to the edge | NO          |
+ *
+ * The last row is a property of the SPAN, not of the lane: an `openEnd` power
+ * span is a reconstruction whatever produced its start, and an unclean
+ * power-off is exactly the case that leaves one (`buildLanes`' outage cut).
+ *
+ * # When an unknown stretch ends
+ *
+ * At the first proof the agent was reporting again: the watchdog's own
+ * `agent_online`, or any `agent:*` record. NOT a `winlog:*` record. The
+ * watchdog's close is the one that can also be missing — `open` outages live
+ * in backend process memory, so a restart mid-outage never writes it — which
+ * is why the agent's own records have to count (`agentDownRanges`).
+ *
+ * # Where each rule lives
+ *
+ *   buildSpans                pair start/end kinds into intervals
+ *   unrecordedShutdownRanges  a `boot` on an open span ⇒ an undated power cycle
+ *   clipToOn                  subordinate lanes ⊆ power ON
+ *   cutAtContradiction        a host record inside a `sleep` disproves it
+ *   gateToHeartbeat           ongoing state past the last heartbeat is hatched
+ *   agentDownRanges           recorded outages, and what closes them
+ *   noEvidenceRanges          every stretch nobody can account for
+ *   noEvidenceByLane          …narrowed to what each lane actually doesn't know
+ *   recordedIntervals         off/asleep intervals the OS bounded at BOTH ends
+ *
+ * The matrix these implement is exercised end to end in
+ * `OperationalTimeline.test.ts`; add the row there before changing a rule
+ * here.
+ */
 import { type MouseEvent as ReactMouseEvent, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -51,29 +127,57 @@ type Span = {
 // The kinds line up with the backend `op_timeline` query's IN-list and the
 // emitters (collect-winlog-events for the log-sourced lanes, the idle
 // sampler for active/idle).
+//
+// `marks` is a third category: records that belong on the lane and must be
+// shown, but that assert no transition AT THEIR OWN TIMESTAMP. Every kind in
+// `starts`/`ends` is stamped when the thing it describes happened; a `marks`
+// kind is not, so pairing it would date a transition from the wrong instant.
 const OP_LANES = [
   {
     key: 'power',
     starts: ['boot', 'log_service_started'],
-    ends: ['shutdown', 'unexpected_shutdown', 'log_service_stopped'],
+    ends: ['shutdown', 'log_service_stopped'],
+    // `unexpected_shutdown` is Kernel-Power 41, and Windows writes it during
+    // the kernel phase of the NEXT boot — the flag saying "the last session
+    // did not end cleanly" is only readable once the machine is back. The
+    // collector takes `at` straight from the record's `TimeCreated`
+    // (winlog.rs), so its timestamp is when the host CAME BACK, never when it
+    // went away.
+    //
+    // Pairing it as a power END therefore closed the previous session at the
+    // following morning's boot and painted the entire dark night solid ON —
+    // as a closed start/end pair, so nothing downstream questioned it: not
+    // the heartbeat gate (it only hatches open spans), not the outage cut (it
+    // only cuts spans that rest on the sampler's silence). That is the
+    // reported "電源を落としているのに夜間ずっと塗られている".
+    //
+    // It stays on the lane as a marker, because "the last power-off was
+    // unclean" is exactly what an operator wants to see at that boot. The off
+    // interval it implies is reconstructed from the unpaired `boot` instead,
+    // which is the one record that does carry a trustworthy instant —
+    // see `unrecordedShutdownRanges`.
+    marks: ['unexpected_shutdown'],
     color: '#10b981', // emerald-500
   },
   {
     key: 'session',
     starts: ['logon'],
     ends: ['logoff'],
+    marks: [],
     color: '#8b5cf6', // violet-500
   },
   {
     key: 'sleep',
     starts: ['sleep'],
     ends: ['resume'],
+    marks: [],
     color: '#f59e0b', // amber-500
   },
   {
     key: 'active',
     starts: ['active'],
     ends: ['idle'],
+    marks: [],
     color: '#0ea5e9', // sky-500
   },
 ] as const;
@@ -102,7 +206,7 @@ const OP_OBSERVATION_KIND_SET: ReadonlySet<string> = new Set(OP_OBSERVATION_KIND
 // before handing them over, and it matches the backend `op_timeline` query's
 // IN-list.
 export const OP_TIMELINE_KINDS: readonly string[] = [
-  ...OP_LANES.flatMap((l) => [...l.starts, ...l.ends]),
+  ...OP_LANES.flatMap((l) => [...l.starts, ...l.ends, ...l.marks]),
   ...OP_OBSERVATION_KINDS,
 ];
 
@@ -266,14 +370,15 @@ function gateToHeartbeat(spans: Span[], certainEdge: number, liveEdge: number): 
 
 // Point markers for the lane's events (instantaneous boot/logon/… ticks),
 // so a lone event with no pair still shows even when it forms no span.
+// `kinds` is the lane's starts, ends AND marks: a `marks` kind drives no
+// transition, so the marker is the only way it reaches the strip at all.
 function laneMarkers(
   events: OpEvent[],
-  starts: readonly string[],
-  ends: readonly string[],
+  kinds: readonly string[],
   t0: number,
   t1: number,
 ): { ts: number; kind: string }[] {
-  const keep = new Set([...starts, ...ends]);
+  const keep = new Set(kinds);
   return events
     .map((e) => ({ ts: Date.parse(e.at), kind: e.kind }))
     .filter((e) => !Number.isNaN(e.ts) && keep.has(e.kind) && e.ts >= t0 && e.ts <= t1);
@@ -554,7 +659,12 @@ export type NoEvidenceReason =
   /** Only the connection was away: the outage closed with no agent restart
    *  at all, so the agent was running and observing the whole time — its own
    *  records for the stretch arrive later through the outbox. */
-  | 'agentDownLinkOnly';
+  | 'agentDownLinkOnly'
+  /** The host came back up and nothing recorded it going down. A `boot`
+   *  arrived while the power lane already believed the machine was ON, which
+   *  proves a power cycle happened and that no `shutdown` record dates it —
+   *  see `unrecordedShutdownRanges`. */
+  | 'unrecordedShutdown';
 
 /**
  * Unknown stretches recorded by `agent_offline` events.
@@ -566,11 +676,11 @@ export type NoEvidenceReason =
  * as unknown rather than reverting to a gap indistinguishable from measured
  * idle — the #1089 asymmetry.
  *
- * Each event opens a stretch that closes at **the next event of any kind from
- * that host**: receiving anything is proof the agent was running again. That
- * is why no `agent_online` is needed to make this useful — an online event
- * would only sharpen the closing edge, since the first event after a restart
- * may lag the restart itself.
+ * Each event opens a stretch that ends at the first instant something proves
+ * the AGENT was running again — see the two kinds of proof at the scan below.
+ * The `agent_online` the watchdog writes is one of them but not the only one,
+ * which matters: it is written from in-memory state that a backend restart
+ * drops, so an outage that spanned a deploy never receives one at all.
  *
  * `events` must be the host's events, and is not assumed sorted.
  */
@@ -598,32 +708,57 @@ export function agentDownRanges(
   const out: { from: number; to: number; reason: NoEvidenceReason }[] = [];
   for (let i = 0; i < sorted.length; i++) {
     if (sorted[i].kind !== 'agent_offline') continue;
-    // What may close an outage: only an event whose EXISTENCE proves the
-    // agent was running at its own timestamp.
+    // What may close an outage: only an instant whose EXISTENCE proves the
+    // agent was running then.
     //
     // This used to close on the next event of any kind, reasoning that
     // "anything arriving from that host proves the agent was running again".
     // That is true of delivery, not of timestamps, and the swimlane is drawn
-    // on timestamps. Winlog records are read out of the Windows event log
-    // AFTER the agent comes back — up to 24 h of them — so a `sleep` stamped
-    // ten seconds after the agent died arrives fourteen hours later and
-    // closed the outage at ten seconds. The reported case collapsed a
-    // fourteen-hour blackout into one (#1245).
+    // on timestamps — the reported case collapsed a fourteen-hour blackout
+    // into ten seconds (#1245).
     //
-    // `agent_online` / `agent_offline` are emitted by the backend's heartbeat
-    // watchdog from live heartbeats, so their timestamps are observations
-    // rather than reconstructions. A later `agent_offline` still closes this
-    // stretch — it means the agent came back and dropped again, and the
-    // interval between the two is a separate matter.
+    // Two things qualify, and they answer slightly different questions:
+    //
+    //  1. `agent_online` / `agent_offline` — the watchdog's own record of
+    //     when it could hear the host. Authoritative about the CONNECTION,
+    //     and the only thing that can attribute the outage, so this is what
+    //     `outageReason` is given below. A later `agent_offline` closes this
+    //     stretch too: the agent came back and dropped again, and the
+    //     interval between the two is a separate matter.
+    //
+    //  2. any record from one of the AGENT's own producers (`source` of
+    //     `agent:*` — the idle sampler, `agent:startup`). The agent wrote it
+    //     while running, so its timestamp is an observation: at that instant
+    //     the agent was alive and sampling, whenever the record happened to
+    //     be delivered. This is the same evidence `outageReason` reads for
+    //     the link-only case, applied to the stretch's extent rather than
+    //     only to its label.
+    //
+    // Winlog stays excluded, which is the whole of #1245: the OS wrote those
+    // records and the agent read them back out of the Event Log afterwards,
+    // so a `sleep` stamped ten seconds after the agent died arrives fourteen
+    // hours later and would collapse a fourteen-hour blackout into one. They
+    // date the MACHINE, never the agent. An event with no `source` is not
+    // counted either — it cannot be attributed, and guessing would put the
+    // reassuring answer back on weak evidence.
     let next: { ts: number } | undefined;
+    let backAt: number | undefined;
     for (let j = i + 1; j < sorted.length; j++) {
       if (sorted[j].ts <= sorted[i].ts) continue; // step over the same instant
+      if (backAt === undefined && sorted[j].source?.startsWith('agent:') === true) {
+        backAt = sorted[j].ts;
+      }
       if (sorted[j].kind !== 'agent_online' && sorted[j].kind !== 'agent_offline') continue;
       next = sorted[j];
       break;
     }
     const from = Math.max(sorted[i].ts, t0);
-    const to = Math.min(next ? next.ts : liveEdge, t1);
+    // The extent ends at the EARLIER proof; the reason is still derived from
+    // the watchdog's own close. Keeping the two apart is what lets a link-only
+    // outage hatch just the stretch before its first backfilled sample and
+    // still say WHY that stretch is blank — narrowing the band and losing the
+    // cause would trade one kind of dishonesty for another.
+    const to = Math.min(backAt ?? next?.ts ?? liveEdge, t1);
     if (to > from) out.push({ from, to, reason: outageReason(sorted, i, next?.ts) });
   }
   return mergeRanges(out);
@@ -759,19 +894,136 @@ function mergeRanges<T extends { from: number; to: number }>(ranges: T[]): T[] {
 }
 
 /**
- * The stretches the strip must not make any claim about. Two causes, one
+ * Stretches an unpaired `boot` proves nobody can account for.
+ *
+ * A machine cannot boot while it is already running. So a `boot` arriving
+ * while the power lane believes the host is ON is proof of two things at
+ * once: that it went down in between, and — because no END record sits
+ * between the two — that nothing recorded WHEN.
+ *
+ * `buildSpans` cannot express that. Its rule for a start on an already-open
+ * span is "ignore the duplicate start (a missed end shouldn't fragment the
+ * interval)", which is right for `sleep` (modern standby logs several
+ * transitions for one suspend) and for `logon`, and quietly paints the whole
+ * dark stretch ON here: the evening's span simply swallows the next
+ * morning's boot and runs on as if the machine never left.
+ *
+ * Both ways of getting here are ordinary:
+ *   - an unclean power-off — power cut, hard reset, BSOD — records no
+ *     `shutdown` and no `log_service_stopped` AT ALL. The only trace is
+ *     Kernel-Power 41, and that is stamped at the next boot (see `marks` on
+ *     the power lane), so it dates nothing;
+ *   - a clean shutdown whose records fell outside the collector's 24 h
+ *     backfill window, or behind a `limit`-truncated fetch.
+ *
+ * The stretch runs from the newest instant ANY event vouched for the host to
+ * the boot itself. Any event: every kind's `at` is an instant the host
+ * demonstrably existed at, including the watchdog's `agent_offline`, whose
+ * `at` is the last heartbeat and is therefore usually the tightest bound
+ * available. Before it the host was up and the span keeps painting; after the
+ * boot it is up again; in between only the FACT of a power cycle is known.
+ *
+ * Which is why the answer is a hatch rather than a gap. Leaving it blank
+ * would assert a measured OFF reaching back to whenever the host last
+ * happened to log something — on a quiet desktop, hours before it actually
+ * went down — and "blank means measured off" is the claim this component
+ * exists to stop making without evidence (#1086).
+ *
+ * Only `boot` counts as the proof, deliberately:
+ *   - `log_service_started` (6005) rides the same boot, so counting it would
+ *     emit a second, sub-second stretch for one power cycle; and it means the
+ *     event-log SERVICE started, which on its own does not say the machine
+ *     had been off.
+ *   - `unexpected_shutdown` (41) is excluded for the reason it is a marker at
+ *     all — its timestamp is that same boot's, so it would date the outage
+ *     from the moment the machine came back.
+ *
+ * And nothing the boot itself produced may BOUND the stretch either, which is
+ * the same fact one step along. `boot` (12), `log_service_started` (6005) and
+ * `unexpected_shutdown` (41) are three providers writing during one kernel
+ * phase, and their order within that second is not fixed. Letting any of them
+ * advance "the last instant something vouched for the host" means whichever
+ * happened to sort first becomes the bound, and a twelve-hour dark night
+ * collapses to the milliseconds between two records of the same boot — this
+ * function's own bug, one line to the left.
+ *
+ * So the bound comes from the previous session only: the newest event that is
+ * neither a power start nor a mark. When the session produced nothing at all
+ * — a host whose whole history is boots — it falls back to the instant that
+ * session began, which is still a real observation of the host being up and
+ * keeps consecutive bare boots from merging into one stretch.
+ */
+export function unrecordedShutdownRanges(
+  events: OpEvent[],
+  t0: number,
+  t1: number,
+): { from: number; to: number }[] {
+  const power = OP_LANES.find((l) => l.key === 'power')!;
+  const starts: ReadonlySet<string> = new Set<string>(power.starts);
+  const ends: ReadonlySet<string> = new Set<string>(power.ends);
+  const marks: ReadonlySet<string> = new Set<string>(power.marks);
+  const sorted = events
+    .map((e) => ({ ts: Date.parse(e.at), kind: e.kind }))
+    .filter((e) => !Number.isNaN(e.ts))
+    .sort((a, b) => a.ts - b.ts);
+
+  const out: { from: number; to: number }[] = [];
+  // Mirrors `buildSpans`' own state machine, seeded OFF: only a START turns
+  // the belief on, so a window whose power evidence begins with an END (the
+  // carry-in case) never reports a phantom cycle at its left edge.
+  let on = false;
+  // Newest instant the CURRENT session produced, and the instant it began.
+  let lastEvidence: number | undefined;
+  let sessionStart: number | undefined;
+  for (const e of sorted) {
+    if (e.kind === 'boot' && on) {
+      const bound = lastEvidence ?? sessionStart;
+      if (bound !== undefined) {
+        const from = Math.max(bound, t0);
+        const to = Math.min(e.ts, t1);
+        if (to > from) out.push({ from, to });
+      }
+      // …and this boot opens the session that follows it. Without the reset a
+      // third bare boot would be bounded by the first and swallow the session
+      // between them.
+      sessionStart = e.ts;
+      lastEvidence = undefined;
+    } else if (starts.has(e.kind)) {
+      // A start while already on is the same boot's second record (6005
+      // beside 12): it opens nothing and must not become the bound.
+      if (!on) {
+        sessionStart = e.ts;
+        lastEvidence = undefined;
+      }
+      on = true;
+    } else if (ends.has(e.kind)) {
+      lastEvidence = e.ts;
+      on = false;
+    } else if (!marks.has(e.kind)) {
+      lastEvidence = e.ts;
+    }
+  }
+  return mergeRanges(out);
+}
+
+/**
+ * The stretches the strip must not make any claim about. Several causes, one
  * meaning — "no evidence either way":
  *
- *   [t0, coverEdge)          the fetch was truncated before reaching here
- *   [certainEdge, liveEdge]  the agent stopped reporting
+ *   [t0, coverEdge)              the fetch was truncated before reaching here
+ *   [certainEdge, liveEdge]      the agent stopped reporting
+ *   each `agent_offline` stretch the backend recorded hearing nothing
+ *   each unpaired `boot`         the host power-cycled and nothing dated it
  *
  * Returned non-overlapping and in order. Overlap is not hypothetical: the
  * coverage floor is global across PCs, so a host that went quiet days ago
  * sits behind a floor set by a busier host's recent events and its
  * `certainEdge` lands before `coverEdge`; a never-reported agent with no
- * events puts `certainEdge` at 0 and overlaps outright. Two entries over the
- * same pixels would stack two elements and leave which `reason` the tooltip
- * shows to paint order.
+ * events puts `certainEdge` at 0 and overlaps outright; and a host that lost
+ * power went quiet at the same moment, so its recorded outage and its
+ * unpaired boot describe overlapping stretches by construction. Two entries
+ * over the same pixels would stack two elements and leave which `reason` the
+ * tooltip shows to paint order.
  */
 export function noEvidenceRanges(
   t0: number,
@@ -825,6 +1077,17 @@ export function noEvidenceRanges(
   for (const r of recorded) {
     for (const piece of subtractRanges([r], out)) out.push(piece);
   }
+
+  // Power cycles nothing recorded the start of. Folded in LAST so the causes
+  // above keep their more specific reason wherever they coincide: a host that
+  // lost power stopped heartbeating at that instant, so the same stretch is
+  // usually also a recorded outage, and "the agent stopped reporting" is the
+  // stronger statement — it is dated by a heartbeat rather than bounded by
+  // whatever the host last happened to log.
+  for (const r of unrecordedShutdownRanges(events, t0, t1)) {
+    const band = { ...r, reason: 'unrecordedShutdown' as const };
+    for (const piece of subtractRanges([band], out)) out.push(piece);
+  }
   return out.sort((a, b) => a.from - b.from);
 }
 
@@ -847,9 +1110,19 @@ export function noEvidenceRanges(
  * records both ends of, which is what makes them usable here — the same
  * property that decides the outage cut in #1245.
  *
- * `power` keeps the raw band: the others are subordinate to it and nothing
- * above it settles it. `sleep` is settled by power-off alone (a machine that
- * is off is not asleep); `session` and `active` by either.
+ * No lane is settled by the lane ABOVE it, `power` least of all — it is the
+ * one the others are subordinate to. What settles a lane is either its own
+ * records or the physical rule above:
+ *   `power`   — its own recorded off intervals. A `shutdown` and the next
+ *               `boot` bound a stretch the OS accounted for at both ends, so
+ *               "the machine was off" is measured there, not guessed. The
+ *               agent is of course silent across it — that is what being off
+ *               means — and hatching the night of every cleanly shut down
+ *               desktop while holding the two records that explain it is
+ *               #1322 one lane up.
+ *   `sleep`   — power-off alone: a machine that is off is not asleep.
+ *   `session`
+ *   `active`  — either.
  *
  * Which intervals settle anything comes from `recordedIntervals`, i.e. from
  * the RECORDS, never from the rendered spans. A span's edges are a drawing
@@ -882,9 +1155,11 @@ export function noEvidenceByLane<
     [...recorded.off, ...recorded.asleep].map((r) => ({ from: r.from, to: r.to })),
   );
   return lanes.map((lane) => {
-    if (lane.key === 'power') return subtractRanges(bands, lane.spans);
-    // A machine that is off is not asleep, so only power-off settles sleep.
-    const settled = lane.key === 'sleep' ? recorded.off : offOrAsleep;
+    // `power` is settled by its own recorded off intervals; `sleep` by
+    // power-off alone (a machine that is off is not asleep); the rest by
+    // either.
+    const settled =
+      lane.key === 'power' || lane.key === 'sleep' ? recorded.off : offOrAsleep;
     return subtractRanges(bands, [...lane.spans, ...settled]);
   });
 }
@@ -1119,6 +1394,36 @@ function cutAtContradiction(spans: Span[], events: OpEvent[]): Span[] {
     .filter((s) => s.to > s.from);
 }
 
+/**
+ * Take the unaccountable stretches back out of the power lane.
+ *
+ * `buildSpans` swallowed the second `boot` as a duplicate start, so one span
+ * now covers both power-on sessions AND the dark stretch between them.
+ * Subtracting restores the two sessions and leaves the middle to the
+ * no-evidence band, which folds the identical ranges in (`noEvidenceRanges`)
+ * so the hatch lands exactly where the paint was removed.
+ *
+ * Per source span, so the edge flags can be repaired against it:
+ * `subtractRanges` copies them onto BOTH pieces, so a split would otherwise
+ * leave the left piece claiming `openEnd` ("still running at the window
+ * edge") and the right claiming `openStart` ("continued from before this
+ * period"). Both are false of a piece whose edge is the power cycle. Same
+ * repair `clipToOn` and the suspend subtraction do.
+ */
+function cutAtUnrecordedShutdown(spans: Span[], cuts: { from: number; to: number }[]): Span[] {
+  if (!cuts.length) return spans;
+  return spans.flatMap((sp) =>
+    subtractRanges([sp], cuts).map((piece) => ({
+      ...piece,
+      openStart: piece.openStart && piece.from === sp.from,
+      openEnd: piece.openEnd && piece.to === sp.to,
+      // A cut edge abuts the hatch that replaces it, so it must be square —
+      // the same rendering requirement `cutByHeartbeat` already carries.
+      cutByHeartbeat: piece.cutByHeartbeat || piece.to !== sp.to,
+    })),
+  );
+}
+
 export function buildLanes(
   events: OpEvent[],
   windowFrom: number,
@@ -1149,7 +1454,10 @@ export function buildLanes(
   // Reconstruct the power lane first: it's the ground truth for "the host
   // was up", and the subordinate lanes get clipped to its ON spans below.
   const power = OP_LANES.find((l) => l.key === 'power')!;
-  const powerSpans = buildSpans(events, power.starts, power.ends, t0, t1, now);
+  const powerSpans = cutAtUnrecordedShutdown(
+    buildSpans(events, power.starts, power.ends, t0, t1, now),
+    unrecordedShutdownRanges(events, t0, t1),
+  );
   const onIntervals = powerSpans.map((s) => ({ from: s.from, to: s.to }));
   // Only clip when we actually have power events — a PC that reports just
   // active/idle (no winlog power lane) has no ON spans, and clipping to an
@@ -1350,10 +1658,31 @@ export function buildLanes(
     // OS-recorded sleep and power evidence to fix a sampler artefact. The lane
     // backfill (#970) inherits the sampler's grounds along with its spans, so
     // `restsOnSilence` follows the source of the spans rather than the lane.
-    if (outages.length && restsOnSilence) {
+    //
+    // But "the OS recorded both ends" is a property of a SPAN, not of a lane,
+    // and an `openEnd` span is precisely the one where it does not hold: no
+    // closing record was found, so `buildSpans` ran the state to the window
+    // edge. Its tail is the renderer's, not the kernel's. That is the shape an
+    // unclean power-off leaves — nothing is logged at the time, so the
+    // evening's `boot` span runs on claiming the host is up right now while
+    // the watchdog has heard nothing since yesterday evening.
+    //
+    // Only against an outage that is STILL OPEN at the span's end, though.
+    // A network blip that closed is proof of the opposite: the agent came
+    // back, and with no `boot` between the two the host never went down, so
+    // the span is right to run through it. Cutting on any outage would leave
+    // every host that ever lost its link showing as off from that moment on.
+    // A power cycle inside a closed outage is not this rule's business
+    // either — `unrecordedShutdownRanges` has the `boot` that proves it.
+    if (outages.length) {
       spans = spans
         .map((sp) => {
-          const o = outages.find((x) => x.from > sp.from && x.from < sp.to);
+          const o = outages.find(
+            (x) =>
+              x.from > sp.from &&
+              x.from < sp.to &&
+              (restsOnSilence || (sp.openEnd && x.to >= sp.to)),
+          );
           // `cutByHeartbeat` is the existing "hard cut, abuts a hatch" edge
           // style; the reason differs but the rendering requirement is the
           // same, and `openEnd` must clear so the tooltip stops claiming the
@@ -1386,7 +1715,7 @@ export function buildLanes(
       key: lane.key as LaneKey,
       color: lane.color,
       spans,
-      markers: laneMarkers(events, lane.starts, lane.ends, t0, t1),
+      markers: laneMarkers(events, [...lane.starts, ...lane.ends, ...lane.marks], t0, t1),
     };
   });
 }

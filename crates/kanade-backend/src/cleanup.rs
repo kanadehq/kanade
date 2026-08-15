@@ -199,6 +199,13 @@ pub fn spawn(
         // Constructed here, not before the loop's first tick, so
         // `observed_since` is the moment watching actually began.
         let mut watchdog = crate::agent_watchdog::AgentWatchdog::new(Utc::now());
+        // …and seeded with whatever a previous process left open, so an
+        // outage that spans a restart still gets its closing `agent_online`.
+        // Best-effort on purpose: without the seed the watchdog behaves as it
+        // did before, which is worth keeping the cleanup task running for.
+        if let Err(e) = watchdog.restore(&pool).await {
+            warn!(error = %e, "agent watchdog: could not restore open outages");
+        }
         loop {
             interval.tick().await;
             // One `now` per tick: every sweep's cutoff derives from

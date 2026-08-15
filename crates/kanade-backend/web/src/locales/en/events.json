@@ -123,7 +123,8 @@
       "agentDown": "Unknown: {{from}} → {{to}} — the agent is recorded as having stopped reporting over this stretch. Whether the machine was off or only the agent had stopped is not distinguishable",
       "agentDownHostOff": "Unknown: {{from}} → {{to}} — the agent stopped reporting here, and came back on a machine that had rebooted in the meantime. The PC itself was away (shut down, suspended or without power)",
       "agentDownAgentStopped": "Unknown: {{from}} → {{to}} — the agent stopped reporting here, and came back on a machine that had NOT rebooted. The PC stayed up; only the agent had stopped",
-      "agentDownLinkOnly": "Unknown: {{from}} → {{to}} — the agent stopped reporting here, but its own records for this stretch arrived afterwards, so it was running and observing throughout. The connection was down, not the PC. Anything still undelivered appears as it arrives"
+      "agentDownLinkOnly": "Unknown: {{from}} → {{to}} — the agent stopped reporting here, but its own records for this stretch arrived afterwards, so it was running and observing throughout. The connection was down, not the PC. Anything still undelivered appears as it arrives",
+      "unrecordedShutdown": "Unknown: {{from}} → {{to}} — the PC booted at the end of this stretch while it was still believed to be on, so it went down somewhere in here and nothing recorded when. An unclean power-off (power cut, hard reset, crash) logs no shutdown at all: Windows only notes it at the NEXT boot, which is where this stretch ends"
     },
     "truncated": "row limit ({{limit}}) reached — nothing before {{from}} was fetched; the hatched part of each lane is window with no data",
     "empty": "No power / session / sleep / active events in this window for this PC."
