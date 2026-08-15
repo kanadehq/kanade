@@ -9,9 +9,11 @@ import {
   evidenceEdges,
   noEvidenceByLane,
   noEvidenceRanges,
+  OP_TIMELINE_KINDS,
   recordedIntervals,
   subtractRanges,
   swimlaneWindow,
+  unrecordedShutdownRanges,
 } from './OperationalTimeline';
 
 // The lane rules are a small set of interacting invariants that have been
@@ -272,6 +274,424 @@ describe('lane matrix: which feeds the PC reports', () => {
 });
 
 // ---------------------------------------------------------------------------
+// How a power-on session ENDS, laid out as a matrix.
+//
+// The lane matrix above asks "which feeds does this PC report". This one asks
+// the question that was never asked, and that both reported bugs live in:
+// given a machine that stopped running, WHAT RECORD SAYS SO, and what may the
+// strip claim about the stretch afterwards?
+//
+// Three producers, three different things a timestamp means:
+//
+//   winlog:*     the OS wrote it. `at` is the record's TimeCreated, so it
+//                dates the MACHINE — except for the one retroactive kind
+//                below, which is dated at the boot that discovered it.
+//   agent:*      the agent wrote it while running. `at` dates the AGENT:
+//                whenever it was delivered, the agent was alive then.
+//   backend:*    the watchdog wrote it from heartbeats. `at` dates the
+//                CONNECTION — when the backend last heard, or heard again.
+//
+//  # | how the session ended        | record that dates it     | power lane after
+//  --|------------------------------|--------------------------|------------------
+//  1 | clean shutdown               | `shutdown` @ the moment  | blank (measured off)
+//  2 | clean shutdown, log service  | `log_service_stopped`    | blank (measured off)
+//  3 | power cut / hard reset / BSOD| NONE. `unexpected_shut-  | ON to last evidence,
+//    |                              | down` is Kernel-Power 41 | then UNKNOWN to the
+//    |                              | and Windows writes it at | boot, then ON again
+//    |                              | the NEXT boot            |
+//  4 | clean shutdown, record lost  | NONE (>24 h backfill     | same as 3
+//    | to backfill / `limit`        | window, truncated fetch) |
+//  5 | it did not end               | —                        | ON throughout
+//
+// Rows 3 and 4 are the reported "電源を落としているのに夜間ずっと塗られている":
+// row 3 closed the evening's span at the FOLLOWING MORNING's boot (41's
+// timestamp) and row 4 swallowed the morning `boot` as a duplicate start, and
+// both painted the dark night solid ON — as closed, healthy-looking pairs
+// that no downstream gate questions.
+// ---------------------------------------------------------------------------
+
+describe('power-cycle matrix: what ends a session, and what it leaves behind', () => {
+  /** Yesterday evening's session, up since 1h. */
+  const upSince = [evw(h(1), 'boot'), evw(h(2), 'logon'), eva(h(2), 'active'), eva(h(8), 'idle')];
+  /** The watchdog noticing the host went quiet at 9h, and hearing the first
+   *  beat of the new session shortly after the 21h boot — it cannot notice a
+   *  recovery before the machine that recovers it has started. */
+  const watchdog = [ev(h(9), 'agent_offline'), ev(h(21.05), 'agent_online')];
+
+  const cases: {
+    row: string;
+    events: { at: string; kind: string; source?: string }[];
+    /** Is the dark stretch (15h) painted as ON? Never, in any row. */
+    onAtNight: false;
+    /** Is it hatched as unknown instead of asserted off? */
+    unknownAtNight: boolean;
+  }[] = [
+    {
+      row: '1: clean shutdown',
+      events: [...upSince, evw(h(9), 'shutdown'), ...watchdog, evw(h(21), 'boot')],
+      onAtNight: false,
+      // The OS accounted for both ends, so "off" is measured, not guessed.
+      unknownAtNight: false,
+    },
+    {
+      row: '2: clean shutdown via the event-log service',
+      events: [...upSince, evw(h(9), 'log_service_stopped'), ...watchdog, evw(h(21), 'boot')],
+      onAtNight: false,
+      unknownAtNight: false,
+    },
+    {
+      row: '3: power cut — 41 stamped at the next boot',
+      events: [
+        ...upSince,
+        ...watchdog,
+        // Both land at the morning boot, and their order within that second
+        // is not fixed: 41 sorting first is what used to close the evening's
+        // span from the following morning.
+        evw(h(21.001), 'unexpected_shutdown'),
+        evw(h(21), 'boot'),
+        evw(h(21.002), 'log_service_started'),
+      ],
+      onAtNight: false,
+      unknownAtNight: true,
+    },
+    {
+      row: '4: the shutdown record never arrived',
+      events: [...upSince, ...watchdog, evw(h(21), 'boot')],
+      onAtNight: false,
+      unknownAtNight: true,
+    },
+  ];
+
+  for (const c of cases) {
+    test(`row ${c.row}: the dark stretch is not painted ON`, () => {
+      const lanes = buildLanes(c.events, T0, T1, NOW);
+      expect(coversAt(lane(lanes, 'power'), H(15))).toBe(c.onAtNight);
+    });
+
+    test(`row ${c.row}: and reads ${c.unknownAtNight ? 'unknown' : 'off'} instead`, () => {
+      const lanes = buildLanes(c.events, T0, T1, NOW);
+      expect(unknownAt(lanes, 'power', c.events, H(15))).toBe(c.unknownAtNight);
+    });
+
+    test(`row ${c.row}: the host is ON again after the morning boot`, () => {
+      const lanes = buildLanes(c.events, T0, T1, NOW);
+      expect(coversAt(lane(lanes, 'power'), H(22))).toBe(true);
+    });
+
+    test(`row ${c.row}: and was ON while it was demonstrably up`, () => {
+      const lanes = buildLanes(c.events, T0, T1, NOW);
+      expect(coversAt(lane(lanes, 'power'), H(5))).toBe(true);
+    });
+  }
+
+  // Row 5 has nothing to end, so it is stated on its own rather than as a
+  // column of falses.
+  test('row 5: a session that never ended stays painted', () => {
+    const lanes = buildLanes([...upSince], T0, T1, NOW);
+    expect(coversAt(lane(lanes, 'power'), H(15))).toBe(true);
+  });
+
+  // The specific shape of rows 3/4, stated once in full: the evening's span
+  // must stop at the last instant something vouched for the host — here the
+  // watchdog's `agent_offline`, whose `at` is the last heartbeat and is the
+  // tightest bound available — and the boot must open a NEW span rather than
+  // being swallowed as a duplicate start.
+  test('the evening session ends at the last evidence, not at the next boot', () => {
+    const events = [...upSince, ...watchdog, evw(h(21), 'boot')];
+    const spans = lane(buildLanes(events, T0, T1, NOW), 'power').spans;
+    expect(spans.map((s) => [s.from, s.to])).toEqual([
+      [H(1), H(9)],
+      [H(21), H(24)],
+    ]);
+  });
+
+  // The 41 record still has to reach the strip: "the last power-off was
+  // unclean" is exactly what an operator wants to see at that boot. Demoting
+  // it from a lane END to a marker must not silently drop it.
+  test('an unexpected_shutdown still shows as a marker on the power lane', () => {
+    const events = [...upSince, ...watchdog, evw(h(21), 'boot'), evw(h(21.001), 'unexpected_shutdown')];
+    const kinds = lane(buildLanes(events, T0, T1, NOW), 'power').markers.map((m) => m.kind);
+    expect(kinds).toContain('unexpected_shutdown');
+    expect(kinds).toContain('boot');
+  });
+
+  // …and it is fetched in the first place. The Events page filters its rows
+  // to this list before handing them over, so a kind missing from it never
+  // reaches the component at all.
+  test('unexpected_shutdown is still one of the kinds the strip reads', () => {
+    expect(OP_TIMELINE_KINDS).toContain('unexpected_shutdown');
+  });
+
+  // A stretch nobody can account for is not a stretch the lanes below it may
+  // fill in. The session lane's `logon` is still open when the machine goes
+  // down, and without this it paints straight across the dark night.
+  test('subordinate lanes do not paint across the unaccounted stretch', () => {
+    const events = [...upSince, ...watchdog, evw(h(21), 'boot')];
+    const lanes = buildLanes(events, T0, T1, NOW);
+    for (const key of ['session', 'sleep', 'active']) {
+      expect(coversAt(lane(lanes, key), H(15)), `${key} must not paint`).toBe(false);
+    }
+  });
+
+  // The two hatches describe the same pixels from different sides — the host
+  // lost power and stopped heartbeating at the same instant — so they must
+  // not stack. The recorded outage is the more specific of the two (dated by
+  // a heartbeat, not by whatever the host last happened to log), so it wins.
+  test('the outage and the power cycle do not both claim the same stretch', () => {
+    const events = [...upSince, ...watchdog, evw(h(21), 'boot')];
+    const bands = noEvidenceRanges(T0, T1, NOW, T0, undefined, undefined, events);
+    for (let i = 1; i < bands.length; i++) {
+      expect(bands[i].from).toBeGreaterThanOrEqual(bands[i - 1].to);
+    }
+    expect(bands.find((b) => b.from <= H(15) && H(15) < b.to)?.reason).toBe('agentDown');
+  });
+
+  // Without a watchdog record there is nothing better to bound it with, and
+  // the stretch is then labelled for what it is.
+  test('with no outage recorded, the power cycle names itself', () => {
+    const events = [...upSince, evw(h(21), 'boot')];
+    const bands = noEvidenceRanges(T0, T1, NOW, T0, undefined, undefined, events);
+    const at15 = bands.find((b) => b.from <= H(15) && H(15) < b.to);
+    expect(at15?.reason).toBe('unrecordedShutdown');
+    // Bounded by the last thing the host produced (the 8h `idle`), never
+    // reaching back to the window edge.
+    expect(at15?.from).toBe(H(8));
+    expect(at15?.to).toBe(H(21));
+  });
+
+  // The rule keys on `boot` alone. `log_service_started` rides the same boot,
+  // so counting it would carve a second, sub-second stretch out of one power
+  // cycle — and on its own it means the event-log SERVICE started, which does
+  // not say the machine had been off.
+  test('one power cycle produces exactly one unaccounted stretch', () => {
+    const events = [
+      ...upSince,
+      ...watchdog,
+      evw(h(21), 'boot'),
+      evw(h(21.001), 'unexpected_shutdown'),
+      evw(h(21.002), 'log_service_started'),
+    ];
+    expect(unrecordedShutdownRanges(events, T0, T1)).toEqual([{ from: H(9), to: H(21) }]);
+  });
+
+  // …and the same fact one step along: none of those three records may BOUND
+  // the stretch either. They are three providers writing during one kernel
+  // phase and their order within that second is not fixed, so if the rule
+  // takes "the newest event before the boot" literally, whichever sorted
+  // first becomes the bound and the twelve-hour night collapses to
+  // milliseconds — the bug this function exists to fix, one line to the left.
+  // Both orderings must give the same stretch.
+  test('the order of the boot’s own records does not change the stretch', () => {
+    for (const markAt of [h(20.999), h(21.001)]) {
+      const events = [
+        ...upSince,
+        ...watchdog,
+        evw(h(21), 'boot'),
+        evw(markAt, 'unexpected_shutdown'),
+        evw(h(21.002), 'log_service_started'),
+      ];
+      expect(unrecordedShutdownRanges(events, T0, T1), `41 at ${markAt}`).toEqual([
+        { from: H(9), to: H(21) },
+      ]);
+    }
+  });
+
+  // The fallback that keeps the bound from disappearing when a session
+  // produced nothing but its own boot — without it a host whose whole history
+  // is boots reports no stretch at all and the span bridges them.
+  test('a session that produced nothing is bounded by its own boot', () => {
+    const bare = [evw(h(2), 'boot'), evw(h(10), 'boot')];
+    expect(unrecordedShutdownRanges(bare, T0, T1)).toEqual([{ from: H(2), to: H(10) }]);
+  });
+
+  // …and each cycle is bounded by ITS OWN session, not by the first one.
+  // Bounding the third boot at 2h would claim the 11h logon happened inside a
+  // stretch nobody could account for.
+  test('a later cycle is bounded by the session it ends', () => {
+    const cycles = [evw(h(2), 'boot'), evw(h(10), 'boot'), evw(h(11), 'logon'), evw(h(18), 'boot')];
+    expect(unrecordedShutdownRanges(cycles, T0, T1)).toEqual([
+      { from: H(2), to: H(10) },
+      { from: H(11), to: H(18) },
+    ]);
+  });
+
+  // A boot that opens the window's first power span is not a power CYCLE:
+  // nothing before it said the host was up, so there is nothing to have gone
+  // down. Reporting one would hatch the run-up to every first boot.
+  test('the first boot in a window is not treated as a power cycle', () => {
+    expect(unrecordedShutdownRanges([evw(h(4), 'boot'), evw(h(9), 'logon')], T0, T1)).toEqual([]);
+  });
+
+  // Neither is a boot that follows a recorded shutdown — that stretch is
+  // accounted for at both ends and reads as measured off.
+  test('a boot after a recorded shutdown is not a power cycle', () => {
+    const events = [evw(h(2), 'boot'), evw(h(9), 'shutdown'), evw(h(21), 'boot')];
+    expect(unrecordedShutdownRanges(events, T0, T1)).toEqual([]);
+  });
+
+  // The row-3/4 shape BEFORE the host comes back — what the demo fixture
+  // showed on a weekend, when the machine that lost power on Friday evening
+  // has no Saturday boot to prove it. Nothing recorded the power-off, so the
+  // evening's span is `openEnd` and ran to the live edge, stating the host is
+  // up RIGHT NOW while the watchdog has heard nothing since Friday. An open
+  // span's tail is the renderer's, not the kernel's.
+  test('an open power span stops where the agent went quiet and never came back', () => {
+    const events = [evw(h(1), 'boot'), evw(h(2), 'logon'), ev(h(9), 'agent_offline')];
+    const lanes = buildLanes(events, T0, T1, NOW);
+    expect(lane(lanes, 'power').spans.map((s) => [s.from, s.to])).toEqual([[H(1), H(9)]]);
+    expect(unknownAt(lanes, 'power', events, H(15))).toBe(true);
+  });
+
+  // …and the guard that keeps that from eating every host that ever lost its
+  // link. A CLOSED outage is proof of the opposite: the agent came back, and
+  // with no `boot` between the two the machine never went down — its uptime
+  // simply continued. Cutting there would show a host as off from its first
+  // network blip onwards.
+  test('a closed outage does not cut the span that runs through it', () => {
+    const events = [
+      evw(h(1), 'boot'),
+      ev(h(9), 'agent_offline'),
+      ev(h(9.5), 'agent_online'), // a blip; the host was up throughout
+    ];
+    const lanes = buildLanes(events, T0, T1, NOW);
+    expect(coversAt(lane(lanes, 'power'), H(15))).toBe(true);
+  });
+
+  // A span the OS closed is not touched either way: `boot`→`shutdown` asserts
+  // its interval on the kernel's record, whenever the records were delivered.
+  test('a closed power span is never cut by an outage inside it', () => {
+    const events = [evw(h(1), 'boot'), ev(h(9), 'agent_offline'), evw(h(20), 'shutdown')];
+    const lanes = buildLanes(events, T0, T1, NOW);
+    expect(lane(lanes, 'power').spans.map((s) => [s.from, s.to])).toEqual([[H(1), H(20)]]);
+  });
+
+  // The rule is about the SPAN, so it is not the power lane's alone. `sleep`
+  // has `restsOnSilence: false` too, and an unclosed `sleep` is a
+  // reconstruction on exactly the same terms: no `resume` was recorded, so
+  // its right edge is the renderer's. A machine that suspends and then loses
+  // power records neither the resume nor the shutdown.
+  test('an open sleep span stops where the agent went quiet', () => {
+    const events = [evw(h(1), 'boot'), evw(h(6), 'sleep'), ev(h(9), 'agent_offline')];
+    const lanes = buildLanes(events, T0, T1, NOW);
+    expect(lane(lanes, 'sleep').spans.map((s) => [s.from, s.to])).toEqual([[H(6), H(9)]]);
+  });
+
+  // …and its guard, which is the #1245 rule the cut was originally narrowed
+  // for: the OS logged BOTH ends, so the pair asserts the night whenever the
+  // records were delivered.
+  test('a closed sleep pair is not cut by an outage inside it', () => {
+    const events = [
+      evw(h(1), 'boot'),
+      evw(h(6), 'sleep'),
+      ev(h(9), 'agent_offline'),
+      evw(h(20), 'resume'),
+    ];
+    const lanes = buildLanes(events, T0, T1, NOW);
+    expect(lane(lanes, 'sleep').spans.map((s) => [s.from, s.to])).toEqual([[H(6), H(20)]]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// When an unknown stretch ENDS — the other half of the same question.
+//
+// An `agent_offline` is durable; the `agent_online` that closes it is written
+// from a HashMap that lives only in the backend process. Restart the backend
+// mid-outage — a deploy, a crash — and the recovery is never recorded at all,
+// so the stretch has no right edge and runs to the live edge: the reported
+// "オフライン期間のあとにイベントが来ているのに、間の区間が不明のまま".
+//
+//  what came back                        | closes the stretch? | why
+//  --------------------------------------|---------------------|-----------------
+//  `agent_online` (watchdog)              | yes                 | dated by a beat
+//  `agent_online` (agent:startup)         | yes                 | the agent wrote it
+//  any `agent:*` record (idle sampler, …) | yes                 | the agent wrote it
+//  a `winlog:*` record                    | NO                  | the OS wrote it and
+//                                         |                     | the agent read it
+//                                         |                     | back afterwards
+//  nothing                                | no — runs to the live edge
+// ---------------------------------------------------------------------------
+
+describe('unknown stretches end at the first proof the agent was back', () => {
+  const LIVE = H(24);
+
+  test('the watchdog’s own recovery closes it', () => {
+    const evs = [ev(h(4), 'agent_offline'), ev(h(9), 'agent_online')];
+    expect(agentDownRanges(evs, T0, T1, LIVE)[0].to).toBe(H(9));
+  });
+
+  // The bug: the backend restarted during the outage, so the watchdog forgot
+  // it was open and never wrote a recovery. The host has been reporting for
+  // hours — its sampler records prove it — and the strip hatched all of it.
+  test('a sampler record closes an outage the backend never closed', () => {
+    const evs = [
+      evw(h(2), 'boot'),
+      ev(h(9), 'agent_offline'), // …and no `agent_online` ever follows
+      eva(h(11), 'active'), // the agent is demonstrably running again
+      eva(h(14), 'idle'),
+      eva(h(19), 'active'),
+    ];
+    expect(agentDownRanges(evs, T0, T1, LIVE)).toEqual([
+      { from: H(9), to: H(11), reason: 'agentDownLinkOnly' },
+    ]);
+  });
+
+  // The same shape end to end: what the operator sees is a hatch over the
+  // stretch nobody can account for, and nothing over the hours the agent was
+  // demonstrably back.
+  test('and the strip stops hatching the hours the host was reporting', () => {
+    const evs = [
+      evw(h(2), 'boot'),
+      ev(h(9), 'agent_offline'),
+      eva(h(11), 'active'),
+      eva(h(14), 'idle'),
+    ];
+    const lanes = buildLanes(evs, T0, T1, NOW);
+    expect(unknownAt(lanes, 'active', evs, H(10))).toBe(true);
+    expect(unknownAt(lanes, 'active', evs, H(13))).toBe(false);
+    expect(unknownAt(lanes, 'active', evs, H(20))).toBe(false);
+  });
+
+  test('an agent:startup closes it too', () => {
+    const evs = [
+      ev(h(4), 'agent_offline'),
+      { at: h(9), kind: 'agent_online', source: 'agent:startup' },
+    ];
+    expect(agentDownRanges(evs, T0, T1, LIVE)[0].to).toBe(H(9));
+  });
+
+  test('a winlog record does not, however late the recovery', () => {
+    const evs = [ev(h(4), 'agent_offline'), evw(h(6), 'resume'), evw(h(7), 'logon')];
+    expect(agentDownRanges(evs, T0, T1, LIVE)[0].to).toBe(LIVE);
+  });
+
+  // An event the caller could not attribute is not evidence either. Guessing
+  // here would put the reassuring answer back on weak grounds — the same rule
+  // `outageReason` applies to the link-only classification.
+  test('an event with no source at all does not close it', () => {
+    const evs = [ev(h(4), 'agent_offline'), ev(h(6), 'active')];
+    expect(agentDownRanges(evs, T0, T1, LIVE)[0].to).toBe(LIVE);
+  });
+
+  test('nothing came back: it still runs to the live edge', () => {
+    expect(agentDownRanges([ev(h(4), 'agent_offline')], T0, T1, LIVE)[0].to).toBe(LIVE);
+  });
+
+  // Shortening the stretch must not weaken the span cut it also drives: the
+  // cut keys on where the agent went QUIET, which is unchanged.
+  test('shortening the stretch does not stop it cutting a span that bridges it', () => {
+    const evs = [
+      evw(h(2), 'boot'),
+      eva(h(3), 'active'), // opened long before the agent went quiet…
+      ev(h(9), 'agent_offline'),
+      eva(h(19), 'idle'), // …and closed only the next morning
+    ];
+    const lanes = buildLanes(evs, T0, T1, NOW);
+    expect(coversAt(lane(lanes, 'active'), H(15))).toBe(false);
+    expect(coversAt(lane(lanes, 'active'), H(8))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // The invariants themselves — the properties every case above must satisfy.
 // ---------------------------------------------------------------------------
 
@@ -470,6 +890,28 @@ describe('the unknown band respects what other lanes recorded (#1322)', () => {
     }
   });
 
+  // …and the power lane itself, which is not a lane "below" anything: the
+  // records that settle it are its OWN. An agent is silent while its host is
+  // off — that is what being off means — so the outage the watchdog records
+  // every night is not new information about a machine whose `shutdown` and
+  // `boot` are both on file. Hatching it left every cleanly shut down desktop
+  // reading "we cannot say" across a night the OS accounted for at both ends.
+  test('and the power lane too, since the off-gap is its own record', () => {
+    const lanes = buildLanes(shutDown, T0, T1, NOW);
+    expect(unknownAt(lanes, 'power', shutDown, H(15))).toBe(false);
+  });
+
+  // The guard on that: settling comes from the RECORD PAIR, never from the
+  // absence of a span. An unclean power-off logs no `shutdown` at all, so the
+  // same-looking dark stretch stays unknown — which is the whole point of the
+  // power-cycle matrix above.
+  test('an unrecorded power-off leaves the power lane unknown', () => {
+    const noRecord = shutDown.filter((e) => e.kind !== 'shutdown');
+    const lanes = buildLanes(noRecord, T0, T1, NOW);
+    expect(coversAt(lane(lanes, 'power'), H(15))).toBe(false);
+    expect(unknownAt(lanes, 'power', noRecord, H(15))).toBe(true);
+  });
+
   // The guard, and the reason this is not "trust the lane above you". An
   // unclosed `sleep` runs to the window edge because that is all the strip
   // can draw, not because the OS said so — the #1245 shape exactly. Letting
@@ -592,13 +1034,17 @@ describe('the unknown band respects what other lanes recorded (#1322)', () => {
     expect(active.some((b) => b.from <= H(12) && H(12) < b.to)).toBe(true);
   });
 
-  // `power` is the lane the others are subordinate to; nothing above it can
-  // settle it, so its band is the raw one minus its own spans.
-  test('the power lane keeps the band it was given', () => {
+  // A recorded SUSPEND settles the lanes below `power` and not `power`
+  // itself: a suspended machine is still a machine that was on, so the sleep
+  // pair says nothing about whether we could have known that. Only power's
+  // own off-intervals settle power, and this host never powered off — so its
+  // band is the raw one minus its own spans, exactly as before.
+  test('a recorded suspend does not settle the power lane', () => {
     const lanes = buildLanes(suspended, T0, T1, NOW);
     const bands = noEvidenceRanges(T0, T1, NOW, T0, undefined, undefined, suspended);
     const power = lane(lanes, 'power');
     const i = lanes.findIndex((l) => l.key === 'power');
+    expect(recordedIntervals(suspended, T0, T1).off).toHaveLength(0);
     expect(noEvidenceByLane(lanes, bands, recordedIntervals(suspended, T0, T1))[i]).toEqual(
       subtractRanges(bands, power.spans),
     );
@@ -643,7 +1089,43 @@ describe('an outage says which of the three causes it was (#1316)', () => {
       eva(h(14), 'idle'),
       ev(h(20), 'agent_online'),
     ];
-    expect(reasonAt(evs, H(15))).toBe('agentDownLinkOnly');
+    expect(reasonAt(evs, H(10))).toBe('agentDownLinkOnly');
+  });
+
+  // …and the stretch it labels is only the part the agent did NOT account
+  // for. Its first sample is proof it was alive and sampling at 12h, so from
+  // there the lanes are drawn from its own records and hatching them as
+  // "nobody can say" contradicts the very evidence the label is derived from.
+  // The two facts come from different scans on purpose: the extent stops at
+  // the earliest proof of life, the cause is still read off the watchdog's
+  // own close at 20h.
+  test('a link-only outage hatches only up to the first record the agent sent', () => {
+    const evs = [
+      ev(h(2), 'boot'),
+      ev(h(9), 'agent_offline'),
+      eva(h(12), 'active'),
+      eva(h(14), 'idle'),
+      ev(h(20), 'agent_online'),
+    ];
+    expect(agentDownRanges(evs, T0, T1, T1)).toEqual([
+      { from: H(9), to: H(12), reason: 'agentDownLinkOnly' },
+    ]);
+  });
+
+  // The counterpart, and the one that keeps #1245 fixed: winlog is read out
+  // of the Event Log after the agent returns, so its timestamps date the
+  // MACHINE and say nothing about when the agent came back.
+  test('a winlog record does not shorten the stretch either', () => {
+    const evs = [
+      ev(h(2), 'boot'),
+      ev(h(9), 'agent_offline'),
+      evw(h(9.02), 'sleep'),
+      evw(h(21), 'resume'),
+      ev(h(22), 'agent_online'),
+    ];
+    expect(agentDownRanges(evs, T0, T1, T1)).toEqual([
+      { from: H(9), to: H(22), reason: 'agentDown' },
+    ]);
   });
 
   test("a flapping agent's later restart does not attribute an earlier outage", () => {
