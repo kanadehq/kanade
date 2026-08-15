@@ -69,18 +69,40 @@ use super::AppState;
 use crate::audit;
 use crate::audit::Caller;
 
+// The installer ships four files verbatim: the stock agent config and the
+// three canonical install scripts. They are `include_str!`d from
+// `crates/kanade-backend/assets/`, which is a COPY of the canonical
+// originals at the workspace root.
+//
+// The copy exists for one reason: `cargo package` only puts the crate
+// directory into the tarball, so an `include_str!` reaching outside it
+// compiles everywhere EXCEPT the verification build `cargo publish` runs on
+// the packaged copy. That failed every release from v0.45.5 to v0.45.9 — and
+// only crates.io, never CI or a local build, because both of those compile in
+// the workspace where the originals are right there (#1364). The publish job
+// runs the members in topological order and stops on the first failure, so
+// one unpackageable crate also held back `kanade` (the CLI, which
+// `cargo install` and `self-update` read) at 0.45.4 for five releases.
+//
+// Duplication is the cost, and it is guarded rather than trusted:
+// `assets_match_the_workspace_originals` below fails if a copy drifts. The
+// test compiles only in the workspace (`cargo package` builds lib and bins,
+// not tests — which is why kanade-shared's test-only `include_str!`s of the
+// same kind have always published fine), so it runs exactly where drift can
+// be introduced.
+
 /// The stock agent config every fresh install starts from. The single
 /// `nats_url` line ([`NATS_URL_LINE`]) is rewritten per request.
-const AGENT_TOML_TEMPLATE: &str = include_str!("../../../../configs/agent.toml");
+const AGENT_TOML_TEMPLATE: &str = include_str!("../../assets/agent.toml");
 
 /// The canonical deploy script, shipped unmodified so the installer can
 /// never drift from what `scripts/deploy/agent.ps1` documents.
-const DEPLOY_AGENT_PS1: &str = include_str!("../../../../scripts/deploy/agent.ps1");
+const DEPLOY_AGENT_PS1: &str = include_str!("../../assets/deploy-agent.ps1");
 
 /// The canonical Linux install script + systemd unit, shipped verbatim for
 /// the same reason — all Linux install logic lives in `setup-agent.sh`.
-const SETUP_AGENT_SH: &str = include_str!("../../../../deploy/linux/setup-agent.sh");
-const AGENT_SERVICE: &str = include_str!("../../../../deploy/linux/systemd/kanade-agent.service");
+const SETUP_AGENT_SH: &str = include_str!("../../assets/setup-agent.sh");
+const AGENT_SERVICE: &str = include_str!("../../assets/kanade-agent.service");
 
 /// The exact `[agent]` line in `configs/agent.toml` that carries the
 /// loopback default. Matched verbatim (and replaced exactly once) so a
@@ -836,6 +858,51 @@ fn render_readme_linux(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The four `assets/` files are copies; this is what keeps them honest.
+    ///
+    /// Editing `configs/agent.toml` or one of the install scripts and not the
+    /// copy would ship an installer that disagrees with the script an
+    /// operator runs by hand — the exact drift the old out-of-crate
+    /// `include_str!` made impossible, and the only thing it bought. Pairing
+    /// them here restores that guarantee at the cost of a failing test
+    /// instead of a silent divergence.
+    ///
+    /// This compiles only in the workspace. `cargo package` builds the lib
+    /// and bins, not tests, so the originals being absent from the published
+    /// tarball cannot break the verification build (#1364) — kanade-shared
+    /// has carried test-only `include_str!`s of workspace files for as long
+    /// and has always published cleanly.
+    #[test]
+    fn assets_match_the_workspace_originals() {
+        for (copy, original, path) in [
+            (
+                AGENT_TOML_TEMPLATE,
+                include_str!("../../../../configs/agent.toml"),
+                "configs/agent.toml",
+            ),
+            (
+                DEPLOY_AGENT_PS1,
+                include_str!("../../../../scripts/deploy/agent.ps1"),
+                "scripts/deploy/agent.ps1",
+            ),
+            (
+                SETUP_AGENT_SH,
+                include_str!("../../../../deploy/linux/setup-agent.sh"),
+                "deploy/linux/setup-agent.sh",
+            ),
+            (
+                AGENT_SERVICE,
+                include_str!("../../../../deploy/linux/systemd/kanade-agent.service"),
+                "deploy/linux/systemd/kanade-agent.service",
+            ),
+        ] {
+            assert_eq!(
+                copy, original,
+                "crates/kanade-backend/assets/ has drifted from {path} — copy it across",
+            );
+        }
+    }
 
     #[test]
     fn agent_toml_url_line_is_rewritten() {
