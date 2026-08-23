@@ -5,6 +5,7 @@ mod auth;
 mod cleanup;
 mod command_publisher;
 mod controller;
+mod http_error;
 mod login_throttle;
 mod mail;
 mod mfa;

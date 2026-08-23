@@ -13,7 +13,7 @@ use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::response::IntoResponse;
 use chrono::{Duration, Utc};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use rand::Rng as _;
@@ -26,6 +26,7 @@ use crate::api::AppState;
 use crate::api::password_setup::{self, PURPOSE_RESET, PURPOSE_SETUP};
 use crate::audit::{self, Caller};
 use crate::auth::{Claims, EXPECTED_AUDIENCE, Role, signing_secret};
+use crate::http_error::ApiError;
 use kanade_shared::feature::Feature;
 
 // ---- allowed_features (page allow-list) helpers --------------------
@@ -55,7 +56,7 @@ fn features_to_json(keys: &[String]) -> Result<String, (StatusCode, String)> {
 }
 
 /// Convert the small helper error into the handler's `Response` error.
-fn feature_err((code, msg): (StatusCode, String)) -> Response {
+fn feature_err((code, msg): (StatusCode, String)) -> ApiError {
     err(code, &msg)
 }
 
@@ -183,8 +184,8 @@ fn mint_jwt(sub: &str, role: Role, ttl_hours: i64) -> Option<(String, i64)> {
 
 // ---- error helper --------------------------------------------------
 
-fn err(code: StatusCode, msg: &str) -> Response {
-    (code, msg.to_owned()).into_response()
+fn err(code: StatusCode, msg: &str) -> ApiError {
+    (code, msg.to_owned()).into_response().into()
 }
 
 // ---- login / me / change-password ----------------------------------
@@ -228,7 +229,7 @@ fn client_ip(headers: &HeaderMap) -> String {
 }
 
 /// `429 Too Many Requests` with a `Retry-After` (seconds) for a throttled login.
-fn too_many(retry_after_secs: u64) -> Response {
+fn too_many(retry_after_secs: u64) -> ApiError {
     (
         StatusCode::TOO_MANY_REQUESTS,
         [(
@@ -238,6 +239,7 @@ fn too_many(retry_after_secs: u64) -> Response {
         "too many login attempts; try again later",
     )
         .into_response()
+        .into()
 }
 
 /// The login result: either a minted session, or a signal that the password
@@ -261,7 +263,7 @@ pub async fn login(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(req): Json<LoginReq>,
-) -> Result<Json<LoginOutcome>, Response> {
+) -> Result<Json<LoginOutcome>, ApiError> {
     let ip = client_ip(&headers);
 
     // #1191: reject a throttled account / IP before spending an argon2 verify.
@@ -363,7 +365,7 @@ pub struct MeResp {
 pub async fn me(
     State(state): State<AppState>,
     claims: axum::Extension<Claims>,
-) -> Result<Json<MeResp>, Response> {
+) -> Result<Json<MeResp>, ApiError> {
     // Service tokens have no `users` row; treat them as never needing a
     // password change and MFA-less.
     let row = sqlx::query_as::<_, (i64, Option<String>)>(
@@ -403,7 +405,7 @@ pub struct MfaInitResp {
 /// returns it + its otpauth URL. Stateless: nothing is written until
 /// `mfa/verify` succeeds, so an abandoned enrolment leaves the account
 /// untouched.
-pub async fn mfa_init(claims: axum::Extension<Claims>) -> Result<Json<MfaInitResp>, Response> {
+pub async fn mfa_init(claims: axum::Extension<Claims>) -> Result<Json<MfaInitResp>, ApiError> {
     let secret = crate::mfa::generate_secret_base32();
     let otpauth_url = crate::mfa::otpauth_url(&secret, &claims.sub)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &format!("mfa init: {e}")))?;
@@ -437,7 +439,7 @@ pub async fn mfa_verify(
     State(state): State<AppState>,
     claims: axum::Extension<Claims>,
     Json(req): Json<MfaVerifyReq>,
-) -> Result<StatusCode, Response> {
+) -> Result<StatusCode, ApiError> {
     let current: Option<String> =
         sqlx::query_scalar("SELECT totp_secret FROM users WHERE username = ?")
             .bind(&claims.sub)
@@ -494,7 +496,7 @@ pub async fn mfa_disable(
     State(state): State<AppState>,
     claims: axum::Extension<Claims>,
     Json(req): Json<MfaDisableReq>,
-) -> Result<StatusCode, Response> {
+) -> Result<StatusCode, ApiError> {
     let secret: Option<String> =
         sqlx::query_scalar("SELECT totp_secret FROM users WHERE username = ?")
             .bind(&claims.sub)
@@ -532,7 +534,7 @@ pub async fn change_password(
     claims: axum::Extension<Claims>,
     caller: Caller,
     Json(req): Json<ChangePwReq>,
-) -> Result<StatusCode, Response> {
+) -> Result<StatusCode, ApiError> {
     if req.new_password.chars().count() < MIN_PASSWORD_LEN {
         return Err(err(
             StatusCode::BAD_REQUEST,
@@ -613,7 +615,7 @@ pub struct UserRow {
 }
 
 /// `GET /api/accounts` — admin. Never returns password hashes.
-pub async fn list(State(state): State<AppState>) -> Result<Json<Vec<UserRow>>, Response> {
+pub async fn list(State(state): State<AppState>) -> Result<Json<Vec<UserRow>>, ApiError> {
     let rows = sqlx::query_as::<_, UserRowDb>(
         "SELECT username, role, disabled, must_change_pw, email, allowed_features, permission_group, created_at, updated_at FROM users ORDER BY username",
     )
@@ -641,7 +643,7 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<Vec<UserRow>>, R
 /// exist. Returns `Ok(())` for `None` (no assignment). `400` when the named
 /// group is unknown, so a typo can't silently leave the account unrestricted
 /// (a dangling group falls back to the per-user list in `auth`).
-async fn ensure_group_exists(pool: &sqlx::SqlitePool, group: Option<&str>) -> Result<(), Response> {
+async fn ensure_group_exists(pool: &sqlx::SqlitePool, group: Option<&str>) -> Result<(), ApiError> {
     let Some(group) = group else { return Ok(()) };
     let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM permission_groups WHERE name = ?")
         .bind(group)
@@ -702,7 +704,7 @@ pub async fn create(
     caller: Caller,
     headers: HeaderMap,
     Json(req): Json<CreateReq>,
-) -> Result<(StatusCode, Json<CreateResp>), Response> {
+) -> Result<(StatusCode, Json<CreateResp>), ApiError> {
     let username = req.username.trim();
     if username.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "username required"));
@@ -850,7 +852,7 @@ pub async fn reset_link(
     Path(username): Path<String>,
     caller: Caller,
     headers: HeaderMap,
-) -> Result<StatusCode, Response> {
+) -> Result<StatusCode, ApiError> {
     let Some(mailer) = &state.mailer else {
         return Err(err(StatusCode::BAD_REQUEST, "[mail] not configured"));
     };
@@ -923,7 +925,7 @@ pub async fn update(
     Path(username): Path<String>,
     caller: Caller,
     Json(req): Json<UpdateReq>,
-) -> Result<StatusCode, Response> {
+) -> Result<StatusCode, ApiError> {
     // Validate every field up front so a bad input can't leave a
     // partially-applied update behind.
     let new_role = match &req.role {
@@ -1112,7 +1114,7 @@ pub async fn delete(
     State(state): State<AppState>,
     Path(username): Path<String>,
     caller: Caller,
-) -> Result<StatusCode, Response> {
+) -> Result<StatusCode, ApiError> {
     let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE username = ?")
         .bind(&username)
         .fetch_one(&state.pool)
@@ -1163,7 +1165,7 @@ pub async fn delete(
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn db_err(e: sqlx::Error) -> Response {
+fn db_err(e: sqlx::Error) -> ApiError {
     warn!(error = %e, "accounts db error");
     err(StatusCode::INTERNAL_SERVER_ERROR, "database error")
 }

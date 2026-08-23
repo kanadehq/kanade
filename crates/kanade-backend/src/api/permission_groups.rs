@@ -12,19 +12,20 @@
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
+use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::api::AppState;
 use crate::audit::{self, Caller};
+use crate::http_error::ApiError;
 use kanade_shared::feature::Feature;
 
-fn err(code: StatusCode, msg: &str) -> Response {
-    (code, msg.to_owned()).into_response()
+fn err(code: StatusCode, msg: &str) -> ApiError {
+    (code, msg.to_owned()).into_response().into()
 }
 
-fn db_err(e: sqlx::Error) -> Response {
+fn db_err(e: sqlx::Error) -> ApiError {
     warn!(error = %e, "permission_groups db error");
     err(StatusCode::INTERNAL_SERVER_ERROR, "database error")
 }
@@ -64,7 +65,7 @@ pub struct GroupRow {
 }
 
 /// `GET /api/permission-groups` — admin. Lists groups with their member count.
-pub async fn list(State(state): State<AppState>) -> Result<Json<Vec<GroupRow>>, Response> {
+pub async fn list(State(state): State<AppState>) -> Result<Json<Vec<GroupRow>>, ApiError> {
     let rows = sqlx::query_as::<_, GroupRowDb>(
         "SELECT g.name, g.features, \
                 (SELECT COUNT(*) FROM users u WHERE u.permission_group = g.name) AS member_count, \
@@ -101,7 +102,7 @@ pub async fn create(
     State(state): State<AppState>,
     caller: Caller,
     Json(req): Json<CreateReq>,
-) -> Result<StatusCode, Response> {
+) -> Result<StatusCode, ApiError> {
     let name = req.name.trim();
     if name.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "group name required"));
@@ -146,7 +147,7 @@ pub async fn update(
     Path(name): Path<String>,
     caller: Caller,
     Json(req): Json<UpdateReq>,
-) -> Result<StatusCode, Response> {
+) -> Result<StatusCode, ApiError> {
     let features = Feature::canonicalize(&req.features)
         .map_err(|k| err(StatusCode::BAD_REQUEST, &format!("unknown feature: {k}")))?;
     let features_json = serde_json::to_string(&features)
@@ -181,7 +182,7 @@ pub async fn delete(
     State(state): State<AppState>,
     Path(name): Path<String>,
     caller: Caller,
-) -> Result<StatusCode, Response> {
+) -> Result<StatusCode, ApiError> {
     // Existence check for the 404. The member guard lives INSIDE the delete
     // statement (a `NOT EXISTS` predicate) so the count and the delete are
     // evaluated atomically — a concurrent `PATCH /api/accounts/{u}` that
