@@ -59,6 +59,8 @@ use std::env;
 use std::sync::OnceLock;
 use tracing::{error, warn};
 
+use crate::http_error::ApiError;
+
 /// Hierarchical role: `Viewer < Operator < Admin` (the derived `Ord`
 /// follows declaration order). `admin ⊇ operator ⊇ viewer`.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
@@ -378,7 +380,7 @@ pub async fn verify(
     State(pool): State<SqlitePool>,
     req: Request,
     next: Next,
-) -> Result<Response, Response> {
+) -> Result<Response, ApiError> {
     // 1. Auth opt-out for local development. Checked here rather than left
     //    to [`verify_bearer`] below because this one covers *every* path —
     //    the SPA static files and /health included — while the call below is
@@ -438,7 +440,7 @@ pub async fn verify(
             // known here — which is why [`verify_token`] returns the reason
             // instead of logging it.
             warn!(path, reason, "auth rejected");
-            Err(unauth(&reason))
+            Err(unauth(&reason).into())
         }
     }
 }
@@ -464,17 +466,17 @@ fn gate(req: &Request, required: Role) -> Option<Response> {
 }
 
 /// `route_layer` middleware: caller must be at least `operator`.
-pub async fn require_operator(req: Request, next: Next) -> Result<Response, Response> {
+pub async fn require_operator(req: Request, next: Next) -> Result<Response, ApiError> {
     if let Some(rejection) = gate(&req, Role::Operator) {
-        return Err(rejection);
+        return Err(rejection.into());
     }
     Ok(next.run(req).await)
 }
 
 /// `route_layer` middleware: caller must be `admin`.
-pub async fn require_admin(req: Request, next: Next) -> Result<Response, Response> {
+pub async fn require_admin(req: Request, next: Next) -> Result<Response, ApiError> {
     if let Some(rejection) = gate(&req, Role::Admin) {
-        return Err(rejection);
+        return Err(rejection.into());
     }
     Ok(next.run(req).await)
 }
@@ -507,7 +509,7 @@ pub async fn require_admin(req: Request, next: Next) -> Result<Response, Respons
 ///
 /// Requests with no `MatchedPath` (the SPA static fallback) pass for
 /// everyone — they serve the app shell itself, not data.
-pub async fn require_features(req: Request, next: Next) -> Result<Response, Response> {
+pub async fn require_features(req: Request, next: Next) -> Result<Response, ApiError> {
     // Decide entirely within a borrow of `req.extensions()` and yield only
     // owned data, so no borrow — and no clone of the allow-list — outlives
     // the block. Then `req` is free to move into `next.run`.
@@ -522,7 +524,7 @@ pub async fn require_features(req: Request, next: Next) -> Result<Response, Resp
 
     match denied {
         None => Ok(next.run(req).await),
-        Some(msg) => Err(forbidden(&msg)),
+        Some(msg) => Err(forbidden(&msg).into()),
     }
 }
 
