@@ -43,7 +43,7 @@ sysinfo    = { workspace = true }
 # #219 collect: zip the script's listed files into a bundle before
 # uploading to OBJECT_COLLECTIONS. Minimal feature set (deflate only) —
 # no bzip2/zstd/aes — keeps the build lean.
-zip        = { version = "2.4.2", default-features = false, features = ["deflate"] }
+zip        = { version = "8.6.0", default-features = false, features = ["deflate"] }
 # #841 PR2: the native Windows Event Log reader renders each record to XML
 # (EvtRender) and plucks specific nested elements/attributes out of it
 # (System/EventRecordID, EventData/Data[@Name]). A read-only DOM (roxmltree)
