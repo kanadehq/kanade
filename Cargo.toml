@@ -90,7 +90,7 @@ mime_guess         = "2.0.5"
 # feature is enabled. The default features don't pin one (and other deps
 # pull rustls providers, making auto-detection ambiguous), so pin the
 # pure-Rust provider explicitly — no C toolchain, clean cross-compile.
-jsonwebtoken       = { version = "10.4.0", default-features = false, features = ["rust_crypto"] }
+jsonwebtoken       = { version = "11.0.0", default-features = false, features = ["rust_crypto"] }
 # #1192: TOTP MFA. otpauth = build the enrollment URL; gen_secret = random
 # secret. no default features → skips the heavy qr image dep (the SPA renders
 # the QR from the otpauth URL instead).
