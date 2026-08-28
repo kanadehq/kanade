@@ -1,5 +1,5 @@
 # Sprint 8 install Manifest for the Tauri kanade-client app
-# (yukimemi/kanade#210). The script body lives in the sibling
+# (kanadehq/kanade#210). The script body lives in the sibling
 # `scripts/install-kanade-client.ps1` and gets inlined by
 # `kanade job create` (#215) before the manifest is stored —
 # operators read the script as a normal `.ps1`, the backend

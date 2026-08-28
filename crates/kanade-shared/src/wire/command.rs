@@ -27,7 +27,7 @@ pub struct Command {
     ///
     /// [`script_object`]: Self::script_object
     pub script: String,
-    /// SPEC §2.4.1 / yukimemi/kanade#210: Object Store reference
+    /// SPEC §2.4.1 / kanadehq/kanade#210: Object Store reference
     /// (`<name>/<version>` key into `OBJECT_SCRIPTS`). When set,
     /// the agent fetches the body via `script_cache` and verifies
     /// its sha256 against [`script_object_sha256`] before launching.
@@ -345,7 +345,7 @@ mod tests {
 
     #[test]
     fn command_round_trips_script_object_fields() {
-        // yukimemi/kanade#210: backend builds Commands carrying an
+        // kanadehq/kanade#210: backend builds Commands carrying an
         // OBJECT_SCRIPTS reference + the operator-approved digest;
         // agent resolves on fetch. Both fields must survive a JSON
         // round-trip with the same shape.

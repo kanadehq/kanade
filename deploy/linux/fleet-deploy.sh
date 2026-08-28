@@ -37,7 +37,7 @@ NATS_TOKEN=""
 OUT_DIR=""
 BACKEND_BIN=""
 AGENT_BIN=""
-GITHUB_REPO="yukimemi/kanade"
+GITHUB_REPO="kanadehq/kanade"
 # --mode update scope
 PC=""
 GROUP=""

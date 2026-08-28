@@ -1,5 +1,5 @@
 //! Local on-disk cache of script bodies referenced by
-//! `Command::script_object` (yukimemi/kanade#210).
+//! `Command::script_object` (kanadehq/kanade#210).
 //!
 //! ## Layout
 //!

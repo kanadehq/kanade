@@ -1,15 +1,15 @@
 <div align="center">
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/yukimemi/kanade/main/assets/logo-dark.svg">
-  <img src="https://raw.githubusercontent.com/yukimemi/kanade/main/assets/logo.svg" alt="kanade — orchestrate fleets of Windows endpoints" width="540">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/kanadehq/kanade/main/assets/logo-dark.svg">
+  <img src="https://raw.githubusercontent.com/kanadehq/kanade/main/assets/logo.svg" alt="kanade — orchestrate fleets of Windows endpoints" width="540">
 </picture>
 
-[![CI](https://github.com/yukimemi/kanade/actions/workflows/ci.yml/badge.svg)](https://github.com/yukimemi/kanade/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/yukimemi/kanade/graph/badge.svg)](https://codecov.io/gh/yukimemi/kanade)
+[![CI](https://github.com/kanadehq/kanade/actions/workflows/ci.yml/badge.svg)](https://github.com/kanadehq/kanade/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/kanadehq/kanade/graph/badge.svg)](https://codecov.io/gh/kanadehq/kanade)
 [![crates.io](https://img.shields.io/crates/v/kanade.svg)](https://crates.io/crates/kanade)
 [![docs](https://img.shields.io/badge/docs-yukimemi.github.io%2Fkanade-blue)](https://yukimemi.github.io/kanade/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/yukimemi/kanade/blob/main/LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/kanadehq/kanade/blob/main/LICENSE)
 
 📚 **Docs site:** <https://yukimemi.github.io/kanade/>
 
@@ -24,7 +24,7 @@
 projector + JetStream KV watcher + cron scheduler) + admin CLI + an
 embedded SPA dashboard + JWT-gated `/api/*` + agent self-update via the
 JetStream Object Store. Full design lives in
-[docs/SPEC.md](https://github.com/yukimemi/kanade/blob/main/docs/SPEC.md) (Japanese, ~1150 lines covering Part 1
+[docs/SPEC.md](https://github.com/kanadehq/kanade/blob/main/docs/SPEC.md) (Japanese, ~1150 lines covering Part 1
 overview and Part 2 detailed design).
 
 ## Why
@@ -49,7 +49,7 @@ broker" — which everyone reinvents from scratch.
   replaces stale rollouts in the broker; consumer-side version checks
   guard execution; `kanade kill <job_id>` terminates running children.
   The emergency-stop path is wired from MVP, not bolted on later (see
-  [SPEC.md §2.6](https://github.com/yukimemi/kanade/blob/main/docs/SPEC.md)).
+  [SPEC.md §2.6](https://github.com/kanadehq/kanade/blob/main/docs/SPEC.md)).
 - **Phased build-out.** One server is enough for a few hundred
   endpoints; the same code scales to a 3-node NATS cluster + replicated
   backend + Postgres for several thousand.
@@ -86,12 +86,12 @@ the example manifests (`jobs/*.yaml`). The fastest way is a shallow
 clone of this repo:
 
 ```powershell
-git clone --depth=1 https://github.com/yukimemi/kanade.git
+git clone --depth=1 https://github.com/kanadehq/kanade.git
 cd kanade
 ```
 
 (or `curl` the individual files from
-`https://raw.githubusercontent.com/yukimemi/kanade/main/...` into your
+`https://raw.githubusercontent.com/kanadehq/kanade/main/...` into your
 own working dir if you'd rather not clone).
 
 > **Build it yourself from source.** Skip the `cargo install` step,
@@ -224,7 +224,7 @@ kanade config effective <pc_id>                  # resolved view for a PC (built
 
 ## Authoring jobs
 
-YAML manifests in `jobs/*.yaml` (see [spec §2.4.1](https://github.com/yukimemi/kanade/blob/main/docs/SPEC.md)).
+YAML manifests in `jobs/*.yaml` (see [spec §2.4.1](https://github.com/kanadehq/kanade/blob/main/docs/SPEC.md)).
 Sample manifests in the repo cover:
 
 - `jobs/echo-test.yaml` — minimal ad-hoc command
@@ -493,7 +493,7 @@ remain the best answer about each host), and a host that was never
 correlated stays empty until the first successful poll.
 
 For multi-tenant / per-agent identity (NKeys, NATS JWT, mTLS), see
-[spec §2.7.1](https://github.com/yukimemi/kanade/blob/main/docs/SPEC.md).
+[spec §2.7.1](https://github.com/kanadehq/kanade/blob/main/docs/SPEC.md).
 Stick with the shared token while operating ≤ ~1000 hosts.
 
 ## Dev workflow
@@ -599,7 +599,7 @@ listing every option an operator can use to fix it.
 ### Install scripts (Windows, recommended)
 
 PowerShell scripts under
-[`scripts/`](https://github.com/yukimemi/kanade/blob/main/scripts/)
+[`scripts/`](https://github.com/kanadehq/kanade/blob/main/scripts/)
 handle the whole "drop a folder onto the target, run as Admin" path
 — no Rust toolchain, no bun, no git required on the deploy host:
 
@@ -707,6 +707,6 @@ patterns stabilise.
 
 ## License
 
-MIT — see [LICENSE](https://github.com/yukimemi/kanade/blob/main/LICENSE).
+MIT — see [LICENSE](https://github.com/kanadehq/kanade/blob/main/LICENSE).
 
 [teravars]: https://github.com/yukimemi/teravars

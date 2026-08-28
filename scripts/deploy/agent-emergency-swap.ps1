@@ -9,7 +9,7 @@
   The normal agent upgrade path is `kanade agent rollout`, which sets a
   `target_version` and lets the running agent SELF-UPDATE (download +
   atomic rename + exit(64) + SCM restart). That path is useless when the
-  bug is *in self-update itself* — e.g. yukimemi/kanade#566, where a
+  bug is *in self-update itself* — e.g. kanadehq/kanade#566, where a
   base64-padding mismatch in the staged-binary digest check made the
   agent reject every download and stay pinned to 0.43.46 with no way to
   pull the fix that would un-wedge it (a classic "can't update the

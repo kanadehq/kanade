@@ -148,7 +148,7 @@ pub async fn exec_manifest(
     //                            script_object: Some(k),
     //                            script_object_sha256: Some(<digest>) };
     //                            the agent's script_cache pulls the body
-    //                            at exec time (yukimemi/kanade#210).
+    //                            at exec time (kanadehq/kanade#210).
     // `script_file:` is operator-side only — the CLI inlines its
     // contents into `script` before POSTing, so it never reaches us
     // as an unresolved alternative.

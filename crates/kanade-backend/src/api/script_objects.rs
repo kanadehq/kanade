@@ -398,7 +398,7 @@ pub async fn download(
             let body_len = end_inclusive - start + 1;
 
             // Same async-nats chunk-level read caveat as
-            // app_packages::download (yukimemi/kanade#209). The
+            // app_packages::download (kanadehq/kanade#209). The
             // size cap on this bucket (4 MB) makes the prefix-skip
             // cost much smaller than the installer bucket, but
             // the underlying limitation is identical.

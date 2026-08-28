@@ -464,7 +464,7 @@ if (-not $svc) {
         -BinaryPathName $binPath `
         -StartupType    Automatic `
         -DisplayName    'Kanade NATS Broker' `
-        -Description    'NATS broker for the kanade endpoint-management fleet (yukimemi/kanade).'
+        -Description    'NATS broker for the kanade endpoint-management fleet (kanadehq/kanade).'
 } else {
     Write-Host "Updating $ServiceName configuration"
     Set-Service -Name $ServiceName -StartupType Automatic
