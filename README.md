@@ -8,10 +8,10 @@
 [![CI](https://github.com/kanadehq/kanade/actions/workflows/ci.yml/badge.svg)](https://github.com/kanadehq/kanade/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/kanadehq/kanade/graph/badge.svg)](https://codecov.io/gh/kanadehq/kanade)
 [![crates.io](https://img.shields.io/crates/v/kanade.svg)](https://crates.io/crates/kanade)
-[![docs](https://img.shields.io/badge/docs-yukimemi.github.io%2Fkanade-blue)](https://yukimemi.github.io/kanade/)
+[![docs](https://img.shields.io/badge/docs-kanadehq.github.io%2Fkanade-blue)](https://kanadehq.github.io/kanade/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/kanadehq/kanade/blob/main/LICENSE)
 
-📚 **Docs site:** <https://yukimemi.github.io/kanade/>
+📚 **Docs site:** <https://kanadehq.github.io/kanade/>
 
 </div>
 
