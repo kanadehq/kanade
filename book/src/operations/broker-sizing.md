@@ -165,10 +165,13 @@ synchronised reconnect event** (the herd moment is what decides the splay
 question):
 
 ```sh
+kanade job create configs/jobs/collect-broker-health.yaml   # from kanadehq/kanade-manifests
 kanade exec collect-broker-health --pcs <backend-host-id>
 ```
 
-The job (`configs/jobs/collect-broker-health.yaml`) samples the broker
+The job ([`configs/jobs/collect-broker-health.yaml`](https://github.com/kanadehq/kanade-manifests/blob/main/configs/jobs/collect-broker-health.yaml)
+in the [`kanadehq/kanade-manifests`](https://github.com/kanadehq/kanade-manifests)
+showcase repo) samples the broker
 over ~3 minutes and uploads a bundle to `OBJECT_COLLECTIONS`; download it
 from the SPA **Collect** page (or hand the zip to your reviewer). It is
 read-only and needs **zero pre-setup**: it reads NATS' unauthenticated

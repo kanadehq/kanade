@@ -3065,40 +3065,42 @@ done!
         );
     }
 
-    /// The example check-job + schedule YAMLs shipped under `configs/`
-    /// must stay valid as the schema evolves (#290 PR-C). `include_str!`
-    /// pins them at compile time so a breaking edit fails `cargo test`
+    /// The example check-job + schedule YAMLs, mirrored into
+    /// `tests/fixtures/` from the showcase repo
+    /// (<https://github.com/kanadehq/kanade-manifests>), must stay
+    /// valid as the schema evolves (#290 PR-C). `include_str!` pins
+    /// them at compile time so a breaking edit fails `cargo test`
     /// rather than only `kanade job create` at deploy time.
     #[test]
     fn example_check_job_yamls_parse_and_validate() {
         let jobs = [
             (
                 "check-bitlocker",
-                include_str!("../../../configs/jobs/check-bitlocker.yaml"),
+                include_str!("../tests/fixtures/jobs/check-bitlocker.yaml"),
             ),
             (
                 "check-av-signature",
-                include_str!("../../../configs/jobs/check-av-signature.yaml"),
+                include_str!("../tests/fixtures/jobs/check-av-signature.yaml"),
             ),
             (
                 "check-cert-expiry",
-                include_str!("../../../configs/jobs/check-cert-expiry.yaml"),
+                include_str!("../tests/fixtures/jobs/check-cert-expiry.yaml"),
             ),
             (
                 "check-disk-space",
-                include_str!("../../../configs/jobs/check-disk-space.yaml"),
+                include_str!("../tests/fixtures/jobs/check-disk-space.yaml"),
             ),
             (
                 "check-pending-reboot",
-                include_str!("../../../configs/jobs/check-pending-reboot.yaml"),
+                include_str!("../tests/fixtures/jobs/check-pending-reboot.yaml"),
             ),
             (
                 "check-defender-rtp",
-                include_str!("../../../configs/jobs/check-defender-rtp.yaml"),
+                include_str!("../tests/fixtures/jobs/check-defender-rtp.yaml"),
             ),
             (
                 "check-firewall",
-                include_str!("../../../configs/jobs/check-firewall.yaml"),
+                include_str!("../tests/fixtures/jobs/check-firewall.yaml"),
             ),
         ];
         for (name, yaml) in jobs {
@@ -3123,44 +3125,45 @@ done!
         }
     }
 
-    /// The example user-invokable job YAMLs (#291) shipped under
-    /// `configs/jobs/` must stay valid as the `client:` schema
-    /// evolves. `include_str!` pins them at compile time so a breaking
-    /// edit fails `cargo test`, not `kanade job create` at deploy.
+    /// The example user-invokable job YAMLs (#291), mirrored into
+    /// `tests/fixtures/jobs/` from kanadehq/kanade-manifests, must
+    /// stay valid as the `client:` schema evolves. `include_str!`
+    /// pins them at compile time so a breaking edit fails
+    /// `cargo test`, not `kanade job create` at deploy.
     #[test]
     fn example_client_job_yamls_parse_and_validate() {
         let jobs = [
             (
                 "fix-teams-cache",
                 "troubleshoot",
-                include_str!("../../../configs/jobs/fix-teams-cache.yaml"),
+                include_str!("../tests/fixtures/jobs/fix-teams-cache.yaml"),
             ),
             (
                 "chrome-update",
                 "software_update",
-                include_str!("../../../configs/jobs/chrome-update.yaml"),
+                include_str!("../tests/fixtures/jobs/chrome-update.yaml"),
             ),
             (
                 "install-slack",
                 "catalog",
-                include_str!("../../../configs/jobs/install-slack.yaml"),
+                include_str!("../tests/fixtures/jobs/install-slack.yaml"),
             ),
             (
                 "fix-defender-rtp",
                 "troubleshoot",
-                include_str!("../../../configs/jobs/fix-defender-rtp.yaml"),
+                include_str!("../tests/fixtures/jobs/fix-defender-rtp.yaml"),
             ),
             // #792 custom category ("settings") + #809 message/inventory.
             (
                 "example-power-plan",
                 "settings",
-                include_str!("../../../configs/jobs/example-power-plan.yaml"),
+                include_str!("../tests/fixtures/jobs/example-power-plan.yaml"),
             ),
             // #792: diagnostics moved to its own "support" tab.
             (
                 "collect-diagnostics",
                 "support",
-                include_str!("../../../configs/jobs/collect-diagnostics.yaml"),
+                include_str!("../tests/fixtures/jobs/collect-diagnostics.yaml"),
             ),
         ];
         for (id, category, yaml) in jobs {
@@ -3178,15 +3181,16 @@ done!
         }
     }
 
-    /// #219: the shipped `collect:` example must stay valid as the
-    /// schema evolves. `include_str!` pins it at compile time so a
-    /// breaking edit (or a YAML typo in the PowerShell block) fails
-    /// `cargo test` rather than `kanade job create` at deploy. It carries
-    /// both `collect:` and `client:` (end-user-triggerable), which must
-    /// compose.
+    /// #219: the `collect:` example, mirrored into `tests/fixtures/`
+    /// from kanadehq/kanade-manifests, must stay valid as the schema
+    /// evolves. `include_str!` pins it at compile time so a breaking
+    /// edit (or a YAML typo in the PowerShell block) fails
+    /// `cargo test` rather than `kanade job create` at deploy. It
+    /// carries both `collect:` and `client:` (end-user-triggerable),
+    /// which must compose.
     #[test]
     fn example_collect_job_yaml_parses_and_validates() {
-        let yaml = include_str!("../../../configs/jobs/collect-diagnostics.yaml");
+        let yaml = include_str!("../tests/fixtures/jobs/collect-diagnostics.yaml");
         let m: Manifest = serde_yaml::from_str(yaml).expect("collect-diagnostics parse");
         m.validate().expect("collect-diagnostics validate");
         assert_eq!(m.id, "collect-diagnostics");
@@ -3201,12 +3205,13 @@ done!
         );
     }
 
-    /// The `emit: { type: events }` collector jobs under
-    /// `configs/jobs/` feed the obs_events timeline. `include_str!`
-    /// pins them at compile time so a breaking edit (e.g. an `emit:`
-    /// paired with `check:`/`inventory:`, a bad watermark field, or a
-    /// YAML typo in the PowerShell block) fails `cargo test` rather
-    /// than `kanade job create` at deploy. Every one must carry an
+    /// The `emit: { type: events }` collector jobs, mirrored into
+    /// `tests/fixtures/jobs/` from kanadehq/kanade-manifests, feed
+    /// the obs_events timeline. `include_str!` pins them at compile
+    /// time so a breaking edit (e.g. an `emit:` paired with
+    /// `check:`/`inventory:`, a bad watermark field, or a YAML typo
+    /// in the PowerShell block) fails `cargo test` rather than
+    /// `kanade job create` at deploy. Every one must carry an
     /// `emit.type=events` block and NO check/inventory (validate()
     /// rejects the pairing).
     #[test]
@@ -3219,11 +3224,11 @@ done!
             // on-demand forensic all-token-logons companion.
             (
                 "collect-winlog-logons-all",
-                include_str!("../../../configs/jobs/collect-winlog-logons-all.yaml"),
+                include_str!("../tests/fixtures/jobs/collect-winlog-logons-all.yaml"),
             ),
             (
                 "collect-wlan-events",
-                include_str!("../../../configs/jobs/collect-wlan-events.yaml"),
+                include_str!("../tests/fixtures/jobs/collect-wlan-events.yaml"),
             ),
         ];
         for (id, yaml) in jobs {
@@ -3248,7 +3253,8 @@ done!
         }
     }
 
-    /// The `inventory:` snapshot jobs under `configs/jobs/` project
+    /// The `inventory:` snapshot jobs, mirrored into
+    /// `tests/fixtures/jobs/` from kanadehq/kanade-manifests, project
     /// facts into `inventory_facts` + exploded tables. `include_str!`
     /// pins them at compile time so a breaking edit (bad explode
     /// schema, a YAML typo in the PowerShell block, an `inventory:`
@@ -3260,15 +3266,15 @@ done!
         let jobs = [
             (
                 "inventory-hw",
-                include_str!("../../../configs/jobs/inventory-hw.yaml"),
+                include_str!("../tests/fixtures/jobs/inventory-hw.yaml"),
             ),
             (
                 "inventory-sw",
-                include_str!("../../../configs/jobs/inventory-sw.yaml"),
+                include_str!("../tests/fixtures/jobs/inventory-sw.yaml"),
             ),
             (
                 "inventory-driver",
-                include_str!("../../../configs/jobs/inventory-driver.yaml"),
+                include_str!("../tests/fixtures/jobs/inventory-driver.yaml"),
             ),
         ];
         for (id, yaml) in jobs {
@@ -3287,31 +3293,31 @@ done!
         let schedules = [
             (
                 "check-bitlocker",
-                include_str!("../../../configs/schedules/check-bitlocker.yaml"),
+                include_str!("../tests/fixtures/schedules/check-bitlocker.yaml"),
             ),
             (
                 "check-av-signature",
-                include_str!("../../../configs/schedules/check-av-signature.yaml"),
+                include_str!("../tests/fixtures/schedules/check-av-signature.yaml"),
             ),
             (
                 "check-cert-expiry",
-                include_str!("../../../configs/schedules/check-cert-expiry.yaml"),
+                include_str!("../tests/fixtures/schedules/check-cert-expiry.yaml"),
             ),
             (
                 "check-disk-space",
-                include_str!("../../../configs/schedules/check-disk-space.yaml"),
+                include_str!("../tests/fixtures/schedules/check-disk-space.yaml"),
             ),
             (
                 "check-pending-reboot",
-                include_str!("../../../configs/schedules/check-pending-reboot.yaml"),
+                include_str!("../tests/fixtures/schedules/check-pending-reboot.yaml"),
             ),
             (
                 "check-defender-rtp",
-                include_str!("../../../configs/schedules/check-defender-rtp.yaml"),
+                include_str!("../tests/fixtures/schedules/check-defender-rtp.yaml"),
             ),
             (
                 "check-firewall",
-                include_str!("../../../configs/schedules/check-firewall.yaml"),
+                include_str!("../tests/fixtures/schedules/check-firewall.yaml"),
             ),
         ];
         for (name, yaml) in schedules {
@@ -3323,23 +3329,25 @@ done!
         }
     }
 
-    /// Inventory schedule wrappers (`per_pc` cadence) must stay valid
-    /// alongside the schedule schema. `include_str!` pins them so a
-    /// breaking edit fails `cargo test`, not `kanade schedule create`.
+    /// Inventory schedule wrappers (`per_pc` cadence), mirrored into
+    /// `tests/fixtures/schedules/` from kanadehq/kanade-manifests,
+    /// must stay valid alongside the schedule schema. `include_str!`
+    /// pins them so a breaking edit fails `cargo test`, not
+    /// `kanade schedule create`.
     #[test]
     fn example_inventory_schedule_yamls_parse_and_validate() {
         let schedules = [
             (
                 "inventory-hw",
-                include_str!("../../../configs/schedules/inventory-hw.yaml"),
+                include_str!("../tests/fixtures/schedules/inventory-hw.yaml"),
             ),
             (
                 "inventory-sw",
-                include_str!("../../../configs/schedules/inventory-sw.yaml"),
+                include_str!("../tests/fixtures/schedules/inventory-sw.yaml"),
             ),
             (
                 "inventory-driver",
-                include_str!("../../../configs/schedules/inventory-driver.yaml"),
+                include_str!("../tests/fixtures/schedules/inventory-driver.yaml"),
             ),
         ];
         for (name, yaml) in schedules {
@@ -7523,13 +7531,14 @@ on_failure:
 
     #[test]
     fn shipped_schedule_configs_parse_and_validate() {
-        // Every YAML under configs/schedules/ must parse with the
-        // current Schedule serde AND pass validate() — keeps the
-        // shipped examples from drifting out of sync with the model
-        // (#418 removed back-compat, so drift = broken at create).
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../configs/schedules");
+        // Every YAML mirrored into tests/fixtures/schedules/ (from
+        // kanadehq/kanade-manifests) must parse with the current
+        // Schedule serde AND pass validate() — keeps the shipped
+        // examples from drifting out of sync with the model (#418
+        // removed back-compat, so drift = broken at create).
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/schedules");
         let mut seen = 0;
-        for entry in std::fs::read_dir(&dir).expect("read configs/schedules") {
+        for entry in std::fs::read_dir(&dir).expect("read tests/fixtures/schedules") {
             let path = entry.expect("dir entry").path();
             if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
                 continue;
