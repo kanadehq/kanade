@@ -85,7 +85,7 @@
 
 .PARAMETER GitHubRepo
   GitHub `owner/repo` to pull kanade release assets from. Default:
-  `yukimemi/kanade`. Override if you fork.
+  `kanadehq/kanade`. Override if you fork.
 
 .PARAMETER Force
   Rebuild every selected role even when the staged binary already
@@ -119,7 +119,7 @@ param(
     [string]  $OutDir      = 'dist',
     [switch]  $FromSource,
     [switch]  $FromCrates,
-    [string]  $GitHubRepo  = 'yukimemi/kanade',
+    [string]  $GitHubRepo  = 'kanadehq/kanade',
     [switch]  $Zip,
     [string[]]$Roles       = @('agent', 'backend', 'nats', 'client'),
     [string]  $TargetDir,

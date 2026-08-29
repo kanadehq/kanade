@@ -8,8 +8,8 @@ src = "src"
 [output.html]
 default-theme = "navy"
 preferred-dark-theme = "navy"
-git-repository-url = "https://github.com/yukimemi/kanade"
-edit-url-template = "https://github.com/yukimemi/kanade/edit/main/book/{path}"
+git-repository-url = "https://github.com/kanadehq/kanade"
+edit-url-template = "https://github.com/kanadehq/kanade/edit/main/book/{path}"
 # Empty default so `mdbook serve` and local `mdbook build` produce
 # assets at the root. CI overrides this via
 # MDBOOK_OUTPUT__HTML__SITE_URL to /kanade/en/ or /kanade/ja/

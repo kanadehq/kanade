@@ -6,7 +6,7 @@ the script source alone.
 
 ## The agent stages scripts on disk and runs them via `-File`
 
-As of [PR #230](https://github.com/yukimemi/kanade/pull/230)
+As of [PR #230](https://github.com/kanadehq/kanade/pull/230)
 (agent version 0.42.0+), the agent:
 
 1. Writes your script body to a temp `.ps1` under

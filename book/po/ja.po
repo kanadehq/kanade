@@ -3893,10 +3893,10 @@ msgstr "agent はスクリプトをディスクに staging してから `-File` 
 
 #: src\developing/writing-agent-scripts.md:9
 msgid ""
-"As of [PR #230](https://github.com/yukimemi/kanade/pull/230) (agent version "
+"As of [PR #230](https://github.com/kanadehq/kanade/pull/230) (agent version "
 "0.42.0+), the agent:"
 msgstr ""
-"[PR #230](https://github.com/yukimemi/kanade/pull/230) (agent version "
+"[PR #230](https://github.com/kanadehq/kanade/pull/230) (agent version "
 "0.42.0+) 以降、agent は次の動作をします:"
 
 #: src\developing/writing-agent-scripts.md:12
@@ -4520,10 +4520,10 @@ msgstr ""
 
 #: src\reference/spec.md:7
 msgid ""
-"[**docs/SPEC.md** on GitHub](https://github.com/yukimemi/kanade/blob/main/"
+"[**docs/SPEC.md** on GitHub](https://github.com/kanadehq/kanade/blob/main/"
 "docs/SPEC.md)"
 msgstr ""
-"[**docs/SPEC.md** on GitHub](https://github.com/yukimemi/kanade/blob/main/"
+"[**docs/SPEC.md** on GitHub](https://github.com/kanadehq/kanade/blob/main/"
 "docs/SPEC.md)"
 
 #: src\reference/spec.md:9

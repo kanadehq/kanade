@@ -560,7 +560,7 @@ pub fn router(state: AppState) -> Router {
                 .delete(app_packages::delete_package)
                 .layer(DefaultBodyLimit::max(APP_PACKAGE_BODY_LIMIT)),
         )
-        // Manifest-script Object Store (yukimemi/kanade#210). Sibling
+        // Manifest-script Object Store (kanadehq/kanade#210). Sibling
         // of `app_packages`; distinct lifecycle (manifest-coupled vs
         // operator-curated installers) so the bucket + audit channels
         // are kept separate — see `kanade-shared::kv::OBJECT_SCRIPTS`.

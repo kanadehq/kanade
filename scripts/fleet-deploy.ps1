@@ -88,7 +88,7 @@
     - `X.Y.Z`   → that exact version (must match the staged exe).
 
 .PARAMETER GitHubRepo
-  owner/repo to resolve `-Version latest` against. Default `yukimemi/kanade`.
+  owner/repo to resolve `-Version latest` against. Default `kanadehq/kanade`.
 
 .PARAMETER ExePath
   Staged binary. Default `dist/<role>/kanade-<role>.exe` (where
@@ -204,7 +204,7 @@ param(
     [string]$Jitter = '',
 
     [string]$Version = '',
-    [string]$GitHubRepo = 'yukimemi/kanade',
+    [string]$GitHubRepo = 'kanadehq/kanade',
     [string]$ExePath = '',
     [switch]$Stage,
 

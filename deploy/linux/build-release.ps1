@@ -29,7 +29,7 @@ param(
 	[string]  $Version,
 	[ValidateSet('x86_64', 'aarch64')][string]$Arch = 'x86_64',
 	[string]  $Out = 'dist',
-	[string]  $GitHubRepo = 'yukimemi/kanade',
+	[string]  $GitHubRepo = 'kanadehq/kanade',
 	[string]  $BackendBin,
 	[string]  $AgentBin,
 	[string]  $NatsVersion = 'v2.14.3',

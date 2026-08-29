@@ -239,7 +239,7 @@ pub const OBJECT_APP_PACKAGES: &str = "app_packages";
 
 /// Object Store holding **manifest script bodies** referenced by
 /// `Execute::script_object` (SPEC §2.4.1's alternative to inline
-/// `script:` / repo-local `script_file:`). Per yukimemi/kanade
+/// `script:` / repo-local `script_file:`). Per kanadehq/kanade
 /// issue #210, this is the "Plan B 4-bucket layout" sibling of
 /// `app_packages` — separated because scripts have a different
 /// lifecycle than installer binaries:

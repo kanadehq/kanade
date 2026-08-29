@@ -30,7 +30,7 @@ const INSTALL_DRAIN: Duration = Duration::from_secs(10);
 
 pub fn options() -> kaishin::KaishinOptions {
     kaishin::KaishinOptions::new(
-        "yukimemi",
+        "kanadehq",
         env!("CARGO_PKG_NAME"),
         env!("CARGO_PKG_NAME"),
         env!("CARGO_PKG_VERSION"),

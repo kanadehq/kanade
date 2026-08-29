@@ -503,7 +503,7 @@ pub async fn download(
             let end_inclusive = end.unwrap_or(total_size - 1);
             let body_len = end_inclusive - start + 1;
 
-            // Perf note (tracked in yukimemi/kanade#209):
+            // Perf note (tracked in kanadehq/kanade#209):
             // async-nats' Object Store doesn't expose chunk-level
             // reads, so resuming a partial download forces the
             // backend to read+discard the prefix from NATS. WAN

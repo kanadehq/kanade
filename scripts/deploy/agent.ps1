@@ -334,7 +334,7 @@ if (-not $svc) {
         -BinaryPathName $binPath `
         -StartupType    Automatic `
         -DisplayName    'Kanade Agent' `
-        -Description    'Kanade endpoint management agent (yukimemi/kanade).'
+        -Description    'Kanade endpoint management agent (kanadehq/kanade).'
 } else {
     Write-Host "Updating $ServiceName configuration"
     # Existing service: binPath rarely needs changing (the exe path

@@ -8,7 +8,7 @@ HTTP endpoint the backend serves at:
     GET /api/app-packages/kanade-client/<version>
 
 (see kanade-shared::kv::OBJECT_APP_PACKAGES and
-kanade-backend::api::app_packages — Sprint 8 / yukimemi/kanade#210).
+kanade-backend::api::app_packages — Sprint 8 / kanadehq/kanade#210).
 
 The script's contract with the inventory projector is "emit a single
 JSON object on stdout" — progress chatter therefore goes to STDERR via

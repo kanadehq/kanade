@@ -180,7 +180,7 @@ $ErrorActionPreference = 'Stop'
 # swap window. The trap reads it to guarantee a restart on any failure there.
 $script:BackendStopped = $false
 
-# === Agent-mode knobs (yukimemi/kanade#210 follow-up) =====================
+# === Agent-mode knobs (kanadehq/kanade#210 follow-up) =====================
 # When this script is uploaded to OBJECT_SCRIPTS via
 # `kanade script publish deploy-backend <v> <edited-copy>` and a
 # manifest references it through `execute.script_object`, PowerShell
@@ -717,7 +717,7 @@ if (-not $svc) {
         -BinaryPathName $binPath `
         -StartupType    Automatic `
         -DisplayName    'Kanade Backend' `
-        -Description    'Kanade backend / projector / HTTP admin API (yukimemi/kanade).'
+        -Description    'Kanade backend / projector / HTTP admin API (kanadehq/kanade).'
 } else {
     Write-Host "Updating $ServiceName configuration"
     # Existing service: binPath rarely needs changing (exe path is
