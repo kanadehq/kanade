@@ -1,5 +1,5 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Activity, AlertTriangle, ArrowDown, ArrowUp, Loader2, Plus, ScrollText, Server, Settings2, Trash2, Users, X } from 'lucide-react';
+import { Activity, AlertTriangle, ArrowDown, ArrowUp, CalendarClock, ChevronDown, History, Loader2, MonitorPlay, Play, Plus, ScrollText, Server, Settings2, Trash2, Users, X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 import { Link, useSearchParams } from 'react-router-dom';
@@ -21,6 +21,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { JsonOutput } from '@/components/ui/json-output';
@@ -153,7 +160,7 @@ export function Agents() {
   const { t } = useTranslation('agents');
   const queryClient = useQueryClient();
   const confirm = useConfirm();
-  const { hasRole } = useAuth();
+  const { hasRole, canSee } = useAuth();
   const canOperate = hasRole('operator');
   const [searchParams, setSearchParams] = useSearchParams();
   // #1061: seed the whole filter + sort state from the URL once on mount
@@ -959,31 +966,98 @@ export function Agents() {
                 <TableCell label={t('columns.cpu')} className="text-right text-muted text-xs">{fmtPct(a.agent_cpu_pct)}</TableCell>
                 <TableCell label={t('columns.rss')} className="text-right text-muted text-xs">{fmtBytes(a.agent_rss_bytes)}</TableCell>
                 <TableCell>
-                  <div className="flex gap-1 flex-wrap">
-                    <Button variant="secondary" size="sm" asChild>
-                      <Link to={`/inventory?pc=${encodeURIComponent(a.pc_id)}`}>
-                        <ScrollText className="size-3.5" />{t('actions.facts')}
-                      </Link>
-                    </Button>
-                    <Button variant="secondary" size="sm" onClick={() => doPing(a.pc_id)} disabled={pendingPcs.has(a.pc_id)}>
-                      <Activity className="size-3.5" />{t('actions.ping')}
-                    </Button>
-                    <Button variant="secondary" size="sm" onClick={() => doGroups(a.pc_id)} disabled={pendingPcs.has(a.pc_id)}>
-                      <Users className="size-3.5" />{t('actions.groups')}
-                    </Button>
-                    <Button variant="secondary" size="sm" onClick={() => doEffective(a.pc_id)} disabled={pendingPcs.has(a.pc_id)}>
-                      <Settings2 className="size-3.5" />{t('actions.effective')}
-                    </Button>
-                    <Button
-                      variant="danger"
-                      size="sm"
-                      onClick={() => doDelete(a.pc_id)}
-                      disabled={!canOperate || pendingPcs.has(a.pc_id)}
-                      title={canOperate ? undefined : t('rbac.operatorRequired', { ns: 'common' })}
-                    >
-                      <Trash2 className="size-3.5" />{t('actions.delete')}
-                    </Button>
-                  </div>
+                  {/* #actions-menu: was a row of standalone icon buttons
+                      (facts / ping / groups / effective / delete), which
+                      wrapped to two lines per row and left no room to add
+                      the job-run / activity / events entry points the
+                      operator actually wants from the fleet roster.
+                      Collapsed into one dropdown so the column stays a
+                      fixed narrow width regardless of how many actions
+                      it carries. */}
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        aria-label={t('actions.menuAria', { pcId: a.pc_id })}
+                      >
+                        {t('actions.menu')}
+                        <ChevronDown className="size-3" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem asChild>
+                        <Link to={`/inventory?pc=${encodeURIComponent(a.pc_id)}`}>
+                          <ScrollText className="size-4 shrink-0" />
+                          {t('actions.facts')}
+                        </Link>
+                      </DropdownMenuItem>
+                      {canSee('exec') && (
+                        <DropdownMenuItem asChild>
+                          <Link to={`/exec?pc=${encodeURIComponent(a.pc_id)}`}>
+                            <Play className="size-4 shrink-0" />
+                            {t('actions.runJob')}
+                          </Link>
+                        </DropdownMenuItem>
+                      )}
+                      {canSee('activity') && (
+                        <DropdownMenuItem asChild>
+                          <Link to={`/activity?pc_id=${encodeURIComponent(a.pc_id)}`}>
+                            <History className="size-4 shrink-0" />
+                            {t('actions.viewActivity')}
+                          </Link>
+                        </DropdownMenuItem>
+                      )}
+                      {canSee('events') && (
+                        <DropdownMenuItem asChild>
+                          <Link to={`/events?pc=${encodeURIComponent(a.pc_id)}`}>
+                            <CalendarClock className="size-4 shrink-0" />
+                            {t('actions.viewEvents')}
+                          </Link>
+                        </DropdownMenuItem>
+                      )}
+                      {canOperate && canSee('remote') && (
+                        <DropdownMenuItem asChild>
+                          <Link to={`/remote/${encodeURIComponent(a.pc_id)}`}>
+                            <MonitorPlay className="size-4 shrink-0" />
+                            {t('actions.remoteScreen')}
+                          </Link>
+                        </DropdownMenuItem>
+                      )}
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem
+                        onSelect={() => doPing(a.pc_id)}
+                        disabled={pendingPcs.has(a.pc_id)}
+                      >
+                        <Activity className="size-4 shrink-0" />
+                        {t('actions.ping')}
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        onSelect={() => doGroups(a.pc_id)}
+                        disabled={pendingPcs.has(a.pc_id)}
+                      >
+                        <Users className="size-4 shrink-0" />
+                        {t('actions.groups')}
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        onSelect={() => doEffective(a.pc_id)}
+                        disabled={pendingPcs.has(a.pc_id)}
+                      >
+                        <Settings2 className="size-4 shrink-0" />
+                        {t('actions.effective')}
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem
+                        variant="danger"
+                        onSelect={() => doDelete(a.pc_id)}
+                        disabled={!canOperate || pendingPcs.has(a.pc_id)}
+                        title={canOperate ? undefined : t('rbac.operatorRequired', { ns: 'common' })}
+                      >
+                        <Trash2 className="size-4 shrink-0" />
+                        {t('actions.delete')}
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                 </TableCell>
               </TableRow>
             );
