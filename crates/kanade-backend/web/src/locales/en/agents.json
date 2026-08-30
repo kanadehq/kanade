@@ -71,7 +71,13 @@
     "credential": "Which NATS credential this host's live connection authenticated with, as reported by the BROKER rather than by the agent — a host kitted from a stale image reports what it was given, not what the server accepted. Blank means no live connection has been correlated to it, which is not the same as being on the old credential."
   },
   "actions": {
+    "menu": "actions",
+    "menuAria": "Open actions menu for {{pcId}}",
     "facts": "facts",
+    "runJob": "run job",
+    "viewActivity": "view activity",
+    "viewEvents": "view events",
+    "remoteScreen": "remote screen",
     "ping": "ping",
     "groups": "groups",
     "effective": "effective",

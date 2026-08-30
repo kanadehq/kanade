@@ -143,7 +143,14 @@ export function Activity() {
   useEffect(() => {
     setJobId(urlJobId);
   }, [urlJobId]);
-  const [pcId, setPcId] = useState('');
+  // pc_id deep-link target (the Agents page row-actions menu links here
+  // as `/activity?pc_id=<id>`). Same seed + re-sync + mirror-back shape
+  // as job_id above.
+  const urlPcId = searchParams.get('pc_id') ?? '';
+  const [pcId, setPcId] = useState(urlPcId);
+  useEffect(() => {
+    setPcId(urlPcId);
+  }, [urlPcId]);
   const [execId, setExecId] = useState('');
   const [stdoutFilter, setStdoutFilter] = useState('');
   const [stderrFilter, setStderrFilter] = useState('');
@@ -172,6 +179,9 @@ export function Activity() {
   useEffect(() => {
     setUrlParam('job_id', dJobId);
   }, [dJobId, setUrlParam]);
+  useEffect(() => {
+    setUrlParam('pc_id', dPcId);
+  }, [dPcId, setUrlParam]);
 
   const queryString = useMemo(() => {
     const sp = new URLSearchParams();

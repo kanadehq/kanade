@@ -46,6 +46,11 @@ export function Exec() {
   // clobber that on rerender. Targets + confirm still happen here.
   const [searchParams] = useSearchParams();
   const [jobId, setJobId] = useState(() => searchParams.get('job_id') ?? '');
+  // Same deep-link idea for a single PC: the Agents page row-actions
+  // menu links here as `/exec?pc=<id>`, so seed target mode straight to
+  // 'pcs' with that PC preselected. Falls back to the usual empty
+  // 'pcs' default when there's no `pc` param.
+  const urlPc = searchParams.get('pc');
   // Default to 'pcs' (not 'all'): firing a job at every registered
   // agent should be a deliberate, explicit choice — never the state
   // the form lands in. With 'pcs' selected and no PCs picked,
@@ -53,7 +58,7 @@ export function Exec() {
   // the operator names targets.
   const [mode, setMode] = useState<TargetMode>('pcs');
   const [groups, setGroups] = useState<string[]>([]);
-  const [pcs, setPcs] = useState<string[]>([]);
+  const [pcs, setPcs] = useState<string[]>(() => (urlPc ? [urlPc] : []));
   const [jitter, setJitter] = useState('');
 
   const jobsQ = useQuery({
