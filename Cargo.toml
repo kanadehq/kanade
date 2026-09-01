@@ -94,7 +94,7 @@ jsonwebtoken       = { version = "10.4.0", default-features = false, features = 
 # #1192: TOTP MFA. otpauth = build the enrollment URL; gen_secret = random
 # secret. no default features → skips the heavy qr image dep (the SPA renders
 # the QR from the otpauth URL instead).
-totp-rs            = { version = "5.7.2", default-features = false, features = ["gen_secret", "otpauth"] }
+totp-rs            = { version = "6.0.0", default-features = false, features = ["gen_secret", "otpauth"] }
 # Same CryptoProvider ambiguity as jsonwebtoken above, but for the async-nats
 # TLS (wss) path: the CLI links BOTH aws-lc-rs (via reqwest) and ring (via
 # async-nats), so rustls can't auto-pick and `kanade run` over wss panics on
