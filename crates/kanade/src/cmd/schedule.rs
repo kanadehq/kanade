@@ -574,7 +574,8 @@ mod tests {
 
     #[test]
     fn validate_one_accepts_a_real_schedule() {
-        let yaml = repo_root().join("configs/schedules/check-av-signature.yaml");
+        let yaml = repo_root()
+            .join("crates/kanade-shared/tests/fixtures/schedules/check-av-signature.yaml");
         if !yaml.exists() {
             return;
         }
