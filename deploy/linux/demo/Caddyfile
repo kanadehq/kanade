@@ -1,0 +1,33 @@
+# kanade demo — Caddy reverse proxy with automatic HTTPS (Let's Encrypt).
+# setup-demo.sh substitutes __KANADE_DEMO_DOMAIN__ with the demo box's
+# sslip.io hostname (or a real domain, if one is ever pointed at it).
+#
+# Same shape as ../Caddyfile for the real deployment: only :443 (and :80
+# for the ACME redirect) faces the internet. demo-api binds 127.0.0.1 only,
+# so Caddy is the single public surface here too.
+__KANADE_DEMO_DOMAIN__ {
+	encode zstd gzip
+
+	# Explicit `handle` blocks, not bare `reverse_proxy`/`try_files`
+	# directives: Caddy sorts directives by its own fixed global order
+	# (not file order), so a bare `reverse_proxy /api/*` above a bare
+	# `try_files` can lose to the SPA fallback depending on that order.
+	# `handle` blocks are matched top-to-bottom as written, so /api and
+	# /health are guaranteed to win before the catch-all SPA handler.
+	handle /api/* {
+		# Forwards the Upgrade header automatically — covers the
+		# /api/remote/*/ws WebSocket used by the remote-assist viewer
+		# (#1140), unlike Vite's dev proxy which needs ws:true.
+		reverse_proxy 127.0.0.1:8082
+	}
+	handle /health {
+		reverse_proxy 127.0.0.1:8082
+	}
+	handle {
+		# The built SPA. try_files falls back to index.html for
+		# client-side routes (react-router).
+		root * /var/www/kanade-demo
+		try_files {path} /index.html
+		file_server
+	}
+}

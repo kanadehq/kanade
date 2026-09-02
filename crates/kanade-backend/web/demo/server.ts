@@ -3187,6 +3187,11 @@ type RemoteSocketData = { pcId: string; seq: number; timer?: ReturnType<typeof s
 
 const server = Bun.serve<RemoteSocketData>({
   port: PORT,
+  // Loopback-only: a Caddy reverse proxy is the intended public surface
+  // when this runs outside `cargo make demo` (e.g. a hosted demo box).
+  // Matches the backend's own `127.0.0.1` bind in deploy/linux/setup.sh —
+  // don't rely on the cloud firewall alone.
+  hostname: process.env.DEMO_API_HOST ?? '127.0.0.1',
   idleTimeout: 60,
   // Return type annotated: `fetch` calls `server.upgrade`, so without it TS
   // recurses through `server`'s own initialiser and gives up (TS7022/7023).
