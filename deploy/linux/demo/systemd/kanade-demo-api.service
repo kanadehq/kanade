@@ -1,0 +1,25 @@
+[Unit]
+Description=kanade demo-api (mock backend for the hosted demo SPA)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kanade-demo
+Group=kanade-demo
+Environment=DEMO_API_PORT=8082
+Environment=DEMO_API_HOST=127.0.0.1
+ExecStart=/usr/local/bin/bun run /var/lib/kanade-demo/server.ts
+WorkingDirectory=/var/lib/kanade-demo
+Restart=on-failure
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/kanade-demo
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
