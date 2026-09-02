@@ -175,29 +175,187 @@ function agentRow(p: (typeof FLEET)[number]) {
   };
 }
 
+/**
+ * The roster, filtered the way the real `GET /api/agents` filters it
+ * (`kanade-backend/src/api/agents.rs`). Every filter the Agents page can
+ * send is honoured here, because a filter the mock silently ignores looks
+ * exactly like a broken filter: the input accepts text, the request
+ * succeeds, and all 248 rows stay on screen.
+ *
+ * Semantics copied from the backend, not invented:
+ * - `q` / `user` / `version` are REGEXES (`super::compile`), not substring
+ *   matches — `q` over pc_id + hostname, `user` over last_logon_user +
+ *   display name, `version` over agent_version.
+ * - `meta_any` is a substring match over ANY `agent_meta` VALUE.
+ * - `meta.<key>.<op>` conditions, with the backend's operator set.
+ * - `sort` / `dir`, including `meta:<key>`.
+ */
+function matchesRegex(re: RegExp | null, ...fields: string[]): boolean {
+  return re === null || fields.some((f) => re.test(f));
+}
+
+/**
+ * A `?q=`-style regex parameter, compiled the way the backend's
+ * `api::compile` does: an invalid pattern is a 400 there, so it must not
+ * silently degrade to "matches everything" here.
+ *
+ * CASE-SENSITIVE, because `Regex::new` is — a fixture that quietly
+ * matched case-insensitively would teach a filter behaviour the real
+ * deployment does not have. (The one thing that cannot be reproduced:
+ * Rust's inline `(?i)` is a syntax error in JS, so a case-insensitive
+ * search must be written out, e.g. `[Kk]anade`.)
+ */
+function compileParam(raw: string | null): RegExp | null | 'invalid' {
+  const s = (raw ?? '').trim();
+  if (!s) return null;
+  try {
+    return new RegExp(s);
+  } catch {
+    return 'invalid';
+  }
+}
+
+const META_OPS = ['contains', 'eq', 'neq', 'starts', 'empty', 'set', 'absent'] as const;
+type MetaOp = (typeof META_OPS)[number];
+
 get(/^\/api\/agents$/, (_req, url) => {
-  const q = (url.searchParams.get('q') ?? '').toLowerCase();
   const status = url.searchParams.get('status');
   const limit = Number(url.searchParams.get('limit') ?? '50');
   const offset = Number(url.searchParams.get('offset') ?? '0');
 
-  let rows = FLEET;
-  if (status === 'online') rows = rows.filter((p) => p.online);
-  if (status === 'offline') rows = rows.filter((p) => !p.online);
-  if (q) {
-    rows = rows.filter((p) =>
-      [p.pc_id, p.last_logon_display_name, p.dept, p.site, p.model].some((v) =>
-        v.toLowerCase().includes(q),
-      ),
-    );
+  const qRe = compileParam(url.searchParams.get('q'));
+  const userRe = compileParam(url.searchParams.get('user'));
+  const versionRe = compileParam(url.searchParams.get('version'));
+  for (const [name, re] of [
+    ['q', qRe],
+    ['user', userRe],
+    ['version', versionRe],
+  ] as const) {
+    if (re === 'invalid') {
+      return new Response(`invalid regex for ${name}`, { status: 400 });
+    }
   }
 
-  const page = rows.slice(offset, offset + limit).map(agentRow);
+  // `meta.<key>.<op>=<value>`. The key may itself contain dots, so the OP
+  // is split off the RIGHT — same as the backend's `rsplit_once('.')`.
+  const conds: Array<{ key: string; op: MetaOp; value: string }> = [];
+  for (const [rawKey, rawVal] of url.searchParams.entries()) {
+    if (!rawKey.startsWith('meta.')) continue;
+    const rest = rawKey.slice('meta.'.length);
+    const dot = rest.lastIndexOf('.');
+    if (dot < 1) return new Response(`malformed meta filter \`${rawKey}\``, { status: 400 });
+    const key = rest.slice(0, dot).trim();
+    const op = rest.slice(dot + 1) as MetaOp;
+    if (!key) return new Response(`meta filter \`${rawKey}\` has an empty key`, { status: 400 });
+    if (!META_OPS.includes(op)) {
+      return new Response(`unknown meta filter operator \`${op}\` in \`${rawKey}\``, {
+        status: 400,
+      });
+    }
+    const value = (rawVal ?? '').trim();
+    // Incomplete condition — skipped rather than matching nothing, so a
+    // half-typed filter row does not empty the table. Only the operators
+    // that consume a value can be incomplete; set/empty/absent are
+    // presence checks and are complete on their own.
+    const wantsValue = op === 'contains' || op === 'eq' || op === 'neq' || op === 'starts';
+    if (wantsValue && !value) continue;
+    conds.push({ key, op, value });
+  }
+
+  const metaAny = (url.searchParams.get('meta_any') ?? '').trim().toLowerCase();
+
+  let rows = FLEET.filter((p) => {
+    if (!matchesRegex(qRe as RegExp | null, p.pc_id, p.hostname)) return false;
+    if (!matchesRegex(userRe as RegExp | null, p.last_logon_user, p.last_logon_display_name)) {
+      return false;
+    }
+    if (!matchesRegex(versionRe as RegExp | null, p.agent_version)) return false;
+
+    const meta = metaAny || conds.length ? agentRow(p).meta : [];
+
+    if (metaAny && !meta.some((e) => e.value.toLowerCase().includes(metaAny))) return false;
+
+    for (const c of conds) {
+      const entries = meta.filter((e) => e.key === c.key);
+      const ok = (() => {
+        switch (c.op) {
+          case 'absent':
+            return entries.length === 0;
+          case 'set':
+            return entries.length > 0;
+          case 'empty':
+            return entries.some((e) => e.value === '');
+          case 'eq':
+            return entries.some((e) => e.value === c.value);
+          case 'neq':
+            return entries.some((e) => e.value !== c.value);
+          case 'starts':
+            return entries.some((e) =>
+              e.value.toLowerCase().startsWith(c.value.toLowerCase()),
+            );
+          case 'contains':
+            return entries.some((e) => e.value.toLowerCase().includes(c.value.toLowerCase()));
+        }
+      })();
+      if (!ok) return false;
+    }
+    return true;
+  });
+
+  // #1061 sort. `meta:<key>` sorts by that attribute's value; anything
+  // else is one of the built-in columns. Default is the historical
+  // `updated_at DESC`, which for this fixture is heartbeat recency.
+  const sort = (url.searchParams.get('sort') ?? '').trim();
+  if (sort) {
+    const desc = (url.searchParams.get('dir') ?? 'asc') === 'desc';
+    const keyOf = (p: (typeof FLEET)[number]): string | number => {
+      if (sort.startsWith('meta:')) {
+        const k = sort.slice('meta:'.length).trim();
+        return agentRow(p).meta.find((e) => e.key === k)?.value ?? '';
+      }
+      switch (sort) {
+        case 'pc_id':
+          return p.pc_id;
+        case 'hostname':
+          return p.hostname;
+        case 'os':
+        case 'os_family':
+          return p.os_family;
+        case 'agent':
+        case 'agent_version':
+          return p.agent_version;
+        case 'last_heartbeat':
+        case 'updated_at':
+          // Smaller "ms ago" is more recent, so negate to keep ascending
+          // order meaning oldest-first the way a timestamp column does.
+          return -p.heartbeat_ms_ago;
+        default:
+          return p.pc_id;
+      }
+    };
+    rows = [...rows].sort((a, b) => {
+      const ka = keyOf(a);
+      const kb = keyOf(b);
+      const cmp =
+        typeof ka === 'number' && typeof kb === 'number'
+          ? ka - kb
+          : String(ka).localeCompare(String(kb), 'ja');
+      return desc ? -cmp : cmp;
+    });
+  }
+
+  // The status chips count the FILTERED set, not the whole fleet — the
+  // backend derives both from `matched_rows`. Reporting fleet totals here
+  // made a filtered view claim "オンライン (231)" beside eight rows.
+  const online = rows.filter((p) => p.online).length;
+  const matched = status ? rows.filter((p) => (status === 'online' ? p.online : !p.online)) : rows;
+
+  const page = matched.slice(offset, offset + limit).map(agentRow);
   return json(page, {
     headers: {
-      'X-Total-Count': String(rows.length),
-      'X-Online-Count': String(ONLINE.length),
-      'X-Offline-Count': String(OFFLINE.length),
+      'X-Total-Count': String(matched.length),
+      'X-Online-Count': String(online),
+      'X-Offline-Count': String(rows.length - online),
     },
   });
 });
@@ -220,6 +378,41 @@ get(/^\/api\/agents\/versions$/, () => {
 get(/^\/api\/agents\/meta-keys$/, () =>
   json(['display_name', 'email', 'department', 'site', 'model', 'serial']),
 );
+
+// Bulk metadata for the rows on screen (#1357) — what the tables' meta
+// COLUMNS read, as `{ pc_id: [{key, value}] }`. Distinct from the per-PC
+// `/meta` below, which answers `{ entries }` for one host.
+//
+// A literal route, so it beats `/api/agents/([^/]+)` — without it that
+// parameterised sibling swallowed `meta` as a pc_id and answered
+// `404 agent not found`, which the SPA turns into blank meta cells: the
+// selected columns appear in the header and every row under them is
+// empty. Exactly the `/api/agents/releases` trap the comment below
+// describes, hit a second time.
+//
+// Derived from `agentRow(p).meta`, the same builder the per-PC route
+// uses, so a column and the PC detail page cannot disagree.
+get(/^\/api\/agents\/meta$/, (_req, url) => {
+  const want = (url.searchParams.get('pcs') ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const out: Record<string, Array<{ key: string; value: string }>> = {};
+  for (const id of want) {
+    // `id` is ALREADY decoded: `searchParams.get` decodes the value once,
+    // and the client encodes the whole joined list as one component
+    // (`encodeURIComponent(ids.join(','))` in table.tsx's useAgentMeta),
+    // so the comma-split tokens are plain pc_ids. A second decode would
+    // both diverge from the backend — Axum's `Query` extractor decodes
+    // exactly once — and throw `URIError` on a lone `%` (`?pcs=%25`),
+    // turning an unknown id into a 500 instead of an omitted key.
+    const p = findPc(id);
+    // Unknown ids are omitted rather than 404ing the whole batch: one
+    // stale row must not blank the metadata for every other row.
+    if (p) out[p.pc_id] = agentRow(p).meta;
+  }
+  return json(out);
+});
 
 // Per-PC routes. A parameterised pattern like `([^/]+)` would swallow
 // the literal siblings above (`versions`, `meta-keys`) and below
@@ -676,15 +869,51 @@ function resultListRow(x: DemoResult) {
 get(/^\/api\/results$/, (_req, url) => {
   const limit = Number(url.searchParams.get('limit') ?? '50');
   const offset = Number(url.searchParams.get('offset') ?? '0');
-  const jobId = url.searchParams.get('job_id');
-  const pcId = url.searchParams.get('pc_id');
   const status = url.searchParams.get('status');
 
+  // Every one of these is a REGEX in the real backend (results.rs
+  // ListParams: pc_id, job_id, exec_id, stdout, stderr), not a substring
+  // match — plain text without metacharacters just happens to behave like
+  // one. `exec_id`, `stdout`, `stderr` and `since` had no implementation
+  // here at all, so the Activity page's output-content filters silently
+  // returned the unfiltered list.
+  const res: Array<[string, RegExp | null | 'invalid']> = [
+    ['pc_id', compileParam(url.searchParams.get('pc_id'))],
+    ['job_id', compileParam(url.searchParams.get('job_id'))],
+    ['exec_id', compileParam(url.searchParams.get('exec_id'))],
+    ['stdout', compileParam(url.searchParams.get('stdout'))],
+    ['stderr', compileParam(url.searchParams.get('stderr'))],
+  ];
+  for (const [name, re] of res) {
+    if (re === 'invalid') return new Response(`invalid regex for ${name}`, { status: 400 });
+  }
+  const [pcRe, jobRe, execRe, outRe, errRe] = res.map(([, re]) => re as RegExp | null);
+
+  // #399: the lower bound is on `started_at` — the column the table
+  // shows — not on when the backend recorded the row.
+  const sinceMs = Date.parse(url.searchParams.get('since') ?? '') || 0;
+
   let rows = RESULTS;
-  if (jobId) rows = rows.filter((x) => x.job_id === jobId);
-  if (pcId) rows = rows.filter((x) => x.pc_id.toLowerCase().includes(pcId.toLowerCase()));
   if (status === 'failure') rows = rows.filter((x) => x.exit_code !== 0);
   if (status === 'success') rows = rows.filter((x) => x.exit_code === 0);
+  rows = rows.filter((x) => {
+    // `started_at` / `exec_id` are DERIVED in resultListRow, so the filter
+    // reads them from there rather than re-deriving — a row that matched a
+    // filter but displayed a different exec_id would be worse than either.
+    const row = resultListRow(x);
+    if (sinceMs && Date.parse(row.started_at) < sinceMs) return false;
+    if (pcRe && !pcRe.test(row.pc_id)) return false;
+    // NULL job_id/exec_id are matched as the empty string server-side, so
+    // a `^foo` filter excludes them while an unset filter keeps them.
+    if (jobRe && !jobRe.test(row.job_id ?? '')) return false;
+    if (execRe && !execRe.test(row.exec_id ?? '')) return false;
+    // Against the WHOLE buffer, not resultListRow's 200-char preview:
+    // the backend matches the stored output and only clips for display,
+    // so filtering the preview would miss hits past the cut.
+    if (outRe && !outRe.test(x.stdout)) return false;
+    if (errRe && !errRe.test(x.stderr)) return false;
+    return true;
+  });
 
   return json(rows.slice(offset, offset + limit).map(resultListRow), {
     headers: { 'X-Total-Count': String(rows.length) },
@@ -1612,15 +1841,57 @@ get(/^\/api\/obs_events$/, (_req, url) => {
   const pcId = url.searchParams.get('pc_id');
   const from = url.searchParams.get('from');
   const to = url.searchParams.get('to');
-  const kinds = (url.searchParams.get('kinds') ?? '').split(',').filter(Boolean);
-  const sources = (url.searchParams.get('sources') ?? '').split(',').filter(Boolean);
+  const csv = (k: string) => (url.searchParams.get(k) ?? '').split(',').filter(Boolean);
+  const kinds = csv('kinds');
+  const kindsEx = csv('kinds_ex');
+  const sources = csv('sources');
+  const sourcesEx = csv('sources_ex');
+
+  // Issue #391: the payload pair constrains only when BOTH halves are
+  // present. A key alone would compare against NULL server-side and blank
+  // the whole result set, so it is neutralised instead. The key is also
+  // allow-listed to identifier characters there (it is interpolated into a
+  // JSONPath), and a key outside that set is a 400 — not a silent no-op.
+  const rawKey = (url.searchParams.get('payload_key') ?? '').trim();
+  if (rawKey && !/^[A-Za-z0-9_]+$/.test(rawKey)) {
+    return new Response('invalid payload_key', { status: 400 });
+  }
+  const payloadValue = rawKey ? url.searchParams.get('payload_value') : null;
+  const payloadKey = payloadValue === null ? '' : rawKey;
+
+  // #1343: blank is "no filter", not "match every PC whose metadata
+  // contains the empty string" — the latter drops every host with no
+  // metadata the moment the box is cleared.
+  const metaAny = (url.searchParams.get('meta_any') ?? '').trim().toLowerCase();
+  // Matches through agent_meta: the PCs whose metadata contains the text.
+  // A PC with no metadata never matches, which is what the backend's
+  // `pc_id IN (SELECT …)` gives.
+  const metaPcs = metaAny
+    ? new Set(
+        FLEET.filter((p) =>
+          agentRow(p).meta.some((e) => e.value.toLowerCase().includes(metaAny)),
+        ).map((p) => p.pc_id),
+      )
+    : null;
 
   let rows = buildEvents();
   if (pcId) rows = rows.filter((e) => e.pc_id.toLowerCase().includes(pcId.toLowerCase()));
   if (from) rows = rows.filter((e) => e.at >= Date.parse(from));
   if (to) rows = rows.filter((e) => e.at <= Date.parse(to));
   if (kinds.length) rows = rows.filter((e) => kinds.includes(e.kind));
+  if (kindsEx.length) rows = rows.filter((e) => !kindsEx.includes(e.kind));
   if (sources.length) rows = rows.filter((e) => sources.includes(e.source));
+  if (sourcesEx.length) rows = rows.filter((e) => !sourcesEx.includes(e.source));
+  if (metaPcs) rows = rows.filter((e) => metaPcs.has(e.pc_id));
+  if (payloadKey) {
+    rows = rows.filter((e) => {
+      const v = (e.payload as Record<string, unknown> | null)?.[payloadKey];
+      // Collectors emit numbers as JSON numbers (logon_type: 2) and the
+      // backend binds a numeric twin, so compare stringified — a
+      // text-only comparison would never match those.
+      return v !== undefined && v !== null && String(v) === payloadValue;
+    });
+  }
 
   return json({
     events: rows.slice(0, limit).map((e, i) => ({
@@ -1788,14 +2059,21 @@ get(/^\/api\/inventory\/by-job\/(.+)$/, (_req, url, m) => {
   const job = INV_JOBS.find((j) => j.manifest_id === manifestId) ?? INV_JOBS[0]!;
   const limit = Number(url.searchParams.get('limit') ?? '50');
   const offset = Number(url.searchParams.get('offset') ?? '0');
+  // `q` is a case-insensitive pc_id substring filter (inventory.rs's
+  // ByJobParams — a LIKE, not a regex, unlike the Agents page's `q`).
+  // Unimplemented here, the Inventory search box changed nothing.
+  const q = (url.searchParams.get('q') ?? '').trim().toLowerCase();
+  const rows = q ? FLEET.filter((p) => p.pc_id.toLowerCase().includes(q)) : FLEET;
   return json({
     manifest_id: job.manifest_id,
     display: job.display,
     summary: job.summary,
-    total: FLEET.length,
+    // `total` is the FILTERED count — it drives the pager, so reporting
+    // the fleet size would page over rows the filter had removed.
+    total: rows.length,
     limit,
     offset,
-    rows: FLEET.slice(offset, offset + limit).map((p) => ({
+    rows: rows.slice(offset, offset + limit).map((p) => ({
       pc_id: p.pc_id,
       facts: invFacts(p, job.manifest_id),
       collected_at: iso(p.heartbeat_ms_ago + 20 * 60 * 1000),
