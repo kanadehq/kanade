@@ -12,6 +12,9 @@ pub struct RevokeArgs {
 
 #[derive(Args, Debug)]
 pub struct UnrevokeArgs {
+    /// Command id to re-activate (matches Command.id from the YAML
+    /// manifest) — the counterpart of `kanade revoke`'s cmd_id, undoing
+    /// it back to ACTIVE.
     pub cmd_id: String,
 }
 
