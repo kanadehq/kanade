@@ -18,9 +18,29 @@ const DEFAULT_BACKEND: &str = "http://127.0.0.1:8080";
     version
 )]
 struct Cli {
+    /// NATS broker URL (not the backend).
+    ///
+    /// Used by the broker subcommands: `run`, `ping`, `kill`, `revoke`,
+    /// `unrevoke`, `agent`, `config`, `group` (except `group def`,
+    /// which is HTTP — see --backend-url), `meta`, `script`, `app`,
+    /// `jetstream`. Its credential is NOT a flag — the CLI reads
+    /// `HKLM\SOFTWARE\kanade\cli\NatsToken` (Windows; no installer
+    /// writes this today — a manual reg add), then
+    /// `HKLM\SOFTWARE\kanade\agent\NatsToken`, then
+    /// `$KANADE_NATS_TOKEN`, and connects unauthenticated if it finds
+    /// none of them.
     #[arg(long, global = true, default_value = DEFAULT_NATS, env = "KANADE_NATS_URL")]
     server: String,
 
+    /// Backend HTTP base URL.
+    ///
+    /// Used by the HTTP subcommands: `job`, `schedule`, `exec`, `view`,
+    /// `query`, `freeze`, `account`, `group def`. They authenticate
+    /// WITH `$KANADE_AUTH_TOKEN`, a JWT — a different credential from
+    /// the broker token above, which is the usual source of confusion
+    /// when one set of subcommands works and the other does not.
+    /// `kanade login` also talks to the backend, but PRODUCES that JWT
+    /// rather than requiring it.
     #[arg(long, global = true, default_value = DEFAULT_BACKEND, env = "KANADE_BACKEND_URL")]
     backend_url: String,
 

@@ -8,7 +8,14 @@ use tracing::info;
 
 #[derive(Args, Debug)]
 pub struct PingArgs {
+    /// Target PC, as the agent registered itself — its OS hostname,
+    /// VERBATIM (NATS subjects are case-sensitive, and casing is not
+    /// uniform across a fleet). Waits for the agent's NEXT periodic
+    /// heartbeat rather than polling a last-known value, so a healthy
+    /// agent still takes up to one heartbeat interval to answer — this
+    /// is a liveness probe, not a status lookup.
     pub pc_id: String,
+    /// Seconds to wait for that heartbeat before giving up.
     #[arg(long, default_value_t = 45)]
     pub wait: u64,
 }

@@ -27,25 +27,135 @@ const DEFAULT_TIMEOUT_SECS: u64 = 60;
 pub const ENV_BREAK_GLASS_KEY: &str = "KANADE_BREAK_GLASS_KEY";
 pub const ENV_BREAK_GLASS_KID: &str = "KANADE_BREAK_GLASS_KID";
 
+// `after_long_help`, not `long_about`: the subcommand's about text comes
+// from the doc comment on `SubCmd::Run` in main.rs, which wins over a
+// `long_about` set here. `after_long_help` is appended instead of
+// competing, and only on `--help` — so `-h` stays a screenful.
+//
+// Per-argument docs follow the same split: first line for `-h`, the rest
+// (after a blank line) only on `--help`. The connection and token
+// questions are what actually stop an operator, so they lead.
 #[derive(Args, Debug)]
+#[command(
+    // No leading indentation in this text: clap trims each line's leading
+    // whitespace when it renders `after_long_help`, so an indented block
+    // arrives left-aligned anyway and only the column alignment INSIDE a
+    // line survives. Written flush-left so what is here is what prints.
+    after_long_help = "CONNECTING\n\
+\n\
+--server is the NATS broker, NOT the backend. It defaults to \
+nats://127.0.0.1:4222 — a broker on THIS machine — so an operator \
+workstation almost always has to point it at the deployment:\n\
+\n\
+  $env:KANADE_NATS_URL = 'wss://nats.kanade.example.com'  (PowerShell)\n\
+  export KANADE_NATS_URL=wss://nats.kanade.example.com    (sh)\n\
+\n\
+The token is NOT a flag. It is resolved in this order:\n\
+\n\
+  1. HKLM\\SOFTWARE\\kanade\\cli\\NatsToken   — Windows; no installer \
+writes this today (a manual reg add)\n\
+  2. HKLM\\SOFTWARE\\kanade\\agent\\NatsToken — the fleet-wide token that \
+predates roles\n\
+  3. $KANADE_NATS_TOKEN                   — the operator-shell path\n\
+\n\
+With none of the three it connects UNAUTHENTICATED, and a broker that \
+requires a token then refuses at connect time. Which value to use: the \
+DEPLOYMENT's NATS token — written by setup.sh into /etc/kanade/nats.env \
+on Linux, or stored by the Windows installer — and the literal `dev` on a \
+dev deployment:\n\
+\n\
+  $env:KANADE_NATS_TOKEN = 'dev'\n\
+\n\
+This subcommand uses neither --backend-url nor $KANADE_AUTH_TOKEN; those \
+belong to the HTTP subcommands (`job`, `schedule`, `exec`, `account`, …), \
+which authenticate WITH a JWT. `kanade login` PRODUCES that JWT, it does \
+not consume one. Two different credentials — a broker token here, a \
+login JWT there — which is why one set of subcommands can work while \
+the other does not.\n\
+\n\
+Confirm the connection and the exact pc_id spelling first:\n\
+\n\
+  kanade ping <pc_id>\n\
+\n\
+SIGNING (optional)\n\
+\n\
+Set KANADE_BREAK_GLASS_KEY and KANADE_BREAK_GLASS_KID together to sign \
+the command with the break-glass key; both or neither, since half a pair \
+is an error. Unsigned commands are still accepted by agents today.\n\
+\n\
+EXAMPLES\n\
+\n\
+Everything after `--` is the script, so ITS flags reach the target \
+instead of being eaten as kanade's own:\n\
+\n\
+  kanade run KANADE-PC-0001 -- Get-Service -Name Spooler\n\
+\n\
+Long-running, and named so `kanade kill patch-web01` can stop it:\n\
+\n\
+  kanade run WEB01 --timeout 900 --exec-id patch-web01 -- winget upgrade --all\n\
+\n\
+In the logged-on user's session — anything that needs their desktop:\n\
+\n\
+  kanade run KANADE-PC-0001 --run-as user -- Write-Host hello\n\
+\n\
+A Linux target:\n\
+\n\
+  kanade run linux-box --shell sh -- systemctl is-active kanade-agent"
+)]
 pub struct RunArgs {
+    /// Target PC — its pc_id, exactly as the agent registered it.
+    ///
+    /// That is the host's OS hostname, VERBATIM. NATS subjects are
+    /// case-sensitive and casing is not uniform across a fleet, so
+    /// `kanade-pc-0001` and `KANADE-PC-0001` are different targets —
+    /// and the wrong one does not error, it just times out. Confirm the
+    /// spelling with `kanade ping <pc_id>` or the SPA's Inventory page,
+    /// and do not case-fold it.
     pub pc_id: String,
+    /// Interpreter on the target [powershell, pwsh, cmd, sh].
+    ///
+    /// `powershell` (alias `ps`) is Windows PowerShell 5.1; `pwsh` is
+    /// PowerShell 7 and works cross-platform; `cmd` is Windows-only;
+    /// `sh` is Linux/macOS. There is no per-OS gate, so an `sh` run
+    /// aimed at Windows is accepted here and fails when the agent tries
+    /// to spawn it.
     #[arg(long, default_value = "powershell")]
     pub shell: String,
+    /// Seconds the agent may spend on the script before killing it.
+    ///
+    /// The CLI waits 10s longer than this for a result, so an overrunning
+    /// script reports the agent's own timeout instead of the CLI giving
+    /// up first and leaving you unsure whether it ran.
     #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS)]
     pub timeout: u64,
-    /// Optional exec_id (formerly `--job-id` pre-v0.29); when set,
-    /// `kanade kill <exec_id>` can terminate the run. The CLI still
-    /// accepts the historical `--job-id` flag name via clap alias so
-    /// existing scripts keep working.
+    /// Name this run so `kanade kill <exec_id>` can stop it.
+    ///
+    /// Optional; a random id is used when omitted, which is fine for a
+    /// run you will not need to interrupt. Called `--job-id` before
+    /// v0.29 and that flag name still works via a clap alias, so
+    /// existing scripts keep running.
     #[arg(long, alias = "job-id")]
     pub exec_id: Option<String>,
-    /// Execution identity: `system` (default), `user`, or
-    /// `system_gui` — same values as the manifest's
+    /// Execution identity [system, user, system_gui].
+    ///
+    /// `system` is the agent's own LocalSystem context. `user` runs in
+    /// the logged-on user's session, which is what anything touching
+    /// their profile or desktop needs. `system_gui` is LocalSystem with
+    /// a desktop attached. Same values as a manifest's
     /// `execute.run_as`.
     #[arg(long, default_value = "system", value_parser = ["system", "user", "system_gui", "system-gui"])]
     pub run_as: String,
-    /// Script body (use `--` before the script to bypass clap flag parsing).
+    /// The script to run — put `--` before it.
+    ///
+    /// Without `--`, anything in the script that looks like a flag
+    /// (`-Name`, `--all`) is parsed as one of kanade's own and the run
+    /// fails or, worse, drops the argument. Everything after `--` is
+    /// taken as the script, but NOT preserved as
+    /// separate argv entries: the words are re-joined with single
+    /// spaces before they reach the target shell, so an argument
+    /// containing internal whitespace (`Get-Content "a b.txt"`) loses
+    /// its original quoting — quote it in the SHELL syntax the target
+    /// will run it under, not in this one.
     pub script: Vec<String>,
 }
 
