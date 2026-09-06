@@ -76,16 +76,28 @@ fn run_service() -> windows_service::Result<()> {
             windows_service::Error::Winapi(e)
         })?;
 
-    runtime.block_on(async {
-        tokio::select! {
-            res = crate::run_backend() => {
-                if let Err(e) = res {
-                    tracing::error!(error = %e, "run_backend exited with error");
-                }
+    let failed = runtime.block_on(async {
+        let stop = async {
+            poll_shutdown(shutdown).await;
+            if let Err(e) = status_handle.set_service_status(ServiceStatus {
+                service_type: SERVICE_TYPE,
+                current_state: ServiceState::StopPending,
+                controls_accepted: ServiceControlAccept::empty(),
+                exit_code: ServiceExitCode::Win32(0),
+                checkpoint: 1,
+                // Allow time for final status reporting after cleanup expires.
+                wait_hint: crate::shutdown::CLOSE_TIMEOUT + Duration::from_secs(3),
+                process_id: None,
+            }) {
+                tracing::warn!(error = %e, "report StopPending");
             }
-            _ = poll_shutdown(shutdown) => {
-                tracing::info!("SCM stop received; backend shutting down");
+        };
+        match crate::run_backend(stop).await {
+            Err(e) => {
+                tracing::error!(error = %e, "run_backend exited with error");
+                true
             }
+            Ok(()) => false,
         }
     });
 
@@ -93,7 +105,11 @@ fn run_service() -> windows_service::Result<()> {
         service_type: SERVICE_TYPE,
         current_state: ServiceState::Stopped,
         controls_accepted: ServiceControlAccept::empty(),
-        exit_code: ServiceExitCode::Win32(0),
+        exit_code: if failed {
+            ServiceExitCode::ServiceSpecific(1)
+        } else {
+            ServiceExitCode::Win32(0)
+        },
         checkpoint: 0,
         wait_hint: Duration::default(),
         process_id: None,

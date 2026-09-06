@@ -493,6 +493,14 @@ release PR instead.
 
 ## Deploying a built release to a host
 
+The backend's SQLite shutdown budget in
+`crates/kanade-backend/src/shutdown.rs` (`CLOSE_TIMEOUT`, 25 seconds)
+must stay below the 30-second `WaitForStatus('Stopped', ...)` in
+`scripts/deploy/backend.ps1`. `crates/kanade-backend/src/service.rs`
+adds 3 seconds to that constant for the SCM StopPending wait hint. WAL retention
+is configured on every writer connection in `shutdown::sqlite_options`;
+it limits retained space after reuse, not active transactions or readers.
+
 Releases (above) ship binaries to GitHub Releases + crates.io. Getting a
 release onto an actual machine (e.g. a co-located host running backend +
 agent + nats) is a separate, agent-driven step:
