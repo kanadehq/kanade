@@ -15,6 +15,7 @@ const WAL_RETAIN_BYTES: u64 = 16 * 1024 * 1024;
 // Keep below deploy-backend.ps1's 30-second service-stop wait.
 pub(crate) const CLOSE_TIMEOUT: Duration = Duration::from_secs(25);
 
+/// Shared writable connection settings, including retention on every connection.
 pub(crate) fn sqlite_options(path: &str) -> Result<SqliteConnectOptions> {
     Ok(SqliteConnectOptions::from_str(&format!("sqlite://{path}"))
         .with_context(|| format!("parse sqlite path {path}"))?
@@ -26,6 +27,7 @@ pub(crate) fn sqlite_options(path: &str) -> Result<SqliteConnectOptions> {
 }
 
 #[derive(Default)]
+/// Own pools and top-level tasks independently of cancellable backend work.
 pub(crate) struct BackendResources {
     pub writer: Option<SqlitePool>,
     pub reader: Option<SqlitePool>,
@@ -33,14 +35,17 @@ pub(crate) struct BackendResources {
 }
 
 impl BackendResources {
+    /// Spawn a task that must be cancelled and joined before pool closure.
     pub fn spawn(&mut self, task: impl Future<Output = ()> + Send + 'static) {
         self.track(tokio::spawn(task));
     }
 
+    /// Adopt a task started by a helper such as the periodic cleanup worker.
     pub fn track(&mut self, task: JoinHandle<()>) {
         self.tasks.push(task);
     }
 
+    /// Stop tracked work and await ordered pool closure within the stop budget.
     pub async fn close(&mut self) {
         for task in &self.tasks {
             task.abort();
@@ -68,6 +73,7 @@ impl BackendResources {
     }
 }
 
+/// Wait for console Ctrl+C, or SIGTERM when running under a Unix service manager.
 pub(crate) async fn console_signal() {
     let ctrl_c = async {
         tokio::signal::ctrl_c()

@@ -497,7 +497,7 @@ The backend's SQLite shutdown budget in
 `crates/kanade-backend/src/shutdown.rs` (`CLOSE_TIMEOUT`, 25 seconds)
 must stay below the 30-second `WaitForStatus('Stopped', ...)` in
 `scripts/deploy/backend.ps1`. `crates/kanade-backend/src/service.rs`
-uses the same constant for the SCM StopPending wait hint. WAL retention
+adds 3 seconds to that constant for the SCM StopPending wait hint. WAL retention
 is configured on every writer connection in `shutdown::sqlite_options`;
 it limits retained space after reuse, not active transactions or readers.
 

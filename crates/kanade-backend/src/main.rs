@@ -25,7 +25,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use kanade_shared::config::{LogSection, load_backend_config};
 use kanade_shared::default_paths;
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tokio::net::TcpListener;
 use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
@@ -555,12 +555,7 @@ async fn wipe_projector_at(db_path: &str) -> Result<(usize, usize)> {
 
     // Re-create with the SAME pragmas the service uses (WAL etc.) so the
     // sidecars it leaves match what the backend expects on next open.
-    let opts = SqliteConnectOptions::from_str(&format!("sqlite://{db_path}"))
-        .with_context(|| format!("parse sqlite path {db_path}"))?
-        .create_if_missing(true)
-        .journal_mode(SqliteJournalMode::Wal)
-        .synchronous(SqliteSynchronous::Normal)
-        .busy_timeout(std::time::Duration::from_secs(30));
+    let opts = shutdown::sqlite_options(db_path)?;
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(opts)
@@ -912,6 +907,7 @@ fn arm_for_swap(new_version: &str, installed_exe: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Run until a stop signal or startup/serve error, then close SQLite resources.
 pub(crate) async fn run_backend(shutdown: impl Future<Output = ()>) -> Result<()> {
     // Config first so the tracing init can honor [log] path / level
     // / keep_days. v0.24: prior to this the backend's tracing layer
@@ -945,6 +941,7 @@ pub(crate) async fn run_backend(shutdown: impl Future<Output = ()>) -> Result<()
     result
 }
 
+/// Cancellable startup/server work; pool and task ownership stays with the caller.
 async fn run_backend_inner(
     cfg: &kanade_shared::config::BackendConfig,
     resources: &mut shutdown::BackendResources,
@@ -1689,6 +1686,7 @@ mod compression_tests {
 mod tests {
     use super::*;
     use sqlx::SqlitePool;
+    use sqlx::sqlite::SqliteJournalMode;
 
     /// A throwaway DB path under the temp dir, unique to this process so
     /// parallel test runs don't collide. Sidecars (-wal/-shm) sit next
