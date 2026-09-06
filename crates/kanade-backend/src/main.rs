@@ -11,6 +11,7 @@ mod mail;
 mod mfa;
 mod projector;
 mod scheduler;
+mod shutdown;
 mod web;
 
 #[cfg(target_os = "windows")]
@@ -65,8 +66,11 @@ use tracing_subscriber::util::SubscriberInitExt;
 /// mode, just triggered by a stream end instead of a create error.
 /// So both arms retry; only the log level and backoff-reset
 /// eligibility differ.
-fn spawn_retrying_projector<F, Fut>(name: &'static str, mut make: F)
-where
+fn spawn_retrying_projector<F, Fut>(
+    tasks: &mut shutdown::BackendResources,
+    name: &'static str,
+    mut make: F,
+) where
     F: FnMut() -> Fut + Send + 'static,
     Fut: Future<Output = Result<()>> + Send + 'static,
 {
@@ -79,7 +83,7 @@ where
     // cleanly for weeks would inherit that elevated backoff on its
     // next, unrelated failure instead of retrying quickly.
     const STABLE_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
-    tokio::spawn(async move {
+    tasks.spawn(async move {
         let mut backoff = INITIAL_BACKOFF;
         loop {
             let started = std::time::Instant::now();
@@ -305,7 +309,7 @@ fn main() -> Result<()> {
         .enable_all()
         .build()
         .context("build tokio runtime")?;
-    runtime.block_on(run_backend())
+    runtime.block_on(run_backend(shutdown::console_signal()))
 }
 
 /// `resolve-db-path` subcommand: load the config exactly as the running
@@ -908,7 +912,7 @@ fn arm_for_swap(new_version: &str, installed_exe: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) async fn run_backend() -> Result<()> {
+pub(crate) async fn run_backend(shutdown: impl Future<Output = ()>) -> Result<()> {
     // Config first so the tracing init can honor [log] path / level
     // / keep_days. v0.24: prior to this the backend's tracing layer
     // was stdout-only, which meant the Windows service (no console)
@@ -927,6 +931,24 @@ pub(crate) async fn run_backend() -> Result<()> {
     let _log_guard = init_tracing(&cfg.log)
         .with_context(|| format!("init tracing from [log] in {cfg_path:?}"))?;
 
+    let mut resources = shutdown::BackendResources::default();
+    let result = tokio::select! {
+        biased;
+        _ = shutdown => {
+            info!("backend shutdown requested");
+            Ok(())
+        }
+        result = run_backend_inner(&cfg, &mut resources) => result,
+    };
+    // Also close on startup/serve errors, while tracing is still alive.
+    resources.close().await;
+    result
+}
+
+async fn run_backend_inner(
+    cfg: &kanade_shared::config::BackendConfig,
+    resources: &mut shutdown::BackendResources,
+) -> Result<()> {
     // Route panics through tracing so they land in the log file. The
     // default hook only writes to stderr, which a Windows service
     // discards — a panic in a request handler (e.g. jsonwebtoken's
@@ -985,17 +1007,13 @@ pub(crate) async fn run_backend() -> Result<()> {
     //   * busy_timeout 30 s — headroom over the worst observed stall
     //     so residual writer-writer contention waits instead of
     //     erroring into the redelivery path.
-    let sqlite_opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", cfg.db.sqlite_path))
-        .with_context(|| format!("parse sqlite path {}", cfg.db.sqlite_path))?
-        .create_if_missing(true)
-        .journal_mode(SqliteJournalMode::Wal)
-        .synchronous(SqliteSynchronous::Normal)
-        .busy_timeout(std::time::Duration::from_secs(30));
+    let sqlite_opts = shutdown::sqlite_options(&cfg.db.sqlite_path)?;
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
         .connect_with(sqlite_opts)
         .await
         .context("open sqlite pool")?;
+    resources.writer = Some(pool.clone());
     sqlx::migrate!("./migrations")
         .run(&pool)
         .await
@@ -1019,6 +1037,7 @@ pub(crate) async fn run_backend() -> Result<()> {
         .connect_with(query_pool_opts)
         .await
         .context("open sqlite read-only pool")?;
+    resources.reader = Some(query_pool.clone());
 
     // RBAC bootstrap: seed the first admin account if the users table
     // is empty (chicken-and-egg). Reads the password registry-first
@@ -1260,21 +1279,21 @@ pub(crate) async fn run_backend() -> Result<()> {
         let js = jetstream.clone();
         let cache = explode_spec_cache.clone();
         let mailer = mailer.clone();
-        spawn_retrying_projector("results", move || {
+        spawn_retrying_projector(resources, "results", move || {
             projector::results::run(js.clone(), pool.clone(), cache.clone(), mailer.clone())
         });
     }
     {
         let pool = pool.clone();
         let js = jetstream.clone();
-        spawn_retrying_projector("audit", move || {
+        spawn_retrying_projector(resources, "audit", move || {
             projector::audit::run(js.clone(), pool.clone())
         });
     }
     {
         let pool = pool.clone();
         let nats_client = nats.clone();
-        spawn_retrying_projector("heartbeat", move || {
+        spawn_retrying_projector(resources, "heartbeat", move || {
             projector::heartbeat::run(nats_client.clone(), pool.clone())
         });
     }
@@ -1285,7 +1304,7 @@ pub(crate) async fn run_backend() -> Result<()> {
     {
         let pool = pool.clone();
         let nats_client = nats.clone();
-        spawn_retrying_projector("host_perf", move || {
+        spawn_retrying_projector(resources, "host_perf", move || {
             projector::host_perf::run(nats_client.clone(), pool.clone())
         });
     }
@@ -1297,7 +1316,7 @@ pub(crate) async fn run_backend() -> Result<()> {
     {
         let pool = pool.clone();
         let nats_client = nats.clone();
-        spawn_retrying_projector("process_perf", move || {
+        spawn_retrying_projector(resources, "process_perf", move || {
             projector::process_perf::run(nats_client.clone(), pool.clone())
         });
     }
@@ -1313,7 +1332,7 @@ pub(crate) async fn run_backend() -> Result<()> {
         // per-run reap deadline from the cached manifest's timeout, so
         // it shares the same ExplodeSpecCache as the results projector.
         let cache = explode_spec_cache.clone();
-        spawn_retrying_projector("events", move || {
+        spawn_retrying_projector(resources, "events", move || {
             projector::events::run(js.clone(), pool.clone(), cache.clone())
         });
     }
@@ -1324,7 +1343,7 @@ pub(crate) async fn run_backend() -> Result<()> {
     {
         let pool = pool.clone();
         let js = jetstream.clone();
-        spawn_retrying_projector("obs_events", move || {
+        spawn_retrying_projector(resources, "obs_events", move || {
             projector::obs_events::run(js.clone(), pool.clone())
         });
     }
@@ -1335,7 +1354,7 @@ pub(crate) async fn run_backend() -> Result<()> {
     {
         let pool = pool.clone();
         let js = jetstream.clone();
-        spawn_retrying_projector("notification-acks", move || {
+        spawn_retrying_projector(resources, "notification-acks", move || {
             projector::notifications::run(js.clone(), pool.clone())
         });
     }
@@ -1345,7 +1364,7 @@ pub(crate) async fn run_backend() -> Result<()> {
     // no console session, agent died mid-script) pile up in the
     // Jobs page live chip indefinitely. 5 min cadence; the function
     // body details the policy.
-    let _cleanup_handle = cleanup::spawn(pool.clone(), jetstream.clone());
+    resources.track(cleanup::spawn(pool.clone(), jetstream.clone()));
 
     // v0.35 / #88: prewarm + watcher for the explode-spec / manifest
     // cache constructed above (before the projector spawns). Prewarm
@@ -1361,7 +1380,7 @@ pub(crate) async fn run_backend() -> Result<()> {
     {
         let cache = explode_spec_cache.clone();
         let js = jetstream.clone();
-        tokio::spawn(async move {
+        resources.spawn(async move {
             if let Err(e) = projector::spec_cache::run(cache, js).await {
                 error!(error = %e, "explode spec cache watcher exited");
             }
@@ -1378,7 +1397,7 @@ pub(crate) async fn run_backend() -> Result<()> {
     {
         let pool = pool.clone();
         let js = jetstream.clone();
-        tokio::spawn(async move {
+        resources.spawn(async move {
             if let Err(e) = projector::agent_meta::run(pool, js).await {
                 error!(error = %e, "agent_meta projector exited");
             }
@@ -1398,7 +1417,7 @@ pub(crate) async fn run_backend() -> Result<()> {
         // credential it merely *resolved* from one the broker actually
         // *accepted* — only the latter proves which auth mode is in force.
         let nats_client = nats.clone();
-        tokio::spawn(async move {
+        resources.spawn(async move {
             if let Err(e) = projector::nats_conns::run(pool, monitor_url, nats_client).await {
                 error!(error = %e, "nats connections projector exited");
             }
@@ -1412,7 +1431,7 @@ pub(crate) async fn run_backend() -> Result<()> {
     for bucket in projector::object_meta::BUCKETS {
         let pool = pool.clone();
         let js = jetstream.clone();
-        tokio::spawn(async move {
+        resources.spawn(async move {
             projector::object_meta::run(pool, js, bucket).await;
         });
     }
@@ -1440,7 +1459,7 @@ pub(crate) async fn run_backend() -> Result<()> {
     // schedules KV, bad cron, etc.) the backend keeps serving HTTP.
     {
         let s = app_state.clone();
-        tokio::spawn(async move {
+        resources.spawn(async move {
             if let Err(e) = scheduler::run(s).await {
                 error!(error = %e, "scheduler exited");
             }
@@ -1454,7 +1473,7 @@ pub(crate) async fn run_backend() -> Result<()> {
     // the AppState (query pool + group cache + jetstream).
     {
         let s = app_state.clone();
-        tokio::spawn(async move {
+        resources.spawn(async move {
             projector::group_materializer::run(s).await;
         });
     }
@@ -1486,7 +1505,7 @@ pub(crate) async fn run_backend() -> Result<()> {
     // sentinel so this version is promoted to last-good and any pending
     // swap sentinel clears. A crash before the grace leaves the sentinel
     // armed, so the next boot re-counts toward rollback.
-    tokio::spawn(async {
+    resources.spawn(async {
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         // A failed current_exe() here means we can't promote this version
         // to last-good — surface it instead of silently leaving the

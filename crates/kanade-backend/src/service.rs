@@ -77,15 +77,22 @@ fn run_service() -> windows_service::Result<()> {
         })?;
 
     runtime.block_on(async {
-        tokio::select! {
-            res = crate::run_backend() => {
-                if let Err(e) = res {
-                    tracing::error!(error = %e, "run_backend exited with error");
-                }
+        let stop = async {
+            poll_shutdown(shutdown).await;
+            if let Err(e) = status_handle.set_service_status(ServiceStatus {
+                service_type: SERVICE_TYPE,
+                current_state: ServiceState::StopPending,
+                controls_accepted: ServiceControlAccept::empty(),
+                exit_code: ServiceExitCode::Win32(0),
+                checkpoint: 1,
+                wait_hint: crate::shutdown::CLOSE_TIMEOUT,
+                process_id: None,
+            }) {
+                tracing::warn!(error = %e, "report StopPending");
             }
-            _ = poll_shutdown(shutdown) => {
-                tracing::info!("SCM stop received; backend shutting down");
-            }
+        };
+        if let Err(e) = crate::run_backend(stop).await {
+            tracing::error!(error = %e, "run_backend exited with error");
         }
     });
 
