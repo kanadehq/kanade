@@ -53,6 +53,14 @@ const PROJECTS = [
 // regex that rewrites `,\s*}` anywhere would happily corrupt a dependency
 // range or a base64 integrity hash that contained the same bytes.
 // ---------------------------------------------------------------------------
+/**
+ * Parse bun.lock, which is JSONC: trailing commas and (in principle) comments.
+ *
+ * @param {string} text raw file contents
+ * @param {string} path only used to make the error message locatable
+ * @returns {object}
+ * @throws {Error} if the result is still not valid JSON after stripping.
+ */
 function parseJsonc(text, path) {
   let out = ''
   let i = 0
@@ -104,6 +112,14 @@ function parseJsonc(text, path) {
 // on disk). Resolving a dependency therefore walks up from the deepest
 // candidate to the root, exactly as node's own resolution does.
 // ---------------------------------------------------------------------------
+/**
+ * Resolve a dependency name to its bun.lock key, as seen from `fromKey`.
+ *
+ * Walks up the nesting path the way node's own resolution does, so a package
+ * with its own pinned copy of a dependency finds that copy first.
+ *
+ * @returns {string|null} the lockfile key, or null if nothing resolves.
+ */
 function resolveKey(packages, fromKey, depName) {
   const segments = fromKey === '' ? [] : fromKey.split('/')
   for (let depth = segments.length; depth >= 0; depth--) {
@@ -113,6 +129,14 @@ function resolveKey(packages, fromKey, depName) {
   return null
 }
 
+/**
+ * The set of lockfile keys reachable from the workspace's *runtime*
+ * dependencies — i.e. what can end up in a distributed artifact.
+ *
+ * @returns {Set<string>} lockfile keys.
+ * @throws {Error} on an unresolvable hard dependency, which means the lockfile
+ *   is stale. Continuing would under-report what we ship, so it stops instead.
+ */
 function productionClosure(lock, path) {
   const packages = lock.packages ?? {}
   const workspaces = lock.workspaces ?? {}
@@ -191,6 +215,13 @@ const LICENSE_FILE = /^(LICEN[CS]E|COPYING|NOTICE)([._-].*)?$/i
 const VENDORED_DIR = join(REPO_ROOT, 'scripts', 'licenses', 'vendored')
 const VENDORED = JSON.parse(readFileSync(join(VENDORED_DIR, 'manifest.json'), 'utf8')).packages
 
+/**
+ * On-disk location of a lockfile key: `a/b` lives at
+ * `node_modules/a/node_modules/b`.
+ *
+ * @returns {string} absolute path (the scope of a scoped name is not a nesting
+ *   level, and is rejoined accordingly).
+ */
 function packageDir(projectDir, key) {
   // "a/b" -> node_modules/a/node_modules/b; "@scope/x" is a single package
   // name, not a nesting separator, so rebuild the segments scope-aware.
@@ -205,6 +236,12 @@ function packageDir(projectDir, key) {
   return join(projectDir, 'node_modules', segments.join('/node_modules/'))
 }
 
+/**
+ * Extract an SPDX expression from a package.json, covering the modern
+ * `license` string, the object form, and the deprecated `licenses` array.
+ *
+ * @returns {string|null} null when the package declares no licence at all.
+ */
 function normalizeLicense(pkgJson) {
   if (typeof pkgJson.license === 'string') return pkgJson.license.trim()
   if (pkgJson.license && typeof pkgJson.license === 'object' && pkgJson.license.type) return String(pkgJson.license.type).trim()
@@ -216,6 +253,13 @@ function normalizeLicense(pkgJson) {
   return null
 }
 
+/**
+ * Read both web projects: resolve what ships, then load each package's licence
+ * expression and notice text from disk (or from the vendored overrides).
+ *
+ * @returns {Array<{label: string, dir: string, packages: object[], unreadable: object[]}>}
+ * @throws {Error} if a lockfile or a node_modules tree is missing.
+ */
 function collect() {
   const results = []
   for (const project of PROJECTS) {
@@ -305,6 +349,13 @@ function collect() {
 }
 
 // ---------------------------------------------------------------------------
+/**
+ * The CI gate. Prints warnings, then exits non-zero if any shipped package
+ * carries a licence outside the allow list or ships without a reproducible
+ * notice.
+ *
+ * @param {ReturnType<typeof collect>} projects
+ */
 function check(projects) {
   // Two severities, because they are two different problems.
   //
@@ -388,6 +439,12 @@ with \`licenses.allow\` in deny.toml.`)
   console.log(`npm licence check OK — ${total} shipped package(s) across ${projects.length} project(s), all within the allow list, all with a reproduced notice${vendoredCount ? ` (${vendoredCount} vendored from upstream)` : ''}.`)
 }
 
+/**
+ * Write the npm half of THIRD-PARTY-NOTICES.md to stdout, grouped by resolved
+ * licence, with each package's notice text reproduced verbatim.
+ *
+ * @param {ReturnType<typeof collect>} projects
+ */
 function notices(projects) {
   // Group by resolved licence so identical text is reproduced once, matching
   // how cargo-about lays out the Rust half.

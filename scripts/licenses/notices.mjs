@@ -33,6 +33,15 @@ const OUTPUT = join(REPO_ROOT, 'THIRD-PARTY-NOTICES.md')
 // exists, so `cargo about` when cargo-about is not installed exits 101 with
 // "no such command", and reporting only the status code would hide the one
 // instruction that fixes it.
+/**
+ * Run a command and return its stdout, turning a failure into an error that
+ * names the remedy rather than just a status code.
+ *
+ * @param {string} cmd
+ * @param {string[]} args
+ * @param {string} what how to fix it if the command is missing
+ * @returns {string} stdout
+ */
 function run(cmd, args, what) {
   try {
     return execFileSync(cmd, args, { cwd: REPO_ROOT, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'inherit'] })
@@ -48,11 +57,24 @@ function run(cmd, args, what) {
 // publish to crates.io), so filter them out afterwards — reading the member
 // list from cargo rather than hardcoding it, so adding a sixth crate cannot
 // silently start listing us as our own third party.
+/**
+ * Names of this workspace's own crates, read from cargo rather than hardcoded
+ * so a new member cannot silently start appearing as our own third party.
+ *
+ * @returns {Set<string>}
+ */
 function workspaceMembers() {
   const meta = JSON.parse(run('cargo', ['metadata', '--no-deps', '--format-version', '1'], 'install Rust'))
   return new Set(meta.packages.map((p) => p.name))
 }
 
+/**
+ * The Rust half of the notices: cargo-about's output with our own crates
+ * filtered out, prefixed by a summary table counted from what survives.
+ *
+ * @param {Set<string>} members workspace crate names to omit
+ * @returns {string} markdown
+ */
 function rustSection(members) {
   const raw = run('cargo', ['about', 'generate', 'about.hbs'], 'run: cargo install cargo-about --locked --features cli')
 
@@ -89,6 +111,13 @@ function rustSection(members) {
 // Count crates per licence heading from the FILTERED body, so the table can
 // never claim a different number from the list under it. (cargo-about's own
 // `overview` is computed before the workspace-member filter runs.)
+/**
+ * Count crates per licence from the already-filtered body, so the table can
+ * never disagree with the list beneath it.
+ *
+ * @param {string} body markdown produced by about.hbs, post-filter
+ * @returns {string} a markdown table
+ */
 function summaryTable(body) {
   const rows = []
   let current = null
@@ -117,6 +146,13 @@ function summaryTable(body) {
   ].join('\n')
 }
 
+/**
+ * Drop licence sections left with a heading and no crates — which only happens
+ * when a licence was used exclusively by our own workspace members.
+ *
+ * @param {string} markdown
+ * @returns {string}
+ */
 function stripEmptySections(markdown) {
   const sections = markdown.split(/\n(?=#### )/)
   return sections
@@ -124,10 +160,21 @@ function stripEmptySections(markdown) {
     .join('\n')
 }
 
+/**
+ * The npm half of the notices, delegated to npm-licenses.mjs so the two modes
+ * of that script cannot drift apart.
+ *
+ * @returns {string} markdown
+ */
 function npmSection() {
   return run('node', [join('scripts', 'licenses', 'npm-licenses.mjs'), '--notices'], 'install Node.js')
 }
 
+/**
+ * Assemble the complete THIRD-PARTY-NOTICES.md, preamble included.
+ *
+ * @returns {string} the full file contents, before line-ending normalisation.
+ */
 function build() {
   const members = workspaceMembers()
   const rust = rustSection(members)

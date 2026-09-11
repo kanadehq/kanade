@@ -49,6 +49,15 @@ export const PREFERENCE = [
 //
 // AND binds tighter than OR, so `A OR B AND C` is `A OR (B AND C)`.
 
+/**
+ * Split an SPDX expression into `(`, `)`, AND/OR/WITH keywords and identifiers.
+ *
+ * Operators are matched case-insensitively even though the spec uppercases
+ * them, because package metadata in the wild does not always comply.
+ *
+ * @param {string} source
+ * @returns {Array<{type: string, value?: string}>}
+ */
 function tokenize(source) {
   const tokens = []
   let i = 0
@@ -66,6 +75,15 @@ function tokenize(source) {
   return tokens
 }
 
+/**
+ * Parse an SPDX expression into an AST.
+ *
+ * @param {string} expression
+ * @returns {{type: 'license', id: string} | {type: 'and'|'or', children: object[]}}
+ * @throws {Error} if the expression is malformed — never returns a best guess,
+ *   because a licence check that silently reinterprets its input is worse than
+ *   one that stops.
+ */
 export function parse(expression) {
   const state = { tokens: tokenize(expression), pos: 0 }
   const ast = parseOr(state, expression)
@@ -78,18 +96,27 @@ export function parse(expression) {
 const peek = (s) => s.tokens[s.pos]
 const next = (s) => s.tokens[s.pos++]
 
+/** `or-expr := and-expr (OR and-expr)*` — the loosest-binding level. */
 function parseOr(state, source) {
   const children = [parseAnd(state, source)]
   while (peek(state)?.type === 'OR') { next(state); children.push(parseAnd(state, source)) }
   return children.length === 1 ? children[0] : { type: 'or', children }
 }
 
+/** `and-expr := primary (AND primary)*` — binds tighter than OR, per spec. */
 function parseAnd(state, source) {
   const children = [parsePrimary(state, source)]
   while (peek(state)?.type === 'AND') { next(state); children.push(parsePrimary(state, source)) }
   return children.length === 1 ? children[0] : { type: 'and', children }
 }
 
+/**
+ * `primary := '(' expression ')' | id ('WITH' id)?`
+ *
+ * A `WITH` exception is folded into the identifier rather than kept as its own
+ * node: `Apache-2.0 WITH LLVM-exception` is one licence for allow-list
+ * purposes, and splitting it means it can never match.
+ */
 function parsePrimary(state, source) {
   const token = next(state)
   if (!token) throw new Error(`unparseable SPDX expression "${source}": unexpected end of input`)
@@ -119,11 +146,20 @@ function parsePrimary(state, source) {
 
 // --- Evaluation ------------------------------------------------------------
 
+/** Position in `preference`; anything unlisted sorts last but stays usable. */
 const rank = (id, preference) => {
   const i = preference.indexOf(id)
   return i === -1 ? preference.length : i
 }
 
+/**
+ * Resolve an AST node to the single licence this project relies on.
+ *
+ * AND requires every operand; OR takes the most preferred allowed branch.
+ *
+ * @returns {{id: string, rank: number} | null} null when no combination under
+ *   this node is satisfiable from `allowed`.
+ */
 function evalNode(node, allowed, preference) {
   if (node.type === 'license') {
     return allowed.has(node.id) ? { id: node.id, rank: rank(node.id, preference) } : null
@@ -146,6 +182,13 @@ function evalNode(node, allowed, preference) {
 }
 
 // Source text for one node, used to report what the package actually offered.
+/**
+ * Render an AST node back to SPDX source text, for reporting what a package
+ * actually offered.
+ *
+ * @param {object} node
+ * @returns {string}
+ */
 export function render(node) {
   if (node.type === 'license') return node.id
   if (node.type === 'and') return node.children.map(renderNested).join(' AND ')
@@ -155,6 +198,15 @@ export function render(node) {
 const renderNested = (node) => (node.type === 'license' ? node.id : `(${render(node)})`)
 
 // Leaf identifiers that are not on the allow list — for error messages only.
+/**
+ * Collect every licence identifier in the tree that is not on the allow list.
+ *
+ * For error messages only — it deliberately ignores structure, so an OR whose
+ * other branch is fine still contributes its disallowed leaf. The caller has
+ * already established that the expression as a whole is unsatisfiable.
+ *
+ * @returns {string[]} identifiers, in first-seen order, without duplicates.
+ */
 export function unlistedLeaves(node, allowed = ALLOWED, seen = []) {
   if (node.type === 'license') {
     if (!allowed.has(node.id) && !seen.includes(node.id)) seen.push(node.id)
