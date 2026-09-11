@@ -9,8 +9,8 @@
 // bun.lock, so this script is it.
 //
 //   node scripts/licenses/npm-licenses.mjs --check
-//       Exit non-zero if any SHIPPED package carries a licence outside
-//       ALLOWED (below). This is the CI gate.
+//       Exit non-zero if any SHIPPED package carries a licence outside the
+//       allow list in spdx.mjs. This is the CI gate.
 //
 //   node scripts/licenses/npm-licenses.mjs --notices
 //       Emit the markdown notice section on stdout, for
@@ -33,6 +33,11 @@ import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+// The allow list and the SPDX expression evaluator live in their own module so
+// they can be unit-tested (`node --test scripts/licenses/`). See spdx.mjs for
+// why the expression handling is a real parser rather than a regex.
+import { evaluate, parse, unlistedLeaves } from './spdx.mjs'
+
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
 // The two npm projects whose output is distributed. Keep in step with the
@@ -40,26 +45,6 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const PROJECTS = [
   { label: 'kanade-backend SPA (embedded in the backend binary via rust-embed)', dir: 'crates/kanade-backend/web' },
   { label: 'kanade-client web assets (bundled into the Tauri desktop client)', dir: 'crates/kanade-client/web' },
-]
-
-// Mirrors `licenses.allow` in deny.toml. The two lists are the same policy
-// applied to two package managers, and nothing mechanically ties them
-// together — changing one means changing the other. See the licence section
-// of AGENTS.md.
-const ALLOWED = new Set([
-  'MIT', 'MIT-0', 'Apache-2.0', 'Apache-2.0 WITH LLVM-exception',
-  'BSD-1-Clause', 'BSD-2-Clause', 'BSD-3-Clause', 'ISC', 'Zlib', '0BSD',
-  'BSL-1.0', 'CC0-1.0', 'Unlicense', 'Unicode-3.0', 'CDLA-Permissive-2.0',
-  'MPL-2.0',
-])
-
-// For `A OR B` expressions we record which branch this project relies on, so
-// the notices state a definite licence instead of an ambiguous menu. MIT
-// first for the same reason as in about.toml: it is what this project itself
-// ships under and it carries no NOTICE-file obligation.
-const PREFERENCE = [
-  'MIT', 'MIT-0', 'ISC', '0BSD', 'BSD-2-Clause', 'BSD-3-Clause', 'Zlib',
-  'Apache-2.0', 'MPL-2.0',
 ]
 
 // ---------------------------------------------------------------------------
@@ -219,28 +204,6 @@ function normalizeLicense(pkgJson) {
   return null
 }
 
-// Reduce an SPDX expression to the branch this project relies on. Only `OR`
-// is a choice; `AND` means every listed licence applies at once and all of
-// them must be allowed.
-function evaluate(expression) {
-  const stripped = expression.replace(/^\(|\)$/g, '').trim()
-  if (/\bAND\b/i.test(stripped)) {
-    const parts = stripped.split(/\s+AND\s+/i).map((p) => p.replace(/^\(|\)$/g, '').trim())
-    const chosen = parts.map((p) => (/\bOR\b/i.test(p) ? evaluate(p) : { id: p, alternatives: null }))
-    if (chosen.some((c) => c === null)) return null
-    return { id: chosen.map((c) => c.id).join(' AND '), alternatives: null }
-  }
-  if (/\bOR\b/i.test(stripped)) {
-    const options = stripped.split(/\s+OR\s+/i).map((p) => p.replace(/^\(|\)$/g, '').trim())
-    for (const preferred of PREFERENCE) {
-      if (options.includes(preferred)) return { id: preferred, alternatives: options }
-    }
-    const allowed = options.find((o) => ALLOWED.has(o))
-    return allowed ? { id: allowed, alternatives: options } : null
-  }
-  return { id: stripped, alternatives: null }
-}
-
 function collect() {
   const results = []
   for (const project of PROJECTS) {
@@ -291,9 +254,22 @@ function collect() {
       }
       texts.sort((a, b) => a.file.localeCompare(b.file))
 
+      // evaluate() throws on a malformed expression rather than guessing at
+      // one. Capture it per package so one bad `license` field names itself
+      // instead of aborting the whole run with a stack trace.
+      let choice = null
+      let malformed = null
+      if (expression) {
+        try {
+          choice = evaluate(expression)
+        } catch (err) {
+          malformed = err.message
+        }
+      }
+
       packages.push({
-        name, version, expression,
-        choice: expression ? evaluate(expression) : null,
+        name, version, expression, malformed,
+        choice,
         repository: typeof pkgJson.repository === 'string' ? pkgJson.repository : pkgJson.repository?.url ?? null,
         texts,
       })
@@ -327,14 +303,17 @@ function check(projects) {
         problems.push(`${where} has no \`license\` field — unlicensed code is under exclusive copyright by default and cannot ship inside an MIT artifact`)
         continue
       }
-      if (!pkg.choice) {
-        problems.push(`${where} is "${pkg.expression}" — no branch of that expression is on the allow list`)
+      if (pkg.malformed) {
+        problems.push(`${where} declares "${pkg.expression}", which is not a valid SPDX expression (${pkg.malformed}) — it cannot be checked, so it cannot be shipped`)
         continue
       }
-      const ids = pkg.choice.id.split(' AND ')
-      const rejected = ids.filter((id) => !ALLOWED.has(id))
-      if (rejected.length) {
-        problems.push(`${where} is "${pkg.expression}" — ${rejected.join(', ')} is not on the allow list`)
+      if (!pkg.choice) {
+        // evaluate() already proved no combination is satisfiable. Name the
+        // identifiers that are missing from the allow list, so the message
+        // says what to decide about rather than just "not allowed".
+        const unlisted = unlistedLeaves(parse(pkg.expression))
+        problems.push(`${where} is "${pkg.expression}" — no combination of that expression is on the allow list (not listed: ${unlisted.join(', ')})`)
+        continue
       }
       if (pkg.texts.length === 0) {
         warnings.push(`${where} declares ${pkg.choice.id} but publishes no LICENSE/COPYING file — THIRD-PARTY-NOTICES.md records the declared licence and the upstream repository instead of a reproduced text`)
@@ -356,8 +335,8 @@ function check(projects) {
     for (const p of problems) console.error(`  - ${p}`)
     console.error(`
 Adding a licence to the allow list is a licensing decision, not a build fix.
-The list lives in scripts/licenses/npm-licenses.mjs (ALLOWED) and must stay in
-step with \`licenses.allow\` in deny.toml.`)
+The list lives in scripts/licenses/spdx.mjs (ALLOWED) and must stay in step
+with \`licenses.allow\` in deny.toml.`)
     process.exit(1)
   }
 

@@ -61,8 +61,22 @@ command = "cargo"
 args = ["publish", "--dry-run", "--allow-dirty"]
 
 [tasks.licenses]
-description = "Run the full licence audit: cargo-deny (Rust) + npm-licenses (SPA/Tauri WebView) + a freshness check on THIRD-PARTY-NOTICES.md. Same three checks .github/workflows/licenses.yml runs."
-dependencies = ["deny", "npm-licenses", "notices-check"]
+description = "Run the full licence audit: unit tests + cargo-deny (Rust) + npm-licenses (SPA/Tauri WebView) + a freshness check on THIRD-PARTY-NOTICES.md. Same four checks .github/workflows/licenses.yml runs."
+dependencies = ["licenses-test", "deny", "npm-licenses", "notices-check"]
+
+[tasks.licenses-test]
+description = "Unit-test the SPDX expression evaluator that gates the npm licence check"
+# node's built-in runner, no framework: this has to be runnable in CI before
+# `bun install` has done anything, and a compliance gate should not acquire a
+# dependency tree of its own. Runs first in `licenses` because it is the
+# cheapest check and the one whose failure invalidates the others.
+# The path is a GLOB, not a directory. `node --test scripts/licenses/`
+# resolves the directory as a module path and dies with MODULE_NOT_FOUND —
+# directory scanning only happens when no path argument is given at all.
+# node expands this pattern itself, so it needs no shell and works the same
+# under PowerShell.
+command = "node"
+args = ["--test", "scripts/licenses/**/*.test.mjs"]
 
 [tasks.deny]
 description = "Check every Rust dependency's licence against the allow list in deny.toml"

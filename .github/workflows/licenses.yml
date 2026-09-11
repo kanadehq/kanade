@@ -5,8 +5,12 @@
 # `kata apply` from the upstream preset doesn't clobber it — same reasoning as
 # integration.yml and web.yml.
 #
-# Three checks, one job, because they answer one question between them:
+# Four checks, one job, because they answer one question between them:
 #
+#   0. node --test — unit tests for the SPDX expression evaluator that check 2
+#      depends on. It is a hand-written parser gating a compliance check; the
+#      regression cases it pins are shapes no current dependency has, which is
+#      exactly why nothing else would catch a break in them.
 #   1. cargo deny check licenses — every Rust crate's licence is on the
 #      allow list in deny.toml, evaluated with --all-features across every
 #      target (the desktop client's MPL-2.0 edges are target-gated, so a
@@ -51,6 +55,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
+
+      # Before any toolchain setup: these tests need nothing but node (already
+      # on the runner) and they gate the evaluator the npm check leans on. A
+      # broken parser should fail in two seconds, not after a Rust toolchain
+      # and two bun installs.
+      # Quoted glob, not a directory: `node --test <dir>` resolves the
+      # directory as a module path and fails with MODULE_NOT_FOUND. node
+      # expands the pattern itself, so the quotes keep the shell out of it.
+      - name: SPDX evaluator unit tests
+        run: node --test "scripts/licenses/**/*.test.mjs"
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2.9.2
         with:

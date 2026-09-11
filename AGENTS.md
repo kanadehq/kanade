@@ -544,7 +544,16 @@ not about our own source, so it is enforced rather than asserted:
   desktop client's MPL-2.0 edges (`cssparser` / `selectors` /
   `dtoa-short`, via Tauri/wry) are target-gated, so a host-only scan on a
   Linux runner reports clean while missing them.
-- `scripts/licenses/npm-licenses.mjs` — the same policy for both
+- `scripts/licenses/spdx.mjs` — the npm-side allow list and a real
+  recursive-descent parser for SPDX expressions (`AND` binds tighter than
+  `OR`; parentheses mean what they say). `scripts/licenses/spdx.test.mjs`
+  pins it with `node --test`, including regression cases for shapes no
+  current dependency has — that is the point, since nothing else would
+  catch a break in them. Invoke it as
+  `node --test "scripts/licenses/**/*.test.mjs"`: a *directory* argument
+  is resolved as a module path and dies with `MODULE_NOT_FOUND`, which
+  looks exactly like a failing test.
+- `scripts/licenses/npm-licenses.mjs` — applies that policy to both
   `crates/*/web` projects. It resolves the **production** closure out of
   `bun.lock` rather than listing `node_modules`, because the dev tree
   carries `lightningcss` and its 12 per-platform binaries (all MPL-2.0)
@@ -554,16 +563,18 @@ not about our own source, so it is enforced rather than asserted:
   travel with the *binary*, and the backend binary carries the SPA inside
   it via rust-embed.
 
-`cargo make licenses` runs all three; `.github/workflows/licenses.yml`
-runs the same three on every PR. Regenerate the notices with `cargo make
+`cargo make licenses` runs all four; `.github/workflows/licenses.yml`
+runs the same four on every PR. Regenerate the notices with `cargo make
 notices` whenever a lockfile changes — the workflow fails the PR
 otherwise.
 
 Four things here are duplicated with no compiler in between:
 
 - **The allow list exists twice** — `licenses.allow` in `deny.toml` and
-  `ALLOWED` in `scripts/licenses/npm-licenses.mjs`. One policy, two
-  package managers, nothing tying them together. Change both.
+  `ALLOWED` in `scripts/licenses/spdx.mjs`. One policy, two package
+  managers, nothing tying them together. Change both. (`spdx.test.mjs`
+  asserts the JS half carries no GPL/AGPL/LGPL identifier, which catches
+  the worst way to get this wrong but not a drift between the two lists.)
 - **The ship-target list exists twice** — the `matrix.include` targets in
   `.github/workflows/release.yml` and `targets` in `about.toml`. A target
   added to the release matrix but not to `about.toml` silently drops that
@@ -592,6 +603,13 @@ Two traps worth knowing before you touch this:
   `notices.mjs` normalises line endings before writing *or* comparing.
   Don't remove that, and don't "fix" it by exempting the file from
   normalisation: the point is that the bytes are identical on every platform.
+- **SPDX expressions need a parser, not a regex.** The first version of
+  `evaluate()` treated any `AND` in the string as the top-level operator,
+  which ignores both parentheses and SPDX precedence. It turned
+  `(GPL-3.0 AND BSD-3-Clause) OR MIT` into `GPL-3.0 AND MIT` — rejecting a
+  package that offers plain MIT — and `MIT OR GPL-3.0 AND ISC` into
+  `MIT AND ISC`, a combination never on offer. Neither shape is in the tree
+  today; both are pinned in `spdx.test.mjs`.
 - **`{{!` handlebars comments end at the first `}}`.** `about.hbs`
   documents its own syntax, so it uses the `{{!-- --}}` block form; the
   short form spilled its tail into the generated notices. It also uses
