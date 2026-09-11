@@ -137,7 +137,7 @@ function build() {
      Regenerate with \`cargo make notices\`; CI enforces freshness via
      \`cargo make notices-check\` in .github/workflows/licenses.yml.
      What may enter this file at all is decided by deny.toml (Rust) and the
-     ALLOWED list in scripts/licenses/npm-licenses.mjs (npm). -->
+     ALLOWED list in scripts/licenses/spdx.mjs (npm). -->
 
 # Third-party notices
 

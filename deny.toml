@@ -16,9 +16,12 @@
 # unrelated PR red, and a vulnerability is a different problem from a license
 # violation. Keep them separable.
 #
-# The npm side of the same question lives in `scripts/licenses/npm-licenses.mjs`
-# (the SPA is embedded into the backend binary via rust-embed, so its
-# dependencies ship in a Rust artifact and need the identical treatment).
+# The npm side of the same question lives in `scripts/licenses/` (the SPA is
+# embedded into the backend binary via rust-embed, so its dependencies ship in
+# a Rust artifact and need the identical treatment): `spdx.mjs` holds the
+# matching allow list and the expression parser, `npm-licenses.mjs` applies
+# them to both bun.lock files. The `allow` list below and `ALLOWED` in
+# spdx.mjs are one policy expressed twice — change both.
 
 [graph]
 # Check every platform, not just the host. The desktop client
