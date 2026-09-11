@@ -532,3 +532,77 @@ Inventory / `kanade ping`); do **not** case-fold it. Dev
 tokens are the literal `dev`. A squashed-migration upgrade needs
 `-WipeDb`; a plain upgrade does not (no
 new files under `crates/kanade-backend/migrations/`).
+
+## Licensing and the dependency audit
+
+This project ships under MIT (`LICENSE`, `[workspace.package].license`).
+That claim is a statement about ~670 Rust crates and ~130 npm packages,
+not about our own source, so it is enforced rather than asserted:
+
+- `deny.toml` — the allow list for Rust, checked by `cargo deny check
+  licenses` with `all-features = true` across **every** target. The
+  desktop client's MPL-2.0 edges (`cssparser` / `selectors` /
+  `dtoa-short`, via Tauri/wry) are target-gated, so a host-only scan on a
+  Linux runner reports clean while missing them.
+- `scripts/licenses/npm-licenses.mjs` — the same policy for both
+  `crates/*/web` projects. It resolves the **production** closure out of
+  `bun.lock` rather than listing `node_modules`, because the dev tree
+  carries `lightningcss` and its 12 per-platform binaries (all MPL-2.0)
+  that vite never bundles into a shipped artifact.
+- `THIRD-PARTY-NOTICES.md` — generated, never hand-edited. MIT, BSD-*,
+  Apache-2.0, ISC and Unicode-3.0 each require the copyright notice to
+  travel with the *binary*, and the backend binary carries the SPA inside
+  it via rust-embed.
+
+`cargo make licenses` runs all three; `.github/workflows/licenses.yml`
+runs the same three on every PR. Regenerate the notices with `cargo make
+notices` whenever a lockfile changes — the workflow fails the PR
+otherwise.
+
+Four things here are duplicated with no compiler in between:
+
+- **The allow list exists twice** — `licenses.allow` in `deny.toml` and
+  `ALLOWED` in `scripts/licenses/npm-licenses.mjs`. One policy, two
+  package managers, nothing tying them together. Change both.
+- **The ship-target list exists twice** — the `matrix.include` targets in
+  `.github/workflows/release.yml` and `targets` in `about.toml`. A target
+  added to the release matrix but not to `about.toml` silently drops that
+  platform's crates from the notices.
+- **The bundle scripts copy licences in four places** —
+  `deploy/linux/bundle.sh`, `bundle.ps1`, `bundle-agent.sh`,
+  `bundle-agent.ps1`. The two non-agent ones additionally extract the
+  Apache-2.0 texts out of the nats-server and caddy release tarballs,
+  because those bundles redistribute unmodified third-party binaries.
+- **The two npm project paths exist twice** — `PROJECTS` in
+  `npm-licenses.mjs` and the `web-install` / `web-install-client` tasks in
+  `Makefile.toml`.
+
+Two traps worth knowing before you touch this:
+
+- **`cargo install cargo-about` installs nothing.** Its binary is behind a
+  non-default `cli` feature, so a plain install compiles for minutes, emits
+  a *warning*, and exits 0 with no binary. Use `cargo install cargo-about
+  --locked --features cli`, or let CI's `taiki-e/install-action` fetch the
+  prebuilt one.
+- **Upstream licence texts contain CRLF.** `pelite` and `equivalent` are two
+  of them, and cargo-about reproduces their bytes exactly. With
+  `* text=auto eol=lf` in `.gitattributes`, git rewrites those to LF on
+  commit — so the generator's output could never equal the committed file and
+  `notices --check` would fail on every fresh checkout, forever.
+  `notices.mjs` normalises line endings before writing *or* comparing.
+  Don't remove that, and don't "fix" it by exempting the file from
+  normalisation: the point is that the bytes are identical on every platform.
+- **`{{!` handlebars comments end at the first `}}`.** `about.hbs`
+  documents its own syntax, so it uses the `{{!-- --}}` block form; the
+  short form spilled its tail into the generated notices. It also uses
+  triple-stache everywhere — the double form HTML-escapes, which would
+  publish an altered copy of the very licence texts we are obliged to
+  reproduce verbatim.
+
+Policy, for when the gate goes red: **MPL-2.0 is allowed, GPL / AGPL /
+LGPL-only are not.** MPL-2.0 is copyleft per *file* and its section 3.3
+explicitly permits distributing a Larger Work under other terms, so it
+does not reach our source — but only while every MPL crate is consumed
+unmodified from crates.io. A `[patch]` entry or a vendored fork of one
+would oblige us to publish those modified files under the MPL-2.0.
+Widening either allow list is a licensing decision, not a build fix.

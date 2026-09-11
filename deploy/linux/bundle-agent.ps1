@@ -41,7 +41,7 @@ $repoRoot = (Resolve-Path (Join-Path $here '..\..')).Path
 
 $stage = Join-Path ([System.IO.Path]::GetTempPath()) ("kabundle-" + [System.IO.Path]::GetRandomFileName())
 $root = Join-Path $stage 'kanade-linux-agent-bundle'
-New-Item -ItemType Directory -Force -Path (Join-Path $root 'bin'), (Join-Path $root 'etc'), (Join-Path $root 'systemd') | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $root 'bin'), (Join-Path $root 'etc'), (Join-Path $root 'systemd'), (Join-Path $root 'licenses') | Out-Null
 try {
 	Write-Host "==> agent: $Agent"
 	Copy-Item -LiteralPath $Agent -Destination (Join-Path $root 'bin\kanade-agent')
@@ -50,6 +50,10 @@ try {
 	Copy-Item -LiteralPath (Join-Path $repoRoot 'configs\agent.toml')        -Destination (Join-Path $root 'etc\agent.toml')
 	Copy-Item -LiteralPath (Join-Path $here 'systemd\kanade-agent.service')  -Destination (Join-Path $root 'systemd\kanade-agent.service')
 	Copy-Item -LiteralPath (Join-Path $here 'setup-agent.sh')               -Destination (Join-Path $root 'setup-agent.sh')
+
+	Write-Host "==> licenses"
+	Copy-Item -LiteralPath (Join-Path $repoRoot 'LICENSE')                  -Destination (Join-Path $root 'licenses\LICENSE.kanade')
+	Copy-Item -LiteralPath (Join-Path $repoRoot 'THIRD-PARTY-NOTICES.md')   -Destination (Join-Path $root 'licenses\THIRD-PARTY-NOTICES.md')
 
 	New-Item -ItemType Directory -Force -Path $Out | Out-Null
 	$outFile = Join-Path ((Resolve-Path $Out).Path) 'kanade-linux-agent-bundle.tar.gz'

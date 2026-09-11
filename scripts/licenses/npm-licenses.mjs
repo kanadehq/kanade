@@ -1,0 +1,428 @@
+#!/usr/bin/env node
+// npm-licenses.mjs — the npm half of the licence audit.
+//
+// Why this exists at all: the SPA in `crates/kanade-backend/web` is embedded
+// into the backend binary with rust-embed, and the Tauri client bundles
+// `crates/kanade-client/web`. Both ship inside artifacts this project
+// distributes under MIT, so their dependencies need exactly the treatment
+// `cargo-deny` + `cargo-about` give the Rust side. No npm equivalent reads a
+// bun.lock, so this script is it.
+//
+//   node scripts/licenses/npm-licenses.mjs --check
+//       Exit non-zero if any SHIPPED package carries a licence outside
+//       ALLOWED (below). This is the CI gate.
+//
+//   node scripts/licenses/npm-licenses.mjs --notices
+//       Emit the markdown notice section on stdout, for
+//       `scripts/licenses/notices.mjs` to splice into THIRD-PARTY-NOTICES.md.
+//
+// Both modes require `bun install` to have run in each web project: licence
+// *text* only exists on disk, never in the lockfile.
+//
+// The dev/prod split is the whole point of walking the lockfile rather than
+// listing `node_modules`. `tailwindcss` pulls `lightningcss` plus its 12
+// per-platform binary packages, all MPL-2.0, and `vite`/`typescript`/
+// `playwright` bring more — none of which are ever bundled by vite into the
+// artifact we distribute. Reporting them as shipped third-party code would
+// claim we distribute code we do not; omitting a genuinely shipped MPL
+// package would be the far worse error. So: resolve the production closure
+// from the lockfile, and treat anything unresolvable as fatal instead of
+// silently dropping it.
+
+import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs'
+import { join, dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
+
+// The two npm projects whose output is distributed. Keep in step with the
+// `web-install` / `web-build` tasks in Makefile.toml.
+const PROJECTS = [
+  { label: 'kanade-backend SPA (embedded in the backend binary via rust-embed)', dir: 'crates/kanade-backend/web' },
+  { label: 'kanade-client web assets (bundled into the Tauri desktop client)', dir: 'crates/kanade-client/web' },
+]
+
+// Mirrors `licenses.allow` in deny.toml. The two lists are the same policy
+// applied to two package managers, and nothing mechanically ties them
+// together — changing one means changing the other. See the licence section
+// of AGENTS.md.
+const ALLOWED = new Set([
+  'MIT', 'MIT-0', 'Apache-2.0', 'Apache-2.0 WITH LLVM-exception',
+  'BSD-1-Clause', 'BSD-2-Clause', 'BSD-3-Clause', 'ISC', 'Zlib', '0BSD',
+  'BSL-1.0', 'CC0-1.0', 'Unlicense', 'Unicode-3.0', 'CDLA-Permissive-2.0',
+  'MPL-2.0',
+])
+
+// For `A OR B` expressions we record which branch this project relies on, so
+// the notices state a definite licence instead of an ambiguous menu. MIT
+// first for the same reason as in about.toml: it is what this project itself
+// ships under and it carries no NOTICE-file obligation.
+const PREFERENCE = [
+  'MIT', 'MIT-0', 'ISC', '0BSD', 'BSD-2-Clause', 'BSD-3-Clause', 'Zlib',
+  'Apache-2.0', 'MPL-2.0',
+]
+
+// ---------------------------------------------------------------------------
+// bun.lock is JSONC: trailing commas, and (in principle) comments. Strip them
+// with a scanner that respects string literals rather than a bare regex — a
+// regex that rewrites `,\s*}` anywhere would happily corrupt a dependency
+// range or a base64 integrity hash that contained the same bytes.
+// ---------------------------------------------------------------------------
+function parseJsonc(text, path) {
+  let out = ''
+  let i = 0
+  while (i < text.length) {
+    const c = text[i]
+    if (c === '"') {
+      // Copy the string literal verbatim, honouring backslash escapes.
+      let j = i + 1
+      while (j < text.length) {
+        if (text[j] === '\\') { j += 2; continue }
+        if (text[j] === '"') break
+        j++
+      }
+      out += text.slice(i, j + 1)
+      i = j + 1
+      continue
+    }
+    if (c === '/' && text[i + 1] === '/') {
+      while (i < text.length && text[i] !== '\n') i++
+      continue
+    }
+    if (c === '/' && text[i + 1] === '*') {
+      i += 2
+      while (i < text.length && !(text[i] === '*' && text[i + 1] === '/')) i++
+      i += 2
+      continue
+    }
+    if (c === ',') {
+      // Look ahead past whitespace: a comma before `}` or `]` is trailing.
+      let j = i + 1
+      while (j < text.length && /\s/.test(text[j])) j++
+      if (text[j] === '}' || text[j] === ']') { i++; continue }
+    }
+    out += c
+    i++
+  }
+  try {
+    return JSON.parse(out)
+  } catch (err) {
+    throw new Error(`${path}: not parseable as JSONC after comma/comment stripping: ${err.message}`)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Production closure.
+//
+// bun.lock keys mirror the installed tree: a hoisted package is `"name"`, a
+// nested one is `"parent/name"` (and `node_modules/parent/node_modules/name`
+// on disk). Resolving a dependency therefore walks up from the deepest
+// candidate to the root, exactly as node's own resolution does.
+// ---------------------------------------------------------------------------
+function resolveKey(packages, fromKey, depName) {
+  const segments = fromKey === '' ? [] : fromKey.split('/')
+  for (let depth = segments.length; depth >= 0; depth--) {
+    const candidate = [...segments.slice(0, depth), depName].join('/')
+    if (candidate in packages) return candidate
+  }
+  return null
+}
+
+function productionClosure(lock, path) {
+  const packages = lock.packages ?? {}
+  const workspaces = lock.workspaces ?? {}
+
+  // Roots: `dependencies` of every workspace, deliberately NOT
+  // `devDependencies`. `optionalDependencies` are included — an optional dep
+  // that does get installed ships like any other.
+  const queue = []
+  const seen = new Set()
+  for (const [wsName, ws] of Object.entries(workspaces)) {
+    for (const depName of Object.keys({ ...ws.dependencies, ...ws.optionalDependencies })) {
+      const key = resolveKey(packages, wsName === '' ? '' : wsName, depName)
+      if (!key) {
+        throw new Error(`${path}: root dependency "${depName}" has no entry in the lockfile — run \`bun install\` and commit the updated bun.lock`)
+      }
+      queue.push(key)
+    }
+  }
+
+  while (queue.length) {
+    const key = queue.pop()
+    if (seen.has(key)) continue
+    seen.add(key)
+
+    const entry = packages[key]
+    if (!entry) continue
+    const meta = entry[2] ?? {}
+
+    // `optionalPeers` names peers the package works without. Those are NOT
+    // shipped edges: `typescript` is an optional peer of i18next and
+    // react-i18next purely so the package can offer types, and it lands in
+    // node_modules here only because it is a devDependency. Traversing it
+    // would put the whole TypeScript compiler in the notices as shipped
+    // code. A non-optional peer (react, react-dom) really is bundled, so
+    // those stay.
+    const optionalPeers = new Set(meta.optionalPeers ?? [])
+    const peers = Object.fromEntries(
+      Object.entries(meta.peerDependencies ?? {}).filter(([name]) => !optionalPeers.has(name)),
+    )
+    const deps = {
+      ...meta.dependencies,
+      ...meta.optionalDependencies,
+      ...peers,
+    }
+
+    for (const depName of Object.keys(deps)) {
+      const resolved = resolveKey(packages, key, depName)
+      if (resolved) { queue.push(resolved); continue }
+      // An unresolvable *optional* peer is normal (react-is for recharts,
+      // say). An unresolvable hard dependency means the lockfile is stale,
+      // and silently continuing would under-report what we ship.
+      const isOptional = optionalPeers.has(depName) || depName in (meta.optionalDependencies ?? {})
+      const isPeer = depName in (meta.peerDependencies ?? {})
+      if (!isOptional && !isPeer) {
+        throw new Error(`${path}: "${key}" depends on "${depName}", which has no entry in the lockfile — run \`bun install\` and commit the updated bun.lock`)
+      }
+    }
+  }
+  return seen
+}
+
+// ---------------------------------------------------------------------------
+// On-disk metadata.
+// ---------------------------------------------------------------------------
+const LICENSE_FILE = /^(LICEN[CS]E|COPYING|NOTICE)(\..*)?$/i
+
+function packageDir(projectDir, key) {
+  // "a/b" -> node_modules/a/node_modules/b; "@scope/x" is a single package
+  // name, not a nesting separator, so rebuild the segments scope-aware.
+  const segments = []
+  for (const part of key.split('/')) {
+    if (segments.length && segments[segments.length - 1].startsWith('@') && !segments[segments.length - 1].includes('/')) {
+      segments[segments.length - 1] += '/' + part
+    } else {
+      segments.push(part)
+    }
+  }
+  return join(projectDir, 'node_modules', segments.join('/node_modules/'))
+}
+
+function normalizeLicense(pkgJson) {
+  if (typeof pkgJson.license === 'string') return pkgJson.license.trim()
+  if (pkgJson.license && typeof pkgJson.license === 'object' && pkgJson.license.type) return String(pkgJson.license.type).trim()
+  // Deprecated pre-npm-v5 form, still present in a few long-lived packages.
+  if (Array.isArray(pkgJson.licenses)) {
+    const types = pkgJson.licenses.map((l) => l.type).filter(Boolean)
+    if (types.length) return types.length === 1 ? types[0] : `(${types.join(' OR ')})`
+  }
+  return null
+}
+
+// Reduce an SPDX expression to the branch this project relies on. Only `OR`
+// is a choice; `AND` means every listed licence applies at once and all of
+// them must be allowed.
+function evaluate(expression) {
+  const stripped = expression.replace(/^\(|\)$/g, '').trim()
+  if (/\bAND\b/i.test(stripped)) {
+    const parts = stripped.split(/\s+AND\s+/i).map((p) => p.replace(/^\(|\)$/g, '').trim())
+    const chosen = parts.map((p) => (/\bOR\b/i.test(p) ? evaluate(p) : { id: p, alternatives: null }))
+    if (chosen.some((c) => c === null)) return null
+    return { id: chosen.map((c) => c.id).join(' AND '), alternatives: null }
+  }
+  if (/\bOR\b/i.test(stripped)) {
+    const options = stripped.split(/\s+OR\s+/i).map((p) => p.replace(/^\(|\)$/g, '').trim())
+    for (const preferred of PREFERENCE) {
+      if (options.includes(preferred)) return { id: preferred, alternatives: options }
+    }
+    const allowed = options.find((o) => ALLOWED.has(o))
+    return allowed ? { id: allowed, alternatives: options } : null
+  }
+  return { id: stripped, alternatives: null }
+}
+
+function collect() {
+  const results = []
+  for (const project of PROJECTS) {
+    const projectDir = join(REPO_ROOT, project.dir)
+    const lockPath = join(projectDir, 'bun.lock')
+    if (!existsSync(lockPath)) throw new Error(`missing ${lockPath}`)
+    const lock = parseJsonc(readFileSync(lockPath, 'utf8'), lockPath)
+    const shipped = productionClosure(lock, lockPath)
+
+    if (!existsSync(join(projectDir, 'node_modules'))) {
+      throw new Error(`${project.dir}: node_modules is missing — run \`bun install --frozen-lockfile\` there first (licence text is only on disk, not in the lockfile)`)
+    }
+
+    const packages = []
+    const unreadable = []
+    for (const key of [...shipped].sort()) {
+      const entry = lock.packages[key]
+      const [nameAtVersion] = entry
+      const at = nameAtVersion.lastIndexOf('@')
+      const name = nameAtVersion.slice(0, at)
+      const version = nameAtVersion.slice(at + 1)
+
+      const dir = packageDir(projectDir, key)
+      if (!existsSync(dir)) {
+        // A package with `os`/`cpu` constraints is simply not installed on
+        // this machine — bun filters it out. That is not a stale lockfile, so
+        // failing here would turn a routine dependency bump into a CI failure
+        // whose message points at the wrong problem. But it is not nothing
+        // either: such a package DOES ship on its own platform, and its
+        // licence cannot be read from here. Surface it by name instead of
+        // dropping it, and let a human decide.
+        const constraints = entry[2] ?? {}
+        if (constraints.os || constraints.cpu) {
+          unreadable.push({ name, version, constraints: { os: constraints.os, cpu: constraints.cpu } })
+          continue
+        }
+        throw new Error(`${project.dir}: "${key}" is in the production closure but not installed at ${dir} — run \`bun install --frozen-lockfile\``)
+      }
+      const pkgJson = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
+      const expression = normalizeLicense(pkgJson)
+
+      let texts = []
+      for (const file of readdirSync(dir)) {
+        if (!LICENSE_FILE.test(file)) continue
+        const full = join(dir, file)
+        if (!statSync(full).isFile()) continue
+        texts.push({ file, text: readFileSync(full, 'utf8').trim() })
+      }
+      texts.sort((a, b) => a.file.localeCompare(b.file))
+
+      packages.push({
+        name, version, expression,
+        choice: expression ? evaluate(expression) : null,
+        repository: typeof pkgJson.repository === 'string' ? pkgJson.repository : pkgJson.repository?.url ?? null,
+        texts,
+      })
+    }
+    results.push({ ...project, packages, unreadable })
+  }
+  return results
+}
+
+// ---------------------------------------------------------------------------
+function check(projects) {
+  // Two severities, because they are two different problems.
+  //
+  // `problems` are licence *terms* this project cannot ship under — the thing
+  // the gate exists to catch, and always fixable here (drop the dependency,
+  // or make a deliberate decision to widen the allow list).
+  //
+  // `warnings` are packages that declare a licence in package.json but ship
+  // no licence text in the published tarball. That is a defect in the
+  // upstream package, not in this repo, and nothing in this tree can fix it —
+  // failing CI on it would mean a red build that the only available "fix" is
+  // to delete a working dependency. The notices file records these
+  // explicitly (declared licence + upstream repository) rather than pretending
+  // the text was reproduced.
+  const problems = []
+  const warnings = []
+  for (const project of projects) {
+    for (const pkg of project.packages) {
+      const where = `${project.dir}: ${pkg.name}@${pkg.version}`
+      if (!pkg.expression) {
+        problems.push(`${where} has no \`license\` field — unlicensed code is under exclusive copyright by default and cannot ship inside an MIT artifact`)
+        continue
+      }
+      if (!pkg.choice) {
+        problems.push(`${where} is "${pkg.expression}" — no branch of that expression is on the allow list`)
+        continue
+      }
+      const ids = pkg.choice.id.split(' AND ')
+      const rejected = ids.filter((id) => !ALLOWED.has(id))
+      if (rejected.length) {
+        problems.push(`${where} is "${pkg.expression}" — ${rejected.join(', ')} is not on the allow list`)
+      }
+      if (pkg.texts.length === 0) {
+        warnings.push(`${where} declares ${pkg.choice.id} but publishes no LICENSE/COPYING file — THIRD-PARTY-NOTICES.md records the declared licence and the upstream repository instead of a reproduced text`)
+      }
+    }
+  }
+
+  for (const project of projects) {
+    for (const u of project.unreadable) {
+      const where = [u.constraints.os && `os=${[].concat(u.constraints.os).join('|')}`, u.constraints.cpu && `cpu=${[].concat(u.constraints.cpu).join('|')}`].filter(Boolean).join(' ')
+      warnings.push(`${project.dir}: ${u.name}@${u.version} is platform-restricted (${where}) and is not installed here, so its licence could not be read or reproduced — re-run this check on a matching platform, or confirm it is not bundled into a shipped artifact`)
+    }
+  }
+
+  for (const w of warnings) console.warn(`  warning: ${w}`)
+
+  if (problems.length) {
+    console.error('\nnpm licence check FAILED:\n')
+    for (const p of problems) console.error(`  - ${p}`)
+    console.error(`
+Adding a licence to the allow list is a licensing decision, not a build fix.
+The list lives in scripts/licenses/npm-licenses.mjs (ALLOWED) and must stay in
+step with \`licenses.allow\` in deny.toml.`)
+    process.exit(1)
+  }
+
+  const total = projects.reduce((n, p) => n + p.packages.length, 0)
+  console.log(`npm licence check OK — ${total} shipped package(s) across ${projects.length} project(s), all within the allow list${warnings.length ? `, ${warnings.length} without upstream licence text` : ''}.`)
+}
+
+function notices(projects) {
+  // Group by resolved licence so identical text is reproduced once, matching
+  // how cargo-about lays out the Rust half.
+  const out = []
+  for (const project of projects) {
+    out.push(`### ${project.label}`, '')
+    out.push(`Source: \`${project.dir}\` — ${project.packages.length} package(s) in the production dependency closure of \`bun.lock\`. Build-only tooling (vite, TypeScript, Tailwind/lightningcss, Playwright) is excluded: it is never bundled into a distributed artifact.`, '')
+    for (const u of project.unreadable) {
+      out.push(`> \`${u.name}@${u.version}\` is platform-restricted and was not installed on the machine that generated this file, so its licence text is not reproduced here.`, '')
+    }
+
+    const byLicense = new Map()
+    for (const pkg of project.packages) {
+      const id = pkg.choice?.id ?? 'UNKNOWN'
+      if (!byLicense.has(id)) byLicense.set(id, [])
+      byLicense.get(id).push(pkg)
+    }
+
+    for (const id of [...byLicense.keys()].sort()) {
+      const pkgs = byLicense.get(id)
+      out.push(`#### ${id}`, '')
+      for (const pkg of pkgs) {
+        const chosen = pkg.choice?.alternatives
+          ? ` (declared \`${pkg.expression}\`; this project relies on the ${id} branch)`
+          : ''
+        out.push(`- **${pkg.name}** ${pkg.version}${chosen}${pkg.repository ? ` — ${pkg.repository}` : ''}`)
+      }
+      out.push('')
+      // One representative text per (licence, package) pair: licences such as
+      // MIT and BSD carry a per-copyright-holder notice, so they cannot be
+      // collapsed to a single shared body the way an Apache-2.0 or MPL-2.0
+      // text could.
+      for (const pkg of pkgs) {
+        if (pkg.texts.length === 0) {
+          // Honest about what is and is not reproduced. See the `warnings`
+          // branch in check().
+          out.push(`> \`${pkg.name}@${pkg.version}\` publishes no licence file in its npm tarball. It declares \`${pkg.expression}\`; the authoritative text is in its repository${pkg.repository ? ` (${pkg.repository})` : ''}.`, '')
+          continue
+        }
+        for (const t of pkg.texts) {
+          out.push(`<details><summary><code>${pkg.name}@${pkg.version}</code> — ${t.file}</summary>`, '', '```', t.text, '```', '', '</details>', '')
+        }
+      }
+    }
+  }
+  process.stdout.write(out.join('\n'))
+}
+
+const mode = process.argv[2]
+if (mode !== '--check' && mode !== '--notices') {
+  console.error('usage: node scripts/licenses/npm-licenses.mjs (--check | --notices)')
+  process.exit(2)
+}
+try {
+  const projects = collect()
+  if (mode === '--check') check(projects)
+  else notices(projects)
+} catch (err) {
+  console.error(`npm-licenses: ${err.message}`)
+  process.exit(1)
+}

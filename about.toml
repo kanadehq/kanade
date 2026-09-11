@@ -1,0 +1,83 @@
+# cargo-about configuration — generates the Rust half of
+# THIRD-PARTY-NOTICES.md.
+#
+# Why a generated file and not a hand-written one: MIT, BSD-*, Apache-2.0,
+# ISC and Unicode-3.0 all require the copyright notice to travel with the
+# *binary*, and this workspace ships binaries built from ~760 crates that
+# Renovate bumps continuously. A notice file maintained by hand is wrong
+# within a week; `cargo make notices` regenerates it from the lockfile.
+#
+# The licence *policy* (what may enter the tree at all) lives in `deny.toml`.
+# This file only decides what gets reproduced in the notices, so `accepted`
+# here is the same set for a different reason: cargo-about refuses to emit a
+# notice for an expression it cannot resolve, which is the failure mode we
+# want if a new licence appears.
+
+# Ship targets, matching the `release.yml` build matrix exactly. Without
+# this, cargo-about resolves target-gated crates against the host only, and
+# the notices generated on a Linux runner would omit every Windows-only and
+# macOS-only dependency — including the `cssparser`/`selectors` (MPL-2.0)
+# edges that come in through Tauri.
+targets = [
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "x86_64-pc-windows-msvc",
+    "aarch64-apple-darwin",
+]
+
+# Build dependencies are kept. Proc-macro crates (serde_derive, thiserror,
+# tauri-macros, ...) generate code that is compiled *into* the shipped
+# binaries, so their terms travel with the artifact even though the crate
+# itself does not.
+ignore-build-dependencies = false
+
+# Dev dependencies are dropped: test harnesses and benchmark crates are
+# never linked into a release binary, so reproducing their notices would
+# claim we distribute code we do not.
+ignore-dev-dependencies = true
+
+# A dependency that is itself unlicensed is a hard failure, not a blank
+# entry — see the same reasoning in `deny.toml`.
+ignore-transitive-dependencies = false
+
+# Our own workspace members (`kanade`, `kanade-agent`, `kanade-backend`,
+# `kanade-client`, `kanade-shared`) are covered by the root LICENSE, not by
+# a *third-party* notice file. They are filtered out in `about.hbs` rather
+# than here, because cargo-about's `private.ignore` keys off
+# `publish = false` and these crates do publish to crates.io.
+
+accepted = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "BSL-1.0",
+    "CC0-1.0",
+    "Unlicense",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    "MPL-2.0",
+]
+
+# Ordering matters: for a dual-licensed crate (`MIT OR Apache-2.0`, the
+# overwhelming majority here) cargo-about picks the FIRST entry of
+# `accepted` that satisfies the expression. MIT leads the list so the
+# notices consistently record the MIT branch — matching what this project
+# itself ships under, and avoiding Apache-2.0's extra NOTICE-file
+# obligation wherever MIT is an option.
+#
+# `dompurify` on the npm side is the same situation (`MPL-2.0 OR
+# Apache-2.0`, no MIT branch); `scripts/licenses/npm-licenses.mjs` records
+# the choice there.
+
+# No per-crate clarification sections. `ring` is the usual candidate — its
+# `Apache-2.0 AND ISC` lives in one concatenated LICENSE file — but cargo-about
+# resolves it from the crate's own metadata against the list above, verified by
+# generating with this section absent. A clarification would only add an
+# upstream file hash to keep in sync for no gain.

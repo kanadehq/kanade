@@ -57,7 +57,7 @@ here="$repo_root/deploy/linux"
 stage="$(mktemp -d)"
 bundle_name="kanade-linux-${ARCH}-bundle"
 root="$stage/$bundle_name"
-mkdir -p "$root/bin" "$root/etc" "$root/systemd"
+mkdir -p "$root/bin" "$root/etc" "$root/systemd" "$root/licenses"
 trap 'rm -rf "$stage"' EXIT
 
 echo "==> backend: $BACKEND_BIN"
@@ -73,6 +73,10 @@ curl -fsSL "$nrel/SHA256SUMS" -o "$tmp/SHA256SUMS"
 	|| { echo "nats-server checksum FAILED" >&2; exit 1; }
 tar -xzf "$tmp/$nbase" -C "$tmp"
 install -m 0755 "$tmp"/nats-server-*/nats-server "$root/bin/nats-server"
+# The NATS release tarball carries its own LICENSE (Apache-2.0). Apache-2.0
+# section 4 requires it to travel with any redistribution, and this bundle IS
+# a redistribution of an unmodified nats-server binary.
+install -m 0644 "$tmp"/nats-server-*/LICENSE "$root/licenses/LICENSE.nats-server"
 
 echo "==> caddy ${CADDY_VERSION} (linux-${DL_ARCH}), checksum-verified"
 cbase="caddy_${CADDY_VERSION}_linux_${DL_ARCH}.tar.gz"
@@ -86,6 +90,9 @@ curl -fsSL "$crel/caddy_${CADDY_VERSION}_checksums.txt" -o "$tmp/caddy_checksums
 	|| { echo "caddy checksum FAILED" >&2; exit 1; }
 tar -xzf "$tmp/$cbase" -C "$tmp"
 install -m 0755 "$tmp/caddy" "$root/bin/caddy"
+# Same obligation as nats-server above: Caddy is Apache-2.0 and its release
+# tarball ships the licence text at the top level.
+install -m 0644 "$tmp/LICENSE" "$root/licenses/LICENSE.caddy"
 rm -rf "$tmp"
 
 echo "==> configs, units, installer"
@@ -97,6 +104,14 @@ install -m 0644 "$here/systemd/kanade-backend.service" "$root/systemd/kanade-bac
 install -m 0644 "$here/systemd/caddy.service"          "$root/systemd/caddy.service"
 install -m 0755 "$here/setup.sh"                  "$root/setup.sh"
 install -m 0644 "$here/README.md"                 "$root/README.md"
+
+# kanade's own licence, plus the notices for everything statically linked into
+# kanade-backend (Rust crates + the SPA bundled in via rust-embed). The two
+# Apache-2.0 texts for the third-party binaries were staged next to these as
+# each one was unpacked above.
+echo "==> licenses"
+install -m 0644 "$repo_root/LICENSE"                  "$root/licenses/LICENSE.kanade"
+install -m 0644 "$repo_root/THIRD-PARTY-NOTICES.md"   "$root/licenses/THIRD-PARTY-NOTICES.md"
 
 mkdir -p "$OUT_DIR"
 out_dir="$(cd "$OUT_DIR" && pwd)"
