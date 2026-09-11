@@ -49,12 +49,26 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# The job only reads the checkout and reports its own status; it writes
+# nothing back to GitHub. Declaring that explicitly drops the default token
+# down to read-only, so a compromised dependency pulled in by the installs
+# below has nothing worth stealing. (Flagged by zizmor's excessive-permissions
+# rule via CodeRabbit.)
+permissions:
+  contents: read
+
 jobs:
   audit:
     name: licence audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          # This job installs and then reads ~800 third-party packages. Nothing
+          # in it performs an authenticated git operation, so the checkout
+          # token has no reason to sit in the git config where a dependency's
+          # install-time code could reach it.
+          persist-credentials: false
 
       # Before any toolchain setup: these tests need nothing but node (already
       # on the runner) and they gate the evaluator the npm check leans on. A
@@ -87,13 +101,21 @@ jobs:
       # Licence *text* only exists in the published npm tarballs, never in
       # bun.lock — both the npm check and the notices generator read it off
       # disk, so both node_modules trees have to be installed first.
+      #
       # --frozen-lockfile so the audited tree is exactly the committed one.
+      #
+      # --ignore-scripts because this job's whole purpose is to *inspect*
+      # dependency content, not to run it: a package's postinstall would
+      # otherwise execute here, able to rewrite the very licence files being
+      # audited. Nothing here needs a build artifact — the audit reads
+      # package.json and LICENSE files — and it matches what the `web-install`
+      # task in Makefile.toml already does.
       - name: Install SPA deps
         working-directory: crates/kanade-backend/web
-        run: bun install --frozen-lockfile
+        run: bun install --frozen-lockfile --ignore-scripts
       - name: Install client WebView deps
         working-directory: crates/kanade-client/web
-        run: bun install --frozen-lockfile
+        run: bun install --frozen-lockfile --ignore-scripts
 
       - name: Rust dependency licences
         run: cargo deny check licenses

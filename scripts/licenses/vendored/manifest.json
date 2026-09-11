@@ -1,0 +1,61 @@
+{
+  "_comment": [
+    "Licence texts for shipped npm packages that publish none in their tarball.",
+    "",
+    "MIT, ISC and the rest of the allow list require the copyright notice to",
+    "travel with the distributed binary. When a package omits it from its own",
+    "tarball, a link is not a substitute - so the text is vendored here from the",
+    "package's canonical source and reproduced in THIRD-PARTY-NOTICES.md.",
+    "",
+    "This file is the ONLY thing standing between a missing notice and a failed",
+    "audit: scripts/licenses/npm-licenses.mjs fails on any shipped package with no",
+    "licence text and no entry here. Adding an entry is therefore a deliberate,",
+    "reviewed act - fetch the text from the source URL, check it names a copyright",
+    "holder, and record where it came from. Do not add an entry to silence a",
+    "failure without doing that.",
+    "",
+    "'covers' lists which parts of the package's SPDX expression each file",
+    "accounts for, so a compound expression cannot be half-satisfied unnoticed."
+  ],
+  "packages": {
+    "@vscode/l10n": {
+      "expression": "MIT",
+      "files": [
+        {
+          "path": "vscode-l10n.txt",
+          "covers": ["MIT"],
+          "source": "https://raw.githubusercontent.com/microsoft/vscode-l10n/main/LICENSE",
+          "note": "The published tarball contains only README.md, dist/ and package.json."
+        }
+      ]
+    },
+    "react-remove-scroll-bar": {
+      "expression": "MIT",
+      "files": [
+        {
+          "path": "react-remove-scroll-bar.txt",
+          "covers": ["MIT"],
+          "source": "https://raw.githubusercontent.com/theKashey/react-remove-scroll-bar/master/LICENSE",
+          "note": "The published tarball contains only README.md, constants/, dist/ and package.json."
+        }
+      ]
+    },
+    "victory-vendor": {
+      "expression": "MIT AND ISC",
+      "files": [
+        {
+          "path": "victory-vendor.txt",
+          "covers": ["MIT"],
+          "source": "https://raw.githubusercontent.com/FormidableLabs/victory/main/LICENSE.txt",
+          "note": "Victory's own MIT licence, covering the packaging."
+        },
+        {
+          "path": "victory-vendor.d3.txt",
+          "covers": ["ISC"],
+          "source": "https://raw.githubusercontent.com/d3/d3-array/main/LICENSE",
+          "note": "The ISC half of `MIT AND ISC`: the package vendors d3-array, d3-color, d3-ease, d3-format, d3-interpolate, d3-path, d3-scale, d3-shape, d3-time and d3-timer, which share this text. Without it the ISC half of the expression would go unattributed."
+        }
+      ]
+    }
+  }
+}

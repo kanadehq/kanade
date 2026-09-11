@@ -177,7 +177,19 @@ function productionClosure(lock, path) {
 // ---------------------------------------------------------------------------
 // On-disk metadata.
 // ---------------------------------------------------------------------------
-const LICENSE_FILE = /^(LICEN[CS]E|COPYING|NOTICE)(\..*)?$/i
+// `LICENSE`, `LICENSE.md`, and also `LICENSE_MIT` / `LICENSE-MPL`. The
+// separator class is not cosmetic: the first version of this pattern allowed
+// only a dot, so `@tauri-apps/api` (LICENSE_MIT + LICENSE_APACHE-2.0) and
+// `dompurify` (LICENSE-MPL) were reported as publishing no licence at all
+// while their texts sat on disk unreproduced. A false negative here is an
+// attribution failure, not a cosmetic one.
+const LICENSE_FILE = /^(LICEN[CS]E|COPYING|NOTICE)([._-].*)?$/i
+
+// Licence texts vendored for packages that publish none. See the _comment in
+// the manifest: an entry here is a reviewed decision, and its absence is what
+// makes a missing notice fail the audit instead of warning.
+const VENDORED_DIR = join(REPO_ROOT, 'scripts', 'licenses', 'vendored')
+const VENDORED = JSON.parse(readFileSync(join(VENDORED_DIR, 'manifest.json'), 'utf8')).packages
 
 function packageDir(projectDir, key) {
   // "a/b" -> node_modules/a/node_modules/b; "@scope/x" is a single package
@@ -254,6 +266,19 @@ function collect() {
       }
       texts.sort((a, b) => a.file.localeCompare(b.file))
 
+      // Nothing in the tarball — fall back to a reviewed vendored text.
+      let vendored = null
+      if (texts.length === 0 && VENDORED[name]) {
+        vendored = VENDORED[name]
+        texts = vendored.files.map((f) => ({
+          file: f.path,
+          vendoredFrom: f.source,
+          covers: f.covers,
+          note: f.note,
+          text: readFileSync(join(VENDORED_DIR, f.path), 'utf8').trim(),
+        }))
+      }
+
       // evaluate() throws on a malformed expression rather than guessing at
       // one. Capture it per package so one bad `license` field names itself
       // instead of aborting the whole run with a stack trace.
@@ -268,7 +293,7 @@ function collect() {
       }
 
       packages.push({
-        name, version, expression, malformed,
+        name, version, expression, malformed, vendored,
         choice,
         repository: typeof pkgJson.repository === 'string' ? pkgJson.repository : pkgJson.repository?.url ?? null,
         texts,
@@ -316,7 +341,25 @@ function check(projects) {
         continue
       }
       if (pkg.texts.length === 0) {
-        warnings.push(`${where} declares ${pkg.choice.id} but publishes no LICENSE/COPYING file — THIRD-PARTY-NOTICES.md records the declared licence and the upstream repository instead of a reproduced text`)
+        // Hard failure, not a warning. MIT, ISC and every other licence on
+        // the allow list require the copyright notice to travel with the
+        // distributed binary, and a repository URL is not that notice. The
+        // escape hatch is scripts/licenses/vendored/ — a reviewed, committed
+        // text — which is deliberately a decision someone has to make rather
+        // than a line of output they can scroll past.
+        problems.push(`${where} declares ${pkg.choice.id} but publishes no licence text, and has no entry in scripts/licenses/vendored/manifest.json — ${pkg.choice.id} requires its notice to ship with the binary. Fetch the text from the package's canonical source, add it under scripts/licenses/vendored/, and record the source URL in the manifest.`)
+        continue
+      }
+      if (pkg.vendored) {
+        // A compound expression must not be half-attributed: `MIT AND ISC`
+        // needs both notices, and vendoring only the MIT half would look
+        // complete while leaving the ISC half unattributed.
+        const required = pkg.choice.id.split(' AND ')
+        const covered = new Set(pkg.vendored.files.flatMap((f) => f.covers ?? []))
+        const uncovered = required.filter((id) => !covered.has(id))
+        if (uncovered.length) {
+          problems.push(`${where} resolves to ${pkg.choice.id}, but its vendored entry only covers ${[...covered].join(', ') || 'nothing'} — no reproduced notice for ${uncovered.join(', ')}`)
+        }
       }
     }
   }
@@ -341,7 +384,8 @@ with \`licenses.allow\` in deny.toml.`)
   }
 
   const total = projects.reduce((n, p) => n + p.packages.length, 0)
-  console.log(`npm licence check OK — ${total} shipped package(s) across ${projects.length} project(s), all within the allow list${warnings.length ? `, ${warnings.length} without upstream licence text` : ''}.`)
+  const vendoredCount = projects.reduce((n, p) => n + p.packages.filter((pkg) => pkg.vendored).length, 0)
+  console.log(`npm licence check OK — ${total} shipped package(s) across ${projects.length} project(s), all within the allow list, all with a reproduced notice${vendoredCount ? ` (${vendoredCount} vendored from upstream)` : ''}.`)
 }
 
 function notices(projects) {
@@ -377,14 +421,14 @@ function notices(projects) {
       // collapsed to a single shared body the way an Apache-2.0 or MPL-2.0
       // text could.
       for (const pkg of pkgs) {
-        if (pkg.texts.length === 0) {
-          // Honest about what is and is not reproduced. See the `warnings`
-          // branch in check().
-          out.push(`> \`${pkg.name}@${pkg.version}\` publishes no licence file in its npm tarball. It declares \`${pkg.expression}\`; the authoritative text is in its repository${pkg.repository ? ` (${pkg.repository})` : ''}.`, '')
-          continue
+        if (pkg.vendored) {
+          // Say where a vendored text came from. A notice whose provenance is
+          // unstated is only marginally better than no notice.
+          out.push(`> \`${pkg.name}@${pkg.version}\` publishes no licence text in its npm tarball. The notice below is reproduced from the package's canonical source, recorded in \`scripts/licenses/vendored/manifest.json\`.`, '')
         }
         for (const t of pkg.texts) {
-          out.push(`<details><summary><code>${pkg.name}@${pkg.version}</code> — ${t.file}</summary>`, '', '```', t.text, '```', '', '</details>', '')
+          const provenance = t.vendoredFrom ? ` (vendored from ${t.vendoredFrom})` : ''
+          out.push(`<details><summary><code>${pkg.name}@${pkg.version}</code> — ${t.file}${provenance}</summary>`, '', '````text', t.text, '````', '', '</details>', '')
         }
       }
     }

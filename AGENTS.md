@@ -562,6 +562,18 @@ not about our own source, so it is enforced rather than asserted:
   Apache-2.0, ISC and Unicode-3.0 each require the copyright notice to
   travel with the *binary*, and the backend binary carries the SPA inside
   it via rust-embed.
+- `scripts/licenses/vendored/` — licence texts for shipped npm packages
+  that publish none in their own tarball (`@vscode/l10n`,
+  `react-remove-scroll-bar`, `victory-vendor` today), with
+  `manifest.json` recording where each came from and which part of the
+  package's SPDX expression it covers. A shipped package with no notice
+  and no entry here **fails** the audit: a repository link is not the
+  notice those licences ask for, and treating it as one was the original
+  mistake. Adding an entry is a reviewed act — fetch the text from the
+  canonical source, check it names a copyright holder, record the URL.
+  `covers` exists so a compound expression cannot be half-attributed:
+  `victory-vendor` is `MIT AND ISC` and needs both Victory's MIT text and
+  the d3 ISC text it vendors.
 
 `cargo make licenses` runs all four; `.github/workflows/licenses.yml`
 runs the same four on every PR. Regenerate the notices with `cargo make
@@ -587,6 +599,12 @@ Four things here are duplicated with no compiler in between:
 - **The two npm project paths exist twice** — `PROJECTS` in
   `npm-licenses.mjs` and the `web-install` / `web-install-client` tasks in
   `Makefile.toml`.
+- **`bun install` flags exist twice** — the `web-install*` tasks in
+  `Makefile.toml` and the install steps in `licenses.yml`. Both use
+  `--frozen-lockfile --ignore-scripts`; the audit job installs dependency
+  content precisely in order to read it, so running that content's
+  postinstall hooks would let a compromised package rewrite the licence
+  files being audited.
 
 Two traps worth knowing before you touch this:
 
@@ -603,6 +621,12 @@ Two traps worth knowing before you touch this:
   `notices.mjs` normalises line endings before writing *or* comparing.
   Don't remove that, and don't "fix" it by exempting the file from
   normalisation: the point is that the bytes are identical on every platform.
+- **The licence-file pattern must allow `_` and `-`, not just `.`.** The
+  first version accepted `LICENSE` and `LICENSE.md` but not `LICENSE_MIT`
+  or `LICENSE-MPL`, so `@tauri-apps/api` and `dompurify` were reported as
+  publishing no licence while their texts sat in `node_modules`
+  unreproduced. A false negative there is an attribution failure that
+  looks exactly like an upstream packaging gap.
 - **SPDX expressions need a parser, not a regex.** The first version of
   `evaluate()` treated any `AND` in the string as the top-level operator,
   which ignores both parentheses and SPDX precedence. It turned
