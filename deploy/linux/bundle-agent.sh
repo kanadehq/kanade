@@ -40,7 +40,7 @@ here="$repo_root/deploy/linux"
 
 stage="$(mktemp -d)"
 root="$stage/kanade-linux-agent-bundle"
-mkdir -p "$root/bin" "$root/etc" "$root/systemd"
+mkdir -p "$root/bin" "$root/etc" "$root/systemd" "$root/licenses"
 trap 'rm -rf "$stage"' EXIT
 
 echo "==> agent: $AGENT_BIN"
@@ -50,6 +50,14 @@ echo "==> config, unit, installer"
 install -m 0644 "$repo_root/configs/agent.toml"        "$root/etc/agent.toml"
 install -m 0644 "$here/systemd/kanade-agent.service"   "$root/systemd/kanade-agent.service"
 install -m 0755 "$here/setup-agent.sh"                 "$root/setup-agent.sh"
+
+# kanade's own licence plus the notices for every crate statically linked into
+# kanade-agent. Unlike the backend bundle there is no third-party *binary*
+# here, but the agent binary itself is a combined work of ~760 crates whose
+# MIT / BSD / Apache-2.0 / ISC terms all require the notice to travel with it.
+echo "==> licenses"
+install -m 0644 "$repo_root/LICENSE"                   "$root/licenses/LICENSE.kanade"
+install -m 0644 "$repo_root/THIRD-PARTY-NOTICES.md"    "$root/licenses/THIRD-PARTY-NOTICES.md"
 
 mkdir -p "$OUT_DIR"
 out_dir="$(cd "$OUT_DIR" && pwd)"

@@ -1,0 +1,130 @@
+# cargo-deny configuration — the license gate for the Rust side of the
+# workspace.
+#
+# Why this exists: every crate here ships under MIT (`license` in the
+# workspace `[workspace.package]`, `LICENSE` at the root). That claim is
+# only honest as long as no dependency drags in a copyleft obligation
+# stronger than MIT can absorb. A human audit answers that once; this
+# file answers it on every PR, which is the only cadence that matters
+# when Renovate opens bumps continuously.
+#
+# Scope: `cargo deny check licenses` is what `.github/workflows/licenses.yml`
+# runs and what `cargo make deny` runs locally. The `advisories`, `bans` and
+# `sources` sections below are configured so an explicit
+# `cargo deny check all` is usable too, but they are deliberately NOT in the
+# required CI gate: a freshly published RUSTSEC advisory would then turn every
+# unrelated PR red, and a vulnerability is a different problem from a license
+# violation. Keep them separable.
+#
+# The npm side of the same question lives in `scripts/licenses/` (the SPA is
+# embedded into the backend binary via rust-embed, so its dependencies ship in
+# a Rust artifact and need the identical treatment): `spdx.mjs` holds the
+# matching allow list and the expression parser, `npm-licenses.mjs` applies
+# them to both bun.lock files. The `allow` list below and `ALLOWED` in
+# spdx.mjs are one policy expressed twice — change both.
+
+[graph]
+# Check every platform, not just the host. The desktop client
+# (`kanade-client`) pulls Tauri -> wry -> `cssparser`/`selectors`/`dtoa-short`,
+# all MPL-2.0, and those edges are target-gated: a host-only scan on a Linux
+# runner would quietly miss whatever is Windows- or macOS-only. An audit that
+# depends on which runner it happened to run on is not an audit.
+all-features = true
+
+[licenses]
+# Tolerate entries in `allow` that nothing in the tree currently uses. The
+# list below is written as a *policy* — what this project is willing to ship —
+# not as an inventory of today's lockfile, and a dependency bump that drops the
+# last BSL-1.0 crate should not fail CI for the crate that is no longer there.
+unused-allowed-license = "allow"
+
+# A crate with no `license` field needs nothing configured here: it satisfies
+# no entry in `allow`, so cargo-deny already rejects it. That is the right
+# outcome — unlicensed code is under exclusive copyright by default, and it is
+# the one case that genuinely cannot ship inside an MIT artifact.
+
+# Everything on this list is either permissive or file-scoped copyleft that
+# MPL-2.0 section 3.3 explicitly allows to be combined into a "Larger Work"
+# under other terms. Nothing here reaches our own source files.
+#
+# Adding a license to this list is a licensing decision, not a build fix.
+# If CI points at this list, read the new crate's terms first.
+allow = [
+    # --- Permissive, MIT-compatible, attribution-only ---------------------
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    # LLVM's Apache-2.0 exception (compiler-builtins, the `*-sys` shims).
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "BSL-1.0",
+    "CC0-1.0",
+    "Unlicense",
+    # Unicode-3.0 covers the ICU crates (`icu_*`, `zerovec`, `yoke`,
+    # `tinystr`, ...) that `idna`/`url` pull in. Permissive, but it wants its
+    # own notice text reproduced — which is exactly what cargo-about emits
+    # into THIRD-PARTY-NOTICES.md.
+    "Unicode-3.0",
+    # `webpki-roots` / `webpki-root-certs` ship the Mozilla CA bundle as
+    # *data* under a data licence, not a code licence. Permissive, no
+    # share-alike clause (that is CDLA-Sharing, which is NOT allowed here).
+    "CDLA-Permissive-2.0",
+
+    # --- Weak, file-scoped copyleft ---------------------------------------
+    # MPL-2.0 is per-file: modifications to MPL-covered *files* must stay
+    # MPL and be offered as source. It does not reach our files, and section
+    # 3.3 explicitly permits distributing the Larger Work under other terms
+    # (here: MIT). We consume every one of these unmodified from crates.io,
+    # so pointing at the upstream source satisfies the source-availability
+    # half, and THIRD-PARTY-NOTICES.md satisfies the notice half.
+    #
+    # In the tree today:
+    #   option-ext  <- dirs <- all four binaries
+    #   cssparser / selectors / dtoa-short  <- Tauri/wry <- kanade-client
+    #
+    # This is the one entry to think twice about before relying on: if a
+    # future change ever *patches* one of these crates (a `[patch]` entry, a
+    # vendored fork), the modified files must be published under MPL-2.0.
+    "MPL-2.0",
+]
+
+# Crates whose SPDX expression cargo-deny cannot satisfy from `allow` alone,
+# or that need a deliberate per-crate decision.
+[[licenses.exceptions]]
+# `aws-lc-sys` vendors BoringSSL-derived C and states the union of every
+# licence in that vendored tree as one `AND` expression. Each component
+# (ISC / Apache-2.0 / MIT / BSD-3-Clause / OpenSSL-style permissive) is on
+# the allow list above; the exception exists so the compound expression
+# resolves without loosening the global list.
+name = "aws-lc-sys"
+allow = ["ISC", "Apache-2.0", "MIT", "MIT-0", "BSD-3-Clause"]
+
+# No `[[licenses.clarify]]` entries. `ring` is the usual candidate — its
+# `Apache-2.0 AND ISC` sits in one concatenated LICENSE file — but both halves
+# are on the allow list, so the expression resolves from crate metadata alone
+# and a clarification would only add a file hash to keep in sync with an
+# upstream bump.
+
+[advisories]
+# Not part of the required gate (see the header). `cargo deny check
+# advisories` on demand, or when triaging a RUSTSEC report.
+yanked = "warn"
+
+[bans]
+# Duplicate versions are routine in a tree this size (764 crates) and are a
+# build-size question, not a correctness one. Warn so `cargo deny check all`
+# still surfaces them without failing.
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+# Every dependency must come from crates.io. A git dependency would bypass
+# the licence metadata this whole file rests on — crates.io enforces a
+# `license` field, a git URL does not.
+unknown-registry = "deny"
+unknown-git = "deny"

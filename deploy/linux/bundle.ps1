@@ -62,7 +62,7 @@ function Get-Checked([string]$Url, [string]$OutFile, [string]$SumsUrl, [string]$
 
 $stage = Join-Path ([System.IO.Path]::GetTempPath()) ("kbundle-" + [System.IO.Path]::GetRandomFileName())
 $root = Join-Path $stage $bundleName
-New-Item -ItemType Directory -Force -Path (Join-Path $root 'bin'), (Join-Path $root 'etc'), (Join-Path $root 'systemd') | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $root 'bin'), (Join-Path $root 'etc'), (Join-Path $root 'systemd'), (Join-Path $root 'licenses') | Out-Null
 try {
 	Write-Host "==> backend: $Backend"
 	Copy-Item -LiteralPath $Backend -Destination (Join-Path $root 'bin\kanade-backend')
@@ -77,6 +77,10 @@ try {
 	Get-Checked "$nrel/$nbase" $ntar "$nrel/SHA256SUMS" $nbase
 	& tar.exe -xzf $ntar -C $dl
 	Copy-Item -LiteralPath (Join-Path $dl "nats-server-$NatsVersion-linux-$dlArch\nats-server") -Destination (Join-Path $root 'bin\nats-server')
+	# Apache-2.0 section 4 requires the licence to travel with a redistributed
+	# binary, and this bundle redistributes nats-server unmodified. Mirrors the
+	# same two lines in bundle.sh.
+	Copy-Item -LiteralPath (Join-Path $dl "nats-server-$NatsVersion-linux-$dlArch\LICENSE") -Destination (Join-Path $root 'licenses\LICENSE.nats-server')
 
 	Write-Host "==> caddy $CaddyVersion (linux-$dlArch), checksum-verified"
 	$cbase = "caddy_${CaddyVersion}_linux_$dlArch.tar.gz"
@@ -85,6 +89,7 @@ try {
 	Get-Checked "$crel/$cbase" $ctar "$crel/caddy_${CaddyVersion}_checksums.txt" $cbase 'SHA512'
 	& tar.exe -xzf $ctar -C $dl
 	Copy-Item -LiteralPath (Join-Path $dl 'caddy') -Destination (Join-Path $root 'bin\caddy')
+	Copy-Item -LiteralPath (Join-Path $dl 'LICENSE') -Destination (Join-Path $root 'licenses\LICENSE.caddy')
 
 	Write-Host "==> configs, units, installer (byte-copied, LF preserved)"
 	Copy-Item -LiteralPath (Join-Path $here 'nats-server.conf')           -Destination (Join-Path $root 'etc\nats-server.conf')
@@ -95,6 +100,10 @@ try {
 	Copy-Item -LiteralPath (Join-Path $here 'systemd\caddy.service')          -Destination (Join-Path $root 'systemd\caddy.service')
 	Copy-Item -LiteralPath (Join-Path $here 'setup.sh')                   -Destination (Join-Path $root 'setup.sh')
 	Copy-Item -LiteralPath (Join-Path $here 'README.md')                  -Destination (Join-Path $root 'README.md')
+
+	Write-Host "==> licenses"
+	Copy-Item -LiteralPath (Join-Path $repoRoot 'LICENSE')                -Destination (Join-Path $root 'licenses\LICENSE.kanade')
+	Copy-Item -LiteralPath (Join-Path $repoRoot 'THIRD-PARTY-NOTICES.md') -Destination (Join-Path $root 'licenses\THIRD-PARTY-NOTICES.md')
 
 	New-Item -ItemType Directory -Force -Path $Out | Out-Null
 	$archiveName = "$bundleName.tar.gz"

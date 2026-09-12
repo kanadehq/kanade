@@ -1,0 +1,131 @@
+# Licence audit: proves the MIT licence this project ships under is actually
+# honest about its dependency tree.
+#
+# Lives in its own workflow file (not the kata-managed ci.yml) so a future
+# `kata apply` from the upstream preset doesn't clobber it — same reasoning as
+# integration.yml and web.yml.
+#
+# Four checks, one job, because they answer one question between them:
+#
+#   0. node --test — unit tests for the SPDX expression evaluator that check 2
+#      depends on. It is a hand-written parser gating a compliance check; the
+#      regression cases it pins are shapes no current dependency has, which is
+#      exactly why nothing else would catch a break in them.
+#   1. cargo deny check licenses — every Rust crate's licence is on the
+#      allow list in deny.toml, evaluated with --all-features across every
+#      target (the desktop client's MPL-2.0 edges are target-gated, so a
+#      host-only scan on a Linux runner would miss them).
+#   2. npm-licenses --check — the same allow list applied to the production
+#      dependency closures of both bun.lock files. The SPA is embedded into
+#      the backend binary via rust-embed, so those packages ship inside a
+#      Rust artifact and need identical treatment.
+#   3. notices --check — THIRD-PARTY-NOTICES.md still matches the lockfiles.
+#      MIT, BSD-*, Apache-2.0, ISC and Unicode-3.0 all require the copyright
+#      notice to travel with the *binary*; a stale notices file means we ship
+#      attribution for a tree we no longer have.
+#
+# Runs on EVERY pull request, not path-filtered. Same reasoning as web.yml: a
+# required status check that never runs on a given PR reports as
+# forever-pending and blocks the merge. It is also the wrong thing to skip —
+# the PRs that change this answer are Renovate bumps, which touch only a
+# lockfile, and a path filter guessing at "does this affect licences" is
+# exactly the logic whose bug would let a copyleft dependency through.
+#
+# Deliberately NOT `cargo deny check all`. The advisories database is
+# published outside this repo and moves on its own schedule: folding it in
+# would turn unrelated PRs red the morning a new RUSTSEC entry lands, and a
+# vulnerability needs a different response from a licence violation. Run
+# `cargo deny check advisories` on demand instead.
+
+name: Licenses
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# The job only reads the checkout and reports its own status; it writes
+# nothing back to GitHub. Declaring that explicitly drops the default token
+# down to read-only, so a compromised dependency pulled in by the installs
+# below has nothing worth stealing. (Flagged by zizmor's excessive-permissions
+# rule via CodeRabbit.)
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: licence audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          # This job installs and then reads ~800 third-party packages. Nothing
+          # in it performs an authenticated git operation, so the checkout
+          # token has no reason to sit in the git config where a dependency's
+          # install-time code could reach it.
+          persist-credentials: false
+
+      # Before any toolchain setup: these tests need nothing but node (already
+      # on the runner) and they gate the evaluator the npm check leans on. A
+      # broken parser should fail in two seconds, not after a Rust toolchain
+      # and two bun installs.
+      # Quoted glob, not a directory: `node --test <dir>` resolves the
+      # directory as a module path and fails with MODULE_NOT_FOUND. node
+      # expands the pattern itself, so the quotes keep the shell out of it.
+      - name: SPDX evaluator unit tests
+        run: node --test "scripts/licenses/**/*.test.mjs"
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+        # See the check job in ci.yml for why continue-on-error is set on
+        # every rust-cache restore (transient GH Actions cache backend flake).
+        continue-on-error: true
+
+      # Prebuilt binaries rather than `cargo install`. Beyond the obvious
+      # speed win, it sidesteps a real trap: cargo-about's binary sits behind
+      # a non-default `cli` feature, so `cargo install cargo-about` compiles
+      # for minutes, installs nothing, and exits 0 with only a warning.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny,cargo-about
+
+      - uses: oven-sh/setup-bun@v2
+
+      # Licence *text* only exists in the published npm tarballs, never in
+      # bun.lock — both the npm check and the notices generator read it off
+      # disk, so both node_modules trees have to be installed first.
+      #
+      # --frozen-lockfile so the audited tree is exactly the committed one.
+      #
+      # --ignore-scripts because this job's whole purpose is to *inspect*
+      # dependency content, not to run it: a package's postinstall would
+      # otherwise execute here, able to rewrite the very licence files being
+      # audited. Nothing here needs a build artifact — the audit reads
+      # package.json and LICENSE files — and it matches what the `web-install`
+      # task in Makefile.toml already does.
+      - name: Install SPA deps
+        working-directory: crates/kanade-backend/web
+        run: bun install --frozen-lockfile --ignore-scripts
+      - name: Install client WebView deps
+        working-directory: crates/kanade-client/web
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Rust dependency licences
+        run: cargo deny check licenses
+
+      - name: npm dependency licences
+        run: node scripts/licenses/npm-licenses.mjs --check
+
+      # Last, because it is the only step that needs both of the above to have
+      # passed to be meaningful — and its failure message is a one-line fix
+      # (`cargo make notices` and commit) that shouldn't be buried under a
+      # genuine licence violation.
+      - name: THIRD-PARTY-NOTICES.md is current
+        run: node scripts/licenses/notices.mjs --check

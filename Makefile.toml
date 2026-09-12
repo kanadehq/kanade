@@ -60,6 +60,85 @@ description = "Dry-run crates.io publish"
 command = "cargo"
 args = ["publish", "--dry-run", "--allow-dirty"]
 
+[tasks.licenses]
+description = "Run the full licence audit: unit tests + cargo-deny (Rust) + npm-licenses (SPA/Tauri WebView) + a freshness check on THIRD-PARTY-NOTICES.md. Same four checks .github/workflows/licenses.yml runs."
+dependencies = ["licenses-test", "deny", "npm-licenses", "notices-check"]
+
+[tasks.licenses-test]
+description = "Unit-test the SPDX expression evaluator that gates the npm licence check"
+# node's built-in runner, no framework: this has to be runnable in CI before
+# `bun install` has done anything, and a compliance gate should not acquire a
+# dependency tree of its own. Runs first in `licenses` because it is the
+# cheapest check and the one whose failure invalidates the others.
+# The path is a GLOB, not a directory. `node --test scripts/licenses/`
+# resolves the directory as a module path and dies with MODULE_NOT_FOUND —
+# directory scanning only happens when no path argument is given at all.
+# node expands this pattern itself, so it needs no shell and works the same
+# under PowerShell.
+command = "node"
+args = ["--test", "scripts/licenses/**/*.test.mjs"]
+
+[tasks.deny]
+description = "Check every Rust dependency's licence against the allow list in deny.toml"
+# `check licenses` only, NOT `check all`. The advisories database is a moving
+# target published outside this repo: folding it into the licence gate would
+# turn an unrelated PR red the morning a new RUSTSEC entry lands, and a
+# vulnerability needs a different response from a licence violation anyway.
+# Run `cargo deny check advisories` on demand.
+install_crate = { crate_name = "cargo-deny", binary = "cargo-deny", test_arg = ["--version"] }
+command = "cargo"
+args = ["deny", "check", "licenses"]
+
+[tasks.npm-licenses]
+description = "Check the SPA / Tauri WebView production dependency closures against the same allow list"
+# node, not bun: this only reads bun.lock + node_modules, and CI already has
+# node available on every runner without a setup step. It does need the
+# node_modules trees, hence the dependency on web-install.
+dependencies = ["web-install", "web-install-client"]
+command = "node"
+args = ["scripts/licenses/npm-licenses.mjs", "--check"]
+
+[tasks.web-install-client]
+description = "Install kanade-client WebView deps via bun"
+# web-install covers the backend SPA only. The licence audit needs BOTH
+# node_modules trees on disk (licence text lives in the published tarballs,
+# not in the lockfile), so the client project gets its own install task
+# rather than widening web-install and changing what `renri add` does on
+# every worktree creation.
+cwd = "${CARGO_MAKE_WORKING_DIRECTORY}/crates/kanade-client/web"
+script_runner = "@duckscript"
+script = '''
+bun_path = which bun
+bun_missing = is_empty ${bun_path}
+if ${bun_missing}
+    echo "skipping web-install-client: bun not on PATH"
+else
+    exec --fail-on-error bun install --frozen-lockfile --ignore-scripts
+end
+'''
+
+[tasks.notices]
+description = "Regenerate THIRD-PARTY-NOTICES.md from Cargo.lock + both bun.lock files"
+# cargo-about's binary is behind a non-default `cli` feature: a plain
+# `cargo install cargo-about` compiles for minutes, installs nothing, and only
+# *warns*. `install_crate_args` below is what carries `--features cli` into
+# cargo-make's auto-install, so it produces a usable binary rather than that
+# silent no-op. (CI takes a different route entirely — taiki-e/install-action
+# fetches the prebuilt binary, see .github/workflows/licenses.yml.)
+dependencies = ["web-install", "web-install-client"]
+install_crate = { crate_name = "cargo-about", binary = "cargo-about", test_arg = ["--version"] }
+install_crate_args = ["--locked", "--features", "cli"]
+command = "node"
+args = ["scripts/licenses/notices.mjs"]
+
+[tasks.notices-check]
+description = "Fail if THIRD-PARTY-NOTICES.md is stale with respect to the lockfiles"
+dependencies = ["web-install", "web-install-client"]
+install_crate = { crate_name = "cargo-about", binary = "cargo-about", test_arg = ["--version"] }
+install_crate_args = ["--locked", "--features", "cli"]
+command = "node"
+args = ["scripts/licenses/notices.mjs", "--check"]
+
 [tasks.web-install]
 description = "Install kanade-backend SPA deps via bun"
 cwd = "${CARGO_MAKE_WORKING_DIRECTORY}/crates/kanade-backend/web"

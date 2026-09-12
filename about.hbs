@@ -1,0 +1,43 @@
+{{!--
+  about.hbs — markdown layout for the Rust half of THIRD-PARTY-NOTICES.md.
+
+  Rendered by `cargo about generate` (see about.toml) and spliced into the
+  final file by scripts/licenses/notices.mjs. cargo-about groups by unique
+  licence TEXT, not by licence id: MIT carries a per-copyright-holder notice,
+  so the same id legitimately appears many times with different bodies.
+  Reproducing each one is the whole obligation.
+
+  Block-comment form (`{{!-- --}}`), not the short one: the short form ends at
+  the first `}}` it sees, so a comment that mentions handlebars syntax spills
+  its own tail into the rendered output.
+
+  TRIPLE braces everywhere, deliberately. Handlebars HTML-escapes the double
+  form, which turns the quotes in `BSD 3-Clause "New" or "Revised" License`
+  into `&quot;` and would corrupt any licence body containing & < > " — i.e.
+  it would publish an altered copy of the very text we are obliged to
+  reproduce verbatim. This is a markdown file, not HTML; nothing here wants
+  escaping.
+
+  Four-backtick fences, so a licence body containing a normal ``` fence (or
+  indented code) still round-trips.
+
+  No summary table here: notices.mjs builds it from the bullets below, after
+  filtering out this workspace's own crates. cargo-about's `overview` counts
+  them in, so a table rendered here would disagree with its own list.
+--}}
+{{#each licenses}}
+#### {{{name}}} (`{{{id}}}`)
+
+{{#each used_by}}
+- **{{{crate.name}}}** {{{crate.version}}}{{#if crate.repository}} — {{{crate.repository}}}{{else}} — https://crates.io/crates/{{{crate.name}}}{{/if}}
+{{/each}}
+
+<details><summary>Licence text</summary>
+
+````text
+{{{text}}}
+````
+
+</details>
+
+{{/each}}

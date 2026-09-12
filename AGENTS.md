@@ -532,3 +532,119 @@ Inventory / `kanade ping`); do **not** case-fold it. Dev
 tokens are the literal `dev`. A squashed-migration upgrade needs
 `-WipeDb`; a plain upgrade does not (no
 new files under `crates/kanade-backend/migrations/`).
+
+## Licensing and the dependency audit
+
+This project ships under MIT (`LICENSE`, `[workspace.package].license`).
+That claim is a statement about ~670 Rust crates and ~130 npm packages,
+not about our own source, so it is enforced rather than asserted:
+
+- `deny.toml` — the allow list for Rust, checked by `cargo deny check
+  licenses` with `all-features = true` across **every** target. The
+  desktop client's MPL-2.0 edges (`cssparser` / `selectors` /
+  `dtoa-short`, via Tauri/wry) are target-gated, so a host-only scan on a
+  Linux runner reports clean while missing them.
+- `scripts/licenses/spdx.mjs` — the npm-side allow list and a real
+  recursive-descent parser for SPDX expressions (`AND` binds tighter than
+  `OR`; parentheses mean what they say). `scripts/licenses/spdx.test.mjs`
+  pins it with `node --test`, including regression cases for shapes no
+  current dependency has — that is the point, since nothing else would
+  catch a break in them. Invoke it as
+  `node --test "scripts/licenses/**/*.test.mjs"`: a *directory* argument
+  is resolved as a module path and dies with `MODULE_NOT_FOUND`, which
+  looks exactly like a failing test.
+- `scripts/licenses/npm-licenses.mjs` — applies that policy to both
+  `crates/*/web` projects. It resolves the **production** closure out of
+  `bun.lock` rather than listing `node_modules`, because the dev tree
+  carries `lightningcss` and its 12 per-platform binaries (all MPL-2.0)
+  that vite never bundles into a shipped artifact.
+- `THIRD-PARTY-NOTICES.md` — generated, never hand-edited. MIT, BSD-*,
+  Apache-2.0, ISC and Unicode-3.0 each require the copyright notice to
+  travel with the *binary*, and the backend binary carries the SPA inside
+  it via rust-embed.
+- `scripts/licenses/vendored/` — licence texts for shipped npm packages
+  that publish none in their own tarball (`@vscode/l10n`,
+  `react-remove-scroll-bar`, `victory-vendor` today), with
+  `manifest.json` recording where each came from and which part of the
+  package's SPDX expression it covers. A shipped package with no notice
+  and no entry here **fails** the audit: a repository link is not the
+  notice those licences ask for, and treating it as one was the original
+  mistake. Adding an entry is a reviewed act — fetch the text from the
+  canonical source, check it names a copyright holder, record the URL.
+  `covers` exists so a compound expression cannot be half-attributed:
+  `victory-vendor` is `MIT AND ISC` and needs both Victory's MIT text and
+  the d3 ISC text it vendors.
+
+`cargo make licenses` runs all four; `.github/workflows/licenses.yml`
+runs the same four on every PR. Regenerate the notices with `cargo make
+notices` whenever a lockfile changes — the workflow fails the PR
+otherwise.
+
+Four things here are duplicated with no compiler in between:
+
+- **The allow list exists twice** — `licenses.allow` in `deny.toml` and
+  `ALLOWED` in `scripts/licenses/spdx.mjs`. One policy, two package
+  managers, nothing tying them together. Change both. (`spdx.test.mjs`
+  asserts the JS half carries no GPL/AGPL/LGPL identifier, which catches
+  the worst way to get this wrong but not a drift between the two lists.)
+- **The ship-target list exists twice** — the `matrix.include` targets in
+  `.github/workflows/release.yml` and `targets` in `about.toml`. A target
+  added to the release matrix but not to `about.toml` silently drops that
+  platform's crates from the notices.
+- **The bundle scripts copy licences in four places** —
+  `deploy/linux/bundle.sh`, `bundle.ps1`, `bundle-agent.sh`,
+  `bundle-agent.ps1`. The two non-agent ones additionally extract the
+  Apache-2.0 texts out of the nats-server and caddy release tarballs,
+  because those bundles redistribute unmodified third-party binaries.
+- **The two npm project paths exist twice** — `PROJECTS` in
+  `npm-licenses.mjs` and the `web-install` / `web-install-client` tasks in
+  `Makefile.toml`.
+- **`bun install` flags exist twice** — the `web-install*` tasks in
+  `Makefile.toml` and the install steps in `licenses.yml`. Both use
+  `--frozen-lockfile --ignore-scripts`; the audit job installs dependency
+  content precisely in order to read it, so running that content's
+  postinstall hooks would let a compromised package rewrite the licence
+  files being audited.
+
+Two traps worth knowing before you touch this:
+
+- **`cargo install cargo-about` installs nothing.** Its binary is behind a
+  non-default `cli` feature, so a plain install compiles for minutes, emits
+  a *warning*, and exits 0 with no binary. Use `cargo install cargo-about
+  --locked --features cli`, or let CI's `taiki-e/install-action` fetch the
+  prebuilt one.
+- **Upstream licence texts contain CRLF.** `pelite` and `equivalent` are two
+  of them, and cargo-about reproduces their bytes exactly. With
+  `* text=auto eol=lf` in `.gitattributes`, git rewrites those to LF on
+  commit — so the generator's output could never equal the committed file and
+  `notices --check` would fail on every fresh checkout, forever.
+  `notices.mjs` normalises line endings before writing *or* comparing.
+  Don't remove that, and don't "fix" it by exempting the file from
+  normalisation: the point is that the bytes are identical on every platform.
+- **The licence-file pattern must allow `_` and `-`, not just `.`.** The
+  first version accepted `LICENSE` and `LICENSE.md` but not `LICENSE_MIT`
+  or `LICENSE-MPL`, so `@tauri-apps/api` and `dompurify` were reported as
+  publishing no licence while their texts sat in `node_modules`
+  unreproduced. A false negative there is an attribution failure that
+  looks exactly like an upstream packaging gap.
+- **SPDX expressions need a parser, not a regex.** The first version of
+  `evaluate()` treated any `AND` in the string as the top-level operator,
+  which ignores both parentheses and SPDX precedence. It turned
+  `(GPL-3.0 AND BSD-3-Clause) OR MIT` into `GPL-3.0 AND MIT` — rejecting a
+  package that offers plain MIT — and `MIT OR GPL-3.0 AND ISC` into
+  `MIT AND ISC`, a combination never on offer. Neither shape is in the tree
+  today; both are pinned in `spdx.test.mjs`.
+- **`{{!` handlebars comments end at the first `}}`.** `about.hbs`
+  documents its own syntax, so it uses the `{{!-- --}}` block form; the
+  short form spilled its tail into the generated notices. It also uses
+  triple-stache everywhere — the double form HTML-escapes, which would
+  publish an altered copy of the very licence texts we are obliged to
+  reproduce verbatim.
+
+Policy, for when the gate goes red: **MPL-2.0 is allowed, GPL / AGPL /
+LGPL-only are not.** MPL-2.0 is copyleft per *file* and its section 3.3
+explicitly permits distributing a Larger Work under other terms, so it
+does not reach our source — but only while every MPL crate is consumed
+unmodified from crates.io. A `[patch]` entry or a vendored fork of one
+would oblige us to publish those modified files under the MPL-2.0.
+Widening either allow list is a licensing decision, not a build fix.
