@@ -37,6 +37,9 @@ import { fileURLToPath } from 'node:url'
 // they can be unit-tested (`node --test scripts/licenses/`). See spdx.mjs for
 // why the expression handling is a real parser rather than a regex.
 import { evaluate, parse, unlistedLeaves } from './spdx.mjs'
+// CycloneDX shaping lives in its own module so the identifier handling is
+// reachable from a unit test — see cyclonedx.test.mjs.
+import { npmComponent } from './cyclonedx.mjs'
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
@@ -518,7 +521,7 @@ function sbom(projects) {
   for (const project of projects) {
     out[project.dir] = {
       label: project.label,
-      components: project.packages.map((pkg) => component(pkg)),
+      components: project.packages.map((pkg) => npmComponent(pkg)),
       // Named, not dropped: a platform-gated package ships on its own
       // platform, and an SBOM that silently omits it is wrong in the
       // direction that matters.
@@ -526,52 +529,6 @@ function sbom(projects) {
     }
   }
   process.stdout.write(JSON.stringify(out, null, 2))
-}
-
-/** One CycloneDX `component` for an npm package. */
-function component(pkg) {
-  const c = {
-    type: 'library',
-    'bom-ref': `pkg:npm/${purlName(pkg.name)}@${pkg.version}`,
-    name: pkg.name,
-    version: pkg.version,
-    purl: `pkg:npm/${purlName(pkg.name)}@${pkg.version}`,
-    scope: 'required',
-  }
-  if (pkg.choice) {
-    // The branch this project relies on, not the raw declaration: for
-    // `MPL-2.0 OR Apache-2.0` a consumer needs to know which one we took.
-    // `expression` rather than `license.id` because an AND of two ids is
-    // not expressible as a single id.
-    c.licenses = [{ expression: pkg.choice.id }]
-  }
-  const hash = cycloneDxHash(pkg.integrity)
-  if (hash) c.hashes = [hash]
-  if (pkg.vendored) {
-    c.properties = [{ name: 'kanade:notice-source', value: 'vendored' }]
-  }
-  return c
-}
-
-/** PURL percent-encodes the `/` in a scoped name, but not the leading `@`. */
-const purlName = (name) => (name.startsWith('@') ? `${name.slice(0, name.indexOf('/'))}%2F${name.slice(name.indexOf('/') + 1)}` : name)
-
-/**
- * Convert npm's `sha512-<base64>` integrity string to a CycloneDX hash.
- *
- * @returns {{alg: string, content: string}|null} null for an unrecognised or
- *   absent integrity string — a missing hash is better than a wrong one.
- */
-function cycloneDxHash(integrity) {
-  if (!integrity) return null
-  const match = /^(sha512|sha384|sha256|sha1)-(.+)$/.exec(integrity)
-  if (!match) return null
-  const alg = { sha512: 'SHA-512', sha384: 'SHA-384', sha256: 'SHA-256', sha1: 'SHA-1' }[match[1]]
-  try {
-    return { alg, content: Buffer.from(match[2], 'base64').toString('hex') }
-  } catch {
-    return null
-  }
 }
 
 const mode = process.argv[2]

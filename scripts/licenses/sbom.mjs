@@ -27,6 +27,7 @@ import { execFileSync } from 'node:child_process'
 import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync } from 'node:fs'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { normalizeBuildPaths } from './cyclonedx.mjs'
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
@@ -90,7 +91,7 @@ function rustBoms(members) {
       if (!existsSync(path)) {
         throw new Error(`cargo-cyclonedx produced no BOM for ${member.package} at ${path} — its output layout may have changed between versions`)
       }
-      boms.set(member.package, normalizeBuildPaths(JSON.parse(readFileSync(path, 'utf8'))))
+      boms.set(member.package, normalizeBuildPaths(JSON.parse(readFileSync(path, 'utf8')), REPO_ROOT))
     }
   } finally {
     for (const member of members) {
@@ -98,40 +99,6 @@ function rustBoms(members) {
     }
   }
   return boms
-}
-
-/**
- * Replace the absolute build path cargo-cyclonedx bakes into workspace-local
- * refs with a repo-relative one.
- *
- * It emits `path+file:///home/runner/work/kanade/kanade/crates/...` for
- * members built from a path, and the same string appears again in every
- * `dependencies[].ref` / `dependsOn` entry that points at one. Published as-is
- * that leaks the build machine's layout into a release asset and makes two
- * builds of the same tag produce different documents for no reason.
- *
- * Rewritten as a whole-document string substitution rather than field by
- * field, precisely because the ref is a cross-reference: changing the
- * definition and missing a `dependsOn` would produce a BOM whose dependency
- * graph points at nodes that no longer exist.
- *
- * @param {object} bom
- * @returns {object} the same document with `<repo root>` paths made relative
- */
-function normalizeBuildPaths(bom) {
-  const fileUrl = `file://${REPO_ROOT}`
-  let text = JSON.stringify(bom)
-  if (!text.includes(REPO_ROOT)) return bom
-  // `path+file:///abs/crates/x` -> `path+file:crates/x`
-  text = text.split(`path+${fileUrl}/`).join('path+file:')
-  // `?download_url=file://.` is already relative but meaningless for a
-  // published artifact; drop the qualifier rather than shipping a URL that
-  // resolves to wherever the consumer happens to stand.
-  text = text.split('?download_url=file://.').join('')
-  // Anything else still carrying the absolute root (an externalReference,
-  // say) becomes repo-relative too.
-  text = text.split(`${fileUrl}/`).join('file:')
-  return JSON.parse(text)
 }
 
 /** npm components per web project, from the resolver that owns "what ships". */
@@ -151,13 +118,16 @@ function merge(bom, npm, binaryName) {
   if (npm.unresolved.length) {
     // An SBOM that quietly omits a platform-gated component is wrong in the
     // direction that matters, so say so in the document itself rather than
-    // only in a log line the consumer never sees.
+    // only in a log line the consumer never sees. Naming the binary matters
+    // because the same web project feeds exactly one of them — a reader of
+    // kanade-backend's BOM should not have to work out whether the gap is
+    // theirs.
     bom.metadata ??= {}
     bom.metadata.properties = [
       ...(bom.metadata.properties ?? []),
       ...npm.unresolved.map((u) => ({
         name: 'kanade:unresolved-component',
-        value: `${u.name}@${u.version} (platform-restricted, not installed on the machine that generated this SBOM)`,
+        value: `${u.name}@${u.version} would ship in ${binaryName} but is platform-restricted and was not installed on the machine that generated this SBOM`,
       })),
     ]
   }
