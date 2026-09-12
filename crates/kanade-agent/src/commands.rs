@@ -814,6 +814,10 @@ pub async fn handle_command(
         "result enqueued to outbox (drain task delivers via JetStream)",
     );
 
+    if exit_code == 0 {
+        crate::local_scheduler::record_job_success(&cmd.id, finished_at).await;
+    }
+
     // Job-generic `finalize:` hook — runs AFTER the result is enqueued
     // (so a long-running cleanup never keeps the row pending) with the
     // collect outcome injected as `KANADE_COLLECT_RESULT`. Best-effort:

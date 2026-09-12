@@ -648,3 +648,23 @@ does not reach our source — but only while every MPL crate is consumed
 unmodified from crates.io. A `[patch]` entry or a vendored fork of one
 would oblige us to publish those modified files under the MPL-2.0.
 Widening either allow list is a licensing decision, not a build fix.
+
+
+## Detached launchers and local cadence
+
+- `process::OUTPUT_DRAIN_GRACE` bounds output capture after the script host
+  exits, including normal exit. Keep the async and native Windows readers
+  cancellable and preserve partial output; aborting a blocking Rust task does
+  not interrupt `ReadFile`. A clean launcher exit must not kill its daemon.
+- Native user/session launches use `InheritedHandles` in `process_as_user.rs`.
+  Keep an explicit per-launch handle list: blanket inheritance can pass another
+  concurrently starting job's pipe into a long-lived child (#1452), which
+  clearing the launcher's own stdout/stderr inheritance cannot fix.
+- `commands::handle_command` records every successful run through
+  `local_scheduler::record_job_success`. The empty schedule-id key in
+  `local_completions.json` stores job-wide success across manual/local triggers;
+  use the newest job-wide or schedule-specific timestamp, never move it back,
+  and never clear a different execution's live claim on manual completion.
+- Schedule status/coverage cadence is an observation of per-PC job starts,
+  separate from historical rollout success. `OVERDUE` means no observed start
+  for three intervals; offline hosts, windows and freezes can also explain it.

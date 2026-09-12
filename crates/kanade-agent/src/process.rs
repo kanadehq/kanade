@@ -469,12 +469,16 @@ pub async fn run_command_with_kill(
     // can serve a running job's output. The ring stores raw bytes and
     // lossy-decodes the whole buffer on snapshot, so a multi-byte char
     // split across two `read` calls doesn't produce a spurious U+FFFD.
+    let (capture_stop, stop) = tokio::sync::watch::channel(false);
     let live_out = live.clone();
-    let stdout_task =
-        tokio::spawn(async move { drain_to_string(stdout_handle, live_out, Stream::Stdout).await });
+    let out_stop = stop.clone();
+    let stdout_task = tokio::spawn(async move {
+        drain_to_string(stdout_handle, live_out, Stream::Stdout, out_stop).await
+    });
     let live_err = live.clone();
-    let stderr_task =
-        tokio::spawn(async move { drain_to_string(stderr_handle, live_err, Stream::Stderr).await });
+    let stderr_task = tokio::spawn(async move {
+        drain_to_string(stderr_handle, live_err, Stream::Stderr, stop).await
+    });
 
     let timeout_dur = Duration::from_secs(cmd.timeout_secs.max(1));
 
@@ -538,35 +542,7 @@ pub async fn run_command_with_kill(
         }
     };
 
-    // #43 / Gemini #83 fix: pre-fix `unwrap_or_default()` here
-    // silently swallowed the reader task's inner `anyhow::Error`
-    // (broken pipe, partial read on child crash, the now-impossible
-    // UTF-8 InvalidData, etc.) — producing `stdout: ""` with no log,
-    // no annotation. That's the worst kind of failure for a fleet
-    // tool: "exit 0 with empty capture" registers as a normal
-    // success. The reader tasks now return `(partial_string,
-    // Option<Error>)` so we KEEP whatever bytes we managed to read
-    // before the failure (`from_utf8_lossy` already applied) and
-    // additionally surface the error via warn-log + a marker in
-    // stderr so the result row is self-explanatory in the SPA /
-    // Activity detail view.
-    let (stdout, stdout_err) = stdout_task
-        .await
-        .map_err(|e| anyhow::anyhow!("stdout task join: {e}"))?;
-    if let Some(e) = stdout_err {
-        warn!(error = %e, "stdout capture failed (kept partial)");
-    }
-    let (mut stderr, stderr_err) = stderr_task
-        .await
-        .map_err(|e| anyhow::anyhow!("stderr task join: {e}"))?;
-    if let Some(e) = stderr_err {
-        warn!(error = %e, "stderr capture failed (kept partial)");
-        // Append the marker AFTER the partial bytes so the partial
-        // capture stays first (operators read top-down). Newline
-        // separator handles the common case where the partial
-        // stream lacked a trailing \n.
-        stderr.push_str(&format!("\n[agent: stderr capture failed: {e}]\n"));
-    }
+    let (stdout, stderr) = finish_capture(stdout_task, stderr_task, capture_stop).await?;
 
     Ok(match inner {
         OutcomeInner::Completed(code) => ExecOutcome::Completed {
@@ -577,6 +553,40 @@ pub async fn run_command_with_kill(
         OutcomeInner::Killed => ExecOutcome::Killed { stdout, stderr },
         OutcomeInner::Timeout => ExecOutcome::Timeout { stdout, stderr },
     })
+}
+
+/// Allow buffered output to drain after the host exits, without waiting for
+/// intentionally detached descendants to close their inherited pipe handles.
+/// Dropping the sender also stops readers on an early return/cancellation.
+pub(crate) const OUTPUT_DRAIN_GRACE: Duration = Duration::from_secs(2);
+
+type Capture = (String, Option<anyhow::Error>);
+
+pub(crate) async fn finish_capture(
+    stdout: tokio::task::JoinHandle<Capture>,
+    stderr: tokio::task::JoinHandle<Capture>,
+    stop: tokio::sync::watch::Sender<bool>,
+) -> Result<(String, String)> {
+    let joined = async { tokio::join!(stdout, stderr) };
+    tokio::pin!(joined);
+    let (out, err) = match tokio::time::timeout(OUTPUT_DRAIN_GRACE, &mut joined).await {
+        Ok(pair) => pair,
+        Err(_) => {
+            let _ = stop.send(true);
+            joined.await
+        }
+    };
+    let (stdout, stdout_err) = out.context("stdout capture join")?;
+    let (mut stderr, stderr_err) = err.context("stderr capture join")?;
+    for (stream, error) in [("stdout", stdout_err), ("stderr", stderr_err)] {
+        if let Some(error) = error {
+            warn!(%stream, %error, "capture ended early (kept partial output)");
+            stderr.push_str(&format!(
+                "\n[agent: {stream} capture ended early: {error}]\n"
+            ));
+        }
+    }
+    Ok((stdout, stderr))
 }
 
 enum OutcomeInner {
@@ -605,6 +615,7 @@ async fn drain_to_string<R>(
     reader: Option<R>,
     live: Option<Arc<LiveTail>>,
     stream: Stream,
+    mut stop: tokio::sync::watch::Receiver<bool>,
 ) -> (String, Option<anyhow::Error>)
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -620,7 +631,15 @@ where
         // promptly (a 5 s SPA poll sees output within one chunk).
         let mut chunk = [0u8; 8 * 1024];
         loop {
-            match s.read(&mut chunk).await {
+            let read = tokio::select! {
+                biased;
+                _ = stop.changed() => {
+                    err = Some(anyhow::anyhow!("output drain deadline reached; a descendant may still hold the pipe"));
+                    break;
+                }
+                read = s.read(&mut chunk) => read,
+            };
+            match read {
                 Ok(0) => break,
                 Ok(n) => {
                     let slice = &chunk[..n];
@@ -733,6 +752,46 @@ async fn run_in_user_session_dispatch(
 #[cfg(test)]
 mod tests {
     use tokio::io::AsyncReadExt;
+
+    #[tokio::test]
+    async fn capture_finishes_with_partial_output_while_writer_stays_open() {
+        use tokio::io::AsyncWriteExt;
+        let (mut writer, reader) = tokio::io::duplex(64);
+        writer.write_all(b"launcher done").await.unwrap();
+        let (stop, rx) = tokio::sync::watch::channel(false);
+        let out = tokio::spawn(super::drain_to_string(
+            Some(reader),
+            None,
+            super::Stream::Stdout,
+            rx,
+        ));
+        let err = tokio::spawn(async { (String::new(), None) });
+        let (stdout, stderr) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            super::finish_capture(out, err, stop),
+        )
+        .await
+        .expect("must not wait for descendant EOF")
+        .unwrap();
+        assert_eq!(stdout, "launcher done");
+        assert!(stderr.contains("stdout capture ended early"));
+        drop(writer);
+    }
+
+    #[tokio::test]
+    async fn capture_preserves_clean_eof_without_warning() {
+        let (stop, rx) = tokio::sync::watch::channel(false);
+        let out = tokio::spawn(super::drain_to_string(
+            Some(&b"done"[..]),
+            None,
+            super::Stream::Stdout,
+            rx,
+        ));
+        let err = tokio::spawn(async { (String::new(), None) });
+        let (stdout, stderr) = super::finish_capture(out, err, stop).await.unwrap();
+        assert_eq!(stdout, "done");
+        assert_eq!(stderr, "");
+    }
 
     /// Mirror the production stdout/stderr reader: read every byte
     /// then `from_utf8_lossy`. Used to assert that invalid UTF-8
