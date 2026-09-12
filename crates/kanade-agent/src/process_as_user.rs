@@ -17,15 +17,14 @@
 //!      privileges. PsExec `-i -s` pattern.
 //! 3. Create stdout/stderr pipes with the child-end inheritable.
 //! 4. Build a user-environment block via `CreateEnvironmentBlock`.
-//! 5. `CreateProcessAsUserW` with the token + STARTUPINFO carrying
-//!    the pipe handles.
+//! 5. `CreateProcessAsUserW` with the token + STARTUPINFOEX carrying
+//!    an explicit handle list (no cross-job pipe inheritance).
 //! 6. Close the parent's copy of the child-end handles so EOF
 //!    propagates when the child exits.
-//! 7. Read pipes on dedicated blocking threads (Win32 anonymous
-//!    pipes don't support overlapped I/O).
-//! 8. Wait via `WaitForSingleObject(INFINITE)` on yet another
-//!    blocking thread; the outer async layer races it against the
-//!    kill receiver + timeout, calling `TerminateProcess` on either.
+//! 7. Poll pipes on dedicated threads, reading only available bytes;
+//!    stop capture after the host exits plus a bounded drain grace.
+//! 8. Poll `WaitForSingleObject` on another thread; the outer async
+//!    layer races it against kill + timeout and terminates the Job tree.
 //!
 //! Every `unsafe` is concentrated here so the rest of the agent
 //! stays plain Rust.
@@ -43,7 +42,8 @@ use kanade_shared::wire::{Command, RunAs, Shell};
 use tokio::sync::oneshot;
 use tracing::{info, warn};
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_BROKEN_PIPE, GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+    CloseHandle, ERROR_BROKEN_PIPE, GetLastError, HANDLE, HANDLE_FLAG_INHERIT,
+    INVALID_HANDLE_VALUE, SetHandleInformation, WAIT_OBJECT_0,
 };
 use windows::Win32::Security::{
     DuplicateTokenEx, SECURITY_ATTRIBUTES, SecurityImpersonation, SetTokenInformation,
@@ -52,13 +52,17 @@ use windows::Win32::Security::{
 };
 use windows::Win32::Storage::FileSystem::ReadFile;
 use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
-use windows::Win32::System::Pipes::CreatePipe;
+use windows::Win32::System::Pipes::{CreatePipe, PeekNamedPipe};
 use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
 use windows::Win32::System::Threading::{
     CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW,
-    DETACHED_PROCESS, GetCurrentProcess, GetExitCodeProcess, INFINITE, OpenProcessToken,
-    PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOW, TerminateProcess,
-    WaitForSingleObject,
+    DETACHED_PROCESS, GetCurrentProcess, GetExitCodeProcess, OpenProcessToken, PROCESS_INFORMATION,
+    ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOW, TerminateProcess, WaitForSingleObject,
+};
+use windows::Win32::System::Threading::{
+    DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, InitializeProcThreadAttributeList,
+    LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTUPINFOEXW,
+    UpdateProcThreadAttribute,
 };
 use windows::core::PWSTR;
 
@@ -97,18 +101,23 @@ pub async fn run_command_in_user_session(
     //    live-tail ring (when present) as it's read, so the
     //    `job.tail.<pc_id>` handler can serve a running user-session
     //    job's output just like the default `system` path.
+    let (capture_stop, stop) = tokio::sync::watch::channel(false);
+    let out_stop = stop.clone();
     let live_out = live.clone();
-    let stdout_task =
-        tokio::task::spawn_blocking(move || read_to_string(stdout_read, live_out, Stream::Stdout));
+    let stdout_task = tokio::task::spawn_blocking(move || {
+        read_to_string(stdout_read, live_out, Stream::Stdout, out_stop)
+    });
     let live_err = live.clone();
-    let stderr_task =
-        tokio::task::spawn_blocking(move || read_to_string(stderr_read, live_err, Stream::Stderr));
+    let stderr_task = tokio::task::spawn_blocking(move || {
+        read_to_string(stderr_read, live_err, Stream::Stderr, stop)
+    });
 
-    // 3) Wait for completion. Block on WaitForSingleObject in a
-    //    dedicated thread; the outer select! races it against kill
-    //    + timeout and calls TerminateProcess on either path.
+    // 3) Poll for completion on a dedicated thread. The stop channel
+    //    also releases this worker if termination fails or the caller drops.
     let process_for_wait = process.clone();
-    let mut wait = tokio::task::spawn_blocking(move || wait_native(process_for_wait.raw()));
+    let (wait_stop, wait_rx) = tokio::sync::watch::channel(false);
+    let mut wait =
+        tokio::task::spawn_blocking(move || wait_native(process_for_wait.raw(), wait_rx));
 
     let wait_outcome: WaitOutcome = tokio::select! {
         biased;
@@ -116,12 +125,14 @@ pub async fn run_command_in_user_session(
             info!(target: "kanade_agent::process_as_user", "kill arm fired — terminating job tree");
             terminate_tree(&job, process.raw());
             // wait should return imminently; if not we still record Killed.
+            let _ = wait_stop.send(true);
             let _ = (&mut wait).await;
             WaitOutcome::Killed
         }
         _ = tokio::time::sleep(timeout) => {
             info!(target: "kanade_agent::process_as_user", "timeout arm fired — terminating job tree");
             terminate_tree(&job, process.raw());
+            let _ = wait_stop.send(true);
             let _ = (&mut wait).await;
             WaitOutcome::Timeout
         }
@@ -130,18 +141,8 @@ pub async fn run_command_in_user_session(
         }
     };
 
-    // Mirror the System path (`process.rs`): keep whatever bytes we
-    // read and surface a non-EOF capture failure via warn + a stderr
-    // marker, instead of dropping it silently.
-    let (stdout, stdout_err) = stdout_task.await.map_err(|e| anyhow!("stdout join: {e}"))?;
-    if let Some(e) = stdout_err {
-        warn!(error = %e, "stdout capture failed (kept partial)");
-    }
-    let (mut stderr, stderr_err) = stderr_task.await.map_err(|e| anyhow!("stderr join: {e}"))?;
-    if let Some(e) = stderr_err {
-        warn!(error = %e, "stderr capture failed (kept partial)");
-        stderr.push_str(&format!("\n[agent: stderr capture failed: {e}]\n"));
-    }
+    let (stdout, stderr) =
+        crate::process::finish_capture(stdout_task, stderr_task, capture_stop).await?;
 
     Ok(match wait_outcome {
         WaitOutcome::Completed(code) => ExecOutcome::Completed {
@@ -228,12 +229,17 @@ fn spawn_native(cmd_line: &[u16], run_as: RunAs, cwd: Option<&str>) -> Result<Sp
             std::ptr::null_mut()
         });
 
-        let mut si: STARTUPINFOW = std::mem::zeroed();
-        si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
-        si.dwFlags = STARTF_USESTDHANDLES;
-        si.hStdOutput = HANDLE(stdout_write.as_raw_handle_value());
-        si.hStdError = HANDLE(stderr_write.as_raw_handle_value());
-        si.hStdInput = HANDLE::default();
+        let handles = [
+            HANDLE(stdout_write.as_raw_handle_value()),
+            HANDLE(stderr_write.as_raw_handle_value()),
+        ];
+        let attributes = InheritedHandles::new(&handles)?;
+        let mut si = STARTUPINFOEXW::default();
+        si.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+        si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        si.StartupInfo.hStdOutput = handles[0];
+        si.StartupInfo.hStdError = handles[1];
+        si.lpAttributeList = attributes.raw();
 
         let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
         let mut cmd_buf: Vec<u16> = cmd_line.to_vec();
@@ -241,7 +247,10 @@ fn spawn_native(cmd_line: &[u16], run_as: RunAs, cwd: Option<&str>) -> Result<Sp
         // Object BEFORE it runs a single instruction — that makes the
         // Job capture race-free (no descendant can be spawned, and
         // thus escape the Job, until we ResumeThread below).
-        let flags = CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW | CREATE_SUSPENDED;
+        let flags = CREATE_UNICODE_ENVIRONMENT
+            | CREATE_NO_WINDOW
+            | CREATE_SUSPENDED
+            | EXTENDED_STARTUPINFO_PRESENT;
 
         // CreateProcessAsUserW's lpCurrentDirectory wants a
         // NUL-terminated wide string or NULL (= inherit parent's cwd).
@@ -283,7 +292,7 @@ fn spawn_native(cmd_line: &[u16], run_as: RunAs, cwd: Option<&str>) -> Result<Sp
             flags,
             Some(env_guard.0 as *const _ as _),
             cwd_pwstr,
-            &si,
+            &si.StartupInfo,
             &mut pi,
         );
         if let Err(e) = result {
@@ -408,6 +417,56 @@ unsafe fn acquire_token(run_as: RunAs, session: u32) -> Result<SafeHandle> {
     }
 }
 
+/// Restrict each concurrent launch to its own write handles. With blanket
+/// inheritance, launcher A can inherit B's pipes while B is spawning; clearing
+/// inheritance on A's STDOUT/STDERR later cannot repair those unrelated handles.
+/// The referenced handles must outlive this attribute list.
+struct InheritedHandles<'a> {
+    storage: Vec<usize>,
+    _handles: &'a [HANDLE],
+}
+
+impl<'a> InheritedHandles<'a> {
+    fn new(handles: &'a [HANDLE]) -> Result<Self> {
+        unsafe {
+            let mut size = 0;
+            let _ = InitializeProcThreadAttributeList(None, 1, None, &mut size);
+            if size == 0 {
+                bail!("InitializeProcThreadAttributeList returned no allocation size");
+            }
+            let mut storage = vec![0usize; size.div_ceil(std::mem::size_of::<usize>())];
+            let raw = LPPROC_THREAD_ATTRIBUTE_LIST(storage.as_mut_ptr().cast());
+            InitializeProcThreadAttributeList(Some(raw), 1, None, &mut size)?;
+            let list = Self {
+                storage,
+                _handles: handles,
+            };
+            UpdateProcThreadAttribute(
+                list.raw(),
+                0,
+                PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+                Some(handles.as_ptr().cast()),
+                std::mem::size_of_val(handles),
+                None,
+                None,
+            )?;
+            Ok(list)
+        }
+    }
+
+    fn raw(&self) -> LPPROC_THREAD_ATTRIBUTE_LIST {
+        LPPROC_THREAD_ATTRIBUTE_LIST(self.storage.as_ptr().cast_mut().cast())
+    }
+}
+
+impl Drop for InheritedHandles<'_> {
+    fn drop(&mut self) {
+        unsafe {
+            DeleteProcThreadAttributeList(self.raw());
+        }
+    }
+}
+
 fn make_inheritable_pipe() -> Result<(OwnedHandle, OwnedHandle)> {
     unsafe {
         let mut sa: SECURITY_ATTRIBUTES = std::mem::zeroed();
@@ -417,10 +476,15 @@ fn make_inheritable_pipe() -> Result<(OwnedHandle, OwnedHandle)> {
         let mut write = HANDLE::default();
         CreatePipe(&mut read, &mut write, Some(&sa), 0)
             .map_err(|e| anyhow!("CreatePipe failed: {e:?}"))?;
-        Ok((
-            OwnedHandle::from_raw_handle(read.0 as _),
-            OwnedHandle::from_raw_handle(write.0 as _),
-        ))
+        let read = OwnedHandle::from_raw_handle(read.0 as _);
+        let write = OwnedHandle::from_raw_handle(write.0 as _);
+        // Only the parent may consume output.
+        SetHandleInformation(
+            HANDLE(read.as_raw_handle_value()),
+            HANDLE_FLAG_INHERIT.0,
+            Default::default(),
+        )?;
+        Ok((read, write))
     }
 }
 
@@ -452,6 +516,7 @@ fn read_to_string(
     handle: OwnedHandle,
     live: Option<Arc<LiveTail>>,
     stream: Stream,
+    stop: tokio::sync::watch::Receiver<bool>,
 ) -> (String, Option<anyhow::Error>) {
     // Bounded exactly as `process.rs::drain_to_string` is — same rule, one
     // implementation, so the two capture paths cannot drift on what a run is
@@ -461,8 +526,37 @@ fn read_to_string(
     let mut err: Option<anyhow::Error> = None;
     let raw = handle.as_raw_handle_value();
     loop {
+        if stop.has_changed().unwrap_or(true) {
+            err = Some(anyhow!(
+                "output drain deadline reached; a descendant may still hold the pipe"
+            ));
+            break;
+        }
+        // This handle has exactly one reader. Read only available bytes:
+        // aborting spawn_blocking cannot cancel a blocked ReadFile.
+        let mut available = 0;
+        if let Err(e) =
+            unsafe { PeekNamedPipe(HANDLE(raw), None, 0, None, Some(&mut available), None) }
+        {
+            if unsafe { GetLastError() } != ERROR_BROKEN_PIPE {
+                err = Some(anyhow!("PeekNamedPipe failed: {e}"));
+            }
+            break;
+        }
+        if available == 0 {
+            std::thread::sleep(Duration::from_millis(10));
+            continue;
+        }
+        let count = (available as usize).min(chunk.len());
         let mut read: u32 = 0;
-        let ok = unsafe { ReadFile(HANDLE(raw), Some(&mut chunk), Some(&mut read), None) };
+        let ok = unsafe {
+            ReadFile(
+                HANDLE(raw),
+                Some(&mut chunk[..count]),
+                Some(&mut read),
+                None,
+            )
+        };
         if let Err(e) = ok {
             // ERROR_BROKEN_PIPE is the normal EOF once the child closes
             // its write end of the anonymous pipe — not a failure.
@@ -499,9 +593,17 @@ fn read_to_string(
     (buf.finish(), err)
 }
 
-fn wait_native(process: HANDLE) -> Result<WaitOutcome> {
+fn wait_native(process: HANDLE, stop: tokio::sync::watch::Receiver<bool>) -> Result<WaitOutcome> {
     unsafe {
-        let r = WaitForSingleObject(process, INFINITE);
+        let r = loop {
+            let r = WaitForSingleObject(process, 50);
+            if r != windows::Win32::Foundation::WAIT_TIMEOUT {
+                break r;
+            }
+            if stop.has_changed().unwrap_or(true) {
+                bail!("process wait cancelled");
+            }
+        };
         if r == WAIT_OBJECT_0 {
             let mut code: u32 = 0;
             GetExitCodeProcess(process, &mut code)
@@ -850,16 +952,19 @@ pub(crate) fn spawn_session_child(
         let mut cmd_buf: Vec<u16> = cmd.encode_utf16().collect();
         cmd_buf.push(0);
 
-        let mut si: STARTUPINFOW = std::mem::zeroed();
-        si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
-        si.dwFlags = STARTF_USESTDHANDLES;
-        si.hStdOutput = HANDLE(stdout_write.as_raw_handle_value());
-        // The child only writes stdout (NDJSON idle lines); no stdin/stderr.
-        si.hStdError = HANDLE::default();
-        si.hStdInput = HANDLE::default();
+        let handles = [HANDLE(stdout_write.as_raw_handle_value())];
+        let attributes = InheritedHandles::new(&handles)?;
+        let mut si = STARTUPINFOEXW::default();
+        si.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+        si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        si.StartupInfo.hStdOutput = handles[0];
+        si.lpAttributeList = attributes.raw();
 
         let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
-        let flags = CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW | CREATE_SUSPENDED;
+        let flags = CREATE_UNICODE_ENVIRONMENT
+            | CREATE_NO_WINDOW
+            | CREATE_SUSPENDED
+            | EXTENDED_STARTUPINFO_PRESENT;
         let env_ptr = if env_guard.0.is_null() {
             None
         } else {
@@ -876,7 +981,7 @@ pub(crate) fn spawn_session_child(
             flags,
             env_ptr,
             PWSTR::null(),
-            &si,
+            &si.StartupInfo,
             &mut pi,
         )
         // The `windows` crate already captured GetLastError() into `e` at the
@@ -988,5 +1093,87 @@ mod launch_tests {
         assert_eq!(quoted("a\"b"), "\"a\\\"b\"");
         // `\"` → backslash then quote → `"\\\"" ` (2*1+1 = 3 backslashes).
         assert_eq!(quoted("\\\""), "\"\\\\\\\"\"");
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+
+    #[test]
+    fn launch_handle_list_excludes_other_jobs_pipes() {
+        use windows::Win32::System::Threading::CreateProcessW;
+        let (_out_read, out_write) = make_inheritable_pipe().unwrap();
+        let (other_read, other_write) = make_inheritable_pipe().unwrap();
+        let handles = [HANDLE(out_write.as_raw_handle_value())];
+        let attributes = InheritedHandles::new(&handles).unwrap();
+        let mut si = STARTUPINFOEXW::default();
+        si.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+        si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        si.StartupInfo.hStdOutput = handles[0];
+        si.StartupInfo.hStdError = handles[0];
+        si.lpAttributeList = attributes.raw();
+        let mut command: Vec<u16> = "cmd.exe /d /c exit 0\0".encode_utf16().collect();
+        let mut pi = PROCESS_INFORMATION::default();
+        // Suspended: the process holds inherited handles but cannot exit or
+        // spawn anything, so absence of another job's writer is deterministic.
+        unsafe {
+            CreateProcessW(
+                None,
+                Some(PWSTR(command.as_mut_ptr())),
+                None,
+                None,
+                true,
+                CREATE_SUSPENDED | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
+                None,
+                None,
+                &si.StartupInfo,
+                &mut pi,
+            )
+            .unwrap();
+            let _ = CloseHandle(pi.hThread);
+        }
+        struct ChildGuard(SafeHandle);
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                terminate(self.0.raw());
+            }
+        }
+        let _child = ChildGuard(SafeHandle::new(pi.hProcess));
+        drop(other_write);
+        let peek = unsafe {
+            PeekNamedPipe(
+                HANDLE(other_read.as_raw_handle_value()),
+                None,
+                0,
+                None,
+                None,
+                None,
+            )
+        };
+        assert!(peek.is_err(), "unrelated pipe writer must not be inherited");
+        assert_eq!(unsafe { GetLastError() }, ERROR_BROKEN_PIPE);
+    }
+
+    #[tokio::test]
+    async fn native_capture_releases_reader_even_with_a_live_writer() {
+        use std::io::Write;
+        let (read, write) = make_inheritable_pipe().unwrap();
+        let mut writer = std::fs::File::from(write);
+        writer.write_all(b"native launcher done").unwrap();
+        let (stop, rx) = tokio::sync::watch::channel(false);
+        let out =
+            tokio::task::spawn_blocking(move || read_to_string(read, None, Stream::Stdout, rx));
+        let err = tokio::spawn(async { (String::new(), None) });
+        let (stdout, stderr) = tokio::time::timeout(
+            Duration::from_secs(5),
+            crate::process::finish_capture(out, err, stop),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(stdout, "native launcher done");
+        assert!(stderr.contains("stdout capture ended early"));
+        assert!(writer.write_all(b"reader has closed").is_err());
     }
 }

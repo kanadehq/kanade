@@ -126,6 +126,35 @@ struct State {
     freeze: Option<kanade_shared::manifest::Freeze>,
 }
 
+#[derive(Default)]
+struct CompletionBridge {
+    state: Option<std::sync::Weak<Mutex<State>>>,
+    pending: HashMap<String, DateTime<Utc>>,
+}
+
+fn completion_bridge() -> &'static std::sync::Mutex<CompletionBridge> {
+    static BRIDGE: std::sync::OnceLock<std::sync::Mutex<CompletionBridge>> =
+        std::sync::OnceLock::new();
+    BRIDGE.get_or_init(Default::default)
+}
+
+/// Every successful command, including manual and replayed executions, feeds
+/// the same persistent per-PC cadence. Never clear another run's live claim.
+pub(crate) async fn record_job_success(job_id: &str, when: DateTime<Utc>) {
+    let state = {
+        let mut bridge = completion_bridge().lock().unwrap();
+        match bridge.state.as_ref().and_then(std::sync::Weak::upgrade) {
+            Some(state) => state,
+            None => {
+                let last = bridge.pending.entry(job_id.to_string()).or_insert(when);
+                *last = (*last).max(when);
+                return;
+            }
+        }
+    };
+    state.lock().await.record_job_success(job_id, when);
+}
+
 impl State {
     fn matching(&self, schedule: &Schedule, pc_id: &str, my_groups: &[String]) -> bool {
         matches!(schedule.runs_on, RunsOn::Agent)
@@ -137,9 +166,38 @@ impl State {
         format!("{schedule_id}::{job_id}")
     }
 
-    fn record_completion(&mut self, schedule_id: &str, job_id: &str, when: DateTime<Utc>) {
+    fn last_completion(&self, schedule_id: &str, job_id: &str) -> Option<&DateTime<Utc>> {
+        // An empty schedule id is reserved for successes from any trigger.
         self.completions
-            .insert(Self::key(schedule_id, job_id), when);
+            .get(&Self::key(schedule_id, job_id))
+            .into_iter()
+            .chain(self.completions.get(&Self::key("", job_id)))
+            .max()
+    }
+
+    fn record_job_success(&mut self, job_id: &str, when: DateTime<Utc>) {
+        self.record_completion("", job_id, when);
+        let ids: Vec<_> = self
+            .schedules
+            .values()
+            .filter(|s| {
+                s.job_id == job_id
+                    && matches!(s.runs_on, RunsOn::Agent)
+                    && matches!(s.when, kanade_shared::manifest::When::PerPc(_))
+            })
+            .map(|s| s.id.clone())
+            .collect();
+        for id in ids {
+            self.record_completion(&id, job_id, when);
+        }
+    }
+
+    fn record_completion(&mut self, schedule_id: &str, job_id: &str, when: DateTime<Utc>) {
+        let last = self
+            .completions
+            .entry(Self::key(schedule_id, job_id))
+            .or_insert(when);
+        *last = (*last).max(when);
         if let Err(e) = self.flush_completions() {
             warn!(
                 error = %e,
@@ -183,7 +241,7 @@ impl State {
             // dedup (startup once-per-boot) is the caller's job; here we
             // only gate concurrent double-claims via `in_flight`.
             ExecMode::EveryTick | ExecMode::Event => true,
-            ExecMode::OncePerPc => match self.completions.get(&Self::key(schedule_id, job_id)) {
+            ExecMode::OncePerPc => match self.last_completion(schedule_id, job_id) {
                 None => true,
                 Some(last) => cooldown.is_some_and(|cd| (now - *last) >= cd),
             },
@@ -446,6 +504,15 @@ async fn run(
         live_fires: HashMap::new(),
         freeze: None,
     }));
+
+    let pending = {
+        let mut bridge = completion_bridge().lock().unwrap();
+        bridge.state = Some(Arc::downgrade(&state));
+        std::mem::take(&mut bridge.pending)
+    };
+    for (job_id, when) in pending {
+        state.lock().await.record_job_success(&job_id, when);
+    }
 
     // Long-lived auxiliary task: react to group-membership flips even
     // while the schedules / jobs watches are mid-reopen. Uses
@@ -1789,8 +1856,7 @@ async fn local_tick(
         }
         ExecMode::OncePerPc => {
             let st = state.lock().await;
-            let key = State::key(&schedule.id, &schedule.job_id);
-            match st.completions.get(&key) {
+            match st.last_completion(&schedule.id, &schedule.job_id) {
                 None => true,
                 Some(last) => match cooldown {
                     None => false, // permanent skip after first success
@@ -2062,6 +2128,41 @@ mod tests {
         Active, Constraints, FanoutPlan, OnFailure, OnceLiteral, PerPolicy, ScheduleTz, Target,
         When,
     };
+
+    #[test]
+    fn manual_success_rearms_cadence_and_survives_reload_without_clearing_live_claim() {
+        let mut st = test_state();
+        st.in_flight.insert("s".into(), t(200));
+        st.record_job_success("job", t(100));
+        st.record_job_success("job", t(50)); // late delivery cannot move time back
+        assert_eq!(st.in_flight.get("s"), Some(&t(200)));
+        st.completions = State::load_completions(&st.completions_path);
+        assert_eq!(st.last_completion("s", "job"), Some(&t(100)));
+        st.in_flight.clear();
+        assert_eq!(
+            st.try_claim_fire(
+                "s",
+                "job",
+                ExecMode::OncePerPc,
+                Some(ChronoDuration::seconds(300)),
+                t(399),
+                ChronoDuration::seconds(60)
+            ),
+            (false, false)
+        );
+        assert_eq!(
+            st.try_claim_fire(
+                "s",
+                "job",
+                ExecMode::OncePerPc,
+                Some(ChronoDuration::seconds(300)),
+                t(400),
+                ChronoDuration::seconds(60)
+            ),
+            (true, false)
+        );
+        let _ = std::fs::remove_file(&st.completions_path);
+    }
 
     // ---- #418 on:startup boot-dedup decision ----
 

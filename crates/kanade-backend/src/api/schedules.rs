@@ -278,6 +278,79 @@ pub struct StatusResponse {
     /// Most recent run, or `null` if this schedule's job has never run.
     pub last_run: Option<LastRun>,
     pub recent: RecentCounts,
+    pub cadence: Option<CadenceHealth>,
+}
+
+/// Observed cadence, not a diagnosis: offline agents, execution windows and
+/// freezes can also explain an overdue PC. Historical rollout success remains
+/// separate, so an old exit 0 no longer makes a stalled cadence look healthy.
+#[derive(Serialize)]
+pub struct CadenceHealth {
+    pub overdue_after_seconds: u64,
+    pub overdue_pcs: Vec<String>,
+    pub no_history_pcs: Vec<String>,
+}
+
+fn cadence_threshold(schedule: &Schedule) -> Option<std::time::Duration> {
+    use kanade_shared::manifest::{PerPolicy, When};
+    if !schedule.enabled || schedule.runs_on != RunsOn::Agent {
+        return None;
+    }
+    let When::PerPc(PerPolicy::Every(spec)) = &schedule.when else {
+        return None;
+    };
+    humantime::parse_duration(&spec.every).ok()?.checked_mul(3)
+}
+
+fn cadence_for(
+    roster: &[String],
+    latest: &HashMap<String, chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+    threshold: std::time::Duration,
+) -> CadenceHealth {
+    let mut health = CadenceHealth {
+        overdue_after_seconds: threshold.as_secs(),
+        overdue_pcs: Vec::new(),
+        no_history_pcs: Vec::new(),
+    };
+    for pc in roster {
+        match latest.get(pc) {
+            Some(last) if (now - *last).to_std().is_ok_and(|age| age >= threshold) => {
+                health.overdue_pcs.push(pc.clone())
+            }
+            None => health.no_history_pcs.push(pc.clone()),
+            _ => {}
+        }
+    }
+    health
+}
+
+async fn cadence_health(
+    pool: &sqlx::SqlitePool,
+    schedule: &Schedule,
+    roster: &[String],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<CadenceHealth>, sqlx::Error> {
+    let Some(threshold) = cadence_threshold(schedule) else {
+        return Ok(None);
+    };
+    // Each start counts, including manual exec and failures. A backend reap's
+    // later finished_at must not make an abandoned run appear freshly fired.
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT pc_id, MAX(started_at) FROM execution_results WHERE job_id = ? GROUP BY pc_id",
+    )
+    .bind(&schedule.job_id)
+    .fetch_all(pool)
+    .await?;
+    let latest = rows
+        .into_iter()
+        .filter_map(|(pc, at)| {
+            chrono::DateTime::parse_from_rfc3339(&at)
+                .ok()
+                .map(|at| (pc, at.with_timezone(&chrono::Utc)))
+        })
+        .collect();
+    Ok(Some(cadence_for(roster, &latest, now, threshold)))
 }
 
 /// Last run + trailing success/fail tally for a job. Keyed by `job_id`
@@ -374,6 +447,17 @@ pub async fn status(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("run stats: {e}")))?;
 
+    let cadence = if cadence_threshold(&schedule).is_some() {
+        let roster = crate::scheduler::resolve_roster(&s, &schedule.plan.target, false)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("roster: {e}")))?;
+        cadence_health(&s.pool, &schedule, &roster, now)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("cadence: {e}")))?
+    } else {
+        None
+    };
+
     Ok(Json(StatusResponse {
         id: schedule.id.clone(),
         when: schedule.when.to_string(),
@@ -382,6 +466,7 @@ pub async fn status(
         next_run,
         last_run,
         recent,
+        cadence,
     }))
 }
 
@@ -421,6 +506,7 @@ pub struct CoverageResponse {
     pub running: usize,
     pub pending: usize,
     pub agents: Vec<AgentRun>,
+    pub cadence: Option<CadenceHealth>,
 }
 
 /// Per-schedule coverage counts for the list view (no per-agent detail).
@@ -660,6 +746,10 @@ pub async fn coverage(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("coverage: {e}")))?;
     let (agents, ok, fail, running, pending) = coverage_for(&roster, &inflight, &finished);
 
+    let cadence = cadence_health(&s.pool, &schedule, &roster, chrono::Utc::now())
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("cadence: {e}")))?;
+
     Ok(Json(CoverageResponse {
         id: schedule.id.clone(),
         when: schedule.when.to_string(),
@@ -671,6 +761,7 @@ pub async fn coverage(
         running,
         pending,
         agents,
+        cadence,
     }))
 }
 
@@ -1405,6 +1496,20 @@ mod tests {
         assert_eq!(out.matches("enabled: true").count(), 1);
     }
 
+    #[test]
+    fn cadence_distinguishes_overdue_from_fresh_and_unobserved_pcs() {
+        let now = chrono::Utc::now();
+        let roster = vec!["stalled".into(), "fresh".into(), "unknown".into()];
+        let latest = HashMap::from([
+            ("stalled".into(), now - chrono::Duration::minutes(15)),
+            ("fresh".into(), now - chrono::Duration::minutes(4)),
+            ("outside-target".into(), now - chrono::Duration::days(4)),
+        ]);
+        let health = super::cadence_for(&roster, &latest, now, std::time::Duration::from_secs(900));
+        assert_eq!(health.overdue_pcs, ["stalled"]);
+        assert_eq!(health.no_history_pcs, ["unknown"]);
+    }
+
     // ---- schedule_run_stats (#418 coverage view) ----
 
     use super::schedule_run_stats;
@@ -1452,6 +1557,36 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cadence_uses_starts_not_reap_time_and_accepts_manual_success() {
+        let pool = fresh_pool().await;
+        let mut schedule: super::Schedule = serde_yaml::from_str(
+            "id: s\njob_id: j1\nwhen: { per_pc: { every: 5m } }\nruns_on: agent\n",
+        )
+        .unwrap();
+        let roster = vec!["pc-1".to_string()];
+        insert_exec(&pool, "hung", "j1", Some(-1), true, 60).await;
+        sqlx::query("UPDATE execution_results SET finished_at = ?, recorded_at = ? WHERE result_id = 'hung'")
+            .bind(Utc::now()).bind(Utc::now()).execute(&pool).await.unwrap();
+        let health = super::cadence_health(&pool, &schedule, &roster, Utc::now())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(health.overdue_pcs, ["pc-1"]);
+        insert_exec(&pool, "manual-ok", "j1", Some(0), true, 0).await;
+        let health = super::cadence_health(&pool, &schedule, &roster, Utc::now())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(health.overdue_pcs.is_empty());
+        assert!(health.no_history_pcs.is_empty());
+        schedule.enabled = false;
+        assert!(super::cadence_threshold(&schedule).is_none());
+        schedule.enabled = true;
+        schedule.runs_on = super::RunsOn::Backend;
+        assert!(super::cadence_threshold(&schedule).is_none());
     }
 
     #[tokio::test]

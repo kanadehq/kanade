@@ -233,6 +233,7 @@ async fn status(base: &str, id: &str) -> Result<()> {
         "  next run : {}",
         p.get("next_run").and_then(|v| v.as_str()).unwrap_or("—")
     );
+    print_cadence(&p);
     match p.get("last_run") {
         Some(lr) if !lr.is_null() => {
             let pc = lr.get("pc_id").and_then(|v| v.as_str()).unwrap_or("?");
@@ -264,6 +265,42 @@ async fn status(base: &str, id: &str) -> Result<()> {
     Ok(())
 }
 
+fn print_cadence(response: &serde_json::Value) {
+    let Some(cadence) = response.get("cadence").filter(|c| !c.is_null()) else {
+        return;
+    };
+    let pcs = |key: &str| -> Vec<&str> {
+        cadence
+            .get(key)
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str())
+            .collect()
+    };
+    let overdue = pcs("overdue_pcs");
+    let unknown = pcs("no_history_pcs");
+    if !overdue.is_empty() {
+        let seconds = cadence
+            .get("overdue_after_seconds")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        println!(
+            "  cadence  : OVERDUE (no observed start for >= {seconds}s): {}",
+            overdue.join(", ")
+        );
+        println!(
+            "             Check agent health, active runs, execution windows and freeze settings."
+        );
+    }
+    if !unknown.is_empty() {
+        println!("  cadence  : no run history: {}", unknown.join(", "));
+    }
+    if overdue.is_empty() && unknown.is_empty() {
+        println!("  cadence  : recent starts observed (agent-local schedule)");
+    }
+}
+
 async fn coverage(base: &str, id: &str, all: bool) -> Result<()> {
     let url = format!("{base}/api/schedules/{id}/coverage");
     let resp = crate::http_client::authed_client()?
@@ -285,6 +322,8 @@ async fn coverage(base: &str, id: &str, all: bool) -> Result<()> {
         (n("total"), n("ok"), n("fail"), n("running"), n("pending"));
     println!("{id}  —  {when}  (job: {job}, runs_on: {runs_on})");
     println!("  rollout : {ok}/{total} ok · {fail} fail · {running} running · {pending} pending");
+
+    print_cadence(&p);
 
     // Per-agent detail: not-yet-done by default (fail/running/pending),
     // everything with --all. ok rows are quiet unless --all.
