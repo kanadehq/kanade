@@ -576,7 +576,33 @@ not about our own source, so it is enforced rather than asserted:
   the d3 ISC text it vendors.
 
 `cargo make licenses` runs all four; `.github/workflows/licenses.yml`
-runs the same four on every PR. Regenerate the notices with `cargo make
+runs the same four on every PR.
+
+**The SBOM is a separate artifact, not a fifth check.** `cargo make sbom`
+(`scripts/licenses/sbom.mjs`) writes one CycloneDX document per shipped
+binary into `target/sbom/`, and `release-extras.yml` attaches them to the
+GitHub Release on a tag. It is deliberately **not** committed and not part
+of `cargo make licenses`: the notices answer "did we honour the licences"
+about a commit, while an SBOM answers "what is inside this binary" about a
+release. `licenses.yml` runs the generator anyway without publishing
+anything, so a change that breaks it fails the PR that causes it rather
+than the next release. See #1450.
+
+Two things about its shape are load-bearing:
+
+- **Per binary, not per workspace.** The four binaries do not contain the
+  same code — 258 components in `kanade-agent` against 494 in
+  `kanade-backend`. One workspace BOM would claim every component is in
+  every artifact, which is the "technically a superset" answer that makes
+  an SBOM useless for the only question anyone asks it: *is this binary
+  affected?*
+- **The npm half comes from our own resolver**, via
+  `npm-licenses.mjs --sbom`, not from a separate tool.
+  `@cyclonedx/cyclonedx-npm` wants an npm lockfile we do not have, but the
+  real reason is that a second tool would compute its own notion of what
+  ships. Two answers to that question is the failure this whole area
+  exists to prevent; sharing `collect()` means the SBOM and the notices
+  cannot disagree. Regenerate the notices with `cargo make
 notices` whenever a lockfile changes — the workflow fails the PR
 otherwise.
 
@@ -598,7 +624,11 @@ Four things here are duplicated with no compiler in between:
   because those bundles redistribute unmodified third-party binaries.
 - **The two npm project paths exist twice** — `PROJECTS` in
   `npm-licenses.mjs` and the `web-install` / `web-install-client` tasks in
-  `Makefile.toml`.
+  `Makefile.toml`. `EMBEDS` in `sbom.mjs` is the same mapping seen from the
+  other side (which binary each web project ends up inside), and it fails
+  loudly if it names a package that is not a binary-producing member — but
+  nothing catches a web project added to `PROJECTS` and forgotten in
+  `EMBEDS`, which would silently leave those components out of every BOM.
 - **`bun install` flags exist twice** — the `web-install*` tasks in
   `Makefile.toml` and the install steps in `licenses.yml`. Both use
   `--frozen-lockfile --ignore-scripts`; the audit job installs dependency

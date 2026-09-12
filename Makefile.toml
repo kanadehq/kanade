@@ -117,6 +117,19 @@ else
 end
 '''
 
+[tasks.sbom]
+description = "Generate one CycloneDX SBOM per shipped binary into target/sbom/"
+# Not part of `cargo make licenses`: that task answers "may we ship this, and
+# have we attributed it", which gates every PR. An SBOM answers "what is in
+# this artifact", which is a release-time question — release-extras.yml
+# generates and uploads it on a tag. licenses.yml still *runs* this on PRs, so
+# a break lands on the PR that causes it rather than at the next release.
+dependencies = ["web-install", "web-install-client"]
+install_crate = { crate_name = "cargo-cyclonedx", binary = "cargo-cyclonedx", test_arg = ["--version"] }
+install_crate_args = ["--locked"]
+command = "node"
+args = ["scripts/licenses/sbom.mjs"]
+
 [tasks.notices]
 description = "Regenerate THIRD-PARTY-NOTICES.md from Cargo.lock + both bun.lock files"
 # cargo-about's binary is behind a non-default `cli` feature: a plain

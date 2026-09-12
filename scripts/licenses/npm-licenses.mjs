@@ -336,8 +336,14 @@ function collect() {
         }
       }
 
+      // bun.lock's 4th element is the npm integrity string
+      // (`sha512-<base64>`). Carried through for the SBOM, where a hash
+      // is what lets a consumer tell whether the component they have is
+      // the component this build resolved.
+      const integrity = typeof entry[3] === 'string' ? entry[3] : null
+
       packages.push({
-        name, version, expression, malformed, vendored,
+        name, version, expression, malformed, vendored, integrity,
         choice,
         repository: typeof pkgJson.repository === 'string' ? pkgJson.repository : pkgJson.repository?.url ?? null,
         texts,
@@ -493,15 +499,91 @@ function notices(projects) {
   process.stdout.write(out.join('\n'))
 }
 
+/**
+ * Emit the shipped npm packages as CycloneDX components on stdout, keyed by
+ * project directory so the caller can fold each set into the right binary's
+ * BOM.
+ *
+ * Deliberately *not* a standalone tool run: `@cyclonedx/cyclonedx-npm` shells
+ * out to `npm ls` and wants an npm lockfile, which this repo does not have.
+ * More importantly, a second tool would compute its own notion of "what
+ * ships" — and two answers to that question is exactly the failure mode this
+ * whole area exists to prevent. Reusing `collect()` means the SBOM and
+ * THIRD-PARTY-NOTICES.md cannot disagree, because they are one computation.
+ *
+ * @param {ReturnType<typeof collect>} projects
+ */
+function sbom(projects) {
+  const out = {}
+  for (const project of projects) {
+    out[project.dir] = {
+      label: project.label,
+      components: project.packages.map((pkg) => component(pkg)),
+      // Named, not dropped: a platform-gated package ships on its own
+      // platform, and an SBOM that silently omits it is wrong in the
+      // direction that matters.
+      unresolved: project.unreadable.map((u) => ({ name: u.name, version: u.version, constraints: u.constraints })),
+    }
+  }
+  process.stdout.write(JSON.stringify(out, null, 2))
+}
+
+/** One CycloneDX `component` for an npm package. */
+function component(pkg) {
+  const c = {
+    type: 'library',
+    'bom-ref': `pkg:npm/${purlName(pkg.name)}@${pkg.version}`,
+    name: pkg.name,
+    version: pkg.version,
+    purl: `pkg:npm/${purlName(pkg.name)}@${pkg.version}`,
+    scope: 'required',
+  }
+  if (pkg.choice) {
+    // The branch this project relies on, not the raw declaration: for
+    // `MPL-2.0 OR Apache-2.0` a consumer needs to know which one we took.
+    // `expression` rather than `license.id` because an AND of two ids is
+    // not expressible as a single id.
+    c.licenses = [{ expression: pkg.choice.id }]
+  }
+  const hash = cycloneDxHash(pkg.integrity)
+  if (hash) c.hashes = [hash]
+  if (pkg.vendored) {
+    c.properties = [{ name: 'kanade:notice-source', value: 'vendored' }]
+  }
+  return c
+}
+
+/** PURL percent-encodes the `/` in a scoped name, but not the leading `@`. */
+const purlName = (name) => (name.startsWith('@') ? `${name.slice(0, name.indexOf('/'))}%2F${name.slice(name.indexOf('/') + 1)}` : name)
+
+/**
+ * Convert npm's `sha512-<base64>` integrity string to a CycloneDX hash.
+ *
+ * @returns {{alg: string, content: string}|null} null for an unrecognised or
+ *   absent integrity string — a missing hash is better than a wrong one.
+ */
+function cycloneDxHash(integrity) {
+  if (!integrity) return null
+  const match = /^(sha512|sha384|sha256|sha1)-(.+)$/.exec(integrity)
+  if (!match) return null
+  const alg = { sha512: 'SHA-512', sha384: 'SHA-384', sha256: 'SHA-256', sha1: 'SHA-1' }[match[1]]
+  try {
+    return { alg, content: Buffer.from(match[2], 'base64').toString('hex') }
+  } catch {
+    return null
+  }
+}
+
 const mode = process.argv[2]
-if (mode !== '--check' && mode !== '--notices') {
-  console.error('usage: node scripts/licenses/npm-licenses.mjs (--check | --notices)')
+if (!['--check', '--notices', '--sbom'].includes(mode)) {
+  console.error('usage: node scripts/licenses/npm-licenses.mjs (--check | --notices | --sbom)')
   process.exit(2)
 }
 try {
   const projects = collect()
   if (mode === '--check') check(projects)
-  else notices(projects)
+  else if (mode === '--notices') notices(projects)
+  else sbom(projects)
 } catch (err) {
   console.error(`npm-licenses: ${err.message}`)
   process.exit(1)
