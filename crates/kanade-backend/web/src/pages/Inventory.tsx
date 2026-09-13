@@ -516,16 +516,32 @@ function FleetProbeTable({
   // filter, not just the FLEET_PAGE_SIZE page rendered above. The
   // by-job endpoint caps a single response at BY_JOB_EXPORT_PAGE_SIZE
   // rows, so a fleet larger than that needs several requests — walk
-  // `offset` forward using the `total` the first page reports until
-  // every matching row has been collected.
+  // `offset` forward until every matching row has been collected.
+  //
+  // The endpoint has no cursor / snapshot isolation — it's a plain
+  // `ORDER BY pc_id LIMIT ? OFFSET ?`, re-run fresh on every page
+  // request — so a PC reporting in (or dropping out) for the first
+  // time while a large, multi-page export is in flight can shift every
+  // row after it by one `pc_id`-ordered position. Two things follow
+  // from that, both handled below: (1) the stop condition is taken
+  // from the FIRST page's `total` and never re-read, so a fleet that
+  // keeps growing mid-export can't push the target out indefinitely
+  // (or one that's shrinking can't cut the export short); (2) rows are
+  // deduped by `pc_id`, so a row that shifts back across a page
+  // boundary and gets re-served isn't written to the CSV twice. A row
+  // shifting the OTHER way (skipped at a boundary because something
+  // ahead of it was removed) can't be recovered client-side without
+  // the backend offering a stable cursor — this export is a best-
+  // effort snapshot of a live table, not a transactional one.
   const [exporting, setExporting] = useState(false);
   const doExport = async () => {
     setExporting(true);
     try {
       const rows: InventoryRow[] = [];
+      const seenPcIds = new Set<string>();
       let offset = 0;
-      let matched = 0;
-      do {
+      let expectedTotal: number | null = null;
+      while (expectedTotal === null || offset < expectedTotal) {
         const sp = new URLSearchParams({
           limit: String(BY_JOB_EXPORT_PAGE_SIZE),
           offset: String(offset),
@@ -534,10 +550,18 @@ function FleetProbeTable({
         const page = await apiFetch<InventoryByJob>(
           `/api/inventory/by-job/${encodeURIComponent(job.manifest_id)}?${sp.toString()}`,
         );
-        rows.push(...page.rows);
-        matched = page.total;
+        if (expectedTotal === null) expectedTotal = page.total;
+        for (const r of page.rows) {
+          if (seenPcIds.has(r.pc_id)) continue;
+          seenPcIds.add(r.pc_id);
+          rows.push(r);
+        }
         offset += BY_JOB_EXPORT_PAGE_SIZE;
-      } while (offset < matched);
+        // The fleet shrank enough (mid-export deletions) that this page
+        // came back empty even though `offset` hasn't reached the frozen
+        // `expectedTotal` yet — stop rather than spin on empty pages.
+        if (page.rows.length === 0) break;
+      }
 
       const header = [
         t('fleet.columns.pcId'),
