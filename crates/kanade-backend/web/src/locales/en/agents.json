@@ -18,6 +18,36 @@
     "button": "Export CSV",
     "truncatedWarning": "The export hit {{count}} rows, which may be the fetch cap rather than the true match count — some agents may be missing. Narrow the search filters and export again."
   },
+  "import": {
+    "button": "Import CSV",
+    "dialogTitle": "Import CSV (bulk attribute update)",
+    "dialogDescription": "Only the attribute keys present in the CSV header are merged into each PC's current attributes. A blank cell deletes that key. Keys not in the header are left untouched.",
+    "loadingFleet": "Loading current fleet data…",
+    "errors": {
+      "empty": "The CSV file is empty.",
+      "header": "The CSV's first column header must be pc_id.",
+      "noColumns": "No attribute columns found (columns after pc_id).",
+      "noRows": "No rows with a pc_id were found."
+    },
+    "summary": "Found {{changeCount}} attribute change(s) across {{pcCount}} PC(s).",
+    "unknownWarningTitle": "{{count}} pc_id(s) are not in the current fleet — likely a typo. Those rows will be skipped.",
+    "skippedUnknown": "Skipped — not in the current fleet",
+    "noChange": "No changes",
+    "colPcId": "pc_id",
+    "colKey": "attribute key",
+    "colChange": "change",
+    "kind": {
+      "add": "added",
+      "update": "updated",
+      "remove": "removed"
+    },
+    "cancel": "Cancel",
+    "execute": "Apply",
+    "running": "Applying…",
+    "progress": "Processing {{done}} / {{total}}",
+    "resultSummary": "{{success}} succeeded, {{failed}} failed",
+    "close": "Close"
+  },
   "status": {
     "online": "online",
     "offline": "offline",
