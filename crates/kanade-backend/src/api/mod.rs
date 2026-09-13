@@ -669,20 +669,7 @@ pub fn feature_for_path(path: &str) -> Option<Feature> {
         | "/api/executions/{exec_id}" => Feature::Activity,
 
         // --- Events (obs_events; `recent` stays commons for the dashboard) ---
-        //
-        // `/api/agents` and `/api/agents/meta-keys` gate here too: the Events
-        // page's PC-search filter and the uptime-lane PC list both call the
-        // fleet-search route (via `PcPicker` / its inline metadata-empty-hint
-        // query), and since #1295 made commons closed-by-default for
-        // restricted accounts, an Events-only account fell through to the
-        // unmapped-commons 403 on every keystroke. NOT added to
-        // `auth::RESTRICTED_COMMONS` — that set is deliberately
-        // infrastructure-only, and `/api/agents` returns full fleet roster
-        // data, exactly what a page restriction should withhold from an
-        // account that doesn't hold Events.
-        "/api/agents"
-        | "/api/agents/meta-keys"
-        | "/api/obs_events"
+        "/api/obs_events"
         | "/api/obs_events/kinds"
         | "/api/obs_events/lane_seeds"
         | "/api/obs_events/sources" => Feature::Events,
@@ -807,6 +794,39 @@ pub fn feature_for_path(path: &str) -> Option<Feature> {
         // freeze banner, `*/defaults`, `*/inherited`, ...).
         _ => return None,
     })
+}
+
+/// Route→feature table for the small set of lookup endpoints that are
+/// legitimately owned by MANY pages at once, rather than exactly one — so
+/// they can't be expressed as a single `feature_for_path` arm.
+///
+/// `GET /api/agents` (PC search / existence-check) and
+/// `GET /api/agents/meta-keys` are both driven by `PcPicker`, the one
+/// shared combobox every page below embeds to let an operator pick a
+/// `pc_id` (see its doc comment in `web/src/components/PcPicker.tsx`) —
+/// plus Events' own metadata-empty-state hint, which hits the same two
+/// routes directly. A restricted account holding any ONE of these
+/// features still needs its own page's PC / metadata search to work, so
+/// `auth::feature_denial` checks this table before falling back to the
+/// single-feature one above. Still NOT `auth::RESTRICTED_COMMONS` — that
+/// stays infrastructure-only and unconditional; this list is scoped to the
+/// pages that actually embed the picker.
+pub fn shared_agent_lookup_features(path: &str) -> Option<&'static [Feature]> {
+    match path {
+        "/api/agents" | "/api/agents/meta-keys" => Some(&[
+            Feature::Run,
+            Feature::Exec,
+            Feature::Inventory,
+            Feature::Activity,
+            Feature::Events,
+            Feature::Logs,
+            Feature::Analytics,
+            Feature::Notifications,
+            Feature::Rollout,
+            Feature::Config,
+        ]),
+        _ => None,
+    }
 }
 
 async fn health() -> &'static str {
@@ -944,15 +964,6 @@ mod feature_map_tests {
             feature_for_path("/api/scripts/{cmd_id}/unrevoke"),
             Some(Feature::Jobs)
         );
-        // #1343-follow-up: the fleet-search route the Events page's PC /
-        // metadata-key filters depend on gates with Events, not commons —
-        // otherwise an Events-only restricted account 403s on every
-        // keystroke (see `feature_denial` doc comment on commons-by-default).
-        assert_eq!(feature_for_path("/api/agents"), Some(Feature::Events));
-        assert_eq!(
-            feature_for_path("/api/agents/meta-keys"),
-            Some(Feature::Events)
-        );
     }
 
     #[test]
@@ -961,8 +972,12 @@ mod feature_map_tests {
         assert_eq!(feature_for_path("/api/version"), None);
         assert_eq!(feature_for_path("/api/auth/me"), None);
         // Shared fleet substrate + dashboard feeds stay open so a page
-        // restriction never blanks the always-visible home. (`/api/agents`
-        // itself now gates under Events — see `gated_routes_map_to_their_feature`.)
+        // restriction never blanks the always-visible home. `/api/agents` /
+        // `/api/agents/meta-keys` are `None` here too — they're gated by
+        // `shared_agent_lookup_features` instead (multi-owner, see
+        // `agent_lookup_routes_are_multi_owner` below), not by this table.
+        assert_eq!(feature_for_path("/api/agents"), None);
+        assert_eq!(feature_for_path("/api/agents/meta-keys"), None);
         assert_eq!(feature_for_path("/api/agents/{pc_id}"), None);
         assert_eq!(feature_for_path("/api/perf/fleet"), None);
         assert_eq!(feature_for_path("/api/obs_events/recent"), None);
@@ -970,6 +985,41 @@ mod feature_map_tests {
         assert_eq!(feature_for_path("/api/config/defaults"), None);
         // An unknown / future path is commons by default.
         assert_eq!(feature_for_path("/api/something-new"), None);
+    }
+
+    #[test]
+    fn agent_lookup_routes_are_multi_owner() {
+        // #1343-follow-up: `PcPicker` (the shared PC-search combobox) is
+        // embedded by Run/Exec/Inventory/Activity/Events/Logs/Analytics/
+        // Notifications/Rollout/Config, and Events' own metadata-empty hint
+        // hits the same two routes directly. Any one of those ten features
+        // must open both routes, or that page's restricted accounts hit the
+        // same 403-flood Events did.
+        let owners = shared_agent_lookup_features("/api/agents").expect("gated");
+        for feature in [
+            Feature::Run,
+            Feature::Exec,
+            Feature::Inventory,
+            Feature::Activity,
+            Feature::Events,
+            Feature::Logs,
+            Feature::Analytics,
+            Feature::Notifications,
+            Feature::Rollout,
+            Feature::Config,
+        ] {
+            assert!(owners.contains(&feature), "{feature:?} missing");
+        }
+        assert_eq!(owners.len(), 10);
+        assert_eq!(
+            shared_agent_lookup_features("/api/agents/meta-keys"),
+            Some(owners)
+        );
+        // A feature that doesn't own any picker page must NOT be in the set.
+        assert!(!owners.contains(&Feature::Audit));
+        // Everything else is untouched by this table.
+        assert_eq!(shared_agent_lookup_features("/api/agents/{pc_id}"), None);
+        assert_eq!(shared_agent_lookup_features("/api/audit"), None);
     }
 
     #[test]
