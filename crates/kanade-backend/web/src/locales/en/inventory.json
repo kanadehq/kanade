@@ -34,7 +34,10 @@
     "pageRange": "showing {{from}}–{{to}}",
     "filterLabel": "filter by pc_id",
     "filterPlaceholder": "filter by pc_id…",
-    "filterEmpty": "No PCs match \"{{q}}\"."
+    "filterEmpty": "No PCs match \"{{q}}\".",
+    "export": {
+      "button": "Export CSV"
+    }
   },
   "sidebar": {
     "ariaLabel": "Inventory types",
