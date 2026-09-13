@@ -14,6 +14,9 @@
     "offline": "Offline ({{count}})"
   },
   "filterEmpty": "No agents match this filter.",
+  "export": {
+    "button": "Export CSV"
+  },
   "status": {
     "online": "online",
     "offline": "offline",
