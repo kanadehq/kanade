@@ -857,10 +857,17 @@ export function Agents() {
 
   const runImport = async () => {
     if (!importState || importState.phase !== 'preview') return;
-    // Rows with no estimated change are left out of the run entirely — a
-    // re-import of a CSV nothing has since diverged from should not issue a
-    // GET+PUT pair for every single row.
-    const targets = importState.rows.filter((r) => r.known && r.changes.length > 0);
+    // Every KNOWN row runs, not just the ones the preview estimated a
+    // change for: `changes` was computed from the fleet snapshot fetched
+    // at file-select time, and something else (another operator, an
+    // AD-sync job) may have edited that exact key in the meantime — a row
+    // that looked like a no-op in the preview can be a real change by the
+    // time "run" is clicked. Dropping such a row here would silently skip
+    // it with nothing in the failure list to show for it. The per-row GET
+    // right before merging (below) is what actually decides whether
+    // anything changes; this filter only narrows to PCs the CSV can apply
+    // to at all.
+    const targets = importState.rows.filter((r) => r.known);
     if (targets.length === 0) return;
     setImportState({ ...importState, phase: 'running', progress: { done: 0, total: targets.length } });
     const failed: { pcId: string; error: string }[] = [];
@@ -1708,7 +1715,13 @@ export function Agents() {
                 <Button
                   size="sm"
                   onClick={runImport}
-                  disabled={importState.rows.every((r) => !r.known || r.changes.length === 0)}
+                  // Not gated on `changes.length` — that's only the
+                  // file-select-time estimate, and disabling here on top of
+                  // filtering the run by it (see runImport) would make a
+                  // row that drifted after the preview both unrunnable
+                  // and, once every row looks like a no-op, the whole
+                  // button unusable, with no way to force a re-check.
+                  disabled={importState.rows.every((r) => !r.known)}
                 >
                   {t('import.execute')}
                 </Button>
