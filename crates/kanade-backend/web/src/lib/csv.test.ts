@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import { toCsv } from './csv';
+import { parseCsv, toCsv } from './csv';
 
 describe('toCsv', () => {
   test('leads with a UTF-8 BOM so Excel doesn\'t mojibake non-ASCII text', () => {
@@ -48,5 +48,48 @@ describe('toCsv', () => {
 
   test('quotes a guarded field that also needs quoting', () => {
     expect(toCsv([['=a,b']])).toBe('﻿"\'=a,b"');
+  });
+});
+
+describe('parseCsv', () => {
+  test('splits plain fields and CRLF rows', () => {
+    expect(parseCsv('a,b\r\nc,d')).toEqual([['a', 'b'], ['c', 'd']]);
+  });
+
+  test('splits on a bare LF too', () => {
+    expect(parseCsv('a,b\nc,d')).toEqual([['a', 'b'], ['c', 'd']]);
+  });
+
+  test('strips a leading UTF-8 BOM', () => {
+    expect(parseCsv('﻿a,b')).toEqual([['a', 'b']]);
+  });
+
+  test('unquotes a field containing a comma', () => {
+    expect(parseCsv('"a,b",c')).toEqual([['a,b', 'c']]);
+  });
+
+  test('unescapes a doubled quote inside a quoted field', () => {
+    expect(parseCsv('"say ""hi"""')).toEqual([['say "hi"']]);
+  });
+
+  test('keeps a line break embedded in a quoted field as part of the row', () => {
+    expect(parseCsv('"line1\nline2",b')).toEqual([['line1\nline2', 'b']]);
+  });
+
+  test('handles a file with no trailing newline', () => {
+    expect(parseCsv('a,b')).toEqual([['a', 'b']]);
+  });
+
+  test('drops a trailing blank line', () => {
+    expect(parseCsv('a,b\r\nc,d\r\n')).toEqual([['a', 'b'], ['c', 'd']]);
+  });
+
+  test('drops a wholly blank line in the middle', () => {
+    expect(parseCsv('a,b\r\n\r\nc,d')).toEqual([['a', 'b'], ['c', 'd']]);
+  });
+
+  test('round-trips through toCsv for a value with every special character', () => {
+    const rows = [['pc-01', 'a "quoted", line1\nline2 value']];
+    expect(parseCsv(toCsv(rows))).toEqual(rows);
   });
 });

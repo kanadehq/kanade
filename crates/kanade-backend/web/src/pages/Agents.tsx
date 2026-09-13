@@ -1,6 +1,6 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Activity, AlertTriangle, ArrowDown, ArrowUp, CalendarClock, ChevronDown, Download, History, Loader2, MonitorPlay, Play, Plus, ScrollText, Server, Settings2, Trash2, Users, X } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { Activity, AlertTriangle, ArrowDown, ArrowUp, CalendarClock, ChevronDown, Download, History, Loader2, MonitorPlay, Play, Plus, ScrollText, Server, Settings2, Trash2, Upload, Users, X } from 'lucide-react';
+import { useEffect, useMemo, useState, type ChangeEvent } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 import { Link, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -36,10 +36,10 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow, useTable
 import { apiFetch, apiFetchPaged, formatError } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { credentialState, credentialUser } from '@/lib/credential';
-import { downloadCsv } from '@/lib/csv';
+import { downloadCsv, parseCsv } from '@/lib/csv';
 import { useDebouncedValue } from '@/lib/hooks';
 import { signingState, type BackendSigningKey } from '@/lib/signing';
-import type { AgentGroups, AgentRow, EffectiveConfigResponse, Heartbeat } from '@/lib/types';
+import type { AgentGroups, AgentMeta, AgentRow, EffectiveConfigResponse, Heartbeat, MetaEntry } from '@/lib/types';
 import { cn, fmtIsoLocal, isAgentOnline, unresolvedQuarantine } from '@/lib/utils';
 
 // #495: server-side page size. The endpoint supports q/limit/offset;
@@ -190,6 +190,109 @@ function lastLogonCsv(a: AgentRow): string {
   if (!dn && !u) return '—';
   return dn && u ? `${dn} (${u})` : (dn || u)!;
 }
+
+// #csv-import: the per-PC attribute PUT (`AgentMetaCard`, PUT
+// /api/agents/{pc_id}/meta) replaces the whole entry set, so importing a
+// CSV that only lists SOME keys must merge rather than overwrite — a CSV
+// exported for a `department` audit must not wipe out `note` on every row.
+// One change per (pc_id, key) touched by the CSV header; a key absent from
+// the header is never looked at. An empty CSV cell deletes the key instead
+// of merely blanking it, matching what an operator means by "clear this
+// cell" in the export/re-import round trip.
+type ImportChangeKind = 'add' | 'update' | 'remove';
+type ImportChange = {
+  key: string;
+  kind: ImportChangeKind;
+  oldValue?: string;
+  newValue?: string;
+};
+// One CSV data row after parsing: `values` holds only the header's
+// attribute keys (never a key the CSV doesn't mention), `known` says
+// whether the pc_id exists in the current fleet (a typo'd pc_id would
+// otherwise silently create a KV entry nothing ever reads), and `changes`
+// is an ESTIMATE from the fleet snapshot fetched at file-select time —
+// good enough to show the operator what's about to happen, but the actual
+// run re-fetches each PC's live attributes right before merging so a
+// change made by someone else between preview and "run" isn't clobbered.
+type ImportRow = {
+  pcId: string;
+  known: boolean;
+  values: Record<string, string>;
+  changes: ImportChange[];
+};
+type ImportPhase = 'loading' | 'preview' | 'running' | 'done';
+type ImportProgress = { done: number; total: number };
+type ImportRunResult = { success: number; failed: { pcId: string; error: string }[] };
+type ImportState = {
+  phase: ImportPhase;
+  rows: ImportRow[];
+  progress?: ImportProgress;
+  result?: ImportRunResult;
+};
+
+/** Diff `values` (the CSV row's header-key → cell map) against a PC's
+ *  current entries. Only keys the CSV header mentions are considered — an
+ *  existing key never in the header can't appear here in any kind. */
+function diffMeta(current: MetaEntry[], values: Record<string, string>): ImportChange[] {
+  const currentMap = new Map(current.map((e) => [e.key, e.value]));
+  const changes: ImportChange[] = [];
+  for (const [key, newValue] of Object.entries(values)) {
+    const had = currentMap.has(key);
+    const oldValue = currentMap.get(key);
+    if (newValue === '') {
+      if (had) changes.push({ key, kind: 'remove', oldValue });
+    } else if (!had) {
+      changes.push({ key, kind: 'add', newValue });
+    } else if (oldValue !== newValue) {
+      changes.push({ key, kind: 'update', oldValue, newValue });
+    }
+  }
+  return changes;
+}
+
+/** Apply `values` onto `current`, returning the full entry set the PUT
+ *  should carry — the merge half of the "full-replace API, partial-update
+ *  semantics" trick. A blank CSV cell deletes the key; anything else
+ *  upserts it. Keys the CSV header never mentions pass through untouched. */
+function mergeMeta(current: MetaEntry[], values: Record<string, string>): MetaEntry[] {
+  const currentMap = new Map(current.map((e) => [e.key, e.value]));
+  for (const [key, newValue] of Object.entries(values)) {
+    if (newValue === '') currentMap.delete(key);
+    else currentMap.set(key, newValue);
+  }
+  return Array.from(currentMap.entries()).map(([key, value]) => ({ key, value }));
+}
+
+// Small worker-pool runner rather than `Promise.all(items.map(...))`: a
+// fleet-wide import is a GET+PUT pair per row, and firing hundreds/thousands
+// of those at once would either flood the backend or hit the browser's
+// per-origin connection cap and serialise anyway with no progress feedback
+// in between. `onDone` fires after each item so the caller can update a
+// progress counter incrementally instead of only at the very end.
+async function runWithConcurrency<T>(
+  items: T[],
+  limit: number,
+  worker: (item: T) => Promise<void>,
+  onDone: () => void,
+): Promise<void> {
+  let idx = 0;
+  const lane = async () => {
+    while (idx < items.length) {
+      const item = items[idx++];
+      try {
+        await worker(item);
+      } finally {
+        onDone();
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, lane));
+}
+
+// Bounds how many GET+PUT pairs run at once during an import — small enough
+// not to overwhelm the backend or a modest agent host, large enough that a
+// several-hundred-row CSV doesn't crawl at one row per round-trip.
+const IMPORT_CONCURRENCY = 8;
 
 export function Agents() {
   const { t } = useTranslation('agents');
@@ -679,6 +782,128 @@ export function Agents() {
   };
 
   const [exporting, setExporting] = useState(false);
+  // #csv-import: `null` = dialog closed. The hidden file input below is
+  // remounted via `importInputKey` after every selection rather than
+  // clearing `.value`, so re-picking the SAME file still fires `onChange`
+  // — an operator fixing a typo and re-importing the identical path is the
+  // common case, not the exception.
+  const [importState, setImportState] = useState<ImportState | null>(null);
+  const [importInputKey, setImportInputKey] = useState(0);
+
+  const onImportFileChange = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    setImportInputKey((k) => k + 1);
+    if (!file) return;
+    setImportState({ phase: 'loading', rows: [] });
+    try {
+      const text = await file.text();
+      const parsed = parseCsv(text);
+      if (parsed.length === 0) {
+        toast.error(t('import.errors.empty'));
+        setImportState(null);
+        return;
+      }
+      const [header, ...dataRows] = parsed;
+      if ((header[0] ?? '').trim().toLowerCase() !== 'pc_id') {
+        toast.error(t('import.errors.header'));
+        setImportState(null);
+        return;
+      }
+      // Keep the header→column index mapping even when a header cell is
+      // blank, so a stray empty column doesn't shift every later key's
+      // values over by one.
+      const headerCols: { name: string; col: number }[] = [];
+      for (let col = 1; col < header.length; col++) {
+        const name = (header[col] ?? '').trim();
+        if (name) headerCols.push({ name, col });
+      }
+      if (headerCols.length === 0) {
+        toast.error(t('import.errors.noColumns'));
+        setImportState(null);
+        return;
+      }
+      // Last row wins for a repeated pc_id — mirrors the backend's own
+      // last-value-wins dedup for a repeated key within one PC's entries.
+      const byPc = new Map<string, Record<string, string>>();
+      for (const r of dataRows) {
+        const pcId = (r[0] ?? '').trim();
+        if (!pcId) continue;
+        const values: Record<string, string> = {};
+        for (const { name, col } of headerCols) values[name] = (r[col] ?? '').trim();
+        byPc.set(pcId, values);
+      }
+      if (byPc.size === 0) {
+        toast.error(t('import.errors.noRows'));
+        setImportState(null);
+        return;
+      }
+      // One unfiltered fetch of the whole fleet — same shape GET /api/agents
+      // already returns for the table (`meta` decorates every row), so this
+      // is the existence check AND the current-attribute snapshot in one
+      // round trip instead of one GET per CSV row just to build the preview.
+      const agents = await apiFetch<AgentRow[]>('/api/agents');
+      const currentByPc = new Map<string, MetaEntry[]>(agents.map((a) => [a.pc_id, a.meta ?? []]));
+      const rows: ImportRow[] = Array.from(byPc.entries()).map(([pcId, values]) => {
+        const known = currentByPc.has(pcId);
+        const changes = known ? diffMeta(currentByPc.get(pcId) ?? [], values) : [];
+        return { pcId, known, values, changes };
+      });
+      setImportState({ phase: 'preview', rows });
+    } catch (err) {
+      toast.error(formatError(err));
+      setImportState(null);
+    }
+  };
+
+  const runImport = async () => {
+    if (!importState || importState.phase !== 'preview') return;
+    // Rows with no estimated change are left out of the run entirely — a
+    // re-import of a CSV nothing has since diverged from should not issue a
+    // GET+PUT pair for every single row.
+    const targets = importState.rows.filter((r) => r.known && r.changes.length > 0);
+    if (targets.length === 0) return;
+    setImportState({ ...importState, phase: 'running', progress: { done: 0, total: targets.length } });
+    const failed: { pcId: string; error: string }[] = [];
+    let success = 0;
+    let doneCount = 0;
+    await runWithConcurrency(
+      targets,
+      IMPORT_CONCURRENCY,
+      async (row) => {
+        try {
+          // Re-fetch live, right before merging — the preview's `changes`
+          // is only an estimate from whenever the file was selected, and
+          // this is the "current attribute set" step of the merge-over-a
+          // full-replace trick described on AgentMetaCard / put_meta:
+          // skipping it would silently re-apply a stale snapshot over
+          // anything changed since.
+          const current = await apiFetch<AgentMeta>(`/api/agents/${encodeURIComponent(row.pcId)}/meta`);
+          const merged = mergeMeta(current.entries, row.values);
+          await apiFetch<AgentMeta>(`/api/agents/${encodeURIComponent(row.pcId)}/meta`, {
+            method: 'PUT',
+            body: JSON.stringify({ entries: merged }),
+          });
+          success++;
+        } catch (err) {
+          failed.push({ pcId: row.pcId, error: formatError(err) });
+        }
+      },
+      () => {
+        doneCount++;
+        setImportState((prev) =>
+          prev && prev.phase === 'running'
+            ? { ...prev, progress: { done: doneCount, total: targets.length } }
+            : prev,
+        );
+      },
+    );
+    void queryClient.invalidateQueries({ queryKey: ['agents'] });
+    void queryClient.invalidateQueries({ queryKey: ['agent-meta-keys'] });
+    setImportState((prev) =>
+      prev ? { ...prev, phase: 'done', result: { success, failed } } : prev,
+    );
+  };
+
   const doExport = async () => {
     setExporting(true);
     try {
@@ -798,6 +1023,41 @@ export function Agents() {
             )}
             {t('export.button')}
           </Button>
+          {/* #csv-import: bulk attribute update, operator-only like every
+              other write action on this page (delete, groups, …). The file
+              input itself stays invisible — a styled label button opening
+              the OS picker matches the rest of the toolbar instead of the
+              browser's default file-input chrome. `key` remounts the input
+              after each pick so choosing the SAME file twice in a row still
+              fires `onChange` (no `.value` to reset). */}
+          {canOperate && (
+            <>
+              <input
+                key={importInputKey}
+                id="agents-import-file"
+                type="file"
+                accept=".csv,text/csv"
+                className="sr-only"
+                onChange={onImportFileChange}
+              />
+              {/* A disabled plain Button while a file is loading/running —
+                  a <label> has no `disabled`, so re-opening the OS picker
+                  mid-import has to be prevented by swapping it out instead. */}
+              {importState?.phase === 'loading' || importState?.phase === 'running' ? (
+                <Button variant="secondary" size="sm" disabled>
+                  <Loader2 className="size-3.5 animate-spin" />
+                  {t('import.button')}
+                </Button>
+              ) : (
+                <Button variant="secondary" size="sm" asChild>
+                  <label htmlFor="agents-import-file" className="cursor-pointer">
+                    <Upload className="size-3.5" />
+                    {t('import.button')}
+                  </label>
+                </Button>
+              )}
+            </>
+          )}
         </div>
       </div>
       <p className="text-xs text-muted">
@@ -1271,6 +1531,200 @@ export function Agents() {
                 {t('resultDialog.close')}
               </Button>
             </DialogClose>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* #csv-import: preview → run, in one dialog. Closing is blocked while
+          `running` (see onOpenChange) — a mid-flight close wouldn't stop the
+          in-flight requests anyway, and losing the progress/result view
+          would make it look like nothing happened. */}
+      <Dialog
+        open={importState !== null}
+        onOpenChange={(open) => {
+          if (!open && importState?.phase !== 'running') setImportState(null);
+        }}
+      >
+        <DialogContent className="max-w-4xl">
+          <DialogHeader>
+            <DialogTitle>{t('import.dialogTitle')}</DialogTitle>
+            <DialogDescription>{t('import.dialogDescription')}</DialogDescription>
+          </DialogHeader>
+
+          {importState?.phase === 'loading' && (
+            <div className="flex items-center gap-2 text-muted text-sm">
+              <Loader2 className="size-4 animate-spin" />
+              {t('import.loadingFleet')}
+            </div>
+          )}
+
+          {importState && importState.phase !== 'loading' && (
+            <div className="space-y-3">
+              {(() => {
+                const unknownRows = importState.rows.filter((r) => !r.known);
+                const changeCount = importState.rows.reduce((n, r) => n + r.changes.length, 0);
+                return (
+                  <>
+                    <p className="text-sm">
+                      {t('import.summary', { pcCount: importState.rows.length, changeCount })}
+                    </p>
+                    {unknownRows.length > 0 && (
+                      <div className="rounded-md border border-danger/40 bg-danger/10 p-3 text-xs text-danger">
+                        <p className="font-medium">
+                          {t('import.unknownWarningTitle', { count: unknownRows.length })}
+                        </p>
+                        <ul className="mt-1 max-h-24 list-disc space-y-0.5 overflow-y-auto pl-4">
+                          {unknownRows.map((r) => (
+                            <li key={r.pcId}>
+                              <code>{r.pcId}</code>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
+
+              <div className="max-h-[40vh] overflow-y-auto rounded-md border border-border">
+                <table className="w-full text-xs">
+                  <thead className="sticky top-0 bg-card">
+                    <tr>
+                      <th className="p-2 text-left">{t('import.colPcId')}</th>
+                      <th className="p-2 text-left">{t('import.colKey')}</th>
+                      <th className="p-2 text-left">{t('import.colChange')}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {importState.rows.flatMap((r) => {
+                      if (!r.known) {
+                        return [
+                          <tr key={r.pcId} className="border-t border-border text-muted">
+                            <td className="p-2 align-top">
+                              <code>{r.pcId}</code>
+                            </td>
+                            <td className="p-2" colSpan={2}>
+                              {t('import.skippedUnknown')}
+                            </td>
+                          </tr>,
+                        ];
+                      }
+                      if (r.changes.length === 0) {
+                        return [
+                          <tr key={r.pcId} className="border-t border-border text-muted">
+                            <td className="p-2 align-top">
+                              <code>{r.pcId}</code>
+                            </td>
+                            <td className="p-2" colSpan={2}>
+                              {t('import.noChange')}
+                            </td>
+                          </tr>,
+                        ];
+                      }
+                      return r.changes.map((c, i) => (
+                        <tr key={`${r.pcId}-${c.key}`} className="border-t border-border">
+                          {i === 0 && (
+                            <td className="p-2 align-top" rowSpan={r.changes.length}>
+                              <code>{r.pcId}</code>
+                            </td>
+                          )}
+                          <td className="p-2 align-top">{c.key}</td>
+                          <td className="p-2 align-top">
+                            <Badge
+                              variant={
+                                c.kind === 'add' ? 'success' : c.kind === 'remove' ? 'danger' : 'amber'
+                              }
+                            >
+                              {t(`import.kind.${c.kind}`)}
+                            </Badge>{' '}
+                            {c.kind === 'add' && <span>{c.newValue}</span>}
+                            {c.kind === 'remove' && (
+                              <span className="text-muted line-through">{c.oldValue}</span>
+                            )}
+                            {c.kind === 'update' && (
+                              <span>
+                                <span className="text-muted line-through">{c.oldValue}</span>
+                                {' → '}
+                                {c.newValue}
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      ));
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {importState.phase === 'running' && importState.progress && (
+                <div className="space-y-1">
+                  <div className="h-2 w-full rounded-full bg-muted/20">
+                    <div
+                      className="h-2 rounded-full bg-accent transition-all"
+                      style={{
+                        width: `${Math.round(
+                          (importState.progress.done / importState.progress.total) * 100,
+                        )}%`,
+                      }}
+                    />
+                  </div>
+                  <p className="text-xs text-muted">
+                    {t('import.progress', {
+                      done: importState.progress.done,
+                      total: importState.progress.total,
+                    })}
+                  </p>
+                </div>
+              )}
+
+              {importState.phase === 'done' && importState.result && (
+                <div className="space-y-2">
+                  <p className="text-sm">
+                    {t('import.resultSummary', {
+                      success: importState.result.success,
+                      failed: importState.result.failed.length,
+                    })}
+                  </p>
+                  {importState.result.failed.length > 0 && (
+                    <ul className="max-h-40 space-y-0.5 overflow-y-auto rounded-md border border-danger/40 bg-danger/10 p-2 text-xs text-danger">
+                      {importState.result.failed.map((f) => (
+                        <li key={f.pcId}>
+                          <code>{f.pcId}</code>: {f.error}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          <DialogFooter>
+            {importState?.phase === 'preview' && (
+              <>
+                <Button variant="ghost" size="sm" onClick={() => setImportState(null)}>
+                  {t('import.cancel')}
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={runImport}
+                  disabled={importState.rows.every((r) => !r.known || r.changes.length === 0)}
+                >
+                  {t('import.execute')}
+                </Button>
+              </>
+            )}
+            {importState?.phase === 'running' && (
+              <Button size="sm" disabled>
+                <Loader2 className="size-4 animate-spin" />
+                {t('import.running')}
+              </Button>
+            )}
+            {importState?.phase === 'done' && (
+              <Button size="sm" onClick={() => setImportState(null)}>
+                {t('import.close')}
+              </Button>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>

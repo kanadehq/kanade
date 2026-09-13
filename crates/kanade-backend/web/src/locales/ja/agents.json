@@ -18,6 +18,36 @@
     "button": "CSVエクスポート",
     "truncatedWarning": "エクスポート結果が {{count}} 件に達し、取得件数の上限に達した可能性があります。一部のエージェントが含まれていないかもしれません。検索条件を絞ってやり直してください。"
   },
+  "import": {
+    "button": "CSVインポート",
+    "dialogTitle": "CSVインポート（属性の一括更新）",
+    "dialogDescription": "CSVヘッダーに含まれる属性キーだけを、各PCの現在の属性にマージして更新します。セルが空欄のキーは削除されます。ヘッダーに無いキーは一切変更されません。",
+    "loadingFleet": "現在のフリート情報を取得中…",
+    "errors": {
+      "empty": "CSVファイルが空です。",
+      "header": "CSVの1列目のヘッダーは pc_id にしてください。",
+      "noColumns": "属性の列（pc_id 以降の列）が見つかりません。",
+      "noRows": "pc_id を含む行が見つかりません。"
+    },
+    "summary": "{{pcCount}} 台の PC、{{changeCount}} 件の属性変更が見つかりました。",
+    "unknownWarningTitle": "現在のフリートに存在しない pc_id が {{count}} 件あります。タイポの可能性があるため、これらの行への書き込みはスキップされます。",
+    "skippedUnknown": "フリートに存在しないためスキップされます",
+    "noChange": "変更なし",
+    "colPcId": "pc_id",
+    "colKey": "属性キー",
+    "colChange": "変更内容",
+    "kind": {
+      "add": "追加",
+      "update": "変更",
+      "remove": "削除"
+    },
+    "cancel": "キャンセル",
+    "execute": "実行",
+    "running": "実行中…",
+    "progress": "{{done}} / {{total}} 件処理中",
+    "resultSummary": "成功 {{success}} 件、失敗 {{failed}} 件",
+    "close": "閉じる"
+  },
   "status": {
     "online": "オンライン",
     "offline": "オフライン",

@@ -1,9 +1,10 @@
 /**
- * Minimal RFC 4180 CSV serialisation for client-side "export what's on
- * screen" buttons (no server endpoint involved — the caller already has
- * the rows). Kept intentionally small rather than pulling in a dependency:
- * quoting a value that contains a comma, quote, or line break is the only
- * rule Excel actually needs.
+ * Minimal RFC 4180 CSV serialisation + parsing for client-side "export
+ * what's on screen" / "import a CSV back in" flows (no server endpoint
+ * involved — the caller already has the rows, or hands the parsed rows
+ * straight to one). Kept intentionally small rather than pulling in a
+ * dependency: quoting/unquoting a value that contains a comma, quote, or
+ * line break is the only rule Excel actually needs.
  */
 
 /**
@@ -39,6 +40,75 @@ function csvField(value: string): string {
  */
 export function toCsv(rows: string[][]): string {
   return '﻿' + rows.map((row) => row.map(csvField).join(',')).join('\r\n');
+}
+
+/**
+ * Parse RFC 4180 CSV text into rows of raw string fields — the counterpart
+ * to `toCsv`, for client-side "import a CSV I exported (or edited in Excel)"
+ * flows. A hand-rolled state machine rather than a `.split(',')` /
+ * `.split('\n')` pair because both of those break on exactly the cells
+ * `toCsv` knows how to quote: a value containing a comma, a quoted value
+ * spanning multiple physical lines, or a doubled `""` escaping a literal
+ * quote. Handles `\r\n`, bare `\n`, and a leading UTF-8 BOM (which Excel
+ * writes and `toCsv` also emits).
+ */
+export function parseCsv(text: string): string[][] {
+  const src = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = '';
+  let inQuotes = false;
+  let i = 0;
+  const n = src.length;
+  const endField = () => {
+    row.push(field);
+    field = '';
+  };
+  const endRow = () => {
+    endField();
+    rows.push(row);
+    row = [];
+  };
+  while (i < n) {
+    const c = src[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (src[i + 1] === '"') {
+          field += '"';
+          i += 2;
+        } else {
+          inQuotes = false;
+          i++;
+        }
+      } else {
+        field += c;
+        i++;
+      }
+      continue;
+    }
+    if (c === '"') {
+      inQuotes = true;
+      i++;
+    } else if (c === ',') {
+      endField();
+      i++;
+    } else if (c === '\r') {
+      endRow();
+      i += src[i + 1] === '\n' ? 2 : 1;
+    } else if (c === '\n') {
+      endRow();
+      i++;
+    } else {
+      field += c;
+      i++;
+    }
+  }
+  // A trailing newline leaves nothing pending; anything else (including a
+  // file with no trailing newline at all) is one more row to flush.
+  if (field !== '' || row.length > 0) endRow();
+  // Drop wholly-blank rows (a trailing blank line, or one in the middle) —
+  // a row with a real pc_id always has at least one non-empty field.
+  return rows.filter((r) => r.some((v) => v !== ''));
 }
 
 /**
