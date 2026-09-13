@@ -41,12 +41,6 @@ content_hash = "4e2735f40c2ae61014810159a2458da2edc1646589f5f65d9f2f3d099366c9a8
 [files.".github/workflows/ci.yml"]
 content_hash = "4aae1c2f39d146003164245b2da6e1d75a8668dc227f1851db6082481ebe515a"
 
-[files.".github/workflows/claude-review.yml"]
-content_hash = "4a8e47aabb3cdf2a59030d5194467022f0efb53bb1819d4495752020d10be773"
-
-[files.".github/workflows/claude.yml"]
-content_hash = "c83b52d5f483fdec494028b932facf98018500ce757718cc2e3703328688f5ad"
-
 [files.".github/workflows/kata-apply.yml"]
 content_hash = "7000353151b01b5d14cb8f56e314b1a25b020e22bdf5842dcaf5686efb59facb"
 
