@@ -32,3 +32,12 @@ create_pull_request = "v8.1.1"
 swatinem_rust_cache = "v2.9.2"
 # renovate: datasource=github-tags depName=anthropics/claude-code-action
 claude_code_action = "v1.0.195"
+
+# renovate: datasource=github-tags depName=editorconfig-checker/action-editorconfig-checker
+# v3 is required, not merely newer: editorconfig-checker v4.0.0 renamed its
+# release assets from `ec-<os>-<arch>` to `editorconfig-checker-<os>-<arch>`,
+# and the action downloads `latest` — so every `@v2` job started failing with
+# `Error: The binary 'ec-linux-amd64*' not found` the moment v4 was published
+# (2026-09-03), regardless of the repo's own config. v3.0.0 is the action
+# release that follows the rename.
+editorconfig_checker = "v3.0.0"

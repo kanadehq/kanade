@@ -13,8 +13,23 @@ default_to_workspace = false
 alias = "check"
 
 [tasks.check]
-description = "Run fmt + clippy + test + lock-check (same as CI)"
-dependencies = ["fmt-check", "clippy", "test", "lock-check"]
+# Aggregate only: do not inherit cargo-make's built-in cargo check command.
+clear = true
+category = "Test"
+description = "Run editorconfig-check + fmt + clippy + test + lock-check (same as CI)"
+dependencies = ["editorconfig-check", "fmt-check", "clippy", "test", "lock-check"]
+
+[tasks.editorconfig-check]
+description = "Check tracked files against .editorconfig (skipped locally if the `editorconfig-checker` binary isn't on PATH — CI always enforces it via editorconfig-checker/action-editorconfig-checker). Install: https://github.com/editorconfig-checker/editorconfig-checker#installation"
+script_runner = "@duckscript"
+script = '''
+ec_path = which editorconfig-checker
+if is_empty ${ec_path}
+    echo "editorconfig-checker not on PATH; skipping editorconfig-check locally (still enforced in CI). Install: https://github.com/editorconfig-checker/editorconfig-checker#installation"
+    exit 0
+end
+exec --fail-on-error editorconfig-checker
+'''
 
 [tasks.fmt-check]
 description = "Check formatting"
@@ -32,6 +47,9 @@ command = "cargo"
 args = ["clippy", "--locked", "--all-targets", "--", "-D", "warnings"]
 
 [tasks.test]
+# Dependencies cover all tests; the built-in cargo test would run them again.
+clear = true
+category = "Test"
 description = "Run all tests (targets + doc)"
 # `cargo test --all-targets` covers lib / bins / tests / benches /
 # examples but EXCLUDES doc tests. Run --doc separately so the

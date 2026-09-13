@@ -1,14 +1,14 @@
 preset = "github.com/yukimemi/pj-presets:rust-workspace"
-applied_at = "2026-08-30T14:54:44.306140496Z"
+applied_at = "2026-09-13T02:31:25.620075352Z"
 
 [[templates]]
 source = "github.com/yukimemi/pj-base"
-rev = "10cd49c09b95af8add4daf71c5151835821cb670"
+rev = "08989f887002780557cb6e0ce18141d7abf2c85e"
 version = "0.18.0"
 
 [[templates]]
 source = "github.com/yukimemi/pj-rust"
-rev = "e9ed48b62025bbe80e1d35cdccca11ec2ee88d3e"
+rev = "180ba085f571da91a8b8f4eddeef77fa41aed31f"
 version = "0.8.1"
 
 [[templates]]
@@ -23,6 +23,7 @@ once_applied = true
 once_applied = true
 
 [files.".editorconfig"]
+content_hash = "02e4337db1bb05d6b19fdfb51328eb000ceb17c635273c63a66767698242b0a4"
 once_applied = true
 
 [files.".gemini/settings.json"]
@@ -38,7 +39,7 @@ content_hash = "0ac5ed2847ab6e1041e34209dcc2396a582722ea9537d03bd950e1db1851a4b7
 content_hash = "4e2735f40c2ae61014810159a2458da2edc1646589f5f65d9f2f3d099366c9a8"
 
 [files.".github/workflows/ci.yml"]
-content_hash = "db97d026a267859e3b93bcac29f69e7ae65be5ad760cf739b2f7622c77d27f6f"
+content_hash = "4aae1c2f39d146003164245b2da6e1d75a8668dc227f1851db6082481ebe515a"
 
 [files.".github/workflows/claude-review.yml"]
 content_hash = "4a8e47aabb3cdf2a59030d5194467022f0efb53bb1819d4495752020d10be773"
@@ -56,11 +57,11 @@ content_hash = "4cba2edfa14ea128ecdfaeba7230c2ddcf68f94b89be6bd3227ce93e0e625652
 content_hash = "4bebd1c3417c33f9d1c51f011694f6d82b098bbb1a5a102ba56e97ab01a866ef"
 
 [files.".kata/vars.toml"]
-content_hash = "8e573305bc9b45b40e4c4c24c0da7728771a12d81c4c1631d6e35f25a189cf84"
+content_hash = "1a2d41c79daff9753bf3592b4b531fb9e0fc4abd31335ea52b72fc7e7a4a5ce1"
 once_applied = true
 
 [files."AGENTS.md"]
-content_hash = "042925929eae8554d57db83e47b8837b5ee32e798edc44a7952ed31a74f56220"
+content_hash = "a3060bcf43a044df9756231020be550decd2c4eddab6b0517e3901685a8066cc"
 
 [files."CLAUDE.md"]
 content_hash = "a76b3af252969b8120128d7ce44f2b6cfdcf88c7420ee00675732f542d047529"
