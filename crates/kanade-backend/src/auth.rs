@@ -493,6 +493,9 @@ pub async fn require_admin(req: Request, next: Next) -> Result<Response, ApiErro
 ///   * the matched route is in [`RESTRICTED_COMMONS`] (the small
 ///     infrastructure set a restricted account still needs: version,
 ///     command-signing, auth self-service) → allow;
+///   * the matched route is one of the multi-owner lookup routes in
+///     `api::shared_agent_lookup_features` → allow iff the caller's
+///     allow-list holds ANY of that route's owning features;
 ///   * the matched route is **feature-gated** (`feature_for_path` →
 ///     `Some`) → allow iff the caller's allow-list holds the feature;
 ///   * otherwise (a **commons** route, `feature_for_path` → `None`) →
@@ -558,6 +561,18 @@ fn feature_denial(allowed: Option<&[Feature]>, matched_path: Option<&str>) -> Op
     let path = matched_path?;
     if RESTRICTED_COMMONS.contains(&path) {
         return None;
+    }
+    // Multi-owner lookup routes (the `PcPicker` search/existence-check the
+    // Run/Exec/Inventory/Activity/Events/Logs/Analytics/Notifications/
+    // Rollout/Config pages all embed) can't be expressed as one
+    // `feature_for_path` arm — checked first so any one of those features
+    // unlocks it, rather than only whichever feature happened to "own" it.
+    if let Some(features) = crate::api::shared_agent_lookup_features(path) {
+        return if features.iter().any(|f| allowed.contains(f)) {
+            None
+        } else {
+            Some("account not permitted to access this route".to_string())
+        };
     }
     match crate::api::feature_for_path(path) {
         Some(feature) if allowed.contains(&feature) => None,
@@ -917,6 +932,53 @@ mod tests {
         // minus infrastructure) — not unrestricted.
         assert!(feature_denial(Some(&[]), Some("/api/agents")).is_some());
         assert_eq!(feature_denial(Some(&[]), Some("/api/auth/me")), None);
+    }
+
+    #[test]
+    fn any_picker_page_feature_unlocks_the_shared_agent_lookup() {
+        // #1343-follow-up: `/api/agents` / `/api/agents/meta-keys` back the
+        // shared `PcPicker` search box (and Events' metadata-empty hint),
+        // embedded in Run/Exec/Inventory/Activity/Events/Logs/Analytics/
+        // Notifications/Rollout/Config. A restricted account holding ANY ONE
+        // of those page features must be able to use its own page's PC /
+        // metadata search without hitting the unmapped-commons 403 — not
+        // just an Events-only account.
+        for feature in [
+            Feature::Run,
+            Feature::Exec,
+            Feature::Inventory,
+            Feature::Activity,
+            Feature::Events,
+            Feature::Logs,
+            Feature::Analytics,
+            Feature::Notifications,
+            Feature::Rollout,
+            Feature::Config,
+        ] {
+            let only = [feature];
+            let restricted = Some(&only[..]);
+            for path in ["/api/agents", "/api/agents/meta-keys"] {
+                assert_eq!(
+                    feature_denial(restricted, Some(path)),
+                    None,
+                    "{path} should be open to {feature:?}-only"
+                );
+            }
+        }
+        // Events' own routes stay gated as before.
+        let events_only = [Feature::Events];
+        assert_eq!(
+            feature_denial(Some(&events_only[..]), Some("/api/obs_events")),
+            None
+        );
+
+        // An account whose ONLY feature doesn't own any picker page is still
+        // denied — the fleet roster stays withheld from accounts the page
+        // restriction doesn't name.
+        let audit_only = [Feature::Audit];
+        let other_restricted = Some(&audit_only[..]);
+        assert!(feature_denial(other_restricted, Some("/api/agents")).is_some());
+        assert!(feature_denial(other_restricted, Some("/api/agents/meta-keys")).is_some());
     }
 
     #[test]
