@@ -1,5 +1,5 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Activity, AlertTriangle, ArrowDown, ArrowUp, CalendarClock, ChevronDown, History, Loader2, MonitorPlay, Play, Plus, ScrollText, Server, Settings2, Trash2, Users, X } from 'lucide-react';
+import { Activity, AlertTriangle, ArrowDown, ArrowUp, CalendarClock, ChevronDown, Download, History, Loader2, MonitorPlay, Play, Plus, ScrollText, Server, Settings2, Trash2, Users, X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 import { Link, useSearchParams } from 'react-router-dom';
@@ -35,8 +35,10 @@ import { Select } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow, useTableColumns } from '@/components/ui/table';
 import { apiFetch, apiFetchPaged, formatError } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
+import { credentialState, credentialUser } from '@/lib/credential';
+import { downloadCsv } from '@/lib/csv';
 import { useDebouncedValue } from '@/lib/hooks';
-import type { BackendSigningKey } from '@/lib/signing';
+import { signingState, type BackendSigningKey } from '@/lib/signing';
 import type { AgentGroups, AgentRow, EffectiveConfigResponse, Heartbeat } from '@/lib/types';
 import { cn, fmtIsoLocal, isAgentOnline, unresolvedQuarantine } from '@/lib/utils';
 
@@ -47,6 +49,13 @@ import { cn, fmtIsoLocal, isAgentOnline, unresolvedQuarantine } from '@/lib/util
 const PAGE_SIZE = 50;
 // Same debounce the other list pages use for typed filters.
 const FILTER_DEBOUNCE_MS = 300;
+// Mirrors `MAX_FETCH` in the backend's `api/agents.rs` list handler. A
+// limit-less request only hits that cap when q/user/version is set (it
+// routes through the regex prefilter, which pulls candidates into memory
+// before matching); the plain-filter fast path has no such ceiling. Used
+// here only to detect the capped case and say so — never to enforce a
+// limit client-side.
+const AGENTS_EXPORT_FETCH_CAP = 10_000;
 
 
 // #1061: metadata filter operators (mirror the backend allow-list). The
@@ -154,6 +163,32 @@ function fmtBytes(v: number | null): string {
     i++;
   }
   return `${n < 10 ? n.toFixed(1) : Math.round(n)} ${units[i]}`;
+}
+
+// CSV export (棚卸: a snapshot of exactly what the table is showing, over
+// every filter-matching row rather than just the current page). `pad2` +
+// `exportFilename` give the file a sortable, human-readable name; the
+// timestamp is the browser's local time, matching every other timestamp
+// on this page.
+function pad2(n: number): string {
+  return String(n).padStart(2, '0');
+}
+
+function exportFilename(now: Date): string {
+  return (
+    `agents_${now.getFullYear()}${pad2(now.getMonth() + 1)}${pad2(now.getDate())}` +
+    `_${pad2(now.getHours())}${pad2(now.getMinutes())}.csv`
+  );
+}
+
+/** The `lastLogon` column's cell as one CSV field, matching the two-line
+ *  display/login-name cell it mirrors: both present → "display (login)",
+ *  otherwise whichever exists, else an em-dash. */
+function lastLogonCsv(a: AgentRow): string {
+  const dn = a.last_logon_display_name;
+  const u = a.last_logon_user;
+  if (!dn && !u) return '—';
+  return dn && u ? `${dn} (${u})` : (dn || u)!;
 }
 
 export function Agents() {
@@ -359,6 +394,21 @@ export function Agents() {
   // the deep link is shareable and survives a refresh; cleared via the
   // chip below.
   const quarantined = searchParams.get('quarantined') ?? '';
+  // The active filter set as query-string params, WITHOUT paging — shared by
+  // the polled page query (which adds its own limit/offset below) and the
+  // CSV export (which deliberately omits them so it walks every matching
+  // row, not just the 50 on screen). Keeping one builder means the two can
+  // never disagree about which filters are active.
+  const filterParams =
+    (dQ ? `&q=${encodeURIComponent(dQ)}` : '') +
+    (dUser ? `&user=${encodeURIComponent(dUser)}` : '') +
+    (dVersion ? `&version=${encodeURIComponent(dVersion)}` : '') +
+    (quarantined ? `&quarantined=${encodeURIComponent(quarantined)}` : '') +
+    (statusFilter !== 'all' ? `&status=${statusFilter}` : '') +
+    // #1061: metadata conditions, global attribute search, sort.
+    condParams +
+    (dMetaAny ? `&meta_any=${encodeURIComponent(dMetaAny)}` : '') +
+    (sort ? `&sort=${encodeURIComponent(sort)}&dir=${dir}` : '');
   const { data, error, isLoading, isFetching } = useQuery({
     queryKey: [
       'agents',
@@ -382,18 +432,7 @@ export function Agents() {
     // exact version pre-filter. Each is appended only when non-empty so
     // the no-filter request stays on the SQL fast path.
     queryFn: () =>
-      apiFetchPaged<AgentRow[]>(
-        `/api/agents?limit=${PAGE_SIZE}&offset=${offset}` +
-          (dQ ? `&q=${encodeURIComponent(dQ)}` : '') +
-          (dUser ? `&user=${encodeURIComponent(dUser)}` : '') +
-          (dVersion ? `&version=${encodeURIComponent(dVersion)}` : '') +
-          (quarantined ? `&quarantined=${encodeURIComponent(quarantined)}` : '') +
-          (statusFilter !== 'all' ? `&status=${statusFilter}` : '') +
-          // #1061: metadata conditions, global attribute search, sort.
-          condParams +
-          (dMetaAny ? `&meta_any=${encodeURIComponent(dMetaAny)}` : '') +
-          (sort ? `&sort=${encodeURIComponent(sort)}&dir=${dir}` : ''),
-      ),
+      apiFetchPaged<AgentRow[]>(`/api/agents?limit=${PAGE_SIZE}&offset=${offset}` + filterParams),
     refetchInterval: 30_000,
     // Keep the previous page rendered while a filter keystroke changes
     // the queryKey, so `isLoading` only flips true on the very first
@@ -594,6 +633,86 @@ export function Agents() {
     }
   };
 
+  // #csv-export: one CSV column per VISIBLE table column, in display order —
+  // an operator's column picks / order double as their export shape, so
+  // hiding a column hides it from the audit ledger too. `actions` has no
+  // data and is dropped. Values are computed here rather than shared with
+  // the row renderer below because a table cell is JSX (badges, links) and
+  // a CSV field wants the plain text it stands for.
+  const exportValue = (colId: string, a: AgentRow): string => {
+    if (colId.startsWith('meta:')) {
+      const key = colId.slice('meta:'.length);
+      return a.meta?.find((m) => m.key === key)?.value ?? '';
+    }
+    switch (colId) {
+      case 'status': {
+        const online = isAgentOnline(a.last_heartbeat);
+        const label = t(online ? 'status.online' : 'status.offline');
+        const unresolved = unresolvedQuarantine(a.quarantined_versions, a.agent_version);
+        return unresolved.length
+          ? `${label} / ${t('quarantinedBadge')}: ${unresolved.join(', ')}`
+          : label;
+      }
+      case 'pcId':
+        return a.hostname && a.hostname.toLowerCase() !== a.pc_id.toLowerCase()
+          ? `${a.pc_id} (${a.hostname})`
+          : a.pc_id;
+      case 'os':
+        return a.os_family ?? '—';
+      case 'agent':
+        return a.agent_version ?? '—';
+      case 'lastHeartbeat':
+        return fmtIsoLocal(a.last_heartbeat);
+      case 'lastLogon':
+        return lastLogonCsv(a);
+      case 'signing':
+        return t(`signing.${signingState(a, backendKey)}`);
+      case 'credential':
+        return credentialUser(a) ?? t(`credential.${credentialState(a)}`);
+      case 'cpu':
+        return fmtPct(a.agent_cpu_pct);
+      case 'rss':
+        return fmtBytes(a.agent_rss_bytes);
+      default:
+        return '';
+    }
+  };
+
+  const [exporting, setExporting] = useState(false);
+  const doExport = async () => {
+    setExporting(true);
+    try {
+      // No `limit` — the endpoint then returns every filter-matching row
+      // (up to its MAX_FETCH backstop), independent of the client-side
+      // PAGE_SIZE pager. Same `filterParams` the polled table query builds,
+      // so the export always matches what's on screen.
+      const rows = await apiFetch<AgentRow[]>(
+        `/api/agents${filterParams ? `?${filterParams.replace(/^&/, '')}` : ''}`,
+      );
+      const cols = tableColumns.filter((c) => c.visible && c.id !== 'actions');
+      const header = cols.map((c) => c.label);
+      const csvRows = rows.map((a) => cols.map((c) => exportValue(c.id, a)));
+      downloadCsv(exportFilename(new Date()), [header, ...csvRows]);
+      // The backend's regex prefilter — active only when pc/host, user, or
+      // version is set — silently caps at MAX_FETCH; a row count landing
+      // exactly on that cap is this request's only signal that more rows
+      // may have matched. A ledger that LOOKS complete but silently isn't
+      // is worse than a slow one, so this has to be surfaced, not just
+      // logged server-side. The plain-filter fast path (status / metadata /
+      // quarantined alone) has no such ceiling — `LIMIT -1` there really
+      // does mean unlimited — so the warning must not fire off row count
+      // alone, or a genuinely complete export of a 10k+ fleet would look
+      // suspect for no reason.
+      if ((dQ || dUser || dVersion) && rows.length >= AGENTS_EXPORT_FETCH_CAP) {
+        toast.warning(t('export.truncatedWarning', { count: rows.length }));
+      }
+    } catch (e) {
+      toast.error(formatError(e));
+    } finally {
+      setExporting(false);
+    }
+  };
+
   if (isLoading) {
     return (
       <div className="flex items-center gap-2 text-muted">
@@ -667,7 +786,19 @@ export function Agents() {
             <Loader2 className="size-4 animate-spin text-muted" />
           )}
         </div>
-        <Badge variant="violet">{t('countBadge', { count: total })}</Badge>
+        <div className="flex items-center gap-2">
+          <Badge variant="violet">{t('countBadge', { count: total })}</Badge>
+          {/* #csv-export: every filter-matching row, not just this page —
+              PAGE_SIZE bounds the table, not the ledger. */}
+          <Button variant="secondary" size="sm" onClick={doExport} disabled={exporting}>
+            {exporting ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <Download className="size-3.5" />
+            )}
+            {t('export.button')}
+          </Button>
+        </div>
       </div>
       <p className="text-xs text-muted">
         <Trans
