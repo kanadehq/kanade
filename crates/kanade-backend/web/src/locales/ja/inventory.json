@@ -34,7 +34,10 @@
     "pageRange": "{{from}}–{{to}} 件目を表示中",
     "filterLabel": "pc_id で絞り込み",
     "filterPlaceholder": "pc_id で絞り込み…",
-    "filterEmpty": "「{{q}}」に一致する PC はありません。"
+    "filterEmpty": "「{{q}}」に一致する PC はありません。",
+    "export": {
+      "button": "CSVエクスポート"
+    }
   },
   "sidebar": {
     "ariaLabel": "インベントリ種別",

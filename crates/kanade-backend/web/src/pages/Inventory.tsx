@@ -1,8 +1,9 @@
 import { useQuery } from '@tanstack/react-query';
-import { Loader2, ScrollText } from 'lucide-react';
+import { Download, Loader2, ScrollText } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 import { Link, useMatch, useSearchParams } from 'react-router-dom';
+import { toast } from 'sonner';
 
 import { ErrorCard } from '@/components/ErrorCard';
 import { PcPicker } from '@/components/PcPicker';
@@ -14,7 +15,8 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { apiFetch } from '@/lib/api';
+import { apiFetch, formatError } from '@/lib/api';
+import { downloadCsv } from '@/lib/csv';
 import { useDebouncedValue } from '@/lib/hooks';
 import { cn, fmtAccount, fmtIsoLocal } from '@/lib/utils';
 
@@ -76,6 +78,25 @@ type InventoryByJob = {
 // at 1000; 50 keeps the polled payload and the rendered DOM bounded
 // regardless of fleet size.
 const FLEET_PAGE_SIZE = 50;
+
+// CSV export (棚卸: every PC matching the selected manifest + current
+// `q` filter, not just the FLEET_PAGE_SIZE page on screen). Mirrors
+// `BY_JOB_MAX_LIMIT` in the backend's `api/inventory.rs` by-job handler
+// — the largest page that endpoint will hand back per request — so the
+// export walks the full match set in chunks of this size instead of
+// assuming one request returns everything.
+const BY_JOB_EXPORT_PAGE_SIZE = 1000;
+
+function pad2(n: number): string {
+  return String(n).padStart(2, '0');
+}
+
+function exportFilename(manifestId: string, now: Date): string {
+  return (
+    `inventory_${manifestId}_${now.getFullYear()}${pad2(now.getMonth() + 1)}${pad2(now.getDate())}` +
+    `_${pad2(now.getHours())}${pad2(now.getMinutes())}.csv`
+  );
+}
 
 /** v0.34 / #92: one row from `inventory_history` — populated by the
  *  projector's diff step (#41 / #86) and served by
@@ -491,6 +512,86 @@ function FleetProbeTable({
 
   const columns = job.summary ?? job.display;
 
+  // #csv-export: every PC matching this manifest + the current `q`
+  // filter, not just the FLEET_PAGE_SIZE page rendered above. The
+  // by-job endpoint caps a single response at BY_JOB_EXPORT_PAGE_SIZE
+  // rows, so a fleet larger than that needs several requests — walk
+  // `offset` forward until every matching row has been collected.
+  //
+  // The endpoint has no cursor / snapshot isolation — it's a plain
+  // `ORDER BY pc_id LIMIT ? OFFSET ?`, re-run fresh on every page
+  // request — so a PC reporting in (or dropping out) for the first
+  // time while a large, multi-page export is in flight can shift every
+  // row after it by one `pc_id`-ordered position. Two things follow
+  // from that, both handled below: (1) the stop condition is taken
+  // from the FIRST page's `total` and never re-read, so a fleet that
+  // keeps growing mid-export can't push the target out indefinitely
+  // (or one that's shrinking can't cut the export short); (2) rows are
+  // deduped by `pc_id`, so a row that shifts back across a page
+  // boundary and gets re-served isn't written to the CSV twice. A row
+  // shifting the OTHER way (skipped at a boundary because something
+  // ahead of it was removed) can't be recovered client-side without
+  // the backend offering a stable cursor — this export is a best-
+  // effort snapshot of a live table, not a transactional one.
+  const [exporting, setExporting] = useState(false);
+  const doExport = async () => {
+    setExporting(true);
+    try {
+      const rows: InventoryRow[] = [];
+      const seenPcIds = new Set<string>();
+      let offset = 0;
+      let expectedTotal: number | null = null;
+      while (expectedTotal === null || offset < expectedTotal) {
+        const sp = new URLSearchParams({
+          limit: String(BY_JOB_EXPORT_PAGE_SIZE),
+          offset: String(offset),
+        });
+        if (dq) sp.set('q', dq);
+        const page = await apiFetch<InventoryByJob>(
+          `/api/inventory/by-job/${encodeURIComponent(job.manifest_id)}?${sp.toString()}`,
+        );
+        if (expectedTotal === null) expectedTotal = page.total;
+        for (const r of page.rows) {
+          if (seenPcIds.has(r.pc_id)) continue;
+          seenPcIds.add(r.pc_id);
+          rows.push(r);
+        }
+        offset += BY_JOB_EXPORT_PAGE_SIZE;
+        // The fleet shrank enough (mid-export deletions) that this page
+        // came back empty even though `offset` hasn't reached the frozen
+        // `expectedTotal` yet — stop rather than spin on empty pages.
+        if (page.rows.length === 0) break;
+      }
+
+      const header = [
+        t('fleet.columns.pcId'),
+        t('fleet.columns.lastLogon'),
+        ...columns.map((c) => c.label),
+        t('fleet.columns.collected'),
+      ];
+      const csvRows = rows.map((r) => [
+        r.pc_id,
+        fmtAccount(r.last_logon_display_name, r.last_logon_user),
+        ...columns.map((c) => {
+          const val = r.facts[c.field];
+          // Mirrors the on-screen cell: a nested `table` field collapses
+          // to a row-count summary rather than exploding into extra
+          // CSV rows/columns.
+          if (c.type === 'table') {
+            return Array.isArray(val) ? t('fleet.nestedRowCount', { count: val.length }) : '—';
+          }
+          return renderCell(val, c.type);
+        }),
+        fmtIsoLocal(r.collected_at),
+      ]);
+      downloadCsv(exportFilename(job.manifest_id, new Date()), [header, ...csvRows]);
+    } catch (e) {
+      toast.error(formatError(e));
+    } finally {
+      setExporting(false);
+    }
+  };
+
   return (
     <Card>
       <CardHeader>
@@ -514,18 +615,30 @@ function FleetProbeTable({
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <div className="mb-3">
-          <Label htmlFor={`fleet-filter-${job.manifest_id}`} className="sr-only">
-            {t('fleet.filterLabel')}
-          </Label>
-          <Input
-            id={`fleet-filter-${job.manifest_id}`}
-            type="search"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder={t('fleet.filterPlaceholder')}
-            className="max-w-xs"
-          />
+        <div className="mb-3 flex flex-wrap items-end gap-3">
+          <div>
+            <Label htmlFor={`fleet-filter-${job.manifest_id}`} className="sr-only">
+              {t('fleet.filterLabel')}
+            </Label>
+            <Input
+              id={`fleet-filter-${job.manifest_id}`}
+              type="search"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder={t('fleet.filterPlaceholder')}
+              className="max-w-xs"
+            />
+          </div>
+          {/* #csv-export: every filter-matching row for this manifest,
+              not just the FLEET_PAGE_SIZE page rendered below. */}
+          <Button variant="secondary" size="sm" onClick={doExport} disabled={exporting}>
+            {exporting ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <Download className="size-3.5" />
+            )}
+            {t('fleet.export.button')}
+          </Button>
         </div>
         {byJob.isLoading ? (
           <div className="flex items-center gap-2 text-muted">
