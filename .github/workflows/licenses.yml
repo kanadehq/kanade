@@ -5,7 +5,7 @@
 # `kata apply` from the upstream preset doesn't clobber it — same reasoning as
 # integration.yml and web.yml.
 #
-# Four checks, one job, because they answer one question between them:
+# Five checks, one job, because they answer one question between them:
 #
 #   0. node --test — unit tests for the SPDX expression evaluator that check 2
 #      depends on. It is a hand-written parser gating a compliance check; the
@@ -23,6 +23,10 @@
 #      MIT, BSD-*, Apache-2.0, ISC and Unicode-3.0 all require the copyright
 #      notice to travel with the *binary*; a stale notices file means we ship
 #      attribution for a tree we no longer have.
+#   4. sbom.mjs — a smoke run of the SBOM generator. It publishes nothing
+#      here (the SBOM is a release asset, built on a tag by
+#      release-extras.yml); this exists so a change that breaks generation is
+#      caught by the PR that makes it. #1450.
 #
 # Runs on EVERY pull request, not path-filtered. Same reasoning as web.yml: a
 # required status check that never runs on a given PR reports as
@@ -94,7 +98,7 @@ jobs:
       # for minutes, installs nothing, and exits 0 with only a warning.
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-deny,cargo-about
+          tool: cargo-deny,cargo-about,cargo-cyclonedx
 
       - uses: oven-sh/setup-bun@v2
 
@@ -129,3 +133,11 @@ jobs:
       # genuine licence violation.
       - name: THIRD-PARTY-NOTICES.md is current
         run: node scripts/licenses/notices.mjs --check
+
+      # The SBOM itself is a release artifact, not a committed one — it is
+      # generated and uploaded on a tag by release-extras.yml. This step does
+      # not publish anything; it proves the generator still works, so a change
+      # that breaks it is caught by the PR that makes it rather than by a
+      # release six weeks later. #1450.
+      - name: SBOM generator still works
+        run: node scripts/licenses/sbom.mjs --out "$RUNNER_TEMP/sbom"

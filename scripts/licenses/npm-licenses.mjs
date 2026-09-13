@@ -37,6 +37,9 @@ import { fileURLToPath } from 'node:url'
 // they can be unit-tested (`node --test scripts/licenses/`). See spdx.mjs for
 // why the expression handling is a real parser rather than a regex.
 import { evaluate, parse, unlistedLeaves } from './spdx.mjs'
+// CycloneDX shaping lives in its own module so the identifier handling is
+// reachable from a unit test — see cyclonedx.test.mjs.
+import { npmComponent } from './cyclonedx.mjs'
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
@@ -336,8 +339,14 @@ function collect() {
         }
       }
 
+      // bun.lock's 4th element is the npm integrity string
+      // (`sha512-<base64>`). Carried through for the SBOM, where a hash
+      // is what lets a consumer tell whether the component they have is
+      // the component this build resolved.
+      const integrity = typeof entry[3] === 'string' ? entry[3] : null
+
       packages.push({
-        name, version, expression, malformed, vendored,
+        name, version, expression, malformed, vendored, integrity,
         choice,
         repository: typeof pkgJson.repository === 'string' ? pkgJson.repository : pkgJson.repository?.url ?? null,
         texts,
@@ -493,15 +502,45 @@ function notices(projects) {
   process.stdout.write(out.join('\n'))
 }
 
+/**
+ * Emit the shipped npm packages as CycloneDX components on stdout, keyed by
+ * project directory so the caller can fold each set into the right binary's
+ * BOM.
+ *
+ * Deliberately *not* a standalone tool run: `@cyclonedx/cyclonedx-npm` shells
+ * out to `npm ls` and wants an npm lockfile, which this repo does not have.
+ * More importantly, a second tool would compute its own notion of "what
+ * ships" — and two answers to that question is exactly the failure mode this
+ * whole area exists to prevent. Reusing `collect()` means the SBOM and
+ * THIRD-PARTY-NOTICES.md cannot disagree, because they are one computation.
+ *
+ * @param {ReturnType<typeof collect>} projects
+ */
+function sbom(projects) {
+  const out = {}
+  for (const project of projects) {
+    out[project.dir] = {
+      label: project.label,
+      components: project.packages.map((pkg) => npmComponent(pkg)),
+      // Named, not dropped: a platform-gated package ships on its own
+      // platform, and an SBOM that silently omits it is wrong in the
+      // direction that matters.
+      unresolved: project.unreadable.map((u) => ({ name: u.name, version: u.version, constraints: u.constraints })),
+    }
+  }
+  process.stdout.write(JSON.stringify(out, null, 2))
+}
+
 const mode = process.argv[2]
-if (mode !== '--check' && mode !== '--notices') {
-  console.error('usage: node scripts/licenses/npm-licenses.mjs (--check | --notices)')
+if (!['--check', '--notices', '--sbom'].includes(mode)) {
+  console.error('usage: node scripts/licenses/npm-licenses.mjs (--check | --notices | --sbom)')
   process.exit(2)
 }
 try {
   const projects = collect()
   if (mode === '--check') check(projects)
-  else notices(projects)
+  else if (mode === '--notices') notices(projects)
+  else sbom(projects)
 } catch (err) {
   console.error(`npm-licenses: ${err.message}`)
   process.exit(1)
