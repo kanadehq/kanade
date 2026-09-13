@@ -81,9 +81,14 @@ cargo install kanade kanade-agent kanade-backend
 `kanade`, `kanade-agent`, and `kanade-backend` are now on your PATH
 (under `~/.cargo/bin/`).
 
-You'll also want the sample configs (`configs/agent.toml` / `configs/backend.toml`) and
-the example manifests (`jobs/*.yaml`). The fastest way is a shallow
-clone of this repo:
+You'll also want the sample configs (`configs/agent.toml` / `configs/backend.toml`).
+A single smoke-test manifest (`configs/jobs/echo-test.yaml`) ships
+here for the Quick start below; the full showcase of operational job
+/ schedule / view / group manifests — health checks, inventory,
+patching, troubleshooting, security feeds — lives in the sibling
+[`kanadehq/kanade-manifests`](https://github.com/kanadehq/kanade-manifests)
+repo, categorized and ready to `kanade job create`. The fastest way
+to get both is a shallow clone of this repo:
 
 ```powershell
 git clone --depth=1 https://github.com/kanadehq/kanade.git
@@ -104,7 +109,7 @@ own working dir if you'd rather not clone).
 
 Run each step in its own PowerShell window so the daemons stay up. All
 of them assume `cd` into the repo root (which holds `configs/agent.toml`
-/ `configs/backend.toml` / `jobs/`).
+/ `configs/backend.toml` / `configs/jobs/`).
 
 ### 1 — start NATS
 
@@ -159,8 +164,10 @@ membership and cadence settings are read from the KV buckets — see
 kanade run $env:COMPUTERNAME -- 'echo hello from kanade'
 
 # Or via the backend's YAML deploy path (writes a row to deployments,
-# emits an audit event, broadcasts the Command).
-kanade exec jobs/echo-test.yaml
+# emits an audit event, broadcasts the Command). Register once, then
+# exec by id as many times as you like.
+kanade job create configs/jobs/echo-test.yaml
+kanade exec echo-test
 
 # Heartbeat probe.
 kanade ping $env:COMPUTERNAME
@@ -224,27 +231,47 @@ kanade config effective <pc_id>                  # resolved view for a PC (built
 
 ## Authoring jobs
 
-YAML manifests in `jobs/*.yaml` (see [spec §2.4.1](https://github.com/kanadehq/kanade/blob/main/docs/SPEC.md)).
-Sample manifests in the repo cover:
+YAML manifests in `configs/jobs/*.yaml` — full field reference in
+[`docs/schemas/job.schema.json`](docs/schemas/job.schema.json) (and
+[`schedule.schema.json`](docs/schemas/schedule.schema.json) for the
+pairing below), generated from the Rust types and served live at
+`GET /api/schemas/manifest.json` / `.../schedule.json` for the SPA's
+YAML editor.
+This repo ships one minimal example, `configs/jobs/echo-test.yaml`,
+for the Quick start above. For real-world examples across every
+category — health checks, inventory, patching, troubleshooting,
+security feeds + dashboards, fleet-targeting groups — see the
+[`kanadehq/kanade-manifests`](https://github.com/kanadehq/kanade-manifests)
+showcase repo.
 
-- `jobs/echo-test.yaml` — minimal ad-hoc command
-- `jobs/wave-test.yaml` — `rollout.waves` rollout (canary → wave1 with delay)
-- `jobs/schedule-test.yaml` — cron-driven echo every 10 s
-
-A wave manifest sketch:
+A job manifest owns only the script and its execution attributes;
+**who** runs it (`target`), **how to phase the fanout** (`rollout`),
+and **when to stagger the start** (`jitter`) live on the paired
+Schedule (or the ad-hoc exec request) instead — the same script can
+be fired against different targets/rollouts without copying the job:
 
 ```yaml
+# configs/jobs/cleanup-disk-temp.yaml
 id: cleanup-disk-temp
 version: 1.0.1
-target:
-  pcs: [PC1234]
 execute:
   shell: powershell
   script: |
     $temp = [System.IO.Path]::GetTempPath()
     Remove-Item "$temp\*" -Recurse -Force -ErrorAction SilentlyContinue
   timeout: 600s
-  jitter: 5m
+```
+
+```yaml
+# configs/schedules/cleanup-disk-temp.yaml
+id: cleanup-disk-temp
+job_id: cleanup-disk-temp
+when:
+  per_pc: { every: 24h }
+enabled: true
+target:
+  all: true
+jitter: 5m
 rollout:
   strategy: wave
   waves:
@@ -373,7 +400,7 @@ Clients send `Authorization: Bearer <token>` on every `/api/*` request:
 # Operator side (CLI) — log in, then run fleet commands
 $env:KANADE_AUTH_TOKEN = (kanade login --username admin --token-only)
 kanade account create alice --role operator      # admin only
-kanade exec jobs\echo-test.yaml                  # operator+
+kanade job create configs/jobs/echo-test.yaml; kanade exec echo-test  # operator+
 
 # CI / automation — admin-equivalent service token, no login round-trip
 $env:KANADE_AUTH_TOKEN = "<your-fleet-token>"   # matches backend StaticToken
