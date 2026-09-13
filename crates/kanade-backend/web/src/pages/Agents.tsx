@@ -693,13 +693,17 @@ export function Agents() {
       const header = cols.map((c) => c.label);
       const csvRows = rows.map((a) => cols.map((c) => exportValue(c.id, a)));
       downloadCsv(exportFilename(new Date()), [header, ...csvRows]);
-      // The backend's regex prefilter (active whenever pc/host, user, or
-      // version is set) silently caps at MAX_FETCH — a row count landing
+      // The backend's regex prefilter — active only when pc/host, user, or
+      // version is set — silently caps at MAX_FETCH; a row count landing
       // exactly on that cap is this request's only signal that more rows
       // may have matched. A ledger that LOOKS complete but silently isn't
       // is worse than a slow one, so this has to be surfaced, not just
-      // logged server-side.
-      if (rows.length >= AGENTS_EXPORT_FETCH_CAP) {
+      // logged server-side. The plain-filter fast path (status / metadata /
+      // quarantined alone) has no such ceiling — `LIMIT -1` there really
+      // does mean unlimited — so the warning must not fire off row count
+      // alone, or a genuinely complete export of a 10k+ fleet would look
+      // suspect for no reason.
+      if ((dQ || dUser || dVersion) && rows.length >= AGENTS_EXPORT_FETCH_CAP) {
         toast.warning(t('export.truncatedWarning', { count: rows.length }));
       }
     } catch (e) {
