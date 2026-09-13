@@ -49,6 +49,13 @@ import { cn, fmtIsoLocal, isAgentOnline, unresolvedQuarantine } from '@/lib/util
 const PAGE_SIZE = 50;
 // Same debounce the other list pages use for typed filters.
 const FILTER_DEBOUNCE_MS = 300;
+// Mirrors `MAX_FETCH` in the backend's `api/agents.rs` list handler. A
+// limit-less request only hits that cap when q/user/version is set (it
+// routes through the regex prefilter, which pulls candidates into memory
+// before matching); the plain-filter fast path has no such ceiling. Used
+// here only to detect the capped case and say so — never to enforce a
+// limit client-side.
+const AGENTS_EXPORT_FETCH_CAP = 10_000;
 
 
 // #1061: metadata filter operators (mirror the backend allow-list). The
@@ -686,6 +693,15 @@ export function Agents() {
       const header = cols.map((c) => c.label);
       const csvRows = rows.map((a) => cols.map((c) => exportValue(c.id, a)));
       downloadCsv(exportFilename(new Date()), [header, ...csvRows]);
+      // The backend's regex prefilter (active whenever pc/host, user, or
+      // version is set) silently caps at MAX_FETCH — a row count landing
+      // exactly on that cap is this request's only signal that more rows
+      // may have matched. A ledger that LOOKS complete but silently isn't
+      // is worse than a slow one, so this has to be surfaced, not just
+      // logged server-side.
+      if (rows.length >= AGENTS_EXPORT_FETCH_CAP) {
+        toast.warning(t('export.truncatedWarning', { count: rows.length }));
+      }
     } catch (e) {
       toast.error(formatError(e));
     } finally {

@@ -15,7 +15,8 @@
   },
   "filterEmpty": "No agents match this filter.",
   "export": {
-    "button": "Export CSV"
+    "button": "Export CSV",
+    "truncatedWarning": "The export hit {{count}} rows, which may be the fetch cap rather than the true match count — some agents may be missing. Narrow the search filters and export again."
   },
   "status": {
     "online": "online",

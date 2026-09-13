@@ -6,10 +6,28 @@
  * rule Excel actually needs.
  */
 
+/**
+ * Characters that make a spreadsheet application read a cell as a formula
+ * (or, for `\t`/`\r`, feed it to a DDE handler) instead of literal text —
+ * the classic CSV/formula-injection vector. Guarded here, not at the call
+ * sites: `toCsv`'s rows come from data an agent or operator supplied
+ * (hostnames, agent_meta values), any of which could contain a value like
+ * `=cmd|'/c calc'!A1` that a spreadsheet would otherwise execute on open.
+ */
+const FORMULA_TRIGGERS = ['=', '+', '-', '@', '\t', '\r'];
+
+/** Prefix a value with an apostrophe if it would otherwise be read as a
+ *  formula — the standard mitigation, since it forces text interpretation
+ *  without changing what the cell displays. */
+function guardFormula(value: string): string {
+  return FORMULA_TRIGGERS.some((p) => value.startsWith(p)) ? `'${value}` : value;
+}
+
 /** Quote one field when it contains a comma, quote, or line break, doubling
  *  any embedded quotes. Plain values pass through unquoted. */
 function csvField(value: string): string {
-  return /[",\r\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+  const guarded = guardFormula(value);
+  return /[",\r\n]/.test(guarded) ? `"${guarded.replace(/"/g, '""')}"` : guarded;
 }
 
 /**
