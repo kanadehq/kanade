@@ -669,7 +669,20 @@ pub fn feature_for_path(path: &str) -> Option<Feature> {
         | "/api/executions/{exec_id}" => Feature::Activity,
 
         // --- Events (obs_events; `recent` stays commons for the dashboard) ---
-        "/api/obs_events"
+        //
+        // `/api/agents` and `/api/agents/meta-keys` gate here too: the Events
+        // page's PC-search filter and the uptime-lane PC list both call the
+        // fleet-search route (via `PcPicker` / its inline metadata-empty-hint
+        // query), and since #1295 made commons closed-by-default for
+        // restricted accounts, an Events-only account fell through to the
+        // unmapped-commons 403 on every keystroke. NOT added to
+        // `auth::RESTRICTED_COMMONS` — that set is deliberately
+        // infrastructure-only, and `/api/agents` returns full fleet roster
+        // data, exactly what a page restriction should withhold from an
+        // account that doesn't hold Events.
+        "/api/agents"
+        | "/api/agents/meta-keys"
+        | "/api/obs_events"
         | "/api/obs_events/kinds"
         | "/api/obs_events/lane_seeds"
         | "/api/obs_events/sources" => Feature::Events,
@@ -931,6 +944,15 @@ mod feature_map_tests {
             feature_for_path("/api/scripts/{cmd_id}/unrevoke"),
             Some(Feature::Jobs)
         );
+        // #1343-follow-up: the fleet-search route the Events page's PC /
+        // metadata-key filters depend on gates with Events, not commons —
+        // otherwise an Events-only restricted account 403s on every
+        // keystroke (see `feature_denial` doc comment on commons-by-default).
+        assert_eq!(feature_for_path("/api/agents"), Some(Feature::Events));
+        assert_eq!(
+            feature_for_path("/api/agents/meta-keys"),
+            Some(Feature::Events)
+        );
     }
 
     #[test]
@@ -939,8 +961,8 @@ mod feature_map_tests {
         assert_eq!(feature_for_path("/api/version"), None);
         assert_eq!(feature_for_path("/api/auth/me"), None);
         // Shared fleet substrate + dashboard feeds stay open so a page
-        // restriction never blanks the always-visible home.
-        assert_eq!(feature_for_path("/api/agents"), None);
+        // restriction never blanks the always-visible home. (`/api/agents`
+        // itself now gates under Events — see `gated_routes_map_to_their_feature`.)
         assert_eq!(feature_for_path("/api/agents/{pc_id}"), None);
         assert_eq!(feature_for_path("/api/perf/fleet"), None);
         assert_eq!(feature_for_path("/api/obs_events/recent"), None);

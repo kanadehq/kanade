@@ -920,6 +920,27 @@ mod tests {
     }
 
     #[test]
+    fn events_only_account_can_reach_the_fleet_search_the_page_needs() {
+        // #1343-follow-up: an Events-only restricted account must be able to
+        // load the Events page's PC-search and metadata-key filters — both
+        // hit `/api/agents` / `/api/agents/meta-keys`, which now gate under
+        // Events instead of falling through to unmapped (and therefore
+        // closed) commons.
+        let events_only = [Feature::Events];
+        let restricted = Some(&events_only[..]);
+        for path in ["/api/agents", "/api/agents/meta-keys", "/api/obs_events"] {
+            assert_eq!(feature_denial(restricted, Some(path)), None, "{path}");
+        }
+
+        // An account without Events is still denied — the fleet roster
+        // stays withheld from anyone the page restriction doesn't name.
+        let logs_only = [Feature::Logs];
+        let other_restricted = Some(&logs_only[..]);
+        assert!(feature_denial(other_restricted, Some("/api/agents")).is_some());
+        assert!(feature_denial(other_restricted, Some("/api/agents/meta-keys")).is_some());
+    }
+
+    #[test]
     fn unrestricted_callers_pass_commons_and_gated_alike() {
         // No allow-list (NULL in the DB, service token, no identity) → the
         // pre-change behaviour for everyone.
