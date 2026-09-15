@@ -47,7 +47,7 @@
 
 use axum::body::Body;
 use axum::extract::{MatchedPath, Request, State};
-use axum::http::{StatusCode, header};
+use axum::http::{Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
@@ -493,13 +493,16 @@ pub async fn require_admin(req: Request, next: Next) -> Result<Response, ApiErro
 ///   * the matched route is in [`RESTRICTED_COMMONS`] (the small
 ///     infrastructure set a restricted account still needs: version,
 ///     command-signing, auth self-service) → allow;
-///   * the matched route is one of the multi-owner lookup routes in
-///     `api::shared_agent_lookup_features` → allow iff the caller's
+///   * the matched route is one of the multi-owner routes in
+///     `api::shared_owner_features` (a picker every one of those pages
+///     embeds) **and the request only reads** → allow iff the caller's
 ///     allow-list holds ANY of that route's owning features;
 ///   * the matched route is **feature-gated** (`feature_for_path` →
 ///     `Some`) → allow iff the caller's allow-list holds the feature;
 ///   * otherwise (a **commons** route, `feature_for_path` → `None`) →
 ///     `403` for a restricted account.
+///
+/// A shared route only ever widens **reads** — see `feature_denial`.
 ///
 /// Commons-by-default now applies ONLY to unrestricted accounts. It used to
 /// cover restricted ones too ("most endpoints are shared substrate"), but
@@ -521,6 +524,7 @@ pub async fn require_features(req: Request, next: Next) -> Result<Response, ApiE
         feature_denial(
             ext.get::<Claims>()
                 .and_then(|c| c.allowed_features.as_deref()),
+            req.method(),
             ext.get::<MatchedPath>().map(|m| m.as_str()),
         )
     };
@@ -554,25 +558,41 @@ const RESTRICTED_COMMONS: [&str; 7] = [
 /// The `require_features` decision, pure for testability: `Some(message)`
 /// to deny with a 403, `None` to allow. `allowed` is the caller's DB
 /// allow-list (`None` = unrestricted / no identity / service token);
-/// `matched_path` is the axum `MatchedPath` pattern (`None` = the SPA
-/// static fallback, which serves no data and always passes).
-fn feature_denial(allowed: Option<&[Feature]>, matched_path: Option<&str>) -> Option<String> {
+/// `method` is the request's method; `matched_path` is the axum
+/// `MatchedPath` pattern (`None` = the SPA static fallback, which serves no
+/// data and always passes).
+///
+/// `pub(crate)` so the SPA-side guard in `api::spa_route_tests` can assert
+/// this decision for the routes each page actually fetches.
+pub(crate) fn feature_denial(
+    allowed: Option<&[Feature]>,
+    method: &Method,
+    matched_path: Option<&str>,
+) -> Option<String> {
     let allowed = allowed?;
     let path = matched_path?;
     if RESTRICTED_COMMONS.contains(&path) {
         return None;
     }
-    // Multi-owner lookup routes (the `PcPicker` search/existence-check the
-    // Run/Exec/Inventory/Activity/Events/Logs/Analytics/Notifications/
-    // Rollout/Config pages all embed) can't be expressed as one
-    // `feature_for_path` arm — checked first so any one of those features
-    // unlocks it, rather than only whichever feature happened to "own" it.
-    if let Some(features) = crate::api::shared_agent_lookup_features(path) {
-        return if features.iter().any(|f| allowed.contains(f)) {
-            None
-        } else {
-            Some("account not permitted to access this route".to_string())
-        };
+    // Multi-owner routes (the `PcPicker` fleet search / existence-check, the
+    // table's `agent_meta` columns, `GroupPicker`'s group list, the Exec
+    // page's job list) can't be expressed as one `feature_for_path` arm —
+    // checked first so any one of those features unlocks it, rather than only
+    // whichever feature happened to "own" it.
+    //
+    // Read methods only. `GET /api/jobs` and `POST /api/jobs` share a
+    // `MatchedPath`, so consulting this table for a write would let an
+    // exec-only account *create* a job — the one thing a multi-owner entry
+    // must never widen. A write therefore falls through to the owning page's
+    // arm below (or to commons-and-closed), which is the safe direction.
+    if matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) {
+        if let Some(features) = crate::api::shared_owner_features(path) {
+            return if features.iter().any(|f| allowed.contains(f)) {
+                None
+            } else {
+                Some("account not permitted to access this route".to_string())
+            };
+        }
     }
     match crate::api::feature_for_path(path) {
         Some(feature) if allowed.contains(&feature) => None,
@@ -614,6 +634,14 @@ fn forbidden(msg: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`feature_denial`] for a **read** request. Almost every assertion below
+    /// is about the page axis, and every SPA fetch that matters here is a
+    /// `GET`; the method axis has its own test and calls `feature_denial`
+    /// directly.
+    fn denied_read(allowed: Option<&[Feature]>, path: Option<&str>) -> Option<String> {
+        feature_denial(allowed, &Method::GET, path)
+    }
 
     #[test]
     fn role_hierarchy() {
@@ -894,11 +922,11 @@ mod tests {
         // Commons data routes are now CLOSED to a restricted account — the
         // porousness this change removes (a "download user" reading the
         // whole fleet roster would make the page restriction cosmetic).
-        assert!(feature_denial(restricted, Some("/api/agents")).is_some());
-        assert!(feature_denial(restricted, Some("/api/perf/fleet")).is_some());
-        assert!(feature_denial(restricted, Some("/api/config/defaults")).is_some());
+        assert!(denied_read(restricted, Some("/api/agents")).is_some());
+        assert!(denied_read(restricted, Some("/api/perf/fleet")).is_some());
+        assert!(denied_read(restricted, Some("/api/config/defaults")).is_some());
         // An unknown / future path is commons, hence also closed.
-        assert!(feature_denial(restricted, Some("/api/something-new")).is_some());
+        assert!(denied_read(restricted, Some("/api/something-new")).is_some());
 
         // …but the hardcoded infrastructure set stays open, or the SPA
         // session itself (and the must_change_pw trap) stops working.
@@ -911,7 +939,7 @@ mod tests {
             "/api/auth/mfa/verify",
             "/api/auth/mfa/disable",
         ] {
-            assert_eq!(feature_denial(restricted, Some(path)), None, "{path}");
+            assert_eq!(denied_read(restricted, Some(path)), None, "{path}");
         }
     }
 
@@ -920,76 +948,187 @@ mod tests {
         let download_user = [Feature::AgentInstall];
         let restricted = Some(&download_user[..]);
         // The one page they hold…
-        assert_eq!(
-            feature_denial(restricted, Some("/api/agents/installer")),
-            None
-        );
+        assert_eq!(denied_read(restricted, Some("/api/agents/installer")), None);
         // …and nothing else gated.
-        let denied = feature_denial(restricted, Some("/api/audit")).expect("denied");
+        let denied = denied_read(restricted, Some("/api/audit")).expect("denied");
         assert!(denied.contains("audit"), "{denied}");
-        assert!(feature_denial(restricted, Some("/api/agents/releases")).is_some());
+        assert!(denied_read(restricted, Some("/api/agents/releases")).is_some());
         // Even an empty allow-list is a REAL restriction (commons-only,
         // minus infrastructure) — not unrestricted.
-        assert!(feature_denial(Some(&[]), Some("/api/agents")).is_some());
-        assert_eq!(feature_denial(Some(&[]), Some("/api/auth/me")), None);
+        assert!(denied_read(Some(&[]), Some("/api/agents")).is_some());
+        assert_eq!(denied_read(Some(&[]), Some("/api/auth/me")), None);
     }
 
     #[test]
-    fn any_picker_page_feature_unlocks_the_shared_agent_lookup() {
-        // #1343-follow-up: `/api/agents` / `/api/agents/meta-keys` back the
-        // shared `PcPicker` search box (and Events' metadata-empty hint),
-        // embedded in Run/Exec/Inventory/Activity/Events/Logs/Analytics/
-        // Notifications/Rollout/Config. A restricted account holding ANY ONE
-        // of those page features must be able to use its own page's PC /
-        // metadata search without hitting the unmapped-commons 403 — not
-        // just an Events-only account.
-        for feature in [
-            Feature::Run,
-            Feature::Exec,
-            Feature::Inventory,
-            Feature::Activity,
-            Feature::Events,
-            Feature::Logs,
-            Feature::Analytics,
-            Feature::Notifications,
-            Feature::Rollout,
-            Feature::Config,
-        ] {
-            let only = [feature];
-            let restricted = Some(&only[..]);
-            for path in ["/api/agents", "/api/agents/meta-keys"] {
+    fn any_embedding_page_feature_unlocks_the_shared_routes() {
+        // #1343-follow-up: the shared pickers are why a page can need a route
+        // its own feature doesn't own. A restricted account holding ANY ONE of
+        // the embedding pages' features must be able to use that page's own
+        // picker without hitting the unmapped-commons 403.
+        //
+        // Deliberately per-route rather than one blanket list: the table is
+        // scoped to the pages that actually embed each component, so a page
+        // that doesn't embed it must stay denied (below).
+        let shared: &[(&str, &[Feature])] = &[
+            (
+                // PcPicker's fleet search / existence check.
+                "/api/agents",
+                &[
+                    Feature::Run,
+                    Feature::Exec,
+                    Feature::Inventory,
+                    Feature::Activity,
+                    Feature::Events,
+                    Feature::Logs,
+                    Feature::Analytics,
+                    Feature::Notifications,
+                    Feature::Rollout,
+                    Feature::Config,
+                ],
+            ),
+            // GroupPicker's group list (Config/Exec/Rollout target groups) plus
+            // the Groups page's own overview.
+            (
+                "/api/groups",
+                &[
+                    Feature::Groups,
+                    Feature::Config,
+                    Feature::Exec,
+                    Feature::Rollout,
+                ],
+            ),
+            // The Exec page picks a job_id from the Jobs page's list.
+            ("/api/jobs", &[Feature::Jobs, Feature::Exec]),
+            // The table's `agent_meta` columns (#1357): the pages whose
+            // <Table metaColumns> can add them, and Events' own metadata hint.
+            (
+                "/api/agents/meta-keys",
+                &[
+                    Feature::Inventory,
+                    Feature::Activity,
+                    Feature::Events,
+                    Feature::Compliance,
+                    Feature::Collect,
+                ],
+            ),
+            (
+                "/api/agents/meta",
+                &[
+                    Feature::Inventory,
+                    Feature::Activity,
+                    Feature::Events,
+                    Feature::Compliance,
+                    Feature::Collect,
+                ],
+            ),
+        ];
+        for (path, owners) in shared {
+            for feature in *owners {
+                let only = [*feature];
                 assert_eq!(
-                    feature_denial(restricted, Some(path)),
+                    denied_read(Some(&only[..]), Some(path)),
                     None,
                     "{path} should be open to {feature:?}-only"
                 );
             }
         }
+
         // Events' own routes stay gated as before.
         let events_only = [Feature::Events];
         assert_eq!(
-            feature_denial(Some(&events_only[..]), Some("/api/obs_events")),
+            denied_read(Some(&events_only[..]), Some("/api/obs_events")),
             None
         );
 
-        // An account whose ONLY feature doesn't own any picker page is still
-        // denied — the fleet roster stays withheld from accounts the page
-        // restriction doesn't name.
+        // A page that does NOT embed the component keeps nothing: no picker
+        // page means no fleet roster, and a page without `metaColumns` never
+        // fires the metadata requests, so it must not get them either.
+        for feature in [Feature::Audit, Feature::Jetstream, Feature::Settings] {
+            let only = [feature];
+            let restricted = Some(&only[..]);
+            for (path, _) in shared {
+                assert!(
+                    denied_read(restricted, Some(path)).is_some(),
+                    "{path} should stay closed to {feature:?}-only"
+                );
+            }
+        }
+        let config_only = [Feature::Config];
+        assert!(denied_read(Some(&config_only[..]), Some("/api/agents/meta-keys")).is_some());
+        let compliance_only = [Feature::Compliance];
+        assert!(denied_read(Some(&compliance_only[..]), Some("/api/agents")).is_some());
+    }
+
+    #[test]
+    fn a_shared_route_widens_reads_but_never_a_write() {
+        // `GET /api/jobs` (list) and `POST /api/jobs` (create) share one
+        // `MatchedPath`, so the multi-owner table has to apply to reads only —
+        // otherwise an exec-only account silently gains job creation, the Jobs
+        // page's own capability. This is the axis that table is *not* allowed
+        // to widen.
+        let exec_only = [Feature::Exec];
+        let exec = Some(&exec_only[..]);
+        assert_eq!(denied_read(exec, Some("/api/jobs")), None);
+        assert!(
+            feature_denial(exec, &Method::POST, Some("/api/jobs")).is_some(),
+            "a write through a shared route still needs the owning page"
+        );
+
+        // The owning page keeps both directions.
+        let jobs_only = [Feature::Jobs];
+        let jobs = Some(&jobs_only[..]);
+        assert_eq!(denied_read(jobs, Some("/api/jobs")), None);
+        assert_eq!(feature_denial(jobs, &Method::POST, Some("/api/jobs")), None);
+
+        // A page that owns no shared route gets neither direction, and a write
+        // falls through to the arm table (or to commons-and-closed).
         let audit_only = [Feature::Audit];
-        let other_restricted = Some(&audit_only[..]);
-        assert!(feature_denial(other_restricted, Some("/api/agents")).is_some());
-        assert!(feature_denial(other_restricted, Some("/api/agents/meta-keys")).is_some());
+        let audit = Some(&audit_only[..]);
+        assert!(feature_denial(audit, &Method::POST, Some("/api/jobs")).is_some());
+        assert!(feature_denial(audit, &Method::PUT, Some("/api/groups")).is_some());
+    }
+
+    #[test]
+    fn routes_a_page_fetches_itself_are_reachable_for_that_page() {
+        // The page's own on-mount fetches. Left commons, each of these 403s
+        // every restricted account holding exactly that page — the Schedules
+        // toast flood, and three more of the same shape found when the SPA's
+        // call sites were audited against this table.
+        let cases: &[(Feature, &str)] = &[
+            (Feature::Schedules, "/api/schedules/coverage"),
+            (Feature::Settings, "/api/server-settings/defaults"),
+            (Feature::Config, "/api/config/defaults"),
+            (Feature::Config, "/api/pcs/{pc_id}/config/inherited"),
+            (Feature::Config, "/api/groups/{name}/config/inherited"),
+            (Feature::Config, "/api/agents/{pc_id}/effective_config"),
+        ];
+        for (feature, path) in cases {
+            let only = [*feature];
+            assert_eq!(
+                denied_read(Some(&only[..]), Some(path)),
+                None,
+                "{path} should be open to {feature:?}-only"
+            );
+        }
+        // Gating them under their page must not hand them to anybody else.
+        let audit_only = [Feature::Audit];
+        for (_, path) in cases {
+            assert!(
+                denied_read(Some(&audit_only[..]), Some(path)).is_some(),
+                "{path} should stay closed to Audit-only"
+            );
+        }
     }
 
     #[test]
     fn unrestricted_callers_pass_commons_and_gated_alike() {
         // No allow-list (NULL in the DB, service token, no identity) → the
         // pre-change behaviour for everyone.
-        assert_eq!(feature_denial(None, Some("/api/agents")), None);
-        assert_eq!(feature_denial(None, Some("/api/audit")), None);
-        assert_eq!(feature_denial(None, Some("/api/auth/me")), None);
+        assert_eq!(denied_read(None, Some("/api/agents")), None);
+        assert_eq!(denied_read(None, Some("/api/audit")), None);
+        assert_eq!(denied_read(None, Some("/api/auth/me")), None);
         // The SPA static fallback has no MatchedPath and serves no data —
         // it passes for restricted accounts too, or they can't load the app.
-        assert_eq!(feature_denial(Some(&[]), None), None);
+        assert_eq!(denied_read(Some(&[]), None), None);
     }
 }
