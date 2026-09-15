@@ -564,7 +564,7 @@ export function Jobs() {
   // job aren't worth a header of their own, so they fold into a single
   // "その他" group — computed from the FULL set (not the filtered one)
   // so a row's group membership stays stable while you search.
-  const OTHER = ' other'; // sentinel that can't collide with a real prefix
+  const OTHER = '\0other'; // sentinel that can't collide with a real prefix
   const prefixOf = (id: string) => {
     const i = id.indexOf('-');
     return i > 0 ? id.slice(0, i) : id;
