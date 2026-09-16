@@ -638,11 +638,19 @@ pub fn router(state: AppState) -> Router {
 /// deliberate (most endpoints are shared substrate); a NEW page-specific
 /// endpoint must be added here to become gated.
 ///
+/// "Commons" is safe only for a route **no restrictable page fetches**.
+/// Because commons is closed to a restricted account, a route a page does
+/// depend on has to be gated (or listed in [`shared_owner_features`]) or the
+/// page 403-toasts for the account holding exactly that page — which is how
+/// Events, Schedules, Settings and Config each broke in turn. The pairs are
+/// pinned by `spa_route_tests`, which reads the SPA's own call sites.
+///
 /// Note: gating is by path, not method. A page's read and its mutation share
 /// a `MatchedPath`, so both are gated together (the vertical role gate still
 /// separately blocks a viewer's write). Endpoints the Dashboard also consumes
 /// are intentionally left commons so restricting a page never blanks the
-/// always-visible home.
+/// always-visible home — a restricted account never sees that home, so
+/// gating one of them under the page that also needs it costs nothing.
 pub fn feature_for_path(path: &str) -> Option<Feature> {
     Some(match path {
         // --- Inventory ---
@@ -696,6 +704,11 @@ pub fn feature_for_path(path: &str) -> Option<Feature> {
 
         // --- Jobs (incl. the script-command revoke lifecycle, which the
         //     SPA surfaces on the Jobs page — Jobs.tsx) ---
+        //
+        // `/api/jobs` is the *owning* page's route for every method, and is
+        // additionally readable by the Exec page's job picker: that read
+        // widening lives in `shared_owner_features`, which never widens a
+        // write — `GET` (list) and `POST` (create) share this MatchedPath.
         "/api/jobs"
         | "/api/jobs/{id}/yaml"
         | "/api/jobs/{id}"
@@ -704,8 +717,16 @@ pub fn feature_for_path(path: &str) -> Option<Feature> {
         | "/api/scripts/{cmd_id}/revoke"
         | "/api/scripts/{cmd_id}/unrevoke" => Feature::Jobs,
 
-        // --- Schedules (upcoming + coverage summary stay commons: dashboard) ---
+        // --- Schedules ---
+        //
+        // `upcoming` stays commons (it feeds the Dashboard card, and a
+        // restricted account is redirected off the Dashboard anyway), but the
+        // coverage *summary* gates here: `Schedules.tsx` fetches it on mount
+        // to draw every row's progress bar, so leaving it commons 403-toasted
+        // the whole page for a Schedules-only account (#1343 follow-up). Its
+        // per-schedule `{id}/coverage` sibling already gated here.
         "/api/schedules"
+        | "/api/schedules/coverage"
         | "/api/schedules/{id}/yaml"
         | "/api/schedules/{id}/preview"
         | "/api/schedules/{id}/status"
@@ -753,12 +774,27 @@ pub fn feature_for_path(path: &str) -> Option<Feature> {
         | "/api/script-objects"
         | "/api/script-objects/{name}/{version}" => Feature::Apps,
 
-        // --- Groups (the Groups page; per-agent membership stays commons) ---
+        // --- Groups (the Groups page; `/api/groups` itself is also read by
+        //     the shared GroupPicker — see `shared_owner_features`) ---
         "/api/groups" | "/api/groups/{name}/email" => Feature::Groups,
 
-        // --- Config (agent-config editor; `inherited`/`effective`/`defaults`
-        //     stay commons as they back per-PC detail views too) ---
-        "/api/config" | "/api/groups/{name}/config" | "/api/pcs/{pc_id}/config" => Feature::Config,
+        // --- Config (agent-config editor) ---
+        //
+        // `defaults` (the compiled-in floor the editor renders as field
+        // placeholders), the per-scope `*/config/inherited` reads and the
+        // per-PC `effective_config` preview all back `Config.tsx`'s own
+        // editors, so they gate with the page. They used to stay commons
+        // "because per-PC detail views use them too" — but those views live
+        // on the commons Agents page, which a restricted account is
+        // redirected away from, so gating them here costs nothing and stops
+        // every Config-only account from being 403'd on its own page.
+        "/api/agents/{pc_id}/effective_config"
+        | "/api/config"
+        | "/api/config/defaults"
+        | "/api/groups/{name}/config"
+        | "/api/groups/{name}/config/inherited"
+        | "/api/pcs/{pc_id}/config"
+        | "/api/pcs/{pc_id}/config/inherited" => Feature::Config,
 
         // --- JetStream ---
         "/api/jetstream/status" => Feature::Jetstream,
@@ -777,7 +813,12 @@ pub fn feature_for_path(path: &str) -> Option<Feature> {
         // Settings page could still mint or rotate the codes that unlock
         // helpdesk-only jobs across the fleet — a wider capability than the
         // generic settings PUT sitting next to them.
+        // `/defaults` belongs here for the same reason the support codes do:
+        // it is the compiled-in floor `Settings.tsx` fetches on mount to
+        // render the fields' placeholders, so left commons it 403'd every
+        // restricted account that held Settings.
         "/api/server-settings"
+        | "/api/server-settings/defaults"
         | "/api/server-settings/support-codes/{scope}"
         | "/api/server/restart" => Feature::Settings,
 
@@ -791,40 +832,86 @@ pub fn feature_for_path(path: &str) -> Option<Feature> {
 
         // Commons: everything else (health, version, auth/*, the fleet
         // roster + per-PC detail/perf, dashboard feeds, editor schemas,
-        // freeze banner, `*/defaults`, `*/inherited`, ...).
+        // freeze banner, …). A route only belongs here while NO restrictable
+        // page fetches it — see the note on this function.
         _ => return None,
     })
 }
 
-/// Route→feature table for the small set of lookup endpoints that are
-/// legitimately owned by MANY pages at once, rather than exactly one — so
-/// they can't be expressed as a single `feature_for_path` arm.
+/// Route→feature table for the routes legitimately owned by MANY pages at
+/// once, which therefore can't be expressed as a single [`feature_for_path`]
+/// arm.
 ///
-/// `GET /api/agents` (PC search / existence-check) and
-/// `GET /api/agents/meta-keys` are both driven by `PcPicker`, the one
-/// shared combobox every page below embeds to let an operator pick a
-/// `pc_id` (see its doc comment in `web/src/components/PcPicker.tsx`) —
-/// plus Events' own metadata-empty-state hint, which hits the same two
-/// routes directly. A restricted account holding any ONE of these
-/// features still needs its own page's PC / metadata search to work, so
-/// `auth::feature_denial` checks this table before falling back to the
-/// single-feature one above. Still NOT `auth::RESTRICTED_COMMONS` — that
-/// stays infrastructure-only and unconditional; this list is scoped to the
-/// pages that actually embed the picker.
-pub fn shared_agent_lookup_features(path: &str) -> Option<&'static [Feature]> {
+/// The pages' shared *pickers* are why this table exists. `PcPicker` — the one
+/// combobox every page embeds to pick a `pc_id` (see its doc comment in
+/// `web/src/components/PcPicker.tsx`) — searches `GET /api/agents`;
+/// `GroupPicker` (`web/src/components/GroupPicker.tsx`) lists `GET /api/groups`
+/// for its group-name field; the table's `metaColumns` section reads
+/// `/api/agents/meta-keys` + `/api/agents/meta` (#1357); and the Exec page's
+/// job field reads the same `GET /api/jobs` list the Jobs page owns. A
+/// restricted account holding any ONE of a route's owning features still needs
+/// its own page to work, so `auth::feature_denial` consults this table before
+/// falling back to the single-feature one above.
+///
+/// Still NOT `auth::RESTRICTED_COMMONS`: that set is infrastructure-only and
+/// unconditional, while this one names exactly the pages that embed the
+/// component — so a page restriction still withholds the data from accounts
+/// the allow-list doesn't name. `spa_route_tests` derives those page sets from
+/// the SPA's own imports, so embedding a picker in a new page without
+/// extending this table fails a test rather than 403ing that page for its
+/// restricted accounts.
+///
+/// Consulted for **read** methods only. A route's *mutation* stays with the
+/// page that owns it in [`feature_for_path`], because `GET /api/jobs` (list)
+/// and `POST /api/jobs` (create) share one `MatchedPath`: a table that ignored
+/// the method would hand an exec-only account job creation. `/api/jobs` is that
+/// case today, which is why the rule is a rule rather than a note.
+pub fn shared_owner_features(path: &str) -> Option<&'static [Feature]> {
+    /// Every page embedding `PcPicker`, which is the whole reason a page can
+    /// need the fleet roster without owning `/api/agents`.
+    const PICKER_OWNERS: [Feature; 10] = [
+        Feature::Run,
+        Feature::Exec,
+        Feature::Inventory,
+        Feature::Activity,
+        Feature::Events,
+        Feature::Logs,
+        Feature::Analytics,
+        Feature::Notifications,
+        Feature::Rollout,
+        Feature::Config,
+    ];
+    /// The pages whose `<Table metaColumns>` turns the `agent_meta` column
+    /// picker on (#1357), which is what actually fires the two requests —
+    /// `table.tsx` passes `metaColumns` straight into the hook's `enabled`, so
+    /// a page that doesn't set it never asks. Events is also here because it
+    /// reads `meta-keys` directly for its metadata-empty hint.
+    const META_COLUMN_OWNERS: [Feature; 5] = [
+        Feature::Inventory,
+        Feature::Activity,
+        Feature::Events,
+        Feature::Compliance,
+        Feature::Collect,
+    ];
+
     match path {
-        "/api/agents" | "/api/agents/meta-keys" => Some(&[
-            Feature::Run,
-            Feature::Exec,
-            Feature::Inventory,
-            Feature::Activity,
-            Feature::Events,
-            Feature::Logs,
-            Feature::Analytics,
-            Feature::Notifications,
-            Feature::Rollout,
+        "/api/agents" => Some(&PICKER_OWNERS),
+        "/api/agents/meta-keys" | "/api/agents/meta" => Some(&META_COLUMN_OWNERS),
+        // `GroupPicker` offers the real groups instead of a free-text field on
+        // the pages that can target one (Config/Exec/Rollout); the Groups page
+        // itself reads the same overview.
+        "/api/groups" => Some(&[
+            Feature::Groups,
             Feature::Config,
+            Feature::Exec,
+            Feature::Rollout,
         ]),
+        // The Exec page picks a `job_id` from the Jobs page's list. `GET`
+        // (list) and `POST` (create) share this `MatchedPath`, which is exactly
+        // why this table is consulted for reads only: an exec-only operator may
+        // list jobs, but creating one still requires the owning page's feature
+        // (`feature_for_path`), or the widening would quietly hand out writes.
+        "/api/jobs" => Some(&[Feature::Jobs, Feature::Exec]),
         _ => None,
     }
 }
@@ -964,6 +1051,30 @@ mod feature_map_tests {
             feature_for_path("/api/scripts/{cmd_id}/unrevoke"),
             Some(Feature::Jobs)
         );
+        // A route a restrictable page fetches on mount gates with that page:
+        // left commons it 403s the page's own restricted accounts. Each of
+        // these was found by auditing the SPA's call sites (see
+        // `spa_route_tests`).
+        assert_eq!(
+            feature_for_path("/api/schedules/coverage"),
+            Some(Feature::Schedules)
+        );
+        assert_eq!(
+            feature_for_path("/api/server-settings/defaults"),
+            Some(Feature::Settings)
+        );
+        for path in [
+            "/api/config/defaults",
+            "/api/groups/{name}/config/inherited",
+            "/api/pcs/{pc_id}/config/inherited",
+            "/api/agents/{pc_id}/effective_config",
+        ] {
+            assert_eq!(feature_for_path(path), Some(Feature::Config), "{path}");
+        }
+        // The two routes a shared picker also reads keep the page that OWNS
+        // them: the shared table widens their reads, and a write stays here.
+        assert_eq!(feature_for_path("/api/jobs"), Some(Feature::Jobs));
+        assert_eq!(feature_for_path("/api/groups"), Some(Feature::Groups));
     }
 
     #[test]
@@ -972,31 +1083,39 @@ mod feature_map_tests {
         assert_eq!(feature_for_path("/api/version"), None);
         assert_eq!(feature_for_path("/api/auth/me"), None);
         // Shared fleet substrate + dashboard feeds stay open so a page
-        // restriction never blanks the always-visible home. `/api/agents` /
-        // `/api/agents/meta-keys` are `None` here too — they're gated by
-        // `shared_agent_lookup_features` instead (multi-owner, see
-        // `agent_lookup_routes_are_multi_owner` below), not by this table.
-        assert_eq!(feature_for_path("/api/agents"), None);
-        assert_eq!(feature_for_path("/api/agents/meta-keys"), None);
-        assert_eq!(feature_for_path("/api/agents/{pc_id}"), None);
-        assert_eq!(feature_for_path("/api/perf/fleet"), None);
-        assert_eq!(feature_for_path("/api/obs_events/recent"), None);
-        assert_eq!(feature_for_path("/api/schedules/upcoming"), None);
-        assert_eq!(feature_for_path("/api/config/defaults"), None);
+        // restriction never blanks the always-visible home (a restricted
+        // account is redirected off that home, so a page that needs one of
+        // these still gets it gated under itself instead).
+        //
+        // The multi-owner routes are `None` here too — `/api/agents` and its
+        // two `meta` siblings are gated by `shared_owner_features` alone
+        // (multi-owner, see `shared_owner_routes_cover_every_embedding_page`
+        // below), while `/api/groups` and `/api/jobs` have an owning page here
+        // *and* a read widening there.
+        for path in [
+            "/api/agents",
+            "/api/agents/meta-keys",
+            "/api/agents/meta",
+            "/api/agents/{pc_id}",
+            "/api/perf/fleet",
+            "/api/obs_events/recent",
+            "/api/schedules/upcoming",
+        ] {
+            assert_eq!(feature_for_path(path), None, "{path}");
+        }
         // An unknown / future path is commons by default.
         assert_eq!(feature_for_path("/api/something-new"), None);
     }
 
     #[test]
-    fn agent_lookup_routes_are_multi_owner() {
-        // #1343-follow-up: `PcPicker` (the shared PC-search combobox) is
-        // embedded by Run/Exec/Inventory/Activity/Events/Logs/Analytics/
-        // Notifications/Rollout/Config, and Events' own metadata-empty hint
-        // hits the same two routes directly. Any one of those ten features
-        // must open both routes, or that page's restricted accounts hit the
-        // same 403-flood Events did.
-        let owners = shared_agent_lookup_features("/api/agents").expect("gated");
-        for feature in [
+    fn shared_owner_routes_cover_every_embedding_page() {
+        // The routes a shared picker makes many-to-one. Each must name exactly
+        // the pages that embed it: a missing owner 403s that page's restricted
+        // accounts, an extra owner hands a page data it never asks for.
+        //
+        // `PcPicker` (the shared PC-search combobox) is embedded by these ten,
+        // so any one of them must open the fleet search.
+        let picker_pages = [
             Feature::Run,
             Feature::Exec,
             Feature::Inventory,
@@ -1007,19 +1126,75 @@ mod feature_map_tests {
             Feature::Notifications,
             Feature::Rollout,
             Feature::Config,
-        ] {
+        ];
+        let owners = shared_owner_features("/api/agents").expect("gated");
+        for feature in picker_pages {
             assert!(owners.contains(&feature), "{feature:?} missing");
         }
-        assert_eq!(owners.len(), 10);
+        assert_eq!(owners.len(), picker_pages.len());
+        // Compliance has a metadata table but embeds no PC picker.
+        assert!(!owners.contains(&Feature::Compliance));
+
+        // The same table's `agent_meta` columns (#1357) — `<Table metaColumns>`
+        // is what fires those two requests, so a page that never sets it is not
+        // an owner (unlike `/api/agents`, which the picker fetches
+        // unconditionally).
+        let meta_owners = shared_owner_features("/api/agents/meta-keys").expect("gated");
+        for feature in [
+            Feature::Inventory,
+            Feature::Activity,
+            Feature::Events,
+            Feature::Compliance,
+            Feature::Collect,
+        ] {
+            assert!(meta_owners.contains(&feature), "{feature:?} missing");
+        }
+        assert_eq!(meta_owners.len(), 5);
+        assert_eq!(shared_owner_features("/api/agents/meta"), Some(meta_owners));
+        assert!(!meta_owners.contains(&Feature::Run));
+        assert!(!meta_owners.contains(&Feature::Config));
+
+        // The other two multi-owner routes: `GroupPicker`'s group list, and
+        // the job list the Exec page picks a `job_id` from.
         assert_eq!(
-            shared_agent_lookup_features("/api/agents/meta-keys"),
-            Some(owners)
+            shared_owner_features("/api/groups"),
+            Some(
+                &[
+                    Feature::Groups,
+                    Feature::Config,
+                    Feature::Exec,
+                    Feature::Rollout
+                ][..]
+            )
         );
-        // A feature that doesn't own any picker page must NOT be in the set.
-        assert!(!owners.contains(&Feature::Audit));
-        // Everything else is untouched by this table.
-        assert_eq!(shared_agent_lookup_features("/api/agents/{pc_id}"), None);
-        assert_eq!(shared_agent_lookup_features("/api/audit"), None);
+        assert_eq!(
+            shared_owner_features("/api/jobs"),
+            Some(&[Feature::Jobs, Feature::Exec][..])
+        );
+
+        // A page that owns none of these is in none of them.
+        for path in [
+            "/api/agents",
+            "/api/agents/meta-keys",
+            "/api/agents/meta",
+            "/api/groups",
+            "/api/jobs",
+        ] {
+            let owners = shared_owner_features(path).expect("gated");
+            for feature in [
+                Feature::Audit,
+                Feature::Jetstream,
+                Feature::Settings,
+                Feature::Accounts,
+            ] {
+                assert!(!owners.contains(&feature), "{feature:?} in {path}");
+            }
+        }
+        // Everything else is untouched by this table — including a single-owner
+        // route whose one arm is in `feature_for_path`.
+        assert_eq!(shared_owner_features("/api/agents/{pc_id}"), None);
+        assert_eq!(shared_owner_features("/api/audit"), None);
+        assert_eq!(shared_owner_features("/api/schedules/coverage"), None);
     }
 
     #[test]
@@ -1027,5 +1202,580 @@ mod feature_map_tests {
         // `GET` and `PUT` on `/api/config` share a MatchedPath, so both are
         // gated under Config (the vertical role gate handles read-vs-write).
         assert_eq!(feature_for_path("/api/config"), Some(Feature::Config));
+    }
+}
+
+/// Guard for the invariant [`feature_for_path`] documents: every route a page
+/// fetches must be reachable by a restricted account holding ONLY that page's
+/// feature, because a **commons** route is closed to a restricted caller.
+///
+/// Cross-language on purpose. The two route tables are Rust and the call sites
+/// are `web/src/**/*.tsx`, and nothing else connects them: the SPA compiles and
+/// its pages look fine while Events, Schedules, Settings and Config each
+/// 403-toast for their own restricted accounts — one page at a time, by report.
+/// Reading the call sites is what turns that failure mode into a test failure.
+///
+/// Derived rather than listed:
+///   * which feature owns a file — `PAGE_FEATURES`, asserted to cover every
+///     `pages/*.tsx`, so a new page can't slip in unchecked;
+///   * which shared modules a page pulls in — the import graph, transitively,
+///     so embedding a fetcher in a new page is enough to have it checked;
+///   * which route pattern a fetch corresponds to — every `/api/...` literal in
+///     the two tables, parsed out of this very file and validated against
+///     `feature_for_path` / `shared_owner_features`.
+///
+/// Each fetch is asserted with the verb its call site passes
+/// (`{ method: 'POST' }`), because a multi-owner route widens reads only: the
+/// day a page writes through a shared route, this fails instead of the write
+/// slipping through on the read widening.
+///
+/// Listed explicitly, because it can't be inferred: the files whose URL is
+/// computed (`DYNAMIC_CALL_FILES`) and the pairs this guard accepts as denied
+/// (`KNOWN_UNREACHABLE`). Both are asserted against reality, so neither can
+/// quietly rot.
+#[cfg(test)]
+mod spa_route_tests {
+    use super::*;
+    use axum::http::Method;
+    use regex::Regex;
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
+    use std::path::{Path, PathBuf};
+
+    /// Every `pages/*.tsx`, and the feature that owns it. `None` marks a
+    /// commons/baseline page (Dashboard, Agents, the self-service ones): only
+    /// an unrestricted account reaches it — `ProtectedLayout.tsx` redirects a
+    /// restricted one off it — so its fetches are outside this invariant.
+    const PAGE_FEATURES: &[(&str, Option<Feature>)] = &[
+        ("Account.tsx", None),
+        ("Accounts.tsx", Some(Feature::Accounts)),
+        ("Activity.tsx", Some(Feature::Activity)),
+        ("AgentDetail.tsx", None),
+        ("AgentInstall.tsx", Some(Feature::AgentInstall)),
+        ("Agents.tsx", None),
+        ("Analytics.tsx", Some(Feature::Analytics)),
+        ("Apps.tsx", Some(Feature::Apps)),
+        ("Audit.tsx", Some(Feature::Audit)),
+        ("ChangePassword.tsx", None),
+        ("Collect.tsx", Some(Feature::Collect)),
+        ("Compliance.tsx", Some(Feature::Compliance)),
+        ("Config.tsx", Some(Feature::Config)),
+        ("Dashboard.tsx", None),
+        ("Events.tsx", Some(Feature::Events)),
+        ("Exec.tsx", Some(Feature::Exec)),
+        ("Groups.tsx", Some(Feature::Groups)),
+        ("Inventory.tsx", Some(Feature::Inventory)),
+        ("JetStream.tsx", Some(Feature::Jetstream)),
+        ("Jobs.tsx", Some(Feature::Jobs)),
+        ("Login.tsx", None),
+        ("Logs.tsx", Some(Feature::Logs)),
+        ("NotificationDetail.tsx", Some(Feature::Notifications)),
+        ("Notifications.tsx", Some(Feature::Notifications)),
+        ("PasswordSetup.tsx", None),
+        ("Placeholder.tsx", None),
+        ("RemoteScreen.tsx", Some(Feature::Remote)),
+        ("ResultDetail.tsx", Some(Feature::Activity)),
+        ("Rollout.tsx", Some(Feature::Rollout)),
+        ("Run.tsx", Some(Feature::Run)),
+        ("Schedules.tsx", Some(Feature::Schedules)),
+        ("Search.tsx", None),
+        ("Settings.tsx", Some(Feature::Settings)),
+        ("Views.tsx", Some(Feature::Views)),
+    ];
+
+    /// Call sites reaching a restrictable page whose `apiFetch*` URL is built
+    /// from a helper instead of a literal, as `(file with the call, page that
+    /// reaches it, the routes that construction can produce **for that page**)`.
+    ///
+    /// The routes are asserted exactly like a literal's, so a helper-built URL
+    /// is checked rather than a hole; and both the `(file, page)` set and the
+    /// routes are asserted, so a new dynamic call site — or a helper that grows
+    /// a route the tables don't cover — fails here until it is declared.
+    ///
+    /// Read routes only: a mutation through the same helper shares the
+    /// `MatchedPath`, and the one shared route with a mutation
+    /// (`/api/jobs`, `POST` = create) is asserted by
+    /// `auth::tests::a_shared_route_widens_reads_but_never_a_write`.
+    const DYNAMIC_CALL_SITES: &[(&str, &str, &[&str])] = &[
+        // Query params (os / signing key) chosen at render time.
+        (
+            "AgentInstall.tsx",
+            "AgentInstall.tsx",
+            &["/api/agents/installer"],
+        ),
+        // The store tab picks the endpoint the list comes from.
+        (
+            "Apps.tsx",
+            "Apps.tsx",
+            &["/api/app-packages", "/api/script-objects"],
+        ),
+        // `bundleUrl(key)` builds the download URL.
+        (
+            "Collect.tsx",
+            "Collect.tsx",
+            &["/api/collect/bundles/{*key}"],
+        ),
+        // `/api/{groups,pcs}/{name}/config` scope base, and `${base}/inherited`
+        // — the reads this guard could not otherwise see, and the reason the
+        // table exists.
+        (
+            "Config.tsx",
+            "Config.tsx",
+            &[
+                "/api/groups/{name}/config",
+                "/api/groups/{name}/config/inherited",
+                "/api/pcs/{pc_id}/config",
+                "/api/pcs/{pc_id}/config/inherited",
+            ],
+        ),
+        // The history feed's URL nests a template inside an interpolation
+        // (`${qs ? `?${qs}` : ''}`), which ends a literal scan at that inner
+        // backtick.
+        (
+            "Inventory.tsx",
+            "Inventory.tsx",
+            &["/api/inventory/{manifest_id}/history/pc/{pc_id}"],
+        ),
+        // Inventory's embedded `InventorySearch`, whose URL is the
+        // search-scalars / search-{field} base plus the live filter state.
+        (
+            "Search.tsx",
+            "Inventory.tsx",
+            &[
+                "/api/inventory/{manifest_id}/search-scalars",
+                "/api/inventory/{manifest_id}/search/{field}",
+            ],
+        ),
+        // `endpointBase(kind)` + `/{id}/yaml`, one kind per page.
+        ("YamlEditorDialog.tsx", "Jobs.tsx", &["/api/jobs/{id}/yaml"]),
+        (
+            "YamlEditorDialog.tsx",
+            "Schedules.tsx",
+            &["/api/schedules/{id}/yaml"],
+        ),
+        (
+            "YamlEditorDialog.tsx",
+            "Views.tsx",
+            &["/api/views/{id}/yaml"],
+        ),
+        (
+            "YamlEditorDialog.tsx",
+            "Groups.tsx",
+            &["/api/group-defs/{id}/yaml"],
+        ),
+    ];
+
+    /// (page file, collapsed route, why) pairs this guard accepts as **denied**.
+    /// Each must still be denied — fixing one fails the test rather than
+    /// leaving a stale exemption behind.
+    const KNOWN_UNREACHABLE: &[(&str, &str, &str)] = &[(
+        "Activity.tsx",
+        "/api/jobs/{}/kill",
+        "the Activity page's per-row stop posts the Jobs-owned kill route, so \
+         an activity-only operator is refused. Deliberate for now: killing is \
+         the Jobs page's capability, and widening it would hand that to every \
+         activity-only group. If the button should instead hide itself for an \
+         account without Jobs, that is the fix — not an entry in a table.",
+    )];
+
+    /// `components/ui/table.tsx`'s two `agent_meta` fetches fire only when the
+    /// page turned metadata columns on: `<Table metaColumns>` is what reaches
+    /// the hook's `enabled`. A page that never sets the prop never asks, and so
+    /// must not be an owner of those routes (see `shared_owner_features`).
+    const META_COLUMN_ROUTES: [&str; 2] = ["/api/agents/meta-keys", "/api/agents/meta"];
+
+    /// The SPA source root, or `None` when this crate was unpacked from
+    /// crates.io: `Cargo.toml` ships `web/dist` (rust-embed's input) and not
+    /// the sources, so this guard is a source-checkout lint, not a failure
+    /// there.
+    fn web_src() -> Option<PathBuf> {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("web/src");
+        dir.is_dir().then_some(dir)
+    }
+
+    /// Component tests (`*.ct.tsx`), unit tests (`*.test.ts`) and their
+    /// harnesses fetch mocked routes; they are not pages.
+    fn is_test_source(name: &str) -> bool {
+        name.contains(".ct.")
+            || name.contains(".test.")
+            || name.contains(".screenshot.")
+            || name.contains("harness")
+    }
+
+    /// A fetch URL as the route tables spell it: interpolations and `{param}`
+    /// segments collapse to `{}`, and any query string is dropped. So
+    /// `/api/schedules/${encodeURIComponent(id)}/coverage` equals
+    /// `/api/schedules/{id}/coverage`, and `/api/checks${cond ? '?x=1' : ''}`
+    /// equals `/api/checks`.
+    ///
+    /// `None` when what is left still isn't a path this guard can trust: a
+    /// template nested inside an interpolation (`${qs ? `?${qs}` : ''}`) ends
+    /// the literal at that inner backtick, and guessing the rest would be worse
+    /// than reporting the file as one whose URL is computed.
+    fn normalize(url: &str) -> Option<String> {
+        let interpolation = Regex::new(r"\$\{[^}]*\}").expect("regex");
+        let segment = Regex::new(r"\{[^}]*\}").expect("regex");
+        let collapsed = interpolation.replace_all(url, "{}");
+        let without_query = collapsed.split('?').next().unwrap_or_default();
+        let collapsed = segment.replace_all(without_query, "{}");
+        let trimmed = collapsed.trim_end_matches('/');
+        // A trailing interpolation that produced the query string rather than a
+        // path segment (`/api/checks{}`).
+        let resolved = match trimmed.strip_suffix("{}") {
+            Some(head) if !head.ends_with('/') => head.to_string(),
+            _ => trimmed.to_string(),
+        };
+        // `{}` is the only brace form a resolved path may still carry.
+        let leftover = resolved.replace("{}", "");
+        if leftover.contains('{') || leftover.contains('}') || leftover.contains('$') {
+            return None;
+        }
+        Some(resolved)
+    }
+
+    /// One `apiFetch*` call site. `url` is `None` when the argument isn't a
+    /// string literal — the caller can't resolve those. `method` matters
+    /// because a multi-owner route widens **reads** only.
+    struct Fetch {
+        url: Option<String>,
+        method: Method,
+    }
+
+    /// The wording after the URL literal up to the `)` that closes the call —
+    /// the options object sits in between, and stopping there is what keeps the
+    /// **next** statement's `method:` out of it (the SPA writes several calls in
+    /// a row, and a read followed by a write is exactly how a route gets misread
+    /// as a mutation).
+    fn options_after(url_tail: &str) -> &str {
+        let mut depth: i32 = 0;
+        let mut quote: Option<u8> = None;
+        for (i, byte) in url_tail.bytes().enumerate() {
+            match quote {
+                Some(open) if byte == open => quote = None,
+                Some(_) => {}
+                None => match byte {
+                    b'\'' | b'"' | b'`' => quote = Some(byte),
+                    b'(' | b'{' | b'[' => depth += 1,
+                    b')' if depth == 0 => return &url_tail[..i],
+                    b')' | b'}' | b']' => depth -= 1,
+                    _ => {}
+                },
+            }
+        }
+        url_tail
+    }
+
+    /// The verb an `apiFetch*` options object passes (`{ method: 'POST' }`).
+    /// Defaults to `GET`, which is what the SPA uses when it says nothing.
+    fn method_of(after_url: &str) -> Method {
+        let options = options_after(after_url);
+        for (verb, method) in [
+            ("POST", Method::POST),
+            ("PUT", Method::PUT),
+            ("PATCH", Method::PATCH),
+            ("DELETE", Method::DELETE),
+        ] {
+            if options.contains(&format!("method: '{verb}'"))
+                || options.contains(&format!("method: \"{verb}\""))
+            {
+                return method;
+            }
+        }
+        Method::GET
+    }
+
+    /// Every `apiFetch*` call in one file. A `function apiFetch(…)` *definition*
+    /// (they all live in `lib/api.ts`) is not a call site and is skipped, and so
+    /// is every other mention — an `import { apiFetch }`, a doc comment — which
+    /// is why the callee must be followed by its argument list and nothing else.
+    fn fetches(src: &str) -> Vec<Fetch> {
+        let helper = Regex::new(r"\bapiFetch(?:Paged|Text|Blob)?\b").expect("regex");
+        let mut out = Vec::new();
+        for found in helper.find_iter(src) {
+            let before = &src[found.start().saturating_sub(32)..found.start()];
+            if before.contains("function ") {
+                continue;
+            }
+            // Only a call: `(…)` or a turbofish then `(…)`, immediately.
+            let mut rest = &src[found.end()..];
+            rest = rest.trim_start();
+            if rest.starts_with('<') {
+                // Skip the turbofish, tracking nesting so a generic whose own
+                // argument list has one (`Record<string, { key: string }[]>`)
+                // doesn't end the skip at the inner `>`.
+                let mut depth = 0usize;
+                let mut end = None;
+                for (i, byte) in rest.bytes().enumerate() {
+                    match byte {
+                        b'<' => depth += 1,
+                        b'>' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                end = Some(i);
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let Some(close) = end else {
+                    continue;
+                };
+                rest = rest[close + 1..].trim_start();
+            }
+            if !rest.starts_with('(') {
+                continue;
+            }
+            let arg = rest[1..].trim_start();
+            let (url, after_url) = match arg.chars().next() {
+                Some(quote @ ('`' | '\'' | '"')) => match arg[1..].find(quote) {
+                    // Past the closing quote: `arg[2 + end..]` is what follows
+                    // the literal, and starting one byte early would leave the
+                    // quote itself to open a bogus string that swallows the
+                    // *next* statement's `method:`.
+                    Some(end) => (Some(arg[1..1 + end].to_string()), &arg[2 + end..]),
+                    None => (None, arg),
+                },
+                _ => (None, arg),
+            };
+            out.push(Fetch {
+                url,
+                method: method_of(after_url),
+            });
+        }
+        out
+    }
+
+    /// `normalized URL → the pattern the tables spell`, for every route in both
+    /// tables. Read out of this file's own source so the guard cannot drift
+    /// from the tables, and validated against the real lookups: where the same
+    /// normalized key has several spellings, the one `feature_for_path` /
+    /// `shared_owner_features` actually recognises wins.
+    fn route_patterns() -> HashMap<String, String> {
+        let src = include_str!("mod.rs");
+        let start = src.find("pub fn feature_for_path").expect("route table");
+        let end = start + src[start..].find("async fn health").expect("end of tables");
+        let literal = Regex::new(r#""(/api/[^"]*)""#).expect("regex");
+
+        let mut candidates: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for found in literal.captures_iter(&src[start..end]) {
+            let pattern = found[1].to_string();
+            let Some(key) = normalize(&pattern) else {
+                continue;
+            };
+            candidates.entry(key).or_default().push(pattern);
+        }
+        candidates
+            .into_iter()
+            .map(|(key, spellings)| {
+                let known = spellings
+                    .iter()
+                    .find(|p| feature_for_path(p).is_some() || shared_owner_features(p).is_some())
+                    .unwrap_or(&spellings[0])
+                    .clone();
+                (key, known)
+            })
+            .collect()
+    }
+
+    /// Resolve an SPA import specifier to a file: `@/x` is `web/src/x`, `./x`
+    /// is relative, anything else is an npm package.
+    fn resolve_import(from: &Path, spec: &str, web: &Path) -> Option<PathBuf> {
+        let base = if let Some(rest) = spec.strip_prefix("@/") {
+            web.join(rest)
+        } else if spec.starts_with('.') {
+            from.parent()?.join(spec)
+        } else {
+            return None;
+        };
+        [
+            base.with_extension("tsx"),
+            base.with_extension("ts"),
+            base.join("index.tsx"),
+            base.join("index.ts"),
+        ]
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+    }
+
+    /// A page plus every module it pulls in, transitively: the files whose
+    /// fetches run when that page renders.
+    fn closure(page: &Path, web: &Path) -> Vec<PathBuf> {
+        let imported = Regex::new(r#"from\s+['"]([^'"]+)['"]"#).expect("regex");
+        let mut seen = BTreeSet::new();
+        let mut pending = vec![page.to_path_buf()];
+        let mut out = Vec::new();
+        while let Some(file) = pending.pop() {
+            if !seen.insert(file.clone()) {
+                continue;
+            }
+            let Ok(src) = std::fs::read_to_string(&file) else {
+                continue;
+            };
+            for found in imported.captures_iter(&src) {
+                if let Some(dependency) = resolve_import(&file, &found[1], web) {
+                    if !seen.contains(&dependency) {
+                        pending.push(dependency);
+                    }
+                }
+            }
+            out.push(file);
+        }
+        out
+    }
+
+    #[test]
+    fn a_restricted_page_can_fetch_what_it_fetches() {
+        let Some(web) = web_src() else {
+            eprintln!("web/src absent (published crate) — SPA route guard skipped");
+            return;
+        };
+        let pages = web.join("pages");
+
+        // A page this guard doesn't know about would go unchecked, silently.
+        let mut declared: Vec<&str> = PAGE_FEATURES.iter().map(|(name, _)| *name).collect();
+        declared.sort_unstable();
+        let mut present: Vec<String> = std::fs::read_dir(&pages)
+            .expect("web/src/pages")
+            .flatten()
+            .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
+            .filter(|name| name.ends_with(".tsx") && !is_test_source(name))
+            .collect();
+        present.sort_unstable();
+        assert_eq!(
+            declared, present,
+            "PAGE_FEATURES has drifted from web/src/pages"
+        );
+
+        let patterns = route_patterns();
+        let mut dynamic: BTreeSet<(String, String)> = BTreeSet::new();
+        let mut violations: Vec<String> = Vec::new();
+        let mut exempted: BTreeSet<(String, String)> = BTreeSet::new();
+
+        for (page_name, feature) in PAGE_FEATURES.iter().copied() {
+            // A commons page is unreachable for a restricted account.
+            let Some(feature) = feature else {
+                continue;
+            };
+            let page = pages.join(page_name);
+            let files = closure(&page, &web);
+            // `<Table metaColumns>` is what reaches the hook's `enabled`, and it
+            // is set by whichever file in the closure renders the table — the
+            // page itself, or a view it embeds (`Search.tsx` inside Inventory).
+            // `table.tsx` owns the prop name and is not evidence of anyone
+            // setting it.
+            let wants_meta_columns = files.iter().any(|file| {
+                let name = file
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default();
+                name != "table.tsx"
+                    && std::fs::read_to_string(file)
+                        .map(|src| src.contains("metaColumns"))
+                        .unwrap_or(false)
+            });
+
+            for file in files {
+                let Some(file_name) = file.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                let file_name = file_name.to_string();
+                let Ok(src) = std::fs::read_to_string(&file) else {
+                    continue;
+                };
+                for fetch in fetches(&src) {
+                    let Some(url) = fetch
+                        .url
+                        .as_deref()
+                        .filter(|u| u.starts_with("/api/"))
+                        .and_then(normalize)
+                    else {
+                        dynamic.insert((page_name.to_string(), file_name.clone()));
+                        continue;
+                    };
+                    if file_name == "table.tsx"
+                        && META_COLUMN_ROUTES.contains(&url.as_str())
+                        && !wants_meta_columns
+                    {
+                        continue;
+                    }
+                    // The tables' own spelling, or the literal as written when
+                    // the route is genuinely commons (which is the bug).
+                    let pattern = patterns.get(&url).cloned().unwrap_or_else(|| url.clone());
+                    let denial = crate::auth::feature_denial(
+                        Some(&[feature]),
+                        &fetch.method,
+                        Some(&pattern),
+                    );
+                    let exempt = KNOWN_UNREACHABLE
+                        .iter()
+                        .find(|(exempt_page, exempt_url, _)| {
+                            *exempt_page == page_name && *exempt_url == url
+                        })
+                        .map(|(_, _, why)| *why);
+                    match (denial, exempt) {
+                        (Some(_), Some(_)) => {
+                            exempted.insert((page_name.to_string(), url));
+                        }
+                        (Some(message), None) => violations.push(format!(
+                            "{page_name} ({}) {file_name} fetches {} {url} -> {pattern}: {message}",
+                            feature.as_str(),
+                            fetch.method,
+                        )),
+                        (None, Some(why)) => violations.push(format!(
+                            "{page_name} can now reach {url} — drop it from KNOWN_UNREACHABLE \
+                             (it was listed because {why})"
+                        )),
+                        (None, None) => {}
+                    }
+                }
+            }
+        }
+
+        assert!(
+            violations.is_empty(),
+            "a route a restricted page fetches must be reachable for that page's feature \
+             (gate it in feature_for_path, list it in shared_owner_features, or exempt it \
+             in KNOWN_UNREACHABLE with a reason):\n  {}",
+            violations.join("\n  ")
+        );
+        for (page_name, url, _) in KNOWN_UNREACHABLE {
+            assert!(
+                exempted.contains(&(page_name.to_string(), url.to_string())),
+                "KNOWN_UNREACHABLE lists {page_name} / {url}, which is no longer denied — drop it"
+            );
+        }
+
+        // The computed URLs: every `(page, file)` pair whose fetch the scan
+        // can't read, and every route that construction can produce.
+        let declared: BTreeSet<(String, String)> = DYNAMIC_CALL_SITES
+            .iter()
+            .map(|(file, page, _)| ((*page).to_string(), (*file).to_string()))
+            .collect();
+        assert_eq!(
+            dynamic, declared,
+            "the set of call sites whose fetch URL is computed changed — make it a literal, or \
+             list it in DYNAMIC_CALL_SITES with the routes it can reach"
+        );
+        for (file, page_name, routes) in DYNAMIC_CALL_SITES {
+            let feature = PAGE_FEATURES
+                .iter()
+                .find(|(name, _)| name == page_name)
+                .and_then(|(_, feature)| *feature)
+                .unwrap_or_else(|| {
+                    panic!("DYNAMIC_CALL_SITES names {page_name}, which is not a restrictable page")
+                });
+            for route in *routes {
+                let pattern = normalize(route)
+                    .and_then(|key| patterns.get(&key).cloned())
+                    .unwrap_or_else(|| (*route).to_string());
+                assert!(
+                    crate::auth::feature_denial(Some(&[feature]), &Method::GET, Some(&pattern))
+                        .is_none(),
+                    "{page_name} ({}) reaches {route} through {file}, which its own feature must \
+                     open — gate it in feature_for_path, or widen reads in shared_owner_features",
+                    feature.as_str()
+                );
+            }
+        }
     }
 }
