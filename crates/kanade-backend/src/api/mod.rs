@@ -1370,11 +1370,13 @@ mod spa_route_tests {
     const KNOWN_UNREACHABLE: &[(&str, &str, &str)] = &[(
         "Activity.tsx",
         "/api/jobs/{}/kill",
-        "the Activity page's per-row stop posts the Jobs-owned kill route, so \
-         an activity-only operator is refused. Deliberate for now: killing is \
-         the Jobs page's capability, and widening it would hand that to every \
-         activity-only group. If the button should instead hide itself for an \
-         account without Jobs, that is the fix — not an entry in a table.",
+        "the Activity page's per-row stop posts the Jobs-owned kill route, and \
+         the vertical gate wants the operator role, so an `activity`-only \
+         account (or a viewer) is refused. Killing stays the Jobs page's \
+         capability instead of being widened to every activity-only group — and \
+         the page no longer offers what it can't do: `killIsOffered` hides the \
+         button unless the account clears both, which `Activity.test.ts` pins. \
+         The route stays denied; that is what this row records.",
     )];
 
     /// `components/ui/table.tsx`'s two `agent_meta` fetches fire only when the
