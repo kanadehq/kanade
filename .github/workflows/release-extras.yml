@@ -4,7 +4,7 @@
 # in a separate workflow file or they'd be clobbered on every kata
 # apply. The release.yml comment block documents this contract.
 #
-# One job runs on every `v*.*.*` tag push:
+# Two jobs run on every `v*.*.*` tag push:
 #
 # `publish-client-to-backend` — when `KANADE_BACKEND_URL` (+ optional
 # `KANADE_BACKEND_TOKEN`) are configured as repo secrets, builds
@@ -17,6 +17,15 @@
 # trying to POST somewhere they shouldn't. This job stays here because
 # release.yml has no client→operator-backend path; it is NOT redundant
 # with the kata-managed pipeline.
+#
+# `sbom` — generates one CycloneDX document per shipped binary and attaches
+# them to the GitHub Release (#1450). Lives here rather than in release.yml
+# for the reason that file's own header gives: it is kata-managed and names
+# "SBOM generation" as an example of what belongs in a sibling workflow.
+# THIRD-PARTY-NOTICES.md (#1449) answers "did we honour the licences" for a
+# human; this answers "what is inside this binary" for a tool, which is what
+# a consumer needs when an advisory lands. Per binary rather than per
+# workspace because the four do not contain the same code.
 #
 # History: this file also carried `upload-windows-bins` and
 # `publish-crates`, both workarounds for the windows-msvc multi-bin
@@ -41,6 +50,65 @@ permissions:
   contents: read
 
 jobs:
+  sbom:
+    name: SBOM
+    runs-on: ubuntu-latest
+    permissions:
+      # Job-scoped override of the workflow's `contents: read`: uploading
+      # release assets needs write. Nothing else in this workflow does, so the
+      # grant stays on the one job that needs it.
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Nothing here runs an authenticated git operation — the release
+          # upload uses GITHUB_TOKEN via the API, not git. Same reasoning as
+          # licenses.yml.
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        continue-on-error: true
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-cyclonedx
+      - uses: oven-sh/setup-bun@v2
+
+      # The npm half of each BOM comes from the same resolver that produces
+      # THIRD-PARTY-NOTICES.md, so both need the installed trees on disk.
+      # --ignore-scripts for the reason licenses.yml gives: this job reads
+      # dependency content rather than running it.
+      - name: Install SPA deps
+        working-directory: crates/kanade-backend/web
+        run: bun install --frozen-lockfile --ignore-scripts
+      - name: Install client WebView deps
+        working-directory: crates/kanade-client/web
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Generate SBOMs
+        run: node scripts/licenses/sbom.mjs --out sbom
+
+      # Fail loudly rather than attaching an empty or partial asset set. The
+      # count is checked against the binaries cargo actually reports, so a new
+      # workspace binary cannot ship without an SBOM just because nobody
+      # updated a hardcoded number here.
+      - name: Verify one SBOM per shipped binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected=$(cargo metadata --no-deps --format-version 1 \
+            | jq '[.packages[] | select(any(.targets[]; .kind | index("bin")))] | length')
+          actual=$(find sbom -name '*.cdx.json' | wc -l | tr -d ' ')
+          echo "binaries: $expected, SBOMs: $actual"
+          if [[ "$expected" != "$actual" ]]; then
+            echo "::error::expected $expected SBOMs (one per binary-producing workspace member) but found $actual"
+            exit 1
+          fi
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: sbom/*.cdx.json
+          fail_on_unmatched_files: true
+
   publish-client-to-backend:
     name: Publish kanade-client to operator backend
     runs-on: windows-latest
