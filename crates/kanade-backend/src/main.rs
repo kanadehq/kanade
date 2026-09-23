@@ -1370,17 +1370,15 @@ async fn run_backend_inner(
     match projector::spec_cache::prewarm(&explode_spec_cache, &jetstream).await {
         Ok(n) => info!(cached = n, "explode spec cache prewarm done"),
         Err(e) => warn!(
-            error = %e,
+            error = %format!("{e:#}"),
             "explode spec cache prewarm failed (watcher + miss-path fallback will recover)",
         ),
     }
     {
         let cache = explode_spec_cache.clone();
         let js = jetstream.clone();
-        resources.spawn(async move {
-            if let Err(e) = projector::spec_cache::run(cache, js).await {
-                error!(error = %e, "explode spec cache watcher exited");
-            }
+        spawn_retrying_projector(resources, "spec_cache", move || {
+            projector::spec_cache::run(cache.clone(), js.clone())
         });
     }
 
@@ -1394,10 +1392,8 @@ async fn run_backend_inner(
     {
         let pool = pool.clone();
         let js = jetstream.clone();
-        resources.spawn(async move {
-            if let Err(e) = projector::agent_meta::run(pool, js).await {
-                error!(error = %e, "agent_meta projector exited");
-            }
+        spawn_retrying_projector(resources, "agent_meta", move || {
+            projector::agent_meta::run(pool.clone(), js.clone())
         });
     }
 
@@ -1416,7 +1412,7 @@ async fn run_backend_inner(
         let nats_client = nats.clone();
         resources.spawn(async move {
             if let Err(e) = projector::nats_conns::run(pool, monitor_url, nats_client).await {
-                error!(error = %e, "nats connections projector exited");
+                error!(error = %format!("{e:#}"), "nats connections projector exited");
             }
         });
     }
@@ -1458,7 +1454,7 @@ async fn run_backend_inner(
         let s = app_state.clone();
         resources.spawn(async move {
             if let Err(e) = scheduler::run(s).await {
-                error!(error = %e, "scheduler exited");
+                error!(error = %format!("{e:#}"), "scheduler exited");
             }
         });
     }
