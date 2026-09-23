@@ -16,7 +16,7 @@
     "marked": "^18.0.10"
   },
   "devDependencies": {
-    "typescript": "^6.0.3",
+    "typescript": "^7.0.2",
     "vite": "^8.2.2"
   }
 }
