@@ -68,10 +68,11 @@ use kanade_shared::wire::{
     FrameKind, FrameMeta, RemoteCtrl, RemoteCtrlReply, TileEncoding, frame_kind,
 };
 use serde::Serialize;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 use super::AppState;
+use crate::audit::{self, Caller};
 use crate::auth::{Claims, Role, verify_bearer};
 
 /// The subprotocol the SPA must offer and the server echoes back. A
@@ -83,6 +84,11 @@ pub const SUBPROTOCOL: &str = "kanade.remote.v1";
 
 /// Prefix marking the credential entry in the offered subprotocol list.
 const BEARER_PREFIX: &str = "bearer.";
+
+/// Offered by the SPA only after the operator acknowledged that the session
+/// is audit-logged. Self-asserted: it keeps out stale clients and bare
+/// scripts that skipped the confirmation, not a hostile one.
+pub const CONSENT_PROTOCOL: &str = "consent.audit.v1";
 
 /// How long to wait for the agent to answer `Start`.
 ///
@@ -187,6 +193,14 @@ fn bearer_from_protocols(headers: &HeaderMap) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// True when the client offered `name` in its subprotocol list.
+fn protocol_offered(headers: &HeaderMap, name: &str) -> bool {
+    headers
+        .get(header::SEC_WEBSOCKET_PROTOCOL)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').map(str::trim).any(|p| p == name))
+}
+
 /// True when `claims` may reach a route owned by `feature`.
 ///
 /// Mirrors [`crate::auth::require_features`] for a handler that the layer
@@ -235,15 +249,98 @@ pub async fn ws(
             .into_response();
     }
 
-    let operator = claims.sub.clone();
+    // Checked after identity, so an anonymous caller learns nothing about it.
+    if !protocol_offered(&headers, CONSENT_PROTOCOL) {
+        warn!(pc_id, sub = %claims.sub, "remote ws: audit consent missing");
+        return (
+            StatusCode::PRECONDITION_REQUIRED,
+            "the operator must acknowledge that this session is audit-logged",
+        )
+            .into_response();
+    }
+
+    // A browser cannot set `X-Kanade-Source` on a WebSocket, and only the SPA
+    // opens this socket.
+    let caller = Caller {
+        sub: Some(claims.sub.clone()),
+        source: Some("spa".to_string()),
+    };
     upgrade
         // Echo the protocol, never the credential.
         .protocols([SUBPROTOCOL])
-        .on_upgrade(move |socket| relay(socket, state, pc_id, operator))
+        .on_upgrade(move |socket| relay(socket, state, pc_id, caller))
 }
 
-async fn relay(mut socket: WebSocket, state: AppState, pc_id: String, operator: String) {
+/// How a session ended, for the audit trail.
+#[derive(Clone, Copy)]
+enum Outcome {
+    /// Never streamed: the backend or the endpoint failed before accepting.
+    Failed,
+    /// The endpoint answered and said no.
+    Refused,
+    /// Streamed, then ended (viewer left or the stream stopped).
+    Closed,
+}
+
+impl Outcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            Outcome::Failed => "failed",
+            Outcome::Refused => "refused",
+            Outcome::Closed => "closed",
+        }
+    }
+}
+
+/// Wraps [`run_session`] so every way out is audited: one
+/// `remote_session_start` and exactly one `remote_session_end`, whichever
+/// path `run_session` takes. Recording is best effort (see [`audit::record`]);
+/// a NATS outage loses the record but does not stop the session.
+async fn relay(mut socket: WebSocket, state: AppState, pc_id: String, caller: Caller) {
     let session_id = format!("sess-{}", uuid::Uuid::new_v4());
+    let operator = caller.sub.clone().unwrap_or_default();
+    audit::record(
+        &state.nats,
+        "operator",
+        "remote_session_start",
+        Some(&pc_id),
+        Some(&caller),
+        serde_json::json!({
+            "pc_id": pc_id,
+            "session_id": session_id,
+            "consent_acknowledged": true,
+        }),
+    )
+    .await;
+
+    let began = Instant::now();
+    let (outcome, reason) = run_session(&mut socket, &state, &pc_id, &session_id, &operator).await;
+
+    audit::record(
+        &state.nats,
+        "operator",
+        "remote_session_end",
+        Some(&pc_id),
+        Some(&caller),
+        serde_json::json!({
+            "pc_id": pc_id,
+            "session_id": session_id,
+            "outcome": outcome.as_str(),
+            "reason": reason,
+            "duration_secs": began.elapsed().as_secs(),
+        }),
+    )
+    .await;
+}
+
+async fn run_session(
+    socket: &mut WebSocket,
+    state: &AppState,
+    pc_id: &str,
+    session_id: &str,
+    operator: &str,
+) -> (Outcome, Option<String>) {
+    let session_id = session_id.to_owned();
 
     // Subscribe BEFORE asking the agent to start. Core NATS has no replay:
     // anything published between the agent accepting and this subscription
@@ -258,8 +355,9 @@ async fn relay(mut socket: WebSocket, state: AppState, pc_id: String, operator: 
         Ok(s) => s,
         Err(e) => {
             warn!(pc_id, session_id, error = %e, "remote ws: frame subscribe failed");
-            end(&mut socket, format!("backend could not subscribe: {e}")).await;
-            return;
+            let reason = format!("backend could not subscribe: {e}");
+            end(socket, reason.clone()).await;
+            return (Outcome::Failed, Some(reason));
         }
     };
 
@@ -273,21 +371,21 @@ async fn relay(mut socket: WebSocket, state: AppState, pc_id: String, operator: 
         // reason about who is allowed to drive it.
         allow_input: false,
     };
-    let reply = match request_ctrl(&state, &pc_id, &start, START_TIMEOUT).await {
+    let reply = match request_ctrl(state, pc_id, &start, START_TIMEOUT).await {
         Ok(r) => r,
         Err(e) => {
             let live = e.may_have_started();
             let reason = e.into_reason();
             warn!(pc_id, session_id, reason, live, "remote ws: start failed");
-            end(&mut socket, reason).await;
+            end(socket, reason.clone()).await;
             // A failed `Start` does not mean an unstarted one. If the agent
             // may have acted on it — it answered too late, or answered
             // something we could not read — a capture child could be running
             // with nobody left to stop it.
             if live {
-                stop_session(&state, &pc_id, &session_id).await;
+                stop_session(state, pc_id, &session_id).await;
             }
-            return;
+            return (Outcome::Failed, Some(reason));
         }
     };
     if !reply.accepted {
@@ -297,8 +395,8 @@ async fn relay(mut socket: WebSocket, state: AppState, pc_id: String, operator: 
         info!(pc_id, session_id, operator, reason, "remote ws: refused");
         // No Stop: the agent never opened a session, and stopping a session
         // it does not hold is exactly the request #1149 made it refuse.
-        end(&mut socket, reason).await;
-        return;
+        end(socket, reason.clone()).await;
+        return (Outcome::Refused, Some(reason));
     }
 
     info!(pc_id, session_id, operator, "remote ws: streaming");
@@ -312,11 +410,12 @@ async fn relay(mut socket: WebSocket, state: AppState, pc_id: String, operator: 
         &[],
     );
     if socket.send(Message::Binary(opened.into())).await.is_ok() {
-        pump(&mut socket, frames).await;
+        pump(socket, frames).await;
     }
 
-    stop_session(&state, &pc_id, &session_id).await;
+    stop_session(state, pc_id, &session_id).await;
     info!(pc_id, session_id, operator, "remote ws: closed");
+    (Outcome::Closed, None)
 }
 
 /// Tear the session down on the endpoint.
@@ -655,6 +754,28 @@ mod tests {
             bearer_from_protocols(&protocols("bearer.tok,kanade.remote.v1")).as_deref(),
             Some("tok")
         );
+    }
+
+    #[test]
+    fn consent_marker_must_be_offered_explicitly() {
+        assert!(protocol_offered(
+            &protocols("kanade.remote.v1, bearer.tok, consent.audit.v1"),
+            CONSENT_PROTOCOL
+        ));
+        assert!(protocol_offered(
+            &protocols("consent.audit.v1,bearer.tok"),
+            CONSENT_PROTOCOL
+        ));
+        assert!(!protocol_offered(
+            &protocols("kanade.remote.v1, bearer.tok"),
+            CONSENT_PROTOCOL
+        ));
+        // A substring or a credential that merely contains it is not consent.
+        assert!(!protocol_offered(
+            &protocols("bearer.consent.audit.v1"),
+            CONSENT_PROTOCOL
+        ));
+        assert!(!protocol_offered(&HeaderMap::new(), CONSENT_PROTOCOL));
     }
 
     #[test]

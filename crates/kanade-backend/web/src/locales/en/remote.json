@@ -17,6 +17,11 @@
     "unavailable": "The screen cannot be captured (locked, a UAC prompt, or a display change)",
     "ended": "The stream ended"
   },
+  "consent": {
+    "title": "Connect to {{pc}}?",
+    "description": "This connection is recorded in the audit log together with your account and the target PC ({{pc}}).",
+    "confirm": "Agree and connect"
+  },
   "errors": {
     "badProtocol": "The server negotiated an unexpected subprotocol ({{got}})",
     "socket": "Could not connect. Check your permissions and the agent's state",

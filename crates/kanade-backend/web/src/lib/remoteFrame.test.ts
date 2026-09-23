@@ -4,6 +4,7 @@ import {
   FrameDecodeError,
   remoteSocketUrl,
   subprotocols,
+  CONSENT_PROTOCOL,
   SUBPROTOCOL,
   type FrameMeta,
   type TileMeta,
@@ -111,8 +112,12 @@ describe('decodeFrame', () => {
 });
 
 describe('handshake', () => {
-  it('offers the protocol first and the credential second', () => {
-    expect(subprotocols('jwt.abc.def')).toEqual([SUBPROTOCOL, 'bearer.jwt.abc.def']);
+  it('offers the protocol first, the credential second, the audit consent third', () => {
+    expect(subprotocols('jwt.abc.def')).toEqual([
+      SUBPROTOCOL,
+      'bearer.jwt.abc.def',
+      CONSENT_PROTOCOL,
+    ]);
   });
 
   it('builds a same-origin socket url, upgrading scheme with the page', () => {

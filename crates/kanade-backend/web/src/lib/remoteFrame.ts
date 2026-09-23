@@ -123,8 +123,15 @@ export function decodeFrame(buf: ArrayBuffer): RemoteFrame {
  */
 export const SUBPROTOCOL = 'kanade.remote.v1';
 
+/**
+ * Marker offered by a client whose operator acknowledged the audit notice.
+ * The backend refuses the upgrade without it. Self-asserted, so it stops
+ * stale clients and bare curl, not a hostile one.
+ */
+export const CONSENT_PROTOCOL = 'consent.audit.v1';
+
 export function subprotocols(token: string): string[] {
-  return [SUBPROTOCOL, `bearer.${token}`];
+  return [SUBPROTOCOL, `bearer.${token}`, CONSENT_PROTOCOL];
 }
 
 /** `ws(s)://…/api/remote/<pc_id>/ws`, matching the page's own origin so the

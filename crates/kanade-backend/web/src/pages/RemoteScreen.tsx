@@ -6,6 +6,7 @@ import { Link, useParams } from 'react-router-dom';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
+import { useConfirm } from '@/components/ui/confirm-dialog';
 import { useAuth } from '@/lib/auth';
 import {
   decodeFrame,
@@ -30,6 +31,7 @@ export function RemoteScreen() {
   const { pcId = '' } = useParams();
   const { hasRole } = useAuth();
   const canView = hasRole('operator');
+  const confirm = useConfirm();
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const socketRef = useRef<WebSocket | null>(null);
@@ -162,6 +164,17 @@ export function RemoteScreen() {
   // encoding its screen for nobody.
   useEffect(() => () => disconnect(), [disconnect]);
 
+  // The backend refuses a socket that did not go through this notice, so the
+  // dialog is the only way to start a session.
+  const requestConnect = async () => {
+    const ok = await confirm({
+      title: t('consent.title', { pc: pcId }),
+      description: t('consent.description', { pc: pcId }),
+      confirmLabel: t('consent.confirm'),
+    });
+    if (ok) connect();
+  };
+
   if (!canView) {
     return (
       <Card>
@@ -197,7 +210,7 @@ export function RemoteScreen() {
               {t('stop')}
             </Button>
           ) : (
-            <Button size="sm" onClick={connect}>
+            <Button size="sm" onClick={requestConnect}>
               <Play className="size-4" />
               {t('start')}
             </Button>
