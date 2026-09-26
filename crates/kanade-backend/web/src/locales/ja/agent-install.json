@@ -40,15 +40,11 @@
     "title": "インストーラのダウンロード",
     "description": "ZIP には <code>kanade-agent.exe</code>、設定済みの <code>agent.toml</code>、インストールスクリプト (<code>install.cmd</code> / <code>install-agent.ps1</code>) が含まれます。 常に最新のエージェントリリースが使われます。",
     "descriptionLinux": "tarball には <code>kanade-agent</code> バイナリ、 設定済みの <code>agent.toml</code>、 <code>install.sh</code> が含まれます。 常に最新のエージェントリリースが使われます。",
-    "descriptionMacos": "tarball には <code>kanade-agent</code> バイナリ、 設定済みの <code>agent.toml</code>、 launchd の plist、 <code>install.sh</code> が含まれます。 常に最新のエージェントリリースが使われます。",
+    "descriptionMacos": "Apple Silicon の Mac 向けです。 tarball には <code>kanade-agent</code> バイナリ、 設定済みの <code>agent.toml</code>、 launchd の plist、 <code>install.sh</code> が含まれます。 常に最新のエージェントリリースが使われます。",
     "archLabel": "アーキテクチャ",
     "archOptions": {
       "x86_64": "x86_64 (64 ビット Intel/AMD)",
       "aarch64": "aarch64 (ARM64)"
-    },
-    "archOptionsMacos": {
-      "x86_64": "x86_64 (Intel Mac)",
-      "aarch64": "aarch64 (Apple Silicon)"
     },
     "downloadButton": "インストーラをダウンロード"
   },
@@ -61,7 +57,7 @@
     "hint": {
       "windows": "開始に管理者権限は不要です。 インストールの段階で UAC の確認が表示されます。",
       "linux": "sudo 経由で実行します。 スクリプトがホストのアーキテクチャを判別し、 systemd サービスをインストールします。",
-      "macos": "sudo 経由で実行します。 スクリプトが Mac のアーキテクチャを判別し、 launchd デーモンをインストールします。"
+      "macos": "sudo 経由で実行します。 スクリプトが Apple Silicon の Mac であることを確認し、 launchd デーモンをインストールします。"
     },
     "tokenWarning": "このコマンドにはセッショントークンが埋め込まれています。 セッションの有効期限とともに失効するため早めに実行してください。 また、 有効な間はこのコマンドを持つ人なら誰でもインストーラをダウンロードできます。 パスワードと同様に取り扱ってください。",
     "copyTitle": "コマンドをクリップボードにコピー",

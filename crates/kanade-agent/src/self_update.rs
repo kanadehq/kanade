@@ -566,18 +566,20 @@ async fn sleep_jitter(max: Duration) {
 /// `target_version`. Mirrors the publish-side key scheme
 /// (`kanade_shared::bin_platform`): Windows releases sit at the bare
 /// `<version>` key (what every pre-Linux agent in the field fetches), Linux
-/// releases at `<version>-linux-<arch>` and macOS releases at
-/// `<version>-macos-<arch>` for the running binary's own architecture.
+/// releases at `<version>-linux-<arch>` for the running binary's own
+/// architecture, and macOS releases at `<version>-macos-aarch64` (Apple
+/// Silicon only — Intel Macs are unsupported).
 /// Pure + cfg-gated so each OS's branch is unit-testable on its own host.
 ///
-/// An arch we don't ship (Linux riscv64, say, or any OS other than
-/// Windows/Linux/macOS) falls back to the bare key — the get then 404s and
-/// the agent keeps running its current binary, which is the safe failure
-/// for an unsupported platform.
-fn release_key_for_this_agent(target: &str) -> String {
+/// An arch we don't ship (Linux riscv64, macOS x86_64, say) yields `None`
+/// and the caller skips the update. It must NOT fall back to the bare key:
+/// that holds the Windows PE whenever a Windows release exists, and the
+/// sha256 check would pass against the store's own digest, replacing this
+/// agent's binary with a foreign executable.
+fn release_key_for_this_agent(target: &str) -> Option<String> {
     #[cfg(target_os = "windows")]
     {
-        target.to_string()
+        Some(target.to_string())
     }
     #[cfg(target_os = "linux")]
     {
@@ -589,31 +591,27 @@ fn release_key_for_this_agent(target: &str) -> String {
         } else {
             warn!(
                 arch = std::env::consts::ARCH,
-                "self-update: unsupported linux arch — trying the bare (Windows) key, which will 404"
+                "self-update: unsupported linux arch — skipping self-update"
             );
-            return target.to_string();
+            return None;
         };
-        format!("{target}{suffix}")
+        Some(format!("{target}{suffix}"))
     }
     #[cfg(target_os = "macos")]
     {
-        use kanade_shared::bin_platform::{MACOS_SUFFIX_AARCH64, MACOS_SUFFIX_X86_64};
-        let suffix = if cfg!(target_arch = "x86_64") {
-            MACOS_SUFFIX_X86_64
-        } else if cfg!(target_arch = "aarch64") {
-            MACOS_SUFFIX_AARCH64
-        } else {
+        use kanade_shared::bin_platform::MACOS_SUFFIX_AARCH64;
+        if !cfg!(target_arch = "aarch64") {
             warn!(
                 arch = std::env::consts::ARCH,
-                "self-update: unsupported macos arch — trying the bare (Windows) key, which will 404"
+                "self-update: unsupported macos arch (Apple Silicon only) — skipping self-update"
             );
-            return target.to_string();
-        };
-        format!("{target}{suffix}")
+            return None;
+        }
+        Some(format!("{target}{MACOS_SUFFIX_AARCH64}"))
     }
     #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
     {
-        target.to_string()
+        Some(target.to_string())
     }
 }
 
@@ -631,7 +629,9 @@ async fn maybe_download(
         running, "target_version drift — downloading new binary"
     );
 
-    let key = release_key_for_this_agent(target);
+    let Some(key) = release_key_for_this_agent(target) else {
+        return Ok(());
+    };
     let mut object = store
         .get(&key)
         .await
@@ -925,7 +925,14 @@ mod tests {
 
     #[test]
     fn release_key_matches_this_agents_platform() {
-        let key = release_key_for_this_agent("0.45.4");
+        // Unsupported arch (e.g. Intel Mac) → None: skip, never the bare key.
+        #[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
+        {
+            assert_eq!(release_key_for_this_agent("0.45.4"), None);
+            return;
+        }
+        #[allow(unreachable_code)]
+        let key = release_key_for_this_agent("0.45.4").unwrap();
         // Windows agents fetch the bare key — the whole backward-compat
         // contract with the pre-Linux fleet.
         #[cfg(target_os = "windows")]
@@ -935,8 +942,6 @@ mod tests {
         assert_eq!(key, "0.45.4-linux-x86_64");
         #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
         assert_eq!(key, "0.45.4-linux-aarch64");
-        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-        assert_eq!(key, "0.45.4-macos-x86_64");
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         assert_eq!(key, "0.45.4-macos-aarch64");
         // Shape invariants on every platform: non-empty, contains the
@@ -951,7 +956,7 @@ mod tests {
             );
         }
         // Semver prerelease dashes pass through untouched.
-        let rc = release_key_for_this_agent("0.46.0-rc.1");
+        let rc = release_key_for_this_agent("0.46.0-rc.1").unwrap();
         assert!(rc.starts_with("0.46.0-rc.1"));
     }
 

@@ -40,15 +40,11 @@
     "title": "Download installer",
     "description": "The ZIP contains <code>kanade-agent.exe</code>, a pre-filled <code>agent.toml</code>, and the install scripts (<code>install.cmd</code> / <code>install-agent.ps1</code>). Always the latest agent release.",
     "descriptionLinux": "The tarball contains the <code>kanade-agent</code> binary, a pre-filled <code>agent.toml</code>, and <code>install.sh</code>. Always the latest agent release.",
-    "descriptionMacos": "The tarball contains the <code>kanade-agent</code> binary, a pre-filled <code>agent.toml</code>, the launchd plist, and <code>install.sh</code>. Always the latest agent release.",
+    "descriptionMacos": "For Apple Silicon Macs. The tarball contains the <code>kanade-agent</code> binary, a pre-filled <code>agent.toml</code>, the launchd plist, and <code>install.sh</code>. Always the latest agent release.",
     "archLabel": "Architecture",
     "archOptions": {
       "x86_64": "x86_64 (64-bit Intel/AMD)",
       "aarch64": "aarch64 (ARM64)"
-    },
-    "archOptionsMacos": {
-      "x86_64": "x86_64 (Intel Mac)",
-      "aarch64": "aarch64 (Apple Silicon)"
     },
     "downloadButton": "Download installer"
   },
@@ -61,7 +57,7 @@
     "hint": {
       "windows": "No admin rights needed to start it — UAC prompts only for the install step.",
       "linux": "Runs under sudo — the script detects the host architecture and installs the systemd service.",
-      "macos": "Runs under sudo — the script detects the Mac's architecture and installs the launchd daemon."
+      "macos": "Runs under sudo — the script checks the Mac is Apple Silicon and installs the launchd daemon."
     },
     "tokenWarning": "The command embeds your session token: it expires with your session, so run it soon — and anyone holding it can download the installer while it's valid. Treat it like a password.",
     "copyTitle": "Copy command to clipboard",

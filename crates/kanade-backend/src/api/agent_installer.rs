@@ -4,7 +4,8 @@
 //! generated one-liner scripts that download + extract + run that archive
 //! in a single pasted command (each embeds the caller's own Bearer token
 //! so the inner download is authenticated). `installer.sh` serves both
-//! Linux and macOS, picking the archive by `uname -s` / `uname -m`.
+//! Linux and macOS, picking the archive by `uname -s` (plus `uname -m` on
+//! Linux; macOS is Apple Silicon only, probed via `sysctl`).
 //!
 //! Self-service: the route sits in the viewer+ base router, gated by the
 //! `agent-install` page feature, so a restricted "download user" account
@@ -12,10 +13,12 @@
 //! bootstrap as admin/root, done. There is no request body and no version
 //! parameter — the caller picks only the platform
 //! (`?os=windows|linux|macos`, default `windows`; `?arch=x86_64|aarch64`,
-//! default `x86_64`). The archive always bundles the latest release FOR
+//! default `x86_64`, except macOS where the only — and default — arch is
+//! `aarch64`: Intel Macs are unsupported and `?os=macos&arch=x86_64` is a
+//! 400). The archive always bundles the latest release FOR
 //! THAT PLATFORM (by Object Store `modified`, over the platform's keys —
 //! bare keys for Windows, `<version>-linux-<arch>` for Linux,
-//! `<version>-macos-<arch>` for macOS; see kanade_shared::bin_platform),
+//! `<version>-macos-aarch64` for macOS; see kanade_shared::bin_platform),
 //! and the NATS url/token it bakes in come from the `agent_install`
 //! section of the server-settings document (falling back to this
 //! backend's own `[nats] url`, no token).
@@ -58,8 +61,8 @@
 //!
 //! macOS tar.gz contents (same shape, launchd instead of systemd):
 //!
-//!   * `bin/kanade-agent` (0755) — the latest `<version>-macos-<arch>`
-//!     release (a thin per-arch Mach-O).
+//!   * `bin/kanade-agent` (0755) — the latest `<version>-macos-aarch64`
+//!     release (a thin Apple Silicon Mach-O).
 //!   * `etc/agent.toml` — same rewritten config as the Windows ZIP.
 //!   * `launchd/com.kanade.agent.plist` — the repo LaunchDaemon, verbatim.
 //!   * `setup-agent-macos.sh` (0755) — the canonical macOS installer
@@ -76,8 +79,7 @@ use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use kanade_shared::bin_platform::{
-    LINUX_SUFFIX_AARCH64, LINUX_SUFFIX_X86_64, MACOS_SUFFIX_AARCH64, MACOS_SUFFIX_X86_64,
-    platform_of_key,
+    LINUX_SUFFIX_AARCH64, LINUX_SUFFIX_X86_64, MACOS_SUFFIX_AARCH64, platform_of_key,
 };
 use kanade_shared::kv::OBJECT_AGENT_RELEASES;
 use kanade_shared::wire::ServerSettings;
@@ -156,7 +158,8 @@ impl InstallerOs {
     }
 }
 
-/// Which CPU architecture a Linux/macOS installer targets. Default x86_64.
+/// Which CPU architecture a Linux/macOS installer targets. Default x86_64
+/// (aarch64 on macOS, its only supported arch).
 /// (Windows releases sit at the bare `<version>` key regardless of arch —
 /// the key scheme's backward-compat decision — so this only filters Linux
 /// and macOS.)
@@ -183,14 +186,6 @@ impl InstallerArch {
             InstallerArch::Aarch64 => LINUX_SUFFIX_AARCH64,
         }
     }
-
-    /// The Object Store key suffix for this arch's macOS releases.
-    fn macos_suffix(&self) -> &'static str {
-        match self {
-            InstallerArch::X86_64 => MACOS_SUFFIX_X86_64,
-            InstallerArch::Aarch64 => MACOS_SUFFIX_AARCH64,
-        }
-    }
 }
 
 /// `?os=windows|linux|macos&arch=x86_64|aarch64` — both optional, unknown
@@ -200,7 +195,26 @@ pub struct InstallerParams {
     #[serde(default)]
     os: InstallerOs,
     #[serde(default)]
-    arch: InstallerArch,
+    arch: Option<InstallerArch>,
+}
+
+impl InstallerParams {
+    /// The effective arch for this request: the explicit `?arch=`, else
+    /// the OS default (x86_64; aarch64 on macOS). Intel Macs are
+    /// unsupported — `?os=macos&arch=x86_64` is a 400, decided here before
+    /// any store lookup.
+    fn resolve_arch(&self) -> Result<InstallerArch, (StatusCode, String)> {
+        match (self.os, self.arch) {
+            (InstallerOs::Macos, Some(InstallerArch::X86_64)) => Err((
+                StatusCode::BAD_REQUEST,
+                "Intel (x86_64) Macs are not supported — kanade supports Apple Silicon (arm64) \
+                 Macs only; use arch=aarch64"
+                    .to_string(),
+            )),
+            (InstallerOs::Macos, None) => Ok(InstallerArch::Aarch64),
+            (_, arch) => Ok(arch.unwrap_or_default()),
+        }
+    }
 }
 
 pub async fn installer(
@@ -208,6 +222,7 @@ pub async fn installer(
     caller: Caller,
     Query(params): Query<InstallerParams>,
 ) -> Result<Response, (StatusCode, String)> {
+    let arch = params.resolve_arch()?;
     let store = state
         .jetstream
         .get_object_store(OBJECT_AGENT_RELEASES)
@@ -234,13 +249,13 @@ pub async fn installer(
             })?;
         let rows: Vec<(String, Option<String>)> =
             metas.into_iter().map(|m| (m.key, m.modified)).collect();
-        match latest_key_for_platform(&rows, params.os, params.arch) {
+        match latest_key_for_platform(&rows, params.os, arch) {
             Some(k) => k,
             None => {
                 let label = match params.os {
                     InstallerOs::Windows => "windows".to_string(),
-                    InstallerOs::Linux => format!("linux-{}", params.arch.as_str()),
-                    InstallerOs::Macos => format!("macos-{}", params.arch.as_str()),
+                    InstallerOs::Linux => format!("linux-{}", arch.as_str()),
+                    InstallerOs::Macos => format!("macos-{}", arch.as_str()),
                 };
                 return Err((
                     StatusCode::NOT_FOUND,
@@ -341,7 +356,6 @@ pub async fn installer(
         }
         InstallerOs::Linux | InstallerOs::Macos => {
             let entries = unix_tar_entries(params.os, &key, exe, agent_toml, nats_token.as_deref());
-            let arch = params.arch;
             let tgz_bytes = tokio::task::spawn_blocking(move || build_tar_gz(entries))
                 .await
                 .map_err(|e| {
@@ -377,7 +391,7 @@ pub async fn installer(
         serde_json::json!({
             "version": key,
             "os": params.os.as_str(),
-            "arch": params.arch.as_str(),
+            "arch": arch.as_str(),
             "nats_url": nats_url,
             "token_embedded": nats_token.is_some(),
             "command_keys_embedded": command_keys_embedded,
@@ -421,8 +435,9 @@ pub async fn installer_ps1(
 }
 
 /// `GET /api/agents/installer.sh` — a generated POSIX sh one-liner
-/// installer for Linux AND macOS: map `uname -s` to a release OS and
-/// `uname -m` to a release arch, download that tar.gz (authenticated as
+/// installer for Linux AND macOS: map `uname -s` to a release OS and the
+/// CPU to a release arch (`uname -m` on Linux; `sysctl hw.optional.arm64`
+/// on macOS, Apple Silicon only), download that tar.gz (authenticated as
 /// the caller), extract, run `install.sh`. Meant to be piped through sudo
 /// (`curl … | sudo bash`).
 pub async fn installer_sh(
@@ -531,10 +546,13 @@ fn render_installer_ps1(base: &str, token: &str) -> String {
 /// The generated `installer.sh` one-liner (LF line endings). `base` and
 /// `token` are embedded as POSIX single-quoted literals ([`sh_quote`]).
 /// One script for both unix platforms: `uname -s` picks the archive
-/// (Linux → `os=linux`, Darwin → `os=macos`), `uname -m` the arch (macOS
-/// reports Apple Silicon as `arm64`, Linux as `aarch64` — both map to the
-/// `aarch64` release). Everything it runs exists on a stock macOS too
-/// (`mktemp -d`, bsdtar's `tar xzf`, curl).
+/// (Linux → `os=linux`, Darwin → `os=macos`). On Linux `uname -m` picks
+/// the arch. On macOS only Apple Silicon is supported, and `uname -m` is
+/// NOT trusted there — a Rosetta-translated shell reports `x86_64` on an
+/// Apple Silicon Mac — so the script asks `sysctl -n hw.optional.arm64`
+/// (`1` on Apple Silicon even under Rosetta, absent/`0` on Intel) and
+/// refuses Intel Macs outright. Everything it runs exists on a stock
+/// macOS too (`mktemp -d`, `sysctl`, bsdtar's `tar xzf`, curl).
 fn render_installer_sh(base: &str, token: &str) -> String {
     let url_os = sh_quote(&format!("{base}/api/agents/installer?os="));
     let url_arch = sh_quote("&arch=");
@@ -556,14 +574,28 @@ fn render_installer_sh(base: &str, token: &str) -> String {
     s.push_str("# The embedded token expires with the issuer's session.\n");
     s.push_str("set -eu\n");
     s.push_str("case \"$(uname -s)\" in\n");
-    s.push_str("    Linux) OS=linux ;;\n");
-    s.push_str("    Darwin) OS=macos ;;\n");
+    s.push_str("    Linux)\n");
+    s.push_str("        OS=linux\n");
+    s.push_str("        case \"$(uname -m)\" in\n");
+    s.push_str("            x86_64) ARCH=x86_64 ;;\n");
+    s.push_str("            aarch64|arm64) ARCH=aarch64 ;;\n");
+    s.push_str("            *) echo \"unsupported architecture: $(uname -m)\" >&2; exit 1 ;;\n");
+    s.push_str("        esac\n");
+    s.push_str("        ;;\n");
+    s.push_str("    Darwin)\n");
+    s.push_str("        OS=macos\n");
+    // `uname -m` lies under Rosetta (x86_64 on Apple Silicon); the sysctl
+    // reports the hardware.
+    s.push_str(
+        "        if [ \"$(sysctl -n hw.optional.arm64 2>/dev/null || true)\" = \"1\" ]; then\n",
+    );
+    s.push_str("            ARCH=aarch64\n");
+    s.push_str("        else\n");
+    s.push_str("            echo \"Intel Macs are not supported — kanade supports Apple Silicon Macs only\" >&2\n");
+    s.push_str("            exit 1\n");
+    s.push_str("        fi\n");
+    s.push_str("        ;;\n");
     s.push_str("    *) echo \"unsupported OS: $(uname -s)\" >&2; exit 1 ;;\n");
-    s.push_str("esac\n");
-    s.push_str("case \"$(uname -m)\" in\n");
-    s.push_str("    x86_64) ARCH=x86_64 ;;\n");
-    s.push_str("    aarch64|arm64) ARCH=aarch64 ;;\n");
-    s.push_str("    *) echo \"unsupported architecture: $(uname -m)\" >&2; exit 1 ;;\n");
     s.push_str("esac\n");
     s.push_str("TMP=\"$(mktemp -d)\"\n");
     s.push_str("trap 'rm -rf \"$TMP\"' EXIT\n");
@@ -598,12 +630,13 @@ fn latest_key_for_platform(
 
 /// Whether a store key belongs to the requested platform, by SUFFIX only
 /// (semver prerelease dashes mid-version are never parsed — see
-/// kanade_shared::bin_platform).
+/// kanade_shared::bin_platform). macOS keys exist for aarch64 only, so
+/// macOS + x86_64 matches nothing (the handler rejects it earlier anyway).
 fn key_matches_platform(key: &str, os: InstallerOs, arch: InstallerArch) -> bool {
     match os {
         InstallerOs::Windows => platform_of_key(key) == "windows",
         InstallerOs::Linux => key.ends_with(arch.linux_suffix()),
-        InstallerOs::Macos => key.ends_with(arch.macos_suffix()),
+        InstallerOs::Macos => arch == InstallerArch::Aarch64 && key.ends_with(MACOS_SUFFIX_AARCH64),
     }
 }
 
@@ -1202,17 +1235,36 @@ mod tests {
         assert!(out.contains("curl -fsSL -K - -o \"$TMP/installer.tar.gz\""));
         assert!(out.contains("header = \"Authorization: Bearer tok-123\""));
         assert!(out.contains("<<'KANADE_CURL_CONFIG'"));
-        // os and arch both come from uname, outside the quoted literals.
+        // os and arch are shell vars, outside the quoted literals.
         assert!(out.contains(
             "'https://kanade.example.com/api/agents/installer?os='\"$OS\"'&arch='\"$ARCH\""
         ));
         assert!(out.contains("case \"$(uname -s)\" in"));
-        assert!(out.contains("Linux) OS=linux ;;"));
-        assert!(out.contains("Darwin) OS=macos ;;"));
         assert!(out.contains("unsupported OS"));
+        // Linux: arch from `uname -m`.
+        assert!(out.contains("OS=linux\n"));
+        assert!(out.contains("case \"$(uname -m)\" in"));
         assert!(out.contains("x86_64) ARCH=x86_64 ;;"));
         assert!(out.contains("aarch64|arm64) ARCH=aarch64 ;;"));
         assert!(out.contains("unsupported architecture"));
+        // macOS: Apple Silicon only, detected via sysctl (uname -m lies
+        // under Rosetta), Intel refused with a clear error.
+        let darwin = &out[out.find("    Darwin)\n").expect("Darwin branch")..];
+        let darwin = &darwin[..darwin.find(";;").unwrap()];
+        assert!(darwin.contains("OS=macos\n"), "{darwin}");
+        assert!(
+            darwin.contains("\"$(sysctl -n hw.optional.arm64 2>/dev/null || true)\" = \"1\""),
+            "{darwin}"
+        );
+        assert!(darwin.contains("ARCH=aarch64\n"), "{darwin}");
+        assert!(!darwin.contains("uname -m"), "{darwin}");
+        assert!(!darwin.contains("ARCH=x86_64"), "{darwin}");
+        assert!(
+            darwin.contains(
+                "echo \"Intel Macs are not supported — kanade supports Apple Silicon Macs only\" >&2\n            exit 1\n"
+            ),
+            "{darwin}"
+        );
         assert!(out.contains("tar xzf \"$TMP/installer.tar.gz\" -C \"$TMP\""));
         assert!(out.contains("sh \"$TMP/install.sh\""));
         assert!(out.contains("sudo bash"));
@@ -1506,7 +1558,7 @@ mod tests {
     fn params_default_to_windows_x86_64_and_reject_unknowns() {
         let p: InstallerParams = serde_urlencoded_defaults();
         assert_eq!(p.os, InstallerOs::Windows);
-        assert_eq!(p.arch, InstallerArch::X86_64);
+        assert_eq!(p.resolve_arch().unwrap(), InstallerArch::X86_64);
         // Unknown values are a deserialize error — axum's Query extractor
         // turns that into a 400 before the handler runs.
         assert!(serde_json::from_str::<InstallerOs>(r#""freebsd""#).is_err());
@@ -1527,6 +1579,53 @@ mod tests {
 
     fn serde_urlencoded_defaults() -> InstallerParams {
         InstallerParams::default()
+    }
+
+    fn params_from(query: &str) -> InstallerParams {
+        let uri: axum::http::Uri = format!("/api/agents/installer?{query}").parse().unwrap();
+        Query::<InstallerParams>::try_from_uri(&uri).unwrap().0
+    }
+
+    #[test]
+    fn macos_is_apple_silicon_only() {
+        // Intel Macs are unsupported: an explicit x86_64 macOS request is a
+        // 400 with a clear message (decided before any store lookup).
+        let (code, msg) = params_from("os=macos&arch=x86_64")
+            .resolve_arch()
+            .unwrap_err();
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert!(
+            msg.contains("Intel (x86_64) Macs are not supported"),
+            "{msg}"
+        );
+        assert!(msg.contains("Apple Silicon"), "{msg}");
+        // aarch64 is macOS's only — and default — arch.
+        for q in ["os=macos&arch=aarch64", "os=macos"] {
+            assert_eq!(
+                params_from(q).resolve_arch().unwrap(),
+                InstallerArch::Aarch64,
+                "{q}"
+            );
+        }
+        // Linux keeps both arches, defaulting to x86_64.
+        assert_eq!(
+            params_from("os=linux").resolve_arch().unwrap(),
+            InstallerArch::X86_64
+        );
+        assert_eq!(
+            params_from("os=linux&arch=aarch64").resolve_arch().unwrap(),
+            InstallerArch::Aarch64
+        );
+        // Even if a stray x86_64 macOS key were in the store, macOS never
+        // matches it.
+        let rows: Vec<(String, Option<String>)> = vec![(
+            "0.45.3-macos-x86_64".into(),
+            Some("2026-07-04T00:00:00Z".into()),
+        )];
+        assert_eq!(
+            latest_key_for_platform(&rows, InstallerOs::Macos, InstallerArch::Aarch64),
+            None
+        );
     }
 
     #[test]
@@ -1611,10 +1710,6 @@ mod tests {
                 Some("2026-07-03T00:00:00Z".into()),
             ),
             (
-                "0.45.3-macos-x86_64".into(),
-                Some("2026-07-04T00:00:00Z".into()),
-            ),
-            (
                 "0.46.0-rc.1-macos-aarch64".into(),
                 Some("2026-07-05T00:00:00Z".into()),
             ),
@@ -1624,10 +1719,6 @@ mod tests {
         assert_eq!(
             latest_key_for_platform(&rows, InstallerOs::Macos, InstallerArch::Aarch64),
             Some("0.46.0-rc.1-macos-aarch64".into())
-        );
-        assert_eq!(
-            latest_key_for_platform(&rows, InstallerOs::Macos, InstallerArch::X86_64),
-            Some("0.45.3-macos-x86_64".into())
         );
         // Newer macOS keys never leak into Linux or Windows.
         assert_eq!(
@@ -1644,7 +1735,7 @@ mod tests {
             Some("2026-07-01T00:00:00Z".into()),
         )];
         assert_eq!(
-            latest_key_for_platform(&linux_only, InstallerOs::Macos, InstallerArch::X86_64),
+            latest_key_for_platform(&linux_only, InstallerOs::Macos, InstallerArch::Aarch64),
             None
         );
     }
