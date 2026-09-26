@@ -1,19 +1,21 @@
 //! `GET /api/agents/installer` — generate an agent installer archive on the
-//! fly, for Windows (ZIP) or Linux (tar.gz). Sibling endpoints
+//! fly, for Windows (ZIP), Linux or macOS (tar.gz). Sibling endpoints
 //! `GET /api/agents/installer.ps1` / `GET /api/agents/installer.sh` return
 //! generated one-liner scripts that download + extract + run that archive
 //! in a single pasted command (each embeds the caller's own Bearer token
-//! so the inner download is authenticated).
+//! so the inner download is authenticated). `installer.sh` serves both
+//! Linux and macOS, picking the archive by `uname -s` / `uname -m`.
 //!
 //! Self-service: the route sits in the viewer+ base router, gated by the
 //! `agent-install` page feature, so a restricted "download user" account
 //! (viewer + ONLY that feature) can kit a fresh machine: extract, run the
 //! bootstrap as admin/root, done. There is no request body and no version
-//! parameter — the caller picks only the platform (`?os=windows|linux`,
-//! default `windows`; `?arch=x86_64|aarch64`, default `x86_64`). The
-//! archive always bundles the latest release FOR THAT PLATFORM (by Object
-//! Store `modified`, over the platform's keys — bare keys for Windows,
-//! `<version>-linux-<arch>` for Linux; see kanade_shared::bin_platform),
+//! parameter — the caller picks only the platform
+//! (`?os=windows|linux|macos`, default `windows`; `?arch=x86_64|aarch64`,
+//! default `x86_64`). The archive always bundles the latest release FOR
+//! THAT PLATFORM (by Object Store `modified`, over the platform's keys —
+//! bare keys for Windows, `<version>-linux-<arch>` for Linux,
+//! `<version>-macos-<arch>` for macOS; see kanade_shared::bin_platform),
 //! and the NATS url/token it bakes in come from the `agent_install`
 //! section of the server-settings document (falling back to this
 //! backend's own `[nats] url`, no token).
@@ -53,12 +55,30 @@
 //!   * `README.txt` — extract + `sudo ./install.sh` instructions, with
 //!     the note that command-signing keyring provisioning is Windows-only
 //!     today (#1165 gap).
+//!
+//! macOS tar.gz contents (same shape, launchd instead of systemd):
+//!
+//!   * `bin/kanade-agent` (0755) — the latest `<version>-macos-<arch>`
+//!     release (a thin per-arch Mach-O).
+//!   * `etc/agent.toml` — same rewritten config as the Windows ZIP.
+//!   * `launchd/com.kanade.agent.plist` — the repo LaunchDaemon, verbatim.
+//!   * `setup-agent-macos.sh` (0755) — the canonical macOS installer
+//!     (`deploy/macos/setup-agent.sh`), verbatim. Token from
+//!     `KANADE_NATS_TOKEN` → existing `agent.env` → hard fail; `nats_url`
+//!     overridden only when `KANADE_NATS_URL` is set.
+//!   * `install.sh` (0755) — the same generated wrapper as Linux, handing
+//!     over to `setup-agent-macos.sh`.
+//!   * `README.txt` — extract + `sudo ./install.sh`, the Gatekeeper note,
+//!     and the same #1165 keyring gap.
 
 use axum::body::Body;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use kanade_shared::bin_platform::{LINUX_SUFFIX_AARCH64, LINUX_SUFFIX_X86_64, platform_of_key};
+use kanade_shared::bin_platform::{
+    LINUX_SUFFIX_AARCH64, LINUX_SUFFIX_X86_64, MACOS_SUFFIX_AARCH64, MACOS_SUFFIX_X86_64,
+    platform_of_key,
+};
 use kanade_shared::kv::OBJECT_AGENT_RELEASES;
 use kanade_shared::wire::ServerSettings;
 use serde::Deserialize;
@@ -69,10 +89,10 @@ use super::AppState;
 use crate::audit;
 use crate::audit::Caller;
 
-// The installer ships four files verbatim: the stock agent config and the
-// three canonical install scripts. They are `include_str!`d from
-// `crates/kanade-backend/assets/`, which is a COPY of the canonical
-// originals at the workspace root.
+// The installer ships six files verbatim: the stock agent config, the
+// three canonical install scripts, and the systemd unit + launchd plist.
+// They are `include_str!`d from `crates/kanade-backend/assets/`, which is
+// a COPY of the canonical originals at the workspace root.
 //
 // The copy exists for one reason: `cargo package` only puts the crate
 // directory into the tarball, so an `include_str!` reaching outside it
@@ -104,6 +124,11 @@ const DEPLOY_AGENT_PS1: &str = include_str!("../../assets/deploy-agent.ps1");
 const SETUP_AGENT_SH: &str = include_str!("../../assets/setup-agent.sh");
 const AGENT_SERVICE: &str = include_str!("../../assets/kanade-agent.service");
 
+/// The canonical macOS install script + LaunchDaemon plist, verbatim —
+/// all macOS install logic lives in `deploy/macos/setup-agent.sh`.
+const SETUP_AGENT_MACOS_SH: &str = include_str!("../../assets/setup-agent-macos.sh");
+const AGENT_PLIST: &str = include_str!("../../assets/com.kanade.agent.plist");
+
 /// The exact `[agent]` line in `configs/agent.toml` that carries the
 /// loopback default. Matched verbatim (and replaced exactly once) so a
 /// template edit that moves or rewords the line fails loudly at request
@@ -118,6 +143,7 @@ enum InstallerOs {
     #[default]
     Windows,
     Linux,
+    Macos,
 }
 
 impl InstallerOs {
@@ -125,13 +151,15 @@ impl InstallerOs {
         match self {
             InstallerOs::Windows => "windows",
             InstallerOs::Linux => "linux",
+            InstallerOs::Macos => "macos",
         }
     }
 }
 
-/// Which CPU architecture a Linux installer targets. Default x86_64.
+/// Which CPU architecture a Linux/macOS installer targets. Default x86_64.
 /// (Windows releases sit at the bare `<version>` key regardless of arch —
-/// the key scheme's backward-compat decision — so this only filters Linux.)
+/// the key scheme's backward-compat decision — so this only filters Linux
+/// and macOS.)
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 enum InstallerArch {
@@ -155,10 +183,18 @@ impl InstallerArch {
             InstallerArch::Aarch64 => LINUX_SUFFIX_AARCH64,
         }
     }
+
+    /// The Object Store key suffix for this arch's macOS releases.
+    fn macos_suffix(&self) -> &'static str {
+        match self {
+            InstallerArch::X86_64 => MACOS_SUFFIX_X86_64,
+            InstallerArch::Aarch64 => MACOS_SUFFIX_AARCH64,
+        }
+    }
 }
 
-/// `?os=windows|linux&arch=x86_64|aarch64` — both optional, unknown values
-/// rejected 400 by the Query extractor's serde failure.
+/// `?os=windows|linux|macos&arch=x86_64|aarch64` — both optional, unknown
+/// values rejected 400 by the Query extractor's serde failure.
 #[derive(Deserialize, Debug, Default)]
 pub struct InstallerParams {
     #[serde(default)]
@@ -204,6 +240,7 @@ pub async fn installer(
                 let label = match params.os {
                     InstallerOs::Windows => "windows".to_string(),
                     InstallerOs::Linux => format!("linux-{}", params.arch.as_str()),
+                    InstallerOs::Macos => format!("macos-{}", params.arch.as_str()),
                 };
                 return Err((
                     StatusCode::NOT_FOUND,
@@ -255,7 +292,7 @@ pub async fn installer(
     // Archive assembly is CPU-bound (deflate/gzip over ~20 MB) — built in
     // a spawn_blocking closure below. The keyring is embedded only in the
     // Windows flow: command-signing keyring provisioning is Windows-only
-    // today (#1165 gap), so the Linux tarball never carries one.
+    // today (#1165 gap), so the Linux/macOS tarballs never carry one.
     let (content_type, filename, payload, command_keys_embedded) = match params.os {
         InstallerOs::Windows => {
             // When this backend signs commands, provision the fresh agent's
@@ -302,21 +339,8 @@ pub async fn installer(
                 command_keys.is_some(),
             )
         }
-        InstallerOs::Linux => {
-            let install_sh = render_install_sh(nats_token.as_deref());
-            let readme = render_readme_linux(&key);
-            let entries: Vec<TarEntry> = vec![
-                TarEntry::new("bin/kanade-agent", 0o755, exe),
-                TarEntry::new("etc/agent.toml", 0o644, agent_toml.into_bytes()),
-                TarEntry::new(
-                    "systemd/kanade-agent.service",
-                    0o644,
-                    AGENT_SERVICE.as_bytes().to_vec(),
-                ),
-                TarEntry::new("setup-agent.sh", 0o755, SETUP_AGENT_SH.as_bytes().to_vec()),
-                TarEntry::new("install.sh", 0o755, install_sh.into_bytes()),
-                TarEntry::new("README.txt", 0o644, readme.into_bytes()),
-            ];
+        InstallerOs::Linux | InstallerOs::Macos => {
+            let entries = unix_tar_entries(params.os, &key, exe, agent_toml, nats_token.as_deref());
             let arch = params.arch;
             let tgz_bytes = tokio::task::spawn_blocking(move || build_tar_gz(entries))
                 .await
@@ -397,9 +421,10 @@ pub async fn installer_ps1(
 }
 
 /// `GET /api/agents/installer.sh` — a generated POSIX sh one-liner
-/// installer: map `uname -m` to a release arch, download the Linux tar.gz
-/// (authenticated as the caller), extract, run `install.sh`. Meant to be
-/// piped through sudo (`curl … | sudo bash`).
+/// installer for Linux AND macOS: map `uname -s` to a release OS and
+/// `uname -m` to a release arch, download that tar.gz (authenticated as
+/// the caller), extract, run `install.sh`. Meant to be piped through sudo
+/// (`curl … | sudo bash`).
 pub async fn installer_sh(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -505,13 +530,19 @@ fn render_installer_ps1(base: &str, token: &str) -> String {
 
 /// The generated `installer.sh` one-liner (LF line endings). `base` and
 /// `token` are embedded as POSIX single-quoted literals ([`sh_quote`]).
+/// One script for both unix platforms: `uname -s` picks the archive
+/// (Linux → `os=linux`, Darwin → `os=macos`), `uname -m` the arch (macOS
+/// reports Apple Silicon as `arm64`, Linux as `aarch64` — both map to the
+/// `aarch64` release). Everything it runs exists on a stock macOS too
+/// (`mktemp -d`, bsdtar's `tar xzf`, curl).
 fn render_installer_sh(base: &str, token: &str) -> String {
-    let zip_url = sh_quote(&format!("{base}/api/agents/installer?os=linux&arch="));
-    // The token rides a curl config heredoc (`-K -`), NOT a `-H` flag:
-    // /proc/<pid>/cmdline is world-readable on Linux, so a header on the
-    // command line would expose the session token to every local user on
-    // the target host. Escape the two bytes that could break out of the
-    // double-quoted config value.
+    let url_os = sh_quote(&format!("{base}/api/agents/installer?os="));
+    let url_arch = sh_quote("&arch=");
+    // The token rides a curl config heredoc (`-K -`), NOT a `-H` flag: a
+    // process's argv is readable by every local user (/proc/<pid>/cmdline
+    // on Linux, `ps` on macOS), so a header on the command line would
+    // expose the session token to all of them. Escape the two bytes that
+    // could break out of the double-quoted config value.
     let token_cfg = token.replace('\\', "\\\\").replace('"', "\\\"");
     let mut s = String::new();
     s.push_str("#!/bin/sh\n");
@@ -520,9 +551,15 @@ fn render_installer_sh(base: &str, token: &str) -> String {
     s.push_str(&format!(
         "#   ({base}/agent-install — piped through `sudo bash`).\n"
     ));
+    s.push_str("# Linux (systemd) and macOS (launchd) alike.\n");
     s.push_str("# install.sh needs root; without the sudo pipe it fails there by design.\n");
     s.push_str("# The embedded token expires with the issuer's session.\n");
     s.push_str("set -eu\n");
+    s.push_str("case \"$(uname -s)\" in\n");
+    s.push_str("    Linux) OS=linux ;;\n");
+    s.push_str("    Darwin) OS=macos ;;\n");
+    s.push_str("    *) echo \"unsupported OS: $(uname -s)\" >&2; exit 1 ;;\n");
+    s.push_str("esac\n");
     s.push_str("case \"$(uname -m)\" in\n");
     s.push_str("    x86_64) ARCH=x86_64 ;;\n");
     s.push_str("    aarch64|arm64) ARCH=aarch64 ;;\n");
@@ -530,10 +567,10 @@ fn render_installer_sh(base: &str, token: &str) -> String {
     s.push_str("esac\n");
     s.push_str("TMP=\"$(mktemp -d)\"\n");
     s.push_str("trap 'rm -rf \"$TMP\"' EXIT\n");
-    // The arch var sits OUTSIDE the single-quoted URL so the shell
-    // expands it; the base half stays literal-safe.
+    // The os/arch vars sit OUTSIDE the single-quoted URL pieces so the
+    // shell expands them; the base half stays literal-safe.
     s.push_str(&format!(
-        "curl -fsSL -K - -o \"$TMP/installer.tar.gz\" {zip_url}\"$ARCH\" <<'KANADE_CURL_CONFIG'\n"
+        "curl -fsSL -K - -o \"$TMP/installer.tar.gz\" {url_os}\"$OS\"{url_arch}\"$ARCH\" <<'KANADE_CURL_CONFIG'\n"
     ));
     s.push_str(&format!("header = \"Authorization: Bearer {token_cfg}\"\n"));
     s.push_str("KANADE_CURL_CONFIG\n");
@@ -566,6 +603,7 @@ fn key_matches_platform(key: &str, os: InstallerOs, arch: InstallerArch) -> bool
     match os {
         InstallerOs::Windows => platform_of_key(key) == "windows",
         InstallerOs::Linux => key.ends_with(arch.linux_suffix()),
+        InstallerOs::Macos => key.ends_with(arch.macos_suffix()),
     }
 }
 
@@ -768,8 +806,8 @@ fn build_zip(entries: Vec<(&str, Vec<u8>)>) -> Result<Vec<u8>, zip::result::ZipE
     Ok(zw.finish()?.into_inner())
 }
 
-/// One entry of the Linux installer tarball: path (relative to the
-/// extraction root, matching the layout `setup-agent.sh` expects around
+/// One entry of a Linux/macOS installer tarball: path (relative to the
+/// extraction root, matching the layout the setup script expects around
 /// itself), permission bits, and bytes.
 struct TarEntry {
     name: &'static str,
@@ -783,7 +821,57 @@ impl TarEntry {
     }
 }
 
-/// Assemble the Linux installer tar.gz in memory. Pure/blocking — the
+/// The Linux/macOS tarball's entries. Same shape on both — the binary +
+/// config, the OS's service definition, its canonical setup script, and
+/// the generated `install.sh` that hands over to it — only the service
+/// definition, the setup script's name, and the README differ. `os` is
+/// Linux or macOS; the handler never calls this for Windows (and a
+/// Windows value falls through to the Linux shape).
+fn unix_tar_entries(
+    os: InstallerOs,
+    key: &str,
+    exe: Vec<u8>,
+    agent_toml: String,
+    nats_token: Option<&str>,
+) -> Vec<TarEntry> {
+    let (service_entry, setup_name, setup_script, service_kind, readme) =
+        if os == InstallerOs::Macos {
+            (
+                TarEntry::new(
+                    "launchd/com.kanade.agent.plist",
+                    0o644,
+                    AGENT_PLIST.as_bytes().to_vec(),
+                ),
+                "setup-agent-macos.sh",
+                SETUP_AGENT_MACOS_SH,
+                "a launchd daemon",
+                render_readme_macos(key),
+            )
+        } else {
+            (
+                TarEntry::new(
+                    "systemd/kanade-agent.service",
+                    0o644,
+                    AGENT_SERVICE.as_bytes().to_vec(),
+                ),
+                "setup-agent.sh",
+                SETUP_AGENT_SH,
+                "a systemd service",
+                render_readme_linux(key),
+            )
+        };
+    let install_sh = render_install_sh(nats_token, setup_name, service_kind);
+    vec![
+        TarEntry::new("bin/kanade-agent", 0o755, exe),
+        TarEntry::new("etc/agent.toml", 0o644, agent_toml.into_bytes()),
+        service_entry,
+        TarEntry::new(setup_name, 0o755, setup_script.as_bytes().to_vec()),
+        TarEntry::new("install.sh", 0o755, install_sh.into_bytes()),
+        TarEntry::new("README.txt", 0o644, readme.into_bytes()),
+    ]
+}
+
+/// Assemble a Linux/macOS installer tar.gz in memory. Pure/blocking — the
 /// handler runs it under `spawn_blocking` (gzip over ~20 MB of binary is
 /// CPU-bound). Modes are set explicitly per entry: the exec bit on
 /// `bin/kanade-agent`, `setup-agent.sh` and `install.sh` is what lets the
@@ -814,23 +902,27 @@ fn sh_quote(value: &str) -> String {
 }
 
 /// The generated `install.sh` wrapper (LF endings, 0755). All real work
-/// stays in `setup-agent.sh`; this only provisions the token from the
-/// backend's settings and hands over. `KANADE_NATS_URL` is deliberately
-/// NOT exported: the baked `etc/agent.toml` already carries it, and
-/// setup-agent.sh only rewrites the url when the env var is set — leaving
-/// it unset keeps the "preserve an existing deployment's broker on
-/// redeploy" logic intact.
-fn render_install_sh(nats_token: Option<&str>) -> String {
+/// stays in the canonical setup script (`setup_script`: `setup-agent.sh`
+/// on Linux, `setup-agent-macos.sh` on macOS; `service` names what it
+/// installs, for the header comment); this only provisions the token from
+/// the backend's settings and hands over. `KANADE_NATS_URL` is
+/// deliberately NOT exported: the baked `etc/agent.toml` already carries
+/// it, and both setup scripts only rewrite the url when the env var is
+/// set — leaving it unset keeps the "preserve an existing deployment's
+/// broker on redeploy" logic intact.
+fn render_install_sh(nats_token: Option<&str>, setup_script: &str, service: &str) -> String {
     let mut s = String::new();
     s.push_str("#!/bin/sh\n");
     s.push_str("# Generated by kanade-backend — do not edit.\n");
-    s.push_str("# Installs kanade-agent as a systemd service. Run as root (sudo).\n");
+    s.push_str(&format!(
+        "# Installs kanade-agent as {service}. Run as root (sudo).\n"
+    ));
     s.push_str("set -eu\n");
     s.push_str("cd \"$(dirname \"$0\")\"\n");
     if let Some(token) = nats_token {
         s.push_str(&format!("export KANADE_NATS_TOKEN={}\n", sh_quote(token)));
     }
-    s.push_str("exec ./setup-agent.sh\n");
+    s.push_str(&format!("exec ./{setup_script}\n"));
     s
 }
 
@@ -876,11 +968,64 @@ fn render_readme_linux(key: &str) -> String {
     s
 }
 
+/// macOS `README.txt` — the Linux README's shape, plus the Gatekeeper /
+/// code-signing facts an operator hits on a Mac, and the same #1165 gap
+/// (the keyring is provisioned into the Windows registry only).
+fn render_readme_macos(key: &str) -> String {
+    let mut s = String::new();
+    s.push_str(&format!("kanade-agent installer (release {key})\n"));
+    s.push_str("=================================================\n");
+    s.push('\n');
+    s.push_str("Contents:\n");
+    s.push('\n');
+    s.push_str("  bin/kanade-agent                the agent binary\n");
+    s.push_str("  etc/agent.toml                  agent configuration (NATS URL baked in)\n");
+    s.push_str("  launchd/com.kanade.agent.plist  the LaunchDaemon definition\n");
+    s.push_str("  setup-agent-macos.sh            the canonical install/update script\n");
+    s.push_str("  install.sh                      generated wrapper (token baked in, if any)\n");
+    s.push_str("  README.txt                      this file\n");
+    s.push('\n');
+    s.push_str("Install:\n");
+    s.push('\n');
+    s.push_str("  1. Extract this tarball on the target Mac and enter the directory,\n");
+    s.push_str("     e.g. in Terminal:\n");
+    s.push_str("       mkdir kanade-agent-installer && cd kanade-agent-installer\n");
+    s.push_str(&format!(
+        "       tar xzf ../kanade-agent-installer-{key}.tar.gz\n"
+    ));
+    s.push_str("  2. Run the installer as root:\n");
+    s.push_str("       sudo ./install.sh\n");
+    s.push('\n');
+    s.push_str("The agent runs as the LaunchDaemon com.kanade.agent\n");
+    s.push_str("(/Library/LaunchDaemons/com.kanade.agent.plist), binary at\n");
+    s.push_str("/usr/local/bin/kanade-agent, config + token under /etc/kanade, logs\n");
+    s.push_str("under /var/log/kanade. Check it with:\n");
+    s.push_str("       sudo launchctl print system/com.kanade.agent\n");
+    s.push('\n');
+    s.push_str("Re-running the installer upgrades the agent in place (an existing\n");
+    s.push_str("/etc/kanade/agent.env token and broker URL are preserved).\n");
+    s.push('\n');
+    s.push_str("Gatekeeper: the agent binary is not notarized. A tarball downloaded\n");
+    s.push_str("with a browser carries the com.apple.quarantine attribute; the\n");
+    s.push_str("installer clears it from the installed binary, and launchd runs the\n");
+    s.push_str("unsigned command-line binary without a Gatekeeper prompt. Apple\n");
+    s.push_str("Silicon still requires at least an ad-hoc code signature, which the\n");
+    s.push_str("Rust toolchain's linker applies; a binary modified after the build\n");
+    s.push_str("must be re-signed (codesign --force --sign - <binary>).\n");
+    s.push('\n');
+    s.push_str("Note: command-signing keyring provisioning is Windows-only today, so\n");
+    s.push_str("signed-command verification is INACTIVE on macOS agents installed\n");
+    s.push_str("from this tarball (the #1165 enforcement gap) — break-glass and\n");
+    s.push_str("backend public keys must be provisioned separately once a macOS\n");
+    s.push_str("provisioning path exists.\n");
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The four `assets/` files are copies; this is what keeps them honest.
+    /// The six `assets/` files are copies; this is what keeps them honest.
     ///
     /// Editing `configs/agent.toml` or one of the install scripts and not the
     /// copy would ship an installer that disagrees with the script an
@@ -916,6 +1061,16 @@ mod tests {
                 AGENT_SERVICE,
                 include_str!("../../../../deploy/linux/systemd/kanade-agent.service"),
                 "deploy/linux/systemd/kanade-agent.service",
+            ),
+            (
+                SETUP_AGENT_MACOS_SH,
+                include_str!("../../../../deploy/macos/setup-agent.sh"),
+                "deploy/macos/setup-agent.sh",
+            ),
+            (
+                AGENT_PLIST,
+                include_str!("../../../../deploy/macos/launchd/com.kanade.agent.plist"),
+                "deploy/macos/launchd/com.kanade.agent.plist",
             ),
         ] {
             assert_eq!(
@@ -1034,21 +1189,27 @@ mod tests {
     }
 
     #[test]
-    fn installer_sh_embeds_base_token_and_arch_map_lf_only() {
+    fn installer_sh_embeds_base_token_and_os_arch_map_lf_only() {
         let out = render_installer_sh("https://kanade.example.com", "tok-123");
         assert!(out.starts_with("#!/bin/sh\n"));
         assert!(out.contains("set -eu\n"));
-        // The token rides a stdin curl config (-K -), never a -H flag —
-        // /proc/<pid>/cmdline is world-readable on Linux.
+        // The token rides a stdin curl config (-K -), never a -H flag or
+        // anywhere else on a command line — argv is readable by every local
+        // user (/proc/<pid>/cmdline on Linux, `ps` on macOS).
         assert!(!out.contains("-H 'Authorization:"));
+        let curl_line = out.lines().find(|l| l.starts_with("curl ")).unwrap();
+        assert!(!curl_line.contains("tok-123"), "{curl_line}");
         assert!(out.contains("curl -fsSL -K - -o \"$TMP/installer.tar.gz\""));
         assert!(out.contains("header = \"Authorization: Bearer tok-123\""));
         assert!(out.contains("<<'KANADE_CURL_CONFIG'"));
-        assert!(
-            out.contains(
-                "'https://kanade.example.com/api/agents/installer?os=linux&arch='\"$ARCH\""
-            )
-        );
+        // os and arch both come from uname, outside the quoted literals.
+        assert!(out.contains(
+            "'https://kanade.example.com/api/agents/installer?os='\"$OS\"'&arch='\"$ARCH\""
+        ));
+        assert!(out.contains("case \"$(uname -s)\" in"));
+        assert!(out.contains("Linux) OS=linux ;;"));
+        assert!(out.contains("Darwin) OS=macos ;;"));
+        assert!(out.contains("unsupported OS"));
         assert!(out.contains("x86_64) ARCH=x86_64 ;;"));
         assert!(out.contains("aarch64|arm64) ARCH=aarch64 ;;"));
         assert!(out.contains("unsupported architecture"));
@@ -1348,11 +1509,15 @@ mod tests {
         assert_eq!(p.arch, InstallerArch::X86_64);
         // Unknown values are a deserialize error — axum's Query extractor
         // turns that into a 400 before the handler runs.
-        assert!(serde_json::from_str::<InstallerOs>(r#""macos""#).is_err());
+        assert!(serde_json::from_str::<InstallerOs>(r#""freebsd""#).is_err());
         assert!(serde_json::from_str::<InstallerArch>(r#""armv7""#).is_err());
         assert_eq!(
             serde_json::from_str::<InstallerOs>(r#""linux""#).unwrap(),
             InstallerOs::Linux
+        );
+        assert_eq!(
+            serde_json::from_str::<InstallerOs>(r#""macos""#).unwrap(),
+            InstallerOs::Macos
         );
         assert_eq!(
             serde_json::from_str::<InstallerArch>(r#""aarch64""#).unwrap(),
@@ -1434,8 +1599,59 @@ mod tests {
     }
 
     #[test]
+    fn latest_key_keeps_macos_and_linux_apart() {
+        let rows: Vec<(String, Option<String>)> = vec![
+            ("0.45.4".into(), Some("2026-07-01T00:00:00Z".into())),
+            (
+                "0.45.4-linux-aarch64".into(),
+                Some("2026-07-02T00:00:00Z".into()),
+            ),
+            (
+                "0.45.4-macos-aarch64".into(),
+                Some("2026-07-03T00:00:00Z".into()),
+            ),
+            (
+                "0.45.3-macos-x86_64".into(),
+                Some("2026-07-04T00:00:00Z".into()),
+            ),
+            (
+                "0.46.0-rc.1-macos-aarch64".into(),
+                Some("2026-07-05T00:00:00Z".into()),
+            ),
+        ];
+        // macOS sees only its own arch's suffix, newest by modified
+        // (a prerelease dash mid-version doesn't confuse the suffix match).
+        assert_eq!(
+            latest_key_for_platform(&rows, InstallerOs::Macos, InstallerArch::Aarch64),
+            Some("0.46.0-rc.1-macos-aarch64".into())
+        );
+        assert_eq!(
+            latest_key_for_platform(&rows, InstallerOs::Macos, InstallerArch::X86_64),
+            Some("0.45.3-macos-x86_64".into())
+        );
+        // Newer macOS keys never leak into Linux or Windows.
+        assert_eq!(
+            latest_key_for_platform(&rows, InstallerOs::Linux, InstallerArch::Aarch64),
+            Some("0.45.4-linux-aarch64".into())
+        );
+        assert_eq!(
+            latest_key_for_platform(&rows, InstallerOs::Windows, InstallerArch::X86_64),
+            Some("0.45.4".into())
+        );
+        // Linux-only store → no macOS release (the handler 404s).
+        let linux_only: Vec<(String, Option<String>)> = vec![(
+            "0.45.4-linux-x86_64".into(),
+            Some("2026-07-01T00:00:00Z".into()),
+        )];
+        assert_eq!(
+            latest_key_for_platform(&linux_only, InstallerOs::Macos, InstallerArch::X86_64),
+            None
+        );
+    }
+
+    #[test]
     fn install_sh_exports_the_token_only_when_given() {
-        let with = render_install_sh(Some("s3cret"));
+        let with = render_install_sh(Some("s3cret"), "setup-agent.sh", "a systemd service");
         assert!(with.starts_with("#!/bin/sh\n"));
         assert!(with.contains("set -eu\n"));
         assert!(with.contains("export KANADE_NATS_TOKEN='s3cret'\n"));
@@ -1446,7 +1662,7 @@ mod tests {
         // LF only.
         assert!(!with.contains('\r'));
 
-        let without = render_install_sh(None);
+        let without = render_install_sh(None, "setup-agent.sh", "a systemd service");
         assert!(!without.contains("KANADE_NATS_TOKEN"));
         assert!(without.ends_with("exec ./setup-agent.sh\n"));
     }
@@ -1456,36 +1672,16 @@ mod tests {
         // POSIX single-quote escaping: `'` → `'\''`. An unescaped quote
         // would terminate the literal and let the rest of the token run
         // as shell.
-        let out = render_install_sh(Some("it's"));
+        let out = render_install_sh(Some("it's"), "setup-agent.sh", "a systemd service");
         assert!(out.contains("export KANADE_NATS_TOKEN='it'\\''s'\n"));
     }
 
-    #[test]
-    fn tar_gz_round_trips_all_entries_with_modes() {
-        let agent_toml = render_agent_toml("nats://broker.corp:4222").unwrap();
-        let install_sh = render_install_sh(Some("tok"));
-        let entries = vec![
-            TarEntry::new("bin/kanade-agent", 0o755, b"\x7fELF-fake".to_vec()),
-            TarEntry::new("etc/agent.toml", 0o644, agent_toml.clone().into_bytes()),
-            TarEntry::new(
-                "systemd/kanade-agent.service",
-                0o644,
-                AGENT_SERVICE.as_bytes().to_vec(),
-            ),
-            TarEntry::new("setup-agent.sh", 0o755, SETUP_AGENT_SH.as_bytes().to_vec()),
-            TarEntry::new("install.sh", 0o755, install_sh.clone().into_bytes()),
-            TarEntry::new(
-                "README.txt",
-                0o644,
-                render_readme_linux("0.45.4-linux-x86_64").into_bytes(),
-            ),
-        ];
+    /// Build the tarball and read it back as `name → (mode, bytes)`.
+    fn tar_round_trip(entries: Vec<TarEntry>) -> std::collections::HashMap<String, (u32, Vec<u8>)> {
         let bytes = build_tar_gz(entries).unwrap();
-
         let dec = flate2::read::GzDecoder::new(bytes.as_slice());
         let mut archive = tar::Archive::new(dec);
-        let mut seen: std::collections::HashMap<String, (u32, Vec<u8>)> =
-            std::collections::HashMap::new();
+        let mut seen = std::collections::HashMap::new();
         for entry in archive.entries().unwrap() {
             let mut entry = entry.unwrap();
             let name = entry.path().unwrap().to_string_lossy().into_owned();
@@ -1495,6 +1691,19 @@ mod tests {
             entry.read_to_end(&mut data).unwrap();
             seen.insert(name, (mode, data));
         }
+        seen
+    }
+
+    #[test]
+    fn linux_tar_gz_round_trips_all_entries_with_modes() {
+        let agent_toml = render_agent_toml("nats://broker.corp:4222").unwrap();
+        let seen = tar_round_trip(unix_tar_entries(
+            InstallerOs::Linux,
+            "0.45.4-linux-x86_64",
+            b"\x7fELF-fake".to_vec(),
+            agent_toml.clone(),
+            Some("tok"),
+        ));
         for expected in [
             "bin/kanade-agent",
             "etc/agent.toml",
@@ -1519,13 +1728,69 @@ mod tests {
         }
         // The generated files round-trip byte-for-byte, and the canonical
         // scripts ship unmodified.
+        assert_eq!(seen["bin/kanade-agent"].1, b"\x7fELF-fake");
         assert_eq!(seen["etc/agent.toml"].1, agent_toml.as_bytes());
-        assert_eq!(seen["install.sh"].1, install_sh.as_bytes());
+        assert_eq!(
+            seen["install.sh"].1,
+            render_install_sh(Some("tok"), "setup-agent.sh", "a systemd service").as_bytes()
+        );
         assert_eq!(seen["setup-agent.sh"].1, SETUP_AGENT_SH.as_bytes());
         assert_eq!(
             seen["systemd/kanade-agent.service"].1,
             AGENT_SERVICE.as_bytes()
         );
+    }
+
+    #[test]
+    fn macos_tar_gz_carries_the_launchd_layout() {
+        let agent_toml = render_agent_toml("nats://broker.corp:4222").unwrap();
+        let seen = tar_round_trip(unix_tar_entries(
+            InstallerOs::Macos,
+            "0.45.4-macos-aarch64",
+            b"\xcf\xfa\xed\xfe-fake".to_vec(),
+            agent_toml.clone(),
+            Some("tok"),
+        ));
+        let mut names: Vec<&str> = seen.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                "README.txt",
+                "bin/kanade-agent",
+                "etc/agent.toml",
+                "install.sh",
+                "launchd/com.kanade.agent.plist",
+                "setup-agent-macos.sh",
+            ]
+        );
+        for exe_name in ["bin/kanade-agent", "setup-agent-macos.sh", "install.sh"] {
+            assert_eq!(seen[exe_name].0, 0o755, "{exe_name} mode");
+        }
+        for data_name in [
+            "etc/agent.toml",
+            "launchd/com.kanade.agent.plist",
+            "README.txt",
+        ] {
+            assert_eq!(seen[data_name].0, 0o644, "{data_name} mode");
+        }
+        assert_eq!(seen["etc/agent.toml"].1, agent_toml.as_bytes());
+        assert_eq!(
+            seen["setup-agent-macos.sh"].1,
+            SETUP_AGENT_MACOS_SH.as_bytes()
+        );
+        assert_eq!(
+            seen["launchd/com.kanade.agent.plist"].1,
+            AGENT_PLIST.as_bytes()
+        );
+        // The wrapper hands over to the macOS script, not the Linux one.
+        let install_sh = String::from_utf8(seen["install.sh"].1.clone()).unwrap();
+        assert!(install_sh.contains("# Installs kanade-agent as a launchd daemon."));
+        assert!(install_sh.contains("export KANADE_NATS_TOKEN='tok'\n"));
+        assert!(install_sh.ends_with("exec ./setup-agent-macos.sh\n"));
+        assert!(!install_sh.contains("KANADE_NATS_URL"));
+        let readme = String::from_utf8(seen["README.txt"].1.clone()).unwrap();
+        assert!(readme.contains("release 0.45.4-macos-aarch64"));
     }
 
     #[test]
@@ -1537,6 +1802,18 @@ mod tests {
         assert!(out.contains("Windows-only"));
         assert!(out.contains("INACTIVE on Linux agents"));
         // LF only.
+        assert!(!out.contains('\r'));
+    }
+
+    #[test]
+    fn readme_macos_documents_the_flow_gatekeeper_and_the_signing_gap() {
+        let out = render_readme_macos("0.45.4-macos-aarch64");
+        assert!(out.contains("release 0.45.4-macos-aarch64"));
+        assert!(out.contains("tar xzf ../kanade-agent-installer-0.45.4-macos-aarch64.tar.gz"));
+        assert!(out.contains("sudo ./install.sh"));
+        assert!(out.contains("launchctl print system/com.kanade.agent"));
+        assert!(out.contains("com.apple.quarantine"));
+        assert!(out.contains("INACTIVE on macOS agents"));
         assert!(!out.contains('\r'));
     }
 }

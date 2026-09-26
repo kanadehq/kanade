@@ -21,8 +21,8 @@ import { fmtIsoLocal } from '@/lib/utils';
 type ReleaseRow = {
   version: string;
   // Which platform build this row is: "windows" for bare-version keys,
-  // "linux-x86_64" / "linux-aarch64" for platform keys. The same version
-  // can appear once per platform.
+  // "linux-x86_64" / "linux-aarch64" / "macos-x86_64" / "macos-aarch64"
+  // for platform keys. The same version can appear once per platform.
   platform: string;
   size: number;
   digest: string | null;
@@ -30,11 +30,12 @@ type ReleaseRow = {
 };
 
 // A rollout targets a bare VERSION while `version` is the Object Store key,
-// which for Linux builds carries a platform suffix (`0.46.0-linux-x86_64`).
-// Strip the suffix to get the rollout-visible version — mirrors
-// `base_version_of_key` in kanade-shared/src/bin_platform.rs.
+// which for Linux/macOS builds carries a platform suffix
+// (`0.46.0-linux-x86_64`, `0.46.0-macos-aarch64`). Strip the suffix to get
+// the rollout-visible version — mirrors `base_version_of_key` in
+// kanade-shared/src/bin_platform.rs.
 export function releaseBaseVersion(key: string): string {
-  return key.replace(/-linux-(x86_64|aarch64)$/, '');
+  return key.replace(/-(linux|macos)-(x86_64|aarch64)$/, '');
 }
 
 type ScopeKind = 'global' | 'group' | 'pc';

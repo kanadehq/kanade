@@ -16,7 +16,8 @@ const FALLBACK_FILENAME = 'kanade-agent-installer.zip';
 
 // Pull the download filename out of the installer's Content-Disposition
 // header (`attachment; filename="kanade-agent-installer-<version>.zip"` /
-// `…-<version>-linux-<arch>.tar.gz`). Kept pure and exported so the parsing
+// `…-<version>-linux-<arch>.tar.gz` / `…-<version>-macos-<arch>.tar.gz`).
+// Kept pure and exported so the parsing
 // is testable without a DOM — the same reason lib/signing.ts stays out of
 // its badge component.
 export function installerFilename(contentDisposition: string | null): string {
@@ -24,18 +25,21 @@ export function installerFilename(contentDisposition: string | null): string {
   return m?.[1]?.trim() || FALLBACK_FILENAME;
 }
 
-export type InstallerOs = 'windows' | 'linux';
+export type InstallerOs = 'windows' | 'linux' | 'macos';
 type InstallerArch = 'x86_64' | 'aarch64';
 
 // Initial OS for the toggle, guessed from the browser. `platform` is
 // `navigator.userAgentData.platform` (Chromium) — more reliable than the UA
 // string, which is frozen/reduced there — with the plain UA as fallback.
-// 'Win' → windows, 'Linux'/'X11' → linux; anything else (including macOS,
-// which has no installer) defaults to 'windows', the dominant endpoint OS.
+// 'Win' → windows, 'Mac'/'macOS' (`Macintosh; Intel Mac OS X`, client hint
+// `macOS`) → macos, 'Linux'/'X11' → linux; anything else defaults to
+// 'windows', the dominant endpoint OS. iPadOS/iOS UAs also say "Mac OS X"
+// and land on macos — harmless, neither can run the agent anyway.
 // Pure + exported so the mapping is unit-testable without a DOM.
 export function detectOs(ua: string, platform?: string): InstallerOs {
   const probe = platform || ua;
   if (probe.includes('Win')) return 'windows';
+  if (probe.includes('Mac') || probe.includes('macOS')) return 'macos';
   if (probe.includes('Linux') || probe.includes('X11')) return 'linux';
   return 'windows';
 }
@@ -44,13 +48,16 @@ export function detectOs(ua: string, platform?: string): InstallerOs {
 // (`installer.ps1` / `installer.sh`) are auth-gated like every other API
 // route, so the command embeds the caller's session token as a Bearer
 // header and points at the backend that served this SPA (`origin`) —
-// correct even when the operator browses through a reverse proxy. Pure +
-// exported so the shape is unit-testable.
+// correct even when the operator browses through a reverse proxy. Linux
+// and macOS share `installer.sh`: the served script branches on
+// `uname -s` / `uname -m` to fetch the matching tarball. Pure + exported
+// so the shape is unit-testable.
 export function oneLiner(os: InstallerOs, origin: string, token: string): string {
-  if (os === 'linux') {
+  if (os !== 'windows') {
     // printf (a shell builtin — never a /proc cmdline entry) feeds curl a
     // config on stdin, so the token never appears in any process's argv:
-    // /proc/<pid>/cmdline is world-readable on Linux. Two escaping layers:
+    // /proc/<pid>/cmdline is world-readable on Linux, and `ps` shows every
+    // user's argv on macOS. Two escaping layers:
     // `\`/`"` for the double-quoted curl-config value (unreachable with
     // today's JWT charset, pinned for future token formats), then `'` →
     // `'\''` for the single-quoted printf argument.
@@ -77,7 +84,11 @@ export function AgentInstall() {
       (navigator as { userAgentData?: { platform?: string } }).userAgentData?.platform,
     ),
   );
-  const [arch, setArch] = useState<InstallerArch>('x86_64');
+  // Preselected architecture: the browser can't reliably tell the host
+  // CPU (Safari reports "Intel Mac OS X" even on Apple Silicon), so guess
+  // the common case — x86_64 for Linux, Apple Silicon for current Macs.
+  // Both options stay selectable; selectOs re-seeds it on every OS switch.
+  const [arch, setArch] = useState<InstallerArch>(os === 'macos' ? 'aarch64' : 'x86_64');
   const [downloading, setDownloading] = useState(false);
   // Session token embedded into the one-liner — same accessor as
   // lib/api.ts / lib/auth.tsx (`localStorage.kanade_token`). Read once:
@@ -103,6 +114,15 @@ export function AgentInstall() {
     }
   }
 
+  // Switching OS re-seeds the arch with that OS's default (Apple Silicon
+  // for macOS) — an x86_64 pick carried over from the Linux tab would
+  // silently hand most Mac users the wrong binary.
+  function selectOs(next: InstallerOs) {
+    if (next === os) return;
+    setOs(next);
+    setArch(next === 'macos' ? 'aarch64' : 'x86_64');
+  }
+
   // Same query key + staleTime as the Agents page: this backend's signing
   // key only changes on an operator rotation, which restarts the backend.
   // `/api/command-signing` is one of the few routes a restricted account may
@@ -120,12 +140,12 @@ export function AgentInstall() {
     setDownloading(true);
     try {
       let filename = FALLBACK_FILENAME;
-      // Bare URL = Windows ZIP; Linux takes the platform query params
+      // Bare URL = Windows ZIP; Linux/macOS take the platform query params
       // (arch defaults server-side to x86_64, sent explicitly anyway).
       const apiUrl =
-        os === 'linux'
-          ? `/api/agents/installer?os=linux&arch=${arch}`
-          : '/api/agents/installer';
+        os === 'windows'
+          ? '/api/agents/installer'
+          : `/api/agents/installer?os=${os}&arch=${arch}`;
       const blob = await apiFetchBlob(apiUrl, {}, (res) => {
         filename = installerFilename(res.headers.get('Content-Disposition'));
       });
@@ -155,15 +175,15 @@ export function AgentInstall() {
 
       {/* OS toggle — switches both the instructions and the download
           target. aria-pressed toggle buttons, not the WAI-ARIA tabs
-          pattern: two options don't justify the roving-tabindex +
+          pattern: three options don't justify the roving-tabindex +
           arrow-key machinery the Settings tabs carry. */}
       <div className="inline-flex rounded-md border border-border bg-card text-sm overflow-hidden">
-        {(['windows', 'linux'] as const).map((k) => (
+        {(['windows', 'linux', 'macos'] as const).map((k) => (
           <button
             key={k}
             type="button"
             aria-pressed={os === k}
-            onClick={() => setOs(k)}
+            onClick={() => selectOs(k)}
             className={os === k ? 'px-4 h-9 bg-accent/15 text-accent' : 'px-4 h-9 hover:bg-accent/5'}
           >
             {t(`os.${k}`)}
@@ -177,7 +197,7 @@ export function AgentInstall() {
           <CardDescription>{t('instructions.description')}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3 text-sm">
-          {os === 'windows' ? (
+          {os === 'windows' && (
             <>
               <ol className="list-decimal space-y-1.5 pl-5">
                 <li>{t('instructions.steps.one')}</li>
@@ -195,7 +215,8 @@ export function AgentInstall() {
                 <li>{t('instructions.windowsNote')}</li>
               </ul>
             </>
-          ) : (
+          )}
+          {os === 'linux' && (
             <>
               <ol className="list-decimal space-y-1.5 pl-5">
                 <li>{t('instructions.linux.steps.one')}</li>
@@ -220,6 +241,38 @@ export function AgentInstall() {
               </ul>
             </>
           )}
+          {os === 'macos' && (
+            <>
+              <ol className="list-decimal space-y-1.5 pl-5">
+                <li>{t('instructions.macos.steps.one')}</li>
+                <li>
+                  <Trans
+                    ns="agent-install"
+                    i18nKey="instructions.macos.steps.two"
+                    components={{ code: <code /> }}
+                  />
+                </li>
+                <li>
+                  <Trans
+                    ns="agent-install"
+                    i18nKey="instructions.macos.steps.three"
+                    components={{ code: <code /> }}
+                  />
+                </li>
+              </ol>
+              <ul className="list-disc space-y-1 pl-5 text-muted">
+                <li>
+                  <Trans
+                    ns="agent-install"
+                    i18nKey="instructions.macos.launchdNote"
+                    components={{ code: <code /> }}
+                  />
+                </li>
+                <li>{t('instructions.macos.gatekeeperNote')}</li>
+                <li>{t('instructions.macos.signingNote')}</li>
+              </ul>
+            </>
+          )}
         </CardContent>
       </Card>
 
@@ -229,14 +282,20 @@ export function AgentInstall() {
           <CardDescription>
             <Trans
               ns="agent-install"
-              i18nKey={os === 'linux' ? 'download.descriptionLinux' : 'download.description'}
+              i18nKey={
+                os === 'linux'
+                  ? 'download.descriptionLinux'
+                  : os === 'macos'
+                    ? 'download.descriptionMacos'
+                    : 'download.description'
+              }
               components={{ code: <code /> }}
             />
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
           <div className="flex items-end gap-3">
-            {os === 'linux' && (
+            {os !== 'windows' && (
               <div className="space-y-1">
                 <Label htmlFor="ai-arch">{t('download.archLabel')}</Label>
                 <Select
@@ -245,8 +304,14 @@ export function AgentInstall() {
                   onChange={(e) => setArch(e.target.value as InstallerArch)}
                   className="w-56"
                 >
-                  <option value="x86_64">{t('download.archOptions.x86_64')}</option>
-                  <option value="aarch64">{t('download.archOptions.aarch64')}</option>
+                  {/* macOS labels by Mac generation (Intel / Apple
+                      Silicon) — what a Mac user actually knows. */}
+                  <option value="x86_64">
+                    {t(os === 'macos' ? 'download.archOptionsMacos.x86_64' : 'download.archOptions.x86_64')}
+                  </option>
+                  <option value="aarch64">
+                    {t(os === 'macos' ? 'download.archOptionsMacos.aarch64' : 'download.archOptions.aarch64')}
+                  </option>
                 </Select>
               </div>
             )}
@@ -285,8 +350,8 @@ export function AgentInstall() {
           )}
           {/* #1260 status: whether this backend signs commands decides
               whether the package embeds a command-signing public key
-              (Windows — Linux provisioning doesn't exist yet). About the
-              backend, not the selected OS, so it shows on both tabs. */}
+              (Windows — Linux/macOS provisioning doesn't exist yet). About
+              the backend, not the selected OS, so it shows on every tab. */}
           {signingQ.error ? (
             <ErrorCard title={t('signing.errorTitle')} error={signingQ.error} />
           ) : signing && (

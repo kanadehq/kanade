@@ -3,7 +3,8 @@
   "intro": "このマシンに kanade エージェントをインストールします。",
   "os": {
     "windows": "Windows",
-    "linux": "Linux"
+    "linux": "Linux",
+    "macos": "macOS"
   },
   "instructions": {
     "title": "インストール手順",
@@ -23,27 +24,44 @@
       },
       "systemdNote": "systemd サービスとして登録されます (root で動作)。 後で再実行すると、そのままエージェントがアップグレードされます。",
       "signingNote": "コマンド署名キーリングのプロビジョニングは現時点では Windows のみです (Linux では署名付きコマンドの検証は無効です)。"
+    },
+    "macos": {
+      "steps": {
+        "one": "下のボタンからインストーラ (tar.gz) をダウンロードします。",
+        "two": "対象の Mac にコピーして展開します: <code>mkdir kanade-agent && tar xzf kanade-agent-installer-*.tar.gz -C kanade-agent</code>",
+        "three": "対象の Mac のターミナルで <code>cd kanade-agent && sudo ./install.sh</code> を実行します。"
+      },
+      "launchdNote": "launchd デーモン (<code>com.kanade.agent</code>、 root で動作) として登録され、 起動時に開始し、 異常終了時は自動で再起動します。 ログは <code>/var/log/kanade/agent.*.log</code> に出力されます。 後で再実行すると、そのままエージェントがアップグレードされます。",
+      "gatekeeperNote": "エージェントのバイナリは公証 (notarization) されていません。 Finder からファイルを開かず、 上記のとおりターミナルからインストーラを実行してください。 インストーラがバイナリのダウンロード検疫フラグを解除するため、 Gatekeeper にサービスがブロックされることはありません。",
+      "signingNote": "コマンド署名キーリングのプロビジョニングは現時点では Windows のみです (macOS では署名付きコマンドの検証は無効です)。"
     }
   },
   "download": {
     "title": "インストーラのダウンロード",
     "description": "ZIP には <code>kanade-agent.exe</code>、設定済みの <code>agent.toml</code>、インストールスクリプト (<code>install.cmd</code> / <code>install-agent.ps1</code>) が含まれます。 常に最新のエージェントリリースが使われます。",
     "descriptionLinux": "tarball には <code>kanade-agent</code> バイナリ、 設定済みの <code>agent.toml</code>、 <code>install.sh</code> が含まれます。 常に最新のエージェントリリースが使われます。",
+    "descriptionMacos": "tarball には <code>kanade-agent</code> バイナリ、 設定済みの <code>agent.toml</code>、 launchd の plist、 <code>install.sh</code> が含まれます。 常に最新のエージェントリリースが使われます。",
     "archLabel": "アーキテクチャ",
     "archOptions": {
       "x86_64": "x86_64 (64 ビット Intel/AMD)",
       "aarch64": "aarch64 (ARM64)"
+    },
+    "archOptionsMacos": {
+      "x86_64": "x86_64 (Intel Mac)",
+      "aarch64": "aarch64 (Apple Silicon)"
     },
     "downloadButton": "インストーラをダウンロード"
   },
   "oneLiner": {
     "label": {
       "windows": "…または、このワンライナーを対象 PC の PowerShell に貼り付けて実行",
-      "linux": "…または、このワンライナーを対象ホストのシェルで実行"
+      "linux": "…または、このワンライナーを対象ホストのシェルで実行",
+      "macos": "…または、このワンライナーを対象 Mac のターミナルで実行"
     },
     "hint": {
       "windows": "開始に管理者権限は不要です。 インストールの段階で UAC の確認が表示されます。",
-      "linux": "sudo 経由で実行します。 スクリプトがホストのアーキテクチャを判別し、 systemd サービスをインストールします。"
+      "linux": "sudo 経由で実行します。 スクリプトがホストのアーキテクチャを判別し、 systemd サービスをインストールします。",
+      "macos": "sudo 経由で実行します。 スクリプトが Mac のアーキテクチャを判別し、 launchd デーモンをインストールします。"
     },
     "tokenWarning": "このコマンドにはセッショントークンが埋め込まれています。 セッションの有効期限とともに失効するため早めに実行してください。 また、 有効な間はこのコマンドを持つ人なら誰でもインストーラをダウンロードできます。 パスワードと同様に取り扱ってください。",
     "copyTitle": "コマンドをクリップボードにコピー",

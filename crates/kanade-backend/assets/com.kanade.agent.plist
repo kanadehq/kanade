@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  kanade agent — LaunchDaemon (macOS counterpart of
+  deploy/linux/systemd/kanade-agent.service). Installed to
+  /Library/LaunchDaemons/com.kanade.agent.plist (root:wheel 0644) by
+  deploy/macos/setup-agent.sh.
+
+  Runs as root (a LaunchDaemon with no UserName) so `run` / jobs can
+  manage the box — the macOS analog of the Windows agent's LocalSystem.
+
+  Token: launchd has no EnvironmentFile, and this plist must be
+  world-readable, so the NATS token is NOT here. The launcher below reads
+  it from /etc/kanade/agent.env (root-only, 0600) as data — sed, never
+  `.`/source, so no byte of the token is ever evaluated as shell — then
+  execs the agent, so launchd supervises the agent process itself.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.kanade.agent</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/sh</string>
+		<string>-c</string>
+		<string>KANADE_NATS_TOKEN="$(sed -n 's/^KANADE_NATS_TOKEN=//p' /etc/kanade/agent.env | head -n 1)"; [ -n "$KANADE_NATS_TOKEN" ] || exit 78; export KANADE_NATS_TOKEN; exec /usr/local/bin/kanade-agent</string>
+	</array>
+
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>KANADE_AGENT_CONFIG</key>
+		<string>/etc/kanade/agent.toml</string>
+		<!-- Same data dir as Linux: never shares a backend's /var/lib/kanade. -->
+		<key>KANADE_AGENT_DATA_DIR</key>
+		<string>/var/lib/kanade-agent</string>
+	</dict>
+
+	<key>WorkingDirectory</key>
+	<string>/var/lib/kanade-agent</string>
+
+	<key>RunAtLoad</key>
+	<true/>
+
+	<!--
+	  Restart on any non-zero exit: crashes, and exit(64) — the NATS
+	  self-update swap signal (self_update.rs) — which must come back up on
+	  the freshly-swapped binary. A clean exit(0) stays down. Mirrors
+	  Restart=on-failure + RestartForceExitStatus=64 on Linux.
+	-->
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+
+	<!--
+	  The agent writes its own daily-rotated log (/var/log/kanade/agent.<date>.log,
+	  from [log] in agent.toml) and mirrors the same lines to stdout; launchd
+	  never rotates, so stdout would be an unbounded duplicate — discard it.
+	  stderr keeps what the rotated log cannot: startup failures before
+	  logging is up, and panics. The name deliberately does not start with
+	  `agent.`, so the appender's pruning and the log viewer never mistake it
+	  for a rotated agent log.
+	-->
+	<key>StandardOutPath</key>
+	<string>/dev/null</string>
+	<key>StandardErrorPath</key>
+	<string>/var/log/kanade/kanade-agent.launchd.log</string>
+</dict>
+</plist>

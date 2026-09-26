@@ -566,14 +566,14 @@ async fn sleep_jitter(max: Duration) {
 /// `target_version`. Mirrors the publish-side key scheme
 /// (`kanade_shared::bin_platform`): Windows releases sit at the bare
 /// `<version>` key (what every pre-Linux agent in the field fetches), Linux
-/// releases at `<version>-linux-<arch>` for the running binary's own
-/// architecture. Pure + cfg-gated so each OS's branch is unit-testable on
-/// its own host.
+/// releases at `<version>-linux-<arch>` and macOS releases at
+/// `<version>-macos-<arch>` for the running binary's own architecture.
+/// Pure + cfg-gated so each OS's branch is unit-testable on its own host.
 ///
-/// An arch we don't ship (Linux riscv64, say, or any non-Windows/Linux OS)
-/// falls back to the bare key — the get then 404s and the agent keeps
-/// running its current binary, which is the safe failure for an
-/// unsupported platform.
+/// An arch we don't ship (Linux riscv64, say, or any OS other than
+/// Windows/Linux/macOS) falls back to the bare key — the get then 404s and
+/// the agent keeps running its current binary, which is the safe failure
+/// for an unsupported platform.
 fn release_key_for_this_agent(target: &str) -> String {
     #[cfg(target_os = "windows")]
     {
@@ -581,10 +581,11 @@ fn release_key_for_this_agent(target: &str) -> String {
     }
     #[cfg(target_os = "linux")]
     {
-        let arch = if cfg!(target_arch = "x86_64") {
-            "x86_64"
+        use kanade_shared::bin_platform::{LINUX_SUFFIX_AARCH64, LINUX_SUFFIX_X86_64};
+        let suffix = if cfg!(target_arch = "x86_64") {
+            LINUX_SUFFIX_X86_64
         } else if cfg!(target_arch = "aarch64") {
-            "aarch64"
+            LINUX_SUFFIX_AARCH64
         } else {
             warn!(
                 arch = std::env::consts::ARCH,
@@ -592,9 +593,25 @@ fn release_key_for_this_agent(target: &str) -> String {
             );
             return target.to_string();
         };
-        format!("{target}-linux-{arch}")
+        format!("{target}{suffix}")
     }
-    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    {
+        use kanade_shared::bin_platform::{MACOS_SUFFIX_AARCH64, MACOS_SUFFIX_X86_64};
+        let suffix = if cfg!(target_arch = "x86_64") {
+            MACOS_SUFFIX_X86_64
+        } else if cfg!(target_arch = "aarch64") {
+            MACOS_SUFFIX_AARCH64
+        } else {
+            warn!(
+                arch = std::env::consts::ARCH,
+                "self-update: unsupported macos arch — trying the bare (Windows) key, which will 404"
+            );
+            return target.to_string();
+        };
+        format!("{target}{suffix}")
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
     {
         target.to_string()
     }
@@ -913,17 +930,23 @@ mod tests {
         // contract with the pre-Linux fleet.
         #[cfg(target_os = "windows")]
         assert_eq!(key, "0.45.4");
-        // Linux agents fetch the arch-suffixed key for their own arch.
+        // Linux / macOS agents fetch the arch-suffixed key for their own arch.
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         assert_eq!(key, "0.45.4-linux-x86_64");
         #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
         assert_eq!(key, "0.45.4-linux-aarch64");
+        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+        assert_eq!(key, "0.45.4-macos-x86_64");
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        assert_eq!(key, "0.45.4-macos-aarch64");
         // Shape invariants on every platform: non-empty, contains the
-        // target, and any suffix is one of the two published ones.
+        // target, and any suffix is one of the published ones.
         assert!(key.starts_with("0.45.4"));
         if key != "0.45.4" {
             assert!(
-                key.ends_with("-linux-x86_64") || key.ends_with("-linux-aarch64"),
+                kanade_shared::bin_platform::PLATFORM_SUFFIXES
+                    .iter()
+                    .any(|s| key.ends_with(s)),
                 "unexpected key shape: {key}"
             );
         }
