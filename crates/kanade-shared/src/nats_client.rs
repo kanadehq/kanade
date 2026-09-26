@@ -677,7 +677,9 @@ mod tests {
             .build()
             .unwrap();
         rt.block_on(async {
-            connect(NatsRole::Agent, "nats://127.0.0.1:1").await.unwrap();
+            connect(NatsRole::Agent, "nats://127.0.0.1:1")
+                .await
+                .unwrap();
         });
         assert!(rustls::crypto::CryptoProvider::get_default().is_some());
     }
