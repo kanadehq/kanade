@@ -28,8 +28,8 @@ describe('installerFilename', () => {
 });
 
 // The OS toggle preselects the visitor's own platform. userAgentData.platform
-// (Chromium) wins over the UA string when both are present; macOS and other
-// unsupported platforms fall back to 'windows', the dominant endpoint OS.
+// (Chromium) wins over the UA string when both are present; unrecognized
+// platforms fall back to 'windows', the dominant endpoint OS.
 
 describe('detectOs', () => {
   test('Windows UA → windows', () => {
@@ -53,12 +53,16 @@ describe('detectOs', () => {
     expect(detectOs('Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Linux')).toBe('linux');
   });
 
-  test('macOS and other unrecognized platforms fall back to windows', () => {
+  test('macOS UA and client hint → macos', () => {
     expect(
       detectOs('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15'),
-    ).toBe('windows');
-    expect(detectOs('', 'macOS')).toBe('windows');
+    ).toBe('macos');
+    expect(detectOs('', 'macOS')).toBe('macos');
+  });
+
+  test('unrecognized platforms fall back to windows', () => {
     expect(detectOs('')).toBe('windows');
+    expect(detectOs('Mozilla/5.0 (compatible; UnknownBot/1.0)', 'Fuchsia')).toBe('windows');
   });
 });
 
@@ -86,6 +90,12 @@ describe('oneLiner', () => {
   test('linux: double quotes and backslashes are escaped for the curl config', () => {
     // `\` → `\\` then `"` → `\"` (the same rules render_installer_sh uses).
     expect(oneLiner('linux', 'https://k', 'we"ird\\tok')).toContain('we\\"ird\\\\tok');
+  });
+
+  test('macos: same installer.sh curl | sudo bash (the script branches on uname -s)', () => {
+    expect(oneLiner('macos', 'https://kanade.example', 'tok123')).toBe(
+      'printf \'header = "Authorization: Bearer %s"\\n\' \'tok123\' | curl -fsSL -K - https://kanade.example/api/agents/installer.sh | sudo bash',
+    );
   });
 
   test('origin and token are interpolated verbatim', () => {

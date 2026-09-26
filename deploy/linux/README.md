@@ -276,6 +276,11 @@ Note: `sh` / `pwsh` command execution on the Linux agent needs #1198
 (older agent builds can register and be monitored but fail exec at
 `spawn powershell`).
 
+macOS agents install the same way (backend-generated `?os=macos`
+tarball, or the same `installer.sh` one-liner, which branches on
+`uname -s`) as a launchd daemon — see
+[`deploy/macos/README.md`](../macos/README.md).
+
 ## Open items
 
 - **aarch64-linux release target** (add to `release.yml`) so the backend

@@ -32,7 +32,7 @@ pub enum AgentSub {
     /// label/binary mismatch. Cross-arch publish works too (the
     /// extractor is pure-Rust `pelite`, no spawn).
     ///
-    /// A non-PE binary (e.g. a Linux ELF) carries no VERSIONINFO
+    /// A non-PE binary (a Linux ELF or macOS Mach-O) carries no VERSIONINFO
     /// resource, so it can't be auto-labelled — pass `--version` for
     /// those. When a PE version AND `--version` are both present they
     /// must agree, preserving the no-mismatch guarantee.
@@ -40,7 +40,7 @@ pub enum AgentSub {
         /// Path to the new agent binary (e.g. `target/release/kanade-agent.exe`).
         binary: PathBuf,
         /// Explicit version label. Omit for a Windows PE (read from its
-        /// VERSIONINFO); required for a non-PE ELF (Linux agent).
+        /// VERSIONINFO); required for a non-PE binary (Linux ELF / macOS Mach-O).
         #[arg(long)]
         version: Option<String>,
     },
@@ -136,10 +136,10 @@ async fn publish(
 
     // v0.13.1+: for a Windows PE the version comes from the embedded
     // VERSIONINFO resource (pelite, no spawn, cross-arch safe) so the
-    // binary IS its label. A non-PE ELF has no such resource, so
-    // `--version` supplies the label. Precedence:
+    // binary IS its label. A Linux ELF / macOS Mach-O has no such
+    // resource, so `--version` supplies the label. Precedence:
     //   * both present  → must agree (keeps the no-mismatch guarantee)
-    //   * --version only → use it (the ELF case)
+    //   * --version only → use it (the ELF / Mach-O case)
     //   * PE only        → use the embedded label
     //   * neither        → interactive prompt (#270), else fail fast
     let extracted = kanade_shared::exe_version::extract_pe_version(&bytes);
@@ -151,8 +151,8 @@ async fn publish(
             Some(v) => v,
             None => bail!(
                 "no version: {binary:?} has no embedded VERSIONINFO (a non-PE binary, e.g. a \
-                 Linux ELF?) — pass --version <X.Y.Z>. A Windows PE built with `winres` \
-                 (kanade ≥ v0.13.1) is auto-labelled."
+                 Linux ELF or macOS Mach-O?) — pass --version <X.Y.Z>. A Windows PE built with \
+                 `winres` (kanade ≥ v0.13.1) is auto-labelled."
             ),
         },
     };
@@ -163,9 +163,10 @@ async fn publish(
 
     // Which platform is this binary? Read from its own bytes, not the
     // filename: PE (Windows) stays at the bare `<version>` key, ELF
-    // (Linux) goes to `<version>-linux-<arch>`, Mach-O / unknown is a
-    // hard error — a publish that can't name its platform must not
-    // silently land on the Windows key (see kanade_shared::bin_platform).
+    // (Linux) goes to `<version>-linux-<arch>`, thin Mach-O (macOS) to
+    // `<version>-macos-<arch>`; universal Mach-O / unknown is a hard
+    // error — a publish that can't name its platform must not silently
+    // land on the Windows key (see kanade_shared::bin_platform).
     let platform = kanade_shared::bin_platform::AgentPlatform::detect(&bytes)
         .map_err(|e| anyhow::anyhow!(e))?;
     let key = platform.release_key(&version);
@@ -248,8 +249,8 @@ async fn rollout(client: async_nats::Client, args: RolloutArgs) -> Result<()> {
     // yet — saves the operator from finding out at agent-side via a
     // "self-update fetch failed" log line per host. A version passes
     // when ANY of its keys exists: the bare Windows key or a
-    // `<version>-linux-<arch>` one — a Linux-only publish never writes
-    // the bare key.
+    // `<version>-linux-<arch>` / `<version>-macos-<arch>` one — a
+    // Linux- or macOS-only publish never writes the bare key.
     let store = js
         .get_object_store(OBJECT_AGENT_RELEASES)
         .await

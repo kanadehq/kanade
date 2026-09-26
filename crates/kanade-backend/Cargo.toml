@@ -14,7 +14,7 @@ categories.workspace   = true
 include = [
     "src/**/*",
     "migrations/**/*",
-    # The four installer payloads the agent-install endpoints serve. Copies
+    # The six installer payloads the agent-install endpoints serve. Copies
     # of the workspace-root originals, kept in the crate because
     # `cargo package` cannot reach outside it — see the note at the top of
     # `src/api/agent_installer.rs` (#1364).

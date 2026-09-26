@@ -8,17 +8,20 @@
 //!     migration. (Windows aarch64 also maps to the bare key: the fleet is
 //!     x86_64 in practice, and distinguishing it is a future problem.)
 //!   * Linux releases live at **`<version>-linux-<arch>`** (`x86_64` /
-//!     `aarch64`). Semver prerelease dashes are fine because consumers
-//!     always match the *suffix* (`-linux-x86_64` / `-linux-aarch64`),
-//!     never a dash mid-version.
+//!     `aarch64`), macOS releases at **`<version>-macos-<arch>`**. Semver
+//!     prerelease dashes are fine because consumers always match the
+//!     *suffix* (`-linux-x86_64` / `-macos-aarch64` / …), never a dash
+//!     mid-version.
 //!
 //! Detection is by magic bytes, not filename: `MZ` → PE (arch from the
 //! COFF header's Machine field), `\x7fELF` → ELF (arch from `e_machine`),
-//! Mach-O magics → a clear "unsupported" error (macOS agents are out of
-//! scope). Pure byte inspection, no parsing library — the PE path only
-//! needs `e_lfanew` + the COFF Machine field, which `pelite` (used for
-//! VERSIONINFO in `exe_version.rs`) doesn't surface as a bare number
-//! without dragging in its full header model.
+//! thin 64-bit Mach-O → macOS (arch from `cputype`). Universal (fat)
+//! Mach-O and 32-bit Mach-O are clear errors: a release key names exactly
+//! one arch, so the operator publishes one thin binary per arch. Pure byte
+//! inspection, no parsing library — the PE path only needs `e_lfanew` +
+//! the COFF Machine field, which `pelite` (used for VERSIONINFO in
+//! `exe_version.rs`) doesn't surface as a bare number without dragging in
+//! its full header model.
 
 /// Object Store key suffix for Linux x86_64 releases.
 pub const LINUX_SUFFIX_X86_64: &str = "-linux-x86_64";
@@ -27,6 +30,22 @@ pub const LINUX_SUFFIX_AARCH64: &str = "-linux-aarch64";
 /// Both Linux suffixes, for "any Linux key" scans (rollout checks).
 pub const LINUX_SUFFIXES: [&str; 2] = [LINUX_SUFFIX_X86_64, LINUX_SUFFIX_AARCH64];
 
+/// Object Store key suffix for macOS x86_64 (Intel) releases.
+pub const MACOS_SUFFIX_X86_64: &str = "-macos-x86_64";
+/// Object Store key suffix for macOS aarch64 (Apple silicon) releases.
+pub const MACOS_SUFFIX_AARCH64: &str = "-macos-aarch64";
+/// Both macOS suffixes, for "any macOS key" scans.
+pub const MACOS_SUFFIXES: [&str; 2] = [MACOS_SUFFIX_X86_64, MACOS_SUFFIX_AARCH64];
+
+/// Every platform key suffix (all non-Windows platforms), in the order
+/// rollout existence checks probe them after the bare Windows key.
+pub const PLATFORM_SUFFIXES: [&str; 4] = [
+    LINUX_SUFFIX_X86_64,
+    LINUX_SUFFIX_AARCH64,
+    MACOS_SUFFIX_X86_64,
+    MACOS_SUFFIX_AARCH64,
+];
+
 /// The platform an uploaded agent binary runs on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentPlatform {
@@ -34,14 +53,16 @@ pub enum AgentPlatform {
     WindowsAarch64,
     LinuxX86_64,
     LinuxAarch64,
+    MacOSX86_64,
+    MacOSAarch64,
 }
 
 impl AgentPlatform {
     /// Identify the platform from the binary's leading bytes. Errors
-    /// (rather than guesses) on Mach-O, on a recognized container with an
-    /// unsupported architecture, and on anything unrecognized — a publish
-    /// that can't name its platform must not silently land on the Windows
-    /// key.
+    /// (rather than guesses) on universal / 32-bit Mach-O, on a recognized
+    /// container with an unsupported architecture, and on anything
+    /// unrecognized — a publish that can't name its platform must not
+    /// silently land on the Windows key.
     pub fn detect(bytes: &[u8]) -> Result<AgentPlatform, String> {
         if bytes.starts_with(b"MZ") {
             return detect_pe(bytes);
@@ -49,23 +70,19 @@ impl AgentPlatform {
         if bytes.starts_with(b"\x7fELF") {
             return detect_elf(bytes);
         }
-        if is_macho(bytes) {
-            return Err(
-                "macOS (Mach-O) agents are not supported — kanade-agent ships for Windows and \
-                 Linux only"
-                    .to_string(),
-            );
+        if let Some(result) = detect_macho(bytes) {
+            return result;
         }
         Err(
-            "unrecognized binary format (not a Windows PE or Linux ELF) — is this a kanade-agent \
-             build?"
+            "unrecognized binary format (not a Windows PE, Linux ELF, or macOS Mach-O) — is this \
+             a kanade-agent build?"
                 .to_string(),
         )
     }
 
     /// The `agent_releases` Object Store key for `version` on this
     /// platform. Windows → the bare version (full backward compatibility);
-    /// Linux → the arch-suffixed key.
+    /// Linux / macOS → the arch-suffixed key.
     pub fn release_key(&self, version: &str) -> String {
         match self.suffix() {
             Some(suffix) => format!("{version}{suffix}"),
@@ -79,6 +96,8 @@ impl AgentPlatform {
             AgentPlatform::WindowsX86_64 | AgentPlatform::WindowsAarch64 => None,
             AgentPlatform::LinuxX86_64 => Some(LINUX_SUFFIX_X86_64),
             AgentPlatform::LinuxAarch64 => Some(LINUX_SUFFIX_AARCH64),
+            AgentPlatform::MacOSX86_64 => Some(MACOS_SUFFIX_X86_64),
+            AgentPlatform::MacOSAarch64 => Some(MACOS_SUFFIX_AARCH64),
         }
     }
 
@@ -89,31 +108,39 @@ impl AgentPlatform {
             AgentPlatform::WindowsAarch64 => "windows-aarch64",
             AgentPlatform::LinuxX86_64 => "linux-x86_64",
             AgentPlatform::LinuxAarch64 => "linux-aarch64",
+            AgentPlatform::MacOSX86_64 => "macos-x86_64",
+            AgentPlatform::MacOSAarch64 => "macos-aarch64",
         }
     }
 }
 
 /// The platform label for an existing store key, derived from its suffix:
-/// `"linux-x86_64"` / `"linux-aarch64"` for suffixed keys, `"windows"` for
-/// anything else (bare keys are Windows by definition of the key scheme).
-/// Used by the releases listing, which only has keys to look at.
+/// `"linux-x86_64"` / `"linux-aarch64"` / `"macos-x86_64"` /
+/// `"macos-aarch64"` for suffixed keys, `"windows"` for anything else (bare
+/// keys are Windows by definition of the key scheme). Used by the releases
+/// listing, which only has keys to look at.
 pub fn platform_of_key(key: &str) -> &'static str {
     if key.ends_with(LINUX_SUFFIX_X86_64) {
         "linux-x86_64"
     } else if key.ends_with(LINUX_SUFFIX_AARCH64) {
         "linux-aarch64"
+    } else if key.ends_with(MACOS_SUFFIX_X86_64) {
+        "macos-x86_64"
+    } else if key.ends_with(MACOS_SUFFIX_AARCH64) {
+        "macos-aarch64"
     } else {
         "windows"
     }
 }
 
-/// The rollout-visible version for a store key: the key with any linux
-/// platform suffix stripped. A scope's `target_version` always names the
-/// BASE version (`0.46.0`, never `0.46.0-linux-x86_64`) — the agent's own
-/// platform decides which suffixed binary it fetches — so guards that
-/// compare a key against `target_version` must go through this.
+/// The rollout-visible version for a store key: the key with any platform
+/// suffix (linux / macos) stripped. A scope's `target_version` always
+/// names the BASE version (`0.46.0`, never `0.46.0-linux-x86_64`) — the
+/// agent's own platform decides which suffixed binary it fetches — so
+/// guards that compare a key against `target_version` must go through
+/// this.
 pub fn base_version_of_key(key: &str) -> &str {
-    for suffix in LINUX_SUFFIXES {
+    for suffix in PLATFORM_SUFFIXES {
         if let Some(base) = key.strip_suffix(suffix) {
             return base;
         }
@@ -122,13 +149,13 @@ pub fn base_version_of_key(key: &str) -> &str {
 }
 
 /// Every store key a rollout's existence check should accept for
-/// `version`: the bare (Windows) key plus each linux platform key. A
-/// version is rollable-out when ANY of these exists — a Linux-only
-/// publish never writes the bare key.
+/// `version`: the bare (Windows) key plus each linux and macOS platform
+/// key. A version is rollable-out when ANY of these exists — a
+/// Linux-only or macOS-only publish never writes the bare key.
 pub fn candidate_keys(version: &str) -> Vec<String> {
-    let mut keys = Vec::with_capacity(1 + LINUX_SUFFIXES.len());
+    let mut keys = Vec::with_capacity(1 + PLATFORM_SUFFIXES.len());
     keys.push(version.to_string());
-    for suffix in LINUX_SUFFIXES {
+    for suffix in PLATFORM_SUFFIXES {
         keys.push(format!("{version}{suffix}"));
     }
     keys
@@ -201,21 +228,65 @@ fn detect_elf(bytes: &[u8]) -> Result<AgentPlatform, String> {
     }
 }
 
-/// Mach-O magics, both endiannesses, 32/64-bit, plus the fat (universal)
-/// wrappers — anything Apple is out of scope, so they all funnel to the
-/// same "unsupported" error rather than a misdetection.
-fn is_macho(bytes: &[u8]) -> bool {
-    const MAGICS: [[u8; 4]; 8] = [
-        [0xFE, 0xED, 0xFA, 0xCE], // MH_MAGIC (32-bit, BE)
-        [0xCE, 0xFA, 0xED, 0xFE], // MH_CIGAM (32-bit, LE)
-        [0xFE, 0xED, 0xFA, 0xCF], // MH_MAGIC_64 (BE)
-        [0xCF, 0xFA, 0xED, 0xFE], // MH_CIGAM_64 (LE)
-        [0xCA, 0xFE, 0xBA, 0xBE], // FAT_MAGIC (universal, BE)
+/// Mach-O: `None` when the bytes carry no Mach-O magic at all (so the
+/// caller falls through to "unrecognized"), otherwise the verdict. Thin
+/// 64-bit images (`MH_MAGIC_64` in either byte order) are identified by
+/// `cputype` (i32 at offset 4, in the header's byte order):
+/// `CPU_TYPE_X86_64` = 0x01000007, `CPU_TYPE_ARM64` = 0x0100000C.
+/// Universal (fat) wrappers are rejected — a release key names one arch,
+/// so the operator must `lipo -thin` per arch — as is 32-bit Mach-O.
+fn detect_macho(bytes: &[u8]) -> Option<Result<AgentPlatform, String>> {
+    const MH_MAGIC_64_BE: [u8; 4] = [0xFE, 0xED, 0xFA, 0xCF];
+    const MH_MAGIC_64_LE: [u8; 4] = [0xCF, 0xFA, 0xED, 0xFE];
+    const MH_MAGIC_32: [[u8; 4]; 2] = [
+        [0xFE, 0xED, 0xFA, 0xCE], // MH_MAGIC (BE)
+        [0xCE, 0xFA, 0xED, 0xFE], // MH_CIGAM (LE)
+    ];
+    // 0xCAFEBABE is also the Java class-file magic; either way it is not
+    // a publishable agent, so it lands on the same rejection.
+    const FAT_MAGICS: [[u8; 4]; 4] = [
+        [0xCA, 0xFE, 0xBA, 0xBE], // FAT_MAGIC
         [0xBE, 0xBA, 0xFE, 0xCA], // FAT_CIGAM
         [0xCA, 0xFE, 0xBA, 0xBF], // FAT_MAGIC_64
         [0xBF, 0xBA, 0xFE, 0xCA], // FAT_CIGAM_64
     ];
-    MAGICS.iter().any(|m| bytes.starts_with(m))
+
+    let little_endian = if bytes.starts_with(&MH_MAGIC_64_LE) {
+        true
+    } else if bytes.starts_with(&MH_MAGIC_64_BE) {
+        false
+    } else if MH_MAGIC_32.iter().any(|m| bytes.starts_with(m)) {
+        return Some(Err(
+            "32-bit Mach-O is not supported — kanade-agent ships 64-bit macOS builds \
+             (x86_64 / aarch64) only"
+                .to_string(),
+        ));
+    } else if FAT_MAGICS.iter().any(|m| bytes.starts_with(m)) {
+        return Some(Err(
+            "universal (fat) Mach-O binaries are not supported — publish one thin binary per \
+             arch (e.g. `lipo -thin arm64 kanade-agent -output kanade-agent-arm64`)"
+                .to_string(),
+        ));
+    } else {
+        return None;
+    };
+
+    let Some(cpu) = bytes.get(4..8) else {
+        return Some(Err("truncated Mach-O header".to_string()));
+    };
+    let cpu = [cpu[0], cpu[1], cpu[2], cpu[3]];
+    let cputype = if little_endian {
+        u32::from_le_bytes(cpu)
+    } else {
+        u32::from_be_bytes(cpu)
+    };
+    Some(match cputype {
+        0x0100_0007 => Ok(AgentPlatform::MacOSX86_64),
+        0x0100_000C => Ok(AgentPlatform::MacOSAarch64),
+        other => Err(format!(
+            "unsupported Mach-O cputype 0x{other:08X} (kanade-agent ships x86_64 and aarch64 only)"
+        )),
+    })
 }
 
 #[cfg(test)]
@@ -287,15 +358,49 @@ mod tests {
         assert!(AgentPlatform::detect(b"\x7fELF").is_err()); // truncated
     }
 
+    /// Minimal thin 64-bit Mach-O header: magic + cputype.
+    fn fake_macho(cputype: u32, little_endian: bool) -> Vec<u8> {
+        let mut b = vec![0u8; 8];
+        if little_endian {
+            b[..4].copy_from_slice(&[0xCF, 0xFA, 0xED, 0xFE]);
+            b[4..8].copy_from_slice(&cputype.to_le_bytes());
+        } else {
+            b[..4].copy_from_slice(&[0xFE, 0xED, 0xFA, 0xCF]);
+            b[4..8].copy_from_slice(&cputype.to_be_bytes());
+        }
+        b
+    }
+
     #[test]
-    fn macho_is_a_clear_unsupported_error() {
-        for magic in [
-            [0xFE, 0xED, 0xFA, 0xCE],
-            [0xCF, 0xFA, 0xED, 0xFE],
-            [0xCA, 0xFE, 0xBA, 0xBE],
-        ] {
+    fn detects_macho_architectures_by_cputype() {
+        assert_eq!(
+            AgentPlatform::detect(&fake_macho(0x0100_0007, true)).unwrap(),
+            AgentPlatform::MacOSX86_64
+        );
+        assert_eq!(
+            AgentPlatform::detect(&fake_macho(0x0100_000C, true)).unwrap(),
+            AgentPlatform::MacOSAarch64
+        );
+        // cputype honors the magic's byte order.
+        assert_eq!(
+            AgentPlatform::detect(&fake_macho(0x0100_000C, false)).unwrap(),
+            AgentPlatform::MacOSAarch64
+        );
+        // 32-bit ARM (CPU_TYPE_ARM = 12) in a 64-bit header: error, not a guess.
+        assert!(AgentPlatform::detect(&fake_macho(12, true)).is_err());
+        // Truncated right after the magic.
+        assert!(AgentPlatform::detect(&[0xCF, 0xFA, 0xED, 0xFE]).is_err());
+    }
+
+    #[test]
+    fn fat_and_32bit_macho_are_clear_errors() {
+        for magic in [[0xCA, 0xFE, 0xBA, 0xBE], [0xBF, 0xBA, 0xFE, 0xCA]] {
             let err = AgentPlatform::detect(&magic).unwrap_err();
-            assert!(err.contains("macOS"), "{err}");
+            assert!(err.contains("thin binary per arch"), "{err}");
+        }
+        for magic in [[0xFE, 0xED, 0xFA, 0xCE], [0xCE, 0xFA, 0xED, 0xFE]] {
+            let err = AgentPlatform::detect(&magic).unwrap_err();
+            assert!(err.contains("32-bit Mach-O"), "{err}");
         }
     }
 
@@ -321,6 +426,14 @@ mod tests {
             AgentPlatform::LinuxAarch64.release_key("0.45.4"),
             "0.45.4-linux-aarch64"
         );
+        assert_eq!(
+            AgentPlatform::MacOSX86_64.release_key("0.45.4"),
+            "0.45.4-macos-x86_64"
+        );
+        assert_eq!(
+            AgentPlatform::MacOSAarch64.release_key("0.45.4"),
+            "0.45.4-macos-aarch64"
+        );
         // Semver prerelease dashes are untouched — only the suffix matters.
         assert_eq!(
             AgentPlatform::LinuxX86_64.release_key("0.46.0-rc.1"),
@@ -334,6 +447,8 @@ mod tests {
         assert_eq!(platform_of_key("0.45.4"), "windows");
         assert_eq!(platform_of_key("0.45.4-linux-x86_64"), "linux-x86_64");
         assert_eq!(platform_of_key("0.45.4-linux-aarch64"), "linux-aarch64");
+        assert_eq!(platform_of_key("0.45.4-macos-x86_64"), "macos-x86_64");
+        assert_eq!(platform_of_key("0.45.4-macos-aarch64"), "macos-aarch64");
         // A version whose PRERELEASE mentions linux still parses by suffix:
         // `-linux-x86_64` wins, but a bare `1.0.0-linux` is a Windows key
         // (no arch suffix — odd, but the suffix rule is the contract).
@@ -346,6 +461,8 @@ mod tests {
         assert_eq!(base_version_of_key("0.45.4"), "0.45.4");
         assert_eq!(base_version_of_key("0.45.4-linux-x86_64"), "0.45.4");
         assert_eq!(base_version_of_key("0.45.4-linux-aarch64"), "0.45.4");
+        assert_eq!(base_version_of_key("0.45.4-macos-x86_64"), "0.45.4");
+        assert_eq!(base_version_of_key("0.45.4-macos-aarch64"), "0.45.4");
         // Prerelease dashes are not platform suffixes.
         assert_eq!(base_version_of_key("0.46.0-rc.1"), "0.46.0-rc.1");
         assert_eq!(
@@ -355,13 +472,15 @@ mod tests {
     }
 
     #[test]
-    fn candidate_keys_cover_bare_then_linux() {
+    fn candidate_keys_cover_bare_then_linux_then_macos() {
         assert_eq!(
             candidate_keys("0.46.0"),
             vec![
                 "0.46.0".to_string(),
                 "0.46.0-linux-x86_64".to_string(),
                 "0.46.0-linux-aarch64".to_string(),
+                "0.46.0-macos-x86_64".to_string(),
+                "0.46.0-macos-aarch64".to_string(),
             ]
         );
     }

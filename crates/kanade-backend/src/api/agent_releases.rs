@@ -4,8 +4,8 @@
 //!   binary, `version` = label, required for non-PE binaries) →
 //!   puts the bytes in the `agent_releases` Object Store under a
 //!   platform-derived key (bare `<version>` for Windows,
-//!   `<version>-linux-<arch>` for Linux — see
-//!   kanade_shared::bin_platform). Mirrors `kanade agent
+//!   `<version>-linux-<arch>` for Linux, `<version>-macos-<arch>`
+//!   for macOS — see kanade_shared::bin_platform). Mirrors `kanade agent
 //!   publish` on the CLI side; the SPA's Rollout page wires a
 //!   file picker to this endpoint.
 //! * `GET  /api/agents/releases` — list every version present in
@@ -41,7 +41,8 @@ use crate::audit::Caller;
 pub struct PublishResponse {
     pub version: String,
     /// The Object Store key the binary was stored under — `version` for
-    /// Windows, `<version>-linux-<arch>` for Linux (bin_platform key scheme).
+    /// Windows, `<version>-linux-<arch>` for Linux, `<version>-macos-<arch>`
+    /// for macOS (bin_platform key scheme).
     pub key: String,
     pub platform: String,
     pub size: u64,
@@ -57,8 +58,8 @@ pub async fn publish(
     // (kanade_shared::bin_platform): a Windows PE is keyed by its embedded
     // VERSIONINFO (making a "label vs binary version" disagreement
     // physically impossible — the failure mode that caused the v0.13.0
-    // "1.0.0"-loop incident), a Linux ELF has no such resource and takes
-    // its label from the `version` form field.
+    // "1.0.0"-loop incident), a Linux ELF / macOS Mach-O has no such
+    // resource and takes its label from the `version` form field.
     let mut bytes: Option<Vec<u8>> = None;
     let mut version_field: Option<String> = None;
 
@@ -125,15 +126,24 @@ pub async fn publish(
             }
             pe
         }
-        AgentPlatform::LinuxX86_64 | AgentPlatform::LinuxAarch64 => version_field.ok_or((
-            StatusCode::BAD_REQUEST,
-            format!(
-                "no version: the uploaded binary is a Linux ELF ({}), which carries no embedded \
-                 VERSIONINFO — include a 'version' form field (e.g. X.Y.Z). A Windows PE built \
-                 with `winres` (kanade ≥ v0.13.1) is auto-labelled.",
-                platform.as_str()
-            ),
-        ))?,
+        AgentPlatform::LinuxX86_64
+        | AgentPlatform::LinuxAarch64
+        | AgentPlatform::MacOSX86_64
+        | AgentPlatform::MacOSAarch64 => {
+            let format = match platform {
+                AgentPlatform::MacOSX86_64 | AgentPlatform::MacOSAarch64 => "macOS Mach-O",
+                _ => "Linux ELF",
+            };
+            version_field.ok_or((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "no version: the uploaded binary is a {format} ({}), which carries no \
+                     embedded VERSIONINFO — include a 'version' form field (e.g. X.Y.Z). A \
+                     Windows PE built with `winres` (kanade ≥ v0.13.1) is auto-labelled.",
+                    platform.as_str()
+                ),
+            ))?
+        }
     };
 
     let key = platform.release_key(&version);
