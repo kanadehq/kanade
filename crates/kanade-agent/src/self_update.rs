@@ -566,14 +566,15 @@ async fn sleep_jitter(max: Duration) {
 /// `target_version`. Mirrors the publish-side key scheme
 /// (`kanade_shared::bin_platform`): Windows releases sit at the bare
 /// `<version>` key (what every pre-Linux agent in the field fetches), Linux
-/// releases at `<version>-linux-<arch>` and macOS releases at
-/// `<version>-macos-<arch>` for the running binary's own architecture.
+/// releases at `<version>-linux-<arch>` for the running binary's own
+/// architecture, and macOS releases at `<version>-macos-aarch64` (Apple
+/// Silicon only — Intel Macs are unsupported).
 /// Pure + cfg-gated so each OS's branch is unit-testable on its own host.
 ///
-/// An arch we don't ship (Linux riscv64, say, or any OS other than
-/// Windows/Linux/macOS) falls back to the bare key — the get then 404s and
-/// the agent keeps running its current binary, which is the safe failure
-/// for an unsupported platform.
+/// An arch we don't ship (Linux riscv64, macOS x86_64, say, or any OS
+/// other than Windows/Linux/macOS) falls back to the bare key — the get
+/// then 404s and the agent keeps running its current binary, which is the
+/// safe failure for an unsupported platform.
 fn release_key_for_this_agent(target: &str) -> String {
     #[cfg(target_os = "windows")]
     {
@@ -597,19 +598,16 @@ fn release_key_for_this_agent(target: &str) -> String {
     }
     #[cfg(target_os = "macos")]
     {
-        use kanade_shared::bin_platform::{MACOS_SUFFIX_AARCH64, MACOS_SUFFIX_X86_64};
-        let suffix = if cfg!(target_arch = "x86_64") {
-            MACOS_SUFFIX_X86_64
-        } else if cfg!(target_arch = "aarch64") {
-            MACOS_SUFFIX_AARCH64
-        } else {
+        use kanade_shared::bin_platform::MACOS_SUFFIX_AARCH64;
+        if !cfg!(target_arch = "aarch64") {
             warn!(
                 arch = std::env::consts::ARCH,
-                "self-update: unsupported macos arch — trying the bare (Windows) key, which will 404"
+                "self-update: unsupported macos arch (Apple Silicon only) — trying the bare \
+                 (Windows) key, which will 404"
             );
             return target.to_string();
-        };
-        format!("{target}{suffix}")
+        }
+        format!("{target}{MACOS_SUFFIX_AARCH64}")
     }
     #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
     {
@@ -935,8 +933,10 @@ mod tests {
         assert_eq!(key, "0.45.4-linux-x86_64");
         #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
         assert_eq!(key, "0.45.4-linux-aarch64");
-        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-        assert_eq!(key, "0.45.4-macos-x86_64");
+        // Intel Macs are unsupported: there is no Intel macOS key, so the
+        // agent falls back to the bare key (which 404s — safe no-op).
+        #[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
+        assert_eq!(key, "0.45.4");
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         assert_eq!(key, "0.45.4-macos-aarch64");
         // Shape invariants on every platform: non-empty, contains the

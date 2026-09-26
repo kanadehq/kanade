@@ -13,9 +13,12 @@ describe('releaseBaseVersion', () => {
     expect(releaseBaseVersion('0.45.4-linux-aarch64')).toBe('0.45.4');
   });
 
-  test('macos platform suffixes are stripped', () => {
-    expect(releaseBaseVersion('0.45.4-macos-x86_64')).toBe('0.45.4');
+  test('the macos (Apple Silicon) suffix is stripped', () => {
     expect(releaseBaseVersion('0.45.4-macos-aarch64')).toBe('0.45.4');
+  });
+
+  test('macos-x86_64 is not a known suffix (Intel Macs unsupported)', () => {
+    expect(releaseBaseVersion('0.45.4-macos-x86_64')).toBe('0.45.4-macos-x86_64');
   });
 
   test('prerelease dashes are not platform suffixes', () => {

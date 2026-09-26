@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import { detectOs, installerFilename, oneLiner } from './AgentInstall';
+import { detectOs, installerFilename, installerUrl, oneLiner } from './AgentInstall';
 
 // The installer endpoint names its ZIP in Content-Disposition
 // (`attachment; filename="kanade-agent-installer-<version>.zip"`). The
@@ -102,5 +102,25 @@ describe('oneLiner', () => {
     const cmd = oneLiner('windows', 'http://localhost:1420', 'dev');
     expect(cmd).toContain('http://localhost:1420/api/agents/installer.ps1');
     expect(cmd).toContain("'Bearer dev'");
+  });
+});
+
+// The download URL: Windows is the bare ZIP endpoint, Linux carries the
+// chosen arch, and macOS is Apple Silicon only — it always asks for
+// aarch64 whatever arch state lingers (Intel Macs are unsupported).
+
+describe('installerUrl', () => {
+  test('windows: bare endpoint, arch ignored', () => {
+    expect(installerUrl('windows', 'aarch64')).toBe('/api/agents/installer');
+  });
+
+  test('linux: honours the chosen arch', () => {
+    expect(installerUrl('linux', 'x86_64')).toBe('/api/agents/installer?os=linux&arch=x86_64');
+    expect(installerUrl('linux', 'aarch64')).toBe('/api/agents/installer?os=linux&arch=aarch64');
+  });
+
+  test('macos: always aarch64, never x86_64', () => {
+    expect(installerUrl('macos', 'x86_64')).toBe('/api/agents/installer?os=macos&arch=aarch64');
+    expect(installerUrl('macos', 'aarch64')).toBe('/api/agents/installer?os=macos&arch=aarch64');
   });
 });

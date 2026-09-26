@@ -163,8 +163,9 @@ async fn publish(
 
     // Which platform is this binary? Read from its own bytes, not the
     // filename: PE (Windows) stays at the bare `<version>` key, ELF
-    // (Linux) goes to `<version>-linux-<arch>`, thin Mach-O (macOS) to
-    // `<version>-macos-<arch>`; universal Mach-O / unknown is a hard
+    // (Linux) goes to `<version>-linux-<arch>`, thin arm64 Mach-O (macOS,
+    // Apple Silicon only) to `<version>-macos-aarch64`; an x86_64 (Intel)
+    // or universal Mach-O / unknown is a hard
     // error — a publish that can't name its platform must not silently
     // land on the Windows key (see kanade_shared::bin_platform).
     let platform = kanade_shared::bin_platform::AgentPlatform::detect(&bytes)
@@ -249,7 +250,7 @@ async fn rollout(client: async_nats::Client, args: RolloutArgs) -> Result<()> {
     // yet — saves the operator from finding out at agent-side via a
     // "self-update fetch failed" log line per host. A version passes
     // when ANY of its keys exists: the bare Windows key or a
-    // `<version>-linux-<arch>` / `<version>-macos-<arch>` one — a
+    // `<version>-linux-<arch>` / `<version>-macos-aarch64` one — a
     // Linux- or macOS-only publish never writes the bare key.
     let store = js
         .get_object_store(OBJECT_AGENT_RELEASES)

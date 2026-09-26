@@ -4,6 +4,11 @@ Runs `kanade-agent` on a Mac as a **launchd daemon** (`com.kanade.agent`),
 the counterpart of the Linux systemd unit and the Windows service. Only the
 agent is supported on macOS; the backend + NATS stay on Linux/Windows.
 
+**Apple Silicon (arm64) Macs only.** Intel (x86_64) Macs are not supported
+— macOS 27 dropped Intel, and no `x86_64-apple-darwin` agent is built:
+`kanade agent publish` rejects an x86_64 Mach-O, the installer endpoint
+rejects `?os=macos&arch=x86_64`, and the one-liner refuses Intel Macs.
+
 | File | Role |
 | --- | --- |
 | `setup-agent.sh` | Install/upgrade from a local bundle (run as root). Ships in the backend installer as `setup-agent-macos.sh` |
@@ -15,16 +20,18 @@ and copy them across; `assets_match_the_workspace_originals` fails on drift.
 
 ## Install via the backend (recommended)
 
-Publish a thin per-arch agent binary first (`<version>-macos-x86_64` /
-`<version>-macos-aarch64` keys in the `agent_releases` Object Store —
-`kanade agent publish` detects the Mach-O arch; universal/fat binaries are
-rejected, so build or `lipo -thin` one per arch). Then either:
+Publish a thin Apple Silicon agent binary first (`<version>-macos-aarch64`
+key in the `agent_releases` Object Store — `kanade agent publish` detects
+the Mach-O arch; universal/fat binaries are rejected, so build
+`aarch64-apple-darwin` or `lipo -thin arm64` a universal one). Then either:
 
 - **One-liner** — the SPA Agent Install page's `curl … | sudo bash`
   command. The generated `installer.sh` picks `os=macos` from `uname -s`
-  and the arch from `uname -m` (`arm64` → `aarch64`).
-- **Tarball** — `GET /api/agents/installer?os=macos&arch=x86_64|aarch64`,
-  then:
+  and checks the hardware with `sysctl -n hw.optional.arm64` (not
+  `uname -m`, which reports `x86_64` in a Rosetta shell on Apple Silicon);
+  on an Intel Mac it exits with an error.
+- **Tarball** — `GET /api/agents/installer?os=macos&arch=aarch64` (`arch`
+  may be omitted on macOS; `x86_64` is rejected with a 400), then:
 
   ```bash
   mkdir kanade-agent-installer && cd kanade-agent-installer
@@ -41,7 +48,7 @@ Lay out a bundle directory the way the backend tarball does and run the
 script from its root:
 
 ```
-bin/kanade-agent                  # the thin binary for this Mac's arch
+bin/kanade-agent                  # the thin Apple Silicon (arm64) binary
 etc/agent.toml                    # configs/agent.toml, nats_url set
 launchd/com.kanade.agent.plist    # this directory's plist
 setup-agent.sh                    # this directory's script

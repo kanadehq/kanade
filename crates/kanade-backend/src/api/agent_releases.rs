@@ -4,8 +4,8 @@
 //!   binary, `version` = label, required for non-PE binaries) →
 //!   puts the bytes in the `agent_releases` Object Store under a
 //!   platform-derived key (bare `<version>` for Windows,
-//!   `<version>-linux-<arch>` for Linux, `<version>-macos-<arch>`
-//!   for macOS — see kanade_shared::bin_platform). Mirrors `kanade agent
+//!   `<version>-linux-<arch>` for Linux, `<version>-macos-aarch64`
+//!   for macOS, Apple Silicon only — see kanade_shared::bin_platform). Mirrors `kanade agent
 //!   publish` on the CLI side; the SPA's Rollout page wires a
 //!   file picker to this endpoint.
 //! * `GET  /api/agents/releases` — list every version present in
@@ -41,8 +41,8 @@ use crate::audit::Caller;
 pub struct PublishResponse {
     pub version: String,
     /// The Object Store key the binary was stored under — `version` for
-    /// Windows, `<version>-linux-<arch>` for Linux, `<version>-macos-<arch>`
-    /// for macOS (bin_platform key scheme).
+    /// Windows, `<version>-linux-<arch>` for Linux, `<version>-macos-aarch64`
+    /// for macOS (bin_platform key scheme; Apple Silicon only).
     pub key: String,
     pub platform: String,
     pub size: u64,
@@ -126,12 +126,9 @@ pub async fn publish(
             }
             pe
         }
-        AgentPlatform::LinuxX86_64
-        | AgentPlatform::LinuxAarch64
-        | AgentPlatform::MacOSX86_64
-        | AgentPlatform::MacOSAarch64 => {
+        AgentPlatform::LinuxX86_64 | AgentPlatform::LinuxAarch64 | AgentPlatform::MacOSAarch64 => {
             let format = match platform {
-                AgentPlatform::MacOSX86_64 | AgentPlatform::MacOSAarch64 => "macOS Mach-O",
+                AgentPlatform::MacOSAarch64 => "macOS Mach-O",
                 _ => "Linux ELF",
             };
             version_field.ok_or((

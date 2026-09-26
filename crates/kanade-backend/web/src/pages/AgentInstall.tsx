@@ -16,7 +16,7 @@ const FALLBACK_FILENAME = 'kanade-agent-installer.zip';
 
 // Pull the download filename out of the installer's Content-Disposition
 // header (`attachment; filename="kanade-agent-installer-<version>.zip"` /
-// `…-<version>-linux-<arch>.tar.gz` / `…-<version>-macos-<arch>.tar.gz`).
+// `…-<version>-linux-<arch>.tar.gz` / `…-<version>-macos-aarch64.tar.gz`).
 // Kept pure and exported so the parsing
 // is testable without a DOM — the same reason lib/signing.ts stays out of
 // its badge component.
@@ -26,7 +26,7 @@ export function installerFilename(contentDisposition: string | null): string {
 }
 
 export type InstallerOs = 'windows' | 'linux' | 'macos';
-type InstallerArch = 'x86_64' | 'aarch64';
+export type InstallerArch = 'x86_64' | 'aarch64';
 
 // Initial OS for the toggle, guessed from the browser. `platform` is
 // `navigator.userAgentData.platform` (Chromium) — more reliable than the UA
@@ -44,13 +44,23 @@ export function detectOs(ua: string, platform?: string): InstallerOs {
   return 'windows';
 }
 
+// The installer download URL. Bare = Windows ZIP; Linux takes the chosen
+// arch; macOS is Apple Silicon only (Intel Macs are unsupported — the
+// backend 400s `arch=x86_64` there), so it always asks for aarch64 and
+// there is no arch choice. Pure + exported so it's unit-testable.
+export function installerUrl(os: InstallerOs, arch: InstallerArch): string {
+  if (os === 'windows') return '/api/agents/installer';
+  return `/api/agents/installer?os=${os}&arch=${os === 'macos' ? 'aarch64' : arch}`;
+}
+
 // The copyable one-liner install command for each OS. The script endpoints
 // (`installer.ps1` / `installer.sh`) are auth-gated like every other API
 // route, so the command embeds the caller's session token as a Bearer
 // header and points at the backend that served this SPA (`origin`) —
 // correct even when the operator browses through a reverse proxy. Linux
 // and macOS share `installer.sh`: the served script branches on
-// `uname -s` / `uname -m` to fetch the matching tarball. Pure + exported
+// `uname -s` to fetch the matching tarball (arch from `uname -m` on Linux;
+// macOS is Apple Silicon only). Pure + exported
 // so the shape is unit-testable.
 export function oneLiner(os: InstallerOs, origin: string, token: string): string {
   if (os !== 'windows') {
@@ -84,11 +94,10 @@ export function AgentInstall() {
       (navigator as { userAgentData?: { platform?: string } }).userAgentData?.platform,
     ),
   );
-  // Preselected architecture: the browser can't reliably tell the host
-  // CPU (Safari reports "Intel Mac OS X" even on Apple Silicon), so guess
-  // the common case — x86_64 for Linux, Apple Silicon for current Macs.
-  // Both options stay selectable; selectOs re-seeds it on every OS switch.
-  const [arch, setArch] = useState<InstallerArch>(os === 'macos' ? 'aarch64' : 'x86_64');
+  // Linux architecture: the browser can't reliably tell the host CPU, so
+  // guess the common case (x86_64); selectOs re-seeds it on every OS
+  // switch. macOS has no choice — Apple Silicon only (installerUrl).
+  const [arch, setArch] = useState<InstallerArch>('x86_64');
   const [downloading, setDownloading] = useState(false);
   // Session token embedded into the one-liner — same accessor as
   // lib/api.ts / lib/auth.tsx (`localStorage.kanade_token`). Read once:
@@ -114,13 +123,12 @@ export function AgentInstall() {
     }
   }
 
-  // Switching OS re-seeds the arch with that OS's default (Apple Silicon
-  // for macOS) — an x86_64 pick carried over from the Linux tab would
-  // silently hand most Mac users the wrong binary.
+  // Switching OS re-seeds the (Linux-only) arch with its default, so an
+  // earlier pick never silently carries over.
   function selectOs(next: InstallerOs) {
     if (next === os) return;
     setOs(next);
-    setArch(next === 'macos' ? 'aarch64' : 'x86_64');
+    setArch('x86_64');
   }
 
   // Same query key + staleTime as the Agents page: this backend's signing
@@ -140,12 +148,7 @@ export function AgentInstall() {
     setDownloading(true);
     try {
       let filename = FALLBACK_FILENAME;
-      // Bare URL = Windows ZIP; Linux/macOS take the platform query params
-      // (arch defaults server-side to x86_64, sent explicitly anyway).
-      const apiUrl =
-        os === 'windows'
-          ? '/api/agents/installer'
-          : `/api/agents/installer?os=${os}&arch=${arch}`;
+      const apiUrl = installerUrl(os, arch);
       const blob = await apiFetchBlob(apiUrl, {}, (res) => {
         filename = installerFilename(res.headers.get('Content-Disposition'));
       });
@@ -295,7 +298,7 @@ export function AgentInstall() {
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
           <div className="flex items-end gap-3">
-            {os !== 'windows' && (
+            {os === 'linux' && (
               <div className="space-y-1">
                 <Label htmlFor="ai-arch">{t('download.archLabel')}</Label>
                 <Select
@@ -304,14 +307,8 @@ export function AgentInstall() {
                   onChange={(e) => setArch(e.target.value as InstallerArch)}
                   className="w-56"
                 >
-                  {/* macOS labels by Mac generation (Intel / Apple
-                      Silicon) — what a Mac user actually knows. */}
-                  <option value="x86_64">
-                    {t(os === 'macos' ? 'download.archOptionsMacos.x86_64' : 'download.archOptions.x86_64')}
-                  </option>
-                  <option value="aarch64">
-                    {t(os === 'macos' ? 'download.archOptionsMacos.aarch64' : 'download.archOptions.aarch64')}
-                  </option>
+                  <option value="x86_64">{t('download.archOptions.x86_64')}</option>
+                  <option value="aarch64">{t('download.archOptions.aarch64')}</option>
                 </Select>
               </div>
             )}
