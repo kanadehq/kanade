@@ -3049,6 +3049,7 @@ dependencies = [
  "humantime",
  "image",
  "kanade-shared",
+ "libc",
  "portpicker",
  "rand 0.10.2",
  "roxmltree",

@@ -29,8 +29,11 @@ pub(crate) const POWERSHELL_UTF8_PRELUDE: &str = "[Console]::OutputEncoding = Ne
 /// Process-wide staging directory for temp `.ps1` files.
 ///
 /// Layout: `%ProgramData%/Kanade/agent-scripts/<uuid>/` on Windows,
+/// `/Library/Application Support/Kanade/agent-scripts/<uuid>/` on a root
+/// macOS agent (0755 dirs / 0644 files, so a `run_as: user` child can read
+/// its launcher — see `process_as_user_macos::create_staging_dir`), and
 /// `$TMPDIR/kanade-agent-<uuid>/` elsewhere (dev / tests only —
-/// non-Windows skips the static `agent-scripts/` segment because
+/// the temp fallback skips the static `agent-scripts/` segment because
 /// `$TMPDIR` is world-writable and a predictable parent would
 /// open up a symlink-redirect attack; see staging_dir for the
 /// full rationale).
@@ -86,30 +89,38 @@ fn staging_dir() -> Result<PathBuf> {
     // Platforms diverge here for security reasons (Gemini PR #231
     // HIGH): the windows path has an admin-controlled category
     // parent under `%ProgramData%`, so we can safely nest a
-    // grep-friendly static `agent-scripts/` segment in. On
-    // non-Windows the natural parent is `$TMPDIR` (typically
-    // `/tmp/`), which is world-writable; a predictable static
-    // child like `/tmp/kanade-agent-scripts/` could be
-    // pre-created by another local user as a symlink to (say)
-    // `/etc/`, and a subsequent `create_dir_all` would follow it
-    // and let us write files outside the intended tree. We mitigate
-    // by skipping the static segment entirely on non-Windows —
+    // grep-friendly static `agent-scripts/` segment in; a root
+    // macOS agent does the same under the root/admin-only
+    // `/Library/Application Support`. Elsewhere the natural parent
+    // is `$TMPDIR` (typically `/tmp/`), which is world-writable; a
+    // predictable static child like `/tmp/kanade-agent-scripts/`
+    // could be pre-created by another local user as a symlink to
+    // (say) `/etc/`, and a subsequent `create_dir_all` would follow
+    // it and let us write files outside the intended tree. We
+    // mitigate by skipping the static segment entirely there —
     // the per-process UUID dir (created with `create_dir`,
     // non-clobber) sits directly under `$TMPDIR`, with an
     // unguessable name that can't be pre-empted.
-    let dir = if cfg!(target_os = "windows") {
-        let category = std::env::var_os("ProgramData")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
-            .join("Kanade")
-            .join("agent-scripts");
-        std::fs::create_dir_all(&category)
-            .with_context(|| format!("create_dir_all {}", category.display()))?;
-        category.join(Uuid::new_v4().simple().to_string())
-    } else {
-        std::env::temp_dir().join(format!("kanade-agent-{}", Uuid::new_v4().simple()))
+    let uuid = Uuid::new_v4().simple().to_string();
+    #[cfg(target_os = "macos")]
+    let dir = crate::process_as_user_macos::create_staging_dir(&uuid)?;
+    #[cfg(not(target_os = "macos"))]
+    let dir = {
+        let dir = if cfg!(target_os = "windows") {
+            let category = std::env::var_os("ProgramData")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
+                .join("Kanade")
+                .join("agent-scripts");
+            std::fs::create_dir_all(&category)
+                .with_context(|| format!("create_dir_all {}", category.display()))?;
+            category.join(&uuid)
+        } else {
+            std::env::temp_dir().join(format!("kanade-agent-{uuid}"))
+        };
+        std::fs::create_dir(&dir).with_context(|| format!("create_dir {}", dir.display()))?;
+        dir
     };
-    std::fs::create_dir(&dir).with_context(|| format!("create_dir {}", dir.display()))?;
     *guard = Some(dir.clone());
     Ok(dir)
 }
@@ -136,11 +147,23 @@ impl TempPowerShellScript {
     pub fn write(body: &str) -> Result<Self> {
         let dir = staging_dir()?;
         let path = dir.join(format!("kanade-{}.ps1", Uuid::new_v4().simple()));
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        // macOS: a `run_as: user` child reads this as another user. Cap the
+        // creation mode at 0644 (never group/other-writable, even under a
+        // lax umask — the staged file is what root may run) and then chmod
+        // to exactly 0644 in case the umask was stricter.
+        #[cfg(target_os = "macos")]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o644);
+        let mut f = options
             .open(&path)
             .with_context(|| format!("create_new {}", path.display()))?;
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            f.set_permissions(std::fs::Permissions::from_mode(0o644))
+                .with_context(|| format!("chmod 644 {}", path.display()))?;
+        }
         // UTF-8 BOM (0xEF 0xBB 0xBF) — PowerShell uses it to detect
         // UTF-8 encoding without a `chcp 65001` dance. Without it,
         // a ja-JP host running default CP932 would mis-parse any
@@ -280,9 +303,13 @@ pub async fn run_command_with_kill(
     cmd: &Command,
     live: Option<Arc<LiveTail>>,
 ) -> Result<ExecOutcome> {
-    // v0.21: run_as: user / system_gui take a separate Win32 path
-    // (CreateProcessAsUserW). System (default) stays on tokio::process
-    // — backward-compatible for every pre-v0.21 manifest in the wild.
+    // v0.21: on Windows, run_as: user / system_gui take a separate Win32
+    // path (CreateProcessAsUserW). System (default) stays on tokio::process
+    // — backward-compatible for every pre-v0.21 manifest in the wild. macOS
+    // needs no separate path: `host_command` wraps the same tokio::process
+    // host in `launchctl asuser`, so it shares the capture / kill / timeout
+    // machinery below.
+    #[cfg(not(target_os = "macos"))]
     if !matches!(cmd.run_as, RunAs::System) {
         return run_in_user_session_dispatch(client, cmd, live).await;
     }
@@ -371,73 +398,24 @@ pub async fn run_command_with_kill(
             ("pwsh", args)
         }
     };
-    let mut builder = ProcessCommand::new(program);
+    let mut builder = host_command(cmd, program, &args)?;
     builder
-        .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    if let Some(dir) = cmd.cwd.as_deref().filter(|s| !s.is_empty()) {
-        // v0.21.2: expand `~` / `%FOO%` against the agent's own
-        // token before handing to current_dir (which itself does
-        // no expansion).
-        #[cfg(target_os = "windows")]
-        {
-            match crate::cwd_expand::open_self_token()
-                .and_then(|tok| crate::cwd_expand::expand(dir, tok.handle()))
-            {
-                Ok(expanded) => {
-                    builder.current_dir(expanded);
-                }
-                Err(e) => {
-                    warn!(error = %e, raw_cwd = %dir, "cwd expansion failed; using raw value");
-                    builder.current_dir(dir);
-                }
-            }
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            builder.current_dir(dir);
-        }
-    }
+    #[cfg(unix)]
+    spawn_in_own_session(&mut builder);
     let mut child = builder
         .spawn()
         .with_context(|| format!("spawn {program}"))?;
 
-    // Job Object: put the host (`powershell` / `cmd`) — and every
-    // descendant it spawns — into a kernel Job so a kill/timeout can
-    // terminate the WHOLE tree at once. Without this, `child.kill()`
-    // only reaps the host; a grandchild (e.g. a job that runs
-    // `claude`) would be orphaned AND keep the inherited stdout/stderr
-    // pipe handles open, so the `read_to_end` drain below would never
-    // hit EOF and this fn would hang forever — leaving the Activity
-    // row stuck on "実行中" after a 強制終了 click. On non-Windows
-    // `job` is always `None` and we fall back to the single-process
-    // kill. Assign failure (e.g. an OS without nested-Job support)
-    // also degrades to the single-process path with a warning.
-    let job: Option<crate::job_object::JobObject> = {
-        #[cfg(target_os = "windows")]
-        {
-            match child.raw_handle() {
-                Some(h) => {
-                    match crate::job_object::JobObject::assign_handle(
-                        windows::Win32::Foundation::HANDLE(h),
-                    ) {
-                        Ok(j) => Some(j),
-                        Err(e) => {
-                            warn!(error = %e, "job object assign failed; kill falls back to single-process terminate");
-                            None
-                        }
-                    }
-                }
-                None => None,
-            }
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            None
-        }
-    };
+    // Put the host (`powershell` / `pwsh` / `sh` / `cmd`) — and every
+    // descendant it spawns — somewhere a kill/timeout can terminate the
+    // WHOLE tree at once. Without this, `child.kill()` only reaps the
+    // host; a grandchild (e.g. a job that runs `claude`) would be
+    // orphaned AND keep the inherited stdout/stderr pipe handles open.
+    // See [`KillTree`].
+    let tree = KillTree::attach(&child);
 
     let stdout_handle = child.stdout.take();
     let stderr_handle = child.stderr.take();
@@ -495,6 +473,8 @@ pub async fn run_command_with_kill(
             debug!(exec_id = %eid, subject = %kill_subject, "kill listener armed");
 
             tokio::select! {
+                // A clean host exit never touches the tree: a daemon the
+                // script detached on purpose keeps running.
                 status = child.wait() => {
                     debug!(exec_id = %eid, "child exited (wait arm fired)");
                     let s = status?;
@@ -502,24 +482,15 @@ pub async fn run_command_with_kill(
                 }
                 msg = kill_sub.next() => {
                     info!(exec_id = %eid, has_msg = msg.is_some(), "kill arm fired");
-                    // Terminate the whole Job (host + descendants) so
+                    // Terminate the whole tree (host + descendants) so
                     // orphaned grandchildren can't keep the pipes open
-                    // and hang the drain. Fall back to the single
-                    // child when no Job was assigned.
-                    if let Some(j) = &job {
-                        j.terminate();
-                    } else if let Err(e) = child.kill().await {
-                        warn!(error = %e, "child.kill failed (process may already be dead)");
-                    }
+                    // and hang the drain.
+                    tree.terminate(&mut child).await;
                     OutcomeInner::Killed
                 }
                 _ = tokio::time::sleep(timeout_dur) => {
                     info!(exec_id = %eid, "timeout arm fired");
-                    if let Some(j) = &job {
-                        j.terminate();
-                    } else if let Err(e) = child.kill().await {
-                        warn!(error = %e, "child.kill on timeout failed");
-                    }
+                    tree.terminate(&mut child).await;
                     OutcomeInner::Timeout
                 }
             }
@@ -531,11 +502,7 @@ pub async fn run_command_with_kill(
                     OutcomeInner::Completed(s.code().unwrap_or(-1))
                 }
                 _ = tokio::time::sleep(timeout_dur) => {
-                    if let Some(j) = &job {
-                        j.terminate();
-                    } else if let Err(e) = child.kill().await {
-                        warn!(error = %e, "child.kill on timeout failed");
-                    }
+                    tree.terminate(&mut child).await;
                     OutcomeInner::Timeout
                 }
             }
@@ -553,6 +520,169 @@ pub async fn run_command_with_kill(
         OutcomeInner::Killed => ExecOutcome::Killed { stdout, stderr },
         OutcomeInner::Timeout => ExecOutcome::Timeout { stdout, stderr },
     })
+}
+
+/// The host process for a job: `program args...` under the agent's own
+/// identity — or, on macOS for `run_as: user` / `system_gui`, wrapped by
+/// [`crate::process_as_user_macos::session_command`] to run in the console
+/// user's GUI session.
+fn host_command(cmd: &Command, program: &str, args: &[&str]) -> Result<ProcessCommand> {
+    #[cfg(target_os = "macos")]
+    if !matches!(cmd.run_as, RunAs::System) {
+        return crate::process_as_user_macos::session_command(
+            cmd.run_as,
+            program,
+            args,
+            cmd.cwd.as_deref(),
+        );
+    }
+    let mut builder = ProcessCommand::new(program);
+    builder.args(args);
+    // macOS: a LaunchDaemon's PATH is only /usr/bin:/bin:/usr/sbin:/sbin
+    // and an installed plist is never rewritten, so the agent itself gives
+    // system jobs the same PATH as session jobs; the rest of the env is
+    // still inherited. Setting PATH on the Command also moves the lookup of
+    // a bare `program` (`pwsh`) onto it — std resolves against the child's
+    // PATH once `env("PATH", ..)` is set.
+    #[cfg(target_os = "macos")]
+    builder.env("PATH", crate::process_as_user_macos::job_path());
+    if let Some(dir) = cmd.cwd.as_deref().filter(|s| !s.is_empty()) {
+        // v0.21.2: expand `~` (and `%FOO%` on Windows) against the
+        // agent's own identity before handing to current_dir (which
+        // itself does no expansion).
+        #[cfg(target_os = "windows")]
+        {
+            match crate::cwd_expand::open_self_token()
+                .and_then(|tok| crate::cwd_expand::expand(dir, tok.handle()))
+            {
+                Ok(expanded) => {
+                    builder.current_dir(expanded);
+                }
+                Err(e) => {
+                    warn!(error = %e, raw_cwd = %dir, "cwd expansion failed; using raw value");
+                    builder.current_dir(dir);
+                }
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            builder.current_dir(crate::process_as_user_macos::expand_agent_cwd(dir));
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        {
+            builder.current_dir(dir);
+        }
+    }
+    Ok(builder)
+}
+
+/// Start the host as the leader of a new session (and so of a new process
+/// group whose id is the host's pid), for [`KillTree`] to signal. `setsid`
+/// rather than a bare process group so the chain also sheds any
+/// controlling terminal of a dev-run agent: with a terminal present,
+/// `sudo` (macOS `run_as: user`) may run the job behind a pseudo-terminal
+/// (its `use_pty` default).
+#[cfg(unix)]
+fn spawn_in_own_session(builder: &mut ProcessCommand) {
+    // SAFETY: the hook runs in the forked child before exec, where only
+    // async-signal-safe calls are allowed; setsid(2) is one and touches no
+    // Rust state.
+    unsafe {
+        builder.pre_exec(|| {
+            if libc::setsid() == -1 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+}
+
+/// How long a unix host gets to exit on SIGTERM before its whole process
+/// group is SIGKILLed.
+#[cfg(unix)]
+const KILL_TERM_GRACE: Duration = Duration::from_secs(5);
+
+/// The host plus every descendant, as one unit to tear down on kill /
+/// timeout — never on a clean host exit, which must leave a deliberately
+/// detached daemon running.
+///
+/// - Windows: a Job Object ([`crate::job_object`]).
+/// - Unix: the host's own process group ([`spawn_in_own_session`]):
+///   SIGTERM to the group, up to [`KILL_TERM_GRACE`] for the host to exit,
+///   then SIGKILL to whatever is left. A descendant that moved itself to
+///   another group/session (a double-forked daemon) is out of reach, but it
+///   can't hang the job: capture is bounded by [`OUTPUT_DRAIN_GRACE`].
+///
+/// With no tree (Job assignment failed) it degrades to killing the host.
+struct KillTree {
+    #[cfg(target_os = "windows")]
+    job: Option<crate::job_object::JobObject>,
+    #[cfg(unix)]
+    group: Option<libc::pid_t>,
+}
+
+impl KillTree {
+    fn attach(child: &tokio::process::Child) -> Self {
+        #[cfg(target_os = "windows")]
+        {
+            let job = child.raw_handle().and_then(|h| {
+                crate::job_object::JobObject::assign_handle(windows::Win32::Foundation::HANDLE(h))
+                    .map_err(|e| {
+                        warn!(error = %e, "job object assign failed; kill falls back to single-process terminate");
+                    })
+                    .ok()
+            });
+            Self { job }
+        }
+        #[cfg(unix)]
+        {
+            Self {
+                group: child.id().and_then(|pid| libc::pid_t::try_from(pid).ok()),
+            }
+        }
+    }
+
+    async fn terminate(&self, child: &mut tokio::process::Child) {
+        #[cfg(target_os = "windows")]
+        if let Some(job) = &self.job {
+            job.terminate();
+            return;
+        }
+        #[cfg(unix)]
+        if let Some(pgid) = self.group {
+            signal_group(pgid, libc::SIGTERM);
+            if tokio::time::timeout(KILL_TERM_GRACE, child.wait())
+                .await
+                .is_err()
+            {
+                info!(
+                    pgid,
+                    "host still running after SIGTERM grace; sending SIGKILL"
+                );
+            }
+            signal_group(pgid, libc::SIGKILL);
+            if let Err(e) = child.wait().await {
+                warn!(error = %e, "wait after killing the process group failed");
+            }
+            return;
+        }
+        if let Err(e) = child.kill().await {
+            warn!(error = %e, "child.kill failed (process may already be dead)");
+        }
+    }
+}
+
+/// `killpg`, treating "no such group" (everyone already gone) as success.
+#[cfg(unix)]
+fn signal_group(pgid: libc::pid_t, signal: libc::c_int) {
+    // SAFETY: killpg(2) only reads its two integer arguments.
+    if unsafe { libc::killpg(pgid, signal) } == -1 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::ESRCH) {
+            warn!(error = %err, pgid, signal, "killpg failed");
+        }
+    }
 }
 
 /// Allow buffered output to drain after the host exits, without waiting for
@@ -679,8 +809,9 @@ where
 /// NATS subscriber-based kill signal) and `process_as_user`'s
 /// `oneshot::Receiver<()>` kill channel. We subscribe to `kill.{exec_id}`
 /// here and forward "fired" into the channel, so the Win32 path's
-/// inner `tokio::select!` can use a plain oneshot.
-//
+/// inner `tokio::select!` can use a plain oneshot. macOS never gets here
+/// (see `host_command`); Linux has no user-session launch yet.
+#[cfg(not(target_os = "macos"))]
 async fn run_in_user_session_dispatch(
     client: &async_nats::Client,
     cmd: &Command,
@@ -692,17 +823,16 @@ async fn run_in_user_session_dispatch(
         let _ = live;
         warn!(
             run_as = ?cmd.run_as,
-            "run_as: user / system_gui is Windows-only — falling back to inherited identity",
+            "run_as: user / system_gui is not supported on Linux agents — skipping the script",
         );
         // Synthesise an immediate "stub" outcome rather than silently
-        // running as the wrong identity on a non-Windows agent. Real
-        // operators are on Windows anyway; this branch exists to keep
-        // the workspace cross-compile-clean.
+        // running as the wrong identity: Linux has no console-session
+        // launch yet (Windows and macOS do).
         Ok(ExecOutcome::Completed {
             exit_code: 0,
             stdout: String::new(),
             stderr: format!(
-                "run_as: {:?} is Windows-only; non-Windows agents skip the script.\n",
+                "run_as: {:?} is not supported on Linux agents; the script was skipped.\n",
                 cmd.run_as
             ),
         })
@@ -950,5 +1080,111 @@ mod tests {
         drop(launch);
         assert!(!launcher_path.exists(), "launcher must be removed on drop");
         assert!(!user_path.exists(), "user file must be removed on drop");
+    }
+}
+
+/// The unix tree-kill contract of `run_command_with_kill`, through the real
+/// spawn: a timeout takes the host's whole process group down, a clean exit
+/// leaves a detached daemon alone. `run_as: system` + `sh`, so it runs as
+/// any user.
+#[cfg(all(test, unix))]
+mod process_tree_tests {
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
+    use super::{ExecOutcome, run_command_with_kill};
+
+    /// No `exec_id`, so the run never touches NATS: nothing listens on
+    /// port 1 and the client just keeps retrying in the background.
+    async fn client() -> async_nats::Client {
+        async_nats::ConnectOptions::new()
+            .retry_on_initial_connect()
+            .connect("127.0.0.1:1")
+            .await
+            .expect("lazy client")
+    }
+
+    fn sh_job(script: &str, timeout_secs: u64) -> kanade_shared::wire::Command {
+        serde_json::from_value(serde_json::json!({
+            "id": "tree-test",
+            "version": "1",
+            "request_id": "req",
+            "exec_id": null,
+            "shell": "sh",
+            "script": script,
+            "timeout_secs": timeout_secs,
+            "jitter_secs": null,
+            "run_as": "system",
+        }))
+        .expect("command")
+    }
+
+    fn read_pid(file: &Path) -> libc::pid_t {
+        std::fs::read_to_string(file)
+            .expect("pid file")
+            .trim()
+            .parse()
+            .expect("pid")
+    }
+
+    fn alive(pid: libc::pid_t) -> bool {
+        // SAFETY: signal 0 only checks that `pid` exists.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    /// SIGKILLs the test's own background process however the test ends.
+    struct Reap(libc::pid_t);
+
+    impl Drop for Reap {
+        fn drop(&mut self) {
+            // SAFETY: plain kill(2) on a pid this test started.
+            unsafe { libc::kill(self.0, libc::SIGKILL) };
+        }
+    }
+
+    #[tokio::test]
+    async fn timeout_kills_the_whole_process_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("grandchild.pid");
+        let script = format!("sleep 300 & echo $! > '{}'; sleep 300", pid_file.display());
+
+        let outcome = run_command_with_kill(&client().await, &sh_job(&script, 1), None)
+            .await
+            .expect("run");
+
+        assert!(matches!(outcome, ExecOutcome::Timeout { .. }));
+        let grandchild = read_pid(&pid_file);
+        let _reap = Reap(grandchild);
+        // Killed by the group signal; allow its new parent a moment to reap it.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while alive(grandchild) && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            !alive(grandchild),
+            "grandchild {grandchild} survived the timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn clean_exit_leaves_a_detached_daemon_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("daemon.pid");
+        let script = format!(
+            "sleep 300 >/dev/null 2>&1 </dev/null & echo $! > '{}'; exit 0",
+            pid_file.display()
+        );
+
+        let outcome = run_command_with_kill(&client().await, &sh_job(&script, 60), None)
+            .await
+            .expect("run");
+
+        let daemon = read_pid(&pid_file);
+        let _reap = Reap(daemon);
+        assert!(matches!(
+            outcome,
+            ExecOutcome::Completed { exit_code: 0, .. }
+        ));
+        assert!(alive(daemon), "daemon {daemon} was killed on a clean exit");
     }
 }

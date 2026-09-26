@@ -1204,7 +1204,7 @@ if matches!(policy.mode, Mode::Strict) && staleness > policy.max_cache_age {
 
 ### 2.6.3 第3層: 実行中の緊急停止
 
-Agent は子プロセス起動と同時に `kill.{exec_id}` を subscribe し、`tokio::select!` で `child.wait()` / `kill_sub.next()` / timeout を競争させる。kill 受信で `child.kill()` を呼び、結果は `ExecOutcome::Killed` として publish される (`run_as: user / system_gui` の Win32 path も oneshot bridge 経由で同じ経路に集約)。
+Agent は子プロセス起動と同時に `kill.{exec_id}` を subscribe し、`tokio::select!` で `child.wait()` / `kill_sub.next()` / timeout を競争させる。kill / timeout ではホストと子孫をまとめて終了し (Windows: Job Object、unix: ホストを `setsid` で専用プロセスグループに置き、グループへ SIGTERM → 最大 5 秒後に SIGKILL)、結果は `ExecOutcome::Killed` (timeout なら `ExecOutcome::Timeout`) として publish される。正常終了時はツリーに触れないので、スクリプトが意図的に切り離したデーモンは残る (`run_as: user / system_gui` の Win32 path も oneshot bridge 経由で同じ経路に集約。macOS はこの tokio::process 経路そのものを `launchctl asuser` で包む)。
 
 ```rust
 // crates/kanade-agent/src/process.rs::run_command_with_kill (抜粋)

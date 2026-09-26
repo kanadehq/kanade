@@ -2416,18 +2416,24 @@ pub struct Execute {
     pub timeout: String,
     /// Token + session combination the agent uses to launch the
     /// script (v0.21). Default = [`RunAs::System`] (Session 0,
-    /// LocalSystem privileges, no GUI) — matches pre-v0.21 behavior.
+    /// LocalSystem privileges, no GUI; root on macOS) — matches
+    /// pre-v0.21 behavior. `user` / `system_gui` run in the logged-in
+    /// console user's session on Windows and macOS, and fail when
+    /// nobody is logged in; Linux agents skip them.
     #[serde(default)]
     pub run_as: RunAs,
     /// Working directory for the spawned child (v0.21.1). When
     /// unset, the child inherits the agent's cwd — on Windows that
     /// means `%SystemRoot%\System32` for the prod service, which is
-    /// almost never what operators actually want. Use an absolute
-    /// path; relative paths are passed through to the OS verbatim.
-    /// `%PROGRAMDATA%` works for `run_as: system`; for `run_as: user`
-    /// you'd want `%USERPROFILE%` (but expansion happens in the
-    /// shell, so write `$env:USERPROFILE` for PowerShell, or set
-    /// it via teravars before `kanade job create`).
+    /// almost never what operators actually want (a macOS `run_as:
+    /// user` job starts in the user's home instead: the daemon's own
+    /// cwd is its 0700 data dir). Use an absolute path; relative paths
+    /// are passed through to the OS verbatim. The agent expands a
+    /// leading `~` to the home of the identity the job runs as (the
+    /// user for `run_as: user`), and on Windows `%FOO%` from that
+    /// identity's environment — so `%PROGRAMDATA%` works for `run_as:
+    /// system`, `~\src` / `%USERPROFILE%` for `run_as: user`. A macOS
+    /// agent expands only `~`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
 }

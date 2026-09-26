@@ -83,8 +83,60 @@ sudo launchctl print system/com.kanade.agent
 tail -f /var/log/kanade/agent.*.log
 # uninstall:
 sudo launchctl bootout system/com.kanade.agent
-sudo rm /Library/LaunchDaemons/com.kanade.agent.plist /usr/local/bin/kanade-agent
+sudo rm -rf /Library/LaunchDaemons/com.kanade.agent.plist /usr/local/bin/kanade-agent \
+     "/Library/Application Support/Kanade"
 ```
+
+launchd's default daemon PATH is only `/usr/bin:/bin:/usr/sbin:/sbin` (no
+Homebrew, no `/usr/local/bin`). The plist does not change that: the agent
+itself gives **every** job — `run_as: system` included — the job PATH
+described below and resolves the host (`pwsh`, `sh`) against it, so an
+install keeps working however old its plist is.
+
+## Job identity (`run_as`)
+
+| `run_as` | Runs as | Bootstrap (GUI / Keychain) | Environment |
+| --- | --- | --- | --- |
+| `system` (default) | root | system — no GUI, no login Keychain | the daemon's own, inherited, except `PATH` (below) |
+| `user` | the console user | the user's GUI session | built from scratch (below) |
+| `system_gui` | root | the console user's GUI session | built from scratch, root's account |
+
+`user` and `system_gui` launch the job's host as
+
+```text
+user:        /bin/launchctl asuser <uid> /usr/bin/sudo -n -u <name> -H -- /usr/bin/env -i <env> <host> <args…>
+system_gui:  /bin/launchctl asuser <uid> /usr/bin/env -i <env> <host> <args…>
+```
+
+- **Console user** = the owner of `/dev/console`. When it is root (the
+  login window) or unreadable, nobody is logged in: the job is **not run**
+  and the command handler fails with `no console user logged in … run_as:
+  user / system_gui needs a logged-in user` — the same outcome as a Windows
+  agent with no active console session.
+- **Environment** is exactly `HOME`, `USER`, `LOGNAME`, `SHELL` (from the
+  passwd entry of the user, or of root for `system_gui`), `LANG` (the
+  daemon's, else `en_US.UTF-8`) and `PATH`. Nothing else crosses over — in
+  particular not the daemon's `KANADE_*` variables or the NATS token.
+  There is no `TMPDIR`; tools fall back to `/tmp`.
+- **PATH** — for every `run_as`, `system` too — is
+  `/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin`, then `/etc/paths`,
+  then each file in `/etc/paths.d` in name order (what `path_helper` gives a
+  login shell), duplicates dropped. The host program is looked up on it.
+- **`cwd`**: `~` / `~/…` expands to the target's home (the user's for
+  `user`, `/var/root` otherwise — also for `system`). A missing directory
+  fails the spawn, as for `system`. With no `cwd`, a `user` job starts in
+  the user's home (the daemon's own working directory is its 0700 data
+  dir); `system_gui` inherits the daemon's.
+- **Staged scripts** (`powershell` / `pwsh` launchers) go to
+  `/Library/Application Support/Kanade/agent-scripts/<uuid>/` (root, 0755
+  dirs / 0644 files, so the user can read them but not change them) and are
+  deleted when the run ends. `$PSScriptRoot` is read-only for a `user` job.
+- **Kill / timeout** — for every `run_as` — signals the host's whole
+  process group (the host is spawned as a session leader): `SIGTERM`, up to
+  5 s for the host to exit, then `SIGKILL`. A clean exit signals nothing, so
+  a daemon the script started (`nohup … &`, `Start-Process`) keeps running;
+  output capture stops 2 s after the host exits even if that daemon still
+  holds stdout/stderr.
 
 ## Caveats
 
