@@ -421,6 +421,16 @@ where
     F: Fn(async_nats::Event) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = ()> + Send + Sync + 'static,
 {
+    // #1187: a workspace build unifies rustls features, so any binary built
+    // alongside a reqwest user (the CLI, the backend) links BOTH aws-lc-rs and
+    // ring. rustls 0.23 then cannot auto-pick a process-level provider, and the
+    // first TLS handshake — a `wss://`/`tls://` broker — panics inside
+    // async-nats' connection task. That panic does not surface here: the
+    // client just goes dead. Every production connect funnels through this
+    // function, so installing ring here covers every binary. `install_default`
+    // returns Err when a provider is already installed — ignore it.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // v0.38 / #137: offline-tolerant boot. Without
     // `retry_on_initial_connect`, `opts.connect(url).await` blocks-then-
     // errors when the broker is unreachable at startup — the agent
@@ -652,5 +662,23 @@ mod tests {
             format!("{:?}", CredentialProbe::from_user("kanade-backend"))
                 .contains("kanade-backend"),
         );
+    }
+
+    #[test]
+    fn connect_leaves_a_process_crypto_provider_installed() {
+        // #1187: a binary that links both aws-lc-rs and ring (any workspace
+        // build) panics on its first wss handshake unless a process-level
+        // provider was installed first. That panic happens inside async-nats'
+        // background task, so the only thing a caller ever sees is a client
+        // that silently never works — pin the precondition here instead.
+        // `retry_on_initial_connect` makes connect return without a broker.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            connect(NatsRole::Agent, "nats://127.0.0.1:1").await.unwrap();
+        });
+        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
     }
 }

@@ -950,7 +950,7 @@ pub(crate) async fn run_agent() -> Result<()> {
         check_sink.clone(),
     );
 
-    let _ = tokio::join!(
+    tokio::join!(
         commands::command_loop(
             client.clone(),
             pc_id.clone(),
@@ -973,7 +973,18 @@ pub(crate) async fn run_agent() -> Result<()> {
         ),
     );
 
-    Ok(())
+    // The command subscriptions only end when the NATS client itself is gone
+    // — e.g. a panic in async-nats' connection task (#1187's missing rustls
+    // provider killed it on the first wss handshake). An agent in that state
+    // can never receive another command, so this is a failure, not a clean
+    // stop: it must exit NON-zero for launchd (`KeepAlive.SuccessfulExit =
+    // false`), systemd (`Restart=on-failure`) and the SCM recovery actions to
+    // bring it back. A deliberate stop never reaches here — the Windows
+    // service path cancels this future on SCM stop, and a signal kills the
+    // process.
+    anyhow::bail!(
+        "command subscriptions ended — NATS client closed; exiting for a supervised restart"
+    )
 }
 
 /// Build the tracing subscriber: stdout (useful in foreground /
