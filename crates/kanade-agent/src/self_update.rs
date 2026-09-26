@@ -839,10 +839,10 @@ async fn swap_and_restart(staged: &Path, target_version: &str, running: &str) ->
         target = target_version,
         replaced = ?current,
         backup   = ?old_path,
-        "swap complete — exiting (code 64); SCM failure-actions take over",
+        "swap complete — exiting (code 64) for the service manager to restart",
     );
 
-    // Let the tracing subscriber flush its buffer before SCM kills us.
+    // Let the tracing subscriber flush its buffer before exiting.
     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
 
     std::process::exit(64);
