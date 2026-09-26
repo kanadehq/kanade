@@ -16,6 +16,8 @@ import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { apiFetch, formatError } from '@/lib/api';
+import { type Role, useAuth } from '@/lib/auth';
+import type { Feature } from '@/lib/features';
 import { fmtIsoLocal } from '@/lib/utils';
 
 /// First N characters of a UUID-shaped identifier (result_id /
@@ -104,9 +106,41 @@ function parseStatusFilter(raw: string | null): StatusFilter {
   return raw === 'running' || raw === 'success' || raw === 'failure' ? raw : '';
 }
 
+/**
+ * Whether a row offers the kill button.
+ *
+ * The backend's own two conditions for `POST /api/jobs/{job_id}/kill`: the
+ * route table gates that route under `Feature::Jobs`, and the vertical gate
+ * under `Role::Operator`. The Activity page is reachable by an
+ * `activity`-only account, so rendering the button on anything less is a
+ * button whose click is a 403 toast — the page would be offering what the
+ * backend refuses. `api::spa_route_tests` pins the route half; this is the
+ * UI half.
+ *
+ * A row is killable only while it is running and carries a `job_id`: ad-hoc
+ * `kanade run` rows have none, and a finished row has nothing to stop. The
+ * predicate form is what lets the JSX use `row.job_id` as a `string` without
+ * a second non-null assertion.
+ */
+export function killIsOffered(
+  row: { job_id: string | null; finished_at: string | null },
+  account: {
+    hasRole: (min: Role) => boolean;
+    canSee: (feature: Feature) => boolean;
+  },
+): row is { job_id: string; finished_at: null } {
+  return (
+    row.job_id !== null &&
+    row.finished_at === null &&
+    account.hasRole('operator') &&
+    account.canSee('jobs')
+  );
+}
+
 export function Activity() {
   const { t } = useTranslation('activity');
   const confirm = useConfirm();
+  const account = useAuth();
   // `status` is URL-backed (the source of truth): the Dashboard
   // "failures / 24h" tile deep-links to `/activity?status=failure` and
   // the Jobs live "running" chip to `/activity?status=running&job_id=…`.
@@ -433,8 +467,13 @@ export function Activity() {
                       `r.job_id && !r.finished_at` was historically
                       always false because every Activity row had
                       a finished_at; now it actually fires for
-                      running rows. */}
-                  {r.job_id && !r.finished_at ? (
+                      running rows.
+
+                      `killIsOffered` adds the account half: the
+                      route is Jobs-gated and operator-gated, so a
+                      viewer or an `activity`-only account gets a
+                      dash rather than a button that 403s. */}
+                  {killIsOffered(r, account) ? (
                     <Button
                       variant="danger"
                       size="sm"
