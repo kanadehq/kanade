@@ -136,17 +136,3 @@ mod imp {
 
 #[cfg(target_os = "windows")]
 pub use imp::JobObject;
-
-// Non-Windows stub so `Option<JobObject>` typechecks in the shared
-// spawn path (`process.rs`). The agent's production target is
-// Windows; on other platforms `job` is always `None` and the code
-// falls back to the single-process kill. The stub carries no handle
-// and `terminate` is a no-op — it never gets constructed off-Windows
-// because `assign_handle` (the only constructor) is Windows-only.
-#[cfg(not(target_os = "windows"))]
-pub struct JobObject;
-
-#[cfg(not(target_os = "windows"))]
-impl JobObject {
-    pub fn terminate(&self) {}
-}

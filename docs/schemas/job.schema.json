@@ -836,14 +836,14 @@
           "type": "boolean"
         },
         "cwd": {
-          "description": "Working directory for the spawned child (v0.21.1). When\nunset, the child inherits the agent's cwd — on Windows that\nmeans `%SystemRoot%\\System32` for the prod service, which is\nalmost never what operators actually want. Use an absolute\npath; relative paths are passed through to the OS verbatim.\n`%PROGRAMDATA%` works for `run_as: system`; for `run_as: user`\nyou'd want `%USERPROFILE%` (but expansion happens in the\nshell, so write `$env:USERPROFILE` for PowerShell, or set\nit via teravars before `kanade job create`).",
+          "description": "Working directory for the spawned child (v0.21.1). When\nunset, the child inherits the agent's cwd — on Windows that\nmeans `%SystemRoot%\\System32` for the prod service, which is\nalmost never what operators actually want (a macOS `run_as:\nuser` job starts in the user's home instead: the daemon's own\ncwd is its 0700 data dir). Use an absolute path; relative paths\nare passed through to the OS verbatim. The agent expands a\nleading `~` to the home of the identity the job runs as (the\nuser for `run_as: user`), and on Windows `%FOO%` from that\nidentity's environment — so `%PROGRAMDATA%` works for `run_as:\nsystem`, `~\\src` / `%USERPROFILE%` for `run_as: user`. A macOS\nagent expands only `~`.",
           "type": [
             "string",
             "null"
           ]
         },
         "run_as": {
-          "description": "Token + session combination the agent uses to launch the\nscript (v0.21). Default = [`RunAs::System`] (Session 0,\nLocalSystem privileges, no GUI) — matches pre-v0.21 behavior.",
+          "description": "Token + session combination the agent uses to launch the\nscript (v0.21). Default = [`RunAs::System`] (Session 0,\nLocalSystem privileges, no GUI; root on macOS) — matches\npre-v0.21 behavior. `user` / `system_gui` run in the logged-in\nconsole user's session on Windows and macOS, and fail when\nnobody is logged in; Linux agents skip them.",
           "$ref": "#/$defs/RunAs",
           "default": "system"
         },
@@ -1164,7 +1164,7 @@
       ]
     },
     "RunAs": {
-      "description": "**Token + session combination** the agent uses to spawn a job's\nchild process. Two orthogonal axes — *whose privileges* and *which\nsession* — collapse into three meaningful combinations:\n\n| variant            | session                | privileges  | GUI |\n|--------------------|------------------------|-------------|-----|\n| `System` (default) | Session 0 (services)   | LocalSystem | ❌  |\n| `User`             | active console session | logged-in user (UAC-filtered when admin) | ✅ |\n| `SystemGui`        | active console session | LocalSystem | ✅  |\n\n`SystemGui` is the \"PsExec `-i -s`\" pattern: the agent duplicates\nits own SYSTEM token and rewrites `TokenSessionId` to the user's\nconsole session, then launches with that hybrid token — useful\nwhen an installer needs admin power *and* needs the user to see\nits UI.",
+      "description": "**Token + session combination** the agent uses to spawn a job's\nchild process. Two orthogonal axes — *whose privileges* and *which\nsession* — collapse into three meaningful combinations:\n\n| variant            | session                | privileges  | GUI |\n|--------------------|------------------------|-------------|-----|\n| `System` (default) | Session 0 (services)   | LocalSystem | ❌  |\n| `User`             | active console session | logged-in user (UAC-filtered when admin) | ✅ |\n| `SystemGui`        | active console session | LocalSystem | ✅  |\n\n`SystemGui` is the \"PsExec `-i -s`\" pattern: the agent duplicates\nits own SYSTEM token and rewrites `TokenSessionId` to the user's\nconsole session, then launches with that hybrid token — useful\nwhen an installer needs admin power *and* needs the user to see\nits UI.\n\nOn macOS, LocalSystem is root and the console session is the GUI\nbootstrap of the user who owns `/dev/console`, joined via\n`launchctl asuser`; `User` runs as that user with a fresh environment.\nOn both OSes `User` / `SystemGui` fail — the script does not run —\nwhen nobody is logged in. Linux agents skip `User` / `SystemGui` jobs.",
       "oneOf": [
         {
           "description": "LocalSystem privileges in Session 0. No GUI. Historical\ndefault — every pre-v0.21 job ran this way.",
@@ -1172,12 +1172,12 @@
           "const": "system"
         },
         {
-          "description": "The currently-logged-in console user's identity, in their\nsession. Can write HKCU / %APPDATA% / show GUI to the user.\nPrivileges are whatever the user has (admin users get the\nUAC-filtered limited token, not the elevated one).",
+          "description": "The currently-logged-in console user's identity, in their\nsession. Can write HKCU / %APPDATA% (macOS: `~/Library`, the\nlogin Keychain) / show GUI to the user. Privileges are whatever\nthe user has (Windows admin users get the UAC-filtered limited\ntoken, not the elevated one).",
           "type": "string",
           "const": "user"
         },
         {
-          "description": "LocalSystem privileges in the user's session — admin power\nwith GUI visibility. Niche but real (force-restart dialogs,\nadmin installers with progress UI).",
+          "description": "LocalSystem (macOS: root) privileges in the user's session —\nadmin power with GUI visibility. Niche but real (force-restart\ndialogs, admin installers with progress UI).",
           "type": "string",
           "const": "system_gui"
         }

@@ -9,6 +9,7 @@ mod groups;
 mod heartbeat;
 mod host_perf;
 mod idle_sampler;
+#[cfg(target_os = "windows")]
 mod job_object;
 mod job_tail;
 mod live_tail;
@@ -49,6 +50,10 @@ mod client_shortcut;
 mod cwd_expand;
 #[cfg(target_os = "windows")]
 mod process_as_user;
+// macOS `run_as: user` / `system_gui`: `launchctl asuser` wrapping of the
+// shared tokio::process spawn path in `process.rs`.
+#[cfg(target_os = "macos")]
+mod process_as_user_macos;
 #[cfg(target_os = "windows")]
 mod service;
 // #855: SYSTEM-side supervisor that keeps a `--session-agent` child alive in

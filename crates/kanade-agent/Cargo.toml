@@ -71,6 +71,13 @@ which = "8.0.5"
 # [dependencies] don't need re-declaration; the agent's own
 # integration tests inherit them.
 
+[target.'cfg(unix)'.dependencies]
+# setsid / killpg: a job's host runs as its own process group so a kill or
+# timeout takes down the whole tree (the unix counterpart of the Windows Job
+# Object). macOS also needs geteuid / getpwuid_r for `run_as: user` /
+# `system_gui` (`process_as_user_macos.rs`). Already in the tree via tokio.
+libc = "0.2.189"
+
 [target.'cfg(target_os = "windows")'.dependencies]
 # wmi crate dropped in v0.12.0 — inventory now shells out to
 # powershell.exe to get past WBEM_E_INVALID_CLASS under LocalSystem.

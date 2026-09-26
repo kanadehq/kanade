@@ -205,6 +205,12 @@ pub enum Shell {
 /// console session, then launches with that hybrid token — useful
 /// when an installer needs admin power *and* needs the user to see
 /// its UI.
+///
+/// On macOS, LocalSystem is root and the console session is the GUI
+/// bootstrap of the user who owns `/dev/console`, joined via
+/// `launchctl asuser`; `User` runs as that user with a fresh environment.
+/// On both OSes `User` / `SystemGui` fail — the script does not run —
+/// when nobody is logged in. Linux agents skip `User` / `SystemGui` jobs.
 #[derive(
     Serialize, Deserialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Default,
 )]
@@ -215,13 +221,14 @@ pub enum RunAs {
     #[default]
     System,
     /// The currently-logged-in console user's identity, in their
-    /// session. Can write HKCU / %APPDATA% / show GUI to the user.
-    /// Privileges are whatever the user has (admin users get the
-    /// UAC-filtered limited token, not the elevated one).
+    /// session. Can write HKCU / %APPDATA% (macOS: `~/Library`, the
+    /// login Keychain) / show GUI to the user. Privileges are whatever
+    /// the user has (Windows admin users get the UAC-filtered limited
+    /// token, not the elevated one).
     User,
-    /// LocalSystem privileges in the user's session — admin power
-    /// with GUI visibility. Niche but real (force-restart dialogs,
-    /// admin installers with progress UI).
+    /// LocalSystem (macOS: root) privileges in the user's session —
+    /// admin power with GUI visibility. Niche but real (force-restart
+    /// dialogs, admin installers with progress UI).
     SystemGui,
 }
 
