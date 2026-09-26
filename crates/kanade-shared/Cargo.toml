@@ -23,6 +23,8 @@ ed25519-dalek = { workspace = true }
 getrandom  = { workspace = true }
 humantime  = { workspace = true }
 pelite     = { workspace = true }
+# #1187: `nats_client` installs the ring CryptoProvider before connecting.
+rustls     = { workspace = true }
 schemars   = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }

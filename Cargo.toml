@@ -97,10 +97,12 @@ jsonwebtoken       = { version = "10.4.0", default-features = false, features = 
 totp-rs            = { version = "5.7.2", default-features = false, features = ["gen_secret", "otpauth"] }
 # Same CryptoProvider ambiguity as jsonwebtoken above, but for the async-nats
 # TLS (wss) path: the CLI links BOTH aws-lc-rs (via reqwest) and ring (via
-# async-nats), so rustls can't auto-pick and `kanade run` over wss panics on
-# the first flush (#1187). The CLI declares rustls directly only to call
-# `crypto::ring::default_provider().install_default()` in main(); ring matches
-# the pure-Rust choice above. Version tracks the transitive rustls in the lock.
+# async-nats), so rustls can't auto-pick and a wss:// connect panics inside
+# async-nats (#1187). A workspace build unifies features, so the agent's own
+# binary links both too. kanade-shared declares rustls directly only so
+# `nats_client` can call `crypto::ring::default_provider().install_default()`
+# before every connect; ring matches the pure-Rust choice above. Version
+# tracks the transitive rustls in the lock.
 rustls             = { version = "0.23.43", default-features = false, features = ["ring"] }
 # argon2id password hashing for RBAC accounts (backend `users` table).
 # Pulls in `password-hash` (PHC string format, SaltString) transitively.
